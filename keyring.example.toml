@@ -1,0 +1,5 @@
+active = "trial-1"
+
+[keys.trial-1]
+algorithm = "aes-256-gcm"
+key = "REPLACE_WITH_64_RANDOM_HEXADECIMAL_CHARACTERS"

@@ -1,0 +1,45 @@
+services:
+  media-gateway:
+    image: wxwmoe/media-gateway:0.0.1
+    pull_policy: never
+    container_name: media-gateway
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:9002:9002"
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+    tmpfs:
+      - /run/media-gateway:uid=10001,gid=10001,mode=0700
+    # Optional deployment limits; omission does not impose a project-wide cap.
+    # cpus: 4
+    # mem_limit: 1g
+    # memswap_limit: 1g
+    stop_grace_period: 45s
+  postgres:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: media_gateway
+      POSTGRES_USER: media_gateway
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U media_gateway -d media_gateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+secrets:
+  postgres_password:
+    file: ./config/secrets/postgres-password
+volumes:
+  postgres:

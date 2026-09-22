@@ -1,0 +1,53 @@
+[package]
+name = "wxw-media-gateway"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "media-gateway"
+path = "src/main.rs"
+
+[features]
+fault-injection = []
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.5"
+async-stream = "0.3"
+async-trait = "0.1"
+aws-lc-rs = "=1.18.1"
+axum = "0.8"
+base64 = "0.22"
+blake3 = "=1.8.7"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+fastcdc = "=5.0.0"
+fs2 = "0.4"
+futures-util = "0.3"
+hex = "0.4"
+hyper = { version = "=1.11.1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+log = "0.4"
+md-5 = "0.10"
+object_store = { version = "=0.14.2", default-features = false, features = ["aws"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+s3s = "=0.16.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "uuid", "chrono", "json", "macros", "migrate"] }
+subtle = "2"
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "net", "fs", "io-util", "time", "signal", "sync"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+zstd = "=0.14.0"
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,72 @@
+[listen]
+s3 = "0.0.0.0:9000"
+web = "0.0.0.0:9001"
+manage = "0.0.0.0:9002"
+admin_socket = "/run/media-gateway/admin.sock"
+region = "us-east-1"
+aws_chunk_limit = "8MiB"
+# s3_domain = "s3.example.com"
+
+[database]
+host = "postgres"
+port = 5432
+name = "media_gateway"
+user = "media_gateway"
+password = "YOUR_POSTGRES_PASSWORD"
+# Use password_file instead of password for Docker secrets.
+# password_file = "secrets/postgres-password"
+ssl_mode = "prefer"
+# max_connections = 12
+
+[backend]
+endpoint = "https://YOUR-ENDPOINT"
+region = "YOUR-REGION"
+bucket = "YOUR-PRIVATE-BACKEND-BUCKET"
+# Omit prefix or set it to "" to use the backend bucket root (meta.json and chunks/).
+prefix = "media-gateway"
+access_key = "YOUR_ACCESS_KEY"
+secret_key = "YOUR_SECRET_KEY"
+# Use each *_file instead of its direct value, never both.
+# access_key_file = "secrets/backend-access-key"
+# secret_key_file = "secrets/backend-secret-key"
+
+[security]
+credential_key_file = "secrets/credential-key"
+
+[manage]
+origin = "https://admin.example.com"
+secure_cookie = true
+session_lifetime = "12h"
+
+[storage]
+data = "/data"
+free_space_floor = "1GiB"
+
+[processing]
+# Omit resource limits for finite automatic budgets based on cgroup/host resources.
+# cpu_jobs = 2
+# inflight_bytes = "128MiB"
+# upload_concurrency = 2
+# read_concurrency = 4
+# backend_concurrency = 8
+# connections = 128
+
+[multipart]
+# local_limit = "2GB"
+idle_timeout = "24h"
+sweep_interval = "5m"
+client_idle_timeout = "120s"
+# max_active_uploads = 10000
+
+[cache]
+# max_size = "10GB"
+# max_entries = 65536
+
+[encryption]
+algorithm = "aes-256-gcm"
+keyring_file = "keys/keyring.toml"
+
+[gc]
+unreferenced_grace = "48h"
+interval = "30m"
+batch_size = 128

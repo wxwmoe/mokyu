@@ -1,0 +1,256 @@
+import { locale, setLocale, t, translate } from './i18n.js';
+
+const $ = id => document.getElementById(id);
+let prefix = '', next = null, csrf = '';
+let folders = [], objects = [], panel = null, currentNotice = '', listing = 0, view = 0;
+const number = value => new Intl.NumberFormat(locale).format(value);
+const date = value => new Date(value).toLocaleString(locale);
+function translatedError(key, values = {}) { return Object.assign(new Error(t(key, values)), { translationKey: key, values }); }
+function notice(error = '') {
+  currentNotice = error;
+  $('notice').textContent = error.translationKey ? t(error.translationKey, error.values) : error instanceof Error ? error.message : error;
+}
+async function api(path, options = {}) {
+  let response;
+  try { response = await fetch(path, { credentials: 'same-origin', ...options }); }
+  catch { throw translatedError('networkError'); }
+  if (!response.ok) {
+    if (response.status === 403) showLogin();
+    throw translatedError('requestFailed', { status: response.status });
+  }
+  return response.status === 204 ? null : response.json();
+}
+function showLogin() { $('login').hidden = false; $('browser').hidden = true; $('logout').hidden = true; }
+function button(text, click) {
+  const element = document.createElement('button');
+  element.textContent = text;
+  element.addEventListener('click', () => Promise.resolve(click()).catch(notice));
+  return element;
+}
+function query(values) { return new URLSearchParams(values).toString(); }
+function size(value) {
+  if (value < 1024) return number(value) + ' B';
+  const unit = Math.min(4, Math.floor(Math.log(value) / Math.log(1024)));
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value / 1024 ** unit) + ' ' + ['B', 'KiB', 'MiB', 'GiB', 'TiB'][unit];
+}
+async function enter() {
+  const buckets = await api('/api/buckets');
+  $('buckets').replaceChildren();
+  for (const bucket of buckets) {
+    const option = document.createElement('option');
+    option.value = bucket.id; option.textContent = bucket.name; $('buckets').append(option);
+  }
+  $('login').hidden = true; $('browser').hidden = false; $('logout').hidden = false;
+  prefix = ''; await list();
+}
+function breadcrumbs() {
+  $('breadcrumbs').replaceChildren(button(t('root'), async () => { prefix = ''; await list(); }));
+  let path = '';
+  for (const part of prefix.split('/').filter(Boolean)) {
+    path += part + '/';
+    const target = path;
+    $('breadcrumbs').append(button(part, async () => { prefix = target; await list(); }));
+  }
+}
+async function list(more = false) {
+  const request = ++listing; ++view;
+  notice();
+  if (!more) { folders = []; objects = []; next = null; panel = null; $('detail').hidden = true; }
+  renderFiles();
+  if (!$('buckets').value) { notice(translatedError('noBuckets')); $('more').hidden = true; return; }
+  const params = { bucket: $('buckets').value, prefix };
+  if (more && next) params.token = next;
+  const page = await api('/api/objects?' + query(params));
+  if (request !== listing) return;
+  folders.push(...page.prefixes); objects.push(...page.objects);
+  next = page.next_token; renderFiles();
+}
+function renderFiles() {
+  breadcrumbs(); $('files').replaceChildren();
+  for (const folder of folders) row(button(t('folder', { name: folder.slice(prefix.length) }), async () => { prefix = folder; await list(); }), '', '', '');
+  for (const object of objects) row(button(object.object_key.slice(prefix.length) || object.object_key, () => detail(object.object_key)), size(object.size), t(object.public_read ? 'public' : 'private'), date(object.touched_at));
+  $('more').hidden = !next;
+}
+function row(name, ...cells) {
+  const tr = document.createElement('tr'), first = document.createElement('td');
+  first.append(name); tr.append(first);
+  for (const text of cells) { const td = document.createElement('td'); td.textContent = text; tr.append(td); }
+  $('files').append(tr);
+}
+function fields(values) {
+  $('facts').replaceChildren();
+  for (const [label, value] of values) {
+    const term = document.createElement('dt'), description = document.createElement('dd');
+    term.textContent = t(label); description.textContent = value ?? '—'; $('facts').append(term, description);
+  }
+}
+function renderPanel(clearPreview = false) {
+  if (!panel) return;
+  const { type, value, params } = panel;
+  $('detail').hidden = false; $('detail-title').dataset.i18n = type;
+  if (clearPreview) $('detail').scrollIntoView({ block: 'start' });
+  $('detail-title').textContent = t(type);
+  $('info').textContent = JSON.stringify(value, null, 2);
+  $('actions').replaceChildren(); $('task-list').replaceChildren();
+  $('website-form').hidden = type !== 'website';
+  $('cors-form').hidden = type !== 'cors';
+  $('actions').append(button(t('backToFiles'), () => { panel = null; $('detail').hidden = true; $('refresh').focus(); $('breadcrumbs').scrollIntoView({ block: 'start' }); }));
+  if (clearPreview) $('preview').replaceChildren();
+  if (type === 'details') {
+    const object = value.object, mime = (object.metadata.content_type || '').split(';')[0].trim();
+    fields([['objectKey', object.object_key], ['size', size(object.size)], ['access', t(object.public_read ? 'public' : 'private')], ['updated', date(object.touched_at)], ['contentType', object.metadata.content_type], ['etag', object.etag]]);
+    const title = document.createElement('h3'); title.textContent = t('bucketGrants'); $('task-list').append(title);
+    for (const grant of value.bucket_grants) { const line = document.createElement('p'); line.textContent = grant.access_key + ' — ' + t(grant.writable ? 'readWrite' : 'readOnly'); $('task-list').append(line); }
+    if (!value.bucket_grants.length) { const line = document.createElement('p'); line.textContent = t('noGrants'); $('task-list').append(line); }
+    const download = document.createElement('a');
+    download.className = 'button'; download.textContent = t('download'); download.href = '/api/download?' + query(params); $('actions').append(download);
+    const image = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif'].includes(mime);
+    const video = ['video/mp4', 'video/webm'].includes(mime);
+    if (image || video) $('actions').append(button(t('preview'), () => {
+      const media = document.createElement(image ? 'img' : 'video');
+      media.src = '/api/download?' + query({ ...params, preview: 'true' });
+      if (image) media.alt = object.object_key; else media.controls = true;
+      $('preview').replaceChildren(media);
+    }));
+  } else if (type === 'cors') {
+    fields([['buckets', params.name]]);
+    if (clearPreview) renderCors(value);
+  } else if (type === 'website') {
+    fields([['buckets', params.name]]);
+    if (clearPreview) {
+      $('website-enabled').checked = value.website_enabled;
+      $('index-document').value = value.index_document;
+      $('error-document').value = value.error_document;
+    }
+  } else if (type === 'status') {
+    fields([['version', value.version], ['cpu', number(value.resources.available_cpus)], ['memory', size(value.resources.memory_bytes)], ['multipartBytes', size(value.local_bytes[0])], ['cacheBytes', size(value.local_bytes[1])], ['gc', t(value.gc_paused ? 'paused' : 'enabled')], ['maintenance', t(value.maintenance ? 'enabled' : 'disabled')], ['cacheHits', number(value.cache_hits)], ['backendGets', number(value.backend_gets)]]);
+  } else {
+    fields([]);
+    if (!value.length) { $('task-list').textContent = t('noTasks'); return; }
+    const table = document.createElement('table'), head = document.createElement('thead'), tr = document.createElement('tr');
+    for (const key of ['taskId', 'taskType', 'taskState', 'processed', 'updated']) { const th = document.createElement('th'); th.textContent = t(key); tr.append(th); }
+    head.append(tr); table.append(head);
+    const body = document.createElement('tbody');
+    for (const task of value) {
+      const row = document.createElement('tr');
+      for (const text of [task.id, t(task.kind), t(task.state), number(task.processed), date(task.updated_at)]) { const td = document.createElement('td'); td.textContent = text; row.append(td); }
+      body.append(row);
+    }
+    table.append(body); $('task-list').append(table);
+  }
+}
+async function detail(key) {
+  const request = ++view, params = { bucket: $('buckets').value, key };
+  const value = await api('/api/object?' + query(params));
+  if (request !== view) return;
+  panel = { type: 'details', value, params }; renderPanel(true);
+}
+const corsMethods = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS'];
+function addCorsRule(rule = { origins: [], methods: ['GET', 'HEAD'] }) {
+  if ($('cors-rules').children.length >= 100) { notice(translatedError('corsInvalid')); return; }
+  const fieldset = document.createElement('fieldset'), legend = document.createElement('legend');
+  legend.dataset.i18n = 'corsRule'; fieldset.append(legend);
+  for (const [name, title] of [['origins', 'corsOrigins'], ['headers', 'corsHeaders'], ['expose', 'corsExpose'], ['max_age', 'corsMaxAge']]) {
+    const label = document.createElement('label'), span = document.createElement('span');
+    span.dataset.i18n = title;
+    const input = document.createElement(name === 'max_age' ? 'input' : 'textarea');
+    input.name = name;
+    if (name === 'max_age') { input.type = 'number'; input.min = '0'; input.max = '4294967295'; input.required = true; input.value = rule.max_age ?? 0; }
+    else { input.rows = 2; input.value = (rule[name] || []).join('\n'); input.required = name === 'origins'; }
+    label.append(span, input); fieldset.append(label);
+  }
+  const methods = document.createElement('fieldset'), title = document.createElement('legend');
+  title.dataset.i18n = 'corsMethods'; methods.className = 'cors-methods'; methods.append(title);
+  for (const method of corsMethods) {
+    const label = document.createElement('label'), input = document.createElement('input');
+    input.type = 'checkbox'; input.name = 'methods'; input.value = method; input.checked = rule.methods.includes(method);
+    label.append(input, document.createTextNode(method)); methods.append(label);
+  }
+  fieldset.append(methods);
+  const remove = button(t('corsRemove'), () => fieldset.remove()); remove.type = 'button'; remove.dataset.i18n = 'corsRemove';
+  fieldset.append(remove); $('cors-rules').append(fieldset); translate(fieldset);
+}
+function renderCors(rules) {
+  $('cors-rules').replaceChildren(); rules.forEach(addCorsRule);
+}
+function corsValues() {
+  return [...$('cors-rules').children].map(fieldset => ({
+    ...Object.fromEntries(['origins', 'headers', 'expose'].map(name => [name, fieldset.querySelector(`[name="${name}"]`).value.split('\n').map(v => v.trim()).filter(Boolean)])),
+    methods: [...fieldset.querySelectorAll('[name="methods"]:checked')].map(input => input.value),
+    max_age: Number(fieldset.querySelector('[name="max_age"]').value),
+  }));
+}
+$('language').value = locale;
+setLocale(locale); translate();
+$('language').addEventListener('change', event => {
+  setLocale(event.target.value); translate(); renderFiles(); renderPanel(); notice(currentNotice);
+});
+$('login').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    const form = new FormData(event.target);
+    const reply = await api('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) });
+    csrf = reply.csrf_token;
+    event.target.reset(); notice(); await enter();
+  } catch (error) { notice(error); }
+});
+$('logout').addEventListener('click', async () => {
+  try { await api('/api/logout', { method: 'POST', headers: { 'X-CSRF-Token': csrf } }); csrf = ''; showLogin(); }
+  catch (error) { notice(error); }
+});
+$('buckets').addEventListener('change', () => { prefix = ''; list().catch(notice); });
+$('refresh').addEventListener('click', () => list().catch(notice));
+$('more').addEventListener('click', () => list(true).catch(notice));
+$('cors').addEventListener('click', async () => {
+  if (!$('buckets').value) return;
+  const request = ++view, params = { bucket: $('buckets').value, name: $('buckets').selectedOptions[0].textContent };
+  try {
+    const value = await api('/api/buckets/' + params.bucket + '/cors');
+    if (request === view) { panel = { type: 'cors', value, params }; renderPanel(true); }
+  } catch (error) { notice(error); }
+});
+$('cors-add').addEventListener('click', () => addCorsRule());
+$('cors-clear').addEventListener('click', () => renderCors([]));
+$('cors-preset').addEventListener('click', () => renderCors([{ origins: ['*'], methods: corsMethods, headers: ['*'], expose: ['*'], max_age: 86400 }]));
+$('cors-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (panel?.type !== 'cors') return;
+  const current = panel, rules = corsValues();
+  if (rules.some(rule => !rule.origins.length || !rule.methods.length)) { notice(translatedError('corsInvalid')); return; }
+  $('cors-save').disabled = true;
+  try {
+    const value = await api('/api/buckets/' + current.params.bucket + '/cors', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(rules),
+    });
+    if (panel === current) { panel.value = value; renderPanel(); notice({ translationKey: 'corsSaved' }); }
+  } catch (error) { notice(error); }
+  finally { $('cors-save').disabled = false; }
+});
+$('website').addEventListener('click', async () => {
+  if (!$('buckets').value) return;
+  const request = ++view, params = { bucket: $('buckets').value, name: $('buckets').selectedOptions[0].textContent };
+  try {
+    const value = await api('/api/buckets/' + params.bucket + '/website');
+    if (request === view) { panel = { type: 'website', value, params }; renderPanel(true); }
+  } catch (error) { notice(error); }
+});
+$('website-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (panel?.type !== 'website') return;
+  const current = panel;
+  $('website-save').disabled = true;
+  try {
+    const value = await api('/api/buckets/' + current.params.bucket + '/website', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify({ website_enabled: $('website-enabled').checked, index_document: $('index-document').value, error_document: $('error-document').value }),
+    });
+    if (panel === current) { panel.value = value; renderPanel(); notice({ translationKey: 'websiteSaved' }); }
+  } catch (error) { notice(error); }
+  finally { $('website-save').disabled = false; }
+});
+for (const [type, path] of [['status', '/api/status'], ['tasks', '/api/tasks']]) $(type).addEventListener('click', async () => {
+  const request = ++view;
+  try { const value = await api(path); if (request === view) { panel = { type, value }; renderPanel(true); } }
+  catch (error) { notice(error); }
+});
+api('/api/session').then(reply => { csrf = reply.csrf_token; return enter(); }).catch(() => showLogin());

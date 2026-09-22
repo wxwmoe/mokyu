@@ -1,0 +1,10 @@
+/target/
+/data/
+/secrets/
+/.env
+/config.toml
+/config/
+/*.tar
+/*.tar.gz
+/*.oci
+/*.log
