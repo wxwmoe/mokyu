@@ -155,8 +155,10 @@ impl App {
                     crate::faults::point("chunk-deleted").await;
                     sqlx::query("UPDATE chunks SET state='deleted',deleted_at=now() WHERE id=$1 AND state='deleting'").bind(id).execute(&self.db).await?;
                     count += 1;
+                    self.statistics.gc_deleted.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {
+                    self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(chunk_id=id,error=%e,"chunk deletion will be retried");
                 }
             }
@@ -195,6 +197,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
     loop {
         let gc = tokio::select! {_=app.wake_gc.notified()=>false,_=local.tick()=>false,_=remote.tick()=>true};
         if let Err(e) = app.cleanup().await {
+            app.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(error=%e,"local cleanup failed; retaining recoverable state");
         }
         if gc {
@@ -205,6 +208,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                     }
                     Ok(_) => break,
                     Err(e) => {
+                        app.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
                         tracing::error!(error=%e,"remote GC failed; retaining deletion journal");
                         break;
                     }

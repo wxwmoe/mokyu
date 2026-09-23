@@ -194,7 +194,10 @@ pub fn cors_headers(bucket: &Bucket, headers: &HeaderMap, method: &str) -> Resul
     Ok(out)
 }
 pub fn public_router(app: Arc<App>) -> Router {
-    Router::new().fallback(public).with_state(app)
+    Router::new()
+        .fallback(public)
+        .with_state(app.clone())
+        .layer(axum::middleware::from_fn_with_state((app, 1usize), observe))
 }
 pub fn manage_router(app: Arc<App>) -> Router {
     Router::new()
@@ -218,7 +221,22 @@ pub fn manage_router(app: Arc<App>) -> Router {
         .route("/api/tasks", get(tasks))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(axum::middleware::from_fn(web_headers))
-        .with_state(app)
+        .with_state(app.clone())
+        .layer(axum::middleware::from_fn_with_state((app, 2usize), observe))
+}
+async fn observe(
+    State((app, index)): State<(Arc<App>, usize)>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    use tracing::Instrument;
+    let observation = crate::stats::Request::new(
+        &app.statistics.http[index],
+        if index == 1 { "web" } else { "manage" },
+        request.method().clone(),
+    );
+    let response = next.run(request).instrument(observation.span.clone()).await;
+    observation.response(response, false).map(Body::new)
 }
 async fn web_headers(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let mut response = next.run(request).await;

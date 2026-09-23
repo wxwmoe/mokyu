@@ -1,5 +1,7 @@
 # CLI 参考（0.0.2）
 
+`docker exec media-gateway cli status` 返回运行计数及后台容量快照，与管理端 `GET /api/status` 使用相同字段；详见[管理 API 的状态字段](manage-api-reference.md#具体返回结构)。运行计数在重启后归零，容量快照异步采集，读取命令不会触发全表汇总。
+
 默认配置 `/config/config.toml`，从中读取 socket 路径
 
 可用 `docker exec media-gateway cli --socket /path/admin.sock ...` 覆写
@@ -13,7 +15,7 @@
 
 | 命令（省略统一前缀） | 参数 / 默认 | 作用和返回 |
 | --- | --- | --- |
-| `status` | 无 | 版本、资源预算、local_bytes、维护/GC标志、连接池、活跃流、累计缓存与后端计数 |
+| `status` | 无 | 版本、资源预算、进程内存、local_bytes、维护/GC标志、连接池、活跃流、HTTP/缓存/后端计数和容量快照 |
 | `bucket list` | 无 | 桶数组：id/name/state/cors/website_enabled/index_document/error_document/created_at |
 | `bucket create NAME` | NAME 必填 | 创建空逻辑桶；返回桶信息 |
 | `bucket delete NAME` | NAME 必填 | 删除空桶；仍有对象、上传或待清理版本则拒绝；返回 deleted UUID |

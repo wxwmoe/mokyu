@@ -70,3 +70,8 @@ keyring_file = "keys/keyring.toml"
 unreferenced_grace = "48h"
 interval = "30m"
 batch_size = 128
+
+[statistics]
+# Background database inventory; page refreshes only read the cached snapshot.
+refresh_interval = "15m"
+query_timeout = "2m"

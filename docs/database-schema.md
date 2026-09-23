@@ -1,5 +1,7 @@
 # 数据库结构（0.0.2 / schema_version=1）
 
+0.0.2 的运行统计和容量快照保存在进程内，无新增表或迁移；继续使用 0.0.1 发布的 `0001_baseline.sql`。升级保留现有数据，后续结构变更从 0002 开始追加迁移。
+
 PostgreSQL 使用同步提交与 fsync；服务独占一个数据库级 advisory lock 和 data 文件锁
 
 ## _sqlx_migrations

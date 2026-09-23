@@ -1,5 +1,13 @@
 # S3 网关兼容性（0.0.2）
 
+## 请求标识
+
+网关为每个进入应用层的 HTTP 请求生成新的 UUIDv4。S3 响应始终带 `x-amz-request-id` 和 `X-Request-ID`，XML 错误体的 `RequestId` 与响应头一致；HEAD 没有错误响应体。CompleteMultipartUpload 在 HTTP 200 之后返回的延迟 XML 错误也包含相同的 RequestId，并计入失败请求。成功请求、鉴权失败、预检和匿名公共读取均带标识。公共读和管理端口返回 `X-Request-ID`。客户端传来的同名头不会成为网关的请求标识；重试会生成新的 ID。
+
+日志的 `request_id`、`listener`、`method` 贯穿处理过程及响应流；失败/中断在 WARN 级别记录状态、已产生字节数和耗时。成功完成记录在 DEBUG，可用 `RUST_LOG=media_gateway=info,media_gateway::stats=debug,s3s=warn` 开启。管理页面在 API 请求失败时显示响应头中的 ID。对象键、签名参数、凭据和 Cookie 不进入这些访问日志或统计标签。代理在请求进入网关前产生的错误没有网关 ID；CDN 缓存命中可能返回原始回源请求的 ID。
+
+不生成 Wasabi 的 HostId/CMReferenceId。此 ID 属于网关请求，不代表后端供应商请求；后端错误通过同一个网关请求日志上下文排查。跨域 JavaScript 需要读取 ID 时，在桶 CORS 的 expose 中加入 `x-amz-request-id`、`x-request-id`；已有规则保持原样。
+
 S3 网关默认端口 9000，web 网关默认端口 9001
 
 非完整 AWS S3 / IAM 实现，未支持的操作返回错误

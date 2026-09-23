@@ -28,6 +28,23 @@ pub struct Config {
     pub encryption: Encryption,
     #[serde(default)]
     pub gc: Gc,
+    #[serde(default)]
+    pub statistics: Statistics,
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Statistics {
+    pub refresh_interval: String,
+    pub query_timeout: String,
+}
+impl Default for Statistics {
+    fn default() -> Self {
+        Self {
+            refresh_interval: "15m".into(),
+            query_timeout: "2m".into(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -353,6 +370,8 @@ impl Config {
             &c.gc.interval,
             &c.gc.unreferenced_grace,
             &c.manage.session_lifetime,
+            &c.statistics.refresh_interval,
+            &c.statistics.query_timeout,
         ] {
             ensure!(
                 seconds(value)? <= i64::MAX as u64 / 1000,
@@ -360,6 +379,10 @@ impl Config {
             );
         }
         bytes(&c.storage.free_space_floor)?;
+        ensure!(
+            seconds(&c.statistics.query_timeout)? <= i32::MAX as u64 / 1000,
+            "statistics.query_timeout exceeds PostgreSQL's statement timeout limit"
+        );
         if let Some(v) = &c.multipart.local_limit {
             ensure!(
                 bytes(v)? >= 4 * 1024 * 1024,

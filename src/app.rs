@@ -86,6 +86,7 @@ pub struct App {
     pub secrets: Arc<Secrets>,
     pub db: PgPool,
     pub storage: Arc<Storage>,
+    pub statistics: crate::stats::Statistics,
     pub coord: tokio::sync::Mutex<()>,
     pub active: Arc<Mutex<HashMap<Uuid, usize>>>,
     pub uploads: Arc<Semaphore>,
@@ -130,6 +131,7 @@ impl App {
             secrets,
             db,
             storage,
+            statistics: crate::stats::Statistics::default(),
             coord: tokio::sync::Mutex::new(()),
             active: Arc::new(Mutex::new(HashMap::new())),
             maintenance: maintenance.into(),
@@ -589,9 +591,17 @@ impl App {
             sqlx::query_as("SELECT gc_paused,maintenance FROM gateway_meta")
                 .fetch_one(&self.db)
                 .await?;
-        Ok(
-            json!({"version":env!("CARGO_PKG_VERSION"),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":paused,"maintenance":maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":self.db.size(),"db_pool_idle":self.db.num_idle(),"data_slots_available":self.slots.available_permits(),"active_streams":self.active.lock().unwrap().len()}),
-        )
+        let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":paused,"maintenance":maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":self.db.size(),"db_pool_idle":self.db.num_idle(),"data_slots_available":self.slots.available_permits(),"active_streams":self.active.lock().unwrap().len()});
+        status["runtime"] = self.statistics.runtime();
+        status["storage"] = self.statistics.inventory(crate::config::seconds(
+            &self.config.statistics.refresh_interval,
+        )?);
+        status["io"] = self.storage.statistics();
+        status["process_memory"] = crate::stats::process_memory().await;
+        status["gc_running"] = json!(self.gc_running.load(std::sync::atomic::Ordering::Relaxed));
+        status["upload_slots_available"] = json!(self.uploads.available_permits());
+        status["read_slots_available"] = json!(self.reads.available_permits());
+        Ok(status)
     }
 }
 pub fn check_write_conditions(

@@ -118,6 +118,7 @@ assert scalar('SELECT state FROM chunks WHERE id=%s', (chunk,)) == 'ready'
 cli('gc', 'resume')
 cli('gc', 'run')
 assert scalar('SELECT state FROM chunks WHERE id=%s', (chunk,)) == 'deleted'
+assert cli('status')['runtime']['gc_deleted'] >= 1
 print('PASS cross-bucket dedup, purge, last-reference grace, paused and resumed GC', flush=True)
 
 # A destructive sweep requires a completed preview, exact prefix and maintenance.

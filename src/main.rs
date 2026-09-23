@@ -10,6 +10,7 @@ mod lifecycle;
 mod listing;
 mod multipart;
 mod s3;
+mod stats;
 mod storage;
 mod tasks;
 mod upload;
@@ -19,6 +20,7 @@ use clap::{Parser, Subcommand};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::Semaphore};
+use tracing::Instrument;
 
 #[derive(Parser)]
 #[command(version, about = "S3-compatible media gateway")]
@@ -106,6 +108,7 @@ fn main() -> Result<()> {
             result=admin::serve(app.clone())=>result?,
             result=lifecycle::run(app.clone())=>result?,
             result=tasks::run(app.clone())=>result?,
+            result=stats::run(app.clone())=>result?,
             _=shutdown_signal()=>{tracing::info!("stopping listeners; draining active data operations");}
         }
         app.maintenance.store(true,std::sync::atomic::Ordering::Release);
@@ -134,14 +137,26 @@ async fn serve_s3(
         let s3 = service.clone();
         let app = app.clone();
         let controls = controls.clone();
-        let service = hyper::service::service_fn(move |request| {
-            let app = app.clone();
-            let s3 = s3.clone();
-            let controls = controls.clone();
-            async move {
-                Ok::<_, std::convert::Infallible>(http::s3_http(app, s3, request, controls).await)
-            }
-        });
+        let service = hyper::service::service_fn(
+            move |mut request: hyper::Request<hyper::body::Incoming>| {
+                let app = app.clone();
+                let s3 = s3.clone();
+                let controls = controls.clone();
+                async move {
+                    let observation = stats::Request::new(
+                        &app.statistics.http[0],
+                        "s3",
+                        request.method().clone(),
+                    );
+                    request.extensions_mut().insert(observation.context.clone());
+                    let mut response = http::s3_http(app, s3, request, controls)
+                        .instrument(observation.span.clone())
+                        .await;
+                    stats::s3_request_id(&mut response, &observation.context.id);
+                    Ok::<_, std::convert::Infallible>(observation.response(response, true))
+                }
+            },
+        );
         tokio::spawn(async move {
             let _permit = permit;
             let result = hyper::server::conn::http1::Builder::new()

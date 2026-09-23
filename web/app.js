@@ -16,7 +16,8 @@ async function api(path, options = {}) {
   catch { throw translatedError('networkError'); }
   if (!response.ok) {
     if (response.status === 403) showLogin();
-    throw translatedError('requestFailed', { status: response.status });
+    const requestId = response.headers.get('x-request-id');
+    throw translatedError(requestId ? 'requestFailedId' : 'requestFailed', { status: response.status, requestId });
   }
   return response.status === 204 ? null : response.json();
 }
@@ -29,6 +30,7 @@ function button(text, click) {
 }
 function query(values) { return new URLSearchParams(values).toString(); }
 function size(value) {
+  if (value < 0) return '−' + size(-value);
   if (value < 1024) return number(value) + ' B';
   const unit = Math.min(4, Math.floor(Math.log(value) / Math.log(1024)));
   return new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value / 1024 ** unit) + ' ' + ['B', 'KiB', 'MiB', 'GiB', 'TiB'][unit];
@@ -92,6 +94,8 @@ function renderPanel(clearPreview = false) {
   $('detail-title').textContent = t(type);
   $('info').textContent = JSON.stringify(value, null, 2);
   $('actions').replaceChildren(); $('task-list').replaceChildren();
+  $('statistics').hidden = type !== 'status';
+  $('statistics').replaceChildren();
   $('website-form').hidden = type !== 'website';
   $('cors-form').hidden = type !== 'cors';
   $('actions').append(button(t('backToFiles'), () => { panel = null; $('detail').hidden = true; $('refresh').focus(); $('breadcrumbs').scrollIntoView({ block: 'start' }); }));
@@ -123,7 +127,13 @@ function renderPanel(clearPreview = false) {
       $('error-document').value = value.error_document;
     }
   } else if (type === 'status') {
-    fields([['version', value.version], ['cpu', number(value.resources.available_cpus)], ['memory', size(value.resources.memory_bytes)], ['multipartBytes', size(value.local_bytes[0])], ['cacheBytes', size(value.local_bytes[1])], ['gc', t(value.gc_paused ? 'paused' : 'enabled')], ['maintenance', t(value.maintenance ? 'enabled' : 'disabled')], ['cacheHits', number(value.cache_hits)], ['backendGets', number(value.backend_gets)]]);
+    fields([['version', value.version], ['startedAt', date(value.runtime.started_at)], ['uptime', number(value.runtime.uptime_seconds) + ' s'], ['cpu', number(value.resources.available_cpus)], ['memory', size(value.resources.memory_bytes)], ['multipartBytes', size(value.local_bytes[0]) + ' / ' + limit(value.io.multipart_limit_bytes)], ['cacheBytes', size(value.local_bytes[1]) + ' / ' + limit(value.io.cache_limit_bytes)], ['gc', t(value.gc_paused ? 'paused' : value.gc_running ? 'running' : 'enabled')], ['maintenance', t(value.maintenance ? 'enabled' : 'disabled')], ['dataSlots', number(value.data_slots_available) + ' / ' + number(value.resources.data_slots)], ['dbPool', number(value.db_pool_idle) + ' / ' + number(value.db_pool_size)], ['cpuSlots', number(value.io.cpu_slots_available) + ' / ' + number(value.resources.cpu_jobs)], ['gcDeleted', number(value.runtime.gc_deleted)], ['gcFailures', number(value.runtime.gc_failures)]]);
+    renderStatistics(value);
+    $('statistics').prepend(button(t('refreshStatistics'), async () => {
+      const request = ++view;
+      const updated = await api('/api/status');
+      if (request === view) { panel = { type: 'status', value: updated }; renderPanel(); }
+    }));
   } else {
     fields([]);
     if (!value.length) { $('task-list').textContent = t('noTasks'); return; }
@@ -138,6 +148,57 @@ function renderPanel(clearPreview = false) {
     }
     table.append(body); $('task-list').append(table);
   }
+}
+const limit = value => value == null ? t('automatic') : size(value);
+const percent = value => value == null ? '—' : new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 1 }).format(value);
+const milliseconds = value => value == null ? '—' : new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(value) + ' ms';
+function renderStatistics(value) {
+  const root = $('statistics');
+  function text(tag, value, parent = root) { const node = document.createElement(tag); node.textContent = value; parent.append(node); return node; }
+  function table(title, headings, rows) {
+    text('h3', t(title));
+    const scroll = document.createElement('div'); scroll.className = 'stats-table';
+    const table = document.createElement('table');
+    const caption = document.createElement('caption'); caption.textContent = t(title); caption.className = 'sr-only'; table.append(caption);
+    const head = document.createElement('thead'), row = document.createElement('tr');
+    headings.forEach(key => { const cell = text('th', t(key), row); cell.scope = 'col'; }); head.append(row); table.append(head);
+    const body = document.createElement('tbody');
+    rows.forEach(values => { const row = document.createElement('tr'); values.forEach(value => text('td', value, row)); body.append(row); });
+    table.append(body); scroll.append(table); root.append(scroll);
+  }
+  text('p', t('runtimeHelp'));
+  const cards = document.createElement('div'); cards.className = 'stats-cards'; root.append(cards);
+  const snapshot = value.storage.snapshot;
+  for (const [key, label] of [['objects', 'objectCount'], ['logical_bytes', 'logicalBytes']]) {
+    const card = document.createElement('div'); text('span', t(label), card);
+    text('strong', !snapshot ? '—' : key === 'objects' ? number(snapshot[key]) : size(snapshot[key]), card); cards.append(card);
+  }
+  for (const [label, content] of [['physicalBytes', snapshot ? size(snapshot.chunks.stored_bytes) : '—'], ['unreferencedBytes', snapshot ? size(snapshot.unreferenced.stored_bytes) : '—'], ['cacheRate', percent(value.io.cache_hit_rate)], ['residentMemory', value.process_memory?.rss_bytes == null ? '—' : size(value.process_memory.rss_bytes)]]) {
+    const card = document.createElement('div'); text('span', t(label), card); text('strong', content, card); cards.append(card);
+  }
+  const inventoryNote = text('p', !snapshot ? t('snapshotPending') : t('snapshotTime', { time: date(snapshot.as_of), interval: number(value.storage.refresh_interval_seconds) }));
+  inventoryNote.id = 'snapshot-state';
+  if (value.storage.collecting) inventoryNote.append(document.createTextNode(' ' + t('snapshotCollecting')));
+  if (value.storage.last_error) inventoryNote.append(document.createTextNode(' ' + t('snapshotFailed')));
+  else if (snapshot && value.storage.stale) inventoryNote.append(document.createTextNode(' ' + t('snapshotStale')));
+  const runtimeRows = Object.entries(value.runtime.http).map(([name, metric]) => [t('listener_' + name), number(metric.completed), number(metric.active), percent(metric.failure_rate), number(metric.client_errors), number(metric.server_errors), number(metric.canceled), milliseconds(metric.duration_ms.mean), milliseconds(metric.duration_ms.p95), size(metric.bytes)]);
+  table('httpStatistics', ['listener', 'completedRequests', 'activeRequests', 'failureRate', 'clientErrors', 'serverErrors', 'canceled', 'meanLatency', 'p95Latency', 'responseBytes'], runtimeRows);
+  const backendRows = Object.entries(value.io.backend).map(([name, metric]) => [name.toUpperCase(), number(metric.completed), number(metric.active), number(metric.failed), number(metric.canceled), milliseconds(metric.duration_ms.mean), milliseconds(metric.duration_ms.p95), size(metric.bytes)]);
+  table('backendStatistics', ['method', 'completedRequests', 'activeRequests', 'failed', 'canceled', 'meanLatency', 'p95Latency', 'transferredBytes'], backendRows);
+  if (!snapshot) return;
+  text('p', t('storageHelp'));
+  const live = snapshot.live;
+  table('spaceSavings', ['metric', 'size', 'savingRate'], [
+    [t('dedupSavings'), size(live.reference_bytes - live.raw_bytes), live.reference_bytes ? percent(1 - live.raw_bytes / live.reference_bytes) : '—'],
+    [t('compressionSavings'), size(live.raw_bytes - live.payload_bytes), live.raw_bytes ? percent(1 - live.payload_bytes / live.raw_bytes) : '—'],
+    [t('liveStoredBytes'), size(live.stored_bytes), '—'],
+    [t('gcEligibleBytes'), size(snapshot.unreferenced.eligible_bytes), '—'],
+    [t('unconfirmedBytes'), size(snapshot.chunks.unconfirmed_bytes), '—'],
+  ]);
+  table('bucketStatistics', ['buckets', 'objectCount', 'logicalBytes'], snapshot.buckets.map(bucket => [bucket.name, number(bucket.objects), size(bucket.logical_bytes)]));
+  if (snapshot.buckets_truncated) text('p', t('bucketsTruncated'));
+  table('taskStatistics', ['taskState', 'count'], ['queued', 'running', 'paused', 'completed', 'failed'].map(state => [t(state), number(snapshot.tasks[state] || 0)]));
+  text('p', t('activeMultipart', { count: number((snapshot.uploads.active || 0) + (snapshot.uploads.completing || 0)) }));
 }
 async function detail(key) {
   const request = ++view, params = { bucket: $('buckets').value, key };

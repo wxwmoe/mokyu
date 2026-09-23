@@ -11,6 +11,7 @@ use md5::{Digest, Md5};
 use s3s::{S3Request, S3Response, dto::*, s3_error};
 use serde_json::{Value, json};
 use std::sync::{Arc, Weak};
+use tracing::Instrument;
 use uuid::Uuid;
 
 #[derive(sqlx::FromRow)]
@@ -594,6 +595,10 @@ impl App {
         drop(_coord);
         let app = self.clone();
         let upin = self.pin(u.id);
+        let context = req
+            .extensions
+            .get::<crate::stats::RequestContext>()
+            .cloned();
         let input = req.input;
         let headers = req.headers;
         let work = tokio::spawn(async move {
@@ -608,9 +613,23 @@ impl App {
                 let _=sqlx::query("UPDATE uploads SET state='active',touched_at=now() WHERE id=$1 AND state='completing'").bind(u.id).execute(&app.db).await;
             }
             result.map_err(crate::app::internal)
+        }.in_current_span());
+        let future = Box::pin(async move {
+            let result = work
+                .await
+                .map_err(|e| crate::app::internal(e.into()))
+                .and_then(|r| r);
+            result.map_err(|mut error| {
+                tracing::warn!(code=?error.code(), "multipart completion failed");
+                if let Some(context) = context {
+                    context
+                        .failed
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    error.set_request_id(context.id);
+                }
+                error
+            })
         });
-        let future =
-            Box::pin(async move { work.await.map_err(|e| crate::app::internal(e.into()))? });
         Ok(S3Response::new(CompleteMultipartUploadOutput {
             future: Some(future),
             ..Default::default()

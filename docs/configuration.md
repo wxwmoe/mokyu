@@ -59,8 +59,12 @@
 | `gc.unreferenced_grace` | duration / `48h` | 失去最后引用/活跃保护后的远端回收宽限 |
 | `gc.interval` | duration / `30m` | 日常远端 GC 空闲检查间隔 |
 | `gc.batch_size` | integer / `128` | 每批工作量，1～10000；同样用于维护任务 |
+| `statistics.refresh_interval` | duration / `15m` | 后台容量汇总完成后的等待间隔；页面刷新只读取快照 |
+| `statistics.query_timeout` | duration / `2m` | 一轮汇总的总时限及 SQL 语句时限 |
 
-duration 上限为 `i64::MAX / 1000` 秒；数量乘法溢出会拒绝。显式资源参数若与可用内存预算矛盾，也拒绝启动。
+duration 上限为 `i64::MAX / 1000` 秒；`statistics.query_timeout` 另受 PostgreSQL 限制，最多 2,147,483 秒。数量乘法溢出会拒绝。显式资源参数若与可用内存预算矛盾，也拒绝启动。
+
+省略 `[statistics]` 时使用默认间隔和时限。汇总使用只读事务，不新增业务表，失败时保留上次结果；大库可增大刷新间隔，按数据库性能调整时限。详见[管理 API](manage-api-reference.md#容量快照)。
 
 ## 自动预算
 

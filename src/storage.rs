@@ -334,6 +334,8 @@ pub struct Storage {
     pub backend_read_bytes: std::sync::atomic::AtomicU64,
     pub backend_write_bytes: std::sync::atomic::AtomicU64,
     pub cache_hit_bytes: std::sync::atomic::AtomicU64,
+    cache_lookups: std::sync::atomic::AtomicU64,
+    operations: [Arc<crate::stats::Counters>; 3],
 }
 impl Storage {
     pub async fn new(c: &Config, secrets: Arc<Secrets>, budget: &Budget) -> Result<Self> {
@@ -396,9 +398,18 @@ impl Storage {
             backend_read_bytes: 0.into(),
             backend_write_bytes: 0.into(),
             cache_hit_bytes: 0.into(),
+            cache_lookups: 0.into(),
+            operations: std::array::from_fn(|_| Arc::default()),
         };
         s.scan().await?;
         Ok(s)
+    }
+    pub fn statistics(&self) -> serde_json::Value {
+        let lookups = self.cache_lookups.load(Ordering::Relaxed);
+        serde_json::json!({"backend":{"get":self.operations[0].snapshot(),"put":self.operations[1].snapshot(),"delete":self.operations[2].snapshot()},
+            "cache_lookups":lookups,"cache_hit_rate":crate::stats::ratio(self.cache_hits.load(Ordering::Relaxed),lookups).map(|v| v.min(1.0)),
+            "cpu_slots_available":self.cpu.available_permits(),"backend_slots_available":self.requests.available_permits(),
+            "cache_limit_bytes":self.capacity,"multipart_limit_bytes":self.disk.limits[0]})
     }
     pub fn path(&self, id: Uuid) -> Path {
         Path::from(format!("{}{}", self.prefix(), chunk_name(id)))
@@ -580,11 +591,16 @@ impl Storage {
             "encoded length mismatch"
         );
         let _permit = self.requests.acquire().await?;
+        let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
         let size = encoded.len();
-        self.backend
+        let result = self
+            .backend
             .put(&self.path(c.storage_id), Bytes::from(encoded).into())
-            .await?;
+            .await;
+        operation.finish(result.is_err());
+        result?;
+        self.operations[1].bytes(size as u64);
         self.backend_write_bytes
             .fetch_add(size as u64, Ordering::Relaxed);
         Ok(())
@@ -702,6 +718,7 @@ impl Storage {
         Ok(())
     }
     pub async fn get(self: &Arc<Self>, c: &Chunk) -> Result<Bytes> {
+        self.cache_lookups.fetch_add(1, Ordering::Relaxed);
         if let Some(raw) = self.cached(c).await? {
             return Ok(Bytes::from(raw));
         }
@@ -730,23 +747,31 @@ impl Storage {
         }
         let encoded = {
             let _permit = self.requests.acquire().await?;
+            let mut operation = self.operations[0].begin();
             self.backend_gets
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let result = self.backend.get(&self.path(c.storage_id)).await?;
-            ensure!(
-                result.meta.size <= (MAX + 16) as u64,
-                "backend chunk exceeds bound"
-            );
-            let mut stream = result.into_stream();
-            let mut data = Vec::new();
-            while let Some(bytes) = stream.next().await {
-                let bytes = bytes?;
+            let result: Result<Vec<u8>> = async {
+                let result = self.backend.get(&self.path(c.storage_id)).await?;
                 ensure!(
-                    data.len() + bytes.len() <= MAX + 16,
+                    result.meta.size <= (MAX + 16) as u64,
                     "backend chunk exceeds bound"
                 );
-                data.extend_from_slice(&bytes);
+                let mut stream = result.into_stream();
+                let mut data = Vec::new();
+                while let Some(bytes) = stream.next().await {
+                    let bytes = bytes?;
+                    ensure!(
+                        data.len() + bytes.len() <= MAX + 16,
+                        "backend chunk exceeds bound"
+                    );
+                    data.extend_from_slice(&bytes);
+                }
+                Ok(data)
             }
+            .await;
+            operation.finish(result.is_err());
+            let data = result?;
+            self.operations[0].bytes(data.len() as u64);
             data
         };
         self.backend_read_bytes
@@ -759,8 +784,11 @@ impl Storage {
     }
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         let _permit = self.requests.acquire().await?;
+        let mut operation = self.operations[2].begin();
         self.backend_deletes.fetch_add(1, Ordering::Relaxed);
-        self.backend.delete(&self.path(id)).await?;
+        let result = self.backend.delete(&self.path(id)).await;
+        operation.finish(result.is_err());
+        result?;
         self.invalidate(id).await?;
         Ok(())
     }
