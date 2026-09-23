@@ -1,4 +1,4 @@
-# 数据库结构（0.0.1 / schema_version=1）
+# 数据库结构（0.0.2 / schema_version=1）
 
 PostgreSQL 使用同步提交与 fsync；服务独占一个数据库级 advisory lock 和 data 文件锁
 

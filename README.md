@@ -18,11 +18,11 @@
 ./build.sh
 ```
 
-构建成功后得到同一镜像的 `wxwmoe/media-gateway:latest` 和 `wxwmoe/media-gateway:0.0.1`
+构建成功后得到同一镜像的 `wxwmoe/media-gateway:latest` 和 `wxwmoe/media-gateway:0.0.2`
 
 > 默认运行镜像为 Debian slim
 
-`./build.sh --alpine` 可构建 Alpine 版本，标签为 `wxwmoe/media-gateway:alpine` 和 `:0.0.1-alpine`
+`./build.sh --alpine` 可构建 Alpine 版本，标签为 `wxwmoe/media-gateway:alpine` 和 `:0.0.2-alpine`
 
 按 [部署与恢复](docs/deployment-and-recovery.md) 准备配置、密钥和目录，随后：
 

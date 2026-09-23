@@ -39,7 +39,7 @@ AAD逐字段拼接，无JSON、分隔符或平台本机端序：
 
 后端key：`<backend.prefix>/chunks/<UUID前两位>/<storage_uuid_simple>`，UUID为32位小写十六进制；例如`chunks/08/084f2ff912ff4c6daef1b416fee7b800`。每个物理key不可变，删除后也不复用。分成256个前缀用于组织与分批维护，不承诺特定S3服务商的性能收益。sweep只识别分组与UUID一致的规范路径，其他对象计入unrecognized且不删除。
 
-同级`<backend.prefix>/meta.json`保存`format_version=1`、与数据库一致的`deployment_id`、`chunk_layout="uuid-prefix2"`、`created_at`和仅供诊断的`created_by="wxw-media-gateway/0.0.1"`（来自Cargo包名和版本）。已有正确身份的marker不会仅为更新诊断字段而重写。存储格式版本独立于软件版本及数据库schema版本；区块AEAD格式仍为1。
+同级`<backend.prefix>/meta.json`保存`format_version=1`、与数据库一致的`deployment_id`、`chunk_layout="uuid-prefix2"`、`created_at`和仅供诊断的`created_by="wxw-media-gateway/0.0.2"`（来自Cargo包名和版本）。已有正确身份的marker不会仅为更新诊断字段而重写。存储格式版本独立于软件版本及数据库schema版本；区块AEAD格式仍为1。
 
 省略`backend.prefix`或设为`""`时，后端key直接为`meta.json`和`chunks/<UUID前两位>/<storage_uuid_simple>`，没有前导斜杠。首次初始化要求整个后端桶为空；非空前缀只检查该命名空间。前缀属于数据库绑定的后端身份，已有部署修改前缀会拒绝启动，不会自动搬运数据。
 

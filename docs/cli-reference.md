@@ -1,4 +1,4 @@
-# CLI 参考（0.0.1）
+# CLI 参考（0.0.2）
 
 默认配置 `/config/config.toml`，从中读取 socket 路径
 
@@ -102,5 +102,5 @@ sweep 仅供维护使用，预览和执行必须相同 `--older-than`
 
 ## 离线入口
 
-`docker run --rm wxwmoe/media-gateway:0.0.1 keygen` 生成 32 字节随机密钥，使用 64 位十六进制表示
+`docker run --rm wxwmoe/media-gateway:0.0.2 keygen` 生成 32 字节随机密钥，使用 64 位十六进制表示
 `media-gateway serve --maintenance` 在监听前设置维护状态，用于数据库恢复

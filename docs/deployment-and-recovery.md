@@ -1,4 +1,4 @@
-# 部署、升级与恢复（0.0.1）
+# 部署、升级与恢复（0.0.2）
 
 需要 Docker 环境，以 Debian 12 为例：
 
@@ -6,12 +6,12 @@
 
 ```sh
 ./build.sh
-docker image inspect wxwmoe/media-gateway:latest wxwmoe/media-gateway:0.0.1 --format '{{.Id}}'
+docker image inspect wxwmoe/media-gateway:latest wxwmoe/media-gateway:0.0.2 --format '{{.Id}}'
 ```
 
 Dockerfile 在构建阶段安装 Rust 所需 CMake，生成 release 二进制，运行阶段为 Debian slim、CA证书及二进制，UID/GID10001
 
-可选 `./build.sh --alpine` 使用 Dockerfile.alpine 构建 musl 版本，得到 `:alpine` 与 `:0.0.1-alpine`
+可选 `./build.sh --alpine` 使用 Dockerfile.alpine 构建 musl 版本，得到 `:alpine` 与 `:0.0.2-alpine`
 
 ## 准备配置
 
@@ -21,9 +21,9 @@ Dockerfile 在构建阶段安装 Rust 所需 CMake，生成 release 二进制，
 mkdir -p config/secrets config/keys data
 chmod 700 config config/secrets config/keys data
 cp config.example.toml config/config.toml
-docker run --rm wxwmoe/media-gateway:0.0.1 keygen > config/secrets/postgres-password
-docker run --rm wxwmoe/media-gateway:0.0.1 keygen > config/secrets/credential-key
-docker run --rm wxwmoe/media-gateway:0.0.1 keygen > config/keys/new-chunk-key
+docker run --rm wxwmoe/media-gateway:0.0.2 keygen > config/secrets/postgres-password
+docker run --rm wxwmoe/media-gateway:0.0.2 keygen > config/secrets/credential-key
+docker run --rm wxwmoe/media-gateway:0.0.2 keygen > config/keys/new-chunk-key
 ```
 
 在 `config.toml` 填写 `database` 的 `host`、`port`、`name` 和 `user`

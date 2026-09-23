@@ -1,6 +1,6 @@
 services:
   media-gateway:
-    image: wxwmoe/media-gateway:0.0.1
+    image: wxwmoe/media-gateway:0.0.2
     pull_policy: never
     container_name: media-gateway
     restart: unless-stopped
