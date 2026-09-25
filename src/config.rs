@@ -171,11 +171,21 @@ impl Default for Multipart {
         }
     }
 }
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cache {
     pub max_size: Option<String>,
     pub max_entries: Option<usize>,
+    pub min_compression_savings_percent: u8,
+}
+impl Default for Cache {
+    fn default() -> Self {
+        Self {
+            max_size: None,
+            max_entries: None,
+            min_compression_savings_percent: 20,
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -392,6 +402,10 @@ impl Config {
         if let Some(v) = &c.cache.max_size {
             bytes(v)?;
         }
+        ensure!(
+            c.cache.min_compression_savings_percent <= 100,
+            "cache.min_compression_savings_percent must be 0..100"
+        );
         ensure!(
             c.gc.batch_size > 0 && c.gc.batch_size <= 10_000,
             "gc.batch_size must be 1..10000"

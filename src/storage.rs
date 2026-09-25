@@ -49,6 +49,15 @@ fn parse_chunk_name(name: &str) -> Option<Uuid> {
     }
     Uuid::parse_str(id).ok()
 }
+fn parse_cache_name(name: &str) -> Option<(Uuid, bool)> {
+    let (name, extension) = name.rsplit_once('.')?;
+    let compressed = match extension {
+        "raw" => false,
+        "zst" => true,
+        _ => return None,
+    };
+    Some((parse_chunk_name(name)?, compressed))
+}
 
 #[derive(Clone, Copy)]
 pub enum Area {
@@ -207,6 +216,7 @@ enum Queue {
 }
 struct Entry {
     size: u64,
+    compressed: bool,
     frequency: u8,
     pins: Arc<AtomicUsize>,
     queue: Queue,
@@ -227,7 +237,7 @@ struct Fifo {
     small_bytes: u64,
 }
 impl Fifo {
-    fn insert(&mut self, id: Uuid, size: u64) {
+    fn insert(&mut self, id: Uuid, size: u64, compressed: bool) {
         if self.entries.contains_key(&id) {
             return;
         }
@@ -246,6 +256,7 @@ impl Fifo {
             id,
             Entry {
                 size,
+                compressed,
                 frequency: 0,
                 pins: Arc::new(AtomicUsize::new(0)),
                 queue,
@@ -323,9 +334,11 @@ pub struct Storage {
     cpu: Arc<Semaphore>,
     requests: Arc<Semaphore>,
     fifo: tokio::sync::Mutex<Fifo>,
+    cache_writes: tokio::sync::Mutex<()>,
     fills: Arc<Semaphore>,
     max_entries: usize,
     capacity: Option<u64>,
+    min_compression_savings_percent: u8,
     misses: Mutex<HashMap<Uuid, std::sync::Weak<FetchResult>>>,
     pub backend_gets: std::sync::atomic::AtomicU64,
     pub cache_hits: std::sync::atomic::AtomicU64,
@@ -387,9 +400,11 @@ impl Storage {
             cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
             requests: Arc::new(Semaphore::new(budget.backend_concurrency)),
             fifo: tokio::sync::Mutex::new(Fifo::default()),
+            cache_writes: tokio::sync::Mutex::new(()),
             fills: Arc::new(Semaphore::new(budget.cpu_jobs)),
             max_entries: budget.cache_entries,
             capacity: c.cache.max_size.as_deref().map(config::bytes).transpose()?,
+            min_compression_savings_percent: c.cache.min_compression_savings_percent,
             misses: Mutex::new(HashMap::new()),
             backend_gets: 0.into(),
             cache_hits: 0.into(),
@@ -525,9 +540,12 @@ impl Storage {
         .await?;
         Ok(())
     }
-    fn cache_path(&self, id: Uuid) -> PathBuf {
-        let s = id.simple().to_string();
-        self.disk.root.join("chunks").join(&s[..2]).join(s)
+    fn cache_path(&self, id: Uuid, compressed: bool) -> PathBuf {
+        self.disk
+            .root
+            .join("chunks")
+            .join(chunk_name(id))
+            .with_extension(if compressed { "zst" } else { "raw" })
     }
     async fn scan(&self) -> Result<()> {
         let mut parts = tokio::fs::read_dir(self.disk.root.join("multipart")).await?;
@@ -548,16 +566,21 @@ impl Storage {
                     continue;
                 }
                 let len = file.metadata().await?.len();
-                let id = Uuid::parse_str(&file.file_name().to_string_lossy()).ok();
+                let cached = parse_cache_name(&format!(
+                    "{}/{}",
+                    dir.file_name().to_string_lossy(),
+                    file.file_name().to_string_lossy()
+                ));
                 let mut fifo = self.fifo.lock().await;
-                if let Some(id) = id.filter(|_| {
-                    len <= (MAX + 16) as u64
+                if let Some((id, compressed)) = cached.filter(|(id, _)| {
+                    (1..=MAX as u64).contains(&len)
+                        && !fifo.entries.contains_key(id)
                         && fifo.entries.len() < self.max_entries
                         && self
                             .capacity
                             .is_none_or(|c| self.disk.used()[1].saturating_add(len) <= c)
                 }) {
-                    fifo.insert(id, len);
+                    fifo.insert(id, len, compressed);
                     self.disk.account_existing(Area::Cache, len);
                 } else {
                     tokio::fs::remove_file(file.path()).await?;
@@ -566,31 +589,33 @@ impl Storage {
         }
         Ok(())
     }
-    pub async fn encode(&self, c: Chunk, raw: Vec<u8>) -> Result<(Chunk, Vec<u8>)> {
+    pub async fn encode(&self, c: Chunk, raw: Vec<u8>) -> Result<(Chunk, Vec<u8>, Bytes)> {
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
+        let threshold = self.min_compression_savings_percent;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            codec::encode(c, &raw, &secrets)
+            codec::encode(c, raw, &secrets, threshold)
         })
         .await?
     }
-    async fn decode(&self, c: &Chunk, encoded: Vec<u8>) -> Result<Vec<u8>> {
+    async fn decode(&self, c: &Chunk, encoded: Vec<u8>) -> Result<(Bytes, Bytes)> {
         let permit = self.cpu.clone().acquire_owned().await?;
         let c = c.clone();
         let secrets = self.secrets.clone();
+        let threshold = self.min_compression_savings_percent;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            codec::decode(&c, encoded, &secrets)
+            codec::decode(&c, encoded, &secrets, threshold)
         })
         .await?
     }
-    pub async fn put(&self, c: &Chunk, encoded: Vec<u8>) -> Result<()> {
+    pub async fn put(self: &Arc<Self>, c: &Chunk, encoded: Vec<u8>, cache: Bytes) -> Result<()> {
         ensure!(
             Some(encoded.len() as i32) == c.stored_size,
             "encoded length mismatch"
         );
-        let _permit = self.requests.acquire().await?;
+        let permit = self.requests.acquire().await?;
         let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
         let size = encoded.len();
@@ -600,45 +625,55 @@ impl Storage {
             .await;
         operation.finish(result.is_err());
         result?;
+        drop(permit);
         self.operations[1].bytes(size as u64);
         self.backend_write_bytes
             .fetch_add(size as u64, Ordering::Relaxed);
+        if let Err(e) = self.fill(c, cache).await {
+            tracing::warn!(error=%e,"cache fill failed; backend upload is durable");
+        }
         Ok(())
     }
-    async fn cached(&self, c: &Chunk) -> Result<Option<Vec<u8>>> {
-        let pin = {
+    async fn cached(&self, c: &Chunk) -> Result<Option<Bytes>> {
+        let (pin, compressed) = {
             let mut fifo = self.fifo.lock().await;
             let Some(e) = fifo.entries.get_mut(&c.storage_id) else {
                 return Ok(None);
             };
             e.pins.fetch_add(1, Ordering::Relaxed);
             e.frequency = e.frequency.saturating_add(1).min(3);
-            CachePin(e.pins.clone())
+            (CachePin(e.pins.clone()), e.compressed)
         };
-        let data = read_bounded(self.cache_path(c.storage_id), MAX + 16).await;
+        let data = read_bounded(self.cache_path(c.storage_id, compressed), MAX).await;
         drop(pin);
-        if let Ok(data) = data
-            && let Ok(raw) = self.decode(c, data).await
-        {
-            self.cache_hits
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.cache_hit_bytes
-                .fetch_add(c.stored_size.unwrap_or(0) as u64, Ordering::Relaxed);
-            return Ok(Some(raw));
+        if let Ok(data) = data {
+            let size = data.len() as u64;
+            let permit = self.cpu.clone().acquire_owned().await?;
+            let chunk = c.clone();
+            let decoded = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                codec::decode_cache(&chunk, Bytes::from(data), compressed)
+            })
+            .await?;
+            if let Ok(raw) = decoded {
+                self.cache_hits.fetch_add(1, Ordering::Relaxed);
+                self.cache_hit_bytes.fetch_add(size, Ordering::Relaxed);
+                return Ok(Some(raw));
+            }
         }
         self.invalidate(c.storage_id).await?;
         Ok(None)
     }
     async fn invalidate(&self, id: Uuid) -> Result<()> {
+        let _write = self.cache_writes.lock().await;
         let mut fifo = self.fifo.lock().await;
-        if fifo
-            .entries
-            .get(&id)
-            .is_some_and(|e| e.pins.load(Ordering::Relaxed) > 0)
-        {
+        let Some(entry) = fifo.entries.get(&id) else {
+            return Ok(());
+        };
+        if entry.pins.load(Ordering::Relaxed) > 0 {
             return Ok(());
         }
-        match tokio::fs::remove_file(self.cache_path(id)).await {
+        match tokio::fs::remove_file(self.cache_path(id, entry.compressed)).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
@@ -648,20 +683,26 @@ impl Storage {
         }
         Ok(())
     }
-    async fn fill(self: &Arc<Self>, id: Uuid, data: &[u8]) -> Result<()> {
+    async fn fill(self: &Arc<Self>, c: &Chunk, data: Bytes) -> Result<()> {
         let Ok(permit) = self.fills.clone().try_acquire_owned() else {
             return Ok(());
         };
         let storage = self.clone();
-        let data = data.to_vec();
+        let id = c.storage_id;
+        let compressed = codec::cache_compressed(c, self.min_compression_savings_percent);
         tokio::spawn(async move {
             let _permit = permit;
-            storage.fill_owned(id, &data).await
+            storage.fill_owned(id, &data, compressed).await
         })
         .await?
     }
-    async fn fill_owned(&self, id: Uuid, data: &[u8]) -> Result<()> {
+    async fn fill_owned(&self, id: Uuid, data: &[u8], compressed: bool) -> Result<()> {
         let size = data.len() as u64;
+        if self.capacity.is_some_and(|capacity| size > capacity) {
+            return Ok(());
+        }
+        // Serialize publication/invalidation while cache hits only need the FIFO index lock.
+        let _write = self.cache_writes.lock().await;
         let mut fifo = self.fifo.lock().await;
         let ticket = {
             if fifo.entries.contains_key(&id) {
@@ -677,7 +718,8 @@ impl Storage {
                 let Some(victim) = fifo.victim(capacity, self.max_entries) else {
                     return Ok(());
                 };
-                match tokio::fs::remove_file(self.cache_path(victim)).await {
+                let entry = &fifo.entries[&victim];
+                match tokio::fs::remove_file(self.cache_path(victim, entry.compressed)).await {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => return Err(e.into()),
@@ -687,13 +729,20 @@ impl Storage {
                 }
             }
         };
-        let path = self.cache_path(id);
+        drop(fifo);
+        let path = self.cache_path(id, compressed);
         #[cfg(feature = "fault-injection")]
         crate::faults::point("cache-reserved").await;
-        let tmp = path.with_extension("tmp");
+        let tmp = path.with_extension(if compressed { "zst.tmp" } else { "raw.tmp" });
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let result = async {
-            let mut f = tokio::fs::File::create(&tmp).await?;
+            let mut f = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
+                .await?;
             f.write_all(data).await?;
             f.flush().await?;
             drop(f);
@@ -714,13 +763,13 @@ impl Storage {
             return Err(e.into());
         }
         ticket.commit();
-        fifo.insert(id, size);
+        self.fifo.lock().await.insert(id, size, compressed);
         Ok(())
     }
     pub async fn get(self: &Arc<Self>, c: &Chunk) -> Result<Bytes> {
         self.cache_lookups.fetch_add(1, Ordering::Relaxed);
         if let Some(raw) = self.cached(c).await? {
-            return Ok(Bytes::from(raw));
+            return Ok(raw);
         }
         let lock = {
             let mut map = self.misses.lock().unwrap();
@@ -743,7 +792,7 @@ impl Storage {
     }
     async fn fetch(self: &Arc<Self>, c: &Chunk) -> Result<Bytes> {
         if let Some(raw) = self.cached(c).await? {
-            return Ok(Bytes::from(raw));
+            return Ok(raw);
         }
         let encoded = {
             let _permit = self.requests.acquire().await?;
@@ -776,11 +825,11 @@ impl Storage {
         };
         self.backend_read_bytes
             .fetch_add(encoded.len() as u64, Ordering::Relaxed);
-        let raw = self.decode(c, encoded.clone()).await?;
-        if let Err(e) = self.fill(c.storage_id, &encoded).await {
+        let (raw, cache) = self.decode(c, encoded).await?;
+        if let Err(e) = self.fill(c, cache).await {
             tracing::warn!(error=%e,"cache fill failed; serving verified backend data");
         }
-        Ok(Bytes::from(raw))
+        Ok(raw)
     }
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         let _permit = self.requests.acquire().await?;
@@ -801,6 +850,17 @@ mod tests {
     fn sweep_accepts_only_canonical_sharded_keys() {
         let id = Uuid::parse_str("084f2ff912ff4c6daef1b416fee7b800").unwrap();
         assert_eq!(parse_chunk_name(&chunk_name(id)), Some(id));
+        assert_eq!(
+            parse_cache_name(&format!("{}.raw", chunk_name(id))),
+            Some((id, false))
+        );
+        assert_eq!(
+            parse_cache_name(&format!("{}.zst", chunk_name(id))),
+            Some((id, true))
+        );
+        for suffix in ["", ".tmp", ".raw.tmp", ".zst.tmp", ".unknown"] {
+            assert!(parse_cache_name(&format!("{}{suffix}", chunk_name(id))).is_none());
+        }
         for name in [
             "084f2ff912ff4c6daef1b416fee7b800",
             "09/084f2ff912ff4c6daef1b416fee7b800",
@@ -810,6 +870,7 @@ mod tests {
             "meta.json",
         ] {
             assert!(parse_chunk_name(name).is_none());
+            assert!(parse_cache_name(&format!("{name}.raw")).is_none());
         }
     }
     #[test]
@@ -838,7 +899,7 @@ mod tests {
                         let victim = fifo.victim(100, 100).unwrap();
                         fifo.remove(victim);
                     }
-                    fifo.insert(id, 1);
+                    fifo.insert(id, 1, false);
                 }
                 if let Some(position) = lru.iter().position(|v| *v == id) {
                     lru.remove(position);
@@ -859,13 +920,13 @@ mod tests {
         let mut q = Fifo::default();
         let a = Uuid::from_u128(1);
         let b = Uuid::from_u128(2);
-        q.insert(a, 100);
-        q.insert(b, 100);
+        q.insert(a, 100, false);
+        q.insert(b, 100, true);
         q.entries.get_mut(&a).unwrap().frequency = 2;
         assert_eq!(q.victim(200, 1), Some(b));
         q.remove(b);
         assert!(q.entries.get(&a).is_some_and(|e| e.queue == Queue::Main));
-        q.insert(b, 100);
+        q.insert(b, 100, true);
         assert!(q.entries.get(&b).is_some_and(|e| e.queue == Queue::Main));
         for e in q.entries.values_mut() {
             e.pins.store(1, Ordering::Relaxed);

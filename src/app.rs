@@ -53,6 +53,23 @@ pub struct Extent {
     pub fragment_id: Option<Uuid>,
     pub source_offset: i32,
 }
+impl Extent {
+    fn slice(&self, data: Bytes) -> Result<Bytes> {
+        let start = self.source_offset as usize;
+        let end = start
+            .checked_add(self.length as usize)
+            .context("extent overflow")?;
+        ensure!(end <= data.len(), "extent exceeds source");
+        Ok(data.slice(start..end))
+    }
+}
+#[derive(sqlx::FromRow)]
+struct ReadExtent {
+    #[sqlx(flatten)]
+    extent: Extent,
+    #[sqlx(flatten)]
+    chunk: Chunk,
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Metadata {
     pub content_type: Option<String>,
@@ -313,12 +330,12 @@ impl App {
         tx.commit().await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-allocated").await;
-        let (c, encoded) = self.storage.encode(c, raw).await?;
+        let (c, encoded, cache) = self.storage.encode(c, raw).await?;
         sqlx::query("UPDATE chunks SET stored_size=$2,compressed=$3,nonce=$4,state='uploading' WHERE id=$1 AND state='preparing'")
             .bind(c.id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).execute(&self.db).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-uploading").await;
-        self.storage.put(&c, encoded).await?;
+        self.storage.put(&c, encoded, cache).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-stored").await;
         let mut tx = self.db.begin().await?;
@@ -414,15 +431,15 @@ impl App {
             );
             Bytes::from(data)
         };
-        let start = e.source_offset as usize;
-        let end = start
-            .checked_add(e.length as usize)
-            .context("extent overflow")?;
-        ensure!(end <= data.len(), "extent exceeds source");
-        Ok(data.slice(start..end))
+        e.slice(data)
     }
     pub async fn extents(&self, stream: Uuid, from: i64, until: i64) -> Result<Vec<Extent>> {
         Ok(sqlx::query_as("SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2 AND offset_bytes<$3 ORDER BY offset_bytes LIMIT 64").bind(stream).bind(from).bind(until).fetch_all(&self.db).await?)
+    }
+    async fn read_extents(&self, stream: Uuid, from: i64, until: i64) -> Result<Vec<ReadExtent>> {
+        // Bound the mapping page before joining; a missing ready chunk must fail decoding the row.
+        Ok(sqlx::query_as("SELECT e.*,c.* FROM (SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2 AND offset_bytes<$3 ORDER BY offset_bytes LIMIT 64) e LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' ORDER BY e.offset_bytes")
+            .bind(stream).bind(from).bind(until).fetch_all(&self.db).await?)
     }
     pub fn body(
         self: &Arc<Self>,
@@ -438,9 +455,9 @@ impl App {
             let mut cursor:Option<i64>=sqlx::query_scalar("SELECT offset_bytes FROM extents WHERE stream_id=$1 AND offset_bytes<=$2 ORDER BY offset_bytes DESC LIMIT 1").bind(stream.id).bind(start).fetch_optional(&app.db).await?;
             let mut position=start;
             while position<end {
-                let rows=app.extents(stream.id,cursor.context("object mapping is incomplete")?,end).await?;
+                let rows=app.read_extents(stream.id,cursor.context("object mapping is incomplete")?,end).await?;
                 (!rows.is_empty()).then_some(()).context("object mapping is incomplete")?;
-                let mut loaded=futures_util::stream::iter(rows.into_iter().map(|row| {let app=app.clone();async move{let data=app.extent_bytes(&row).await?;Ok::<_,anyhow::Error>((row,data))}})).buffered(2);
+                let mut loaded=futures_util::stream::iter(rows.into_iter().map(|row| {let app=app.clone();async move{let data=app.storage.get(&row.chunk).await?;let data=row.extent.slice(data)?;Ok::<_,anyhow::Error>((row.extent,data))}})).buffered(2);
                 while let Some(result)=loaded.next().await {
                     let (row,data)=result?;
                     (row.offset_bytes<=position && row.offset_bytes+row.length as i64>position).then_some(()).context("object mapping has a gap")?;

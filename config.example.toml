@@ -61,6 +61,8 @@ client_idle_timeout = "120s"
 [cache]
 # max_size = "10GB"
 # max_entries = 65536
+# Keep decrypted Zstd payloads only when they save at least this percentage.
+min_compression_savings_percent = 20
 
 [encryption]
 algorithm = "aes-256-gcm"

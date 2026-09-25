@@ -1,6 +1,7 @@
 use crate::config::Secrets;
 use anyhow::{Context, Result, bail, ensure};
 use aws_lc_rs::aead::{AES_256_GCM, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
+use bytes::Bytes;
 use chrono::{DateTime, Datelike, Utc};
 use serde::Serialize;
 use uuid::Uuid;
@@ -75,20 +76,38 @@ fn aad(c: &Chunk) -> Result<Vec<u8>> {
     aad.extend_from_slice(c.key_id.as_bytes());
     Ok(aad)
 }
-pub fn encode(mut c: Chunk, input: &[u8], secrets: &Secrets) -> Result<(Chunk, Vec<u8>)> {
+pub fn cache_compressed(c: &Chunk, min_savings_percent: u8) -> bool {
+    let tag = if c.algorithm == "none" { 0 } else { 16 };
+    c.compressed
+        && c.stored_size.is_some_and(|size| {
+            (i64::from(size) - tag) * 100
+                <= i64::from(c.raw_size) * (100 - i64::from(min_savings_percent))
+        })
+}
+pub fn encode(
+    mut c: Chunk,
+    input: Vec<u8>,
+    secrets: &Secrets,
+    min_savings_percent: u8,
+) -> Result<(Chunk, Vec<u8>, Bytes)> {
     ensure!(
-        input.len() == c.raw_size as usize && blake3::hash(input).as_bytes() == c.hash.as_slice(),
+        input.len() == c.raw_size as usize && blake3::hash(&input).as_bytes() == c.hash.as_slice(),
         "chunk input mismatch"
     );
-    let compressed = zstd::bulk::compress(input, 3)?;
+    let compressed = zstd::bulk::compress(&input, 3)?;
     c.compressed = compressed.len() < input.len();
     let mut encoded = if c.compressed {
         compressed
     } else {
-        input.to_vec()
+        input.clone()
     };
     let tag_len = if c.algorithm == "none" { 0 } else { 16 };
     c.stored_size = Some(i32::try_from(encoded.len() + tag_len)?);
+    let cache = if cache_compressed(&c, min_savings_percent) {
+        Bytes::copy_from_slice(&encoded)
+    } else {
+        Bytes::from(input)
+    };
     if c.algorithm != "none" {
         let (alg, material) = secrets.keys.get(&c.key_id).context("missing chunk key")?;
         ensure!(*alg == c.algorithm, "chunk key algorithm mismatch");
@@ -104,20 +123,25 @@ pub fn encode(mut c: Chunk, input: &[u8], secrets: &Secrets) -> Result<(Chunk, V
             )
             .map_err(|_| anyhow::anyhow!("chunk encryption failed"))?;
     }
-    Ok((c, encoded))
+    Ok((c, encoded, cache))
 }
-pub fn decode(c: &Chunk, mut encoded: Vec<u8>, secrets: &Secrets) -> Result<Vec<u8>> {
+pub fn decode(
+    c: &Chunk,
+    mut encoded: Vec<u8>,
+    secrets: &Secrets,
+    min_savings_percent: u8,
+) -> Result<(Bytes, Bytes)> {
     ensure!(
         encoded.len() <= MAX + 16 && Some(encoded.len() as i32) == c.stored_size,
         "encoded chunk length mismatch"
     );
     let metadata = aad(c)?;
-    let plain = if c.algorithm == "none" {
+    let plain_len = if c.algorithm == "none" {
         ensure!(
             c.key_id.is_empty() && c.nonce.is_none(),
             "invalid unencrypted chunk metadata"
         );
-        encoded.as_slice()
+        encoded.len()
     } else {
         let (alg, material) = secrets
             .keys
@@ -137,11 +161,36 @@ pub fn decode(c: &Chunk, mut encoded: Vec<u8>, secrets: &Secrets) -> Result<Vec<
                 &mut encoded,
             )
             .map_err(|_| anyhow::anyhow!("chunk authentication failed"))?
+            .len()
     };
-    let raw = if c.compressed {
-        zstd::bulk::decompress(plain, c.raw_size as usize)?
+    encoded.truncate(plain_len);
+    let plain = Bytes::from(encoded);
+    let raw = decode_cache(c, plain.clone(), c.compressed)?;
+    let cache = if cache_compressed(c, min_savings_percent) {
+        plain
     } else {
-        plain.to_vec()
+        raw.clone()
+    };
+    Ok((raw, cache))
+}
+pub fn decode_cache(c: &Chunk, data: Bytes, compressed: bool) -> Result<Bytes> {
+    ensure!(
+        c.format == 1 && c.hash.len() == 32 && (1..=MAX as i32).contains(&c.raw_size),
+        "invalid chunk metadata"
+    );
+    let raw = if compressed {
+        let tag = match c.algorithm.as_str() {
+            "none" => 0,
+            "aes-256-gcm" | "chacha20-poly1305" => 16,
+            _ => bail!("unknown chunk algorithm"),
+        };
+        ensure!(
+            c.compressed && data.len() <= MAX && Some(data.len() as i32 + tag) == c.stored_size,
+            "compressed cache length mismatch"
+        );
+        Bytes::from(zstd::bulk::decompress(&data, c.raw_size as usize)?)
+    } else {
+        data
     };
     ensure!(
         raw.len() == c.raw_size as usize && blake3::hash(&raw).as_bytes() == c.hash.as_slice(),
@@ -210,7 +259,7 @@ mod tests {
                 state: "preparing".into(),
                 created_at: "2026-09-21T00:00:00Z".parse().unwrap(),
             };
-            let (c, encoded) = encode(c, input, &secrets).unwrap();
+            let (c, encoded, cache) = encode(c, input.to_vec(), &secrets, 20).unwrap();
             assert_eq!(
                 hex::encode(&c.hash),
                 "1ed8177cb9b303cde3647b13887acb45f852af54364751de2067abb8fcd7c257"
@@ -221,7 +270,8 @@ mod tests {
                 _ => "c698b8ca807c7636e6bcef57aea0c94181c4264391d7b7e202797b24c5a2e090",
             };
             assert_eq!(hex::encode(&encoded), expected);
-            assert_eq!(decode(&c, encoded, &secrets).unwrap(), input);
+            assert_eq!(decode(&c, encoded, &secrets, 20).unwrap().0.as_ref(), input);
+            assert_eq!(decode_cache(&c, cache, false).unwrap().as_ref(), input);
         }
     }
     #[test]
@@ -255,21 +305,57 @@ mod tests {
                     state: "preparing".into(),
                     created_at: "2026-09-21T00:00:00Z".parse().unwrap(),
                 };
-                let (c, stored) = encode(c, &input, &secrets).unwrap();
-                assert_eq!(decode(&c, stored.clone(), &secrets).unwrap(), input);
+                let (c, stored, cache) = encode(c, input.clone(), &secrets, 20).unwrap();
+                let (raw, fetched_cache) = decode(&c, stored.clone(), &secrets, 20).unwrap();
+                assert_eq!(raw.as_ref(), input);
+                assert_eq!(cache, fetched_cache);
+                assert_eq!(
+                    decode_cache(&c, cache.clone(), cache_compressed(&c, 20))
+                        .unwrap()
+                        .as_ref(),
+                    input
+                );
+                let mut bad_cache = cache.to_vec();
+                bad_cache[0] ^= 1;
+                assert!(
+                    decode_cache(&c, Bytes::from(bad_cache), cache_compressed(&c, 20)).is_err()
+                );
+                let mut oversized = c.clone();
+                oversized.raw_size = MAX as i32 + 1;
+                assert!(decode_cache(&oversized, cache.clone(), cache_compressed(&c, 20)).is_err());
+                for threshold in [0, 100] {
+                    let (c, encoded, cache) =
+                        encode(c.clone(), input.clone(), &secrets, threshold).unwrap();
+                    assert_eq!(stored, encoded);
+                    assert_eq!(decode(&c, encoded, &secrets, threshold).unwrap().1, cache);
+                    assert_eq!(
+                        decode_cache(&c, cache, cache_compressed(&c, threshold))
+                            .unwrap()
+                            .as_ref(),
+                        input
+                    );
+                }
                 let mut changed = stored.clone();
                 changed[0] ^= 1;
-                assert!(decode(&c, changed, &secrets).is_err());
+                assert!(decode(&c, changed, &secrets, 20).is_err());
                 let mut changed = c.clone();
                 changed.hash[0] ^= 1;
-                assert!(decode(&changed, stored.clone(), &secrets).is_err());
+                assert!(decode(&changed, stored.clone(), &secrets, 20).is_err());
                 let mut changed = stored.clone();
                 changed.push(0);
-                assert!(decode(&c, changed, &secrets).is_err());
+                assert!(decode(&c, changed, &secrets, 20).is_err());
                 if algorithm != "none" {
                     let mut changed = c.clone();
                     changed.storage_id = Uuid::new_v4();
-                    assert!(decode(&changed, stored, &secrets).is_err());
+                    assert!(decode(&changed, stored, &secrets, 20).is_err());
+                }
+                let mut boundary = c.clone();
+                boundary.raw_size = 1000;
+                boundary.compressed = true;
+                let tag = if algorithm == "none" { 0 } else { 16 };
+                for size in [799, 800, 801] {
+                    boundary.stored_size = Some(size + tag);
+                    assert_eq!(cache_compressed(&boundary, 20), size <= 800);
                 }
             }
         }

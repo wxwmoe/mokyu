@@ -52,8 +52,9 @@
 | `multipart.sweep_interval` | duration / `5m` | 本地过期/无引用映射清理间隔，任务完成也会唤醒清理 |
 | `multipart.client_idle_timeout` | duration / `120s` | 上传相邻有效数据之间的等待上限 |
 | `multipart.max_active_uploads` | optional positive bigint / 无 | 所有逻辑桶的活跃 multipart 数量配额 |
-| `cache.max_size` | optional size / 无单独字节配额 | chunks 缓存实际编码字节上限；包括写入预留 |
+| `cache.max_size` | optional size / 无单独字节配额 | chunks 缓存实际文件字节上限；包括写入预留 |
 | `cache.max_entries` | positive integer / 自动 | 缓存文件索引条目预算，ghost 元数据同样有界 |
+| `cache.min_compression_savings_percent` | integer 0～100 / `20` | 压缩至少节省此百分比才保留 `.zst`，否则保存 `.raw`；0 保留所有已压缩载荷，100 全部缓存原始字节；只影响新填充 |
 | `encryption.algorithm` | enum / `aes-256-gcm` | `none` / `aes-256-gcm` / `chacha20-poly1305`；只决定新写入 |
 | `encryption.keyring_file` | optional path / 加密时必填 | 当前写密钥与历史读密钥 |
 | `gc.unreferenced_grace` | duration / `48h` | 失去最后引用/活跃保护后的远端回收宽限 |

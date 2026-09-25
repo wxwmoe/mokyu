@@ -86,6 +86,14 @@ assert snapshot['chunks']['stored_bytes'] == snapshot['live']['stored_bytes']
 assert snapshot['buckets'][0]['objects'] == 3
 assert snapshot['buckets'][0]['logical_bytes'] == snapshot['logical_bytes']
 
+# Uploads now populate the cache; remove one test file to exercise backend GET accounting.
+with psycopg.connect(db_url) as db:
+    storage_id = db.execute('''SELECT c.storage_id FROM objects o JOIN buckets b ON b.id=o.bucket_id
+        JOIN extents e ON e.stream_id=o.stream_id JOIN chunks c ON c.id=e.chunk_id
+        WHERE b.name=%s AND o.key='statistics/one' ''', (bucket,)).fetchone()[0].hex
+for path in (Path(os.environ['MGW_TEST_DATA']) / 'chunks' / storage_id[:2]).glob(storage_id + '.*'):
+    path.unlink()
+
 # A complete stream, Range, HEAD and an empty object must never count as canceled.
 initial = status()['runtime']['http']['s3']
 for _ in range(2):

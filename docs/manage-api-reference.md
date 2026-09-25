@@ -61,6 +61,8 @@ CORS每条规则需要非空origins/methods，headers/expose默认空数组，ma
 
 状态保留 `version`、`resources`（自动/显式生效预算）、`local_bytes:[multipart,chunks]`、`gc_paused`、`maintenance`、`active_streams`、`data_slots_available`、`db_pool_size`、`db_pool_idle`、`backend_gets/puts/deletes`、`backend_read_bytes/write_bytes`、`cache_hits/cache_hit_bytes`。
 
+`cache_hit_bytes` 累计成功命中时读取的本地缓存文件字节（`.raw` 或 `.zst`）；`backend_read_bytes/write_bytes` 仍统计远端编码字节，两者可能不同。
+
 0.0.2 新增运行统计：
 
 | 字段 | 含义 |
