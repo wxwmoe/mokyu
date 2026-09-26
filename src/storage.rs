@@ -274,7 +274,27 @@ impl Fifo {
         self.main.retain(|v| *v != id);
         Some(e)
     }
-    fn victim(&mut self, capacity: u64, max_ghosts: usize) -> Option<Uuid> {
+    fn restore_victim(&mut self, id: Uuid) {
+        match self.entries[&id].queue {
+            Queue::Small => self.small.push_front(id),
+            Queue::Main => self.main.push_front(id),
+        }
+    }
+    // Commit eviction only after the cache file is gone.
+    fn evict(&mut self, id: Uuid, max_ghosts: usize) -> Option<Entry> {
+        let e = self.remove(id)?;
+        if e.queue == Queue::Small {
+            self.ghost.insert(id);
+            self.ghosts.push_back(id);
+            while self.ghosts.len() > max_ghosts {
+                if let Some(old) = self.ghosts.pop_front() {
+                    self.ghost.remove(&old);
+                }
+            }
+        }
+        Some(e)
+    }
+    fn victim(&mut self, capacity: u64) -> Option<Uuid> {
         // A bounded scan also terminates when every candidate is pinned.
         for _ in 0..self.entries.len().saturating_mul(5).max(1) {
             let small = (self.small_bytes > capacity / 10 || self.main.is_empty())
@@ -306,15 +326,6 @@ impl Fifo {
                 e.frequency -= 1;
                 self.main.push_back(id);
                 continue;
-            }
-            if small {
-                self.ghost.insert(id);
-                self.ghosts.push_back(id);
-                while self.ghosts.len() > max_ghosts {
-                    if let Some(old) = self.ghosts.pop_front() {
-                        self.ghost.remove(&old);
-                    }
-                }
             }
             return Some(id);
         }
@@ -672,7 +683,9 @@ impl Storage {
                 return Ok(Some(raw));
             }
         }
-        self.invalidate(c.storage_id).await?;
+        if let Err(e) = self.invalidate(c.storage_id).await {
+            tracing::warn!(storage_id=%c.storage_id,error=%e,"cache invalidation failed; falling back to backend");
+        }
         Ok(None)
     }
     async fn invalidate(&self, id: Uuid) -> Result<()> {
@@ -726,16 +739,19 @@ impl Storage {
                     break ticket;
                 }
                 let capacity = self.capacity.unwrap_or(self.disk.used()[1].max(size));
-                let Some(victim) = fifo.victim(capacity, self.max_entries) else {
+                let Some(victim) = fifo.victim(capacity) else {
                     return Ok(());
                 };
                 let entry = &fifo.entries[&victim];
                 match tokio::fs::remove_file(self.cache_path(victim, entry.compressed)).await {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        fifo.restore_victim(victim);
+                        return Err(e.into());
+                    }
                 }
-                if let Some(e) = fifo.remove(victim) {
+                if let Some(e) = fifo.evict(victim, self.max_entries) {
                     self.disk.release(Area::Cache, e.size);
                 }
             }
@@ -916,8 +932,8 @@ mod tests {
                     fifo_hits += 1;
                 } else {
                     if fifo.entries.len() == 100 {
-                        let victim = fifo.victim(100, 100).unwrap();
-                        fifo.remove(victim);
+                        let victim = fifo.victim(100).unwrap();
+                        fifo.evict(victim, 100);
                     }
                     fifo.insert(id, 1, false);
                 }
@@ -943,15 +959,54 @@ mod tests {
         q.insert(a, 100, false);
         q.insert(b, 100, true);
         q.entries.get_mut(&a).unwrap().frequency = 2;
-        assert_eq!(q.victim(200, 1), Some(b));
-        q.remove(b);
+        assert_eq!(q.victim(200), Some(b));
+        q.evict(b, 1);
         assert!(q.entries.get(&a).is_some_and(|e| e.queue == Queue::Main));
         q.insert(b, 100, true);
         assert!(q.entries.get(&b).is_some_and(|e| e.queue == Queue::Main));
         for e in q.entries.values_mut() {
             e.pins.store(1, Ordering::Relaxed);
         }
-        assert_eq!(q.victim(200, 1), None);
+        assert_eq!(q.victim(200), None);
         assert!(q.ghosts.len() <= 1);
+    }
+    #[test]
+    fn fifo_failed_evictions_preserve_candidates_and_ghosts() {
+        for frequency in [0, 2] {
+            let mut q = Fifo::default();
+            let old = Uuid::from_u128(1);
+            let id = Uuid::from_u128(2);
+            q.insert(old, 100, false);
+            assert_eq!(q.victim(100), Some(old));
+            q.evict(old, 1);
+            q.insert(id, 100, true);
+            q.entries.get_mut(&id).unwrap().frequency = frequency;
+            let queue = if frequency == 0 {
+                Queue::Small
+            } else {
+                Queue::Main
+            };
+            for _ in 0..3 {
+                assert_eq!(q.victim(100), Some(id));
+                assert_eq!(q.ghost, HashSet::from([old]));
+                assert_eq!(q.ghosts, VecDeque::from([old]));
+                q.restore_victim(id);
+                assert_eq!(q.entries.len(), 1);
+                let e = &q.entries[&id];
+                assert!(e.queue == queue && e.size == 100 && e.compressed);
+                assert_eq!(e.frequency, 0);
+                assert_eq!(q.small_bytes, if queue == Queue::Small { 100 } else { 0 });
+                assert_eq!(q.small.len() + q.main.len(), 1);
+                assert_eq!(q.small.front() == Some(&id), queue == Queue::Small);
+                assert_eq!(q.main.front() == Some(&id), queue == Queue::Main);
+            }
+            assert_eq!(q.victim(100), Some(id));
+            assert_eq!(q.evict(id, 1).unwrap().size, 100);
+            assert!(q.entries.is_empty() && q.small.is_empty() && q.main.is_empty());
+            assert_eq!(q.small_bytes, 0);
+            let ghost = if queue == Queue::Small { id } else { old };
+            assert_eq!(q.ghost, HashSet::from([ghost]));
+            assert_eq!(q.ghosts, VecDeque::from([ghost]));
+        }
     }
 }

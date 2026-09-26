@@ -1,7 +1,8 @@
 """Adaptive cache checks using the state_checks environment and default 20% threshold.
 
 Requires an isolated deployment with enough cache space for three small chunks.
-Modifies only cache files belonging to objects created by this test.
+Run gateway and test as the same unprivileged UID so directory permissions apply.
+Modifies its own cache files and temporarily removes shard directory write access.
 """
 import json
 import os
@@ -14,6 +15,7 @@ import psycopg
 from botocore.config import Config
 
 assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+assert os.geteuid() != 0, 'run gateway and test as the same unprivileged UID'
 credential = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
 bucket = credential['bucket']
 s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
@@ -74,6 +76,35 @@ for name, raw, extension in [
     read(key, raw)
     assert status()['backend_gets'] == before + 1
     assert path.read_bytes() == original
+
+    # Failed cleanup must not block verified backend reads or release occupied space.
+    path.write_bytes(changed)
+    mode = stat.S_IMODE(path.parent.stat().st_mode)
+    try:
+        path.parent.chmod(0o500)
+        try:
+            path.unlink()
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError('cache deletion must fail with the test permissions')
+        before = status()
+        read(key, raw)
+        read(key, raw[13:73], Range='bytes=13-72')
+        after = status()
+        assert after['backend_gets'] == before['backend_gets'] + 2
+        assert after['cache_hits'] == before['cache_hits']
+        assert after['local_bytes'][1] == before['local_bytes'][1]
+        assert path.read_bytes() == changed
+    finally:
+        path.parent.chmod(mode)
+    before = status()['backend_gets']
+    read(key, raw)
+    assert status()['backend_gets'] == before + 1
+    assert path.read_bytes() == original
+    read(key, raw)
+    assert status()['backend_gets'] == before + 1
+    print('PASS read-only corrupt cache fallback, accounting and recovery:', name, extension, flush=True)
 
     # Bounds apply before decompression or serving a raw cache entry.
     for bad in [original[:-1], bytes(4 * 1024 * 1024 + 1)]:
