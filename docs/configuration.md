@@ -1,141 +1,158 @@
-# 配置参考（0.0.2）
+# 配置参考
 
-主配置默认为 `/config/config.toml`
+主配置为 [TOML](../config.example.toml)，默认路径 `/config/config.toml`，重启后生效。未知字段、错误类型、数值溢出或与内存预算冲突的限制会拒绝启动。
 
-可以通过 `media-gateway --config PATH` 改路径，配置在重启后生效，未知字段和错误类型会拒绝启动
+使用其他路径时，统一修改服务、CLI 和健康检查：
 
-镜像健康检查和 `cli` 也默认读取 `/config/config.toml`，使用其他配置路径时，CLI 调用 `media-gateway --config PATH cli ...`，并将 Compose 的 healthcheck 命令同步设为 `["CMD", "media-gateway", "--config", "PATH", "cli", "status"]`
+```sh
+media-gateway --config PATH serve
+media-gateway --config PATH cli status
+```
 
-资源限制不使用 `null` 或空字符串表示自动，**省略可选资源项**即自动预算或无该项业务配额
+Compose 健康检查对应 `["CMD","media-gateway","--config","PATH","cli","status"]`。
 
-大小必须是正整数加 `B/KB/MB/GB/TB/KiB/MiB/GiB/TiB`，时间必须是正整数加 `s/m/h/d`。`2GB` 是 2,000,000,000 B，`2GiB` 是 2,147,483,648 B；不接受小数、`0`、`1G` 或 `auto`
+- **省略可选资源项**表示自动预算或无该项配额，不使用 `null`、空字符串或 `auto`。
+- 大小使用正整数加 `B/KB/MB/GB/TB/KiB/MiB/GiB/TiB`；`2GB` 为 2,000,000,000 字节，`2GiB` 为 2,147,483,648 字节。不接受小数、`0` 或 `1G`。
+- 时间使用正整数加 `s/m/h/d`；允许零值的例外在字段表注明。通用时限最多为 `i64::MAX / 1000` 秒，个别字段有更小上限。
 
-## 完整字段
+## 监听与管理
 
-| 字段 | 类型 / 默认 | 含义与边界 |
+| 字段 | 类型 / 默认值 | 说明 |
 | --- | --- | --- |
-| `listen.s3` | string / `0.0.0.0:9000` | S3 监听 SocketAddr |
-| `listen.web` | string / `0.0.0.0:9001` | 给反代的公共读和可选网站入口 |
-| `listen.manage` | string / `0.0.0.0:9002` | 管理入口；三个监听地址必须不同 |
-| `listen.admin_socket` | path / `/run/media-gateway/admin.sock` | CLI 的 Unix socket；权限 0600 |
-| `listen.s3_domain` | optional string / 无 | 启用此域名的 virtual-hosted 寻址；否则用 path-style |
-| `listen.region` | string / `us-east-1` | 客户端签名区域；与后端区域相互独立 |
-| `listen.aws_chunk_limit` | size / `8MiB` | 单个 AWS 签名传输 chunk 上限；不是对象或 UploadPart 大小上限 |
-| `database.host` | string / 必填 | PostgreSQL 主机或容器服务名 |
-| `database.port` | u16 / 5432 | PostgreSQL 端口，不能为0 |
-| `database.name` | string / 必填 | 数据库名 |
-| `database.user` | string / 必填 | 数据库用户名 |
-| `database.password` / `database.password_file` | string / path，二选一必填 | 直接密码或密码文本文件；不是数据库数据文件 |
-| `database.ssl_mode` | string / `prefer` | disable/allow/prefer/require/verify-ca/verify-full；远程连接按部署需要验证证书 |
-| `database.max_connections` | positive integer / 自动 | 业务连接池上限；另有一个独占锁连接 |
-| `backend.endpoint` | string / 必填 | 带 scheme 的 S3 endpoint，默认要求 HTTPS |
-| `backend.region` | string / 必填 | 后端签名区域 |
-| `backend.bucket` | string / 必填 | 已存在的私有后端桶 |
-| `backend.prefix` | string / `""` | 可省略；省略或空字符串使用后端桶根目录，非空时使用部署专用前缀。不允许前导 `/` 或 `.` / `..` 路径段 |
-| `backend.access_key` / `backend.access_key_file` | string / path，二选一必填 | 后端 access key 或其文本文件 |
-| `backend.secret_key` / `backend.secret_key_file` | string / path，二选一必填 | 后端 secret key 或其文本文件 |
-| `backend.allow_http` | bool / `false` | 可信网络内可显式允许 HTTP 后端 |
-| `security.credential_key_file` | path / 必填 | 64 位十六进制字符串，保护数据库内 S3 客户端 secret；与区块密钥不同 |
-| `manage.origin` | string / `http://localhost:9002` | 浏览器看到的完整 origin，无末尾 `/`；登录和写操作严格匹配 |
+| `listen.s3` | 字符串 / `0.0.0.0:9000` | S3 监听 SocketAddr |
+| `listen.web` | 字符串 / `0.0.0.0:9001` | 给反代的公共读和可选网站入口 |
+| `listen.manage` | 字符串 / `0.0.0.0:9002` | 管理入口；三个监听地址必须不同 |
+| `listen.admin_socket` | 路径 / `/run/media-gateway/admin.sock` | CLI 的 Unix socket；权限 0600 |
+| `listen.s3_domain` | 可选字符串 / 无 | 启用此域名的 virtual-hosted 寻址；否则使用 path-style |
+| `listen.region` | 字符串 / `us-east-1` | 客户端签名区域；与后端区域相互独立 |
+| `listen.aws_chunk_limit` | 大小 / `8MiB` | 单个 AWS 签名传输 chunk 上限；不是对象或 UploadPart 大小上限 |
+| `manage.origin` | 字符串 / `http://localhost:9002` | 浏览器看到的完整 origin，无末尾 `/`；登录和写操作严格匹配 |
 | `manage.secure_cookie` | bool / `true` | Cookie Secure；通过 HTTP 访问时需要 false |
-| `manage.session_lifetime` | duration / `12h` | 会话固定有效期，不随查询无限续期 |
-| `storage.data` | path / `/data` | 唯一可写数据目录，含 multipart/chunks/gateway.lock |
-| `storage.free_space_floor` | size / `1GiB` | 新文件预留后仍须保留的文件系统空间 |
-| `processing.cpu_jobs` | positive integer / 自动 | 并行压缩/哈希/加解密等阻塞计算预算 |
-| `processing.inflight_bytes` | size / 自动 | 在途数据槽预算，非进程 RSS 硬限制 |
-| `processing.upload_concurrency` | positive integer / 自动 | 同时接收 PUT/part/完成操作的上限 |
-| `processing.read_concurrency` | positive integer / 自动 | 同时流式读取上限 |
-| `processing.backend_concurrency` | positive integer / 自动 | 后端请求并发上限 |
-| `processing.connections` | positive integer / 自动 | 三入口合计连接上限 |
-| `multipart.local_limit` | optional size / 无单独配额 | 原始尾部及预留总量；显式值至少 4MiB；始终受文件系统空余空间限制 |
-| `multipart.idle_timeout` | duration / `24h` | 无有效上传进展的过期时间；ListParts 不续期 |
-| `multipart.sweep_interval` | duration / `5m` | 本地过期/无引用映射清理间隔，任务完成也会唤醒清理 |
-| `multipart.client_idle_timeout` | duration / `120s` | 上传相邻有效数据之间的等待上限 |
-| `multipart.max_active_uploads` | optional positive bigint / 无 | 所有逻辑桶的活跃 multipart 数量配额 |
-| `cache.max_size` | optional size / 无单独字节配额 | chunks 缓存实际文件字节上限；包括写入预留 |
-| `cache.max_entries` | positive integer / 自动 | 缓存文件索引条目预算，ghost 元数据同样有界 |
-| `cache.min_compression_savings_percent` | integer 0～100 / `20` | 压缩至少节省此百分比才保留 `.zst`，否则保存 `.raw`；0 保留所有已压缩载荷，100 全部缓存原始字节；只影响新填充 |
-| `compression.strategy` | enum / `always` | `always` 全部试压；`sample` 抽样筛选；`file_type` 按对象类型筛选 |
-| `compression.level` | signed integer / `3` | 当前 Zstd 支持的等级，包含负等级；0 使用 Zstd 默认等级，不表示关闭压缩；高等级需要更多 CPU 和工作内存 |
-| `compression.min_savings_percent` | integer 0～100 / `2` | 后端保存压缩载荷要求的最低节省比例，排除加密标签；与字节门槛同时满足 |
-| `compression.min_savings_bytes` | nonnegative integer / `256` | 最低节省字节数；两个门槛均为0时仍必须严格缩小 |
-| `compression.context_idle_timeout` | duration / `30s` | Zstd 压缩、解压上下文及试压缓冲区的闲置保留时间；允许 `0s` 表示任务结束即释放 |
-| `compression.skip_mime_types` | string array / 内置名单 | 仅 `file_type` 使用；省略采用内置名单，显式数组替换名单，`[]` 不跳过任何类型；仅精确 MIME，忽略大小写，不接受参数或通配符 |
-| `encryption.algorithm` | enum / `aes-256-gcm` | `none` / `aes-256-gcm` / `chacha20-poly1305`；只决定新写入 |
-| `encryption.keyring_file` | optional path / 加密时必填 | 当前写密钥与历史读密钥 |
-| `gc.unreferenced_grace` | duration / `48h` | 失去最后引用/活跃保护后的远端回收宽限 |
-| `gc.interval` | duration / `30m` | 日常远端 GC 空闲检查间隔 |
-| `gc.batch_size` | integer / `128` | 每批工作量，1～10000；同样用于维护任务 |
-| `cleanup.interval` | duration / `5m` | 已结束记录和过期会话的后台清理间隔，启动后也执行一次 |
-| `cleanup.batch_size` | integer / `1000` | 每条历史清理 DELETE 的最多行数，1～10000 |
-| `cleanup.max_duration` | duration / `5s` | 每轮历史清理总时限，1～30 秒；本地引用清理也在批次间检查此预算 |
-| `cleanup.deleted_chunk_retention` | duration / `7d` | 从远端删除成功后的 `deleted_at` 起保留区块日志 |
-| `cleanup.upload_retention` | duration / `24h` | completed/aborted 上传记录保留时间；与活动上传的 idle_timeout 无关 |
-| `cleanup.task_retention` | duration / `30d` | 已完成任务保留时间，包括 backend sweep 预览 |
-| `statistics.refresh_interval` | duration / `15m` | 后台容量汇总完成后的等待间隔；页面刷新只读取快照 |
-| `statistics.query_timeout` | duration / `2m` | 一轮汇总的总时限及 SQL 语句时限 |
-| `integrity.concurrency` | positive integer / `1` | 区块检查并发，实际值不超过读取并发、在途槽数减一及64；共享 CPU/后端预算 |
-| `integrity.requests_per_second` | optional positive integer / 无额外限速 | 远端巡检逻辑请求的平均速率；SDK 内部重试仍受其重试策略约束 |
-| `integrity.bandwidth` | optional bytes / 无额外限速 | full 模式平均每秒读取的编码字节，如 `10MiB`；允许一次并发批次的突发 |
-| `integrity.request_timeout` | duration / `30s` | 单批检查总时限，1～120秒，包含数据库、共享资源等待、SDK 重试和解码；超时保留已提交进度 |
+| `manage.session_lifetime` | 时间 / `12h` | 会话固定有效期，不随查询无限续期 |
 
-duration 上限为 `i64::MAX / 1000` 秒；`statistics.query_timeout` 另受 PostgreSQL 限制，最多 2,147,483 秒。数量乘法溢出会拒绝。显式资源参数若与可用内存预算矛盾，也拒绝启动。
+## 数据库
 
-省略 `[cleanup]` 使用以上默认值。到期记录分批提交，达到时限后在后续轮次继续；锁住的行可跳过，不需要额外 crontab。历史清理在 GC 暂停及维护模式下仍运行，且不会删除远端数据。`CompleteMultipartUpload` 的重复完成结果只在上传记录保留期内提供，已发布对象不受该期限影响；清空桶会提前移除该桶的上传记录。已完成的 sweep 预览过期后需要重新预览。
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `database.host` | 字符串 / 必填 | PostgreSQL 主机或容器服务名 |
+| `database.port` | u16 / 5432 | PostgreSQL 端口，不能为 0 |
+| `database.name` | 字符串 / 必填 | 数据库名 |
+| `database.user` | 字符串 / 必填 | 数据库用户名 |
+| `database.password` / `database.password_file` | 字符串 / 路径，二选一必填 | 直接密码或密码文本文件 |
+| `database.ssl_mode` | 字符串 / `prefer` | disable/allow/prefer/require/verify-ca/verify-full；远程连接按部署需要验证证书 |
+| `database.max_connections` | 正整数 / 自动 | 业务连接池上限；另有一个独占锁连接 |
 
-省略 `[statistics]` 时使用默认间隔和时限。汇总使用只读事务，不新增业务表，失败时保留上次结果；大库可增大刷新间隔，按数据库性能调整时限。详见[管理 API](manage-api-reference.md#容量快照)。
+直接密码由 SQLx 连接参数传递，无需 URL 转义。密码与密码文件二选一，文件内容是密码文本。
 
-巡检由 CLI 或 Web 手动启动，不自动定时执行。省略 `[integrity]` 使用单并发，其余资源仍受共享预算限制。请求/带宽限速通过批次之间的等待实现，等待时其他维护任务可以推进。调整这些参数后重启生效，已有任务继续使用新的限额。
+## S3 后端
 
-## 自动预算
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `backend.endpoint` | 字符串 / 必填 | 带 scheme 的 S3 endpoint，默认要求 HTTPS |
+| `backend.region` | 字符串 / 必填 | 后端签名区域 |
+| `backend.bucket` | 字符串 / 必填 | 已存在的私有后端桶 |
+| `backend.prefix` | 字符串 / `""` | 可省略；省略或空字符串使用后端桶根目录，非空时使用部署专用前缀。不允许前导 `/` 或 `.` / `..` 路径段 |
+| `backend.access_key` / `backend.access_key_file` | 字符串 / 路径，二选一必填 | 后端 access key 或其文本文件 |
+| `backend.secret_key` / `backend.secret_key_file` | 字符串 / 路径，二选一必填 | 后端 secret key 或其文本文件 |
+| `backend.allow_http` | bool / `false` | 可信网络内可显式允许 HTTP 后端 |
 
-`C` 取 `/proc/self/status` 的 CPU 亲和性与 cgroup v2 CPU quota 的较小值（quota 向上取整，至少 1），亲和性读取失败使用 Rust 可用 CPU 估计，仍失败回退 1
+endpoint、bucket 和 prefix 共同绑定部署身份；已有部署不能直接修改它们来搬迁数据。根目录和空前缀规则见[后端布局](storage-format.md#后端布局)。
 
-`M` 取 `/proc/meminfo` 的 MemAvailable 与可读 cgroup v2 / 父级 `memory.max` 的较小值，内存探测失败时回退 512 MiB
+## 数据目录与上传
 
-默认 `inflight=M/4`，槽大小 `S=32MiB + W + 2×max(aws_chunk_limit−8MiB,0)`
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `storage.data` | 路径 / `/data` | 唯一可写数据目录，含 multipart/chunks/gateway.lock |
+| `storage.free_space_floor` | 大小 / `1GiB` | 新文件预留后仍须保留的文件系统空间 |
+| `multipart.local_limit` | 可选大小 / 无单独配额 | 原始尾部及预留总量；显式值至少 4 MiB；始终受文件系统空余空间限制 |
+| `multipart.idle_timeout` | 时间 / `24h` | 无有效上传进展的过期时间；ListParts 不续期 |
+| `multipart.sweep_interval` | 时间 / `5m` | 本地过期/无引用映射清理间隔，任务完成也会唤醒清理 |
+| `multipart.client_idle_timeout` | 时间 / `120s` | 上传相邻有效数据之间的等待上限 |
+| `multipart.max_active_uploads` | 可选正 bigint / 无 | 所有逻辑桶的活跃 multipart 数量配额 |
 
-`W` 为编解码工作区预算：静态链接的 Zstd 给出的单线程一次性压缩上下文上界与解压上下文大小之和的两倍，加上最大4MiB区块的压缩输出上界及16字节标签空间。压缩上下文上界随等级变化；两倍上下文预算覆盖重分配时的临时重叠，输出预算同时覆盖闲置缓冲区。该估算对输入大小保守，高等级在小内存容器中可能因不足两个槽而拒绝启动；可降低等级或增加容器内存与在途预算。
+multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。目录用途见[本地数据](storage-format.md#本地数据)。
 
-槽数 `N=floor(inflight/S)`。至少要有两个槽，且 inflight 不得超过 `M/2`
+## 区块缓存
 
-| 预算 | 省略时计算 |
-| --- | --- |
-| cpu_jobs | `min(C,N)` |
-| upload_concurrency | `max(1,min(C,N/2))` |
-| read_concurrency | `max(1,min(2C,N))` |
-| backend_concurrency | `min(4C,2N)` |
-| connections | `max(32,16N)` |
-| database.max_connections | `min(2C+4,64)`，池最少 0 个，闲置 60 秒释放 |
-| cache.max_entries | `M/64/256` |
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `cache.max_size` | 可选大小 / 无单独字节配额 | chunks 缓存实际文件字节上限；包括写入预留 |
+| `cache.max_entries` | 正整数 / 自动 | 缓存文件索引条目预算，ghost 元数据同样有界 |
+| `cache.min_compression_savings_percent` | 整数 0～100 / `20` | 压缩至少节省此百分比才保留 `.zst`，否则保存 `.raw`；0 保留所有已压缩载荷，100 全部缓存原始字节；只影响新填充 |
 
-显式 cpu_jobs ≤ N、upload_concurrency < N、read_concurrency ≤ N、cache.max_entries ≤ M/256/8
+## 处理资源
 
-启动日志及运行统计中的 `slot_bytes`、`data_slots` 等字段显示当前等级下实际采用的预算。
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `processing.cpu_jobs` | 正整数 / 自动 | 并行压缩/哈希/加解密等阻塞计算预算 |
+| `processing.inflight_bytes` | 大小 / 自动 | 在途数据槽预算，非进程 RSS 硬限制 |
+| `processing.upload_concurrency` | 正整数 / 自动 | 同时接收 PUT/part/完成操作的上限 |
+| `processing.read_concurrency` | 正整数 / 自动 | 同时流式读取上限 |
+| `processing.backend_concurrency` | 正整数 / 自动 | 后端请求并发上限 |
+| `processing.connections` | 正整数 / 自动 | 三入口合计连接上限 |
 
-磁盘空间可通过 `multipart.local_limit` 和 `cache.max_size` 分别限制
+### 自动预算
+
+`C` 为 CPU 亲和性与 cgroup v2 quota 的较小值（quota 向上取整，至少 1）；读取失败时使用 Rust 可用 CPU 估计，再失败回退 1。`M` 为 MemAvailable 与可读 cgroup v2／父级 memory.max 的较小值，探测失败回退 512 MiB。
+
+默认在途预算 `inflight=M/4`。每槽预算 `S=32MiB + W + 2×max(aws_chunk_limit−8MiB,0)`，槽数 `N=floor(inflight/S)`。至少需要两个槽，且 inflight ≤ M/2。
+
+`W` 包含两倍的 Zstd 压缩／解压上下文上界，以及 4 MiB 区块的压缩输出上界和 16 字节标签，覆盖重分配重叠及闲置缓冲。高压缩等级会增大 W；预算不足时可降低等级或增加内存及在途预算。启动日志和状态字段 `slot_bytes/data_slots` 显示实际值。
+
+| 预算 | 自动值 | 显式限制 |
+| --- | --- | --- |
+| processing.cpu_jobs | min(C,N) | ≤ N |
+| processing.upload_concurrency | max(1,min(C,N/2)) | < N |
+| processing.read_concurrency | max(1,min(2C,N)) | ≤ N |
+| processing.backend_concurrency | min(4C,2N) | 正整数 |
+| processing.connections | max(32,16N) | 正整数 |
+| database.max_connections | min(2C+4,64) | 正整数；池最少 0 个连接，闲置 60 秒释放 |
+| cache.max_entries | M/64/256 | ≤ M/256/8 |
+
+这些是内部工作预算；容器 CPU／内存硬限制由部署配置设置。本地磁盘分别用 `multipart.local_limit` 和 `cache.max_size` 限制。
 
 ## 压缩策略
 
-默认 `always` 关闭筛选，对每个需要新编码的区块进行完整试压。三个策略最终都要求压缩结果严格小于原始数据，并同时满足比例及字节门槛。已去重命中的区块直接复用；调整策略、等级或门槛不重写旧区块，也不改变读取方式。`cache.min_compression_savings_percent` 独立决定本地缓存是否保留压缩。
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `compression.strategy` | 枚举 / `always` | `always` 全部试压；`sample` 抽样筛选；`file_type` 按对象类型筛选 |
+| `compression.level` | 有符号整数 / `3` | 当前 Zstd 支持的等级，包含负等级；0 使用 Zstd 默认等级，不表示关闭压缩；高等级需要更多 CPU 和工作内存 |
+| `compression.min_savings_percent` | 整数 0～100 / `2` | 后端保存压缩载荷要求的最低节省比例，排除加密标签；与字节门槛同时满足 |
+| `compression.min_savings_bytes` | 非负整数 / `256` | 最低节省字节数；两个门槛均为 0 时仍必须严格缩小 |
+| `compression.context_idle_timeout` | 时间 / `30s` | Zstd 压缩、解压上下文及试压缓冲区的闲置保留时间；允许 `0s` 表示任务结束即释放 |
+| `compression.skip_mime_types` | 字符串数组 / 内置名单 | 仅 `file_type` 使用；省略采用内置名单，显式数组替换名单，`[]` 不跳过任何类型；仅精确 MIME，忽略大小写，不接受参数或通配符 |
 
-`sample` 对小于256KiB的区块直接试压；其余在头尾及中间两处各独立试压一段。每段长度为区块大小的1/64，限制在16～64KiB；1MiB区块最多采样64KiB，4MiB区块最多采样256KiB。任一段变小就停止采样并完整试压，只有四段均无收益时跳过。抽样与完整试压使用相同等级。局部或远距离重复可能被漏判，样本节省率不能代表全块节省率；需要尽量保留压缩收益时使用 `always`。
+| 策略 | 行为 |
+| --- | --- |
+| `always` | 默认关闭筛选，对所有需新编码的区块完整试压 |
+| `sample` | 小于 256 KiB 直接试压；其他块在头尾及中间两处抽样，任一段变小就完整试压，否则跳过 |
+| `file_type` | 按对象 Content-Type 筛选；缺失、无效或为 application/octet-stream 时按扩展名补充，未知类型仍试压，不叠加抽样 |
 
-`file_type` 只按类型筛选，不叠加抽样。优先使用去掉参数、统一大小写后的对象 `Content-Type`；缺失、无效或为 `application/octet-stream` 时用 key 的扩展名补充。未知类型仍完整试压。普通 PUT 使用对象类型；multipart 使用初始化时的类型，包括乱序分片、边界重切、重启后继续及 Complete 尾部，不要求 UploadPart 携带相同请求头。CopyObject 直接复用已有区块，不重新编码；UploadPartCopy 尚不支持。
+抽样每段为块大小的 1/64，限制在 16～64 KiB；1 MiB 块最多采样 64 KiB，4 MiB 块最多采样 256 KiB。抽样与完整试压使用相同等级，可能漏掉局部或远距离重复；需要尽量保留收益时使用 `always`。
 
-内置跳过名单如下；这些类型仍可能有压缩收益，是否跳过由所选策略决定：
+所有策略最终都要求结果严格变小，并同时满足比例、字节门槛。去重命中直接复用；调整策略、等级和门槛不重写已有区块。multipart 使用初始化时的对象类型，UploadPart 无需重复 Content-Type；CopyObject 复用已有区块。
+
+`file_type` 的 MIME 去参数、忽略大小写，只接受精确类型。内置跳过名单：
 
 | 类别 | MIME |
 | --- | --- |
-| 图片 | `image/jpeg`, `image/png`, `image/apng`, `image/gif`, `image/webp`, `image/avif` |
-| 音视频 | `video/mp4`, `video/webm`, `audio/mp4`, `audio/mpeg`, `audio/aac`, `audio/ogg`, `video/ogg`, `application/ogg`, `audio/flac`, `audio/x-flac` |
-| 压缩文件 | `application/zip`, `application/gzip`, `application/x-gzip`, `application/x-7z-compressed`, `application/vnd.rar`, `application/x-rar-compressed`, `application/x-xz`, `application/x-bzip2`, `application/zstd` |
+| 图片 | image/jpeg、image/png、image/apng、image/gif、image/webp、image/avif |
+| 音视频 | video/mp4、video/webm、audio/mp4、audio/mpeg、audio/aac、audio/ogg、video/ogg、application/ogg、audio/flac、audio/x-flac |
+| 压缩文件 | application/zip、application/gzip、application/x-gzip、application/x-7z-compressed、application/vnd.rar、application/x-rar-compressed、application/x-xz、application/x-bzip2、application/zstd |
 
-扩展名补充支持 jpg/jpeg/jpe、png、apng、gif、webp、avif、mp4/m4v、webm、m4a、mp3/mp2、aac、ogg/oga/opus、ogv、ogx、flac、zip、gz/tgz、7z、rar、xz、bz2、zst/zstd；另外识别 svg、txt、html/htm、css、js/mjs、json、xml，以便自定义名单。不存在 `image/*` 之类整类跳过规则，SVG 默认仍试压。
+扩展名补充支持 jpg/jpeg/jpe、png、apng、gif、webp、avif、mp4/m4v、webm、m4a、mp3/mp2、aac、ogg/oga/opus、ogv、ogx、flac、zip、gz/tgz、7z、rar、xz、bz2、zst/zstd；也识别 svg、txt、html/htm、css、js/mjs、json、xml，供自定义名单使用。没有 `image/*` 通配规则，SVG 默认试压。
 
-压缩与解压上下文按需创建，共用现有 CPU 并发额度，借用期间独占使用；两类上下文分别限制保留数量，均计入上述预算。同一任务的抽样与完整试压复用临时缓冲区。采用的压缩结果直接交给加密和上传，解压结果由读取响应持有，上下文不等待网络请求完成。每块仍是独立 Zstd frame，不共享压缩历史。空闲清理每秒检查，即使没有新请求也释放到期工作区；实际进程 RSS 的回落还取决于分配器。
+压缩／解压上下文及试压缓冲按 CPU 并发额度复用，每秒清理到期的闲置工作区；RSS 回落还取决于分配器。区块仍各自使用独立 Zstd frame，不共享压缩历史。
 
-## 密钥与环境变量
+## 加密与密钥
+
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `security.credential_key_file` | 路径 / 必填 | 64 个十六进制字符，保护数据库内 S3 客户端 secret；与区块密钥不同 |
+| `encryption.algorithm` | 枚举 / `aes-256-gcm` | `none` / `aes-256-gcm` / `chacha20-poly1305`；只决定新写入 |
+| `encryption.keyring_file` | 可选路径 / 加密时必填 | 当前写密钥与历史读密钥 |
+
+keyring 示例：
 
 ```toml
 active = "write-1"
@@ -144,6 +161,42 @@ algorithm = "aes-256-gcm"
 key = "REPLACE_WITH_64_HEX_CHARACTERS"
 ```
 
-key ID 非空、最多128字节；不同 ID 不得使用同一实际密钥，历史 key 留在文件中供旧区块读取
+key ID 为 1～128 字节，不同 ID 必须使用不同实际密钥。更换算法时配置匹配的新 active key，历史密钥保留供读取。使用 `none` 时可省略 keyring；仍有旧加密区块时必须提供其密钥。数据库恢复的换密钥要求见[恢复步骤](deployment-and-recovery.md#恢复步骤)。
 
-改变加密算法时同时配置匹配的新 active key，`none` 可以省略 keyring，若还有旧加密区块，仍须提供相应历史密钥
+## 回收与历史清理
+
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `gc.unreferenced_grace` | 时间 / `48h` | 失去最后引用/活跃保护后的远端回收宽限 |
+| `gc.interval` | 时间 / `30m` | 日常远端 GC 空闲检查间隔 |
+| `gc.batch_size` | 整数 / `128` | GC、清空桶及后端清查的每批工作量，1～10000 |
+| `cleanup.interval` | 时间 / `5m` | 已结束记录和过期会话的后台清理间隔，启动后也执行一次 |
+| `cleanup.batch_size` | 整数 / `1000` | 每条历史清理 DELETE 的最多行数，1～10000 |
+| `cleanup.max_duration` | 时间 / `5s` | 每轮历史清理总时限，1～30 秒；本地引用清理也在批次间检查此预算 |
+| `cleanup.deleted_chunk_retention` | 时间 / `7d` | 从远端删除成功后的 `deleted_at` 起保留区块日志 |
+| `cleanup.upload_retention` | 时间 / `24h` | completed/aborted 上传记录保留时间；与活动上传的 idle_timeout 无关 |
+| `cleanup.task_retention` | 时间 / `30d` | 已完成任务及巡检异常保留时间，包括 sweep 预览 |
+
+远端 GC 与数据库历史清理独立调度，无需 crontab。历史清理在 GC 暂停及维护模式下仍运行，不删除远端数据；到期行分批提交，达到时限后下一轮继续，被锁或仍被引用／活跃保护的行暂缓。
+
+仅已确认远端删除的区块、completed/aborted 上传、completed 任务及过期会话按年龄清理。Complete 的幂等结果在上传记录保留期内可用；清空桶可能提前移除记录，已发布对象不受影响。sweep 预览过期后需重新预览。
+
+## 运行统计
+
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `statistics.refresh_interval` | 时间 / `15m` | 后台容量汇总完成后的等待间隔；页面刷新只读取快照 |
+| `statistics.query_timeout` | 时间 / `2m` | 一轮汇总的总时限及 SQL 语句时限 |
+
+query_timeout 最多 2,147,483 秒。后台汇总失败时保留上次成功结果；大库可增加间隔并按数据库能力调整时限。字段、统计口径和过期标识见[容量快照](manage-api-reference.md#容量快照)。
+
+## 完整性巡检
+
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `integrity.concurrency` | 正整数 / `1` | 区块检查并发，实际值不超过读取并发、在途槽数减一及 64；共享 CPU/后端预算 |
+| `integrity.requests_per_second` | 可选正整数 / 无额外限速 | 远端巡检逻辑请求的平均速率；SDK 内部重试仍受其重试策略约束 |
+| `integrity.bandwidth` | 可选大小 / 无额外限速 | full 模式平均每秒读取的编码字节，如 `10MiB`；允许一次并发批次的突发 |
+| `integrity.request_timeout` | 时间 / `30s` | 单批检查总时限，1～120 秒，包含数据库、共享资源等待、SDK 重试和解码；超时保留已提交进度 |
+
+巡检由 CLI 或 Web 手动启动。请求和带宽限额为批次间的平均限速，允许一个并发批次的突发；等待期间其他维护任务可继续。重启后，已有任务使用新的配置限额。使用方法见[CLI](cli-reference.md#完整性巡检)。

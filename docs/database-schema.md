@@ -1,30 +1,33 @@
-# 数据库结构（0.0.2 / schema_version=4）
+# 数据库结构
 
-0.0.2 通过 `0002_cleanup.sql` 添加清理/引用索引及表级自动维护参数，`0003_task_listing.sql` 添加任务分页索引，`0004_integrity.sql` 添加完整性巡检任务与异常表，保留现有数据。0.0.1 发布的 `0001_baseline.sql` 保持不变；运行统计、容量快照和最近清理结果仍保存在进程内。
+本文列出当前表、字段和索引；完整 SQL 见 [migrations](../migrations)，迁移行为见[升级说明](deployment-and-recovery.md#升级与数据库迁移)。
 
-PostgreSQL 使用同步提交与 fsync；服务独占一个数据库级 advisory lock 和 data 文件锁
+- 时间使用 `timestamptz`，按 UTC 存储和传输；size、offset、length 的单位为字节。
+- `—` 表示无默认值，可空列默认 NULL。`identity` 为 PostgreSQL 自增分配；JSONB 是内部结构，通过管理接口修改。
+- 未特别注明的外键删除行为为 NO ACTION。主键和唯一约束的隐式索引不另列。
+- 服务使用同步提交、fsync、数据库独占锁及 data 文件锁；运行计数和容量快照保存在进程内。
+
+导航：[部署与密钥](#gateway_meta) · [桶与权限](#buckets) · [对象与区块](#streams) · [分片上传](#uploads) · [管理用户](#web_users) · [任务与巡检](#tasks) · [状态与清理](#状态与清理)
 
 ## _sqlx_migrations
 
-SQLx 管理的迁移历史表，纳入数据库备份，不应手动修改
+SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `version` | bigint PRIMARY KEY | 迁移编号，0.0.1基线为1 |
+| `version` | bigint PRIMARY KEY | 已应用的迁移编号 |
 | `description` | text NOT NULL | 迁移描述 |
 | `installed_on` | timestamptz NOT NULL DEFAULT now() | 登记时间 |
 | `success` | boolean NOT NULL | 迁移是否成功 |
-| `checksum` | bytea NOT NULL | SQL文件的SHA-384校验和 |
+| `checksum` | bytea NOT NULL | SQL 文件的 SHA-384 校验和 |
 | `execution_time` | bigint NOT NULL | 执行耗时（纳秒） |
-
-所有时间为 `timestamptz`，以 UTC 存储/传输；所有 size、offset、length 单位为字节。部署UUID由数据库生成，其他UUID由服务生成；chunks.id 与 integrity_issues.id 使用 PostgreSQL identity。`—` 表示无默认值，调用者必须提供（可空列则默认 NULL）。JSONB 是内部结构，不是允许直接写库的管理接口。
 
 ## gateway_meta
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `singleton` | boolean | 否 | `true` | 固定 true，保证仅一行 |
-| `schema_version` | integer | 否 | — | 当前数据库结构版本4，与最近一次迁移编号一致 |
+| `schema_version` | integer | 否 | — | 结构编号，当前为 4，与最近迁移编号一致 |
 | `deployment_id` | uuid | 否 | — | 部署 UUID |
 | `backend_identity` | text | 否 | — | 后端 endpoint/bucket/prefix 身份 |
 | `backend_initialized` | boolean | 否 | `false` | 后端 meta.json 已完成绑定；标识丢失时不自动重建 |
@@ -32,127 +35,68 @@ SQLx 管理的迁移历史表，纳入数据库备份，不应手动修改
 | `maintenance` | boolean | 否 | `false` | 持久维护标志 |
 | `created_at` | timestamptz | 否 | `now()` | 部署初始化时间 |
 
-约束和索引（实际 SQL）：
-
-```sql
-CREATE TABLE gateway_meta (
-    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    schema_version integer NOT NULL,
-    deployment_id uuid NOT NULL,
-    backend_identity text NOT NULL,
-    backend_initialized boolean NOT NULL DEFAULT false,
-    gc_paused boolean NOT NULL DEFAULT false,
-    maintenance boolean NOT NULL DEFAULT false,
-    created_at timestamptz NOT NULL DEFAULT now()
-);
-```
+主键：`singleton`，约束为 true，仅允许一行。
 
 ## key_fingerprints
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `key_id` | text | 否 | — | 写入或历史密钥标识 |
 | `algorithm` | text | 否 | — | 密钥算法或 credential 保护用途 |
 | `fingerprint` | bytea | 否 | — | 密钥材料指纹；防止同 ID 换材料 |
 
-约束和索引（实际 SQL）：
-
-```sql
-CREATE TABLE key_fingerprints (
-    key_id text PRIMARY KEY,
-    algorithm text NOT NULL,
-    fingerprint bytea NOT NULL CHECK (octet_length(fingerprint) = 32)
-);
-```
+主键：`key_id`；`fingerprint` 固定 32 字节。同 ID 不能替换实际密钥材料。
 
 ## buckets
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `id` | uuid | 否 | — | 逻辑桶 UUID |
 | `name` | text | 否 | — | S3 桶名，C 排序 |
 | `state` | text | 否 | `'active'` | active / purging |
 | `cors` | jsonb | 否 | `'[]'` | 项目 CORS 规则数组 |
 | `website_enabled` | boolean | 否 | `false` | 公共 web 入口是否启用首页/404 路由 |
-| `index_document` | text | 否 | `'index.html'` | 目录首页文件名，管理接口限制1～255 UTF-8字节、不含路径段 |
-| `error_document` | text | 否 | `'404.html'` | 桶根相对对象键，最多1024 UTF-8字节；空字符串使用内置404 |
+| `index_document` | text | 否 | `'index.html'` | 目录首页文件名，管理接口限制 1～255 UTF-8 字节、不含路径段 |
+| `error_document` | text | 否 | `'404.html'` | 桶根相对对象键，最多 1024 UTF-8 字节；空字符串使用内置 404 |
 | `created_at` | timestamptz | 否 | `now()` | 创建时间 |
 
-约束和索引（实际 SQL）：
-
-```sql
-CREATE TABLE buckets (
-    id uuid PRIMARY KEY,
-    name text COLLATE "C" NOT NULL UNIQUE,
-    state text NOT NULL DEFAULT 'active' CHECK (state IN ('active','purging')),
-    cors jsonb NOT NULL DEFAULT '[]',
-    website_enabled boolean NOT NULL DEFAULT false,
-    index_document text NOT NULL DEFAULT 'index.html',
-    error_document text NOT NULL DEFAULT '404.html',
-    created_at timestamptz NOT NULL DEFAULT now()
-);
-```
+主键：`id`；`name` 唯一、使用 C 排序。`state` 只允许表内枚举值。网站字段的 API 校验见[网站设置](manage-api-reference.md#网站设置)。
 
 ## credentials
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `access_key` | text | 否 | — | S3 客户端 access key |
 | `secret_encrypted` | bytea | 否 | — | AES-GCM 保护的 secret：随机 nonce + ciphertext + tag |
 | `enabled` | boolean | 否 | `true` | 能否认证 |
 | `created_at` | timestamptz | 否 | `now()` | 创建时间 |
 
-约束和索引（实际 SQL）：
-
-```sql
-CREATE TABLE credentials (
-    access_key text PRIMARY KEY,
-    secret_encrypted bytea NOT NULL,
-    enabled boolean NOT NULL DEFAULT true,
-    created_at timestamptz NOT NULL DEFAULT now()
-);
-```
+主键：`access_key`。
 
 ## grants
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `access_key` | text | 否 | — | 客户端凭据 |
 | `bucket_id` | uuid | 否 | — | 可访问逻辑桶 |
 | `writable` | boolean | 否 | — | false 只读，true 读写 |
 
-约束和索引（实际 SQL）：
-
-```sql
-CREATE TABLE grants (
-    access_key text NOT NULL REFERENCES credentials ON DELETE CASCADE,
-    bucket_id uuid NOT NULL REFERENCES buckets ON DELETE CASCADE,
-    writable boolean NOT NULL,
-    PRIMARY KEY (access_key,bucket_id)
-);
-```
+主键：`(access_key,bucket_id)`；两列分别引用 `credentials`、`buckets`，均随目标删除级联。
 
 ## domains
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `host` | text | 否 | — | 小写 HTTP Host，可含端口 |
 | `bucket_id` | uuid | 否 | — | 公共域名绑定桶 |
 
-约束和索引（实际 SQL）：
-
-```sql
-CREATE TABLE domains (
-    host text PRIMARY KEY,
-    bucket_id uuid NOT NULL REFERENCES buckets ON DELETE CASCADE
-);
-```
+主键：`host`；`bucket_id` 引用 `buckets`，随桶删除级联。
 
 ## streams
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
-| `id` | uuid | 否 | — | 不可变对象/part 版本 UUID |
+| `id` | uuid | 否 | — | 不可变对象 / part 版本 UUID |
 | `bucket_id` | uuid | 否 | — | 所属桶 |
 | `object_key` | text | 否 | — | 完整原始 key |
 | `kind` | text | 否 | — | object / part |
@@ -165,296 +109,194 @@ CREATE TABLE domains (
 | `created_at` | timestamptz | 否 | `now()` | 该版本创建时间 |
 | `touched_at` | timestamptz | 否 | `now()` | 发布、退役或写入进度时间 |
 
-约束和索引（实际 SQL）：
+主键：`id`；`bucket_id` 引用 `buckets`；`object_key` 使用 C 排序。`kind/state` 受枚举约束，`size >= 0`。
 
-```sql
-CREATE TABLE streams (
-    id uuid PRIMARY KEY,
-    bucket_id uuid NOT NULL REFERENCES buckets,
-    object_key text COLLATE "C" NOT NULL,
-    kind text NOT NULL CHECK (kind IN ('object','part')),
-    state text NOT NULL CHECK (state IN ('writing','ready','retired','abandoned')),
-    size bigint NOT NULL DEFAULT 0 CHECK (size >= 0),
-    etag text NOT NULL DEFAULT '',
-    metadata jsonb NOT NULL DEFAULT '{}',
-    public_read boolean NOT NULL DEFAULT false,
-    checksums jsonb NOT NULL DEFAULT '{}',
-    created_at timestamptz NOT NULL DEFAULT now(),
-    touched_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX streams_cleanup ON streams(state,touched_at,id);
-```
+| 索引 | 列与条件 |
+| --- | --- |
+| `streams_cleanup` | `(state,touched_at,id)` |
+| `streams_writing` | `(bucket_id,object_key) WHERE state='writing'` |
 
 ## objects
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `bucket_id` | uuid | 否 | — | 逻辑桶 |
-| `key` | text | 否 | — | 对象 key，UTF-8 长度1～1024 B |
+| `key` | text | 否 | — | 对象 key，UTF-8 长度 1～1024 字节 |
 | `stream_id` | uuid | 是 | — | 当前可见版本；NULL 为待写/删除占位 |
 | `write_epoch` | uuid | 否 | — | 当前写入资格 UUID，迟到请求不能覆盖新版本 |
 
-约束和索引（实际 SQL）：
+主键：`(bucket_id,key)`；`bucket_id` 引用 `buckets`；`stream_id` 唯一并引用 `streams`。`key` 使用 C 排序，UTF-8 长度为 1～1024 字节。
 
-```sql
-CREATE TABLE objects (
-    bucket_id uuid NOT NULL REFERENCES buckets,
-    key text COLLATE "C" NOT NULL CHECK (octet_length(key) BETWEEN 1 AND 1024),
-    stream_id uuid UNIQUE REFERENCES streams,
-    write_epoch uuid NOT NULL,
-    PRIMARY KEY(bucket_id,key)
-);
-```
+| 索引 | 列与条件 |
+| --- | --- |
+| `objects_empty` | `(bucket_id,key) WHERE stream_id IS NULL` |
 
 ## chunks
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `id` | bigint | 否 | `GENERATED ALWAYS AS IDENTITY` | 正 bigint 自增分配；加密前提交 |
 | `storage_id` | uuid | 否 | — | 永不复用的物理 UUID |
 | `owner_stream` | uuid | 是 | — | 尚未转交 extent 引用时的写入保护 |
-| `hash` | bytea | 否 | — | 原始明文 BLAKE3 完整32字节 |
-| `raw_size` | integer | 否 | — | 明文长度，B，1～4MiB |
-| `stored_size` | integer | 是 | — | 后端长度，B，含AEAD tag；编码前NULL |
+| `hash` | bytea | 否 | — | 原始明文 BLAKE3，完整 32 字节 |
+| `raw_size` | integer | 否 | — | 明文长度，B，1～4 MiB |
+| `stored_size` | integer | 是 | — | 后端长度，B，含 AEAD tag；编码前为 NULL |
 | `algorithm` | text | 否 | — | none / aes-256-gcm / chacha20-poly1305 |
-| `key_id` | text | 否 | — | 历史解密密钥 ID；none 时空串 |
+| `key_id` | text | 否 | — | 历史解密密钥 ID；none 时为空串 |
 | `compressed` | boolean | 否 | `false` | 是否使用 zstd |
-| `nonce` | bytea | 是 | — | AEAD 12字节 nonce；未编码/none 时NULL |
-| `format` | integer | 否 | `1` | 区块格式版本1 |
+| `nonce` | bytea | 是 | — | AEAD 12 字节 nonce；未编码/none 时为 NULL |
+| `format` | integer | 否 | `1` | 区块编码格式，固定为 1 |
 | `state` | text | 否 | — | preparing / uploading / ready / failed / deleting / deleted |
-| `created_at` | timestamptz | 否 | `now()` | 分配时间，UTC日期用于nonce |
-| `unreferenced_at` | timestamptz | 是 | — | 最后引用消失的时间；有引用通常NULL |
+| `created_at` | timestamptz | 否 | `now()` | 分配时间，UTC 日期用于 nonce |
+| `unreferenced_at` | timestamptz | 是 | — | 最后引用消失的时间；有引用通常为 NULL |
 | `deleted_at` | timestamptz | 是 | — | 后端删除确认时间 |
 
-约束和索引（实际 SQL）：
+主键：`id`；`storage_id` 唯一；`owner_stream` 引用 `streams`，目标删除时置 NULL。约束：hash 为 32 字节，raw_size 为 1～4194304，stored_size 非空时为 1～4194320，format=1，algorithm/state 受枚举约束。`none` 要求空 key_id、NULL nonce；加密模式要求非空 key_id，nonce 可在准备阶段为 NULL，否则长 12 字节。
 
-```sql
-CREATE TABLE chunks (
-    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    storage_id uuid NOT NULL UNIQUE,
-    owner_stream uuid REFERENCES streams ON DELETE SET NULL,
-    hash bytea NOT NULL CHECK (octet_length(hash) = 32),
-    raw_size integer NOT NULL CHECK (raw_size BETWEEN 1 AND 4194304),
-    stored_size integer CHECK (stored_size BETWEEN 1 AND 4194320),
-    algorithm text NOT NULL CHECK (algorithm IN ('none','aes-256-gcm','chacha20-poly1305')),
-    key_id text NOT NULL,
-    compressed boolean NOT NULL DEFAULT false,
-    nonce bytea,
-    format integer NOT NULL DEFAULT 1 CHECK (format = 1),
-    state text NOT NULL CHECK (state IN ('preparing','uploading','ready','failed','deleting','deleted')),
-    created_at timestamptz NOT NULL DEFAULT now(),
-    unreferenced_at timestamptz,
-    deleted_at timestamptz,
-    CHECK ((algorithm = 'none' AND nonce IS NULL AND key_id = '') OR
-           (algorithm <> 'none' AND (nonce IS NULL OR octet_length(nonce) = 12) AND key_id <> ''))
-);
-CREATE UNIQUE INDEX chunks_dedup ON chunks(hash,raw_size,algorithm,key_id) WHERE state IN ('preparing','uploading','ready');
-CREATE INDEX chunks_gc ON chunks(unreferenced_at,id) WHERE state IN ('ready','failed','deleting');
-CREATE INDEX chunks_owner ON chunks(owner_stream) WHERE owner_stream IS NOT NULL;
-```
+| 索引 | 列与条件 |
+| --- | --- |
+| `chunks_dedup` | `UNIQUE (hash,raw_size,algorithm,key_id) WHERE state IN ('preparing','uploading','ready')` |
+| `chunks_gc` | `(unreferenced_at,id) WHERE state IN ('ready','failed','deleting')` |
+| `chunks_owner` | `(owner_stream) WHERE owner_stream IS NOT NULL` |
+| `chunks_deleted` | `(deleted_at,id) WHERE state='deleted'` |
 
 ## fragments
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `id` | uuid | 否 | — | 本地原始片段 UUID / 文件名 |
 | `owner_stream` | uuid | 是 | — | 写入未发布映射前的保护 |
 | `sealed` | boolean | 否 | `false` | 本地写入已完成 |
-| `size` | integer | 否 | — | 原始文件长度，B，1～4MiB |
+| `size` | integer | 否 | — | 原始文件长度，B，1～4 MiB |
 | `hash` | bytea | 否 | — | 原始片段 BLAKE3 |
 | `created_at` | timestamptz | 否 | `now()` | 创建时间 |
 
-约束和索引（实际 SQL）：
+主键：`id`；`owner_stream` 引用 `streams`，目标删除时置 NULL。size 为 1～4194304，hash 为 32 字节。
 
-```sql
-CREATE TABLE fragments (
-    id uuid PRIMARY KEY,
-    owner_stream uuid REFERENCES streams ON DELETE SET NULL,
-    sealed boolean NOT NULL DEFAULT false,
-    size integer NOT NULL CHECK (size BETWEEN 1 AND 4194304),
-    hash bytea NOT NULL CHECK (octet_length(hash) = 32),
-    created_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX fragments_owner ON fragments(owner_stream) WHERE owner_stream IS NOT NULL;
-```
+| 索引 | 列与条件 |
+| --- | --- |
+| `fragments_owner` | `(owner_stream) WHERE owner_stream IS NOT NULL` |
+| `fragments_cleanup` | `(created_at,id)` |
 
 ## extents
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
-| `stream_id` | uuid | 否 | — | 所属对象/part版本 |
+| `stream_id` | uuid | 否 | — | 所属对象 / part 版本 |
 | `offset_bytes` | bigint | 否 | — | 在此版本中的起始偏移，B |
-| `length` | integer | 否 | — | 映射长度，B，1～4MiB |
-| `chunk_id` | bigint | 是 | — | 远端区块来源，与fragment二选一 |
-| `fragment_id` | uuid | 是 | — | 唯一原始本地来源，与chunk二选一 |
+| `length` | integer | 否 | — | 映射长度，B，1～4 MiB |
+| `chunk_id` | bigint | 是 | — | 远端区块来源，与 fragment 二选一 |
+| `fragment_id` | uuid | 是 | — | 唯一原始本地来源，与 chunk 二选一 |
 | `source_offset` | integer | 否 | `0` | 在来源中的偏移，B |
 
-约束和索引（实际 SQL）：
+主键：`(stream_id,offset_bytes)`；随 stream 删除级联，另外引用 `chunks` 或 `fragments` 且必须二选一。offset_bytes ≥ 0，length 为 1～4194304，source_offset 为 0～4194303，source_offset + length ≤ 4194304。
 
-```sql
-CREATE TABLE extents (
-    stream_id uuid NOT NULL REFERENCES streams ON DELETE CASCADE,
-    offset_bytes bigint NOT NULL CHECK (offset_bytes >= 0),
-    length integer NOT NULL CHECK (length BETWEEN 1 AND 4194304),
-    chunk_id bigint REFERENCES chunks,
-    fragment_id uuid REFERENCES fragments,
-    source_offset integer NOT NULL DEFAULT 0 CHECK (source_offset >= 0 AND source_offset < 4194304),
-    CHECK ((chunk_id IS NULL) <> (fragment_id IS NULL)),
-    CHECK (source_offset + length <= 4194304),
-    PRIMARY KEY(stream_id,offset_bytes)
-);
-CREATE INDEX extents_chunk ON extents(chunk_id) WHERE chunk_id IS NOT NULL;
-CREATE INDEX extents_fragment ON extents(fragment_id) WHERE fragment_id IS NOT NULL;
-```
+| 索引 | 列与条件 |
+| --- | --- |
+| `extents_chunk` | `(chunk_id) WHERE chunk_id IS NOT NULL` |
+| `extents_fragment` | `(fragment_id) WHERE fragment_id IS NOT NULL` |
 
 ## uploads
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `id` | uuid | 否 | — | S3 UploadId UUID |
 | `bucket_id` | uuid | 否 | — | 目标桶 |
-| `object_key` | text | 否 | — | 目标对象key |
+| `object_key` | text | 否 | — | 目标对象 key |
 | `access_key` | text | 否 | — | 创建上传的身份字符串 |
 | `state` | text | 否 | `'active'` | active / completing / completed / aborted |
 | `metadata` | jsonb | 否 | `'{}'` | 创建时对象元数据 |
-| `public_read` | boolean | 否 | `false` | 创建时ACL |
-| `checksum_algorithm` | text | 是 | — | 请求的S3校验算法 |
+| `public_read` | boolean | 否 | `false` | 创建时 ACL |
+| `checksum_algorithm` | text | 是 | — | 请求的 S3 校验算法 |
 | `checksum_type` | text | 是 | — | FULL_OBJECT / COMPOSITE |
-| `manifest_hash` | text | 是 | — | 冻结Complete请求清单摘要 |
-| `result` | jsonb | 是 | — | 已提交Complete返回数据，供幂等重试 |
+| `manifest_hash` | text | 是 | — | 冻结的 Complete 请求清单摘要 |
+| `result` | jsonb | 是 | — | 已提交的 Complete 返回数据，供幂等重试 |
 | `output_stream` | uuid | 是 | — | 完成时构造的对象版本 |
 | `created_at` | timestamptz | 否 | `now()` | 创建时间 |
 | `touched_at` | timestamptz | 否 | `now()` | 有效上传/状态变更时间，决定过期 |
 
-约束和索引（实际 SQL）：
+主键：`id`；`bucket_id` 引用 `buckets`；`output_stream` 引用 `streams`，目标删除时置 NULL。`object_key` 使用 C 排序，`state` 受枚举约束。
 
-```sql
-CREATE TABLE uploads (
-    id uuid PRIMARY KEY,
-    bucket_id uuid NOT NULL REFERENCES buckets,
-    object_key text COLLATE "C" NOT NULL,
-    access_key text NOT NULL,
-    state text NOT NULL DEFAULT 'active' CHECK (state IN ('active','completing','completed','aborted')),
-    metadata jsonb NOT NULL DEFAULT '{}',
-    public_read boolean NOT NULL DEFAULT false,
-    checksum_algorithm text,
-    checksum_type text,
-    manifest_hash text,
-    result jsonb,
-    output_stream uuid REFERENCES streams ON DELETE SET NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    touched_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX uploads_expiry ON uploads(state,touched_at,id);
-CREATE INDEX uploads_list ON uploads(bucket_id,object_key,id);
-```
+| 索引 | 列与条件 |
+| --- | --- |
+| `uploads_expiry` | `(state,touched_at,id)` |
+| `uploads_list` | `(bucket_id,object_key,id)` |
+| `uploads_finished` | `(touched_at,id) WHERE state IN ('completed','aborted')` |
+| `uploads_output` | `(output_stream) WHERE output_stream IS NOT NULL` |
 
 ## parts
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `upload_id` | uuid | 否 | — | 所属上传 |
 | `part_number` | integer | 否 | — | 1～10000 |
-| `stream_id` | uuid | 是 | — | 当前已确认part版本；首次在写时可NULL |
-| `write_epoch` | uuid | 否 | — | part替换资格 UUID；失败保持旧stream |
+| `stream_id` | uuid | 是 | — | 当前已确认 part 版本；首次在写时可为 NULL |
+| `write_epoch` | uuid | 否 | — | part 替换资格 UUID；失败保持旧 stream |
 
-约束和索引（实际 SQL）：
+主键：`(upload_id,part_number)`；随 upload 删除级联，`stream_id` 引用 `streams`；part_number 为 1～10000。
 
-```sql
-CREATE TABLE parts (
-    upload_id uuid NOT NULL REFERENCES uploads ON DELETE CASCADE,
-    part_number integer NOT NULL CHECK (part_number BETWEEN 1 AND 10000),
-    stream_id uuid REFERENCES streams,
-    write_epoch uuid NOT NULL,
-    PRIMARY KEY(upload_id,part_number)
-);
-```
+| 索引 | 列与条件 |
+| --- | --- |
+| `parts_stream` | `(stream_id) WHERE stream_id IS NOT NULL` |
 
 ## web_users
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
-| `id` | uuid | 否 | — | Web管理员 UUID |
+| `id` | uuid | 否 | — | Web 管理员 UUID |
 | `username` | text | 否 | — | 用户名 |
-| `password_hash` | text | 否 | — | 带参数与salt的Argon2哈希 |
+| `password_hash` | text | 否 | — | 带参数与 salt 的 Argon2 哈希 |
 | `enabled` | boolean | 否 | `true` | 可否登录/使用会话 |
 | `created_at` | timestamptz | 否 | `now()` | 创建时间 |
 
-约束和索引（实际 SQL）：
-
-```sql
-CREATE TABLE web_users (
-    id uuid PRIMARY KEY,
-    username text NOT NULL UNIQUE,
-    password_hash text NOT NULL,
-    enabled boolean NOT NULL DEFAULT true,
-    created_at timestamptz NOT NULL DEFAULT now()
-);
-```
+主键：`id`；`username` 唯一。
 
 ## sessions
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
-| `token_hash` | bytea | 否 | — | cookie token 的 BLAKE3，不存明文token |
-| `user_id` | uuid | 否 | — | 所属Web用户 |
-| `csrf_hash` | bytea | 否 | — | CSRF token 的BLAKE3 |
+| `token_hash` | bytea | 否 | — | cookie token 的 BLAKE3，不存明文 token |
+| `user_id` | uuid | 否 | — | 所属 Web 用户 |
+| `csrf_hash` | bytea | 否 | — | CSRF token 的 BLAKE3 |
 | `expires_at` | timestamptz | 否 | — | 固定到期时间 |
 
-约束和索引（实际 SQL）：
+主键：`token_hash`；两个 hash 均固定 32 字节；`user_id` 引用 `web_users`，随用户删除级联。
 
-```sql
-CREATE TABLE sessions (
-    token_hash bytea PRIMARY KEY CHECK (octet_length(token_hash) = 32),
-    user_id uuid NOT NULL REFERENCES web_users ON DELETE CASCADE,
-    csrf_hash bytea NOT NULL CHECK (octet_length(csrf_hash) = 32),
-    expires_at timestamptz NOT NULL
-);
-CREATE INDEX sessions_expiry ON sessions(expires_at);
-```
+| 索引 | 列与条件 |
+| --- | --- |
+| `sessions_expiry` | `(expires_at)` |
 
 ## tasks
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `id` | uuid | 否 | — | 维护任务 UUID |
 | `kind` | text | 否 | — | purge / sweep / integrity |
-| `bucket_id` | uuid | 是 | — | 目标桶；桶删除后NULL，巡检的原始范围另外保存在 detail |
+| `bucket_id` | uuid | 是 | — | 目标桶；桶删除后为 NULL，巡检的原始范围另外保存在 detail |
 | `state` | text | 否 | — | queued / running / paused / completed / failed |
-| `cursor` | text | 是 | — | 最后处理对象key、后端物理key，或巡检的对象/范围/区块 JSON 游标 |
+| `cursor` | text | 是 | — | 最后处理对象 key、后端物理 key，或巡检的对象/范围/区块 JSON 游标 |
 | `processed` | bigint | 否 | `0` | 累计处理条目数 |
 | `detail` | jsonb | 否 | `'{}'` | 任务范围、预览参数、计数及少量样本 |
 | `error` | text | 是 | — | 最近失败原因 |
 | `created_at` | timestamptz | 否 | `now()` | 创建时间 |
 | `updated_at` | timestamptz | 否 | `now()` | 最近批次/状态时间 |
 
-约束和索引（实际 SQL）：
+主键：`id`；`bucket_id` 引用 `buckets`，目标删除时置 NULL。kind/state 受枚举约束。
 
-```sql
-CREATE TABLE tasks (
-    id uuid PRIMARY KEY,
-    kind text NOT NULL CHECK (kind IN ('purge','sweep','integrity')),
-    bucket_id uuid REFERENCES buckets ON DELETE SET NULL,
-    state text NOT NULL CHECK (state IN ('queued','running','paused','completed','failed')),
-    cursor text,
-    processed bigint NOT NULL DEFAULT 0,
-    detail jsonb NOT NULL DEFAULT '{}',
-    error text,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX tasks_list ON tasks(created_at DESC,id DESC);
-CREATE INDEX tasks_state_list ON tasks(state,created_at DESC,id DESC);
-CREATE INDEX tasks_work ON tasks(updated_at,id) WHERE state IN ('queued','running');
-```
+| 索引 | 列与条件 |
+| --- | --- |
+| `tasks_list` | `(created_at DESC,id DESC)` |
+| `tasks_state_list` | `(state,created_at DESC,id DESC)` |
+| `tasks_work` | `(updated_at,id) WHERE state IN ('queued','running')` |
+| `tasks_completed` | `(updated_at,id) WHERE state='completed'` |
 
 ## integrity_issues
 
-仅保存巡检异常，正常区块不逐条保存检查记录。进度及异常在同一事务提交，`(task_id,subject,code)` 保证重试去重。主体身份为检查时的快照；只有 task_id 使用外键，避免正常对象/区块清理使历史异常失去依据。应用按任务保留期分批清理此表，然后删除任务。
+仅保存异常；正常区块不逐条记录。异常与任务进度在同一事务提交。
 
-| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
-| `id` | bigint | 否 | GENERATED ALWAYS AS IDENTITY | 报告分页 ID，API 使用十进制字符串 |
+| `id` | bigint | 否 | `GENERATED ALWAYS AS IDENTITY` | 报告分页 ID，API 使用十进制字符串 |
 | `task_id` | uuid | 否 | — | tasks 外键，ON DELETE CASCADE |
 | `subject` | text | 否 | — | `chunk:ID` 或 `object:UUID:offset`，用于去重 |
 | `code` | text | 否 | — | 稳定英文异常代码 |
@@ -466,64 +308,37 @@ CREATE INDEX tasks_work ON tasks(updated_at,id) WHERE state IN ('queued','runnin
 | `detail` | jsonb | 否 | `'{}'` | 期望值、实际值、范围位置等诊断信息 |
 | `created_at` | timestamptz | 否 | `now()` | 异常记录时间 |
 
-```sql
-CREATE TABLE integrity_issues (
-    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    task_id uuid NOT NULL REFERENCES tasks ON DELETE CASCADE,
-    subject text NOT NULL,
-    code text NOT NULL,
-    chunk_id bigint,
-    storage_id uuid,
-    stream_id uuid,
-    bucket_id uuid,
-    object_key text,
-    detail jsonb NOT NULL DEFAULT '{}',
-    created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE(task_id,subject,code)
-);
-CREATE INDEX integrity_issues_page ON integrity_issues(task_id,id);
-```
-
-## 状态、引用与删除
-
-- **streams**：writing → ready（原子发布）→ retired；失败或启动恢复中的 writing → abandoned。对象当前指针只指向完整 ready 版本。GET 固定版本并持有内存读取保护，覆盖/删除不影响已接纳的流。
-- **objects**：主键为桶+key，stream_id 指向可见 generation。write_epoch 每次写/删除更换，旧任务迟到不能发布。NULL 占位在没有写入版本后清理。
-- **chunks**：preparing（ID已提交）→ uploading（编码元数据已落库）→ ready（后端成功并建立来源引用）；不确定失败转 failed，后续加密分配新ID/UUID。ready/failed → deleting（数据库先认领）→ deleted（后端确认删除）。deleted 日志从 deleted_at 起默认保留7天，仍有extent时不删除；不再参与去重，不得重用其物理key或identity ID。
-- **extents**：每行二选一引用 chunk 或 fragment，不保存全对象大字节串。最终对象只能引用 ready chunk，offset 连续且总长正确才发布。part 可混合来源和局部偏移。
-- **uploads/parts**：active → completing → completed，或 aborted。part替换只有新版本成功后切换指针。Complete 冻结清单、生成正式CDC结果，并在同一发布事务保存 result；相同清单重试返回该结果。重启时未提交 completing 恢复 active；completed 不重复发布。ListParts 不修改活动时间。
-- **引用保护**：所有 extents、owner_stream、活跃读取/完成/写入保护共同决定生命周期。失去最后引用时设置 unreferenced_at；再次引用清空资格。删除认领与新引用在行锁/短协调区内核对；删除中的块不参与新去重。
-- **本地片段**：先登记写入所有者，再持久写文件和目录，最后提交 sealed/范围映射。启动时核对引用片段完整性；缺失唯一来源使对应未完成上传失效，不会让残缺对象发布。
-- **tasks**：queued → running → completed/failed，可暂停并从持久cursor继续；重启把 running 重排 queued。completed 从 updated_at 起默认保留30天，包括sweep预览；其他状态不按年龄清理。sweep不把缓存或某种区块状态当作不存在，删除前重新查询整个索引。
-
-completed/aborted uploads 从 touched_at 起默认保留24小时，且仍有part或活跃保护时暂缓。过期后Complete重试返回NoSuchUpload，不影响已发布对象。过期sessions分批移除。清理不重置chunks identity序列，也不删除key_fingerprints。
-
-## 0002 新增索引与维护参数
+主键：`id`；`(task_id,subject,code)` 唯一，保证重试去重；`task_id` 引用 `tasks` 并级联删除。其他身份字段均为诊断快照，不设外键，主体删除后仍保留异常记录。应用先分批清理异常，再删除过期任务。
 
 | 索引 | 列与条件 |
 | --- | --- |
-| `chunks_deleted` | `(deleted_at,id)` WHERE state='deleted' |
-| `uploads_finished` | `(touched_at,id)` WHERE state IN ('completed','aborted') |
-| `tasks_completed` | `(updated_at,id)` WHERE state='completed' |
-| `objects_empty` | `(bucket_id,key)` WHERE stream_id IS NULL |
-| `streams_writing` | `(bucket_id,object_key)` WHERE state='writing' |
-| `parts_stream` | `(stream_id)` WHERE stream_id IS NOT NULL |
-| `uploads_output` | `(output_stream)` WHERE output_stream IS NOT NULL |
-| `fragments_cleanup` | `(created_at,id)` |
+| `integrity_issues_page` | `(task_id,id)` |
 
-chunks、extents、streams、objects、uploads、parts、fragments、sessions、tasks 的表级 `autovacuum_vacuum_scale_factor=0.05`、`autovacuum_analyze_scale_factor=0.02`，其他阈值沿用 PostgreSQL 配置。无新增字段或业务表。
+## 状态与清理
 
-FK 默认 NO ACTION，例外均明确写在上面的 SQL：授权/域名跟桶级联、会话跟用户级联、part跟上传级联、extent跟stream级联；owner/output/task目标在对应来源移除时置NULL。删除桶前先清掉依赖对象/上传/版本，区块可被其他桶共享。
+| 对象 | 状态及发布规则 |
+| --- | --- |
+| streams / objects | writing → ready → retired；失败或启动恢复的 writing → abandoned。对象指针只指向完整 ready stream；每次写入或删除更换 write_epoch，迟到写入不能覆盖新对象；无写入版本后清理 NULL 占位 |
+| chunks | preparing（ID 已提交）→ uploading（编码元数据已提交）→ ready；不确定失败转 failed。ready/failed → deleting → deleted，最后一步要求后端确认删除 |
+| uploads / parts | active → completing → completed，或 aborted。part 替换成功后才切换指针；Complete 冻结清单、发布并保存 result，相同清单重试复用结果。未提交的 completing 在重启后回到 active |
+| tasks | queued → running → completed/failed；可暂停并从持久游标继续，重启将 running 重排 queued，paused 保持暂停 |
 
-## 0003 任务分页索引
+引用由 extents、owner_stream 和活跃读写保护共同决定。最后引用消失时设置 unreferenced_at，重新引用时清空；删除认领与新引用互斥，deleting 块不参与去重。已接纳的读取固定 stream，覆盖或删除对象不影响该读取。
 
-`0003_task_listing.sql` 增加 `tasks_list(created_at DESC,id DESC)` 和 `tasks_state_list(state,created_at DESC,id DESC)`，替换原 `tasks_active` 索引。任务按创建时间和 UUID 确定顺序，通过游标继续；同一时间创建的任务也不会因分页遗漏。无新增表或字段。
+最终对象的 extents 必须全部指向 ready 区块、偏移连续且总长正确；part 可混合区块和本地片段。片段先持久写入，再提交 sealed 与映射；缺失唯一来源会使受影响上传失效。发布和文件格式见[存储格式](storage-format.md#分片上传与发布)。
+
+已结束记录按[清理配置](configuration.md#回收与历史清理)到期，仍被引用或活跃保护的记录暂缓。任务异常先于任务分批删除；identity 序列和密钥指纹不回收，物理区块身份不得复用。删除桶前需清除对象、上传和 stream；区块可能仍被其他桶引用。
+
+chunks、extents、streams、objects、uploads、parts、fragments、sessions、tasks 的表级参数为 `autovacuum_vacuum_scale_factor=0.05`、`autovacuum_analyze_scale_factor=0.02`，其他阈值沿用 PostgreSQL 配置。
 
 ## JSONB 结构
 
-- `streams.metadata` / `uploads.metadata`：content_type、cache_control、content_disposition、content_encoding、content_language、expires（可空字符串），user（S3自定义元数据字典）。
-- `checksums`：S3校验算法对应值和checksum_type；不是内部BLAKE3去重哈希。
-- `buckets.cors`：origins/methods/headers/expose/max_age 规则数组，见 CLI 文档。
-- `uploads.result`：成功完成的 ETag、时间等返回元数据，必须与 manifest_hash 一起保留供重试。
-- `tasks.detail`：purge保存name/bucket_id；sweep保存dry_run/prefix/older_than_seconds/cutoff/candidates/bytes/unrecognized/samples。样本有界，不能用作不经复核的删除清单。
+| 字段 | 内容 |
+| --- | --- |
+| streams.metadata / uploads.metadata | 可空 HTTP 元数据：content_type、cache_control、content_disposition、content_encoding、content_language、expires；user 为 S3 自定义元数据字典 |
+| streams.checksums | S3 校验算法对应值及 checksum_type，与内部 BLAKE3 去重哈希独立 |
+| buckets.cors | origins/methods/headers/expose/max_age 规则数组，见[CORS 设置](manage-api-reference.md#cors-设置) |
+| uploads.result | Complete 成功返回的 ETag、时间等，与 manifest_hash 一同用于幂等重试 |
+| tasks.detail | purge：name/bucket_id；sweep：dry_run/prefix/older_than_seconds/cutoff/candidates/bytes/unrecognized/samples；integrity 见[巡检字段](manage-api-reference.md#完整性巡检) |
 
-数据库日常管理通过CLI完成，不建议直接改状态、序列、引用或 nonce。恢复数据库时必须连同历史密钥和后端身份核对，见部署与恢复文档。
+sweep 样本有界，不是可直接执行的删除清单。日常管理通过 CLI/Web 完成；不要手改状态、序列、引用或 nonce 来绕过检查。[数据库恢复](deployment-and-recovery.md#恢复步骤)还需核对历史密钥和后端身份。

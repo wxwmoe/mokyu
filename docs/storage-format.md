@@ -1,68 +1,100 @@
-# 存储格式（版本1）
+# 存储格式
 
-元数据保存在 PostgreSQL，后端文件只有编码载荷，单凭后端桶不能恢复对象路径或权限
+PostgreSQL 保存对象路径、权限和引用，后端文件只保存区块载荷，不能单独重建对象索引。区块编码 `format=1`，后端标识 `format_version=1`；它们独立于数据库结构编号和程序版本。
 
-## 分块、去重与编码
+## 分块与编码
 
-原始文件按 FastCDC v2020、默认 Normalization Level1/seed0 分块：min262144、avg1048576、max4194304字节。对连续最多4MiB窗口执行实际切点，消费切点前的数据，窗口末尾不是人为EOF。尾部只有在确认文件EOF时作为最终块；不足256KiB的非空完整对象一块，空对象零块。
+| 项目 | 规则 |
+| --- | --- |
+| CDC | FastCDC v2020，Normalization Level 1、seed 0；最小 256 KiB、目标 1 MiB、最大 4 MiB |
+| 边界 | 对连续最多 4 MiB 窗口执行实际切点，窗口末尾不视为 EOF；确认文件结束后才提交尾块 |
+| 小文件 | 不足 256 KiB 的非空完整对象使用一个块；空对象零块 |
+| 去重 | 部署内跨桶，以原始明文的完整 32 字节 BLAKE3、raw_size、algorithm、key_id 匹配 |
+| 压缩 | 每块独立 Zstd frame，compressed 记录实际选择；读取不依赖写入时的等级或策略 |
+| 加密 | none / AES-256-GCM / ChaCha20-Poly1305；加密密钥 32 字节，16 字节认证标签附在密文末尾 |
 
-原始区块的完整32字节BLAKE3是去重哈希。去重域为此部署全部逻辑桶，索引同时包含raw_size、algorithm、key_id，不能跨密钥/编码模式错误复用。对象ETag/S3校验另算，不用BLAKE3代替协议ETag。
-
-需要新编码的区块按 `compression.strategy` 决定是否尝试 Zstd，默认全部尝试、level3。压缩后必须严格变小，并同时满足最低节省比例和字节数（默认2%及256字节），否则保存原始载荷。门槛比较排除加密标签；数据库compressed标识实际选择，读取不依赖当前策略或等级。每块独立压缩，不共享跨块字典；旧版本保存的压缩块和原始块继续可读，去重命中不会因配置变化而重编码。详见[压缩配置](configuration.md#压缩策略)。随后按none/AES-256-GCM/ChaCha20-Poly1305编码；加密方案密钥均32字节、tag16字节，tag附加在密文末尾。none仍校验原始长度与BLAKE3，但不提供密钥认证/保密。
+压缩收益门槛见[压缩策略](configuration.md#压缩策略)。去重命中直接复用，调整配置不重编码已有块。`none` 仍校验长度和 BLAKE3，但不提供保密或密钥认证；对象 ETag 与 S3 checksum 独立计算。
 
 ## nonce 与 AAD
 
-加密前提交chunks行，取得正bigint ID，再加密一次。nonce为12字节：`u32(UTC YYYYMMDD).to_be_bytes() || u64(chunk_id).to_be_bytes()`，日期取区块created_at。日期是标识，唯一性来自密钥域内不回滚复用的ID；时钟回退不会抵消ID唯一性。
+加密前先提交 chunks 行，取得正 bigint ID，每个物理身份只加密一次。nonce 为 12 字节：
 
-例如 `2026-09-21T00:00:00Z`、ID42：nonce十六进制 `01352839000000000000002a`。日期以整数编码，不是8字节ASCII。读取直接使用数据库保存的nonce。
+```text
+u32(UTC YYYYMMDD).to_be_bytes() || u64(chunk_id).to_be_bytes()
+```
 
-AAD逐字段拼接，无JSON、分隔符或平台本机端序：
+日期取 created_at，是整数日期标识；唯一性来自同一密钥下不回滚复用的 ID。例：日期 2026-09-21、ID 42 得到 `01352839000000000000002a`。读取直接使用数据库保存的 nonce。
 
-| 次序 | 长度 | 字节 |
+AAD 按下表逐字段拼接，不使用 JSON、分隔符或本机端序：
+
+| 次序 | 长度（字节） | 内容 |
 | --- | --- | --- |
-| 1 | 9 | ASCII `MGWCHUNK` + `01` |
-| 2 | 8 | chunk ID，i64 big-endian（正值） |
-| 3 | 16 | storage UUID原始字节 |
-| 4 | 32 | 原始BLAKE3 |
+| 1 | 9 | ASCII `MGWCHUNK` + `0x01` |
+| 2 | 8 | 正 chunk ID，i64 big-endian |
+| 3 | 16 | storage UUID 原始字节 |
+| 4 | 32 | 原始 BLAKE3 |
 | 5 | 4 | raw_size，i32 big-endian |
-| 6 | 4 | stored_size（含tag），i32 big-endian |
+| 6 | 4 | stored_size（含 tag），i32 big-endian |
 | 7 | 1 | compressed：0/1 |
-| 8 | 1 | 算法：none0、AES-GCM1、ChaCha2 |
-| 9 | 2 | key_id UTF-8字节长度，u16 big-endian |
-| 10 | 可变 | key_id UTF-8字节 |
+| 8 | 1 | 算法：none=0、AES-GCM=1、ChaCha=2 |
+| 9 | 2 | key_id UTF-8 字节长度，u16 big-endian |
+| 10 | 可变 | key_id UTF-8 字节 |
 
-完整块先认证再解压，解压输出不得超过raw_size，最后核对长度与BLAKE3。物理ID、大小、压缩、算法及密钥ID被AAD绑定，不能互换区块元数据。
+完整块先认证，再有界解压，最后校验原始长度和 BLAKE3。ID、长度、压缩和密钥信息均受 AAD 绑定，不能互换元数据。
 
-数据库恢复、序列回滚、独立克隆会使旧ID再次出现。恢复写入前必须生成**新的实际区块写密钥**；改日期、只改key ID、只提高一个估计序列值都不能代替。旧密钥保留作读取。后端PUT结果不明时可以对同一物理key重传完全相同的编码字节；再次加密必须分配新ID和新storage_id。
+后端 PUT 结果不明时，可对同一 key 重传完全相同的编码字节；重新加密需新 ID 和 storage_id。数据库恢复、序列回滚或独立克隆后，恢复写入前必须换用**新的实际写密钥**，保留历史读密钥；具体步骤见[恢复说明](deployment-and-recovery.md#恢复步骤)。
 
-## 物理文件与缓存
+## 后端布局
 
-后端key：`<backend.prefix>/chunks/<UUID前两位>/<storage_uuid_simple>`，UUID为32位小写十六进制；例如`chunks/08/084f2ff912ff4c6daef1b416fee7b800`。每个物理key不可变，删除后也不复用。分成256个前缀用于组织与分批维护，不承诺特定S3服务商的性能收益。sweep只识别分组与UUID一致的规范路径，其他对象计入unrecognized且不删除。
+```text
+<backend.prefix>/meta.json
+<backend.prefix>/chunks/<UUID 前两位>/<32 位小写 storage UUID>
+```
 
-同级`<backend.prefix>/meta.json`保存`format_version=1`、与数据库一致的`deployment_id`、`chunk_layout="uuid-prefix2"`、`created_at`和仅供诊断的`created_by="wxw-media-gateway/0.0.2"`（来自Cargo包名和版本）。已有正确身份的marker不会仅为更新诊断字段而重写。存储格式版本独立于软件版本及数据库schema版本；区块AEAD格式仍为1。
+例如 `chunks/08/084f2ff912ff4c6daef1b416fee7b800`。物理 key 不可变且永不复用；两位分组共有 256 个前缀。sweep 只识别分组与 UUID 一致的规范路径，其他对象计入 unrecognized，不删除。
 
-省略`backend.prefix`或设为`""`时，后端key直接为`meta.json`和`chunks/<UUID前两位>/<storage_uuid_simple>`，没有前导斜杠。首次初始化要求整个后端桶为空；非空前缀只检查该命名空间。前缀属于数据库绑定的后端身份，已有部署修改前缀会拒绝启动，不会自动搬运数据。
+省略 prefix 或设为 `""` 时使用桶根，无前导斜杠；首次初始化要求整个桶为空。非空 prefix 只检查该命名空间。prefix 属于部署身份，修改它不会自动搬迁数据。
 
-本地 `data/chunks` 缓存已解密的数据，按区块选择是否保留压缩。使用数据库 `compressed`、`raw_size`、`stored_size` 和 `algorithm` 判断收益：从 `stored_size` 扣除加密标签（`none` 为0字节，其余算法为16字节），压缩至少节省 `cache.min_compression_savings_percent`（默认20%）才保留 Zstd 载荷，否则缓存原始字节。无需重新压缩或扫描内容估算收益。此目录包含明文数据，应限制访问；新缓存文件权限为0600。
+### 后端标识
 
-每次启动在恢复、监听及GC之前校验标识，限制16KiB；身份冲突、未知格式、损坏或已初始化后丢失均拒绝启动。仅未初始化且后端专用前缀为空、数据库无对象/区块时，用create-only条件写创建标识。S3写成功而DB确认前中断，重启可使用数据库已提交的deployment_id完成确认。后端必须支持If-None-Match条件创建，失败不降级为覆盖写。
+| meta.json 字段 | 含义 |
+| --- | --- |
+| format_version | 固定为 1 |
+| deployment_id | 与数据库一致的部署 UUID |
+| chunk_layout | `uuid-prefix2` |
+| created_at | 创建时间 |
+| created_by | Cargo 包名与版本组成的 `wxw-media-gateway/<版本号>`，仅用于诊断 |
 
-标识不保存密钥、对象索引或引用计数；不属于chunks扫描范围。它不是数据库备份或跨数据库写锁，克隆/恢复仍须遵守独占部署与更换实际写密钥规则。数据库迁移不会自动转换后端格式；涉及格式升级时需遵循对应版本的升级说明。
+启动时先校验标识，再恢复上传、监听和运行 GC。标识上限 16 KiB；身份冲突、未知格式、损坏或已初始化后丢失均拒绝启动。已有正确标识不因 created_by 变化而重写。
 
-本地路径为 `data/chunks/<前两位>/<同一32位UUID>.zst`（已解密、保留压缩）或 `.raw`（原始字节）。后缀决定读取格式，修改收益阈值不会误读既有缓存。启动清理旧版无后缀缓存、无效文件、重复UUID及未完成的临时文件，按需从后端重建；不转换数据库或远端区块。填充先写 `.zst.tmp` / `.raw.tmp` 再原子改名；配额预留、启动重建及实际占用均按本地文件大小计量。S3-FIFO使用small/main队列（初始10%/90%目标）、0～3饱和频率和有界ghost ID。缓存缺失/坏块可从后端重建；无空间填充时可直接返回验证后的数据，不破坏multipart唯一来源。
+仅数据库未初始化、无对象／区块且后端范围为空时，使用 `If-None-Match` 条件创建标识，失败不降级为覆盖写。S3 已写入但数据库确认前中断时，重启使用已提交的 deployment_id 完成确认。
 
-GET/Range 每批最多读取64条映射及对应区块元数据，最多并行预读请求范围内的两个块。回源区块先通过认证，再解压和校验；缓存命中跳过解密，`.zst` 仍需有界解压，`.raw` 直接校验。所有区块都须通过原始长度及BLAKE3校验后才输出。缓存写入和失效处理串行协调；写临时文件、刷新及改名期间释放S3-FIFO索引锁，其他已缓存块仍可读取。缓存写入失败不会阻止返回已验证的后端数据。
+标识不保存密钥、对象索引或引用计数，不属于 chunks 清查范围，也不能替代备份或跨数据库写锁。数据库迁移不会自动转换后端格式。
 
-新区块在后端PUT确认成功后也会尝试填充本地缓存，复用本次上传加密前已有的压缩载荷或原始字节；普通上传和multipart共用此路径。回源填充复用本次解密或解压的结果，不再额外解密或压缩。填充受相同容量、条目数及并发预算约束，失败不影响后端已成功的上传；新上传块以普通新条目进入S3-FIFO，不增加命中频率。去重命中已有区块时不重新编码或回源来预热缓存。
+## 本地数据
 
-`data/multipart/<32位小写十六进制fragment UUID>` 为仍需恢复的原始片段文件；先写文件、fsync文件及父目录，再提交sealed/extent映射。此目录不等同于缓存：仍有引用的尾部不能因“旧”或缓存压力擅自删除。Abort/过期后通过引用清理释放。
+| 路径 | 内容与用途 |
+| --- | --- |
+| `data/chunks/<前两位>/<UUID>.zst` | 已解密、仍压缩的 Zstd 载荷 |
+| `data/chunks/<前两位>/<UUID>.raw` | 已解密、解压的原始字节 |
+| `data/multipart/<fragment UUID>` | 仍需保留的原始片段；UUID 为 32 位小写十六进制 |
 
-## multipart 与发布
+chunks 使用 S3-FIFO 淘汰，按实际文件大小和条目预算限制。根据 compressed、raw_size、stored_size 和 algorithm，扣除认证标签后计算压缩收益，达到[缓存阈值](configuration.md#区块缓存)才保留 .zst，其余用 .raw；不重新压缩估算。缓存含明文，新文件权限为 0600。
 
-每次UploadPart生成不可变stream版本，parts.write_epoch防止旧请求迟到替换；新版本确认前旧part仍可用。已接收的连续数据可以CDC/上传后端；缺口之后也可产生候选区块，前后尚不确定的局部范围由extents引用远端候选或本地fragment。
+填充先写 .zst.tmp／.raw.tmp 再原子改名，预留和占用均计入配额。启动清理无后缀、无效、重复及未完成的缓存；修改收益阈值不影响既有后缀的读取。缺失或坏缓存按需回源重建，填充失败不阻止返回已经校验的数据。
 
-UploadPart成功表示每个字节都有已持久化的来源，不表示全片已经形成最终整文件CDC区块。相邻part可接续处理、释放原始尾部。Complete按客户端冻结的有序清单流式重建连续字节并执行同一CDC，候选块在此之前仍受引用保护。无需整文件拼接落盘或一次加载全部映射。
+GET/Range 每批读取最多 64 条映射，最多并行预读范围内两个块。回源先认证、解压、校验；.zst 缓存有界解压，.raw 直接校验，所有块通过长度与 BLAKE3 校验后才输出。
 
-发布事务核对：全部来源是ready区块、offset连续、总长一致；随后原子切换objects.stream_id、退役旧generation并保存Complete结果。GET固定当前版本，并持有活跃保护直到响应结束。删除对象仅解除可见指针，不会立刻删除共享区块。
+新块 PUT 成功后也尝试填充缓存，复用上传已有载荷；回源填充复用解密／解压结果。去重命中不主动回源预热，新上传块按普通新条目进入缓存。
 
-密钥指纹、引用和删除日志是恢复与回收的必要状态，不可手工删除它们来绕过启动检查。
+multipart 片段先写文件并 fsync 文件及父目录，再提交 sealed 和映射。**仍被引用的片段不能因陈旧或缓存压力删除**；Abort／过期释放引用后才清理。已发布对象不依赖该目录。
+
+## 分片上传与发布
+
+1. UploadPart 生成不可变 stream，write_epoch 防止迟到请求覆盖新 part；替换成功前旧 part 仍可用。
+2. 已接收的连续数据可 CDC 并上传，缺口后的数据也可形成候选块；尚未确定边界的范围通过 extents 引用远端候选或本地 fragment。
+3. UploadPart 成功保证每个字节都有持久来源，不保证全部成为最终整文件 CDC 块。相邻 part 可接续处理并释放尾部。
+4. Complete 按冻结的有序清单流式重建连续字节，执行相同 CDC；无需整文件落盘或一次载入全部映射，候选块持续受引用保护。
+5. 发布事务核对 ready 来源、连续偏移和总长，原子切换 objects.stream_id、退役旧 stream 并保存 Complete 结果。
+
+GET 固定当前 stream 并持有活跃保护。覆盖和删除仅解除可见引用，共享块按[数据库生命周期](database-schema.md#状态与清理)回收。
