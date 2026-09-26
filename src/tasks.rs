@@ -108,15 +108,36 @@ impl App {
         Ok(json!({"task_id":id,"dry_run":!execute}))
     }
     pub async fn task_change(&self, id: Uuid, resume: bool) -> Result<Value> {
+        let _coord = self.coord.lock().await;
+        if resume {
+            let (kind, detail): (String, Value) =
+                sqlx::query_as("SELECT kind,detail FROM tasks WHERE id=$1")
+                    .bind(id)
+                    .fetch_optional(&self.db)
+                    .await?
+                    .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+            if kind == "sweep" && detail["dry_run"] == false {
+                if !self.maintenance.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(s3s::s3_error!(
+                        OperationAborted,
+                        "enable maintenance before resuming destructive sweep"
+                    )
+                    .into());
+                }
+            } else if kind == "purge" {
+                self.writable()?;
+            }
+        }
         let changed = if resume {
             sqlx::query("UPDATE tasks SET state='queued',error=NULL,updated_at=now() WHERE id=$1 AND state IN ('paused','failed')").bind(id).execute(&self.db).await?
         } else {
             sqlx::query("UPDATE tasks SET state='paused',updated_at=now() WHERE id=$1 AND state IN ('queued','running')").bind(id).execute(&self.db).await?
         };
-        ensure!(
-            changed.rows_affected() == 1,
-            "task not found or cannot change state"
-        );
+        if changed.rows_affected() != 1 {
+            return Err(
+                s3s::s3_error!(OperationAborted, "task not found or cannot change state").into(),
+            );
+        }
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id,"state":if resume{"queued"}else{"paused"}}))
     }

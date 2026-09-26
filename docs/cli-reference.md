@@ -46,7 +46,7 @@
 | `task list` | 无 | 最近100个任务 |
 | `task show UUID` | 必填 | 任务完整状态、游标、计数、detail/error |
 | `task pause UUID` | queued/running | 当前批次可能结束，然后暂停 |
-| `task resume UUID` | paused/failed | 从持久进度重排队，清除旧错误 |
+| `task resume UUID` | paused/failed | 从持久进度重排队，清除旧错误；破坏性 sweep 需维护模式，purge 需退出维护模式，只读 sweep 预览可在维护模式下继续 |
 | `backend sweep [--older-than 48h]` | 默认仅预览 | 扫描部署 chunks 前缀，统计未被数据库任何状态索引的区块 |
 | `backend sweep --execute --preview UUID [--older-than 48h]` | 终端、已完成预览、维护状态 | 使用相同前缀及年龄阈值重新扫描，每次删除前重查DB |
 

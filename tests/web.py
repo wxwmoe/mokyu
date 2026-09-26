@@ -1,10 +1,13 @@
 """Browser checks for both supported Web locales, against an isolated test setup."""
 import os
 import json
+import uuid
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlencode
 import boto3
+import psycopg
 from botocore.config import Config
 from playwright.sync_api import sync_playwright
 
@@ -16,6 +19,16 @@ s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_nam
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
                   config=Config(s3={'addressing_style': 'path'}, max_pool_connections=8))
 bucket = credential['bucket']
+assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+paused_task = str(uuid.uuid4())
+backend_prefix = tomllib.loads(Path(os.environ['MGW_TEST_CONFIG']).read_text())['backend'].get('prefix', '').rstrip('/')
+with psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text()) as db:
+    db.execute("INSERT INTO tasks(id,kind,state,error) VALUES(%s,'sweep','failed',%s)",
+               (uuid.uuid4(), '<script>unsafe task error</script>'))
+    db.execute("INSERT INTO tasks(id,kind,state,detail) VALUES(%s,'sweep','paused',%s)", (paused_task, json.dumps({
+        'dry_run': True, 'prefix': (backend_prefix + '/' if backend_prefix else '') + 'chunks/',
+        'older_than_seconds': 172800, 'cutoff': '2000-01-01T00:00:00Z', 'candidates': 0,
+        'bytes': 0, 'unrecognized': 0, 'samples': []})))
 def fixture(i):
     s3.put_object(Bucket=bucket, Key=f'web-accept/file-{i:03}', Body=b'private pagination fixture')
 with ThreadPoolExecutor(max_workers=4) as pool:
@@ -75,7 +88,8 @@ with sync_playwright() as playwright:
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
     page.set_viewport_size({'width': 1280, 'height': 900})
     page.get_by_role('button', name='Background tasks', exact=True).click()
-    page.locator('#detail-title').filter(has_text='Background tasks').wait_for()
+    page.locator('#tasks-view:not([hidden])').wait_for()
+    page.get_by_role('button', name='Bucket settings', exact=True).click()
     page.get_by_role('button', name='CORS settings', exact=True).click()
     page.locator('#cors-form:not([hidden])').wait_for()
     old_cors = page.locator('#info').text_content()
@@ -130,6 +144,7 @@ with sync_playwright() as playwright:
     page.get_by_label('Error document key', exact=True).fill('404.html')
     page.get_by_role('button', name='Save', exact=True).click()
     page.locator('#notice').filter(has_text='Website settings saved').wait_for()
+    page.get_by_role('button', name='Objects', exact=True).click()
     page.get_by_role('button', name='multipart', exact=True).click()
     page.locator('#facts').filter(has_text='Object key').wait_for()
     assert page.get_by_role('link', name='Download original').count() == 1
@@ -137,26 +152,42 @@ with sync_playwright() as playwright:
     assert page.get_by_role('link', name='下载原文件').count() == 1
     assert 'multipart' in page.locator('#facts').inner_text()
     page.locator('#language').select_option('en')
-    page.get_by_role('button', name='Refresh', exact=True).click()
+    page.get_by_role('button', name='Back to files', exact=True).click()
     page.locator('#files button').filter(has_text='web-accept/').click()
     page.wait_for_function('() => document.querySelectorAll("#files tr").length === 100')
     page.locator('#more').click()
-    page.wait_for_function('() => document.querySelectorAll("#files tr").length === 125')
+    page.wait_for_function('() => document.querySelectorAll("#files tr").length === 25')
     assert page.locator('#more').is_hidden()
+    page.reload()
+    page.wait_for_function('() => document.querySelectorAll("#files tr").length === 25')
+    page.get_by_role('button', name='Previous page', exact=True).click()
+    page.wait_for_function('() => document.querySelectorAll("#files tr").length === 100')
+    page.get_by_label('Key prefix', exact=True).fill('web-accept/file-12')
+    page.get_by_role('button', name='Search', exact=True).click()
+    page.get_by_role('button', name='web-accept/file-120', exact=True).wait_for()
+    assert page.locator('#files tr').count() == 1
+    page.get_by_label('Key prefix', exact=True).fill('web-accept/')
+    page.get_by_role('button', name='Search', exact=True).click()
+    page.wait_for_function('() => document.querySelectorAll("#files tr").length === 100')
     page.get_by_role('button', name=injection, exact=True).click()
     page.locator('#facts').filter(has_text=injection).wait_for()
     assert not page.evaluate('Boolean(window.injected)')
     assert page.locator('#info script, #facts img').count() == 0
-    page.get_by_role('button', name='image.png', exact=True).click()
+    def locate(key):
+        page.get_by_role('button', name='Objects', exact=True).click()
+        page.get_by_label('Full object key', exact=True).fill(key)
+        page.get_by_role('button', name='Open object', exact=True).click()
+        page.locator('#facts').filter(has_text=key).wait_for()
+    locate('web-accept/image.png')
     page.get_by_role('button', name='Preview', exact=True).click()
     page.wait_for_function('() => document.querySelector("#preview img")?.naturalWidth === 640')
     page.screenshot(path=str(results / 'web-private-image-en.png'), full_page=True)
-    page.get_by_role('button', name='video.mp4', exact=True).click()
+    locate('web-accept/video.mp4')
     page.get_by_role('button', name='Preview', exact=True).click()
     page.wait_for_function('() => document.querySelector("#preview video")?.readyState >= 2')
     page.locator('#preview video').evaluate('v => { v.currentTime = 5; }')
     page.wait_for_function('() => document.querySelector("#preview video").currentTime >= 5 && !document.querySelector("#preview video").seeking')
-    page.get_by_role('button', name='unsafe.html', exact=True).click()
+    locate('web-accept/unsafe.html')
     page.locator('#facts').filter(has_text='text/html').wait_for()
     assert page.get_by_role('button', name='Preview', exact=True).count() == 0
     bucket_id = page.locator('#buckets').input_value()
@@ -169,6 +200,105 @@ with sync_playwright() as playwright:
         page.get_by_role('link', name='Download original', exact=True).click()
     assert Path(download.value.path()).read_bytes() == b'<script>window.injected=true</script>'
     assert not page.evaluate('Boolean(window.injected)')
+    # Search and navigation preserve the literal key, including reserved URL characters.
+    unusual = 'web-actions/a//+%? #中'
+    s3.put_object(Bucket=bucket, Key=unusual, Body=b'object one', Metadata={'unsafe': injection})
+    s3.put_object(Bucket=bucket, Key='web-actions/b', Body=b'object two')
+    locate(unusual)
+    saved_url = page.url
+    page.reload()
+    page.locator('#facts').filter(has_text=unusual).wait_for()
+    assert page.url == saved_url and injection in page.locator('#task-list').inner_text()
+    page.get_by_role('button', name='Copy object key', exact=True).click()
+    if page.locator('#copy-dialog').is_visible():
+        assert page.locator('#copy-value').input_value() == unusual
+        page.locator('#copy-close').click()
+    page.get_by_role('button', name='Chunk details', exact=True).click()
+    page.locator('#chunks:not([hidden]) table').wait_for()
+    assert 'aes-256-gcm' in page.locator('#chunks').inner_text()
+    page.get_by_role('button', name='Objects', exact=True).click()
+    page.get_by_label('Key prefix', exact=True).fill('web-actions/')
+    page.get_by_label('Include subfolders', exact=True).check()
+    page.get_by_role('button', name='Search', exact=True).click()
+    page.wait_for_function('() => document.querySelectorAll("#files tr").length === 2')
+    page.get_by_role('checkbox', name='Select current page', exact=True).check()
+    page.get_by_role('button', name='Make public', exact=True).click()
+    page.locator('#confirm-dialog').wait_for(state='visible')
+    assert '2 objects' in page.locator('#confirm-help').inner_text()
+    page.locator('#confirm-cancel').click()
+    assert not page.locator('#confirm-dialog').is_visible()
+    page.get_by_role('button', name='Make public', exact=True).click()
+    s3.put_object(Bucket=bucket, Key='web-actions/b', Body=b'replaced while confirming')
+    page.locator('#confirm-execute').click()
+    page.locator('#confirm-help').filter(has_text='Results for each selected object').wait_for()
+    assert 'Succeeded' in page.locator('#confirm-items').inner_text()
+    assert 'Object changed' in page.locator('#confirm-items').inner_text()
+    assert 'Request ID:' in page.locator('#confirm-notice').inner_text()
+    page.screenshot(path=str(results / 'web-actions-en.png'), full_page=True)
+    page.locator('#confirm-cancel').click()
+    page.reload()
+    page.wait_for_function('() => document.querySelectorAll("#files tr").length === 2')
+    assert page.get_by_label('Key prefix', exact=True).input_value() == 'web-actions/'
+    assert page.get_by_label('Include subfolders', exact=True).is_checked()
+    page.get_by_role('checkbox', name='Select current page', exact=True).check()
+    page.locator('#language').select_option('zh-CN')
+    assert '2' in page.locator('#selected-count').inner_text()
+    page.get_by_role('button', name='设为私有', exact=True).click()
+    page.locator('#confirm-execute').click()
+    page.locator('#confirm-help').filter(has_text='各对象的操作结果').wait_for()
+    assert page.locator('#confirm-items').inner_text().count('成功') == 2
+    page.locator('#confirm-cancel').click()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.screenshot(path=str(results / 'web-browser-mobile-zh-CN.png'), full_page=True)
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+    page.set_viewport_size({'width': 1280, 'height': 900})
+    page.locator('#language').select_option('en')
+    locate(unusual)
+    page.go_back()
+    page.locator('#objects-view:not([hidden])').wait_for()
+    page.go_forward()
+    page.locator('#facts').filter(has_text=unusual).wait_for()
+    page.get_by_role('button', name='Delete objects', exact=True).click()
+    page.locator('#confirm-execute').click()
+    page.locator('#confirm-help').filter(has_text='Results for each selected object').wait_for()
+    assert 'Succeeded' in page.locator('#confirm-items').inner_text()
+    page.locator('#confirm-cancel').click()
+    page.locator('#objects-view:not([hidden])').wait_for()
+    assert page.locator('#files tr').count() == 1
+
+    page.get_by_role('button', name='Background tasks', exact=True).click()
+    page.get_by_label('State', exact=True).select_option('failed')
+    page.locator('#tasks-table tbody tr').first.wait_for()
+    page.locator('#tasks-table button').first.click()
+    page.locator('#detail-title').filter(has_text='Task details').wait_for()
+    assert page.locator('#tasks-table').is_hidden()
+    assert '<script>unsafe task error</script>' in page.locator('#facts').inner_text()
+    assert page.locator('#facts script').count() == 0
+    page.get_by_role('button', name='Retry task', exact=True).click()
+    page.locator('#confirm-dialog').wait_for(state='visible')
+    page.locator('#confirm-cancel').click()
+    page.locator('#language').select_option('zh-CN')
+    page.screenshot(path=str(results / 'web-task-details-zh-CN.png'), full_page=True)
+    page.get_by_label('状态', exact=True).select_option('paused')
+    page.get_by_role('button', name=paused_task, exact=True).click()
+    page.get_by_role('button', name='继续任务', exact=True).click()
+    page.locator('#confirm-execute').click()
+    page.locator('#confirm-help').filter(has_text='成功').wait_for()
+    page.locator('#confirm-cancel').click()
+    page.locator('#facts').filter(has_text='已完成').wait_for(timeout=15000)
+    polls = []
+    page.on('request', lambda r: polls.append(r.url) if '/api/tasks?' in r.url else None)
+    page.wait_for_timeout(5500)
+    assert polls, 'visible tasks should poll'
+    page.evaluate("Object.defineProperty(document, 'hidden', {configurable:true,get:()=>true}); document.dispatchEvent(new Event('visibilitychange'))")
+    count = len(polls)
+    page.wait_for_timeout(5500)
+    assert len(polls) == count, 'hidden tasks must stop polling'
+    page.evaluate("delete document.hidden; document.dispatchEvent(new Event('visibilitychange'))")
+    page.get_by_role('button', name='对象浏览', exact=True).click()
+    count = len(polls)
+    page.wait_for_timeout(5500)
+    assert len(polls) == count, 'leaving tasks must stop polling'
     page.locator('#language').select_option('zh-CN')
     # A fresh tab has cookies but no per-tab CSRF value; /api/session must supply it.
     new_tab = context.new_page()

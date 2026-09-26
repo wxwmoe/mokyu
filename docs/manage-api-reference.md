@@ -2,18 +2,20 @@
 
 管理端口 9002，当前所有登录用户均为部署管理员，可以浏览全部逻辑桶及私有对象
 
-暂未提供多角色委托、Web 上传和批量编辑，删除任务由 CLI 创建，Web 查看任务及 GC 状态
+提供对象浏览、版本保护的删除/ACL 批量操作、存储桶设置、运行状态和后台任务管理。整桶清除与后端清查任务由 CLI 创建，Web 可查看、暂停和继续已有任务。所有管理员权限相同。
 
 ## 页面和静态文件
 
 | 方法 | 路径 | 内容 |
 | --- | --- | --- |
-| GET/HEAD | `/` | 单页管理：登录、桶选择、前缀目录/面包屑、分页、对象详情/ACL、媒体预览/下载、服务状态和任务 |
+| GET/HEAD | `/` | 对象浏览、存储桶设置、运行状态、后台任务四个导航入口；登录、双语、预览与下载 |
 | GET/HEAD | `/app.js` | 原生 ES module，无前端运行时服务 |
 | GET/HEAD | `/i18n.js` | zh-CN/en 字典和语言选择 |
 | GET/HEAD | `/app.css` | 响应式样式 |
 
 没有其他页面路由；目录和对象通过 query 参数传给 API，不映射成本地文件路径。静态文件随 Rust 二进制嵌入，不依赖 CDN。
+
+页面 URL 保存 `page=objects/settings/status/tasks`、`bucket`、`prefix`、`recursive`、对象分页 `token`、详情 `key`、设置 `section=cors/website`、任务筛选 `state`、任务 `task` 及分页 `taskToken`。支持刷新恢复、前进后退和复制页面链接；访问仍需登录。对象键逐字保留，不规范化斜杠、空格或特殊字符。对象列表每页100项，前缀搜索可包含子目录，完整键可直接定位；换页替换当前列表，勾选仅作用于当前页。上一页使用本标签页的浏览历史，新标签页打开游标链接可继续下一页或返回根目录。
 
 首次按浏览器语言选择：中文语言使用 zh-CN，其余回退 en；右上角可切换，保存在 localStorage。日期、数字使用浏览器 Intl 格式化。对象名称、用户元数据、API字段名保持原样，不作为翻译文案或HTML执行。
 
@@ -21,7 +23,7 @@
 
 登录体为JSON，限制16KiB。Cookie名 `mgw_session`，HttpOnly、SameSite=Strict，Secure由配置决定。数据库仅保存随机token哈希；会话默认12h。没有默认管理员，须先CLI创建。
 
-POST登录要求 `Origin` 精确匹配 manage.origin；POST退出和PUT网站/CORS设置还要求 `X-CSRF-Token`。GET `/api/session` 给已登录标签页返回可用 CSRF token，支持新标签页和刷新。密码修改、禁用/删除用户会撤销旧会话。桶CORS不作用于管理端口。
+POST登录要求 `Origin` 精确匹配 manage.origin；其余写接口还要求 `X-CSRF-Token`。GET `/api/session` 给已登录标签页返回可用 CSRF token，支持新标签页和刷新。密码修改、禁用/删除用户会撤销旧会话。桶CORS不作用于管理端口。
 
 所有管理 API 响应统一 `Cache-Control: private, no-store`；媒体下载另设 `Vary: Cookie`。登录最多同时2个哈希任务，失败不泄露用户名存在性。UI通过textContent/DOM API显示名称和元数据，CSP禁用外部脚本、插件和被嵌入框架。
 
@@ -40,14 +42,30 @@ POST登录要求 `Origin` 精确匹配 manage.origin；POST退出和PUT网站/CO
 | `PUT /api/buckets/{bucket}/website` | body `{website_enabled,index_document,error_document}`，三个字段均必填 | 是 | 200 保存后的设置；仅active桶、非维护模式可写 |
 | `GET /api/buckets/{bucket}/cors` | 路径bucket为UUID | 否 | 200 CORS规则数组 |
 | `PUT /api/buckets/{bucket}/cors` | body `[{origins,methods,headers,expose,max_age}]`；`[]`关闭 | 是 | 200 保存后的规则；仅active桶、非维护模式可写 |
-| `GET /api/objects` | bucket=UUID 必填；prefix默认空；token可选；limit默认100，0～1000 | 否 | 200 `{objects,prefixes,next_token}` |
+| `GET /api/objects` | bucket=UUID 必填；prefix默认空；recursive默认false；token可选；limit默认100，0～1000 | 否 | 200 `{objects,prefixes,next_token}` |
 | `GET /api/object` | bucket=UUID、key必填 | 否 | 200 `{object,bucket_grants}` |
+| `GET /api/object/chunks` | bucket=UUID、key、version=对象UUID必填；after=上页offset；limit默认100，1～200 | 否 | 200 `{chunks,next_offset}`；版本已更换412 |
+| `POST /api/objects/actions` | `{bucket,action,objects:[{key,version}]}`；action为delete/private/public-read | 是 | 200 `{results:[{key,version,status}]}`，逐项结果 |
 | `GET/HEAD /api/download` | bucket=UUID、key必填；preview默认false | 否 | 原始字节/HEAD头，支持Range与条件请求 |
-| `GET /api/tasks` | 无 | 否 | 200，按created_at降序的最近100条任务 |
+| `GET /api/tasks` | state可选；token可选；limit默认100，1～200 | 否 | 200 `{tasks,next_token}`；按created_at、id降序 |
+| `GET /api/tasks/{id}` | id=任务UUID | 否 | 200 任务详情；不存在404 |
+| `POST /api/tasks/{id}/actions` | `{action:"pause"或"resume"}` | 是 | 200 `{task_id,state}`；不允许状态转换409 |
 
 Axum 的 GET 路由也接受HEAD；JSON API的HEAD不返回body。前端只对实际下载使用HEAD语义。
 
-所有query参数按UTF-8编码。`key` 保留完整字符串，不做路径规范化。分页以数据库 C 排序、桶/prefix绑定的游标继续；不使用深OFFSET。`prefixes` 是按 `/` 分组的完整目录前缀，文件与目录共用limit；下一页传入原prefix和返回的next_token。不要解析或跨桶复用token。
+所有query参数按UTF-8编码。`key` 保留完整字符串，不做路径规范化。分页以数据库 C 排序、桶/prefix/recursive绑定的游标继续；不使用深OFFSET。`prefixes` 是按 `/` 分组的完整目录前缀，文件与目录共用limit；recursive=true时平铺列出所有匹配前缀的对象。下一页传入原筛选条件和返回的next_token。不要解析或跨桶复用token。
+
+任务 state 支持 queued/running/paused/completed/failed，游标绑定筛选状态，并包含创建时间和UUID，以确定同一时间创建任务的顺序。0.0.2 的任务列表返回带 next_token 的对象，客户端应从 tasks 字段读取数组。并发状态变化期间页面反映当前数据，不提供跨请求快照或固定总页数。
+
+### 对象写操作与区块详情
+
+操作请求必须有1～1000个不同对象键，version取对象详情/列表的id。服务器在对象行锁与协调锁内核对当前版本；已覆盖或消失返回该项412，不会操作新版本。成功项status=200，维护模式503、封桶409、未知桶404、内部失败500。请求格式/数量错误整体拒绝；合法批次逐项提交，允许部分成功。中断或断网后应刷新核对结果，不假设整批回滚。成功HTTP响应仍可能包含失败项，运行统计将其计为失败请求。
+
+仅此批量路由允许2MiB请求体、最多同时处理2个请求，其余管理JSON仍为16KiB。先校验会话与CSRF，再取得名额、读取请求体；取得名额后60秒内未完成返回408并释放名额，已提交的操作保留。超限413，繁忙503。对象写操作和任务控制在请求日志中记录管理员UUID、目标、动作、结果，并继承RequestId；不记录会话令牌或密钥。UI在提交前列出具体对象，结果逐项展示并附RequestId。
+
+删除复用正常对象退役与全局GC路径，不同步删除共享区块。private/public-read修改匿名对象ACL，不改变S3凭据授权。网关处于维护模式或桶处于清除状态时不允许对象写操作。
+
+区块详情按对象版本与offset分页，只读取数据库，不触发后端GET。每行含 `id,offset_bytes,length,source_offset,raw_size,stored_size,payload_size,compression,algorithm,key_id`；id和offset_bytes为十进制字符串，避免JavaScript bigint精度丢失，next_offset同样为字符串或null。compression为none/zstd，payload_size为编码大小减去认证标签。size字段描述完整区块，length/source_offset描述引用区间；共享块或部分区间引用不能据此计算删除可释放空间。UI显示逐块压缩节省比例 `(raw_size-payload_size)/raw_size`，不含认证标签；不提供密钥材料。
 
 ## 具体返回结构
 
@@ -111,7 +129,7 @@ CORS每条规则需要非空origins/methods，headers/expose默认空数组，ma
 
 去重节省量为 `live.reference_bytes-live.raw_bytes`，比例以 reference_bytes 为分母；压缩节省量为 `live.raw_bytes-live.payload_bytes`，比例以 raw_bytes 为分母。分母为 0 时显示空值。共享区块只在全局计一次，不按桶分摊物理空间；部分区间引用整块时，去重节省量可能为负，保留实际计算结果。物理统计来自数据库，不遍历后端，不包含未索引对象、meta.json、提供商版本或账单规则；未确认上传和删除期间还可能存在短暂差异。
 
-任务字段完整对应tasks表：`id,kind,bucket_id,state,cursor,processed,detail,error,created_at,updated_at`。状态翻译只发生在界面，API仍为固定英文状态值。错误详情只对管理员显示；任务管理用CLI。
+任务字段完整对应tasks表：`id,kind,bucket_id,state,cursor,processed,detail,error,created_at,updated_at`。状态翻译只发生在界面，API仍为固定英文状态值。错误详情只对管理员显示。pause适用于queued/running；resume适用于paused/failed，从持久游标继续并清除上次错误。暂停允许当前批次结束，已完成任务不能重试。破坏性sweep继续前需维护模式，执行批次仍检查活跃操作和GC；purge 继续前需退出维护模式；只读 sweep 预览允许在维护模式下继续。UI确认窗口展示任务ID与范围，任务列表可每5秒刷新，页面隐藏或离开任务页时停止轮询；用户可关闭自动刷新。
 
 ## 预览、下载与错误
 

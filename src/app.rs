@@ -590,10 +590,27 @@ impl App {
         Ok(())
     }
     pub async fn delete_object(&self, bucket: Uuid, key: &str) -> Result<()> {
+        self.change_object(bucket, key, None, None).await
+    }
+    pub async fn change_object(
+        &self,
+        bucket: Uuid,
+        key: &str,
+        expected: Option<Uuid>,
+        public: Option<bool>,
+    ) -> Result<()> {
         self.writable()?;
         let _coord = self.coord.lock().await;
         self.writable()?;
         let mut tx = self.db.begin().await?;
+        let state: String = sqlx::query_scalar("SELECT state FROM buckets WHERE id=$1 FOR SHARE")
+            .bind(bucket)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| s3_error!(NoSuchBucket))?;
+        if state != "active" {
+            return Err(s3_error!(OperationAborted, "bucket is being purged").into());
+        }
         let old: Option<Uuid> = sqlx::query_scalar(
             "SELECT stream_id FROM objects WHERE bucket_id=$1 AND key=$2 FOR UPDATE",
         )
@@ -602,6 +619,23 @@ impl App {
         .fetch_optional(&mut *tx)
         .await?
         .flatten();
+        if expected.is_some() && expected != old {
+            return Err(s3_error!(
+                PreconditionFailed,
+                "object changed; refresh before retrying"
+            )
+            .into());
+        }
+        if let Some(public) = public {
+            let id = old.ok_or_else(|| s3_error!(NoSuchKey))?;
+            sqlx::query("UPDATE streams SET public_read=$2 WHERE id=$1")
+                .bind(id)
+                .bind(public)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(());
+        }
         sqlx::query("INSERT INTO objects(bucket_id,key,write_epoch) VALUES($1,$2,$3) ON CONFLICT(bucket_id,key) DO UPDATE SET stream_id=NULL,write_epoch=excluded.write_epoch").bind(bucket).bind(key).bind(Uuid::new_v4()).execute(&mut *tx).await?;
         if let Some(old) = old {
             sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id=$1")

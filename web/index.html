@@ -6,10 +6,20 @@
 <main><p id="notice" role="status"></p>
 <form id="login" method="post"><h2 data-i18n="loginTitle">Administration sign in</h2><label><span data-i18n="username">Username</span><input name="username" autocomplete="username" required></label><label><span data-i18n="password">Password</span><input name="password" type="password" autocomplete="current-password" required></label><button data-i18n="login">Sign in</button></form>
 <section id="browser" hidden>
-<nav><label><span data-i18n="buckets">Bucket</span> <select id="buckets"></select></label><button id="refresh" data-i18n="refresh">Refresh</button><button id="website" data-i18n="website">Website settings</button><button id="cors" data-i18n="cors">CORS settings</button><button id="status" data-i18n="status">Service status</button><button id="tasks" data-i18n="tasks">Background tasks</button></nav>
+<nav aria-label="Management" data-i18n-label="navigation"><button id="objects-tab" data-i18n="objectBrowser">Objects</button><button id="settings" data-i18n="bucketSettings">Bucket settings</button><button id="status" data-i18n="status">Service status</button><button id="tasks" data-i18n="tasks">Background tasks</button></nav>
+<div id="bucket-toolbar" class="toolbar"><label><span data-i18n="buckets">Bucket</span> <select id="buckets"></select></label><button id="refresh" data-i18n="refresh">Refresh</button></div>
+<section id="objects-view">
+<form id="search-form" class="toolbar compact"><label><span data-i18n="searchPrefix">Key prefix</span><input id="search-prefix" maxlength="1024"></label><label class="checkbox"><input id="recursive" type="checkbox"><span data-i18n="recursive">Include subfolders</span></label><button data-i18n="search">Search</button></form>
+<form id="locate-form" class="toolbar compact"><label><span data-i18n="exactKey">Full object key</span><input id="exact-key" required maxlength="1024"></label><button data-i18n="locate">Open object</button></form>
 <div id="breadcrumbs" data-i18n-label="path" aria-label="Folder path"></div>
-<table><thead><tr><th data-i18n="name">Name</th><th data-i18n="size">Size</th><th data-i18n="access">Access</th><th data-i18n="updated">Last modified</th></tr></thead><tbody id="files"></tbody></table>
+<div id="bulk-actions" class="toolbar"><span id="selected-count" role="status"></span><button id="bulk-public" data-i18n="makePublic">Make public</button><button id="bulk-private" data-i18n="makePrivate">Make private</button><button id="bulk-delete" class="danger" data-i18n="deleteObjects">Delete objects</button></div>
+<div class="table-scroll"><table id="file-table"><thead><tr><th><input id="select-page" type="checkbox" data-i18n-label="selectPage" aria-label="Select current page"></th><th data-i18n="name">Name</th><th data-i18n="size">Size</th><th data-i18n="access">Access</th><th data-i18n="updated">Last modified</th></tr></thead><tbody id="files"></tbody></table></div>
+<p id="empty-files" data-i18n="emptyFiles" hidden>No objects in this view.</p>
+<button id="previous" data-i18n="previous" hidden>Previous page</button>
 <button id="more" data-i18n="more" hidden>Load next page</button>
+</section>
+<section id="settings-view" hidden><h2 data-i18n="bucketSettings">Bucket settings</h2><div class="toolbar"><button id="website" data-i18n="website">Website settings</button><button id="cors" data-i18n="cors">CORS settings</button></div></section>
+<section id="tasks-view" hidden><h2 data-i18n="tasks">Background tasks</h2><div class="toolbar"><label for="task-state" data-i18n="taskState">State</label><select id="task-state"><option value="" data-i18n="allStates">All states</option><option value="queued" data-i18n="queued">Queued</option><option value="running" data-i18n="running">Running</option><option value="paused" data-i18n="paused">Paused</option><option value="completed" data-i18n="completed">Completed</option><option value="failed" data-i18n="failed">Failed</option></select><button id="refresh-tasks" data-i18n="refresh">Refresh</button><label class="checkbox"><input id="auto-tasks" type="checkbox" checked><span data-i18n="autoRefresh">Refresh every 5 seconds</span></label></div><div id="tasks-table" class="table-scroll"></div><button id="tasks-previous" data-i18n="previous" hidden>Previous page</button><button id="tasks-more" data-i18n="more" hidden>Load next page</button></section>
 <section id="detail" hidden><h2 id="detail-title" data-i18n="details">Object details</h2><div id="statistics" hidden></div><dl id="facts"></dl>
 <form id="website-form" hidden>
 <label class="checkbox"><input id="website-enabled" type="checkbox"><span data-i18n="websiteEnabled">Enable website routing</span></label>
@@ -24,5 +34,8 @@
 <div id="cors-rules"></div>
 <div class="form-actions"><button id="cors-add" type="button" data-i18n="corsAdd">Add rule</button><button id="cors-save" type="submit" data-i18n="save">Save</button></div>
 </form>
-<div id="task-list"></div><div id="actions"></div><div id="preview"></div><details><summary data-i18n="rawDetails">API details</summary><pre id="info"></pre></details></section>
-</section></main></body></html>
+<div id="task-list"></div><div id="actions"></div><div id="preview"></div><section id="chunks" hidden></section><details><summary data-i18n="rawDetails">API details</summary><pre id="info"></pre></details></section>
+</section></main>
+<dialog id="confirm-dialog" aria-labelledby="confirm-title"><h2 id="confirm-title"></h2><p id="confirm-help"></p><div id="confirm-items" class="table-scroll"></div><p id="confirm-notice" role="status"></p><div class="toolbar"><button id="confirm-cancel" data-i18n="cancel">Cancel</button><button id="confirm-execute" data-i18n="confirm">Confirm</button></div></dialog>
+<dialog id="copy-dialog" aria-labelledby="copy-title"><h2 id="copy-title" data-i18n="copyKey">Copy object key</h2><p data-i18n="copyHelp">Copy the selected text.</p><input id="copy-value" readonly data-i18n-label="objectKey" aria-label="Object key"><button id="copy-close" data-i18n="close">Close</button></dialog>
+</body></html>

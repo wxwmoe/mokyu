@@ -11,6 +11,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::{DateTime, Utc};
 use s3s::dto::{ETagCondition, Range, Timestamp, TimestampFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -216,9 +218,21 @@ pub fn manage_router(app: Arc<App>) -> Router {
         )
         .route("/api/buckets/{bucket}/cors", get(cors).put(save_cors))
         .route("/api/objects", get(objects))
+        .route(
+            "/api/objects/actions",
+            post(object_actions)
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+                .layer(axum::middleware::from_fn_with_state(
+                    app.clone(),
+                    limit_object_actions,
+                )),
+        )
         .route("/api/object", get(object))
+        .route("/api/object/chunks", get(object_chunks))
         .route("/api/download", get(download))
         .route("/api/tasks", get(tasks))
+        .route("/api/tasks/{id}", get(task))
+        .route("/api/tasks/{id}/actions", post(task_action))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(axum::middleware::from_fn(web_headers))
         .with_state(app.clone())
@@ -226,7 +240,7 @@ pub fn manage_router(app: Arc<App>) -> Router {
 }
 async fn observe(
     State((app, index)): State<(Arc<App>, usize)>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
     use tracing::Instrument;
@@ -235,6 +249,7 @@ async fn observe(
         if index == 1 { "web" } else { "manage" },
         request.method().clone(),
     );
+    request.extensions_mut().insert(observation.context.clone());
     let response = next.run(request).instrument(observation.span.clone()).await;
     observation.response(response, false).map(Body::new)
 }
@@ -735,6 +750,8 @@ struct Browse {
     prefix: String,
     token: Option<String>,
     limit: Option<usize>,
+    #[serde(default)]
+    recursive: bool,
 }
 async fn objects(
     State(app): State<Arc<App>>,
@@ -746,7 +763,7 @@ async fn objects(
         .list(
             q.bucket,
             &q.prefix,
-            "/",
+            if q.recursive { "" } else { "/" },
             None,
             q.token.as_deref(),
             q.limit.unwrap_or(100),
@@ -780,13 +797,222 @@ async fn object(
         json!({"object":s,"bucket_grants":grants.into_iter().map(|(access_key,writable)|json!({"access_key":access_key,"writable":writable})).collect::<Vec<_>>()}),
     ))
 }
-async fn tasks(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Json<Value>, HttpError> {
+static OBJECT_ACTIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+async fn limit_object_actions(
+    State(app): State<Arc<App>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Err(error) = authenticate(&app, request.headers(), true).await {
+        return error.into_response();
+    }
+    let Ok(_permit) = OBJECT_ACTIONS.try_acquire() else {
+        return HttpError(s3s::s3_error!(SlowDown).into()).into_response();
+    };
+    match tokio::time::timeout(Duration::from_secs(60), next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(json!({"error":"Request Timeout"})),
+        )
+            .into_response(),
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectedObject {
+    key: String,
+    version: Uuid,
+}
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "kebab-case")]
+enum ObjectAction {
+    Delete,
+    Private,
+    PublicRead,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObjectActions {
+    bucket: Uuid,
+    action: ObjectAction,
+    objects: Vec<SelectedObject>,
+}
+async fn object_actions(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    axum::extract::Extension(context): axum::extract::Extension<crate::stats::RequestContext>,
+    Json(input): Json<ObjectActions>,
+) -> Result<Json<Value>, HttpError> {
+    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let mut keys = std::collections::HashSet::new();
+    if input.objects.is_empty()
+        || input.objects.len() > 1000
+        || input
+            .objects
+            .iter()
+            .any(|o| o.key.is_empty() || o.key.len() > 1024 || !keys.insert(&o.key))
+    {
+        return Err(s3s::s3_error!(InvalidArgument, "select 1 to 1000 distinct objects").into());
+    }
+    let public = match input.action {
+        ObjectAction::Delete => None,
+        ObjectAction::Private => Some(false),
+        ObjectAction::PublicRead => Some(true),
+    };
+    let mut results = Vec::with_capacity(input.objects.len());
+    for object in &input.objects {
+        let status = match app
+            .change_object(input.bucket, &object.key, Some(object.version), public)
+            .await
+        {
+            Ok(()) => 200,
+            Err(e) => HttpError(e).into_response().status().as_u16(),
+        };
+        if status != 200 {
+            context
+                .failed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        tracing::info!(%user_id, bucket_id=%input.bucket, action=?input.action, object_key=%object.key, version=%object.version, status, "management object action");
+        results.push(json!({"key":object.key,"version":object.version,"status":status}));
+    }
+    Ok(Json(json!({"results":results})))
+}
+#[derive(Deserialize)]
+struct ChunkQuery {
+    bucket: Uuid,
+    key: String,
+    version: Uuid,
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+async fn object_chunks(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Query(q): Query<ChunkQuery>,
+) -> Result<Json<Value>, HttpError> {
     authenticate(&app, &headers, false).await?;
-    let rows: Vec<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(t) FROM tasks t ORDER BY created_at DESC LIMIT 100")
-            .fetch_all(&app.db)
-            .await?;
-    Ok(Json(json!(rows)))
+    let limit = q.limit.unwrap_or(100);
+    if !(1..=200).contains(&limit) || q.after.is_some_and(|a| a < 0) {
+        return Err(s3s::s3_error!(InvalidArgument).into());
+    }
+    let (object, _pin) = app.current(q.bucket, &q.key).await?;
+    if object.id != q.version {
+        return Err(s3s::s3_error!(PreconditionFailed).into());
+    }
+    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',c.id::text,'offset_bytes',e.offset_bytes::text,'length',e.length,'source_offset',e.source_offset,'raw_size',c.raw_size,'stored_size',c.stored_size,'payload_size',c.stored_size-CASE WHEN c.algorithm='none' THEN 0 ELSE 16 END,'compression',CASE WHEN c.compressed THEN 'zstd' ELSE 'none' END,'algorithm',c.algorithm,'key_id',c.key_id) FROM extents e JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=$1 AND e.offset_bytes>$2 ORDER BY e.offset_bytes LIMIT $3")
+        .bind(object.id).bind(q.after.unwrap_or(-1)).bind(limit + 1).fetch_all(&app.db).await?;
+    let more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next = more.then(|| rows.last().unwrap()["offset_bytes"].clone());
+    Ok(Json(json!({"chunks":rows,"next_offset":next})))
+}
+#[derive(Deserialize)]
+struct TasksQuery {
+    state: Option<String>,
+    token: Option<String>,
+    limit: Option<i64>,
+}
+#[derive(Deserialize, Serialize)]
+struct TaskCursor {
+    state: Option<String>,
+    created_at: DateTime<Utc>,
+    id: Uuid,
+}
+async fn tasks(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Query(q): Query<TasksQuery>,
+) -> Result<Json<Value>, HttpError> {
+    authenticate(&app, &headers, false).await?;
+    let limit = q.limit.unwrap_or(100);
+    if !(1..=200).contains(&limit)
+        || q.state
+            .as_deref()
+            .is_some_and(|s| !["queued", "running", "paused", "completed", "failed"].contains(&s))
+    {
+        return Err(s3s::s3_error!(InvalidArgument).into());
+    }
+    let cursor = q
+        .token
+        .as_ref()
+        .map(|token| -> Result<TaskCursor> {
+            let bytes = URL_SAFE_NO_PAD.decode(token)?;
+            Ok(serde_json::from_slice(&bytes)?)
+        })
+        .transpose()
+        .map_err(|_| s3s::s3_error!(InvalidArgument))?;
+    if cursor.as_ref().is_some_and(|c| c.state != q.state) {
+        return Err(s3s::s3_error!(InvalidArgument).into());
+    }
+    let mut query =
+        sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT to_jsonb(t) FROM tasks t WHERE true");
+    if let Some(state) = &q.state {
+        query.push(" AND state=").push_bind(state);
+    }
+    if let Some(cursor) = cursor {
+        query
+            .push(" AND (created_at,id)<(")
+            .push_bind(cursor.created_at)
+            .push(",")
+            .push_bind(cursor.id)
+            .push(")");
+    }
+    query
+        .push(" ORDER BY created_at DESC,id DESC LIMIT ")
+        .push_bind(limit + 1);
+    let mut rows: Vec<Value> = query.build_query_scalar().fetch_all(&app.db).await?;
+    let more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next = if more {
+        let last = rows.last().unwrap();
+        Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&TaskCursor {
+            state: q.state,
+            created_at: serde_json::from_value(last["created_at"].clone())?,
+            id: serde_json::from_value(last["id"].clone())?,
+        })?))
+    } else {
+        None
+    };
+    Ok(Json(json!({"tasks":rows,"next_token":next})))
+}
+async fn task(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, HttpError> {
+    authenticate(&app, &headers, false).await?;
+    let task = sqlx::query_scalar("SELECT to_jsonb(t) FROM tasks t WHERE id=$1")
+        .bind(id)
+        .fetch_optional(&app.db)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+    Ok(Json(task))
+}
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+enum TaskAction {
+    Pause,
+    Resume,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskChange {
+    action: TaskAction,
+}
+async fn task_action(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<TaskChange>,
+) -> Result<Json<Value>, HttpError> {
+    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let result = app
+        .task_change(id, matches!(input.action, TaskAction::Resume))
+        .await;
+    tracing::info!(%user_id, task_id=%id, action=?input.action, success=result.is_ok(), "management task action");
+    Ok(Json(result?))
 }
 async fn download(
     State(app): State<Arc<App>>,

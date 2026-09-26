@@ -1,6 +1,6 @@
-# 数据库结构（0.0.2 / schema_version=2）
+# 数据库结构（0.0.2 / schema_version=3）
 
-0.0.2 通过 `0002_cleanup.sql` 添加清理/引用索引及表级自动维护参数，保留现有数据和字段。0.0.1 发布的 `0001_baseline.sql` 保持不变；运行统计、容量快照和最近清理结果保存在进程内，不新增业务表。
+0.0.2 通过 `0002_cleanup.sql` 添加清理/引用索引及表级自动维护参数，并通过 `0003_task_listing.sql` 添加任务分页索引，保留现有数据和字段。0.0.1 发布的 `0001_baseline.sql` 保持不变；运行统计、容量快照和最近清理结果保存在进程内，不新增业务表。
 
 PostgreSQL 使用同步提交与 fsync；服务独占一个数据库级 advisory lock 和 data 文件锁
 
@@ -24,7 +24,7 @@ SQLx 管理的迁移历史表，纳入数据库备份，不应手动修改
 | 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
 | --- | --- | --- | --- | --- |
 | `singleton` | boolean | 否 | `true` | 固定 true，保证仅一行 |
-| `schema_version` | integer | 否 | — | 当前数据库结构版本2，与最近一次迁移编号一致 |
+| `schema_version` | integer | 否 | — | 当前数据库结构版本3，与最近一次迁移编号一致 |
 | `deployment_id` | uuid | 否 | — | 部署 UUID |
 | `backend_identity` | text | 否 | — | 后端 endpoint/bucket/prefix 身份 |
 | `backend_initialized` | boolean | 否 | `false` | 后端 meta.json 已完成绑定；标识丢失时不自动重建 |
@@ -443,7 +443,8 @@ CREATE TABLE tasks (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX tasks_active ON tasks(state,created_at);
+CREATE INDEX tasks_list ON tasks(created_at DESC,id DESC);
+CREATE INDEX tasks_state_list ON tasks(state,created_at DESC,id DESC);
 ```
 
 ## 状态、引用与删除
@@ -475,6 +476,10 @@ completed/aborted uploads 从 touched_at 起默认保留24小时，且仍有part
 chunks、extents、streams、objects、uploads、parts、fragments、sessions、tasks 的表级 `autovacuum_vacuum_scale_factor=0.05`、`autovacuum_analyze_scale_factor=0.02`，其他阈值沿用 PostgreSQL 配置。无新增字段或业务表。
 
 FK 默认 NO ACTION，例外均明确写在上面的 SQL：授权/域名跟桶级联、会话跟用户级联、part跟上传级联、extent跟stream级联；owner/output/task目标在对应来源移除时置NULL。删除桶前先清掉依赖对象/上传/版本，区块可被其他桶共享。
+
+## 0003 任务分页索引
+
+`0003_task_listing.sql` 增加 `tasks_list(created_at DESC,id DESC)` 和 `tasks_state_list(state,created_at DESC,id DESC)`，替换原 `tasks_active` 索引。任务按创建时间和 UUID 确定顺序，通过游标继续；同一时间创建的任务也不会因分页遗漏。无新增表或字段。
 
 ## JSONB 结构
 

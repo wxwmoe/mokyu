@@ -1,153 +1,275 @@
 import { locale, setLocale, t, translate } from './i18n.js';
 
 const $ = id => document.getElementById(id);
-let prefix = '', next = null, csrf = '';
-let folders = [], objects = [], panel = null, currentNotice = '', listing = 0, view = 0;
+let prefix = '', next = null, csrf = '', view = 0;
+let folders = [], objects = [], panel = null, currentNotice = '', route = {}, tasksPage = null;
+let selected = new Set(), timer = null, pending = null, executing = false, chunks = null, taskRefresh = 0, chunkRequest = 0;
 const number = value => new Intl.NumberFormat(locale).format(value);
 const date = value => new Date(value).toLocaleString(locale);
+const query = values => new URLSearchParams(values).toString();
+const node = (tag, text) => { const element = document.createElement(tag); if (text != null) element.textContent = text; return element; };
 function translatedError(key, values = {}) { return Object.assign(new Error(t(key, values)), { translationKey: key, values }); }
-function notice(error = '') {
-  currentNotice = error;
-  $('notice').textContent = error.translationKey ? t(error.translationKey, error.values) : error instanceof Error ? error.message : error;
-}
+function errorText(error) { return error.translationKey ? t(error.translationKey, error.values) : error instanceof Error ? error.message : error; }
+function notice(error = '') { currentNotice = error; $('notice').textContent = errorText(error); }
 async function api(path, options = {}) {
   let response;
   try { response = await fetch(path, { credentials: 'same-origin', ...options }); }
   catch { throw translatedError('networkError'); }
+  const requestId = response.headers.get('x-request-id');
   if (!response.ok) {
-    if (response.status === 403) showLogin();
-    const requestId = response.headers.get('x-request-id');
+    if (response.status === 403 && path !== '/api/login') {
+      const session = await fetch('/api/session').catch(() => null);
+      if (session?.status === 403) showLogin();
+    }
     throw translatedError(requestId ? 'requestFailedId' : 'requestFailed', { status: response.status, requestId });
   }
-  return response.status === 204 ? null : response.json();
+  const value = response.status === 204 ? null : await response.json();
+  if (options.method === 'POST' && value && !Array.isArray(value)) value.request_id = requestId;
+  return value;
 }
-function showLogin() { $('login').hidden = false; $('browser').hidden = true; $('logout').hidden = true; }
+function write(path, body) { return api(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(body) }); }
+function showLogin() { ++view; clearTimeout(timer); $('login').hidden = false; $('browser').hidden = true; $('logout').hidden = true; }
 function button(text, click) {
-  const element = document.createElement('button');
-  element.textContent = text;
-  element.addEventListener('click', () => Promise.resolve(click()).catch(notice));
-  return element;
+  const element = node('button', text); element.type = 'button';
+  element.addEventListener('click', () => Promise.resolve().then(click).catch(notice)); return element;
 }
-function query(values) { return new URLSearchParams(values).toString(); }
 function size(value) {
   if (value < 0) return '−' + size(-value);
   if (value < 1024) return number(value) + ' B';
-  const unit = Math.min(4, Math.floor(Math.log(value) / Math.log(1024)));
-  return new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value / 1024 ** unit) + ' ' + ['B', 'KiB', 'MiB', 'GiB', 'TiB'][unit];
+  const unit = Math.min(5, Math.floor(Math.log(value) / Math.log(1024)));
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value / 1024 ** unit) + ' ' + ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'][unit];
+}
+function table(headings, rows) {
+  const table = node('table'), head = node('thead'), tr = node('tr'), body = node('tbody');
+  headings.forEach(key => { const cell = node('th', t(key)); cell.scope = 'col'; tr.append(cell); }); head.append(tr); table.append(head);
+  rows.forEach(values => { const row = node('tr'); values.forEach(value => { const cell = node('td'); cell.append(value instanceof Node ? value : document.createTextNode(value ?? '—')); row.append(cell); }); body.append(row); });
+  table.append(body); return table;
+}
+function readRoute() {
+  const p = new URLSearchParams(location.search);
+  return { page: ['objects', 'settings', 'status', 'tasks'].includes(p.get('page')) ? p.get('page') : 'objects', bucket: p.get('bucket') || '', prefix: p.get('prefix') || '', token: p.get('token') || '', recursive: p.get('recursive') === 'true', key: p.get('key'), section: p.get('section') || '', state: p.get('state') || '', task: p.get('task'), taskToken: p.get('taskToken') || '' };
+}
+function go(values, previousPage = false) {
+  const url = new URL(location.href);
+  for (const [key, value] of Object.entries(values)) {
+    if (value == null || value === '' || value === false) url.searchParams.delete(key);
+    else url.searchParams.set(key, value);
+  }
+  const before = new URL(location.href), state = history.state || { index: 0 };
+  const sameListing = ['page', 'bucket', 'prefix', 'recursive', 'token', 'state', 'taskToken'].every(key => before.searchParams.get(key) === url.searchParams.get(key));
+  if (url.href !== location.href) history.pushState({ index: state.index + 1, previousPage: previousPage || (sameListing && state.previousPage), previousIndex: previousPage ? state.index : sameListing ? state.previousIndex : null }, '', url);
+  return loadView();
 }
 async function enter() {
-  const buckets = await api('/api/buckets');
-  $('buckets').replaceChildren();
-  for (const bucket of buckets) {
-    const option = document.createElement('option');
-    option.value = bucket.id; option.textContent = bucket.name; $('buckets').append(option);
-  }
+  const buckets = await api('/api/buckets'); $('buckets').replaceChildren();
+  for (const bucket of buckets) { const option = node('option', bucket.name); option.value = bucket.id; $('buckets').append(option); }
+  const wanted = readRoute().bucket;
+  if (buckets.some(b => b.id === wanted)) $('buckets').value = wanted;
+  const url = new URL(location.href);
+  if ($('buckets').value) url.searchParams.set('bucket', $('buckets').value);
+  history.replaceState(history.state || { index: 0 }, '', url);
   $('login').hidden = true; $('browser').hidden = false; $('logout').hidden = false;
-  prefix = ''; await list();
+  await loadView();
 }
 function breadcrumbs() {
-  $('breadcrumbs').replaceChildren(button(t('root'), async () => { prefix = ''; await list(); }));
+  const root = $('breadcrumbs'); root.replaceChildren(button(t('root'), () => go({ prefix: '', token: null, key: null, recursive: false })));
   let path = '';
-  for (const part of prefix.split('/').filter(Boolean)) {
-    path += part + '/';
-    const target = path;
-    $('breadcrumbs').append(button(part, async () => { prefix = target; await list(); }));
-  }
-}
-async function list(more = false) {
-  const request = ++listing; ++view;
-  notice();
-  if (!more) { folders = []; objects = []; next = null; panel = null; $('detail').hidden = true; }
-  renderFiles();
-  if (!$('buckets').value) { notice(translatedError('noBuckets')); $('more').hidden = true; return; }
-  const params = { bucket: $('buckets').value, prefix };
-  if (more && next) params.token = next;
-  const page = await api('/api/objects?' + query(params));
-  if (request !== listing) return;
-  folders.push(...page.prefixes); objects.push(...page.objects);
-  next = page.next_token; renderFiles();
+  // Preserve empty segments: object keys are not filesystem paths.
+  const parts = prefix.split('/');
+  parts.forEach((part, index) => {
+    if (index === parts.length - 1) return;
+    path += part + '/'; const target = path;
+    root.append(button(part || '/', () => go({ prefix: target, token: null, key: null, recursive: false })));
+  });
 }
 function renderFiles() {
   breadcrumbs(); $('files').replaceChildren();
-  for (const folder of folders) row(button(t('folder', { name: folder.slice(prefix.length) }), async () => { prefix = folder; await list(); }), '', '', '');
-  for (const object of objects) row(button(object.object_key.slice(prefix.length) || object.object_key, () => detail(object.object_key)), size(object.size), t(object.public_read ? 'public' : 'private'), date(object.touched_at));
-  $('more').hidden = !next;
+  const trim = prefix.endsWith('/') ? prefix.length : 0;
+  for (const folder of folders) {
+    const tr = node('tr'); tr.append(node('td'));
+    const name = node('td'); name.append(button(t('folder', { name: folder.slice(trim) }), () => go({ prefix: folder, token: null, recursive: false }))); tr.append(name);
+    for (let i = 0; i < 3; i++) tr.append(node('td')); $('files').append(tr);
+  }
+  for (const object of objects) {
+    const tr = node('tr'), select = node('input'), cell = node('td'), name = node('td');
+    select.type = 'checkbox'; select.checked = selected.has(object.id); select.setAttribute('aria-label', t('selectObject', { key: object.object_key }));
+    select.addEventListener('change', () => { if (select.checked) selected.add(object.id); else selected.delete(object.id); renderSelection(); });
+    cell.append(select); name.append(button(object.object_key.slice(trim) || object.object_key, () => go({ key: object.object_key })));
+    tr.append(cell, name, node('td', size(object.size)), node('td', t(object.public_read ? 'public' : 'private')), node('td', date(object.touched_at))); $('files').append(tr);
+  }
+  $('empty-files').hidden = folders.length + objects.length !== 0;
+  $('more').hidden = !next; $('previous').hidden = !(route.token && history.state?.previousPage);
+  renderSelection();
 }
-function row(name, ...cells) {
-  const tr = document.createElement('tr'), first = document.createElement('td');
-  first.append(name); tr.append(first);
-  for (const text of cells) { const td = document.createElement('td'); td.textContent = text; tr.append(td); }
-  $('files').append(tr);
+function renderSelection() {
+  $('selected-count').textContent = t('selectedCount', { count: number(selected.size) });
+  $('select-page').checked = objects.length > 0 && selected.size === objects.length;
+  $('select-page').indeterminate = selected.size > 0 && selected.size < objects.length;
+  $('select-page').disabled = objects.length === 0;
+  for (const id of ['bulk-public', 'bulk-private', 'bulk-delete']) $(id).disabled = selected.size === 0;
 }
 function fields(values) {
   $('facts').replaceChildren();
-  for (const [label, value] of values) {
-    const term = document.createElement('dt'), description = document.createElement('dd');
-    term.textContent = t(label); description.textContent = value ?? '—'; $('facts').append(term, description);
-  }
+  for (const [label, value] of values) $('facts').append(node('dt', t(label)), node('dd', value ?? '—'));
 }
-function renderPanel(clearPreview = false) {
+async function loadView() {
+  const request = ++view; clearTimeout(timer); route = readRoute(); prefix = route.prefix;
+  notice(); panel = null; chunks = null; $('preview').replaceChildren(); $('chunks').replaceChildren(); $('chunks').hidden = true;
+  $('detail').hidden = true; $('objects-view').hidden = route.page !== 'objects' || route.key !== null;
+  $('settings-view').hidden = route.page !== 'settings'; $('tasks-view').hidden = route.page !== 'tasks';
+  $('bucket-toolbar').hidden = !['objects', 'settings'].includes(route.page);
+  for (const [id, page] of [['objects-tab', 'objects'], ['settings', 'settings'], ['status', 'status'], ['tasks', 'tasks']]) {
+    if (route.page === page) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current');
+  }
+  $('buckets').value = route.bucket; $('search-prefix').value = prefix; $('recursive').checked = route.recursive; $('task-state').value = route.state;
+  if (['objects', 'settings'].includes(route.page) && !$('buckets').value) { notice(translatedError('noBuckets')); return; }
+  try {
+    if (route.page === 'objects') {
+      if (route.key !== null) {
+        const params = { bucket: route.bucket, key: route.key }, value = await api('/api/object?' + query(params));
+        if (request !== view) return;
+        panel = { type: 'details', value, params }; renderPanel();
+      } else {
+        objects = []; folders = []; next = null; selected.clear(); renderFiles(); $('empty-files').hidden = true;
+        const params = { bucket: route.bucket, prefix, recursive: route.recursive };
+        if (route.token) params.token = route.token;
+        const value = await api('/api/objects?' + query(params)); if (request !== view) return;
+        objects = value.objects; folders = value.prefixes; next = value.next_token; renderFiles();
+      }
+    } else if (route.page === 'settings') {
+      if (!['cors', 'website'].includes(route.section)) return;
+      const params = { bucket: route.bucket, name: $('buckets').selectedOptions[0].textContent };
+      const value = await api('/api/buckets/' + route.bucket + '/' + route.section); if (request !== view) return;
+      panel = { type: route.section, value, params }; renderPanel(true);
+    } else if (route.page === 'status') {
+      const value = await api('/api/status'); if (request !== view) return;
+      panel = { type: 'status', value }; renderPanel();
+    } else await refreshTasks(request);
+  } catch (error) { if (request === view) notice(error); }
+}
+function renderPanel(resetForm = false) {
   if (!panel) return;
   const { type, value, params } = panel;
-  $('detail').hidden = false; $('detail-title').dataset.i18n = type;
-  if (clearPreview) $('detail').scrollIntoView({ block: 'start' });
-  $('detail-title').textContent = t(type);
-  $('info').textContent = JSON.stringify(value, null, 2);
-  $('actions').replaceChildren(); $('task-list').replaceChildren();
-  $('statistics').hidden = type !== 'status';
-  $('statistics').replaceChildren();
-  $('website-form').hidden = type !== 'website';
-  $('cors-form').hidden = type !== 'cors';
-  $('actions').append(button(t('backToFiles'), () => { panel = null; $('detail').hidden = true; $('refresh').focus(); $('breadcrumbs').scrollIntoView({ block: 'start' }); }));
-  if (clearPreview) $('preview').replaceChildren();
+  $('detail').hidden = false; $('detail-title').textContent = t(type); $('detail-title').dataset.i18n = type;
+  $('info').textContent = JSON.stringify(value, null, 2); $('actions').replaceChildren(); $('task-list').replaceChildren();
+  $('statistics').hidden = type !== 'status'; $('statistics').replaceChildren();
+  $('website-form').hidden = type !== 'website'; $('cors-form').hidden = type !== 'cors';
   if (type === 'details') {
-    const object = value.object, mime = (object.metadata.content_type || '').split(';')[0].trim();
-    fields([['objectKey', object.object_key], ['size', size(object.size)], ['access', t(object.public_read ? 'public' : 'private')], ['updated', date(object.touched_at)], ['contentType', object.metadata.content_type], ['etag', object.etag]]);
-    const title = document.createElement('h3'); title.textContent = t('bucketGrants'); $('task-list').append(title);
-    for (const grant of value.bucket_grants) { const line = document.createElement('p'); line.textContent = grant.access_key + ' — ' + t(grant.writable ? 'readWrite' : 'readOnly'); $('task-list').append(line); }
-    if (!value.bucket_grants.length) { const line = document.createElement('p'); line.textContent = t('noGrants'); $('task-list').append(line); }
-    const download = document.createElement('a');
-    download.className = 'button'; download.textContent = t('download'); download.href = '/api/download?' + query(params); $('actions').append(download);
-    const image = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif'].includes(mime);
-    const video = ['video/mp4', 'video/webm'].includes(mime);
+    const object = value.object, metadata = object.metadata, mime = (metadata.content_type || '').split(';')[0].trim();
+    fields([['objectKey', object.object_key], ['objectVersion', object.id], ['size', size(object.size)], ['access', t(object.public_read ? 'public' : 'private')], ['updated', date(object.touched_at)], ['contentType', metadata.content_type], ['etag', object.etag], ['cacheControl', metadata.cache_control], ['contentDisposition', metadata.content_disposition], ['contentEncoding', metadata.content_encoding], ['contentLanguage', metadata.content_language], ['expires', metadata.expires]]);
+    if (metadata.user && Object.keys(metadata.user).length) $('task-list').append(node('h3', t('userMetadata')), table(['name', 'value'], Object.entries(metadata.user)));
+    $('task-list').append(node('h3', t('bucketGrants')));
+    for (const grant of value.bucket_grants) $('task-list').append(node('p', grant.access_key + ' — ' + t(grant.writable ? 'readWrite' : 'readOnly')));
+    if (!value.bucket_grants.length) $('task-list').append(node('p', t('noGrants')));
+    const download = node('a', t('download')); download.className = 'button'; download.href = '/api/download?' + query(params);
+    $('actions').append(button(t('backToFiles'), () => go({ key: null })), download, button(t('copyKey'), () => copyKey(object.object_key)));
+    const image = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif'].includes(mime), video = ['video/mp4', 'video/webm'].includes(mime);
     if (image || video) $('actions').append(button(t('preview'), () => {
-      const media = document.createElement(image ? 'img' : 'video');
-      media.src = '/api/download?' + query({ ...params, preview: 'true' });
-      if (image) media.alt = object.object_key; else media.controls = true;
-      $('preview').replaceChildren(media);
+      const media = node(image ? 'img' : 'video'); media.src = '/api/download?' + query({ ...params, preview: 'true' });
+      if (image) media.alt = object.object_key; else media.controls = true; $('preview').replaceChildren(media);
     }));
-  } else if (type === 'cors') {
+    $('actions').append(button(t(object.public_read ? 'makePrivate' : 'makePublic'), () => confirmObjects(object.public_read ? 'private' : 'public-read', [object])), button(t('deleteObjects'), () => confirmObjects('delete', [object])), button(t('showChunks'), () => loadChunks(null, [])));
+  } else if (type === 'cors' || type === 'website') {
     fields([['buckets', params.name]]);
-    if (clearPreview) renderCors(value);
-  } else if (type === 'website') {
-    fields([['buckets', params.name]]);
-    if (clearPreview) {
-      $('website-enabled').checked = value.website_enabled;
-      $('index-document').value = value.index_document;
-      $('error-document').value = value.error_document;
-    }
+    if (resetForm && type === 'cors') renderCors(value);
+    if (resetForm && type === 'website') { $('website-enabled').checked = value.website_enabled; $('index-document').value = value.index_document; $('error-document').value = value.error_document; }
   } else if (type === 'status') {
     fields([['version', value.version], ['startedAt', date(value.runtime.started_at)], ['uptime', number(value.runtime.uptime_seconds) + ' s'], ['cpu', number(value.resources.available_cpus)], ['memory', size(value.resources.memory_bytes)], ['multipartBytes', size(value.local_bytes[0]) + ' / ' + limit(value.io.multipart_limit_bytes)], ['cacheBytes', size(value.local_bytes[1]) + ' / ' + limit(value.io.cache_limit_bytes)], ['gc', t(value.gc_paused ? 'paused' : value.gc_running ? 'running' : 'enabled')], ['maintenance', t(value.maintenance ? 'enabled' : 'disabled')], ['dataSlots', number(value.data_slots_available) + ' / ' + number(value.resources.data_slots)], ['dbPool', number(value.db_pool_idle) + ' / ' + number(value.db_pool_size)], ['cpuSlots', number(value.io.cpu_slots_available) + ' / ' + number(value.resources.cpu_jobs)], ['gcDeleted', number(value.runtime.gc_deleted)], ['gcFailures', number(value.runtime.gc_failures)]]);
-    renderStatistics(value);
-    $('statistics').prepend(button(t('refreshStatistics'), async () => {
-      const request = ++view;
-      const updated = await api('/api/status');
-      if (request === view) { panel = { type: 'status', value: updated }; renderPanel(); }
-    }));
-  } else {
-    fields([]);
-    if (!value.length) { $('task-list').textContent = t('noTasks'); return; }
-    const table = document.createElement('table'), head = document.createElement('thead'), tr = document.createElement('tr');
-    for (const key of ['taskId', 'taskType', 'taskState', 'processed', 'updated']) { const th = document.createElement('th'); th.textContent = t(key); tr.append(th); }
-    head.append(tr); table.append(head);
-    const body = document.createElement('tbody');
-    for (const task of value) {
-      const row = document.createElement('tr');
-      for (const text of [task.id, t(task.kind), t(task.state), number(task.processed), date(task.updated_at)]) { const td = document.createElement('td'); td.textContent = text; row.append(td); }
-      body.append(row);
-    }
-    table.append(body); $('task-list').append(table);
+    renderStatistics(value); $('statistics').prepend(button(t('refreshStatistics'), loadView));
+  } else if (type === 'taskDetails') {
+    fields([['taskId', value.id], ['taskType', t(value.kind)], ['taskState', t(value.state)], ['processed', number(value.processed)], ['created', date(value.created_at)], ['updated', date(value.updated_at)], ['taskCursor', value.cursor], ['taskError', value.error]]);
+    $('task-list').append(node('p', t('taskHelp')), node('pre', JSON.stringify(value.detail, null, 2)));
+    $('actions').append(button(t('closeDetails'), () => go({ task: null })));
+    if (['queued', 'running'].includes(value.state)) $('actions').append(button(t('pauseTask'), () => confirmTask('pause', value)));
+    if (['paused', 'failed'].includes(value.state)) $('actions').append(button(t(value.state === 'failed' ? 'retryTask' : 'resumeTask'), () => confirmTask('resume', value)));
   }
+}
+function renderTasks() {
+  $('tasks-table').hidden = route.task !== null;
+  if (!tasksPage) return;
+  const rows = tasksPage.tasks;
+  $('tasks-table').replaceChildren(rows.length ? table(['taskId', 'taskType', 'taskState', 'processed', 'updated'], rows.map(task => [button(task.id, () => go({ task: task.id })), t(task.kind), t(task.state), number(task.processed), date(task.updated_at)])) : node('p', t('noTasks')));
+  $('tasks-more').hidden = route.task !== null || !tasksPage.next_token; $('tasks-previous').hidden = route.task !== null || !(route.taskToken && history.state?.previousPage);
+}
+async function refreshTasks(request = view) {
+  clearTimeout(timer);
+  const refresh = ++taskRefresh, current = () => request === view && refresh === taskRefresh;
+  const focused = document.activeElement;
+  const focusText = focused?.matches('#tasks-table button, #actions button') ? focused.textContent : null;
+  const params = {}; if (route.state) params.state = route.state; if (route.taskToken) params.token = route.taskToken;
+  const taskId = route.task;
+  try {
+    const value = await api('/api/tasks?' + query(params)); if (!current()) return;
+    tasksPage = value; renderTasks();
+    if (taskId) { const task = await api('/api/tasks/' + encodeURIComponent(taskId)); if (!current()) return; panel = { type: 'taskDetails', value: task }; renderPanel(); }
+    if (focusText && (document.activeElement === focused || document.activeElement === document.body)) [...document.querySelectorAll('#tasks-table button, #actions button')].find(b => b.textContent === focusText)?.focus({ preventScroll: true });
+  } catch (error) { if (current()) notice(error); }
+  finally { if (current()) scheduleTasks(); }
+}
+function scheduleTasks() {
+  clearTimeout(timer);
+  if (route.page === 'tasks' && !document.hidden && !$('browser').hidden && $('auto-tasks').checked) timer = setTimeout(() => refreshTasks(), 5000);
+}
+async function copyKey(key) {
+  try { if (navigator.clipboard) { await navigator.clipboard.writeText(key); notice({ translationKey: 'copied' }); return; } } catch {}
+  $('copy-value').value = key; $('copy-dialog').showModal(); $('copy-value').select();
+}
+async function loadChunks(after, previous) {
+  const current = panel; if (current?.type !== 'details') return;
+  const request = ++chunkRequest;
+  const params = { ...current.params, version: current.value.object.id }; if (after !== null) params.after = after;
+  const value = await api('/api/object/chunks?' + query(params)); if (panel !== current || request !== chunkRequest) return;
+  chunks = { value, after, previous }; renderChunks();
+}
+function renderChunks() {
+  if (!chunks) return;
+  const root = $('chunks'), { value, after, previous } = chunks; root.hidden = false;
+  root.replaceChildren(node('h3', t('showChunks')), node('p', t('chunksHelp')));
+  const scroll = node('div'); scroll.className = 'table-scroll';
+  scroll.append(table(['chunkId', 'offset', 'referenceLength', 'rawSize', 'encodedSize', 'compression', 'savingRate', 'encryption'], value.chunks.map(c => [c.id, number(BigInt(c.offset_bytes)), size(c.length), size(c.raw_size), c.stored_size == null ? '—' : size(c.stored_size), c.compression, c.payload_size == null ? '—' : percent(1 - c.payload_size / c.raw_size), c.algorithm]))); root.append(scroll);
+  if (previous.length) root.append(button(t('previous'), () => loadChunks(previous.at(-1), previous.slice(0, -1))));
+  if (value.next_offset !== null) root.append(button(t('more'), () => loadChunks(value.next_offset, [...previous, after])));
+}
+function showConfirmation(title, help, items) {
+  $('confirm-title').textContent = title; $('confirm-help').textContent = help; $('confirm-items').replaceChildren(items); $('confirm-notice').textContent = '';
+  $('confirm-execute').hidden = false; $('confirm-execute').disabled = false; $('confirm-cancel').textContent = t('cancel');
+  if (!$('confirm-dialog').open) $('confirm-dialog').showModal(); $('confirm-cancel').focus();
+}
+function confirmObjects(action, targets) {
+  if (!targets.length || executing) return;
+  pending = { kind: 'objects', bucket: route.bucket, action, objects: targets.map(o => ({ key: o.object_key, version: o.id })) };
+  renderConfirmation();
+}
+function confirmTask(action, task) {
+  if (executing) return;
+  pending = { kind: 'task', action, task }; renderConfirmation();
+}
+function renderConfirmation() {
+  if (!pending || executing) return;
+  if (pending.kind === 'objects') showConfirmation(t('action_' + pending.action), t('confirmObjects', { count: number(pending.objects.length) }), table(['objectKey'], pending.objects.map(o => [o.key])));
+  else showConfirmation(t(pending.action === 'pause' ? 'pauseTask' : 'resumeTask'), t('confirmTask', { id: pending.task.id, type: t(pending.task.kind) }), node('pre', JSON.stringify(pending.task.detail, null, 2)));
+}
+async function executeConfirmation() {
+  if (!pending || executing) return;
+  const current = pending, url = location.href; executing = true; $('confirm-execute').disabled = true;
+  $('confirm-cancel').disabled = true;
+  $('confirm-notice').textContent = t('working');
+  try {
+    if (current.kind === 'objects') {
+      const value = await write('/api/objects/actions', { bucket: current.bucket, action: current.action, objects: current.objects });
+      const resultTable = table(['objectKey', 'result'], value.results.map(r => [r.key, t(r.status === 200 ? 'operationSuccess' : r.status === 412 ? 'objectChanged' : 'operationFailed', { status: r.status })]));
+      if (location.href === url) {
+        if (route.key !== null && current.action === 'delete' && value.results[0]?.status === 200) await go({ key: null }); else await loadView();
+      }
+      $('confirm-items').replaceChildren(resultTable); $('confirm-help').textContent = t('operationResults');
+      $('confirm-notice').textContent = t('requestId', { id: value.request_id });
+    } else {
+      const value = await write('/api/tasks/' + current.task.id + '/actions', { action: current.action });
+      if (location.href === url) await loadView(); $('confirm-help').textContent = t('operationSuccess');
+      $('confirm-notice').textContent = t('requestId', { id: value.request_id });
+    }
+  } catch (error) { $('confirm-notice').textContent = errorText(error) + ' ' + t('verifyResults'); }
+  finally { executing = false; pending = null; $('confirm-execute').hidden = true; $('confirm-cancel').disabled = false; $('confirm-cancel').textContent = t('close'); }
 }
 const limit = value => value == null ? t('automatic') : size(value);
 const percent = value => value == null ? '—' : new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 1 }).format(value);
@@ -215,12 +337,6 @@ function renderStatistics(value) {
   ]));
   text('p', t('databaseHelp'));
 }
-async function detail(key) {
-  const request = ++view, params = { bucket: $('buckets').value, key };
-  const value = await api('/api/object?' + query(params));
-  if (request !== view) return;
-  panel = { type: 'details', value, params }; renderPanel(true);
-}
 const corsMethods = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS'];
 function addCorsRule(rule = { origins: [], methods: ['GET', 'HEAD'] }) {
   if ($('cors-rules').children.length >= 100) { notice(translatedError('corsInvalid')); return; }
@@ -256,77 +372,49 @@ function corsValues() {
     max_age: Number(fieldset.querySelector('[name="max_age"]').value),
   }));
 }
-$('language').value = locale;
-setLocale(locale); translate();
+$('language').value = locale; setLocale(locale); translate();
 $('language').addEventListener('change', event => {
-  setLocale(event.target.value); translate(); renderFiles(); renderPanel(); notice(currentNotice);
+  setLocale(event.target.value); translate(); renderFiles(); renderPanel(); renderTasks(); renderChunks(); notice(currentNotice);
+  if (pending && $('confirm-dialog').open && !executing) renderConfirmation();
 });
 $('login').addEventListener('submit', async event => {
   event.preventDefault();
-  try {
-    const form = new FormData(event.target);
-    const reply = await api('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) });
-    csrf = reply.csrf_token;
-    event.target.reset(); notice(); await enter();
-  } catch (error) { notice(error); }
-});
-$('logout').addEventListener('click', async () => {
-  try { await api('/api/logout', { method: 'POST', headers: { 'X-CSRF-Token': csrf } }); csrf = ''; showLogin(); }
+  try { const form = new FormData(event.target); const reply = await api('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); csrf = reply.csrf_token; event.target.reset(); await enter(); }
   catch (error) { notice(error); }
 });
-$('buckets').addEventListener('change', () => { prefix = ''; list().catch(notice); });
-$('refresh').addEventListener('click', () => list().catch(notice));
-$('more').addEventListener('click', () => list(true).catch(notice));
-$('cors').addEventListener('click', async () => {
-  if (!$('buckets').value) return;
-  const request = ++view, params = { bucket: $('buckets').value, name: $('buckets').selectedOptions[0].textContent };
-  try {
-    const value = await api('/api/buckets/' + params.bucket + '/cors');
-    if (request === view) { panel = { type: 'cors', value, params }; renderPanel(true); }
-  } catch (error) { notice(error); }
-});
+$('logout').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST', headers: { 'X-CSRF-Token': csrf } }); csrf = ''; showLogin(); } catch (error) { notice(error); } });
+window.addEventListener('popstate', () => { if (!$('browser').hidden) loadView(); });
+for (const [id, page] of [['objects-tab', 'objects'], ['settings', 'settings'], ['status', 'status'], ['tasks', 'tasks']]) $(id).addEventListener('click', () => go({ page, key: null, task: null }));
+$('buckets').addEventListener('change', () => go({ bucket: $('buckets').value, prefix: null, key: null, token: null }));
+$('refresh').addEventListener('click', loadView);
+$('search-form').addEventListener('submit', event => { event.preventDefault(); go({ prefix: $('search-prefix').value, recursive: $('recursive').checked, token: null, key: null }); });
+$('locate-form').addEventListener('submit', event => { event.preventDefault(); go({ key: $('exact-key').value }); });
+$('more').addEventListener('click', () => { if (next) go({ token: next }, true); });
+$('previous').addEventListener('click', () => history.go(history.state.previousIndex - history.state.index));
+$('select-page').addEventListener('change', event => { selected = new Set(event.target.checked ? objects.map(o => o.id) : []); renderFiles(); });
+for (const [id, action] of [['bulk-public', 'public-read'], ['bulk-private', 'private'], ['bulk-delete', 'delete']]) $(id).addEventListener('click', () => confirmObjects(action, objects.filter(o => selected.has(o.id))));
+$('confirm-cancel').addEventListener('click', () => { if (!executing) { pending = null; $('confirm-dialog').close(); } });
+$('confirm-execute').addEventListener('click', executeConfirmation);
+$('confirm-dialog').addEventListener('cancel', event => { if (executing) event.preventDefault(); else pending = null; });
+$('copy-close').addEventListener('click', () => $('copy-dialog').close());
+$('task-state').addEventListener('change', () => go({ state: $('task-state').value, taskToken: null, task: null }));
+$('tasks-more').addEventListener('click', () => { if (tasksPage?.next_token) go({ taskToken: tasksPage.next_token, task: null }, true); });
+$('tasks-previous').addEventListener('click', () => history.go(history.state.previousIndex - history.state.index));
+$('refresh-tasks').addEventListener('click', loadView);
+$('auto-tasks').addEventListener('change', scheduleTasks);
+document.addEventListener('visibilitychange', scheduleTasks);
+for (const type of ['cors', 'website']) $(type).addEventListener('click', () => go({ page: 'settings', section: type }));
 $('cors-add').addEventListener('click', () => addCorsRule());
 $('cors-clear').addEventListener('click', () => renderCors([]));
 $('cors-preset').addEventListener('click', () => renderCors([{ origins: ['*'], methods: corsMethods, headers: ['*'], expose: ['*'], max_age: 86400 }]));
-$('cors-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  if (panel?.type !== 'cors') return;
-  const current = panel, rules = corsValues();
-  if (rules.some(rule => !rule.origins.length || !rule.methods.length)) { notice(translatedError('corsInvalid')); return; }
-  $('cors-save').disabled = true;
+for (const type of ['cors', 'website']) $(type + '-form').addEventListener('submit', async event => {
+  event.preventDefault(); if (panel?.type !== type) return;
+  const current = panel, value = type === 'cors' ? corsValues() : { website_enabled: $('website-enabled').checked, index_document: $('index-document').value, error_document: $('error-document').value };
+  if (type === 'cors' && value.some(rule => !rule.origins.length || !rule.methods.length)) { notice(translatedError('corsInvalid')); return; }
+  $(type + '-save').disabled = true;
   try {
-    const value = await api('/api/buckets/' + current.params.bucket + '/cors', {
-      method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(rules),
-    });
-    if (panel === current) { panel.value = value; renderPanel(); notice({ translationKey: 'corsSaved' }); }
-  } catch (error) { notice(error); }
-  finally { $('cors-save').disabled = false; }
-});
-$('website').addEventListener('click', async () => {
-  if (!$('buckets').value) return;
-  const request = ++view, params = { bucket: $('buckets').value, name: $('buckets').selectedOptions[0].textContent };
-  try {
-    const value = await api('/api/buckets/' + params.bucket + '/website');
-    if (request === view) { panel = { type: 'website', value, params }; renderPanel(true); }
-  } catch (error) { notice(error); }
-});
-$('website-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  if (panel?.type !== 'website') return;
-  const current = panel;
-  $('website-save').disabled = true;
-  try {
-    const value = await api('/api/buckets/' + current.params.bucket + '/website', {
-      method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
-      body: JSON.stringify({ website_enabled: $('website-enabled').checked, index_document: $('index-document').value, error_document: $('error-document').value }),
-    });
-    if (panel === current) { panel.value = value; renderPanel(); notice({ translationKey: 'websiteSaved' }); }
-  } catch (error) { notice(error); }
-  finally { $('website-save').disabled = false; }
-});
-for (const [type, path] of [['status', '/api/status'], ['tasks', '/api/tasks']]) $(type).addEventListener('click', async () => {
-  const request = ++view;
-  try { const value = await api(path); if (request === view) { panel = { type, value }; renderPanel(true); } }
-  catch (error) { notice(error); }
+    const saved = await api('/api/buckets/' + current.params.bucket + '/' + type, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(value) });
+    if (panel === current) { panel.value = saved; renderPanel(); notice({ translationKey: type + 'Saved' }); }
+  } catch (error) { notice(error); } finally { $(type + '-save').disabled = false; }
 });
 api('/api/session').then(reply => { csrf = reply.csrf_token; return enter(); }).catch(() => showLogin());

@@ -724,14 +724,30 @@ impl S3 for Gateway {
         &self,
         req: S3Request<PutObjectAclInput>,
     ) -> S3Result<S3Response<PutObjectAclOutput>> {
-        async{
-        reject_features(&req.headers)?;let i=req.input;let b=self.0.bucket(&i.bucket,true).await?;self.0.authorize(req.credentials.as_ref().map(|c|c.access_key.as_str()),b.id,true).await?;
-        if i.access_control_policy.is_some(){return Err(s3_error!(NotImplemented,"use private or public-read canned ACL").into());}
-        let public=canned(i.acl.as_ref())?;let _coord=self.0.coord.lock().await;
-        self.0.bucket(&i.bucket,true).await?;
-        let n=sqlx::query("UPDATE streams s SET public_read=$3 FROM objects o WHERE o.stream_id=s.id AND o.bucket_id=$1 AND o.key=$2").bind(b.id).bind(&i.key).bind(public).execute(&self.0.db).await?.rows_affected();
-        if n==0{return Err(s3_error!(NoSuchKey).into());}Ok(S3Response::new(PutObjectAclOutput::default()))
-    }.await.map_err(internal)
+        async {
+            reject_features(&req.headers)?;
+            let i = req.input;
+            let b = self.0.bucket(&i.bucket, true).await?;
+            self.0
+                .authorize(
+                    req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                    b.id,
+                    true,
+                )
+                .await?;
+            if i.access_control_policy.is_some() {
+                return Err(
+                    s3_error!(NotImplemented, "use private or public-read canned ACL").into(),
+                );
+            }
+            let public = canned(i.acl.as_ref())?;
+            self.0
+                .change_object(b.id, &i.key, None, Some(public))
+                .await?;
+            Ok(S3Response::new(PutObjectAclOutput::default()))
+        }
+        .await
+        .map_err(internal)
     }
     async fn copy_object(
         &self,
