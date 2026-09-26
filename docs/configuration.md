@@ -59,7 +59,7 @@
 | `compression.level` | signed integer / `3` | 当前 Zstd 支持的等级，包含负等级；0 使用 Zstd 默认等级，不表示关闭压缩；高等级需要更多 CPU 和工作内存 |
 | `compression.min_savings_percent` | integer 0～100 / `2` | 后端保存压缩载荷要求的最低节省比例，排除加密标签；与字节门槛同时满足 |
 | `compression.min_savings_bytes` | nonnegative integer / `256` | 最低节省字节数；两个门槛均为0时仍必须严格缩小 |
-| `compression.context_idle_timeout` | duration / `30s` | Zstd 上下文和试压缓冲区的闲置保留时间；允许 `0s` 表示任务结束即释放 |
+| `compression.context_idle_timeout` | duration / `30s` | Zstd 压缩、解压上下文及试压缓冲区的闲置保留时间；允许 `0s` 表示任务结束即释放 |
 | `compression.skip_mime_types` | string array / 内置名单 | 仅 `file_type` 使用；省略采用内置名单，显式数组替换名单，`[]` 不跳过任何类型；仅精确 MIME，忽略大小写，不接受参数或通配符 |
 | `encryption.algorithm` | enum / `aes-256-gcm` | `none` / `aes-256-gcm` / `chacha20-poly1305`；只决定新写入 |
 | `encryption.keyring_file` | optional path / 加密时必填 | 当前写密钥与历史读密钥 |
@@ -89,7 +89,7 @@ duration 上限为 `i64::MAX / 1000` 秒；`statistics.query_timeout` 另受 Pos
 
 默认 `inflight=M/4`，槽大小 `S=32MiB + W + 2×max(aws_chunk_limit−8MiB,0)`
 
-`W` 为压缩工作区预算：静态链接的 Zstd 根据等级给出的单线程一次性压缩上下文上界的两倍，加上最大4MiB区块的压缩输出上界及16字节标签空间。两倍上下文预算覆盖重分配时的临时重叠，输出预算同时覆盖闲置缓冲区。该估算对输入大小保守，高等级在小内存容器中可能因不足两个槽而拒绝启动；可降低等级或增加容器内存与在途预算。
+`W` 为编解码工作区预算：静态链接的 Zstd 给出的单线程一次性压缩上下文上界与解压上下文大小之和的两倍，加上最大4MiB区块的压缩输出上界及16字节标签空间。压缩上下文上界随等级变化；两倍上下文预算覆盖重分配时的临时重叠，输出预算同时覆盖闲置缓冲区。该估算对输入大小保守，高等级在小内存容器中可能因不足两个槽而拒绝启动；可降低等级或增加容器内存与在途预算。
 
 槽数 `N=floor(inflight/S)`。至少要有两个槽，且 inflight 不得超过 `M/2`
 
@@ -127,7 +127,7 @@ duration 上限为 `i64::MAX / 1000` 秒；`statistics.query_timeout` 另受 Pos
 
 扩展名补充支持 jpg/jpeg/jpe、png、apng、gif、webp、avif、mp4/m4v、webm、m4a、mp3/mp2、aac、ogg/oga/opus、ogv、ogx、flac、zip、gz/tgz、7z、rar、xz、bz2、zst/zstd；另外识别 svg、txt、html/htm、css、js/mjs、json、xml，以便自定义名单。不存在 `image/*` 之类整类跳过规则，SVG 默认仍试压。
 
-压缩上下文按需创建，在现有 CPU 并发范围内独占使用；同一任务的抽样与完整试压复用临时缓冲区。采用的压缩结果直接交给加密和上传，CPU 上下文不等待后端请求。每块仍是独立 Zstd frame，不共享压缩历史。空闲清理每秒检查，即使没有新请求也释放到期工作区；实际进程 RSS 的回落还取决于分配器。
+压缩与解压上下文按需创建，共用现有 CPU 并发额度，借用期间独占使用；两类上下文分别限制保留数量，均计入上述预算。同一任务的抽样与完整试压复用临时缓冲区。采用的压缩结果直接交给加密和上传，解压结果由读取响应持有，上下文不等待网络请求完成。每块仍是独立 Zstd frame，不共享压缩历史。空闲清理每秒检查，即使没有新请求也释放到期工作区；实际进程 RSS 的回落还取决于分配器。
 
 ## 密钥与环境变量
 

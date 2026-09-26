@@ -97,13 +97,16 @@ pub async fn connect(
         i64::from(version) == latest,
         "schema version does not match the migration history"
     );
-    for (id, (alg, material)) in secrets.keys.iter().chain(std::iter::once((
-        &"__credentials".to_string(),
-        &(
-            "credentials-aes-256-gcm".to_string(),
-            secrets.credential_key,
-        ),
-    ))) {
+    for (id, alg, material) in secrets
+        .keys
+        .iter()
+        .map(|(id, key)| (id.as_str(), key.algorithm.as_str(), &key.material))
+        .chain(std::iter::once((
+            "__credentials",
+            "credentials-aes-256-gcm",
+            &secrets.credential_key.material,
+        )))
+    {
         let hash = blake3::hash(material);
         sqlx::query("INSERT INTO key_fingerprints(key_id,algorithm,fingerprint) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
             .bind(id).bind(alg).bind(hash.as_bytes().as_slice()).execute(&pool).await?;
@@ -113,7 +116,7 @@ pub async fn connect(
                 .fetch_one(&pool)
                 .await?;
         ensure!(
-            saved_alg == *alg && saved == hash.as_bytes(),
+            saved_alg == alg && saved == hash.as_bytes(),
             "key ID changed algorithm or material"
         );
     }

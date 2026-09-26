@@ -43,15 +43,27 @@ pub fn nonce(date: DateTime<Utc>, id: i64) -> Result<[u8; 12]> {
     result[4..].copy_from_slice(&(id as u64).to_be_bytes());
     Ok(result)
 }
-fn cipher(algorithm: &str, material: &[u8; 32]) -> Result<LessSafeKey> {
-    let a = match algorithm {
-        "aes-256-gcm" => &AES_256_GCM,
-        "chacha20-poly1305" => &CHACHA20_POLY1305,
-        _ => bail!("unknown encryption algorithm"),
-    };
-    Ok(LessSafeKey::new(
-        UnboundKey::new(a, material).map_err(|_| anyhow::anyhow!("invalid encryption key"))?,
-    ))
+pub struct Key {
+    pub algorithm: String,
+    pub material: [u8; 32],
+    cipher: LessSafeKey,
+}
+impl Key {
+    pub fn new(algorithm: &str, material: [u8; 32]) -> Result<Self> {
+        let a = match algorithm {
+            "aes-256-gcm" => &AES_256_GCM,
+            "chacha20-poly1305" => &CHACHA20_POLY1305,
+            _ => bail!("unknown encryption algorithm"),
+        };
+        Ok(Self {
+            algorithm: algorithm.into(),
+            material,
+            cipher: LessSafeKey::new(
+                UnboundKey::new(a, &material)
+                    .map_err(|_| anyhow::anyhow!("invalid encryption key"))?,
+            ),
+        })
+    }
 }
 fn aad(c: &Chunk) -> Result<Vec<u8>> {
     ensure!(
@@ -98,8 +110,12 @@ pub fn encode(
     );
     let compressed = compression.compress(&input, should_compress)?;
     c.compressed = compressed.is_some();
-    let mut encoded = compressed.unwrap_or_else(|| input.clone());
     let tag_len = if c.algorithm == "none" { 0 } else { 16 };
+    let mut encoded = compressed.unwrap_or_else(|| {
+        let mut encoded = Vec::with_capacity(input.len() + tag_len);
+        encoded.extend_from_slice(&input);
+        encoded
+    });
     c.stored_size = Some(i32::try_from(encoded.len() + tag_len)?);
     let cache = if cache_compressed(&c, min_savings_percent) {
         Bytes::copy_from_slice(&encoded)
@@ -107,13 +123,13 @@ pub fn encode(
         Bytes::from(input)
     };
     if c.algorithm != "none" {
-        let (alg, material) = secrets.keys.get(&c.key_id).context("missing chunk key")?;
-        ensure!(*alg == c.algorithm, "chunk key algorithm mismatch");
+        let key = secrets.keys.get(&c.key_id).context("missing chunk key")?;
+        ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
         let n = nonce(c.created_at, c.id)?;
         c.nonce = Some(n.to_vec());
         #[cfg(feature = "fault-injection")]
         crate::faults::blocking("chunk-encrypting");
-        cipher(alg, material)?
+        key.cipher
             .seal_in_place_append_tag(
                 Nonce::assume_unique_for_key(n),
                 Aad::from(aad(&c)?),
@@ -128,6 +144,7 @@ pub fn decode(
     mut encoded: Vec<u8>,
     secrets: &Secrets,
     min_savings_percent: u8,
+    compression: &crate::compression::Pool,
 ) -> Result<(Bytes, Bytes)> {
     ensure!(
         encoded.len() <= MAX + 16 && Some(encoded.len() as i32) == c.stored_size,
@@ -141,18 +158,18 @@ pub fn decode(
         );
         encoded.len()
     } else {
-        let (alg, material) = secrets
+        let key = secrets
             .keys
             .get(&c.key_id)
             .context("missing historical chunk key")?;
-        ensure!(*alg == c.algorithm, "chunk key algorithm mismatch");
+        ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
         let n: [u8; 12] = c
             .nonce
             .as_deref()
             .context("missing nonce")?
             .try_into()
             .context("invalid nonce")?;
-        cipher(alg, material)?
+        key.cipher
             .open_in_place(
                 Nonce::assume_unique_for_key(n),
                 Aad::from(metadata),
@@ -163,7 +180,7 @@ pub fn decode(
     };
     encoded.truncate(plain_len);
     let plain = Bytes::from(encoded);
-    let raw = decode_cache(c, plain.clone(), c.compressed)?;
+    let raw = decode_cache(c, plain.clone(), c.compressed, compression)?;
     let cache = if cache_compressed(c, min_savings_percent) {
         plain
     } else {
@@ -171,7 +188,12 @@ pub fn decode(
     };
     Ok((raw, cache))
 }
-pub fn decode_cache(c: &Chunk, data: Bytes, compressed: bool) -> Result<Bytes> {
+pub fn decode_cache(
+    c: &Chunk,
+    data: Bytes,
+    compressed: bool,
+    compression: &crate::compression::Pool,
+) -> Result<Bytes> {
     ensure!(
         c.format == 1 && c.hash.len() == 32 && (1..=MAX as i32).contains(&c.raw_size),
         "invalid chunk metadata"
@@ -186,7 +208,7 @@ pub fn decode_cache(c: &Chunk, data: Bytes, compressed: bool) -> Result<Bytes> {
             c.compressed && data.len() <= MAX && Some(data.len() as i32 + tag) == c.stored_size,
             "compressed cache length mismatch"
         );
-        Bytes::from(zstd::bulk::decompress(&data, c.raw_size as usize)?)
+        Bytes::from(compression.decompress(&data, c.raw_size as usize)?)
     } else {
         data
     };
@@ -197,26 +219,29 @@ pub fn decode_cache(c: &Chunk, data: Bytes, compressed: bool) -> Result<Bytes> {
     Ok(raw)
 }
 
-pub fn protect(secret: &[u8], key: &[u8; 32], binding: &[u8]) -> Result<Vec<u8>> {
+pub fn protect(secret: &[u8], key: &Key, binding: &[u8]) -> Result<Vec<u8>> {
     let mut nonce = [0; 12];
     aws_lc_rs::rand::fill(&mut nonce).map_err(|_| anyhow::anyhow!("randomness unavailable"))?;
-    let mut data = secret.to_vec();
-    cipher("aes-256-gcm", key)?
+    let mut data = Vec::with_capacity(secret.len() + 16);
+    data.extend_from_slice(secret);
+    key.cipher
         .seal_in_place_append_tag(
             Nonce::assume_unique_for_key(nonce),
             Aad::from(binding),
             &mut data,
         )
         .map_err(|_| anyhow::anyhow!("credential encryption failed"))?;
-    let mut result = nonce.to_vec();
+    let mut result = Vec::with_capacity(nonce.len() + data.len());
+    result.extend_from_slice(&nonce);
     result.extend_from_slice(&data);
     Ok(result)
 }
-pub fn unprotect(data: &[u8], key: &[u8; 32], binding: &[u8]) -> Result<String> {
+pub fn unprotect(data: &[u8], key: &Key, binding: &[u8]) -> Result<String> {
     ensure!(data.len() >= 28, "invalid protected credential");
     let nonce: [u8; 12] = data[..12].try_into()?;
     let mut data = data[12..].to_vec();
-    let plain = cipher("aes-256-gcm", key)?
+    let plain = key
+        .cipher
         .open_in_place(
             Nonce::assume_unique_for_key(nonce),
             Aad::from(binding),
@@ -230,20 +255,28 @@ pub fn unprotect(data: &[u8], key: &[u8; 32], binding: &[u8]) -> Result<String> 
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    fn secrets_for(algorithm: &str) -> Secrets {
+        Secrets {
+            database_password: String::new(),
+            backend_access: String::new(),
+            backend_secret: String::new(),
+            credential_key: Key::new("aes-256-gcm", [8; 32]).unwrap(),
+            active_key: "test-key".into(),
+            keys: if algorithm == "none" {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([("test-key".into(), Key::new(algorithm, [7; 32]).unwrap())])
+            },
+        }
+    }
     #[test]
     fn fixed_format_vectors() {
         let compression = crate::compression::Pool::new(Default::default(), 1).unwrap();
         let input = b"media-gateway-v1";
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
             let key_id = if algorithm == "none" { "" } else { "test-key" };
-            let secrets = Secrets {
-                database_password: String::new(),
-                backend_access: String::new(),
-                backend_secret: String::new(),
-                credential_key: [8; 32],
-                active_key: key_id.into(),
-                keys: BTreeMap::from([(key_id.into(), (algorithm.into(), [7; 32]))]),
-            };
+            let secrets = secrets_for(algorithm);
             let c = Chunk {
                 id: 42,
                 storage_id: Uuid::from_u128(42),
@@ -270,8 +303,19 @@ mod tests {
                 _ => "c698b8ca807c7636e6bcef57aea0c94181c4264391d7b7e202797b24c5a2e090",
             };
             assert_eq!(hex::encode(&encoded), expected);
-            assert_eq!(decode(&c, encoded, &secrets, 20).unwrap().0.as_ref(), input);
-            assert_eq!(decode_cache(&c, cache, false).unwrap().as_ref(), input);
+            assert_eq!(
+                decode(&c, encoded, &secrets, 20, &compression)
+                    .unwrap()
+                    .0
+                    .as_ref(),
+                input
+            );
+            assert_eq!(
+                decode_cache(&c, cache, false, &compression)
+                    .unwrap()
+                    .as_ref(),
+                input
+            );
 
             // Older writers stored even small gains, below the current default savings gate.
             let legacy = crate::compression::Pool::new(
@@ -291,14 +335,16 @@ mod tests {
                 encode(historical, small.clone(), &secrets, 20, &legacy, true).unwrap();
             assert!(historical.compressed);
             assert_eq!(
-                decode(&historical, encoded, &secrets, 20)
+                decode(&historical, encoded, &secrets, 20, &compression)
                     .unwrap()
                     .0
                     .as_ref(),
                 small
             );
             assert_eq!(
-                decode_cache(&historical, cache, true).unwrap().as_ref(),
+                decode_cache(&historical, cache, true, &compression)
+                    .unwrap()
+                    .as_ref(),
                 small
             );
         }
@@ -308,14 +354,7 @@ mod tests {
         let compression = crate::compression::Pool::new(Default::default(), 1).unwrap();
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
             let key_id = if algorithm == "none" { "" } else { "test-key" };
-            let secrets = Secrets {
-                database_password: String::new(),
-                backend_access: String::new(),
-                backend_secret: String::new(),
-                credential_key: [8; 32],
-                active_key: key_id.into(),
-                keys: BTreeMap::from([(key_id.into(), (algorithm.into(), [7; 32]))]),
-            };
+            let secrets = secrets_for(algorithm);
             for input in [vec![3; MIN - 1], {
                 let mut v = vec![0; MAX];
                 aws_lc_rs::rand::fill(&mut v).unwrap();
@@ -337,11 +376,12 @@ mod tests {
                 };
                 let (c, stored, cache) =
                     encode(c, input.clone(), &secrets, 20, &compression, true).unwrap();
-                let (raw, fetched_cache) = decode(&c, stored.clone(), &secrets, 20).unwrap();
+                let (raw, fetched_cache) =
+                    decode(&c, stored.clone(), &secrets, 20, &compression).unwrap();
                 assert_eq!(raw.as_ref(), input);
                 assert_eq!(cache, fetched_cache);
                 assert_eq!(
-                    decode_cache(&c, cache.clone(), cache_compressed(&c, 20))
+                    decode_cache(&c, cache.clone(), cache_compressed(&c, 20), &compression)
                         .unwrap()
                         .as_ref(),
                     input
@@ -349,11 +389,25 @@ mod tests {
                 let mut bad_cache = cache.to_vec();
                 bad_cache[0] ^= 1;
                 assert!(
-                    decode_cache(&c, Bytes::from(bad_cache), cache_compressed(&c, 20)).is_err()
+                    decode_cache(
+                        &c,
+                        Bytes::from(bad_cache),
+                        cache_compressed(&c, 20),
+                        &compression
+                    )
+                    .is_err()
                 );
                 let mut oversized = c.clone();
                 oversized.raw_size = MAX as i32 + 1;
-                assert!(decode_cache(&oversized, cache.clone(), cache_compressed(&c, 20)).is_err());
+                assert!(
+                    decode_cache(
+                        &oversized,
+                        cache.clone(),
+                        cache_compressed(&c, 20),
+                        &compression
+                    )
+                    .is_err()
+                );
                 for threshold in [0, 100] {
                     let (c, encoded, cache) = encode(
                         c.clone(),
@@ -365,9 +419,14 @@ mod tests {
                     )
                     .unwrap();
                     assert_eq!(stored, encoded);
-                    assert_eq!(decode(&c, encoded, &secrets, threshold).unwrap().1, cache);
                     assert_eq!(
-                        decode_cache(&c, cache, cache_compressed(&c, threshold))
+                        decode(&c, encoded, &secrets, threshold, &compression)
+                            .unwrap()
+                            .1,
+                        cache
+                    );
+                    assert_eq!(
+                        decode_cache(&c, cache, cache_compressed(&c, threshold), &compression)
                             .unwrap()
                             .as_ref(),
                         input
@@ -375,17 +434,17 @@ mod tests {
                 }
                 let mut changed = stored.clone();
                 changed[0] ^= 1;
-                assert!(decode(&c, changed, &secrets, 20).is_err());
+                assert!(decode(&c, changed, &secrets, 20, &compression).is_err());
                 let mut changed = c.clone();
                 changed.hash[0] ^= 1;
-                assert!(decode(&changed, stored.clone(), &secrets, 20).is_err());
+                assert!(decode(&changed, stored.clone(), &secrets, 20, &compression).is_err());
                 let mut changed = stored.clone();
                 changed.push(0);
-                assert!(decode(&c, changed, &secrets, 20).is_err());
+                assert!(decode(&c, changed, &secrets, 20, &compression).is_err());
                 if algorithm != "none" {
                     let mut changed = c.clone();
                     changed.storage_id = Uuid::new_v4();
-                    assert!(decode(&changed, stored, &secrets, 20).is_err());
+                    assert!(decode(&changed, stored, &secrets, 20, &compression).is_err());
                 }
                 let mut boundary = c.clone();
                 boundary.raw_size = 1000;
@@ -401,6 +460,73 @@ mod tests {
             hex::encode(nonce("2026-09-21T00:00:00Z".parse().unwrap(), 42).unwrap()),
             "01352839000000000000002a"
         );
+    }
+    #[test]
+    fn shared_keys_keep_operations_independent() {
+        let mut secrets = secrets_for("aes-256-gcm");
+        secrets.keys.insert(
+            "next-key".into(),
+            Key::new("chacha20-poly1305", [9; 32]).unwrap(),
+        );
+        secrets.active_key = "next-key".into();
+        let compression = crate::compression::Pool::new(Default::default(), 4).unwrap();
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                let (secrets, compression) = (&secrets, &compression);
+                scope.spawn(move || {
+                    for (i, (key_id, key)) in secrets.keys.iter().enumerate() {
+                        let input = vec![worker as u8; MIN + i];
+                        let c = Chunk {
+                            id: 1 + worker * 2 + i as i64,
+                            storage_id: Uuid::new_v4(),
+                            hash: blake3::hash(&input).as_bytes().to_vec(),
+                            raw_size: input.len() as i32,
+                            stored_size: None,
+                            algorithm: key.algorithm.clone(),
+                            key_id: key_id.clone(),
+                            compressed: false,
+                            nonce: None,
+                            format: 1,
+                            state: "preparing".into(),
+                            created_at: "2026-09-26T00:00:00Z".parse().unwrap(),
+                        };
+                        let (c, encoded, _) =
+                            encode(c, input.clone(), secrets, 20, compression, true).unwrap();
+                        assert_eq!(
+                            decode(&c, encoded.clone(), secrets, 20, compression)
+                                .unwrap()
+                                .0
+                                .as_ref(),
+                            input
+                        );
+                        let mut wrong = c;
+                        wrong.key_id = "missing-key".into();
+                        assert!(decode(&wrong, encoded, secrets, 20, compression).is_err());
+                        let binding = format!("access-{worker}-{i}");
+                        let mut protected = protect(
+                            b"credential-secret",
+                            &secrets.credential_key,
+                            binding.as_bytes(),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            unprotect(&protected, &secrets.credential_key, binding.as_bytes())
+                                .unwrap(),
+                            "credential-secret"
+                        );
+                        assert!(
+                            unprotect(&protected, &secrets.credential_key, b"other-access")
+                                .is_err()
+                        );
+                        protected[12] ^= 1;
+                        assert!(
+                            unprotect(&protected, &secrets.credential_key, binding.as_bytes())
+                                .is_err()
+                        );
+                    }
+                });
+            }
+        });
     }
     #[test]
     fn windows_keep_the_whole_file_boundaries() {

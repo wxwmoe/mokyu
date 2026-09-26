@@ -66,11 +66,9 @@ pub enum Area {
 }
 pub async fn read_bounded(path: impl AsRef<std::path::Path>, max: usize) -> Result<Vec<u8>> {
     let f = tokio::fs::File::open(path).await?;
-    ensure!(
-        f.metadata().await?.len() <= max as u64,
-        "local file exceeds bound"
-    );
-    let mut bytes = Vec::new();
+    let size = f.metadata().await?.len();
+    ensure!(size <= max as u64, "local file exceeds bound");
+    let mut bytes = Vec::with_capacity(size as usize);
     f.take(max as u64 + 1).read_to_end(&mut bytes).await?;
     ensure!(bytes.len() <= max, "local file exceeds bound");
     Ok(bytes)
@@ -615,9 +613,10 @@ impl Storage {
         let c = c.clone();
         let secrets = self.secrets.clone();
         let threshold = self.min_compression_savings_percent;
+        let compression = self.compression.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            codec::decode(&c, encoded, &secrets, threshold)
+            codec::decode(&c, encoded, &secrets, threshold, &compression)
         })
         .await?
     }
@@ -661,9 +660,10 @@ impl Storage {
             let size = data.len() as u64;
             let permit = self.cpu.clone().acquire_owned().await?;
             let chunk = c.clone();
+            let compression = self.compression.clone();
             let decoded = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                codec::decode_cache(&chunk, Bytes::from(data), compressed)
+                codec::decode_cache(&chunk, Bytes::from(data), compressed, &compression)
             })
             .await?;
             if let Ok(raw) = decoded {
@@ -816,8 +816,8 @@ impl Storage {
                     result.meta.size <= (MAX + 16) as u64,
                     "backend chunk exceeds bound"
                 );
+                let mut data = Vec::with_capacity(result.meta.size as usize);
                 let mut stream = result.into_stream();
-                let mut data = Vec::new();
                 while let Some(bytes) = stream.next().await {
                     let bytes = bytes?;
                     ensure!(

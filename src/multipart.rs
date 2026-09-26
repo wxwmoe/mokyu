@@ -419,8 +419,9 @@ impl App {
             .await?;
         let data = self.extent_bytes(&tail).await?;
         let mut used = 0;
+        let mut window = Vec::with_capacity(MAX);
         while used < data.len() && data.len() - used + right.size as usize >= MAX {
-            let mut window = Vec::with_capacity(MAX);
+            window.clear();
             window.extend_from_slice(&data[used..]);
             let mut pos = 0;
             while window.len() < MAX {

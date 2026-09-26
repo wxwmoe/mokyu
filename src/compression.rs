@@ -147,18 +147,23 @@ impl Config {
         Ok(())
     }
 
-    // Includes idle output capacity and temporary overlap while a context reallocates.
+    // Includes idle encoder/decoder contexts, output capacity and reallocation overlap.
     pub fn workspace_bytes(&self) -> Result<u64> {
         self.validate()?;
         // Safety: this scalar-only estimator comes from our pinned, statically linked Zstd.
         // It bounds single-threaded compress2 for arbitrary input sizes and levels <= this one.
-        let (size, error) = unsafe {
+        let (size, error, decoder) = unsafe {
             let size = zstd::zstd_safe::zstd_sys::ZSTD_estimateCCtxSize(self.level.max(3));
-            (size, zstd::zstd_safe::zstd_sys::ZSTD_isError(size))
+            (
+                size,
+                zstd::zstd_safe::zstd_sys::ZSTD_isError(size),
+                zstd::zstd_safe::zstd_sys::ZSTD_estimateDCtxSize(),
+            )
         };
         ensure!(error == 0, "Zstd context size estimation failed");
         (size as u64)
-            .checked_mul(2)
+            .checked_add(decoder as u64)
+            .and_then(|n| n.checked_mul(2))
             .and_then(|n| n.checked_add(zstd::zstd_safe::compress_bound(MAX) as u64 + 16))
             .context("compression workspace budget overflow")
     }
@@ -240,6 +245,7 @@ pub struct Pool {
     idle_timeout: Duration,
     // Callers hold the existing CPU permit until this operation finishes, bounding active + idle.
     idle: Mutex<Vec<(Instant, Workspace)>>,
+    decoders: Mutex<Vec<(Instant, zstd::bulk::Decompressor<'static>)>>,
     max_idle: usize,
 }
 impl Pool {
@@ -249,6 +255,7 @@ impl Pool {
             idle_timeout: config.idle_timeout()?,
             config,
             idle: Mutex::new(Vec::new()),
+            decoders: Mutex::new(Vec::new()),
             max_idle,
         })
     }
@@ -275,11 +282,35 @@ impl Pool {
         }
         Ok(result)
     }
+    pub fn decompress(&self, input: &[u8], capacity: usize) -> Result<Vec<u8>> {
+        ensure!(
+            input.len() <= MAX && (1..=MAX).contains(&capacity),
+            "invalid decompression input length or capacity"
+        );
+        let cached = self.decoders.lock().unwrap().pop();
+        let mut decoder = match cached {
+            Some((time, decoder)) if time.elapsed() < self.idle_timeout => decoder,
+            _ => zstd::bulk::Decompressor::new()?,
+        };
+        // The output belongs to its caller; only the context can return before HTTP completes.
+        let result = decoder.decompress(input, capacity)?;
+        if !self.idle_timeout.is_zero() {
+            let mut idle = self.decoders.lock().unwrap();
+            if idle.len() < self.max_idle {
+                idle.push((Instant::now(), decoder));
+            }
+        }
+        Ok(result)
+    }
     pub async fn run(&self) -> Result<()> {
         let mut timer = tokio::time::interval(Duration::from_secs(1));
         loop {
             timer.tick().await;
             self.idle
+                .lock()
+                .unwrap()
+                .retain(|(time, _)| time.elapsed() < self.idle_timeout);
+            self.decoders
                 .lock()
                 .unwrap()
                 .retain(|(time, _)| time.elapsed() < self.idle_timeout);
@@ -421,15 +452,18 @@ mod tests {
         let pool = Arc::new(Pool::new(Config::default(), 2).unwrap());
         let cpu = Arc::new(tokio::sync::Semaphore::new(2));
         let mut jobs = Vec::new();
-        for _ in 0..8 {
+        for i in 0..8 {
             let (pool, cpu) = (pool.clone(), cpu.clone());
             jobs.push(tokio::spawn(async move {
                 let permit = cpu.acquire_owned().await.unwrap();
                 tokio::task::spawn_blocking(move || {
                     let _permit = permit;
-                    let raw = vec![42; MIN];
+                    let raw = vec![i; MIN + i as usize];
                     let encoded = pool.compress(&raw, true).unwrap().unwrap();
-                    assert_eq!(zstd::bulk::decompress(&encoded, MIN).unwrap(), raw);
+                    let first = pool.decompress(&encoded, raw.len()).unwrap();
+                    assert_eq!(first, raw);
+                    assert_eq!(pool.decompress(&encoded, raw.len()).unwrap(), first);
+                    assert_eq!(first, raw);
                 })
                 .await
                 .unwrap();
@@ -441,18 +475,33 @@ mod tests {
         assert_eq!(cpu.available_permits(), 2);
         let count = pool.idle.lock().unwrap().len();
         assert!((1..=2).contains(&count));
+        assert!((1..=2).contains(&pool.decoders.lock().unwrap().len()));
         for (time, _) in pool.idle.lock().unwrap().iter_mut() {
             *time = Instant::now() - Duration::from_secs(31);
         }
-        // The maintenance timer, without a new upload, frees expired contexts.
+        for (time, _) in pool.decoders.lock().unwrap().iter_mut() {
+            *time = Instant::now() - Duration::from_secs(31);
+        }
+        // The maintenance timer, without a new request, frees expired contexts.
         assert!(
             tokio::time::timeout(Duration::from_millis(20), pool.run())
                 .await
                 .is_err()
         );
         assert!(pool.idle.lock().unwrap().is_empty());
-        assert!(pool.compress(&vec![0; MIN], true).unwrap().is_some());
+        assert!(pool.decoders.lock().unwrap().is_empty());
+        let encoded = pool.compress(&vec![0; MIN], true).unwrap().unwrap();
+        let held = pool.decompress(&encoded, MIN).unwrap();
+        assert!(pool.decompress(b"invalid frame", MIN).is_err());
+        assert!(pool.decoders.lock().unwrap().is_empty());
+        assert!(pool.decompress(&encoded, MIN - 1).is_err());
+        assert!(pool.decoders.lock().unwrap().is_empty());
+        assert!(pool.decompress(&encoded, 0).is_err());
+        assert!(pool.decompress(&encoded, MAX + 1).is_err());
+        assert_eq!(pool.decompress(&encoded, MIN).unwrap(), held);
+        assert_eq!(held, vec![0; MIN]);
         assert_eq!(pool.idle.lock().unwrap().len(), 1);
+        assert_eq!(pool.decoders.lock().unwrap().len(), 1);
         let no_idle = Pool::new(
             Config {
                 context_idle_timeout: "0s".into(),
@@ -464,5 +513,7 @@ mod tests {
         assert!(no_idle.compress(&[], true).is_err());
         assert!(no_idle.compress(&vec![0; MIN], true).unwrap().is_some());
         assert!(no_idle.idle.lock().unwrap().is_empty());
+        assert_eq!(no_idle.decompress(&encoded, MIN).unwrap(), held);
+        assert!(no_idle.decoders.lock().unwrap().is_empty());
     }
 }

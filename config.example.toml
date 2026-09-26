@@ -72,7 +72,7 @@ level = 3
 # Both savings thresholds must be met, excluding encryption overhead.
 min_savings_percent = 2
 min_savings_bytes = 256
-# Release idle Zstd contexts and scratch buffers; 0s disables retention between jobs.
+# Release idle Zstd compression/decompression contexts and scratch buffers; 0s disables retention.
 context_idle_timeout = "30s"
 # file_type only: omit for built-in types, replace with an array, or [] to skip none.
 # skip_mime_types = ["image/jpeg", "image/png", "video/mp4", "application/zip"]

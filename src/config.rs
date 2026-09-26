@@ -261,9 +261,9 @@ pub struct Secrets {
     pub database_password: String,
     pub backend_access: String,
     pub backend_secret: String,
-    pub credential_key: [u8; 32],
+    pub credential_key: crate::codec::Key,
     pub active_key: String,
-    pub keys: BTreeMap<String, (String, [u8; 32])>,
+    pub keys: BTreeMap<String, crate::codec::Key>,
 }
 #[derive(Clone, serde::Serialize)]
 pub struct Budget {
@@ -459,7 +459,7 @@ impl Config {
             let raw = secret(file, base)?;
             let ring: KeyFile =
                 toml::from_str(&raw).map_err(|_| anyhow::anyhow!("invalid keyring TOML"))?;
-            let mut keys = BTreeMap::new();
+            let mut keys = BTreeMap::<String, crate::codec::Key>::new();
             for (id, entry) in ring.keys {
                 ensure!(!id.is_empty() && id.len() <= 128, "invalid key ID");
                 ensure!(
@@ -471,15 +471,15 @@ impl Config {
                 );
                 let material = key(&entry.key)?;
                 ensure!(
-                    !keys.values().any(|(_, k)| k == &material),
+                    !keys.values().any(|k| k.material == material),
                     "each encryption key must have distinct material"
                 );
-                keys.insert(id, (entry.algorithm, material));
+                keys.insert(id, crate::codec::Key::new(&entry.algorithm, material)?);
             }
             if c.encryption.algorithm != "none" {
                 ensure!(
                     keys.get(&ring.active)
-                        .is_some_and(|(a, _)| a == &c.encryption.algorithm),
+                        .is_some_and(|k| k.algorithm == c.encryption.algorithm),
                     "active key missing or algorithm mismatch"
                 );
             }
@@ -510,7 +510,10 @@ impl Config {
                 base,
                 "backend.secret_key",
             )?,
-            credential_key: key(&secret(&c.security.credential_key_file, base)?)?,
+            credential_key: crate::codec::Key::new(
+                "aes-256-gcm",
+                key(&secret(&c.security.credential_key_file, base)?)?,
+            )?,
             active_key,
             keys,
         };
@@ -518,7 +521,7 @@ impl Config {
             !secrets
                 .keys
                 .values()
-                .any(|(_, k)| k == &secrets.credential_key),
+                .any(|k| k.material == secrets.credential_key.material),
             "credential protection and chunk keys must differ"
         );
         let budget = c.budget()?;
