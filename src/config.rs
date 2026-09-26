@@ -34,6 +34,8 @@ pub struct Config {
     pub cleanup: Cleanup,
     #[serde(default)]
     pub statistics: Statistics,
+    #[serde(default)]
+    pub integrity: crate::integrity::Config,
 }
 
 #[derive(Deserialize)]
@@ -422,6 +424,7 @@ impl Config {
             );
         }
         bytes(&c.storage.free_space_floor)?;
+        c.integrity.validate()?;
         ensure!(
             seconds(&c.statistics.query_timeout)? <= i32::MAX as u64 / 1000,
             "statistics.query_timeout exceeds PostgreSQL's statement timeout limit"

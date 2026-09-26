@@ -126,6 +126,15 @@ impl App {
                 }
             } else if kind == "purge" {
                 self.writable()?;
+            } else if kind == "integrity" {
+                let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE kind='integrity' AND state IN ('queued','running') AND id<>$1)").bind(id).fetch_one(&self.db).await?;
+                if busy {
+                    return Err(s3s::s3_error!(
+                        OperationAborted,
+                        "an integrity check is already active"
+                    )
+                    .into());
+                }
             }
         }
         let changed = if resume {
@@ -273,12 +282,12 @@ impl App {
 }
 pub async fn run(app: Arc<App>) -> Result<()> {
     loop {
-        let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',updated_at=now() WHERE id=(SELECT id FROM tasks WHERE state='queued' ORDER BY created_at LIMIT 1) RETURNING id").fetch_optional(&app.db).await?;
+        let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',updated_at=now() WHERE id=(SELECT id FROM tasks WHERE state IN ('queued','running') ORDER BY updated_at,id LIMIT 1) AND state IN ('queued','running') RETURNING id").fetch_optional(&app.db).await?;
         let Some(id) = id else {
             tokio::select! {_=app.wake_tasks.notified()=>{},_=tokio::time::sleep(Duration::from_secs(30))=>{}}
             continue;
         };
-        loop {
+        {
             let (kind, state, bucket, cursor, detail): (
                 String,
                 String,
@@ -290,7 +299,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 .fetch_one(&app.db)
                 .await?;
             if state != "running" {
-                break;
+                continue;
             }
             let result = if kind == "purge" {
                 app.purge_batch(
@@ -299,16 +308,35 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                     cursor.as_deref(),
                 )
                 .await
+                .map(|_| false)
+            } else if kind == "sweep" {
+                app.sweep_batch(id, cursor.as_deref(), detail)
+                    .await
+                    .map(|_| false)
+            } else if kind == "integrity" {
+                match tokio::time::timeout(
+                    Duration::from_secs(config::seconds(&app.config.integrity.request_timeout)?),
+                    app.integrity_batch(id, cursor.as_deref(), detail),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "integrity batch timed out waiting for database, resources or backend; resume to retry"
+                    )),
+                }
             } else {
-                app.sweep_batch(id, cursor.as_deref(), detail).await
+                Err(anyhow::anyhow!("unknown maintenance task kind"))
             };
             match result {
-                Ok(true) => break,
+                Ok(true) => {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
                 Ok(false) => {}
                 Err(e) => {
                     tracing::error!(task_id=%id,error=%e,"maintenance task stopped");
                     sqlx::query("UPDATE tasks SET state='failed',error=$2,updated_at=now() WHERE id=$1 AND state='running'").bind(id).bind(e.to_string()).execute(&app.db).await?;
-                    break;
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

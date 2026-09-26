@@ -4,6 +4,8 @@
 
 提供对象浏览、版本保护的删除/ACL 批量操作、存储桶设置、运行状态和后台任务管理。整桶清除与后端清查任务由 CLI 创建，Web 可查看、暂停和继续已有任务。所有管理员权限相同。
 
+完整性巡检可从后台任务页启动，选择全部桶、单桶或精确对象键；详情显示检查结果、分页异常、关联对象和报告下载。
+
 ## 页面和静态文件
 
 | 方法 | 路径 | 内容 |
@@ -18,6 +20,27 @@
 页面 URL 保存 `page=objects/settings/status/tasks`、`bucket`、`prefix`、`recursive`、对象分页 `token`、详情 `key`、设置 `section=cors/website`、任务筛选 `state`、任务 `task` 及分页 `taskToken`。支持刷新恢复、前进后退和复制页面链接；访问仍需登录。对象键逐字保留，不规范化斜杠、空格或特殊字符。对象列表每页100项，前缀搜索可包含子目录，完整键可直接定位；换页替换当前列表，勾选仅作用于当前页。上一页使用本标签页的浏览历史，新标签页打开游标链接可继续下一页或返回根目录。
 
 首次按浏览器语言选择：中文语言使用 zh-CN，其余回退 en；右上角可切换，保存在 localStorage。日期、数字使用浏览器 Intl 格式化。对象名称、用户元数据、API字段名保持原样，不作为翻译文案或HTML执行。
+
+## 完整性巡检
+
+| 方法 | 路径 | CSRF | 内容 |
+| --- | --- | --- | --- |
+| POST | `/api/integrity` | 是 | `{mode?,bucket?,key?}`，返回 `{task_id}`；mode 默认 metadata，可选 head/full；bucket 为桶名，key 需 bucket |
+| GET | `/api/tasks/{id}/issues?after=0&limit=100` | 否 | `{issues,next_after}`；limit 为1～200，next_after 为十进制字符串或 null |
+| GET | `/api/tasks/{id}/issues/{issue}/objects?after=...` | 否 | `{objects,next}`；每页100项，after/next 为 JSON 编码的 `[bucket UUID,key]`，需 URL 编码 |
+| GET | `/api/tasks/{id}/report` | 否 | 已完成巡检的流式 JSONL 报告；其他状态409，非巡检任务404 |
+
+创建请求拒绝未知字段、未知模式、无桶的 key、空 key 和超过1024字节的 key。精确对象/桶不存在返回404；已有 queued/running 巡检时返回409，暂停后可启动另一个。继续任务也遵守单个活动巡检限制。复用 `task pause/resume` 与对应 Web 路径，任何巡检均不要求维护模式。
+
+任务 kind 为 `integrity`。`detail`：`mode`、`phase`（metadata/chunks/done）、`bucket_id`、`bucket`、`key`、十进制字符串 `upper_chunk_id`、对象游标上界 `upper_object`（`[bucket UUID,key]` 或 null）、`objects_checked`、`chunks_checked`、`bytes_checked`、`issues`、`skipped`、`finished_at`。`processed` 是对象和区块检查数之和，不是完成百分比；`bytes_checked` 统计已提交批次下载的编码字节，网络中断或未提交批次的实际流量应看运行统计。cursor 是服务使用的 JSON 字符串，包含当前对象、范围进度和区块游标。
+
+对象映射以创建任务时范围内最大的 `(bucket_id,key)` 为边界，按最多64条一页检查，单个大对象也可断点续跑；区块以任务创建时的最大 ID 为边界，按 ID 分页，只检查仍由目标范围已发布对象引用的 ready 区块。metadata 不访问后端；head 不验证内容；full 直接 GET，沿用有界读取与编解码校验。所有模式均不使用/填充区块缓存，不自动修复或改变对象及区块状态。只对小批次当前引用持有活跃保护，避免 GC 删除正在检查的数据；期间解除的引用会跳过。在线扫描记录的是时间窗口，不提供全库同一时刻快照，也不重算完整对象 ETag；活动上传、未引用块、晚于上界的新块不在覆盖范围。检查结果以保存的数据库映射与哈希为依据。
+
+异常字段：`id,task_id,subject,code,chunk_id,storage_id,stream_id,bucket_id,object_key,detail,created_at`；bigint ID 均返回字符串。code 包括 `remote_missing`、`length_mismatch`、`chunk_metadata`、`missing_key`、`authentication_failed`、`decompression_failed`、`hash_mismatch`、`object_metadata`、`mapping_gap`、`mapping_source`、`object_length`。映射异常保存对象版本及范围位置，区块异常保存物理身份；异常不因后续删除对象而消失。关联对象接口按当前引用返回 `{bucket_id,bucket,key,version}`，可包含范围外共享同一块的其他桶；已经替换/删除的历史版本不在结果内。
+
+发现数据异常继续扫描并计数；权限、连接、后端错误或超过批次时限会停止任务并保留已提交进度，不记作坏块。`completed` 加 `issues>0` 表示完成且有异常；`failed` 表示检查未完成。异常与进度在同一事务内落库，重启不会重复登记同一异常；暂停允许当前批次结束，维护任务在批次间轮换。
+
+报告为 `application/x-ndjson` 附件，首行为 `{type:"task",task:...}`，随后逐条 `{type:"issue",issue:...}`，最后 `{type:"end",issues:N}`；完整导出应包含最后一行。每次只读取100条，不保留长事务或连接。清理过程中记录过期或传输中断时不输出结束行。异常随 `cleanup.task_retention` 分批清理；failed/paused 任务不自动到期。浏览器显示原始对象键和异常内容时始终作为文本；终止或暂停的巡检详情停止自动轮询，可手动刷新。
 
 ## 会话与安全
 
@@ -88,7 +111,7 @@ CORS每条规则需要非空origins/methods，headers/expose默认空数组，ma
 | `runtime.started_at/uptime_seconds` | 本次进程启动时间和运行秒数 |
 | `runtime.http.s3/web/manage` | 三个 HTTP 接口的请求计数和耗时 |
 | `runtime.gc_deleted/gc_failures` | 已回收区块数，以及本地清理、后台回收或单块远端删除失败次数 |
-| `io.backend.get/put/delete` | 区块后端操作计数、成功传输字节数和耗时；不含 marker、清查 LIST 或 SDK 内部重试次数 |
+| `io.backend.get/put/delete/head` | 区块后端操作计数、成功传输字节数和耗时；不含 marker、清查 LIST 或 SDK 内部重试次数 |
 | `io.cache_lookups/cache_hit_rate` | 区块读取次数和本地命中比例；合并等待同一次后端读取的请求仍各计一次 lookup |
 | `io.cpu_slots_available/backend_slots_available` | 当前可用 CPU 处理和后端请求槽位 |
 | `io.cache_limit_bytes/multipart_limit_bytes` | 显式配置的本地容量限制；未配置为 null |
@@ -97,7 +120,7 @@ CORS每条规则需要非空origins/methods，headers/expose默认空数组，ma
 | `storage` | 后台数据库容量快照，见下文 |
 | `cleanup` | `running,interval,batch_size,max_duration,deleted_chunk_retention,upload_retention,task_retention,last_run`；与 `cli cleanup status` 相同 |
 
-`cleanup.last_run` 在首次执行前为 null，此后包含 `started_at,finished_at,duration_ms,deleted,batches,budget_exhausted,last_error`。`deleted` 分别统计 chunks/uploads/tasks/sessions 已确认提交的删除行数；`batches` 包含未删除行的已提交批次。预算耗尽时保留已提交的结果，未完成事务回滚，后续轮次继续；锁等待或其他失败时 `last_error=cleanup_failed`，详情见服务日志。运行状态在进程重启后归零，不逐轮写入任务表。该状态不包含本地 fragment 文件和 extent 引用清理。
+`cleanup.last_run` 在首次执行前为 null，此后包含 `started_at,finished_at,duration_ms,deleted,batches,budget_exhausted,last_error`。`deleted` 分别统计 chunks/uploads/tasks/sessions/integrity_issues 已确认提交的删除行数；`batches` 包含未删除行的已提交批次。预算耗尽时保留已提交的结果，未完成事务回滚，后续轮次继续；锁等待或其他失败时 `last_error=cleanup_failed`，详情见服务日志。运行状态在进程重启后归零，不逐轮写入任务表。该状态不包含本地 fragment 文件和 extent 引用清理。
 
 每组 HTTP/后端计数包含 `started,completed,active,failed,canceled,client_errors,server_errors,bytes,failure_rate,duration_ms`。`completed` 包括成功、失败和取消；`failed` 包括 HTTP 4xx/5xx、流错误或分片合并的延迟 XML 错误（这种错误可能使用 HTTP 200），`canceled` 为未完成便被丢弃的操作，两者互斥。`failure_rate=(failed+canceled)/completed`；`client_errors/server_errors` 按已产生的 HTTP 状态分别计数，后端组的这两项为 0。HTTP bytes 为交给 HTTP 层的响应数据字节，不含请求体、头部或网络开销，也不保证客户端已接收。
 
@@ -124,7 +147,7 @@ CORS每条规则需要非空origins/methods，headers/expose默认空数组，ma
 | `live` | 当前可见对象引用的区块：`chunks` 为唯一块数，`reference_bytes` 为引用区间总长，`raw_bytes` 为唯一块原始大小，`stored_bytes` 为编码大小，`payload_bytes` 为编码大小减去 AEAD 标签（每块 16 字节，none 为 0） |
 | `unreferenced` | 无 extent 引用且标记无引用的 ready/failed/deleting 区块数和 `stored_bytes`；`eligible_chunks/eligible_bytes` 进一步要求已过 GC 宽限且没有 owner_stream，不代表 GC 已执行或所有可回收对象的精确数量 |
 | `tasks/uploads` | 按状态汇总的任务数量 / active、completing 分片上传数量 |
-| `cleanup` | chunks/uploads/tasks/sessions 各类已到期历史的 `{eligible,oldest_at}`；时间分别取 deleted_at/touched_at/updated_at/expires_at。不计仍有 extent 的区块和仍有 part 的上传，可能包含当前被锁或活跃保护暂缓的行 |
+| `cleanup` | chunks/uploads/tasks/sessions/integrity_issues 各类已到期历史的 `{eligible,oldest_at}`；时间分别取 deleted_at/touched_at/updated_at/expires_at，巡检异常按所属任务的 updated_at 判断。不计仍有 extent 的区块和仍有 part 的上传，可能包含当前被锁或活跃保护暂缓的行 |
 | `database` | 各业务表 `{table,total_bytes,index_bytes,live_rows_estimate,dead_rows_estimate,last_autovacuum,last_autoanalyze}`；大小含索引和 TOAST，行数来自 PostgreSQL 估计，维护时间允许 null |
 
 去重节省量为 `live.reference_bytes-live.raw_bytes`，比例以 reference_bytes 为分母；压缩节省量为 `live.raw_bytes-live.payload_bytes`，比例以 raw_bytes 为分母。分母为 0 时显示空值。共享区块只在全局计一次，不按桶分摊物理空间；部分区间引用整块时，去重节省量可能为负，保留实际计算结果。物理统计来自数据库，不遍历后端，不包含未索引对象、meta.json、提供商版本或账单规则；未确认上传和删除期间还可能存在短暂差异。

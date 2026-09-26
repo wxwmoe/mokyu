@@ -74,12 +74,18 @@
 | `cleanup.task_retention` | duration / `30d` | 已完成任务保留时间，包括 backend sweep 预览 |
 | `statistics.refresh_interval` | duration / `15m` | 后台容量汇总完成后的等待间隔；页面刷新只读取快照 |
 | `statistics.query_timeout` | duration / `2m` | 一轮汇总的总时限及 SQL 语句时限 |
+| `integrity.concurrency` | positive integer / `1` | 区块检查并发，实际值不超过读取并发、在途槽数减一及64；共享 CPU/后端预算 |
+| `integrity.requests_per_second` | optional positive integer / 无额外限速 | 远端巡检逻辑请求的平均速率；SDK 内部重试仍受其重试策略约束 |
+| `integrity.bandwidth` | optional bytes / 无额外限速 | full 模式平均每秒读取的编码字节，如 `10MiB`；允许一次并发批次的突发 |
+| `integrity.request_timeout` | duration / `30s` | 单批检查总时限，1～120秒，包含数据库、共享资源等待、SDK 重试和解码；超时保留已提交进度 |
 
 duration 上限为 `i64::MAX / 1000` 秒；`statistics.query_timeout` 另受 PostgreSQL 限制，最多 2,147,483 秒。数量乘法溢出会拒绝。显式资源参数若与可用内存预算矛盾，也拒绝启动。
 
 省略 `[cleanup]` 使用以上默认值。到期记录分批提交，达到时限后在后续轮次继续；锁住的行可跳过，不需要额外 crontab。历史清理在 GC 暂停及维护模式下仍运行，且不会删除远端数据。`CompleteMultipartUpload` 的重复完成结果只在上传记录保留期内提供，已发布对象不受该期限影响；清空桶会提前移除该桶的上传记录。已完成的 sweep 预览过期后需要重新预览。
 
 省略 `[statistics]` 时使用默认间隔和时限。汇总使用只读事务，不新增业务表，失败时保留上次结果；大库可增大刷新间隔，按数据库性能调整时限。详见[管理 API](manage-api-reference.md#容量快照)。
+
+巡检由 CLI 或 Web 手动启动，不自动定时执行。省略 `[integrity]` 使用单并发，其余资源仍受共享预算限制。请求/带宽限速通过批次之间的等待实现，等待时其他维护任务可以推进。调整这些参数后重启生效，已有任务继续使用新的限额。
 
 ## 自动预算
 

@@ -347,7 +347,7 @@ pub struct Storage {
     pub backend_write_bytes: std::sync::atomic::AtomicU64,
     pub cache_hit_bytes: std::sync::atomic::AtomicU64,
     cache_lookups: std::sync::atomic::AtomicU64,
-    operations: [Arc<crate::stats::Counters>; 3],
+    operations: [Arc<crate::stats::Counters>; 4],
 }
 impl Storage {
     pub async fn new(c: &Config, secrets: Arc<Secrets>, budget: &Budget) -> Result<Self> {
@@ -424,7 +424,7 @@ impl Storage {
     }
     pub fn statistics(&self) -> serde_json::Value {
         let lookups = self.cache_lookups.load(Ordering::Relaxed);
-        serde_json::json!({"backend":{"get":self.operations[0].snapshot(),"put":self.operations[1].snapshot(),"delete":self.operations[2].snapshot()},
+        serde_json::json!({"backend":{"get":self.operations[0].snapshot(),"put":self.operations[1].snapshot(),"delete":self.operations[2].snapshot(),"head":self.operations[3].snapshot()},
             "cache_lookups":lookups,"cache_hit_rate":crate::stats::ratio(self.cache_hits.load(Ordering::Relaxed),lookups).map(|v| v.min(1.0)),
             "cpu_slots_available":self.cpu.available_permits(),"backend_slots_available":self.requests.available_permits(),
             "cache_limit_bytes":self.capacity,"multipart_limit_bytes":self.disk.limits[0]})
@@ -608,7 +608,7 @@ impl Storage {
         })
         .await?
     }
-    async fn decode(&self, c: &Chunk, encoded: Vec<u8>) -> Result<(Bytes, Bytes)> {
+    pub(crate) async fn decode(&self, c: &Chunk, encoded: Vec<u8>) -> Result<(Bytes, Bytes)> {
         let permit = self.cpu.clone().acquire_owned().await?;
         let c = c.clone();
         let secrets = self.secrets.clone();
@@ -805,42 +805,51 @@ impl Storage {
         if let Some(raw) = self.cached(c).await? {
             return Ok(raw);
         }
-        let encoded = {
-            let _permit = self.requests.acquire().await?;
-            let mut operation = self.operations[0].begin();
-            self.backend_gets
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let result: Result<Vec<u8>> = async {
-                let result = self.backend.get(&self.path(c.storage_id)).await?;
-                ensure!(
-                    result.meta.size <= (MAX + 16) as u64,
-                    "backend chunk exceeds bound"
-                );
-                let mut data = Vec::with_capacity(result.meta.size as usize);
-                let mut stream = result.into_stream();
-                while let Some(bytes) = stream.next().await {
-                    let bytes = bytes?;
-                    ensure!(
-                        data.len() + bytes.len() <= MAX + 16,
-                        "backend chunk exceeds bound"
-                    );
-                    data.extend_from_slice(&bytes);
-                }
-                Ok(data)
-            }
-            .await;
-            operation.finish(result.is_err());
-            let data = result?;
-            self.operations[0].bytes(data.len() as u64);
-            data
-        };
-        self.backend_read_bytes
-            .fetch_add(encoded.len() as u64, Ordering::Relaxed);
+        let encoded = self.read_backend(c).await?;
         let (raw, cache) = self.decode(c, encoded).await?;
         if let Err(e) = self.fill(c, cache).await {
             tracing::warn!(error=%e,"cache fill failed; serving verified backend data");
         }
         Ok(raw)
+    }
+    pub(crate) async fn head(&self, c: &Chunk) -> Result<u64> {
+        let _permit = self.requests.acquire().await?;
+        let mut operation = self.operations[3].begin();
+        let result = self.backend.head(&self.path(c.storage_id)).await;
+        operation.finish(result.is_err());
+        Ok(result?.size)
+    }
+    // Shared bounded remote read. Inspection must not use or populate the cache.
+    pub(crate) async fn read_backend(&self, c: &Chunk) -> Result<Vec<u8>> {
+        let _permit = self.requests.acquire().await?;
+        let mut operation = self.operations[0].begin();
+        self.backend_gets
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let result: Result<Vec<u8>> = async {
+            let result = self.backend.get(&self.path(c.storage_id)).await?;
+            ensure!(
+                result.meta.size <= (MAX + 16) as u64,
+                codec::IntegrityError::Length
+            );
+            let mut data = Vec::with_capacity(result.meta.size as usize);
+            let mut stream = result.into_stream();
+            while let Some(bytes) = stream.next().await {
+                let bytes = bytes?;
+                ensure!(
+                    data.len() + bytes.len() <= MAX + 16,
+                    codec::IntegrityError::Length
+                );
+                data.extend_from_slice(&bytes);
+            }
+            Ok(data)
+        }
+        .await;
+        operation.finish(result.is_err());
+        let data = result?;
+        self.operations[0].bytes(data.len() as u64);
+        self.backend_read_bytes
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+        Ok(data)
     }
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         let _permit = self.requests.acquire().await?;

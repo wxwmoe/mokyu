@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 let prefix = '', next = null, csrf = '', view = 0;
 let folders = [], objects = [], panel = null, currentNotice = '', route = {}, tasksPage = null;
 let selected = new Set(), timer = null, pending = null, executing = false, chunks = null, taskRefresh = 0, chunkRequest = 0;
+let report = null, issueObjects = null, issueRequest = 0, objectRequest = 0;
 const number = value => new Intl.NumberFormat(locale).format(value);
 const date = value => new Date(value).toLocaleString(locale);
 const query = values => new URLSearchParams(values).toString();
@@ -63,6 +64,8 @@ function go(values, previousPage = false) {
 async function enter() {
   const buckets = await api('/api/buckets'); $('buckets').replaceChildren();
   for (const bucket of buckets) { const option = node('option', bucket.name); option.value = bucket.id; $('buckets').append(option); }
+  const all = node('option', t('allBuckets')); all.value = ''; all.dataset.i18n = 'allBuckets'; $('integrity-bucket').replaceChildren(all);
+  for (const bucket of buckets) { const option = node('option', bucket.name); option.value = bucket.name; $('integrity-bucket').append(option); }
   const wanted = readRoute().bucket;
   if (buckets.some(b => b.id === wanted)) $('buckets').value = wanted;
   const url = new URL(location.href);
@@ -114,6 +117,8 @@ function fields(values) {
 }
 async function loadView() {
   const request = ++view; clearTimeout(timer); route = readRoute(); prefix = route.prefix;
+  report = null; issueObjects = null; $('integrity-report').hidden = true;
+  $('integrity-create').hidden = route.page !== 'tasks' || route.task !== null;
   notice(); panel = null; chunks = null; $('preview').replaceChildren(); $('chunks').replaceChildren(); $('chunks').hidden = true;
   $('detail').hidden = true; $('objects-view').hidden = route.page !== 'objects' || route.key !== null;
   $('settings-view').hidden = route.page !== 'settings'; $('tasks-view').hidden = route.page !== 'tasks';
@@ -154,6 +159,7 @@ function renderPanel(resetForm = false) {
   $('info').textContent = JSON.stringify(value, null, 2); $('actions').replaceChildren(); $('task-list').replaceChildren();
   $('statistics').hidden = type !== 'status'; $('statistics').replaceChildren();
   $('website-form').hidden = type !== 'website'; $('cors-form').hidden = type !== 'cors';
+  $('integrity-report').hidden = type !== 'taskDetails' || value.kind !== 'integrity';
   if (type === 'details') {
     const object = value.object, metadata = object.metadata, mime = (metadata.content_type || '').split(';')[0].trim();
     fields([['objectKey', object.object_key], ['objectVersion', object.id], ['size', size(object.size)], ['access', t(object.public_read ? 'public' : 'private')], ['updated', date(object.touched_at)], ['contentType', metadata.content_type], ['etag', object.etag], ['cacheControl', metadata.cache_control], ['contentDisposition', metadata.content_disposition], ['contentEncoding', metadata.content_encoding], ['contentLanguage', metadata.content_language], ['expires', metadata.expires]]);
@@ -182,6 +188,20 @@ function renderPanel(resetForm = false) {
     $('actions').append(button(t('closeDetails'), () => go({ task: null })));
     if (['queued', 'running'].includes(value.state)) $('actions').append(button(t('pauseTask'), () => confirmTask('pause', value)));
     if (['paused', 'failed'].includes(value.state)) $('actions').append(button(t(value.state === 'failed' ? 'retryTask' : 'resumeTask'), () => confirmTask('resume', value)));
+    if (value.kind === 'integrity') {
+      const d = value.detail;
+      $('task-list').replaceChildren(node('p', t('integrityCoverage')), table(['metric', 'value'], [
+        [t('integrityMode'), t('mode_' + d.mode)], [t('integrityPhase'), t('phase_' + d.phase)],
+        [t('integrityBucket'), d.bucket ?? t('allBuckets')], [t('objectKey'), d.key ?? '—'],
+        [t('objectsChecked'), number(d.objects_checked)], [t('chunksChecked'), number(d.chunks_checked)],
+        [t('bytesChecked'), size(d.bytes_checked)], [t('findings'), number(d.issues)], [t('skipped'), number(d.skipped)],
+      ]));
+      if (value.state === 'completed') {
+        $('task-list').prepend(node('p', t(d.issues ? 'integrityFound' : 'integrityClear')));
+        const link = node('a', t('exportReport')); link.className = 'button'; link.href = '/api/tasks/' + value.id + '/report'; $('actions').append(link);
+      }
+      renderIssues();
+    }
   }
 }
 function renderTasks() {
@@ -201,13 +221,14 @@ async function refreshTasks(request = view) {
   try {
     const value = await api('/api/tasks?' + query(params)); if (!current()) return;
     tasksPage = value; renderTasks();
-    if (taskId) { const task = await api('/api/tasks/' + encodeURIComponent(taskId)); if (!current()) return; panel = { type: 'taskDetails', value: task }; renderPanel(); }
+    if (taskId) { const task = await api('/api/tasks/' + encodeURIComponent(taskId)); if (!current()) return; panel = { type: 'taskDetails', value: task }; renderPanel(); if (task.kind === 'integrity') await loadIssues(report?.after ?? null, report?.previous ?? []); }
     if (focusText && (document.activeElement === focused || document.activeElement === document.body)) [...document.querySelectorAll('#tasks-table button, #actions button')].find(b => b.textContent === focusText)?.focus({ preventScroll: true });
   } catch (error) { if (current()) notice(error); }
   finally { if (current()) scheduleTasks(); }
 }
 function scheduleTasks() {
   clearTimeout(timer);
+  if (panel?.type === 'taskDetails' && panel.value.kind === 'integrity' && ['completed', 'failed', 'paused'].includes(panel.value.state)) return;
   if (route.page === 'tasks' && !document.hidden && !$('browser').hidden && $('auto-tasks').checked) timer = setTimeout(() => refreshTasks(), 5000);
 }
 async function copyKey(key) {
@@ -229,6 +250,38 @@ function renderChunks() {
   scroll.append(table(['chunkId', 'offset', 'referenceLength', 'rawSize', 'encodedSize', 'compression', 'savingRate', 'encryption'], value.chunks.map(c => [c.id, number(BigInt(c.offset_bytes)), size(c.length), size(c.raw_size), c.stored_size == null ? '—' : size(c.stored_size), c.compression, c.payload_size == null ? '—' : percent(1 - c.payload_size / c.raw_size), c.algorithm]))); root.append(scroll);
   if (previous.length) root.append(button(t('previous'), () => loadChunks(previous.at(-1), previous.slice(0, -1))));
   if (value.next_offset !== null) root.append(button(t('more'), () => loadChunks(value.next_offset, [...previous, after])));
+}
+async function loadIssues(after, previous) {
+  const task = route.task, request = ++issueRequest, currentView = view;
+  const value = await api('/api/tasks/' + task + '/issues?' + query(after === null ? {} : { after }));
+  if (task !== route.task || request !== issueRequest || currentView !== view) return;
+  report = { value, after, previous }; renderIssues();
+}
+async function loadIssueObjects(issue, after = null, previous = []) {
+  const task = route.task, request = ++objectRequest, currentView = view;
+  const value = await api('/api/tasks/' + task + '/issues/' + issue.id + '/objects?' + query(after === null ? {} : { after: JSON.stringify(after) }));
+  if (task !== route.task || request !== objectRequest || currentView !== view) return;
+  issueObjects = { issue, value, after, previous }; renderIssues();
+}
+function renderIssues() {
+  const root = $('integrity-report');
+  if (panel?.type !== 'taskDetails' || panel.value.kind !== 'integrity') { root.hidden = true; return; }
+  root.hidden = false; root.replaceChildren(node('h3', t('findings')));
+  if (!report) return;
+  const scroll = node('div'); scroll.className = 'table-scroll';
+  scroll.tabIndex = 0; scroll.setAttribute('role', 'region'); scroll.setAttribute('aria-label', t('findings'));
+  scroll.append(report.value.issues.length ? table(['result', 'chunkId', 'objectKey', 'created', 'affectedObjects'], report.value.issues.map(i => [t('issue_' + i.code), i.chunk_id ?? '—', i.object_key ?? '—', date(i.created_at), button(t('affectedObjects'), () => loadIssueObjects(i))])) : node('p', t('noFindings'))); root.append(scroll);
+  if (report.previous.length) root.append(button(t('previous'), () => { issueObjects = null; return loadIssues(report.previous.at(-1), report.previous.slice(0, -1)); }));
+  if (report.value.next_after !== null) root.append(button(t('more'), () => { issueObjects = null; return loadIssues(report.value.next_after, [...report.previous, report.after]); }));
+  if (issueObjects) {
+    const { issue, value, after, previous } = issueObjects, section = node('section'); section.id = 'issue-objects';
+    section.append(node('h4', t('affectedObjects')), node('p', t('affectedHelp')), node('pre', JSON.stringify({ code: issue.code, chunk_id: issue.chunk_id, storage_id: issue.storage_id, version: issue.stream_id, detail: issue.detail }, null, 2)));
+    for (const object of value.objects) section.append(button(object.bucket + '/' + object.key, () => go({ page: 'objects', bucket: object.bucket_id, key: object.key, task: null, token: null })));
+    if (!value.objects.length) section.append(node('p', t('noAffectedObjects')));
+    if (previous.length) section.append(button(t('previous'), () => loadIssueObjects(issue, previous.at(-1), previous.slice(0, -1))));
+    if (value.next !== null) section.append(button(t('more'), () => loadIssueObjects(issue, value.next, [...previous, after])));
+    root.append(section);
+  }
 }
 function showConfirmation(title, help, items) {
   $('confirm-title').textContent = title; $('confirm-help').textContent = help; $('confirm-items').replaceChildren(items); $('confirm-notice').textContent = '';
@@ -312,7 +365,7 @@ function renderStatistics(value) {
   if (cleanup.running) text('p', t('cleanupRunning'));
   if (lastRun?.budget_exhausted) text('p', t('cleanupBudget'));
   if (lastRun?.last_error) text('p', t('cleanupFailed'));
-  table('databaseCleanup', ['cleanupCategory', 'cleanupRemoved', 'cleanupPending', 'cleanupOldest'], ['chunks', 'uploads', 'tasks', 'sessions'].map(kind => [
+  table('databaseCleanup', ['cleanupCategory', 'cleanupRemoved', 'cleanupPending', 'cleanupOldest'], ['chunks', 'uploads', 'tasks', 'sessions', 'integrity_issues'].map(kind => [
     t('cleanup_' + kind), lastRun ? number(lastRun.deleted[kind]) : '—',
     snapshot ? number(snapshot.cleanup[kind].eligible) : '—', snapshot?.cleanup[kind].oldest_at ? date(snapshot.cleanup[kind].oldest_at) : '—',
   ]));
@@ -402,6 +455,14 @@ $('tasks-more').addEventListener('click', () => { if (tasksPage?.next_token) go(
 $('tasks-previous').addEventListener('click', () => history.go(history.state.previousIndex - history.state.index));
 $('refresh-tasks').addEventListener('click', loadView);
 $('auto-tasks').addEventListener('change', scheduleTasks);
+$('integrity-bucket').addEventListener('change', () => { $('integrity-key').disabled = !$('integrity-bucket').value; if ($('integrity-key').disabled) $('integrity-key').value = ''; });
+$('integrity-form').addEventListener('submit', async event => {
+  event.preventDefault(); $('integrity-start').disabled = true;
+  try {
+    const value = await write('/api/integrity', { mode: $('integrity-mode').value, bucket: $('integrity-bucket').value || null, key: $('integrity-key').value || null });
+    await go({ page: 'tasks', task: value.task_id, state: null, taskToken: null });
+  } catch (error) { notice(error); } finally { $('integrity-start').disabled = false; }
+});
 document.addEventListener('visibilitychange', scheduleTasks);
 for (const type of ['cors', 'website']) $(type).addEventListener('click', () => go({ page: 'settings', section: type }));
 $('cors-add').addEventListener('click', () => addCorsRule());

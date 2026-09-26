@@ -10,6 +10,66 @@ pub const MIN: usize = 256 * 1024;
 pub const AVG: usize = 1024 * 1024;
 pub const MAX: usize = 4 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy)]
+pub enum IntegrityError {
+    Length,
+    Metadata,
+    MissingKey,
+    Authentication,
+    Decompression,
+    Hash,
+}
+impl IntegrityError {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Length => "length_mismatch",
+            Self::Metadata => "chunk_metadata",
+            Self::MissingKey => "missing_key",
+            Self::Authentication => "authentication_failed",
+            Self::Decompression => "decompression_failed",
+            Self::Hash => "hash_mismatch",
+        }
+    }
+}
+impl std::fmt::Display for IntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+impl std::error::Error for IntegrityError {}
+
+pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
+    aad(c).context(IntegrityError::Metadata)?;
+    let tag = if c.algorithm == "none" { 0 } else { 16 };
+    ensure!(
+        c.id > 0
+            && c.state == "ready"
+            && c.stored_size
+                .is_some_and(|n| n > tag && n <= MAX as i32 + tag),
+        IntegrityError::Metadata
+    );
+    ensure!(
+        c.compressed || c.stored_size == Some(c.raw_size + tag),
+        IntegrityError::Metadata
+    );
+    if c.algorithm == "none" {
+        ensure!(
+            c.key_id.is_empty() && c.nonce.is_none(),
+            IntegrityError::Metadata
+        );
+    } else {
+        let key = secrets
+            .keys
+            .get(&c.key_id)
+            .context(IntegrityError::MissingKey)?;
+        ensure!(
+            key.algorithm == c.algorithm && c.nonce.as_ref().is_some_and(|n| n.len() == 12),
+            IntegrityError::Metadata
+        );
+    }
+    Ok(())
+}
+
 #[derive(Clone, sqlx::FromRow, Serialize)]
 pub struct Chunk {
     pub id: i64,
@@ -148,9 +208,9 @@ pub fn decode(
 ) -> Result<(Bytes, Bytes)> {
     ensure!(
         encoded.len() <= MAX + 16 && Some(encoded.len() as i32) == c.stored_size,
-        "encoded chunk length mismatch"
+        IntegrityError::Length
     );
-    let metadata = aad(c)?;
+    let metadata = aad(c).context(IntegrityError::Metadata)?;
     let plain_len = if c.algorithm == "none" {
         ensure!(
             c.key_id.is_empty() && c.nonce.is_none(),
@@ -161,7 +221,7 @@ pub fn decode(
         let key = secrets
             .keys
             .get(&c.key_id)
-            .context("missing historical chunk key")?;
+            .context(IntegrityError::MissingKey)?;
         ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
         let n: [u8; 12] = c
             .nonce
@@ -175,7 +235,7 @@ pub fn decode(
                 Aad::from(metadata),
                 &mut encoded,
             )
-            .map_err(|_| anyhow::anyhow!("chunk authentication failed"))?
+            .map_err(|_| IntegrityError::Authentication)?
             .len()
     };
     encoded.truncate(plain_len);
@@ -208,13 +268,17 @@ pub fn decode_cache(
             c.compressed && data.len() <= MAX && Some(data.len() as i32 + tag) == c.stored_size,
             "compressed cache length mismatch"
         );
-        Bytes::from(compression.decompress(&data, c.raw_size as usize)?)
+        Bytes::from(
+            compression
+                .decompress(&data, c.raw_size as usize)
+                .context(IntegrityError::Decompression)?,
+        )
     } else {
         data
     };
     ensure!(
         raw.len() == c.raw_size as usize && blake3::hash(&raw).as_bytes() == c.hash.as_slice(),
-        "chunk integrity mismatch"
+        IntegrityError::Hash
     );
     Ok(raw)
 }

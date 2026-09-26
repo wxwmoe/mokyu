@@ -1,6 +1,6 @@
-# 数据库结构（0.0.2 / schema_version=3）
+# 数据库结构（0.0.2 / schema_version=4）
 
-0.0.2 通过 `0002_cleanup.sql` 添加清理/引用索引及表级自动维护参数，并通过 `0003_task_listing.sql` 添加任务分页索引，保留现有数据和字段。0.0.1 发布的 `0001_baseline.sql` 保持不变；运行统计、容量快照和最近清理结果保存在进程内，不新增业务表。
+0.0.2 通过 `0002_cleanup.sql` 添加清理/引用索引及表级自动维护参数，`0003_task_listing.sql` 添加任务分页索引，`0004_integrity.sql` 添加完整性巡检任务与异常表，保留现有数据。0.0.1 发布的 `0001_baseline.sql` 保持不变；运行统计、容量快照和最近清理结果仍保存在进程内。
 
 PostgreSQL 使用同步提交与 fsync；服务独占一个数据库级 advisory lock 和 data 文件锁
 
@@ -17,14 +17,14 @@ SQLx 管理的迁移历史表，纳入数据库备份，不应手动修改
 | `checksum` | bytea NOT NULL | SQL文件的SHA-384校验和 |
 | `execution_time` | bigint NOT NULL | 执行耗时（纳秒） |
 
-所有时间为 `timestamptz`，以 UTC 存储/传输；所有 size、offset、length 单位为字节。部署UUID由数据库生成，其他UUID由服务生成；仅 chunks.id 使用 PostgreSQL identity。`—` 表示无默认值，调用者必须提供（可空列则默认 NULL）。JSONB 是内部结构，不是允许直接写库的管理接口。
+所有时间为 `timestamptz`，以 UTC 存储/传输；所有 size、offset、length 单位为字节。部署UUID由数据库生成，其他UUID由服务生成；chunks.id 与 integrity_issues.id 使用 PostgreSQL identity。`—` 表示无默认值，调用者必须提供（可空列则默认 NULL）。JSONB 是内部结构，不是允许直接写库的管理接口。
 
 ## gateway_meta
 
 | 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
 | --- | --- | --- | --- | --- |
 | `singleton` | boolean | 否 | `true` | 固定 true，保证仅一行 |
-| `schema_version` | integer | 否 | — | 当前数据库结构版本3，与最近一次迁移编号一致 |
+| `schema_version` | integer | 否 | — | 当前数据库结构版本4，与最近一次迁移编号一致 |
 | `deployment_id` | uuid | 否 | — | 部署 UUID |
 | `backend_identity` | text | 否 | — | 后端 endpoint/bucket/prefix 身份 |
 | `backend_initialized` | boolean | 否 | `false` | 后端 meta.json 已完成绑定；标识丢失时不自动重建 |
@@ -418,10 +418,10 @@ CREATE INDEX sessions_expiry ON sessions(expires_at);
 | 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
 | --- | --- | --- | --- | --- |
 | `id` | uuid | 否 | — | 维护任务 UUID |
-| `kind` | text | 否 | — | purge / sweep |
-| `bucket_id` | uuid | 是 | — | purge目标；桶删除后NULL |
+| `kind` | text | 否 | — | purge / sweep / integrity |
+| `bucket_id` | uuid | 是 | — | 目标桶；桶删除后NULL，巡检的原始范围另外保存在 detail |
 | `state` | text | 否 | — | queued / running / paused / completed / failed |
-| `cursor` | text | 是 | — | 最后处理对象key或后端物理key |
+| `cursor` | text | 是 | — | 最后处理对象key、后端物理key，或巡检的对象/范围/区块 JSON 游标 |
 | `processed` | bigint | 否 | `0` | 累计处理条目数 |
 | `detail` | jsonb | 否 | `'{}'` | 任务范围、预览参数、计数及少量样本 |
 | `error` | text | 是 | — | 最近失败原因 |
@@ -433,7 +433,7 @@ CREATE INDEX sessions_expiry ON sessions(expires_at);
 ```sql
 CREATE TABLE tasks (
     id uuid PRIMARY KEY,
-    kind text NOT NULL CHECK (kind IN ('purge','sweep')),
+    kind text NOT NULL CHECK (kind IN ('purge','sweep','integrity')),
     bucket_id uuid REFERENCES buckets ON DELETE SET NULL,
     state text NOT NULL CHECK (state IN ('queued','running','paused','completed','failed')),
     cursor text,
@@ -445,6 +445,43 @@ CREATE TABLE tasks (
 );
 CREATE INDEX tasks_list ON tasks(created_at DESC,id DESC);
 CREATE INDEX tasks_state_list ON tasks(state,created_at DESC,id DESC);
+CREATE INDEX tasks_work ON tasks(updated_at,id) WHERE state IN ('queued','running');
+```
+
+## integrity_issues
+
+仅保存巡检异常，正常区块不逐条保存检查记录。进度及异常在同一事务提交，`(task_id,subject,code)` 保证重试去重。主体身份为检查时的快照；只有 task_id 使用外键，避免正常对象/区块清理使历史异常失去依据。应用按任务保留期分批清理此表，然后删除任务。
+
+| 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | 否 | GENERATED ALWAYS AS IDENTITY | 报告分页 ID，API 使用十进制字符串 |
+| `task_id` | uuid | 否 | — | tasks 外键，ON DELETE CASCADE |
+| `subject` | text | 否 | — | `chunk:ID` 或 `object:UUID:offset`，用于去重 |
+| `code` | text | 否 | — | 稳定英文异常代码 |
+| `chunk_id` | bigint | 是 | — | 异常区块 ID 快照 |
+| `storage_id` | uuid | 是 | — | 异常物理区块 UUID 快照 |
+| `stream_id` | uuid | 是 | — | 异常对象版本快照 |
+| `bucket_id` | uuid | 是 | — | 异常对象所属桶快照 |
+| `object_key` | text | 是 | — | 原样保存的对象键 |
+| `detail` | jsonb | 否 | `'{}'` | 期望值、实际值、范围位置等诊断信息 |
+| `created_at` | timestamptz | 否 | `now()` | 异常记录时间 |
+
+```sql
+CREATE TABLE integrity_issues (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    task_id uuid NOT NULL REFERENCES tasks ON DELETE CASCADE,
+    subject text NOT NULL,
+    code text NOT NULL,
+    chunk_id bigint,
+    storage_id uuid,
+    stream_id uuid,
+    bucket_id uuid,
+    object_key text,
+    detail jsonb NOT NULL DEFAULT '{}',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(task_id,subject,code)
+);
+CREATE INDEX integrity_issues_page ON integrity_issues(task_id,id);
 ```
 
 ## 状态、引用与删除

@@ -434,6 +434,8 @@ async fn collect(app: &App) -> Result<Value> {
                 AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id)
             UNION ALL SELECT 'tasks',count(*),min(updated_at) FROM tasks
                 WHERE state='completed' AND updated_at<now()-$3*interval '1 second'
+            UNION ALL SELECT 'integrity_issues',count(*),min(t.updated_at) FROM integrity_issues i JOIN tasks t ON t.id=i.task_id
+                WHERE t.state='completed' AND t.updated_at<now()-$3*interval '1 second'
             UNION ALL SELECT 'sessions',count(*),min(expires_at) FROM sessions WHERE expires_at<now()
         ) backlog")
         .bind(config::seconds(&app.config.cleanup.deleted_chunk_retention)? as f64)
@@ -445,7 +447,7 @@ async fn collect(app: &App) -> Result<Value> {
             'index_bytes',pg_indexes_size(relid),'live_rows_estimate',n_live_tup,
             'dead_rows_estimate',n_dead_tup,'last_autovacuum',last_autovacuum,'last_autoanalyze',last_autoanalyze)
          FROM pg_stat_user_tables WHERE schemaname='public'
-            AND relname IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions')
+            AND relname IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions','integrity_issues')
          ORDER BY relname")
         .fetch_all(&mut *tx).await?;
     tx.commit().await?;

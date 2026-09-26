@@ -233,6 +233,13 @@ pub fn manage_router(app: Arc<App>) -> Router {
         .route("/api/tasks", get(tasks))
         .route("/api/tasks/{id}", get(task))
         .route("/api/tasks/{id}/actions", post(task_action))
+        .route("/api/integrity", post(start_integrity))
+        .route("/api/tasks/{id}/issues", get(integrity_issues))
+        .route(
+            "/api/tasks/{id}/issues/{issue}/objects",
+            get(integrity_objects),
+        )
+        .route("/api/tasks/{id}/report", get(integrity_report))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(axum::middleware::from_fn(web_headers))
         .with_state(app.clone())
@@ -1031,6 +1038,106 @@ async fn download(
         Some(q.preview),
     )
     .await
+}
+async fn start_integrity(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(input): Json<crate::integrity::Request>,
+) -> Result<Json<Value>, HttpError> {
+    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let result = app.integrity_start(input).await;
+    tracing::info!(%user_id,success=result.is_ok(),task_id=?result.as_ref().ok().and_then(|r|r.get("task_id")),"management integrity check");
+    Ok(Json(result?))
+}
+#[derive(Deserialize)]
+struct IssueQuery {
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+async fn integrity_issues(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Query(q): Query<IssueQuery>,
+) -> Result<Json<Value>, HttpError> {
+    authenticate(&app, &headers, false).await?;
+    Ok(Json(
+        app.integrity_issues(id, q.after.unwrap_or(0), q.limit.unwrap_or(100))
+            .await?,
+    ))
+}
+#[derive(Deserialize)]
+struct IssueObjectsQuery {
+    after: Option<String>,
+}
+async fn integrity_objects(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path((id, issue)): Path<(Uuid, i64)>,
+    Query(q): Query<IssueObjectsQuery>,
+) -> Result<Json<Value>, HttpError> {
+    authenticate(&app, &headers, false).await?;
+    let after = q
+        .after
+        .map(|s| serde_json::from_str::<(Uuid, String)>(&s))
+        .transpose()
+        .map_err(|_| s3s::s3_error!(InvalidArgument))?;
+    Ok(Json(app.integrity_objects(id, issue, after).await?))
+}
+async fn integrity_report(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Response, HttpError> {
+    authenticate(&app, &headers, false).await?;
+    let task: Value =
+        sqlx::query_scalar("SELECT to_jsonb(t) FROM tasks t WHERE id=$1 AND kind='integrity'")
+            .bind(id)
+            .fetch_optional(&app.db)
+            .await?
+            .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+    if task["state"] != "completed" {
+        return Err(s3s::s3_error!(
+            OperationAborted,
+            "finish the inspection before exporting its report"
+        )
+        .into());
+    }
+    // Fix the boundary so report size stays finite; pages do not retain a database connection.
+    let upper: i64 =
+        sqlx::query_scalar("SELECT COALESCE(max(id),0) FROM integrity_issues WHERE task_id=$1")
+            .bind(id)
+            .fetch_one(&app.db)
+            .await?;
+    let body = async_stream::try_stream! {
+        yield bytes::Bytes::from(format!("{}\n",json!({"type":"task","task":task})));
+        let mut after = 0;
+        let mut count = 0u64;
+        loop {
+            let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(i)||jsonb_build_object('id',i.id::text,'chunk_id',i.chunk_id::text) FROM integrity_issues i WHERE task_id=$1 AND id>$2 AND id<=$3 ORDER BY id LIMIT 100").bind(id).bind(after).bind(upper).fetch_all(&app.db).await.map_err(std::io::Error::other)?;
+            if rows.is_empty() { break; }
+            for row in rows {
+                after = row["id"].as_str().and_then(|v|v.parse().ok()).ok_or_else(||std::io::Error::other("invalid report ID"))?;
+                count += 1;
+                yield bytes::Bytes::from(format!("{}\n",json!({"type":"issue","issue":row})));
+            }
+        }
+        if count != task["detail"]["issues"].as_u64().unwrap_or(0) { Err(std::io::Error::other("report expired during export"))?; }
+        yield bytes::Bytes::from(format!("{}\n",json!({"type":"end","issues":count})));
+    };
+    let body: std::pin::Pin<
+        Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>,
+    > = Box::pin(body);
+    let mut response = Body::from_stream(body).into_response();
+    response.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("application/x-ndjson"),
+    );
+    response.headers_mut().insert(
+        "content-disposition",
+        HeaderValue::from_str(&format!("attachment; filename=\"integrity-{id}.jsonl\""))?,
+    );
+    Ok(response)
 }
 pub fn decode_path(path: &str) -> Result<String> {
     let bytes = path.as_bytes();

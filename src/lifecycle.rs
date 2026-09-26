@@ -32,7 +32,8 @@ impl App {
         let start = Instant::now();
         let duration = Duration::from_secs(config::seconds(&c.max_duration)?);
         let batch = c.batch_size as i64;
-        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0});
+        let mut deleted =
+            json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"integrity_issues":0});
         let mut batches = 0;
         let queries = [
             (
@@ -46,9 +47,14 @@ impl App {
                 "DELETE FROM uploads WHERE id IN (SELECT id FROM uploads u WHERE state IN ('completed','aborted') AND touched_at<now()-$1*interval '1 second' AND NOT (id=ANY($3)) AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id) ORDER BY touched_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
             ),
             (
+                "integrity_issues",
+                config::seconds(&c.task_retention)? as f64,
+                "DELETE FROM integrity_issues WHERE id IN (SELECT i.id FROM integrity_issues i JOIN tasks t ON t.id=i.task_id WHERE t.state='completed' AND t.updated_at<now()-$1*interval '1 second' ORDER BY i.id LIMIT $2 FOR UPDATE OF i SKIP LOCKED)",
+            ),
+            (
                 "tasks",
                 config::seconds(&c.task_retention)? as f64,
-                "DELETE FROM tasks WHERE id IN (SELECT id FROM tasks WHERE state='completed' AND updated_at<now()-$1*interval '1 second' ORDER BY updated_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+                "DELETE FROM tasks WHERE id IN (SELECT id FROM tasks t WHERE state='completed' AND updated_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id) ORDER BY updated_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
             ),
             (
                 "sessions",

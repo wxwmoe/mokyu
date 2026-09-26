@@ -47,6 +47,8 @@
 | `task show UUID` | 必填 | 任务完整状态、游标、计数、detail/error |
 | `task pause UUID` | queued/running | 当前批次可能结束，然后暂停 |
 | `task resume UUID` | paused/failed | 从持久进度重排队，清除旧错误；破坏性 sweep 需维护模式，purge 需退出维护模式，只读 sweep 预览可在维护模式下继续 |
+| `integrity check [--mode metadata/head/full] [--bucket NAME] [--key KEY]` | 默认 metadata；key 需 bucket | 创建只读巡检任务并返回 task_id；同一时间最多一个排队/运行中的巡检 |
+| `integrity issues UUID [--after ID] [--limit N]` | 默认 after=0、limit=100；N为1～200 | 分页返回异常；next_after 为下一页游标，ID 使用十进制字符串 |
 | `backend sweep [--older-than 48h]` | 默认仅预览 | 扫描部署 chunks 前缀，统计未被数据库任何状态索引的区块 |
 | `backend sweep --execute --preview UUID [--older-than 48h]` | 终端、已完成预览、维护状态 | 使用相同前缀及年龄阈值重新扫描，每次删除前重查DB |
 
@@ -103,6 +105,22 @@ docker exec -it media-gateway cli backend sweep --execute --preview PREVIEW_UUID
 sweep 仅供维护使用，预览和执行必须相同 `--older-than`
 
 执行前需已进入维护模式、完成预览、排空活跃操作、非空区块索引
+
+## 完整性巡检
+
+```sh
+docker exec media-gateway cli integrity check --mode metadata
+docker exec media-gateway cli integrity check --mode head --bucket media
+docker exec media-gateway cli integrity check --mode full --bucket media --key path/file.mp4
+docker exec media-gateway cli task show TASK_UUID
+docker exec media-gateway cli integrity issues TASK_UUID
+docker exec media-gateway cli task pause TASK_UUID
+docker exec media-gateway cli task resume TASK_UUID
+```
+
+metadata 检查已发布对象的映射和区块元数据；head 额外检查后端存在性与编码长度；full 直接下载区块并校验认证、解压、原始长度及 BLAKE3。共享物理块一轮只检查一次。远端检查绕过缓存，也不填充缓存；任何模式均不修复或删除数据。维护模式允许巡检。
+
+`completed` 表示已完成扫描，须同时查看 `detail.issues`；网络、权限及超时等执行故障使任务 `failed`，可从提交进度继续。暂停允许当前批次完成，重启自动恢复此前运行的任务；paused 保持暂停。CLI 返回英文协议字段，Web 提供双语说明、关联对象和完成报告导出。覆盖范围与返回结构见[管理 API](manage-api-reference.md#完整性巡检)。
 
 ## 离线入口
 

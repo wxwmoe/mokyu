@@ -7,6 +7,7 @@ mod db;
 #[cfg(feature = "fault-injection")]
 mod faults;
 mod http;
+mod integrity;
 mod lifecycle;
 mod listing;
 mod multipart;

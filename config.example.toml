@@ -99,3 +99,11 @@ task_retention = "30d"
 # Background database inventory; page refreshes only read the cached snapshot.
 refresh_interval = "15m"
 query_timeout = "2m"
+
+[integrity]
+# Manual checks only. Effective concurrency also respects the shared resource budget.
+concurrency = 1
+request_timeout = "30s"
+# Optional average limits, with bursts up to one concurrent batch.
+# requests_per_second = 10
+# bandwidth = "10MiB"

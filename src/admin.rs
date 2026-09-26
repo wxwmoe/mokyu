@@ -40,6 +40,26 @@ pub enum Command {
     Task(Tasks),
     #[command(subcommand)]
     Backend(Backend),
+    #[command(subcommand)]
+    Integrity(Integrity),
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Integrity {
+    Check {
+        #[arg(long, value_enum, default_value = "metadata")]
+        mode: crate::integrity::Mode,
+        #[arg(long)]
+        bucket: Option<String>,
+        #[arg(long, requires = "bucket")]
+        key: Option<String>,
+    },
+    Issues {
+        id: Uuid,
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+    },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Buckets {
@@ -357,6 +377,13 @@ pub async fn password_hash(password: String) -> Result<String> {
 pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
     match command {
         Command::Status => app.status().await,
+        Command::Integrity(Integrity::Check { mode, bucket, key }) => {
+            app.integrity_start(crate::integrity::Request { mode, bucket, key })
+                .await
+        }
+        Command::Integrity(Integrity::Issues { id, after, limit }) => {
+            app.integrity_issues(id, after, limit).await
+        }
         Command::Cleanup(Cleanup::Status) => Ok(app.cleanup_status()),
         Command::Cleanup(Cleanup::Run) => app.cleanup_history().await,
         Command::Gc(Gc::Status) => app.gc_status().await,
