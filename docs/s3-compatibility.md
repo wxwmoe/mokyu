@@ -16,7 +16,7 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | UploadPart | 编号 1～10000，可并行、乱序、替换；校验并持久保存每个字节的来源后返回 |
 | CompleteMultipartUpload | 按冻结清单执行整文件 CDC，保存幂等结果；除末片外每片至少 5 MiB，ETag 和顺序须正确 |
 | AbortMultipartUpload | 释放临时引用，与 Complete 互斥 |
-| ListParts | 支持分页，不刷新过期时间 |
+| ListParts | 支持分页，每页的分片元数据一致；跨页不固定快照，不刷新过期时间 |
 | ListMultipartUploads | prefix/delimiter/key+upload-id marker/URL 编码分页，最多 1000 项 |
 | CopyObject | 同部署桶间复制，需源读和目标写权限；复用区块，支持 metadata COPY/REPLACE 及条件复制 |
 | GetObjectAcl / PutObjectAcl | private/public-read 及相应 owner/full-control、AllUsers READ XML；不支持任意 IAM ACL |

@@ -476,7 +476,7 @@ impl App {
         req: S3Request<CompleteMultipartUploadInput>,
     ) -> Result<S3Response<CompleteMultipartUploadOutput>> {
         reject_features(&req.headers)?;
-        let permits = self.admit(false).await?;
+        let permits = self.admit(true).await?;
         let i = &req.input;
         let b = self.bucket(&i.bucket, true).await?;
         let access = req
@@ -618,6 +618,8 @@ impl App {
             let _pins = pins;
             let _upin = upin;
             let _permits = permits;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("multipart-completing").await;
             let result = app
                 .assemble(&u, &parts, &input, &headers, total, &etag, &hash)
                 .await;
@@ -822,23 +824,21 @@ impl App {
         if !(0..=1000).contains(&limit) || !(0..=10000).contains(&marker) {
             return Err(s3_error!(InvalidArgument).into());
         }
-        let rows:Vec<(i32,Uuid)>=sqlx::query_as("SELECT part_number,stream_id FROM parts WHERE upload_id=$1 AND part_number>$2 AND stream_id IS NOT NULL ORDER BY part_number LIMIT $3").bind(u.id).bind(marker).bind(limit as i64+1).fetch_all(&self.db).await?;
+        let rows:Vec<(i32,i64,String,DateTime<Utc>,Value)>=sqlx::query_as("SELECT p.part_number,s.size,s.etag,s.touched_at,s.checksums FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number>$2 ORDER BY p.part_number LIMIT $3").bind(u.id).bind(marker).bind(limit as i64+1).fetch_all(&self.db).await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("list-parts-read").await;
         let truncated = rows.len() > limit as usize;
         let mut parts = Vec::new();
         let mut last = marker;
-        for (number, id) in rows.into_iter().take(limit as usize) {
-            let s: StoredStream = sqlx::query_as("SELECT * FROM streams WHERE id=$1")
-                .bind(id)
-                .fetch_one(&self.db)
-                .await?;
+        for (number, size, etag, touched_at, checksums) in rows.into_iter().take(limit as usize) {
             let mut part = Part {
                 part_number: Some(number),
-                size: Some(s.size),
-                e_tag: Some(ETag::Strong(s.etag)),
-                last_modified: Some(stamp(s.touched_at)),
+                size: Some(size),
+                e_tag: Some(ETag::Strong(etag)),
+                last_modified: Some(stamp(touched_at)),
                 ..Default::default()
             };
-            checksums!(part, &s.checksums);
+            checksums!(part, &checksums);
             parts.push(part);
             last = number;
         }

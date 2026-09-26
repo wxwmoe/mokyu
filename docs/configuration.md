@@ -86,7 +86,7 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 | --- | --- | --- |
 | `processing.cpu_jobs` | 正整数 / 自动 | 并行压缩/哈希/加解密等阻塞计算预算 |
 | `processing.inflight_bytes` | 大小 / 自动 | 在途数据槽预算，非进程 RSS 硬限制 |
-| `processing.upload_concurrency` | 正整数 / 自动 | 同时接收 PUT/part/完成操作的上限 |
+| `processing.upload_concurrency` | 正整数 / 自动 | PUT/part/完成操作的并发上限；完成操作持续占用名额直到后台合并结束 |
 | `processing.read_concurrency` | 正整数 / 自动 | 同时流式读取上限 |
 | `processing.backend_concurrency` | 正整数 / 自动 | 后端请求并发上限 |
 | `processing.connections` | 正整数 / 自动 | 三入口合计连接上限 |
