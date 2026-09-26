@@ -89,18 +89,16 @@ pub fn encode(
     input: Vec<u8>,
     secrets: &Secrets,
     min_savings_percent: u8,
+    compression: &crate::compression::Pool,
+    should_compress: bool,
 ) -> Result<(Chunk, Vec<u8>, Bytes)> {
     ensure!(
         input.len() == c.raw_size as usize && blake3::hash(&input).as_bytes() == c.hash.as_slice(),
         "chunk input mismatch"
     );
-    let compressed = zstd::bulk::compress(&input, 3)?;
-    c.compressed = compressed.len() < input.len();
-    let mut encoded = if c.compressed {
-        compressed
-    } else {
-        input.clone()
-    };
+    let compressed = compression.compress(&input, should_compress)?;
+    c.compressed = compressed.is_some();
+    let mut encoded = compressed.unwrap_or_else(|| input.clone());
     let tag_len = if c.algorithm == "none" { 0 } else { 16 };
     c.stored_size = Some(i32::try_from(encoded.len() + tag_len)?);
     let cache = if cache_compressed(&c, min_savings_percent) {
@@ -234,6 +232,7 @@ mod tests {
     use std::collections::BTreeMap;
     #[test]
     fn fixed_format_vectors() {
+        let compression = crate::compression::Pool::new(Default::default(), 1).unwrap();
         let input = b"media-gateway-v1";
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
             let key_id = if algorithm == "none" { "" } else { "test-key" };
@@ -259,7 +258,8 @@ mod tests {
                 state: "preparing".into(),
                 created_at: "2026-09-21T00:00:00Z".parse().unwrap(),
             };
-            let (c, encoded, cache) = encode(c, input.to_vec(), &secrets, 20).unwrap();
+            let (c, encoded, cache) =
+                encode(c, input.to_vec(), &secrets, 20, &compression, true).unwrap();
             assert_eq!(
                 hex::encode(&c.hash),
                 "1ed8177cb9b303cde3647b13887acb45f852af54364751de2067abb8fcd7c257"
@@ -272,10 +272,40 @@ mod tests {
             assert_eq!(hex::encode(&encoded), expected);
             assert_eq!(decode(&c, encoded, &secrets, 20).unwrap().0.as_ref(), input);
             assert_eq!(decode_cache(&c, cache, false).unwrap().as_ref(), input);
+
+            // Older writers stored even small gains, below the current default savings gate.
+            let legacy = crate::compression::Pool::new(
+                crate::compression::Config {
+                    min_savings_percent: 0,
+                    min_savings_bytes: 0,
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+            let small = vec![42; 128];
+            let mut historical = c;
+            historical.hash = blake3::hash(&small).as_bytes().to_vec();
+            historical.raw_size = small.len() as i32;
+            let (historical, encoded, cache) =
+                encode(historical, small.clone(), &secrets, 20, &legacy, true).unwrap();
+            assert!(historical.compressed);
+            assert_eq!(
+                decode(&historical, encoded, &secrets, 20)
+                    .unwrap()
+                    .0
+                    .as_ref(),
+                small
+            );
+            assert_eq!(
+                decode_cache(&historical, cache, true).unwrap().as_ref(),
+                small
+            );
         }
     }
     #[test]
     fn formats_authenticate_all_metadata_and_payload() {
+        let compression = crate::compression::Pool::new(Default::default(), 1).unwrap();
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
             let key_id = if algorithm == "none" { "" } else { "test-key" };
             let secrets = Secrets {
@@ -305,7 +335,8 @@ mod tests {
                     state: "preparing".into(),
                     created_at: "2026-09-21T00:00:00Z".parse().unwrap(),
                 };
-                let (c, stored, cache) = encode(c, input.clone(), &secrets, 20).unwrap();
+                let (c, stored, cache) =
+                    encode(c, input.clone(), &secrets, 20, &compression, true).unwrap();
                 let (raw, fetched_cache) = decode(&c, stored.clone(), &secrets, 20).unwrap();
                 assert_eq!(raw.as_ref(), input);
                 assert_eq!(cache, fetched_cache);
@@ -324,8 +355,15 @@ mod tests {
                 oversized.raw_size = MAX as i32 + 1;
                 assert!(decode_cache(&oversized, cache.clone(), cache_compressed(&c, 20)).is_err());
                 for threshold in [0, 100] {
-                    let (c, encoded, cache) =
-                        encode(c.clone(), input.clone(), &secrets, threshold).unwrap();
+                    let (c, encoded, cache) = encode(
+                        c.clone(),
+                        input.clone(),
+                        &secrets,
+                        threshold,
+                        &compression,
+                        true,
+                    )
+                    .unwrap();
                     assert_eq!(stored, encoded);
                     assert_eq!(decode(&c, encoded, &secrets, threshold).unwrap().1, cache);
                     assert_eq!(

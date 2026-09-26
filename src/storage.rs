@@ -332,6 +332,7 @@ pub struct Storage {
     pub disk: Arc<Disk>,
     pub secrets: Arc<Secrets>,
     cpu: Arc<Semaphore>,
+    pub compression: Arc<crate::compression::Pool>,
     requests: Arc<Semaphore>,
     fifo: tokio::sync::Mutex<Fifo>,
     cache_writes: tokio::sync::Mutex<()>,
@@ -398,6 +399,10 @@ impl Storage {
             disk,
             secrets,
             cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
+            compression: Arc::new(crate::compression::Pool::new(
+                c.compression.clone(),
+                budget.cpu_jobs,
+            )?),
             requests: Arc::new(Semaphore::new(budget.backend_concurrency)),
             fifo: tokio::sync::Mutex::new(Fifo::default()),
             cache_writes: tokio::sync::Mutex::new(()),
@@ -589,13 +594,19 @@ impl Storage {
         }
         Ok(())
     }
-    pub async fn encode(&self, c: Chunk, raw: Vec<u8>) -> Result<(Chunk, Vec<u8>, Bytes)> {
+    pub async fn encode(
+        &self,
+        c: Chunk,
+        raw: Vec<u8>,
+        should_compress: bool,
+    ) -> Result<(Chunk, Vec<u8>, Bytes)> {
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
         let threshold = self.min_compression_savings_percent;
+        let compression = self.compression.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            codec::encode(c, raw, &secrets, threshold)
+            codec::encode(c, raw, &secrets, threshold, &compression, should_compress)
         })
         .await?
     }

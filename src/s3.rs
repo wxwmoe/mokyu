@@ -345,6 +345,11 @@ impl S3 for Gateway {
                     true,
                 )
                 .await?;
+            let should_compress = self
+                .0
+                .config
+                .compression
+                .should_try(i.content_type.as_deref(), &i.key);
             let body = req
                 .input
                 .body
@@ -360,6 +365,7 @@ impl S3 for Gateway {
                     req.input.content_length,
                     req.input.checksum_algorithm.as_ref().map(|a| a.as_str()),
                     None,
+                    should_compress,
                 )
                 .await?;
             self.0

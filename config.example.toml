@@ -64,6 +64,19 @@ client_idle_timeout = "120s"
 # Keep decrypted Zstd payloads only when they save at least this percentage.
 min_compression_savings_percent = 20
 
+[compression]
+# Screening only: always tries every new chunk; sample probes four regions;
+# file_type skips known compressed MIME types. Deduplicated chunks stay unchanged.
+strategy = "always"
+level = 3
+# Both savings thresholds must be met, excluding encryption overhead.
+min_savings_percent = 2
+min_savings_bytes = 256
+# Release idle Zstd contexts and scratch buffers; 0s disables retention between jobs.
+context_idle_timeout = "30s"
+# file_type only: omit for built-in types, replace with an array, or [] to skip none.
+# skip_mime_types = ["image/jpeg", "image/png", "video/mp4", "application/zip"]
+
 [encryption]
 algorithm = "aes-256-gcm"
 keyring_file = "keys/keyring.toml"

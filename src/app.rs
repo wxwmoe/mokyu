@@ -295,7 +295,13 @@ impl App {
         tx.commit().await?;
         Ok(())
     }
-    pub async fn put_chunk(&self, stream: Uuid, offset: i64, raw: Vec<u8>) -> Result<Chunk> {
+    pub async fn put_chunk(
+        &self,
+        stream: Uuid,
+        offset: i64,
+        raw: Vec<u8>,
+        should_compress: bool,
+    ) -> Result<Chunk> {
         ensure!(!raw.is_empty() && raw.len() <= MAX, "invalid chunk length");
         let hash = *blake3::hash(&raw).as_bytes();
         let mutex = {
@@ -334,7 +340,7 @@ impl App {
         tx.commit().await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-allocated").await;
-        let (c, encoded, cache) = self.storage.encode(c, raw).await?;
+        let (c, encoded, cache) = self.storage.encode(c, raw, should_compress).await?;
         sqlx::query("UPDATE chunks SET stored_size=$2,compressed=$3,nonce=$4,state='uploading' WHERE id=$1 AND state='preparing'")
             .bind(c.id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).execute(&self.db).await?;
         #[cfg(feature = "fault-injection")]

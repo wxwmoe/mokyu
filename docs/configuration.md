@@ -55,6 +55,12 @@
 | `cache.max_size` | optional size / 无单独字节配额 | chunks 缓存实际文件字节上限；包括写入预留 |
 | `cache.max_entries` | positive integer / 自动 | 缓存文件索引条目预算，ghost 元数据同样有界 |
 | `cache.min_compression_savings_percent` | integer 0～100 / `20` | 压缩至少节省此百分比才保留 `.zst`，否则保存 `.raw`；0 保留所有已压缩载荷，100 全部缓存原始字节；只影响新填充 |
+| `compression.strategy` | enum / `always` | `always` 全部试压；`sample` 抽样筛选；`file_type` 按对象类型筛选 |
+| `compression.level` | signed integer / `3` | 当前 Zstd 支持的等级，包含负等级；0 使用 Zstd 默认等级，不表示关闭压缩；高等级需要更多 CPU 和工作内存 |
+| `compression.min_savings_percent` | integer 0～100 / `2` | 后端保存压缩载荷要求的最低节省比例，排除加密标签；与字节门槛同时满足 |
+| `compression.min_savings_bytes` | nonnegative integer / `256` | 最低节省字节数；两个门槛均为0时仍必须严格缩小 |
+| `compression.context_idle_timeout` | duration / `30s` | Zstd 上下文和试压缓冲区的闲置保留时间；允许 `0s` 表示任务结束即释放 |
+| `compression.skip_mime_types` | string array / 内置名单 | 仅 `file_type` 使用；省略采用内置名单，显式数组替换名单，`[]` 不跳过任何类型；仅精确 MIME，忽略大小写，不接受参数或通配符 |
 | `encryption.algorithm` | enum / `aes-256-gcm` | `none` / `aes-256-gcm` / `chacha20-poly1305`；只决定新写入 |
 | `encryption.keyring_file` | optional path / 加密时必填 | 当前写密钥与历史读密钥 |
 | `gc.unreferenced_grace` | duration / `48h` | 失去最后引用/活跃保护后的远端回收宽限 |
@@ -81,7 +87,9 @@ duration 上限为 `i64::MAX / 1000` 秒；`statistics.query_timeout` 另受 Pos
 
 `M` 取 `/proc/meminfo` 的 MemAvailable 与可读 cgroup v2 / 父级 `memory.max` 的较小值，内存探测失败时回退 512 MiB
 
-默认 `inflight=M/4`，槽大小 `S=32MiB + 2×max(aws_chunk_limit−8MiB,0)`
+默认 `inflight=M/4`，槽大小 `S=32MiB + W + 2×max(aws_chunk_limit−8MiB,0)`
+
+`W` 为压缩工作区预算：静态链接的 Zstd 根据等级给出的单线程一次性压缩上下文上界的两倍，加上最大4MiB区块的压缩输出上界及16字节标签空间。两倍上下文预算覆盖重分配时的临时重叠，输出预算同时覆盖闲置缓冲区。该估算对输入大小保守，高等级在小内存容器中可能因不足两个槽而拒绝启动；可降低等级或增加容器内存与在途预算。
 
 槽数 `N=floor(inflight/S)`。至少要有两个槽，且 inflight 不得超过 `M/2`
 
@@ -97,9 +105,29 @@ duration 上限为 `i64::MAX / 1000` 秒；`statistics.query_timeout` 另受 Pos
 
 显式 cpu_jobs ≤ N、upload_concurrency < N、read_concurrency ≤ N、cache.max_entries ≤ M/256/8
 
-例如 4 CPU / 1GiB 容器、默认 8MiB AWS chunk 时：8 个数据槽、4 个上传、8 个读取、16 个后端请求、12 个业务 DB 连接
+启动日志及运行统计中的 `slot_bytes`、`data_slots` 等字段显示当前等级下实际采用的预算。
 
 磁盘空间可通过 `multipart.local_limit` 和 `cache.max_size` 分别限制
+
+## 压缩策略
+
+默认 `always` 关闭筛选，对每个需要新编码的区块进行完整试压。三个策略最终都要求压缩结果严格小于原始数据，并同时满足比例及字节门槛。已去重命中的区块直接复用；调整策略、等级或门槛不重写旧区块，也不改变读取方式。`cache.min_compression_savings_percent` 独立决定本地缓存是否保留压缩。
+
+`sample` 对小于256KiB的区块直接试压；其余在头尾及中间两处各独立试压一段。每段长度为区块大小的1/64，限制在16～64KiB；1MiB区块最多采样64KiB，4MiB区块最多采样256KiB。任一段变小就停止采样并完整试压，只有四段均无收益时跳过。抽样与完整试压使用相同等级。局部或远距离重复可能被漏判，样本节省率不能代表全块节省率；需要尽量保留压缩收益时使用 `always`。
+
+`file_type` 只按类型筛选，不叠加抽样。优先使用去掉参数、统一大小写后的对象 `Content-Type`；缺失、无效或为 `application/octet-stream` 时用 key 的扩展名补充。未知类型仍完整试压。普通 PUT 使用对象类型；multipart 使用初始化时的类型，包括乱序分片、边界重切、重启后继续及 Complete 尾部，不要求 UploadPart 携带相同请求头。CopyObject 直接复用已有区块，不重新编码；UploadPartCopy 尚不支持。
+
+内置跳过名单如下；这些类型仍可能有压缩收益，是否跳过由所选策略决定：
+
+| 类别 | MIME |
+| --- | --- |
+| 图片 | `image/jpeg`, `image/png`, `image/apng`, `image/gif`, `image/webp`, `image/avif` |
+| 音视频 | `video/mp4`, `video/webm`, `audio/mp4`, `audio/mpeg`, `audio/aac`, `audio/ogg`, `video/ogg`, `application/ogg`, `audio/flac`, `audio/x-flac` |
+| 压缩文件 | `application/zip`, `application/gzip`, `application/x-gzip`, `application/x-7z-compressed`, `application/vnd.rar`, `application/x-rar-compressed`, `application/x-xz`, `application/x-bzip2`, `application/zstd` |
+
+扩展名补充支持 jpg/jpeg/jpe、png、apng、gif、webp、avif、mp4/m4v、webm、m4a、mp3/mp2、aac、ogg/oga/opus、ogv、ogx、flac、zip、gz/tgz、7z、rar、xz、bz2、zst/zstd；另外识别 svg、txt、html/htm、css、js/mjs、json、xml，以便自定义名单。不存在 `image/*` 之类整类跳过规则，SVG 默认仍试压。
+
+压缩上下文按需创建，在现有 CPU 并发范围内独占使用；同一任务的抽样与完整试压复用临时缓冲区。采用的压缩结果直接交给加密和上传，CPU 上下文不等待后端请求。每块仍是独立 Zstd frame，不共享压缩历史。空闲清理每秒检查，即使没有新请求也释放到期工作区；实际进程 RSS 的回落还取决于分配器。
 
 ## 密钥与环境变量
 

@@ -1,6 +1,7 @@
 mod admin;
 mod app;
 mod codec;
+mod compression;
 mod config;
 mod db;
 #[cfg(feature = "fault-injection")]
@@ -110,6 +111,7 @@ fn main() -> Result<()> {
             result=lifecycle::run_history(app.clone())=>result?,
             result=tasks::run(app.clone())=>result?,
             result=stats::run(app.clone())=>result?,
+            result=app.storage.compression.run()=>result?,
             _=shutdown_signal()=>{tracing::info!("stopping listeners; draining active data operations");}
         }
         app.maintenance.store(true,std::sync::atomic::Ordering::Release);

@@ -233,6 +233,7 @@ impl App {
         length: Option<i64>,
         algorithm: Option<&str>,
         upload: Option<(Uuid, i32)>,
+        should_compress: bool,
     ) -> Result<(i64, String, Value)> {
         let mut check = Integrity::new(headers, algorithm)?;
         let declared = if let Some(v) = headers.get("x-amz-decoded-content-length") {
@@ -278,7 +279,9 @@ impl App {
                 rest = &rest[take..];
                 if window.len() == MAX {
                     let n = codec::cut(&window);
-                    let chunk = self.put_chunk(stream, offset, window[..n].to_vec()).await?;
+                    let chunk = self
+                        .put_chunk(stream, offset, window[..n].to_vec(), should_compress)
+                        .await?;
                     let taken = self
                         .consume_seed(stream, offset, &chunk, &mut seed, n)
                         .await?;
@@ -312,7 +315,8 @@ impl App {
         } else {
             while !window.is_empty() {
                 let n = codec::cut(&window);
-                self.put_chunk(stream, offset, window[..n].to_vec()).await?;
+                self.put_chunk(stream, offset, window[..n].to_vec(), should_compress)
+                    .await?;
                 window.drain(..n);
                 offset += n as i64;
             }

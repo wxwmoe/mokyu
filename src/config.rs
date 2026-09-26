@@ -25,6 +25,8 @@ pub struct Config {
     #[serde(default)]
     pub cache: Cache,
     #[serde(default)]
+    pub compression: crate::compression::Config,
+    #[serde(default)]
     pub encryption: Encryption,
     #[serde(default)]
     pub gc: Gc,
@@ -351,6 +353,7 @@ impl Config {
             anyhow::anyhow!("invalid TOML configuration, unknown field or wrong type")
         })?;
         let base = path.parent().unwrap_or(Path::new("."));
+        c.compression.validate()?;
         for listen in [&c.listen.s3, &c.listen.web, &c.listen.manage] {
             listen
                 .parse::<std::net::SocketAddr>()
@@ -587,6 +590,8 @@ impl Config {
             .unwrap_or(memory / 4);
         let aws_chunk = bytes(&self.listen.aws_chunk_limit)?;
         let slot_bytes = SLOT_BYTES
+            .checked_add(self.compression.workspace_bytes()?)
+            .context("compression workspace budget overflow")?
             .checked_add(
                 aws_chunk
                     .saturating_sub(8 * 1024 * 1024)
@@ -596,7 +601,9 @@ impl Config {
             .context("AWS chunk limit overflow")?;
         ensure!(
             slot_bytes <= usize::MAX as u64 && slot_bytes <= inflight / 2 && inflight <= memory / 2,
-            "inflight_bytes must allow two data slots and leave half of memory for runtime/cache/OS"
+            "inflight_bytes must allow two data slots ({} bytes each at compression.level={}) and leave half of memory for runtime/cache/OS",
+            slot_bytes,
+            self.compression.level
         );
         let slots = (inflight / slot_bytes) as usize;
         let cpu_jobs = self.processing.cpu_jobs.unwrap_or(cpus.min(slots));

@@ -8,7 +8,7 @@
 
 原始区块的完整32字节BLAKE3是去重哈希。去重域为此部署全部逻辑桶，索引同时包含raw_size、algorithm、key_id，不能跨密钥/编码模式错误复用。对象ETag/S3校验另算，不用BLAKE3代替协议ETag。
 
-每块先尝试zstd level3；只有编码结果比原始字节短才使用，数据库compressed标识实际选择。随后按none/AES-256-GCM/ChaCha20-Poly1305编码；加密方案密钥均32字节、tag16字节，tag附加在密文末尾。none仍校验原始长度与BLAKE3，但不提供密钥认证/保密。
+需要新编码的区块按 `compression.strategy` 决定是否尝试 Zstd，默认全部尝试、level3。压缩后必须严格变小，并同时满足最低节省比例和字节数（默认2%及256字节），否则保存原始载荷。门槛比较排除加密标签；数据库compressed标识实际选择，读取不依赖当前策略或等级。每块独立压缩，不共享跨块字典；旧版本保存的压缩块和原始块继续可读，去重命中不会因配置变化而重编码。详见[压缩配置](configuration.md#压缩策略)。随后按none/AES-256-GCM/ChaCha20-Poly1305编码；加密方案密钥均32字节、tag16字节，tag附加在密文末尾。none仍校验原始长度与BLAKE3，但不提供密钥认证/保密。
 
 ## nonce 与 AAD
 

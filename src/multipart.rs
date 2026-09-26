@@ -211,6 +211,9 @@ impl App {
                     .as_deref()
                     .or(i.checksum_algorithm.as_ref().map(|a| a.as_str())),
                 Some((u.id, i.part_number)),
+                self.config
+                    .compression
+                    .should_try(u.metadata["content_type"].as_str(), &u.object_key),
             )
             .await?;
         {
@@ -372,19 +375,24 @@ impl App {
     pub async fn stitch_pair(&self, upload: Uuid, number: i32) -> Result<()> {
         let lock = self.upload_lock(upload);
         let _guard = lock.lock().await;
-        let active: bool = sqlx::query_scalar("SELECT state='active' FROM uploads WHERE id=$1")
-            .bind(upload)
-            .fetch_one(&self.db)
-            .await?;
-        if !active {
+        let metadata: Option<Value> =
+            sqlx::query_scalar("SELECT metadata FROM uploads WHERE id=$1 AND state='active'")
+                .bind(upload)
+                .fetch_optional(&self.db)
+                .await?;
+        let Some(metadata) = metadata else {
             return Ok(());
-        }
+        };
         let rows:Vec<StoredStream>=sqlx::query_as("SELECT s.* FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number IN ($2,$2+1) AND s.state='ready' ORDER BY p.part_number").bind(upload).bind(number).fetch_all(&self.db).await?;
         if rows.len() != 2 {
             return Ok(());
         }
         let left = &rows[0];
         let right = &rows[1];
+        let should_compress = self
+            .config
+            .compression
+            .should_try(metadata["content_type"].as_str(), &left.object_key);
         let _lpin = self.pin(left.id);
         let _rpin = self.pin(right.id);
         let tail: Option<Extent> = sqlx::query_as(
@@ -431,7 +439,7 @@ impl App {
             }
             let n = codec::cut(&window);
             let chunk = self
-                .put_chunk(work, used as i64, window[..n].to_vec())
+                .put_chunk(work, used as i64, window[..n].to_vec(), should_compress)
                 .await?;
             let l = (data.len() - used).min(n);
             let r = n - l;
@@ -656,6 +664,10 @@ impl App {
                 true,
             )
             .await?;
+        let should_compress = self
+            .config
+            .compression
+            .should_try(u.metadata["content_type"].as_str(), &u.object_key);
         let mut window = Vec::with_capacity(MAX);
         let mut offset = 0;
         let mut full = Integrity::new(&hyper::HeaderMap::new(), u.checksum_algorithm.as_deref())?;
@@ -677,7 +689,8 @@ impl App {
                         rest = &rest[n..];
                         if window.len() == MAX {
                             let n = codec::cut(&window);
-                            self.put_chunk(id, offset, window[..n].to_vec()).await?;
+                            self.put_chunk(id, offset, window[..n].to_vec(), should_compress)
+                                .await?;
                             offset += n as i64;
                             window.drain(..n);
                         }
@@ -692,7 +705,8 @@ impl App {
         }
         while !window.is_empty() {
             let n = codec::cut(&window);
-            self.put_chunk(id, offset, window[..n].to_vec()).await?;
+            self.put_chunk(id, offset, window[..n].to_vec(), should_compress)
+                .await?;
             offset += n as i64;
             window.drain(..n);
         }
