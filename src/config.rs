@@ -29,6 +29,8 @@ pub struct Config {
     #[serde(default)]
     pub gc: Gc,
     #[serde(default)]
+    pub cleanup: Cleanup,
+    #[serde(default)]
     pub statistics: Statistics,
 }
 
@@ -219,6 +221,29 @@ impl Default for Gc {
 }
 
 #[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Cleanup {
+    pub interval: String,
+    pub batch_size: u32,
+    pub max_duration: String,
+    pub deleted_chunk_retention: String,
+    pub upload_retention: String,
+    pub task_retention: String,
+}
+impl Default for Cleanup {
+    fn default() -> Self {
+        Self {
+            interval: "5m".into(),
+            batch_size: 1000,
+            max_duration: "5s".into(),
+            deleted_chunk_retention: "7d".into(),
+            upload_retention: "24h".into(),
+            task_retention: "30d".into(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeyFile {
     active: String,
@@ -379,6 +404,11 @@ impl Config {
             &c.multipart.client_idle_timeout,
             &c.gc.interval,
             &c.gc.unreferenced_grace,
+            &c.cleanup.interval,
+            &c.cleanup.max_duration,
+            &c.cleanup.deleted_chunk_retention,
+            &c.cleanup.upload_retention,
+            &c.cleanup.task_retention,
             &c.manage.session_lifetime,
             &c.statistics.refresh_interval,
             &c.statistics.query_timeout,
@@ -409,6 +439,14 @@ impl Config {
         ensure!(
             c.gc.batch_size > 0 && c.gc.batch_size <= 10_000,
             "gc.batch_size must be 1..10000"
+        );
+        ensure!(
+            c.cleanup.batch_size > 0 && c.cleanup.batch_size <= 10_000,
+            "cleanup.batch_size must be 1..10000"
+        );
+        ensure!(
+            seconds(&c.cleanup.max_duration)? <= 30,
+            "cleanup.max_duration must be 1s..30s"
         );
         ensure!(
             c.multipart.max_active_uploads.is_none_or(|n| n > 0),

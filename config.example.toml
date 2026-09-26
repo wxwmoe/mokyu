@@ -73,6 +73,15 @@ unreferenced_grace = "48h"
 interval = "30m"
 batch_size = 128
 
+[cleanup]
+# Database history only; independent of remote GC grace and upload idle timeout.
+interval = "5m"
+batch_size = 1000
+max_duration = "5s"
+deleted_chunk_retention = "7d"
+upload_retention = "24h"
+task_retention = "30d"
+
 [statistics]
 # Background database inventory; page refreshes only read the cached snapshot.
 refresh_interval = "15m"

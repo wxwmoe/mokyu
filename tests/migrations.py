@@ -2,6 +2,7 @@
 
 Uses the MGW_TEST_BINARY, MGW_TEST_CONFIG and MGW_TEST_DATABASE_FILE settings.
 Requires psycopg and MGW_TEST_ALLOW_STATE_CHANGES=isolated-only.
+Set MGW_TEST_BASELINE_BINARY to a schema-1 binary to also check upgrade rollback.
 """
 import hashlib
 import json
@@ -18,6 +19,10 @@ conninfo = Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip()
 db = psycopg.connect(conninfo, autocommit=True)
 assert db.execute("SELECT to_regclass('gateway_meta'),to_regclass('_sqlx_migrations')").fetchone() == (None, None)
 process = None
+migrations = Path(__file__).resolve().parents[1] / 'migrations'
+checksums = {int(path.stem.split('_')[0]): hashlib.sha384(path.read_bytes()).digest()
+             for path in migrations.glob('*.sql')}
+latest = max(checksums)
 
 
 def cli(*args):
@@ -25,9 +30,9 @@ def cli(*args):
     return json.loads(result.stdout)
 
 
-def start():
+def start(binary=None):
     global process
-    process = subprocess.Popen(command + ['serve'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen([binary or command[0], *command[1:], 'serve'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
 
 def stopped_with(message):
@@ -85,12 +90,48 @@ try:
     assert history() == []
     print('PASS interrupted migration rolls back schema and can be retried', flush=True)
 
+    if baseline := os.environ.get('MGW_TEST_BASELINE_BINARY'):
+        start(baseline)
+        ready()
+        cli('bucket', 'create', 'upgrade-preserved')
+        old_bucket = db.execute("SELECT id,created_at FROM buckets WHERE name='upgrade-preserved'").fetchone()
+        stop()
+        old_history = history()
+        assert [row[0] for row in old_history] == [1]
+        db.execute('CREATE INDEX tasks_completed ON tasks(id)')
+        start()
+        stopped_with('apply database migrations')
+        assert db.execute("SELECT to_regclass('chunks_deleted'),to_regclass('uploads_finished')").fetchone() == (None, None)
+        assert db.execute('SELECT schema_version FROM gateway_meta').fetchone()[0] == 1
+        assert history() == old_history
+        db.execute('DROP INDEX tasks_completed')
+        with psycopg.connect(conninfo) as blocker:
+            blocker.execute('LOCK TABLE _sqlx_migrations IN SHARE MODE')
+            start()
+            for _ in range(100):
+                waiting = db.execute("""SELECT pid FROM pg_stat_activity WHERE datname=current_database()
+                    AND wait_event_type='Lock' AND query ILIKE '%INSERT INTO _sqlx_migrations%'""").fetchone()
+                if waiting:
+                    break
+                assert process.poll() is None, process.stderr.read()
+                time.sleep(.1)
+            else:
+                raise AssertionError('upgrade did not reach history insertion')
+            assert db.execute('SELECT pg_terminate_backend(%s)', waiting).fetchone()[0]
+            stopped_with('apply database migrations')
+        assert db.execute("SELECT to_regclass('chunks_deleted'),to_regclass('uploads_finished')").fetchone() == (None, None)
+        assert db.execute('SELECT schema_version FROM gateway_meta').fetchone()[0] == 1
+        assert history() == old_history
+        assert db.execute("SELECT id,created_at FROM buckets WHERE name='upgrade-preserved'").fetchone() == old_bucket
+        print('PASS failed and interrupted schema-1 upgrade preserves data and rolls back new indexes', flush=True)
+
     start()
     ready()
-    assert db.execute('SELECT schema_version FROM gateway_meta').fetchone()[0] == 1
+    assert db.execute('SELECT schema_version FROM gateway_meta').fetchone()[0] == latest
     before = history()
-    expected = hashlib.sha384((Path(__file__).resolve().parents[1] / 'migrations/0001_baseline.sql').read_bytes()).digest()
-    assert len(before) == 1 and before[0][0] == 1 and before[0][2] and before[0][3] == expected
+    expected = checksums[1]
+    assert [row[0] for row in before] == sorted(checksums)
+    assert all(row[2] and row[3] == checksums[row[0]] for row in before)
     cli('bucket', 'create', 'migration-preserved')
     bucket = db.execute("SELECT id,created_at FROM buckets WHERE name='migration-preserved'").fetchone()
     deployment = db.execute('SELECT deployment_id FROM gateway_meta').fetchone()
@@ -101,7 +142,7 @@ try:
     assert db.execute("SELECT id,created_at FROM buckets WHERE name='migration-preserved'").fetchone() == bucket
     assert db.execute('SELECT deployment_id FROM gateway_meta').fetchone() == deployment
     stop()
-    print('PASS baseline 1 initialized once; restart preserves data and migration history', flush=True)
+    print('PASS migrations initialize once; restart preserves data and migration history', flush=True)
 
     db.execute("UPDATE _sqlx_migrations SET checksum=decode(repeat('00',48),'hex') WHERE version=1")
     start()
@@ -114,7 +155,7 @@ try:
     db.execute('UPDATE gateway_meta SET schema_version=999')
     start()
     stopped_with('database schema is newer')
-    db.execute('UPDATE gateway_meta SET schema_version=1')
+    db.execute('UPDATE gateway_meta SET schema_version=%s', (latest,))
     start()
     ready()
     assert history() == before

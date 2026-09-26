@@ -1,6 +1,6 @@
-# 数据库结构（0.0.2 / schema_version=1）
+# 数据库结构（0.0.2 / schema_version=2）
 
-0.0.2 的运行统计和容量快照保存在进程内，无新增表或迁移；继续使用 0.0.1 发布的 `0001_baseline.sql`。升级保留现有数据，后续结构变更从 0002 开始追加迁移。
+0.0.2 通过 `0002_cleanup.sql` 添加清理/引用索引及表级自动维护参数，保留现有数据和字段。0.0.1 发布的 `0001_baseline.sql` 保持不变；运行统计、容量快照和最近清理结果保存在进程内，不新增业务表。
 
 PostgreSQL 使用同步提交与 fsync；服务独占一个数据库级 advisory lock 和 data 文件锁
 
@@ -24,7 +24,7 @@ SQLx 管理的迁移历史表，纳入数据库备份，不应手动修改
 | 字段 | PostgreSQL 类型 | 可空 | 默认 / identity | 含义 |
 | --- | --- | --- | --- | --- |
 | `singleton` | boolean | 否 | `true` | 固定 true，保证仅一行 |
-| `schema_version` | integer | 否 | — | 当前数据库结构版本1，与最近一次迁移编号一致 |
+| `schema_version` | integer | 否 | — | 当前数据库结构版本2，与最近一次迁移编号一致 |
 | `deployment_id` | uuid | 否 | — | 部署 UUID |
 | `backend_identity` | text | 否 | — | 后端 endpoint/bucket/prefix 身份 |
 | `backend_initialized` | boolean | 否 | `false` | 后端 meta.json 已完成绑定；标识丢失时不自动重建 |
@@ -450,12 +450,29 @@ CREATE INDEX tasks_active ON tasks(state,created_at);
 
 - **streams**：writing → ready（原子发布）→ retired；失败或启动恢复中的 writing → abandoned。对象当前指针只指向完整 ready 版本。GET 固定版本并持有内存读取保护，覆盖/删除不影响已接纳的流。
 - **objects**：主键为桶+key，stream_id 指向可见 generation。write_epoch 每次写/删除更换，旧任务迟到不能发布。NULL 占位在没有写入版本后清理。
-- **chunks**：preparing（ID已提交）→ uploading（编码元数据已落库）→ ready（后端成功并建立来源引用）；不确定失败转 failed，后续加密分配新ID/UUID。ready/failed → deleting（数据库先认领）→ deleted（后端确认删除）。deleted 为删除日志，当前版保留，不再参与去重；不得重用其物理key。
+- **chunks**：preparing（ID已提交）→ uploading（编码元数据已落库）→ ready（后端成功并建立来源引用）；不确定失败转 failed，后续加密分配新ID/UUID。ready/failed → deleting（数据库先认领）→ deleted（后端确认删除）。deleted 日志从 deleted_at 起默认保留7天，仍有extent时不删除；不再参与去重，不得重用其物理key或identity ID。
 - **extents**：每行二选一引用 chunk 或 fragment，不保存全对象大字节串。最终对象只能引用 ready chunk，offset 连续且总长正确才发布。part 可混合来源和局部偏移。
 - **uploads/parts**：active → completing → completed，或 aborted。part替换只有新版本成功后切换指针。Complete 冻结清单、生成正式CDC结果，并在同一发布事务保存 result；相同清单重试返回该结果。重启时未提交 completing 恢复 active；completed 不重复发布。ListParts 不修改活动时间。
 - **引用保护**：所有 extents、owner_stream、活跃读取/完成/写入保护共同决定生命周期。失去最后引用时设置 unreferenced_at；再次引用清空资格。删除认领与新引用在行锁/短协调区内核对；删除中的块不参与新去重。
 - **本地片段**：先登记写入所有者，再持久写文件和目录，最后提交 sealed/范围映射。启动时核对引用片段完整性；缺失唯一来源使对应未完成上传失效，不会让残缺对象发布。
-- **tasks**：queued → running → completed/failed，可暂停并从持久cursor继续；重启把 running 重排 queued。sweep不把缓存或某种区块状态当作不存在，删除前重新查询整个索引。
+- **tasks**：queued → running → completed/failed，可暂停并从持久cursor继续；重启把 running 重排 queued。completed 从 updated_at 起默认保留30天，包括sweep预览；其他状态不按年龄清理。sweep不把缓存或某种区块状态当作不存在，删除前重新查询整个索引。
+
+completed/aborted uploads 从 touched_at 起默认保留24小时，且仍有part或活跃保护时暂缓。过期后Complete重试返回NoSuchUpload，不影响已发布对象。过期sessions分批移除。清理不重置chunks identity序列，也不删除key_fingerprints。
+
+## 0002 新增索引与维护参数
+
+| 索引 | 列与条件 |
+| --- | --- |
+| `chunks_deleted` | `(deleted_at,id)` WHERE state='deleted' |
+| `uploads_finished` | `(touched_at,id)` WHERE state IN ('completed','aborted') |
+| `tasks_completed` | `(updated_at,id)` WHERE state='completed' |
+| `objects_empty` | `(bucket_id,key)` WHERE stream_id IS NULL |
+| `streams_writing` | `(bucket_id,object_key)` WHERE state='writing' |
+| `parts_stream` | `(stream_id)` WHERE stream_id IS NOT NULL |
+| `uploads_output` | `(output_stream)` WHERE output_stream IS NOT NULL |
+| `fragments_cleanup` | `(created_at,id)` |
+
+chunks、extents、streams、objects、uploads、parts、fragments、sessions、tasks 的表级 `autovacuum_vacuum_scale_factor=0.05`、`autovacuum_analyze_scale_factor=0.02`，其他阈值沿用 PostgreSQL 配置。无新增字段或业务表。
 
 FK 默认 NO ACTION，例外均明确写在上面的 SQL：授权/域名跟桶级联、会话跟用户级联、part跟上传级联、extent跟stream级联；owner/output/task目标在对应来源移除时置NULL。删除桶前先清掉依赖对象/上传/版本，区块可被其他桶共享。
 

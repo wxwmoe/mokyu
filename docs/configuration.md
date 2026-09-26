@@ -60,10 +60,18 @@
 | `gc.unreferenced_grace` | duration / `48h` | 失去最后引用/活跃保护后的远端回收宽限 |
 | `gc.interval` | duration / `30m` | 日常远端 GC 空闲检查间隔 |
 | `gc.batch_size` | integer / `128` | 每批工作量，1～10000；同样用于维护任务 |
+| `cleanup.interval` | duration / `5m` | 已结束记录和过期会话的后台清理间隔，启动后也执行一次 |
+| `cleanup.batch_size` | integer / `1000` | 每条历史清理 DELETE 的最多行数，1～10000 |
+| `cleanup.max_duration` | duration / `5s` | 每轮历史清理总时限，1～30 秒；本地引用清理也在批次间检查此预算 |
+| `cleanup.deleted_chunk_retention` | duration / `7d` | 从远端删除成功后的 `deleted_at` 起保留区块日志 |
+| `cleanup.upload_retention` | duration / `24h` | completed/aborted 上传记录保留时间；与活动上传的 idle_timeout 无关 |
+| `cleanup.task_retention` | duration / `30d` | 已完成任务保留时间，包括 backend sweep 预览 |
 | `statistics.refresh_interval` | duration / `15m` | 后台容量汇总完成后的等待间隔；页面刷新只读取快照 |
 | `statistics.query_timeout` | duration / `2m` | 一轮汇总的总时限及 SQL 语句时限 |
 
 duration 上限为 `i64::MAX / 1000` 秒；`statistics.query_timeout` 另受 PostgreSQL 限制，最多 2,147,483 秒。数量乘法溢出会拒绝。显式资源参数若与可用内存预算矛盾，也拒绝启动。
+
+省略 `[cleanup]` 使用以上默认值。到期记录分批提交，达到时限后在后续轮次继续；锁住的行可跳过，不需要额外 crontab。历史清理在 GC 暂停及维护模式下仍运行，且不会删除远端数据。`CompleteMultipartUpload` 的重复完成结果只在上传记录保留期内提供，已发布对象不受该期限影响；清空桶会提前移除该桶的上传记录。已完成的 sweep 预览过期后需要重新预览。
 
 省略 `[statistics]` 时使用默认间隔和时限。汇总使用只读事务，不新增业务表，失败时保留上次结果；大库可增大刷新间隔，按数据库性能调整时限。详见[管理 API](manage-api-reference.md#容量快照)。
 

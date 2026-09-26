@@ -424,12 +424,36 @@ async fn collect(app: &App) -> Result<Value> {
     let uploads: Value = sqlx::query_scalar(
         "SELECT COALESCE(jsonb_object_agg(state,n),'{}') FROM (SELECT state,count(*) n FROM uploads WHERE state IN ('active','completing') GROUP BY state) u")
         .fetch_one(&mut *tx).await?;
+    let cleanup: Value = sqlx::query_scalar(
+        "SELECT jsonb_object_agg(kind,jsonb_build_object('eligible',n,'oldest_at',oldest)) FROM (
+            SELECT 'chunks' kind,count(*) n,min(deleted_at) oldest FROM chunks c
+                WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second'
+                AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)
+            UNION ALL SELECT 'uploads',count(*),min(touched_at) FROM uploads u
+                WHERE state IN ('completed','aborted') AND touched_at<now()-$2*interval '1 second'
+                AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id)
+            UNION ALL SELECT 'tasks',count(*),min(updated_at) FROM tasks
+                WHERE state='completed' AND updated_at<now()-$3*interval '1 second'
+            UNION ALL SELECT 'sessions',count(*),min(expires_at) FROM sessions WHERE expires_at<now()
+        ) backlog")
+        .bind(config::seconds(&app.config.cleanup.deleted_chunk_retention)? as f64)
+        .bind(config::seconds(&app.config.cleanup.upload_retention)? as f64)
+        .bind(config::seconds(&app.config.cleanup.task_retention)? as f64)
+        .fetch_one(&mut *tx).await?;
+    let database: Vec<Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object('table',relname,'total_bytes',pg_total_relation_size(relid),
+            'index_bytes',pg_indexes_size(relid),'live_rows_estimate',n_live_tup,
+            'dead_rows_estimate',n_dead_tup,'last_autovacuum',last_autovacuum,'last_autoanalyze',last_autoanalyze)
+         FROM pg_stat_user_tables WHERE schemaname='public'
+            AND relname IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions')
+         ORDER BY relname")
+        .fetch_all(&mut *tx).await?;
     tx.commit().await?;
     Ok(
         json!({"as_of":as_of,"collected_at":Utc::now(),"objects":buckets[0]["objects"],
         "logical_bytes":buckets[0]["logical_bytes"],"buckets":buckets.iter().skip(1).take(1000).collect::<Vec<_>>(),
         "buckets_truncated":buckets.len()>1001,"chunks":chunks,"live":live,
-        "unreferenced":unreferenced,"tasks":tasks,"uploads":uploads}),
+        "unreferenced":unreferenced,"tasks":tasks,"uploads":uploads,"cleanup":cleanup,"database":database}),
     )
 }
 

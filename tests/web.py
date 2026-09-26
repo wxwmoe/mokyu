@@ -60,11 +60,13 @@ with sync_playwright() as playwright:
     page.locator('#facts').filter(has_text='检测到的内存预算').wait_for()
     page.locator('#statistics').filter(has_text='区块缓存命中率').wait_for()
     assert page.locator('#statistics .stats-cards>div').count() == 6
+    assert page.get_by_role('table', name='数据库清理', exact=True).count() == 1
     page.screenshot(path=str(results / 'web-status-zh-CN.png'), full_page=True)
     page.locator('#language').select_option('en')
     assert 'Detected memory budget' in page.locator('#facts').inner_text()
     assert page.locator('#detail-title').inner_text() == 'Service status'
     assert 'HTTP requests' in page.locator('#statistics').inner_text()
+    assert page.get_by_role('table', name='Database cleanup', exact=True).count() == 1
     page.get_by_role('button', name='Refresh statistics', exact=True).click()
     page.locator('#statistics').filter(has_text='Indexed remote size').wait_for()
     page.screenshot(path=str(results / 'web-status-en.png'), full_page=True)

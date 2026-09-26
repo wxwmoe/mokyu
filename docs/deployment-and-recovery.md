@@ -77,10 +77,15 @@ S3 兼容访问网关，path-style 默认可用，region 需要匹配 listen.reg
 docker logs --tail 100 media-gateway
 docker exec media-gateway cli status
 docker exec media-gateway cli gc status
+docker exec media-gateway cli cleanup status
 docker exec media-gateway cli task list
 ```
 
 GC 和上传过期由服务内部调度，无需 `crontab` 定时执行
+
+数据库历史同样自动清理：默认保留已删除区块日志 7 天、已结束上传 24 小时、已完成任务 30 天。失败/暂停/运行中的任务，以及尚未确认远端删除的区块，不按年龄删除。历史保留不会延长后端区块保留或数据库恢复窗口；identity 序列和密钥指纹不会被回收。
+
+管理页显示清理结果、后台快照中的到期积压、表/索引大小、估计死行和自动维护时间。可用 `cli cleanup run` 提前执行一轮，命令不会绕过保留期。正常 DELETE 后交由 PostgreSQL autovacuum/ANALYZE 回收可复用空间和更新统计；项目不自动运行 `VACUUM FULL`，普通 VACUUM 通常也不会让操作系统看到文件立即缩小。
 
 ## 备份材料
 
@@ -116,5 +121,7 @@ PITR 可恢复到的时间同时受数据库 / WAL 保留、后端全局 GC 宽�
 4. 检查启动日志、`cli status`、旧对象和新上传。普通升级不回滚数据库序列，因此不要求更换实际写密钥；从备份恢复数据库时仍须按恢复步骤换写密钥。
 
 每个迁移在事务中执行。失败或中断不会提交该步，服务保持未启动状态；处理原因后可重新启动。已经成功的迁移不会重复执行，也不能修改已发布的迁移文件或手改迁移历史。
+
+0.0.2 的 `0002_cleanup.sql` 添加历史清理/引用索引，并将频繁变动表的 autovacuum/analyze scale factor 分别设为 0.05/0.02。升级会在监听启动前建立索引；大库需要为索引构建预留时间及磁盘空间。保持 PostgreSQL autovacuum 启用，表级参数可由数据库管理员按负载调整。
 
 新版数据库不能直接使用旧程序启动；需要回退时按恢复流程还原升级前的一致备份，且需确认对应后端区块仍被保留。项目不自动删除数据库、降级结构或重置用户数据。

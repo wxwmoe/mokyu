@@ -107,6 +107,7 @@ fn main() -> Result<()> {
             result=serve_router(manage_listener,http::manage_router(app.clone()),connections)=>result?,
             result=admin::serve(app.clone())=>result?,
             result=lifecycle::run(app.clone())=>result?,
+            result=lifecycle::run_history(app.clone())=>result?,
             result=tasks::run(app.clone())=>result?,
             result=stats::run(app.clone())=>result?,
             _=shutdown_signal()=>{tracing::info!("stopping listeners; draining active data operations");}

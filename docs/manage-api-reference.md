@@ -77,6 +77,9 @@ CORS每条规则需要非空origins/methods，headers/expose默认空数组，ma
 | `process_memory.rss_bytes/peak_rss_bytes` | Linux 进程常驻内存和峰值；读取不可用时为 null，不等于容器含文件页缓存的内存占用 |
 | `gc_running/upload_slots_available/read_slots_available` | 当前回收状态及可用读写并发槽位 |
 | `storage` | 后台数据库容量快照，见下文 |
+| `cleanup` | `running,interval,batch_size,max_duration,deleted_chunk_retention,upload_retention,task_retention,last_run`；与 `cli cleanup status` 相同 |
+
+`cleanup.last_run` 在首次执行前为 null，此后包含 `started_at,finished_at,duration_ms,deleted,batches,budget_exhausted,last_error`。`deleted` 分别统计 chunks/uploads/tasks/sessions 已确认提交的删除行数；`batches` 包含未删除行的已提交批次。预算耗尽时保留已提交的结果，未完成事务回滚，后续轮次继续；锁等待或其他失败时 `last_error=cleanup_failed`，详情见服务日志。运行状态在进程重启后归零，不逐轮写入任务表。该状态不包含本地 fragment 文件和 extent 引用清理。
 
 每组 HTTP/后端计数包含 `started,completed,active,failed,canceled,client_errors,server_errors,bytes,failure_rate,duration_ms`。`completed` 包括成功、失败和取消；`failed` 包括 HTTP 4xx/5xx、流错误或分片合并的延迟 XML 错误（这种错误可能使用 HTTP 200），`canceled` 为未完成便被丢弃的操作，两者互斥。`failure_rate=(failed+canceled)/completed`；`client_errors/server_errors` 按已产生的 HTTP 状态分别计数，后端组的这两项为 0。HTTP bytes 为交给 HTTP 层的响应数据字节，不含请求体、头部或网络开销，也不保证客户端已接收。
 
@@ -103,6 +106,8 @@ CORS每条规则需要非空origins/methods，headers/expose默认空数组，ma
 | `live` | 当前可见对象引用的区块：`chunks` 为唯一块数，`reference_bytes` 为引用区间总长，`raw_bytes` 为唯一块原始大小，`stored_bytes` 为编码大小，`payload_bytes` 为编码大小减去 AEAD 标签（每块 16 字节，none 为 0） |
 | `unreferenced` | 无 extent 引用且标记无引用的 ready/failed/deleting 区块数和 `stored_bytes`；`eligible_chunks/eligible_bytes` 进一步要求已过 GC 宽限且没有 owner_stream，不代表 GC 已执行或所有可回收对象的精确数量 |
 | `tasks/uploads` | 按状态汇总的任务数量 / active、completing 分片上传数量 |
+| `cleanup` | chunks/uploads/tasks/sessions 各类已到期历史的 `{eligible,oldest_at}`；时间分别取 deleted_at/touched_at/updated_at/expires_at。不计仍有 extent 的区块和仍有 part 的上传，可能包含当前被锁或活跃保护暂缓的行 |
+| `database` | 各业务表 `{table,total_bytes,index_bytes,live_rows_estimate,dead_rows_estimate,last_autovacuum,last_autoanalyze}`；大小含索引和 TOAST，行数来自 PostgreSQL 估计，维护时间允许 null |
 
 去重节省量为 `live.reference_bytes-live.raw_bytes`，比例以 reference_bytes 为分母；压缩节省量为 `live.raw_bytes-live.payload_bytes`，比例以 raw_bytes 为分母。分母为 0 时显示空值。共享区块只在全局计一次，不按桶分摊物理空间；部分区间引用整块时，去重节省量可能为负，保留实际计算结果。物理统计来自数据库，不遍历后端，不包含未索引对象、meta.json、提供商版本或账单规则；未确认上传和删除期间还可能存在短暂差异。
 

@@ -33,6 +33,8 @@ pub enum Command {
     #[command(subcommand)]
     Gc(Gc),
     #[command(subcommand)]
+    Cleanup(Cleanup),
+    #[command(subcommand)]
     Maintenance(Maintenance),
     #[command(subcommand)]
     Task(Tasks),
@@ -70,6 +72,11 @@ pub enum Gc {
     Run,
     Pause,
     Resume,
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Cleanup {
+    Status,
+    Run,
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Maintenance {
@@ -350,6 +357,8 @@ pub async fn password_hash(password: String) -> Result<String> {
 pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
     match command {
         Command::Status => app.status().await,
+        Command::Cleanup(Cleanup::Status) => Ok(app.cleanup_status()),
+        Command::Cleanup(Cleanup::Run) => app.cleanup_history().await,
         Command::Gc(Gc::Status) => app.gc_status().await,
         Command::Gc(Gc::Pause) => {
             sqlx::query("UPDATE gateway_meta SET gc_paused=true")

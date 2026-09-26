@@ -185,6 +185,16 @@ function renderStatistics(value) {
   table('httpStatistics', ['listener', 'completedRequests', 'activeRequests', 'failureRate', 'clientErrors', 'serverErrors', 'canceled', 'meanLatency', 'p95Latency', 'responseBytes'], runtimeRows);
   const backendRows = Object.entries(value.io.backend).map(([name, metric]) => [name.toUpperCase(), number(metric.completed), number(metric.active), number(metric.failed), number(metric.canceled), milliseconds(metric.duration_ms.mean), milliseconds(metric.duration_ms.p95), size(metric.bytes)]);
   table('backendStatistics', ['method', 'completedRequests', 'activeRequests', 'failed', 'canceled', 'meanLatency', 'p95Latency', 'transferredBytes'], backendRows);
+  const cleanup = value.cleanup, lastRun = cleanup.last_run;
+  text('p', lastRun ? t('cleanupLastRun', { time: date(lastRun.finished_at), duration: milliseconds(lastRun.duration_ms) }) : t('cleanupPendingRun'));
+  if (cleanup.running) text('p', t('cleanupRunning'));
+  if (lastRun?.budget_exhausted) text('p', t('cleanupBudget'));
+  if (lastRun?.last_error) text('p', t('cleanupFailed'));
+  table('databaseCleanup', ['cleanupCategory', 'cleanupRemoved', 'cleanupPending', 'cleanupOldest'], ['chunks', 'uploads', 'tasks', 'sessions'].map(kind => [
+    t('cleanup_' + kind), lastRun ? number(lastRun.deleted[kind]) : '—',
+    snapshot ? number(snapshot.cleanup[kind].eligible) : '—', snapshot?.cleanup[kind].oldest_at ? date(snapshot.cleanup[kind].oldest_at) : '—',
+  ]));
+  text('p', t('cleanupHelp'));
   if (!snapshot) return;
   text('p', t('storageHelp'));
   const live = snapshot.live;
@@ -199,6 +209,11 @@ function renderStatistics(value) {
   if (snapshot.buckets_truncated) text('p', t('bucketsTruncated'));
   table('taskStatistics', ['taskState', 'count'], ['queued', 'running', 'paused', 'completed', 'failed'].map(state => [t(state), number(snapshot.tasks[state] || 0)]));
   text('p', t('activeMultipart', { count: number((snapshot.uploads.active || 0) + (snapshot.uploads.completing || 0)) }));
+  table('databaseTables', ['databaseTable', 'totalSize', 'indexSize', 'liveRows', 'deadRows', 'lastAutovacuum', 'lastAutoanalyze'], snapshot.database.map(row => [
+    row.table, size(row.total_bytes), size(row.index_bytes), number(row.live_rows_estimate), number(row.dead_rows_estimate),
+    row.last_autovacuum ? date(row.last_autovacuum) : '—', row.last_autoanalyze ? date(row.last_autoanalyze) : '—',
+  ]));
+  text('p', t('databaseHelp'));
 }
 async function detail(key) {
   const request = ++view, params = { bucket: $('buckets').value, key };
