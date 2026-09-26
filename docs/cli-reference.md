@@ -44,7 +44,7 @@ docker exec media-gateway cli bucket cors media /config/cors.json
 | `user disable USERNAME` | 禁用用户并撤销全部会话 |
 | `user delete USERNAME` | 删除用户及其会话 |
 
-创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入，不接受明文命令参数；自动化时可从 stdin 读取：
+创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入并再次确认，使用 `docker exec -it`；非终端须指定 `--password-stdin`。不接受明文命令参数，自动化时可从 stdin 读取一行：
 
 ```sh
 docker exec -i media-gateway cli user create admin --password-stdin < /secure/password-file
@@ -63,7 +63,7 @@ docker exec -i media-gateway cli user create admin --password-stdin < /secure/pa
 | `gc resume` | 解除暂停；需要立即执行时再调用 `gc run` |
 | `cleanup status` | 返回历史保留策略、运行状态和上轮结果 |
 | `cleanup run` | 立即执行一轮历史清理，遵守保留期、引用和资源预算；已有清理运行时返回当前状态 |
-| `maintenance enable` | 持久禁止新写入和远端 GC，返回 active_operations；须等待已接纳操作排空 |
+| `maintenance enable` | 持久禁止新写入和远端 GC，暂停清桶任务，返回 active_operations；须等待已接纳操作排空 |
 | `maintenance disable` | 恢复写入；须先暂停或完成破坏性 sweep |
 
 ## 后台任务
@@ -75,7 +75,7 @@ docker exec -i media-gateway cli user create admin --password-stdin < /secure/pa
 | `task pause UUID` | 暂停 queued/running 任务，允许当前批次结束 |
 | `task resume UUID` | 从持久进度继续 paused/failed 任务，清除旧错误 |
 
-重启后此前运行的任务自动继续，paused 保持暂停。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge 需要退出维护模式，只读 sweep 预览和巡检可在维护模式下运行。
+重启后此前运行的任务自动继续，paused 保持暂停。维护模式下启动或运行中的 purge 会持久暂停，退出维护后需显式 `task resume`。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge 需要退出维护模式，只读 sweep 预览和巡检可在维护模式下运行。
 
 ### 清空存储桶
 

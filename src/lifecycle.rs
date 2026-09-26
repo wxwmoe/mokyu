@@ -133,7 +133,8 @@ impl App {
         sqlx::query("UPDATE uploads SET state='active' WHERE state='completing'")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE tasks SET state='queued',updated_at=now() WHERE state='running'")
+        sqlx::query("UPDATE tasks SET state=CASE WHEN kind='purge' AND $1 THEN 'paused' ELSE 'queued' END,updated_at=now() WHERE state='running' OR (kind='purge' AND state='queued' AND $1)")
+            .bind(self.maintenance.load(Ordering::Acquire))
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -246,7 +247,7 @@ impl App {
             let chunks:Vec<Option<i64>>=sqlx::query_scalar("DELETE FROM extents WHERE stream_id=$1 AND offset_bytes IN (SELECT offset_bytes FROM extents WHERE stream_id=$1 ORDER BY offset_bytes LIMIT $2) RETURNING chunk_id").bind(id).bind(batch).fetch_all(&mut *tx).await?;
             let count = chunks.len();
             let chunks: Vec<i64> = chunks.into_iter().flatten().collect();
-            sqlx::query("UPDATE chunks c SET unreferenced_at=now() WHERE id=ANY($1) AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)").bind(&chunks).execute(&mut *tx).await?;
+            mark_unreferenced(&mut tx, &chunks).await?;
             let streams = sqlx::query("DELETE FROM streams s WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM chunks WHERE owner_stream=s.id) AND NOT EXISTS(SELECT 1 FROM fragments WHERE owner_stream=s.id)").bind(id).execute(&mut *tx).await?.rows_affected();
             tx.commit().await?;
             removed += count + (detached + fragments + streams) as usize;
@@ -362,6 +363,17 @@ impl App {
         )
     }
 }
+pub(crate) async fn mark_unreferenced(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chunks: &[i64],
+) -> Result<()> {
+    if !chunks.is_empty() {
+        sqlx::query("UPDATE chunks c SET unreferenced_at=COALESCE(unreferenced_at,now()) WHERE id=ANY($1) AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)")
+            .bind(chunks).execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
 struct Running<'a>(&'a std::sync::atomic::AtomicBool);
 impl Drop for Running<'_> {
     fn drop(&mut self) {

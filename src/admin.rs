@@ -265,13 +265,20 @@ pub async fn client(path: &Path, mut command: Command) -> Result<()> {
                 ..
             },
         ) => {
-            ensure!(
-                *password_stdin,
-                "use --password-stdin; passwords are not accepted on the command line"
-            );
-            let mut text = String::new();
-            std::io::stdin().read_line(&mut text)?;
-            *password = Some(text.trim_end_matches(['\r', '\n']).to_owned());
+            *password = Some(if *password_stdin {
+                let mut text = String::new();
+                std::io::stdin().read_line(&mut text)?;
+                text.trim_end_matches(['\r', '\n']).to_owned()
+            } else {
+                ensure!(
+                    std::io::stdin().is_terminal(),
+                    "password input requires a terminal; use docker exec -it or --password-stdin"
+                );
+                let text = rpassword::prompt_password("Password: ")?;
+                let confirmation = rpassword::prompt_password("Confirm password: ")?;
+                ensure!(text == confirmation, "passwords do not match");
+                text
+            });
         }
         Command::Bucket(Buckets::Cors { file, document, .. }) => {
             let meta = std::fs::metadata(&file)?;
@@ -416,10 +423,16 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
                 );
             }
             let _coord = app.coord.lock().await;
+            let mut tx = app.db.begin().await?;
             sqlx::query("UPDATE gateway_meta SET maintenance=$1")
                 .bind(enabled)
-                .execute(&app.db)
+                .execute(&mut *tx)
                 .await?;
+            if enabled {
+                sqlx::query("UPDATE tasks SET state='paused',updated_at=now() WHERE kind='purge' AND state IN ('queued','running')")
+                    .execute(&mut *tx).await?;
+            }
+            tx.commit().await?;
             app.maintenance
                 .store(enabled, std::sync::atomic::Ordering::Release);
             Ok(json!({"maintenance":enabled,"active_operations":app.active.lock().unwrap().len()}))

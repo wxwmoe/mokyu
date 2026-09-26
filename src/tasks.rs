@@ -17,6 +17,7 @@ impl App {
     pub async fn purge_start(&self, name: &str, id: Uuid) -> Result<Value> {
         self.writable()?;
         let _coord = self.coord.lock().await;
+        self.writable()?;
         let mut tx = self.db.begin().await?;
         let found: Option<Uuid> =
             sqlx::query_scalar("SELECT id FROM buckets WHERE name=$1 AND id=$2 FOR UPDATE")
@@ -151,6 +152,21 @@ impl App {
         Ok(json!({"task_id":id,"state":if resume{"queued"}else{"paused"}}))
     }
     async fn purge_batch(&self, id: Uuid, bucket: Uuid, cursor: Option<&str>) -> Result<bool> {
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("purge-before-batch").await;
+        let coord = self.coord.lock().await;
+        if self.maintenance.load(std::sync::atomic::Ordering::Acquire) {
+            sqlx::query("UPDATE tasks SET state='paused',updated_at=now() WHERE id=$1 AND state IN ('queued','running')")
+                .bind(id).execute(&self.db).await?;
+            return Ok(false);
+        }
+        let running: bool = sqlx::query_scalar("SELECT state='running' FROM tasks WHERE id=$1")
+            .bind(id)
+            .fetch_one(&self.db)
+            .await?;
+        if !running {
+            return Ok(false);
+        }
         let batch = self.config.gc.batch_size as i64;
         let uploads:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM uploads WHERE bucket_id=$1 AND state IN ('active','completing') ORDER BY id LIMIT $2").bind(bucket).bind(batch).fetch_all(&self.db).await?;
         if !uploads.is_empty() {
@@ -159,11 +175,10 @@ impl App {
                 let Ok(_guard) = lock.try_lock() else {
                     continue;
                 };
-                self.abort_upload(upload).await?;
+                self.abort_upload_locked(upload, &coord).await?;
             }
             return Ok(false);
         }
-        let _coord = self.coord.lock().await;
         let mut tx = self.db.begin().await?;
         let keys:Vec<(String,Option<Uuid>)>=sqlx::query_as("SELECT key,stream_id FROM objects WHERE bucket_id=$1 AND ($2::text IS NULL OR key>$2) ORDER BY key LIMIT $3 FOR UPDATE").bind(bucket).bind(cursor).bind(batch).fetch_all(&mut *tx).await?;
         if !keys.is_empty() {

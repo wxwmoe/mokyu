@@ -80,6 +80,16 @@ docker exec media-gateway cli task list
 
 需要验证数据时，手动运行[完整性巡检](cli-reference.md#完整性巡检)。后端未索引区块仅在管理需要时使用[清查命令](cli-reference.md#后端清查)。
 
+### 补齐无引用区块的回收标记
+
+若数据库中存在 `ready`、无引用且 `unreferenced_at` 为空的遗留区块，可先启用维护模式并停止网关，再用 PostgreSQL 客户端执行仓库内的脚本：
+
+```sh
+psql -X -h DB_HOST -U DB_USER -d DB_NAME -f scripts/mark-unreferenced-chunks.sql
+```
+
+[脚本](../scripts/mark-unreferenced-chunks.sql) 取得网关数据库独占锁，每批最多检查 1000 条记录并提交，可中断后重跑。它只补时间标记，不访问后端；重新启动并退出维护后，区块按正常 GC 宽限回收。有引用的区块和已有时间标记保持不变。无需日常执行，勿使用 `--single-transaction`。
+
 ## 备份材料
 
 项目不备份后端 S3 区块。可用 pgBackRest 备份 PostgreSQL/WAL、restic 备份配置，亦可选用其他满足恢复要求的工具。
@@ -102,7 +112,7 @@ docker exec media-gateway cli task list
 2. 恢复数据库、配置和全部历史密钥；需要恢复未完成上传时，一并恢复一致的 multipart 快照。chunks 缓存可以为空。
 3. **生成新的实际区块写密钥**，加入 keyring 并设为 active，保留旧密钥供读取。数据库 ID 可能回滚，只改 key ID 或日期不能防止 nonce 重用。`credential-key` 仍须与恢复的数据库匹配。
 4. 在 Compose 中临时设置 `command: ["serve", "--maintenance"]` 后启动，使维护状态在监听前生效。
-5. 确认 `cli status` 的 `maintenance=true`，核对后端身份、历史密钥、旧对象和 Range 读取；可运行巡检。缺失 multipart 尾部的未完成上传需重传，已发布对象不依赖该目录。
+5. 确认 `cli status` 的 `maintenance=true`，核对后端身份、历史密钥、旧对象和 Range 读取；可运行巡检。清桶任务会保持暂停，须在核验并退出维护后显式恢复。缺失 multipart 尾部的未完成上传需重传，已发布对象不依赖该目录。
 6. 如需清理恢复点之后遗留的未知区块，保持维护并排空活跃操作，先[预览后端清查](cli-reference.md#后端清查)，核对后再确认执行；并非每次恢复都需清查。
 7. 移除 Compose 的临时启动参数，再用 `cli maintenance disable` 恢复写入；验证新上传和旧对象读取。切换 active 后仍应保留历史读密钥。
 

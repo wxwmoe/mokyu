@@ -595,26 +595,41 @@ async fn login(
             .await?;
     let started = tokio::time::Instant::now();
     let verified = if let Some((id, hash)) = row {
-        let valid = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let _job = job;
             use argon2::{Argon2, PasswordHash, PasswordVerifier};
-            PasswordHash::new(&hash).ok().is_some_and(|hash| {
+            let valid = PasswordHash::new(&hash).ok().is_some_and(|hash| {
                 Argon2::default()
                     .verify_password(input.password.as_bytes(), &hash)
                     .is_ok()
-            })
+            });
+            valid.then_some((id, hash))
         })
-        .await?;
-        valid.then_some(id)
+        .await?
     } else {
         None
     };
     tokio::time::sleep_until(started + Duration::from_millis(300)).await;
-    let user = verified.ok_or_else(unauthorized)?;
+    let (user, verified_hash) = verified.ok_or_else(unauthorized)?;
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("login-verified").await;
     let token = crate::admin::random_secret()?;
     let csrf = csrf_token(&token);
     let seconds = config::seconds(&app.config.manage.session_lifetime)?;
-    sqlx::query("INSERT INTO sessions(token_hash,user_id,csrf_hash,expires_at) VALUES($1,$2,$3,now()+$4*interval '1 second')").bind(blake3::hash(token.as_bytes()).as_bytes().as_slice()).bind(user).bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice()).bind(seconds as f64).execute(&app.db).await?;
+    let mut tx = app.db.begin().await?;
+    // Password reset and disable update this same row before revoking sessions.
+    let current: Option<(String, bool)> =
+        sqlx::query_as("SELECT password_hash,enabled FROM web_users WHERE id=$1 FOR UPDATE")
+            .bind(user)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if !current.is_some_and(|(hash, enabled)| enabled && hash == verified_hash) {
+        return Err(unauthorized());
+    }
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("login-before-session").await;
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,csrf_hash,expires_at) VALUES($1,$2,$3,now()+$4*interval '1 second')").bind(blake3::hash(token.as_bytes()).as_bytes().as_slice()).bind(user).bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice()).bind(seconds as f64).execute(&mut *tx).await?;
+    tx.commit().await?;
     let mut response = Json(json!({"csrf_token":csrf})).into_response();
     let secure = if app.config.manage.secure_cookie {
         "; Secure"

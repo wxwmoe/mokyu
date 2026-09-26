@@ -329,6 +329,8 @@ impl App {
         if prefix == 0 {
             return Ok(consumed);
         }
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("multipart-before-seed").await;
         let lock = self.upload_lock(seed.upload);
         let _guard = lock.lock().await;
         let _coord = self.coord.lock().await;
@@ -360,6 +362,7 @@ impl App {
                 .bind(offset)
                 .execute(&mut *tx)
                 .await?;
+            crate::lifecycle::mark_unreferenced(&mut tx, &[c.id]).await?;
         } else {
             sqlx::query("UPDATE extents SET source_offset=$3,length=$4 WHERE stream_id=$1 AND offset_bytes=$2").bind(stream).bind(offset).bind(prefix as i32).bind((consumed-prefix) as i32).execute(&mut *tx).await?;
         }
@@ -775,7 +778,14 @@ impl App {
         Ok(S3Response::new(AbortMultipartUploadOutput::default()))
     }
     pub async fn abort_upload(&self, id: Uuid) -> Result<()> {
-        let _coord = self.coord.lock().await;
+        let coord = self.coord.lock().await;
+        self.abort_upload_locked(id, &coord).await
+    }
+    pub(crate) async fn abort_upload_locked(
+        &self,
+        id: Uuid,
+        _coord: &tokio::sync::MutexGuard<'_, ()>,
+    ) -> Result<()> {
         let mut tx = self.db.begin().await?;
         let changed=sqlx::query("UPDATE uploads SET state='aborted',touched_at=now() WHERE id=$1 AND state IN ('active','completing')").bind(id).execute(&mut *tx).await?.rows_affected();
         if changed == 0 {
@@ -989,7 +999,11 @@ async fn replace_range(
     let end = offset + length as i64;
     let rows:Vec<Extent>=sqlx::query_as("SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=GREATEST(0,$2-4194304) AND offset_bytes<$3 AND offset_bytes+length>$2 ORDER BY offset_bytes FOR UPDATE").bind(stream).bind(offset).bind(end).fetch_all(&mut **tx).await?;
     let mut covered = offset;
+    let mut previous = Vec::new();
     for row in rows {
+        if let Some(id) = row.chunk_id {
+            previous.push(id);
+        }
         ensure!(row.offset_bytes <= covered, "extent replacement gap");
         let row_end = row.offset_bytes + row.length as i64;
         covered = covered.max(row_end.min(end));
@@ -1021,6 +1035,8 @@ async fn replace_range(
     }
     ensure!(covered == end, "extent replacement incomplete");
     sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id,source_offset) VALUES($1,$2,$3,$4,$5)").bind(stream).bind(offset).bind(length as i32).bind(chunk).bind(source as i32).execute(&mut **tx).await?;
+    // Retained slices and references from other streams still protect the old chunk.
+    crate::lifecycle::mark_unreferenced(tx, &previous).await?;
     Ok(())
 }
 async fn insert_extent(
