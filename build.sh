@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 cd -- "$(dirname -- "$0")"
-version=0.0.2
+version=0.0.3
 file=Dockerfile
 tag=latest
 no_cache=
