@@ -607,9 +607,10 @@ impl Config {
             .context("AWS chunk limit overflow")?;
         ensure!(
             slot_bytes <= usize::MAX as u64 && slot_bytes <= inflight / 2 && inflight <= memory / 2,
-            "inflight_bytes must allow two data slots ({} bytes each at compression.level={}) and leave half of memory for runtime/cache/OS",
+            "inflight_bytes must allow two data slots ({} bytes each at compression.level={}, compression.sample_level={}) and leave half of memory for runtime/cache/OS",
             slot_bytes,
-            self.compression.level
+            self.compression.level,
+            self.compression.sample_level
         );
         let slots = (inflight / slot_bytes) as usize;
         let cpu_jobs = self.processing.cpu_jobs.unwrap_or(cpus.min(slots));

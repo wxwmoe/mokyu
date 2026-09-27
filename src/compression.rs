@@ -23,6 +23,7 @@ pub enum Strategy {
 pub struct Config {
     pub strategy: Strategy,
     pub level: i32,
+    pub sample_level: i32,
     pub min_savings_percent: u8,
     pub min_savings_bytes: u64,
     pub context_idle_timeout: String,
@@ -61,7 +62,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             strategy: Strategy::Always,
-            level: 3,
+            level: 6,
+            sample_level: 3,
             min_savings_percent: 2,
             min_savings_bytes: 256,
             context_idle_timeout: "30s".into(),
@@ -135,6 +137,10 @@ impl Config {
             "compression.level outside Zstd supported range"
         );
         ensure!(
+            zstd::compression_level_range().contains(&self.sample_level),
+            "compression.sample_level outside Zstd supported range"
+        );
+        ensure!(
             self.min_savings_percent <= 100,
             "compression.min_savings_percent must be 0..100"
         );
@@ -147,22 +153,38 @@ impl Config {
         Ok(())
     }
 
+    fn separate_sample_level(&self) -> Option<i32> {
+        let effective = |level| match level {
+            0 => zstd::zstd_safe::CLEVEL_DEFAULT,
+            _ => level,
+        };
+        (self.strategy == Strategy::Sample && effective(self.level) != effective(self.sample_level))
+            .then_some(self.sample_level)
+    }
+
     // Includes idle encoder/decoder contexts, output capacity and reallocation overlap.
     pub fn workspace_bytes(&self) -> Result<u64> {
         self.validate()?;
         // Safety: this scalar-only estimator comes from our pinned, statically linked Zstd.
         // It bounds single-threaded compress2 for arbitrary input sizes and levels <= this one.
-        let (size, error, decoder) = unsafe {
+        let (size, sample, error, decoder) = unsafe {
             let size = zstd::zstd_safe::zstd_sys::ZSTD_estimateCCtxSize(self.level.max(3));
+            let sample = match self.separate_sample_level() {
+                Some(level) => zstd::zstd_safe::zstd_sys::ZSTD_estimateCCtxSize(level.max(3)),
+                None => 0,
+            };
             (
                 size,
-                zstd::zstd_safe::zstd_sys::ZSTD_isError(size),
+                sample,
+                zstd::zstd_safe::zstd_sys::ZSTD_isError(size)
+                    | zstd::zstd_safe::zstd_sys::ZSTD_isError(sample),
                 zstd::zstd_safe::zstd_sys::ZSTD_estimateDCtxSize(),
             )
         };
         ensure!(error == 0, "Zstd context size estimation failed");
         (size as u64)
-            .checked_add(decoder as u64)
+            .checked_add(sample as u64)
+            .and_then(|n| n.checked_add(decoder as u64))
             .and_then(|n| n.checked_mul(2))
             .and_then(|n| n.checked_add(zstd::zstd_safe::compress_bound(MAX) as u64 + 16))
             .context("compression workspace budget overflow")
@@ -200,31 +222,41 @@ impl Config {
 
 struct Workspace {
     compressor: zstd::bulk::Compressor<'static>,
+    sampler: Option<zstd::bulk::Compressor<'static>>,
     output: Vec<u8>,
 }
 impl Workspace {
     fn new(level: i32) -> Result<Self> {
         Ok(Self {
             compressor: zstd::bulk::Compressor::new(level)?,
+            sampler: None,
             output: Vec::new(),
         })
     }
-    fn trial(&mut self, input: &[u8]) -> Result<usize> {
+    fn trial(&mut self, input: &[u8], sample_level: Option<i32>) -> Result<usize> {
         self.output.clear();
         // Exact reservation prevents geometric growth beyond the maximum chunk's bound.
         self.output
             .try_reserve_exact(zstd::zstd_safe::compress_bound(input.len()) + 16)?;
-        Ok(self
-            .compressor
-            .compress_to_buffer(input, &mut self.output)?)
+        let compressor = match sample_level {
+            Some(level) => {
+                if self.sampler.is_none() {
+                    self.sampler = Some(zstd::bulk::Compressor::new(level)?);
+                }
+                self.sampler.as_mut().unwrap()
+            }
+            None => &mut self.compressor,
+        };
+        Ok(compressor.compress_to_buffer(input, &mut self.output)?)
     }
     fn encode(&mut self, input: &[u8], config: &Config) -> Result<Option<Vec<u8>>> {
         if config.strategy == Strategy::Sample && input.len() >= MIN {
             let len = (input.len() / 64).clamp(16 * 1024, 64 * 1024);
+            let sample_level = config.separate_sample_level();
             let mut hit = false;
             for i in 0..4 {
                 let start = (input.len() - len) * i / 3;
-                if self.trial(&input[start..start + len])? < len {
+                if self.trial(&input[start..start + len], sample_level)? < len {
                     hit = true;
                     break;
                 }
@@ -233,7 +265,7 @@ impl Workspace {
                 return Ok(None);
             }
         }
-        let size = self.trial(input)?;
+        let size = self.trial(input, None)?;
         Ok(config
             .worth_storing(input.len(), size)
             .then(|| std::mem::take(&mut self.output)))
@@ -330,11 +362,14 @@ mod tests {
             (
                 c.strategy,
                 c.level,
+                c.sample_level,
                 c.min_savings_percent,
                 c.min_savings_bytes
             ),
-            (Strategy::Always, 3, 2, 256)
+            (Strategy::Always, 6, 3, 2, 256)
         );
+        let explicit: Config = toml::from_str("level=3\nsample_level=1").unwrap();
+        assert_eq!((explicit.level, explicit.sample_level), (3, 1));
         assert_eq!(c.idle_timeout().unwrap(), Duration::from_secs(30));
         for (raw, saved, expected) in [
             (12800, 256, true),
@@ -352,6 +387,8 @@ mod tests {
         for text in [
             "strategy='disabled'",
             "level=2147483647",
+            "sample_level=2147483647",
+            "sample_level=-2147483648",
             "min_savings_percent=101",
             "min_savings_bytes=-1",
             "context_idle_timeout='-1s'",
@@ -375,7 +412,33 @@ mod tests {
         ] {
             c.level = level;
             assert!(c.workspace_bytes().unwrap() > MAX as u64);
+            c.sample_level = level;
+            c.level = 6;
+            c.strategy = Strategy::Sample;
+            assert!(c.workspace_bytes().unwrap() > MAX as u64);
         }
+        c = Config::default();
+        let full_budget = c.workspace_bytes().unwrap();
+        for strategy in [Strategy::Always, Strategy::FileType] {
+            c.strategy = strategy;
+            c.sample_level = 12;
+            assert_eq!(c.workspace_bytes().unwrap(), full_budget);
+        }
+        c.strategy = Strategy::Sample;
+        c.sample_level = 6;
+        assert_eq!(c.workspace_bytes().unwrap(), full_budget);
+        c.sample_level = 3;
+        let separate_budget = c.workspace_bytes().unwrap();
+        assert!(separate_budget > full_budget);
+        c.level = 3;
+        c.sample_level = 6;
+        assert_eq!(c.workspace_bytes().unwrap(), separate_budget);
+        c.level = 0;
+        c.sample_level = 3;
+        c.strategy = Strategy::Always;
+        let default_budget = c.workspace_bytes().unwrap();
+        c.strategy = Strategy::Sample;
+        assert_eq!(c.workspace_bytes().unwrap(), default_budget);
         c = Config::default();
         assert!(c.should_try(Some("image/jpeg"), "a.jpg"));
         c.strategy = Strategy::Sample;
@@ -430,7 +493,7 @@ mod tests {
             strategy: Strategy::Sample,
             ..Default::default()
         };
-        let mut work = Workspace::new(3).unwrap();
+        let mut work = Workspace::new(c.level).unwrap();
         assert!(work.encode(&random, &c).unwrap().is_none());
         let pointer = work.output.as_ptr();
         assert!(work.encode(&random, &c).unwrap().is_none());
@@ -447,9 +510,82 @@ mod tests {
         assert!(pool.idle.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn sample_level_is_independent_and_lazy() {
+        let input: Vec<_> = (0..MIN).map(|i| (i % 256) as u8).collect();
+        let fastest = *zstd::compression_level_range().start();
+        // Each original sampling window has identical bytes; the fastest probe misses this pattern.
+        assert!(
+            zstd::bulk::compress(&input[..16 * 1024], fastest)
+                .unwrap()
+                .len()
+                >= 16 * 1024
+        );
+        let full = zstd::bulk::compress(&input, 6).unwrap();
+        let config = Config {
+            strategy: Strategy::Sample,
+            sample_level: fastest,
+            ..Default::default()
+        };
+        let mut work = Workspace::new(config.level).unwrap();
+        assert!(work.encode(&input, &config).unwrap().is_none());
+        assert!(work.sampler.is_some());
+        let buffer = work.output.as_ptr();
+        assert!(work.encode(&input, &config).unwrap().is_none());
+        assert_eq!(buffer, work.output.as_ptr());
+        for (level, sample_level, separate) in [
+            (6, 3, true),
+            (3, 6, true),
+            (6, 6, false),
+            (0, 3, false),
+            (3, 0, false),
+            (6, 0, true),
+        ] {
+            let config = Config {
+                level,
+                sample_level,
+                strategy: Strategy::Sample,
+                ..Default::default()
+            };
+            let mut work = Workspace::new(level).unwrap();
+            assert!(work.sampler.is_none());
+            let small = &input[..MIN - 1];
+            assert_eq!(
+                work.encode(small, &config).unwrap().unwrap(),
+                zstd::bulk::compress(small, level).unwrap()
+            );
+            assert!(work.sampler.is_none());
+            for _ in 0..2 {
+                let encoded = work.encode(&input, &config).unwrap().unwrap();
+                assert_eq!(encoded, zstd::bulk::compress(&input, level).unwrap());
+                assert_eq!(zstd::bulk::decompress(&encoded, MIN).unwrap(), input);
+                assert_eq!(work.sampler.is_some(), separate);
+            }
+        }
+        for strategy in [Strategy::Always, Strategy::FileType] {
+            let config = Config {
+                strategy,
+                sample_level: fastest,
+                ..Default::default()
+            };
+            let mut work = Workspace::new(config.level).unwrap();
+            assert_eq!(work.encode(&input, &config).unwrap().unwrap(), full);
+            assert!(work.sampler.is_none());
+        }
+    }
+
     #[tokio::test]
     async fn bounded_contexts_and_idle_release() {
-        let pool = Arc::new(Pool::new(Config::default(), 2).unwrap());
+        let pool = Arc::new(
+            Pool::new(
+                Config {
+                    strategy: Strategy::Sample,
+                    ..Default::default()
+                },
+                2,
+            )
+            .unwrap(),
+        );
         let cpu = Arc::new(tokio::sync::Semaphore::new(2));
         let mut jobs = Vec::new();
         for i in 0..8 {
@@ -475,6 +611,13 @@ mod tests {
         assert_eq!(cpu.available_permits(), 2);
         let count = pool.idle.lock().unwrap().len();
         assert!((1..=2).contains(&count));
+        assert!(
+            pool.idle
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, work)| work.sampler.is_some())
+        );
         assert!((1..=2).contains(&pool.decoders.lock().unwrap().len()));
         for (time, _) in pool.idle.lock().unwrap().iter_mut() {
             *time = Instant::now() - Duration::from_secs(31);
@@ -504,6 +647,7 @@ mod tests {
         assert_eq!(pool.decoders.lock().unwrap().len(), 1);
         let no_idle = Pool::new(
             Config {
+                strategy: Strategy::Sample,
                 context_idle_timeout: "0s".into(),
                 ..Default::default()
             },

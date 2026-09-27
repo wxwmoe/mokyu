@@ -68,7 +68,9 @@ min_compression_savings_percent = 20
 # Screening only: always tries every new chunk; sample probes four regions;
 # file_type skips known compressed MIME types. Deduplicated chunks stay unchanged.
 strategy = "always"
-level = 3
+level = 6
+# sample only: independent probe level; 0 means the Zstd default (3) for either level.
+sample_level = 3
 # Both savings thresholds must be met, excluding encryption overhead.
 min_savings_percent = 2
 min_savings_bytes = 256

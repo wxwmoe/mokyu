@@ -97,7 +97,7 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 
 默认在途预算 `inflight=M/4`。每槽预算 `S=32MiB + W + 2×max(aws_chunk_limit−8MiB,0)`，槽数 `N=floor(inflight/S)`。至少需要两个槽，且 inflight ≤ M/2。
 
-`W` 包含两倍的 Zstd 压缩／解压上下文上界，以及 4 MiB 区块的压缩输出上界和 16 字节标签，覆盖重分配重叠及闲置缓冲。高压缩等级会增大 W；预算不足时可降低等级或增加内存及在途预算。启动日志和状态字段 `slot_bytes/data_slots` 显示实际值。
+`W` 包含两倍的 Zstd 压缩／解压上下文上界，以及 4 MiB 区块的压缩输出上界和 16 字节标签，覆盖重分配重叠及闲置缓冲。`sample` 使用不同的采样等级时，额外计入采样上下文。提高完整或采样等级可能增大 W；预算不足时可降低等级或增加内存及在途预算。启动日志和状态字段 `slot_bytes/data_slots` 显示实际值。
 
 | 预算 | 自动值 | 显式限制 |
 | --- | --- | --- |
@@ -116,7 +116,8 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 | 字段 | 类型 / 默认值 | 说明 |
 | --- | --- | --- |
 | `compression.strategy` | 枚举 / `always` | `always` 全部试压；`sample` 抽样筛选；`file_type` 按对象类型筛选 |
-| `compression.level` | 有符号整数 / `3` | 当前 Zstd 支持的等级，包含负等级；0 使用 Zstd 默认等级，不表示关闭压缩；高等级需要更多 CPU 和工作内存 |
+| `compression.level` | 有符号整数 / `6` | 完整试压等级；支持当前 Zstd 的等级范围，包含负等级；0 使用 Zstd 默认等级 3，不表示关闭压缩 |
+| `compression.sample_level` | 有符号整数 / `3` | 仅 `sample` 的采样试压使用；等级范围及 0 的含义与 `level` 相同，独立于完整试压等级 |
 | `compression.min_savings_percent` | 整数 0～100 / `2` | 后端保存压缩载荷要求的最低节省比例，排除加密标签；与字节门槛同时满足 |
 | `compression.min_savings_bytes` | 非负整数 / `256` | 最低节省字节数；两个门槛均为 0 时仍必须严格缩小 |
 | `compression.context_idle_timeout` | 时间 / `30s` | Zstd 压缩、解压上下文及试压缓冲区的闲置保留时间；允许 `0s` 表示任务结束即释放 |
@@ -128,7 +129,7 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 | `sample` | 小于 256 KiB 直接试压；其他块在头尾及中间两处抽样，任一段变小就完整试压，否则跳过 |
 | `file_type` | 按对象 Content-Type 筛选；缺失、无效或为 application/octet-stream 时按扩展名补充，未知类型仍试压，不叠加抽样 |
 
-抽样每段为块大小的 1/64，限制在 16～64 KiB；1 MiB 块最多采样 64 KiB，4 MiB 块最多采样 256 KiB。抽样与完整试压使用相同等级，可能漏掉局部或远距离重复；需要尽量保留收益时使用 `always`。
+抽样每段为块大小的 1/64，限制在 16～64 KiB；1 MiB 块最多采样 64 KiB，4 MiB 块最多采样 256 KiB。抽样使用 `sample_level`，通过筛选后按 `level` 完整试压；低等级抽样及有限窗口可能漏掉压缩收益，需要尽量保留收益时使用 `always`。将两个等级设为相同值可让抽样沿用完整试压等级。
 
 所有策略最终都要求结果严格变小，并同时满足比例、字节门槛。去重命中直接复用；调整策略、等级和门槛不重写已有区块。multipart 使用初始化时的对象类型，UploadPart 无需重复 Content-Type；CopyObject 复用已有区块。
 
@@ -142,7 +143,7 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 
 扩展名补充支持 jpg/jpeg/jpe、png、apng、gif、webp、avif、mp4/m4v、webm、m4a、mp3/mp2、aac、ogg/oga/opus、ogv、ogx、flac、zip、gz/tgz、7z、rar、xz、bz2、zst/zstd；也识别 svg、txt、html/htm、css、js/mjs、json、xml，供自定义名单使用。没有 `image/*` 通配规则，SVG 默认试压。
 
-压缩／解压上下文及试压缓冲按 CPU 并发额度复用，每秒清理到期的闲置工作区；RSS 回落还取决于分配器。区块仍各自使用独立 Zstd frame，不共享压缩历史。
+压缩／解压上下文及试压缓冲按 CPU 并发额度复用，每秒清理到期的闲置工作区；RSS 回落还取决于分配器。采样与完整试压的有效等级相同时共用压缩上下文，否则按需创建独立采样上下文，仍共用输出缓冲。区块仍各自使用独立 Zstd frame，不共享压缩历史。
 
 ## 加密与密钥
 
