@@ -15,6 +15,7 @@ mod listing;
 mod multipart;
 mod pack;
 mod pack_tasks;
+mod range;
 mod s3;
 mod stats;
 mod storage;

@@ -22,9 +22,22 @@ pub(crate) struct Mapping {
     pub(crate) pack_id: Option<i64>,
 }
 pub(crate) struct Output {
-    chunks: Vec<i64>,
-    pack: Option<Pack>,
-    independent: Option<Chunk>,
+    pub(crate) chunks: Vec<i64>,
+    pub(crate) pack: Option<Pack>,
+    pub(crate) independent: Option<Chunk>,
+}
+impl Output {
+    pub(crate) fn size(&self) -> i64 {
+        self.pack
+            .as_ref()
+            .and_then(|p| p.stored_size)
+            .or_else(|| {
+                self.independent
+                    .as_ref()
+                    .and_then(|c| c.stored_size.map(i64::from))
+            })
+            .unwrap_or(0)
+    }
 }
 
 impl App {
@@ -84,7 +97,7 @@ impl App {
     pub async fn pack_status(&self) -> Result<Value> {
         let rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('state',state,'count',count(*),'raw_bytes',COALESCE(sum(raw_size),0),'stored_bytes',COALESCE(sum(stored_size),0)) FROM packs GROUP BY state").fetch_all(&self.db).await?;
         Ok(
-            json!({"enabled":self.config.pack.enabled,"packs":rows,"max_size":self.config.pack.max_size}),
+            json!({"enabled":self.config.pack.enabled,"range_optimization":self.config.pack.range_optimization,"packs":rows,"max_size":self.config.pack.max_size}),
         )
     }
     pub async fn pack_start(&self, kind: &str) -> Result<Value> {
@@ -92,8 +105,11 @@ impl App {
     }
     async fn start_pack(&self, kind: &str, automatic: bool) -> Result<Value> {
         self.writable()?;
-        if !["pack", "reuse", "reclaim", "repack"].contains(&kind) {
+        if !["pack", "reuse", "reclaim", "repack", "range"].contains(&kind) {
             return Err(s3s::s3_error!(InvalidArgument, "unknown pack maintenance kind").into());
+        }
+        if kind == "range" && !self.config.pack.range_optimization {
+            return Err(s3s::s3_error!(OperationAborted, "Range optimization is disabled").into());
         }
         if matches!(kind, "pack" | "repack") && !self.config.pack.enabled {
             return Err(s3s::s3_error!(OperationAborted, "pack creation is disabled").into());
@@ -378,8 +394,14 @@ impl App {
                 .bind(task)
                 .fetch_one(&mut *tx)
                 .await?;
+        let range: bool = sqlx::query_scalar(
+            "SELECT kind='pack' AND detail->>'kind'='range' FROM tasks WHERE id=$1",
+        )
+        .bind(task)
+        .fetch_one(&mut *tx)
+        .await?;
         if !split && !upload {
-            let exclusive:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM chunks c WHERE c.id=ANY($1) AND ((SELECT count(*) FROM extents WHERE chunk_id=c.id)<>1 OR NOT COALESCE(c.repack_after<=now(),true) OR c.range_split_at IS NOT NULL OR (c.split_at IS NOT NULL AND c.reference_changed_at>now()-$2*interval '1 second')))").bind(&ids).bind(config::seconds(&self.config.pack.repack_cooldown)? as f64).fetch_one(&mut *tx).await?;
+            let exclusive:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM chunks c CROSS JOIN gateway_meta g WHERE c.id=ANY($1) AND ((SELECT count(*) FROM extents WHERE chunk_id=c.id)<>1 OR NOT COALESCE(c.repack_after<=now(),true) OR (c.range_split_at IS NOT NULL AND (g.access_coverage_since IS NULL OR g.access_coverage_since>date_trunc('hour',now()-$3*interval '1 second') OR g.access_flushed_at IS NULL OR g.access_flushed_at<now()-$4*interval '1 second' OR EXISTS(SELECT 1 FROM chunk_access_windows w WHERE w.chunk_id=c.id AND w.range_reads>0 AND w.window_start>=date_trunc('hour',now()-$3*interval '1 second')))) OR (c.split_at IS NOT NULL AND c.reference_changed_at>now()-$2*interval '1 second')))").bind(&ids).bind(config::seconds(&self.config.pack.repack_cooldown)? as f64).bind(config::seconds(&self.config.pack.range_repack_window)? as f64).bind((2*config::seconds(&self.config.statistics.access_flush_interval)?) as f64).fetch_one(&mut *tx).await?;
             ensure!(exclusive, "pack references changed; retry maintenance");
         }
         for output in outputs.iter().filter(|o| o.pack.is_some()) {
@@ -407,8 +429,8 @@ impl App {
             } else if let Some(c) = &output.independent {
                 sqlx::query("UPDATE chunk_locations SET state='ready',unreferenced_at=NULL WHERE id=$1 AND state='uploading'").bind(c.encoding_id).execute(&mut *tx).await?;
             }
-            sqlx::query("UPDATE chunks SET pack_id=$2,split_at=CASE WHEN $3 THEN now() ELSE split_at END,repack_after=CASE WHEN $3 THEN now()+$4*interval '1 second' ELSE repack_after END WHERE id=ANY($1)")
-                .bind(&output.chunks).bind(output.pack.as_ref().map(|p|p.id)).bind(split).bind(config::seconds(&self.config.pack.repack_cooldown)? as f64).execute(&mut *tx).await?;
+            sqlx::query("UPDATE chunks SET pack_id=$2,split_at=CASE WHEN $3 THEN now() ELSE split_at END,repack_after=CASE WHEN $3 THEN GREATEST(repack_after,now()+$4*interval '1 second') ELSE repack_after END,range_split_at=CASE WHEN $5 THEN now() WHEN NOT $3 AND $2::bigint IS NOT NULL THEN NULL ELSE range_split_at END WHERE id=ANY($1)")
+                .bind(&output.chunks).bind(output.pack.as_ref().map(|p|p.id)).bind(split).bind(config::seconds(if range {&self.config.pack.range_repack_after}else{&self.config.pack.repack_cooldown})? as f64).bind(range).execute(&mut *tx).await?;
         }
         let retained: Vec<i64> = outputs
             .iter()
@@ -586,6 +608,7 @@ impl App {
         from: i64,
         repack: bool,
     ) -> Result<(i64, usize)> {
+        self.defer_range_repack(stream, from).await?;
         #[derive(sqlx::FromRow)]
         struct Candidate {
             #[sqlx(flatten)]
@@ -593,7 +616,7 @@ impl App {
             eligible: bool,
             unit_count: i64,
         }
-        let rows:Vec<Candidate>=sqlx::query_as("SELECT c.*,e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND e.source_offset=0 AND e.length=c.raw_size AND (SELECT count(*) FROM extents WHERE chunk_id=c.id)=1 AND COALESCE(c.repack_after<=now(),true) AND (c.split_at IS NULL OR c.reference_changed_at<=now()-$3*interval '1 second') AND c.range_split_at IS NULL) eligible,CASE WHEN c.pack_id IS NULL THEN 1 ELSE (SELECT count(*) FROM chunks WHERE pack_id=c.pack_id AND state='ready') END unit_count FROM extents e JOIN chunks c ON c.id=e.chunk_id JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=$1 AND e.offset_bytes>=$2 AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026")
+        let rows:Vec<Candidate>=sqlx::query_as("SELECT c.*,e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND e.source_offset=0 AND e.length=c.raw_size AND (SELECT count(*) FROM extents WHERE chunk_id=c.id)=1 AND COALESCE(c.repack_after<=now(),true) AND (c.split_at IS NULL OR c.reference_changed_at<=now()-$3*interval '1 second')) eligible,CASE WHEN c.pack_id IS NULL THEN 1 ELSE (SELECT count(*) FROM chunks WHERE pack_id=c.pack_id AND state='ready') END unit_count FROM extents e JOIN chunks c ON c.id=e.chunk_id JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=$1 AND e.offset_bytes>=$2 AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026")
             .bind(stream).bind(from).bind(config::seconds(&self.config.pack.repack_cooldown)? as f64).fetch_all(&self.db).await?;
         let Some(first) = rows.first() else {
             return Ok((-1, 0));
@@ -730,6 +753,9 @@ impl App {
             return Ok(false);
         }
         let kind = detail["kind"].as_str().unwrap_or("unpack");
+        if kind == "range" {
+            return self.range_batch(id, &detail).await;
+        }
         if detail["automatic"] == true {
             return self.pack_queue_batch(id, kind, &detail).await;
         }
@@ -830,7 +856,7 @@ impl App {
 }
 
 pub async fn run(app: Arc<App>) -> Result<()> {
-    let mut last = [std::time::Instant::now(); 4];
+    let mut last = [std::time::Instant::now(); 5];
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         if app.maintenance.load(Ordering::Acquire) {
@@ -845,14 +871,18 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             ("reuse", &app.config.pack.reuse_interval),
             ("reclaim", &app.config.pack.reclaim_interval),
             ("repack", &app.config.pack.repack_interval),
+            ("range", &app.config.pack.range_interval),
         ]
         .into_iter()
         .enumerate()
         {
             if last[i].elapsed() >= Duration::from_secs(config::seconds(interval)?) {
                 last[i] = std::time::Instant::now();
-                if (app.config.pack.enabled || matches!(kind, "reuse" | "reclaim"))
-                    && let Err(e) = app.start_pack(kind, true).await
+                if (if kind == "range" {
+                    app.config.pack.range_optimization
+                } else {
+                    app.config.pack.enabled || matches!(kind, "reuse" | "reclaim")
+                }) && let Err(e) = app.start_pack(kind, true).await
                 {
                     tracing::warn!(error=%e,kind,"pack schedule failed");
                 }

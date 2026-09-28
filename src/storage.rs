@@ -279,44 +279,44 @@ pub struct LoadedPack {
     pub pack: crate::pack::Pack,
     pub data: crate::pack::Decoded,
     _memory: tokio::sync::OwnedSemaphorePermit,
-    observe: bool,
-    range: bool,
-    used: Mutex<HashMap<i64, (usize, usize)>>,
+    used: Mutex<DownloadUsage>,
     access: Arc<crate::access::Access>,
 }
+#[derive(Default)]
+struct DownloadUsage {
+    members: HashMap<i64, (usize, usize)>,
+    observed: bool,
+    range: bool,
+    full: bool,
+}
 impl LoadedPack {
-    fn touch(&self, c: &Chunk) {
-        if self
-            .used
-            .lock()
-            .unwrap()
-            .insert(
-                c.id,
-                (
-                    c.raw_size as usize,
-                    c.stored_size.unwrap_or(c.raw_size + 16) as usize,
-                ),
-            )
-            .is_none()
-            && self.observe
-            && self.range
-        {
-            self.access.origin(c.id);
-        }
+    fn touch(&self, c: &Chunk, observe: bool, range: bool) {
+        let mut used = self.used.lock().unwrap();
+        used.observed |= observe;
+        used.range |= observe && range;
+        used.full |= !observe || !range;
+        used.members.insert(
+            c.id,
+            (
+                c.raw_size as usize,
+                c.stored_size.unwrap_or(c.raw_size + 16) as usize,
+            ),
+        );
     }
 }
 impl Drop for LoadedPack {
     fn drop(&mut self) {
-        if self.observe {
-            let used = self.used.lock().unwrap();
-            let raw: usize = used.values().map(|(n, _)| n).sum();
+        let used = self.used.lock().unwrap();
+        if used.observed {
+            let raw: usize = used.members.values().map(|(n, _)| n).sum();
             let bytes = self.pack.stored_size.unwrap_or(0) as usize;
-            let useful: usize = used.values().map(|(_, n)| n).sum();
+            let useful: usize = used.members.values().map(|(_, n)| n).sum();
             self.access.pack(
                 self.pack.id,
                 bytes,
-                self.range && raw < self.pack.raw_size as usize,
+                used.range && !used.full && raw < self.pack.raw_size as usize,
                 useful.min(bytes),
+                used.members.keys().copied(),
             );
         }
     }
@@ -336,11 +336,10 @@ impl ReadContext {
         }
     }
     async fn touch(&self, c: &Chunk) {
-        if self.observe
-            && let Some(p) = self.pack.lock().await.as_ref()
+        if let Some(p) = self.pack.lock().await.as_ref()
             && p.data.members.iter().any(|m| m.id == c.id)
         {
-            p.touch(c);
+            p.touch(c, self.observe, self.range);
         }
     }
 }
@@ -1286,9 +1285,7 @@ impl Storage {
                 .as_ref()
                 .filter(|p| p.data.members.iter().any(|m| m.id == c.id))
             {
-                if context.observe {
-                    loaded.touch(c);
-                }
+                loaded.touch(c, context.observe, context.range);
                 return loaded.data.chunk(c);
             }
         }
@@ -1309,9 +1306,7 @@ impl Storage {
         {
             Ok((raw, loaded)) => {
                 if let (Some(context), Some(loaded)) = (context, loaded) {
-                    if context.observe {
-                        loaded.touch(c);
-                    }
+                    loaded.touch(c, context.observe, context.range);
                     // Prefetch may be advancing to the next pack while waiting for this one's
                     // memory. Never retain the previous pack while waiting for that advance.
                     if let Ok(mut current) = context.pack.try_lock() {
@@ -1354,21 +1349,18 @@ impl Storage {
                 if let Some(context) = context {
                     let mut current = context.pack.lock().await;
                     if let Some(loaded) = current.as_ref().filter(|p| p.pack.id == pack.id) {
-                        if context.observe {
-                            loaded.touch(c);
-                        }
+                        loaded.touch(c, context.observe, context.range);
                         return Ok((loaded.data.chunk(c)?, Some(loaded.clone())));
                     }
                     *current = None;
-                    let loaded = self.load_pack(pack, context.observe, context.range).await?;
-                    if context.observe {
-                        loaded.touch(c);
-                    }
+                    let loaded = self.load_pack(pack).await?;
+                    loaded.touch(c, context.observe, context.range);
                     let raw = loaded.data.chunk(c)?;
                     *current = Some(loaded.clone());
                     Ok((raw, Some(loaded)))
                 } else {
-                    let loaded = self.load_pack(pack, false, false).await?;
+                    let loaded = self.load_pack(pack).await?;
+                    loaded.touch(c, false, false);
                     Ok((loaded.data.chunk(c)?, Some(loaded)))
                 }
             }
@@ -1495,12 +1487,7 @@ impl Storage {
         );
         Ok(())
     }
-    async fn load_pack(
-        self: &Arc<Self>,
-        p: crate::pack::Pack,
-        observe: bool,
-        range: bool,
-    ) -> Result<Arc<LoadedPack>> {
+    async fn load_pack(self: &Arc<Self>, p: crate::pack::Pack) -> Result<Arc<LoadedPack>> {
         if let Some(live) = self
             .pack_live
             .lock()
@@ -1560,9 +1547,7 @@ impl Storage {
                         pack: p.clone(),
                         data,
                         _memory: memory,
-                        observe,
-                        range,
-                        used: Mutex::new(HashMap::new()),
+                        used: Mutex::new(DownloadUsage::default()),
                         access: self.access.clone(),
                     });
                     {

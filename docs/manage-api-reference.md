@@ -100,6 +100,8 @@
 
 source 为 chunk/pack/pending；stored_size 是当前独立副本长度，没有独立副本时为 null。independent_size_hint、compression 和 payload_size 分别为独立编码长度提示、压缩标记和扣标签后的长度，不代表 pack 中某成员的实际占用。reads/range_reads 为延迟落库的累计块读取次数。length/source_offset 描述引用区间，不能据此直接推算删除释放空间。
 
+algorithm/key_id 是逻辑块的初始编码与去重域；重编码后的实际算法和密钥由 chunk_locations 或 packs 记录，可能与初始值不同。
+
 ### 预览与下载
 
 preview=false 使用 attachment 和 application/octet-stream；preview=true 仅对 JPEG/PNG/GIF/WebP/AVIF、MP4/WebM 及 MPEG/OGG/MP4 音频 MIME 内联，其余仍下载。HTML/SVG/XML 不在管理同源执行；响应带 nosniff 和 sandbox CSP，始终需要管理员会话。
@@ -184,12 +186,14 @@ last_run 首次执行前为 null，此后为 `{started_at,finished_at,duration_m
 | --- | --- | --- |
 | `GET /api/packs` | after 默认 0；limit 默认 100，1～200 | `{status,packs,next_after}`，按 ID 升序 |
 | `GET /api/packs/{id}` | 正 bigint 十进制 ID | `{pack,members}`，成员含逻辑区块及当前映射标志 |
-| `POST /api/packs/run` | `{kind}`：pack/reuse/reclaim/repack | `{task_id}`，已有同类任务可返回 existing=true |
+| `POST /api/packs/run` | `{kind}`：pack/reuse/reclaim/range/repack | `{task_id}`，已有同类任务可返回 existing=true |
 | `POST /api/packs/unpack` | `{pack_id?:字符串,all?:bool,execute?:bool}` | 默认返回 preview/packs/raw_bytes/effect；execute=true 返回 task_id |
 
 pack_id 与 all=true 必须二选一；全部拆包要求 pack.enabled=false。包及成员的大整数 ID 使用字符串，避免浏览器精度损失。Pack 页面可查看列表、成员、维护入口与拆包预览；写接口遵守会话、Origin、CSRF 和维护模式。操作、冷却和回收语义见[CLI](cli-reference.md#pack-维护)。
 
 任务 detail.last_rewrite 保存最近一次成功切换的 before_bytes/output_bytes/temporary_added_bytes/transition_bytes，分别为旧布局、新布局、本批新增载荷及新旧并存大小；不包含更早批次仍在 GC 宽限内的副本，部署总占用以 physical 汇总为准。
+
+Pack status 含 range_optimization；Range 任务的 detail.evaluated 为已评估包数，last_range 含 pack_id、applied、reason、partial_downloads，以及 benefit 的 observed_bytes/projected_bytes/rewrite_bytes/extra_gets/request_penalty_bytes/net_savings_bytes。收益是按历史窗口外推的预计值，重写大小采用实际编码结果，不承诺未来命中率。Pack 的 range_checked_at 是最近评估时间。
 
 ## 后台任务
 
@@ -250,10 +254,10 @@ processed 为对象和区块检查数之和，不是百分比；cursor 是内部
 
 ## 管理页面
 
-`GET/HEAD /` 提供对象、桶设置、状态和任务四个入口；静态资源为 `/app.js`、`/i18n.js`、`/app.css`，随二进制提供，无外部前端服务。
+`GET/HEAD /` 提供对象、桶设置、状态、任务和 Pack 入口；静态资源为 `/app.js`、`/i18n.js`、`/app.css`，随二进制提供，无外部前端服务。
 
 - 支持 zh-CN/en：首次按浏览器语言选择，中文以外回退英语；选择保存在 localStorage，切换保留未提交表单。名称、元数据和错误内容始终按文本显示。
-- URL 保存 page、bucket、prefix、recursive、token、key、section、state、task、taskToken，支持刷新、前进后退和复制链接。section 为 cors/website，page 为 objects/settings/status/tasks；访问仍需登录。
+- URL 保存 page、bucket、prefix、recursive、token、key、section、state、task、taskToken、pack、packAfter，支持刷新、前进后退和复制链接。section 为 cors/website，page 为 objects/settings/status/tasks/packs；访问仍需登录。
 - 对象每页 100 项，可按前缀／完整 key 定位；勾选仅限当前页，上一页使用本标签页历史。支持图片／视频预览和原文件下载；批量操作先列出目标，再显示逐项结果。
 - 任务可每 5 秒刷新，页面隐藏或离开任务页时停止；用户可关闭。暂停或终止的巡检详情停止自动轮询，可手动刷新、查看关联对象和导出报告。
 - 状态页刷新只读取运行计数和已缓存的容量快照。库存通过分页浏览，不设累计对象数量上限。

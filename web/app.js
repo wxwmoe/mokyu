@@ -189,7 +189,7 @@ function renderPanel(resetForm = false) {
   } else if (type === 'packs') {
     fields([['enabled', t(value.status.enabled ? 'enabled' : 'disabled')], ['packMaxSize', value.status.max_size]]);
     $('task-list').append(node('p', t('packHelp')), table(['packId', 'taskState', 'rawSize', 'encodedSize', 'compression', 'created'], value.packs.map(p => [button(p.id, () => go({ pack: p.id })), t(p.state), size(p.raw_size), p.stored_size == null ? '—' : size(p.stored_size), p.compressed ? 'zstd' : 'none', date(p.created_at)])));
-    for (const kind of ['pack', 'reuse', 'reclaim', 'repack']) if (value.status.enabled || ['reuse', 'reclaim'].includes(kind)) $('actions').append(button(t('run_' + kind), async () => { const task = await write('/api/packs/run', { kind }); await go({ page: 'tasks', task: task.task_id }); }));
+    for (const kind of ['pack', 'reuse', 'reclaim', 'range', 'repack']) if (kind === 'range' ? value.status.range_optimization : value.status.enabled || ['reuse', 'reclaim'].includes(kind)) $('actions').append(button(t('run_' + kind), async () => { const task = await write('/api/packs/run', { kind }); await go({ page: 'tasks', task: task.task_id }); }));
     if (!value.status.enabled) $('actions').append(button(t('unpackAll'), () => previewUnpack(null)));
     if (route.packAfter) $('actions').append(button(t('previous'), () => history.back()));
     if (value.next_after) $('actions').append(button(t('more'), () => go({ packAfter: value.next_after }, true)));

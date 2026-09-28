@@ -1,5 +1,6 @@
 export const messages = {
   en: {
+    run_range: 'Optimize cold Range reads',
     uploadCache: 'Upload cache', effectiveCache: 'Effective chunk capacity', uploadLimit: 'Effective upload quota', pendingBytes: 'Pending bytes', oldestPending: 'Oldest pending upload', syncFallbacks: 'Requests falling back to synchronous upload', cache_flush: 'Flush upload cache', cachePins: 'Cache pins (first 100)', pinType: 'Reason', pinOwner: 'Owner', pending: 'Local pending upload',
     uploadCacheHelp: 'Acknowledged uploads may still depend on this local data. Pins protect pending sources from eviction. Flush writes existing pending data to independent backend chunks; new uploads can add more work.',
     packs: 'Packs', pack: 'Pack maintenance', unpack: 'Unpack', packDetails: 'Pack details', packId: 'Pack ID', packMaxSize: 'Maximum raw size', backPacks: 'Back to packs', unpackAll: 'Unpack all packs',
@@ -90,6 +91,7 @@ export const messages = {
     purge: 'Bucket purge', sweep: 'Backend sweep', queued: 'Queued', completed: 'Completed', failed: 'Failed',
   },
   'zh-CN': {
+    run_range: '优化 Range 回源',
     uploadCache: '上传缓存', effectiveCache: '区块缓存有效容量', uploadLimit: '上传有效额度', pendingBytes: '待上传字节', oldestPending: '最早待上传时间', syncFallbacks: '回退同步上传的请求数', cache_flush: '排空上传缓存', cachePins: '缓存保护（前 100 项）', pinType: '原因', pinOwner: '归属', pending: '本地待上传',
     uploadCacheHelp: '已确认的上传可能仍依赖这些本地数据；pin 防止待上传来源被淘汰。排空操作将当前积压写成独立后端区块，新上传仍可产生积压。',
     packs: 'Pack', pack: 'Pack 维护', unpack: '拆成独立区块', packDetails: 'Pack 详情', packId: 'Pack ID', packMaxSize: '原始大小上限', backPacks: '返回 Pack 列表', unpackAll: '拆除全部 Pack',

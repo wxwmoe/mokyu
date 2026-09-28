@@ -97,6 +97,15 @@ context_idle_timeout = "30s"
 enabled = true
 max_size = "32MiB"
 upload_cache_timeout = "60s"
+range_optimization = true
+range_interval = "15m"
+range_window = "24h"
+range_min_downloads = 8
+range_min_savings_percent = 50
+range_min_savings_bytes = "64MiB"
+range_repack_after = "30d"
+range_repack_window = "7d"
+range_repack_retry_interval = "7d"
 # Omit to inherit compression.strategy; always / sample / file_type / chunk_hint.
 # compression_strategy = "chunk_hint"
 maintenance_concurrency = 1

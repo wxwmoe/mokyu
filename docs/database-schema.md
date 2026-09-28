@@ -27,7 +27,7 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `singleton` | boolean | 否 | `true` | 固定 true，保证仅一行 |
-| `schema_version` | integer | 否 | — | 结构编号，当前为 5，与最近迁移编号一致 |
+| `schema_version` | integer | 否 | — | 当前结构编号，与最近迁移编号一致 |
 | `deployment_id` | uuid | 否 | — | 部署 UUID |
 | `backend_identity` | text | 否 | — | 后端 endpoint/bucket/prefix 身份 |
 | `backend_initialized` | boolean | 否 | `false` | 后端 meta.json 已完成绑定；标识丢失时不自动重建 |
@@ -174,7 +174,7 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | 表 | 字段（未注明可空者均 NOT NULL） |
 | --- | --- |
 | `chunk_locations` | id bigint BY DEFAULT identity PK；chunk_id bigint → chunks CASCADE；storage_id uuid UNIQUE；algorithm/key_id text；stored_size integer 可空；compressed bool；nonce bytea 可空；state text；created_at timestamptz；unreferenced_at/deleted_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
-| `packs` | id bigint ALWAYS identity PK；storage_id uuid UNIQUE；algorithm/key_id text；raw_size bigint >0；stored_size bigint 可空；compressed bool 默认 false；nonce bytea（12 B）/digest bytea（32 B）可空；member_count integer ≥2；state text；created_at timestamptz 默认 now()；unreferenced_at/deleted_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
+| `packs` | id bigint ALWAYS identity PK；storage_id uuid UNIQUE；algorithm/key_id text；raw_size bigint >0；stored_size bigint 可空；compressed bool 默认 false；nonce bytea（12 B）/digest bytea（32 B）可空；member_count integer ≥2；state text；created_at timestamptz 默认 now()；unreferenced_at/deleted_at/range_checked_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
 | `pack_members` | pack_id bigint → packs CASCADE；ordinal integer ≥0；chunk_id bigint → chunks CASCADE；offset_bytes bigint ≥0；PK(pack_id,ordinal)、UNIQUE(pack_id,chunk_id) |
 | `pack_inputs` | task_id uuid → tasks CASCADE；chunk_id bigint → chunks；created_at timestamptz 默认 now()；PK(task_id,chunk_id)、UNIQUE(chunk_id)，防止重写任务同时占有相同输入 |
 | `pack_maintenance` | stream_id uuid PK → streams CASCADE；cursor bigint 默认 0；generation bigint 默认 1；reason text 默认 pack；next_check_at/updated_at timestamptz 默认 now() |
@@ -191,9 +191,12 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | --- | --- |
 | `chunk_access_stats` | chunk_id bigint PK → chunks CASCADE；reads/range_reads/bytes bigint 默认 0；last_read_at timestamptz |
 | `chunk_access_windows` | window_start timestamptz、chunk_id bigint → chunks CASCADE，构成 PK；reads/range_reads/bytes/range_origin_reads bigint 默认 0 |
-| `pack_access_windows` | window_start timestamptz、pack_id bigint → packs CASCADE，构成 PK；downloads/downloaded_bytes/partial_downloads/useful_bytes bigint 默认 0 |
+| `pack_access_windows` | window_start timestamptz、pack_id bigint → packs CASCADE，构成 PK；downloads/downloaded_bytes/partial_downloads/partial_bytes/useful_bytes bigint 默认 0；updated_at timestamptz 默认 now() |
+| `pack_member_access_windows` | window_start timestamptz、pack_id bigint → packs CASCADE、chunk_id bigint → chunks CASCADE，构成 PK；downloads bigint 默认 0，仅实际局部回源使用的成员 |
 
 窗口按 UTC 小时聚合，另有 (chunk_id,window_start) 和 (pack_id,window_start) 查询索引。读取先更新有界进程计数，再批量落库；统计不是审计账本，进程异常退出可能丢失尚未落库的一小段。后台预热不增加逻辑访问；pack 统计记录实际回源及完整成员代价，缓存 Range 与远端局部 pack 下载分开计数。
+
+共享下载只登记一次；同次下载若服务完整读取或维护读取，不算局部 Range 压力。range_checked_at 避免在没有新观测时反复试压。Range 冷却保存在逻辑 chunks，另有 `(repack_after,id) WHERE range_split_at IS NOT NULL` 索引，不依赖旧包或任务历史。
 
 ## fragments
 

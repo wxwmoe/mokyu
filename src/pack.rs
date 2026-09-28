@@ -37,6 +37,15 @@ pub struct Config {
     pub repack_interval: String,
     pub repack_cooldown: String,
     pub reclaim_min_savings_bytes: String,
+    pub range_optimization: bool,
+    pub range_interval: String,
+    pub range_window: String,
+    pub range_min_downloads: u32,
+    pub range_min_savings_percent: u8,
+    pub range_min_savings_bytes: String,
+    pub range_repack_after: String,
+    pub range_repack_window: String,
+    pub range_repack_retry_interval: String,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -52,6 +61,15 @@ impl Default for Config {
             repack_interval: "24h".into(),
             repack_cooldown: "1h".into(),
             reclaim_min_savings_bytes: "4MiB".into(),
+            range_optimization: true,
+            range_interval: "15m".into(),
+            range_window: "24h".into(),
+            range_min_downloads: 8,
+            range_min_savings_percent: 50,
+            range_min_savings_bytes: "64MiB".into(),
+            range_repack_after: "30d".into(),
+            range_repack_window: "7d".into(),
+            range_repack_retry_interval: "7d".into(),
         }
     }
 }
@@ -66,6 +84,11 @@ impl Config {
             "pack.maintenance_concurrency must be positive"
         );
         config::bytes(&self.reclaim_min_savings_bytes)?;
+        config::bytes(&self.range_min_savings_bytes)?;
+        ensure!(
+            self.range_min_downloads > 0 && (1..=100).contains(&self.range_min_savings_percent),
+            "pack Range thresholds must be positive; percentage must be 1..100"
+        );
         for time in [
             &self.upload_cache_timeout,
             &self.interval,
@@ -73,6 +96,11 @@ impl Config {
             &self.reclaim_interval,
             &self.repack_interval,
             &self.repack_cooldown,
+            &self.range_interval,
+            &self.range_window,
+            &self.range_repack_after,
+            &self.range_repack_window,
+            &self.range_repack_retry_interval,
         ] {
             config::seconds(time)?;
         }

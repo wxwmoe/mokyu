@@ -142,8 +142,19 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 | `pack.repack_interval` | 时间 / `24h` | 相邻小包和独立块的碎片合并间隔 |
 | `pack.repack_cooldown` | 时间 / `1h` | 拆分和引用变化后重新合并的冷却 |
 | `pack.reclaim_min_savings_bytes` | 大小 / `4MiB` | 无引用成员重写预计节省的最小编码字节 |
+| `pack.range_optimization` | bool / `true` | 优化反复局部 Range 回源的历史 pack；独立于 pack.enabled |
+| `pack.range_interval` | 时间 / `15m` | Range 候选评估间隔 |
+| `pack.range_window` | 时间 / `24h` | 实际回源收益的观测窗口 |
+| `pack.range_min_downloads` | 正整数 / `8` | 窗口内至少发生的局部 pack 下载次数 |
+| `pack.range_min_savings_percent` | 1～100 / `50` | 扣除重写和新增请求代价后的最低节省比例 |
+| `pack.range_min_savings_bytes` | 大小 / `64MiB` | 同时满足的最低预计净流量节省 |
+| `pack.range_repack_after` | 时间 / `30d` | Range 拆分后最早开始重新合包评估 |
+| `pack.range_repack_window` | 时间 / `7d` | 重新合包前检查的近期 Range 窗口，包括缓存命中 |
+| `pack.range_repack_retry_interval` | 时间 / `7d` | 仍有 Range 或统计覆盖不足时的再评估间隔 |
 
 chunk_hint 对含已压缩成员的包完整试压，其他包抽样；最终仍应用全局压缩收益门槛。允许无压缩 pack 减少顺序读取请求，但小范围冷读需要整包回源。关闭 pack 不自动拆除历史包，使用[维护命令](cli-reference.md#pack-维护)。
+
+Range 评估只使用实际局部回源；缓存命中、HEAD、完整范围和共享完整下载不触发。按整 CDC 成员估算读取量，扣除旧包读取、新来源写入和额外 GET 每次 64 KiB 的保守等价代价；这不是提供商账单估算。pack 关闭时 Range 维护只输出独立块。观测按小时聚合，保留期须覆盖两个 Range 窗口；重新合包还要求连续覆盖和近期成功刷盘，统计缺口不视为零访问。
 
 ## 压缩策略
 
@@ -223,7 +234,7 @@ key ID 为 1～128 字节，不同 ID 必须使用不同实际密钥。更换算
 | `statistics.refresh_interval` | 时间 / `15m` | 后台容量汇总完成后的等待间隔；页面刷新只读取快照 |
 | `statistics.query_timeout` | 时间 / `2m` | 一轮汇总的总时限及 SQL 语句时限 |
 | `statistics.access_flush_interval` | 时间 / `1m` | 有界内存访问计数批量写入数据库的间隔 |
-| `statistics.access_retention` | 时间 / `14d` | 小时访问窗口保留期，至少 7d；累计区块计数随区块保留 |
+| `statistics.access_retention` | 时间 / `14d` | 小时访问窗口保留期，至少 7d 且覆盖两个 Range 窗口；累计区块计数随区块保留 |
 
 query_timeout 最多 2,147,483 秒。后台汇总失败时保留上次成功结果；大库可增加间隔并按数据库能力调整时限。字段、统计口径和过期标识见[容量快照](manage-api-reference.md#容量快照)。
 

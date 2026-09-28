@@ -426,8 +426,11 @@ impl Config {
         seconds(&c.processing.upload_idle_timeout)?;
         seconds(&c.statistics.access_flush_interval)?;
         ensure!(
-            seconds(&c.statistics.access_retention)? >= 7 * 24 * 3600,
-            "statistics.access_retention must cover at least seven days"
+            seconds(&c.statistics.access_retention)?
+                >= seconds(&c.pack.range_repack_window)?
+                    .max(seconds(&c.pack.range_window)?)
+                    .max(7 * 24 * 3600),
+            "statistics.access_retention must cover seven days and the configured Range windows"
         );
         for value in [
             c.backend.read_concurrency,
