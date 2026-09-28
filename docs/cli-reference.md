@@ -63,7 +63,7 @@ docker exec -i media-gateway cli user create admin --password-stdin < /secure/pa
 | `gc resume` | 解除暂停；需要立即执行时再调用 `gc run` |
 | `cleanup status` | 返回历史保留策略、运行状态和上轮结果 |
 | `cleanup run` | 立即执行一轮历史清理，遵守保留期、引用和资源预算；已有清理运行时返回当前状态 |
-| `maintenance enable` | 持久禁止新写入和远端 GC，暂停清桶任务，返回 active_operations；须等待已接纳操作排空 |
+| `maintenance enable` | 持久禁止新写入和远端 GC，暂停清桶、pack 和拆包任务，返回 active_operations；须等待已接纳操作排空 |
 | `maintenance disable` | 恢复写入；须先暂停或完成破坏性 sweep |
 
 ## 后台任务
@@ -75,7 +75,18 @@ docker exec -i media-gateway cli user create admin --password-stdin < /secure/pa
 | `task pause UUID` | 暂停 queued/running 任务，允许当前批次结束 |
 | `task resume UUID` | 从持久进度继续 paused/failed 任务，清除旧错误 |
 
-重启后此前运行的任务自动继续，paused 保持暂停。维护模式下启动或运行中的 purge 会持久暂停，退出维护后需显式 `task resume`。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge 需要退出维护模式，只读 sweep 预览和巡检可在维护模式下运行。
+重启后此前运行的任务自动继续，paused 保持暂停。维护模式下 purge/pack/unpack 会持久暂停，退出维护后需显式 `task resume`。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge/pack/unpack 需要退出维护模式，只读 sweep 预览和巡检可在维护模式下运行。
+
+### Pack 维护
+
+| 命令 | 作用 |
+| --- | --- |
+| `pack status` | 开关、大小上限，以及各状态的数量和字节 |
+| `pack run [--kind KIND]` | KIND 为 pack（默认）、reuse、reclaim、repack；分别为创建、复用拆分、无引用成员回收、碎片合并 |
+| `pack unpack ID [--execute]` | 默认预览；execute 创建将指定包拆成独立区块的任务 |
+| `pack unpack --all [--execute]` | 拆除全部历史包；先关闭 pack.enabled 并重启 |
+
+手动维护仍遵守引用、冷却、收益、维护模式和资源限制；run 返回 task_id，可用 task 命令暂停、恢复、查看错误。拆包先写新来源再切换映射，旧包按 GC 宽限回收，临时占用会增加。关闭 pack 后 reuse/reclaim 仍可执行，但只输出独立块。
 
 ### 清空存储桶
 
@@ -90,10 +101,12 @@ docker exec -it media-gateway cli bucket purge media --execute
 
 | 命令 | 作用 |
 | --- | --- |
-| `backend sweep [--older-than 48h]` | 默认预览；扫描部署 chunks 范围，统计未被数据库任何状态索引的区块 |
+| `backend sweep [--older-than 48h]` | 默认预览；扫描部署 chunks/packs 规范路径，统计未被数据库任何物理状态索引的载荷 |
 | `backend sweep --execute --preview UUID [--older-than 48h]` | 按相同前缀和年龄阈值重新扫描，每次删除前重新查询数据库 |
 
 执行需要维护模式、已完成的预览、排空的活跃操作、非空区块索引及真实终端；按提示确认前缀，再输入 `DELETE`。预览过期后需重新生成。
+
+旧 chunks-only 预览不能用于扩大范围后的清查；重新生成预览，不复用旧任务的确认范围。
 
 ```sh
 docker exec media-gateway cli maintenance enable

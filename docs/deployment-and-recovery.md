@@ -92,13 +92,13 @@ psql -X -h DB_HOST -U DB_USER -d DB_NAME -f scripts/mark-unreferenced-chunks.sql
 
 ## 备份材料
 
-项目不备份后端 S3 区块。可用 pgBackRest 备份 PostgreSQL/WAL、restic 备份配置，亦可选用其他满足恢复要求的工具。
+项目不备份后端 S3 区块或 pack。可用 pgBackRest 备份 PostgreSQL/WAL、restic 备份配置，亦可选用其他满足恢复要求的工具。
 
 | 材料 | 恢复用途 |
 | --- | --- |
 | 数据库一致备份及所需 WAL | 对象索引、权限、引用和上传状态 |
 | 配置、全部历史区块密钥、`credential-key` | 后端身份、解密区块及客户端凭据 |
-| 仍存在的后端区块 | 实际对象内容 |
+| 仍存在的后端区块和 pack | 实际对象内容 |
 | `data/multipart` 的一致快照 | 恢复已确认但尚未 Complete 的分片上传 |
 | `data/chunks` | 可丢弃并按需重建 |
 
@@ -126,3 +126,7 @@ psql -X -h DB_HOST -U DB_USER -d DB_NAME -f scripts/mark-unreferenced-chunks.sql
 迁移在事务中执行，失败或中断后可修正原因并重启；已成功的迁移不重复执行。不要修改已发布迁移或迁移历史。涉及索引构建时，应为大库预留启动时间和磁盘空间。
 
 程序不自动降级数据库。回退需按恢复流程还原升级前的一致备份，并确认相关后端区块仍存在。实际 SQL 见[migrations](../migrations)。
+
+支持 pack 的服务将匹配身份的后端标识升级为格式 2；维护启动时延后至解除维护。物理来源表保留旧区块的身份和密文，升级不重编码数据。历史 chunks-only sweep 预览不再匹配当前范围，需要重新预览。旧 processing.backend_concurrency 可继续作为读写额度；改用 backend 三个方向的并发项时应删除旧项。
+
+Pack 默认开启，维护改写期间新旧载荷并存，旧载荷在 GC 宽限后删除；为这段临时空间和 S3 请求预留预算。停用时设置 pack.enabled=false，历史数据仍可读；需要消除历史包时执行 pack unpack --all 的预览与确认操作。

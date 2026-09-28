@@ -55,8 +55,16 @@ Compose 健康检查对应 `["CMD","media-gateway","--config","PATH","cli","stat
 | `backend.access_key` / `backend.access_key_file` | 字符串 / 路径，二选一必填 | 后端 access key 或其文本文件 |
 | `backend.secret_key` / `backend.secret_key_file` | 字符串 / 路径，二选一必填 | 后端 secret key 或其文本文件 |
 | `backend.allow_http` | bool / `false` | 可信网络内可显式允许 HTTP 后端 |
+| `backend.read_concurrency` / `backend.upload_concurrency` | 可选正整数 / 自动 | 全部后端 GET / PUT 的共享并发，含即时请求与维护任务 |
+| `backend.control_concurrency` | 可选正整数 / 自动 | HEAD、LIST、DELETE 的共享并发 |
+| `backend.connect_timeout` / `backend.request_timeout` | 时间 / `5s` / `30s` | 连接时限 / 单次 HTTP 尝试时限 |
+| `backend.max_retries` | 非负整数 / `3` | 每轮 SDK 最大重试次数 |
+| `backend.retry_timeout` | 时间 / `120s` | SDK 重试窗口，不是严格整体截止 |
+| `backend.priority_aging` | 时间 / `30s` | 老请求提升调度优先级的等待时间 |
 
 endpoint、bucket 和 prefix 共同绑定部署身份；已有部署不能直接修改它们来搬迁数据。根目录和空前缀规则见[后端布局](storage-format.md#后端布局)。
+
+后端名额用满时排队，前端请求优先、维护请求随后；已发出的请求不抢占，老等待者避免长期饥饿。排队计入前端无进展超时；SDK 重试期间仍持有同一后端名额。取消等待不占用执行名额。
 
 ## 数据目录与上传
 
@@ -76,7 +84,7 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 
 | 字段 | 类型 / 默认值 | 说明 |
 | --- | --- | --- |
-| `cache.max_size` | 可选大小 / 无单独字节配额 | chunks 缓存实际文件字节上限；包括写入预留 |
+| `cache.max_size` | 可选大小 / 无单独字节配额 | chunks 缓存实际文件字节上限；包括写入预留；`0B` 禁用填充 |
 | `cache.max_entries` | 正整数 / 自动 | 缓存文件索引条目预算，ghost 元数据同样有界 |
 | `cache.min_compression_savings_percent` | 整数 0～100 / `20` | 压缩至少节省此百分比才保留 `.zst`，否则保存 `.raw`；0 保留所有已压缩载荷，100 全部缓存原始字节；只影响新填充 |
 
@@ -88,8 +96,9 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 | `processing.inflight_bytes` | 大小 / 自动 | 在途数据槽预算，非进程 RSS 硬限制 |
 | `processing.upload_concurrency` | 正整数 / 自动 | PUT/part/完成操作的并发上限；完成操作持续占用名额直到后台合并结束 |
 | `processing.read_concurrency` | 正整数 / 自动 | 同时流式读取上限 |
-| `processing.backend_concurrency` | 正整数 / 自动 | 后端请求并发上限 |
+| `processing.backend_concurrency` | 可选正整数 / 自动 | 兼容旧配置，分别作为后端读/写额度；不能与 backend 的三个并发字段并用 |
 | `processing.connections` | 正整数 / 自动 | 三入口合计连接上限 |
+| `processing.read_idle_timeout` / `processing.upload_idle_timeout` | 时间 / `120s` | 读出下一块 / 上传下一块的无进展时限，包含数据库、资源及后端排队；multipart 重建也受上传时限约束 |
 
 ### 自动预算
 
@@ -109,7 +118,26 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 | database.max_connections | min(2C+4,64) | 正整数；池最少 0 个连接，闲置 60 秒释放 |
 | cache.max_entries | M/64/256 | ≤ M/256/8 |
 
+后端读写分别默认 min(4C,2N)，控制请求默认 min(C,8)。Pack 读取和准备分别使用剩余预算 `(M−N×S−M/4)/2`，每次按四倍载荷加编解码工作区预留；状态中的 pack_memory_units 以 MiB 表示每组预算。无法容纳配置写入上限时拒绝启动。准备完成的编码数据等待后端名额时仍计入此预算，CPU 名额已释放。
+
 这些是内部工作预算；容器 CPU／内存硬限制由部署配置设置。本地磁盘分别用 `multipart.local_limit` 和 `cache.max_size` 限制。
+
+## Pack 维护
+
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `pack.enabled` | bool / `true` | 自动创建及合并 pack；关闭后历史 pack 仍可读取、拆分和回收 |
+| `pack.max_size` | 大小 / `32MiB` | 完整成员原始长度上限，4～256 MiB，另受内存预算限制 |
+| `pack.compression_strategy` | 可选枚举 / 继承 | always / sample / file_type / chunk_hint；省略继承 compression.strategy，其余压缩参数均继承 |
+| `pack.maintenance_concurrency` | 正整数 / `1` | 同时运行的 pack 准备任务，实际 I/O 与 CPU 仍共享全局预算 |
+| `pack.interval` | 时间 / `1h` | 新打包候选检查间隔 |
+| `pack.reuse_interval` | 时间 / `5m` | 复用队列补查及失败退避；正常引用变更直接排队 |
+| `pack.reclaim_interval` | 时间 / `30m` | 包内无引用成员回收检查间隔 |
+| `pack.repack_interval` | 时间 / `24h` | 相邻小包和独立块的碎片合并间隔 |
+| `pack.repack_cooldown` | 时间 / `1h` | 拆分和引用变化后重新合并的冷却 |
+| `pack.reclaim_min_savings_bytes` | 大小 / `4MiB` | 无引用成员重写预计节省的最小编码字节 |
+
+chunk_hint 对含已压缩成员的包完整试压，其他包抽样；最终仍应用全局压缩收益门槛。允许无压缩 pack 减少顺序读取请求，但小范围冷读需要整包回源。关闭 pack 不自动拆除历史包，使用[维护命令](cli-reference.md#pack-维护)。
 
 ## 压缩策略
 
@@ -188,6 +216,8 @@ key ID 为 1～128 字节，不同 ID 必须使用不同实际密钥。更换算
 | --- | --- | --- |
 | `statistics.refresh_interval` | 时间 / `15m` | 后台容量汇总完成后的等待间隔；页面刷新只读取快照 |
 | `statistics.query_timeout` | 时间 / `2m` | 一轮汇总的总时限及 SQL 语句时限 |
+| `statistics.access_flush_interval` | 时间 / `1m` | 有界内存访问计数批量写入数据库的间隔 |
+| `statistics.access_retention` | 时间 / `14d` | 小时访问窗口保留期，至少 7d；累计区块计数随区块保留 |
 
 query_timeout 最多 2,147,483 秒。后台汇总失败时保留上次成功结果；大库可增加间隔并按数据库能力调整时限。字段、统计口径和过期标识见[容量快照](manage-api-reference.md#容量快照)。
 

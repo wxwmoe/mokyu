@@ -27,6 +27,8 @@ struct BackendMeta {
     format_version: u32,
     deployment_id: Uuid,
     chunk_layout: String,
+    #[serde(default)]
+    pack_layout: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     created_by: String,
 }
@@ -225,6 +227,85 @@ impl Drop for CachePin {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
+pub struct LoadedPack {
+    pub pack: crate::pack::Pack,
+    pub data: crate::pack::Decoded,
+    _memory: tokio::sync::OwnedSemaphorePermit,
+    observe: bool,
+    range: bool,
+    used: Mutex<HashMap<i64, (usize, usize)>>,
+    access: Arc<crate::access::Access>,
+}
+impl LoadedPack {
+    fn touch(&self, c: &Chunk) {
+        if self
+            .used
+            .lock()
+            .unwrap()
+            .insert(
+                c.id,
+                (
+                    c.raw_size as usize,
+                    c.stored_size.unwrap_or(c.raw_size + 16) as usize,
+                ),
+            )
+            .is_none()
+            && self.observe
+            && self.range
+        {
+            self.access.origin(c.id);
+        }
+    }
+}
+impl Drop for LoadedPack {
+    fn drop(&mut self) {
+        if self.observe {
+            let used = self.used.lock().unwrap();
+            let raw: usize = used.values().map(|(n, _)| n).sum();
+            let bytes = self.pack.stored_size.unwrap_or(0) as usize;
+            let useful: usize = used.values().map(|(_, n)| n).sum();
+            self.access.pack(
+                self.pack.id,
+                bytes,
+                self.range && raw < self.pack.raw_size as usize,
+                useful.min(bytes),
+            );
+        }
+    }
+}
+#[derive(Default)]
+pub struct ReadContext {
+    pack: tokio::sync::Mutex<Option<Arc<LoadedPack>>>,
+    observe: bool,
+    range: bool,
+}
+impl ReadContext {
+    pub fn user(range: bool) -> Self {
+        Self {
+            observe: true,
+            range,
+            ..Default::default()
+        }
+    }
+    async fn touch(&self, c: &Chunk) {
+        if self.observe
+            && let Some(p) = self.pack.lock().await.as_ref()
+            && p.data.members.iter().any(|m| m.id == c.id)
+        {
+            p.touch(c);
+        }
+    }
+}
+enum Source {
+    Chunk(Chunk, CachePin),
+    Pack(crate::pack::Pack, CachePin),
+}
+#[derive(sqlx::FromRow)]
+struct InspectionMember {
+    #[sqlx(flatten)]
+    chunk: Chunk,
+    offset_bytes: i64,
+}
 #[derive(Default)]
 struct Fifo {
     entries: HashMap<Uuid, Entry>,
@@ -333,16 +414,34 @@ impl Fifo {
     }
 }
 
-type FetchResult = tokio::sync::OnceCell<Result<Bytes, Arc<anyhow::Error>>>;
+type FetchResult =
+    tokio::sync::OnceCell<Result<(Bytes, Option<Arc<LoadedPack>>), Arc<anyhow::Error>>>;
+struct PackFetch {
+    result: tokio::sync::OnceCell<Result<Arc<LoadedPack>, Arc<anyhow::Error>>>,
+    priority: Arc<AtomicUsize>,
+}
 
 pub struct Storage {
-    pub backend: Arc<dyn ObjectStore>,
+    pub access: Arc<crate::access::Access>,
+    maintenance: Arc<std::sync::atomic::AtomicBool>,
+    pub db: sqlx::PgPool,
+    pub source_gate: tokio::sync::RwLock<()>,
+    physical_pins: Mutex<HashMap<Uuid, std::sync::Weak<AtomicUsize>>>,
+    pack_misses: Mutex<HashMap<i64, std::sync::Weak<PackFetch>>>,
+    pack_live: Mutex<HashMap<i64, std::sync::Weak<LoadedPack>>>,
+    pack_memory: Arc<Semaphore>,
+    pack_memory_units: u32,
+    pack_work: Arc<Semaphore>,
+    inspection: tokio::sync::Mutex<()>,
+    backend: Arc<dyn ObjectStore>,
     prefix: String,
     pub disk: Arc<Disk>,
     pub secrets: Arc<Secrets>,
     cpu: Arc<Semaphore>,
     pub compression: Arc<crate::compression::Pool>,
-    requests: Arc<Semaphore>,
+    pub reads: Arc<crate::backend::Gate>,
+    pub writes: Arc<crate::backend::Gate>,
+    pub controls: Arc<crate::backend::Gate>,
     fifo: tokio::sync::Mutex<Fifo>,
     cache_writes: tokio::sync::Mutex<()>,
     fills: Arc<Semaphore>,
@@ -361,7 +460,14 @@ pub struct Storage {
     operations: [Arc<crate::stats::Counters>; 4],
 }
 impl Storage {
-    pub async fn new(c: &Config, secrets: Arc<Secrets>, budget: &Budget) -> Result<Self> {
+    pub async fn new(
+        c: &Config,
+        secrets: Arc<Secrets>,
+        budget: &Budget,
+        db: sqlx::PgPool,
+        maintenance: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<Self> {
+        let pack_units = budget.pack_memory_units;
         for name in ["multipart", "chunks"] {
             tokio::fs::create_dir_all(c.storage.data.join(name)).await?;
         }
@@ -373,7 +479,11 @@ impl Storage {
                     .as_deref()
                     .map(config::bytes)
                     .transpose()?,
-                c.cache.max_size.as_deref().map(config::bytes).transpose()?,
+                c.cache
+                    .max_size
+                    .as_deref()
+                    .map(config::cache_bytes)
+                    .transpose()?,
             ],
             floor: config::bytes(&c.storage.free_space_floor)?,
             usage: Mutex::new(Usage {
@@ -394,15 +504,33 @@ impl Storage {
             .with_client_options(
                 ClientOptions::new()
                     .with_allow_http(c.backend.allow_http)
-                    .with_timeout(Duration::from_secs(30)),
+                    .with_connect_timeout(Duration::from_secs(config::seconds(
+                        &c.backend.connect_timeout,
+                    )?))
+                    .with_timeout(Duration::from_secs(config::seconds(
+                        &c.backend.request_timeout,
+                    )?)),
             )
             .with_retry(RetryConfig {
-                max_retries: 3,
-                retry_timeout: Duration::from_secs(120),
+                max_retries: c.backend.max_retries,
+                retry_timeout: Duration::from_secs(config::seconds(&c.backend.retry_timeout)?),
                 ..Default::default()
             })
             .build()?;
         let s = Self {
+            maintenance,
+            access: Arc::new(crate::access::Access::new(
+                budget.cache_entries.clamp(128, 8192),
+            )),
+            db,
+            source_gate: tokio::sync::RwLock::new(()),
+            physical_pins: Mutex::new(HashMap::new()),
+            pack_misses: Mutex::new(HashMap::new()),
+            pack_live: Mutex::new(HashMap::new()),
+            pack_memory: Arc::new(Semaphore::new(pack_units as usize)),
+            pack_memory_units: pack_units,
+            pack_work: Arc::new(Semaphore::new(pack_units as usize)),
+            inspection: tokio::sync::Mutex::new(()),
             backend: Arc::new(backend),
             prefix: c.backend.prefix.trim_end_matches('/').into(),
             disk,
@@ -412,12 +540,34 @@ impl Storage {
                 c.compression.clone(),
                 budget.cpu_jobs,
             )?),
-            requests: Arc::new(Semaphore::new(budget.backend_concurrency)),
+            reads: crate::backend::Gate::new(
+                c.backend
+                    .read_concurrency
+                    .unwrap_or(budget.backend_concurrency),
+                Duration::from_secs(config::seconds(&c.backend.priority_aging)?),
+            ),
+            writes: crate::backend::Gate::new(
+                c.backend
+                    .upload_concurrency
+                    .unwrap_or(budget.backend_concurrency),
+                Duration::from_secs(config::seconds(&c.backend.priority_aging)?),
+            ),
+            controls: crate::backend::Gate::new(
+                c.backend
+                    .control_concurrency
+                    .unwrap_or(budget.available_cpus.clamp(1, 8)),
+                Duration::from_secs(config::seconds(&c.backend.priority_aging)?),
+            ),
             fifo: tokio::sync::Mutex::new(Fifo::default()),
             cache_writes: tokio::sync::Mutex::new(()),
             fills: Arc::new(Semaphore::new(budget.cpu_jobs)),
             max_entries: budget.cache_entries,
-            capacity: c.cache.max_size.as_deref().map(config::bytes).transpose()?,
+            capacity: c
+                .cache
+                .max_size
+                .as_deref()
+                .map(config::cache_bytes)
+                .transpose()?,
             min_compression_savings_percent: c.cache.min_compression_savings_percent,
             misses: Mutex::new(HashMap::new()),
             backend_gets: 0.into(),
@@ -437,7 +587,7 @@ impl Storage {
         let lookups = self.cache_lookups.load(Ordering::Relaxed);
         serde_json::json!({"backend":{"get":self.operations[0].snapshot(),"put":self.operations[1].snapshot(),"delete":self.operations[2].snapshot(),"head":self.operations[3].snapshot()},
             "cache_lookups":lookups,"cache_hit_rate":crate::stats::ratio(self.cache_hits.load(Ordering::Relaxed),lookups).map(|v| v.min(1.0)),
-            "cpu_slots_available":self.cpu.available_permits(),"backend_slots_available":self.requests.available_permits(),
+            "cpu_slots_available":self.cpu.available_permits(),"backend_queues":{"read":self.reads.snapshot(),"upload":self.writes.snapshot(),"control":self.controls.snapshot()},
             "cache_limit_bytes":self.capacity,"multipart_limit_bytes":self.disk.limits[0]})
     }
     pub fn path(&self, id: Uuid) -> Path {
@@ -446,7 +596,7 @@ impl Storage {
     pub fn prefix(&self) -> String {
         format!("{}chunks/", self.namespace())
     }
-    fn namespace(&self) -> String {
+    pub fn namespace(&self) -> String {
         if self.prefix.is_empty() {
             String::new()
         } else {
@@ -457,18 +607,51 @@ impl Storage {
         let prefix = Path::from(self.prefix());
         parse_chunk_name(path.strip_prefix(&format!("{prefix}/"))?)
     }
-    pub async fn check_identity(&self, db: &sqlx::PgPool) -> Result<()> {
+    pub fn parse_physical_path(&self, path: &str) -> Option<Uuid> {
+        self.parse_path(path).or_else(|| {
+            parse_chunk_name(path.strip_prefix(&format!("{}packs/", self.namespace()))?)
+        })
+    }
+    pub async fn list_physical(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<object_store::ObjectMeta>> {
+        let _permit = crate::backend::PRIORITY
+            .scope(crate::backend::MAINTENANCE, self.controls.acquire())
+            .await?;
+        let prefix = Path::from(self.namespace());
+        let offset = Path::parse(cursor.unwrap_or(""))?;
+        Ok(self
+            .backend
+            .list_with_offset(Some(&prefix), &offset)
+            .filter(|r| {
+                std::future::ready(
+                    r.as_ref()
+                        .map_or(true, |m| m.location.as_ref().starts_with(&self.namespace())),
+                )
+            })
+            .take(limit)
+            .try_collect()
+            .await?)
+    }
+    pub async fn check_identity(&self, db: &sqlx::PgPool, maintenance: bool) -> Result<()> {
         let (deployment_id, created_at, initialized): (Uuid, chrono::DateTime<chrono::Utc>, bool) =
             sqlx::query_as("SELECT deployment_id,created_at,backend_initialized FROM gateway_meta")
                 .fetch_one(db)
                 .await?;
         let path = Path::from(format!("{}meta.json", self.namespace()));
+        let read_permit = self.reads.acquire().await?;
         let saved = match self.backend.get(&path).await {
             Ok(result) => {
                 ensure!(
                     result.meta.size <= 16 * 1024,
                     "backend meta.json exceeds limit"
                 );
+                let version = object_store::UpdateVersion {
+                    e_tag: result.meta.e_tag.clone(),
+                    version: result.meta.version.clone(),
+                };
                 let mut stream = result.into_stream();
                 let mut data = Vec::new();
                 while let Some(bytes) = stream.try_next().await? {
@@ -478,24 +661,51 @@ impl Storage {
                     );
                     data.extend_from_slice(&bytes);
                 }
-                Some(
+                Some((
                     serde_json::from_slice::<BackendMeta>(&data)
                         .context("invalid backend meta.json")?,
-                )
+                    version,
+                ))
             }
             Err(object_store::Error::NotFound { .. }) => None,
             Err(e) => return Err(e.into()),
         };
-        if let Some(meta) = saved {
+        drop(read_permit);
+        if let Some((mut meta, version)) = saved {
             ensure!(
                 meta.deployment_id == deployment_id,
                 "backend deployment ID differs from database"
             );
             ensure!(
-                meta.format_version == 1 && meta.chunk_layout == "uuid-prefix2",
+                (meta.format_version == 1
+                    || (meta.format_version == 2
+                        && meta.pack_layout.as_deref() == Some("uuid-prefix2-v1")))
+                    && meta.chunk_layout == "uuid-prefix2",
                 "unsupported backend storage format"
             );
+            if meta.format_version == 1 && !maintenance {
+                meta.format_version = 2;
+                meta.pack_layout = Some("uuid-prefix2-v1".into());
+                meta.created_by =
+                    format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+                let _permit = self.writes.acquire().await?;
+                self.backend
+                    .put_opts(
+                        &path,
+                        Bytes::from(serde_json::to_vec_pretty(&meta)?).into(),
+                        PutOptions {
+                            mode: PutMode::Update(version),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .context("cannot upgrade backend marker conditionally")?;
+            }
         } else {
+            ensure!(
+                !maintenance,
+                "backend marker is missing; initialize outside maintenance mode"
+            );
             ensure!(
                 !initialized,
                 "backend meta.json is missing; restore the matching marker before startup"
@@ -515,6 +725,7 @@ impl Storage {
             } else {
                 format!("{prefix}/")
             };
+            let control_permit = self.controls.acquire().await?;
             let mut objects = self.backend.list(if self.prefix.is_empty() {
                 None
             } else {
@@ -526,14 +737,18 @@ impl Storage {
                     "backend namespace is not empty; refusing initialization"
                 );
             }
+            drop(objects);
+            drop(control_permit);
             let meta = BackendMeta {
-                format_version: 1,
+                format_version: 2,
                 deployment_id,
                 chunk_layout: "uuid-prefix2".into(),
+                pack_layout: Some("uuid-prefix2-v1".into()),
                 created_at,
                 created_by: format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
             };
             // Create-only protects an existing marker if another database races initialization.
+            let _write_permit = self.writes.acquire().await?;
             self.backend
                 .put_opts(
                     &path,
@@ -636,7 +851,7 @@ impl Storage {
             Some(encoded.len() as i32) == c.stored_size,
             "encoded length mismatch"
         );
-        let permit = self.requests.acquire().await?;
+        let permit = self.writes.acquire().await?;
         let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
         let size = encoded.len();
@@ -688,7 +903,7 @@ impl Storage {
         }
         Ok(None)
     }
-    async fn invalidate(&self, id: Uuid) -> Result<()> {
+    pub(crate) async fn invalidate(&self, id: Uuid) -> Result<()> {
         let _write = self.cache_writes.lock().await;
         let mut fifo = self.fifo.lock().await;
         let Some(entry) = fifo.entries.get(&id) else {
@@ -793,10 +1008,29 @@ impl Storage {
         self.fifo.lock().await.insert(id, size, compressed);
         Ok(())
     }
-    pub async fn get(self: &Arc<Self>, c: &Chunk) -> Result<Bytes> {
+    pub async fn get_with(
+        self: &Arc<Self>,
+        c: &Chunk,
+        context: Option<&ReadContext>,
+    ) -> Result<Bytes> {
         self.cache_lookups.fetch_add(1, Ordering::Relaxed);
         if let Some(raw) = self.cached(c).await? {
+            if let Some(context) = context {
+                context.touch(c).await;
+            }
             return Ok(raw);
+        }
+        if let Some(context) = context {
+            let current = context.pack.lock().await;
+            if let Some(loaded) = current
+                .as_ref()
+                .filter(|p| p.data.members.iter().any(|m| m.id == c.id))
+            {
+                if context.observe {
+                    loaded.touch(c);
+                }
+                return loaded.data.chunk(c);
+            }
         }
         let lock = {
             let mut map = self.misses.lock().unwrap();
@@ -810,41 +1044,448 @@ impl Storage {
             }
         };
         match lock
-            .get_or_init(|| async { self.fetch(c).await.map_err(Arc::new) })
+            .get_or_init(|| async { self.fetch(c, context).await.map_err(Arc::new) })
             .await
         {
-            Ok(raw) => Ok(raw.clone()),
+            Ok((raw, loaded)) => {
+                if let (Some(context), Some(loaded)) = (context, loaded) {
+                    if context.observe {
+                        loaded.touch(c);
+                    }
+                    // Prefetch may be advancing to the next pack while waiting for this one's
+                    // memory. Never retain the previous pack while waiting for that advance.
+                    if let Ok(mut current) = context.pack.try_lock() {
+                        *current = Some(loaded.clone());
+                    }
+                }
+                Ok(raw.clone())
+            }
             Err(error) => Err(anyhow::anyhow!("chunk read failed: {error:#}")),
         }
     }
-    async fn fetch(self: &Arc<Self>, c: &Chunk) -> Result<Bytes> {
+    async fn fetch(
+        self: &Arc<Self>,
+        c: &Chunk,
+        context: Option<&ReadContext>,
+    ) -> Result<(Bytes, Option<Arc<LoadedPack>>)> {
         if let Some(raw) = self.cached(c).await? {
-            return Ok(raw);
+            if let Some(context) = context {
+                context.touch(c).await;
+            }
+            return Ok((raw, None));
         }
-        let encoded = self.read_backend(c).await?;
-        let (raw, cache) = self.decode(c, encoded).await?;
-        if let Err(e) = self.fill(c, cache).await {
-            tracing::warn!(error=%e,"cache fill failed; serving verified backend data");
+        match self.source(c.id).await? {
+            Source::Chunk(physical, _pin) => {
+                let encoded = self.read_backend(&physical).await?;
+                let (raw, cache) = self.decode(&physical, encoded).await?;
+                let fill = if physical.compressed == c.compressed
+                    && physical.stored_size == c.stored_size
+                {
+                    self.fill(c, cache).await
+                } else {
+                    self.fill_raw(c, raw.clone()).await
+                };
+                if let Err(e) = fill {
+                    tracing::warn!(error=%e,"cache fill failed; serving verified backend data");
+                }
+                Ok((raw, None))
+            }
+            Source::Pack(pack, _pin) => {
+                if let Some(context) = context {
+                    let mut current = context.pack.lock().await;
+                    if let Some(loaded) = current.as_ref().filter(|p| p.pack.id == pack.id) {
+                        if context.observe {
+                            loaded.touch(c);
+                        }
+                        return Ok((loaded.data.chunk(c)?, Some(loaded.clone())));
+                    }
+                    *current = None;
+                    let loaded = self.load_pack(pack, context.observe, context.range).await?;
+                    if context.observe {
+                        loaded.touch(c);
+                    }
+                    let raw = loaded.data.chunk(c)?;
+                    *current = Some(loaded.clone());
+                    Ok((raw, Some(loaded)))
+                } else {
+                    let loaded = self.load_pack(pack, false, false).await?;
+                    Ok((loaded.data.chunk(c)?, Some(loaded)))
+                }
+            }
         }
-        Ok(raw)
+    }
+    pub async fn register_location(&self, c: &Chunk) -> Result<()> {
+        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,stored_size,compressed,nonce,state,created_at,unreferenced_at) VALUES($1,$2,$3,$4,$5,$6,'uploading',$7,now())")
+            .bind(c.encoding_id).bind(c.id).bind(c.storage_id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).bind(c.created_at).execute(&self.db).await?;
+        Ok(())
+    }
+    fn physical_pin(&self, id: Uuid) -> CachePin {
+        let mut pins = self.physical_pins.lock().unwrap();
+        pins.retain(|_, p| p.strong_count() > 0);
+        let counter = pins
+            .get(&id)
+            .and_then(std::sync::Weak::upgrade)
+            .unwrap_or_else(|| {
+                let counter = Arc::new(AtomicUsize::new(0));
+                pins.insert(id, Arc::downgrade(&counter));
+                counter
+            });
+        counter.fetch_add(1, Ordering::Relaxed);
+        CachePin(counter)
+    }
+    pub fn physical_active(&self, id: Uuid) -> bool {
+        self.physical_pins
+            .lock()
+            .unwrap()
+            .get(&id)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|p| p.load(Ordering::Relaxed) > 0)
+    }
+    async fn source(&self, id: i64) -> Result<Source> {
+        let _gate = self.source_gate.read().await;
+        let physical:Option<Chunk>=sqlx::query_as("SELECT c.id,l.id encoding_id,l.storage_id,c.hash,c.raw_size,l.stored_size,c.algorithm,c.key_id,l.compressed,l.nonce,c.format,c.state,l.created_at FROM chunk_locations l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready'")
+            .bind(id).fetch_optional(&self.db).await?;
+        if let Some(c) = physical {
+            let pin = self.physical_pin(c.storage_id);
+            return Ok(Source::Chunk(c, pin));
+        }
+        let p:crate::pack::Pack=sqlx::query_as("SELECT p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=$1 AND c.state='ready' AND p.state='ready'")
+            .bind(id).fetch_optional(&self.db).await?.context(codec::IntegrityError::Metadata)?;
+        let pin = self.physical_pin(p.storage_id);
+        Ok(Source::Pack(p, pin))
+    }
+    pub fn pack_path(&self, id: Uuid) -> Path {
+        Path::from(format!("{}packs/{}", self.namespace(), chunk_name(id)))
+    }
+    pub async fn pack_memory(&self, size: usize) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        let workspace = self.compression.workspace_bytes()?;
+        let units = (size as u64 * 4 + workspace).div_ceil(1024 * 1024);
+        ensure!(
+            units <= u64::from(self.pack_memory_units),
+            "pack exceeds available memory budget"
+        );
+        Ok(self
+            .pack_memory
+            .clone()
+            .acquire_many_owned(units as u32)
+            .await?)
+    }
+    pub async fn pack_work(&self, size: usize) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        let units = (size as u64 * 4 + self.compression.workspace_bytes()?).div_ceil(1024 * 1024);
+        ensure!(
+            units <= u64::from(self.pack_memory_units),
+            "pack rewrite exceeds available memory budget"
+        );
+        Ok(self
+            .pack_work
+            .clone()
+            .acquire_many_owned(units as u32)
+            .await?)
+    }
+    pub async fn encode_pack(
+        &self,
+        p: crate::pack::Pack,
+        members: Vec<(Chunk, Bytes)>,
+        strategy: crate::compression::Strategy,
+        should_try: bool,
+    ) -> Result<(crate::pack::Pack, Vec<u8>)> {
+        let permit = self.cpu.clone().acquire_owned().await?;
+        let secrets = self.secrets.clone();
+        let pool = self.compression.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            crate::pack::encode(p, &members, &secrets, &pool, strategy, should_try)
+        })
+        .await?
+    }
+    pub async fn put_path(&self, path: &Path, data: Vec<u8>) -> Result<()> {
+        let _permit = self.writes.acquire().await?;
+        self.background_writable()?;
+        let mut operation = self.operations[1].begin();
+        self.backend_puts.fetch_add(1, Ordering::Relaxed);
+        let size = data.len() as u64;
+        let result = self.backend.put(path, Bytes::from(data).into()).await;
+        operation.finish(result.is_err());
+        result?;
+        self.operations[1].bytes(size);
+        self.backend_write_bytes.fetch_add(size, Ordering::Relaxed);
+        Ok(())
+    }
+    pub async fn delete_path(&self, path: &Path) -> Result<()> {
+        let _permit = self.controls.acquire().await?;
+        self.background_writable()?;
+        let mut operation = self.operations[2].begin();
+        self.backend_deletes.fetch_add(1, Ordering::Relaxed);
+        let result = self.backend.delete(path).await;
+        operation.finish(result.is_err());
+        result?;
+        Ok(())
+    }
+    fn background_writable(&self) -> Result<()> {
+        ensure!(
+            !self.maintenance.load(Ordering::Acquire)
+                || crate::backend::PRIORITY
+                    .try_with(|p| *p)
+                    .unwrap_or(crate::backend::FOREGROUND)
+                    == crate::backend::FOREGROUND,
+            "background writes are paused for maintenance"
+        );
+        Ok(())
+    }
+    async fn load_pack(
+        self: &Arc<Self>,
+        p: crate::pack::Pack,
+        observe: bool,
+        range: bool,
+    ) -> Result<Arc<LoadedPack>> {
+        if let Some(live) = self
+            .pack_live
+            .lock()
+            .unwrap()
+            .get(&p.id)
+            .and_then(std::sync::Weak::upgrade)
+        {
+            return Ok(live);
+        }
+        let lock = {
+            let mut map = self.pack_misses.lock().unwrap();
+            map.retain(|_, v| v.strong_count() > 0);
+            map.get(&p.id)
+                .and_then(std::sync::Weak::upgrade)
+                .unwrap_or_else(|| {
+                    let cell = Arc::new(PackFetch {
+                        result: tokio::sync::OnceCell::new(),
+                        priority: Arc::new(AtomicUsize::new(crate::backend::MAINTENANCE)),
+                    });
+                    map.insert(p.id, Arc::downgrade(&cell));
+                    cell
+                })
+        };
+        lock.priority.fetch_min(
+            crate::backend::PRIORITY
+                .try_with(|p| *p)
+                .unwrap_or(crate::backend::FOREGROUND),
+            Ordering::Relaxed,
+        );
+        self.reads.refresh();
+        let result = lock
+            .result
+            .get_or_init(|| async {
+                let result: Result<Arc<LoadedPack>> = async {
+                    let memory = self.pack_memory(p.payload_size()?).await?;
+                    let read_permit = self
+                        .reads
+                        .acquire_shared(Some(lock.priority.clone()))
+                        .await?;
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("pack-download").await;
+                    let encoded = self
+                        .read_path_permitted(&self.pack_path(p.storage_id), p.payload_size()? + 16)
+                        .await?;
+                    drop(read_permit);
+                    let permit = self.cpu.clone().acquire_owned().await?;
+                    let secrets = self.secrets.clone();
+                    let pool = self.compression.clone();
+                    let pack = p.clone();
+                    let data = tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        crate::pack::decode(&pack, encoded, &secrets, &pool)
+                    })
+                    .await??;
+                    let loaded = Arc::new(LoadedPack {
+                        pack: p.clone(),
+                        data,
+                        _memory: memory,
+                        observe,
+                        range,
+                        used: Mutex::new(HashMap::new()),
+                        access: self.access.clone(),
+                    });
+                    {
+                        let mut live = self.pack_live.lock().unwrap();
+                        live.retain(|_, v| v.strong_count() > 0);
+                        live.insert(p.id, Arc::downgrade(&loaded));
+                    }
+                    if let Ok(permit) = self.fills.clone().try_acquire_owned() {
+                        let storage = self.clone();
+                        let loaded = loaded.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            if let Err(e) = storage.fill_pack(&loaded).await {
+                                tracing::warn!(error=%e,"pack cache fill failed");
+                            }
+                        });
+                    }
+                    Ok(loaded)
+                }
+                .await;
+                result.map_err(Arc::new)
+            })
+            .await;
+        result
+            .as_ref()
+            .map(Arc::clone)
+            .map_err(|e| anyhow::anyhow!("pack read failed: {e:#}"))
+    }
+    async fn fill_pack(self: &Arc<Self>, loaded: &LoadedPack) -> Result<()> {
+        let ids: Vec<i64> = loaded.data.members.iter().map(|m| m.id).collect();
+        let chunks: Vec<Chunk> =
+            sqlx::query_as("SELECT * FROM chunks WHERE id=ANY($1) AND state='ready'")
+                .bind(ids)
+                .fetch_all(&self.db)
+                .await?;
+        for c in chunks {
+            self.fill_raw(&c, loaded.data.chunk(&c)?).await?;
+        }
+        Ok(())
+    }
+    pub async fn fill_raw(&self, c: &Chunk, raw: Bytes) -> Result<()> {
+        if self.capacity == Some(0) {
+            return Ok(());
+        }
+        if codec::cache_compressed(c, self.min_compression_savings_percent) {
+            let permit = self.cpu.clone().acquire_owned().await?;
+            let pool = self.compression.clone();
+            let input = raw.clone();
+            let compressed = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                pool.compress_with(&input, true, crate::compression::Strategy::Always)
+            })
+            .await??;
+            if let Some(data) = compressed {
+                return self.fill_owned(c.storage_id, &data, true).await;
+            }
+        }
+        self.fill_owned(c.storage_id, &raw, false).await
     }
     pub(crate) async fn head(&self, c: &Chunk) -> Result<u64> {
-        let _permit = self.requests.acquire().await?;
+        let _permit = self.controls.acquire().await?;
         let mut operation = self.operations[3].begin();
         let result = self.backend.head(&self.path(c.storage_id)).await;
         operation.finish(result.is_err());
         Ok(result?.size)
     }
+    pub async fn inspect(
+        &self,
+        task: Uuid,
+        c: &Chunk,
+        mode: crate::integrity::Mode,
+        physical_detail: &mut serde_json::Value,
+    ) -> Result<u64> {
+        match self.source(c.id).await? {
+            Source::Chunk(physical, _pin) => {
+                *physical_detail = serde_json::json!({"source":"chunk","encoding_id":physical.encoding_id.to_string(),"storage_id":physical.storage_id});
+                codec::validate_metadata(&physical, &self.secrets)?;
+                match mode {
+                    crate::integrity::Mode::Metadata => Ok(0),
+                    crate::integrity::Mode::Head => {
+                        let size = self.head(&physical).await?;
+                        ensure!(
+                            Some(size as i32) == physical.stored_size,
+                            codec::IntegrityError::Length
+                        );
+                        Ok(0)
+                    }
+                    crate::integrity::Mode::Full => {
+                        let data = self.read_backend(&physical).await?;
+                        let size = data.len() as u64;
+                        self.decode(&physical, data).await?;
+                        Ok(size)
+                    }
+                }
+            }
+            Source::Pack(p, _pin) => {
+                *physical_detail = serde_json::json!({"source":"pack","pack_id":p.id.to_string(),"storage_id":p.storage_id});
+                p.validate(&self.secrets)?;
+                let capacity = p.payload_size().context(codec::IntegrityError::Metadata)?;
+                ensure!(
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS(SELECT 1 FROM pack_members WHERE pack_id=$1 AND chunk_id=$2)"
+                    )
+                    .bind(p.id)
+                    .bind(c.id)
+                    .fetch_one(&self.db)
+                    .await?,
+                    codec::IntegrityError::Metadata
+                );
+                // Persistent task results avoid downloading one physical pack per logical chunk.
+                let _inspection = self.inspection.lock().await;
+                if let Some((code,)) = sqlx::query_as::<_, (Option<String>,)>(
+                    "SELECT error_code FROM integrity_packs WHERE task_id=$1 AND pack_id=$2",
+                )
+                .bind(task)
+                .bind(p.id)
+                .fetch_optional(&self.db)
+                .await?
+                {
+                    if let Some(code) = code {
+                        return Err(codec::IntegrityError::from_code(&code)
+                            .context("invalid inspection result")?
+                            .into());
+                    }
+                    return Ok(0);
+                }
+                let result:Result<u64>=async {
+                    let members:Vec<(Chunk,i64)>=sqlx::query_as::<_,InspectionMember>("SELECT c.*,m.offset_bytes FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 ORDER BY m.ordinal LIMIT 4097")
+                        .bind(p.id).fetch_all(&self.db).await?.into_iter().map(|m|(m.chunk,m.offset_bytes)).collect();
+                    let mut offset=0i64;
+                    ensure!(members.len()==p.member_count as usize,codec::IntegrityError::Metadata);
+                    for (c,start) in &members {ensure!(*start==offset && c.raw_size>0,codec::IntegrityError::Metadata);offset+=i64::from(c.raw_size);}
+                    ensure!(offset==p.raw_size,codec::IntegrityError::Metadata);
+                    if matches!(mode,crate::integrity::Mode::Metadata) {return Ok(0);}
+                    if matches!(mode,crate::integrity::Mode::Head) {
+                        let _permit=self.controls.acquire().await?;
+                        let mut operation=self.operations[3].begin();
+                        let result=self.backend.head(&self.pack_path(p.storage_id)).await;operation.finish(result.is_err());
+                        ensure!(Some(result?.size as i64)==p.stored_size,codec::IntegrityError::Length);return Ok(0);
+                    }
+                    let _memory=self.pack_memory(capacity).await?;
+                    let data=self.read_path(&self.pack_path(p.storage_id),capacity+16).await?;
+                    let size=data.len() as u64;
+                    let permit=self.cpu.clone().acquire_owned().await?;let pool=self.compression.clone();let secrets=self.secrets.clone();let pack=p.clone();
+                    tokio::task::spawn_blocking(move||{
+                        let _permit=permit;let decoded=crate::pack::decode(&pack,data,&secrets,&pool)?;
+                        for ((c,offset),member) in members.iter().zip(&decoded.members) {
+                            ensure!(member.id==c.id && member.hash.as_slice()==c.hash && member.len==c.raw_size as usize && member.start==12+44*members.len()+*offset as usize,codec::IntegrityError::Metadata);
+                        }
+                        Ok::<_,anyhow::Error>(())
+                    }).await??;
+                    Ok(size)
+                }.await;
+                let code = result.as_ref().err().and_then(|e| {
+                    e.downcast_ref::<codec::IntegrityError>()
+                        .map(|e| e.code())
+                        .or_else(|| {
+                            matches!(
+                                e.downcast_ref::<object_store::Error>(),
+                                Some(object_store::Error::NotFound { .. })
+                            )
+                            .then_some("remote_missing")
+                        })
+                });
+                if result.is_ok() || code.is_some() {
+                    sqlx::query("INSERT INTO integrity_packs(task_id,pack_id,error_code) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(task).bind(p.id).bind(code).execute(&self.db).await?;
+                }
+                result
+            }
+        }
+    }
     // Shared bounded remote read. Inspection must not use or populate the cache.
     pub(crate) async fn read_backend(&self, c: &Chunk) -> Result<Vec<u8>> {
-        let _permit = self.requests.acquire().await?;
+        self.read_path(&self.path(c.storage_id), MAX + 16).await
+    }
+    pub async fn read_path(&self, path: &Path, bound: usize) -> Result<Vec<u8>> {
+        let _permit = self.reads.acquire().await?;
+        self.read_path_permitted(path, bound).await
+    }
+    async fn read_path_permitted(&self, path: &Path, bound: usize) -> Result<Vec<u8>> {
         let mut operation = self.operations[0].begin();
         self.backend_gets
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let result: Result<Vec<u8>> = async {
-            let result = self.backend.get(&self.path(c.storage_id)).await?;
+            let result = self.backend.get(path).await?;
             ensure!(
-                result.meta.size <= (MAX + 16) as u64,
+                result.meta.size <= bound as u64,
                 codec::IntegrityError::Length
             );
             let mut data = Vec::with_capacity(result.meta.size as usize);
@@ -852,7 +1493,7 @@ impl Storage {
             while let Some(bytes) = stream.next().await {
                 let bytes = bytes?;
                 ensure!(
-                    data.len() + bytes.len() <= MAX + 16,
+                    data.len() + bytes.len() <= bound,
                     codec::IntegrityError::Length
                 );
                 data.extend_from_slice(&bytes);
@@ -866,16 +1507,6 @@ impl Storage {
         self.backend_read_bytes
             .fetch_add(data.len() as u64, Ordering::Relaxed);
         Ok(data)
-    }
-    pub async fn delete(&self, id: Uuid) -> Result<()> {
-        let _permit = self.requests.acquire().await?;
-        let mut operation = self.operations[2].begin();
-        self.backend_deletes.fetch_add(1, Ordering::Relaxed);
-        let result = self.backend.delete(&self.path(id)).await;
-        operation.finish(result.is_err());
-        result?;
-        self.invalidate(id).await?;
-        Ok(())
     }
 }
 

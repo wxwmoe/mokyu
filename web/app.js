@@ -48,7 +48,7 @@ function table(headings, rows) {
 }
 function readRoute() {
   const p = new URLSearchParams(location.search);
-  return { page: ['objects', 'settings', 'status', 'tasks'].includes(p.get('page')) ? p.get('page') : 'objects', bucket: p.get('bucket') || '', prefix: p.get('prefix') || '', token: p.get('token') || '', recursive: p.get('recursive') === 'true', key: p.get('key'), section: p.get('section') || '', state: p.get('state') || '', task: p.get('task'), taskToken: p.get('taskToken') || '' };
+  return { page: ['objects', 'settings', 'status', 'tasks', 'packs'].includes(p.get('page')) ? p.get('page') : 'objects', bucket: p.get('bucket') || '', prefix: p.get('prefix') || '', token: p.get('token') || '', recursive: p.get('recursive') === 'true', key: p.get('key'), section: p.get('section') || '', state: p.get('state') || '', task: p.get('task'), taskToken: p.get('taskToken') || '', pack: p.get('pack'), packAfter: p.get('packAfter') || '' };
 }
 function go(values, previousPage = false) {
   const url = new URL(location.href);
@@ -123,7 +123,7 @@ async function loadView() {
   $('detail').hidden = true; $('objects-view').hidden = route.page !== 'objects' || route.key !== null;
   $('settings-view').hidden = route.page !== 'settings'; $('tasks-view').hidden = route.page !== 'tasks';
   $('bucket-toolbar').hidden = !['objects', 'settings'].includes(route.page);
-  for (const [id, page] of [['objects-tab', 'objects'], ['settings', 'settings'], ['status', 'status'], ['tasks', 'tasks']]) {
+  for (const [id, page] of [['objects-tab', 'objects'], ['settings', 'settings'], ['status', 'status'], ['tasks', 'tasks'], ['packs-tab', 'packs']]) {
     if (route.page === page) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current');
   }
   $('buckets').value = route.bucket; $('search-prefix').value = prefix; $('recursive').checked = route.recursive; $('task-state').value = route.state;
@@ -149,6 +149,10 @@ async function loadView() {
     } else if (route.page === 'status') {
       const value = await api('/api/status'); if (request !== view) return;
       panel = { type: 'status', value }; renderPanel();
+    } else if (route.page === 'packs') {
+      const value = await api(route.pack ? '/api/packs/' + encodeURIComponent(route.pack) : '/api/packs?' + query(route.packAfter ? { after: route.packAfter } : {}));
+      if (request !== view) return;
+      panel = { type: route.pack ? 'packDetails' : 'packs', value }; renderPanel();
     } else await refreshTasks(request);
   } catch (error) { if (request === view) notice(error); }
 }
@@ -182,6 +186,20 @@ function renderPanel(resetForm = false) {
   } else if (type === 'status') {
     fields([['version', value.version], ['startedAt', date(value.runtime.started_at)], ['uptime', number(value.runtime.uptime_seconds) + ' s'], ['cpu', number(value.resources.available_cpus)], ['memory', size(value.resources.memory_bytes)], ['multipartBytes', size(value.local_bytes[0]) + ' / ' + limit(value.io.multipart_limit_bytes)], ['cacheBytes', size(value.local_bytes[1]) + ' / ' + limit(value.io.cache_limit_bytes)], ['gc', t(value.gc_paused ? 'paused' : value.gc_running ? 'running' : 'enabled')], ['maintenance', t(value.maintenance ? 'enabled' : 'disabled')], ['dataSlots', number(value.data_slots_available) + ' / ' + number(value.resources.data_slots)], ['dbPool', number(value.db_pool_idle) + ' / ' + number(value.db_pool_size)], ['cpuSlots', number(value.io.cpu_slots_available) + ' / ' + number(value.resources.cpu_jobs)], ['gcDeleted', number(value.runtime.gc_deleted)], ['gcFailures', number(value.runtime.gc_failures)]]);
     renderStatistics(value); $('statistics').prepend(button(t('refreshStatistics'), loadView));
+  } else if (type === 'packs') {
+    fields([['enabled', t(value.status.enabled ? 'enabled' : 'disabled')], ['packMaxSize', value.status.max_size]]);
+    $('task-list').append(node('p', t('packHelp')), table(['packId', 'taskState', 'rawSize', 'encodedSize', 'compression', 'created'], value.packs.map(p => [button(p.id, () => go({ pack: p.id })), t(p.state), size(p.raw_size), p.stored_size == null ? '—' : size(p.stored_size), p.compressed ? 'zstd' : 'none', date(p.created_at)])));
+    for (const kind of ['pack', 'reuse', 'reclaim', 'repack']) if (value.status.enabled || ['reuse', 'reclaim'].includes(kind)) $('actions').append(button(t('run_' + kind), async () => { const task = await write('/api/packs/run', { kind }); await go({ page: 'tasks', task: task.task_id }); }));
+    if (!value.status.enabled) $('actions').append(button(t('unpackAll'), () => previewUnpack(null)));
+    if (route.packAfter) $('actions').append(button(t('previous'), () => history.back()));
+    if (value.next_after) $('actions').append(button(t('more'), () => go({ packAfter: value.next_after }, true)));
+    $('actions').append(button(t('refresh'), loadView));
+  } else if (type === 'packDetails') {
+    const p = value.pack;
+    fields([['packId', p.id], ['taskState', t(p.state)], ['rawSize', size(p.raw_size)], ['encodedSize', p.stored_size == null ? '—' : size(p.stored_size)], ['compression', p.compressed ? 'zstd' : 'none'], ['encryption', p.algorithm]]);
+    $('task-list').append(table(['chunkId', 'offset', 'rawSize', 'currentSource'], value.members.map(m => [m.chunk_id, number(m.offset), size(m.raw_size), t(m.current ? 'yes' : 'no')])));
+    $('actions').append(button(t('backPacks'), () => go({ pack: null })));
+    if (p.state === 'ready') $('actions').append(button(t('unpack'), () => previewUnpack(p.id)));
   } else if (type === 'taskDetails') {
     fields([['taskId', value.id], ['taskType', t(value.kind)], ['taskState', t(value.state)], ['processed', number(value.processed)], ['created', date(value.created_at)], ['updated', date(value.updated_at)], ['taskCursor', value.cursor], ['taskError', value.error]]);
     $('task-list').append(node('p', t('taskHelp')), node('pre', JSON.stringify(value.detail, null, 2)));
@@ -247,7 +265,7 @@ function renderChunks() {
   const root = $('chunks'), { value, after, previous } = chunks; root.hidden = false;
   root.replaceChildren(node('h3', t('showChunks')), node('p', t('chunksHelp')));
   const scroll = node('div'); scroll.className = 'table-scroll';
-  scroll.append(table(['chunkId', 'offset', 'referenceLength', 'rawSize', 'encodedSize', 'compression', 'savingRate', 'encryption'], value.chunks.map(c => [c.id, number(BigInt(c.offset_bytes)), size(c.length), size(c.raw_size), c.stored_size == null ? '—' : size(c.stored_size), c.compression, c.payload_size == null ? '—' : percent(1 - c.payload_size / c.raw_size), c.algorithm]))); root.append(scroll);
+  scroll.append(table(['chunkId', 'offset', 'referenceLength', 'rawSize', 'independentSizeHint', 'compression', 'savingRate', 'encryption', 'source', 'readCount', 'rangeReadCount'], value.chunks.map(c => [c.id, number(BigInt(c.offset_bytes)), size(c.length), size(c.raw_size), c.independent_size_hint == null ? '—' : size(c.independent_size_hint), c.compression, c.payload_size == null ? '—' : percent(1 - c.payload_size / c.raw_size), c.algorithm, c.pack_id ? button('Pack ' + c.pack_id, () => go({ page: 'packs', pack: c.pack_id })) : t(c.source), number(c.reads), number(c.range_reads)]))); root.append(scroll);
   if (previous.length) root.append(button(t('previous'), () => loadChunks(previous.at(-1), previous.slice(0, -1))));
   if (value.next_offset !== null) root.append(button(t('more'), () => loadChunks(value.next_offset, [...previous, after])));
 }
@@ -297,9 +315,15 @@ function confirmTask(action, task) {
   if (executing) return;
   pending = { kind: 'task', action, task }; renderConfirmation();
 }
+async function previewUnpack(id) {
+  if (executing) return;
+  const input = { pack_id: id, all: id === null }, preview = await write('/api/packs/unpack', input);
+  pending = { kind: 'unpack', input, preview }; renderConfirmation();
+}
 function renderConfirmation() {
   if (!pending || executing) return;
   if (pending.kind === 'objects') showConfirmation(t('action_' + pending.action), t('confirmObjects', { count: number(pending.objects.length) }), table(['objectKey'], pending.objects.map(o => [o.key])));
+  else if (pending.kind === 'unpack') showConfirmation(t('unpack'), t('unpackHelp'), table(['metric', 'value'], [[t('packs'), number(pending.preview.packs)], [t('rawSize'), size(pending.preview.raw_bytes)]]));
   else showConfirmation(t(pending.action === 'pause' ? 'pauseTask' : 'resumeTask'), t('confirmTask', { id: pending.task.id, type: t(pending.task.kind) }), node('pre', JSON.stringify(pending.task.detail, null, 2)));
 }
 async function executeConfirmation() {
@@ -316,6 +340,10 @@ async function executeConfirmation() {
       }
       $('confirm-items').replaceChildren(resultTable); $('confirm-help').textContent = t('operationResults');
       $('confirm-notice').textContent = t('requestId', { id: value.request_id });
+    } else if (current.kind === 'unpack') {
+      const value = await write('/api/packs/unpack', { ...current.input, execute: true });
+      if (location.href === url) await go({ page: 'tasks', task: value.task_id, state: null, taskToken: null });
+      $('confirm-help').textContent = t('operationSuccess'); $('confirm-notice').textContent = t('requestId', { id: value.request_id });
     } else {
       const value = await write('/api/tasks/' + current.task.id + '/actions', { action: current.action });
       if (location.href === url) await loadView(); $('confirm-help').textContent = t('operationSuccess');
@@ -365,12 +393,14 @@ function renderStatistics(value) {
   if (cleanup.running) text('p', t('cleanupRunning'));
   if (lastRun?.budget_exhausted) text('p', t('cleanupBudget'));
   if (lastRun?.last_error) text('p', t('cleanupFailed'));
-  table('databaseCleanup', ['cleanupCategory', 'cleanupRemoved', 'cleanupPending', 'cleanupOldest'], ['chunks', 'uploads', 'tasks', 'sessions', 'integrity_issues'].map(kind => [
+  table('databaseCleanup', ['cleanupCategory', 'cleanupRemoved', 'cleanupPending', 'cleanupOldest'], ['chunks', 'chunk_locations', 'packs', 'uploads', 'tasks', 'sessions', 'integrity_issues'].map(kind => [
     t('cleanup_' + kind), lastRun ? number(lastRun.deleted[kind]) : '—',
     snapshot ? number(snapshot.cleanup[kind].eligible) : '—', snapshot?.cleanup[kind].oldest_at ? date(snapshot.cleanup[kind].oldest_at) : '—',
   ]));
   text('p', t('cleanupHelp'));
+  table('backendQueues', ['direction', 'running', 'queueLimit', 'foreground', 'upload', 'maintenanceQueue', 'oldestWait'], Object.entries(value.io.backend_queues).map(([direction, q]) => [t(direction), number(q.running), number(q.limit), number(q.queued.foreground), number(q.queued.upload), number(q.queued.maintenance), number(q.oldest_wait_seconds)]));
   if (!snapshot) return;
+  table('physicalSources', ['source', 'taskState', 'count', 'encodedSize'], snapshot.physical.map(p => [t(p.kind), t(p.state), number(p.objects), size(p.stored_bytes)]));
   text('p', t('storageHelp'));
   const live = snapshot.live;
   table('spaceSavings', ['metric', 'size', 'savingRate'], [
@@ -437,7 +467,7 @@ $('login').addEventListener('submit', async event => {
 });
 $('logout').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST', headers: { 'X-CSRF-Token': csrf } }); csrf = ''; showLogin(); } catch (error) { notice(error); } });
 window.addEventListener('popstate', () => { if (!$('browser').hidden) loadView(); });
-for (const [id, page] of [['objects-tab', 'objects'], ['settings', 'settings'], ['status', 'status'], ['tasks', 'tasks']]) $(id).addEventListener('click', () => go({ page, key: null, task: null }));
+for (const [id, page] of [['objects-tab', 'objects'], ['settings', 'settings'], ['status', 'status'], ['tasks', 'tasks'], ['packs-tab', 'packs']]) $(id).addEventListener('click', () => go({ page, key: null, task: null, pack: null }));
 $('buckets').addEventListener('change', () => go({ bucket: $('buckets').value, prefix: null, key: null, token: null }));
 $('refresh').addEventListener('click', loadView);
 $('search-form').addEventListener('submit', event => { event.preventDefault(); go({ prefix: $('search-prefix').value, recursive: $('recursive').checked, token: null, key: null }); });

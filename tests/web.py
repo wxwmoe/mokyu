@@ -26,7 +26,7 @@ with psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text()) as 
     db.execute("INSERT INTO tasks(id,kind,state,error) VALUES(%s,'sweep','failed',%s)",
                (uuid.uuid4(), '<script>unsafe task error</script>'))
     db.execute("INSERT INTO tasks(id,kind,state,detail) VALUES(%s,'sweep','paused',%s)", (paused_task, json.dumps({
-        'dry_run': True, 'prefix': (backend_prefix + '/' if backend_prefix else '') + 'chunks/',
+        'dry_run': True, 'prefix': (backend_prefix + '/' if backend_prefix else ''),
         'older_than_seconds': 172800, 'cutoff': '2000-01-01T00:00:00Z', 'candidates': 0,
         'bytes': 0, 'unrecognized': 0, 'samples': []})))
 def fixture(i):

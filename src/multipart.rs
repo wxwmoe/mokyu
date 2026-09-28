@@ -420,7 +420,8 @@ impl App {
                 false,
             )
             .await?;
-        let data = self.extent_bytes(&tail).await?;
+        let context = crate::storage::ReadContext::default();
+        let data = self.extent_bytes_with(&tail, &context).await?;
         let mut used = 0;
         let mut window = Vec::with_capacity(MAX);
         while used < data.len() && data.len() - used + right.size as usize >= MAX {
@@ -432,7 +433,7 @@ impl App {
                 ensure!(!rows.is_empty(), "part mapping incomplete");
                 for row in rows {
                     ensure!(row.offset_bytes == pos, "part mapping has gap");
-                    let bytes = self.extent_bytes(&row).await?;
+                    let bytes = self.extent_bytes_with(&row, &context).await?;
                     let n = (MAX - window.len()).min(bytes.len());
                     window.extend_from_slice(&bytes[..n]);
                     pos += row.length as i64;
@@ -677,6 +678,7 @@ impl App {
         let mut window = Vec::with_capacity(MAX);
         let mut offset = 0;
         let mut full = Integrity::new(&hyper::HeaderMap::new(), u.checksum_algorithm.as_deref())?;
+        let context = crate::storage::ReadContext::default();
         for part in parts {
             let mut part_hash = Md5::new();
             let mut pos = 0;
@@ -685,7 +687,7 @@ impl App {
                 ensure!(!rows.is_empty(), "part mapping incomplete");
                 for row in rows {
                     ensure!(row.offset_bytes == pos, "part mapping has gap");
-                    let data = self.extent_bytes(&row).await?;
+                    let data = self.extent_bytes_with(&row, &context).await?;
                     part_hash.update(&data);
                     full.update(&data);
                     let mut rest = data.as_ref();

@@ -234,6 +234,10 @@ pub fn manage_router(app: Arc<App>) -> Router {
         .route("/api/tasks/{id}", get(task))
         .route("/api/tasks/{id}/actions", post(task_action))
         .route("/api/integrity", post(start_integrity))
+        .route("/api/packs", get(packs))
+        .route("/api/packs/{id}", get(pack_detail))
+        .route("/api/packs/run", post(pack_run))
+        .route("/api/packs/unpack", post(pack_unpack))
         .route("/api/tasks/{id}/issues", get(integrity_issues))
         .route(
             "/api/tasks/{id}/issues/{issue}/objects",
@@ -923,7 +927,7 @@ async fn object_chunks(
     if object.id != q.version {
         return Err(s3s::s3_error!(PreconditionFailed).into());
     }
-    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',c.id::text,'offset_bytes',e.offset_bytes::text,'length',e.length,'source_offset',e.source_offset,'raw_size',c.raw_size,'stored_size',c.stored_size,'payload_size',c.stored_size-CASE WHEN c.algorithm='none' THEN 0 ELSE 16 END,'compression',CASE WHEN c.compressed THEN 'zstd' ELSE 'none' END,'algorithm',c.algorithm,'key_id',c.key_id) FROM extents e JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=$1 AND e.offset_bytes>$2 ORDER BY e.offset_bytes LIMIT $3")
+    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',c.id::text,'offset_bytes',e.offset_bytes::text,'length',e.length,'source_offset',e.source_offset,'raw_size',c.raw_size,'stored_size',l.stored_size,'independent_size_hint',c.stored_size,'payload_size',c.stored_size-CASE WHEN c.algorithm='none' THEN 0 ELSE 16 END,'compression',CASE WHEN c.compressed THEN 'zstd' ELSE 'none' END,'algorithm',c.algorithm,'key_id',c.key_id,'pack_id',c.pack_id::text,'source',CASE WHEN l.id IS NOT NULL THEN 'chunk' ELSE 'pack' END,'reads',COALESCE(a.reads,0),'range_reads',COALESCE(a.range_reads,0)) FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_locations l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN chunk_access_stats a ON a.chunk_id=c.id WHERE e.stream_id=$1 AND e.offset_bytes>$2 ORDER BY e.offset_bytes LIMIT $3")
         .bind(object.id).bind(q.after.unwrap_or(-1)).bind(limit + 1).fetch_all(&app.db).await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
@@ -1062,6 +1066,83 @@ async fn start_integrity(
     let (user_id, _) = authenticate(&app, &headers, true).await?;
     let result = app.integrity_start(input).await;
     tracing::info!(%user_id,success=result.is_ok(),task_id=?result.as_ref().ok().and_then(|r|r.get("task_id")),"management integrity check");
+    Ok(Json(result?))
+}
+async fn packs(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Query(q): Query<IssueQuery>,
+) -> Result<Json<Value>, HttpError> {
+    authenticate(&app, &headers, false).await?;
+    let limit = q.limit.unwrap_or(100);
+    if !(1..=200).contains(&limit) || q.after.is_some_and(|id| id < 0) {
+        return Err(s3s::s3_error!(InvalidArgument).into());
+    }
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(p)||jsonb_build_object('id',p.id::text) FROM packs p WHERE id>$1 ORDER BY id LIMIT $2")
+        .bind(q.after.unwrap_or(0)).bind(limit+1).fetch_all(&app.db).await?;
+    let next = if rows.len() > limit as usize {
+        rows[limit as usize - 1]["id"].clone()
+    } else {
+        Value::Null
+    };
+    Ok(Json(
+        json!({"status":app.pack_status().await?,"packs":rows.into_iter().take(limit as usize).collect::<Vec<_>>(),"next_after":next}),
+    ))
+}
+async fn pack_detail(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, HttpError> {
+    authenticate(&app, &headers, false).await?;
+    let pack: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(p)||jsonb_build_object('id',p.id::text) FROM packs p WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_optional(&app.db)
+    .await?
+    .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+    let members:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('ordinal',m.ordinal,'chunk_id',m.chunk_id::text,'offset',m.offset_bytes,'raw_size',c.raw_size,'current',c.pack_id=m.pack_id) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 ORDER BY ordinal LIMIT 4096").bind(id).fetch_all(&app.db).await?;
+    Ok(Json(json!({"pack":pack,"members":members})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackRun {
+    kind: String,
+}
+async fn pack_run(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(input): Json<PackRun>,
+) -> Result<Json<Value>, HttpError> {
+    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let result = app.pack_start(&input.kind).await;
+    tracing::info!(%user_id,kind=%input.kind,success=result.is_ok(),"management pack maintenance");
+    Ok(Json(result?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackUnpack {
+    pack_id: Option<String>,
+    #[serde(default)]
+    all: bool,
+    #[serde(default)]
+    execute: bool,
+}
+async fn pack_unpack(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(input): Json<PackUnpack>,
+) -> Result<Json<Value>, HttpError> {
+    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let id = input
+        .pack_id
+        .as_deref()
+        .map(str::parse::<i64>)
+        .transpose()
+        .map_err(|_| s3s::s3_error!(InvalidArgument))?;
+    let result = app.unpack_start(id, input.all, input.execute).await;
+    tracing::info!(%user_id,success=result.is_ok(),"management pack unpack");
     Ok(Json(result?))
 }
 #[derive(Deserialize)]
@@ -1488,6 +1569,7 @@ async fn respond(
             span.start as i64,
             span.end as i64,
             permits,
+            range.is_some(),
         )))
     };
     Ok(response.body(body)?)

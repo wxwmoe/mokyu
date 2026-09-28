@@ -96,9 +96,9 @@
 
 ### 区块详情
 
-每行：`{id,offset_bytes,length,source_offset,raw_size,stored_size,payload_size,compression,algorithm,key_id}`。id、offset_bytes、next_offset 用十进制字符串表示，末页 next_offset 为 null；只读数据库，不访问后端。
+每行：`{id,offset_bytes,length,source_offset,raw_size,stored_size,independent_size_hint,payload_size,compression,algorithm,key_id,source,pack_id,reads,range_reads}`。id、offset_bytes、next_offset、pack_id 用十进制字符串表示，末页 next_offset 为 null；只读数据库，不访问后端。
 
-compression 为 none/zstd，payload_size 为编码长度减认证标签。size 字段描述完整区块，length/source_offset 描述引用区间；共享块和部分引用不能用于直接推算删除释放空间。压缩节省比例为 `(raw_size-payload_size)/raw_size`。
+source 为 chunk/pack；stored_size 是当前独立副本长度，没有独立副本时为 null。independent_size_hint、compression 和 payload_size 分别为独立编码长度提示、压缩标记和扣标签后的长度，不代表 pack 中某成员的实际占用。reads/range_reads 为延迟落库的累计块读取次数。length/source_offset 描述引用区间，不能据此直接推算删除释放空间。
 
 ### 预览与下载
 
@@ -123,10 +123,11 @@ preview=false 使用 attachment 和 application/octet-stream；preview=true 仅�
 | cache_hits / cache_hit_bytes | 缓存命中数 / 实际读取的 .raw 或 .zst 文件字节 |
 | runtime.started_at / uptime_seconds | 进程启动时间 / 运行秒数 |
 | runtime.http.s3/web/manage | 各 HTTP 入口的请求计数和耗时 |
-| runtime.gc_deleted / gc_failures | 回收区块数 / 本地清理、后台回收或单块删除失败次数 |
+| runtime.gc_deleted / gc_failures | 完成逻辑退役的区块数 / 本地清理、后台回收或物理删除失败次数 |
 | io.backend.get/put/delete/head | 后端区块操作计数、成功传输字节和耗时，不含 marker、LIST 和 SDK 内部重试次数 |
 | io.cache_lookups / cache_hit_rate | 区块读取次数 / 缓存命中比例；合并等待同次回源的请求各计一次 lookup |
-| io.cpu_slots_available / backend_slots_available | 可用 CPU / 后端请求名额 |
+| io.cpu_slots_available | 可用 CPU 名额 |
+| io.backend_queues.read/upload/control | 各方向的 limit/running、queued（foreground/upload/maintenance）及 oldest_wait_seconds |
 | io.cache_limit_bytes / multipart_limit_bytes | 配置的本地字节配额，未配置为 null |
 | process_memory.rss_bytes / peak_rss_bytes | Linux RSS / 峰值，读取失败为 null；不是包含文件页缓存的容器内存 |
 | cleanup | 历史清理状态，见下文 |
@@ -145,7 +146,7 @@ preview=false 使用 attachment 和 application/octet-stream；preview=true 仅�
 
 `cleanup`：`{running,interval,batch_size,max_duration,deleted_chunk_retention,upload_retention,task_retention,last_run}`，与 `cli cleanup status` 一致。
 
-last_run 首次执行前为 null，此后为 `{started_at,finished_at,duration_ms,deleted,batches,budget_exhausted,last_error}`。deleted 统计 chunks/uploads/tasks/sessions/integrity_issues 已提交的删除行数；batches 包含删除零行的批次。时限耗尽后保留已提交结果、回滚未完成事务，后续轮次继续；失败时 last_error 为 cleanup_failed，详情见日志。该结果不包含本地 fragment 文件和 extent 清理。
+last_run 首次执行前为 null，此后为 `{started_at,finished_at,duration_ms,deleted,batches,budget_exhausted,last_error}`。deleted 统计 chunks/chunk_locations/packs/uploads/tasks/sessions/integrity_issues 已提交的删除行数；batches 包含删除零行的批次。时限耗尽后保留已提交结果、回滚未完成事务，后续轮次继续；失败时 last_error 为 cleanup_failed，详情见日志。该结果不包含本地 fragment 文件和 extent 清理。
 
 ### 容量快照
 
@@ -159,17 +160,31 @@ last_run 首次执行前为 null，此后为 `{started_at,finished_at,duration_m
 | objects / logical_bytes | 当前可见对象数量 / 原始字节总和，不含旧版本和未完成分片 |
 | buckets / buckets_truncated | `{id,name,objects,logical_bytes}` 数组，含空桶，按 UUID 排序，最多 1000 桶；截断时全局总数仍包含全部桶 |
 | chunks.states | 各状态区块行数，包括保留的 deleted 元数据 |
-| chunks.stored_bytes | ready/deleting 区块的编码大小，包含待回收数据 |
-| chunks.unconfirmed_bytes | uploading/failed 区块已记录的编码大小，远端是否存在尚不确定 |
+| chunks.stored_bytes | ready/retired/deleting 物理来源的编码大小，包含过渡副本与待回收数据 |
+| chunks.unconfirmed_bytes | preparing/uploading 物理来源已记录的编码大小，远端是否存在尚不确定 |
+| physical | 按 kind（chunk/pack）、state 分组的 objects/stored_bytes |
 | live | 可见对象引用的唯一块数 chunks、引用区间总长 reference_bytes、唯一块原始大小 raw_bytes、编码大小 stored_bytes、扣标签后的 payload_bytes |
-| unreferenced | 无 extent 引用且标记无引用的 ready/failed/deleting 块数和 stored_bytes；eligible_chunks/eligible_bytes 另要求已过宽限且无 owner_stream，不代表 GC 已执行 |
+| unreferenced | chunks/eligible_chunks 为无 extent 引用的逻辑块数及过宽限、无 owner_stream 的数量；stored_bytes 为无引用独立来源及退役物理来源字节，eligible_bytes 按物理来源宽限筛选。部分闲置 pack 的剩余占用在 physical 中，实际回收还受引用和活跃保护约束 |
 | tasks / uploads | 按状态计数的任务 / active、completing 上传 |
 | cleanup | chunks/uploads/tasks/sessions/integrity_issues 到期历史的 `{eligible,oldest_at}`；时间分别为 deleted_at/touched_at/updated_at/expires_at，巡检异常使用所属任务 updated_at；排除仍有 extent 的块和仍有 part 的上传，可能含被锁或活跃保护暂缓的行 |
 | database | `{table,total_bytes,index_bytes,live_rows_estimate,dead_rows_estimate,last_autovacuum,last_autoanalyze}`；大小含索引和 TOAST，行数为估计，维护时间可为 null |
 
-去重节省量为 `live.reference_bytes-live.raw_bytes`，比例分母为 reference_bytes；压缩节省量为 `live.raw_bytes-live.payload_bytes`，分母为 raw_bytes。标签为每块 16 字节，none 为 0；分母为 0 时比例为 null。共享块只在全局计一次，不按桶分摊；部分区间引用整块时去重节省可为负。
+去重节省量为 `live.reference_bytes-live.raw_bytes`；编码节省量为 `live.raw_bytes-live.payload_bytes`。物理大小按唯一可见来源计数：一个 pack 即使只剩部分成员仍在使用，也计入整个包；过渡副本另外计入 physical。每个加密物理载荷扣 16 字节标签，none 为 0；分母为 0 时比例为 null。部分引用、索引开销可使节省为负，不按桶分摊共享来源。
 
 物理统计来自数据库，不遍历后端，不包含未索引对象、meta.json、提供商对象版本或账单规则；上传和删除期间可能短暂不一致。
+
+## Pack
+
+| 方法与路径 | 输入 | 成功响应 |
+| --- | --- | --- |
+| `GET /api/packs` | after 默认 0；limit 默认 100，1～200 | `{status,packs,next_after}`，按 ID 升序 |
+| `GET /api/packs/{id}` | 正 bigint 十进制 ID | `{pack,members}`，成员含逻辑区块及当前映射标志 |
+| `POST /api/packs/run` | `{kind}`：pack/reuse/reclaim/repack | `{task_id}`，已有同类任务可返回 existing=true |
+| `POST /api/packs/unpack` | `{pack_id?:字符串,all?:bool,execute?:bool}` | 默认返回 preview/packs/raw_bytes/effect；execute=true 返回 task_id |
+
+pack_id 与 all=true 必须二选一；全部拆包要求 pack.enabled=false。包及成员的大整数 ID 使用字符串，避免浏览器精度损失。Pack 页面可查看列表、成员、维护入口与拆包预览；写接口遵守会话、Origin、CSRF 和维护模式。操作、冷却和回收语义见[CLI](cli-reference.md#pack-维护)。
+
+任务 detail.last_rewrite 保存最近一次成功切换的 before_bytes/output_bytes/temporary_added_bytes/transition_bytes，分别为旧布局、新布局、本批新增载荷及新旧并存大小；不包含更早批次仍在 GC 宽限内的副本，部署总占用以 physical 汇总为准。
 
 ## 后台任务
 

@@ -27,13 +27,14 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `singleton` | boolean | 否 | `true` | 固定 true，保证仅一行 |
-| `schema_version` | integer | 否 | — | 结构编号，当前为 4，与最近迁移编号一致 |
+| `schema_version` | integer | 否 | — | 结构编号，当前为 5，与最近迁移编号一致 |
 | `deployment_id` | uuid | 否 | — | 部署 UUID |
 | `backend_identity` | text | 否 | — | 后端 endpoint/bucket/prefix 身份 |
 | `backend_initialized` | boolean | 否 | `false` | 后端 meta.json 已完成绑定；标识丢失时不自动重建 |
 | `gc_paused` | boolean | 否 | `false` | 持久远端 GC 暂停标志 |
 | `maintenance` | boolean | 否 | `false` | 持久维护标志 |
 | `created_at` | timestamptz | 否 | `now()` | 部署初始化时间 |
+| `access_coverage_since` / `access_flushed_at` | timestamptz | 否 | `now()` | 连续访问观测起点 / 最近成功落库时间；重启、丢失计数或落库中断后重新计算覆盖 |
 
 主键：`singleton`，约束为 true，仅允许一行。
 
@@ -136,20 +137,24 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `id` | bigint | 否 | `GENERATED ALWAYS AS IDENTITY` | 正 bigint 自增分配；加密前提交 |
-| `storage_id` | uuid | 否 | — | 永不复用的物理 UUID |
+| `storage_id` | uuid | 否 | — | 初始物理 UUID，也是稳定的逻辑缓存身份 |
+| `encoding_id` | bigint | 否 | `nextval('chunk_locations_id_seq')` | 初始独立编码身份；升级时沿用原 id |
+| `pack_id` | bigint | 是 | — | 当前 pack 来源，引用 packs |
 | `owner_stream` | uuid | 是 | — | 尚未转交 extent 引用时的写入保护 |
 | `hash` | bytea | 否 | — | 原始明文 BLAKE3，完整 32 字节 |
 | `raw_size` | integer | 否 | — | 明文长度，B，1～4 MiB |
-| `stored_size` | integer | 是 | — | 后端长度，B，含 AEAD tag；编码前为 NULL |
+| `stored_size` | integer | 是 | — | 初始独立编码长度提示，B，含 tag；不随打包改变 |
 | `algorithm` | text | 否 | — | none / aes-256-gcm / chacha20-poly1305 |
 | `key_id` | text | 否 | — | 历史解密密钥 ID；none 时为空串 |
-| `compressed` | boolean | 否 | `false` | 是否使用 zstd |
+| `compressed` | boolean | 否 | `false` | 独立压缩提示，不代表所在 pack 的压缩状态 |
 | `nonce` | bytea | 是 | — | AEAD 12 字节 nonce；未编码/none 时为 NULL |
 | `format` | integer | 否 | `1` | 区块编码格式，固定为 1 |
 | `state` | text | 否 | — | preparing / uploading / ready / failed / deleting / deleted |
 | `created_at` | timestamptz | 否 | `now()` | 分配时间，UTC 日期用于 nonce |
 | `unreferenced_at` | timestamptz | 是 | — | 最后引用消失的时间；有引用通常为 NULL |
-| `deleted_at` | timestamptz | 是 | — | 后端删除确认时间 |
+| `deleted_at` | timestamptz | 是 | — | 逻辑区块完成退役的时间；物理删除由各来源表记录 |
+| `reference_changed_at` | timestamptz | 否 | `now()` | 最近引用变化 |
+| `split_at` / `range_split_at` / `repack_after` | timestamptz | 是 | — | 最近拆分 / Range 拆分 / 最早重新合并时间 |
 
 主键：`id`；`storage_id` 唯一；`owner_stream` 引用 `streams`，目标删除时置 NULL。约束：hash 为 32 字节，raw_size 为 1～4194304，stored_size 非空时为 1～4194320，format=1，algorithm/state 受枚举约束。`none` 要求空 key_id、NULL nonce；加密模式要求非空 key_id，nonce 可在准备阶段为 NULL，否则长 12 字节。
 
@@ -159,6 +164,35 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | `chunks_gc` | `(unreferenced_at,id) WHERE state IN ('ready','failed','deleting')` |
 | `chunks_owner` | `(owner_stream) WHERE owner_stream IS NOT NULL` |
 | `chunks_deleted` | `(deleted_at,id) WHERE state='deleted'` |
+| `chunks_pack` | `(pack_id) WHERE pack_id IS NOT NULL` |
+
+## 物理来源与 Pack
+
+逻辑块与物理编码分开计数。chunks 的初始编码字段保留为压缩提示；实际独立载荷读取 chunk_locations，打包载荷读取 packs/pack_members。每次重编码使用新物理 ID 和 storage_id。
+
+| 表 | 字段（未注明可空者均 NOT NULL） |
+| --- | --- |
+| `chunk_locations` | id bigint BY DEFAULT identity PK；chunk_id bigint → chunks CASCADE；storage_id uuid UNIQUE；stored_size integer 可空；compressed bool；nonce bytea 可空；state text；created_at timestamptz；unreferenced_at/deleted_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
+| `packs` | id bigint ALWAYS identity PK；storage_id uuid UNIQUE；algorithm/key_id text；raw_size bigint >0；stored_size bigint 可空；compressed bool 默认 false；nonce bytea（12 B）/digest bytea（32 B）可空；member_count integer ≥2；state text；created_at timestamptz 默认 now()；unreferenced_at/deleted_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
+| `pack_members` | pack_id bigint → packs CASCADE；ordinal integer ≥0；chunk_id bigint → chunks CASCADE；offset_bytes bigint ≥0；PK(pack_id,ordinal)、UNIQUE(pack_id,chunk_id) |
+| `pack_inputs` | task_id uuid → tasks CASCADE；chunk_id bigint → chunks；created_at timestamptz 默认 now()；PK(task_id,chunk_id)、UNIQUE(chunk_id)，防止重写任务同时占有相同输入 |
+| `pack_maintenance` | stream_id uuid PK → streams CASCADE；cursor bigint 默认 0；generation bigint 默认 1；reason text 默认 pack；next_check_at/updated_at timestamptz 默认 now() |
+| `pack_changes` | pack_id bigint PK → packs CASCADE；generation bigint 默认 1；next_check_at timestamptz 默认 now()；reason text 默认 reuse，允许 reuse/reclaim |
+| `integrity_packs` | task_id uuid → tasks CASCADE；pack_id bigint → packs CASCADE；error_code text 可空；PK(task_id,pack_id)，NULL 表示该任务已验证该物理包 |
+
+独立来源状态为 uploading/ready/retired/deleting/deleted，pack 为 preparing/ready/retired/deleting/deleted。仅 ready 映射可发布；失败准备记录退役后仍受正常 GC 宽限。逻辑行清理必须等待它的物理日志删除及仍存活 pack 的成员索引不再需要它。
+
+索引：chunk_locations_current 在 ready 上唯一约束 chunk_id；两类物理 GC 索引为 retired/deleting 的 (unreferenced_at,id)；pack_members_chunk 为 chunk_id；pack_maintenance_due 为 (next_check_at,stream_id)，pack_changes_due 为 (reason,next_check_at,pack_id)。引用变更的 statement trigger 和 stream 发布 trigger 在同一事务更新候选及 generation；任务只删除自己处理过的 generation，后续事件不会被覆盖。
+
+## 访问统计
+
+| 表 | 字段与主键 |
+| --- | --- |
+| `chunk_access_stats` | chunk_id bigint PK → chunks CASCADE；reads/range_reads/bytes bigint 默认 0；last_read_at timestamptz |
+| `chunk_access_windows` | window_start timestamptz、chunk_id bigint → chunks CASCADE，构成 PK；reads/range_reads/bytes/range_origin_reads bigint 默认 0 |
+| `pack_access_windows` | window_start timestamptz、pack_id bigint → packs CASCADE，构成 PK；downloads/downloaded_bytes/partial_downloads/useful_bytes bigint 默认 0 |
+
+窗口按 UTC 小时聚合，另有 (chunk_id,window_start) 和 (pack_id,window_start) 查询索引。读取先更新有界进程计数，再批量落库；统计不是审计账本，进程异常退出可能丢失尚未落库的一小段。后台预热不增加逻辑访问；pack 统计记录实际回源及完整成员代价，缓存 Range 与远端局部 pack 下载分开计数。
 
 ## fragments
 
@@ -271,7 +305,7 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `id` | uuid | 否 | — | 维护任务 UUID |
-| `kind` | text | 否 | — | purge / sweep / integrity |
+| `kind` | text | 否 | — | purge / sweep / integrity / pack / unpack |
 | `bucket_id` | uuid | 是 | — | 目标桶；桶删除后为 NULL，巡检的原始范围另外保存在 detail |
 | `state` | text | 否 | — | queued / running / paused / completed / failed |
 | `cursor` | text | 是 | — | 最后处理对象 key、后端物理 key，或巡检的对象/范围/区块 JSON 游标 |
@@ -301,7 +335,7 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | `subject` | text | 否 | — | `chunk:ID` 或 `object:UUID:offset`，用于去重 |
 | `code` | text | 否 | — | 稳定英文异常代码 |
 | `chunk_id` | bigint | 是 | — | 异常区块 ID 快照 |
-| `storage_id` | uuid | 是 | — | 异常物理区块 UUID 快照 |
+| `storage_id` | uuid | 是 | — | 实际异常物理区块或 pack 的 UUID 快照 |
 | `stream_id` | uuid | 是 | — | 异常对象版本快照 |
 | `bucket_id` | uuid | 是 | — | 异常对象所属桶快照 |
 | `object_key` | text | 是 | — | 原样保存的对象键 |
@@ -319,7 +353,7 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | 对象 | 状态及发布规则 |
 | --- | --- |
 | streams / objects | writing → ready → retired；失败或启动恢复的 writing → abandoned。对象指针只指向完整 ready stream；每次写入或删除更换 write_epoch，迟到写入不能覆盖新对象；无写入版本后清理 NULL 占位 |
-| chunks | preparing（ID 已提交）→ uploading（编码元数据已提交）→ ready；不确定失败转 failed。ready/failed → deleting → deleted，最后一步要求后端确认删除 |
+| chunks | preparing → uploading → ready；不确定失败转 failed。ready/failed → deleting → deleted 表示逻辑退役，物理来源另行按宽限删除；仍被未删除 pack 索引需要的逻辑行继续保留 |
 | uploads / parts | active → completing → completed，或 aborted。part 替换成功后才切换指针；Complete 冻结清单、发布并保存 result，相同清单重试复用结果。未提交的 completing 在重启后回到 active |
 | tasks | queued → running → completed/failed；可暂停并从持久游标继续，重启将 running 重排 queued，paused 保持暂停 |
 

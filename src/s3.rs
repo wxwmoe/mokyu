@@ -445,10 +445,14 @@ impl S3 for Gateway {
                 checksums!(out, &s.checksums);
                 out.checksum_type = checksum(&s.checksums, "type").map(ChecksumType::from);
             }
-            out.body = Some(
-                self.0
-                    .body(s, pin, range.start as i64, range.end as i64, permits),
-            );
+            out.body = Some(self.0.body(
+                s,
+                pin,
+                range.start as i64,
+                range.end as i64,
+                permits,
+                requested.is_some(),
+            ));
             Ok(S3Response::new(out))
         }
         .await

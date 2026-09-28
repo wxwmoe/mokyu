@@ -1,6 +1,6 @@
 use crate::{
     codec::{Chunk, MAX},
-    config::{Budget, Config, Secrets},
+    config::{self, Budget, Config, Secrets},
     storage::Storage,
 };
 use anyhow::{Context, Result, ensure};
@@ -112,7 +112,7 @@ pub struct App {
     pub uploads: Arc<Semaphore>,
     pub reads: Arc<Semaphore>,
     pub slots: Arc<Semaphore>,
-    pub maintenance: std::sync::atomic::AtomicBool,
+    pub maintenance: Arc<std::sync::atomic::AtomicBool>,
     pub gc_running: std::sync::atomic::AtomicBool,
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: tokio::sync::Notify,
@@ -125,6 +125,7 @@ impl App {
         config: Config,
         secrets: Secrets,
         budget: Budget,
+        start_maintenance: bool,
     ) -> Result<(Arc<Self>, sqlx::PgConnection)> {
         tokio::fs::create_dir_all(&config.storage.data).await?;
         let lock = std::fs::OpenOptions::new()
@@ -136,12 +137,29 @@ impl App {
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("another gateway owns this data directory")?;
         let (db, owner) = crate::db::connect(&config, &secrets, &budget).await?;
+        if start_maintenance {
+            sqlx::query("UPDATE gateway_meta SET maintenance=true")
+                .execute(&db)
+                .await?;
+        }
         let maintenance: bool = sqlx::query_scalar("SELECT maintenance FROM gateway_meta")
             .fetch_one(&db)
             .await?;
+        let maintenance = Arc::new(std::sync::atomic::AtomicBool::new(maintenance));
         let secrets = Arc::new(secrets);
-        let storage = Arc::new(Storage::new(&config, secrets.clone(), &budget).await?);
-        storage.check_identity(&db).await?;
+        let storage = Arc::new(
+            Storage::new(
+                &config,
+                secrets.clone(),
+                &budget,
+                db.clone(),
+                maintenance.clone(),
+            )
+            .await?,
+        );
+        storage
+            .check_identity(&db, maintenance.load(std::sync::atomic::Ordering::Acquire))
+            .await?;
         let app = Arc::new(Self {
             uploads: Arc::new(Semaphore::new(budget.upload_concurrency)),
             reads: Arc::new(Semaphore::new(budget.read_concurrency)),
@@ -157,7 +175,7 @@ impl App {
             local_cleanup: tokio::sync::Mutex::new(()),
             coord: tokio::sync::Mutex::new(()),
             active: Arc::new(Mutex::new(HashMap::new())),
-            maintenance: maintenance.into(),
+            maintenance,
             gc_running: false.into(),
             wake_gc: Arc::new(tokio::sync::Notify::new()),
             wake_tasks: tokio::sync::Notify::new(),
@@ -304,6 +322,22 @@ impl App {
         raw: Vec<u8>,
         should_compress: bool,
     ) -> Result<Chunk> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(config::seconds(
+                &self.config.processing.upload_idle_timeout,
+            )?),
+            self.put_chunk_inner(stream, offset, raw, should_compress),
+        )
+        .await
+        .map_err(|_| s3_error!(RequestTimeout, "upload processing made no progress"))?
+    }
+    async fn put_chunk_inner(
+        &self,
+        stream: Uuid,
+        offset: i64,
+        raw: Vec<u8>,
+        should_compress: bool,
+    ) -> Result<Chunk> {
         ensure!(!raw.is_empty() && raw.len() <= MAX, "invalid chunk length");
         let hash = *blake3::hash(&raw).as_bytes();
         let mutex = {
@@ -345,6 +379,7 @@ impl App {
         let (c, encoded, cache) = self.storage.encode(c, raw, should_compress).await?;
         sqlx::query("UPDATE chunks SET stored_size=$2,compressed=$3,nonce=$4,state='uploading' WHERE id=$1 AND state='preparing'")
             .bind(c.id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).execute(&self.db).await?;
+        self.storage.register_location(&c).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-uploading").await;
         self.storage.put(&c, encoded, cache).await?;
@@ -352,6 +387,7 @@ impl App {
         crate::faults::point("chunk-stored").await;
         let mut tx = self.db.begin().await?;
         let changed=sqlx::query("UPDATE chunks SET state='ready',unreferenced_at=NULL,owner_stream=NULL WHERE id=$1 AND state='uploading'").bind(c.id).execute(&mut *tx).await?.rows_affected();
+        sqlx::query("UPDATE chunk_locations SET state='ready',unreferenced_at=NULL WHERE id=$1 AND state='uploading'").bind(c.encoding_id).execute(&mut *tx).await?;
         if changed != 1 {
             return Err(s3_error!(OperationAborted).into());
         }
@@ -418,13 +454,35 @@ impl App {
         Ok(())
     }
     pub async fn extent_bytes(&self, e: &Extent) -> Result<Bytes> {
+        self.extent_bytes_with(e, &crate::storage::ReadContext::default())
+            .await
+    }
+    pub async fn extent_bytes_with(
+        &self,
+        e: &Extent,
+        context: &crate::storage::ReadContext,
+    ) -> Result<Bytes> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(config::seconds(
+                &self.config.processing.upload_idle_timeout,
+            )?),
+            self.extent_bytes_inner(e, context),
+        )
+        .await
+        .context("multipart reconstruction made no progress before timeout")?
+    }
+    async fn extent_bytes_inner(
+        &self,
+        e: &Extent,
+        context: &crate::storage::ReadContext,
+    ) -> Result<Bytes> {
         let data = if let Some(id) = e.chunk_id {
             let c: Chunk = sqlx::query_as("SELECT * FROM chunks WHERE id=$1 AND state='ready'")
                 .bind(id)
                 .fetch_optional(&self.db)
                 .await?
                 .context("referenced chunk not ready")?;
-            self.storage.get(&c).await?
+            self.storage.get_with(&c, Some(context)).await?
         } else {
             let id = e.fragment_id.context("extent has no source")?;
             let (size, hash): (i32, Vec<u8>) =
@@ -460,29 +518,41 @@ impl App {
         start: i64,
         end: i64,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
+        range: bool,
     ) -> StreamingBlob {
         let app = self.clone();
         let body = async_stream::try_stream! {
-            let _pin=pin;let _permits=permits;
+            let _pin=pin;let _permits=permits;let read_context=Arc::new(crate::storage::ReadContext::user(range));
             let mut cursor:Option<i64>=sqlx::query_scalar("SELECT offset_bytes FROM extents WHERE stream_id=$1 AND offset_bytes<=$2 ORDER BY offset_bytes DESC LIMIT 1").bind(stream.id).bind(start).fetch_optional(&app.db).await?;
             let mut position=start;
             while position<end {
                 let rows=app.read_extents(stream.id,cursor.context("object mapping is incomplete")?,end).await?;
                 (!rows.is_empty()).then_some(()).context("object mapping is incomplete")?;
-                let mut loaded=futures_util::stream::iter(rows.into_iter().map(|row| {let app=app.clone();async move{let data=app.storage.get(&row.chunk).await?;let data=row.extent.slice(data)?;Ok::<_,anyhow::Error>((row.extent,data))}})).buffered(2);
+                let mut loaded=futures_util::stream::iter(rows.into_iter().map(|row| {let app=app.clone();let context=read_context.clone();async move{let data=app.storage.get_with(&row.chunk,Some(&context)).await?;let data=row.extent.slice(data)?;Ok::<_,anyhow::Error>((row.extent,data))}})).buffered(2);
                 while let Some(result)=loaded.next().await {
                     let (row,data)=result?;
                     (row.offset_bytes<=position && row.offset_bytes+row.length as i64>position).then_some(()).context("object mapping has a gap")?;
                     let skip=(position-row.offset_bytes) as usize;let count=((end-position) as usize).min(data.len()-skip);
                     position+=count as i64;cursor=Some(row.offset_bytes+row.length as i64);
+                    if let Some(id)=row.chunk_id {app.storage.access.chunk(id,range,count,false);}
                     yield data.slice(skip..skip+count);
                     if position==end {break;}
                 }
             }
         };
-        let body = Mutex::new(Box::pin(
-            body.map(|r: Result<Bytes>| r.map_err(std::io::Error::other)),
-        ));
+        let mut body = Box::pin(body.map(|r: Result<Bytes>| r.map_err(std::io::Error::other)));
+        let idle = std::time::Duration::from_secs(
+            config::seconds(&self.config.processing.read_idle_timeout)
+                .expect("validated read timeout"),
+        );
+        let limited = async_stream::stream! {
+            loop {match tokio::time::timeout(idle,body.next()).await {
+                Ok(Some(result))=>{let failed=result.is_err();yield result;if failed {break;}},
+                Ok(None)=>break,
+                Err(_)=>{yield Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"read made no progress"));break;}
+            }}
+        };
+        let body = Mutex::new(Box::pin(limited));
         StreamingBlob::wrap(futures_util::stream::poll_fn(move |cx| {
             futures_util::Stream::poll_next(body.lock().unwrap().as_mut(), cx)
         }))

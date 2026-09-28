@@ -1,5 +1,7 @@
+mod access;
 mod admin;
 mod app;
+mod backend;
 mod codec;
 mod compression;
 mod config;
@@ -11,6 +13,8 @@ mod integrity;
 mod lifecycle;
 mod listing;
 mod multipart;
+mod pack;
+mod pack_tasks;
 mod s3;
 mod stats;
 mod storage;
@@ -89,8 +93,7 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let(app,mut owner)=app::App::new(config,secrets,budget).await?;
-        if start_maintenance{sqlx::query("UPDATE gateway_meta SET maintenance=true").execute(&app.db).await?;app.maintenance.store(true,std::sync::atomic::Ordering::Release);}
+        let(app,mut owner)=app::App::new(config,secrets,budget,start_maintenance).await?;
         tokio::spawn(async move{loop{tokio::time::sleep(Duration::from_secs(1)).await;let alive=tokio::time::timeout(Duration::from_secs(3),sqlx::query("SELECT 1").execute(&mut owner)).await;if !matches!(alive,Ok(Ok(_))){tracing::error!("database ownership connection lost; terminating");std::process::exit(1);}}});
         app.recover().await?;
         let s3_listener=TcpListener::bind(&app.config.listen.s3).await.context("S3 listener")?;
@@ -111,7 +114,9 @@ fn main() -> Result<()> {
             result=lifecycle::run(app.clone())=>result?,
             result=lifecycle::run_history(app.clone())=>result?,
             result=tasks::run(app.clone())=>result?,
+            result=pack_tasks::run(app.clone())=>result?,
             result=stats::run(app.clone())=>result?,
+            result=access::run(app.clone())=>result?,
             result=app.storage.compression.run()=>result?,
             _=shutdown_signal()=>{tracing::info!("stopping listeners; draining active data operations");}
         }

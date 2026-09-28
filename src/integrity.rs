@@ -1,6 +1,6 @@
 use crate::{
     app::{Active, App, StoredStream},
-    codec::{self, Chunk, IntegrityError},
+    codec::{Chunk, IntegrityError},
     config,
 };
 use anyhow::{Context, Result, ensure};
@@ -235,7 +235,7 @@ impl App {
                 let started = Instant::now();
                 let requests = rows.len();
                 let results: Vec<_> =
-                    futures_util::stream::iter(rows.iter().map(|c| self.inspect_chunk(c, &d)))
+                    futures_util::stream::iter(rows.iter().map(|c| self.inspect_chunk(id, c, &d)))
                         .buffered(count)
                         .try_collect()
                         .await?;
@@ -448,7 +448,12 @@ impl App {
         let id: Option<Uuid> = query.build_query_scalar().fetch_optional(&self.db).await?;
         Ok(id.map(|id| self.pin(id)))
     }
-    async fn inspect_chunk(&self, c: &Chunk, d: &Detail) -> Result<Option<(u64, Option<Finding>)>> {
+    async fn inspect_chunk(
+        &self,
+        task: Uuid,
+        c: &Chunk,
+        d: &Detail,
+    ) -> Result<Option<(u64, Option<Finding>)>> {
         let _slot = self.slots.acquire().await?;
         let Some(_pin) = self.chunk_pin(c, d).await? else {
             return Ok(None);
@@ -456,22 +461,12 @@ impl App {
         #[cfg(feature = "fault-injection")]
         crate::faults::point("integrity-chunk-pinned").await;
         let mut size = 0;
+        let mut physical_detail = json!({});
         let result = async {
-            codec::validate_metadata(c, &self.secrets)?;
-            match d.mode {
-                Mode::Metadata => {}
-                Mode::Head => {
-                    ensure!(
-                        Some(self.storage.head(c).await? as i64) == c.stored_size.map(i64::from),
-                        IntegrityError::Length
-                    );
-                }
-                Mode::Full => {
-                    let encoded = self.storage.read_backend(c).await?;
-                    size = encoded.len() as u64;
-                    self.storage.decode(c, encoded).await?;
-                }
-            }
+            size = self
+                .storage
+                .inspect(task, c, d.mode, &mut physical_detail)
+                .await?;
             Ok::<_, anyhow::Error>(())
         };
         let result = tokio::time::timeout(
@@ -509,7 +504,12 @@ impl App {
                 if self.chunk_pin(c, d).await?.is_none() {
                     return Ok(None);
                 }
-                Some(Finding::chunk(c, code))
+                let mut finding = Finding::chunk(c, code);
+                finding.storage_id = physical_detail["storage_id"]
+                    .as_str()
+                    .and_then(|s| Uuid::parse_str(s).ok());
+                finding.detail = physical_detail;
+                Some(finding)
             }
         };
         Ok(Some((size, issue)))

@@ -36,6 +36,8 @@ pub struct Config {
     pub statistics: Statistics,
     #[serde(default)]
     pub integrity: crate::integrity::Config,
+    #[serde(default)]
+    pub pack: crate::pack::Config,
 }
 
 #[derive(Deserialize)]
@@ -43,12 +45,16 @@ pub struct Config {
 pub struct Statistics {
     pub refresh_interval: String,
     pub query_timeout: String,
+    pub access_flush_interval: String,
+    pub access_retention: String,
 }
 impl Default for Statistics {
     fn default() -> Self {
         Self {
             refresh_interval: "15m".into(),
             query_timeout: "2m".into(),
+            access_flush_interval: "1m".into(),
+            access_retention: "14d".into(),
         }
     }
 }
@@ -111,6 +117,34 @@ pub struct Backend {
     pub secret_key_file: Option<PathBuf>,
     #[serde(default)]
     pub allow_http: bool,
+    pub read_concurrency: Option<usize>,
+    pub upload_concurrency: Option<usize>,
+    pub control_concurrency: Option<usize>,
+    #[serde(default = "connect_timeout")]
+    pub connect_timeout: String,
+    #[serde(default = "request_timeout")]
+    pub request_timeout: String,
+    #[serde(default = "backend_retries")]
+    pub max_retries: usize,
+    #[serde(default = "retry_timeout")]
+    pub retry_timeout: String,
+    #[serde(default = "priority_aging")]
+    pub priority_aging: String,
+}
+fn connect_timeout() -> String {
+    "5s".into()
+}
+fn request_timeout() -> String {
+    "30s".into()
+}
+fn retry_timeout() -> String {
+    "120s".into()
+}
+fn priority_aging() -> String {
+    "30s".into()
+}
+fn backend_retries() -> usize {
+    3
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,7 +181,7 @@ impl Default for Storage {
         }
     }
 }
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Processing {
     pub cpu_jobs: Option<usize>,
@@ -156,6 +190,27 @@ pub struct Processing {
     pub read_concurrency: Option<usize>,
     pub backend_concurrency: Option<usize>,
     pub connections: Option<usize>,
+    #[serde(default = "data_idle")]
+    pub read_idle_timeout: String,
+    #[serde(default = "data_idle")]
+    pub upload_idle_timeout: String,
+}
+fn data_idle() -> String {
+    "120s".into()
+}
+impl Default for Processing {
+    fn default() -> Self {
+        Self {
+            cpu_jobs: None,
+            inflight_bytes: None,
+            upload_concurrency: None,
+            read_concurrency: None,
+            backend_concurrency: None,
+            connections: None,
+            read_idle_timeout: data_idle(),
+            upload_idle_timeout: data_idle(),
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -280,6 +335,7 @@ pub struct Budget {
     pub connections: usize,
     pub db_connections: u32,
     pub cache_entries: usize,
+    pub pack_memory_units: u32,
 }
 
 pub const SLOT_BYTES: u64 = 32 * 1024 * 1024;
@@ -312,8 +368,13 @@ pub fn quantity(value: &str, time: bool) -> Result<u64> {
 pub fn bytes(s: &str) -> Result<u64> {
     quantity(s, false)
 }
+pub fn cache_bytes(s: &str) -> Result<u64> {
+    if s == "0B" { Ok(0) } else { bytes(s) }
+}
 pub fn seconds(s: &str) -> Result<u64> {
-    quantity(s, true)
+    let seconds = quantity(s, true)?;
+    ensure!(seconds <= i64::MAX as u64 / 1000, "duration too large");
+    Ok(seconds)
 }
 fn secret(path: &Path, base: &Path) -> Result<String> {
     let path = if path.is_absolute() {
@@ -356,6 +417,39 @@ impl Config {
         })?;
         let base = path.parent().unwrap_or(Path::new("."));
         c.compression.validate()?;
+        c.pack.validate()?;
+        seconds(&c.processing.read_idle_timeout)?;
+        seconds(&c.processing.upload_idle_timeout)?;
+        seconds(&c.statistics.access_flush_interval)?;
+        ensure!(
+            seconds(&c.statistics.access_retention)? >= 7 * 24 * 3600,
+            "statistics.access_retention must cover at least seven days"
+        );
+        for value in [
+            c.backend.read_concurrency,
+            c.backend.upload_concurrency,
+            c.backend.control_concurrency,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            ensure!(value > 0, "backend concurrency must be positive");
+        }
+        ensure!(
+            c.processing.backend_concurrency.is_none()
+                || (c.backend.read_concurrency.is_none()
+                    && c.backend.upload_concurrency.is_none()
+                    && c.backend.control_concurrency.is_none()),
+            "replace processing.backend_concurrency before setting backend direction limits"
+        );
+        for value in [
+            &c.backend.connect_timeout,
+            &c.backend.request_timeout,
+            &c.backend.retry_timeout,
+            &c.backend.priority_aging,
+        ] {
+            seconds(value)?;
+        }
         for listen in [&c.listen.s3, &c.listen.web, &c.listen.manage] {
             listen
                 .parse::<std::net::SocketAddr>()
@@ -436,7 +530,7 @@ impl Config {
             );
         }
         if let Some(v) = &c.cache.max_size {
-            bytes(v)?;
+            cache_bytes(v)?;
         }
         ensure!(
             c.cache.min_compression_savings_percent <= 100,
@@ -595,8 +689,18 @@ impl Config {
             .transpose()?
             .unwrap_or(memory / 4);
         let aws_chunk = bytes(&self.listen.aws_chunk_limit)?;
+        let mut compression_budget = self.compression.clone();
+        if matches!(
+            self.pack.compression_strategy,
+            Some(
+                crate::pack::CompressionStrategy::Sample
+                    | crate::pack::CompressionStrategy::ChunkHint
+            )
+        ) {
+            compression_budget.strategy = crate::compression::Strategy::Sample;
+        }
         let slot_bytes = SLOT_BYTES
-            .checked_add(self.compression.workspace_bytes()?)
+            .checked_add(compression_budget.workspace_bytes()?)
             .context("compression workspace budget overflow")?
             .checked_add(
                 aws_chunk
@@ -613,6 +717,21 @@ impl Config {
             self.compression.sample_level
         );
         let slots = (inflight / slot_bytes) as usize;
+        let pack_memory_units = (memory
+            .saturating_sub(slots as u64 * slot_bytes)
+            .saturating_sub(memory / 4)
+            / 2
+            / (1024 * 1024))
+            .min(u32::MAX as u64) as u32;
+        if self.pack.enabled {
+            let maximum = bytes(&self.pack.max_size)?;
+            let payload = maximum + 12 + 44 * (maximum / crate::codec::MIN as u64 + 1);
+            ensure!(
+                (payload * 4 + compression_budget.workspace_bytes()?).div_ceil(1024 * 1024)
+                    <= u64::from(pack_memory_units),
+                "pack.max_size exceeds effective memory; lower the pack size or increase the container memory limit"
+            );
+        }
         let cpu_jobs = self.processing.cpu_jobs.unwrap_or(cpus.min(slots));
         let uploads = self
             .processing
@@ -668,6 +787,7 @@ impl Config {
             connections,
             db_connections: db,
             cache_entries: entries,
+            pack_memory_units,
         })
     }
 }

@@ -115,14 +115,17 @@ try:
     db.execute('UPDATE chunks SET key_id=%s WHERE id=%s', ('missing-inspection-key', chunk))
     codes('metadata', ['missing_key'])
     db.execute("UPDATE chunks SET algorithm='none',key_id='',nonce=NULL,compressed=false,stored_size=raw_size WHERE id=%s", (chunk,))
+    db.execute('UPDATE chunk_locations SET nonce=NULL,compressed=false,stored_size=%s WHERE chunk_id=%s', (len(data), chunk))
     backend.put_object(**remote, Body=b'!' + data[1:])
     codes('full', ['hash_mismatch'])
     broken = b'not a zstd frame'
     db.execute('UPDATE chunks SET compressed=true,stored_size=%s WHERE id=%s', (len(broken), chunk))
+    db.execute('UPDATE chunk_locations SET compressed=true,stored_size=%s WHERE chunk_id=%s', (len(broken), chunk))
     backend.put_object(**remote, Body=broken)
     codes('full', ['decompression_failed'])
 finally:
     db.execute('UPDATE chunks SET stored_size=%s,algorithm=%s,key_id=%s,nonce=%s,compressed=%s WHERE id=%s', (stored, algorithm, key_id, nonce, compressed, chunk))
+    db.execute('UPDATE chunk_locations SET stored_size=%s,nonce=%s,compressed=%s WHERE chunk_id=%s', (stored, nonce, compressed, chunk))
     backend.put_object(**remote, Body=encoded)
 codes('full', [])
 print('PASS remote corruption hidden by cache, length/authentication/hash/decompression/key classifications', flush=True)

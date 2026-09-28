@@ -281,6 +281,11 @@ pub struct Pool {
     max_idle: usize,
 }
 impl Pool {
+    pub fn workspace_bytes(&self) -> Result<u64> {
+        let mut config = self.config.clone();
+        config.strategy = Strategy::Sample;
+        config.workspace_bytes()
+    }
     pub fn new(config: Config, max_idle: usize) -> Result<Self> {
         config.validate()?;
         Ok(Self {
@@ -296,6 +301,18 @@ impl Pool {
             (1..=MAX).contains(&input.len()),
             "invalid compression input length"
         );
+        self.compress_with(input, should_try, self.config.strategy)
+    }
+    pub fn compress_with(
+        &self,
+        input: &[u8],
+        should_try: bool,
+        strategy: Strategy,
+    ) -> Result<Option<Vec<u8>>> {
+        ensure!(
+            !input.is_empty() && input.len() <= crate::pack::MAX_PAYLOAD,
+            "pack compression exceeds bound"
+        );
         if !should_try {
             return Ok(None);
         }
@@ -305,7 +322,12 @@ impl Pool {
             _ => Workspace::new(self.config.level)?,
         };
         // Error or panic drops the workspace instead of returning an uncertain context.
-        let result = work.encode(input, &self.config)?;
+        let mut config = self.config.clone();
+        config.strategy = strategy;
+        let result = work.encode(input, &config)?;
+        if work.output.capacity() > zstd::zstd_safe::compress_bound(MAX) + 16 {
+            work.output = Vec::new();
+        }
         if !self.idle_timeout.is_zero() {
             let mut idle = self.idle.lock().unwrap();
             if idle.len() < self.max_idle {
@@ -318,6 +340,14 @@ impl Pool {
         ensure!(
             input.len() <= MAX && (1..=MAX).contains(&capacity),
             "invalid decompression input length or capacity"
+        );
+        self.decompress_pack(input, capacity)
+    }
+    pub fn decompress_pack(&self, input: &[u8], capacity: usize) -> Result<Vec<u8>> {
+        ensure!(
+            input.len() <= crate::pack::MAX_PAYLOAD
+                && (1..=crate::pack::MAX_PAYLOAD).contains(&capacity),
+            "pack decompression exceeds bound"
         );
         let cached = self.decoders.lock().unwrap().pop();
         let mut decoder = match cached {

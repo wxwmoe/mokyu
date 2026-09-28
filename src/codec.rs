@@ -18,6 +18,7 @@ pub enum IntegrityError {
     Authentication,
     Decompression,
     Hash,
+    RemoteMissing,
 }
 impl IntegrityError {
     pub fn code(self) -> &'static str {
@@ -28,7 +29,21 @@ impl IntegrityError {
             Self::Authentication => "authentication_failed",
             Self::Decompression => "decompression_failed",
             Self::Hash => "hash_mismatch",
+            Self::RemoteMissing => "remote_missing",
         }
+    }
+    pub fn from_code(code: &str) -> Option<Self> {
+        [
+            Self::Length,
+            Self::Metadata,
+            Self::MissingKey,
+            Self::Authentication,
+            Self::Decompression,
+            Self::Hash,
+            Self::RemoteMissing,
+        ]
+        .into_iter()
+        .find(|e| e.code() == code)
     }
 }
 impl std::fmt::Display for IntegrityError {
@@ -43,6 +58,7 @@ pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
     let tag = if c.algorithm == "none" { 0 } else { 16 };
     ensure!(
         c.id > 0
+            && c.encoding_id > 0
             && c.state == "ready"
             && c.stored_size
                 .is_some_and(|n| n > tag && n <= MAX as i32 + tag),
@@ -73,6 +89,7 @@ pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
 #[derive(Clone, sqlx::FromRow, Serialize)]
 pub struct Chunk {
     pub id: i64,
+    pub encoding_id: i64,
     pub storage_id: Uuid,
     pub hash: Vec<u8>,
     pub raw_size: i32,
@@ -93,13 +110,17 @@ pub fn cut(input: &[u8]) -> usize {
         .unwrap_or(0)
 }
 pub fn nonce(date: DateTime<Utc>, id: i64) -> Result<[u8; 12]> {
+    typed_nonce(date, id, 0)
+}
+pub fn typed_nonce(date: DateTime<Utc>, id: i64, kind: u8) -> Result<[u8; 12]> {
     ensure!(id > 0, "chunk ID must be positive");
     let day = u32::try_from(date.year())?
         .checked_mul(10_000)
         .and_then(|n| n.checked_add(date.month() * 100 + date.day()))
         .context("invalid nonce date")?;
+    ensure!(kind < 32 && day < (1 << 27), "nonce fields exceed format");
     let mut result = [0; 12];
-    result[..4].copy_from_slice(&day.to_be_bytes());
+    result[..4].copy_from_slice(&((u32::from(kind) << 27) | day).to_be_bytes());
     result[4..].copy_from_slice(&(id as u64).to_be_bytes());
     Ok(result)
 }
@@ -109,6 +130,20 @@ pub struct Key {
     cipher: LessSafeKey,
 }
 impl Key {
+    pub fn seal(&self, nonce: [u8; 12], aad: &[u8], data: &mut Vec<u8>) -> Result<()> {
+        self.cipher
+            .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(aad), data)
+            .map_err(|_| anyhow::anyhow!("encryption failed"))
+    }
+    pub fn open(&self, nonce: [u8; 12], aad: &[u8], data: &mut Vec<u8>) -> Result<()> {
+        let len = self
+            .cipher
+            .open_in_place(Nonce::assume_unique_for_key(nonce), Aad::from(aad), data)
+            .map_err(|_| IntegrityError::Authentication)?
+            .len();
+        data.truncate(len);
+        Ok(())
+    }
     pub fn new(algorithm: &str, material: [u8; 32]) -> Result<Self> {
         let a = match algorithm {
             "aes-256-gcm" => &AES_256_GCM,
@@ -132,7 +167,7 @@ fn aad(c: &Chunk) -> Result<Vec<u8>> {
     );
     let mut aad = Vec::with_capacity(128 + c.key_id.len());
     aad.extend_from_slice(b"MGWCHUNK\x01");
-    aad.extend_from_slice(&c.id.to_be_bytes());
+    aad.extend_from_slice(&c.encoding_id.to_be_bytes());
     aad.extend_from_slice(c.storage_id.as_bytes());
     aad.extend_from_slice(&c.hash);
     aad.extend_from_slice(&c.raw_size.to_be_bytes());
@@ -185,7 +220,7 @@ pub fn encode(
     if c.algorithm != "none" {
         let key = secrets.keys.get(&c.key_id).context("missing chunk key")?;
         ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
-        let n = nonce(c.created_at, c.id)?;
+        let n = nonce(c.created_at, c.encoding_id)?;
         c.nonce = Some(n.to_vec());
         #[cfg(feature = "fault-injection")]
         crate::faults::blocking("chunk-encrypting");
@@ -265,7 +300,9 @@ pub fn decode_cache(
             _ => bail!("unknown chunk algorithm"),
         };
         ensure!(
-            c.compressed && data.len() <= MAX && Some(data.len() as i32 + tag) == c.stored_size,
+            c.compressed
+                && data.len() <= MAX
+                && data.len() + tag as usize <= c.raw_size as usize + 16,
             "compressed cache length mismatch"
         );
         Bytes::from(
@@ -343,6 +380,7 @@ mod tests {
             let secrets = secrets_for(algorithm);
             let c = Chunk {
                 id: 42,
+                encoding_id: 42,
                 storage_id: Uuid::from_u128(42),
                 hash: blake3::hash(input).as_bytes().to_vec(),
                 raw_size: input.len() as i32,
@@ -426,6 +464,7 @@ mod tests {
             }] {
                 let c = Chunk {
                     id: 42,
+                    encoding_id: 42,
                     storage_id: Uuid::from_u128(42),
                     hash: blake3::hash(&input).as_bytes().to_vec(),
                     raw_size: input.len() as i32,
@@ -542,6 +581,7 @@ mod tests {
                         let input = vec![worker as u8; MIN + i];
                         let c = Chunk {
                             id: 1 + worker * 2 + i as i64,
+                            encoding_id: 1 + worker * 2 + i as i64,
                             storage_id: Uuid::new_v4(),
                             hash: blake3::hash(&input).as_bytes().to_vec(),
                             raw_size: input.len() as i32,

@@ -1,6 +1,6 @@
 # 存储格式
 
-PostgreSQL 保存对象路径、权限和引用，后端文件只保存区块载荷，不能单独重建对象索引。区块编码 `format=1`，后端标识 `format_version=1`；它们独立于数据库结构编号和程序版本。
+PostgreSQL 保存对象路径、权限和引用，后端保存独立区块或 pack，不能单独重建对象索引。区块编码 `format=1`、pack 编码 1、后端标识 `format_version=2`，分别独立于数据库结构编号和程序版本。
 
 ## 分块与编码
 
@@ -17,20 +17,20 @@ PostgreSQL 保存对象路径、权限和引用，后端文件只保存区块载
 
 ## nonce 与 AAD
 
-加密前先提交 chunks 行，取得正 bigint ID，每个物理身份只加密一次。nonce 为 12 字节：
+加密前先提交物理记录，取得正 bigint ID，每个物理身份只加密一次。nonce 为 12 字节：
 
 ```text
-u32(UTC YYYYMMDD).to_be_bytes() || u64(chunk_id).to_be_bytes()
+u32((type << 27) | UTC_YYYYMMDD).to_be_bytes() || u64(physical_id).to_be_bytes()
 ```
 
-日期取 created_at，是整数日期标识；唯一性来自同一密钥下不回滚复用的 ID。例：日期 2026-09-21、ID 42 得到 `01352839000000000000002a`。读取直接使用数据库保存的 nonce。
+高 5 bit 为类型（独立区块 0、pack 1），低 27 bit 为 created_at 的 UTC 整数日期。后 64 bit 分别取 chunk_locations.id 或 packs.id。唯一性依赖同一密钥和类型下不回滚复用的物理 ID；读取只使用数据库保存的完整 nonce，不解析日期或类型作校验。逻辑 chunks.id 不因重编码改变。
 
 AAD 按下表逐字段拼接，不使用 JSON、分隔符或本机端序：
 
 | 次序 | 长度（字节） | 内容 |
 | --- | --- | --- |
 | 1 | 9 | ASCII `MGWCHUNK` + `0x01` |
-| 2 | 8 | 正 chunk ID，i64 big-endian |
+| 2 | 8 | 独立编码 ID，i64 big-endian；首次升级沿用原 chunk ID |
 | 3 | 16 | storage UUID 原始字节 |
 | 4 | 32 | 原始 BLAKE3 |
 | 5 | 4 | raw_size，i32 big-endian |
@@ -49,6 +49,7 @@ AAD 按下表逐字段拼接，不使用 JSON、分隔符或本机端序：
 ```text
 <backend.prefix>/meta.json
 <backend.prefix>/chunks/<UUID 前两位>/<32 位小写 storage UUID>
+<backend.prefix>/packs/<UUID 前两位>/<32 位小写 storage UUID>
 ```
 
 例如 `chunks/08/084f2ff912ff4c6daef1b416fee7b800`。物理 key 不可变且永不复用；两位分组共有 256 个前缀。sweep 只识别分组与 UUID 一致的规范路径，其他对象计入 unrecognized，不删除。
@@ -59,9 +60,10 @@ AAD 按下表逐字段拼接，不使用 JSON、分隔符或本机端序：
 
 | meta.json 字段 | 含义 |
 | --- | --- |
-| format_version | 固定为 1 |
+| format_version | 2，支持独立区块与 pack |
 | deployment_id | 与数据库一致的部署 UUID |
 | chunk_layout | `uuid-prefix2` |
+| pack_layout | `uuid-prefix2-v1` |
 | created_at | 创建时间 |
 | created_by | Cargo 包名与版本组成的 `wxw-media-gateway/<版本号>`，仅用于诊断 |
 
@@ -69,7 +71,19 @@ AAD 按下表逐字段拼接，不使用 JSON、分隔符或本机端序：
 
 仅数据库未初始化、无对象／区块且后端范围为空时，使用 `If-None-Match` 条件创建标识，失败不降级为覆盖写。S3 已写入但数据库确认前中断时，重启使用已提交的 deployment_id 完成确认。
 
-标识不保存密钥、对象索引或引用计数，不属于 chunks 清查范围，也不能替代备份或跨数据库写锁。数据库迁移不会自动转换后端格式。
+标识不保存密钥、对象索引或引用计数，不属于载荷清查范围，也不能替代备份或跨数据库写锁。匹配身份的格式 1 标识使用条件写入升级到 2，维护模式下延后至解除维护。旧载荷不重写；不支持格式 2 的读取者不得继续写入。
+
+## Pack
+
+按对象顺序收集完整、连续 CDC 块，成员原始长度之和不超过 pack.max_size（默认 32 MiB），至少两个成员；不改变 CDC 边界。每个包属于同一加密算法和密钥域。一个文件可包含多个 pack 和独立块，不按 MIME 限制打包。
+
+未压缩载荷依次为 `MGWPACK` + `0x01`（8 字节）、成员数 u32、每成员的逻辑 ID i64 / BLAKE3 32 字节 / 长度 u32，最后按成员顺序拼接原始字节；整数均为 big-endian，偏移由累计长度推导。整个载荷可压缩为一个 Zstd frame，再整体加密。
+
+Pack AAD 顺序为魔数、物理 ID i64、storage UUID、原始成员总长 i64、编码长度 i64、成员数 i32、未压缩载荷 BLAKE3、compressed u8、算法 u8、key_id 长度 u16 和 UTF-8 字节。读取先验证尺寸、密钥和认证，再有界解压、检查载荷摘要、成员索引及各块 BLAKE3；格式最多接受 256 MiB 原始成员和 4096 个成员。写入配置调小不影响历史格式上限，但读取仍需足够内存预算。
+
+布局切换先上传新来源，再事务提交映射，旧来源进入正常 GC 宽限。整包复用无需改写；部分复用按实际连续引用边界拆成小 pack 或单块。无引用成员达到回收收益门槛才重写；碎片合并等待冷却、要求不再共享，并且只合并完整旧物理单元。压缩退化时最多二分尝试一次，仍无收益则保留独立块。
+
+读取按逻辑块缓存、独立来源、pack 的顺序选择。缺失时下载并验证整包；并发下载和同一顺序请求内的工作区可复用。解开后仍按块缓存，附带成员作为冷条目进入 S3-FIFO，不建立永久 pack 缓存。区块的独立压缩提示与 pack 压缩标记分开保存；仅已有可压缩提示且满足缓存收益门槛的成员重新生成 .zst，其余使用 .raw。无缓存时仍可有界读取，但小范围请求可能下载整个包。
 
 ## 本地数据
 

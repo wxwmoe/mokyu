@@ -22,13 +22,22 @@ ssl_mode = "prefer"
 endpoint = "https://YOUR-ENDPOINT"
 region = "YOUR-REGION"
 bucket = "YOUR-PRIVATE-BACKEND-BUCKET"
-# Omit prefix or set it to "" to use the backend bucket root (meta.json and chunks/).
+# Omit prefix or set it to "" to use the backend bucket root.
 prefix = "media-gateway"
 access_key = "YOUR_ACCESS_KEY"
 secret_key = "YOUR_SECRET_KEY"
 # Use each *_file instead of its direct value, never both.
 # access_key_file = "secrets/backend-access-key"
 # secret_key_file = "secrets/backend-secret-key"
+# Omit concurrency limits for automatic budgets shared by all backend work.
+# read_concurrency = 16
+# upload_concurrency = 4
+# control_concurrency = 2
+connect_timeout = "5s"
+request_timeout = "30s"
+max_retries = 3
+retry_timeout = "120s"
+priority_aging = "30s"
 
 [security]
 credential_key_file = "secrets/credential-key"
@@ -48,8 +57,9 @@ free_space_floor = "1GiB"
 # inflight_bytes = "128MiB"
 # upload_concurrency = 2
 # read_concurrency = 4
-# backend_concurrency = 8
 # connections = 128
+read_idle_timeout = "120s"
+upload_idle_timeout = "120s"
 
 [multipart]
 # local_limit = "2GB"
@@ -59,7 +69,8 @@ client_idle_timeout = "120s"
 # max_active_uploads = 10000
 
 [cache]
-# max_size = "10GB"
+# max_size = "10GiB"
+# Set max_size = "0B" to disable persistent chunk caching.
 # max_entries = 65536
 # Keep decrypted Zstd payloads only when they save at least this percentage.
 min_compression_savings_percent = 20
@@ -78,6 +89,19 @@ min_savings_bytes = 256
 context_idle_timeout = "30s"
 # file_type only: omit for built-in types, replace with an array, or [] to skip none.
 # skip_mime_types = ["image/jpeg", "image/png", "video/mp4", "application/zip"]
+
+[pack]
+enabled = true
+max_size = "32MiB"
+# Omit to inherit compression.strategy; always / sample / file_type / chunk_hint.
+# compression_strategy = "chunk_hint"
+maintenance_concurrency = 1
+interval = "1h"
+reuse_interval = "5m"
+reclaim_interval = "30m"
+repack_interval = "24h"
+repack_cooldown = "1h"
+reclaim_min_savings_bytes = "4MiB"
 
 [encryption]
 algorithm = "aes-256-gcm"
@@ -101,6 +125,8 @@ task_retention = "30d"
 # Background database inventory; page refreshes only read the cached snapshot.
 refresh_interval = "15m"
 query_timeout = "2m"
+access_flush_interval = "1m"
+access_retention = "14d"
 
 [integrity]
 # Manual checks only. Effective concurrency also respects the shared resource budget.

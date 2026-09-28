@@ -42,6 +42,23 @@ pub enum Command {
     Backend(Backend),
     #[command(subcommand)]
     Integrity(Integrity),
+    #[command(subcommand)]
+    Pack(Packs),
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Packs {
+    Status,
+    Run {
+        #[arg(long, default_value = "pack")]
+        kind: String,
+    },
+    Unpack {
+        id: Option<i64>,
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
+        #[arg(long)]
+        execute: bool,
+    },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Integrity {
@@ -384,6 +401,11 @@ pub async fn password_hash(password: String) -> Result<String> {
 pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
     match command {
         Command::Status => app.status().await,
+        Command::Pack(Packs::Status) => app.pack_status().await,
+        Command::Pack(Packs::Run { kind }) => app.pack_start(&kind).await,
+        Command::Pack(Packs::Unpack { id, all, execute }) => {
+            app.unpack_start(id, all, execute).await
+        }
         Command::Integrity(Integrity::Check { mode, bucket, key }) => {
             app.integrity_start(crate::integrity::Request { mode, bucket, key })
                 .await
@@ -423,13 +445,16 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
                 );
             }
             let _coord = app.coord.lock().await;
+            if !enabled {
+                app.storage.check_identity(&app.db, false).await?;
+            }
             let mut tx = app.db.begin().await?;
             sqlx::query("UPDATE gateway_meta SET maintenance=$1")
                 .bind(enabled)
                 .execute(&mut *tx)
                 .await?;
             if enabled {
-                sqlx::query("UPDATE tasks SET state='paused',updated_at=now() WHERE kind='purge' AND state IN ('queued','running')")
+                sqlx::query("UPDATE tasks SET state='paused',updated_at=now() WHERE kind IN ('purge','pack','unpack') AND state IN ('queued','running')")
                     .execute(&mut *tx).await?;
             }
             tx.commit().await?;

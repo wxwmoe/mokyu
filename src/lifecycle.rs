@@ -32,14 +32,23 @@ impl App {
         let start = Instant::now();
         let duration = Duration::from_secs(config::seconds(&c.max_duration)?);
         let batch = c.batch_size as i64;
-        let mut deleted =
-            json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"integrity_issues":0});
+        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"integrity_issues":0,"packs":0,"chunk_locations":0});
         let mut batches = 0;
         let queries = [
             (
                 "chunks",
                 config::seconds(&c.deleted_chunk_retention)? as f64,
-                "DELETE FROM chunks WHERE id IN (SELECT id FROM chunks c WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) ORDER BY deleted_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+                "DELETE FROM chunks WHERE id IN (SELECT id FROM chunks c WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_locations WHERE chunk_id=c.id AND state<>'deleted') AND NOT EXISTS(SELECT 1 FROM pack_members m JOIN packs p ON p.id=m.pack_id WHERE m.chunk_id=c.id AND p.state<>'deleted') ORDER BY deleted_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+            ),
+            (
+                "packs",
+                config::seconds(&c.deleted_chunk_retention)? as f64,
+                "DELETE FROM packs WHERE id IN (SELECT id FROM packs p WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id) ORDER BY deleted_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+            ),
+            (
+                "chunk_locations",
+                config::seconds(&c.deleted_chunk_retention)? as f64,
+                "DELETE FROM chunk_locations WHERE id IN (SELECT id FROM chunk_locations WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second' ORDER BY deleted_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
             ),
             (
                 "uploads",
@@ -126,14 +135,22 @@ impl App {
 
     pub async fn recover(&self) -> Result<()> {
         let mut tx = self.db.begin().await?;
+        sqlx::query("UPDATE gateway_meta SET access_coverage_since=now(),access_flushed_at=now()")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("UPDATE streams SET state='abandoned',touched_at=now() WHERE state='writing'")
             .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=COALESCE(unreferenced_at,now()) WHERE state IN ('preparing','uploading')").execute(&mut *tx).await?;
+        sqlx::query("UPDATE chunk_locations SET state='retired',unreferenced_at=COALESCE(unreferenced_at,now()) WHERE state='uploading'").execute(&mut *tx).await?;
+        sqlx::query("UPDATE packs SET state='retired',unreferenced_at=COALESCE(unreferenced_at,now()) WHERE state='preparing'").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM pack_inputs")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("UPDATE uploads SET state='active' WHERE state='completing'")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE tasks SET state=CASE WHEN kind='purge' AND $1 THEN 'paused' ELSE 'queued' END,updated_at=now() WHERE state='running' OR (kind='purge' AND state='queued' AND $1)")
+        sqlx::query("UPDATE tasks SET state=CASE WHEN kind IN ('purge','pack','unpack') AND $1 THEN 'paused' ELSE 'queued' END,updated_at=now() WHERE state='running' OR (kind IN ('purge','pack','unpack') AND state='queued' AND $1)")
             .bind(self.maintenance.load(Ordering::Acquire))
             .execute(&mut *tx)
             .await?;
@@ -303,6 +320,11 @@ impl App {
         Ok(removed)
     }
     pub async fn reclaim(&self) -> Result<usize> {
+        crate::backend::PRIORITY
+            .scope(crate::backend::MAINTENANCE, self.reclaim_inner())
+            .await
+    }
+    async fn reclaim_inner(&self) -> Result<usize> {
         if self.gc_running.swap(true, Ordering::AcqRel) {
             return Ok(0);
         }
@@ -317,8 +339,12 @@ impl App {
         let ids:Vec<i64>=sqlx::query_scalar("SELECT id FROM chunks WHERE state IN ('ready','failed','deleting') AND unreferenced_at<now()-$1*interval '1 second' ORDER BY unreferenced_at,id LIMIT $2").bind(grace).bind(self.config.gc.batch_size as i64).fetch_all(&self.db).await?;
         let mut count = 0;
         for id in ids {
+            let coord = self.coord.lock().await;
+            if self.maintenance.load(Ordering::Acquire) {
+                break;
+            }
             let mut tx = self.db.begin().await?;
-            let row:Option<(Uuid,Option<Uuid>)>=sqlx::query_as("SELECT storage_id,owner_stream FROM chunks WHERE id=$1 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$2*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) FOR UPDATE").bind(id).bind(grace).fetch_optional(&mut *tx).await?;
+            let row:Option<(Uuid,Option<Uuid>)>=sqlx::query_as("SELECT storage_id,owner_stream FROM chunks WHERE id=$1 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$2*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) FOR UPDATE").bind(id).bind(grace).fetch_optional(&mut *tx).await?;
             let Some((storage, owner)) = row else {
                 continue;
             };
@@ -329,10 +355,17 @@ impl App {
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
+            sqlx::query("UPDATE chunk_locations l SET state='retired',unreferenced_at=COALESCE(l.unreferenced_at,c.unreferenced_at,now()) FROM chunks c WHERE l.chunk_id=c.id AND c.id=$1 AND l.state IN ('ready','uploading')")
+                .bind(id).execute(&mut *tx).await?;
+            sqlx::query("UPDATE chunks SET pack_id=NULL WHERE id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
             tx.commit().await?;
+            drop(coord);
             #[cfg(feature = "fault-injection")]
             crate::faults::point("chunk-delete-claimed").await;
-            match self.storage.delete(storage).await {
+            match self.storage.invalidate(storage).await {
                 // The immutable physical key remains journaled until the database records deletion.
                 Ok(()) => {
                     #[cfg(feature = "fault-injection")]
@@ -344,6 +377,47 @@ impl App {
                 Err(e) => {
                     self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(chunk_id=id,error=%e,"chunk deletion will be retried");
+                }
+            }
+        }
+        self.reclaim_physical(grace).await?;
+        Ok(count)
+    }
+    async fn reclaim_physical(&self, grace: f64) -> Result<usize> {
+        sqlx::query("UPDATE packs p SET state='retired',unreferenced_at=COALESCE(unreferenced_at,(SELECT max(c.unreferenced_at) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=p.id),now()) WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id AND state='ready')").execute(&self.db).await?;
+        let mut count = 0;
+        for table in ["chunk_locations", "packs"] {
+            let rows:Vec<(i64,Uuid)>=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT id,storage_id FROM {table} WHERE state IN ('retired','deleting') AND unreferenced_at<now()-$1*interval '1 second' ORDER BY unreferenced_at,id LIMIT $2")))
+                .bind(grace).bind(self.config.gc.batch_size as i64).fetch_all(&self.db).await?;
+            for (id, storage) in rows {
+                let coord = self.coord.lock().await;
+                if self.maintenance.load(Ordering::Acquire) {
+                    return Ok(count);
+                }
+                let sources = self.storage.source_gate.write().await;
+                if self.storage.physical_active(storage) {
+                    continue;
+                }
+                let changed=sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleting' WHERE id=$1 AND state IN ('retired','deleting')"))).bind(id).execute(&self.db).await?.rows_affected();
+                drop(sources);
+                drop(coord);
+                if changed == 0 {
+                    continue;
+                }
+                let path = if table == "packs" {
+                    self.storage.pack_path(storage)
+                } else {
+                    self.storage.path(storage)
+                };
+                match self.storage.delete_path(&path).await {
+                    Ok(()) => {
+                        sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleted',deleted_at=now() WHERE id=$1 AND state='deleting'"))).bind(id).execute(&self.db).await?;
+                        count += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error=%e,table,id,"physical deletion will be retried");
+                        self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }

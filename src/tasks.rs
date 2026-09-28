@@ -1,7 +1,6 @@
 use crate::{app::App, config};
 use anyhow::{Context, Result, ensure};
-use futures_util::{StreamExt, TryStreamExt};
-use object_store::path::Path;
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
@@ -61,7 +60,7 @@ impl App {
     ) -> Result<Value> {
         let age = config::seconds(older_than)?;
         ensure!(age <= i64::MAX as u64 / 1000, "age too large");
-        let prefix = self.storage.prefix();
+        let prefix = self.storage.namespace().to_string();
         if execute {
             let indexed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunks)")
                 .fetch_one(&self.db)
@@ -125,7 +124,7 @@ impl App {
                     )
                     .into());
                 }
-            } else if kind == "purge" {
+            } else if matches!(kind.as_str(), "purge" | "pack" | "unpack") {
                 self.writable()?;
             } else if kind == "integrity" {
                 let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE kind='integrity' AND state IN ('queued','running') AND id<>$1)").bind(id).fetch_one(&self.db).await?;
@@ -243,19 +242,14 @@ impl App {
                 "wait for current GC batch"
             );
         }
-        let prefix = self.storage.prefix();
+        let prefix = self.storage.namespace().to_string();
         ensure!(detail["prefix"] == prefix, "backend namespace changed");
         let cutoff = chrono::DateTime::parse_from_rfc3339(
             detail["cutoff"].as_str().context("missing sweep cutoff")?,
         )?;
-        let path = Path::from(prefix.clone());
-        let offset = Path::parse(cursor.unwrap_or(""))?;
-        let rows: Vec<_> = self
+        let rows = self
             .storage
-            .backend
-            .list_with_offset(Some(&path), &offset)
-            .take(self.config.gc.batch_size as usize)
-            .try_collect()
+            .list_physical(cursor, self.config.gc.batch_size as usize)
             .await?;
         let Some(last) = rows.last().map(|r| r.location.to_string()) else {
             sqlx::query("UPDATE tasks SET state='completed',updated_at=now() WHERE id=$1 AND state='running'").bind(id).execute(&self.db).await?;
@@ -266,13 +260,13 @@ impl App {
                 continue;
             }
             let name = row.location.as_ref();
-            let Some(storage) = self.storage.parse_path(name) else {
+            let Some(storage) = self.storage.parse_physical_path(name) else {
                 detail["unrecognized"] = json!(detail["unrecognized"].as_u64().unwrap_or(0) + 1);
                 continue;
             };
             // Every indexed state protects a physical key, including preparing and deleting.
             let indexed: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunks WHERE storage_id=$1)")
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunk_locations WHERE storage_id=$1) OR EXISTS(SELECT 1 FROM packs WHERE storage_id=$1)")
                     .bind(storage)
                     .fetch_one(&self.db)
                     .await?;
@@ -280,7 +274,7 @@ impl App {
                 continue;
             }
             if destructive {
-                self.storage.delete(storage).await?;
+                self.storage.delete_path(&row.location).await?;
             }
             detail["candidates"] = json!(detail["candidates"].as_u64().unwrap_or(0) + 1);
             detail["bytes"] = json!(detail["bytes"].as_u64().unwrap_or(0) + row.size);
@@ -296,10 +290,36 @@ impl App {
     }
 }
 pub async fn run(app: Arc<App>) -> Result<()> {
+    let active = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut workers = futures_util::stream::FuturesUnordered::new();
+    for pack in std::iter::once(false).chain(std::iter::repeat_n(
+        true,
+        app.config.pack.maintenance_concurrency,
+    )) {
+        workers.push(worker(app.clone(), active.clone(), pack));
+    }
+    workers
+        .next()
+        .await
+        .context("maintenance workers stopped")?
+}
+async fn worker(
+    app: Arc<App>,
+    active: Arc<tokio::sync::Mutex<std::collections::HashSet<Uuid>>>,
+    pack: bool,
+) -> Result<()> {
     loop {
-        let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',updated_at=now() WHERE id=(SELECT id FROM tasks WHERE state IN ('queued','running') ORDER BY updated_at,id LIMIT 1) AND state IN ('queued','running') RETURNING id").fetch_optional(&app.db).await?;
+        let id = {
+            let mut active = active.lock().await;
+            let ids: Vec<Uuid> = active.iter().copied().collect();
+            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',updated_at=now() WHERE id=(SELECT id FROM tasks WHERE state IN ('queued','running') AND (kind IN ('pack','unpack'))=$1 AND NOT(id=ANY($2)) ORDER BY updated_at,id LIMIT 1) AND state IN ('queued','running') RETURNING id").bind(pack).bind(ids).fetch_optional(&app.db).await?;
+            if let Some(id) = id {
+                active.insert(id);
+            }
+            id
+        };
         let Some(id) = id else {
-            tokio::select! {_=app.wake_tasks.notified()=>{},_=tokio::time::sleep(Duration::from_secs(30))=>{}}
+            tokio::select! {_=app.wake_tasks.notified()=>{},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
             continue;
         };
         {
@@ -314,6 +334,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 .fetch_one(&app.db)
                 .await?;
             if state != "running" {
+                active.lock().await.remove(&id);
                 continue;
             }
             let result = if kind == "purge" {
@@ -331,7 +352,10 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             } else if kind == "integrity" {
                 match tokio::time::timeout(
                     Duration::from_secs(config::seconds(&app.config.integrity.request_timeout)?),
-                    app.integrity_batch(id, cursor.as_deref(), detail),
+                    crate::backend::PRIORITY.scope(
+                        crate::backend::MAINTENANCE,
+                        app.integrity_batch(id, cursor.as_deref(), detail),
+                    ),
                 )
                 .await
                 {
@@ -340,9 +364,24 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                         "integrity batch timed out waiting for database, resources or backend; resume to retry"
                     )),
                 }
+            } else if kind == "pack" || kind == "unpack" {
+                crate::backend::PRIORITY
+                    .scope(
+                        crate::backend::MAINTENANCE,
+                        app.pack_batch(id, cursor.as_deref(), detail, kind == "unpack"),
+                    )
+                    .await
             } else {
                 Err(anyhow::anyhow!("unknown maintenance task kind"))
             };
+            if pack {
+                if result.is_err() {
+                    sqlx::query("UPDATE pack_changes SET next_check_at=now()+$2*interval '1 second' WHERE pack_id IN (SELECT c.pack_id FROM pack_inputs i JOIN chunks c ON c.id=i.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.pack.reuse_interval)? as f64).execute(&app.db).await?;
+                    sqlx::query("UPDATE pack_maintenance SET next_check_at=now()+$2*interval '1 second' WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.pack.reuse_interval)? as f64).execute(&app.db).await?;
+                }
+                app.finish_pack_work(id).await?;
+            }
+            active.lock().await.remove(&id);
             match result {
                 Ok(true) => {
                     tokio::task::yield_now().await;

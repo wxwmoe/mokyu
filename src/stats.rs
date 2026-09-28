@@ -401,23 +401,51 @@ async fn collect(app: &App) -> Result<Value> {
             'unconfirmed_bytes',COALESCE(sum(bytes) FILTER(WHERE state IN ('uploading','failed')),0))
          FROM (SELECT state,count(*) n,COALESCE(sum(stored_size),0) bytes FROM chunks GROUP BY state) c")
         .fetch_one(&mut *tx).await?;
+    let physical:Value=sqlx::query_scalar("SELECT COALESCE(jsonb_agg(to_jsonb(p)),'[]') FROM (SELECT kind,state,count(*) objects,COALESCE(sum(stored_size),0) stored_bytes FROM (SELECT 'chunk' kind,state,stored_size FROM chunk_locations UNION ALL SELECT 'pack',state,stored_size FROM packs) sources GROUP BY kind,state ORDER BY kind,state) p").fetch_one(&mut *tx).await?;
+    let mut chunks = chunks;
+    chunks["stored_bytes"] = json!(
+        physical
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| matches!(p["state"].as_str(), Some("ready" | "retired" | "deleting")))
+            .map(|p| p["stored_bytes"].as_i64().unwrap_or(0))
+            .sum::<i64>()
+    );
+    chunks["unconfirmed_bytes"] = json!(
+        physical
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| matches!(p["state"].as_str(), Some("preparing" | "uploading")))
+            .map(|p| p["stored_bytes"].as_i64().unwrap_or(0))
+            .sum::<i64>()
+    );
     let live: Value = sqlx::query_scalar(
         "WITH refs AS (
             SELECT e.chunk_id,sum(e.length) bytes FROM objects o JOIN extents e ON e.stream_id=o.stream_id
-            WHERE e.chunk_id IS NOT NULL GROUP BY e.chunk_id)
+            WHERE e.chunk_id IS NOT NULL GROUP BY e.chunk_id),
+         physical AS (
+            SELECT l.stored_size bytes,l.stored_size-CASE WHEN c.algorithm='none' THEN 0 ELSE 16 END payload
+            FROM refs r JOIN chunks c ON c.id=r.chunk_id JOIN chunk_locations l ON l.chunk_id=c.id AND l.state='ready'
+            UNION ALL SELECT p.stored_size,p.stored_size-CASE WHEN p.algorithm='none' THEN 0 ELSE 16 END
+            FROM packs p WHERE state='ready' AND EXISTS(SELECT 1 FROM refs r JOIN chunks c ON c.id=r.chunk_id WHERE c.pack_id=p.id))
          SELECT jsonb_build_object('chunks',count(*),'reference_bytes',COALESCE(sum(r.bytes),0),
-            'raw_bytes',COALESCE(sum(c.raw_size),0),'stored_bytes',COALESCE(sum(c.stored_size),0),
-            'payload_bytes',COALESCE(sum(c.stored_size-CASE WHEN c.algorithm='none' THEN 0 ELSE 16 END),0))
+            'raw_bytes',COALESCE(sum(c.raw_size),0),'stored_bytes',(SELECT COALESCE(sum(bytes),0) FROM physical),
+            'payload_bytes',(SELECT COALESCE(sum(payload),0) FROM physical))
          FROM refs r JOIN chunks c ON c.id=r.chunk_id")
         .fetch_one(&mut *tx).await?;
     let grace = config::seconds(&app.config.gc.unreferenced_grace)? as f64;
-    let unreferenced: Value = sqlx::query_scalar(
+    let mut unreferenced: Value = sqlx::query_scalar(
         "SELECT jsonb_build_object('chunks',count(*),'stored_bytes',COALESCE(sum(stored_size),0),
             'eligible_chunks',count(*) FILTER(WHERE unreferenced_at<now()-$1*interval '1 second' AND owner_stream IS NULL),
             'eligible_bytes',COALESCE(sum(stored_size) FILTER(WHERE unreferenced_at<now()-$1*interval '1 second' AND owner_stream IS NULL),0))
          FROM chunks c WHERE state IN ('ready','failed','deleting') AND unreferenced_at IS NOT NULL
             AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)")
         .bind(grace).fetch_one(&mut *tx).await?;
+    let reclaimable:Value=sqlx::query_scalar("SELECT jsonb_build_object('bytes',COALESCE(sum(bytes),0),'eligible',COALESCE(sum(bytes) FILTER(WHERE since<now()-$1*interval '1 second'),0)) FROM (SELECT l.stored_size bytes,COALESCE(l.unreferenced_at,c.unreferenced_at) since FROM chunk_locations l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('retired','deleting') OR (l.state='ready' AND c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) UNION ALL SELECT stored_size,unreferenced_at FROM packs WHERE state IN ('retired','deleting')) p").bind(grace).fetch_one(&mut *tx).await?;
+    unreferenced["stored_bytes"] = reclaimable["bytes"].clone();
+    unreferenced["eligible_bytes"] = reclaimable["eligible"].clone();
     let tasks: Value = sqlx::query_scalar(
         "SELECT COALESCE(jsonb_object_agg(state,n),'{}') FROM (SELECT state,count(*) n FROM tasks GROUP BY state) t")
         .fetch_one(&mut *tx).await?;
@@ -437,6 +465,8 @@ async fn collect(app: &App) -> Result<Value> {
             UNION ALL SELECT 'integrity_issues',count(*),min(t.updated_at) FROM integrity_issues i JOIN tasks t ON t.id=i.task_id
                 WHERE t.state='completed' AND t.updated_at<now()-$3*interval '1 second'
             UNION ALL SELECT 'sessions',count(*),min(expires_at) FROM sessions WHERE expires_at<now()
+            UNION ALL SELECT 'packs',count(*),min(deleted_at) FROM packs WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second'
+            UNION ALL SELECT 'chunk_locations',count(*),min(deleted_at) FROM chunk_locations WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second'
         ) backlog")
         .bind(config::seconds(&app.config.cleanup.deleted_chunk_retention)? as f64)
         .bind(config::seconds(&app.config.cleanup.upload_retention)? as f64)
@@ -447,14 +477,14 @@ async fn collect(app: &App) -> Result<Value> {
             'index_bytes',pg_indexes_size(relid),'live_rows_estimate',n_live_tup,
             'dead_rows_estimate',n_dead_tup,'last_autovacuum',last_autovacuum,'last_autoanalyze',last_autoanalyze)
          FROM pg_stat_user_tables WHERE schemaname='public'
-            AND relname IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions','integrity_issues')
+            AND relname IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions','integrity_issues','chunk_locations','packs','pack_members','pack_maintenance','pack_changes','pack_inputs','chunk_access_stats','chunk_access_windows','pack_access_windows','integrity_packs')
          ORDER BY relname")
         .fetch_all(&mut *tx).await?;
     tx.commit().await?;
     Ok(
         json!({"as_of":as_of,"collected_at":Utc::now(),"objects":buckets[0]["objects"],
         "logical_bytes":buckets[0]["logical_bytes"],"buckets":buckets.iter().skip(1).take(1000).collect::<Vec<_>>(),
-        "buckets_truncated":buckets.len()>1001,"chunks":chunks,"live":live,
+        "buckets_truncated":buckets.len()>1001,"chunks":chunks,"live":live,"physical":physical,
         "unreferenced":unreferenced,"tasks":tasks,"uploads":uploads,"cleanup":cleanup,"database":database}),
     )
 }
