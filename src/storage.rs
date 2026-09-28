@@ -1612,12 +1612,15 @@ impl Storage {
         Ok((raw, false))
     }
     pub(crate) async fn head(&self, c: &Chunk) -> Result<u64> {
+        Ok(self.head_path(&self.path(c.storage_id)).await?.size)
+    }
+    pub(crate) async fn head_path(&self, path: &Path) -> Result<object_store::ObjectMeta> {
         self.ensure_identity().await?;
         let _permit = self.controls.acquire().await?;
         let mut operation = self.operations[3].begin();
-        let result = self.backend.head(&self.path(c.storage_id)).await;
+        let result = self.backend.head(path).await;
         operation.finish(result.is_err());
-        Ok(result?.size)
+        Ok(result?)
     }
     pub async fn inspect(
         &self,
@@ -1697,11 +1700,8 @@ impl Storage {
                     ensure!(offset==p.raw_size,codec::IntegrityError::Metadata);
                     if matches!(mode,crate::integrity::Mode::Metadata) {return Ok(0);}
                     if matches!(mode,crate::integrity::Mode::Head) {
-                        self.ensure_identity().await?;
-                        let _permit=self.controls.acquire().await?;
-                        let mut operation=self.operations[3].begin();
-                        let result=self.backend.head(&self.pack_path(p.storage_id)).await;operation.finish(result.is_err());
-                        ensure!(Some(result?.size as i64)==p.stored_size,codec::IntegrityError::Length);return Ok(0);
+                        let meta=self.head_path(&self.pack_path(p.storage_id)).await?;
+                        ensure!(Some(meta.size as i64)==p.stored_size,codec::IntegrityError::Length);return Ok(0);
                     }
                     let _memory=self.pack_memory(capacity).await?;
                     let data=self.read_path(&self.pack_path(p.storage_id),capacity+16).await?;

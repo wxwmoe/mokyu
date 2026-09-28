@@ -57,8 +57,8 @@ docker exec -i media-gateway cli user create admin --password-stdin < /secure/pa
 | 命令 | 作用与返回 |
 | --- | --- |
 | `status` | 返回[运行状态和容量快照](manage-api-reference.md#运行状态)，读取不触发全表汇总 |
-| `gc status` | 返回 paused/maintenance/running、区块状态计数、宽限和间隔 |
-| `gc run` | 执行一批本地清理与远端回收，返回计数；遵守暂停、维护和宽限 |
+| `gc status` | 返回 paused/maintenance/running、区块状态计数、宽限、间隔和 min_storage_duration |
+| `gc run` | 执行一批本地清理与远端回收，返回计数；遵守暂停、维护、宽限及后端最低存储期限 |
 | `gc pause` | 持久暂停后续远端 GC，已发出的请求可能完成 |
 | `gc resume` | 解除暂停；需要立即执行时再调用 `gc run` |
 | `cleanup status` | 返回历史保留策略、运行状态和上轮结果 |
@@ -105,6 +105,8 @@ docker exec -it media-gateway cli bucket purge media --execute
 | --- | --- |
 | `backend sweep [--older-than 48h]` | 默认预览；扫描部署 chunks/packs 规范路径，统计未被数据库任何物理状态索引的载荷 |
 | `backend sweep --execute --preview UUID [--older-than 48h]` | 按相同前缀和年龄阈值重新扫描，每次删除前重新查询数据库 |
+
+预览和执行均以远端 `Last-Modified` 计算年龄，取 `--older-than` 与 `backend.min_storage_duration` 中较长者。最低期限改变后须重新预览；继续旧任务也不会绕过当前最低期限。
 
 执行需要维护模式、已完成的预览、排空的活跃操作、非空区块索引及真实终端；按提示确认前缀，再输入 `DELETE`。预览过期后需重新生成。
 

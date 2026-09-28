@@ -431,7 +431,7 @@ impl App {
         crate::faults::point("chunk-stored").await;
         let mut tx = self.db.begin().await?;
         let changed=sqlx::query("UPDATE chunks SET state='ready',unreferenced_at=NULL,owner_stream=NULL WHERE id=$1 AND state='uploading'").bind(c.id).execute(&mut *tx).await?.rows_affected();
-        sqlx::query("UPDATE chunk_locations SET state='ready',unreferenced_at=NULL WHERE id=$1 AND state='uploading'").bind(c.encoding_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE chunk_locations SET state='ready',unreferenced_at=NULL,stored_at=clock_timestamp() WHERE id=$1 AND state='uploading'").bind(c.encoding_id).execute(&mut *tx).await?;
         if changed != 1 {
             return Err(s3_error!(OperationAborted).into());
         }

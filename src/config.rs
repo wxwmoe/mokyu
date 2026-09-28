@@ -130,6 +130,20 @@ pub struct Backend {
     pub retry_timeout: String,
     #[serde(default = "priority_aging")]
     pub priority_aging: String,
+    #[serde(default = "no_minimum_storage_duration")]
+    pub min_storage_duration: String,
+}
+impl Backend {
+    pub fn min_storage_seconds(&self) -> Result<u64> {
+        if self.min_storage_duration == "0s" {
+            Ok(0)
+        } else {
+            seconds(&self.min_storage_duration).context("invalid backend.min_storage_duration")
+        }
+    }
+}
+fn no_minimum_storage_duration() -> String {
+    "0s".into()
 }
 fn connect_timeout() -> String {
     "5s".into()
@@ -504,6 +518,7 @@ impl Config {
             ),
             "unknown encryption algorithm"
         );
+        c.backend.min_storage_seconds()?;
         for value in [
             &c.multipart.idle_timeout,
             &c.multipart.sweep_interval,
@@ -805,6 +820,19 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backend_minimum_age_is_optional_and_allows_zero() {
+        let mut backend: Backend =
+            toml::from_str("endpoint='https://s3.example'\nregion='local'\nbucket='backend'")
+                .unwrap();
+        assert_eq!(backend.min_storage_seconds().unwrap(), 0);
+        backend.min_storage_duration = "30d".into();
+        assert_eq!(backend.min_storage_seconds().unwrap(), 30 * 86400);
+        for invalid in ["", "-1d", "30", "30days", "18446744073709551615d"] {
+            backend.min_storage_duration = invalid.into();
+            assert!(backend.min_storage_seconds().is_err());
+        }
+    }
     #[test]
     fn secret_sources_are_exclusive_and_preserve_literal_passwords() {
         let base = std::env::temp_dir().join(format!("mgw-config-{}", uuid::Uuid::new_v4()));

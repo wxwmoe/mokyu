@@ -173,8 +173,8 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 
 | 表 | 字段（未注明可空者均 NOT NULL） |
 | --- | --- |
-| `chunk_locations` | id bigint BY DEFAULT identity PK；chunk_id bigint → chunks CASCADE；storage_id uuid UNIQUE；algorithm/key_id text；stored_size integer 可空；compressed bool；nonce bytea 可空；state text；created_at timestamptz；unreferenced_at/deleted_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
-| `packs` | id bigint ALWAYS identity PK；storage_id uuid UNIQUE；algorithm/key_id text；raw_size bigint >0；stored_size bigint 可空；compressed bool 默认 false；nonce bytea（12 B）/digest bytea（32 B）可空；member_count integer ≥2；state text；created_at timestamptz 默认 now()；unreferenced_at/deleted_at/range_checked_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
+| `chunk_locations` | id bigint BY DEFAULT identity PK；chunk_id bigint → chunks CASCADE；storage_id uuid UNIQUE；algorithm/key_id text；stored_size integer 可空；compressed bool；nonce bytea 可空；state text；created_at timestamptz；stored_at/unreferenced_at/deleted_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
+| `packs` | id bigint ALWAYS identity PK；storage_id uuid UNIQUE；algorithm/key_id text；raw_size bigint >0；stored_size bigint 可空；compressed bool 默认 false；nonce bytea（12 B）/digest bytea（32 B）可空；member_count integer ≥2；state text；created_at timestamptz 默认 now()；stored_at/unreferenced_at/deleted_at/range_checked_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
 | `pack_members` | pack_id bigint → packs CASCADE；ordinal integer ≥0；chunk_id bigint → chunks CASCADE；offset_bytes bigint ≥0；PK(pack_id,ordinal)、UNIQUE(pack_id,chunk_id) |
 | `pack_inputs` | task_id uuid → tasks CASCADE；chunk_id bigint → chunks；created_at timestamptz 默认 now()；PK(task_id,chunk_id)、UNIQUE(chunk_id)，防止重写任务同时占有相同输入 |
 | `pack_maintenance` | stream_id uuid PK → streams CASCADE；cursor bigint 默认 0；generation bigint 默认 1；reason text 默认 pack；next_check_at/updated_at timestamptz 默认 now() |
@@ -182,6 +182,8 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | `integrity_packs` | task_id uuid → tasks CASCADE；pack_id bigint → packs CASCADE；error_code text 可空；PK(task_id,pack_id)，NULL 表示该任务已验证该物理包 |
 
 独立来源状态为 uploading/ready/retired/deleting/deleted，pack 为 preparing/ready/retired/deleting/deleted。仅 ready 映射可发布；失败准备记录退役后仍受正常 GC 宽限。逻辑行清理必须等待它的物理日志删除及仍存活 pack 的成员索引不再需要它。
+
+`stored_at` 在远端写入成功并发布时记录；复用现有来源不重置。NULL 表示时间未知，启用最低存储期限后在物理回收前查询远端 `Last-Modified` 补齐，不使用分配记录时的 `created_at` 推算。
 
 索引：chunk_locations_current 在 ready 上唯一约束 chunk_id；两类物理 GC 索引为 retired/deleting 的 (unreferenced_at,id)；pack_members_chunk 为 chunk_id；pack_maintenance_due 为 (next_check_at,stream_id)，pack_changes_due 为 (reason,next_check_at,pack_id)。引用变更的 statement trigger 和 stream 发布 trigger 在同一事务更新候选及 generation；任务只删除自己处理过的 generation，后续事件不会被覆盖。
 
@@ -393,6 +395,6 @@ chunks、extents、streams、objects、uploads、parts、fragments、sessions、
 | streams.checksums | S3 校验算法对应值及 checksum_type，与内部 BLAKE3 去重哈希独立 |
 | buckets.cors | origins/methods/headers/expose/max_age 规则数组，见[CORS 设置](manage-api-reference.md#cors-设置) |
 | uploads.result | Complete 成功返回的 ETag、时间等，与 manifest_hash 一同用于幂等重试 |
-| tasks.detail | purge：name/bucket_id；sweep：dry_run/prefix/older_than_seconds/cutoff/candidates/bytes/unrecognized/samples；integrity 见[巡检字段](manage-api-reference.md#完整性巡检) |
+| tasks.detail | purge：name/bucket_id；sweep：dry_run/prefix/older_than_seconds/min_storage_duration_seconds/cutoff/candidates/bytes/unrecognized/samples；integrity 见[巡检字段](manage-api-reference.md#完整性巡检) |
 
 sweep 样本有界，不是可直接执行的删除清单。日常管理通过 CLI/Web 完成；不要手改状态、序列、引用或 nonce 来绕过检查。[数据库恢复](deployment-and-recovery.md#恢复步骤)还需核对历史密钥和后端身份。

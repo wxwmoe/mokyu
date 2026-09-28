@@ -424,10 +424,10 @@ impl App {
         }
         for output in outputs {
             if let Some(p) = &output.pack {
-                sqlx::query("UPDATE packs SET state='ready',unreferenced_at=NULL WHERE id=$1 AND state='preparing'").bind(p.id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE packs SET state='ready',unreferenced_at=NULL,stored_at=clock_timestamp() WHERE id=$1 AND state='preparing'").bind(p.id).execute(&mut *tx).await?;
                 sqlx::query("UPDATE chunk_locations SET state='retired',unreferenced_at=now() WHERE chunk_id=ANY($1) AND state='ready'").bind(&output.chunks).execute(&mut *tx).await?;
             } else if let Some(c) = &output.independent {
-                sqlx::query("UPDATE chunk_locations SET state='ready',unreferenced_at=NULL WHERE id=$1 AND state='uploading'").bind(c.encoding_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE chunk_locations SET state='ready',unreferenced_at=NULL,stored_at=clock_timestamp() WHERE id=$1 AND state='uploading'").bind(c.encoding_id).execute(&mut *tx).await?;
             }
             sqlx::query("UPDATE chunks SET pack_id=$2,split_at=CASE WHEN $3 THEN now() ELSE split_at END,repack_after=CASE WHEN $3 THEN GREATEST(repack_after,now()+$4*interval '1 second') ELSE repack_after END,range_split_at=CASE WHEN $5 THEN now() WHEN NOT $3 AND $2::bigint IS NOT NULL THEN NULL ELSE range_split_at END WHERE id=ANY($1)")
                 .bind(&output.chunks).bind(output.pack.as_ref().map(|p|p.id)).bind(split).bind(config::seconds(if range {&self.config.pack.range_repack_after}else{&self.config.pack.repack_cooldown})? as f64).bind(range).execute(&mut *tx).await?;

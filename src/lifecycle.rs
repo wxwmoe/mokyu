@@ -385,12 +385,41 @@ impl App {
         Ok(count)
     }
     async fn reclaim_physical(&self, grace: f64) -> Result<usize> {
+        let minimum = self.config.backend.min_storage_seconds()? as f64;
         sqlx::query("UPDATE packs p SET state='retired',unreferenced_at=COALESCE(unreferenced_at,(SELECT max(c.unreferenced_at) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=p.id),now()) WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id AND state='ready')").execute(&self.db).await?;
         let mut count = 0;
         for table in ["chunk_locations", "packs"] {
-            let rows:Vec<(i64,Uuid)>=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT id,storage_id FROM {table} WHERE state IN ('retired','deleting') AND unreferenced_at<now()-$1*interval '1 second' ORDER BY unreferenced_at,id LIMIT $2")))
-                .bind(grace).bind(self.config.gc.batch_size as i64).fetch_all(&self.db).await?;
-            for (id, storage) in rows {
+            let rows:Vec<(i64,Uuid,bool)>=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT id,storage_id,stored_at IS NULL FROM {table} WHERE state IN ('retired','deleting') AND unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second') ORDER BY unreferenced_at,id LIMIT $2")))
+                .bind(grace).bind(self.config.gc.batch_size as i64).bind(minimum).fetch_all(&self.db).await?;
+            for (id, storage, unknown_age) in rows {
+                let path = if table == "packs" {
+                    self.storage.pack_path(storage)
+                } else {
+                    self.storage.path(storage)
+                };
+                if minimum > 0.0 && unknown_age {
+                    match self.storage.head_path(&path).await {
+                        Ok(meta) => {
+                            sqlx::query(sqlx::AssertSqlSafe(format!(
+                                "UPDATE {table} SET stored_at=COALESCE(stored_at,$2) WHERE id=$1"
+                            )))
+                            .bind(id)
+                            .bind(meta.last_modified)
+                            .execute(&self.db)
+                            .await?;
+                        }
+                        Err(e)
+                            if matches!(
+                                e.downcast_ref::<object_store::Error>(),
+                                Some(object_store::Error::NotFound { .. })
+                            ) => {}
+                        Err(e) => {
+                            self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(error=%e,table,id,"cannot determine remote age; physical deletion deferred");
+                            continue;
+                        }
+                    }
+                }
                 let coord = self.coord.lock().await;
                 if self.maintenance.load(Ordering::Acquire) {
                     return Ok(count);
@@ -399,17 +428,12 @@ impl App {
                 if self.storage.physical_active(storage) {
                     continue;
                 }
-                let changed=sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleting' WHERE id=$1 AND state IN ('retired','deleting')"))).bind(id).execute(&self.db).await?.rows_affected();
+                let changed=sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleting' WHERE id=$1 AND state IN ('retired','deleting') AND unreferenced_at<now()-$2*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second')"))).bind(id).bind(grace).bind(minimum).execute(&self.db).await?.rows_affected();
                 drop(sources);
                 drop(coord);
                 if changed == 0 {
                     continue;
                 }
-                let path = if table == "packs" {
-                    self.storage.pack_path(storage)
-                } else {
-                    self.storage.path(storage)
-                };
                 match self.storage.delete_path(&path).await {
                     Ok(()) => {
                         sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleted',deleted_at=now() WHERE id=$1 AND state='deleting'"))).bind(id).execute(&self.db).await?;
@@ -434,7 +458,7 @@ impl App {
                 .fetch_one(&self.db)
                 .await?;
         Ok(
-            json!({"paused":paused,"maintenance":maintenance,"running":self.gc_running.load(Ordering::Acquire),"chunks":counts,"grace":self.config.gc.unreferenced_grace,"interval":self.config.gc.interval}),
+            json!({"paused":paused,"maintenance":maintenance,"running":self.gc_running.load(Ordering::Acquire),"chunks":counts,"grace":self.config.gc.unreferenced_grace,"interval":self.config.gc.interval,"min_storage_duration":self.config.backend.min_storage_duration}),
         )
     }
 }

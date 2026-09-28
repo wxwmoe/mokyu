@@ -61,10 +61,13 @@ Compose 健康检查对应 `["CMD","media-gateway","--config","PATH","cli","stat
 | `backend.max_retries` | 非负整数 / `3` | 每轮 SDK 最大重试次数 |
 | `backend.retry_timeout` | 时间 / `120s` | SDK 重试窗口，不是严格整体截止 |
 | `backend.priority_aging` | 时间 / `30s` | 老请求提升调度优先级的等待时间 |
+| `backend.min_storage_duration` | 时间 / `0s` | 区块和 pack 从远端写入成功起的最低存储期限；省略或 `0s` 不额外保留，示例为注释的 `30d` |
 
 endpoint、bucket 和 prefix 共同绑定部署身份；已有部署不能直接修改它们来搬迁数据。根目录和空前缀规则见[后端布局](storage-format.md#后端布局)。
 
 后端名额用满时排队，前端请求优先、维护请求随后；已发出的请求不抢占，老等待者避免长期饥饿。排队计入前端无进展超时；SDK 重试期间仍持有同一后端名额。取消等待不占用执行名额。
+
+物理 GC 必须同时满足最低存储期限与 `gc.unreferenced_grace`；backend sweep 也遵守最低期限。旧数据缺少写入时间时，GC 查询后端 `Last-Modified`，查询失败则延后删除。该设置只延迟物理删除，不延长逻辑去重窗口，也不阻止 pack 重写产生新旧载荷重叠占用；不是备份保留或 S3 Object Lock。
 
 ## 数据目录与上传
 

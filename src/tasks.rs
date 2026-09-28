@@ -60,6 +60,7 @@ impl App {
     ) -> Result<Value> {
         let age = config::seconds(older_than)?;
         ensure!(age <= i64::MAX as u64 / 1000, "age too large");
+        let minimum = self.config.backend.min_storage_seconds()?;
         let prefix = self.storage.namespace().to_string();
         if execute {
             let indexed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunks)")
@@ -89,6 +90,13 @@ impl App {
                 "use the same --older-than as the preview"
             );
             ensure!(
+                previous["min_storage_duration_seconds"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    == minimum,
+                "backend.min_storage_duration changed; preview again"
+            );
+            ensure!(
                 self.maintenance.load(std::sync::atomic::Ordering::Acquire),
                 "enable maintenance before destructive backend sweep"
             );
@@ -98,7 +106,10 @@ impl App {
             );
         }
         let id = Uuid::new_v4();
-        let detail = json!({"dry_run":!execute,"prefix":prefix,"older_than_seconds":age,"cutoff":(chrono::Utc::now()-chrono::TimeDelta::seconds(age as i64)).to_rfc3339(),"candidates":0,"bytes":0,"unrecognized":0,"samples":[]});
+        let cutoff = chrono::Utc::now()
+            .checked_sub_signed(chrono::TimeDelta::seconds(age.max(minimum) as i64))
+            .context("age too large")?;
+        let detail = json!({"dry_run":!execute,"prefix":prefix,"older_than_seconds":age,"min_storage_duration_seconds":minimum,"cutoff":cutoff.to_rfc3339(),"candidates":0,"bytes":0,"unrecognized":0,"samples":[]});
         sqlx::query("INSERT INTO tasks(id,kind,state,detail) VALUES($1,'sweep','queued',$2)")
             .bind(id)
             .bind(detail)
@@ -246,7 +257,15 @@ impl App {
         ensure!(detail["prefix"] == prefix, "backend namespace changed");
         let cutoff = chrono::DateTime::parse_from_rfc3339(
             detail["cutoff"].as_str().context("missing sweep cutoff")?,
-        )?;
+        )?
+        .with_timezone(&chrono::Utc);
+        // A resumed task may have been created under a shorter retention policy.
+        let minimum = self.config.backend.min_storage_seconds()?;
+        let cutoff = cutoff.min(
+            chrono::Utc::now()
+                .checked_sub_signed(chrono::TimeDelta::seconds(minimum as i64))
+                .context("age too large")?,
+        );
         let rows = self
             .storage
             .list_physical(cursor, self.config.gc.batch_size as usize)
