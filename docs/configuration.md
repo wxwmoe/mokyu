@@ -5,11 +5,11 @@
 使用其他路径时，统一修改服务、CLI 和健康检查：
 
 ```sh
-media-gateway --config PATH serve
-media-gateway --config PATH cli status
+mokyu --config PATH serve
+mokyu --config PATH cli status
 ```
 
-Compose 健康检查对应 `["CMD","media-gateway","--config","PATH","cli","status"]`。
+Compose 健康检查对应 `["CMD","mokyu","--config","PATH","cli","status"]`。
 
 - **省略可选资源项**表示自动预算或无该项配额，不使用 `null`、空字符串或 `auto`。
 - 大小使用正整数加 `B/KB/MB/GB/TB/KiB/MiB/GiB/TiB`；`2GB` 为 2,000,000,000 字节，`2GiB` 为 2,147,483,648 字节。不接受小数、`0` 或 `1G`。
@@ -22,7 +22,7 @@ Compose 健康检查对应 `["CMD","media-gateway","--config","PATH","cli","stat
 | `listen.s3` | 字符串 / `0.0.0.0:9000` | S3 监听 SocketAddr |
 | `listen.web` | 字符串 / `0.0.0.0:9001` | 给反代的公共读和可选网站入口 |
 | `listen.manage` | 字符串 / `0.0.0.0:9002` | 管理入口；三个监听地址必须不同 |
-| `listen.admin_socket` | 路径 / `/run/media-gateway/admin.sock` | CLI 的 Unix socket；权限 0600 |
+| `listen.admin_socket` | 路径 / `/run/mokyu/admin.sock` | CLI 的 Unix socket；权限 0600 |
 | `listen.s3_domain` | 可选字符串 / 无 | 启用此域名的 virtual-hosted 寻址；否则使用 path-style |
 | `listen.region` | 字符串 / `us-east-1` | 客户端签名区域；与后端区域相互独立 |
 | `listen.aws_chunk_limit` | 大小 / `8MiB` | 单个 AWS 签名传输 chunk 上限；不是对象或 UploadPart 大小上限 |
@@ -61,13 +61,13 @@ Compose 健康检查对应 `["CMD","media-gateway","--config","PATH","cli","stat
 | `backend.max_retries` | 非负整数 / `3` | 每轮 SDK 最大重试次数 |
 | `backend.retry_timeout` | 时间 / `120s` | SDK 重试窗口，不是严格整体截止 |
 | `backend.priority_aging` | 时间 / `30s` | 老请求提升调度优先级的等待时间 |
-| `backend.min_storage_duration` | 时间 / `0s` | 区块和 pack 从远端写入成功起的最低存储期限；省略或 `0s` 不额外保留，示例为注释的 `30d` |
+| `backend.min_storage_duration` | 时间 / `0s` | 区块和区块包从远端写入成功起的最低存储期限；省略或 `0s` 不额外保留，示例为注释的 `30d` |
 
 endpoint、bucket 和 prefix 共同绑定部署身份；已有部署不能直接修改它们来搬迁数据。根目录和空前缀规则见[后端布局](storage-format.md#后端布局)。
 
 后端名额用满时排队，前端请求优先、维护请求随后；已发出的请求不抢占，老等待者避免长期饥饿。排队计入前端无进展超时；SDK 重试期间仍持有同一后端名额。取消等待不占用执行名额。
 
-物理 GC 必须同时满足最低存储期限与 `gc.unreferenced_grace`；backend sweep 也遵守最低期限。旧数据缺少写入时间时，GC 查询后端 `Last-Modified`，查询失败则延后删除。该设置只延迟物理删除，不延长逻辑去重窗口，也不阻止 pack 重写产生新旧载荷重叠占用；不是备份保留或 S3 Object Lock。
+物理 GC 必须同时满足最低存储期限与 `gc.unreferenced_grace`；backend sweep 也遵守最低期限。旧数据缺少写入时间时，GC 查询后端 `Last-Modified`，查询失败则延后删除。该设置只延迟物理删除，不延长逻辑去重窗口，也不阻止区块包重写产生新旧载荷重叠占用；不是备份保留或 S3 Object Lock。
 
 ## 数据目录与上传
 
@@ -123,11 +123,11 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 | database.max_connections | min(2C+4,64) | 正整数；池最少 0 个连接，闲置 60 秒释放 |
 | cache.max_entries | M/64/256 | ≤ M/256/8 |
 
-后端读写分别默认 min(4C,2N)，控制请求默认 min(C,8)。Pack 读取和准备分别使用剩余预算 `(M−N×S−M/4)/2`，每次按四倍载荷加编解码工作区预留；状态中的 pack_memory_units 以 MiB 表示每组预算。无法容纳配置写入上限时拒绝启动。准备完成的编码数据等待后端名额时仍计入此预算，CPU 名额已释放。
+后端读写分别默认 min(4C,2N)，控制请求默认 min(C,8)。区块包读取和准备分别使用剩余预算 `(M−N×S−M/4)/2`，每次按四倍载荷加编解码工作区预留；状态中的 pack_memory_units 以 MiB 表示每组预算。无法容纳配置写入上限时拒绝启动。准备完成的编码数据等待后端名额时仍计入此预算，CPU 名额已释放。
 
 这些是内部工作预算；容器 CPU／内存硬限制由部署配置设置。本地磁盘分别用 `multipart.local_limit` 和 `cache.max_size` 限制。
 
-## Pack 维护
+## 区块包维护
 
 `pack.upload_cache_timeout` 默认 `60s`：从连续段最早未上传块开始计时，不因后续上传而续期。到期将完整 CDC 块作为独立块上传；未确定的 multipart 尾部继续保留。它不是后端传输期限。
 
@@ -135,29 +135,29 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 
 | 字段 | 类型 / 默认值 | 说明 |
 | --- | --- | --- |
-| `pack.enabled` | bool / `true` | 自动创建及合并 pack；关闭后历史 pack 仍可读取、拆分和回收 |
+| `pack.enabled` | bool / `true` | 自动创建及合并区块包；关闭后历史区块包仍可读取、拆分和回收 |
 | `pack.max_size` | 大小 / `32MiB` | 完整成员原始长度上限，4～256 MiB，另受内存预算限制 |
 | `pack.compression_strategy` | 可选枚举 / 继承 | always / sample / file_type / chunk_hint；省略继承 compression.strategy，其余压缩参数均继承 |
-| `pack.maintenance_concurrency` | 正整数 / `1` | 同时运行的 pack 准备任务，实际 I/O 与 CPU 仍共享全局预算 |
+| `pack.maintenance_concurrency` | 正整数 / `1` | 同时运行的区块包准备任务，实际 I/O 与 CPU 仍共享全局预算 |
 | `pack.interval` | 时间 / `1h` | 新打包候选检查间隔 |
 | `pack.reuse_interval` | 时间 / `5m` | 复用队列补查及失败退避；正常引用变更直接排队 |
 | `pack.reclaim_interval` | 时间 / `30m` | 包内无引用成员回收检查间隔 |
 | `pack.repack_interval` | 时间 / `24h` | 相邻小包和独立块的碎片合并间隔 |
 | `pack.repack_cooldown` | 时间 / `1h` | 拆分和引用变化后重新合并的冷却 |
 | `pack.reclaim_min_savings_bytes` | 大小 / `4MiB` | 无引用成员重写预计节省的最小编码字节 |
-| `pack.range_optimization` | bool / `true` | 优化反复局部 Range 回源的历史 pack；独立于 pack.enabled |
+| `pack.range_optimization` | bool / `true` | 优化反复局部 Range 回源的历史区块包；独立于 pack.enabled |
 | `pack.range_interval` | 时间 / `15m` | Range 候选评估间隔 |
 | `pack.range_window` | 时间 / `24h` | 实际回源收益的观测窗口 |
-| `pack.range_min_downloads` | 正整数 / `8` | 窗口内至少发生的局部 pack 下载次数 |
+| `pack.range_min_downloads` | 正整数 / `8` | 窗口内至少发生的局部区块包下载次数 |
 | `pack.range_min_savings_percent` | 1～100 / `50` | 扣除重写和新增请求代价后的最低节省比例 |
 | `pack.range_min_savings_bytes` | 大小 / `64MiB` | 同时满足的最低预计净流量节省 |
 | `pack.range_repack_after` | 时间 / `30d` | Range 拆分后最早开始重新合包评估 |
 | `pack.range_repack_window` | 时间 / `7d` | 重新合包前检查的近期 Range 窗口，包括缓存命中 |
 | `pack.range_repack_retry_interval` | 时间 / `7d` | 仍有 Range 或统计覆盖不足时的再评估间隔 |
 
-chunk_hint 对含已压缩成员的包完整试压，其他包抽样；最终仍应用全局压缩收益门槛。允许无压缩 pack 减少顺序读取请求，但小范围冷读需要整包回源。关闭 pack 不自动拆除历史包，使用[维护命令](cli-reference.md#pack-维护)。
+chunk_hint 对含已压缩成员的包完整试压，其他包抽样；最终仍应用全局压缩收益门槛。允许无压缩区块包减少顺序读取请求，但小范围冷读需要整包回源。关闭打包功能不自动拆除历史包，使用[维护命令](cli-reference.md#区块包维护)。
 
-Range 评估只使用实际局部回源；缓存命中、HEAD、完整范围和共享完整下载不触发。按整 CDC 成员估算读取量，扣除旧包读取、新来源写入和额外 GET 每次 64 KiB 的保守等价代价；这不是提供商账单估算。pack 关闭时 Range 维护只输出独立块。观测按小时聚合，保留期须覆盖两个 Range 窗口；重新合包还要求连续覆盖和近期成功刷盘，统计缺口不视为零访问。
+Range 评估只使用实际局部回源；缓存命中、HEAD、完整范围和共享完整下载不触发。按整 CDC 成员估算读取量，扣除旧包读取、新来源写入和额外 GET 每次 64 KiB 的保守等价代价；这不是提供商账单估算。关闭打包功能时 Range 维护只输出独立块。观测按小时聚合，保留期须覆盖两个 Range 窗口；重新合包还要求连续覆盖和近期成功刷盘，统计缺口不视为零访问。
 
 ## 压缩策略
 

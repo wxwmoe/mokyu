@@ -1,7 +1,7 @@
 """Statistics / RequestId contracts against a fresh isolated test bucket.
 
-Uses the integration.py environment plus MGW_TEST_WEB, MGW_TEST_PASSWORD and
-MGW_TEST_DATABASE_FILE. Configure statistics.refresh_interval=2s for this test.
+Uses the integration.py environment plus MOKYU_TEST_WEB, MOKYU_TEST_PASSWORD and
+MOKYU_TEST_DATABASE_FILE. Configure statistics.refresh_interval=2s for this test.
 The lock test deliberately delays an inventory scan; never use a real deployment.
 """
 import json
@@ -22,14 +22,14 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-credential = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+credential = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 bucket = credential['bucket']
-endpoint, web = os.environ['MGW_TEST_ENDPOINT'], os.environ['MGW_TEST_WEB']
-db_url = Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text()
+endpoint, web = os.environ['MOKYU_TEST_ENDPOINT'], os.environ['MOKYU_TEST_WEB']
+db_url = Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text()
 session = requests.Session()
 session.headers['Origin'] = web
-login = session.post(web + '/api/login', json={'username': 'tester', 'password': os.environ['MGW_TEST_PASSWORD']})
+login = session.post(web + '/api/login', json={'username': 'tester', 'password': os.environ['MOKYU_TEST_PASSWORD']})
 login.raise_for_status()
 s3 = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
@@ -91,7 +91,7 @@ with psycopg.connect(db_url) as db:
     storage_id = db.execute('''SELECT c.storage_id FROM objects o JOIN buckets b ON b.id=o.bucket_id
         JOIN extents e ON e.stream_id=o.stream_id JOIN chunks c ON c.id=e.chunk_id
         WHERE b.name=%s AND o.key='statistics/one' ''', (bucket,)).fetchone()[0].hex
-for path in (Path(os.environ['MGW_TEST_DATA']) / 'chunks' / storage_id[:2]).glob(storage_id + '.*'):
+for path in (Path(os.environ['MOKYU_TEST_DATA']) / 'chunks' / storage_id[:2]).glob(storage_id + '.*'):
     path.unlink()
 
 # A complete stream, Range, HEAD and an empty object must never count as canceled.
@@ -121,7 +121,7 @@ for method in ('GET', 'HEAD', 'OPTIONS'):
     if method == 'GET':
         assert response.status_code in (403, 404)
         assert ElementTree.fromstring(response.content).findtext('RequestId') == rid
-for port in [web, os.environ['MGW_TEST_PUBLIC']]:
+for port in [web, os.environ['MOKYU_TEST_PUBLIC']]:
     response = requests.get(port + '/missing', headers={'Host': 'media.test', 'X-Request-ID': 'untrusted'})
     request_id(response)
 presigned = s3.generate_presigned_url('get_object', Params={'Bucket': bucket, 'Key': 'statistics/one'})
@@ -181,7 +181,7 @@ s3.abort_multipart_upload(Bucket=bucket, Key='statistics/bad-complete', UploadId
 data = os.urandom(4 * 1024 * 1024) * 8
 s3.put_object(Bucket=bucket, Key='statistics/large', Body=data, ACL='public-read')
 previous = status()['runtime']['http']['web']['canceled']
-with requests.get(os.environ['MGW_TEST_PUBLIC'] + '/statistics/large', headers={'Host': 'media.test'}, stream=True) as response:
+with requests.get(os.environ['MOKYU_TEST_PUBLIC'] + '/statistics/large', headers={'Host': 'media.test'}, stream=True) as response:
     response.raise_for_status()
     request_id(response)
     response.raw.read(128)

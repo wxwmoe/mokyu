@@ -169,7 +169,7 @@ fn aad(c: &Chunk) -> Result<Vec<u8>> {
         "invalid chunk metadata"
     );
     let mut aad = Vec::with_capacity(128 + c.key_id.len());
-    aad.extend_from_slice(b"MGWCHUNK\x01");
+    aad.extend_from_slice(b"MOKYU\x00\x00\x01");
     aad.extend_from_slice(&c.encoding_id.to_be_bytes());
     aad.extend_from_slice(c.storage_id.as_bytes());
     aad.extend_from_slice(&c.hash);
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn fixed_format_vectors() {
         let compression = crate::compression::Pool::new(Default::default(), 1).unwrap();
-        let input = b"media-gateway-v1";
+        let input = b"mokyu-v1";
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
             let key_id = if algorithm == "none" { "" } else { "test-key" };
             let secrets = secrets_for(algorithm);
@@ -400,13 +400,14 @@ mod tests {
                 encode(c, input.to_vec(), &secrets, 20, &compression, true).unwrap();
             assert_eq!(
                 hex::encode(&c.hash),
-                "1ed8177cb9b303cde3647b13887acb45f852af54364751de2067abb8fcd7c257"
+                "3ae0295bf104287bf9e700f2af2a7cf56f403f4243fabf92e719947d4d87f750"
             );
             let expected = match algorithm {
-                "none" => "6d656469612d676174657761792d7631",
-                "aes-256-gcm" => "9e55ce18aa0784ec76541d24e91cf9330cfc645d27fce034cef1ab9891fc04a1",
-                _ => "c698b8ca807c7636e6bcef57aea0c94181c4264391d7b7e202797b24c5a2e090",
+                "none" => "6d6f6b79752d7631",
+                "aes-256-gcm" => "9e5fc108be0795bcceb3a9c9b72cd67964b6ed6ddcd46682",
+                _ => "c692b7da947c67663cf8179a3cd513b8faa0c8b031109846",
             };
+            assert_eq!(&aad(&c).unwrap()[..8], b"MOKYU\x00\x00\x01");
             assert_eq!(hex::encode(&encoded), expected);
             assert_eq!(
                 decode(&c, encoded, &secrets, 20, &compression)

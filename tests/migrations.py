@@ -1,8 +1,7 @@
 """Migration checks against an empty, disposable database with no running gateway.
 
-Uses the MGW_TEST_BINARY, MGW_TEST_CONFIG and MGW_TEST_DATABASE_FILE settings.
-Requires psycopg and MGW_TEST_ALLOW_STATE_CHANGES=isolated-only.
-Set MGW_TEST_BASELINE_BINARY to a schema-1 binary to also check upgrade rollback.
+Uses the MOKYU_TEST_BINARY, MOKYU_TEST_CONFIG and MOKYU_TEST_DATABASE_FILE settings.
+Requires psycopg and MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only.
 """
 import hashlib
 import json
@@ -13,11 +12,11 @@ from pathlib import Path
 
 import psycopg
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-command = [os.environ['MGW_TEST_BINARY'], '--config', os.environ['MGW_TEST_CONFIG']]
-conninfo = Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip()
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG']]
+conninfo = Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip()
 db = psycopg.connect(conninfo, autocommit=True)
-assert db.execute("SELECT to_regclass('gateway_meta'),to_regclass('_sqlx_migrations')").fetchone() == (None, None)
+assert db.execute("SELECT to_regclass('gateway_meta'),to_regclass('mokyu_meta'),to_regclass('_sqlx_migrations')").fetchone() == (None, None, None)
 process = None
 migrations = Path(__file__).resolve().parents[1] / 'migrations'
 checksums = {int(path.stem.split('_')[0]): hashlib.sha384(path.read_bytes()).digest()
@@ -90,57 +89,56 @@ try:
     assert history() == []
     print('PASS interrupted migration rolls back schema and can be retried', flush=True)
 
-    if baseline := os.environ.get('MGW_TEST_BASELINE_BINARY'):
-        start(baseline)
-        ready()
-        cli('bucket', 'create', 'upgrade-preserved')
-        old_bucket = db.execute("SELECT id,created_at FROM buckets WHERE name='upgrade-preserved'").fetchone()
-        stop()
-        old_history = history()
-        assert [row[0] for row in old_history] == [1]
-        db.execute('CREATE INDEX tasks_completed ON tasks(id)')
+    # An initialized legacy backend or any business data must block the format change.
+    with db.transaction():
+        db.execute("SELECT set_config('media_gateway.backend_identity','legacy-test',false)")
+        for path in sorted(migrations.glob('*.sql')):
+            version = int(path.stem.split('_')[0])
+            if version > 8:
+                continue
+            db.execute(path.read_text())
+            db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
+                       (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
+    legacy_history = history()
+    for setup, cleanup in [
+        ('UPDATE gateway_meta SET backend_initialized=true', 'UPDATE gateway_meta SET backend_initialized=false'),
+        ("INSERT INTO buckets(id,name) VALUES(gen_random_uuid(),'legacy-preserved')", "DELETE FROM buckets WHERE name='legacy-preserved'"),
+    ]:
+        db.execute(setup)
+        legacy_meta = db.execute('SELECT * FROM gateway_meta').fetchone()
+        legacy_buckets = db.execute('SELECT * FROM buckets').fetchall()
         start()
-        stopped_with('apply database migrations')
-        assert db.execute("SELECT to_regclass('chunks_deleted'),to_regclass('uploads_finished')").fetchone() == (None, None)
-        assert db.execute('SELECT schema_version FROM gateway_meta').fetchone()[0] == 1
-        assert history() == old_history
-        db.execute('DROP INDEX tasks_completed')
-        with psycopg.connect(conninfo) as blocker:
-            blocker.execute('LOCK TABLE _sqlx_migrations IN SHARE MODE')
-            start()
-            for _ in range(100):
-                waiting = db.execute("""SELECT pid FROM pg_stat_activity WHERE datname=current_database()
-                    AND wait_event_type='Lock' AND query ILIKE '%INSERT INTO _sqlx_migrations%'""").fetchone()
-                if waiting:
-                    break
-                assert process.poll() is None, process.stderr.read()
-                time.sleep(.1)
-            else:
-                raise AssertionError('upgrade did not reach history insertion')
-            assert db.execute('SELECT pg_terminate_backend(%s)', waiting).fetchone()[0]
-            stopped_with('apply database migrations')
-        assert db.execute("SELECT to_regclass('chunks_deleted'),to_regclass('uploads_finished')").fetchone() == (None, None)
-        assert db.execute('SELECT schema_version FROM gateway_meta').fetchone()[0] == 1
-        assert history() == old_history
-        assert db.execute("SELECT id,created_at FROM buckets WHERE name='upgrade-preserved'").fetchone() == old_bucket
-        print('PASS failed and interrupted schema-1 upgrade preserves data and rolls back new indexes', flush=True)
+        stopped_with('legacy storage format cannot be upgraded to Mokyu')
+        assert db.execute("SELECT to_regclass('mokyu_meta')").fetchone()[0] is None
+        assert db.execute('SELECT * FROM gateway_meta').fetchone() == legacy_meta
+        assert db.execute('SELECT * FROM buckets').fetchall() == legacy_buckets
+        assert history() == legacy_history
+        db.execute(cleanup)
+    print('PASS legacy backend and business data reject rename without changing tables, data or history', flush=True)
+    with db.transaction():
+        db.execute('DROP SCHEMA public CASCADE')
+        db.execute('CREATE SCHEMA public')
 
     start()
     ready()
-    assert db.execute('SELECT schema_version FROM gateway_meta').fetchone()[0] == latest
+    assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone()[0] == latest
+    assert db.execute("SELECT to_regclass('gateway_meta')").fetchone()[0] is None
+    assert db.execute("SELECT conname FROM pg_constraint WHERE conrelid='mokyu_meta'::regclass AND contype IN ('p','c') ORDER BY conname").fetchall() == [('mokyu_meta_pkey',), ('mokyu_meta_singleton_check',)]
+    assert db.execute("SELECT count(*) FROM pg_constraint WHERE conrelid='mokyu_meta'::regclass AND starts_with(conname,'gateway_meta_')").fetchone()[0] == 0
+    assert db.execute("SELECT to_regclass('mokyu_meta_pkey'),to_regclass('gateway_meta_pkey')").fetchone() == ('mokyu_meta_pkey', None)
     before = history()
     expected = checksums[1]
     assert [row[0] for row in before] == sorted(checksums)
     assert all(row[2] and row[3] == checksums[row[0]] for row in before)
     cli('bucket', 'create', 'migration-preserved')
     bucket = db.execute("SELECT id,created_at FROM buckets WHERE name='migration-preserved'").fetchone()
-    deployment = db.execute('SELECT deployment_id FROM gateway_meta').fetchone()
+    deployment = db.execute('SELECT deployment_id FROM mokyu_meta').fetchone()
     stop()
     start()
     ready()
     assert history() == before
     assert db.execute("SELECT id,created_at FROM buckets WHERE name='migration-preserved'").fetchone() == bucket
-    assert db.execute('SELECT deployment_id FROM gateway_meta').fetchone() == deployment
+    assert db.execute('SELECT deployment_id FROM mokyu_meta').fetchone() == deployment
     stop()
     print('PASS migrations initialize once; restart preserves data and migration history', flush=True)
 
@@ -152,10 +150,10 @@ try:
     start()
     stopped_with('applied but is missing')
     db.execute('DELETE FROM _sqlx_migrations WHERE version=999')
-    db.execute('UPDATE gateway_meta SET schema_version=999')
+    db.execute('UPDATE mokyu_meta SET schema_version=999')
     start()
     stopped_with('database schema is newer')
-    db.execute('UPDATE gateway_meta SET schema_version=%s', (latest,))
+    db.execute('UPDATE mokyu_meta SET schema_version=%s', (latest,))
     start()
     ready()
     assert history() == before

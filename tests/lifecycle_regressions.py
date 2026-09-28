@@ -1,7 +1,7 @@
 """Maintenance, multipart reclamation and admin authentication regressions.
 
 Requires an isolated fault-injection build, boto3, requests and psycopg; uses
-the same MGW_TEST_* environment as cleanup_concurrency.py plus MGW_TEST_WEB.
+the same MOKYU_TEST_* environment as cleanup_concurrency.py plus MOKYU_TEST_WEB.
 """
 import errno
 import json
@@ -22,11 +22,11 @@ import psycopg
 import requests
 from botocore.config import Config
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-command = [os.environ['MGW_TEST_BINARY'], '--config', os.environ['MGW_TEST_CONFIG'], 'cli']
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
-faults = Path(os.environ['MGW_TEST_FAULT_DIR'])
-web = os.environ['MGW_TEST_WEB']
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli']
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
+faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
+web = os.environ['MOKYU_TEST_WEB']
 prefix = 'regression-' + uuid.uuid4().hex[:12]
 
 
@@ -159,7 +159,7 @@ print('PASS password reset, disable and delete races in both transaction orders'
 
 def client(bucket):
     credentials = cli('credential', 'create', bucket)
-    return boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
+    return boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                         aws_access_key_id=credentials['access_key'], aws_secret_access_key=credentials['secret_key'],
                         config=Config(retries={'max_attempts': 0}, read_timeout=30,
                                       request_checksum_calculation='when_required', response_checksum_validation='when_required'))

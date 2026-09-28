@@ -1,7 +1,7 @@
 """Public website and management authorization checks in an isolated test bucket.
 
-Uses the integration.py MGW_TEST_* variables plus MGW_TEST_WEB,
-MGW_TEST_PASSWORD (tester user), MGW_TEST_PUBLIC and MGW_TEST_PUBLIC_HOST.
+Uses the integration.py MOKYU_TEST_* variables plus MOKYU_TEST_WEB,
+MOKYU_TEST_PASSWORD (tester user), MOKYU_TEST_PUBLIC and MOKYU_TEST_PUBLIC_HOST.
 """
 import json
 import os
@@ -12,17 +12,17 @@ import requests
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-credentials = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+credentials = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 bucket = credentials['bucket']
-s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
+s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                   aws_access_key_id=credentials['access_key'], aws_secret_access_key=credentials['secret_key'],
                   config=Config(s3={'addressing_style': 'path'}, retries={'max_attempts': 0},
                                 request_checksum_calculation='when_required'))
-manage = os.environ['MGW_TEST_WEB']
-public = os.environ['MGW_TEST_PUBLIC']
+manage = os.environ['MOKYU_TEST_WEB']
+public = os.environ['MOKYU_TEST_PUBLIC']
 session = requests.Session()
 reply = session.post(manage + '/api/login', headers={'Origin': manage},
-                     json={'username': 'tester', 'password': os.environ['MGW_TEST_PASSWORD']})
+                     json={'username': 'tester', 'password': os.environ['MOKYU_TEST_PASSWORD']})
 reply.raise_for_status()
 headers = {'Origin': manage, 'X-CSRF-Token': reply.json()['csrf_token']}
 bucket_id = next(b['id'] for b in session.get(manage + '/api/buckets').json() if b['name'] == bucket)
@@ -39,7 +39,7 @@ def put(key, body, acl='public-read'):
 
 def get(path, method='GET', **extra):
     return requests.request(method, public + path,
-                            headers={'Host': os.environ['MGW_TEST_PUBLIC_HOST'], **extra}, allow_redirects=False)
+                            headers={'Host': os.environ['MOKYU_TEST_PUBLIC_HOST'], **extra}, allow_redirects=False)
 
 
 def save(**values):

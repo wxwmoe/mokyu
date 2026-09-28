@@ -12,7 +12,7 @@ use uuid::Uuid;
 pub const MAX_RAW: usize = 256 * 1024 * 1024;
 pub const MAX_MEMBERS: usize = 4096;
 pub const MAX_PAYLOAD: usize = MAX_RAW + 12 + MAX_MEMBERS * 44;
-const MAGIC: &[u8; 8] = b"MGWPACK\x01";
+const MAGIC: &[u8; 8] = b"MOKYU\x00\x00\x02";
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -420,8 +420,41 @@ mod tests {
             let (p, encoded) =
                 encode(p, &members, &secrets, &pool, Strategy::Always, true).unwrap();
             let decoded = decode(&p, encoded.clone(), &secrets, &pool).unwrap();
+            assert!(p.compressed);
+            assert_eq!(&p.aad().unwrap()[..8], b"MOKYU\x00\x00\x02");
+            assert_eq!(&decoded.bytes[..8], b"MOKYU\x00\x00\x02");
             for (c, raw) in &members {
                 assert_eq!(decoded.chunk(c).unwrap(), *raw);
+            }
+            let (uncompressed, encoded_raw) = encode(
+                p.clone(),
+                &members,
+                &secrets,
+                &pool,
+                Strategy::Always,
+                false,
+            )
+            .unwrap();
+            assert!(!uncompressed.compressed);
+            assert_eq!(
+                decode(&uncompressed, encoded_raw, &secrets, &pool)
+                    .unwrap()
+                    .bytes,
+                decoded.bytes
+            );
+            if algorithm == "none" {
+                for (offset, value) in [(0, b'X'), (5, 1), (6, 1), (7, 0), (7, 1), (7, 3)] {
+                    let mut damaged = decoded.bytes.to_vec();
+                    damaged[offset] = value;
+                    let mut changed = uncompressed.clone();
+                    // Keep the digest valid so rejection checks the format marker.
+                    changed.digest = Some(blake3::hash(&damaged).as_bytes().to_vec());
+                    let error = decode(&changed, damaged, &secrets, &pool).err().unwrap();
+                    assert!(matches!(
+                        error.downcast_ref::<codec::IntegrityError>(),
+                        Some(codec::IntegrityError::Metadata)
+                    ));
+                }
             }
             let mut changed = p.clone();
             changed.raw_size += 1;

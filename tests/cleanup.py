@@ -1,7 +1,7 @@
 """Retention checks against an isolated gateway/database, never a real deployment.
 
-Uses integration.py settings plus MGW_TEST_BINARY, MGW_TEST_CONFIG and
-MGW_TEST_DATABASE_FILE. Configure cleanup interval=1h, batch_size=3,
+Uses integration.py settings plus MOKYU_TEST_BINARY, MOKYU_TEST_CONFIG and
+MOKYU_TEST_DATABASE_FILE. Configure cleanup interval=1h, batch_size=3,
 max_duration=1s, multipart idle_timeout=72h; leave history retention defaults.
 """
 import json
@@ -16,19 +16,19 @@ import psycopg
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-db_url = Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip()
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+db_url = Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip()
 db = psycopg.connect(db_url, autocommit=True)
-credential = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+credential = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 bucket = credential['bucket']
-s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
+s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
                   config=Config(retries={'max_attempts': 0}, s3={'addressing_style': 'path'},
                                 request_checksum_calculation='when_required', response_checksum_validation='when_required'))
 
 
 def cli(*args, check=True):
-    p = subprocess.run([os.environ['MGW_TEST_BINARY'], '--config', os.environ['MGW_TEST_CONFIG'], 'cli', *args],
+    p = subprocess.run([os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli', *args],
                        capture_output=True, text=True, timeout=15)
     if check:
         assert p.returncode == 0, p.stderr

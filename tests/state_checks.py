@@ -14,11 +14,11 @@ import boto3
 import psycopg
 from botocore.config import Config
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-binary = os.environ['MGW_TEST_BINARY']
-configuration = os.environ['MGW_TEST_CONFIG']
-endpoint = os.environ['MGW_TEST_ENDPOINT']
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+binary = os.environ['MOKYU_TEST_BINARY']
+configuration = os.environ['MOKYU_TEST_CONFIG']
+endpoint = os.environ['MOKYU_TEST_ENDPOINT']
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
 config = Config(signature_version='s3v4', s3={'addressing_style': 'path'},
                 retries={'max_attempts': 0}, request_checksum_calculation='when_required',
                 response_checksum_validation='when_required')
@@ -130,7 +130,7 @@ task = danger(scope, 'backend', 'sweep', '--execute', '--preview', preview,
               '--older-than', '1s')['task_id']
 wait(lambda: task_done(task))
 cli('maintenance', 'disable')
-creds = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+creds = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 s3 = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
                   aws_access_key_id=creds['access_key'], aws_secret_access_key=creds['secret_key'], config=config)
 with s3.get_object(Bucket='test-media', Key='same-put')['Body'] as body:
@@ -140,7 +140,7 @@ with s3.get_object(Bucket='test-media', Key='multipart')['Body'] as body:
 print('PASS maintenance sweep and protection of all indexed current data', flush=True)
 
 wait(lambda: scalar("SELECT count(*) FROM fragments f WHERE NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id)") == 0)
-actual = sum(p.stat().st_size for p in (Path(os.environ['MGW_TEST_DATA']) / 'multipart').iterdir() if p.is_file())
+actual = sum(p.stat().st_size for p in (Path(os.environ['MOKYU_TEST_DATA']) / 'multipart').iterdir() if p.is_file())
 assert cli('status')['local_bytes'][0] == actual
 assert scalar("SELECT count(*) FROM extents e LEFT JOIN chunks c ON c.id=e.chunk_id WHERE e.chunk_id IS NOT NULL AND c.state<>'ready'") == 0
 help_text = subprocess.check_output([binary, 'cli', '--help'], text=True)

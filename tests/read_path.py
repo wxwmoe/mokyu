@@ -2,7 +2,7 @@
 
 Uses the integration/state_checks environment. PostgreSQL must preload
 pg_stat_statements. Cache checks additionally require a fault-injection build,
-MEDIA_GATEWAY_TEST_FAULT_DIR in the gateway, and MGW_TEST_FAULT_DIR here pointing
+MOKYU_TEST_FAULT_DIR in the gateway, and MOKYU_TEST_FAULT_DIR here pointing
 at the same directory. Never use a deployment containing user data.
 """
 import json
@@ -18,10 +18,10 @@ import psycopg
 import requests
 from botocore.config import Config
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-credential = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
-bucket, endpoint = credential['bucket'], os.environ['MGW_TEST_ENDPOINT']
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text(), autocommit=True)
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+credential = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
+bucket, endpoint = credential['bucket'], os.environ['MOKYU_TEST_ENDPOINT']
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
 db.execute('CREATE EXTENSION IF NOT EXISTS pg_stat_statements')
 s3 = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
@@ -41,8 +41,8 @@ def read(key, headers=None, timeout=30):
 
 
 def status():
-    return json.loads(subprocess.check_output([os.environ['MGW_TEST_BINARY'], '--config',
-        os.environ['MGW_TEST_CONFIG'], 'cli', 'status'], text=True))
+    return json.loads(subprocess.check_output([os.environ['MOKYU_TEST_BINARY'], '--config',
+        os.environ['MOKYU_TEST_CONFIG'], 'cli', 'status'], text=True))
 
 
 def mapping_calls():
@@ -59,7 +59,7 @@ def evict(key):
         WHERE b.name=%s AND o.key=%s''', (bucket, prefix + key)).fetchall()
     for (storage_id,) in rows:
         name = storage_id.hex
-        for path in (Path(os.environ['MGW_TEST_DATA']) / 'chunks' / name[:2]).glob(name + '.*'):
+        for path in (Path(os.environ['MOKYU_TEST_DATA']) / 'chunks' / name[:2]).glob(name + '.*'):
             path.unlink()
 
 
@@ -125,7 +125,7 @@ finally:
 assert read('slice') == raw[17:-17]
 print('PASS source offsets and fail closed on missing ready metadata', flush=True)
 
-faults = Path(os.environ['MGW_TEST_FAULT_DIR'])
+faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
 faults.mkdir(parents=True, exist_ok=True)
 put('warm', raw)
 assert read('warm') == raw
@@ -152,7 +152,7 @@ for boundary in ['cache-reserved', 'cache-written', 'cache-published']:
         assert pending.result(timeout=15) == cold
     assert read(boundary) == cold
     reached.unlink(missing_ok=True)
-cache = Path(os.environ['MGW_TEST_DATA']) / 'chunks'
+cache = Path(os.environ['MOKYU_TEST_DATA']) / 'chunks'
 assert not list(cache.glob('*/*.tmp'))
 assert status()['local_bytes'][1] == sum(p.stat().st_size for p in cache.glob('*/*') if p.is_file())
 print('PASS warm reads during every cache write boundary and exact disk accounting', flush=True)

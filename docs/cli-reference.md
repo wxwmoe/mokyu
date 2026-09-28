@@ -1,8 +1,8 @@
 # CLI 参考
 
-在线命令通过常驻服务的 Unix socket 执行，统一前缀为 `docker exec media-gateway cli`。命令和输出使用英语；每层命令均支持 `--help`，下表的 `[]` 表示可选参数。
+在线命令通过常驻服务的 Unix socket 执行，统一前缀为 `docker exec mokyu cli`。命令和输出使用英语；每层命令均支持 `--help`，下表的 `[]` 表示可选参数。
 
-默认读取 `/config/config.toml`，可用 `media-gateway --config PATH cli ...` 指定配置，或用 `cli --socket PATH ...` 覆盖 socket 路径。socket 权限为 0600，需以容器 UID 10001 或 root 访问。
+默认读取 `/config/config.toml`，可用 `mokyu --config PATH cli ...` 指定配置，或用 `cli --socket PATH ...` 覆盖 socket 路径。socket 权限为 0600，需以容器 UID 10001 或 root 访问。
 
 成功向 stdout 输出 JSON、退出 0；执行或连接失败向 stderr 输出错误并非零退出，参数错误退出 2。管理帧最多 1 MiB，RPC 等待 60 秒。任务创建成功表示已排队，后续结果通过 `task show` 查看。
 
@@ -26,7 +26,7 @@ CORS 文件示例，字段规则见[CORS 设置](manage-api-reference.md#cors-�
 ```
 
 ```sh
-docker exec media-gateway cli bucket cors media /config/cors.json
+docker exec mokyu cli bucket cors media /config/cors.json
 ```
 
 ## 凭据与用户
@@ -47,7 +47,7 @@ docker exec media-gateway cli bucket cors media /config/cors.json
 创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入并再次确认，使用 `docker exec -it`；非终端须指定 `--password-stdin`。不接受明文命令参数，自动化时可从 stdin 读取一行：
 
 ```sh
-docker exec -i media-gateway cli user create admin --password-stdin < /secure/password-file
+docker exec -i mokyu cli user create admin --password-stdin < /secure/password-file
 ```
 
 首次初始化流程见[部署与接入](deployment-and-recovery.md#初始化与接入)。
@@ -63,7 +63,7 @@ docker exec -i media-gateway cli user create admin --password-stdin < /secure/pa
 | `gc resume` | 解除暂停；需要立即执行时再调用 `gc run` |
 | `cleanup status` | 返回历史保留策略、运行状态和上轮结果 |
 | `cleanup run` | 立即执行一轮历史清理，遵守保留期、引用和资源预算；已有清理运行时返回当前状态 |
-| `maintenance enable` | 持久禁止新写入和远端 GC，暂停清桶、pack 和拆包任务，返回 active_operations；须等待已接纳操作排空 |
+| `maintenance enable` | 持久禁止新写入和远端 GC，暂停清桶、打包和拆包任务，返回 active_operations；须等待已接纳操作排空 |
 | `maintenance disable` | 恢复写入；须先暂停或完成破坏性 sweep |
 
 ## 后台任务
@@ -77,24 +77,24 @@ docker exec -i media-gateway cli user create admin --password-stdin < /secure/pa
 
 重启后此前运行的任务自动继续，paused 保持暂停。维护模式下 purge/pack/unpack/upload 会持久暂停，退出维护后需显式 `task resume`。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge/pack/unpack/upload 需要退出维护模式，只读 sweep、巡检和显式 cache flush 可在维护模式下运行。
 
-### Pack 维护
+### 区块包维护
 
 | 命令 | 作用 |
 | --- | --- |
 | `pack status` | 开关、大小上限，以及各状态的数量和字节 |
-| `pack run [--kind KIND]` | KIND 为 pack（默认）、reuse、reclaim、range、repack；分别为创建、复用拆分、无引用成员回收、Range 回源优化、碎片合并 |
+| `pack run [--kind KIND]` | KIND 为 `pack`（默认）、reuse、reclaim、range、repack；分别为创建、复用拆分、无引用成员回收、Range 回源优化、碎片合并 |
 | `pack unpack ID [--execute]` | 默认预览；execute 创建将指定包拆成独立区块的任务 |
 | `pack unpack --all [--execute]` | 拆除全部历史包；先关闭 pack.enabled 并重启 |
 
-手动维护仍遵守引用、冷却、收益、维护模式和资源限制；run 返回 task_id，可用 task 命令暂停、恢复、查看错误。拆包先写新来源再切换映射，旧包按 GC 宽限回收，临时占用会增加。关闭 pack 后 reuse/reclaim 仍可执行，但只输出独立块。
+手动维护仍遵守引用、冷却、收益、维护模式和资源限制；run 返回 task_id，可用 task 命令暂停、恢复、查看错误。拆包先写新来源再切换映射，旧包按 GC 宽限回收，临时占用会增加。关闭打包功能后 reuse/reclaim 仍可执行，但只输出独立块。
 
 range 需要 range_optimization=true；pack.enabled=false 时可优化历史包，但不新建小包。task detail.last_range 给出候选、处理原因和预计净收益。重新合包受观测窗口及冷却约束，复用拆分不受这项冷却阻挡。
 
 ### 清空存储桶
 
 ```sh
-docker exec media-gateway cli bucket purge media
-docker exec -it media-gateway cli bucket purge media --execute
+docker exec mokyu cli bucket purge media
+docker exec -it mokyu cli bucket purge media --execute
 ```
 
 执行需要真实终端，依次输入精确桶名和 `DELETE`。任务遍历删除对象及上传；共享区块在失去最后引用并满足 GC 宽限后回收，返回 task_id 时空间不会立即释放。
@@ -113,10 +113,10 @@ docker exec -it media-gateway cli bucket purge media --execute
 旧 chunks-only 预览不能用于扩大范围后的清查；重新生成预览，不复用旧任务的确认范围。
 
 ```sh
-docker exec media-gateway cli maintenance enable
-docker exec media-gateway cli backend sweep
-docker exec media-gateway cli task show PREVIEW_UUID
-docker exec -it media-gateway cli backend sweep --execute --preview PREVIEW_UUID
+docker exec mokyu cli maintenance enable
+docker exec mokyu cli backend sweep
+docker exec mokyu cli task show PREVIEW_UUID
+docker exec -it mokyu cli backend sweep --execute --preview PREVIEW_UUID
 ```
 
 ## 完整性巡检
@@ -135,11 +135,11 @@ docker exec -it media-gateway cli backend sweep --execute --preview PREVIEW_UUID
 巡检只报告，不修复或删除数据；远端检查绕过且不填充缓存，共享物理块每轮只检查一次。没有远端来源的 pending 块在所有模式下校验本地唯一副本。`completed` 仍可能有异常，应查看 `detail.issues`；网络、权限及超时使任务 `failed`，可恢复后继续。覆盖边界、异常代码和 JSONL 导出见[巡检 API](manage-api-reference.md#完整性巡检)，并发和限速见[配置](configuration.md#完整性巡检)。
 
 ```sh
-docker exec media-gateway cli integrity check --mode full --bucket media
-docker exec media-gateway cli task show TASK_UUID
-docker exec media-gateway cli integrity issues TASK_UUID
-docker exec media-gateway cli task pause TASK_UUID
-docker exec media-gateway cli task resume TASK_UUID
+docker exec mokyu cli integrity check --mode full --bucket media
+docker exec mokyu cli task show TASK_UUID
+docker exec mokyu cli integrity issues TASK_UUID
+docker exec mokyu cli task pause TASK_UUID
+docker exec mokyu cli task resume TASK_UUID
 ```
 
 ## 上传缓存
@@ -155,5 +155,5 @@ docker exec media-gateway cli task resume TASK_UUID
 
 | 命令 | 作用 |
 | --- | --- |
-| `docker run --rm wxwmoe/media-gateway:latest keygen` | 生成 32 字节随机密钥，以 64 个十六进制字符表示 |
-| `media-gateway serve --maintenance` | 在监听前设置维护状态，供[数据库恢复](deployment-and-recovery.md#恢复步骤)使用 |
+| `docker run --rm wxwmoe/mokyu:latest keygen` | 生成 32 字节随机密钥，以 64 个十六进制字符表示 |
+| `mokyu serve --maintenance` | 在监听前设置维护状态，供[数据库恢复](deployment-and-recovery.md#恢复步骤)使用 |

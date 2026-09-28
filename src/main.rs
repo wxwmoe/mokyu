@@ -59,7 +59,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "media_gateway=info,s3s=warn".into()),
+                .unwrap_or_else(|_| "mokyu=info,s3s=warn".into()),
         )
         .with_target(false)
         .init();
@@ -77,7 +77,7 @@ fn main() -> Result<()> {
                 toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid TOML configuration"))?;
             config.listen.admin_socket
         } else {
-            PathBuf::from("/run/media-gateway/admin.sock")
+            PathBuf::from("/run/mokyu/admin.sock")
         };
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -88,7 +88,7 @@ fn main() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("TLS provider initialization failed"))?;
     let (config, secrets, budget) = config::Config::load(&args.config)?;
-    tracing::info!(version=env!("CARGO_PKG_VERSION"),resources=%serde_json::to_string(&budget)?,"starting media gateway");
+    tracing::info!(version=env!("CARGO_PKG_VERSION"),resources=%serde_json::to_string(&budget)?,"starting Mokyu");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(budget.available_cpus)
         .max_blocking_threads((budget.cpu_jobs * 2).max(8))

@@ -10,10 +10,10 @@ from pathlib import Path
 import psycopg
 from integration import s3, bucket
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
-command = [os.environ['MGW_TEST_BINARY'], '--config', os.environ['MGW_TEST_CONFIG']]
-faults = Path(os.environ['MGW_TEST_FAULT_DIR'])
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG']]
+faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
 
 
 def cli(*args):
@@ -44,7 +44,7 @@ def read_hash(key):
     return digest.digest()
 
 
-path = Path(os.environ['MGW_TEST_RESULTS']) / 'streaming-input.bin'
+path = Path(os.environ['MOKYU_TEST_RESULTS']) / 'streaming-input.bin'
 try:
     digest = hashlib.sha256()
     with path.open('wb') as out:

@@ -11,18 +11,18 @@ import psycopg
 from botocore.config import Config
 from playwright.sync_api import sync_playwright
 
-url = os.environ['MGW_TEST_WEB']
-results = Path(os.environ['MGW_TEST_RESULTS'])
+url = os.environ['MOKYU_TEST_WEB']
+results = Path(os.environ['MOKYU_TEST_RESULTS'])
 results.mkdir(parents=True, exist_ok=True)
-credential = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
-s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
+credential = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
+s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
                   config=Config(s3={'addressing_style': 'path'}, max_pool_connections=8))
 bucket = credential['bucket']
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
 paused_task = str(uuid.uuid4())
-backend_prefix = tomllib.loads(Path(os.environ['MGW_TEST_CONFIG']).read_text())['backend'].get('prefix', '').rstrip('/')
-with psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text()) as db:
+backend_prefix = tomllib.loads(Path(os.environ['MOKYU_TEST_CONFIG']).read_text())['backend'].get('prefix', '').rstrip('/')
+with psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text()) as db:
     db.execute("INSERT INTO tasks(id,kind,state,error) VALUES(%s,'sweep','failed',%s)",
                (uuid.uuid4(), '<script>unsafe task error</script>'))
     db.execute("INSERT INTO tasks(id,kind,state,detail) VALUES(%s,'sweep','paused',%s)", (paused_task, json.dumps({
@@ -37,7 +37,7 @@ injection = '<img src=x onerror=window.injected=true>'
 s3.put_object(Bucket=bucket, Key='web-accept/' + injection, Body=b'safe', Metadata={'probe': '<script>window.injected=true</script>'})
 s3.put_object(Bucket=bucket, Key='web-accept/unsafe.html', Body=b'<script>window.injected=true</script>', ContentType='text/html')
 for name, mime in [('image.png', 'image/png'), ('video.mp4', 'video/mp4')]:
-    with (Path(os.environ['MGW_TEST_MEDIA']) / name).open('rb') as body:
+    with (Path(os.environ['MOKYU_TEST_MEDIA']) / name).open('rb') as body:
         s3.put_object(Bucket=bucket, Key='web-accept/' + name, Body=body, ContentType=mime)
 
 with sync_playwright() as playwright:
@@ -64,7 +64,7 @@ with sync_playwright() as playwright:
     page.reload()
     page.locator('html[lang="zh-CN"]').wait_for()
     page.get_by_label('用户名', exact=True).fill('tester')
-    page.get_by_label('密码', exact=True).fill(os.environ['MGW_TEST_PASSWORD'])
+    page.get_by_label('密码', exact=True).fill(os.environ['MOKYU_TEST_PASSWORD'])
     page.get_by_role('button', name='登录', exact=True).click()
     page.locator('#browser:not([hidden])').wait_for()
     page.locator('#buckets').select_option(label='test-media')

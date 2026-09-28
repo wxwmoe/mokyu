@@ -2,7 +2,7 @@
 use std::{path::PathBuf, time::Duration};
 
 fn armed(name: &str) -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var_os("MEDIA_GATEWAY_TEST_FAULT_DIR")?).join(name);
+    let path = PathBuf::from(std::env::var_os("MOKYU_TEST_FAULT_DIR")?).join(name);
     if !path.exists() {
         return None;
     }

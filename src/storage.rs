@@ -710,7 +710,7 @@ impl Storage {
     }
     pub async fn check_identity(&self, db: &sqlx::PgPool, maintenance: bool) -> Result<()> {
         let (deployment_id, created_at, initialized): (Uuid, chrono::DateTime<chrono::Utc>, bool) =
-            sqlx::query_as("SELECT deployment_id,created_at,backend_initialized FROM gateway_meta")
+            sqlx::query_as("SELECT deployment_id,created_at,backend_initialized FROM mokyu_meta")
                 .fetch_one(db)
                 .await?;
         let path = Path::from(format!("{}meta.json", self.namespace()));
@@ -835,11 +835,9 @@ impl Storage {
                 .context("cannot create backend meta.json without overwriting")?;
         }
         // A crash after the S3 write is recoverable using this database's committed deployment ID.
-        sqlx::query(
-            "UPDATE gateway_meta SET backend_initialized=true WHERE NOT backend_initialized",
-        )
-        .execute(db)
-        .await?;
+        sqlx::query("UPDATE mokyu_meta SET backend_initialized=true WHERE NOT backend_initialized")
+            .execute(db)
+            .await?;
         self.identity_ready.store(true, Ordering::Release);
         Ok(())
     }

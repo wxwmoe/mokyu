@@ -12,16 +12,16 @@ import psycopg
 import requests
 from botocore.config import Config
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-url = os.environ['MGW_TEST_WEB']
-credential = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+url = os.environ['MOKYU_TEST_WEB']
+credential = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 bucket = credential['bucket']
-s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
+s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
     aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
     config=Config(s3={'addressing_style': 'path'}))
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text(), autocommit=True)
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
 session = requests.Session()
-login = session.post(url + '/api/login', headers={'Origin': url}, json={'username': 'tester', 'password': os.environ['MGW_TEST_PASSWORD']})
+login = session.post(url + '/api/login', headers={'Origin': url}, json={'username': 'tester', 'password': os.environ['MOKYU_TEST_PASSWORD']})
 login.raise_for_status()
 headers = {'Origin': url, 'X-CSRF-Token': login.json()['csrf_token']}
 bucket_id = next(b['id'] for b in session.get(url + '/api/buckets').json() if b['name'] == bucket)
@@ -83,7 +83,7 @@ try:
     target = urlsplit(url)
     def stalled(authenticated):
         connection = socket.create_connection((target.hostname, target.port), timeout=75)
-        auth = (f"Cookie: mgw_session={session.cookies['mgw_session']}\r\nOrigin: {url}\r\nX-CSRF-Token: {headers['X-CSRF-Token']}\r\n" if authenticated else '')
+        auth = (f"Cookie: mokyu_session={session.cookies['mokyu_session']}\r\nOrigin: {url}\r\nX-CSRF-Token: {headers['X-CSRF-Token']}\r\n" if authenticated else '')
         connection.sendall((f'POST /api/objects/actions HTTP/1.1\r\nHost: {target.netloc}\r\n{auth}Content-Type: application/json\r\nContent-Length: 100000\r\n\r\n{{').encode())
         return connection
     unauthenticated = stalled(False)
@@ -107,7 +107,7 @@ try:
     assert change('private', body['objects']) == [200]
     # Set maintenance through the running service, not only its database flag.
     import subprocess
-    command = [os.environ['MGW_TEST_BINARY'], '--config', os.environ['MGW_TEST_CONFIG'], 'cli']
+    command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli']
     subprocess.run(command + ['maintenance', 'enable'], check=True, capture_output=True)
     assert change('private', body['objects']) == [503]
     subprocess.run(command + ['maintenance', 'disable'], check=True, capture_output=True)
@@ -171,9 +171,9 @@ try:
     db.execute("UPDATE tasks SET detail=%s WHERE id=%s", (json.dumps({'dry_run': False}), task_id))
     assert session.post(url + '/api/tasks/' + task_id + '/actions', headers=headers, json={'action': 'resume'}).status_code == 409
     # Resume an authorized non-destructive sweep from its saved scope.
-    config = __import__('tomllib').loads(Path(os.environ['MGW_TEST_CONFIG']).read_text())
+    config = __import__('tomllib').loads(Path(os.environ['MOKYU_TEST_CONFIG']).read_text())
     backend_prefix = config['backend'].get('prefix', '').rstrip('/')
-    detail = {'dry_run': True, 'prefix': (backend_prefix + '/' if backend_prefix else '') + 'chunks/', 'older_than_seconds': 172800,
+    detail = {'dry_run': True, 'prefix': (backend_prefix + '/' if backend_prefix else ''), 'older_than_seconds': 172800,
               'cutoff': '2000-01-01T00:00:00Z', 'candidates': 0, 'bytes': 0, 'unrecognized': 0, 'samples': []}
     db.execute('UPDATE tasks SET detail=%s WHERE id=%s', (json.dumps(detail), task_id))
     subprocess.run(command + ['maintenance', 'enable'], check=True, capture_output=True)

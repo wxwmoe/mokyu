@@ -103,7 +103,7 @@ GetObject、公共读和管理下载支持单段 `bytes=a-b`、`bytes=a-`、`byt
 日志以 request_id/listener/method 关联处理及响应流。失败／中断为 WARN，成功为 DEBUG，可设置：
 
 ```sh
-RUST_LOG=media_gateway=info,media_gateway::stats=debug,s3s=warn
+RUST_LOG=mokyu=info,mokyu::stats=debug,s3s=warn
 ```
 
 访问日志和统计标签不记录对象键、签名参数、凭据或 Cookie；管理页在 API 失败时显示 RequestId。

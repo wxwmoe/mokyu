@@ -1517,6 +1517,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "mokyu"
+version = "0.0.3"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-stream",
+ "async-trait",
+ "aws-lc-rs",
+ "axum",
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "chrono",
+ "clap",
+ "fastcdc",
+ "fs2",
+ "futures-util",
+ "hex",
+ "hyper",
+ "hyper-util",
+ "log",
+ "md-5 0.10.6",
+ "object_store",
+ "rpassword",
+ "rustls",
+ "s3s",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "subtle",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zstd",
+]
+
+[[package]]
 name = "nom"
 version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3434,46 +3474,6 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
-
-[[package]]
-name = "wxw-media-gateway"
-version = "0.0.3"
-dependencies = [
- "anyhow",
- "argon2",
- "async-stream",
- "async-trait",
- "aws-lc-rs",
- "axum",
- "base64 0.22.1",
- "blake3",
- "bytes",
- "chrono",
- "clap",
- "fastcdc",
- "fs2",
- "futures-util",
- "hex",
- "hyper",
- "hyper-util",
- "log",
- "md-5 0.10.6",
- "object_store",
- "rpassword",
- "rustls",
- "s3s",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "subtle",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zstd",
-]
 
 [[package]]
 name = "xxhash-rust"

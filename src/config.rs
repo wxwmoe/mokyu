@@ -76,7 +76,7 @@ impl Default for Listen {
             s3: "0.0.0.0:9000".into(),
             web: "0.0.0.0:9001".into(),
             manage: "0.0.0.0:9002".into(),
-            admin_socket: "/run/media-gateway/admin.sock".into(),
+            admin_socket: "/run/mokyu/admin.sock".into(),
             s3_domain: None,
             region: "us-east-1".into(),
             aws_chunk_limit: "8MiB".into(),
@@ -835,7 +835,7 @@ mod tests {
     }
     #[test]
     fn secret_sources_are_exclusive_and_preserve_literal_passwords() {
-        let base = std::env::temp_dir().join(format!("mgw-config-{}", uuid::Uuid::new_v4()));
+        let base = std::env::temp_dir().join(format!("mokyu-config-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&base).unwrap();
         fs::write(base.join("password"), "file-password\n").unwrap();
         let file = Some(Path::new("password"));

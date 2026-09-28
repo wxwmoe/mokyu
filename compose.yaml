@@ -1,8 +1,8 @@
 services:
-  media-gateway:
-    image: wxwmoe/media-gateway:0.0.3
+  mokyu:
+    image: wxwmoe/mokyu:0.0.3
     pull_policy: never
-    container_name: media-gateway
+    container_name: mokyu
     restart: unless-stopped
     init: true
     depends_on:
@@ -16,7 +16,7 @@ services:
       - ./config:/config:ro
       - ./data:/data
     tmpfs:
-      - /run/media-gateway:uid=10001,gid=10001,mode=0700
+      - /run/mokyu:uid=10001,gid=10001,mode=0700
     # Optional deployment limits; omission does not impose a project-wide cap.
     # cpus: 4
     # mem_limit: 1g
@@ -26,15 +26,15 @@ services:
     image: postgres:18-bookworm
     restart: unless-stopped
     environment:
-      POSTGRES_DB: media_gateway
-      POSTGRES_USER: media_gateway
+      POSTGRES_DB: mokyu
+      POSTGRES_USER: mokyu
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     secrets:
       - postgres_password
     volumes:
       - postgres:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U media_gateway -d media_gateway"]
+      test: ["CMD-SHELL", "pg_isready -U mokyu -d mokyu"]
       interval: 5s
       timeout: 5s
       retries: 12

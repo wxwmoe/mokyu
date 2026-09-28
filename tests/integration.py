@@ -1,6 +1,6 @@
 """S3/HTTP contract checks against an isolated gateway; never point at production.
 
-Requires boto3 and requests. MGW_TEST_CREDENTIALS points to the JSON returned by
+Requires boto3 and requests. MOKYU_TEST_CREDENTIALS points to the JSON returned by
 `cli credential create`; that credential must only grant the empty test bucket.
 """
 import base64
@@ -16,8 +16,8 @@ import requests
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-endpoint = os.environ["MGW_TEST_ENDPOINT"]
-credentials = json.loads(Path(os.environ["MGW_TEST_CREDENTIALS"]).read_text())
+endpoint = os.environ["MOKYU_TEST_ENDPOINT"]
+credentials = json.loads(Path(os.environ["MOKYU_TEST_CREDENTIALS"]).read_text())
 bucket = credentials["bucket"]
 config = Config(signature_version="s3v4", s3={"addressing_style": "path"},
                 retries={"max_attempts": 0}, request_checksum_calculation="when_required",
@@ -121,7 +121,7 @@ def multipart():
 
 
 def http_acl():
-    public = os.environ["MGW_TEST_PUBLIC"]
+    public = os.environ["MOKYU_TEST_PUBLIC"]
     key = "space +/中文%2F.jpg"
     url = f"{public}/{quote(key, safe='/')}"
     headers = {"Host": "media.test"}
@@ -138,13 +138,15 @@ def http_acl():
     values["X-Amz-Signature"] = ("0" if signature[0] != "0" else "1") + signature[1:]
     bad = urlunsplit(parsed._replace(query=urlencode(values)))
     assert requests.get(bad).status_code == 403
-    web = os.environ["MGW_TEST_WEB"]
+    web = os.environ["MOKYU_TEST_WEB"]
+    assert "<title>Mokyu</title>" in requests.get(web + "/").text
     session = requests.Session()
     assert session.get(web + "/api/buckets").status_code == 403
     assert session.post(web + "/api/login", json={"username": "tester", "password": "irrelevant"}).status_code == 403
     login = session.post(web + "/api/login", headers={"Origin": web},
-                         json={"username": "tester", "password": os.environ["MGW_TEST_PASSWORD"]})
+                         json={"username": "tester", "password": os.environ["MOKYU_TEST_PASSWORD"]})
     assert login.status_code == 200, login.text
+    assert len(session.cookies["mokyu_session"]) == 64
     assert session.get(web + "/api/buckets").status_code == 200
     assert session.post(web + "/api/logout", headers={"Origin": web}).status_code == 403
     assert session.post(web + "/api/logout", headers={"Origin": web, "X-CSRF-Token": login.json()["csrf_token"]}).status_code == 204

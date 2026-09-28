@@ -8,7 +8,7 @@
 ./build.sh
 ```
 
-默认构建 Debian slim 镜像，标签为 `wxwmoe/media-gateway:latest` 及项目版本号。可用 `./build.sh --alpine` 构建 Alpine 镜像，标签为 `:alpine` 及带 `-alpine` 后缀的版本号；`--no-cache` 禁用构建缓存。
+默认构建 Debian slim 镜像，标签为 `wxwmoe/mokyu:latest` 及项目版本号。可用 `./build.sh --alpine` 构建 Alpine 镜像，标签为 `:alpine` 及带 `-alpine` 后缀的版本号；`--no-cache` 禁用构建缓存。
 
 下文使用默认镜像。[Compose 示例](../compose.yaml) 使用随源码维护的版本标签；选择 Alpine 时需相应调整服务的 `image`。
 
@@ -23,9 +23,9 @@
    chmod 700 config config/secrets config/keys data
    cp config.example.toml config/config.toml
    cp keyring.example.toml config/keys/keyring.toml
-   docker run --rm wxwmoe/media-gateway:latest keygen > config/secrets/postgres-password
-   docker run --rm wxwmoe/media-gateway:latest keygen > config/secrets/credential-key
-   docker run --rm wxwmoe/media-gateway:latest keygen > config/keys/new-chunk-key
+   docker run --rm wxwmoe/mokyu:latest keygen > config/secrets/postgres-password
+   docker run --rm wxwmoe/mokyu:latest keygen > config/secrets/credential-key
+   docker run --rm wxwmoe/mokyu:latest keygen > config/keys/new-chunk-key
    ```
 
 2. 编辑 `config/config.toml`：
@@ -46,7 +46,7 @@
    chown -R 10001:10001 config data
    docker compose up -d
    docker compose ps
-   docker exec media-gateway cli status
+   docker exec mokyu cli status
    ```
 
 Compose 将配置只读挂载、数据目录可写挂载，CLI socket 使用 tmpfs；PostgreSQL 在独立容器中使用命名卷。网关以 UID/GID 10001 运行。
@@ -54,10 +54,10 @@ Compose 将配置只读挂载、数据目录可写挂载，CLI socket 使用 tmp
 ## 初始化与接入
 
 ```sh
-docker exec media-gateway cli bucket create media
-docker exec media-gateway cli credential create media
-docker exec media-gateway cli domain set media.example.com media
-docker exec -it media-gateway cli user create admin
+docker exec mokyu cli bucket create media
+docker exec mokyu cli credential create media
+docker exec mokyu cli domain set media.example.com media
+docker exec -it mokyu cli user create admin
 ```
 
 凭据的 secret 仅在创建时返回，保存到应用私有配置。不同应用可使用独立逻辑桶、凭据和域名；区块跨桶去重，授权各自独立。
@@ -67,11 +67,11 @@ S3 客户端使用网关 endpoint、逻辑桶和生成的凭据，签名 region 
 ## 日常维护
 
 ```sh
-docker logs --tail 100 media-gateway
-docker exec media-gateway cli status
-docker exec media-gateway cli gc status
-docker exec media-gateway cli cleanup status
-docker exec media-gateway cli task list
+docker logs --tail 100 mokyu
+docker exec mokyu cli status
+docker exec mokyu cli gc status
+docker exec mokyu cli cleanup status
+docker exec mokyu cli task list
 ```
 
 远端 GC、上传过期和数据库历史清理由服务调度，无需 crontab。管理页可查看容量、清理结果及到期积压；保留期见[清理配置](configuration.md#回收与历史清理)。历史记录保留期不延长远端区块保留或数据库恢复窗口。
@@ -92,13 +92,13 @@ psql -X -h DB_HOST -U DB_USER -d DB_NAME -f scripts/mark-unreferenced-chunks.sql
 
 ## 备份材料
 
-项目不备份后端 S3 区块或 pack。可用 pgBackRest 备份 PostgreSQL/WAL、restic 备份配置，亦可选用其他满足恢复要求的工具。
+项目不备份后端 S3 区块或区块包。可用 pgBackRest 备份 PostgreSQL/WAL、restic 备份配置，亦可选用其他满足恢复要求的工具。
 
 | 材料 | 恢复用途 |
 | --- | --- |
 | 数据库一致备份及所需 WAL | 对象索引、权限、引用和上传状态 |
 | 配置、全部历史区块密钥、`credential-key` | 后端身份、解密区块及客户端凭据 |
-| 仍存在的后端区块和 pack | 实际对象内容 |
+| 仍存在的后端区块和区块包 | 实际对象内容 |
 | `data/multipart` 的一致快照 | 恢复已确认但尚未 Complete 的分片上传 |
 | `data/chunks` | 包含待上传唯一副本；有积压时必须与数据库一致保存 |
 
@@ -125,6 +125,8 @@ psql -X -h DB_HOST -U DB_USER -d DB_NAME -f scripts/mark-unreferenced-chunks.sql
 
 ## 升级与数据库迁移
 
+wxw-media-gateway 的旧区块和区块包格式不支持直接升级为 Mokyu。改名迁移仅允许后端尚未初始化、没有业务数据的数据库；已使用的旧实例会明确报错。请使用新的数据库、data 目录和空后端命名空间；需要保留文件时，先通过原服务导出，再通过 Mokyu 的 S3 接口重新上传。
+
 1. 阅读目标 Release 的升级说明，保留当前镜像，并按上面的方式排空或一致备份待上传数据，同时保留数据库、配置、密钥及必要的 multipart 数据。
 2. 停止网关，构建目标源码的镜像，保留现有数据库、data 和后端配置。
 3. 启动新镜像。服务先取得独占锁、校验迁移文件并执行待应用 SQL，全部成功后才启动 HTTP、GC 和上传恢复。
@@ -134,6 +136,6 @@ psql -X -h DB_HOST -U DB_USER -d DB_NAME -f scripts/mark-unreferenced-chunks.sql
 
 程序不自动降级数据库。回退需按恢复流程还原升级前的一致备份，并确认相关后端区块仍存在。实际 SQL 见[migrations](../migrations)。
 
-支持 pack 的服务将匹配身份的后端标识升级为格式 2；维护启动时延后至解除维护。物理来源表保留旧区块的身份和密文，升级不重编码数据。历史 chunks-only sweep 预览不再匹配当前范围，需要重新预览。旧 processing.backend_concurrency 可继续作为读写额度；改用 backend 三个方向的并发项时应删除旧项。
+支持区块包的服务将匹配身份的后端标识升级为格式 2；维护启动时延后至解除维护。物理来源表保留旧区块的身份和密文，升级不重编码数据。历史 chunks-only sweep 预览不再匹配当前范围，需要重新预览。旧 processing.backend_concurrency 可继续作为读写额度；改用 backend 三个方向的并发项时应删除旧项。
 
-Pack 默认开启，维护改写期间新旧载荷并存，旧载荷在 GC 宽限后删除；为这段临时空间和 S3 请求预留预算。停用时设置 pack.enabled=false，历史数据仍可读；需要消除历史包时执行 pack unpack --all 的预览与确认操作。
+打包功能默认开启，维护改写期间新旧载荷并存，旧载荷在 GC 宽限后删除；为这段临时空间和 S3 请求预留预算。停用时设置 pack.enabled=false，历史数据仍可读；需要消除历史包时执行 `pack unpack --all` 的预览与确认操作。

@@ -281,7 +281,7 @@ async fn web_headers(request: axum::extract::Request, next: axum::middleware::Ne
 }
 fn csrf_token(token: &str) -> String {
     let mut hash = blake3::Hasher::new();
-    hash.update(b"media-gateway-web-csrf-v1\0");
+    hash.update(b"mokyu-web-csrf-v1\0");
     hash.update(token.as_bytes());
     hash.finalize().to_hex().to_string()
 }
@@ -547,7 +547,7 @@ fn token(headers: &HeaderMap) -> Result<&str, HttpError> {
         .and_then(|s| {
             s.split(';')
                 .map(str::trim)
-                .find_map(|s| s.strip_prefix("mgw_session="))
+                .find_map(|s| s.strip_prefix("mokyu_session="))
         })
         .filter(|s| s.len() == 64)
         .ok_or_else(unauthorized)
@@ -644,7 +644,7 @@ async fn login(
     response.headers_mut().insert(
         "set-cookie",
         HeaderValue::from_str(&format!(
-            "mgw_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={seconds}{secure}"
+            "mokyu_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={seconds}{secure}"
         ))?,
     );
     response
@@ -665,7 +665,7 @@ async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Respo
     let mut r = StatusCode::NO_CONTENT.into_response();
     r.headers_mut().insert(
         "set-cookie",
-        HeaderValue::from_static("mgw_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"),
+        HeaderValue::from_static("mokyu_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"),
     );
     Ok(r)
 }

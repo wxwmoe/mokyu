@@ -1,6 +1,6 @@
 """Cleanup/read/write concurrency with deterministic pauses in an isolated gateway.
 
-Uses cleanup.py's environment plus MGW_TEST_FAULT_DIR and a fault-injection
+Uses cleanup.py's environment plus MOKYU_TEST_FAULT_DIR and a fault-injection
 build. Set cleanup.interval=1s and leave other retention settings at defaults.
 """
 import json
@@ -15,22 +15,22 @@ import boto3
 import psycopg
 from botocore.config import Config
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-creds = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+creds = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 bucket = creds['bucket']
-s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
+s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                   aws_access_key_id=creds['access_key'], aws_secret_access_key=creds['secret_key'],
                   config=Config(read_timeout=3, retries={'max_attempts': 0}, s3={'addressing_style': 'path'},
                                 request_checksum_calculation='when_required', response_checksum_validation='when_required'))
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text(), autocommit=True)
-faults = Path(os.environ['MGW_TEST_FAULT_DIR'])
-data = Path(os.environ['MGW_TEST_DATA'])
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
+faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
+data = Path(os.environ['MOKYU_TEST_DATA'])
 prefix = 'cleanup-concurrency-' + uuid.uuid4().hex + '/'
 
 
 def cli(*args):
-    return json.loads(subprocess.check_output([os.environ['MGW_TEST_BINARY'], '--config',
-        os.environ['MGW_TEST_CONFIG'], 'cli', *args], text=True, timeout=10))
+    return json.loads(subprocess.check_output([os.environ['MOKYU_TEST_BINARY'], '--config',
+        os.environ['MOKYU_TEST_CONFIG'], 'cli', *args], text=True, timeout=10))
 
 
 def wait(predicate):

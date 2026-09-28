@@ -47,7 +47,7 @@ pub async fn connect(
     let fsync: String = sqlx::query_scalar("SHOW fsync").fetch_one(&pool).await?;
     ensure!(fsync == "on", "PostgreSQL fsync must be enabled");
     let exists: Option<String> =
-        sqlx::query_scalar("SELECT to_regclass('public.gateway_meta')::text")
+        sqlx::query_scalar("SELECT to_regclass('public.mokyu_meta')::text")
             .fetch_one(&pool)
             .await?;
     let backend = format!(
@@ -63,7 +63,7 @@ pub async fn connect(
         .version;
     if exists.is_some() {
         let (version, identity): (i32, String) = sqlx::query_as(
-            "SELECT schema_version,backend_identity FROM gateway_meta WHERE singleton",
+            "SELECT schema_version,backend_identity FROM mokyu_meta WHERE singleton",
         )
         .fetch_one(&pool)
         .await?;
@@ -81,6 +81,7 @@ pub async fn connect(
     sqlx::raw_sql("SET synchronous_commit = on; SET lock_timeout = '30s'")
         .execute(&mut owner)
         .await?;
+    // The immutable baseline reads this historical migration parameter.
     sqlx::query("SELECT set_config('media_gateway.backend_identity',$1,false)")
         .bind(&backend)
         .execute(&mut owner)
@@ -89,10 +90,9 @@ pub async fn connect(
         .run(&mut owner)
         .await
         .context("apply database migrations")?;
-    let version: i32 =
-        sqlx::query_scalar("SELECT schema_version FROM gateway_meta WHERE singleton")
-            .fetch_one(&pool)
-            .await?;
+    let version: i32 = sqlx::query_scalar("SELECT schema_version FROM mokyu_meta WHERE singleton")
+        .fetch_one(&pool)
+        .await?;
     ensure!(
         i64::from(version) == latest,
         "schema version does not match the migration history"

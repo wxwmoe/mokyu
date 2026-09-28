@@ -13,9 +13,9 @@ from integration import s3, bucket
 import boto3
 import requests
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
-command = [os.environ['MGW_TEST_BINARY'], '--config', os.environ['MGW_TEST_CONFIG'], 'cli']
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli']
 
 
 def cli(*args):
@@ -74,7 +74,7 @@ assert get('pack-source') == raw
 if before is not None:
     assert cli('status')['backend_gets'] - before == 1
 
-marker=Path(os.environ['MGW_TEST_FAULT_DIR'])/'pack-download'
+marker=Path(os.environ['MOKYU_TEST_FAULT_DIR'])/'pack-download'
 marker.with_suffix('.hit').unlink(missing_ok=True)
 marker.touch()
 before=cli('status')['backend_gets']
@@ -180,7 +180,7 @@ assert db.execute('SELECT state FROM packs WHERE id=%s',(old_pack,)).fetchone()[
 assert get('pack-gc-first')==reclaim[:cut]
 
 # Metadata-only maintenance must never treat indexed pack payloads as sweep orphans.
-configuration=tomllib.loads(Path(os.environ['MGW_TEST_CONFIG']).read_text())['backend']
+configuration=tomllib.loads(Path(os.environ['MOKYU_TEST_CONFIG']).read_text())['backend']
 backend=boto3.client('s3',endpoint_url=configuration['endpoint'],region_name=configuration['region'],aws_access_key_id=configuration['access_key'],aws_secret_access_key=configuration['secret_key'])
 orphan=configuration['prefix']+'/packs/aa/'+'a'*32
 backend.put_object(Bucket=configuration['bucket'],Key=orphan,Body=b'orphan')
@@ -189,8 +189,8 @@ swept=task('backend','sweep','--older-than','1s')
 assert swept['detail']['candidates']==1,swept
 assert orphan in swept['detail']['samples']
 
-web=os.environ['MGW_TEST_WEB'];session=requests.Session()
-login=session.post(web+'/api/login',headers={'Origin':web},json={'username':'tester','password':os.environ['MGW_TEST_PASSWORD']});login.raise_for_status()
+web=os.environ['MOKYU_TEST_WEB'];session=requests.Session()
+login=session.post(web+'/api/login',headers={'Origin':web},json={'username':'tester','password':os.environ['MOKYU_TEST_PASSWORD']});login.raise_for_status()
 headers={'Origin':web,'X-CSRF-Token':login.json()['csrf_token']}
 page=session.get(web+'/api/packs',params={'limit':1});page.raise_for_status()
 assert len(page.json()['packs'])==1 and isinstance(page.json()['packs'][0]['id'],str)
@@ -210,7 +210,7 @@ with sync_playwright() as playwright:
     page.on('pageerror',lambda error: errors.append(str(error)))
     page.goto(web)
     page.get_by_label('Username',exact=True).fill('tester')
-    page.get_by_label('Password',exact=True).fill(os.environ['MGW_TEST_PASSWORD'])
+    page.get_by_label('Password',exact=True).fill(os.environ['MOKYU_TEST_PASSWORD'])
     page.get_by_role('button',name='Sign in',exact=True).click()
     page.locator('#browser:not([hidden])').wait_for()
     page.locator('#packs-tab').click()
@@ -224,7 +224,7 @@ with sync_playwright() as playwright:
     page.keyboard.press('Escape')
     page.locator('#language').select_option('zh-CN')
     page.get_by_role('button',name='拆成独立区块',exact=True).wait_for()
-    page.screenshot(path=str(Path(os.environ['MGW_TEST_RESULTS'])/'pack-detail-zh.png'),full_page=True)
+    page.screenshot(path=str(Path(os.environ['MOKYU_TEST_RESULTS'])/'pack-detail-zh.png'),full_page=True)
     page.set_viewport_size({'width':390,'height':844})
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
     assert not errors,errors

@@ -94,18 +94,18 @@ export const messages = {
     run_range: '优化 Range 回源',
     uploadCache: '上传缓存', effectiveCache: '区块缓存有效容量', uploadLimit: '上传有效额度', pendingBytes: '待上传字节', oldestPending: '最早待上传时间', syncFallbacks: '回退同步上传的请求数', cache_flush: '排空上传缓存', cachePins: '缓存保护（前 100 项）', pinType: '原因', pinOwner: '归属', pending: '本地待上传',
     uploadCacheHelp: '已确认的上传可能仍依赖这些本地数据；pin 防止待上传来源被淘汰。排空操作将当前积压写成独立后端区块，新上传仍可产生积压。',
-    packs: 'Pack', pack: 'Pack 维护', unpack: '拆成独立区块', packDetails: 'Pack 详情', packId: 'Pack ID', packMaxSize: '原始大小上限', backPacks: '返回 Pack 列表', unpackAll: '拆除全部 Pack',
-    packHelp: 'Pack 合并连续区块；读取时校验完整包，并按区块缓存。旧副本会保留至 GC 宽限期结束。',
-    unpackHelp: '先写入独立区块，再退役旧 Pack。GC 完成前可能增加临时存储占用；任务支持暂停和恢复。',
-    run_pack: '打包符合条件的区块', run_reuse: '检查复用边界', run_reclaim: '回收无引用成员', run_repack: '合并相邻存储副本',
-    independentSizeHint: '独立编码大小参考', source: '读取来源', chunk: '独立区块', currentSource: '当前来源', yes: '是', no: '否', readCount: '区块读取次数', rangeReadCount: 'Range 读取次数',
+    packs: '区块包', pack: '区块包维护', unpack: '拆包', packDetails: '区块包详情', packId: '区块包 ID', packMaxSize: '原始大小上限', backPacks: '返回区块包列表', unpackAll: '拆除全部区块包',
+    packHelp: '区块包合并连续区块；读取时校验整包，并按区块缓存。旧副本会保留至 GC 宽限期结束。',
+    unpackHelp: '先将包内区块单独存储，再退役旧区块包。GC 完成前可能增加临时存储占用；任务支持暂停和恢复。',
+    run_pack: '打包符合条件的区块', run_reuse: '检查复用边界', run_reclaim: '回收无引用成员', run_repack: '重新打包',
+    independentSizeHint: '独立编码大小参考', source: '读取来源', chunk: '区块', currentSource: '当前来源', yes: '是', no: '否', readCount: '区块读取次数', rangeReadCount: 'Range 读取次数',
     ready: '就绪', preparing: '准备中', uploading: '上传中', retired: '已退役', deleting: '删除中', deleted: '已删除',
     physicalSources: '物理副本', backendQueues: '后端队列', direction: '方向', queueLimit: '并发上限', foreground: '即时请求', upload: '异步上传', maintenanceQueue: '维护', oldestWait: '最长等待（秒）', control: '控制', read: '读取',
-    cleanup_packs: '已删除 Pack', cleanup_chunk_locations: '已删除区块副本',
+    cleanup_packs: '已删除区块包', cleanup_chunk_locations: '已删除区块副本',
     cleanup_integrity_issues: '巡检异常记录',
     integrity: '完整性巡检', startIntegrity: '启动完整性巡检', integrityMode: '检查模式', integrityBucket: '检查存储桶', integrityKey: '精确对象键（可选）', allBuckets: '全部存储桶',
     mode_metadata: '元数据', mode_head: '远端存在性与长度', mode_full: '完整区块校验',
-    integrityHelp: '检查已发布对象。HEAD 检查物理来源；完整校验验证区块或 Pack，同一任务中的共享 Pack 只检查一次。所有模式均校验待上传本地来源，不修复或删除数据。',
+    integrityHelp: '检查已发布对象。HEAD 检查物理来源；完整校验验证区块或区块包，同一任务中的共享区块包只检查一次。所有模式均校验待上传本地来源，不修复或删除数据。',
     issue_pending_unavailable: '待上传本地来源缺失或损坏',
     integrityCoverage: '在线巡检覆盖一段时间内的已发布对象，并非同一时刻的快照。进行中的上传及超出已保存 ID 边界的新区块不在范围内；期间已解除的引用计为跳过。',
     integrityPhase: '阶段', phase_metadata: '对象映射', phase_chunks: '区块', phase_done: '结束', objectsChecked: '已检查对象', chunksChecked: '已检查区块', bytesChecked: '已检查编码字节', findings: '异常记录', skipped: '变更后跳过',
@@ -123,7 +123,7 @@ export const messages = {
     operationResults: '各对象的操作结果', operationSuccess: '成功', objectChanged: '对象已变更或不存在，请刷新后重试。', operationFailed: '失败（HTTP {status}）。', requestId: '请求 ID：{id}',
     objectVersion: '对象版本', cacheControl: 'Cache-Control', contentDisposition: 'Content-Disposition', contentEncoding: 'Content-Encoding', contentLanguage: 'Content-Language', expires: 'Expires', userMetadata: '用户元数据',
     showChunks: '区块详情', chunkId: '区块 ID', offset: '对象偏移', referenceLength: '引用字节数', rawSize: '完整区块大小', encodedSize: '编码后大小', compression: '压缩算法', encryption: '加密算法',
-    chunksHelp: '每行引用一个逻辑区块。独立编码大小与压缩信息是提示，不代表该成员在 Pack 中的实际占用或删除可释放的空间。查看无需读取后端。',
+    chunksHelp: '每行引用一个逻辑区块。独立编码大小与压缩信息是提示，不代表该成员在区块包中的实际占用或删除可释放的空间。查看无需读取后端。',
     allStates: '全部状态', autoRefresh: '每 5 秒刷新', taskDetails: '任务详情', created: '创建时间', taskCursor: '上次游标', taskError: '失败原因',
     pauseTask: '暂停任务', resumeTask: '继续任务', retryTask: '重试任务', confirmTask: '修改任务 {id}（{type}）？请核对下方范围后确认。',
     taskHelp: '数量表示已处理工作量，不代表百分比。暂停时当前批次可能继续完成。继续或重试从保存的游标恢复；后端清查仍受维护状态检查保护。',
@@ -181,7 +181,7 @@ export const messages = {
 };
 
 let saved;
-try { saved = localStorage.getItem('media-gateway-language'); } catch { /* Storage can be disabled by the browser. */ }
+try { saved = localStorage.getItem('mokyu-language'); } catch { /* Storage can be disabled by the browser. */ }
 const preferred = (navigator.languages || [navigator.language]).find(value => /^(zh|en)(-|$)/i.test(value)) || 'en';
 export let locale = Object.hasOwn(messages, saved) ? saved : (preferred.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en');
 export function t(key, values = {}) {
@@ -191,7 +191,7 @@ export function setLocale(value) {
   if (!Object.hasOwn(messages, value)) return;
   locale = value;
   document.documentElement.lang = value;
-  try { localStorage.setItem('media-gateway-language', value); } catch { /* Translation still works without persistence. */ }
+  try { localStorage.setItem('mokyu-language', value); } catch { /* Translation still works without persistence. */ }
 }
 export function translate(root = document) {
   root.querySelectorAll('[data-i18n]').forEach(element => { element.textContent = t(element.dataset.i18n); });

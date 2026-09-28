@@ -8,10 +8,10 @@ from pathlib import Path
 import psycopg
 from integration import s3, bucket
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
-command = [os.environ['MGW_TEST_BINARY'], '--config', os.environ['MGW_TEST_CONFIG']]
-faults = Path(os.environ['MGW_TEST_FAULT_DIR'])
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG']]
+faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
 marker = faults / 'upload-before-work'
 
 
@@ -110,9 +110,9 @@ finally:
 
 import requests
 from playwright.sync_api import sync_playwright
-web = os.environ['MGW_TEST_WEB']
+web = os.environ['MOKYU_TEST_WEB']
 session = requests.Session()
-login = session.post(web + '/api/login', headers={'Origin': web}, json={'username': 'tester', 'password': os.environ['MGW_TEST_PASSWORD']})
+login = session.post(web + '/api/login', headers={'Origin': web}, json={'username': 'tester', 'password': os.environ['MOKYU_TEST_PASSWORD']})
 login.raise_for_status()
 assert session.post(web + '/api/cache/flush').status_code == 403
 response = session.post(web + '/api/cache/flush', headers={'Origin': web, 'X-CSRF-Token': login.json()['csrf_token']})
@@ -125,7 +125,7 @@ with sync_playwright() as playwright:
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(web)
     page.get_by_label('Username', exact=True).fill('tester')
-    page.get_by_label('Password', exact=True).fill(os.environ['MGW_TEST_PASSWORD'])
+    page.get_by_label('Password', exact=True).fill(os.environ['MOKYU_TEST_PASSWORD'])
     page.get_by_role('button', name='Sign in', exact=True).click()
     page.locator('#browser:not([hidden])').wait_for()
     page.locator('#status').click()
@@ -135,7 +135,7 @@ with sync_playwright() as playwright:
     page.get_by_role('button', name='排空上传缓存', exact=True).wait_for()
     page.set_viewport_size({'width': 390, 'height': 844})
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
-    page.screenshot(path=str(Path(os.environ['MGW_TEST_RESULTS']) / 'upload-cache-zh.png'), full_page=True)
+    page.screenshot(path=str(Path(os.environ['MOKYU_TEST_RESULTS']) / 'upload-cache-zh.png'), full_page=True)
     assert not errors, errors
     browser.close()
 print('PASS upload cache status in both languages, mobile layout and CSRF', flush=True)

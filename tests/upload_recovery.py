@@ -11,16 +11,16 @@ from pathlib import Path
 import psycopg
 from integration import s3, bucket
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
-config = Path(os.environ['MGW_TEST_CONFIG'])
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
+config = Path(os.environ['MOKYU_TEST_CONFIG'])
 original = config.read_text()
-command = [os.environ['MGW_TEST_BINARY'], '--config', str(config)]
-faults = Path(os.environ['MGW_TEST_FAULT_DIR'])
-data = Path(os.environ['MGW_TEST_DATA'])
-pid = int(os.environ['MGW_TEST_GATEWAY_PID'])
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', str(config)]
+faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
+data = Path(os.environ['MOKYU_TEST_DATA'])
+pid = int(os.environ['MOKYU_TEST_GATEWAY_PID'])
 process = None
-backend_pid = int(os.environ['MGW_TEST_BACKEND_PID'])
+backend_pid = int(os.environ['MOKYU_TEST_BACKEND_PID'])
 
 
 def cli(*args):
@@ -53,7 +53,7 @@ def start(text, maintenance=True):
     global process, pid
     config.write_text(text)
     process = subprocess.Popen(command + ['serve'] + (['--maintenance'] if maintenance else []),
-                               stdout=open(Path(os.environ['MGW_TEST_RESULTS']) / 'upload-recovery.log', 'a'),
+                               stdout=open(Path(os.environ['MOKYU_TEST_RESULTS']) / 'upload-recovery.log', 'a'),
                                stderr=subprocess.STDOUT)
     pid = process.pid
     def ready():

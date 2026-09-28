@@ -1,14 +1,10 @@
 [package]
-name = "wxw-media-gateway"
+name = "mokyu"
 version = "0.0.3"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
 publish = false
-
-[[bin]]
-name = "media-gateway"
-path = "src/main.rs"
 
 [features]
 fault-injection = []

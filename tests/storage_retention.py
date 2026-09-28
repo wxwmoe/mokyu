@@ -14,16 +14,16 @@ import boto3
 import psycopg
 from integration import s3, bucket, read
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text(), autocommit=True)
-config = Path(os.environ['MGW_TEST_CONFIG'])
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
+config = Path(os.environ['MOKYU_TEST_CONFIG'])
 original = config.read_text()
-command = [os.environ['MGW_TEST_BINARY'], '--config', str(config), 'cli']
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', str(config), 'cli']
 settings = tomllib.loads(original)['backend']
 backend = boto3.client('s3', endpoint_url=settings['endpoint'], region_name=settings['region'],
                       aws_access_key_id=settings['access_key'], aws_secret_access_key=settings['secret_key'])
-pid = int(os.environ['MGW_TEST_GATEWAY_PID'])
-backend_pid = int(os.environ['MGW_TEST_BACKEND_PID'])
+pid = int(os.environ['MOKYU_TEST_GATEWAY_PID'])
+backend_pid = int(os.environ['MOKYU_TEST_BACKEND_PID'])
 process = None
 
 
@@ -78,7 +78,7 @@ def stop():
     if process:
         process.wait(timeout=10)
     def unlocked():
-        with (Path(os.environ['MGW_TEST_DATA']) / 'gateway.lock').open('rb') as lock:
+        with (Path(os.environ['MOKYU_TEST_DATA']) / 'gateway.lock').open('rb') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return True
@@ -93,7 +93,7 @@ def start(minimum):
                             + '"\nrequest_timeout="1s"\nretry_timeout="1s"\nmax_retries=0')
     config.write_text(text)
     process = subprocess.Popen(command[:-1] + ['serve', '--maintenance'],
-                               stdout=open(Path(os.environ['MGW_TEST_RESULTS']) / 'storage-retention.log', 'a'),
+                               stdout=open(Path(os.environ['MOKYU_TEST_RESULTS']) / 'storage-retention.log', 'a'),
                                stderr=subprocess.STDOUT)
     pid = process.pid
     def ready():
@@ -125,15 +125,12 @@ try:
     pack = db.execute("SELECT id,storage_id,nonce,stored_at FROM packs WHERE state='ready'").fetchone()
     assert pack and pack[3] is not None and read('retained')[0] == raw
 
-    # Reconstruct the immediately preceding schema, preserving its data/history.
+    # Missing storage timestamps require conservative remote age checks.
     stop()
     with db.transaction():
-        db.execute('ALTER TABLE chunk_locations DROP COLUMN stored_at')
-        db.execute('ALTER TABLE packs DROP COLUMN stored_at')
-        db.execute('DELETE FROM _sqlx_migrations WHERE version=8')
-        db.execute('UPDATE gateway_meta SET schema_version=7')
+        db.execute('UPDATE chunk_locations SET stored_at=NULL')
+        db.execute('UPDATE packs SET stored_at=NULL')
     start('30d')
-    assert scalar('SELECT schema_version FROM gateway_meta') == 8
     assert db.execute('SELECT id,storage_id,nonce FROM chunk_locations ORDER BY id').fetchall() == [r[:3] for r in locations]
     assert db.execute('SELECT id,storage_id,nonce,stored_at FROM packs').fetchone() == (*pack[:3], None)
     assert scalar('SELECT bool_and(stored_at IS NULL) FROM chunk_locations')
@@ -151,7 +148,7 @@ try:
     for table in ('chunk_locations', 'packs'):
         assert scalar(f"SELECT bool_and(stored_at>now()-interval '1 day' AND state='retired') FROM {table} WHERE state<>'ready'")
     assert read('retained')[0] == raw
-    print('PASS default, metadata reuse, schema upgrade, write timestamps and legacy remote age', flush=True)
+    print('PASS default, metadata reuse, write timestamps and legacy remote age', flush=True)
 
     # A failed HEAD is not absence; a missing abandoned physical source is safe to clear.
     location, storage = locations[0][:2]

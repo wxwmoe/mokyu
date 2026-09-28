@@ -14,7 +14,7 @@ BEGIN
     IF NOT pg_try_advisory_lock(734922709851001) THEN
         RAISE EXCEPTION 'stop the gateway before marking unreferenced chunks';
     END IF;
-    IF (SELECT maintenance FROM gateway_meta WHERE singleton) IS NOT TRUE THEN
+    IF (SELECT maintenance FROM mokyu_meta WHERE singleton) IS NOT TRUE THEN
         RAISE EXCEPTION 'enable maintenance before stopping the gateway';
     END IF;
     SELECT max(id) INTO upper_id FROM chunks;

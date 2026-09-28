@@ -7,7 +7,7 @@
 ## 通用约定
 
 - 除登录外，API 均需有效会话 Cookie。登录要求 `Origin` 精确匹配 `manage.origin`；其他写请求还要求 `X-CSRF-Token`。桶 CORS 不作用于管理端口。
-- Cookie 为 `mgw_session`，HttpOnly、SameSite=Strict；Secure 和固定有效期由[配置](configuration.md#监听与管理)决定。更改密码、禁用或删除用户会撤销会话。
+- Cookie 为 `mokyu_session`，HttpOnly、SameSite=Strict；Secure 和固定有效期由[配置](configuration.md#监听与管理)决定。更改密码、禁用或删除用户会撤销会话。
 - JSON 请求体上限 16 KiB，批量对象操作另有说明。GET 路由也接受 HEAD，HEAD 不返回响应体。
 - 查询参数按 UTF-8 编码；key 原样保留，不规范化斜杠、空格或路径。分页 token 不应解析或跨范围复用；并发变更期间不提供跨请求快照。
 - 响应使用 `Cache-Control: private, no-store`，下载另带 `Vary: Cookie`；页面 CSP 限制外部脚本、插件和被嵌入。失败可用响应头 `X-Request-ID` 排查，见[请求标识](s3-compatibility.md#请求标识)。
@@ -98,7 +98,7 @@
 
 每行：`{id,offset_bytes,length,source_offset,raw_size,stored_size,independent_size_hint,payload_size,compression,algorithm,key_id,source,pack_id,reads,range_reads}`。id、offset_bytes、next_offset、pack_id 用十进制字符串表示，末页 next_offset 为 null；只读数据库，不访问后端。
 
-source 为 chunk/pack/pending；stored_size 是当前独立副本长度，没有独立副本时为 null。independent_size_hint、compression 和 payload_size 分别为独立编码长度提示、压缩标记和扣标签后的长度，不代表 pack 中某成员的实际占用。reads/range_reads 为延迟落库的累计块读取次数。length/source_offset 描述引用区间，不能据此直接推算删除释放空间。
+source 为 chunk/pack/pending；stored_size 是当前独立副本长度，没有独立副本时为 null。independent_size_hint、compression 和 payload_size 分别为独立编码长度提示、压缩标记和扣标签后的长度，不代表区块包中某成员的实际占用。reads/range_reads 为延迟落库的累计块读取次数。length/source_offset 描述引用区间，不能据此直接推算删除释放空间。
 
 algorithm/key_id 是逻辑块的初始编码与去重域；重编码后的实际算法和密钥由 chunk_locations 或 packs 记录，可能与初始值不同。
 
@@ -167,16 +167,16 @@ last_run 首次执行前为 null，此后为 `{started_at,finished_at,duration_m
 | chunks.unconfirmed_bytes | preparing/uploading 物理来源已记录的编码大小，远端是否存在尚不确定 |
 | physical | 按 kind（chunk/pack）、state 分组的 objects/stored_bytes |
 | live | 可见对象引用的唯一块数 chunks、引用区间总长 reference_bytes、唯一块原始大小 raw_bytes、尚无远端来源的 pending_raw_bytes、编码大小 stored_bytes、扣标签后的 payload_bytes |
-| unreferenced | chunks/eligible_chunks 为无 extent 引用的逻辑块数及过宽限、无 owner_stream 的数量；stored_bytes 为无引用独立来源及退役物理来源字节，eligible_bytes 按物理来源宽限筛选。部分闲置 pack 的剩余占用在 physical 中，实际回收还受引用和活跃保护约束 |
+| unreferenced | chunks/eligible_chunks 为无 extent 引用的逻辑块数及过宽限、无 owner_stream 的数量；stored_bytes 为无引用独立来源及退役物理来源字节，eligible_bytes 按物理来源宽限筛选。部分闲置区块包的剩余占用在 physical 中，实际回收还受引用和活跃保护约束 |
 | tasks / uploads | 按状态计数的任务 / active、completing 上传 |
 | cleanup | chunks/uploads/tasks/sessions/integrity_issues 到期历史的 `{eligible,oldest_at}`；时间分别为 deleted_at/touched_at/updated_at/expires_at，巡检异常使用所属任务 updated_at；排除仍有 extent 的块和仍有 part 的上传，可能含被锁或活跃保护暂缓的行 |
 | database | `{table,total_bytes,index_bytes,live_rows_estimate,dead_rows_estimate,last_autovacuum,last_autoanalyze}`；大小含索引和 TOAST，行数为估计，维护时间可为 null |
 
-去重节省量为 `live.reference_bytes-live.raw_bytes`；编码节省量为 `live.raw_bytes-live.pending_raw_bytes-live.payload_bytes`。物理大小按唯一可见来源计数：一个 pack 即使只剩部分成员仍在使用，也计入整个包；过渡副本另外计入 physical。每个加密物理载荷扣 16 字节标签，none 为 0；分母为 0 时比例为 null。部分引用、索引开销可使节省为负，不按桶分摊共享来源。
+去重节省量为 `live.reference_bytes-live.raw_bytes`；编码节省量为 `live.raw_bytes-live.pending_raw_bytes-live.payload_bytes`。物理大小按唯一可见来源计数：一个区块包即使只剩部分成员仍在使用，也计入整个包；过渡副本另外计入 physical。每个加密物理载荷扣 16 字节标签，none 为 0；分母为 0 时比例为 null。部分引用、索引开销可使节省为负，不按桶分摊共享来源。
 
 物理统计来自数据库，不遍历后端，不包含未索引对象、meta.json、提供商对象版本或账单规则；上传和删除期间可能短暂不一致。
 
-## Pack
+## 区块包
 
 `POST /api/cache/flush` 返回 `{task_id}`，使用相同的会话、Origin 和 CSRF 验证。它将任务创建前的积压写成独立来源，在维护模式也可显式执行；通过现有任务 API 暂停/恢复。完成不阻止后续请求产生新积压，备份需先阻止写入。
 
@@ -189,11 +189,11 @@ last_run 首次执行前为 null，此后为 `{started_at,finished_at,duration_m
 | `POST /api/packs/run` | `{kind}`：pack/reuse/reclaim/range/repack | `{task_id}`，已有同类任务可返回 existing=true |
 | `POST /api/packs/unpack` | `{pack_id?:字符串,all?:bool,execute?:bool}` | 默认返回 preview/packs/raw_bytes/effect；execute=true 返回 task_id |
 
-pack_id 与 all=true 必须二选一；全部拆包要求 pack.enabled=false。包及成员的大整数 ID 使用字符串，避免浏览器精度损失。Pack 页面可查看列表、成员、维护入口与拆包预览；写接口遵守会话、Origin、CSRF 和维护模式。操作、冷却和回收语义见[CLI](cli-reference.md#pack-维护)。
+pack_id 与 all=true 必须二选一；全部拆包要求 pack.enabled=false。包及成员的大整数 ID 使用字符串，避免浏览器精度损失。区块包页面可查看列表、成员、维护入口与拆包预览；写接口遵守会话、Origin、CSRF 和维护模式。操作、冷却和回收语义见[CLI](cli-reference.md#区块包维护)。
 
 任务 detail.last_rewrite 保存最近一次成功切换的 before_bytes/output_bytes/temporary_added_bytes/transition_bytes，分别为旧布局、新布局、本批新增载荷及新旧并存大小；不包含更早批次仍在 GC 宽限内的副本，部署总占用以 physical 汇总为准。
 
-Pack status 含 range_optimization；Range 任务的 detail.evaluated 为已评估包数，last_range 含 pack_id、applied、reason、partial_downloads，以及 benefit 的 observed_bytes/projected_bytes/rewrite_bytes/extra_gets/request_penalty_bytes/net_savings_bytes。收益是按历史窗口外推的预计值，重写大小采用实际编码结果，不承诺未来命中率。Pack 的 range_checked_at 是最近评估时间。
+区块包状态含 range_optimization；Range 任务的 detail.evaluated 为已评估包数，last_range 含 pack_id、applied、reason、partial_downloads，以及 benefit 的 observed_bytes/projected_bytes/rewrite_bytes/extra_gets/request_penalty_bytes/net_savings_bytes。收益是按历史窗口外推的预计值，重写大小采用实际编码结果，不承诺未来命中率。区块包的 range_checked_at 是最近评估时间。
 
 ## 后台任务
 
@@ -254,10 +254,10 @@ processed 为对象和区块检查数之和，不是百分比；cursor 是内部
 
 ## 管理页面
 
-`GET/HEAD /` 提供对象、桶设置、状态、任务和 Pack 入口；静态资源为 `/app.js`、`/i18n.js`、`/app.css`，随二进制提供，无外部前端服务。
+`GET/HEAD /` 提供对象、桶设置、状态、任务和区块包入口；静态资源为 `/app.js`、`/i18n.js`、`/app.css`，随二进制提供，无外部前端服务。
 
 - 支持 zh-CN/en：首次按浏览器语言选择，中文以外回退英语；选择保存在 localStorage，切换保留未提交表单。名称、元数据和错误内容始终按文本显示。
-- URL 保存 page、bucket、prefix、recursive、token、key、section、state、task、taskToken、pack、packAfter，支持刷新、前进后退和复制链接。section 为 cors/website，page 为 objects/settings/status/tasks/packs；访问仍需登录。
+- URL 保存 page、bucket、prefix、recursive、token、key、section、state、task、taskToken、`pack`、packAfter，支持刷新、前进后退和复制链接。section 为 cors/website，page 为 objects/settings/status/tasks/packs；访问仍需登录。
 - 对象每页 100 项，可按前缀／完整 key 定位；勾选仅限当前页，上一页使用本标签页历史。支持图片／视频预览和原文件下载；批量操作先列出目标，再显示逐项结果。
 - 任务可每 5 秒刷新，页面隐藏或离开任务页时停止；用户可关闭。暂停或终止的巡检详情停止自动轮询，可手动刷新、查看关联对象和导出报告。
 - 状态页刷新只读取运行计数和已缓存的容量快照。库存通过分页浏览，不设累计对象数量上限。

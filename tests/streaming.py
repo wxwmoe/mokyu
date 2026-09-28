@@ -1,6 +1,6 @@
 """Real SigV4 chunk chains and checksum trailers; use only an isolated test bucket.
 
-MGW_TEST_ENDPOINT and MGW_TEST_CREDENTIALS match integration.py.
+MOKYU_TEST_ENDPOINT and MOKYU_TEST_CREDENTIALS match integration.py.
 """
 import base64
 import hashlib
@@ -16,8 +16,8 @@ from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 from botocore.config import Config
 
-endpoint = os.environ['MGW_TEST_ENDPOINT']
-credential = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+endpoint = os.environ['MOKYU_TEST_ENDPOINT']
+credential = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 bucket = credential['bucket']
 credentials = Credentials(credential['access_key'], credential['secret_key'])
 client = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',

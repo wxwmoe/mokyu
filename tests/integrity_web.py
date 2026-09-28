@@ -9,18 +9,18 @@ import psycopg
 from botocore.config import Config
 from playwright.sync_api import sync_playwright
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-credential = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+credential = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 bucket = credential['bucket']
-url = os.environ['MGW_TEST_WEB']
-results = Path(os.environ['MGW_TEST_RESULTS'])
+url = os.environ['MOKYU_TEST_WEB']
+results = Path(os.environ['MOKYU_TEST_RESULTS'])
 results.mkdir(parents=True, exist_ok=True)
-s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
+s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
     aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
     config=Config(s3={'addressing_style': 'path'}))
 key = 'integrity-web/' + uuid.uuid4().hex + '/<img src=x onerror=window.injected=true>?+% #中//'
 s3.put_object(Bucket=bucket, Key=key, Body=b'integrity browser fixture')
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text(), autocommit=True)
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
 stream, chunk = db.execute('SELECT o.stream_id,e.chunk_id FROM objects o JOIN extents e ON e.stream_id=o.stream_id WHERE o.key=%s', (key,)).fetchone()
 db.execute('DELETE FROM extents WHERE stream_id=%s', (stream,))
 with db.cursor() as cursor:
@@ -35,7 +35,7 @@ try:
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.goto(url)
         page.get_by_label('Username', exact=True).fill('tester')
-        page.get_by_label('Password', exact=True).fill(os.environ['MGW_TEST_PASSWORD'])
+        page.get_by_label('Password', exact=True).fill(os.environ['MOKYU_TEST_PASSWORD'])
         page.get_by_role('button', name='Sign in', exact=True).click()
         page.locator('#browser:not([hidden])').wait_for()
         page.get_by_role('button', name='Background tasks', exact=True).click()

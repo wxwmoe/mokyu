@@ -14,6 +14,6 @@ for arg in "$@"; do
 done
 if [ "$tag" = alpine ]; then version="$version-alpine"; fi
 docker build ${no_cache:+--no-cache} --file "$file" \
-  --tag "wxwmoe/media-gateway:$tag" \
-  --tag "wxwmoe/media-gateway:$version" .
-docker image inspect "wxwmoe/media-gateway:$version" --format '{{.Id}} {{.Size}} bytes'
+  --tag "wxwmoe/mokyu:$tag" \
+  --tag "wxwmoe/mokyu:$version" .
+docker image inspect "wxwmoe/mokyu:$version" --format '{{.Id}} {{.Size}} bytes'

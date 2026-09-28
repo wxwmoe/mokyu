@@ -14,22 +14,22 @@ import boto3
 import psycopg
 from botocore.config import Config
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
 assert os.geteuid() != 0, 'run gateway and test as the same unprivileged UID'
-credential = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+credential = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 bucket = credential['bucket']
-s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
+s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
                   config=Config(retries={'max_attempts': 0}, s3={'addressing_style': 'path'},
                                 request_checksum_calculation='when_required', response_checksum_validation='when_required'))
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text(), autocommit=True)
-root = Path(os.environ['MGW_TEST_DATA']) / 'chunks'
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
+root = Path(os.environ['MOKYU_TEST_DATA']) / 'chunks'
 prefix = 'cache-eviction-' + os.urandom(4).hex() + '/'
 
 
 def status():
-    return json.loads(subprocess.check_output([os.environ['MGW_TEST_BINARY'], '--config',
-        os.environ['MGW_TEST_CONFIG'], 'cli', 'status'], text=True))
+    return json.loads(subprocess.check_output([os.environ['MOKYU_TEST_BINARY'], '--config',
+        os.environ['MOKYU_TEST_CONFIG'], 'cli', 'status'], text=True))
 
 
 def read(key, expected):

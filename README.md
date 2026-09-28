@@ -1,4 +1,4 @@
-# Media Gateway
+# Mokyu
 
 一个 Rust 实现的 S3 媒体存储网关，支持分块、去重、压缩和加密，并将数据存储至 S3 后端
 
@@ -18,20 +18,20 @@
 ./build.sh
 ```
 
-构建成功后得到同一镜像的 `wxwmoe/media-gateway:latest` 和 `wxwmoe/media-gateway:0.0.3`
+构建成功后得到同一镜像的 `wxwmoe/mokyu:latest` 和 `wxwmoe/mokyu:0.0.3`
 
 > 默认运行镜像为 Debian slim
 
-`./build.sh --alpine` 可构建 Alpine 版本，标签为 `wxwmoe/media-gateway:alpine` 和 `:0.0.3-alpine`
+`./build.sh --alpine` 可构建 Alpine 版本，标签为 `wxwmoe/mokyu:alpine` 和 `:0.0.3-alpine`
 
 按 [部署与恢复](docs/deployment-and-recovery.md) 准备配置、密钥和目录，随后：
 
 ```sh
 docker compose up -d
-docker exec media-gateway cli status
-docker exec media-gateway cli bucket create media
-docker exec media-gateway cli credential create media
-docker exec -it media-gateway cli user create admin
+docker exec mokyu cli status
+docker exec mokyu cli bucket create media
+docker exec mokyu cli credential create media
+docker exec -it mokyu cli user create admin
 ```
 
 ## 实际接口和运维文档
@@ -47,3 +47,50 @@ docker exec -it media-gateway cli user create admin
 | [存储格式](docs/storage-format.md) | CDC、AEAD/AAD、nonce、物理路径和恢复规则 |
 
 每个部署仅运行一个网关实例，独占其数据库和 data
+
+## 版权声明
+
+> (> ʌ <) 都看到这了，点个 Star 吧 ~
+
+互操作参考
+
+- [mastodon / AGPL-3.0][1]
+- [misskey / AGPL-3.0][2]
+
+相关依赖
+
+- [tokio / MIT][3]
+- [axum / MIT][4]
+- [hyper / MIT][5]
+- [s3s / Apache-2.0][6]
+- [object_store / Apache-2.0][7]
+- [sqlx / MIT OR Apache-2.0][8]
+- [fastcdc / MIT][9]
+- [blake3 / CC0-1.0 OR Apache-2.0][10]
+- [zstd / BSD-3-Clause][11]
+- [rustls / Apache-2.0 OR ISC OR MIT][12]
+- [aws-lc-rs / ISC AND (Apache-2.0 OR ISC)][13]
+- [argon2 / MIT OR Apache-2.0][14]
+- [serde / MIT OR Apache-2.0][15]
+- [clap / MIT OR Apache-2.0][16]
+
+###### 引用的项目与相关依赖保留各自的版权及许可证
+
+MIT © wxw.moe
+
+  [1]: https://github.com/mastodon/mastodon
+  [2]: https://github.com/misskey-dev/misskey
+  [3]: https://github.com/tokio-rs/tokio
+  [4]: https://github.com/tokio-rs/axum
+  [5]: https://github.com/hyperium/hyper
+  [6]: https://github.com/s3s-project/s3s
+  [7]: https://github.com/apache/arrow-rs-object-store
+  [8]: https://github.com/launchbadge/sqlx
+  [9]: https://github.com/nlfiedler/fastcdc-rs
+  [10]: https://github.com/BLAKE3-team/BLAKE3
+  [11]: https://github.com/gyscos/zstd-rs
+  [12]: https://github.com/rustls/rustls
+  [13]: https://github.com/aws/aws-lc-rs
+  [14]: https://github.com/RustCrypto/password-hashes/tree/master/argon2
+  [15]: https://github.com/serde-rs/serde
+  [16]: https://github.com/clap-rs/clap

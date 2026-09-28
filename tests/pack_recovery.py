@@ -10,11 +10,11 @@ from pathlib import Path
 import psycopg
 from integration import s3, bucket
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
-command = [os.environ['MGW_TEST_BINARY'], '--config', os.environ['MGW_TEST_CONFIG']]
-faults = Path(os.environ['MGW_TEST_FAULT_DIR'])
-pid = int(os.environ['MGW_TEST_GATEWAY_PID'])
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG']]
+faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
+pid = int(os.environ['MOKYU_TEST_GATEWAY_PID'])
 process = None
 
 
@@ -54,7 +54,7 @@ try:
         # A killed process may remain a zombie until the outer runner reaps it.
         wait(lambda: not Path(f'/proc/{pid}/stat').exists() or Path(f'/proc/{pid}/stat').read_text().split()[2] == 'Z')
         def released():
-            with (Path(os.environ['MGW_TEST_DATA'])/'gateway.lock').open('rb') as lock:
+            with (Path(os.environ['MOKYU_TEST_DATA'])/'gateway.lock').open('rb') as lock:
                 try:
                     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
                     return True
@@ -62,7 +62,7 @@ try:
                     return False
         wait(released)
         marker.unlink()
-        log = open(Path(os.environ['MGW_TEST_RESULTS']) / 'pack-recovery.log', 'a')
+        log = open(Path(os.environ['MOKYU_TEST_RESULTS']) / 'pack-recovery.log', 'a')
         process = subprocess.Popen(command + ['serve', '--maintenance'], stdout=log, stderr=subprocess.STDOUT)
         pid = process.pid
         wait(ready)

@@ -135,7 +135,7 @@ impl App {
 
     pub async fn recover(&self) -> Result<()> {
         let mut tx = self.db.begin().await?;
-        sqlx::query("UPDATE gateway_meta SET access_coverage_since=now(),access_flushed_at=now()")
+        sqlx::query("UPDATE mokyu_meta SET access_coverage_since=now(),access_flushed_at=now()")
             .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE streams SET state='abandoned',touched_at=now() WHERE state='writing'")
@@ -330,7 +330,7 @@ impl App {
             return Ok(0);
         }
         let _running = Running(&self.gc_running);
-        let paused: bool = sqlx::query_scalar("SELECT gc_paused OR maintenance FROM gateway_meta")
+        let paused: bool = sqlx::query_scalar("SELECT gc_paused OR maintenance FROM mokyu_meta")
             .fetch_one(&self.db)
             .await?;
         if paused {
@@ -454,7 +454,7 @@ impl App {
                 .fetch_all(&self.db)
                 .await?;
         let (paused, maintenance): (bool, bool) =
-            sqlx::query_as("SELECT gc_paused,maintenance FROM gateway_meta")
+            sqlx::query_as("SELECT gc_paused,maintenance FROM mokyu_meta")
                 .fetch_one(&self.db)
                 .await?;
         Ok(

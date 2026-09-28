@@ -157,7 +157,7 @@ impl Access {
         sqlx::query("INSERT INTO pack_member_access_windows(pack_id,chunk_id,window_start,downloads) SELECT p.id,c.id,s.hour,s.n FROM unnest($1::bigint[],$2::bigint[],$3::timestamptz[],$4::bigint[]) s(p,c,hour,n) JOIN packs p ON p.id=s.p JOIN chunks c ON c.id=s.c ON CONFLICT(window_start,pack_id,chunk_id) DO UPDATE SET downloads=pack_member_access_windows.downloads+EXCLUDED.downloads")
             .bind(packs).bind(chunks).bind(hours).bind(counts).execute(&mut *tx).await?;
         let stale = (config::seconds(&app.config.statistics.access_flush_interval)? * 2) as f64;
-        sqlx::query("UPDATE gateway_meta SET access_coverage_since=CASE WHEN $1 OR access_flushed_at<now()-$2*interval '1 second' THEN now() ELSE access_coverage_since END,access_flushed_at=now()")
+        sqlx::query("UPDATE mokyu_meta SET access_coverage_since=CASE WHEN $1 OR access_flushed_at<now()-$2*interval '1 second' THEN now() ELSE access_coverage_since END,access_flushed_at=now()")
             .bind(pending.dropped).bind(stale).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())

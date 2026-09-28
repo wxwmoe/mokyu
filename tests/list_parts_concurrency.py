@@ -1,6 +1,6 @@
 """ListParts snapshots during replacement/cleanup in an isolated fault-injection build.
 
-Uses the MGW_TEST_* environment from cleanup_concurrency.py. Requires boto3 and
+Uses the MOKYU_TEST_* environment from cleanup_concurrency.py. Requires boto3 and
 psycopg; creates its own uploads in the configured disposable test bucket.
 """
 import base64
@@ -19,15 +19,15 @@ import psycopg
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-credentials = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+credentials = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 bucket = credentials['bucket']
-s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
+s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                   aws_access_key_id=credentials['access_key'], aws_secret_access_key=credentials['secret_key'],
                   config=Config(retries={'max_attempts': 0}, read_timeout=30,
                                 request_checksum_calculation='when_required', response_checksum_validation='when_required'))
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text(), autocommit=True)
-faults = Path(os.environ['MGW_TEST_FAULT_DIR'])
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
+faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
 key = 'list-parts-' + uuid.uuid4().hex
 upload = s3.create_multipart_upload(Bucket=bucket, Key=key, ChecksumAlgorithm='SHA256', ChecksumType='COMPOSITE')['UploadId']
 args = {'Bucket': bucket, 'Key': key, 'UploadId': upload}
@@ -45,7 +45,7 @@ def wait(predicate):
 
 
 def gc():
-    subprocess.run([os.environ['MGW_TEST_BINARY'], '--config', os.environ['MGW_TEST_CONFIG'],
+    subprocess.run([os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'],
                     'cli', 'gc', 'run'], check=True, capture_output=True, timeout=10)
 
 

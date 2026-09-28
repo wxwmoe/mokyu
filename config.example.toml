@@ -2,7 +2,7 @@
 s3 = "0.0.0.0:9000"
 web = "0.0.0.0:9001"
 manage = "0.0.0.0:9002"
-admin_socket = "/run/media-gateway/admin.sock"
+admin_socket = "/run/mokyu/admin.sock"
 region = "us-east-1"
 aws_chunk_limit = "8MiB"
 # s3_domain = "s3.example.com"
@@ -10,8 +10,8 @@ aws_chunk_limit = "8MiB"
 [database]
 host = "postgres"
 port = 5432
-name = "media_gateway"
-user = "media_gateway"
+name = "mokyu"
+user = "mokyu"
 password = "YOUR_POSTGRES_PASSWORD"
 # Use password_file instead of password for Docker secrets.
 # password_file = "secrets/postgres-password"
@@ -23,7 +23,7 @@ endpoint = "https://YOUR-ENDPOINT"
 region = "YOUR-REGION"
 bucket = "YOUR-PRIVATE-BACKEND-BUCKET"
 # Omit prefix or set it to "" to use the backend bucket root.
-prefix = "media-gateway"
+prefix = "mokyu"
 access_key = "YOUR_ACCESS_KEY"
 secret_key = "YOUR_SECRET_KEY"
 # Use each *_file instead of its direct value, never both.

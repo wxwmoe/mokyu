@@ -11,14 +11,14 @@ from pathlib import Path
 import psycopg
 from integration import s3, bucket
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
-config = Path(os.environ['MGW_TEST_CONFIG'])
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
+config = Path(os.environ['MOKYU_TEST_CONFIG'])
 original = config.read_text()
-command = [os.environ['MGW_TEST_BINARY'], '--config', str(config)]
-data = Path(os.environ['MGW_TEST_DATA'])
-faults = Path(os.environ['MGW_TEST_FAULT_DIR'])
-pid = int(os.environ['MGW_TEST_GATEWAY_PID'])
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', str(config)]
+data = Path(os.environ['MOKYU_TEST_DATA'])
+faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
+pid = int(os.environ['MOKYU_TEST_GATEWAY_PID'])
 process = None
 
 
@@ -70,7 +70,7 @@ def restart(text, maintenance=False):
                 return False
     wait(released)
     config.write_text(text)
-    process = subprocess.Popen(command + ['serve'] + (['--maintenance'] if maintenance else []), stdout=open(Path(os.environ['MGW_TEST_RESULTS']) / 'range-restarts.log', 'a'), stderr=subprocess.STDOUT)
+    process = subprocess.Popen(command + ['serve'] + (['--maintenance'] if maintenance else []), stdout=open(Path(os.environ['MOKYU_TEST_RESULTS']) / 'range-restarts.log', 'a'), stderr=subprocess.STDOUT)
     pid = process.pid
     def ready():
         assert process.poll() is None, 'Range restart exited'
@@ -193,16 +193,16 @@ try:
         db.execute("UPDATE chunks SET range_split_at=now()-interval '31 days',repack_after=now()-interval '1 second',reference_changed_at=now()-interval '2 hours' WHERE id=ANY(%s)", (ids,))
 
     expire()
-    db.execute("UPDATE gateway_meta SET access_coverage_since=now()-interval '8 days',access_flushed_at=now()")
+    db.execute("UPDATE mokyu_meta SET access_coverage_since=now()-interval '8 days',access_flushed_at=now()")
     task('pack', 'run', '--kind', 'repack')
     assert db.execute("SELECT repack_after>now()+interval '6 days' FROM chunks WHERE id=%s", (target[1],)).fetchone()[0]
     db.execute('DELETE FROM chunk_access_windows WHERE chunk_id=ANY(%s)', (ids,))
     expire()
-    db.execute('UPDATE gateway_meta SET access_coverage_since=now()')
+    db.execute('UPDATE mokyu_meta SET access_coverage_since=now()')
     task('pack', 'run', '--kind', 'repack')
     assert db.execute("SELECT bool_and(repack_after>now()+interval '6 days') FROM chunks WHERE id=ANY(%s)", (ids,)).fetchone()[0]
     expire()
-    db.execute("UPDATE gateway_meta SET access_coverage_since=now()-interval '8 days',access_flushed_at=now()")
+    db.execute("UPDATE mokyu_meta SET access_coverage_since=now()-interval '8 days',access_flushed_at=now()")
     task('pack', 'run', '--kind', 'repack')
     packed = db.execute('SELECT DISTINCT pack_id,range_split_at FROM chunks WHERE id=ANY(%s)', (ids,)).fetchall()
     assert len(packed) == 1 and packed[0][0] is not None and packed[0][1] is None, packed
@@ -248,9 +248,9 @@ try:
         page = browser.new_page(locale='en-US')
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
-        page.goto(os.environ['MGW_TEST_WEB'])
+        page.goto(os.environ['MOKYU_TEST_WEB'])
         page.get_by_label('Username', exact=True).fill('tester')
-        page.get_by_label('Password', exact=True).fill(os.environ['MGW_TEST_PASSWORD'])
+        page.get_by_label('Password', exact=True).fill(os.environ['MOKYU_TEST_PASSWORD'])
         page.get_by_role('button', name='Sign in', exact=True).click()
         page.locator('#browser:not([hidden])').wait_for()
         page.locator('#packs-tab').click()
@@ -258,7 +258,7 @@ try:
         assert page.get_by_role('button', name='Pack eligible chunks', exact=True).count() == 0
         page.locator('#language').select_option('zh-CN')
         page.get_by_role('button', name='优化 Range 回源', exact=True).wait_for()
-        page.screenshot(path=str(Path(os.environ['MGW_TEST_RESULTS']) / 'range-pack-off-zh.png'), full_page=True)
+        page.screenshot(path=str(Path(os.environ['MOKYU_TEST_RESULTS']) / 'range-pack-off-zh.png'), full_page=True)
         assert not errors, errors
         browser.close()
     print('PASS Range management in both locales while pack creation is disabled', flush=True)

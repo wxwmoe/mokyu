@@ -8,17 +8,17 @@ import boto3
 import requests
 from botocore.config import Config
 
-credential = json.loads(Path(os.environ['MGW_TEST_CREDENTIALS']).read_text())
+credential = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
 bucket = credential['bucket']
-endpoint = os.environ['MGW_TEST_ENDPOINT']
-manage = os.environ['MGW_TEST_WEB']
+endpoint = os.environ['MOKYU_TEST_ENDPOINT']
+manage = os.environ['MOKYU_TEST_WEB']
 s3 = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
                   config=Config(signature_version='s3v4', s3={'addressing_style': 'path'}, retries={'max_attempts': 0},
                                 request_checksum_calculation='when_required'))
 session = requests.Session()
 reply = session.post(manage + '/api/login', headers={'Origin': manage},
-                     json={'username': 'tester', 'password': os.environ['MGW_TEST_PASSWORD']})
+                     json={'username': 'tester', 'password': os.environ['MOKYU_TEST_PASSWORD']})
 reply.raise_for_status()
 auth = {'Origin': manage, 'X-CSRF-Token': reply.json()['csrf_token']}
 bucket_id = next(b['id'] for b in session.get(manage + '/api/buckets').json() if b['name'] == bucket)
@@ -32,9 +32,9 @@ rules = [{'origins': [origin], 'methods': ['GET', 'HEAD', 'PUT'],
 routes = [
     (endpoint + '/' + bucket, {}),
     (endpoint, {'Host': bucket.upper() + ':9000'}),
-    (os.environ['MGW_TEST_PUBLIC'], {'Host': os.environ['MGW_TEST_PUBLIC_HOST']}),
+    (os.environ['MOKYU_TEST_PUBLIC'], {'Host': os.environ['MOKYU_TEST_PUBLIC_HOST']}),
 ]
-if domain := os.environ.get('MGW_TEST_S3_DOMAIN'):
+if domain := os.environ.get('MOKYU_TEST_S3_DOMAIN'):
     routes.append((endpoint, {'Host': bucket + '.' + domain + ':9000'}))
 
 

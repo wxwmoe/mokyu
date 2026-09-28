@@ -1,7 +1,7 @@
 """Multipart completion quotas in an isolated fault-injection build.
 
-Uses integration.py's environment plus MGW_TEST_BINARY, MGW_TEST_CONFIG,
-MGW_TEST_DATABASE_FILE and MGW_TEST_FAULT_DIR. Configure upload_concurrency=4,
+Uses integration.py's environment plus MOKYU_TEST_BINARY, MOKYU_TEST_CONFIG,
+MOKYU_TEST_DATABASE_FILE and MOKYU_TEST_FAULT_DIR. Configure upload_concurrency=4,
 read_concurrency=6 and enough inflight_bytes for at least 10 data slots.
 """
 import http.client
@@ -21,15 +21,15 @@ import requests
 from botocore.exceptions import ClientError
 from integration import bucket, s3, read, error
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text(), autocommit=True)
-marker = Path(os.environ['MGW_TEST_FAULT_DIR']) / 'multipart-completing'
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
+marker = Path(os.environ['MOKYU_TEST_FAULT_DIR']) / 'multipart-completing'
 prefix = 'multipart-admission-' + uuid.uuid4().hex + '/'
 
 
 def status():
-    return json.loads(subprocess.check_output([os.environ['MGW_TEST_BINARY'], '--config',
-        os.environ['MGW_TEST_CONFIG'], 'cli', 'status'], text=True, timeout=10))
+    return json.loads(subprocess.check_output([os.environ['MOKYU_TEST_BINARY'], '--config',
+        os.environ['MOKYU_TEST_CONFIG'], 'cli', 'status'], text=True, timeout=10))
 
 
 def wait(predicate):
@@ -118,8 +118,8 @@ with ThreadPoolExecutor(max_workers=4) as pool:
         body, response = read(warm_key, Range='bytes=7-1030')
         assert body == warm[7:1031] and response['ResponseMetadata']['HTTPStatusCode'] == 206
         for headers, code, expected in [({}, 200, warm), ({'Range': 'bytes=7-1030'}, 206, warm[7:1031])]:
-            response = requests.get(os.environ['MGW_TEST_PUBLIC'] + '/' + warm_key,
-                headers={'Host': os.environ.get('MGW_TEST_PUBLIC_HOST', 'media.test'), **headers}, timeout=10)
+            response = requests.get(os.environ['MOKYU_TEST_PUBLIC'] + '/' + warm_key,
+                headers={'Host': os.environ.get('MOKYU_TEST_PUBLIC_HOST', 'media.test'), **headers}, timeout=10)
             assert response.status_code == code and response.content == expected
         wait(lambda: slots(status()) == (0, 6, data_slots - 4))
         assert status()['backend_gets'] == before, 'warm GET/Range should stay in cache'

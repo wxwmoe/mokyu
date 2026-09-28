@@ -12,11 +12,11 @@ import psycopg
 import requests
 from botocore.config import Config
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-configuration = tomllib.loads(Path(os.environ['MGW_TEST_CONFIG']).read_text())
-url = os.environ['MGW_TEST_WEB']
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text(), autocommit=True)
-command = [os.environ['MGW_TEST_BINARY'], '--config', os.environ['MGW_TEST_CONFIG'], 'cli']
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+configuration = tomllib.loads(Path(os.environ['MOKYU_TEST_CONFIG']).read_text())
+url = os.environ['MOKYU_TEST_WEB']
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli']
 
 
 def cli(*args):
@@ -28,15 +28,15 @@ cli('bucket', 'create', bucket)
 credential = cli('credential', 'create', bucket)
 client_config = Config(s3={'addressing_style': 'path'}, retries={'max_attempts': 0},
     request_checksum_calculation='when_required', response_checksum_validation='when_required')
-s3 = boto3.client('s3', endpoint_url=os.environ['MGW_TEST_ENDPOINT'], region_name='us-east-1',
+s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
     aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'], config=client_config)
 backend_config = configuration['backend']
 def secret(name):
-    return backend_config.get(name) or (Path(os.environ['MGW_TEST_CONFIG']).parent / backend_config[name + '_file']).read_text().strip()
+    return backend_config.get(name) or (Path(os.environ['MOKYU_TEST_CONFIG']).parent / backend_config[name + '_file']).read_text().strip()
 backend = boto3.client('s3', endpoint_url=backend_config['endpoint'], region_name=backend_config['region'],
     aws_access_key_id=secret('access_key'), aws_secret_access_key=secret('secret_key'), config=client_config)
 session = requests.Session()
-login = session.post(url + '/api/login', headers={'Origin': url}, json={'username': 'tester', 'password': os.environ['MGW_TEST_PASSWORD']})
+login = session.post(url + '/api/login', headers={'Origin': url}, json={'username': 'tester', 'password': os.environ['MOKYU_TEST_PASSWORD']})
 login.raise_for_status()
 headers = {'Origin': url, 'X-CSRF-Token': login.json()['csrf_token']}
 bucket_id = str(db.execute('SELECT id FROM buckets WHERE name=%s', (bucket,)).fetchone()[0])
@@ -77,7 +77,7 @@ def codes(mode, expected, key='a'):
 data = os.urandom(128 * 1024)
 for key, body in [('a', data), ('b', data), ('empty', b'')]:
     s3.put_object(Bucket=bucket, Key=key, Body=body)
-cache = Path(os.environ['MGW_TEST_DATA']) / 'chunks'
+cache = Path(os.environ['MOKYU_TEST_DATA']) / 'chunks'
 cache_before = {str(p): p.read_bytes() for p in cache.rglob('*') if p.is_file()}
 gets = get('/api/status')['backend_gets']
 task, issues = check()

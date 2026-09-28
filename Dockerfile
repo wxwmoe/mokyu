@@ -10,20 +10,20 @@ COPY src ./src
 COPY web ./web
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release --locked --bin media-gateway \
-    && cp target/release/media-gateway /media-gateway
+    cargo build --release --locked --bin mokyu \
+    && cp target/release/mokyu /mokyu
 
 FROM debian:bookworm-slim
 ENV MALLOC_MMAP_THRESHOLD_=131072
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /media-gateway /usr/local/bin/media-gateway
-RUN mkdir -p /data/multipart /data/chunks /run/media-gateway /config \
-    && chown -R 10001:10001 /data /run/media-gateway \
-    && printf '#!/bin/sh\nexec media-gateway cli "$@"\n' > /usr/local/bin/cli \
+COPY --from=build /mokyu /usr/local/bin/mokyu
+RUN mkdir -p /data/multipart /data/chunks /run/mokyu /config \
+    && chown -R 10001:10001 /data /run/mokyu \
+    && printf '#!/bin/sh\nexec mokyu cli "$@"\n' > /usr/local/bin/cli \
     && chmod 755 /usr/local/bin/cli
 USER 10001:10001
 EXPOSE 9000 9001 9002
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD cli status >/dev/null || exit 1
-ENTRYPOINT ["/usr/local/bin/media-gateway"]
+ENTRYPOINT ["/usr/local/bin/mokyu"]
 CMD ["serve"]

@@ -138,11 +138,11 @@ impl App {
             .context("another gateway owns this data directory")?;
         let (db, owner) = crate::db::connect(&config, &secrets, &budget).await?;
         if start_maintenance {
-            sqlx::query("UPDATE gateway_meta SET maintenance=true")
+            sqlx::query("UPDATE mokyu_meta SET maintenance=true")
                 .execute(&db)
                 .await?;
         }
-        let maintenance: bool = sqlx::query_scalar("SELECT maintenance FROM gateway_meta")
+        let maintenance: bool = sqlx::query_scalar("SELECT maintenance FROM mokyu_meta")
             .fetch_one(&db)
             .await?;
         let maintenance = Arc::new(std::sync::atomic::AtomicBool::new(maintenance));
@@ -161,7 +161,7 @@ impl App {
             .check_identity(&db, maintenance.load(std::sync::atomic::Ordering::Acquire))
             .await
         {
-            let pending:bool=sqlx::query_scalar("SELECT backend_initialized AND EXISTS(SELECT 1 FROM pending_uploads) FROM gateway_meta").fetch_one(&db).await?;
+            let pending:bool=sqlx::query_scalar("SELECT backend_initialized AND EXISTS(SELECT 1 FROM pending_uploads) FROM mokyu_meta").fetch_one(&db).await?;
             if !pending || error.downcast_ref::<object_store::Error>().is_none() {
                 return Err(error);
             }
@@ -766,7 +766,7 @@ impl App {
     }
     pub async fn status(&self) -> Result<Value> {
         let (paused, maintenance): (bool, bool) =
-            sqlx::query_as("SELECT gc_paused,maintenance FROM gateway_meta")
+            sqlx::query_as("SELECT gc_paused,maintenance FROM mokyu_meta")
                 .fetch_one(&self.db)
                 .await?;
         let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":paused,"maintenance":maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":self.db.size(),"db_pool_idle":self.db.num_idle(),"data_slots_available":self.slots.available_permits(),"active_streams":self.active.lock().unwrap().len()});

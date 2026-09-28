@@ -12,13 +12,13 @@ from pathlib import Path
 import psycopg
 from integration import s3, bucket, error
 
-assert os.environ.get('MGW_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-db = psycopg.connect(Path(os.environ['MGW_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
-config = Path(os.environ['MGW_TEST_CONFIG'])
-command = [os.environ['MGW_TEST_BINARY'], '--config', str(config)]
-faults = Path(os.environ['MGW_TEST_FAULT_DIR'])
-data = Path(os.environ['MGW_TEST_DATA'])
-pid = int(os.environ['MGW_TEST_GATEWAY_PID'])
+assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip(), autocommit=True)
+config = Path(os.environ['MOKYU_TEST_CONFIG'])
+command = [os.environ['MOKYU_TEST_BINARY'], '--config', str(config)]
+faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
+data = Path(os.environ['MOKYU_TEST_DATA'])
+pid = int(os.environ['MOKYU_TEST_GATEWAY_PID'])
 process = None
 points = ('upload-cache-written', 'upload-cache-durable', 'upload-cache-before-commit',
           'upload-cache-committed', 'object-published', 'pack-stored',
@@ -54,7 +54,7 @@ def kill():
 def start():
     global process, pid
     process = subprocess.Popen(command + ['serve', '--maintenance'],
-                               stdout=open(Path(os.environ['MGW_TEST_RESULTS']) / 'upload-crashes.log', 'a'),
+                               stdout=open(Path(os.environ['MOKYU_TEST_RESULTS']) / 'upload-crashes.log', 'a'),
                                stderr=subprocess.STDOUT)
     pid = process.pid
     def ready():

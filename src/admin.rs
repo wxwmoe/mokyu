@@ -426,13 +426,13 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
         Command::Cleanup(Cleanup::Run) => app.cleanup_history().await,
         Command::Gc(Gc::Status) => app.gc_status().await,
         Command::Gc(Gc::Pause) => {
-            sqlx::query("UPDATE gateway_meta SET gc_paused=true")
+            sqlx::query("UPDATE mokyu_meta SET gc_paused=true")
                 .execute(&app.db)
                 .await?;
             app.gc_status().await
         }
         Command::Gc(Gc::Resume) => {
-            sqlx::query("UPDATE gateway_meta SET gc_paused=false")
+            sqlx::query("UPDATE mokyu_meta SET gc_paused=false")
                 .execute(&app.db)
                 .await?;
             app.gc_status().await
@@ -458,7 +458,7 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
                 app.storage.check_identity(&app.db, false).await?;
             }
             let mut tx = app.db.begin().await?;
-            sqlx::query("UPDATE gateway_meta SET maintenance=$1")
+            sqlx::query("UPDATE mokyu_meta SET maintenance=$1")
                 .bind(enabled)
                 .execute(&mut *tx)
                 .await?;
@@ -580,7 +580,7 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
         }
         Command::Credential(Credentials::Create { bucket, read_only }) => {
             let b = app.bucket(&bucket, true).await?;
-            let access = format!("MGW{}", &random_secret()?[..24]);
+            let access = format!("MOKYU{}", &random_secret()?[..24]);
             let secret = random_secret()?;
             let protected = codec::protect(
                 secret.as_bytes(),
