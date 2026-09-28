@@ -98,7 +98,7 @@
 
 每行：`{id,offset_bytes,length,source_offset,raw_size,stored_size,independent_size_hint,payload_size,compression,algorithm,key_id,source,pack_id,reads,range_reads}`。id、offset_bytes、next_offset、pack_id 用十进制字符串表示，末页 next_offset 为 null；只读数据库，不访问后端。
 
-source 为 chunk/pack；stored_size 是当前独立副本长度，没有独立副本时为 null。independent_size_hint、compression 和 payload_size 分别为独立编码长度提示、压缩标记和扣标签后的长度，不代表 pack 中某成员的实际占用。reads/range_reads 为延迟落库的累计块读取次数。length/source_offset 描述引用区间，不能据此直接推算删除释放空间。
+source 为 chunk/pack/pending；stored_size 是当前独立副本长度，没有独立副本时为 null。independent_size_hint、compression 和 payload_size 分别为独立编码长度提示、压缩标记和扣标签后的长度，不代表 pack 中某成员的实际占用。reads/range_reads 为延迟落库的累计块读取次数。length/source_offset 描述引用区间，不能据此直接推算删除释放空间。
 
 ### 预览与下载
 
@@ -108,12 +108,13 @@ preview=false 使用 attachment 和 application/octet-stream；preview=true 仅�
 
 ## 运行状态
 
-`GET /api/status` 返回 200，与 `cli status` 相同。运行计数在进程内累计、重启归零；容量统计异步采集，读取此接口不会扫描数据库。
+`GET /api/status` 返回 200，与 `cli status` 相同。运行计数在进程内累计、重启归零；库存容量异步采集，不随页面刷新扫描对象表。待上传诊断读取有界缓存对应的元数据。
 
 | 字段 | 含义 |
 | --- | --- |
 | version / resources | 程序版本 / 生效的[资源预算](configuration.md#自动预算) |
 | local_bytes | `[multipart,chunks]` 本地占用 |
+| upload_cache | enabled、configured_size、effective_cache_bytes、effective_upload_bytes、reserved_bytes、fallbacks；pending 为 entries/bytes/oldest_at/failed_entries；pins 最多 100 项，含字符串 chunk_id、pin_type、owner_id、created_at、attempts、next_retry_at、last_error |
 | gc_paused / maintenance / gc_running | GC 暂停、维护模式、GC 是否运行 |
 | active_streams / data_slots_available | 活跃 stream 数 / 可用在途数据槽 |
 | upload_slots_available / read_slots_available | 可用读写并发名额 |
@@ -163,17 +164,21 @@ last_run 首次执行前为 null，此后为 `{started_at,finished_at,duration_m
 | chunks.stored_bytes | ready/retired/deleting 物理来源的编码大小，包含过渡副本与待回收数据 |
 | chunks.unconfirmed_bytes | preparing/uploading 物理来源已记录的编码大小，远端是否存在尚不确定 |
 | physical | 按 kind（chunk/pack）、state 分组的 objects/stored_bytes |
-| live | 可见对象引用的唯一块数 chunks、引用区间总长 reference_bytes、唯一块原始大小 raw_bytes、编码大小 stored_bytes、扣标签后的 payload_bytes |
+| live | 可见对象引用的唯一块数 chunks、引用区间总长 reference_bytes、唯一块原始大小 raw_bytes、尚无远端来源的 pending_raw_bytes、编码大小 stored_bytes、扣标签后的 payload_bytes |
 | unreferenced | chunks/eligible_chunks 为无 extent 引用的逻辑块数及过宽限、无 owner_stream 的数量；stored_bytes 为无引用独立来源及退役物理来源字节，eligible_bytes 按物理来源宽限筛选。部分闲置 pack 的剩余占用在 physical 中，实际回收还受引用和活跃保护约束 |
 | tasks / uploads | 按状态计数的任务 / active、completing 上传 |
 | cleanup | chunks/uploads/tasks/sessions/integrity_issues 到期历史的 `{eligible,oldest_at}`；时间分别为 deleted_at/touched_at/updated_at/expires_at，巡检异常使用所属任务 updated_at；排除仍有 extent 的块和仍有 part 的上传，可能含被锁或活跃保护暂缓的行 |
 | database | `{table,total_bytes,index_bytes,live_rows_estimate,dead_rows_estimate,last_autovacuum,last_autoanalyze}`；大小含索引和 TOAST，行数为估计，维护时间可为 null |
 
-去重节省量为 `live.reference_bytes-live.raw_bytes`；编码节省量为 `live.raw_bytes-live.payload_bytes`。物理大小按唯一可见来源计数：一个 pack 即使只剩部分成员仍在使用，也计入整个包；过渡副本另外计入 physical。每个加密物理载荷扣 16 字节标签，none 为 0；分母为 0 时比例为 null。部分引用、索引开销可使节省为负，不按桶分摊共享来源。
+去重节省量为 `live.reference_bytes-live.raw_bytes`；编码节省量为 `live.raw_bytes-live.pending_raw_bytes-live.payload_bytes`。物理大小按唯一可见来源计数：一个 pack 即使只剩部分成员仍在使用，也计入整个包；过渡副本另外计入 physical。每个加密物理载荷扣 16 字节标签，none 为 0；分母为 0 时比例为 null。部分引用、索引开销可使节省为负，不按桶分摊共享来源。
 
 物理统计来自数据库，不遍历后端，不包含未索引对象、meta.json、提供商对象版本或账单规则；上传和删除期间可能短暂不一致。
 
 ## Pack
+
+`POST /api/cache/flush` 返回 `{task_id}`，使用相同的会话、Origin 和 CSRF 验证。它将任务创建前的积压写成独立来源，在维护模式也可显式执行；通过现有任务 API 暂停/恢复。完成不阻止后续请求产生新积压，备份需先阻止写入。
+
+对象区块的 source 可为 pending，表示目前依赖本地待上传来源；此时 stored_size 为空，independent_size_hint 仅是编码提示。巡检对本地唯一来源进行读取校验，不能宣称已确认后端存在。
 
 | 方法与路径 | 输入 | 成功响应 |
 | --- | --- | --- |
@@ -223,7 +228,7 @@ kind 为 integrity，detail 包含：
 
 processed 为对象和区块检查数之和，不是百分比；cursor 是内部 JSON 字符串，可保存对象中途的进度。未提交批次及中断下载的流量不计入 bytes_checked，应结合运行统计判断。
 
-巡检在线检查保存上界内、仍由范围内已发布对象引用的区块。它反映一段时间窗口，不是同一时刻快照；不重算完整对象 ETag，不检查活动上传、未引用块或本地缓存。新数据可能在扫描期间进入上界内的范围；晚于上界的新对象／区块不在覆盖范围。
+巡检在线检查保存上界内、仍由范围内已发布对象引用的区块。它反映一段时间窗口，不是同一时刻快照；不重算完整对象 ETag，不检查活动上传、未引用块或可丢弃缓存。尚无远端来源的 pending 块在所有模式下校验本地唯一副本。新数据可能在扫描期间进入上界内的范围；晚于上界的新对象／区块不在覆盖范围。
 
 当前批次持有读取保护，解除引用的数据可跳过。异常与进度原子保存，重启不重复登记；权限、连接及超时等执行错误停止任务并保留进度，不记作坏块。`completed` 且 issues>0 表示完成但有异常，`failed` 表示未完成。
 
@@ -234,6 +239,7 @@ processed 为对象和区块检查数之和，不是百分比；cursor 是内部
 | code | 含义 |
 | --- | --- |
 | remote_missing / length_mismatch | 远端缺失 / 编码长度异常 |
+| pending_unavailable | 本地待上传唯一副本缺失或损坏，保留现场等待恢复 |
 | chunk_metadata / missing_key | 区块元数据异常 / 缺少历史密钥 |
 | authentication_failed / decompression_failed / hash_mismatch | 认证 / 解压 / 原始长度或哈希校验失败 |
 | object_metadata / mapping_gap / mapping_source / object_length | 对象身份或状态 / 映射缺口或重叠 / 来源 / 总长度异常 |

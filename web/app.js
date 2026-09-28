@@ -399,13 +399,28 @@ function renderStatistics(value) {
   ]));
   text('p', t('cleanupHelp'));
   table('backendQueues', ['direction', 'running', 'queueLimit', 'foreground', 'upload', 'maintenanceQueue', 'oldestWait'], Object.entries(value.io.backend_queues).map(([direction, q]) => [t(direction), number(q.running), number(q.limit), number(q.queued.foreground), number(q.queued.upload), number(q.queued.maintenance), number(q.oldest_wait_seconds)]));
+  const uploadCache = value.upload_cache;
+  if (uploadCache) {
+    table('uploadCache', ['metric', 'value'], [
+      [t('taskState'), t(uploadCache.enabled ? 'enabled' : 'disabled')],
+      [t('effectiveCache'), size(uploadCache.effective_cache_bytes)],
+      [t('uploadLimit'), size(uploadCache.effective_upload_bytes)],
+      [t('pendingBytes'), size(uploadCache.pending.bytes)],
+      [t('count'), number(uploadCache.pending.entries)],
+      [t('oldestPending'), uploadCache.pending.oldest_at ? date(uploadCache.pending.oldest_at) : '—'],
+      [t('syncFallbacks'), number(uploadCache.fallbacks)],
+    ]);
+    text('p', t('uploadCacheHelp'));
+    root.append(button(t('cache_flush'), async () => { const result = await write('/api/cache/flush', {}); await go({ page: 'tasks', task: result.task_id, state: null, taskToken: null }); }));
+    table('cachePins', ['chunkId', 'pinType', 'pinOwner', 'created', 'taskError'], uploadCache.pins.map(p => [p.chunk_id, t(p.pin_type), p.owner_id, date(p.created_at), p.last_error || '—']));
+  }
   if (!snapshot) return;
   table('physicalSources', ['source', 'taskState', 'count', 'encodedSize'], snapshot.physical.map(p => [t(p.kind), t(p.state), number(p.objects), size(p.stored_bytes)]));
   text('p', t('storageHelp'));
   const live = snapshot.live;
   table('spaceSavings', ['metric', 'size', 'savingRate'], [
     [t('dedupSavings'), size(live.reference_bytes - live.raw_bytes), live.reference_bytes ? percent(1 - live.raw_bytes / live.reference_bytes) : '—'],
-    [t('compressionSavings'), size(live.raw_bytes - live.payload_bytes), live.raw_bytes ? percent(1 - live.payload_bytes / live.raw_bytes) : '—'],
+    [t('compressionSavings'), size(live.raw_bytes - (live.pending_raw_bytes || 0) - live.payload_bytes), live.raw_bytes > (live.pending_raw_bytes || 0) ? percent(1 - live.payload_bytes / (live.raw_bytes - (live.pending_raw_bytes || 0))) : '—'],
     [t('liveStoredBytes'), size(live.stored_bytes), '—'],
     [t('gcEligibleBytes'), size(snapshot.unreferenced.eligible_bytes), '—'],
     [t('unconfirmedBytes'), size(snapshot.chunks.unconfirmed_bytes), '—'],

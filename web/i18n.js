@@ -1,5 +1,7 @@
 export const messages = {
   en: {
+    uploadCache: 'Upload cache', effectiveCache: 'Effective chunk capacity', uploadLimit: 'Effective upload quota', pendingBytes: 'Pending bytes', oldestPending: 'Oldest pending upload', syncFallbacks: 'Requests falling back to synchronous upload', cache_flush: 'Flush upload cache', cachePins: 'Cache pins (first 100)', pinType: 'Reason', pinOwner: 'Owner', pending: 'Local pending upload',
+    uploadCacheHelp: 'Acknowledged uploads may still depend on this local data. Pins protect pending sources from eviction. Flush writes existing pending data to independent backend chunks; new uploads can add more work.',
     packs: 'Packs', pack: 'Pack maintenance', unpack: 'Unpack', packDetails: 'Pack details', packId: 'Pack ID', packMaxSize: 'Maximum raw size', backPacks: 'Back to packs', unpackAll: 'Unpack all packs',
     packHelp: 'Packs combine consecutive chunks. Reads verify the complete pack and cache individual chunks. Retired sources remain until the GC grace period ends.',
     unpackHelp: 'Write independent chunk sources, then retire the old packs. Temporary storage can increase until GC. This task can be paused or resumed.',
@@ -11,7 +13,8 @@ export const messages = {
     cleanup_integrity_issues: 'Integrity findings',
     integrity: 'Integrity check', startIntegrity: 'Start integrity check', integrityMode: 'Check mode', integrityBucket: 'Check bucket', integrityKey: 'Exact object key (optional)', allBuckets: 'All buckets',
     mode_metadata: 'Metadata', mode_head: 'Remote presence and size', mode_full: 'Full chunk verification',
-    integrityHelp: 'Checks published objects. HEAD checks physical sources; full mode downloads and verifies each chunk or pack. Shared packs are checked once per task. Cache is bypassed. No data is repaired or deleted.',
+    integrityHelp: 'Checks published objects. HEAD checks physical sources; full mode verifies each chunk or pack. Shared packs are checked once per task. Pending local sources are verified in every mode. No data is repaired or deleted.',
+    issue_pending_unavailable: 'Pending local source missing or corrupt',
     integrityCoverage: 'Online inspection of published objects over a time window, not a point-in-time snapshot. Active uploads and chunks above the saved ID boundary are outside coverage. Concurrently removed references are skipped.',
     integrityPhase: 'Phase', phase_metadata: 'Object mappings', phase_chunks: 'Chunks', phase_done: 'Finished', objectsChecked: 'Objects checked', chunksChecked: 'Chunks checked', bytesChecked: 'Encoded bytes checked', findings: 'Findings', skipped: 'Skipped after changes',
     integrityFound: 'Inspection completed with findings. Review the report.', integrityClear: 'Inspection completed with no findings in the checked scope.', noFindings: 'No findings recorded so far.', exportReport: 'Export report (JSONL)',
@@ -87,6 +90,8 @@ export const messages = {
     purge: 'Bucket purge', sweep: 'Backend sweep', queued: 'Queued', completed: 'Completed', failed: 'Failed',
   },
   'zh-CN': {
+    uploadCache: '上传缓存', effectiveCache: '区块缓存有效容量', uploadLimit: '上传有效额度', pendingBytes: '待上传字节', oldestPending: '最早待上传时间', syncFallbacks: '回退同步上传的请求数', cache_flush: '排空上传缓存', cachePins: '缓存保护（前 100 项）', pinType: '原因', pinOwner: '归属', pending: '本地待上传',
+    uploadCacheHelp: '已确认的上传可能仍依赖这些本地数据；pin 防止待上传来源被淘汰。排空操作将当前积压写成独立后端区块，新上传仍可产生积压。',
     packs: 'Pack', pack: 'Pack 维护', unpack: '拆成独立区块', packDetails: 'Pack 详情', packId: 'Pack ID', packMaxSize: '原始大小上限', backPacks: '返回 Pack 列表', unpackAll: '拆除全部 Pack',
     packHelp: 'Pack 合并连续区块；读取时校验完整包，并按区块缓存。旧副本会保留至 GC 宽限期结束。',
     unpackHelp: '先写入独立区块，再退役旧 Pack。GC 完成前可能增加临时存储占用；任务支持暂停和恢复。',
@@ -98,7 +103,8 @@ export const messages = {
     cleanup_integrity_issues: '巡检异常记录',
     integrity: '完整性巡检', startIntegrity: '启动完整性巡检', integrityMode: '检查模式', integrityBucket: '检查存储桶', integrityKey: '精确对象键（可选）', allBuckets: '全部存储桶',
     mode_metadata: '元数据', mode_head: '远端存在性与长度', mode_full: '完整区块校验',
-    integrityHelp: '检查已发布对象。HEAD 检查物理来源；完整校验会下载并验证区块或 Pack，同一任务中的共享 Pack 只检查一次。巡检绕过缓存，不修复或删除数据。',
+    integrityHelp: '检查已发布对象。HEAD 检查物理来源；完整校验验证区块或 Pack，同一任务中的共享 Pack 只检查一次。所有模式均校验待上传本地来源，不修复或删除数据。',
+    issue_pending_unavailable: '待上传本地来源缺失或损坏',
     integrityCoverage: '在线巡检覆盖一段时间内的已发布对象，并非同一时刻的快照。进行中的上传及超出已保存 ID 边界的新区块不在范围内；期间已解除的引用计为跳过。',
     integrityPhase: '阶段', phase_metadata: '对象映射', phase_chunks: '区块', phase_done: '结束', objectsChecked: '已检查对象', chunksChecked: '已检查区块', bytesChecked: '已检查编码字节', findings: '异常记录', skipped: '变更后跳过',
     integrityFound: '巡检已完成，发现异常，请查看报告。', integrityClear: '巡检已完成，已检查范围内未发现异常。', noFindings: '目前没有异常记录。', exportReport: '导出报告（JSONL）',

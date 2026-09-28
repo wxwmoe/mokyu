@@ -236,6 +236,8 @@ impl Default for Multipart {
 #[serde(default, deny_unknown_fields)]
 pub struct Cache {
     pub max_size: Option<String>,
+    pub upload_cache: bool,
+    pub upload_cache_size: Option<String>,
     pub max_entries: Option<usize>,
     pub min_compression_savings_percent: u8,
 }
@@ -243,6 +245,8 @@ impl Default for Cache {
     fn default() -> Self {
         Self {
             max_size: None,
+            upload_cache: true,
+            upload_cache_size: None,
             max_entries: None,
             min_compression_savings_percent: 20,
         }
@@ -530,6 +534,9 @@ impl Config {
             );
         }
         if let Some(v) = &c.cache.max_size {
+            cache_bytes(v)?;
+        }
+        if let Some(v) = &c.cache.upload_cache_size {
             cache_bytes(v)?;
         }
         ensure!(

@@ -28,6 +28,7 @@ pub enum CompressionStrategy {
 pub struct Config {
     pub enabled: bool,
     pub max_size: String,
+    pub upload_cache_timeout: String,
     pub compression_strategy: Option<CompressionStrategy>,
     pub maintenance_concurrency: usize,
     pub interval: String,
@@ -42,6 +43,7 @@ impl Default for Config {
         Self {
             enabled: true,
             max_size: "32MiB".into(),
+            upload_cache_timeout: "60s".into(),
             compression_strategy: None,
             maintenance_concurrency: 1,
             interval: "1h".into(),
@@ -65,6 +67,7 @@ impl Config {
         );
         config::bytes(&self.reclaim_min_savings_bytes)?;
         for time in [
+            &self.upload_cache_timeout,
             &self.interval,
             &self.reuse_interval,
             &self.reclaim_interval,
@@ -214,8 +217,8 @@ pub fn encode(
                 && data.len() <= codec::MAX
                 && data.len() == c.raw_size as usize
                 && blake3::hash(data).as_bytes().as_slice() == c.hash
-                && c.algorithm == p.algorithm
-                && c.key_id == p.key_id,
+                && c.algorithm == members[0].0.algorithm
+                && c.key_id == members[0].0.key_id,
             "invalid pack member"
         );
         raw.extend_from_slice(&c.id.to_be_bytes());

@@ -19,6 +19,7 @@ pub enum IntegrityError {
     Decompression,
     Hash,
     RemoteMissing,
+    PendingUnavailable,
 }
 impl IntegrityError {
     pub fn code(self) -> &'static str {
@@ -30,6 +31,7 @@ impl IntegrityError {
             Self::Decompression => "decompression_failed",
             Self::Hash => "hash_mismatch",
             Self::RemoteMissing => "remote_missing",
+            Self::PendingUnavailable => "pending_unavailable",
         }
     }
     pub fn from_code(code: &str) -> Option<Self> {
@@ -41,6 +43,7 @@ impl IntegrityError {
             Self::Decompression,
             Self::Hash,
             Self::RemoteMissing,
+            Self::PendingUnavailable,
         ]
         .into_iter()
         .find(|e| e.code() == code)

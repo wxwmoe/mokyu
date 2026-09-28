@@ -107,6 +107,7 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | `metadata` | jsonb | 否 | `'{}'` | HTTP 元数据及 user 字典 |
 | `public_read` | boolean | 否 | `false` | 对象匿名读取标志 |
 | `checksums` | jsonb | 否 | `'{}'` | S3 校验和值/类型 |
+| `upload_cache_bypass` | boolean | 否 | `false` | 本次请求已因暂存不可用转同步，后续新块沿用 |
 | `created_at` | timestamptz | 否 | `now()` | 该版本创建时间 |
 | `touched_at` | timestamptz | 否 | `now()` | 发布、退役或写入进度时间 |
 
@@ -145,7 +146,7 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | `raw_size` | integer | 否 | — | 明文长度，B，1～4 MiB |
 | `stored_size` | integer | 是 | — | 初始独立编码长度提示，B，含 tag；不随打包改变 |
 | `algorithm` | text | 否 | — | none / aes-256-gcm / chacha20-poly1305 |
-| `key_id` | text | 否 | — | 历史解密密钥 ID；none 时为空串 |
+| `key_id` | text | 否 | — | 初始编码密钥和逻辑去重域；none 时为空串 |
 | `compressed` | boolean | 否 | `false` | 独立压缩提示，不代表所在 pack 的压缩状态 |
 | `nonce` | bytea | 是 | — | AEAD 12 字节 nonce；未编码/none 时为 NULL |
 | `format` | integer | 否 | `1` | 区块编码格式，固定为 1 |
@@ -172,7 +173,7 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 
 | 表 | 字段（未注明可空者均 NOT NULL） |
 | --- | --- |
-| `chunk_locations` | id bigint BY DEFAULT identity PK；chunk_id bigint → chunks CASCADE；storage_id uuid UNIQUE；stored_size integer 可空；compressed bool；nonce bytea 可空；state text；created_at timestamptz；unreferenced_at/deleted_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
+| `chunk_locations` | id bigint BY DEFAULT identity PK；chunk_id bigint → chunks CASCADE；storage_id uuid UNIQUE；algorithm/key_id text；stored_size integer 可空；compressed bool；nonce bytea 可空；state text；created_at timestamptz；unreferenced_at/deleted_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
 | `packs` | id bigint ALWAYS identity PK；storage_id uuid UNIQUE；algorithm/key_id text；raw_size bigint >0；stored_size bigint 可空；compressed bool 默认 false；nonce bytea（12 B）/digest bytea（32 B）可空；member_count integer ≥2；state text；created_at timestamptz 默认 now()；unreferenced_at/deleted_at timestamptz 可空；owner_task uuid → tasks SET NULL 可空 |
 | `pack_members` | pack_id bigint → packs CASCADE；ordinal integer ≥0；chunk_id bigint → chunks CASCADE；offset_bytes bigint ≥0；PK(pack_id,ordinal)、UNIQUE(pack_id,chunk_id) |
 | `pack_inputs` | task_id uuid → tasks CASCADE；chunk_id bigint → chunks；created_at timestamptz 默认 now()；PK(task_id,chunk_id)、UNIQUE(chunk_id)，防止重写任务同时占有相同输入 |
@@ -305,7 +306,7 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `id` | uuid | 否 | — | 维护任务 UUID |
-| `kind` | text | 否 | — | purge / sweep / integrity / pack / unpack |
+| `kind` | text | 否 | — | purge / sweep / integrity / pack / unpack / upload / cache_flush |
 | `bucket_id` | uuid | 是 | — | 目标桶；桶删除后为 NULL，巡检的原始范围另外保存在 detail |
 | `state` | text | 否 | — | queued / running / paused / completed / failed |
 | `cursor` | text | 是 | — | 最后处理对象 key、后端物理 key，或巡检的对象/范围/区块 JSON 游标 |
@@ -347,6 +348,22 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | 索引 | 列与条件 |
 | --- | --- |
 | `integrity_issues_page` | `(task_id,id)` |
+
+## pending_uploads / cache_pins
+
+| pending_uploads 字段 | 类型 / 默认 | 含义 |
+| --- | --- | --- |
+| chunk_id | bigint，主键 | 引用 chunks，逻辑块对应一份待处理缓存，物理字节只计一次 |
+| stream_id / offset_bytes | uuid 可空 / bigint | 凑包顺序所属 stream 与位置；stream 删除时置空，后者非负 |
+| cache_size / cache_compressed | bigint / boolean | 持久文件的实际字节和 .zst/.raw 后缀；大小必须为正 |
+| source_pack | bigint 可空 | 引用原 pack；NULL 表示初次上传，非空表示暂存的复用拆包输入 |
+| created_at / next_retry_at | timestamptz / now()、必填 | 最早暂存时间 / 下一次可执行时间，新增字节不重置前者 |
+| attempts / last_error | integer / text 可空；0 / NULL | 跨轮重试次数和最近任务错误 |
+| owner_task | uuid 可空 | 当前处理任务，任务删除时置空 |
+
+索引：pending_uploads_due `(next_retry_at,chunk_id) WHERE owner_task IS NULL`；pending_uploads_stream `(stream_id,offset_bytes)`；非空 source_pack、owner_task 各有索引。
+
+cache_pins 主键为 `(chunk_id,pin_type,owner_id)`：chunk_id 引用 pending_uploads 并级联删除；pin_type 为 upload/pack；owner_id 为上传 stream UUID；created_at 为 `timestamptz NOT NULL DEFAULT now()`。多个归属共同保护同一文件；实际来源提交或确认无需保留后一起解除。年龄不是删除唯一副本的依据。
 
 ## 状态与清理
 

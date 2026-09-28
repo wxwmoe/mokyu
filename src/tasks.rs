@@ -124,7 +124,7 @@ impl App {
                     )
                     .into());
                 }
-            } else if matches!(kind.as_str(), "purge" | "pack" | "unpack") {
+            } else if matches!(kind.as_str(), "purge" | "pack" | "unpack" | "upload") {
                 self.writable()?;
             } else if kind == "integrity" {
                 let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE kind='integrity' AND state IN ('queued','running') AND id<>$1)").bind(id).fetch_one(&self.db).await?;
@@ -292,11 +292,20 @@ impl App {
 pub async fn run(app: Arc<App>) -> Result<()> {
     let active = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
     let mut workers = futures_util::stream::FuturesUnordered::new();
-    for pack in std::iter::once(false).chain(std::iter::repeat_n(
-        true,
-        app.config.pack.maintenance_concurrency,
-    )) {
-        workers.push(worker(app.clone(), active.clone(), pack));
+    for class in std::iter::once(0)
+        .chain(std::iter::repeat_n(
+            1,
+            app.config.pack.maintenance_concurrency,
+        ))
+        .chain(std::iter::repeat_n(
+            2,
+            app.budget
+                .cpu_jobs
+                .min(app.budget.upload_concurrency)
+                .clamp(1, 4),
+        ))
+    {
+        workers.push(worker(app.clone(), active.clone(), class));
     }
     workers
         .next()
@@ -306,19 +315,26 @@ pub async fn run(app: Arc<App>) -> Result<()> {
 async fn worker(
     app: Arc<App>,
     active: Arc<tokio::sync::Mutex<std::collections::HashSet<Uuid>>>,
-    pack: bool,
+    class: i32,
 ) -> Result<()> {
     loop {
         let id = {
             let mut active = active.lock().await;
             let ids: Vec<Uuid> = active.iter().copied().collect();
-            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',updated_at=now() WHERE id=(SELECT id FROM tasks WHERE state IN ('queued','running') AND (kind IN ('pack','unpack'))=$1 AND NOT(id=ANY($2)) ORDER BY updated_at,id LIMIT 1) AND state IN ('queued','running') RETURNING id").bind(pack).bind(ids).fetch_optional(&app.db).await?;
+            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',updated_at=now() WHERE id=(SELECT id FROM tasks WHERE state IN ('queued','running') AND CASE WHEN kind IN ('pack','unpack') THEN 1 WHEN kind IN ('upload','cache_flush') THEN 2 ELSE 0 END=$1 AND NOT(id=ANY($2)) ORDER BY updated_at,id LIMIT 1) AND state IN ('queued','running') RETURNING id").bind(class).bind(ids).fetch_optional(&app.db).await?;
             if let Some(id) = id {
                 active.insert(id);
             }
             id
         };
         let Some(id) = id else {
+            if class == 2 {
+                match app.enqueue_upload().await {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(error=%e,"pending upload scheduling failed"),
+                }
+            }
             tokio::select! {_=app.wake_tasks.notified()=>{},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
             continue;
         };
@@ -371,28 +387,43 @@ async fn worker(
                         app.pack_batch(id, cursor.as_deref(), detail, kind == "unpack"),
                     )
                     .await
+            } else if kind == "upload" || kind == "cache_flush" {
+                crate::backend::PRIORITY
+                    .scope(
+                        crate::backend::UPLOAD,
+                        crate::upload_cache::FLUSH.scope(
+                            kind == "cache_flush",
+                            app.upload_batch(id, detail, kind == "cache_flush"),
+                        ),
+                    )
+                    .await
             } else {
                 Err(anyhow::anyhow!("unknown maintenance task kind"))
             };
-            if pack {
-                if result.is_err() {
+            if class != 0 {
+                if class == 1 && result.is_err() {
                     sqlx::query("UPDATE pack_changes SET next_check_at=now()+$2*interval '1 second' WHERE pack_id IN (SELECT c.pack_id FROM pack_inputs i JOIN chunks c ON c.id=i.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.pack.reuse_interval)? as f64).execute(&app.db).await?;
                     sqlx::query("UPDATE pack_maintenance SET next_check_at=now()+$2*interval '1 second' WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.pack.reuse_interval)? as f64).execute(&app.db).await?;
                 }
                 app.finish_pack_work(id).await?;
             }
-            active.lock().await.remove(&id);
             match result {
                 Ok(true) => {
+                    active.lock().await.remove(&id);
                     tokio::task::yield_now().await;
                     continue;
                 }
                 Ok(false) => {}
                 Err(e) => {
                     tracing::error!(task_id=%id,error=%e,"maintenance task stopped");
-                    sqlx::query("UPDATE tasks SET state='failed',error=$2,updated_at=now() WHERE id=$1 AND state='running'").bind(id).bind(e.to_string()).execute(&app.db).await?;
+                    if class == 2 {
+                        app.upload_retry(id, &e.to_string()).await?;
+                    } else {
+                        sqlx::query("UPDATE tasks SET state='failed',error=$2,updated_at=now() WHERE id=$1 AND state='running'").bind(id).bind(e.to_string()).execute(&app.db).await?;
+                    }
                 }
             }
+            active.lock().await.remove(&id);
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }

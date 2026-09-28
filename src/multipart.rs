@@ -177,7 +177,7 @@ impl App {
             .into());
         }
         let (id, _pin) = self
-            .new_stream(b.id, &i.key, "part", json!({}), false, false)
+            .new_stream(b.id, &i.key, "part", u.metadata.clone(), false, false)
             .await?;
         {
             let lock = self.upload_lock(u.id);
@@ -264,6 +264,7 @@ impl App {
                 .await?;
             tx.commit().await?;
         }
+        self.seal_uploads(id, false).await?;
         // A late predecessor can now transfer its tail using an already durable successor.
         if let Err(e) = self.stitch_pair(u.id, i.part_number).await {
             tracing::warn!(error=%e,"multipart boundary remains recoverable for retry");
@@ -415,7 +416,7 @@ impl App {
                 left.bucket_id,
                 &left.object_key,
                 "part",
-                json!({}),
+                metadata,
                 false,
                 false,
             )

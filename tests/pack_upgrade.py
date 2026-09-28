@@ -49,7 +49,7 @@ try:
         except subprocess.CalledProcessError: pass
         time.sleep(.1)
     else: raise AssertionError('upgrade startup timeout')
-    assert db.execute('SELECT schema_version FROM gateway_meta').fetchone()[0]==5
+    assert db.execute('SELECT schema_version FROM gateway_meta').fetchone()[0]==6
     assert db.execute('SELECT id,storage_id,nonce FROM chunk_locations ORDER BY id').fetchall()==original
     assert db.execute('SELECT last_value FROM chunk_locations_id_seq').fetchone()[0]>=100000
     assert json.loads(backend.get_object(**marker)['Body'].read())['format_version']==1

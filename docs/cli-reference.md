@@ -75,7 +75,7 @@ docker exec -i media-gateway cli user create admin --password-stdin < /secure/pa
 | `task pause UUID` | 暂停 queued/running 任务，允许当前批次结束 |
 | `task resume UUID` | 从持久进度继续 paused/failed 任务，清除旧错误 |
 
-重启后此前运行的任务自动继续，paused 保持暂停。维护模式下 purge/pack/unpack 会持久暂停，退出维护后需显式 `task resume`。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge/pack/unpack 需要退出维护模式，只读 sweep 预览和巡检可在维护模式下运行。
+重启后此前运行的任务自动继续，paused 保持暂停。维护模式下 purge/pack/unpack/upload 会持久暂停，退出维护后需显式 `task resume`。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge/pack/unpack/upload 需要退出维护模式，只读 sweep、巡检和显式 cache flush 可在维护模式下运行。
 
 ### Pack 维护
 
@@ -128,7 +128,7 @@ docker exec -it media-gateway cli backend sweep --execute --preview PREVIEW_UUID
 | `head` | metadata，加后端存在性及编码长度 |
 | `full` | metadata，加远端下载、认证、解压、长度及 BLAKE3 校验 |
 
-巡检只报告，不修复或删除数据；远端检查绕过且不填充缓存，共享物理块每轮只检查一次。`completed` 仍可能有异常，应查看 `detail.issues`；网络、权限及超时使任务 `failed`，可恢复后继续。覆盖边界、异常代码和 JSONL 导出见[巡检 API](manage-api-reference.md#完整性巡检)，并发和限速见[配置](configuration.md#完整性巡检)。
+巡检只报告，不修复或删除数据；远端检查绕过且不填充缓存，共享物理块每轮只检查一次。没有远端来源的 pending 块在所有模式下校验本地唯一副本。`completed` 仍可能有异常，应查看 `detail.issues`；网络、权限及超时使任务 `failed`，可恢复后继续。覆盖边界、异常代码和 JSONL 导出见[巡检 API](manage-api-reference.md#完整性巡检)，并发和限速见[配置](configuration.md#完整性巡检)。
 
 ```sh
 docker exec media-gateway cli integrity check --mode full --bucket media
@@ -137,6 +137,15 @@ docker exec media-gateway cli integrity issues TASK_UUID
 docker exec media-gateway cli task pause TASK_UUID
 docker exec media-gateway cli task resume TASK_UUID
 ```
+
+## 上传缓存
+
+| 命令 | 返回与行为 |
+| --- | --- |
+| `cache status` | 配置及有效额度、待上传字节/条目/最早时间、最近错误、前 100 条 pin 归属；回退次数为本次进程累计 |
+| `cache flush` | 返回 task_id，将创建时已有积压写入独立后端来源；可在维护模式显式执行，支持任务暂停/恢复 |
+
+新请求仍可产生积压。备份排空需先阻止新写入并等待活跃请求，任务完成后确认 pending 为零。关闭上传缓存不删除已有待上传文件；恢复与备份要求见[部署说明](deployment-and-recovery.md#备份材料)。
 
 ## 离线入口
 

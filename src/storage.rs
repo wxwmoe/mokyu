@@ -78,11 +78,13 @@ pub async fn read_bounded(path: impl AsRef<std::path::Path>, max: usize) -> Resu
 struct Usage {
     used: [u64; 2],
     reserved: u64,
+    upload: u64,
 }
 pub struct Disk {
     pub root: PathBuf,
     limits: [Option<u64>; 2],
     floor: u64,
+    upload_limit: Option<u64>,
     usage: Mutex<Usage>,
     io: Arc<Semaphore>,
     pending: Mutex<HashSet<Uuid>>,
@@ -118,6 +120,37 @@ impl Drop for Reservation {
     }
 }
 impl Disk {
+    fn cache_capacity(&self, usage: &Usage) -> Result<u64> {
+        let capacity = usage.used[1].saturating_add(
+            fs2::available_space(&self.root)?
+                .saturating_sub(self.floor)
+                .saturating_sub(usage.reserved),
+        );
+        Ok(self.limits[1].map_or(capacity, |limit| limit.min(capacity)))
+    }
+    pub fn upload_capacity(&self) -> Result<(u64, u64, u64)> {
+        let usage = self.usage.lock().unwrap();
+        let total = self.cache_capacity(&usage)?;
+        Ok((
+            total,
+            self.upload_limit.unwrap_or(total / 5).min(total),
+            usage.upload,
+        ))
+    }
+    fn claim_upload(self: &Arc<Self>, size: u64) -> Result<UploadCharge> {
+        let mut usage = self.usage.lock().unwrap();
+        let total = self.cache_capacity(&usage)?;
+        let limit = self.upload_limit.unwrap_or(total / 5).min(total);
+        ensure!(
+            usage.upload.saturating_add(size) <= limit,
+            "upload cache quota exhausted"
+        );
+        usage.upload += size;
+        Ok(UploadCharge {
+            disk: self.clone(),
+            size,
+        })
+    }
     fn reserve(self: &Arc<Self>, area: Area, bytes: u64) -> Result<Reservation> {
         let mut usage = self.usage.lock().unwrap();
         let next = usage.used[area as usize]
@@ -226,6 +259,21 @@ impl Drop for CachePin {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
+}
+struct UploadCharge {
+    disk: Arc<Disk>,
+    size: u64,
+}
+impl Drop for UploadCharge {
+    fn drop(&mut self) {
+        self.disk.usage.lock().unwrap().upload -= self.size;
+    }
+}
+pub struct UploadPin {
+    _pin: CachePin,
+    _charge: UploadCharge,
+    pub size: u64,
+    pub compressed: bool,
 }
 pub struct LoadedPack {
     pub pack: crate::pack::Pack,
@@ -434,6 +482,8 @@ pub struct Storage {
     pack_work: Arc<Semaphore>,
     inspection: tokio::sync::Mutex<()>,
     backend: Arc<dyn ObjectStore>,
+    identity_ready: std::sync::atomic::AtomicBool,
+    identity_check: tokio::sync::Mutex<()>,
     prefix: String,
     pub disk: Arc<Disk>,
     pub secrets: Arc<Secrets>,
@@ -444,6 +494,7 @@ pub struct Storage {
     pub controls: Arc<crate::backend::Gate>,
     fifo: tokio::sync::Mutex<Fifo>,
     cache_writes: tokio::sync::Mutex<()>,
+    upload_pins: Mutex<HashMap<Uuid, UploadPin>>,
     fills: Arc<Semaphore>,
     max_entries: usize,
     capacity: Option<u64>,
@@ -486,9 +537,16 @@ impl Storage {
                     .transpose()?,
             ],
             floor: config::bytes(&c.storage.free_space_floor)?,
+            upload_limit: c
+                .cache
+                .upload_cache_size
+                .as_deref()
+                .map(config::cache_bytes)
+                .transpose()?,
             usage: Mutex::new(Usage {
                 used: [0; 2],
                 reserved: 0,
+                upload: 0,
             }),
             io: Arc::new(Semaphore::new(budget.cpu_jobs)),
             pending: Mutex::new(HashSet::new()),
@@ -532,6 +590,8 @@ impl Storage {
             pack_work: Arc::new(Semaphore::new(pack_units as usize)),
             inspection: tokio::sync::Mutex::new(()),
             backend: Arc::new(backend),
+            identity_ready: false.into(),
+            identity_check: tokio::sync::Mutex::new(()),
             prefix: c.backend.prefix.trim_end_matches('/').into(),
             disk,
             secrets,
@@ -560,6 +620,7 @@ impl Storage {
             ),
             fifo: tokio::sync::Mutex::new(Fifo::default()),
             cache_writes: tokio::sync::Mutex::new(()),
+            upload_pins: Mutex::new(HashMap::new()),
             fills: Arc::new(Semaphore::new(budget.cpu_jobs)),
             max_entries: budget.cache_entries,
             capacity: c
@@ -580,6 +641,7 @@ impl Storage {
             cache_lookups: 0.into(),
             operations: std::array::from_fn(|_| Arc::default()),
         };
+        s.restore_upload_pins().await?;
         s.scan().await?;
         Ok(s)
     }
@@ -617,6 +679,7 @@ impl Storage {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Vec<object_store::ObjectMeta>> {
+        self.ensure_identity().await?;
         let _permit = crate::backend::PRIORITY
             .scope(crate::backend::MAINTENANCE, self.controls.acquire())
             .await?;
@@ -634,6 +697,17 @@ impl Storage {
             .take(limit)
             .try_collect()
             .await?)
+    }
+    async fn ensure_identity(&self) -> Result<()> {
+        if self.identity_ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _check = self.identity_check.lock().await;
+        if !self.identity_ready.load(Ordering::Acquire) {
+            self.check_identity(&self.db, self.maintenance.load(Ordering::Acquire))
+                .await?;
+        }
+        Ok(())
     }
     pub async fn check_identity(&self, db: &sqlx::PgPool, maintenance: bool) -> Result<()> {
         let (deployment_id, created_at, initialized): (Uuid, chrono::DateTime<chrono::Utc>, bool) =
@@ -767,6 +841,7 @@ impl Storage {
         )
         .execute(db)
         .await?;
+        self.identity_ready.store(true, Ordering::Release);
         Ok(())
     }
     fn cache_path(&self, id: Uuid, compressed: bool) -> PathBuf {
@@ -775,6 +850,174 @@ impl Storage {
             .join("chunks")
             .join(chunk_name(id))
             .with_extension(if compressed { "zst" } else { "raw" })
+    }
+    async fn restore_upload_pins(&self) -> Result<()> {
+        let mut after = 0i64;
+        loop {
+            let rows: Vec<(i64,Uuid,i64,bool)> = sqlx::query_as("SELECT u.chunk_id,c.storage_id,u.cache_size,u.cache_compressed FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE u.chunk_id>$1 ORDER BY u.chunk_id LIMIT 512")
+                .bind(after).fetch_all(&self.db).await?;
+            if rows.is_empty() {
+                break;
+            }
+            for (id, key, expected, compressed) in rows {
+                after = id;
+                let size = match tokio::fs::metadata(self.cache_path(key, compressed)).await {
+                    Ok(m) => m.len(),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+                    Err(e) => return Err(e.into()),
+                };
+                let mut fifo = self.fifo.lock().await;
+                fifo.insert(key, size, compressed);
+                let pin = fifo.entries[&key].pins.clone();
+                pin.fetch_add(1, Ordering::Relaxed);
+                self.disk.account_existing(Area::Cache, size);
+                self.disk.usage.lock().unwrap().upload += expected as u64;
+                self.upload_pins.lock().unwrap().insert(
+                    key,
+                    UploadPin {
+                        _pin: CachePin(pin),
+                        _charge: UploadCharge {
+                            disk: self.disk.clone(),
+                            size: expected as u64,
+                        },
+                        size: expected as u64,
+                        compressed,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+    pub fn hold_upload(&self, id: Uuid, pin: UploadPin) {
+        self.upload_pins.lock().unwrap().insert(id, pin);
+    }
+    pub fn release_upload(&self, id: Uuid) {
+        self.upload_pins.lock().unwrap().remove(&id);
+    }
+    pub fn upload_pin_ids(&self) -> Vec<Uuid> {
+        self.upload_pins.lock().unwrap().keys().copied().collect()
+    }
+    pub async fn stage_upload(
+        self: &Arc<Self>,
+        c: &Chunk,
+        data: Bytes,
+        compressed: bool,
+    ) -> Result<Option<UploadPin>> {
+        let permit = self.fills.clone().acquire_owned().await?;
+        let storage = self.clone();
+        let id = c.storage_id;
+        tokio::spawn(async move {
+            let _permit = permit;
+            storage.stage_upload_owned(id, data, compressed).await
+        })
+        .await?
+    }
+    async fn stage_upload_owned(
+        &self,
+        id: Uuid,
+        data: Bytes,
+        compressed: bool,
+    ) -> Result<Option<UploadPin>> {
+        let size = data.len() as u64;
+        let _write = self.cache_writes.lock().await;
+        let mut fifo = self.fifo.lock().await;
+        if fifo
+            .entries
+            .get(&id)
+            .is_some_and(|e| e.pins.load(Ordering::Relaxed) > 0)
+        {
+            return Ok(None);
+        }
+        let Ok(charge) = self.disk.claim_upload(size) else {
+            return Ok(None);
+        };
+        if let Some(e) = fifo.entries.get(&id) {
+            match tokio::fs::remove_file(self.cache_path(id, e.compressed)).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            let e = fifo.forget(id).unwrap();
+            self.disk.release(Area::Cache, e.size);
+        }
+        let ticket = loop {
+            if fifo.entries.len() < self.max_entries
+                && let Ok(ticket) = self.disk.reserve(Area::Cache, size)
+            {
+                break ticket;
+            }
+            let capacity = self.capacity.unwrap_or(self.disk.used()[1].max(size));
+            let Some(victim) = fifo.victim(capacity) else {
+                return Ok(None);
+            };
+            let entry = &fifo.entries[&victim];
+            match tokio::fs::remove_file(self.cache_path(victim, entry.compressed)).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    fifo.restore_victim(victim);
+                    return Err(e.into());
+                }
+            }
+            if let Some(e) = fifo.evict(victim, self.max_entries) {
+                self.disk.release(Area::Cache, e.size);
+            }
+        };
+        drop(fifo);
+        let path = self.cache_path(id, compressed);
+        let tmp = path.with_extension(if compressed { "zst.tmp" } else { "raw.tmp" });
+        tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+        let result = async {
+            let mut f = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
+                .await?;
+            f.write_all(&data).await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("upload-cache-written").await;
+            f.sync_all().await?;
+            drop(f);
+            tokio::fs::rename(&tmp, &path).await?;
+            tokio::fs::File::open(path.parent().unwrap())
+                .await?
+                .sync_all()
+                .await?;
+            tokio::fs::File::open(self.disk.root.join("chunks"))
+                .await?
+                .sync_all()
+                .await?;
+            Ok::<_, std::io::Error>(())
+        }
+        .await;
+        if let Err(e) = result {
+            let mut retained = false;
+            for file in [&tmp, &path] {
+                retained |= tokio::fs::remove_file(file).await.is_err()
+                    && tokio::fs::try_exists(file).await.unwrap_or(true);
+            }
+            if retained {
+                ticket.commit();
+            }
+            return Err(e.into());
+        }
+        ticket.commit();
+        let mut fifo = self.fifo.lock().await;
+        fifo.insert(id, size, compressed);
+        let pin = fifo.entries[&id].pins.clone();
+        pin.fetch_add(1, Ordering::Relaxed);
+        drop(fifo);
+        let pin = UploadPin {
+            _pin: CachePin(pin),
+            _charge: charge,
+            size,
+            compressed,
+        };
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("upload-cache-durable").await;
+        Ok(Some(pin))
     }
     async fn scan(&self) -> Result<()> {
         let mut parts = tokio::fs::read_dir(self.disk.root.join("multipart")).await?;
@@ -801,6 +1044,16 @@ impl Storage {
                     file.file_name().to_string_lossy()
                 ));
                 let mut fifo = self.fifo.lock().await;
+                if cached.is_some_and(|(id, compressed)| {
+                    self.upload_pins
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .is_some_and(|p| p.compressed == compressed)
+                }) {
+                    // Restored durable entries are protected and accounted before any eviction.
+                    continue;
+                }
                 if let Some((id, compressed)) = cached.filter(|(id, _)| {
                     (1..=MAX as u64).contains(&len)
                         && !fifo.entries.contains_key(id)
@@ -847,6 +1100,7 @@ impl Storage {
         .await?
     }
     pub async fn put(self: &Arc<Self>, c: &Chunk, encoded: Vec<u8>, cache: Bytes) -> Result<()> {
+        self.ensure_identity().await?;
         ensure!(
             Some(encoded.len() as i32) == c.stored_size,
             "encoded length mismatch"
@@ -897,6 +1151,12 @@ impl Storage {
                 self.cache_hit_bytes.fetch_add(size, Ordering::Relaxed);
                 return Ok(Some(raw));
             }
+        }
+        let pending = self.upload_pins.lock().unwrap().contains_key(&c.storage_id);
+        if pending
+            && sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_locations WHERE chunk_id=$1 AND state='ready'))")
+                .bind(c.id).fetch_one(&self.db).await? {
+            return Err(anyhow::anyhow!("pending upload cache is missing or corrupt for chunk {}; preserve data/chunks and restore its durable source", c.id).context(codec::IntegrityError::PendingUnavailable));
         }
         if let Err(e) = self.invalidate(c.storage_id).await {
             tracing::warn!(storage_id=%c.storage_id,error=%e,"cache invalidation failed; falling back to backend");
@@ -1115,8 +1375,8 @@ impl Storage {
         }
     }
     pub async fn register_location(&self, c: &Chunk) -> Result<()> {
-        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,stored_size,compressed,nonce,state,created_at,unreferenced_at) VALUES($1,$2,$3,$4,$5,$6,'uploading',$7,now())")
-            .bind(c.encoding_id).bind(c.id).bind(c.storage_id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).bind(c.created_at).execute(&self.db).await?;
+        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,stored_size,compressed,nonce,state,created_at,unreferenced_at,algorithm,key_id) VALUES($1,$2,$3,$4,$5,$6,'uploading',$7,now(),$8,$9)")
+            .bind(c.encoding_id).bind(c.id).bind(c.storage_id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).bind(c.created_at).bind(&c.algorithm).bind(&c.key_id).execute(&self.db).await?;
         Ok(())
     }
     fn physical_pin(&self, id: Uuid) -> CachePin {
@@ -1143,7 +1403,7 @@ impl Storage {
     }
     async fn source(&self, id: i64) -> Result<Source> {
         let _gate = self.source_gate.read().await;
-        let physical:Option<Chunk>=sqlx::query_as("SELECT c.id,l.id encoding_id,l.storage_id,c.hash,c.raw_size,l.stored_size,c.algorithm,c.key_id,l.compressed,l.nonce,c.format,c.state,l.created_at FROM chunk_locations l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready'")
+        let physical:Option<Chunk>=sqlx::query_as("SELECT c.id,l.id encoding_id,l.storage_id,c.hash,c.raw_size,l.stored_size,l.algorithm,l.key_id,l.compressed,l.nonce,c.format,c.state,l.created_at FROM chunk_locations l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready'")
             .bind(id).fetch_optional(&self.db).await?;
         if let Some(c) = physical {
             let pin = self.physical_pin(c.storage_id);
@@ -1199,6 +1459,7 @@ impl Storage {
         .await?
     }
     pub async fn put_path(&self, path: &Path, data: Vec<u8>) -> Result<()> {
+        self.ensure_identity().await?;
         let _permit = self.writes.acquire().await?;
         self.background_writable()?;
         let mut operation = self.operations[1].begin();
@@ -1212,6 +1473,7 @@ impl Storage {
         Ok(())
     }
     pub async fn delete_path(&self, path: &Path) -> Result<()> {
+        self.ensure_identity().await?;
         let _permit = self.controls.acquire().await?;
         self.background_writable()?;
         let mut operation = self.operations[2].begin();
@@ -1224,6 +1486,7 @@ impl Storage {
     fn background_writable(&self) -> Result<()> {
         ensure!(
             !self.maintenance.load(Ordering::Acquire)
+                || crate::upload_cache::FLUSH.try_with(|f| *f).unwrap_or(false)
                 || crate::backend::PRIORITY
                     .try_with(|p| *p)
                     .unwrap_or(crate::backend::FOREGROUND)
@@ -1272,6 +1535,7 @@ impl Storage {
             .result
             .get_or_init(|| async {
                 let result: Result<Arc<LoadedPack>> = async {
+                    self.ensure_identity().await?;
                     let memory = self.pack_memory(p.payload_size()?).await?;
                     let read_permit = self
                         .reads
@@ -1343,6 +1607,10 @@ impl Storage {
         if self.capacity == Some(0) {
             return Ok(());
         }
+        let (data, compressed) = self.cache_payload(c, raw).await?;
+        self.fill_owned(c.storage_id, &data, compressed).await
+    }
+    pub async fn cache_payload(&self, c: &Chunk, raw: Bytes) -> Result<(Bytes, bool)> {
         if codec::cache_compressed(c, self.min_compression_savings_percent) {
             let permit = self.cpu.clone().acquire_owned().await?;
             let pool = self.compression.clone();
@@ -1353,12 +1621,13 @@ impl Storage {
             })
             .await??;
             if let Some(data) = compressed {
-                return self.fill_owned(c.storage_id, &data, true).await;
+                return Ok((Bytes::from(data), true));
             }
         }
-        self.fill_owned(c.storage_id, &raw, false).await
+        Ok((raw, false))
     }
     pub(crate) async fn head(&self, c: &Chunk) -> Result<u64> {
+        self.ensure_identity().await?;
         let _permit = self.controls.acquire().await?;
         let mut operation = self.operations[3].begin();
         let result = self.backend.head(&self.path(c.storage_id)).await;
@@ -1372,6 +1641,15 @@ impl Storage {
         mode: crate::integrity::Mode,
         physical_detail: &mut serde_json::Value,
     ) -> Result<u64> {
+        let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_locations WHERE chunk_id=$1 AND state='ready'))").bind(c.id).fetch_one(&self.db).await?;
+        if pending {
+            *physical_detail = serde_json::json!({"source":"pending","storage_id":c.storage_id});
+            ensure!(
+                self.cached(c).await?.is_some(),
+                "pending upload source is missing"
+            );
+            return Ok(0);
+        }
         match self.source(c.id).await? {
             Source::Chunk(physical, _pin) => {
                 *physical_detail = serde_json::json!({"source":"chunk","encoding_id":physical.encoding_id.to_string(),"storage_id":physical.storage_id});
@@ -1434,6 +1712,7 @@ impl Storage {
                     ensure!(offset==p.raw_size,codec::IntegrityError::Metadata);
                     if matches!(mode,crate::integrity::Mode::Metadata) {return Ok(0);}
                     if matches!(mode,crate::integrity::Mode::Head) {
+                        self.ensure_identity().await?;
                         let _permit=self.controls.acquire().await?;
                         let mut operation=self.operations[3].begin();
                         let result=self.backend.head(&self.pack_path(p.storage_id)).await;operation.finish(result.is_err());
@@ -1475,6 +1754,7 @@ impl Storage {
         self.read_path(&self.path(c.storage_id), MAX + 16).await
     }
     pub async fn read_path(&self, path: &Path, bound: usize) -> Result<Vec<u8>> {
+        self.ensure_identity().await?;
         let _permit = self.reads.acquire().await?;
         self.read_path_permitted(path, bound).await
     }

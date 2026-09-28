@@ -15,26 +15,50 @@ use std::{
 use uuid::Uuid;
 
 #[derive(Clone, sqlx::FromRow)]
-struct Mapping {
+pub(crate) struct Mapping {
     #[sqlx(flatten)]
-    chunk: Chunk,
-    offset_bytes: i64,
-    pack_id: Option<i64>,
+    pub(crate) chunk: Chunk,
+    pub(crate) offset_bytes: i64,
+    pub(crate) pack_id: Option<i64>,
 }
-struct Output {
+pub(crate) struct Output {
     chunks: Vec<i64>,
     pack: Option<Pack>,
     independent: Option<Chunk>,
 }
 
 impl App {
-    async fn pin_pack_inputs(&self, task: Uuid, rows: &[Mapping]) -> Result<()> {
+    fn physical_encoding(&self, c: &Chunk) -> Result<(String, String)> {
+        let algorithm = &self.config.encryption.algorithm;
+        ensure!(
+            c.algorithm == "none" || algorithm != "none",
+            "an active encryption key is required to rewrite previously encrypted data"
+        );
+        Ok((
+            algorithm.clone(),
+            if algorithm == "none" {
+                String::new()
+            } else {
+                self.secrets.active_key.clone()
+            },
+        ))
+    }
+    pub(crate) async fn pin_pack_inputs(&self, task: Uuid, rows: &[Mapping]) -> Result<()> {
         let _coord = self.coord.lock().await;
-        self.writable()?;
+        self.storage_writable()?;
         let mut ids: Vec<i64> = rows.iter().map(|r| r.chunk.id).collect();
         ids.sort_unstable();
         ids.dedup();
         let mut tx = self.db.begin().await?;
+        ensure!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT state='running' FROM tasks WHERE id=$1 FOR UPDATE"
+            )
+            .bind(task)
+            .fetch_one(&mut *tx)
+            .await?,
+            "physical task was paused"
+        );
         let ready: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM chunks WHERE id=ANY($1) AND state='ready' ORDER BY id FOR UPDATE",
         )
@@ -123,7 +147,7 @@ impl App {
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id}))
     }
-    fn same_references(
+    pub(crate) fn same_references(
         a: i64,
         b: i64,
         distance: i64,
@@ -149,6 +173,7 @@ impl App {
             });
         }
         let mut physical = c.clone();
+        (physical.algorithm, physical.key_id) = self.physical_encoding(c)?;
         physical.encoding_id = sqlx::query_scalar("SELECT nextval('chunk_locations_id_seq')")
             .fetch_one(&self.db)
             .await?;
@@ -156,8 +181,8 @@ impl App {
         physical.created_at = chrono::Utc::now();
         physical.nonce = None;
         // A newly encoded physical copy always consumes a fresh persisted identity.
-        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,compressed,state,created_at,unreferenced_at,owner_task) VALUES($1,$2,$3,false,'uploading',$4,now(),$5)")
-            .bind(physical.encoding_id).bind(c.id).bind(physical.storage_id).bind(physical.created_at).bind(task).execute(&self.db).await?;
+        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,compressed,state,created_at,unreferenced_at,owner_task,algorithm,key_id) VALUES($1,$2,$3,false,'uploading',$4,now(),$5,$6,$7)")
+            .bind(physical.encoding_id).bind(c.id).bind(physical.storage_id).bind(physical.created_at).bind(task).bind(&physical.algorithm).bind(&physical.key_id).execute(&self.db).await?;
         let (physical, encoded, _) = self
             .storage
             .encode(physical, raw.to_vec(), c.compressed)
@@ -178,7 +203,7 @@ impl App {
             independent: Some(physical),
         })
     }
-    async fn pack_output(
+    pub(crate) async fn pack_output(
         &self,
         task: Uuid,
         rows: &[Mapping],
@@ -238,8 +263,9 @@ impl App {
     ) -> Result<Option<Output>> {
         let raw_size: i64 = rows.iter().map(|r| i64::from(r.chunk.raw_size)).sum();
         let first = &rows[0].chunk;
+        let (algorithm, key_id) = self.physical_encoding(first)?;
         let p:Pack=sqlx::query_as("INSERT INTO packs(storage_id,algorithm,key_id,raw_size,member_count,state,unreferenced_at,owner_task) VALUES($1,$2,$3,$4,$5,'preparing',now(),$6) RETURNING *")
-            .bind(Uuid::new_v4()).bind(&first.algorithm).bind(&first.key_id).bind(raw_size).bind(rows.len() as i32).bind(task).fetch_one(&self.db).await?;
+            .bind(Uuid::new_v4()).bind(&algorithm).bind(&key_id).bind(raw_size).bind(rows.len() as i32).bind(task).fetch_one(&self.db).await?;
         let strategy = match self.config.pack.compression_strategy {
             None => self.config.compression.strategy,
             Some(CompressionStrategy::Always) => crate::compression::Strategy::Always,
@@ -299,7 +325,7 @@ impl App {
             independent: None,
         }))
     }
-    async fn commit_outputs(
+    pub(crate) async fn commit_outputs(
         &self,
         task: Uuid,
         rows: &[Mapping],
@@ -309,7 +335,7 @@ impl App {
         #[cfg(feature = "fault-injection")]
         crate::faults::point("pack-before-publish").await;
         let _coord = self.coord.lock().await;
-        self.writable()?;
+        self.storage_writable()?;
         let _sources = self.storage.source_gate.write().await;
         let mut ids: Vec<i64> = rows.iter().map(|r| r.chunk.id).collect();
         ids.sort_unstable();
@@ -347,7 +373,12 @@ impl App {
                     .unwrap_or(0)
             })
             .sum();
-        if !split {
+        let upload: bool =
+            sqlx::query_scalar("SELECT kind IN ('upload','cache_flush') FROM tasks WHERE id=$1")
+                .bind(task)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !split && !upload {
             let exclusive:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM chunks c WHERE c.id=ANY($1) AND ((SELECT count(*) FROM extents WHERE chunk_id=c.id)<>1 OR NOT COALESCE(c.repack_after<=now(),true) OR c.range_split_at IS NOT NULL OR (c.split_at IS NOT NULL AND c.reference_changed_at>now()-$2*interval '1 second')))").bind(&ids).bind(config::seconds(&self.config.pack.repack_cooldown)? as f64).fetch_one(&mut *tx).await?;
             ensure!(exclusive, "pack references changed; retry maintenance");
         }
@@ -410,15 +441,34 @@ impl App {
         tx.commit().await?;
         Ok(())
     }
-    async fn rewrite_pack(&self, task: Uuid, id: i64, unpack: bool) -> Result<usize> {
-        self.writable()?;
+    pub(crate) async fn rewrite_pack(&self, task: Uuid, id: i64, unpack: bool) -> Result<usize> {
+        self.storage_writable()?;
+        if !unpack
+            && crate::backend::PRIORITY
+                .try_with(|p| *p)
+                .unwrap_or(crate::backend::FOREGROUND)
+                != crate::backend::UPLOAD
+            && sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack=$1)",
+            )
+            .bind(id)
+            .fetch_one(&self.db)
+            .await?
+        {
+            return Ok(0);
+        }
         let rows:Vec<Mapping>=sqlx::query_as("SELECT c.*,m.offset_bytes,c.pack_id FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 AND c.pack_id=$1 AND c.state='ready' ORDER BY m.ordinal LIMIT 4096")
             .bind(id).fetch_all(&self.db).await?;
         if rows.is_empty() {
             return Ok(0);
         }
         let writing:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM extents e JOIN chunks c ON c.id=e.chunk_id JOIN streams s ON s.id=e.stream_id WHERE c.pack_id=$1 AND s.state='writing')").bind(id).fetch_one(&self.db).await?;
-        if writing {
+        if writing
+            && crate::backend::PRIORITY
+                .try_with(|p| *p)
+                .unwrap_or(crate::backend::FOREGROUND)
+                != crate::backend::UPLOAD
+        {
             return Ok(0);
         }
         let mut groups: Vec<Vec<Mapping>> = Vec::new();
@@ -543,7 +593,7 @@ impl App {
             eligible: bool,
             unit_count: i64,
         }
-        let rows:Vec<Candidate>=sqlx::query_as("SELECT c.*,e.offset_bytes,c.pack_id,(e.source_offset=0 AND e.length=c.raw_size AND (SELECT count(*) FROM extents WHERE chunk_id=c.id)=1 AND COALESCE(c.repack_after<=now(),true) AND (c.split_at IS NULL OR c.reference_changed_at<=now()-$3*interval '1 second') AND c.range_split_at IS NULL) eligible,CASE WHEN c.pack_id IS NULL THEN 1 ELSE (SELECT count(*) FROM chunks WHERE pack_id=c.pack_id AND state='ready') END unit_count FROM extents e JOIN chunks c ON c.id=e.chunk_id JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=$1 AND e.offset_bytes>=$2 AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026")
+        let rows:Vec<Candidate>=sqlx::query_as("SELECT c.*,e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND e.source_offset=0 AND e.length=c.raw_size AND (SELECT count(*) FROM extents WHERE chunk_id=c.id)=1 AND COALESCE(c.repack_after<=now(),true) AND (c.split_at IS NULL OR c.reference_changed_at<=now()-$3*interval '1 second') AND c.range_split_at IS NULL) eligible,CASE WHEN c.pack_id IS NULL THEN 1 ELSE (SELECT count(*) FROM chunks WHERE pack_id=c.pack_id AND state='ready') END unit_count FROM extents e JOIN chunks c ON c.id=e.chunk_id JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=$1 AND e.offset_bytes>=$2 AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026")
             .bind(stream).bind(from).bind(config::seconds(&self.config.pack.repack_cooldown)? as f64).fetch_all(&self.db).await?;
         let Some(first) = rows.first() else {
             return Ok((-1, 0));

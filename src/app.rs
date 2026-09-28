@@ -157,9 +157,16 @@ impl App {
             )
             .await?,
         );
-        storage
+        if let Err(error) = storage
             .check_identity(&db, maintenance.load(std::sync::atomic::Ordering::Acquire))
-            .await?;
+            .await
+        {
+            let pending:bool=sqlx::query_scalar("SELECT backend_initialized AND EXISTS(SELECT 1 FROM pending_uploads) FROM gateway_meta").fetch_one(&db).await?;
+            if !pending || error.downcast_ref::<object_store::Error>().is_none() {
+                return Err(error);
+            }
+            tracing::warn!(error=%error,"backend identity unavailable; serving durable local uploads while remote operations wait for verification");
+        }
         let app = Arc::new(Self {
             uploads: Arc::new(Semaphore::new(budget.upload_concurrency)),
             reads: Arc::new(Semaphore::new(budget.read_concurrency)),
@@ -311,8 +318,13 @@ impl App {
             .bind(c.id)
             .execute(&mut *tx)
             .await?;
+        sqlx::query("INSERT INTO cache_pins(chunk_id,pin_type,owner_id) SELECT chunk_id,CASE WHEN source_pack IS NULL THEN 'upload' ELSE 'pack' END,$2 FROM pending_uploads WHERE chunk_id=$1 ON CONFLICT DO NOTHING")
+            .bind(c.id).bind(stream).execute(&mut *tx).await?;
+        sqlx::query("UPDATE pending_uploads SET stream_id=$2,offset_bytes=$3 WHERE chunk_id=$1 AND owner_task IS NULL AND source_pack IS NULL AND EXISTS(SELECT 1 FROM streams WHERE id=$2 AND kind='object' AND state='writing')")
+            .bind(c.id).bind(stream).bind(offset).execute(&mut *tx).await?;
         sqlx::query("UPDATE streams SET size=GREATEST(size,$2),touched_at=now() WHERE id=$1 AND state='writing'").bind(stream).bind(offset+c.raw_size as i64).execute(&mut *tx).await?;
         tx.commit().await?;
+        self.seal_uploads(stream, false).await?;
         Ok(())
     }
     pub async fn put_chunk(
@@ -361,6 +373,22 @@ impl App {
         let old:Option<Chunk>=sqlx::query_as("SELECT * FROM chunks WHERE hash=$1 AND raw_size=$2 AND algorithm=$3 AND key_id=$4 AND state='ready'")
             .bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).fetch_optional(&self.db).await?;
         if let Some(c) = old {
+            if self.config.cache.upload_cache {
+                let packed:bool=sqlx::query_scalar("SELECT pack_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=$1) FROM chunks WHERE id=$1")
+                    .bind(c.id).fetch_one(&self.db).await?;
+                if packed {
+                    let (data, compressed) = self
+                        .storage
+                        .cache_payload(&c, Bytes::copy_from_slice(&raw))
+                        .await?;
+                    if self
+                        .stage_chunk(stream, offset, &c, data, compressed, false)
+                        .await?
+                    {
+                        return Ok(c);
+                    }
+                }
+            }
             match self.reference(stream, offset, &c).await {
                 Ok(()) => return Ok(c),
                 Err(e) if e.downcast_ref::<s3s::S3Error>().is_some() => {}
@@ -379,6 +407,22 @@ impl App {
         let (c, encoded, cache) = self.storage.encode(c, raw, should_compress).await?;
         sqlx::query("UPDATE chunks SET stored_size=$2,compressed=$3,nonce=$4,state='uploading' WHERE id=$1 AND state='preparing'")
             .bind(c.id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).execute(&self.db).await?;
+        if self
+            .stage_chunk(
+                stream,
+                offset,
+                &c,
+                cache.clone(),
+                crate::codec::cache_compressed(
+                    &c,
+                    self.config.cache.min_compression_savings_percent,
+                ),
+                true,
+            )
+            .await?
+        {
+            return Ok(c);
+        }
         self.storage.register_location(&c).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-uploading").await;
@@ -657,6 +701,7 @@ impl App {
         }
         tx.commit().await?;
         self.wake_gc.notify_one();
+        self.seal_uploads(id, true).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("object-published").await;
         Ok(())
@@ -731,6 +776,7 @@ impl App {
             &self.config.statistics.refresh_interval,
         )?);
         status["io"] = self.storage.statistics();
+        status["upload_cache"] = self.upload_cache_status().await?;
         status["process_memory"] = crate::stats::process_memory().await;
         status["gc_running"] = json!(self.gc_running.load(std::sync::atomic::Ordering::Relaxed));
         status["upload_slots_available"] = json!(self.uploads.available_permits());

@@ -20,6 +20,7 @@ mod stats;
 mod storage;
 mod tasks;
 mod upload;
+mod upload_cache;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

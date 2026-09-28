@@ -44,6 +44,13 @@ pub enum Command {
     Integrity(Integrity),
     #[command(subcommand)]
     Pack(Packs),
+    #[command(subcommand)]
+    Cache(Cache),
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Cache {
+    Status,
+    Flush,
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Packs {
@@ -401,6 +408,8 @@ pub async fn password_hash(password: String) -> Result<String> {
 pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
     match command {
         Command::Status => app.status().await,
+        Command::Cache(Cache::Status) => app.upload_cache_status().await,
+        Command::Cache(Cache::Flush) => app.cache_flush_start().await,
         Command::Pack(Packs::Status) => app.pack_status().await,
         Command::Pack(Packs::Run { kind }) => app.pack_start(&kind).await,
         Command::Pack(Packs::Unpack { id, all, execute }) => {

@@ -237,6 +237,7 @@ pub fn manage_router(app: Arc<App>) -> Router {
         .route("/api/packs", get(packs))
         .route("/api/packs/{id}", get(pack_detail))
         .route("/api/packs/run", post(pack_run))
+        .route("/api/cache/flush", post(cache_flush))
         .route("/api/packs/unpack", post(pack_unpack))
         .route("/api/tasks/{id}/issues", get(integrity_issues))
         .route(
@@ -927,7 +928,7 @@ async fn object_chunks(
     if object.id != q.version {
         return Err(s3s::s3_error!(PreconditionFailed).into());
     }
-    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',c.id::text,'offset_bytes',e.offset_bytes::text,'length',e.length,'source_offset',e.source_offset,'raw_size',c.raw_size,'stored_size',l.stored_size,'independent_size_hint',c.stored_size,'payload_size',c.stored_size-CASE WHEN c.algorithm='none' THEN 0 ELSE 16 END,'compression',CASE WHEN c.compressed THEN 'zstd' ELSE 'none' END,'algorithm',c.algorithm,'key_id',c.key_id,'pack_id',c.pack_id::text,'source',CASE WHEN l.id IS NOT NULL THEN 'chunk' ELSE 'pack' END,'reads',COALESCE(a.reads,0),'range_reads',COALESCE(a.range_reads,0)) FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_locations l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN chunk_access_stats a ON a.chunk_id=c.id WHERE e.stream_id=$1 AND e.offset_bytes>$2 ORDER BY e.offset_bytes LIMIT $3")
+    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',c.id::text,'offset_bytes',e.offset_bytes::text,'length',e.length,'source_offset',e.source_offset,'raw_size',c.raw_size,'stored_size',l.stored_size,'independent_size_hint',c.stored_size,'payload_size',c.stored_size-CASE WHEN c.algorithm='none' THEN 0 ELSE 16 END,'compression',CASE WHEN c.compressed THEN 'zstd' ELSE 'none' END,'algorithm',c.algorithm,'key_id',c.key_id,'pack_id',c.pack_id::text,'source',CASE WHEN l.id IS NOT NULL THEN 'chunk' WHEN c.pack_id IS NOT NULL THEN 'pack' ELSE 'pending' END,'reads',COALESCE(a.reads,0),'range_reads',COALESCE(a.range_reads,0)) FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_locations l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN chunk_access_stats a ON a.chunk_id=c.id WHERE e.stream_id=$1 AND e.offset_bytes>$2 ORDER BY e.offset_bytes LIMIT $3")
         .bind(object.id).bind(q.after.unwrap_or(-1)).bind(limit + 1).fetch_all(&app.db).await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
@@ -1109,6 +1110,15 @@ async fn pack_detail(
 #[serde(deny_unknown_fields)]
 struct PackRun {
     kind: String,
+}
+async fn cache_flush(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, HttpError> {
+    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let result = app.cache_flush_start().await;
+    tracing::info!(%user_id,success=result.is_ok(),"management upload cache flush");
+    Ok(Json(result?))
 }
 async fn pack_run(
     State(app): State<Arc<App>>,

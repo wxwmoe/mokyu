@@ -426,12 +426,12 @@ async fn collect(app: &App) -> Result<Value> {
             SELECT e.chunk_id,sum(e.length) bytes FROM objects o JOIN extents e ON e.stream_id=o.stream_id
             WHERE e.chunk_id IS NOT NULL GROUP BY e.chunk_id),
          physical AS (
-            SELECT l.stored_size bytes,l.stored_size-CASE WHEN c.algorithm='none' THEN 0 ELSE 16 END payload
+            SELECT l.stored_size bytes,l.stored_size-CASE WHEN l.algorithm='none' THEN 0 ELSE 16 END payload
             FROM refs r JOIN chunks c ON c.id=r.chunk_id JOIN chunk_locations l ON l.chunk_id=c.id AND l.state='ready'
             UNION ALL SELECT p.stored_size,p.stored_size-CASE WHEN p.algorithm='none' THEN 0 ELSE 16 END
             FROM packs p WHERE state='ready' AND EXISTS(SELECT 1 FROM refs r JOIN chunks c ON c.id=r.chunk_id WHERE c.pack_id=p.id))
          SELECT jsonb_build_object('chunks',count(*),'reference_bytes',COALESCE(sum(r.bytes),0),
-            'raw_bytes',COALESCE(sum(c.raw_size),0),'stored_bytes',(SELECT COALESCE(sum(bytes),0) FROM physical),
+            'raw_bytes',COALESCE(sum(c.raw_size),0),'pending_raw_bytes',COALESCE(sum(c.raw_size) FILTER(WHERE c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_locations WHERE chunk_id=c.id AND state='ready')),0),'stored_bytes',(SELECT COALESCE(sum(bytes),0) FROM physical),
             'payload_bytes',(SELECT COALESCE(sum(payload),0) FROM physical))
          FROM refs r JOIN chunks c ON c.id=r.chunk_id")
         .fetch_one(&mut *tx).await?;
@@ -477,7 +477,7 @@ async fn collect(app: &App) -> Result<Value> {
             'index_bytes',pg_indexes_size(relid),'live_rows_estimate',n_live_tup,
             'dead_rows_estimate',n_dead_tup,'last_autovacuum',last_autovacuum,'last_autoanalyze',last_autoanalyze)
          FROM pg_stat_user_tables WHERE schemaname='public'
-            AND relname IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions','integrity_issues','chunk_locations','packs','pack_members','pack_maintenance','pack_changes','pack_inputs','chunk_access_stats','chunk_access_windows','pack_access_windows','integrity_packs')
+            AND relname IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions','integrity_issues','chunk_locations','packs','pack_members','pack_maintenance','pack_changes','pack_inputs','chunk_access_stats','chunk_access_windows','pack_access_windows','integrity_packs','pending_uploads','cache_pins')
          ORDER BY relname")
         .fetch_all(&mut *tx).await?;
     tx.commit().await?;

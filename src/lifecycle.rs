@@ -43,7 +43,7 @@ impl App {
             (
                 "packs",
                 config::seconds(&c.deleted_chunk_retention)? as f64,
-                "DELETE FROM packs WHERE id IN (SELECT id FROM packs p WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id) ORDER BY deleted_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+                "DELETE FROM packs WHERE id IN (SELECT id FROM packs p WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack=p.id) ORDER BY deleted_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
             ),
             (
                 "chunk_locations",
@@ -150,7 +150,7 @@ impl App {
         sqlx::query("UPDATE uploads SET state='active' WHERE state='completing'")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE tasks SET state=CASE WHEN kind IN ('purge','pack','unpack') AND $1 THEN 'paused' ELSE 'queued' END,updated_at=now() WHERE state='running' OR (kind IN ('purge','pack','unpack') AND state='queued' AND $1)")
+        sqlx::query("UPDATE tasks SET state=CASE WHEN kind IN ('purge','pack','unpack','upload','cache_flush') AND $1 THEN 'paused' ELSE 'queued' END,updated_at=now() WHERE state='running' OR (kind IN ('purge','pack','unpack','upload','cache_flush') AND state='queued' AND $1)")
             .bind(self.maintenance.load(Ordering::Acquire))
             .execute(&mut *tx)
             .await?;
@@ -204,6 +204,7 @@ impl App {
         let Ok(_running) = self.local_cleanup.try_lock() else {
             return Ok(0);
         };
+        self.reconcile_upload_pins().await?;
         let deadline = Instant::now()
             + Duration::from_secs(config::seconds(&self.config.cleanup.max_duration)?);
         let mut removed = 0;
@@ -344,7 +345,7 @@ impl App {
                 break;
             }
             let mut tx = self.db.begin().await?;
-            let row:Option<(Uuid,Option<Uuid>)>=sqlx::query_as("SELECT storage_id,owner_stream FROM chunks WHERE id=$1 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$2*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) FOR UPDATE").bind(id).bind(grace).fetch_optional(&mut *tx).await?;
+            let row:Option<(Uuid,Option<Uuid>)>=sqlx::query_as("SELECT storage_id,owner_stream FROM chunks WHERE id=$1 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$2*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) FOR UPDATE").bind(id).bind(grace).fetch_optional(&mut *tx).await?;
             let Some((storage, owner)) = row else {
                 continue;
             };
