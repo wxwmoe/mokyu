@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/mokyu-banner-dark.svg">
+  <img src="docs/assets/mokyu-banner-light.svg" width="1280" alt="Mokyu — Little chunks, lots of love. S3-compatible media storage.">
+</picture>
+
 # Mokyu
 
 一个 Rust 实现的 S3 媒体存储网关，支持分块、去重、压缩和加密，并将数据存储至 S3 后端
