@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ErrorNotice from './ErrorNotice.vue'
 import { computed, reactive, ref } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { Gauge, SlidersHorizontal, Sprout, Clock3 } from 'lucide-vue-next'
@@ -44,7 +45,7 @@ async function save() {
 <template>
   <section class="quota-card" :class="{ exceeded: over }">
     <div class="section-heading"><h3><Sprout :size="18" />{{ t('quotaTitle') }}</h3><button v-if="session?.role === 'admin' && row" class="text-button" @click="edit"><SlidersHorizontal :size="15" />{{ t('quotaEdit') }}</button></div>
-    <p v-if="quota.error.value" class="error" role="alert">{{ errorText(quota.error.value) }}</p>
+    <ErrorNotice v-if="quota.error.value" :error="quota.error.value" />
     <template v-if="row"><div v-if="used != null" class="quota-reading"><strong>{{ bytes(used) }}</strong><span>/ {{ limit == null ? t('quotaUnlimited') : bytes(limit) }}</span><span v-if="over" class="badge">{{ t('quotaExceeded') }}</span></div>
       <p v-else class="field-help">{{ t('quotaScoped') }}</p>
       <div v-if="used != null && limit != null" class="quota-meter" role="progressbar" :aria-label="t('quotaTitle')" :aria-valuenow="Math.round(percent)" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: percent + '%' }" /></div>
@@ -60,5 +61,5 @@ async function save() {
   </form></UiDialog>
 </template>
 <style scoped>
-.quota-card{background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:18px 22px;margin:18px 0}.quota-card h3{display:flex;align-items:center;gap:8px;margin:0}.quota-card h3 svg{color:#66978a}.quota-reading{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;margin-top:15px}.quota-reading strong{font-size:24px}.quota-reading>span{color:var(--muted)}.quota-meter{height:7px;background:var(--line);border-radius:9px;margin-top:12px;overflow:hidden}.quota-meter>span{display:block;height:100%;border-radius:9px;background:linear-gradient(90deg,#97c5b6,#c2d0ab)}.exceeded .quota-meter>span{background:#d997a4}.quota-details{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:12px;color:var(--muted)}.quota-details>span{display:flex;align-items:center;gap:5px}.quota-input{display:grid;grid-template-columns:minmax(0,1fr) 105px;gap:8px}.quota-card .field-help{margin-bottom:0}
+.quota-card{background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:18px 22px;margin:18px 0}.quota-card h3{display:flex;align-items:center;gap:8px;margin:0}.quota-card h3 svg{color:#66978a}.quota-reading{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;margin-top:15px}.quota-reading strong{font-size:24px;font-weight:850}.quota-reading>span{color:var(--muted)}.quota-meter{height:7px;background:var(--line);border-radius:9px;margin-top:12px;overflow:hidden}.quota-meter>span{display:block;height:100%;border-radius:9px;background:linear-gradient(90deg,#97c5b6,#c2d0ab)}.exceeded .quota-meter>span{background:#d997a4}.quota-details{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:var(--small-size,12px);color:var(--muted)}.quota-details>span{display:flex;align-items:center;gap:5px}.quota-input{display:grid;grid-template-columns:minmax(0,1fr) 105px;gap:8px}.quota-card .field-help{margin-bottom:0}
 </style>

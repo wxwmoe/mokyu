@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, write, refreshSession } from '../api/client'
+import { api, write, refreshSession, identityChanged } from '../api/client'
 import { startupError } from '../app/router'
 import { errorText, notify } from '../app/feedback'
 import { t } from '../app/i18n'
@@ -29,8 +29,9 @@ async function login() {
     await write('/api/login', { username: username.value, password: password.value })
     password.value = ''
     await refreshSession()
+    identityChanged()
     startupError.value = ''
-    await router.replace('/media')
+    await router.replace('/overview')
   } catch (failure) {
     error.value = errorText(failure)
   } finally { busy.value = false }

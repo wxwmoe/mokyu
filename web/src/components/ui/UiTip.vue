@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { TooltipRoot, TooltipTrigger, TooltipPortal, TooltipContent, TooltipArrow } from 'reka-ui'
-defineProps<{ text: string }>()
+import { Primitive, TooltipRoot, TooltipTrigger, TooltipPortal, TooltipContent, TooltipArrow, useForwardExpose } from 'reka-ui'
+defineOptions({ inheritAttrs: false })
+defineProps<{ text?: string }>()
+const { forwardRef } = useForwardExpose()
 </script>
-<template><TooltipRoot><TooltipTrigger as-child><slot /></TooltipTrigger><TooltipPortal><TooltipContent class="tooltip" :side-offset="7">{{ text }}<TooltipArrow /></TooltipContent></TooltipPortal></TooltipRoot></template>
+<template><TooltipRoot v-if="text"><TooltipTrigger :ref="forwardRef" as-child v-bind="$attrs"><slot /></TooltipTrigger><TooltipPortal><TooltipContent class="tooltip" :aria-label="text" :side-offset="7">{{ text }}<TooltipArrow /></TooltipContent></TooltipPortal></TooltipRoot><Primitive v-else :ref="forwardRef" as-child v-bind="$attrs"><slot /></Primitive></template>

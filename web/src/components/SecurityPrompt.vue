@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { verifyOpen, verified } from '../app/security'
-import { write } from '../api/client'
+import { write, session } from '../api/client'
 import { errorText } from '../app/feedback'
 import { t } from '../app/i18n'
 import UiDialog from './ui/UiDialog.vue'
 const password = ref(''), busy = ref(false), error = ref('')
 watch(verifyOpen, value => { password.value = ''; error.value = ''; if (!value) verified(false) })
+watch(() => session.value?.id, () => verified(false))
 async function submit() {
   busy.value = true; error.value = ''
   try { await write('/api/me/reauth', { password: password.value }); verified(true) }

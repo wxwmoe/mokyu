@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ErrorNotice from '../components/ErrorNotice.vue'
 import { computed, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { UploadCloud, CloudCheck, Pause, Play, X, RefreshCw, ArrowUpRight, CircleCheck, Clock, FileCheck2, ChevronRight } from 'lucide-vue-next'
@@ -56,7 +57,7 @@ async function remove() {
   <div class="page-heading"><div><p class="eyebrow">{{ t('uploadEyebrow') }}</p><h1>{{ t('transfers') }}</h1><p>{{ t('transferHint') }}</p></div><div class="heading-actions"><button :disabled="transfers.isFetching.value" :aria-label="t('refresh')" @click="transfers.refetch()"><RefreshCw :size="16" /></button><button v-if="writable" class="primary" @click="add = true"><UploadCloud :size="16" />{{ t('uploadTitle') }}</button></div></div>
   <div class="transfer-banner"><div class="transfer-mascot"><img src="/assets/mokyu-mochi.svg" alt="" width="108" height="98"></div><div><h2>{{ t('transferStory') }}</h2><p>{{ t('transferSafe') }}</p></div><div class="transfer-count"><strong>{{ active }}</strong><span>{{ t('transferSending') }}</span></div><div class="transfer-count remote"><strong>{{ pending }}</strong><span>{{ t('transferWaiting') }}</span></div></div>
   <div class="transfer-toolbar"><UiSelect v-model="state" :label="t('transferFilter')" :options="[{ value: 'active', label: t('transferActive') }, { value: 'completed', label: t('transferFinished') }, { value: 'all', label: t('transferAll') }]" /><UiSelect v-model="bucket" :label="t('bucket')" :options="options" /><span>{{ t('transferScope') }}</span></div>
-  <p v-if="transfers.error.value" class="error" role="alert">{{ errorText(transfers.error.value) }}</p>
+  <ErrorNotice v-if="transfers.error.value" :error="transfers.error.value" />
   <section class="surface transfer-list">
     <div v-if="transfers.isPending.value" class="skeleton-row" />
     <article v-for="row in rows" :key="row.id" class="transfer-row" :data-state="status(row)">

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { DropdownMenuItem } from 'reka-ui'
-import { Check } from 'lucide-vue-next'
+import { Check, Languages } from 'lucide-vue-next'
 import UiMenu from './ui/UiMenu.vue'
 import { locale, locales, setLocale, t, type Locale } from '../app/i18n'
 import { savePreferences, session } from '../api/client'
@@ -14,4 +14,4 @@ async function choose(value: Locale) {
   finally { busy.value = false }
 }
 </script>
-<template><UiMenu :label="t('language')"><template #trigger><span class="locale-short">{{ t('short_' + locale) }}</span></template><DropdownMenuItem v-for="language in locales" :key="language" class="menu-item language-item" :disabled="busy" @select="choose(language)"><span :lang="language">{{ t('language_' + language) }}</span><Check v-if="locale === language" :size="15" /></DropdownMenuItem></UiMenu></template>
+<template><UiMenu :label="t('language')" :tooltip="`${t('language')} · ${t('language_' + locale)}`"><template #trigger><Languages class="locale-icon" :size="19" aria-hidden="true" /></template><DropdownMenuItem v-for="language in locales" :key="language" class="menu-item language-item" :disabled="busy" @select="choose(language)"><span :lang="language">{{ t('language_' + language) }}</span><Check v-if="locale === language" :size="15" aria-hidden="true" /></DropdownMenuItem></UiMenu></template>

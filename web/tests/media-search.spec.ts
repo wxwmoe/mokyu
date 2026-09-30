@@ -28,7 +28,7 @@ test('search, type chips, sorted results, styled date picker and URL restoration
     await page.getByRole('textbox', { name: en.username, exact: true }).fill('tester')
     await page.getByRole('textbox', { name: en.password, exact: true }).fill(password)
     await page.getByRole('button', { name: en.signIn, exact: true }).click()
-    await expect(page).toHaveURL(/\/media$/)
+    await expect(page).toHaveURL(/\/overview$/); await page.goto('/media')
     await page.goto('/media/' + bucket.id + '?' + new URLSearchParams({ prefix }))
     await expect(page.getByRole('button', { name: 'folder/', exact: true })).toBeVisible()
     await page.getByRole('searchbox', { name: en.mediaSearch, exact: true }).fill('heart')

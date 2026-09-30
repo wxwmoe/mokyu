@@ -38,5 +38,5 @@ router.beforeEach(async to => {
   if (!session.value && to.name !== 'login') return { name: 'login' }
   if (session.value?.must_change_password && to.name !== 'account') return { name: 'account' }
   if (to.meta.admin && session.value?.role !== 'admin') return { name: 'media' }
-  if (session.value && to.name === 'login') return { name: 'media' }
+  if (session.value && to.name === 'login') return { name: 'overview' }
 })

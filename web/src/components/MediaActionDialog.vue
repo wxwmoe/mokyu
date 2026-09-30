@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ErrorNotice from './ErrorNotice.vue'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { ArrowRight, Check, CircleAlert, LoaderCircle, Plus, Trash2 } from 'lucide-vue-next'
@@ -107,7 +108,7 @@ function explain(row: Entry) { return row.outcome ? errorText(new ApiError(row.o
 </script>
 <template>
   <UiDialog :open="open" @update:open="closing" :title="t('mediaAction_' + action)" :description="t('actionHint_' + action)" :busy="busy || loading">
-    <p v-if="error" class="error" role="alert">{{ errorText(error) }}</p>
+    <ErrorNotice v-if="error" :error="error" />
     <div v-if="loading" class="skeleton-row" role="status" :aria-label="t('opening')" />
     <template v-else>
       <fieldset v-if="copyMove && !attempted" class="action-fields" :disabled="busy || attempted"><label class="field">{{ t('targetBucket') }}<UiSelect v-model="target" :disabled="attempted" :label="t('targetBucket')" :options="options" /></label><label class="field">{{ t(items.length === 1 ? 'targetPath' : 'targetFolder') }}<input v-model="path" maxlength="1024" :aria-label="t(items.length === 1 ? 'targetPath' : 'targetFolder')"></label><UiCheckbox v-if="current?.actions.includes('bucket.list')" v-model="overwrite" :disabled="attempted" :label="t('actionOverwrite')" /><UiCheckbox v-if="action === 'copy' && current?.actions.includes('object.acl')" v-model="publicRead" :disabled="attempted" :label="t('actionPublicCopy')" /><p v-if="action === 'move'" class="field-help">{{ t('moveAccessHint') }}</p></fieldset>

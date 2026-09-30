@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ErrorNotice from '../components/ErrorNotice.vue'
 import { computed, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { useRoute, useRouter } from 'vue-router'
@@ -86,7 +87,7 @@ async function refresh() {
 
 <template>
   <div class="page-heading"><div><p class="eyebrow">{{ t('collection') }}</p><h1>{{ current?.name || t('media') }}</h1><p>{{ t('everything') }}</p></div><div class="heading-actions"><CreateBucket v-if="!bucket" @created="router.push('/media/' + $event.id)" /><RouterLink v-if="current?.actions.includes('bucket.settings')" class="button" :to="'/buckets/' + bucket">{{ t('buckets') }}</RouterLink><button :disabled="buckets.isFetching.value || (bucket !== '' && objects.isFetching.value)" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button><button v-if="current?.state === 'active' && current.actions.includes('object.write')" :disabled="current?.uploads_paused || current?.state !== 'active'" class="primary" @click="uploading = true"><UploadCloud :size="16" />{{ t('uploadTitle') }}</button></div></div>
-  <p v-if="buckets.error.value || objects.error.value" class="error" role="alert">{{ errorText(buckets.error.value || objects.error.value) }}</p>
+  <ErrorNotice v-if="buckets.error.value || objects.error.value" :error="buckets.error.value || objects.error.value" />
   <QuotaPanel v-if="current?.actions.includes('storage.inspect')" kind="bucket" :id="current.id" />
   <div v-if="!bucket" class="bucket-grid">
     <RouterLink v-for="item in buckets.data.value" :key="item.id" class="bucket-card" :to="`/media/${item.id}`"><img src="/assets/mokyu-pack.svg" alt="" width="64" height="64"><h2>{{ item.name }}</h2><span>{{ t(item.state) }}</span><ArrowUpRight class="bucket-arrow" :size="19" /></RouterLink>

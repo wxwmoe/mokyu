@@ -19,7 +19,7 @@ test('filter the journal, inspect an event and export its visible page', async (
     await page.getByRole('textbox', { name: en.username, exact: true }).fill('tester')
     await page.getByRole('textbox', { name: en.password, exact: true }).fill(password)
     await page.getByRole('button', { name: en.signIn, exact: true }).click()
-    await expect(page).toHaveURL(/\/media$/)
+    await expect(page).toHaveURL(/\/overview$/); await page.goto('/media')
     await page.getByRole('link', { name: en.audit, exact: true }).click()
     await page.getByRole('combobox', { name: en.auditAction, exact: true }).click()
     await page.getByRole('option', { name: en.auditGroup_project, exact: true }).click()

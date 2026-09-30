@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ErrorNotice from '../components/ErrorNotice.vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
@@ -60,7 +61,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
 </script>
 <template>
   <div class="page-heading"><div><p class="eyebrow">{{ t('littleHomes') }}</p><h1>{{ settings.data.value?.bucket.name || t('buckets') }}</h1><p>{{ t('bucketSettingsHint') }}</p></div><div class="heading-actions"><template v-if="id"><RouterLink class="button" :to="`/media/${id}`"><ArrowUpRight :size="16" />{{ t('browseFiles') }}</RouterLink><button :disabled="saving" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button></template><CreateBucket v-else @created="router.push('/buckets/' + $event.id)" /></div></div>
-  <p v-if="settings.error.value || buckets.error.value" class="error" role="alert">{{ errorText(settings.error.value || buckets.error.value) }}</p>
+  <ErrorNotice v-if="settings.error.value || buckets.error.value" :error="settings.error.value || buckets.error.value" />
   <template v-if="!id"><label class="search-field"><span class="sr-only">{{ t('findBucket') }}</span><input v-model="filter" :placeholder="t('findBucket')" type="search"></label><div class="bucket-grid"><RouterLink v-for="bucket in filtered" :key="bucket.id" class="bucket-card" :to="'/buckets/' + bucket.id"><img src="/assets/mokyu-pack.svg" alt="" width="64" height="64"><h2>{{ bucket.name }}</h2><span class="badge">{{ t(bucket.uploads_paused ? 'uploadsPaused' : bucket.state) }}</span><Settings2 class="bucket-arrow" :size="19" /></RouterLink></div><EmptyState v-if="!buckets.isPending.value && !filtered.length" :title="t('noBuckets')" :description="t('bucketSettingsEmpty')" /></template>
   <template v-else-if="draft && settings.data.value"><nav class="breadcrumbs bucket-back"><RouterLink to="/buckets">{{ t('buckets') }}</RouterLink><span>/</span><span>{{ settings.data.value.bucket.name }}</span><span v-if="settings.data.value.bucket.state !== 'active'" class="badge">{{ t(settings.data.value.bucket.state) }}</span></nav>
     <QuotaPanel v-if="settings.data.value.bucket.actions.includes('storage.inspect')" kind="bucket" :id="id" />

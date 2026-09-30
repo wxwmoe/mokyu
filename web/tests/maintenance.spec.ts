@@ -14,7 +14,7 @@ test('maintenance policies, task history, service configuration and key generati
   await page.getByRole('textbox', { name: en.username, exact: true }).fill('tester')
   await page.getByRole('textbox', { name: en.password, exact: true }).fill(password)
   await page.getByRole('button', { name: en.signIn, exact: true }).click()
-  await expect(page).toHaveURL(/\/media$/)
+  await expect(page).toHaveURL(/\/overview$/); await page.goto('/media')
   try {
     await page.goto('/maintenance'); await expect(page.locator('.policy-card')).toHaveCount(7)
     const cleanup = page.locator('.policy-card').filter({ has: page.getByRole('heading', { name: en.task_cleanup, exact: true }) })

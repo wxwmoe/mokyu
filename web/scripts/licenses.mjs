@@ -10,4 +10,6 @@ for (const [directory, item] of Object.entries(lock.packages)) {
   notices.push(`\n${'='.repeat(72)}\n${pkg.name} ${pkg.version}\nLicense: ${pkg.license || item.license || 'See package distribution'}\n`)
   for (const name of names) notices.push(await readFile(path.join(directory, name), 'utf8'))
 }
+notices.push('\nResource Han Rounded CN 0.990 (WOFF2 subsets)\nhttps://github.com/CyanoHao/Resource-Han-Rounded\n')
+notices.push(await readFile('src/fonts/resource-han-rounded/OFL.txt', 'utf8'))
 await writeFile('dist/THIRD_PARTY_NOTICES.txt', notices.join('\n'))

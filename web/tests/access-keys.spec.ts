@@ -17,7 +17,7 @@ test('create, save and revoke a scoped token through styled controls', async ({ 
     await page.getByRole('textbox', { name: en.username, exact: true }).fill('tester')
     await page.getByRole('textbox', { name: en.password, exact: true }).fill(password)
     await page.getByRole('button', { name: en.signIn, exact: true }).click()
-    await expect(page).toHaveURL(/\/media$/)
+    await expect(page).toHaveURL(/\/overview$/); await page.goto('/media')
     await page.goto('/tokens')
     await page.getByRole('button', { name: en.createToken, exact: true }).click()
     const dialog = page.getByRole('dialog', { name: en.createToken, exact: true })

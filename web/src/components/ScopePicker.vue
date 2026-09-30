@@ -15,4 +15,4 @@ const options = computed(() => [{ value: 'all', label: t(session.value?.role ===
 const selected = computed({ get: () => route.query.bucket ? 'bucket:' + route.query.bucket : route.query.project ? 'project:' + route.query.project : 'all',
   set: value => { const [kind, id] = value.split(':'); router.push({ query: { bucket: kind === 'bucket' ? id : undefined, project: kind === 'project' ? id : undefined } }) } })
 </script>
-<template><div class="scope-picker"><UiSelect v-model="selected" :options="options" :label="t('insightScope')" /></div></template>
+<template><div class="scope-picker"><UiSelect v-model="selected" :options="options" :label="t('insightScope')" :searchable="options.length > 10" /></div></template>

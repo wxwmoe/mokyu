@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ErrorNotice from '../components/ErrorNotice.vue'
 import { computed } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { Heart, Images, HardDrive, Sparkles, ArrowUpRight, Package, CloudUpload, RefreshCw, Archive, Flower2, Activity, Clock3 } from 'lucide-vue-next'
@@ -25,11 +26,11 @@ const packed = computed(() => usage.value && Number(usage.value.unique_bytes) ? 
 async function refresh() { const result = await statistics.refetch(); if (admin.value) await runtime.refetch(); if (result.error) report(result.error); else notify(t('refreshed')) }
 </script>
 <template>
-  <div class="page-heading"><div><p class="eyebrow">{{ t('overviewEyebrow') }}</p><h1>{{ t('welcomeHome', { name: session?.display_name || session?.username || 'Mokyu' }) }} <Heart class="heading-heart" :size="24" /></h1><p>{{ t('overviewHint') }}</p></div><div class="heading-actions"><ScopePicker /><button class="icon-button" :aria-label="t('refresh')" :disabled="statistics.isFetching.value" @click="refresh"><RefreshCw :size="17" /></button></div></div>
-  <p v-if="statistics.error.value || runtime.error.value" class="error" role="alert">{{ errorText(statistics.error.value || runtime.error.value) }}</p>
+  <div class="page-heading overview-heading"><div><p class="eyebrow">{{ t('overviewEyebrow') }}</p><h1>{{ t('welcomeHome', { name: session?.display_name || session?.username || 'Mokyu' }) }} <Heart class="heading-heart" :size="24" /></h1><p>{{ t('overviewHint') }}</p></div><div class="heading-actions"><ScopePicker /><button class="icon-button" :aria-label="t('refresh')" :disabled="statistics.isFetching.value" @click="refresh"><RefreshCw :size="17" /></button></div></div>
+  <ErrorNotice v-if="statistics.error.value || runtime.error.value" :error="statistics.error.value || runtime.error.value" />
   <div v-if="statistics.data.value?.stale && usage" class="snapshot-note"><Clock3 :size="14" />{{ t('snapshotStale') }}</div>
   <div v-if="runtime.data.value && Number(runtime.data.value.failed_uploads) > 0" class="info-callout"><CloudUpload :size="20" /><p>{{ t('uploadNeedsAttention', { count: runtime.data.value.failed_uploads }) }}</p><RouterLink class="button" to="/transfers">{{ t('transfers') }}<ArrowUpRight :size="15" /></RouterLink></div>
-  <div class="insight-cards">
+  <div class="overview-ribbon" aria-hidden="true"><img src="/assets/mokyu-mochi.svg" alt="" width="138" height="132"><span>{{ t('overviewRibbon') }}</span><Heart :size="20" /><i /><Sparkles :size="21" /></div><div class="insight-cards">
     <RouterLink :to="{ path: '/storage', query: scope }" class="insight-card rose"><span class="metric-icon"><Images :size="23" /></span><small>{{ t('logicalMedia') }}</small><strong>{{ usage ? bytes(Number(usage.logical_bytes)) : '—' }}</strong><span>{{ usage ? t('objectsKept', { count: usage.objects }) : t('collectingInsights') }}</span><ArrowUpRight class="metric-link" :size="17" /></RouterLink>
     <RouterLink :to="{ path: '/storage', query: scope }" class="insight-card lilac"><span class="metric-icon"><HardDrive v-if="usage?.physical" :size="23" /><Sparkles v-else :size="23" /></span><small>{{ t(usage?.physical ? 'indexedBackend' : saving != null && saving < 0 ? 'extraEncoding' : 'spaceSaved') }}</small><strong>{{ usage?.physical ? bytes(Number(usage.physical.indexed_bytes)) : saving == null ? '—' : bytes(Math.abs(saving)) }}</strong><span>{{ t(usage?.physical ? 'indexedBackendHint' : 'attributionEstimate') }}</span><ArrowUpRight class="metric-link" :size="17" /></RouterLink>
     <RouterLink :to="{ path: '/storage', query: scope }" class="insight-card mint"><span class="metric-icon"><Archive v-if="admin" :size="23" /><Package v-else :size="23" /></span><small>{{ t(admin ? 'cacheHitRate' : 'packedContent') }}</small><strong>{{ admin ? hitRate == null ? '—' : hitRate + '%' : usage ? packed + '%' : '—' }}</strong><span>{{ admin ? t('deploymentSinceStart') : usage ? t('packsInScope', { count: usage.packs }) : t('collectingInsights') }}</span><ArrowUpRight class="metric-link" :size="17" /></RouterLink>

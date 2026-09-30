@@ -3,6 +3,7 @@ import { shallowRef } from 'vue'
 import type { components } from './schema'
 import { applyPreferences } from '../app/preferences'
 import { locale } from '../app/i18n'
+import { saveLocal } from '../app/theme'
 
 export type Session = components['schemas']['SessionView']
 export type Bucket = components['schemas']['BucketView']
@@ -42,7 +43,7 @@ export function write<T>(path: string, body: unknown, method = 'POST'): Promise<
 }
 
 export async function refreshSession() {
-  try { session.value = await api<Session>('/api/session'); await applyPreferences(session.value) }
+  try { const current = await api<Session>('/api/session'); if (session.value?.id !== current.id) queries.clear(); session.value = current; await applyPreferences(current) }
   catch (error) {
     if (!(error instanceof ApiError) || ![401, 403].includes(error.status)) throw error
     session.value = null
@@ -61,6 +62,7 @@ export function savePreferences(changes: Partial<Preferences>) {
       theme: current.theme ?? null, avatar_email: current.avatar_email, avatar_enabled: current.avatar_enabled, ...changes }
     const profile = await write<Profile>('/api/me', input, 'PUT')
     if (session.value?.id === owner) { session.value = { ...session.value, ...profile }; await applyPreferences(profile) }
+    saveLocal('mokyu.preferences-change', uuid())
     return profile
   })
   preferenceQueue = operation
@@ -71,7 +73,10 @@ export async function signOut() {
   await api('/api/logout', { method: 'POST' })
   session.value = null
   queries.clear()
+  identityChanged()
 }
+
+export function identityChanged() { saveLocal('mokyu.identity-change', uuid()) }
 
 export function params(values: Record<string, string | undefined>) {
   return new URLSearchParams(Object.entries(values).filter((entry): entry is [string, string] => entry[1] !== undefined)).toString()

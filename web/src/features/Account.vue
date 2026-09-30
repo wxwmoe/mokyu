@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ErrorNotice from '../components/ErrorNotice.vue'
 import { computed, reactive, ref, watch, onBeforeUnmount } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { useQuery } from '@tanstack/vue-query'
@@ -79,7 +80,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
       </form>
     </section>
     <section class="surface settings-card"><h2><Laptop :size="20" />{{ t('sessions') }}</h2><p class="field-help">{{ t('sessionHint') }}</p>
-      <p v-if="sessions.error.value" class="error" role="alert">{{ errorText(sessions.error.value) }}</p>
+      <ErrorNotice v-if="sessions.error.value" :error="sessions.error.value" />
       <p v-if="sessions.data.value?.more" class="field-help">{{ t('sessionMore') }}</p>
       <ul class="session-list"><li v-for="item in sessions.data.value?.sessions" :key="item.id"><div class="session-heading"><span class="device-name" :title="item.user_agent">{{ item.user_agent || t('unknownDevice') }}</span><span v-if="item.current" class="badge public">{{ t('currentSession') }}</span></div>
         <span class="field-help">{{ t('lastSeen') }} · {{ date(item.last_seen_at) }}</span><span class="field-help">{{ t('expires') }} · {{ date(item.expires_at) }}</span>
