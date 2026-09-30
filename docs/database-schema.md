@@ -74,6 +74,8 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 
 主键：`access_key`。
 
+credentials 另有：label text=''、可空 xpires_at/last_used_at timestamptz、可空 created_by uuid（用户删除时置空）。修改有效期推进授权 revision；应用密钥不随创建者删除。
+
 ## grants
 
 | 字段 | 类型 | 可空 | 默认值 | 含义 |
@@ -278,6 +280,14 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | 索引 | 列与条件 |
 | --- | --- |
 | `parts_stream` | `(stream_id) WHERE stream_id IS NOT NULL` |
+
+## api_tokens 与 token_grants
+
+`api_tokens`：`id uuid` 主键、`user_id uuid` 用户外键级联删除、`label text`（1～128 字节）、`prefix text`、唯一 `token_hash bytea`（32 字节）、`system boolean=false`、签发时的 `auth_revision bigint`、`authorization_revision bigint=0`、`created_at timestamptz=now()`，可空 `expires_at/last_used_at/revoked_at timestamptz`。索引 `(user_id,id)`。不存明文 Token。
+
+`token_grants`：复合主键 `(token_id,bucket_id)`、有效动作 `actions text[]`，两外键级联删除，反向索引 `(bucket_id,token_id)`。`token_bucket_access` 视图计算 Token 范围与用户当前桶权限的交集；管理员仍受显式 Token 范围限制，完整 system Token 另行验证。
+
+Token 范围、有效期及撤销变更推进授权 revision；用户安全 revision 改变使旧 Token 永久失效。权限检查同时锁定用户和 Token，防止撤权前的校验结果被用于稍后提交。
 
 ## web_users
 

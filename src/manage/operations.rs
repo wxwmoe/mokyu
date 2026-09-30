@@ -1,11 +1,10 @@
 use crate::{
     admin::{
         Backend, Buckets, Cache, Cleanup, Command, Credentials, Domains, Gc, Integrity,
-        Maintenance, Packs, Projects, Tasks, Users, random_secret,
+        Maintenance, Packs, Projects, Tasks, Users,
     },
     app::{App, Bucket},
     authorization::{Action, Principal},
-    codec,
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -260,89 +259,171 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
             let rules = document.context("missing CORS document")?;
             app.set_cors(&Principal::Local, b.id, rules).await
         }
-        Command::Credential(Credentials::List) => {
-            let rows: Vec<(String, bool)> =
-                sqlx::query_as("SELECT access_key,enabled FROM credentials ORDER BY access_key")
-                    .fetch_all(&app.db)
+        Command::Credential(command) => {
+            use super::keys::{self, CredentialInput, RotateCredential};
+            match command {
+                Credentials::List { after } => Ok(serde_json::to_value(
+                    keys::list_credentials(&app.db, None, &after.unwrap_or_default(), 100).await?,
+                )?),
+                Credentials::Show { access_key } => Ok(serde_json::to_value(
+                    keys::get_credential(&mut *app.db.acquire().await?, &access_key).await?,
+                )?),
+                Credentials::Create {
+                    bucket,
+                    read_only,
+                    label,
+                    expires_in,
+                } => {
+                    let b = app.bucket(&bucket, true).await?;
+                    let row = keys::create_credential(
+                        app,
+                        &Principal::Local,
+                        CredentialInput {
+                            project_id: b.project_id,
+                            label: label.unwrap_or_else(|| bucket.clone()),
+                            expires_in,
+                            grants: vec![super::users::BucketGrant {
+                                bucket_id: b.id,
+                                actions: Action::role(if read_only { "reader" } else { "writer" }),
+                            }],
+                        },
+                    )
                     .await?;
-            Ok(json!(
-                rows.into_iter()
-                    .map(|(access_key, enabled)| json!({"access_key":access_key,"enabled":enabled}))
-                    .collect::<Vec<_>>()
-            ))
+                    Ok(
+                        json!({"access_key":row.access_key,"secret_key":row.secret_key,"bucket":bucket,"writable":!read_only}),
+                    )
+                }
+                Credentials::Grant {
+                    access_key,
+                    bucket,
+                    read_only,
+                } => {
+                    let b = app.bucket(&bucket, true).await?;
+                    keys::change_grant(
+                        app,
+                        &Principal::Local,
+                        &access_key,
+                        b.id,
+                        Action::role(if read_only { "reader" } else { "writer" }),
+                    )
+                    .await?;
+                    Ok(json!({"granted":true}))
+                }
+                Credentials::Revoke { access_key, bucket } => {
+                    let b = app.bucket(&bucket, true).await?;
+                    keys::change_grant(app, &Principal::Local, &access_key, b.id, vec![]).await?;
+                    Ok(json!({"revoked":true}))
+                }
+                Credentials::Disable { access_key } => {
+                    keys::enable_credential(app, &Principal::Local, &access_key, false).await?;
+                    Ok(json!({"disabled":true}))
+                }
+                Credentials::Enable { access_key } => {
+                    keys::enable_credential(app, &Principal::Local, &access_key, true).await?;
+                    Ok(json!({"enabled":true}))
+                }
+                Credentials::Delete { access_key } => {
+                    keys::revoke_credential(app, &Principal::Local, &access_key).await?;
+                    Ok(json!({"deleted":true}))
+                }
+                Credentials::Rotate {
+                    access_key,
+                    overlap,
+                    expires_in,
+                } => Ok(serde_json::to_value(
+                    keys::rotate_credential(
+                        app,
+                        &Principal::Local,
+                        &access_key,
+                        RotateCredential {
+                            overlap,
+                            expires_in,
+                        },
+                    )
+                    .await?,
+                )?),
+                Credentials::Update {
+                    access_key,
+                    document,
+                    ..
+                } => Ok(serde_json::to_value(
+                    keys::update_credential(
+                        app,
+                        &Principal::Local,
+                        &access_key,
+                        serde_json::from_value(document.context("missing key settings")?)?,
+                    )
+                    .await?,
+                )?),
+                Credentials::Permissions {
+                    access_key,
+                    document,
+                    ..
+                } => Ok(serde_json::to_value(
+                    keys::set_grants(
+                        app,
+                        &Principal::Local,
+                        &access_key,
+                        serde_json::from_value(document.context("missing grants")?)?,
+                    )
+                    .await?,
+                )?),
+            }
         }
-        Command::Credential(Credentials::Create { bucket, read_only }) => {
-            let b = app.bucket(&bucket, true).await?;
-            let access = format!("MOKYU{}", &random_secret()?[..24]);
-            let secret = random_secret()?;
-            let protected = codec::protect(
-                secret.as_bytes(),
-                &app.secrets.credential_key,
-                access.as_bytes(),
-            )?;
-            let mut tx = app.db.begin().await?;
-            sqlx::query(
-                "INSERT INTO credentials(access_key,secret_encrypted,project_id) VALUES($1,$2,$3)",
-            )
-            .bind(&access)
-            .bind(protected)
-            .bind(b.project_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query("INSERT INTO grants(access_key,bucket_id,actions) VALUES($1,$2,$3)")
-                .bind(&access)
-                .bind(b.id)
-                .bind(
-                    Action::role(if read_only { "reader" } else { "writer" })
-                        .iter()
-                        .map(|a| a.name())
-                        .collect::<Vec<_>>(),
-                )
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(
-                json!({"access_key":access,"secret_key":secret,"bucket":bucket,"writable":!read_only}),
-            )
-        }
-        Command::Credential(Credentials::Grant {
-            access_key,
-            bucket,
-            read_only,
-        }) => {
-            let b = app.bucket(&bucket, true).await?;
-            let mut tx = app.db.begin().await?;
-            let project: Uuid = sqlx::query_scalar(
-                "SELECT project_id FROM credentials WHERE access_key=$1 FOR UPDATE",
-            )
-            .bind(&access_key)
-            .fetch_one(&mut *tx)
-            .await?;
-            ensure!(
-                project == b.project_id,
-                "service key and bucket must belong to the same project"
-            );
-            sqlx::query("INSERT INTO grants(access_key,bucket_id,actions) VALUES($1,$2,$3) ON CONFLICT(access_key,bucket_id) DO UPDATE SET actions=excluded.actions").bind(access_key).bind(b.id).bind(Action::role(if read_only { "reader" } else { "writer" }).iter().map(|a| a.name()).collect::<Vec<_>>()).execute(&mut *tx).await?;
-            tx.commit().await?;
-            Ok(json!({"granted":true}))
-        }
-        Command::Credential(Credentials::Revoke { access_key, bucket }) => {
-            let b = app.bucket(&bucket, true).await?;
-            sqlx::query("DELETE FROM grants WHERE access_key=$1 AND bucket_id=$2")
-                .bind(access_key)
-                .bind(b.id)
-                .execute(&app.db)
-                .await?;
-            Ok(json!({"revoked":true}))
-        }
-        Command::Credential(Credentials::Disable { access_key }) => {
-            let n = sqlx::query("UPDATE credentials SET enabled=false WHERE access_key=$1")
-                .bind(access_key)
-                .execute(&app.db)
-                .await?
-                .rows_affected();
-            ensure!(n == 1, "credential not found");
-            Ok(json!({"disabled":true}))
+        Command::Token(command) => {
+            use super::tokens;
+            use crate::admin::Tokens;
+            match command {
+                Tokens::List { username, after } => {
+                    let user = sqlx::query_scalar("SELECT id FROM web_users WHERE username=$1")
+                        .bind(username)
+                        .fetch_optional(&app.db)
+                        .await?
+                        .context("user not found")?;
+                    Ok(serde_json::to_value(
+                        tokens::list_tokens(&app.db, user, after, 100).await?,
+                    )?)
+                }
+                Tokens::Create {
+                    username, document, ..
+                } => {
+                    let user = sqlx::query_scalar("SELECT id FROM web_users WHERE username=$1")
+                        .bind(username)
+                        .fetch_optional(&app.db)
+                        .await?
+                        .context("user not found")?;
+                    Ok(serde_json::to_value(
+                        tokens::create_token(
+                            app,
+                            &Principal::Local,
+                            user,
+                            serde_json::from_value(document.context("missing token settings")?)?,
+                        )
+                        .await?,
+                    )?)
+                }
+                Tokens::Update { id, document, .. } => {
+                    let user = sqlx::query_scalar("SELECT user_id FROM api_tokens WHERE id=$1")
+                        .bind(id)
+                        .fetch_optional(&app.db)
+                        .await?
+                        .context("token not found")?;
+                    Ok(serde_json::to_value(
+                        tokens::update_token(
+                            app,
+                            &Principal::Local,
+                            user,
+                            id,
+                            serde_json::from_value(document.context("missing token settings")?)?,
+                        )
+                        .await?,
+                    )?)
+                }
+                Tokens::Revoke { id } => {
+                    tokens::revoke_token(app, &Principal::Local, id).await?;
+                    Ok(json!({"revoked":true}))
+                }
+            }
         }
         Command::Domain(Domains::List) => {
             let rows:Vec<(String,String)>=sqlx::query_as("SELECT d.host,b.name FROM domains d JOIN buckets b ON b.id=d.bucket_id ORDER BY d.host").fetch_all(&app.db).await?;

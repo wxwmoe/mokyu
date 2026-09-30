@@ -6,7 +6,7 @@
 
 ## 通用约定
 
-- 除登录、安装引导、`GET /api/info` 和 `GET /api/openapi.json` 外，API 均需有效会话 Cookie。登录和安装引导要求 `Origin` 精确匹配 `manage.origin`；其他写请求还要求 `X-CSRF-Token`。桶 CORS 不作用于管理端口。
+- 除登录、安装引导、`GET /api/info` 和 `GET /api/openapi.json` 外，API 需有效会话 Cookie 或 `Authorization: Bearer TOKEN`。Cookie 写请求要求 `Origin` 精确匹配 `manage.origin` 和 `X-CSRF-Token`；登录及安装引导要求 Origin。Bearer 不使用 CSRF，不能与 Cookie 混用或放入 URL。桶 CORS 不作用于管理端口。
 - Cookie 为 `mokyu_session`，HttpOnly、SameSite=Strict；Secure 和固定有效期由[配置](configuration.md#监听与管理)决定。自行改密保留当前会话、撤销其余会话；CLI 重置密码、禁用或删除用户撤销全部会话。
 - JSON 请求体上限 16 KiB，批量对象操作另有说明。GET 路由也接受 HEAD，HEAD 不返回响应体。
 - 查询参数按 UTF-8 编码；key 原样保留，不规范化斜杠、空格或路径。分页 token 不应解析或跨范围复用；并发变更期间不提供跨请求快照。
@@ -50,6 +50,29 @@
 ### 首次安装
 
 `GET /api/bootstrap` 返回 `{setup_required}`。只有数据库没有任何用户时，服务才在管理 socket 旁写入权限 0600 的 `setup-token`，默认 `/run/mokyu/setup-token`。`POST /api/setup` 接收 `{token,username,password}` 并返回 201；成功后令牌失效并删除文件。并发初始化只允许一次成功；CLI 创建首个用户也会关闭此入口。令牌不得放入 URL。
+
+## 应用密钥与 API Token
+
+S3 应用密钥属于项目，与创建者账号生命周期无关。个人管理 Token 存哈希，其逐桶权限与用户当前权限取交集；改密、重置密码、禁用或角色变更使已签发 Token 失效。两者均有过期时间和最近使用时间（最多每五分钟写入一次），secret 仅创建或轮换时返回。
+
+应用密钥仅管理员管理。Token 创建、编辑、查询自己的条目；管理员还可查询和撤销其他用户的 Token。这些 Token 管理接口，以及 `/api/session`、`/api/logout`、`/api/me` 与其子路径，只接受 Cookie。写操作需近期密码验证。
+
+| 方法与路径 | 输入与行为 |
+| --- | --- |
+| `GET /api/credentials` | `project?,after?,limit?`，limit 1～100；返回 `{credentials,next}` |
+| `POST /api/credentials` | `{project_id,label,expires_in?,grants}`；返回 201 `{access_key,secret_key,credential}` |
+| `PUT /api/credentials/{key}` | `{label,enabled,expires_in?,keep_expiry?,grants?}`；原子更新元数据及可选授权 |
+| `PUT /api/credentials/{key}/grants` | 完整替换 `[{bucket_id,actions}]`，所有桶必须属于密钥项目 |
+| `POST /api/credentials/{key}/rotate` | `{overlap,expires_in?}`；新 ID/secret 与原权限，旧密钥在重叠期或原到期时间的较早者失效 |
+| `DELETE /api/credentials/{key}` | 删除应用密钥；204 |
+| `GET /api/tokens` | `user?,after?,limit?`，默认自己；limit 1～100；返回 `{tokens,next}` |
+| `POST /api/tokens` | `{label,system?,expires_in?,grants?}`；返回 201 `{token,secret}` |
+| `PUT /api/tokens/{id}` | 同创建输入，另支持 `keep_expiry`；仅可修改自己未撤销的 Token |
+| `DELETE /api/tokens/{id}` | 永久撤销；204 |
+
+label 为 1～128 字节；grants 最多 1000 个不同桶，actions 使用项目授权动作。空授权不授予桶权限。`system=true` 仅管理员可选择，grants 必须为空，允许完整实例管理，包括全部桶和用户；仍不能调用 Cookie 专属入口。普通 Token 不能访问实例任务、全局统计或用户管理。系统 Token 无需密码重验证，所有可写路径仍重新验证其有效性。
+
+`expires_in` 接受 `30d` 等时长，范围大于零且不超过 3650 天；应用密钥省略/null 表示不过期，Token 省略默认 90 天、null 表示不过期。更新时 `keep_expiry=true,expires_in=null` 保留原时间；轮换 overlap 为 0～30 天。密钥与 Token 正文上限 512 KiB。撤销或缩减权限会阻止尚未提交的写操作，已获授权的读取正文可继续完成。
 
 ## 用户与成员
 

@@ -1,8 +1,10 @@
 pub(crate) mod account;
 mod assets;
 mod contract;
+pub(crate) mod keys;
 pub(crate) mod operations;
 pub(crate) mod projects;
+pub(crate) mod tokens;
 pub(crate) mod users;
 
 use crate::{
@@ -160,6 +162,9 @@ pub(super) struct Identity {
 }
 impl Identity {
     async fn recent(&self, app: &App) -> Result<(), HttpError> {
+        if self.principal.token_id().is_some() && self.admin {
+            return Ok(());
+        }
         let Principal::User { session, .. } = self.principal else {
             return Err(unauthorized());
         };
@@ -192,10 +197,16 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/object/chunks"
                 | "/api/download"
                 | "/api/projects"
+                | "/api/tokens"
         ) | (
             "POST",
-            "/api/logout" | "/api/me/password" | "/api/me/reauth" | "/api/objects/actions"
+            "/api/logout"
+                | "/api/me/password"
+                | "/api/me/reauth"
+                | "/api/objects/actions"
+                | "/api/tokens"
         ) | ("PUT", "/api/me")
+            | ("PUT" | "DELETE", "/api/tokens/{id}")
             | ("DELETE", "/api/me/sessions" | "/api/me/sessions/{id}")
             | (
                 "GET" | "PUT",
@@ -228,6 +239,14 @@ async fn access_gate(
         Method::GET | Method::HEAD | Method::OPTIONS
     );
     match authenticate(&app, request.headers(), write).await {
+        Ok(identity)
+            if identity.principal.token_id().is_some()
+                && (matches!(path.as_str(), "/api/session" | "/api/logout" | "/api/me")
+                    || path.starts_with("/api/me/")
+                    || path.starts_with("/api/tokens")) =>
+        {
+            unauthorized().into_response()
+        }
         Ok(identity)
             if identity.password_change
                 && !matches!(
@@ -262,7 +281,35 @@ struct AuthSession {
 }
 async fn authenticate(app: &App, headers: &HeaderMap, csrf: bool) -> Result<Identity, HttpError> {
     if headers.contains_key("authorization") {
-        return Err(unauthorized());
+        if headers.contains_key("cookie") {
+            return Err(unauthorized());
+        }
+        let secret = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .filter(|v| {
+                v.len() == 68
+                    && v.starts_with("mky_")
+                    && v[4..].bytes().all(|b| b.is_ascii_hexdigit())
+            })
+            .ok_or_else(unauthorized)?;
+        let hash = blake3::hash(secret.as_bytes());
+        let row: Option<(Uuid,Uuid,String,bool,i64,i64)>=sqlx::query_as("SELECT t.id,t.user_id,u.role,t.system,t.authorization_revision,u.authorization_revision FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.token_hash=$1 AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AND t.auth_revision=u.auth_revision AND u.enabled AND NOT u.must_change_password")
+            .bind(hash.as_bytes().as_slice()).fetch_optional(&app.db).await?;
+        let (id, user, role, system, revision, user_revision) = row.ok_or_else(unauthorized)?;
+        sqlx::query("UPDATE api_tokens SET last_used_at=now() WHERE id=$1 AND (last_used_at IS NULL OR last_used_at<now()-interval '5 minutes')").bind(id).execute(&app.db).await?;
+        return Ok(Identity {
+            id: user,
+            admin: role == "admin" && system,
+            password_change: false,
+            principal: Principal::Token {
+                id,
+                user,
+                revision,
+                user_revision,
+            },
+        });
     }
     let token = token(headers)?;
     let hash = blake3::hash(token.as_bytes());
@@ -420,8 +467,8 @@ async fn buckets(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<BucketView>>, HttpError> {
-    let rows: Vec<BucketView> = sqlx::query_as("SELECT b.*,CASE WHEN $2 THEN ARRAY['bucket.list','object.read','object.write','object.delete','object.acl','bucket.settings','storage.inspect'] ELSE a.actions END AS actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=$1 WHERE $2 OR 'bucket.list'=ANY(a.actions) ORDER BY b.name LIMIT 1000")
-        .bind(actor.id).bind(actor.admin)
+    let rows: Vec<BucketView> = sqlx::query_as("SELECT b.*,CASE WHEN $2 THEN ARRAY['bucket.list','object.read','object.write','object.delete','object.acl','bucket.settings','storage.inspect'] WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END AS actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=$1 LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=$3 WHERE $2 OR 'bucket.list'=ANY(CASE WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END) ORDER BY b.name LIMIT 1000")
+        .bind(actor.id).bind(actor.admin).bind(actor.principal.token_id())
         .fetch_all(&app.db)
         .await?;
     Ok(Json(rows))
@@ -641,6 +688,8 @@ async fn object_actions(
         ObjectAction::PublicRead => Some(true),
     };
     let mut results = Vec::with_capacity(input.objects.len());
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("management-before-change").await;
     for object in &input.objects {
         let status = match app
             .change_object(

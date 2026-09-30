@@ -45,11 +45,21 @@ docker exec mokyu cli bucket cors media /config/cors.json
 
 | 命令 | 作用与返回 |
 | --- | --- |
-| `credential list` | 返回 access_key/enabled 数组，不含 secret |
-| `credential create BUCKET [--read-only]` | 生成 access_key/secret_key 并授权该桶，默认读写；secret 仅返回一次 |
+| `credential list [--after ACCESS_KEY]` | 返回最多 100 条元数据与授权，不含 secret；after 使用上页末项 access_key |
+| `credential create BUCKET [--read-only] [--label TEXT] [--expires-in 30d]` | 生成 access_key/secret_key 并授权该桶，默认读写；secret 仅返回一次 |
 | `credential grant ACCESS_KEY BUCKET [--read-only]` | 添加或替换同项目桶授权，默认读写，返回 granted |
 | `credential revoke ACCESS_KEY BUCKET` | 撤销桶授权，返回 revoked |
 | `credential disable ACCESS_KEY` | 禁用凭据及其全部桶授权 |
+| `credential enable ACCESS_KEY` | 重新启用密钥，保留到期时间 |
+| `credential show ACCESS_KEY` | 查看安全元数据和授权 |
+| `credential update ACCESS_KEY FILE` | JSON 设置，格式同管理 API PUT |
+| `credential permissions ACCESS_KEY FILE` | 用 JSON 数组替换完整授权 |
+| `credential rotate ACCESS_KEY [--overlap 24h] [--expires-in 30d]` | 创建替代密钥与重叠期，仅返回一次新 secret |
+| `credential delete ACCESS_KEY` | 永久删除密钥 |
+| `token list USERNAME [--after UUID]` | 返回最多 100 个 Token 安全记录 |
+| `token create USERNAME FILE` | 按管理 API JSON 签发个人 Token，仅返回一次 secret |
+| `token update ID FILE` | 替换自己名下 Token 的设置；CLI 可指定任意用户的 Token |
+| `token revoke ID` | 永久撤销 Token |
 | `user list` | 返回 id/username/enabled，不含密码哈希 |
 | `user create USERNAME [--role admin/member] [--require-change] [--password-stdin]` | 创建账户，默认管理员；密码 12～1024 字节 |
 | `user password USERNAME [--require-change] [--password-stdin]` | 更新密码并撤销全部会话 |
@@ -62,7 +72,7 @@ docker exec mokyu cli bucket cors media /config/cors.json
 
 最后一个启用的管理员不可被禁用、降级或删除。`--require-change` 要求下次登录先改密。`user list` 包含角色、启用状态和改密要求。
 
-创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入并再次确认，使用 `docker exec -it`；非终端须指定 `--password-stdin`。不接受明文命令参数，自动化时可从 stdin 读取一行：
+凭据/Token 设置文件上限 512 KiB。JSON 中的权限与有效期语义见[管理 API](manage-api-reference.md#应用密钥与-api-token)。创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入并再次确认，使用 `docker exec -it`；非终端须指定 `--password-stdin`。不接受明文命令参数，自动化时可从 stdin 读取一行：
 
 ```sh
 docker exec -i mokyu cli user create admin --password-stdin < /secure/password-file

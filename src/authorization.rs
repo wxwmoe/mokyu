@@ -72,8 +72,31 @@ pub enum Principal {
         access_key: String,
         revision: i64,
     },
+    Token {
+        id: Uuid,
+        user: Uuid,
+        revision: i64,
+        user_revision: i64,
+    },
 }
 impl Principal {
+    pub fn user_id(&self) -> Option<Uuid> {
+        match self {
+            Self::User { id, .. } => Some(*id),
+            Self::Token { user, .. } => Some(*user),
+            _ => None,
+        }
+    }
+    pub fn token_id(&self) -> Option<Uuid> {
+        if let Self::Token { id, .. } = self {
+            Some(*id)
+        } else {
+            None
+        }
+    }
+    pub async fn lock_identity(&self, tx: &mut Transaction<'_, Postgres>) -> Result<bool> {
+        self.validate(tx, true).await
+    }
     pub async fn lock_admin(&self, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
         if self.validate(tx, true).await? {
             Ok(())
@@ -83,7 +106,7 @@ impl Principal {
     }
     pub async fn service(db: &PgPool, access_key: &str) -> Result<Self> {
         let revision = sqlx::query_scalar(
-            "SELECT authorization_revision FROM credentials WHERE access_key=$1 AND enabled",
+            "SELECT authorization_revision FROM credentials WHERE access_key=$1 AND enabled AND (expires_at IS NULL OR expires_at>now())",
         )
         .bind(access_key)
         .fetch_optional(db)
@@ -122,9 +145,9 @@ impl Principal {
                 revision,
             } => {
                 let query = if lock {
-                    "SELECT authorization_revision FROM credentials WHERE access_key=$1 AND enabled FOR SHARE"
+                    "SELECT authorization_revision FROM credentials WHERE access_key=$1 AND enabled AND (expires_at IS NULL OR expires_at>now()) FOR SHARE"
                 } else {
-                    "SELECT authorization_revision FROM credentials WHERE access_key=$1 AND enabled"
+                    "SELECT authorization_revision FROM credentials WHERE access_key=$1 AND enabled AND (expires_at IS NULL OR expires_at>now())"
                 };
                 let current: Option<i64> = sqlx::query_scalar(query)
                     .bind(access_key)
@@ -134,6 +157,43 @@ impl Principal {
                     Ok(false)
                 } else {
                     Err(s3_error!(AccessDenied).into())
+                }
+            }
+            Self::Token {
+                id,
+                user,
+                revision,
+                user_revision,
+            } => {
+                let user_query = if lock {
+                    "SELECT role,authorization_revision,auth_revision FROM web_users WHERE id=$1 AND enabled AND NOT must_change_password FOR SHARE"
+                } else {
+                    "SELECT role,authorization_revision,auth_revision FROM web_users WHERE id=$1 AND enabled AND NOT must_change_password"
+                };
+                let current: Option<(String, i64, i64)> = sqlx::query_as(user_query)
+                    .bind(user)
+                    .fetch_optional(&mut *connection)
+                    .await?;
+                let (role, current, auth) = current.ok_or_else(|| s3_error!(AccessDenied))?;
+                if current != *user_revision {
+                    return Err(s3_error!(AccessDenied).into());
+                }
+                let token_query = if lock {
+                    "SELECT system,authorization_revision FROM api_tokens WHERE id=$1 AND user_id=$2 AND auth_revision=$3 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now()) FOR SHARE"
+                } else {
+                    "SELECT system,authorization_revision FROM api_tokens WHERE id=$1 AND user_id=$2 AND auth_revision=$3 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())"
+                };
+                let token: Option<(bool, i64)> = sqlx::query_as(token_query)
+                    .bind(id)
+                    .bind(user)
+                    .bind(auth)
+                    .fetch_optional(connection)
+                    .await?;
+                match token {
+                    Some((system, current)) if current == *revision => {
+                        Ok(system && role == "admin")
+                    }
+                    _ => Err(s3_error!(AccessDenied).into()),
                 }
             }
         }
@@ -148,6 +208,22 @@ impl Principal {
             return Ok(Action::ALL.to_vec());
         }
         let actions = match self {
+            Self::Token { id, .. } => {
+                let row: Option<Vec<String>> = sqlx::query_scalar(
+                    "SELECT actions FROM token_bucket_access WHERE token_id=$1 AND bucket_id=$2",
+                )
+                .bind(id)
+                .bind(bucket)
+                .fetch_optional(connection)
+                .await?;
+                Action::ALL
+                    .into_iter()
+                    .filter(|a| {
+                        row.as_ref()
+                            .is_some_and(|row| row.iter().any(|s| s == a.name()))
+                    })
+                    .collect()
+            }
             Self::User { id, .. } => {
                 let row: Option<Vec<String>> = sqlx::query_scalar(
                     "SELECT actions FROM user_bucket_access WHERE bucket_id=$1 AND user_id=$2",

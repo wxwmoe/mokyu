@@ -268,3 +268,20 @@ details > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 @media (max-width: 760px) { .sidebar { display: none; } .mobile-nav { display: inline-flex; } .topbar { padding: 12px 16px; min-height: 66px; } .location-icon, .topbar-location > span:last-child, .account-name { display: none; } .workspace main { padding: 26px 16px; } .surface { padding: 16px; border-radius: 18px; } .page-heading { align-items: start; } h1 { font-size: 26px; } .login-page { padding: 24px; } .login-art { display: none; } .app-footer { padding: 20px 16px; } .app-footer > span:last-child { display: none; } }
 @media (max-width: 480px) { .page-heading { gap: 10px; } .heading-actions { flex-wrap: wrap; justify-content: flex-end; } .media-toolbar { align-items: start; } .breadcrumbs { font-size: 12px; gap: 7px; } .dialog-panel.drawer { inset: 8px; width: auto; border-radius: 20px; } .toast-viewport { bottom: 16px; right: 16px; } .dialog-header, .dialog-body { padding: 18px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+
+.key-filter { max-width: 280px; margin: 20px 0; }
+.key-list { overflow: hidden; }
+.key-row { width: 100%; display: flex; align-items: center; gap: 18px; padding: 21px 24px; border: 0; border-radius: 0; border-bottom: 1px solid var(--line); text-align: left; background: transparent; }
+.key-row:hover { background: var(--surface-soft); }
+.key-name { flex: 1; min-width: 0; display: grid; gap: 5px; }
+.key-name code, .key-hero code { font-size: 12px; overflow-wrap: anywhere; color: var(--muted); }
+.key-dates { display: grid; gap: 3px; font-size: 12px; }
+.key-dates small { color: var(--muted); }
+.key-symbol, .secret-emblem { display: grid; place-items: center; flex-shrink: 0; width: 50px; height: 50px; border-radius: 18px; background: var(--lilac-soft); color: var(--lilac); }
+.key-hero { display: flex; align-items: center; gap: 16px; margin-bottom: 22px; }
+.key-facts { display: grid; grid-template-columns: auto 1fr; gap: 12px 20px; font-size: 13px; }
+.key-facts dt { color: var(--muted); }.key-facts dd { margin: 0; text-align: right; }
+.grant-summary { display: grid; gap: 12px; margin-bottom: 20px; }.grant-summary strong { overflow-wrap: anywhere; }
+.key-editor { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.6fr); gap: 28px; }
+.secret-emblem { margin: 0 auto 24px; background: var(--rose-soft); color: var(--rose); }
+@media (max-width: 700px) { .key-editor { grid-template-columns: 1fr; }.key-dates { display: none; }.key-row { gap: 12px; padding: 18px 15px; } }

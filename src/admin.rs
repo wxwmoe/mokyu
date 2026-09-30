@@ -25,6 +25,8 @@ pub enum Command {
     #[command(subcommand)]
     Credential(Credentials),
     #[command(subcommand)]
+    Token(Tokens),
+    #[command(subcommand)]
     Domain(Domains),
     #[command(subcommand)]
     User(Users),
@@ -149,11 +151,18 @@ pub enum Backend {
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Credentials {
-    List,
+    List {
+        #[arg(long)]
+        after: Option<String>,
+    },
     Create {
         bucket: String,
         #[arg(long)]
         read_only: bool,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        expires_in: Option<String>,
     },
     Grant {
         access_key: String,
@@ -167,6 +176,57 @@ pub enum Credentials {
     },
     Disable {
         access_key: String,
+    },
+    Enable {
+        access_key: String,
+    },
+    Delete {
+        access_key: String,
+    },
+    Show {
+        access_key: String,
+    },
+    Rotate {
+        access_key: String,
+        #[arg(long, default_value = "24h")]
+        overlap: String,
+        #[arg(long)]
+        expires_in: Option<String>,
+    },
+    Update {
+        access_key: String,
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    Permissions {
+        access_key: String,
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Tokens {
+    List {
+        username: String,
+        #[arg(long)]
+        after: Option<Uuid>,
+    },
+    Create {
+        username: String,
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    Update {
+        id: Uuid,
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    Revoke {
+        id: Uuid,
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
@@ -267,10 +327,17 @@ async fn receive_frame(socket: &mut UnixStream) -> Result<Vec<u8>> {
 }
 pub async fn client(path: &Path, mut command: Command) -> Result<()> {
     match &mut command {
-        Command::User(Users::Membership { file, document, .. }) => {
+        Command::User(Users::Membership { file, document, .. })
+        | Command::Token(
+            Tokens::Create { file, document, .. } | Tokens::Update { file, document, .. },
+        )
+        | Command::Credential(
+            Credentials::Update { file, document, .. }
+            | Credentials::Permissions { file, document, .. },
+        ) => {
             ensure!(
                 std::fs::metadata(&file)?.len() <= 512 * 1024,
-                "membership file too large"
+                "JSON file too large"
             );
             *document = Some(serde_json::from_slice(&std::fs::read(file)?)?);
         }

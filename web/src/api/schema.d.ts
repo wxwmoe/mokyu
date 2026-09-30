@@ -48,6 +48,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["credentials_list"];
+        put?: never;
+        post: operations["credentials_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/credentials/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["credentials_update"];
+        post?: never;
+        delete: operations["credentials_revoke"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/credentials/{key}/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["credentials_grants"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/credentials/{key}/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["credentials_rotate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/info": {
         parameters: {
             query?: never;
@@ -304,6 +368,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["tokens_list"];
+        put?: never;
+        post: operations["tokens_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["tokens_update"];
+        post?: never;
+        delete: operations["tokens_revoke"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/users": {
         parameters: {
             query?: never;
@@ -392,6 +488,49 @@ export interface components {
             role: string;
             username: string;
         };
+        Credential: {
+            access_key: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            created_by?: string | null;
+            enabled: boolean;
+            /** Format: date-time */
+            expires_at?: string | null;
+            grants: components["schemas"]["BucketGrant"][];
+            label: string;
+            /** Format: date-time */
+            last_used_at?: string | null;
+            /** Format: uuid */
+            project_id: string;
+        };
+        CredentialInput: {
+            expires_in?: string | null;
+            grants: components["schemas"]["BucketGrant"][];
+            label: string;
+            /** Format: uuid */
+            project_id: string;
+        };
+        CredentialPage: {
+            credentials: components["schemas"]["Credential"][];
+            next?: string | null;
+        };
+        CredentialRotation: components["schemas"]["CredentialSecret"] & {
+            /** Format: date-time */
+            old_expires_at: string;
+        };
+        CredentialSecret: {
+            access_key: string;
+            credential: components["schemas"]["Credential"];
+            secret_key: string;
+        };
+        CredentialSettings: {
+            enabled: boolean;
+            expires_in?: string | null;
+            grants?: components["schemas"]["BucketGrant"][] | null;
+            keep_expiry?: boolean;
+            label: string;
+        };
         ErrorBody: {
             code: string;
             error: string;
@@ -469,6 +608,10 @@ export interface components {
             must_change_password?: boolean;
             password: string;
         };
+        RotateCredential: {
+            expires_in?: string | null;
+            overlap: string;
+        };
         Session: {
             /** Format: date-time */
             created_at: string;
@@ -492,6 +635,41 @@ export interface components {
             password: string;
             token: string;
             username: string;
+        };
+        Token: {
+            active: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            expires_at?: string | null;
+            grants: components["schemas"]["BucketGrant"][];
+            /** Format: uuid */
+            id: string;
+            label: string;
+            /** Format: date-time */
+            last_used_at?: string | null;
+            prefix: string;
+            /** Format: date-time */
+            revoked_at?: string | null;
+            system: boolean;
+            /** Format: uuid */
+            user_id: string;
+        };
+        TokenInput: {
+            expires_in?: string | null;
+            grants?: components["schemas"]["BucketGrant"][];
+            keep_expiry?: boolean;
+            label: string;
+            system?: boolean;
+        };
+        TokenPage: {
+            /** Format: uuid */
+            next?: string | null;
+            tokens: components["schemas"]["Token"][];
+        };
+        TokenSecret: {
+            secret: string;
+            token: components["schemas"]["Token"];
         };
         User: {
             /** Format: date-time */
@@ -630,6 +808,146 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    credentials_list: {
+        parameters: {
+            query?: {
+                project?: string | null;
+                after?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialPage"];
+                };
+            };
+        };
+    };
+    credentials_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CredentialInput"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialSecret"];
+                };
+            };
+        };
+    };
+    credentials_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CredentialSettings"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Credential"];
+                };
+            };
+        };
+    };
+    credentials_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    credentials_grants: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BucketGrant"][];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Credential"];
+                };
+            };
+        };
+    };
+    credentials_rotate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RotateCredential"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialRotation"];
                 };
             };
         };
@@ -1113,6 +1431,96 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
+            };
+        };
+    };
+    tokens_list: {
+        parameters: {
+            query?: {
+                user?: string | null;
+                after?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenPage"];
+                };
+            };
+        };
+    };
+    tokens_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TokenInput"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenSecret"];
+                };
+            };
+        };
+    };
+    tokens_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TokenInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Token"];
+                };
+            };
+        };
+    };
+    tokens_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

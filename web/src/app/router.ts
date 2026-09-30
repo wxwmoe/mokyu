@@ -8,6 +8,8 @@ export const router = createRouter({
     { path: '/login', name: 'login', component: () => import('../features/Login.vue') },
     { path: '/', redirect: '/media' },
     { path: '/media', name: 'media', component: () => import('../features/Media.vue') },
+    { path: '/credentials', name: 'credentials', meta: { admin: true }, component: () => import('../features/AccessKeys.vue') },
+    { path: '/tokens', name: 'tokens', component: () => import('../features/AccessKeys.vue') },
     { path: '/users', name: 'users', meta: { admin: true }, component: () => import('../features/Users.vue') },
     { path: '/projects', name: 'projects', component: () => import('../features/Projects.vue') },
     { path: '/account', name: 'account', component: () => import('../features/Account.vue') },

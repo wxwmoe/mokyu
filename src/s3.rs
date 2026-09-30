@@ -159,7 +159,7 @@ impl S3Auth for Gateway {
     async fn get_secret_key(&self, key: &str) -> S3Result<SecretKey> {
         async {
             let encrypted: Vec<u8> = sqlx::query_scalar(
-                "SELECT secret_encrypted FROM credentials WHERE access_key=$1 AND enabled",
+                "SELECT secret_encrypted FROM credentials WHERE access_key=$1 AND enabled AND (expires_at IS NULL OR expires_at>now())",
             )
             .bind(key)
             .fetch_optional(&self.0.db)
@@ -214,6 +214,9 @@ impl S3Access for Gateway {
         }
         if cx.credentials().is_none() && !matches!(cx.s3_op().name(), "GetObject" | "HeadObject") {
             return Err(s3_error!(AccessDenied));
+        }
+        if let Some(credential) = cx.credentials() {
+            sqlx::query("UPDATE credentials SET last_used_at=now() WHERE access_key=$1 AND (last_used_at IS NULL OR last_used_at<now()-interval '5 minutes')").bind(&credential.access_key).execute(&self.0.db).await.map_err(|e|internal(e.into()))?;
         }
         Ok(())
     }
@@ -313,7 +316,7 @@ impl S3 for Gateway {
         let i=req.input;let limit=i.max_buckets.unwrap_or(1000);if !(1..=10000).contains(&limit){return Err(s3_error!(InvalidArgument).into());}
         let prefix=i.prefix.as_deref().unwrap_or("");
         let after=if let Some(token)=i.continuation_token{let bytes=URL_SAFE_NO_PAD.decode(token).map_err(|_|s3_error!(InvalidArgument))?;let (access,p,r,last):(String,String,Option<String>,String)=serde_json::from_slice(&bytes).map_err(|_|s3_error!(InvalidArgument))?;if access!=key||p!=prefix||r!=i.bucket_region{return Err(s3_error!(InvalidArgument,"continuation token belongs to another listing").into());}last}else{String::new()};
-        let mut rows:Vec<crate::app::Bucket>=sqlx::query_as("SELECT b.* FROM buckets b JOIN grants g ON g.bucket_id=b.id JOIN credentials c USING(access_key) WHERE g.access_key=$1 AND c.enabled AND c.project_id=b.project_id AND 'bucket.list'=ANY(g.actions) AND starts_with(b.name,$2) AND b.name>$3 AND ($4::text IS NULL OR $4=$5) ORDER BY b.name LIMIT $6").bind(key).bind(prefix).bind(after).bind(&i.bucket_region).bind(&self.0.config.listen.region).bind(limit as i64+1).fetch_all(&self.0.db).await?;
+        let mut rows:Vec<crate::app::Bucket>=sqlx::query_as("SELECT b.* FROM buckets b JOIN grants g ON g.bucket_id=b.id JOIN credentials c USING(access_key) WHERE g.access_key=$1 AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>now()) AND c.project_id=b.project_id AND 'bucket.list'=ANY(g.actions) AND starts_with(b.name,$2) AND b.name>$3 AND ($4::text IS NULL OR $4=$5) ORDER BY b.name LIMIT $6").bind(key).bind(prefix).bind(after).bind(&i.bucket_region).bind(&self.0.config.listen.region).bind(limit as i64+1).fetch_all(&self.0.db).await?;
         let truncated=rows.len()>limit as usize;rows.truncate(limit as usize);
         let token=if truncated{Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&(key,prefix,&i.bucket_region,&rows.last().unwrap().name))?))}else{None};
         Ok(S3Response::new(ListBucketsOutput{buckets:Some(rows.into_iter().map(|b|Bucket{name:Some(b.name),creation_date:Some(stamp(b.created_at)),bucket_region:Some(self.0.config.listen.region.clone()),..Default::default()}).collect()),continuation_token:token,prefix:i.prefix,..Default::default()}))
