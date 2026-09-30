@@ -14,7 +14,7 @@ const props = defineProps<{ buckets: Bucket[]; bucket?: string; prefix?: string 
 const open = defineModel<boolean>('open', { required: true })
 const router = useRouter(), picker = ref<HTMLInputElement>(), files = ref<File[]>([])
 const target = ref(''), prefix = ref(''), publicRead = ref(false), overwrite = ref(false), dragging = ref(false)
-const options = computed(() => props.buckets.filter(b => b.state === 'active' && b.actions.includes('object.write')).map(b => ({ value: b.id, label: b.name })))
+const options = computed(() => props.buckets.filter(b => b.state === 'active' && !b.uploads_paused && b.actions.includes('object.write')).map(b => ({ value: b.id, label: b.name })))
 const current = computed(() => props.buckets.find(b => b.id === target.value))
 watch(open, value => { if (value) { files.value = []; target.value = props.bucket || options.value[0]?.value || ''; prefix.value = props.prefix || ''; publicRead.value = false; overwrite.value = false } })
 watch(target, () => { if (!current.value?.actions.includes('object.acl')) publicRead.value = false })

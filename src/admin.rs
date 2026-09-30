@@ -102,6 +102,8 @@ pub enum Buckets {
     List,
     Create {
         name: String,
+        #[arg(long)]
+        project: Option<Uuid>,
     },
     Delete {
         name: String,

@@ -13,18 +13,26 @@ impl App {
             json!({"bucket_id":b.id,"name":b.name,"state":b.state,"objects":objects,"active_uploads":uploads,"effect":"seal bucket, remove every object and upload, then delete bucket; shared chunks use normal GC grace"}),
         )
     }
-    pub async fn purge_start(&self, name: &str, id: Uuid) -> Result<Value> {
+    pub async fn purge_start(
+        &self,
+        principal: &crate::authorization::Principal,
+        name: &str,
+        id: Uuid,
+        confirmation: Option<&str>,
+    ) -> Result<Value> {
         self.writable()?;
         let _coord = self.coord.lock().await;
         self.writable()?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = crate::manage::users::admin_transaction(self, principal).await?;
         let found: Option<Uuid> =
             sqlx::query_scalar("SELECT id FROM buckets WHERE name=$1 AND id=$2 FOR UPDATE")
                 .bind(name)
                 .bind(id)
                 .fetch_optional(&mut *tx)
                 .await?;
-        ensure!(found.is_some(), "bucket identity changed; preview again");
+        if found.is_none() {
+            return Err(s3s::s3_error!(PreconditionFailed).into());
+        }
         if let Some(task) = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM tasks WHERE kind='purge' AND bucket_id=$1 AND state<>'completed'",
         )
@@ -33,6 +41,12 @@ impl App {
         .await?
         {
             return Ok(json!({"task_id":task,"existing":true}));
+        }
+        if let Some(expected) = confirmation {
+            let preview = crate::manage::buckets::impact(&mut tx, id).await?;
+            if crate::manage::buckets::fingerprint(&preview, None)? != expected {
+                return Err(s3s::s3_error!(PreconditionFailed).into());
+            }
         }
         sqlx::query("UPDATE buckets SET state='purging' WHERE id=$1")
             .bind(id)
@@ -46,6 +60,13 @@ impl App {
         .bind(id)
         .bind(json!({"bucket_id":id,"name":name}))
         .execute(&mut *tx)
+        .await?;
+        crate::manage::audit::checkpoint(
+            &mut tx,
+            "bucket.purge",
+            name,
+            json!({"bucket_id":id,"task_id":task}),
+        )
         .await?;
         tx.commit().await?;
         self.wake_tasks.notify_one();
@@ -227,6 +248,11 @@ impl App {
             .bind(bucket)
             .execute(&mut *tx)
             .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(crate::manage::account::USER_LOCK)
+            .execute(&mut *tx)
+            .await?;
+        crate::manage::buckets::lock_dependents(&mut tx, bucket).await?;
         sqlx::query("DELETE FROM buckets WHERE id=$1 AND state='purging'")
             .bind(bucket)
             .execute(&mut *tx)

@@ -25,6 +25,9 @@ pub struct Bucket {
     pub project_id: Uuid,
     pub name: String,
     pub state: String,
+    pub settings_revision: i64,
+    pub uploads_paused: bool,
+    pub public_base_url: String,
     pub cors: Value,
     pub website_enabled: bool,
     pub index_document: String,
@@ -224,9 +227,7 @@ impl App {
         self.writable()?;
         crate::http::validate_cors(&rules).map_err(|e| s3_error!(InvalidArgument, "{e}"))?;
         let mut tx = self.db.begin().await?;
-        Permit::for_action(principal.clone(), bucket, Action::Settings)
-            .lock(&mut tx)
-            .await?;
+        crate::manage::buckets::lock_settings(&mut tx, principal, bucket).await?;
         let result = sqlx::query_scalar(
             "UPDATE buckets SET cors=$2 WHERE id=$1 AND state='active' RETURNING cors",
         )
@@ -303,6 +304,7 @@ impl App {
         metadata: Value,
         public: bool,
         claim_object: bool,
+        completion: Option<Uuid>,
     ) -> Result<(Uuid, Active)> {
         self.writable()?;
         if key.is_empty() || key.len() > 1024 {
@@ -318,12 +320,22 @@ impl App {
             authority.add(bucket, Action::Acl);
         }
         authority.lock(&mut tx).await?;
-        let state: String = sqlx::query_scalar("SELECT state FROM buckets WHERE id=$1 FOR SHARE")
-            .bind(bucket)
-            .fetch_one(&mut *tx)
-            .await?;
+        let (state, paused): (String, bool) =
+            sqlx::query_as("SELECT state,uploads_paused FROM buckets WHERE id=$1 FOR SHARE")
+                .bind(bucket)
+                .fetch_one(&mut *tx)
+                .await?;
         if state != "active" {
             return Err(s3_error!(OperationAborted).into());
+        }
+        if paused && kind == "object" {
+            let finishing: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM uploads WHERE id=$1 AND bucket_id=$2 AND object_key=$3 AND state='completing')")
+                .bind(completion).bind(bucket).bind(key).fetch_one(&mut *tx).await?;
+            if !finishing {
+                return Err(
+                    s3_error!(OperationAborted, "new uploads are paused for this bucket").into(),
+                );
+            }
         }
         sqlx::query("INSERT INTO streams(id,bucket_id,object_key,kind,state,metadata,public_read,write_authorization) VALUES($1,$2,$3,$4,'writing',$5,$6,$7)").bind(id).bind(bucket).bind(key).bind(kind).bind(metadata).bind(public).bind(sqlx::types::Json(authority)).execute(&mut *tx).await?;
         if claim_object {

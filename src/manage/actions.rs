@@ -450,7 +450,7 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         )
     };
     let (id, _pin) = app
-        .new_stream(permit, target, key, "object", meta, public, false)
+        .new_stream(permit, target, key, "object", meta, public, false, None)
         .await?;
     let result=async {
         app.copy_extents(id,&source).await?;

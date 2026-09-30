@@ -85,7 +85,7 @@ impl HttpError {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, serde::Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CorsRule {
     pub origins: Vec<String>,

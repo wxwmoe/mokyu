@@ -435,3 +435,18 @@ processed 为对象和区块检查数之和，不是百分比；cursor 是内部
 - 对象每页 100 项，可按前缀／完整 key 定位；勾选仅限当前页，上一页使用本标签页历史。支持图片／视频预览和原文件下载；批量操作先列出目标，再显示逐项结果。
 - 任务可每 5 秒刷新，页面隐藏或离开任务页时停止；用户可关闭。暂停或终止的巡检详情停止自动轮询，可手动刷新、查看关联对象和导出报告。
 - 状态页刷新只读取运行计数和已缓存的容量快照。库存通过分页浏览，不设累计对象数量上限。
+## 存储桶工作流
+
+`GET /api/bucket-projects` 返回当前身份可以创建桶的项目；`POST /api/buckets` 接收 `name`、可选 `project_id`。管理员可创建任意项目的桶；项目允许创建时，维护成员可创建，选择范围成员会获得新桶的全部桶权限。普通 API Token 不提供创建桶能力。
+
+`GET/PUT /api/buckets/{bucket}/settings` 统一读取、保存 CORS、网站、公共 URL、域名和新上传暂停状态。保存必须带读取时的 `revision`；发生并发更改返回 412。成员需要 `bucket.settings`，只能修改 CORS 与网站；域名、公共 URL、暂停由管理员管理。`public_base_url` 只用于公开对象链接，不配置 DNS/TLS。域名冲突返回 `DomainInUse`，不会自动抢占其他桶的域名。
+
+以下操作限管理员，并在执行时检查近期身份验证：
+
+| 操作 | 预览与确认 |
+| --- | --- |
+| 删除空桶 | `POST /api/buckets/{bucket}/purge/preview` 后 `DELETE /api/buckets/{bucket}`，传 `confirm_name` 和预览的 `confirmation`；桶必须无数据流和上传历史 |
+| 清空并删除 | 同一预览后 `POST /api/buckets/{bucket}/purge`，传同样确认字段，返回持久 `task_id`；数据按现有 GC/保留策略回收 |
+| 项目转移 | `POST /api/buckets/{bucket}/transfer/preview` 传 `target_project`；执行 `/transfer` 再传 `confirm_name`、`confirmation` |
+
+转移必须先暂停新上传并排空已有写入、活动分片及配额预留；读取和已开始的 multipart 可以继续。执行原子检查目标项目的容量和桶数配额、迁移用量、撤销此桶原有成员/S3 密钥/Token 授权，并按目标项目角色重新计算访问权限。公共域名和桶限额保留，成功后恢复新上传。关闭确认窗口不会自动恢复先前暂停的上传。

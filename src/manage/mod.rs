@@ -2,6 +2,7 @@ pub(crate) mod account;
 pub(crate) mod actions;
 mod assets;
 pub(crate) mod audit;
+pub(crate) mod buckets;
 pub(crate) mod catalog;
 mod contract;
 pub(crate) mod keys;
@@ -15,7 +16,7 @@ pub(crate) mod users;
 
 use crate::{
     app::App,
-    authorization::{Action, Permit, Principal},
+    authorization::{Action, Principal},
     config,
     http::{HttpError, observe, respond, unauthorized},
 };
@@ -199,6 +200,7 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/me"
                 | "/api/me/sessions"
                 | "/api/buckets"
+                | "/api/bucket-projects"
                 | "/api/objects"
                 | "/api/object"
                 | "/api/object/chunks"
@@ -225,6 +227,7 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/me/reauth"
                 | "/api/objects/actions"
                 | "/api/media/actions"
+                | "/api/buckets"
                 | "/api/tokens"
                 | "/api/buckets/{bucket}/uploads"
                 | "/api/uploads/{id}/complete"
@@ -235,7 +238,9 @@ fn member_route(path: &str, method: &Method) -> bool {
             | ("DELETE", "/api/me/sessions" | "/api/me/sessions/{id}")
             | (
                 "GET" | "PUT",
-                "/api/buckets/{bucket}/cors" | "/api/buckets/{bucket}/website"
+                "/api/buckets/{bucket}/cors"
+                    | "/api/buckets/{bucket}/website"
+                    | "/api/buckets/{bucket}/settings"
             )
     )
 }
@@ -555,7 +560,7 @@ async fn buckets(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<BucketView>>, HttpError> {
-    let rows: Vec<BucketView> = sqlx::query_as("SELECT b.*,CASE WHEN $2 THEN ARRAY['bucket.list','object.read','object.write','object.delete','object.acl','bucket.settings','storage.inspect'] WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END AS actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=$1 LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=$3 WHERE $2 OR 'bucket.list'=ANY(CASE WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END) ORDER BY b.name LIMIT 1000")
+    let rows: Vec<BucketView> = sqlx::query_as("SELECT b.*,b.settings_revision::text AS revision,CASE WHEN $2 THEN ARRAY['bucket.list','object.read','object.write','object.delete','object.acl','bucket.settings','storage.inspect'] WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END AS actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=$1 LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=$3 WHERE $2 OR 'bucket.list'=ANY(CASE WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END) ORDER BY b.name LIMIT 1000")
         .bind(actor.id).bind(actor.admin).bind(actor.principal.token_id())
         .fetch_all(&app.db)
         .await?;
@@ -641,9 +646,7 @@ async fn save_website(
     app.writable()?;
     input.validate()?;
     let mut tx = app.db.begin().await?;
-    Permit::for_action(actor.principal, bucket, Action::Settings)
-        .lock(&mut tx)
-        .await?;
+    buckets::lock_settings(&mut tx, &actor.principal, bucket).await?;
     let row = sqlx::query_as("UPDATE buckets SET website_enabled=$2,index_document=$3,error_document=$4 WHERE id=$1 AND state='active' RETURNING website_enabled,index_document,error_document")
         .bind(bucket).bind(input.website_enabled).bind(&input.index_document).bind(&input.error_document)
         .fetch_optional(&mut *tx).await?.ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;

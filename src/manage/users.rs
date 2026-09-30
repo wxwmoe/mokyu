@@ -49,7 +49,7 @@ pub(crate) async fn find(app: &App, name: &str) -> Result<User> {
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchKey))?)
 }
-pub(super) async fn admin_transaction<'a>(
+pub(crate) async fn admin_transaction<'a>(
     app: &'a App,
     principal: &Principal,
 ) -> Result<Transaction<'a, Postgres>> {

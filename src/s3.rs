@@ -352,6 +352,7 @@ impl S3 for Gateway {
                     serde_json::to_value(metadata!(i))?,
                     canned(i.acl.as_ref())?,
                     true,
+                    None,
                 )
                 .await?;
             let should_compress = self
@@ -839,6 +840,7 @@ impl S3 for Gateway {
                     meta,
                     canned(i.acl.as_ref())?,
                     true,
+                    None,
                 )
                 .await?;
             self.0.reserve_quota(id, source.size, false, None).await?;

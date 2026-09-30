@@ -198,3 +198,4 @@ docker exec mokyu cli task resume TASK_UUID
 | --- | --- |
 | `docker run --rm wxwmoe/mokyu:latest keygen` | 生成 32 字节随机密钥，以 64 个十六进制字符表示 |
 | `mokyu serve --maintenance` | 在监听前设置维护状态，供[数据库恢复](deployment-and-recovery.md#恢复步骤)使用 |
+桶管理也可在 Web 的“存储桶设置”完成。`bucket create NAME --project UUID` 可指定项目，省略使用默认项目。`domain set HOST BUCKET` 拒绝占用其他桶的域名；需先显式删除旧映射再设置。CLI 和 Web 复用创建、删除、域名修改及清桶服务。

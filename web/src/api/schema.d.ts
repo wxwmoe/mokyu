@@ -64,6 +64,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/bucket-projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["bucket_creation_options"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/buckets": {
         parameters: {
             query?: never;
@@ -73,8 +89,24 @@ export interface paths {
         };
         get: operations["buckets"];
         put?: never;
-        post?: never;
+        post: operations["bucket_create"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/buckets/{bucket}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["bucket_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -170,6 +202,86 @@ export interface paths {
         get: operations["browse_media"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/buckets/{bucket}/purge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["bucket_purge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/buckets/{bucket}/purge/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["bucket_purge_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/buckets/{bucket}/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["bucket_settings"];
+        put: operations["bucket_settings_save"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/buckets/{bucket}/transfer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["bucket_transfer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/buckets/{bucket}/transfer/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["bucket_transfer_preview"];
         delete?: never;
         options?: never;
         head?: never;
@@ -752,6 +864,44 @@ export interface components {
             /** Format: uuid */
             bucket_id: string;
         };
+        BucketImpact: {
+            active_uploads: string;
+            /** Format: uuid */
+            bucket_id: string;
+            domains: string[];
+            inflight_bytes: string;
+            logical_bytes: string;
+            member_grants: string;
+            name: string;
+            objects: string;
+            /** Format: uuid */
+            project_id: string;
+            reserved_bytes: string;
+            revision: string;
+            service_grants: string;
+            state: string;
+            token_grants: string;
+            uploads_paused: boolean;
+            writing_streams: string;
+        };
+        BucketPreview: {
+            bucket: components["schemas"]["BucketImpact"];
+            confirmation: string;
+        };
+        BucketProject: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
+        BucketSettings: {
+            bucket: components["schemas"]["BucketView"];
+            domains: string[];
+        };
+        BucketTask: {
+            existing?: boolean;
+            /** Format: uuid */
+            task_id: string;
+        };
         BucketView: {
             actions: components["schemas"]["Action"][];
             cors: unknown;
@@ -764,7 +914,10 @@ export interface components {
             name: string;
             /** Format: uuid */
             project_id: string;
+            public_base_url: string;
+            revision: string;
             state: string;
+            uploads_paused: boolean;
             website_enabled: boolean;
         };
         CatalogStatus: {
@@ -777,6 +930,23 @@ export interface components {
         };
         Completion: {
             parts: components["schemas"]["PartReceipt"][];
+        };
+        ConfirmBucket: {
+            confirm_name: string;
+            confirmation: string;
+        };
+        CorsRule: {
+            expose?: string[];
+            headers?: string[];
+            /** Format: int32 */
+            max_age?: number;
+            methods: string[];
+            origins: string[];
+        };
+        CreateBucket: {
+            name: string;
+            /** Format: uuid */
+            project_id?: string | null;
         };
         CreateUser: {
             must_change_password?: boolean;
@@ -1054,6 +1224,16 @@ export interface components {
         SessionView: components["schemas"]["Profile"] & {
             csrf_token: string;
         };
+        SettingsInput: {
+            cors: components["schemas"]["CorsRule"][];
+            domains?: string[] | null;
+            error_document: string;
+            index_document: string;
+            public_base_url: string;
+            revision: string;
+            uploads_paused: boolean;
+            website_enabled: boolean;
+        };
         Setup: {
             password: string;
             token: string;
@@ -1127,9 +1307,35 @@ export interface components {
             /** Format: uuid */
             user_id?: string | null;
         };
+        TransferInput: {
+            confirm_name: string;
+            confirmation: string;
+            /** Format: uuid */
+            target_project: string;
+        };
         TransferPage: {
             next?: string | null;
             uploads: components["schemas"]["Transfer"][];
+        };
+        TransferPreview: {
+            bucket: components["schemas"]["BucketImpact"];
+            confirmation: string;
+            target: components["schemas"]["TransferProject"];
+        };
+        TransferProject: {
+            bucket_count: string;
+            bucket_limit?: string | null;
+            byte_limit?: string | null;
+            /** Format: uuid */
+            id: string;
+            members: string;
+            name: string;
+            reserved_bytes: string;
+            used_bytes: string;
+        };
+        TransferTarget: {
+            /** Format: uuid */
+            target_project: string;
         };
         UploadInput: {
             /** Format: uuid */
@@ -1275,6 +1481,25 @@ export interface operations {
             };
         };
     };
+    bucket_creation_options: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketProject"][];
+                };
+            };
+        };
+    };
     buckets: {
         parameters: {
             query?: never;
@@ -1299,6 +1524,52 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
+            };
+        };
+    };
+    bucket_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateBucket"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketView"];
+                };
+            };
+        };
+    };
+    bucket_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmBucket"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -1471,6 +1742,148 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MediaPage"];
+                };
+            };
+        };
+    };
+    bucket_purge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmBucket"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketTask"];
+                };
+            };
+        };
+    };
+    bucket_purge_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketPreview"];
+                };
+            };
+        };
+    };
+    bucket_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketSettings"];
+                };
+            };
+        };
+    };
+    bucket_settings_save: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SettingsInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketSettings"];
+                };
+            };
+        };
+    };
+    bucket_transfer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TransferInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketView"];
+                };
+            };
+        };
+    };
+    bucket_transfer_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TransferTarget"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TransferPreview"];
                 };
             };
         };

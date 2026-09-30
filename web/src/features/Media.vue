@@ -20,6 +20,7 @@ import MediaActionsMenu from '../components/MediaActionsMenu.vue'
 import MediaActionDialog from '../components/MediaActionDialog.vue'
 import type { MediaAction } from '../app/media'
 import type { components } from '../api/schema'
+import CreateBucket from '../components/CreateBucket.vue'
 
 type MediaObject = components['schemas']['MediaItem']
 type ObjectPage = components['schemas']['MediaPage']
@@ -84,7 +85,7 @@ async function refresh() {
 </script>
 
 <template>
-  <div class="page-heading"><div><p class="eyebrow">{{ t('collection') }}</p><h1>{{ current?.name || t('media') }}</h1><p>{{ t('everything') }}</p></div><div class="heading-actions"><button :disabled="buckets.isFetching.value || (bucket !== '' && objects.isFetching.value)" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button><button v-if="current?.state === 'active' && current.actions.includes('object.write')" class="primary" @click="uploading = true"><UploadCloud :size="16" />{{ t('uploadTitle') }}</button></div></div>
+  <div class="page-heading"><div><p class="eyebrow">{{ t('collection') }}</p><h1>{{ current?.name || t('media') }}</h1><p>{{ t('everything') }}</p></div><div class="heading-actions"><CreateBucket v-if="!bucket" @created="router.push('/media/' + $event.id)" /><RouterLink v-if="current?.actions.includes('bucket.settings')" class="button" :to="'/buckets/' + bucket">{{ t('buckets') }}</RouterLink><button :disabled="buckets.isFetching.value || (bucket !== '' && objects.isFetching.value)" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button><button v-if="current?.state === 'active' && current.actions.includes('object.write')" :disabled="current?.uploads_paused || current?.state !== 'active'" class="primary" @click="uploading = true"><UploadCloud :size="16" />{{ t('uploadTitle') }}</button></div></div>
   <p v-if="buckets.error.value || objects.error.value" class="error" role="alert">{{ errorText(buckets.error.value || objects.error.value) }}</p>
   <QuotaPanel v-if="current?.actions.includes('storage.inspect')" kind="bucket" :id="current.id" />
   <div v-if="!bucket" class="bucket-grid">

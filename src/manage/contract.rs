@@ -32,9 +32,12 @@ pub(super) struct BucketView {
     id: Uuid,
     project_id: Uuid,
     #[schema(value_type = Vec<crate::authorization::Action>)]
-    actions: Vec<String>,
+    pub(super) actions: Vec<String>,
     name: String,
     state: String,
+    revision: String,
+    uploads_paused: bool,
+    public_base_url: String,
     cors: Value,
     website_enabled: bool,
     index_document: String,
@@ -53,6 +56,9 @@ impl From<Bucket> for BucketView {
                 .collect(),
             name: bucket.name,
             state: bucket.state,
+            revision: bucket.settings_revision.to_string(),
+            uploads_paused: bucket.uploads_paused,
+            public_base_url: bucket.public_base_url,
             cors: bucket.cors,
             website_enabled: bucket.website_enabled,
             index_document: bucket.index_document,
@@ -86,6 +92,18 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::session))
         .routes(routes!(super::status))
         .routes(routes!(super::buckets))
+        .routes(routes!(super::buckets::create))
+        .routes(routes!(super::buckets::options))
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(super::buckets::get, super::buckets::save))
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .routes(routes!(super::buckets::delete))
+        .routes(routes!(super::buckets::purge_preview))
+        .routes(routes!(super::buckets::purge))
+        .routes(routes!(super::buckets::transfer_preview))
+        .routes(routes!(super::buckets::transfer))
         .routes(routes!(super::website, super::save_website))
         .routes(routes!(super::account::me, super::account::save))
         .routes(routes!(super::account::password))

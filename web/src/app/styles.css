@@ -425,3 +425,24 @@ details > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 .stage-zoom .zoom-button { position: sticky; flex-shrink: 0; left: 10px; top: 10px; }
 @media (max-width: 800px) { .object-viewer.expanded { inset: 8px; } .expanded .object-viewer-body { display: block; overflow: auto; padding: 18px; } .expanded .object-stage { height: 50dvh; } .expanded .object-inspector { overflow: visible; padding: 0; } .expanded .object-identity { padding-top: 18px; } .inspector-hidden .object-stage { height: 100%; } .media-gallery { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); padding: 12px; gap: 10px; } .gallery-preview { height: 120px; } }
 @media (max-width: 480px) { .object-viewer { inset: 8px; width: auto; border-radius: 20px; } .viewer-title { font-size: 11px; gap: 5px; } .object-viewer-bar { padding: 10px 13px; min-height: 58px; } .viewer-separator { margin: 0 4px; } .viewer-controls .icon-button { width: 29px; } .media-view-options { gap: 6px; } .media-toolbar { flex-wrap: wrap; } }
+.bucket-back { margin-bottom: 20px; }
+.bucket-settings { margin: 20px 0; overflow: hidden; }
+.bucket-settings > .tabs-list { padding: 12px 24px 0; }
+.bucket-fields { border: 0; padding: 24px; margin: 0; min-width: 0; max-width: 820px; }
+.bucket-fields h2 { font-size: 18px; }
+.bucket-fields .field { margin-top: 18px; }
+.input-action { display: flex; align-items: center; gap: 8px; }
+.input-action input { min-width: 0; flex: 1; }
+.bucket-save { border-top: 1px solid var(--line); padding: 16px 24px; background: var(--surface-soft); }
+.bucket-save > span { margin-right: auto; }
+.cors-rule { padding: 16px 20px; margin: 18px 0; border: 1px solid var(--line); border-radius: 18px; background: var(--surface-soft); }
+.cors-rule .section-heading h3 { font-size: 13px; }
+.cors-methods { display: flex; gap: 10px 20px; flex-wrap: wrap; }
+.form-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.lifecycle-card { margin-top: 24px; }
+.lifecycle-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 20px 0; border-top: 1px solid var(--line); }
+.lifecycle-row strong { font-size: 14px; }.lifecycle-row p { font-size: 12px; color: var(--muted); max-width: 520px; }
+.lifecycle-row > button, .lifecycle-row .actions { flex-shrink: 0; }
+.lifecycle-danger { margin-top: 8px; }.bucket-impact { margin-top: 24px; }.bucket-impact .info-callout { display: block; }
+.danger-callout { color: var(--danger); background: var(--rose-soft); }
+@media (max-width: 720px) { .lifecycle-row { align-items: flex-start; flex-direction: column; gap: 8px; }.form-pair { grid-template-columns: 1fr; gap: 0; }.bucket-save { flex-wrap: wrap; }.bucket-save > span { width: 100%; }.bucket-fields { padding: 18px; }.bucket-settings > .tabs-list { padding: 8px 12px 0; } }

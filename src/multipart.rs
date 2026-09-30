@@ -159,10 +159,11 @@ impl App {
         self.writable()?;
         let mut tx = self.db.begin().await?;
         authority.lock(&mut tx).await?;
-        let state: String = sqlx::query_scalar("SELECT state FROM buckets WHERE id=$1 FOR SHARE")
-            .bind(bucket.id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let (state, paused): (String, bool) =
+            sqlx::query_as("SELECT state,uploads_paused FROM buckets WHERE id=$1 FOR SHARE")
+                .bind(bucket.id)
+                .fetch_one(&mut *tx)
+                .await?;
         if state != "active" {
             return Err(s3_error!(OperationAborted).into());
         }
@@ -205,6 +206,9 @@ impl App {
         } else {
             None
         };
+        if paused {
+            return Err(s3_error!(OperationAborted).into());
+        }
         if let Some(limit) = self.config.multipart.max_active_uploads {
             let count: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM uploads WHERE state IN ('active','completing')",
@@ -280,6 +284,7 @@ impl App {
                 u.metadata.clone(),
                 false,
                 false,
+                None,
             )
             .await?;
         {
@@ -532,6 +537,7 @@ impl App {
                 metadata,
                 false,
                 false,
+                None,
             )
             .await?;
         let context = crate::storage::ReadContext::default();
@@ -790,6 +796,7 @@ impl App {
                 u.metadata.clone(),
                 u.public_read,
                 true,
+                Some(u.id),
             )
             .await?;
         self.complete_quota(u.id, id, total).await?;

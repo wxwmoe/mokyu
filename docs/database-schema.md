@@ -481,3 +481,8 @@ objects 增加可空 `catalog_size bigint`、`catalog_modified timestamptz`、`c
 - `credentials.authorization_revision`：bigint；成员/授权/身份变更通过触发器推进授权版本。
 - `streams.write_authorization`：内部 JSONB，保存写入身份、授权版本及所需动作，发布前重新校验；不包含密码或令牌。
 `web_users.must_change_password`：boolean NOT NULL DEFAULT false，限制账户先完成密码修改；目录索引为 `username COLLATE "C"`。用户身份和项目授权写入共享管理事务锁；数据流写入不占用此锁。
+## 桶配置与归属
+
+迁移 `0019_bucket_management.sql` 增加 `buckets.settings_revision bigint`、`uploads_paused boolean` 和 `public_base_url text`。CORS、网站、域名、归属和状态变化推进配置修订号，供并发编辑检查；不是对象版本。
+
+项目转移复用 `quota_accounts`：锁定来源和目标项目配额行，在同一事务内迁移逻辑用量、对象数和桶数，保留桶限额。活动预留阻止转移。成员和凭据授权的撤销也在此事务中完成。

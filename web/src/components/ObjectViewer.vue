@@ -22,6 +22,12 @@ const detail = useQuery({ queryKey: ['object', () => props.bucket.id, query], en
 const text = useQuery({ queryKey: ['object-text', () => props.bucket.id, query], enabled: computed(() => !!props.item && canRead.value && detail.data.value?.preview === 'text'), queryFn: ({ signal }) => api<components['schemas']['TextPreview']>(mediaUrl(props.bucket.id, props.item!, 'text'), { signal }), gcTime: 0 })
 const preview = computed(() => detail.data.value?.preview || 'none')
 const name = computed(() => props.item?.object_key.split('/').pop() || props.item?.object_key || t('objectDetails'))
+const publicLink = computed(() => {
+  if (!props.item?.public_read || !props.bucket.public_base_url) return ''
+  const segments = props.item.object_key.split('/')
+  if (segments.some(s => s === '.' || s === '..')) return ''
+  return props.bucket.public_base_url + segments.map(encodeURIComponent).join('/')
+})
 let returnFocus: HTMLElement | null = null
 watch(() => props.item, (value, previous) => {
   if (value && !previous) returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -55,7 +61,7 @@ function permalink() { const url = new URL(location.href); url.searchParams.set(
           <div class="object-primary-actions"><a v-if="canRead" class="button primary" :href="mediaUrl(bucket.id, item)" :download="name"><Download :size="16" />{{ t('download') }}</a><button class="icon-button" :aria-label="t('copyPath')" @click="copy(item.object_key)"><Copy :size="17" /></button><button class="icon-button" :aria-label="t('copyViewLink')" @click="permalink"><Link :size="17" /></button><MediaActionsMenu :bucket="bucket" :items="[item]" @action="emit('action', $event)" /></div>
           <TabsRoot default-value="information"><TabsList class="tabs-list" :aria-label="t('objectDetails')"><TabsTrigger class="tab-trigger" value="information"><Info :size="14" />{{ t('information') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="access"><ShieldCheck :size="14" />{{ t('access') }}</TabsTrigger></TabsList>
             <TabsContent value="information"><dl class="facts object-facts"><dt>{{ t('fileType') }}</dt><dd class="break-anywhere">{{ item.content_type }}</dd><dt>{{ t('updated') }}</dt><dd>{{ date(item.modified_at) }}</dd><dt>{{ t('bucket') }}</dt><dd>{{ bucket.name }}</dd></dl><details class="object-fold"><summary>{{ t('fullPath') }}</summary><p class="object-path">{{ item.object_key }}</p></details><details v-if="detail.data.value" class="object-fold"><summary>{{ t('technicalDetails') }}</summary><dl class="facts object-facts"><dt>{{ t('version') }}</dt><dd class="object-path">{{ item.id }}</dd><dt>ETag</dt><dd class="object-path">{{ detail.data.value.etag }}</dd></dl><dl class="metadata-fields"><template v-for="(value, key) in detail.data.value.metadata" :key="key"><template v-if="value && key !== 'user'"><dt>{{ key }}</dt><dd>{{ value }}</dd></template></template><template v-for="(value, key) in detail.data.value.metadata.user" :key="key"><dt>{{ key }}</dt><dd>{{ value }}</dd></template></dl></details></TabsContent>
-            <TabsContent value="access"><div class="access-note"><Globe v-if="item.public_read" :size="24" /><LockKeyhole v-else :size="24" /><div><strong>{{ t(item.public_read ? 'anyone' : 'authorized') }}</strong><p>{{ t('sessionDownload') }}</p></div></div><p class="field-help">{{ t('yourCapabilities') }}</p><div class="capability-list"><span v-for="action in bucket.actions" :key="action" class="badge">{{ t('action_' + action) }}</span></div></TabsContent>
+            <TabsContent value="access"><div class="access-note"><Globe v-if="item.public_read" :size="24" /><LockKeyhole v-else :size="24" /><div><strong>{{ t(item.public_read ? 'anyone' : 'authorized') }}</strong><p>{{ t('sessionDownload') }}</p></div></div><div v-if="publicLink" class="actions"><a class="button" :href="publicLink" target="_blank" rel="noopener noreferrer"><Globe :size="16" />{{ t('openPublicLink') }}</a><button @click="copy(publicLink)">{{ t('copy') }}</button></div><p class="field-help">{{ t('yourCapabilities') }}</p><div class="capability-list"><span v-for="action in bucket.actions" :key="action" class="badge">{{ t('action_' + action) }}</span></div></TabsContent>
           </TabsRoot>
         </aside>
       </div>

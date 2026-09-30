@@ -9,7 +9,6 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use uuid::Uuid;
 static PASSWORD_JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 pub async fn password_matches(hash: String, password: String) -> Result<bool> {
     let job = PASSWORD_JOBS
@@ -256,8 +255,10 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 "purge requires preview and confirmation through CLI"
             );
             app.purge_start(
+                &Principal::Local,
                 &name,
                 confirm_bucket.context("missing bucket confirmation")?,
+                None,
             )
             .await
         }
@@ -267,43 +268,22 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 .await?;
             Ok(serde_json::to_value(buckets)?)
         }
-        Command::Bucket(Buckets::Create { name }) => {
-            app.writable()?;
-            ensure!(
-                s3s::path::check_bucket_name(&name),
-                "invalid S3 bucket name"
-            );
-            let id = Uuid::new_v4();
-            sqlx::query("INSERT INTO buckets(id,name) VALUES($1,$2)")
-                .bind(id)
-                .bind(&name)
-                .execute(&app.db)
-                .await?;
-            Ok(json!({"id":id,"name":name}))
+        Command::Bucket(Buckets::Create { name, project }) => {
+            let row = super::buckets::create_bucket(
+                app,
+                &Principal::Local,
+                super::buckets::CreateBucket {
+                    name,
+                    project_id: project,
+                },
+            )
+            .await?;
+            Ok(serde_json::to_value(row)?)
         }
         Command::Bucket(Buckets::Delete { name }) => {
-            let b = app.bucket(&name, true).await?;
-            let _coord = app.coord.lock().await;
-            let mut tx = app.db.begin().await?;
-            sqlx::query("SELECT id FROM buckets WHERE id=$1 FOR UPDATE")
-                .bind(b.id)
-                .execute(&mut *tx)
-                .await?;
-            let nonempty:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM streams WHERE bucket_id=$1) OR EXISTS(SELECT 1 FROM uploads WHERE bucket_id=$1)").bind(b.id).fetch_one(&mut *tx).await?;
-            ensure!(
-                !nonempty,
-                "bucket has objects, writes or multipart records; use purge or wait for cleanup"
-            );
-            sqlx::query("DELETE FROM objects WHERE bucket_id=$1")
-                .bind(b.id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM buckets WHERE id=$1")
-                .bind(b.id)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(json!({"deleted":b.id}))
+            let bucket = app.bucket(&name, true).await?;
+            super::buckets::delete_bucket(app, &Principal::Local, bucket.id, &name, None).await?;
+            Ok(json!({"deleted":bucket.id}))
         }
         Command::Bucket(Buckets::Cors { name, document, .. }) => {
             let b = app.bucket(&name, true).await?;
@@ -485,24 +465,12 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
             ))
         }
         Command::Domain(Domains::Set { host, bucket }) => {
-            let host = host.to_ascii_lowercase();
-            ensure!(
-                !host.is_empty()
-                    && host.len() <= 253
-                    && host
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b".-:".contains(&b)),
-                "invalid media host"
-            );
-            let b = app.bucket(&bucket, true).await?;
-            sqlx::query("INSERT INTO domains(host,bucket_id) VALUES($1,$2) ON CONFLICT(host) DO UPDATE SET bucket_id=excluded.bucket_id").bind(&host).bind(b.id).execute(&app.db).await?;
-            Ok(json!({"host":host,"bucket":bucket}))
+            let row = app.bucket(&bucket, true).await?;
+            super::buckets::domain_change(app, &Principal::Local, &host, Some(row.id)).await?;
+            Ok(json!({"host":host.to_ascii_lowercase(),"bucket":bucket}))
         }
         Command::Domain(Domains::Delete { host }) => {
-            sqlx::query("DELETE FROM domains WHERE host=$1")
-                .bind(host.to_ascii_lowercase())
-                .execute(&app.db)
-                .await?;
+            super::buckets::domain_change(app, &Principal::Local, &host, None).await?;
             Ok(json!({"deleted":true}))
         }
         Command::User(user) => {
