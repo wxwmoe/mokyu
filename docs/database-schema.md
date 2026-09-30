@@ -289,6 +289,12 @@ credentials 另有：label text=''、可空 xpires_at/last_used_at timestamptz�
 
 Token 范围、有效期及撤销变更推进授权 revision；用户安全 revision 改变使旧 Token 永久失效。权限检查同时锁定用户和 Token，防止撤权前的校验结果被用于稍后提交。
 
+## audit_events
+
+`id bigint identity` 主键；`created_at timestamptz=now()`、可空 `finished_at timestamptz`；可空 `actor_id/token_id uuid`，`actor_label text` 保留操作时账号名称；`source text` 为 web/token/cli。`action/target text`、可空 `project_id/bucket_id uuid` 表示动作与范围；`outcome text='unknown'` 为 unknown/succeeded/failed/partial；可空 `request_id text/status integer`，`detail jsonb='{}'` 仅含显式脱敏业务字段。
+
+审计身份和范围不使用级联外键，删除业务记录不移除历史。索引 `(created_at,id)`、`(actor_id,id)`、`(project_id,id)`、`(bucket_id,id)` 与非空 request_id。关键授权变更与结果记录同一事务；未完成意图不自动推断成功。
+
 ## web_users
 
 | 字段 | 类型 | 可空 | 默认值 | 含义 |

@@ -231,6 +231,13 @@ impl App {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| s3_error!(NoSuchBucket))?;
+        crate::manage::audit::checkpoint(
+            &mut tx,
+            "bucket.cors",
+            &bucket.to_string(),
+            json!({"bucket_id":bucket,"cors":result}),
+        )
+        .await?;
         tx.commit().await?;
         Ok(result)
     }

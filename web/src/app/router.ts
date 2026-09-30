@@ -10,6 +10,7 @@ export const router = createRouter({
     { path: '/media', name: 'media', component: () => import('../features/Media.vue') },
     { path: '/credentials', name: 'credentials', meta: { admin: true }, component: () => import('../features/AccessKeys.vue') },
     { path: '/tokens', name: 'tokens', component: () => import('../features/AccessKeys.vue') },
+    { path: '/audit', name: 'audit', component: () => import('../features/Activity.vue') },
     { path: '/users', name: 'users', meta: { admin: true }, component: () => import('../features/Users.vue') },
     { path: '/projects', name: 'projects', component: () => import('../features/Projects.vue') },
     { path: '/account', name: 'account', component: () => import('../features/Account.vue') },

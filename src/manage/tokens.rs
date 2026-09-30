@@ -153,6 +153,7 @@ pub(crate) async fn create_token(
         .bind(id).bind(user).bind(input.label.trim()).bind(&secret[..12]).bind(hash.as_bytes().as_slice()).bind(input.system).bind(revision).bind(expires).execute(&mut *tx).await?;
     grants(&mut tx, id, input.grants).await?;
     let token = get_token(&mut tx, id).await?;
+    super::audit::checkpoint(&mut tx,"token.create",&id.to_string(),serde_json::json!({"user_id":user,"label":token.label,"system":token.system,"grants":token.grants,"expires_at":token.expires_at})).await?;
     tx.commit().await?;
     Ok(TokenSecret { token, secret })
 }
@@ -180,6 +181,7 @@ pub(crate) async fn update_token(
     sqlx::query("UPDATE api_tokens SET label=$2,system=$3,expires_at=CASE WHEN $5 THEN expires_at ELSE $4 END WHERE id=$1").bind(id).bind(input.label.trim()).bind(input.system).bind(expires).bind(input.keep_expiry).execute(&mut *tx).await?;
     grants(&mut tx, id, input.grants).await?;
     let result = get_token(&mut tx, id).await?;
+    super::audit::checkpoint(&mut tx,"token.update",&id.to_string(),serde_json::json!({"user_id":user,"label":result.label,"system":result.system,"grants":result.grants,"expires_at":result.expires_at})).await?;
     tx.commit().await?;
     Ok(result)
 }
@@ -194,6 +196,13 @@ pub(crate) async fn revoke_token(app: &App, principal: &Principal, id: Uuid) -> 
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "token.revoke",
+        &id.to_string(),
+        serde_json::json!({"user_id":user}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }

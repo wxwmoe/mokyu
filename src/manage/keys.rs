@@ -157,6 +157,7 @@ pub(crate) async fn create_credential(
 ) -> Result<CredentialSecret> {
     let mut tx = users::admin_transaction(app, principal).await?;
     let row = insert(app, &mut tx, principal, input).await?;
+    super::audit::checkpoint(&mut tx,"credential.create",&row.access_key,serde_json::json!({"project_id":row.credential.project_id,"label":row.credential.label,"grants":row.credential.grants,"expires_at":row.credential.expires_at})).await?;
     tx.commit().await?;
     Ok(row)
 }
@@ -191,6 +192,7 @@ pub(crate) async fn update_credential(
         replace_grants(&mut tx, access, row.project_id, grants).await?;
     }
     let row = get_credential(&mut tx, access).await?;
+    super::audit::checkpoint(&mut tx,"credential.update",access,serde_json::json!({"project_id":row.project_id,"label":row.label,"enabled":row.enabled,"grants":row.grants,"expires_at":row.expires_at})).await?;
     tx.commit().await?;
     Ok(row)
 }
@@ -209,6 +211,13 @@ pub(crate) async fn set_grants(
             .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
     replace_grants(&mut tx, access, project, grants).await?;
     let row = get_credential(&mut tx, access).await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "credential.permissions",
+        access,
+        serde_json::json!({"project_id":row.project_id,"grants":row.grants}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(row)
 }
@@ -222,6 +231,7 @@ pub(crate) async fn revoke_credential(
         .bind(access)
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(&mut tx, "credential.delete", access, serde_json::json!({})).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -241,6 +251,13 @@ pub(crate) async fn enable_credential(
     if n == 0 {
         return Err(s3s::s3_error!(NoSuchKey).into());
     }
+    super::audit::checkpoint(
+        &mut tx,
+        "credential.enabled",
+        access,
+        serde_json::json!({"enabled":enabled}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -266,6 +283,14 @@ pub(crate) async fn change_grant(
         });
     }
     replace_grants(&mut tx, access, current.project_id, grants).await?;
+    let row = get_credential(&mut tx, access).await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "credential.permissions",
+        access,
+        serde_json::json!({"project_id":row.project_id,"grants":row.grants}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -322,6 +347,7 @@ pub(crate) async fn rotate_credential(
         .bind(old_expires_at)
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(&mut tx,"credential.rotate",access,serde_json::json!({"project_id":replacement.credential.project_id,"replacement_key":replacement.access_key,"old_expires_at":old_expires_at})).await?;
     tx.commit().await?;
     Ok(CredentialRotation {
         replacement,

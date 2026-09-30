@@ -53,7 +53,37 @@ pub async fn password_hash(password: String) -> Result<String> {
     .await?
 }
 pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
+    if !super::audit::active()
+        && let Some(action) = command.audit_action()
+    {
+        let id = super::audit::begin(&app.db, &Principal::Local, action, None).await?;
+        let result = super::audit::scope(id, execute_inner(app, command)).await;
+        super::audit::finish(&app.db, id, if result.is_ok() { 200 } else { 400 }, false).await;
+        return result;
+    }
+    execute_inner(app, command).await
+}
+async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
     match command {
+        Command::Audit {
+            after,
+            actor,
+            action,
+        } => Ok(serde_json::to_value(
+            super::audit::page(
+                app,
+                true,
+                None,
+                super::audit::Filter {
+                    after,
+                    actor,
+                    action,
+                    ..Default::default()
+                },
+                false,
+            )
+            .await?,
+        )?),
         Command::Project(project) => {
             use super::projects::{self, ProjectInput};
             match project {

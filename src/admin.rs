@@ -26,6 +26,14 @@ pub enum Command {
     Credential(Credentials),
     #[command(subcommand)]
     Token(Tokens),
+    Audit {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long)]
+        action: Option<String>,
+    },
     #[command(subcommand)]
     Domain(Domains),
     #[command(subcommand)]
@@ -228,6 +236,40 @@ pub enum Tokens {
     Revoke {
         id: Uuid,
     },
+}
+impl Command {
+    pub fn audit_action(&self) -> Option<&'static str> {
+        match self {
+            Self::Status
+            | Self::Audit { .. }
+            | Self::Bucket(Buckets::List)
+            | Self::Credential(Credentials::List { .. } | Credentials::Show { .. })
+            | Self::Token(Tokens::List { .. })
+            | Self::Domain(Domains::List)
+            | Self::User(Users::List)
+            | Self::Project(Projects::List)
+            | Self::Gc(Gc::Status)
+            | Self::Cleanup(Cleanup::Status)
+            | Self::Task(Tasks::List | Tasks::Show { .. })
+            | Self::Integrity(Integrity::Issues { .. })
+            | Self::Pack(Packs::Status)
+            | Self::Cache(Cache::Status) => None,
+            Self::Bucket(_) => Some("bucket.change"),
+            Self::Credential(_) => Some("credential.change"),
+            Self::Token(_) => Some("token.change"),
+            Self::Domain(_) => Some("domain.change"),
+            Self::User(_) => Some("user.change"),
+            Self::Project(_) => Some("project.change"),
+            Self::Gc(_) => Some("gc.change"),
+            Self::Cleanup(_) => Some("cleanup.run"),
+            Self::Maintenance(_) => Some("maintenance.change"),
+            Self::Task(_) => Some("task.change"),
+            Self::Backend(_) => Some("backend.sweep"),
+            Self::Integrity(_) => Some("integrity.check"),
+            Self::Pack(_) => Some("pack.change"),
+            Self::Cache(_) => Some("cache.flush"),
+        }
+    }
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Domains {

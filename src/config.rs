@@ -329,6 +329,7 @@ pub struct Cleanup {
     pub deleted_chunk_retention: String,
     pub upload_retention: String,
     pub task_retention: String,
+    pub audit_retention: String,
 }
 impl Default for Cleanup {
     fn default() -> Self {
@@ -339,6 +340,7 @@ impl Default for Cleanup {
             deleted_chunk_retention: "7d".into(),
             upload_retention: "24h".into(),
             task_retention: "30d".into(),
+            audit_retention: "90d".into(),
         }
     }
 }
@@ -554,6 +556,7 @@ impl Config {
             &c.cleanup.deleted_chunk_retention,
             &c.cleanup.upload_retention,
             &c.cleanup.task_retention,
+            &c.cleanup.audit_retention,
             &c.manage.session_lifetime,
             &c.statistics.refresh_interval,
             &c.statistics.query_timeout,

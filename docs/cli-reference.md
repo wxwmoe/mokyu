@@ -31,6 +31,10 @@ CORS 文件示例，字段规则见[CORS 设置](manage-api-reference.md#cors-�
 docker exec mokyu cli bucket cors media /config/cors.json
 ```
 
+## 活动审计
+
+`audit [--after ID] [--actor NAME] [--action PREFIX]` 返回 `{events,next}`，每页最多 50 条，不含密码或 secret。管理写命令以 Local CLI 记入同一审计记录。
+
 ## 项目
 
 | 命令 | 作用 |

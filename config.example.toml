@@ -136,6 +136,8 @@ max_duration = "5s"
 deleted_chunk_retention = "7d"
 upload_retention = "24h"
 task_retention = "30d"
+# Management activity and security events; independent of object retention.
+audit_retention = "90d"
 
 [statistics]
 # Background database inventory; page refreshes only read the cached snapshot.

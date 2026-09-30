@@ -74,6 +74,18 @@ label 为 1～128 字节；grants 最多 1000 个不同桶，actions 使用项�
 
 `expires_in` 接受 `30d` 等时长，范围大于零且不超过 3650 天；应用密钥省略/null 表示不过期，Token 省略默认 90 天、null 表示不过期。更新时 `keep_expiry=true,expires_in=null` 保留原时间；轮换 overlap 为 0～30 天。密钥与 Token 正文上限 512 KiB。撤销或缩减权限会阻止尚未提交的写操作，已获授权的读取正文可继续完成。
 
+## 活动审计
+
+`GET /api/audit` 返回 `{events,next}`；`GET /api/audit/{id}` 返回完整详情。支持 `after,limit,actor,action,source,outcome,project,bucket,since,until`：ID 为十进制字符串，after 使用上页 next；limit 默认 50、范围 1～200；actor 匹配账号名称，action 匹配动作前缀；时间为带时区的 RFC3339。source 为 web/token/cli，outcome 为 succeeded/failed/partial/unknown。
+
+管理员查看全局记录。普通用户只可查看自己的账号/Token 活动、无敏感详情的失败记录及当前可列举桶内的个人操作；降级后不再显示原管理员权限下的全局管理详情。受限管理 Token 不可访问审计，完整系统 Token 可访问。删除账号后保留当时的账号标签与 UUID，不级联删除历史。
+
+管理写请求先持久记录意图；用户、项目授权、凭据、Token 和账户安全变更在业务事务中保存结果。其他入口记录请求结果；中断而未记录结果显示 unknown，不应推断成功或失败。普通 S3 数据读写不逐条写审计。已知账号的错误密码每分钟最多保留一条，标记身份尚未确认，不保存未知账号的尝试。
+
+详情仅收录显式选择的业务字段，不含密码、secret、认证哈希、完整正文或查询串。批量对象操作保留计数和前 20 项结果。完整详情最多 256 KiB；列表超过 8 KiB 的详情通过单条入口按需读取。
+
+`GET /api/audit/export` 使用同一筛选条件，返回 JSON Lines；每页默认 50、最多 100 条完整记录，响应 `X-Next-Cursor` 表示仍有后续页。页面导出当前页。审计保留由 `cleanup.audit_retention` 控制，默认 90 天，使用现有分批清理任务。
+
 ## 用户与成员
 
 以下接口仅管理员可用，写操作需要近期密码验证。用户记录不包含密码、哈希或头像邮箱。修改角色/状态、重置密码和删除会撤销该用户的会话；不删除项目媒体与 S3 应用密钥。

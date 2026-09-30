@@ -75,7 +75,7 @@ pub(crate) async fn save(
     if duplicate {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
-    let row = if let Some(id) = id {
+    let row: Project = if let Some(id) = id {
         sqlx::query_as("UPDATE projects SET name=$2,description=$3,allow_bucket_create=$4 WHERE id=$1 RETURNING *")
             .bind(id).bind(input.name.trim()).bind(input.description).bind(input.allow_bucket_create).fetch_optional(&mut *tx).await?.ok_or_else(|| s3s::s3_error!(NoSuchKey))?
     } else {
@@ -85,6 +85,7 @@ pub(crate) async fn save(
         sqlx::query_as("INSERT INTO projects(id,name,description,allow_bucket_create) VALUES($1,$2,$3,$4) RETURNING *")
             .bind(Uuid::new_v4()).bind(input.name.trim()).bind(input.description).bind(input.allow_bucket_create).fetch_one(&mut *tx).await?
     };
+    super::audit::checkpoint(&mut tx,if id.is_some(){"project.update"}else{"project.create"},&row.id.to_string(),serde_json::json!({"project_id":row.id,"name":row.name,"allow_bucket_create":row.allow_bucket_create})).await?;
     tx.commit().await?;
     Ok(row)
 }
@@ -108,6 +109,13 @@ pub(crate) async fn remove(app: &App, principal: &Principal, id: Uuid) -> Result
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "project.delete",
+        &id.to_string(),
+        serde_json::json!({"project_id":id}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -126,6 +134,13 @@ pub(crate) async fn mode(app: &App, principal: &Principal, enabled: bool) -> Res
         .bind(enabled)
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "project.mode",
+        "",
+        serde_json::json!({"enabled":enabled}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }

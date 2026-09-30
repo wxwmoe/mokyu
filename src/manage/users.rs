@@ -102,6 +102,13 @@ pub(crate) async fn create_user(
     sqlx::query("DELETE FROM manage_setup")
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "user.create",
+        &row.id.to_string(),
+        serde_json::json!({"username":row.username,"role":row.role,"enabled":row.enabled}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(row)
 }
@@ -164,6 +171,7 @@ pub(crate) async fn update_user(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(&mut tx,"user.update",&id.to_string(),serde_json::json!({"username":current.username,"old_role":current.role,"role":role,"enabled":enabled})).await?;
     tx.commit().await?;
     Ok(row)
 }
@@ -179,6 +187,13 @@ pub(crate) async fn delete_user(app: &App, principal: &Principal, id: Uuid) -> R
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "user.delete",
+        &id.to_string(),
+        serde_json::json!({"username":current.username}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -209,6 +224,13 @@ pub(crate) async fn reset_password(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "user.reset_password",
+        &id.to_string(),
+        serde_json::json!({"must_change_password":input.must_change_password}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -366,6 +388,7 @@ pub(crate) async fn save_member(
     if !exists {
         return Err(s3s::s3_error!(NoSuchKey).into());
     }
+    let audit_detail = serde_json::json!({"project_id":project,"user_id":user,"membership":input});
     if let Some(input) = input {
         let mut buckets: Vec<Uuid> = input.grants.iter().map(|g| g.bucket_id).collect();
         buckets.sort();
@@ -396,6 +419,13 @@ pub(crate) async fn save_member(
             .execute(&mut *tx)
             .await?;
     }
+    super::audit::checkpoint(
+        &mut tx,
+        "project.membership",
+        &user.to_string(),
+        audit_detail,
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }

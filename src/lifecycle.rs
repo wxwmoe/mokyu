@@ -20,7 +20,7 @@ impl App {
             "last_run":self.cleanup_state.last_run.lock().unwrap().clone(),
             "interval":c.interval,"batch_size":c.batch_size,"max_duration":c.max_duration,
             "deleted_chunk_retention":c.deleted_chunk_retention,
-            "upload_retention":c.upload_retention,"task_retention":c.task_retention})
+            "upload_retention":c.upload_retention,"task_retention":c.task_retention,"audit_retention":c.audit_retention})
     }
 
     pub async fn cleanup_history(&self) -> Result<Value> {
@@ -32,9 +32,14 @@ impl App {
         let start = Instant::now();
         let duration = Duration::from_secs(config::seconds(&c.max_duration)?);
         let batch = c.batch_size as i64;
-        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"integrity_issues":0,"packs":0,"chunk_locations":0});
+        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"integrity_issues":0,"packs":0,"chunk_locations":0,"audit_events":0});
         let mut batches = 0;
         let queries = [
+            (
+                "audit_events",
+                config::seconds(&c.audit_retention)? as f64,
+                "DELETE FROM audit_events WHERE id IN (SELECT id FROM audit_events WHERE created_at<now()-$1*interval '1 second' ORDER BY created_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+            ),
             (
                 "chunks",
                 config::seconds(&c.deleted_chunk_retention)? as f64,

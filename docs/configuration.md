@@ -226,6 +226,7 @@ key ID 为 1～128 字节，不同 ID 必须使用不同实际密钥。更换算
 | `cleanup.deleted_chunk_retention` | 时间 / `7d` | 从远端删除成功后的 `deleted_at` 起保留区块日志 |
 | `cleanup.upload_retention` | 时间 / `24h` | completed/aborted 上传记录保留时间；与活动上传的 idle_timeout 无关 |
 | `cleanup.task_retention` | 时间 / `30d` | 已完成任务及巡检异常保留时间，包括 sweep 预览 |
+| `cleanup.audit_retention` | 时间 / `90d` | 管理审计记录的保留时间，独立于对象和任务保留 |
 
 远端 GC 与数据库历史清理独立调度，无需 crontab。历史清理在 GC 暂停及维护模式下仍运行，不删除远端数据；到期行分批提交，达到时限后下一轮继续，被锁或仍被引用／活跃保护的行暂缓。
 

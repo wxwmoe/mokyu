@@ -1,5 +1,6 @@
 pub(crate) mod account;
 mod assets;
+pub(crate) mod audit;
 mod contract;
 pub(crate) mod keys;
 pub(crate) mod operations;
@@ -198,6 +199,9 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/download"
                 | "/api/projects"
                 | "/api/tokens"
+                | "/api/audit"
+                | "/api/audit/export"
+                | "/api/audit/{id}"
         ) | (
             "POST",
             "/api/logout"
@@ -243,7 +247,8 @@ async fn access_gate(
             if identity.principal.token_id().is_some()
                 && (matches!(path.as_str(), "/api/session" | "/api/logout" | "/api/me")
                     || path.starts_with("/api/me/")
-                    || path.starts_with("/api/tokens")) =>
+                    || path.starts_with("/api/tokens")
+                    || (path.starts_with("/api/audit") && !identity.admin)) =>
         {
             unauthorized().into_response()
         }
@@ -262,10 +267,61 @@ async fn access_gate(
             crate::http::problem(StatusCode::FORBIDDEN, "PasswordChangeRequired").into_response()
         }
         Ok(identity) if identity.admin || member_route(&path, request.method()) => {
+            let event = if write {
+                let request_id = request
+                    .extensions()
+                    .get::<crate::stats::RequestContext>()
+                    .map(|c| c.id.as_str());
+                match audit::begin(
+                    &app.db,
+                    &identity.principal,
+                    &format!("{} {}", request.method(), path),
+                    request_id,
+                )
+                .await
+                {
+                    Ok(id) => Some(id),
+                    Err(error) => return HttpError(error).into_response(),
+                }
+            } else {
+                None
+            };
+            let context = request
+                .extensions()
+                .get::<crate::stats::RequestContext>()
+                .cloned();
             request.extensions_mut().insert(identity);
-            next.run(request).await
+            if let Some(id) = event {
+                let response = audit::scope(id, next.run(request)).await;
+                audit::finish(
+                    &app.db,
+                    id,
+                    response.status().as_u16(),
+                    context.is_some_and(|c| c.failed.load(std::sync::atomic::Ordering::Relaxed)),
+                )
+                .await;
+                response
+            } else {
+                next.run(request).await
+            }
         }
-        Ok(_) => unauthorized().into_response(),
+        Ok(identity) => {
+            if write
+                && let Ok(id) = audit::begin(
+                    &app.db,
+                    &identity.principal,
+                    &format!("{} {}", request.method(), path),
+                    request
+                        .extensions()
+                        .get::<crate::stats::RequestContext>()
+                        .map(|c| c.id.as_str()),
+                )
+                .await
+            {
+                audit::finish(&app.db, id, 403, false).await;
+            }
+            unauthorized().into_response()
+        }
         Err(error) => error.into_response(),
     }
 }
@@ -359,6 +415,7 @@ struct Login {
 #[utoipa::path(post, path = "/api/login", request_body = Login, responses((status = 200, body = LoginReply), (status = 403, body = contract::ErrorBody)))]
 async fn login(
     State(app): State<Arc<App>>,
+    Extension(context): Extension<crate::stats::RequestContext>,
     headers: HeaderMap,
     Json(input): Json<Login>,
 ) -> Result<Response, HttpError> {
@@ -372,6 +429,7 @@ async fn login(
     .bind(input.username)
     .fetch_optional(&app.db)
     .await?;
+    let attempted = row.as_ref().map(|row| row.0);
     let started = tokio::time::Instant::now();
     let verified = if let Some((id, hash, revision)) = row {
         operations::password_matches(hash.clone(), input.password)
@@ -381,7 +439,14 @@ async fn login(
         None
     };
     tokio::time::sleep_until(started + Duration::from_millis(300)).await;
-    let (user, verified_hash, revision) = verified.ok_or_else(unauthorized)?;
+    let Some((user, verified_hash, revision)) = verified else {
+        if let Some(user) = attempted {
+            let mut tx = app.db.begin().await?;
+            audit::security(&mut tx, user, "session.login", false, &context.id).await?;
+            tx.commit().await?;
+        }
+        return Err(unauthorized());
+    };
     #[cfg(feature = "fault-injection")]
     crate::faults::point("login-verified").await;
     let token = crate::admin::random_secret()?;
@@ -403,6 +468,7 @@ async fn login(
     #[cfg(feature = "fault-injection")]
     crate::faults::point("login-before-session").await;
     sqlx::query("INSERT INTO sessions(token_hash,user_id,csrf_hash,expires_at,auth_revision,user_agent) VALUES($1,$2,$3,now()+$4*interval '1 second',$5,$6)").bind(blake3::hash(token.as_bytes()).as_bytes().as_slice()).bind(user).bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice()).bind(seconds as f64).bind(revision).bind(headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("").chars().filter(|c| !c.is_control()).take(128).collect::<String>()).execute(&mut *tx).await?;
+    audit::security(&mut tx, user, "session.login", true, &context.id).await?;
     tx.commit().await?;
     let mut response = Json(LoginReply { csrf_token: csrf }).into_response();
     let secure = if app.config.manage.secure_cookie {
@@ -438,6 +504,7 @@ async fn logout(
         )
         .execute(&mut *tx)
         .await?;
+    audit::checkpoint(&mut tx, "session.logout", &id.to_string(), json!({})).await?;
     tx.commit().await?;
     let mut r = StatusCode::NO_CONTENT.into_response();
     r.headers_mut().insert(
@@ -557,8 +624,9 @@ async fn save_website(
         .lock(&mut tx)
         .await?;
     let row = sqlx::query_as("UPDATE buckets SET website_enabled=$2,index_document=$3,error_document=$4 WHERE id=$1 AND state='active' RETURNING website_enabled,index_document,error_document")
-        .bind(bucket).bind(input.website_enabled).bind(input.index_document).bind(input.error_document)
+        .bind(bucket).bind(input.website_enabled).bind(&input.index_document).bind(&input.error_document)
         .fetch_optional(&mut *tx).await?.ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    audit::checkpoint(&mut tx,"bucket.website",&bucket.to_string(),json!({"bucket_id":bucket,"website_enabled":input.website_enabled,"index_document":input.index_document,"error_document":input.error_document})).await?;
     tx.commit().await?;
     Ok(Json(row))
 }
@@ -712,6 +780,12 @@ async fn object_actions(
         tracing::info!(%user_id, bucket_id=%input.bucket, action=?input.action, object_key=%object.key, version=%object.version, status, "management object action");
         results.push(json!({"key":object.key,"version":object.version,"status":status}));
     }
+    let mut tx = app.db.begin().await?;
+    audit::checkpoint(&mut tx,"object.batch",&input.bucket.to_string(),json!({"bucket_id":input.bucket,"operation":format!("{:?}",input.action),"count":results.len(),"failed":results.iter().filter(|r|r["status"]!=200).count(),"sample":results.iter().take(20).collect::<Vec<_>>()})).await?;
+    if context.failed.load(std::sync::atomic::Ordering::Relaxed) {
+        audit::partial(&mut tx).await?;
+    }
+    tx.commit().await?;
     Ok(Json(json!({"results":results})))
 }
 #[derive(Deserialize)]

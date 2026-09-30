@@ -105,6 +105,13 @@ pub(super) async fn save(
     sqlx::query("UPDATE web_users SET display_name=$2,locale=$3,theme=$4,avatar_email=$5,avatar_enabled=$6 WHERE id=$1 AND enabled")
         .bind(id).bind(input.display_name.trim()).bind(input.locale).bind(input.theme)
         .bind(input.avatar_email.trim().to_lowercase()).bind(input.avatar_enabled).execute(&mut *tx).await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "account.preferences",
+        &id.to_string(),
+        serde_json::json!({}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(profile(&app, id).await?))
 }
@@ -202,6 +209,13 @@ pub(super) async fn password(
     .bind(verified.2 + 1)
     .execute(&mut *tx)
     .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "account.password",
+        &actor.id.to_string(),
+        serde_json::json!({}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -224,6 +238,13 @@ pub(super) async fn reauthenticate(
         )
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "session.reauthenticate",
+        &actor.id.to_string(),
+        serde_json::json!({}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -274,6 +295,13 @@ pub(super) async fn revoke_session(
         .bind(user)
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "session.revoke",
+        &id.to_string(),
+        serde_json::json!({}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -295,6 +323,13 @@ pub(super) async fn revoke_others(
         )
         .execute(&mut *tx)
         .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "session.revoke_others",
+        &id.to_string(),
+        serde_json::json!({}),
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -371,6 +406,7 @@ pub(super) struct Setup {
 #[utoipa::path(post, path="/api/setup", request_body=Setup, responses((status=201)))]
 pub(super) async fn setup(
     State(app): State<Arc<App>>,
+    Extension(context): Extension<crate::stats::RequestContext>,
     headers: HeaderMap,
     Json(input): Json<Setup>,
 ) -> Result<StatusCode, HttpError> {
@@ -402,12 +438,14 @@ pub(super) async fn setup(
     if !allowed {
         return Err(unauthorized());
     }
+    let user = Uuid::new_v4();
     sqlx::query("INSERT INTO web_users(id,username,password_hash,role) VALUES($1,$2,$3,'admin')")
-        .bind(Uuid::new_v4())
+        .bind(user)
         .bind(input.username)
         .bind(hash)
         .execute(&mut *tx)
         .await?;
+    super::audit::security(&mut tx, user, "account.setup", true, &context.id).await?;
     sqlx::query("DELETE FROM manage_setup")
         .execute(&mut *tx)
         .await?;
