@@ -82,6 +82,28 @@ label 为 1～128 字节；grants 最多 1000 个不同桶，actions 使用项�
 
 桶账本需要 storage.inspect；项目成员可以读取共享上限，只有拥有全项目范围的成员可以读取项目汇总，其他成员的汇总字段为 null。受限 Token 只可读取获授权的桶账本。
 
+## 媒体目录与检索
+
+`GET /api/buckets/{bucket}/objects` 需要 bucket.list，返回 `{objects,prefixes,next,layout,search_mode,index_ready}`。对象摘要包含 `id`（版本 UUID）、`object_key,size,content_type,public_read,modified_at`；size 为十进制字符串。搜索限定在当前桶，不能跨授权范围。
+
+| 参数 | 含义 |
+| --- | --- |
+| prefix / recursive | 当前路径前缀；recursive=true 展开子目录 |
+| q / mode / search_in | 搜索词；mode=contains（默认）/prefix/exact；包含搜索的 search_in=name（默认）/path |
+| kind / public | image/video/audio/document/archive/other；公开读取 true/false |
+| min_size / max_size | 原始字节范围，非负十进制字符串，包含边界 |
+| since / until | 更新时刻范围，RFC3339，包含边界 |
+| sort / order | name（默认）/size/modified；asc（默认）/desc |
+| after / limit | 上页 next；limit 1～200，默认 100 |
+
+前缀与完整路径区分大小写，q 接在 prefix 后；包含搜索不区分大小写，通配符按普通字符处理。无法提取连续三个文字/数字的包含搜索改为路径前缀匹配，响应 search_mode 明确为 prefix。类型来自 MIME 与扩展名，只用于整理显示，不是内容安全判断。
+
+无筛选的名称升序使用虚拟目录；其他组合返回平面文件列表，不推算文件夹大小。游标绑定桶和筛选排序参数，变更参数后从第一页开始；并发写入期间不是跨请求快照。检索查询限制为 2 秒，超时要求缩小范围或重试。
+
+`GET /api/buckets/{bucket}/catalog` 返回索引阶段 indexes/backfill/ready。只有管理员能看到全局 scanned/current_index/last_error，其余用户这些字段为 null。索引未就绪仍可浏览目录、按完整路径或前缀检索；其他条件返回 503 CatalogBuilding。
+
+目录摘要与发布、覆盖、ACL 变更及删除同事务更新。升级后逐批回填旧对象并并发建索引；中断后自动继续，不在启动迁移里重建整个库存。管理状态和 `cli status` 包含 catalog 进度。
+
 ## 上传与传输中心
 
 浏览器上传复用 S3 分片的接收、额度和发布流程，不向浏览器签发 S3 secret。默认每片 16 MiB，大文件自动增大片段以满足最多 10000 片和每片最多 5 GiB 的协议限制。所有字节数用十进制字符串。

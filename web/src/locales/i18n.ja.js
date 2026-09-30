@@ -1,4 +1,12 @@
 export default {
+  mediaSearch: 'このバケットを検索', mediaSearchHint: 'お気に入りを見つけよう…', searchMatch: '検索方法', matchName: 'ファイル名に含む', matchPath: 'パスに含む', matchPrefix: 'パスの先頭', matchExact: '完全なパス',
+  fileType: 'ファイルの種類', kind_all: 'すべて', kind_image: '画像', kind_video: '動画', kind_audio: '音声', kind_document: '文書', kind_archive: 'アーカイブ', kind_other: 'その他',
+  moreFilters: 'もう少し絞り込む', mediaFilterHint: '探しているコレクションに、そっと近づきましょう。', mediaSort: '並べ方', sortNameAsc: '名前 · 昇順', sortNameDesc: '名前 · 降順', sortNewest: '新しい順', sortOldest: '古い順', sortLargest: '大きい順', sortSmallest: '小さい順',
+  clearFilters: '絞り込みを解除', accessAll: 'すべての公開状態', minimumSize: '最小サイズ', maximumSize: '最大サイズ', modifiedFrom: '更新開始日', modifiedUntil: '更新終了日', mediaDatesHint: '日付はブラウザーのタイムゾーンで一日全体を含みます。サイズは重複排除・符号化前のバイト数です。',
+  includeSubfolders: 'サブフォルダーのファイルも表示', invalidFilterRange: 'サイズと日付の範囲を確認してください。開始は終了以下にしてください。', applyFilters: 'ファイルを探す',
+  chooseDate: '{label}を選ぶ', clearDate: '{label}を消す', previousMonth: '前の月', nextMonth: '次の月',
+  catalogBuilding: 'コレクションの索引を準備中です。フォルダー閲覧、完全なパス、パスの先頭による検索は使えます。', shortSearchHint: '短い検索語は、このフォルダー内のパスの先頭と照合します。部分一致には連続する3文字以上の文字または数字を使ってください。', flatResults: 'サブフォルダーも含めた結果です。上のフォルダーからの相対パスを表示しています。',
+  error_CatalogBuilding: '索引を準備中です。フォルダー閲覧か、完全なパス・先頭による検索を使ってください。', error_SearchTooBroad: '検索範囲が広すぎます。パスを絞るか、より具体的な名前・条件を指定してください。',
   transfers: '転送センター', uploadEyebrow: '好きなものを、おうちへ', uploadTitle: 'ファイルを送る', uploadHint: 'お気に入りを、コレクションに届けましょう。',
   chooseFiles: 'ファイルを選ぶ', dropFiles: 'ここにそっとドロップ', removeFile: '{name} を取り除く', uploadDestination: 'お気に入りの居場所',
   uploadPrefix: 'オブジェクトパスの接頭辞', uploadPrefixPlaceholder: 'gallery/', uploadPathHint: 'ファイル名をそのまま末尾に追加します。フォルダーには末尾の / が必要です。',

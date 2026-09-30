@@ -128,6 +128,7 @@ fn main() -> Result<()> {
             result=tasks::run(app.clone())=>result?,
             result=pack_tasks::run(app.clone())=>result?,
             result=stats::run(app.clone())=>result?,
+            result=manage::catalog::run(app.clone())=>result?,
             result=access::run(app.clone())=>result?,
             result=app.storage.compression.run()=>result?,
             _=shutdown_signal()=>{tracing::info!("stopping listeners; draining active data operations");}

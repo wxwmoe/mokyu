@@ -80,6 +80,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/buckets/{bucket}/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["catalog_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/buckets/{bucket}/objects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["browse_media"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/buckets/{bucket}/uploads": {
         parameters: {
             query?: never;
@@ -642,6 +674,14 @@ export interface components {
             state: string;
             website_enabled: boolean;
         };
+        CatalogStatus: {
+            current_index?: string | null;
+            last_error?: string | null;
+            phase: string;
+            scanned?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+        };
         Completion: {
             parts: components["schemas"]["PartReceipt"][];
         };
@@ -734,6 +774,24 @@ export interface components {
         };
         LoginReply: {
             csrf_token: string;
+        };
+        MediaItem: {
+            content_type: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            modified_at: string;
+            object_key: string;
+            public_read: boolean;
+            size: string;
+        };
+        MediaPage: {
+            index_ready: boolean;
+            layout: string;
+            next?: string | null;
+            objects: components["schemas"]["MediaItem"][];
+            prefixes: string[];
+            search_mode: string;
         };
         Member: {
             display_name: string;
@@ -1098,6 +1156,64 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    catalog_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogStatus"];
+                };
+            };
+        };
+    };
+    browse_media: {
+        parameters: {
+            query?: {
+                prefix?: string;
+                q?: string;
+                mode?: string;
+                search_in?: string;
+                kind?: string | null;
+                public?: boolean | null;
+                min_size?: string | null;
+                max_size?: string | null;
+                since?: string | null;
+                until?: string | null;
+                sort?: string;
+                order?: string;
+                recursive?: boolean;
+                after?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MediaPage"];
                 };
             };
         };

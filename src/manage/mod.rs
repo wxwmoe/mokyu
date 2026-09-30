@@ -1,6 +1,7 @@
 pub(crate) mod account;
 mod assets;
 pub(crate) mod audit;
+pub(crate) mod catalog;
 mod contract;
 pub(crate) mod keys;
 pub(crate) mod operations;
@@ -201,6 +202,8 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/download"
                 | "/api/projects"
                 | "/api/quotas/{kind}/{id}"
+                | "/api/buckets/{bucket}/objects"
+                | "/api/buckets/{bucket}/catalog"
                 | "/api/uploads"
                 | "/api/uploads/{id}"
                 | "/api/uploads/{id}/parts"

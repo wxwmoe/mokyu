@@ -1,4 +1,12 @@
 export default {
+  mediaSearch: 'Search this bucket', mediaSearchHint: 'Find a little something…', searchMatch: 'Search matching', matchName: 'Filename contains', matchPath: 'Path contains', matchPrefix: 'Path starts with', matchExact: 'Exact path',
+  fileType: 'File type', kind_all: 'Everything', kind_image: 'Images', kind_video: 'Video', kind_audio: 'Audio', kind_document: 'Documents', kind_archive: 'Archives', kind_other: 'Other files',
+  moreFilters: 'A little more precise', mediaFilterHint: 'Narrow the collection to just what you need.', mediaSort: 'Arrange by', sortNameAsc: 'Name · A to Z', sortNameDesc: 'Name · Z to A', sortNewest: 'Newest first', sortOldest: 'Oldest first', sortLargest: 'Largest first', sortSmallest: 'Smallest first',
+  clearFilters: 'Clear filters', accessAll: 'Any access', minimumSize: 'At least', maximumSize: 'At most', modifiedFrom: 'Updated from', modifiedUntil: 'Updated through', mediaDatesHint: 'Dates include the whole day in your browser time zone. Sizes use original bytes, before deduplication and encoding.',
+  includeSubfolders: 'Show files from subfolders', invalidFilterRange: 'Check the size and date ranges. The start must not exceed the end.', applyFilters: 'Find my files',
+  chooseDate: 'Choose {label}', clearDate: 'Clear {label}', previousMonth: 'Previous month', nextMonth: 'Next month',
+  catalogBuilding: 'Your collection is being indexed. Folder browsing, exact paths and prefixes are available meanwhile.', shortSearchHint: 'This short search is matching the start of the path within this folder. Add at least three consecutive letters or numbers for contains search.', flatResults: 'Showing matching files across subfolders. Paths are relative to the folder above.',
+  error_CatalogBuilding: 'The search index is still being prepared. Browse folders or use an exact path or prefix for now.', error_SearchTooBroad: 'This search is too broad. Choose a more specific path, name or filter.',
   transfers: 'Transfers', uploadEyebrow: 'A little journey home', uploadTitle: 'Upload files', uploadHint: 'Send a little something to your collection.',
   chooseFiles: 'Choose files', dropFiles: 'Drop your files here', removeFile: 'Remove {name}', uploadDestination: 'A place to call home',
   uploadPrefix: 'Object path prefix', uploadPrefixPlaceholder: 'gallery/', uploadPathHint: 'The filename is appended exactly. Add a trailing / for a folder.',

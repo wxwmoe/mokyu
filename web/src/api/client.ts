@@ -78,3 +78,12 @@ export function bytes(value: number) {
   const unit = Math.min(5, Math.floor(Math.log2(Math.max(1, Math.abs(value))) / 10))
   return `${new Intl.NumberFormat(locale.value, { maximumFractionDigits: 1 }).format(value / 1024 ** unit)} ${units[unit]}`
 }
+
+export function parseBytes(value: string, factor = '1'): string | null {
+  if (!value.trim()) return null
+  if (!/^\d+(\.\d{1,3})?$/.test(value)) throw new Error('Invalid size')
+  const [whole, fraction = ''] = value.split('.'), scale = 10n ** BigInt(fraction.length)
+  const n = BigInt(whole! + fraction) * BigInt(factor)
+  if (n % scale || n / scale > 9223372036854775807n) throw new Error('Invalid size')
+  return String(n / scale)
+}

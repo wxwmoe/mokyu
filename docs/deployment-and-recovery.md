@@ -80,6 +80,8 @@ docker exec mokyu cli task list
 
 保持 PostgreSQL autovacuum/ANALYZE 启用。普通 DELETE/VACUUM 释放的空间通常供数据库复用，不会立即缩小磁盘文件；项目不自动执行 `VACUUM FULL`。
 
+媒体目录需要 PostgreSQL 的 `pg_trgm` 扩展；数据库用户须能创建该扩展，或由数据库管理员提前安装。首次启动或升级后，服务会逐个并发创建目录索引，再分批回填摘要，重启可继续。构建期间仍可浏览目录、按路径前缀或完整路径查找；包含搜索、筛选和其他排序在就绪后开放。`cli status` 的 `catalog` 字段显示进度。为索引和构建临时文件预留数据库磁盘空间，长路径和大量对象会增加占用。
+
 需要验证数据时，手动运行[完整性巡检](cli-reference.md#完整性巡检)。后端未索引区块仅在管理需要时使用[清查命令](cli-reference.md#后端清查)。
 
 ### 补齐无引用区块的回收标记

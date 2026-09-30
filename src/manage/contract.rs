@@ -113,6 +113,8 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::quotas::get, super::quotas::put))
         .routes(routes!(super::uploads::create))
         .routes(routes!(super::uploads::list))
+        .routes(routes!(super::catalog::list))
+        .routes(routes!(super::catalog::status))
         .routes(routes!(super::uploads::get, super::uploads::abort))
         .routes(routes!(super::uploads::parts))
         .merge(

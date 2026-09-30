@@ -2,7 +2,7 @@
 import { computed, reactive, ref } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { Gauge, SlidersHorizontal, Sprout, Clock3 } from 'lucide-vue-next'
-import { api, bytes, session, write } from '../api/client'
+import { api, bytes, parseBytes, session, write } from '../api/client'
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
 import { secure } from '../app/security'
@@ -32,17 +32,9 @@ function edit() {
   ;[draft.inflight, draft.inflightUnit] = input(row.value?.inflight_limit)
   draft.buckets = row.value?.bucket_limit || ''; invalid.value = false; open.value = true
 }
-function amount(value: string, factor = '1') {
-  if (!value.trim()) return null
-  if (!/^\d+(\.\d{1,3})?$/.test(value)) throw new Error('Invalid quota')
-  const [whole, fraction = ''] = value.split('.'), scale = 10n ** BigInt(fraction.length)
-  const n = BigInt(whole! + fraction) * BigInt(factor)
-  if (n % scale || n / scale > 9223372036854775807n) throw new Error('Invalid quota')
-  return String(n / scale)
-}
 async function save() {
   let limits
-  try { limits = { byte_limit: amount(draft.bytes, draft.byteUnit), inflight_limit: props.kind === 'project' ? amount(draft.inflight, draft.inflightUnit) : null, bucket_limit: props.kind === 'project' ? amount(draft.buckets) : null } }
+  try { limits = { byte_limit: parseBytes(draft.bytes, draft.byteUnit), inflight_limit: props.kind === 'project' ? parseBytes(draft.inflight, draft.inflightUnit) : null, bucket_limit: props.kind === 'project' ? parseBytes(draft.buckets) : null } }
   catch { invalid.value = true; return }
   busy.value = true
   try { await secure(() => write(path.value, limits, 'PUT')); open.value = false; await quota.refetch(); notify(t('quotaSaved')) }

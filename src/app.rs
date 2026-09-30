@@ -854,6 +854,7 @@ impl App {
         let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":paused,"maintenance":maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":self.db.size(),"db_pool_idle":self.db.num_idle(),"data_slots_available":self.slots.available_permits(),"active_streams":self.active.lock().unwrap().len()});
         status["runtime"] = self.statistics.runtime();
         status["cleanup"] = self.cleanup_status();
+        status["catalog"] = serde_json::to_value(crate::manage::catalog::progress(self).await?)?;
         status["storage"] = self.statistics.inventory(crate::config::seconds(
             &self.config.statistics.refresh_interval,
         )?);

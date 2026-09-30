@@ -449,6 +449,16 @@ chunks、extents、streams、objects、uploads、parts、fragments、sessions、
 
 sweep 样本有界，不是可直接执行的删除清单。日常管理通过 CLI/Web 完成；不要手改状态、序列、引用或 nonce 来绕过检查。[数据库恢复](deployment-and-recovery.md#恢复步骤)还需核对历史密钥和后端身份。
 
+## 当前媒体目录
+
+objects 增加可空 `catalog_size bigint`、`catalog_modified timestamptz`、`catalog_type/catalog_kind text`、`catalog_public boolean`。摘要由对象/流触发器同步维护；旧记录在后台每批 500 行回填。仅修改摘要不会触发配额记账。
+
+`catalog_build` 为单例检查点：phase（indexes/backfill/ready）、cursor_bucket UUID、cursor_key text COLLATE C、scanned bigint、current_index/last_error text、updated_at timestamptz。批次数据和游标同事务提交，锁冲突回退重试，不跳过被锁定的旧对象。
+
+后台逐个并发建立 `objects_catalog_size(bucket_id,catalog_size,key)`、`objects_catalog_modified(bucket_id,catalog_modified,key)`、`objects_catalog_kind(bucket_id,catalog_kind,key)`，以及 `objects_catalog_search`（默认数据库排序规则下 key 的 pg_trgm GIN）。均只索引当前可见对象。无效的中断索引会重建；已有有效索引复用。每次只运行一个构建，maintenance_work_mem=32 MiB，关闭并行维护 worker。
+
+需要 PostgreSQL 的 pg_trgm 扩展与安装权限；迁移尝试 CREATE EXTENSION IF NOT EXISTS。索引增加数据库磁盘占用，取决于键长、对象数量和分布，应为升级预留数据库空间。
+
 ## 浏览器上传
 
 `web_uploads` 以 upload_id 为主键，级联关联 uploads；user_id 可空，删除用户后置空，不转移续传身份。字段包括 client_id UUID、request_hash bytea(32)、file_name text、expected_size/part_size bigint、modified_at bigint（浏览器毫秒时间）、expected_stream UUID（开始时对象版本，不设外键）。唯一 `(user_id,client_id)` 约束重复创建。

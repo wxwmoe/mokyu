@@ -1,4 +1,12 @@
 export default {
+  mediaSearch: '搜索这个存储桶', mediaSearchHint: '找一点心心念念的东西…', searchMatch: '匹配方式', matchName: '文件名包含', matchPath: '路径包含', matchPrefix: '路径开头', matchExact: '完整路径',
+  fileType: '文件类型', kind_all: '全部收藏', kind_image: '图片', kind_video: '视频', kind_audio: '音频', kind_document: '文档', kind_archive: '压缩包', kind_other: '其他文件',
+  moreFilters: '再找得准一点', mediaFilterHint: '缩小范围，让想找的收藏快一点出现。', mediaSort: '排列方式', sortNameAsc: '名称 · 升序', sortNameDesc: '名称 · 降序', sortNewest: '新来的在前', sortOldest: '最早的在前', sortLargest: '大文件在前', sortSmallest: '小文件在前',
+  clearFilters: '清除筛选', accessAll: '所有访问状态', minimumSize: '最小大小', maximumSize: '最大大小', modifiedFrom: '更新起始日期', modifiedUntil: '更新截止日期', mediaDatesHint: '日期按浏览器时区包含整天。大小采用去重、编码前的原始字节数。',
+  includeSubfolders: '一起查看子目录里的文件', invalidFilterRange: '请检查大小和日期范围，起始不能大于结束。', applyFilters: '找找我的文件',
+  chooseDate: '选择{label}', clearDate: '清除{label}', previousMonth: '上个月', nextMonth: '下个月',
+  catalogBuilding: '正在为收藏建立索引。这期间可以浏览目录，或使用完整路径、路径前缀查找。', shortSearchHint: '短搜索词按当前目录内的路径开头匹配。使用至少三个连续文字或数字可进行包含搜索。', flatResults: '这里展示包含子目录的匹配文件，路径相对于上方目录。',
+  error_CatalogBuilding: '搜索索引仍在准备，请先浏览目录，或按完整路径、前缀查找。', error_SearchTooBroad: '搜索范围有点大，请缩小路径范围，或使用更具体的名称、筛选条件。',
   transfers: '传输中心', uploadEyebrow: '喜欢的东西，正在回家', uploadTitle: '上传文件', uploadHint: '送一点喜欢，进你的小收藏。',
   chooseFiles: '选择文件', dropFiles: '把文件轻轻放在这里', removeFile: '移除 {name}', uploadDestination: '给喜欢找个家',
   uploadPrefix: '对象路径前缀', uploadPrefixPlaceholder: 'gallery/', uploadPathHint: '直接拼接文件名；若要放入目录，请以 / 结尾。',
