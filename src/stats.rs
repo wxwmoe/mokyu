@@ -330,6 +330,7 @@ impl Drop for Operation {
 }
 
 pub struct Statistics {
+    pub wake: tokio::sync::Notify,
     started: Instant,
     started_at: DateTime<Utc>,
     pub http: [Arc<Counters>; 3],
@@ -340,6 +341,7 @@ pub struct Statistics {
 impl Default for Statistics {
     fn default() -> Self {
         Self {
+            wake: tokio::sync::Notify::new(),
             started: Instant::now(),
             started_at: Utc::now(),
             http: std::array::from_fn(|_| Arc::default()),
@@ -374,7 +376,7 @@ impl Statistics {
 
 async fn collect(app: &App) -> Result<Value> {
     let mut tx = app.db.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         .execute(&mut *tx)
         .await?;
     // One worker, bounded working memory and wait time; large sorts may spill to PostgreSQL disk.
@@ -480,6 +482,7 @@ async fn collect(app: &App) -> Result<Value> {
             AND relname IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions','integrity_issues','chunk_locations','packs','pack_members','pack_maintenance','pack_changes','pack_inputs','chunk_access_stats','chunk_access_windows','pack_access_windows','pack_member_access_windows','integrity_packs','pending_uploads','cache_pins')
          ORDER BY relname")
         .fetch_all(&mut *tx).await?;
+    crate::manage::insights::collect(app, &mut tx).await?;
     tx.commit().await?;
     Ok(
         json!({"as_of":as_of,"collected_at":Utc::now(),"objects":buckets[0]["objects"],
@@ -516,7 +519,10 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 }
             }
         }
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => (),
+            _ = app.statistics.wake.notified() => tokio::time::sleep(Duration::from_secs(5)).await,
+        }
     }
 }
 

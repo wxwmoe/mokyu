@@ -43,6 +43,11 @@ pub struct Config {
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Statistics {
+    pub scope_limit: usize,
+    pub storage_sample_interval: String,
+    pub storage_retention: String,
+    pub runtime_sample_interval: String,
+    pub runtime_retention: String,
     pub refresh_interval: String,
     pub query_timeout: String,
     pub access_flush_interval: String,
@@ -51,6 +56,11 @@ pub struct Statistics {
 impl Default for Statistics {
     fn default() -> Self {
         Self {
+            scope_limit: 64,
+            storage_sample_interval: "15m".into(),
+            storage_retention: "7d".into(),
+            runtime_sample_interval: "1m".into(),
+            runtime_retention: "24h".into(),
             refresh_interval: "15m".into(),
             query_timeout: "2m".into(),
             access_flush_interval: "1m".into(),
@@ -575,6 +585,27 @@ impl Config {
             seconds(&c.statistics.query_timeout)? <= i32::MAX as u64 / 1000,
             "statistics.query_timeout exceeds PostgreSQL's statement timeout limit"
         );
+        ensure!(
+            (1..=256).contains(&c.statistics.scope_limit),
+            "statistics.scope_limit must be 1..256"
+        );
+        for (interval, retention) in [
+            (
+                &c.statistics.storage_sample_interval,
+                &c.statistics.storage_retention,
+            ),
+            (
+                &c.statistics.runtime_sample_interval,
+                &c.statistics.runtime_retention,
+            ),
+        ] {
+            let interval = seconds(interval)?;
+            let retention = seconds(retention)?;
+            ensure!(
+                interval >= 60 && retention >= interval && retention <= 90 * 86400,
+                "statistics sampling requires an interval of at least one minute and retention between one interval and 90 days"
+            );
+        }
         if let Some(v) = &c.multipart.local_limit {
             ensure!(
                 bytes(v)? >= 4 * 1024 * 1024,

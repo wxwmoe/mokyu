@@ -420,6 +420,22 @@ processed 为对象和区块检查数之和，不是百分比；cursor 是内部
 
 报告为 `application/x-ndjson`，首行 `{type:"task",task:...}`，随后逐条 `{type:"issue",issue:...}`，末行 `{type:"end",issues:N}`。每次读取 100 条、不持有长事务；过期清理或中断导致内容不全时不会输出结束行。异常随已完成任务按[保留期](configuration.md#回收与历史清理)分批清理，failed/paused 不自动到期。
 
+## 存储洞察
+
+| 路径 | 权限与用途 |
+| --- | --- |
+| `GET /api/insights?bucket=&project=` | 按当前 `storage.inspect` 范围读取空间快照与容量历史；省略范围时管理员看全局、成员看全部获授权桶 |
+| `GET /api/insights/runtime` | 管理员读取运行采样、本地缓存、待上传与近期任务 |
+| `GET /api/storage/packs` | 当前范围的区块包，支持 `bucket/project/after/limit`；管理员可按 state 筛选 |
+| `GET /api/storage/packs/{id}` | 游标分页的获授权成员区块；普通成员不返回全包大小、成员总数、全局序号 |
+| `GET /api/storage/packs/{id}/objects` | 当前引用文件，额外要求 `bucket.list`；支持范围和绑定范围的 cursor |
+
+空间分为原始逻辑量 R、范围内区间并集 U、项目间再桶间均分的内容归属 D、所选物理来源编码占用分摊 A。共享区块包只计算一次，未使用成员占用计入编码成本，允许出现负的编码节省。`R-A=(R-U)+(U-D)+(D-A)`；跨桶统计的 U 重新取并集，不能相加。
+
+尚无远端来源的内容计入 pending；此时 A 和编码节省为 null，不伪造零。全局 physical 区分当前选用、额外保留、待回收与未确认来源；索引量不等于供应商账单。归属是空间解释，不是计费。
+
+页面只读后台快照。新授权组合首次显示 collecting；as_of 标示实际时间，超时保留旧快照并显示 stale。容量与运行历史按配置保留，进程重启后的计数断开；未积累采样不绘制趋势。字节、大整数 ID 与计数使用十进制字符串。
+
 ## 管理页面
 
 `GET/HEAD /` 提供 Vue 管理应用；媒体库支持桶、目录与对象浏览和授权下载。现有桶设置、任务、区块包和批量操作保留在 `/classic/`。静态资源随二进制提供，无 Node.js 运行服务。

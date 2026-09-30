@@ -241,10 +241,15 @@ key ID 为 1～128 字节，不同 ID 必须使用不同实际密钥。更换算
 | --- | --- | --- |
 | `statistics.refresh_interval` | 时间 / `15m` | 后台容量汇总完成后的等待间隔；页面刷新只读取快照 |
 | `statistics.query_timeout` | 时间 / `2m` | 一轮汇总的总时限及 SQL 语句时限 |
+| `statistics.scope_limit` | 整数 / `64` | 缓存的授权范围组合数，1～256；全局另占一项 |
+| `statistics.storage_sample_interval` / `storage_retention` | 时间 / `15m`、`7d` | 容量采样最小间隔与历史保留 |
+| `statistics.runtime_sample_interval` / `runtime_retention` | 时间 / `1m`、`24h` | 运行采样间隔与历史保留 |
 | `statistics.access_flush_interval` | 时间 / `1m` | 有界内存访问计数批量写入数据库的间隔 |
 | `statistics.access_retention` | 时间 / `14d` | 小时访问窗口保留期，至少 7d 且覆盖两个 Range 窗口；累计区块计数随区块保留 |
 
 query_timeout 最多 2,147,483 秒。后台汇总失败时保留上次成功结果；大库可增加间隔并按数据库能力调整时限。字段、统计口径和过期标识见[容量快照](manage-api-reference.md#容量快照)。
+
+两种采样间隔至少 1 分钟，保留期不少于采样间隔且最多 90 天；每次查询最多返回最近 2048 点。统计只由单个后台 worker 执行，SQL work_mem 为 16 MiB，复杂汇总会使用 PostgreSQL 临时磁盘，应为数据库预留空间。
 
 ## 完整性巡检
 

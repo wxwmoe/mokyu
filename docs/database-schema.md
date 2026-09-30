@@ -481,6 +481,12 @@ objects 增加可空 `catalog_size bigint`、`catalog_modified timestamptz`、`c
 - `credentials.authorization_revision`：bigint；成员/授权/身份变更通过触发器推进授权版本。
 - `streams.write_authorization`：内部 JSONB，保存写入身份、授权版本及所需动作，发布前重新校验；不包含密码或令牌。
 `web_users.must_change_password`：boolean NOT NULL DEFAULT false，限制账户先完成密码修改；目录索引为 `username COLLATE "C"`。用户身份和项目授权写入共享管理事务锁；数据流写入不占用此锁。
+## 存储快照与历史
+
+`storage_insights` 以内部范围摘要 id 为主键，保存 bucket_ids UUID 数组、requested_at、as_of、data JSONB；global 的 bucket_ids 为 NULL。范围始终由当前授权生成，数量有上限，空闲范围到期删除。
+
+`storage_history(scope_id,at,data)` 保存同口径快照，联合主键，关联范围删除时级联清理。`runtime_history(at,data)` 保存进程标识、累计计数与缓存用量。两类历史均定期按保留期清理；它们不参与配额或权限判断。
+
 ## 桶配置与归属
 
 迁移 `0019_bucket_management.sql` 增加 `buckets.settings_revision bigint`、`uploads_paused boolean` 和 `public_base_url text`。CORS、网站、域名、归属和状态变化推进配置修订号，供并发编辑检查；不是对象版本。

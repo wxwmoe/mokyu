@@ -5,11 +5,13 @@ pub(crate) mod audit;
 pub(crate) mod buckets;
 pub(crate) mod catalog;
 mod contract;
+pub(crate) mod insights;
 pub(crate) mod keys;
 pub(crate) mod media;
 pub(crate) mod operations;
 pub(crate) mod projects;
 pub(crate) mod quotas;
+mod storage_catalog;
 pub(crate) mod tokens;
 mod uploads;
 pub(crate) mod users;
@@ -75,7 +77,6 @@ pub fn router(app: Arc<App>) -> Router {
                 .layer(axum::middleware::from_fn(limit_object_actions)),
         )
         .route("/api/object", get(object))
-        .route("/api/object/chunks", get(object_chunks))
         .route("/api/download", get(download))
         .route("/api/tasks", get(tasks))
         .route("/api/tasks/{id}", get(task))
@@ -200,6 +201,10 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/me"
                 | "/api/me/sessions"
                 | "/api/buckets"
+                | "/api/insights"
+                | "/api/storage/packs"
+                | "/api/storage/packs/{id}"
+                | "/api/storage/packs/{id}/objects"
                 | "/api/bucket-projects"
                 | "/api/objects"
                 | "/api/object"
@@ -810,7 +815,7 @@ async fn object_actions(
     tx.commit().await?;
     Ok(Json(json!({"results":results})))
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct ChunkQuery {
     bucket: Uuid,
     key: String,
@@ -818,11 +823,12 @@ struct ChunkQuery {
     after: Option<i64>,
     limit: Option<i64>,
 }
+#[utoipa::path(get,operation_id="object_chunks",path="/api/object/chunks",params(ChunkQuery),responses((status=200,body=insights::ChunkPage)))]
 async fn object_chunks(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
     Query(q): Query<ChunkQuery>,
-) -> Result<Json<Value>, HttpError> {
+) -> Result<Json<insights::ChunkPage>, HttpError> {
     actor
         .principal
         .require(&app.db, q.bucket, Action::Inspect)
@@ -835,7 +841,7 @@ async fn object_chunks(
     if object.id != q.version {
         return Err(s3s::s3_error!(PreconditionFailed).into());
     }
-    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',c.id::text,'offset_bytes',e.offset_bytes::text,'length',e.length,'source_offset',e.source_offset,'raw_size',c.raw_size,'stored_size',l.stored_size,'independent_size_hint',c.stored_size,'payload_size',c.stored_size-CASE WHEN c.algorithm='none' THEN 0 ELSE 16 END,'compression',CASE WHEN c.compressed THEN 'zstd' ELSE 'none' END,'algorithm',c.algorithm,'key_id',c.key_id,'pack_id',c.pack_id::text,'source',CASE WHEN l.id IS NOT NULL THEN 'chunk' WHEN c.pack_id IS NOT NULL THEN 'pack' ELSE 'pending' END,'reads',COALESCE(a.reads,0),'range_reads',COALESCE(a.range_reads,0)) FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_locations l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN chunk_access_stats a ON a.chunk_id=c.id WHERE e.stream_id=$1 AND e.offset_bytes>$2 ORDER BY e.offset_bytes LIMIT $3")
+    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',c.id::text,'offset_bytes',e.offset_bytes::text,'length',e.length,'source_offset',e.source_offset,'raw_size',c.raw_size,'stored_size',l.stored_size,'independent_size_hint',c.stored_size,'payload_size',c.stored_size-CASE WHEN c.algorithm='none' THEN 0 ELSE 16 END,'compression',CASE WHEN c.compressed THEN 'zstd' ELSE 'none' END,'algorithm',c.algorithm,'key_id',c.key_id,'pack_id',c.pack_id::text,'source',CASE WHEN l.id IS NOT NULL THEN 'chunk' WHEN c.pack_id IS NOT NULL THEN 'pack' ELSE 'pending' END,'reads',COALESCE(a.reads,0)::text,'range_reads',COALESCE(a.range_reads,0)::text) FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_locations l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN chunk_access_stats a ON a.chunk_id=c.id WHERE e.stream_id=$1 AND e.offset_bytes>$2 ORDER BY e.offset_bytes LIMIT $3")
         .bind(object.id).bind(q.after.unwrap_or(-1)).bind(limit + 1).fetch_all(&app.db).await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
@@ -848,8 +854,20 @@ async fn object_chunks(
             }
         }
     }
-    let next = more.then(|| rows.last().unwrap()["offset_bytes"].clone());
-    Ok(Json(json!({"chunks":rows,"next_offset":next})))
+    let next_offset = more.then(|| {
+        rows.last().unwrap()["offset_bytes"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    });
+    let chunks = rows
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<_, _>>()?;
+    Ok(Json(insights::ChunkPage {
+        chunks,
+        next_offset,
+    }))
 }
 #[derive(Deserialize)]
 struct TasksQuery {

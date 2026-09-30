@@ -141,6 +141,11 @@ task_retention = "30d"
 audit_retention = "90d"
 
 [statistics]
+scope_limit = 64
+storage_sample_interval = "15m"
+storage_retention = "7d"
+runtime_sample_interval = "1m"
+runtime_retention = "24h"
 # Background database inventory; page refreshes only read the cached snapshot.
 refresh_interval = "15m"
 query_timeout = "2m"

@@ -400,6 +400,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/insights": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_insights"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/insights/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["runtime_insights"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/login": {
         parameters: {
             query?: never;
@@ -522,6 +554,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["media_actions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/object/chunks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["object_chunks"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -664,6 +712,54 @@ export interface paths {
             cookie?: never;
         };
         get: operations["status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/storage/packs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_packs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/storage/packs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_pack"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/storage/packs/{id}/objects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_pack_objects"];
         put?: never;
         post?: never;
         delete?: never;
@@ -920,6 +1016,11 @@ export interface components {
             uploads_paused: boolean;
             website_enabled: boolean;
         };
+        CapacityPoint: {
+            /** Format: date-time */
+            at: string;
+            usage: components["schemas"]["StorageUsage"];
+        };
         CatalogStatus: {
             current_index?: string | null;
             last_error?: string | null;
@@ -927,6 +1028,10 @@ export interface components {
             scanned?: string | null;
             /** Format: date-time */
             updated_at: string;
+        };
+        ChunkPage: {
+            chunks: components["schemas"]["ObjectChunk"][];
+            next_offset?: string | null;
         };
         Completion: {
             parts: components["schemas"]["PartReceipt"][];
@@ -1089,6 +1194,29 @@ export interface components {
             role: string;
             scope: string;
         };
+        ObjectChunk: {
+            algorithm: string;
+            compression: string;
+            id: string;
+            /** Format: int32 */
+            independent_size_hint?: number | null;
+            key_id?: string | null;
+            /** Format: int32 */
+            length: number;
+            offset_bytes: string;
+            pack_id?: string | null;
+            /** Format: int32 */
+            payload_size?: number | null;
+            range_reads?: string | null;
+            /** Format: int32 */
+            raw_size: number;
+            reads?: string | null;
+            source: string;
+            /** Format: int32 */
+            source_offset: number;
+            /** Format: int32 */
+            stored_size?: number | null;
+        };
         ObjectDetail: {
             etag: string;
             item: components["schemas"]["MediaItem"];
@@ -1116,6 +1244,51 @@ export interface components {
             /** Format: int32 */
             status: number;
         };
+        PackDetail: {
+            members: components["schemas"]["PackMember"][];
+            next?: string | null;
+            pack: components["schemas"]["PackSummary"];
+            scoped: boolean;
+        };
+        PackMember: {
+            chunk_id: string;
+            current_source: boolean;
+            /** Format: int32 */
+            ordinal?: number | null;
+            /** Format: int32 */
+            raw_size?: number | null;
+            visible_bytes: string;
+        };
+        PackObject: {
+            /** Format: uuid */
+            bucket_id: string;
+            bucket_name: string;
+            content_type: string;
+            key: string;
+            public_read: boolean;
+            size: string;
+            /** Format: uuid */
+            version: string;
+        };
+        PackObjects: {
+            next?: string | null;
+            objects: components["schemas"]["PackObject"][];
+        };
+        PackPage: {
+            next?: string | null;
+            packs: components["schemas"]["PackSummary"][];
+        };
+        PackSummary: {
+            compressed: boolean;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            /** Format: int32 */
+            member_count?: number | null;
+            raw_size?: string | null;
+            state: string;
+            stored_size?: string | null;
+        };
         Page: {
             events: components["schemas"]["Event"][];
             next?: string | null;
@@ -1134,6 +1307,15 @@ export interface components {
         Password: {
             current_password: string;
             new_password: string;
+        };
+        PhysicalUsage: {
+            chunk_objects: string;
+            gc_bytes: string;
+            indexed_bytes: string;
+            pack_objects: string;
+            retained_bytes: string;
+            selected_bytes: string;
+            unconfirmed_bytes: string;
         };
         Preferences: {
             avatar_email: string;
@@ -1205,6 +1387,35 @@ export interface components {
             expires_in?: string | null;
             overlap: string;
         };
+        RuntimeInsights: {
+            current: components["schemas"]["RuntimePoint"];
+            failed_uploads: string;
+            history: components["schemas"]["RuntimePoint"][];
+            /** Format: date-time */
+            oldest_pending?: string | null;
+            pending_bytes: string;
+            pending_entries: string;
+            work: components["schemas"]["WorkSummary"][];
+        };
+        RuntimePoint: {
+            /** Format: date-time */
+            at: string;
+            backend_read_bytes: string;
+            backend_write_bytes: string;
+            cache_bytes: string;
+            cache_hits: string;
+            cache_limit: string;
+            cache_lookups: string;
+            /** Format: date-time */
+            epoch: string;
+            failed: string;
+            multipart_bytes: string;
+            requests: string;
+            rss_bytes?: string | null;
+            thumbnail_bytes: string;
+            upload_bytes: string;
+            upload_limit: string;
+        };
         Session: {
             /** Format: date-time */
             created_at: string;
@@ -1238,6 +1449,35 @@ export interface components {
             password: string;
             token: string;
             username: string;
+        };
+        StorageInsights: {
+            /** Format: date-time */
+            as_of?: string | null;
+            bucket_count: number;
+            collecting: boolean;
+            history: components["schemas"]["CapacityPoint"][];
+            /** Format: int64 */
+            refresh_seconds: number;
+            scope: string;
+            stale: boolean;
+            usage?: components["schemas"]["StorageUsage"] | null;
+        };
+        StorageUsage: {
+            attributed_raw_bytes: string;
+            buckets: string;
+            chunks: string;
+            encoded_bytes?: string | null;
+            encoded_known_bytes: string;
+            encoding_savings?: string | null;
+            local_savings: string;
+            logical_bytes: string;
+            objects: string;
+            packed_bytes: string;
+            packs: string;
+            pending_bytes: string;
+            physical?: components["schemas"]["PhysicalUsage"] | null;
+            shared_savings: string;
+            unique_bytes: string;
         };
         TextPreview: {
             text: string;
@@ -1372,6 +1612,15 @@ export interface components {
             error_document: string;
             index_document: string;
             website_enabled: boolean;
+        };
+        WorkSummary: {
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            processed: string;
+            state: string;
+            /** Format: date-time */
+            updated_at: string;
         };
     };
     responses: never;
@@ -2134,6 +2383,47 @@ export interface operations {
             };
         };
     };
+    storage_insights: {
+        parameters: {
+            query?: {
+                bucket?: string | null;
+                project?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageInsights"];
+                };
+            };
+        };
+    };
+    runtime_insights: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeInsights"];
+                };
+            };
+        };
+    };
     login: {
         parameters: {
             query?: never;
@@ -2348,6 +2638,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BatchResult"];
+                };
+            };
+        };
+    };
+    object_chunks: {
+        parameters: {
+            query: {
+                bucket: string;
+                key: string;
+                version: string;
+                after?: number | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChunkPage"];
                 };
             };
         };
@@ -2664,6 +2979,82 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    storage_packs: {
+        parameters: {
+            query?: {
+                bucket?: string | null;
+                project?: string | null;
+                after?: number | null;
+                limit?: number | null;
+                state?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PackPage"];
+                };
+            };
+        };
+    };
+    storage_pack: {
+        parameters: {
+            query?: {
+                bucket?: string | null;
+                project?: string | null;
+                after?: number | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PackDetail"];
+                };
+            };
+        };
+    };
+    storage_pack_objects: {
+        parameters: {
+            query?: {
+                bucket?: string | null;
+                project?: string | null;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PackObjects"];
                 };
             };
         };

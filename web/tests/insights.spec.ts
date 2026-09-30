@@ -1,0 +1,41 @@
+import { readFileSync } from 'node:fs'
+import { test, expect } from '@playwright/test'
+import en from '../src/locales/i18n.en.js'
+
+test('real storage insights, scope selection, pack detail and responsive charts', async ({ page, request }) => {
+  const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
+  const login = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
+  const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await login.json()).csrf_token }
+  await request.put('/api/me', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  await page.goto('/login')
+  await page.getByRole('textbox', { name: en.username, exact: true }).fill('tester')
+  await page.getByRole('textbox', { name: en.password, exact: true }).fill(password)
+  await page.getByRole('button', { name: en.signIn, exact: true }).click()
+  await expect(page).toHaveURL(/\/media$/)
+  await page.goto('/overview')
+  await expect(page.locator('.insight-card')).toHaveCount(4)
+  await expect(page.locator('.space-story')).toBeVisible()
+  await page.setViewportSize({ width: 1440, height: 1040 })
+  await page.screenshot({ path: '/results/step15-overview.png', fullPage: true })
+  await page.getByRole('combobox').click()
+  await page.getByRole('option', { name: 'media', exact: true }).click()
+  await expect(page).toHaveURL(/bucket=/)
+  await expect(page.locator('.space-story')).toBeVisible({ timeout: 20000 })
+  await page.goto('/storage')
+  await expect(page.locator('.bridge-total')).toBeVisible()
+  const packs = await (await request.get('/api/storage/packs?limit=1')).json()
+  expect(packs.packs.length).toBeGreaterThan(0)
+  await page.goto('/storage?pack=' + packs.packs[0].id)
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByRole('tab', { name: en.referencingFiles, exact: true }).click()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog')).not.toBeVisible()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/overview')
+  await expect(page.locator('.insight-card')).toHaveCount(4)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: '/results/step15-overview-mobile.png', fullPage: true })
+  expect(errors).toEqual([])
+})

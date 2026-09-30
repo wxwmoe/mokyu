@@ -6,7 +6,9 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/login', name: 'login', component: () => import('../features/Login.vue') },
-    { path: '/', redirect: '/media' },
+    { path: '/', redirect: '/overview' },
+    { path: '/overview', name: 'overview', component: () => import('../features/Overview.vue') },
+    { path: '/storage', name: 'storage', component: () => import('../features/Storage.vue') },
     { path: '/media', name: 'media', component: () => import('../features/Media.vue') },
     { path: '/buckets/:bucket?', name: 'buckets', component: () => import('../features/Buckets.vue') },
     { path: '/credentials', name: 'credentials', meta: { admin: true }, component: () => import('../features/AccessKeys.vue') },
