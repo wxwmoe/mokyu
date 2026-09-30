@@ -156,6 +156,6 @@ mod tests {
     fn prefix_seek_handles_unicode() {
         assert_eq!(successor("abc/"), Some("abc0".into()));
         assert!(successor("\u{10ffff}").is_none());
-        assert_eq!(encode_key("a +%中"), "a%20%2B%25%E4%B8%AD");
+        assert_eq!(encode_key("a +%\u{4e2d}"), "a%20%2B%25%E4%B8%AD");
     }
 }

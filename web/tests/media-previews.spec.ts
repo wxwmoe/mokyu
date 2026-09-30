@@ -11,7 +11,22 @@ test('gallery thumbnails, compact and expanded viewer, safe text and versioned d
   const bucket = (await (await request.get('/api/buckets')).json()).find((b: any) => b.name === 'media')
   const prefix = 'ui-preview-' + randomUUID().slice(0, 8) + '/'
   const picture = readFileSync('public/assets/apple-touch-icon.png')
-  const files: [string, string, Buffer][] = [['mochi.png', 'image/png', picture], ['readme.txt', 'text/plain', Buffer.from('<script>document.body.remove()</script>\nA little room for love.')], ['motion.mp4', 'video/mp4', Buffer.alloc(100)]]
+  const recording = await page.evaluate(async () => {
+    const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 180
+    const ctx = canvas.getContext('2d')!, stream = canvas.captureStream(10)
+    const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' }), chunks: Blob[] = []
+    return new Promise<number[]>(resolve => {
+      recorder.ondataavailable = event => chunks.push(event.data)
+      recorder.onstop = async () => { stream.getTracks().forEach(track => track.stop()); resolve(Array.from(new Uint8Array(await new Blob(chunks).arrayBuffer()))) }
+      recorder.start(); let frame = 0
+      const timer = setInterval(() => {
+        ctx.fillStyle = '#fcecf3'; ctx.fillRect(0, 0, 320, 180)
+        ctx.fillStyle = '#af456e'; ctx.fillRect(frame * 10, 65, 30, 30)
+        if (++frame === 20) { clearInterval(timer); recorder.stop() }
+      }, 100)
+    })
+  })
+  const files: [string, string, Buffer][] = [['mochi.png', 'image/png', picture], ['readme.txt', 'text/plain', Buffer.from('<script>document.body.remove()</script>\nA little room for love.')], ['motion.webm', 'video/webm', Buffer.from(recording)]]
   const errors: string[] = [], requests: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', message => { if (message.type() === 'error' && /Content Security Policy|Refused to/i.test(message.text())) errors.push(message.text()) })
@@ -54,7 +69,13 @@ test('gallery thumbnails, compact and expanded viewer, safe text and versioned d
     await page.screenshot({ path: '/results/step12-object-wide.png', fullPage: false })
     await viewer.locator('.viewer-title').click()
     await page.keyboard.press('ArrowRight')
-    await expect(page.getByRole('dialog', { name: 'motion.mp4', exact: true })).toBeVisible()
+    const movie = page.getByRole('dialog', { name: 'motion.webm', exact: true })
+    await expect(movie).toBeVisible()
+    await movie.getByRole('button', { name: new RegExp(en.loadMedia) }).click()
+    await expect.poll(() => movie.locator('video').evaluate(video => (video as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2)
+    await movie.locator('video').evaluate(video => { (video as HTMLVideoElement).currentTime = 1 })
+    await expect.poll(() => movie.locator('video').evaluate(video => (video as HTMLVideoElement).currentTime >= 1 && !(video as HTMLVideoElement).seeking)).toBe(true)
+    await movie.locator('.viewer-title').click()
     await page.keyboard.press('ArrowLeft')
     await expect(viewer).toBeVisible()
     await page.keyboard.press('Escape')

@@ -1,486 +1,254 @@
 # 管理页面与 API
 
-管理端口默认 9002。部署管理员可访问全部桶和私有对象；普通成员仅能访问获授权的项目与桶。管理员由 [CLI](cli-reference.md#凭据与用户) 或首次安装引导创建，无默认账户。
-
-导航：[会话](#会话) · [存储桶](#存储桶) · [对象](#对象) · [运行状态](#运行状态) · [后台任务](#后台任务) · [完整性巡检](#完整性巡检) · [页面](#管理页面)
+管理端口默认 `9002`。页面使用同源 `/api/`，接口与 CLI 复用授权、发布和维护服务。日常使用见[管理指南](management.md)；请求与响应类型以 `GET /api/openapi.json` 为准，亦可运行 `mokyu api-schema` 离线导出。`GET /api/info` 返回产品、程序版本和契约标识。
 
 ## 通用约定
 
-- 除登录、安装引导、`GET /api/info` 和 `GET /api/openapi.json` 外，API 需有效会话 Cookie 或 `Authorization: Bearer TOKEN`。Cookie 写请求要求 `Origin` 精确匹配 `manage.origin` 和 `X-CSRF-Token`；登录及安装引导要求 Origin。Bearer 不使用 CSRF，不能与 Cookie 混用或放入 URL。桶 CORS 不作用于管理端口。
-- Cookie 为 `mokyu_session`，HttpOnly、SameSite=Strict；Secure 和固定有效期由[配置](configuration.md#监听与管理)决定。自行改密保留当前会话、撤销其余会话；CLI 重置密码、禁用或删除用户撤销全部会话。
-- JSON 请求体上限 16 KiB，批量对象操作另有说明。GET 路由也接受 HEAD，HEAD 不返回响应体。
-- 查询参数按 UTF-8 编码；key 原样保留，不规范化斜杠、空格或路径。分页 token 不应解析或跨范围复用；并发变更期间不提供跨请求快照。
-- 响应使用 `Cache-Control: private, no-store`，下载另带 `Vary: Cookie`；页面 CSP 限制外部脚本、插件和被嵌入。失败可用响应头 `X-Request-ID` 排查，见[请求标识](s3-compatibility.md#请求标识)。
+- 认证使用 `mokyu_session` Cookie 或 `Authorization: Bearer TOKEN`，不能混用，令牌不能放入 URL。Cookie 为 HttpOnly、SameSite=Strict，Secure 和固定寿命见[配置](configuration.md#监听与管理)。
+- Cookie 写请求要求 `Origin` 精确匹配 `manage.origin`，并提交 `X-CSRF-Token`；登录、安装引导要求 Origin。`GET /api/session` 返回 CSRF token。Bearer 不使用 CSRF，桶 CORS 不作用于管理接口。
+- 登录、首次安装状态、安装提交、info 和 OpenAPI 无需已有会话，其余入口默认拒绝未认证请求。账户与 Token 自助管理仅接受 Cookie；管理员明确签发的 system Token 可调用实例管理入口。
+- 敏感管理写操作要求最近五分钟验证密码；收到 `ReauthenticationRequired` 后调用 `/api/me/reauth` 再重试。system Token 不使用交互式密码验证。
+- JSON 默认上限 16 KiB；桶设置 128 KiB、授权与密钥 512 KiB、对象批量操作和上传完成 2 MiB。UploadPart 按预期分片大小校验。
+- key 按原始 UTF-8 传递，不折叠斜杠、空格或路径段。bigint 身份、字节量及新接口计数使用十进制字符串。游标不可解析或跨筛选范围复用；分页不保证跨请求快照。
+- 私有响应为 `Cache-Control: private, no-store`。GET 支持 HEAD，HEAD 无正文。错误为 `{error,code,request_id}`，与 `X-Request-ID` 对应；不回显密码、SQL 或请求正文。
 
-错误统一返回 `{error,code,request_id}`：error 为标准 HTTP 原因，code 为稳定错误标识，request_id 与响应头一致；不会回显密码、数据库错误或请求正文。调用方同时检查 HTTP 状态和 code。
-
-`GET /api/info` 返回产品、程序版本与管理契约标识。`GET /api/openapi.json` 提供从 Rust 类型和路由生成的契约，目前覆盖账户、会话、安装引导、状态、桶列表与网站设置；其余接口以本文为准。可使用 `mokyu api-schema` 离线导出同一文档，无需配置、数据库或运行服务。
-
-| 状态 | 常见原因 |
+| HTTP 状态 | 含义 |
 | --- | --- |
-| 400 / 422 | 参数、查询或 JSON 无效 |
-| 403 | 会话、Origin 或 CSRF 校验失败 |
-| 404 | 桶、对象或任务不存在 |
-| 409 | 状态冲突、桶正在清除或不允许的任务操作 |
-| 412 | 对象版本已变更或条件不满足 |
+| 400 / 422 | 无效参数、查询或 JSON |
+| 403 | 身份、Origin、CSRF、权限或配额限制 |
+| 404 | 资源不存在或不可见 |
+| 409 | 状态冲突、维护前提不满足、幂等编号冲突 |
+| 412 | 对象版本或设置修订号已变化 |
 | 413 | 请求体超限 |
-| 503 / 500 | 繁忙、维护限制 / 内部错误 |
+| 503 / 504 / 500 | 繁忙或索引未就绪 / 超时 / 内部失败 |
 
 ## 会话
 
-| 方法与路径 | 输入 | 成功响应 |
-| --- | --- | --- |
-| `POST /api/login` | `{username,password}`，需 Origin | 200 `{csrf_token}`，设置 Cookie |
-| `POST /api/logout` | 无 | 204，撤销会话并清除 Cookie |
-| `GET /api/session` | 无 | 200 个人资料及 `csrf_token` |
-| `GET /api/me` | 无 | 200 个人资料 |
-| `PUT /api/me` | `{display_name,locale,theme,avatar_email,avatar_enabled}` | 200 保存后的个人资料 |
-| `POST /api/me/password` | `{current_password,new_password}` | 204，保留当前会话 |
-| `POST /api/me/reauth` | `{password}` | 204，更新近期验证时间 |
-| `GET /api/me/sessions` | 无 | 200 `{sessions,more}`，最多 100 个有效会话 |
-| `DELETE /api/me/sessions/{id}` | 会话 UUID | 204，仅能撤销自己的会话 |
-| `DELETE /api/me/sessions` | 无 | 204，撤销其余会话 |
-
-新标签页和刷新后可通过 session 取得 CSRF token。密码哈希与验证共享最多两个并行任务，失败不泄露用户名是否存在。改密、重置、撤销和登录在提交前重新校验用户与会话状态。
-
-个人资料包含 `id,username,role,project_management,must_change_password,display_name,locale,theme,avatar_email,avatar_enabled,avatar_url`。display_name 最多 240 UTF-8 字节；avatar_email 最多 320 字节，开启头像时必填。locale 为 `en/zh-CN/ja/null`，theme 为 `auto/light/dark/null`；null 表示跟随浏览器。头像默认关闭，启用后返回规范化邮箱的 SHA-256 Gravatar URL，不上传图片。
-
-会话条目为 `{id,created_at,last_seen_at,expires_at,user_agent,current}`，按创建时间倒序；不返回认证凭据。last_seen_at 最多每五分钟刷新一次，不延长会话寿命。新密码为 12～1024 UTF-8 字节。
-
-### 首次安装
-
-`GET /api/bootstrap` 返回 `{setup_required}`。只有数据库没有任何用户时，服务才在管理 socket 旁写入权限 0600 的 `setup-token`，默认 `/run/mokyu/setup-token`。`POST /api/setup` 接收 `{token,username,password}` 并返回 201；成功后令牌失效并删除文件。并发初始化只允许一次成功；CLI 创建首个用户也会关闭此入口。令牌不得放入 URL。
-
-## 应用密钥与 API Token
-
-S3 应用密钥属于项目，与创建者账号生命周期无关。个人管理 Token 存哈希，其逐桶权限与用户当前权限取交集；改密、重置密码、禁用或角色变更使已签发 Token 失效。两者均有过期时间和最近使用时间（最多每五分钟写入一次），secret 仅创建或轮换时返回。
-
-应用密钥仅管理员管理。Token 创建、编辑、查询自己的条目；管理员还可查询和撤销其他用户的 Token。这些 Token 管理接口，以及 `/api/session`、`/api/logout`、`/api/me` 与其子路径，只接受 Cookie。写操作需近期密码验证。
-
-| 方法与路径 | 输入与行为 |
+| 方法与路径 | 用途 |
 | --- | --- |
-| `GET /api/credentials` | `project?,after?,limit?`，limit 1～100；返回 `{credentials,next}` |
-| `POST /api/credentials` | `{project_id,label,expires_in?,grants}`；返回 201 `{access_key,secret_key,credential}` |
-| `PUT /api/credentials/{key}` | `{label,enabled,expires_in?,keep_expiry?,grants?}`；原子更新元数据及可选授权 |
-| `PUT /api/credentials/{key}/grants` | 完整替换 `[{bucket_id,actions}]`，所有桶必须属于密钥项目 |
-| `POST /api/credentials/{key}/rotate` | `{overlap,expires_in?}`；新 ID/secret 与原权限，旧密钥在重叠期或原到期时间的较早者失效 |
-| `DELETE /api/credentials/{key}` | 删除应用密钥；204 |
-| `GET /api/tokens` | `user?,after?,limit?`，默认自己；limit 1～100；返回 `{tokens,next}` |
-| `POST /api/tokens` | `{label,system?,expires_in?,grants?}`；返回 201 `{token,secret}` |
-| `PUT /api/tokens/{id}` | 同创建输入，另支持 `keep_expiry`；仅可修改自己未撤销的 Token |
-| `DELETE /api/tokens/{id}` | 永久撤销；204 |
+| `POST /api/login`、`POST /api/logout` | 登录、撤销当前会话 |
+| `GET /api/session`、`GET /api/me` | 身份、个人资料及能力 |
+| `PUT /api/me` | 保存显示名、语言、主题及头像偏好 |
+| `POST /api/me/password` | 原密码验证后改密，保留当前会话、撤销其余会话及已有个人 Token |
+| `POST /api/me/reauth` | 验证密码，为敏感操作建立五分钟窗口 |
+| `GET /api/me/sessions` | 最多 100 个有效会话及 `more`，不返回认证凭据 |
+| `DELETE /api/me/sessions/{id}`、`DELETE /api/me/sessions` | 撤销指定会话 / 其余会话 |
+| `GET /api/bootstrap`、`POST /api/setup` | 首个管理员初始化 |
 
-label 为 1～128 字节；grants 最多 1000 个不同桶，actions 使用项目授权动作。空授权不授予桶权限。`system=true` 仅管理员可选择，grants 必须为空，允许完整实例管理，包括全部桶和用户；仍不能调用 Cookie 专属入口。普通 Token 不能访问实例任务、全局统计或用户管理。系统 Token 无需密码重验证，所有可写路径仍重新验证其有效性。
+`locale` 为 en/zh-CN/ja/null，`theme` 为 auto/light/dark/null。null 使用浏览器偏好。显示名最多 240 UTF-8 字节，头像邮箱最多 320 字节；头像默认关闭，启用时用规范化邮箱的 SHA-256 构造 Gravatar URL。
 
-`expires_in` 接受 `30d` 等时长，范围大于零且不超过 3650 天；应用密钥省略/null 表示不过期，Token 省略默认 90 天、null 表示不过期。更新时 `keep_expiry=true,expires_in=null` 保留原时间；轮换 overlap 为 0～30 天。密钥与 Token 正文上限 512 KiB。撤销或缩减权限会阻止尚未提交的写操作，已获授权的读取正文可继续完成。
+密码为 12～1024 UTF-8 字节，哈希与验证共用两个并行名额。密码验证和会话创建同步检查用户版本，不能用重置前的验证结果创建新会话。`last_seen_at` 最多五分钟更新一次，不延长会话寿命。
 
-## 存储额度
-
-`GET /api/quotas/{kind}/{id}` 读取 project 或 bucket 的账本；`PUT` 完整替换 `{byte_limit,inflight_limit,bucket_limit}`，需要管理员及近期验证。值为非负十进制字符串或 null，null 不限、`"0"` 为零；桶仅支持 byte_limit。读取返回同名上限及 `used_bytes,reserved_bytes,inflight_bytes,object_count,bucket_count` 字符串。
-
-项目按当前可见对象的原始字节计费，去重和压缩不抵扣额度。接收前预留、覆盖扣抵旧版本、完成时转为已用；在途预算另外包含未完成分片与并发覆盖。低于当前用量的新上限不会删文件，仍允许读取、删除和不增加用量的替换。超过上限返回 HTTP 403、`QuotaExceeded`。
-
-桶账本需要 storage.inspect；项目成员可以读取共享上限，只有拥有全项目范围的成员可以读取项目汇总，其他成员的汇总字段为 null。受限 Token 只可读取获授权的桶账本。
-
-## 媒体目录与检索
-
-`GET /api/buckets/{bucket}/objects` 需要 bucket.list，返回 `{objects,prefixes,next,layout,search_mode,index_ready}`。对象摘要包含 `id`（版本 UUID）、`object_key,size,content_type,public_read,modified_at`；size 为十进制字符串。搜索限定在当前桶，不能跨授权范围。
-
-| 参数 | 含义 |
-| --- | --- |
-| prefix / recursive | 当前路径前缀；recursive=true 展开子目录 |
-| q / mode / search_in | 搜索词；mode=contains（默认）/prefix/exact；包含搜索的 search_in=name（默认）/path |
-| kind / public | image/video/audio/document/archive/other；公开读取 true/false |
-| min_size / max_size | 原始字节范围，非负十进制字符串，包含边界 |
-| since / until | 更新时刻范围，RFC3339，包含边界 |
-| sort / order | name（默认）/size/modified；asc（默认）/desc |
-| after / limit | 上页 next；limit 1～200，默认 100 |
-
-前缀与完整路径区分大小写，q 接在 prefix 后；包含搜索不区分大小写，通配符按普通字符处理。无法提取连续三个文字/数字的包含搜索改为路径前缀匹配，响应 search_mode 明确为 prefix。类型来自 MIME 与扩展名，只用于整理显示，不是内容安全判断。
-
-无筛选的名称升序使用虚拟目录；其他组合返回平面文件列表，不推算文件夹大小。游标绑定桶和筛选排序参数，变更参数后从第一页开始；并发写入期间不是跨请求快照。检索查询限制为 2 秒，超时要求缩小范围或重试。
-
-`GET /api/buckets/{bucket}/catalog` 返回索引阶段 indexes/backfill/ready。只有管理员能看到全局 scanned/current_index/last_error，其余用户这些字段为 null。索引未就绪仍可浏览目录、按完整路径或前缀检索；其他条件返回 503 CatalogBuilding。
-
-目录摘要与发布、覆盖、ACL 变更及删除同事务更新。升级后逐批回填旧对象并并发建索引；中断后自动继续，不在启动迁移里重建整个库存。管理状态和 `cli status` 包含 catalog 进度。
-
-## 对象操作
-
-`POST /api/media/actions` 接受 `bucket`、`action`、`objects`。每项为 `{client_id,key,version,target_key?,target_version?}`；`client_id` 是调用方生成的 UUID。单次最多 1000 项、2 MiB，共享两个操作名额与 60 秒请求期限。返回 `results`，每项包含原 client_id/key、status、code、output_version、replayed；批次 HTTP 200 不代表每项都成功。
-
-| action | 附加字段与权限 |
-| --- | --- |
-| delete | `object.delete` |
-| private / public-read | `object.acl` |
-| copy | `target_bucket`，源 `object.read`、目标 `object.write`；副本默认私有，可显式 `public_read=true`，另需目标 `object.acl` |
-| move | `target_bucket`，源读取/删除、目标写入；保留原 ACL，移动公开对象另需目标 ACL 权限 |
-| metadata | `metadata` 包含 HTTP 字段和 `user` 字典，源读取/写入，公开对象另需 ACL 权限 |
-
-复制/移动必须提供 target_key；目标不存在时省略 target_version，替换已存在对象时提供其当前 UUID。源或目标变化返回逐项 412。复制复用区块引用，元数据编辑产生新版本；移动原子调整对象归属，按源/目标净变化记账。同项目移动不临时占用双份逻辑配额；跨项目移动仍受目标额度约束。
-
-成功结果与变更同事务落库。相同用户/Token 下使用同一 client_id 和参数重试会返回已记录结果；不同参数返回 409 IdempotencyConflict。已确认失败后再次尝试使用新的 client_id；未知结果使用原 client_id。重试仍检查当前权限，操作记录按 cleanup.task_retention 清理。Web 每批发送 20 项，选择仅限当前页；对话框保留未确认项的操作编号以处理断线重试。
-
-## 上传与传输中心
-
-浏览器上传复用 S3 分片的接收、额度和发布流程，不向浏览器签发 S3 secret。默认每片 16 MiB，大文件自动增大片段以满足最多 10000 片和每片最多 5 GiB 的协议限制。所有字节数用十进制字符串。
-
-| 方法与路径 | 输入与行为 |
-| --- | --- |
-| `POST /api/buckets/{bucket}/uploads` | `{client_id,key,file_name,size,modified_at?,content_type?,public_read?,overwrite?}`；201 上传记录。client_id 为客户端 UUID，同用户同参数重复调用返回同一上传 |
-| `GET /api/uploads` | `bucket?,state?,source?,own?,after?,limit?`；返回 `{uploads,next}`。默认 active/completing，state 支持 all/active/completing/completed/aborted；source=web/s3；limit 1～100，默认 50 |
-| `GET /api/uploads/{id}` | 上传详情，含 received_bytes、expected_size、part_size、parts、expires_at、can_resume、remote_state |
-| `GET /api/uploads/{id}/parts` | after 为分片号；每页最多 1000 项，返回 `{parts:[{number,size,etag,sha256}],next}` |
-| `PUT /api/uploads/{id}/parts/{number}` | 原始字节正文、`X-Content-SHA256` 为 Base64 SHA-256；必须符合该分片的预期长度。返回 `{number,etag,sha256}` |
-| `POST /api/uploads/{id}/complete` | `{parts:[{number,etag,sha256}]}`，连续完整清单；正文最多 2 MiB。等待发布完成后返回上传记录；相同清单可重试 |
-| `DELETE /api/uploads/{id}` | 终止未完成上传，204；不存在/已结束可能返回状态错误 |
-
-接收与续传仅限发起用户且须保留当前 object.write 权限；受限 Token 另受其动作范围约束。管理员或同时具有 object.write/bucket.settings 的成员可查看和终止其他上传，不能替他人续传。公开上传另需 object.acl。覆盖默认关闭；即使启用，完成时仍比较开始时的对象版本，发生变化返回 412。
-
-`state=completed` 表示对象已发布。remote_state=stored 表示观察到其后端副本就绪，pending 表示仍在等待，unavailable 表示原输出流已不再跟踪；不能用“已接收”代替远端持久化确认。上传空闲期限沿用 multipart.idle_timeout；暂停浏览器不延长期限。
-
-传输中心每个标签页同时发送最多两个分片，文件依次处理。暂停让当前分片收尾；刷新或关闭后需重新选择原文件，续传前在 worker 中逐一校验所有已接收分片。尚未接收的部分没有预存指纹，须继续选择同一份原文件。网络繁忙时分片有限重试；没有后台浏览器上传或永久保存文件权限。
-
-## 活动审计
-
-`GET /api/audit` 返回 `{events,next}`；`GET /api/audit/{id}` 返回完整详情。支持 `after,limit,actor,action,source,outcome,project,bucket,since,until`：ID 为十进制字符串，after 使用上页 next；limit 默认 50、范围 1～200；actor 匹配账号名称，action 匹配动作前缀；时间为带时区的 RFC3339。source 为 web/token/cli，outcome 为 succeeded/failed/partial/unknown。
-
-管理员查看全局记录。普通用户只可查看自己的账号/Token 活动、无敏感详情的失败记录及当前可列举桶内的个人操作；降级后不再显示原管理员权限下的全局管理详情。受限管理 Token 不可访问审计，完整系统 Token 可访问。删除账号后保留当时的账号标签与 UUID，不级联删除历史。
-
-管理写请求先持久记录意图；用户、项目授权、凭据、Token 和账户安全变更在业务事务中保存结果。其他入口记录请求结果；中断而未记录结果显示 unknown，不应推断成功或失败。普通 S3 数据读写不逐条写审计。已知账号的错误密码每分钟最多保留一条，标记身份尚未确认，不保存未知账号的尝试。
-
-详情仅收录显式选择的业务字段，不含密码、secret、认证哈希、完整正文或查询串。批量对象操作保留计数和前 20 项结果。完整详情最多 256 KiB；列表超过 8 KiB 的详情通过单条入口按需读取。
-
-`GET /api/audit/export` 使用同一筛选条件，返回 JSON Lines；每页默认 50、最多 100 条完整记录，响应 `X-Next-Cursor` 表示仍有后续页。页面导出当前页。审计保留由 `cleanup.audit_retention` 控制，默认 90 天，使用现有分批清理任务。
-
-## 用户与成员
-
-以下接口仅管理员可用，写操作需要近期密码验证。用户记录不包含密码、哈希或头像邮箱。修改角色/状态、重置密码和删除会撤销该用户的会话；不删除项目媒体与 S3 应用密钥。
-
-| 方法与路径 | 输入与行为 |
-| --- | --- |
-| `GET /api/users` | `q?,role?,after?,limit?`；按用户名 C 排序，limit 1～100，返回 `{users,next}`，after 使用上页 next |
-| `POST /api/users` | `{username,password,role,must_change_password?}`；role 为 admin/member，改密要求默认 true；返回 201 用户 |
-| `GET /api/users/{id}` | 返回单个用户记录 |
-| `PATCH /api/users/{id}` | `{role?,enabled?}`，至少一项；返回 200 用户 |
-| `DELETE /api/users/{id}` | 删除账户、会话及成员授权；返回 204 |
-| `POST /api/users/{id}/reset-password` | `{password,must_change_password?}`；改密要求默认 true；返回 204 |
-| `GET /api/projects/{id}/members` | 返回 `{user_id,username,display_name,enabled,role,scope,grants}` 数组，最多 1000 项 |
-| `PUT /api/projects/{id}/members/{user}` | `{role,scope,grants:[{bucket_id,actions}]}`，完整替换此项目授权；返回 204 |
-| `DELETE /api/projects/{id}/members/{user}` | 仅移除该项目授权；返回 204 |
-
-创建普通成员会开启项目管理。成员授权请求体上限 512 KiB，最多 1000 个桶。all 范围的 grants 必须为空；selected 范围只接受项目内的不同桶，动作不得超出角色上限。管理员无需成员授权；提升为管理员会移除旧成员关系，再降级时需重新分配。
-
-最后一个已启用管理员不可被禁用、降级或删除；Web 与 CLI 的并发操作共用保护，返回 409 `LastAdministrator`。must_change_password 用户可登录、查看个人设置和修改密码，其余业务 API 返回 403 `PasswordChangeRequired`；自行改密后解除。
+首次安装仅在没有用户时开放。服务在管理 socket 旁写入 0600 的 `setup-token`；`POST /api/setup` 接收 `{token,username,password}`，成功后立即失效并移除文件。CLI 创建首个管理员也会关闭初始化入口。
 
 ## 项目与权限
 
-默认使用内置 Default 项目，项目管理关闭；创建额外项目会开启项目管理。关闭前必须移除额外项目、普通成员与成员关系，不会自动提升权限。桶和 S3 服务凭据各属于一个项目，凭据不能跨项目授权。
+默认项目管理关闭，内置 Default 项目承载全部桶。管理员始终访问全实例；成员按项目角色和范围授权。创建额外项目或普通成员会开启项目管理；关闭前须移除额外项目、普通成员和成员关系。
 
-| 方法与路径 | 输入与行为 |
+| 角色 | 动作上限 |
 | --- | --- |
-| `GET /api/projects` | 管理员列出全部项目；成员列出所属项目，最多 1000 个 |
-| `POST /api/projects` | `{name,description?,allow_bucket_create?}`，返回 201 项目 |
-| `PUT /api/projects/{id}` | 同上，更新项目；返回 200 |
-| `DELETE /api/projects/{id}` | 删除空项目；内置项目不可删除；返回 204 |
-| `GET /api/settings/projects` | 返回 `{enabled}` |
-| `PUT /api/settings/projects` | `{enabled}`，设置项目管理开关 |
+| reader | `bucket.list`、`object.read`、`storage.inspect` |
+| writer | reader + `object.write`、`object.delete`、`object.acl` |
+| maintainer | writer + `bucket.settings` |
 
-项目写操作仅管理员可用，要求最近五分钟验证密码；否则返回 403 `ReauthenticationRequired`，先调用 `/api/me/reauth`。name 为 1～128 UTF-8 字节，description 最多 2000 字节。
+范围为 all 或 selected；selected 的逐桶 actions 与角色取交集。桶列表的 `actions` 是当前身份的有效能力。S3 与 Web 在写入发布前复核授权；撤权阻止旧请求发布，已获授权的读取正文可完成。匿名 public-read 与成员权限独立。
 
-动作：`bucket.list`、`object.read`、`object.write`、`object.delete`、`object.acl`、`bucket.settings`、`storage.inspect`。reader 允许列举、读取和存储详情；writer 增加写入、删除和 ACL；maintainer 再增加桶设置。成员可访问项目全部桶或仅指定桶；指定动作与角色权限取交集。桶列表返回当前身份的有效 actions。
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET/POST /api/projects`、`PUT/DELETE /api/projects/{id}` | 项目目录、创建、修改及删除空项目 |
+| `GET/PUT /api/settings/projects` | 项目管理开关 `{enabled}` |
+| `GET /api/projects/{id}/members` | 项目成员及授权 |
+| `PUT/DELETE /api/projects/{id}/members/{user}` | 完整替换 `{role,scope,grants}` / 移除成员 |
+| `GET/POST /api/users`、`GET/PATCH/DELETE /api/users/{id}` | 用户目录、创建、角色与状态、删除 |
+| `POST /api/users/{id}/reset-password` | 重置密码及下次改密要求 |
 
-S3、管理页面和 CLI 共用存储变更逻辑。PUT、分片及异步完成在发布前复核授权版本；撤权后的旧写请求不能发布。已接收数据的后台落盘可继续。匿名 public-read 不受项目成员关系限制。全局状态、任务和维护接口仅管理员可用；成员的区块详情不暴露全局读取计数或密钥标识。
+用户、项目及成员写操作限管理员。最后一个启用的管理员不可被删除、禁用或降级。角色/状态变更和重置密码撤销会话与旧 Token；删除用户不删除项目数据或 S3 应用密钥。`must_change_password` 只允许访问个人设置并完成改密。
+
+用户目录支持 q/role/after/limit，每页最多 100；项目与成员列表最多 1000。成员授权最多 1000 个不同桶，all 的 grants 必须为空；项目名 1～128 字节，描述最多 2000 字节。
+
+## 应用密钥与 API Token
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET/POST /api/credentials` | 列举、创建项目 S3 应用密钥 |
+| `PUT/DELETE /api/credentials/{key}` | 修改状态、有效期、授权 / 删除 |
+| `PUT /api/credentials/{key}/grants` | 完整替换逐桶 actions |
+| `POST /api/credentials/{key}/rotate` | 新密钥和可选旧密钥重叠期 |
+| `GET/POST /api/tokens`、`PUT/DELETE /api/tokens/{id}` | 列举、创建、更新及撤销个人管理 Token |
+
+S3 密钥由管理员管理，属于项目，不随创建者删除；只能授权同项目桶。Token 权限与用户当前权限取交集，空 grants 没有桶权限。`system=true` 仅管理员可签发，必须空 grants，允许全实例管理；仍不能调用 Cookie 专属入口。普通 Token 无全局任务、审计和用户管理权限。
+
+secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 credential-key 加密。label 1～128 字节，授权最多 1000 桶。`expires_in` 为正时长、最多 3650 天：密钥省略或 null 不到期；Token 省略为 90 天、null 不到期。更新的 `keep_expiry=true` 保留原时间；轮换 overlap 为 0～30 天。最近使用最多五分钟落库一次。
 
 ## 存储桶
 
-| 方法与路径 | 输入 | 成功响应 |
-| --- | --- | --- |
-| `GET /api/buckets` | 无 | 200 桶数组，按 name 排序，最多 1000 个 |
-| `GET /api/buckets/{bucket}/website` | bucket 为 UUID | 200 网站设置 |
-| `PUT /api/buckets/{bucket}/website` | `{website_enabled,index_document,error_document}`，均必填 | 200 保存后的设置 |
-| `GET /api/buckets/{bucket}/cors` | bucket 为 UUID | 200 CORS 规则数组 |
-| `PUT /api/buckets/{bucket}/cors` | 规则数组，`[]` 关闭 | 200 保存后的规则 |
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET/POST /api/buckets` | 可见桶目录 / 创建桶，目录最多 1000 项 |
+| `GET /api/bucket-projects` | 当前用户可创建桶的项目及额度 |
+| `GET/PUT /api/buckets/{bucket}/settings` | 带 revision 的统一设置 |
+| `GET/PUT /api/buckets/{bucket}/cors`、`website` | 单独读取或替换 CORS / 网站设置 |
+| `POST /api/buckets/{bucket}/purge/preview` | 空桶删除或清桶的影响预览 |
+| `DELETE /api/buckets/{bucket}` | 删除空桶 |
+| `POST /api/buckets/{bucket}/purge` | 清空并删除，返回 task_id |
+| `POST /api/buckets/{bucket}/transfer/preview`、`transfer` | 预览 / 执行项目转移 |
 
-桶信息：`{id,project_id,actions,name,state,cors,website_enabled,index_document,error_document,created_at}`。设置仅在桶 active 且非维护模式时可写；创建、删除和清空桶使用 CLI。
+桶信息含 id、name、project_id、actions、state、revision、uploads_paused、public_base_url、CORS 和网站设置。统一保存携带读取时的 revision；并发改变返回 412。成员需要 bucket.settings，只能改 CORS 与网站；域名、公共 URL 和暂停新上传限管理员。
+
+删除、清桶和转移限管理员，执行时提交预览返回的 confirmation 与精确 confirm_name。空桶删除也要求没有残留流或上传历史。转移先暂停新上传并排空写入、multipart、额度预留，再检查目标额度、转移用量、清除旧桶授权，按目标项目范围重新计算权限；公共域名和桶限额保留，成功后恢复新上传。已开始的 multipart 在暂停期间仍可完成。
 
 ### 网站设置
 
-默认关闭，首页为 `index.html`、错误页为 `404.html`。
-
-| 字段 | 约束 |
-| --- | --- |
-| website_enabled | bool |
-| index_document | 单个文件名，1～255 UTF-8 字节 |
-| error_document | 桶根相对对象键，最多 1024 UTF-8 字节；空字符串使用内置 404 |
-
-路径拒绝前导斜杠、反斜杠、控制字符和 `.`／`..` 路径段；无效值返回 400，未知 JSON 字段返回 422。保存立即生效，路由规则见[公共网站](s3-compatibility.md#公共网站)。
+默认关闭，index_document 默认 `index.html`，为 1～255 字节文件名；error_document 默认 `404.html`，为最多 1024 字节的桶内路径，空值使用内置 404。页面必须已存在且 public-read，不改变 S3 路由。域名绑定不会抢占其他桶，public_base_url 只用于生成链接，不配置 DNS/TLS。
 
 ### CORS 设置
 
-每桶最多 100 条规则，同时作用于 S3 和公共读入口，不改变 ACL。
+每桶最多 100 条，同时作用于 S3 与公共读端口，不改变 ACL。字段为 origins、methods、headers、expose、max_age；origin 支持 HTTP(S) 或 `*`，methods 支持 GET/HEAD/POST/PUT/DELETE/OPTIONS，headers/expose 为头名或 `*`。`[]` 关闭。Web 可填入预设；匹配规则见 [S3 CORS](s3-compatibility.md#cors)。
 
-| 字段 | 类型与默认值 | 约束 |
-| --- | --- | --- |
-| origins | 必填字符串数组 | 非空，HTTP(S) origin 或 `*` |
-| methods | 必填字符串数组 | 非空，GET/HEAD/POST/PUT/DELETE/OPTIONS |
-| headers | 字符串数组，默认 `[]` | HTTP 头名或 `*` |
-| expose | 字符串数组，默认 `[]` | HTTP 头名或 `*` |
-| max_age | u32，默认 0 | 预检缓存秒数 |
+## 存储额度
 
-非法规则返回 400，请求仍受 16 KiB 限制。Web 支持添加、删除、清空和填入 Wasabi 风格预设，保存后生效；匹配行为和预设内容见[S3 CORS](s3-compatibility.md#cors)。
+`GET/PUT /api/quotas/{kind}/{id}` 读取 / 完整替换 project 或 bucket 额度。上限为 byte_limit、inflight_limit、bucket_limit，非负十进制字符串或 null；null 不限，`"0"` 为零。桶只设置 byte_limit，写操作限管理员。
 
-## 对象
+逻辑用量按当前对象原始大小计算，去重和压缩不抵扣。接收前预留、覆盖抵扣旧版本、发布时转为已用；在途预算另含未完成分片及并发覆盖。降低额度不删文件，不增加用量的替换仍可执行。超额返回 403 QuotaExceeded。
 
-| 方法与路径 | 输入 | 成功响应 |
-| --- | --- | --- |
-| `GET /api/objects` | bucket=UUID；prefix 默认空，recursive 默认 false，token 可选，limit 默认 100、范围 0～1000 | 200 `{objects,prefixes,next_token}` |
-| `GET /api/object` | bucket=UUID、key | 200 `{object,bucket_grants}` |
-| `GET /api/object/chunks` | bucket、key、version=对象 UUID；after 可选，limit 默认 100、范围 1～200 | 200 `{chunks,next_offset}`；版本变更 412 |
-| `POST /api/objects/actions` | `{bucket,action,objects:[{key,version}]}`；action 为 delete/private/public-read | 200 `{results:[{key,version,status}]}` |
-| `GET/HEAD /api/download` | bucket、key；preview 默认 false | 原始字节或响应头，支持 Range 和条件请求 |
+桶账本需 storage.inspect。项目的完整汇总只向具有全项目范围的成员显示；受限成员仍可看项目共享上限，其他汇总为 null。受限 Token 只能读取自己的桶账本。
 
-列表按 C 排序，游标绑定 bucket/prefix/recursive。`prefixes` 按 `/` 分组，文件和目录共用 limit；recursive=true 平铺列出匹配对象。下一页保留筛选参数并传入 next_token。
+## 媒体目录与检索
 
-对象字段：`{id,bucket_id,object_key,kind,state,size,etag,metadata,public_read,checksums,created_at,touched_at}`。size 为原始字节，etag 不含引号；metadata 结构见[数据库](database-schema.md#jsonb-结构)。`bucket_grants` 为 `{access_key,writable}` 数组，不含 secret；凭据授权与对象 public_read 分别生效。
+`GET /api/buckets/{bucket}/objects` 需 bucket.list，返回 objects/prefixes/next/layout/search_mode/index_ready；对象版本为 id UUID。
 
-### 批量写操作
+| 参数 | 取值 |
+| --- | --- |
+| prefix / recursive | 路径前缀 / 是否展开子目录 |
+| q / mode / search_in | 搜索词；contains/prefix/exact；name/path |
+| kind / public | image/video/audio/document/archive/other；true/false |
+| min_size / max_size | 原始字节范围，含边界 |
+| since / until | RFC3339 更新时间范围，含边界 |
+| sort / order | name/size/modified；asc/desc |
+| after / limit | 上页 next；每页 1～200，默认 100 |
 
-- objects 包含 1～1000 个不同 key，version 取对象列表／详情的 id；覆盖或删除后返回该项 412，避免操作新版本。
-- 每项独立提交，允许部分成功。成功项为 200，失败项可能为 404/409/412/500/503；HTTP 200 不表示所有项成功，中断后应刷新核对结果。
-- 该路由允许 2 MiB 请求体、最多两个并发请求；认证后取得名额，60 秒内未收完请求体返回 408。超限 413、繁忙 503。
-- 删除走正常引用退役和 GC 流程，不同步删除共享块；ACL 不改变 S3 凭据授权。维护模式或清除中的桶拒绝写操作。
-- 日志包含管理员 UUID、目标、动作、结果和 RequestId，不记录会话令牌或密钥。批次内失败也计入运行统计的失败请求。
+前缀和完整路径区分大小写，q 接在 prefix 后；包含搜索不区分大小写，通配符按普通字符处理。无法提取连续三个文字/数字时改为路径前缀，响应明确 search_mode。无筛选的名称升序使用虚拟目录，其余为平面文件列表，不推算文件夹大小。
 
-### 区块详情
-
-每行：`{id,offset_bytes,length,source_offset,raw_size,stored_size,independent_size_hint,payload_size,compression,algorithm,key_id,source,pack_id,reads,range_reads}`。id、offset_bytes、next_offset、pack_id 用十进制字符串表示，末页 next_offset 为 null；只读数据库，不访问后端。
-
-source 为 chunk/pack/pending；stored_size 是当前独立副本长度，没有独立副本时为 null。independent_size_hint、compression 和 payload_size 分别为独立编码长度提示、压缩标记和扣标签后的长度，不代表区块包中某成员的实际占用。reads/range_reads 为延迟落库的累计块读取次数。length/source_offset 描述引用区间，不能据此直接推算删除释放空间。
-
-algorithm/key_id 是逻辑块的初始编码与去重域；重编码后的实际算法和密钥由 chunk_locations 或 packs 记录，可能与初始值不同。
+`GET /api/buckets/{bucket}/catalog` 返回 indexes/backfill/ready。索引未就绪可浏览目录、按完整路径或前缀查找；其余查询返回 503 CatalogBuilding。查询预算 2 秒。目录摘要与对象变更同事务更新，旧对象后台分批回填，重启可继续。
 
 ### 预览与下载
 
-以下接口都用查询参数 `key`、`version`（stream UUID）绑定当前对象；对象被覆盖或删除后拒绝旧版本，不能用历史 UUID 绕过当前授权。
-
-| 方法与路径 | 响应与权限 |
+| `GET /api/buckets/{bucket}/object` 后缀 | 用途与权限 |
 | --- | --- |
-| `GET /api/buckets/{bucket}/object` | 目录项、ETag、HTTP/自定义元数据、可用预览类型；需要 `bucket.list` |
-| `GET /api/buckets/{bucket}/object/content` | 原文件，另接受 `preview` bool；需要 `object.read` |
-| `GET /api/buckets/{bucket}/object/thumbnail` | 按需 PNG 缩略图；每次检查 `object.read`，包含命中本地缓存的请求 |
-| `GET /api/buckets/{bucket}/object/text` | `{text,truncated}`，最多读取前 64 KiB，纯文本/Markdown/CSV/JSON/XML；需要 `object.read` |
+| 无 | 详情和可用预览类型，bucket.list |
+| `/content` | 原文件；preview 控制安全内联，object.read |
+| `/thumbnail` | PNG 缩略图，每次验证 object.read |
+| `/text` | 最多前 64 KiB 的安全文本，object.read |
 
-preview=false 使用 attachment 和 application/octet-stream；preview=true 仅对 JPEG/PNG/GIF/WebP/AVIF、MP4/WebM/OGG 视频及 MPEG/OGG/MP4/WebM/WAV/FLAC 音频 MIME 内联；带非 identity Content-Encoding 的对象仍下载。HTML/SVG 不嵌入管理页，XML 仅作为文本显示。响应带 nosniff、sandbox CSP 和 private/no-store；需要会话或有效 scoped Token。
+均用 key/version 绑定当前对象，覆盖后旧版本返回 412。图片、音频和视频按允许的 MIME 明确加载；HTML/SVG 不嵌入，XML 等按文本显示。下载带 nosniff、sandbox CSP 和 private/no-store；支持 Range 与条件读取。服务端缩略图受[格式、像素和内存限制](configuration.md#监听与管理)，失败保留类型卡片，不自动下载原图。
 
-缩略图采用独立、可丢弃的本地缓存，范围和资源限制见[管理配置](configuration.md#监听与管理)。不支持的格式、解码失败或超限返回 415；繁忙 503、等待超时 504。图库失败时保留类型图标，不自动下载原图。前端对象 URL 离开时释放，不保存到浏览器持久缓存。
+## 对象操作
 
-下载可返回 200、单段 Range 206、条件命中 304、条件不符 412 或范围无效 416（含总长）。后续区块损坏可能中止已经开始的响应，不发送损坏块明文；客户端须确认响应完整。
+`POST /api/media/actions`：bucket、action、objects；每项 `{client_id,key,version,target_key?,target_version?}`。最多 1000 项、共享两个操作名额、60 秒请求期限。HTTP 200 返回 results，须逐项检查 status/code/output_version/replayed。
 
-## 运行状态
-
-`GET /api/status` 返回 200，与 `cli status` 相同。运行计数在进程内累计、重启归零；库存容量异步采集，不随页面刷新扫描对象表。待上传诊断读取有界缓存对应的元数据。
-
-| 字段 | 含义 |
+| action | 权限与语义 |
 | --- | --- |
-| version / resources | 程序版本 / 生效的[资源预算](configuration.md#自动预算) |
-| local_bytes | `[multipart,chunks,thumbnails]` 本地占用 |
-| upload_cache | enabled、configured_size、effective_cache_bytes、effective_upload_bytes、reserved_bytes、fallbacks；pending 为 entries/bytes/oldest_at/failed_entries；pins 最多 100 项，含字符串 chunk_id、pin_type、owner_id、created_at、attempts、next_retry_at、last_error |
-| gc_paused / maintenance / gc_running | GC 暂停、维护模式、GC 是否运行 |
-| active_streams / data_slots_available | 活跃 stream 数 / 可用在途数据槽 |
-| upload_slots_available / read_slots_available | 可用读写并发名额 |
-| db_pool_size / db_pool_idle | 连接池总数 / 闲置连接 |
-| backend_gets/puts/deletes | 后端区块操作累计次数 |
-| backend_read_bytes / backend_write_bytes | 后端成功读取／写入的编码字节 |
-| cache_hits / cache_hit_bytes | 缓存命中数 / 实际读取的 .raw 或 .zst 文件字节 |
-| runtime.started_at / uptime_seconds | 进程启动时间 / 运行秒数 |
-| runtime.http.s3/web/manage | 各 HTTP 入口的请求计数和耗时 |
-| runtime.gc_deleted / gc_failures | 完成逻辑退役的区块数 / 本地清理、后台回收或物理删除失败次数 |
-| io.backend.get/put/delete/head | 后端区块操作计数、成功传输字节和耗时，不含 marker、LIST 和 SDK 内部重试次数 |
-| io.cache_lookups / cache_hit_rate | 区块读取次数 / 缓存命中比例；合并等待同次回源的请求各计一次 lookup |
-| io.cpu_slots_available | 可用 CPU 名额 |
-| io.backend_queues.read/upload/control | 各方向的 limit/running、queued（foreground/upload/maintenance）及 oldest_wait_seconds |
-| io.cache_limit_bytes / multipart_limit_bytes | 配置的本地字节配额，未配置为 null |
-| process_memory.rss_bytes / peak_rss_bytes | Linux RSS / 峰值，读取失败为 null；不是包含文件页缓存的容器内存 |
-| cleanup | 历史清理状态，见下文 |
-| storage | 后台容量快照，见下文 |
+| delete | object.delete；解除引用，按正常 GC 回收 |
+| private / public-read | object.acl |
+| copy | 源 read、目标 write；默认私有，公开副本另需目标 acl |
+| move | 源 read/delete、目标 write；保留 ACL，公开对象另需目标 acl |
+| metadata | 源 read/write；公开对象另需 acl，产生新版本 |
 
-### 计数与耗时
+复制/移动使用 target_bucket 和逐项 target_key；替换目标须提供 target_version。源/目标变化返回逐项 412。复制仅复用引用；同项目移动按逻辑净变化记账，跨项目受目标额度约束。
 
-每组 HTTP／后端统计包含 `started,completed,active,failed,canceled,client_errors,server_errors,bytes,failure_rate,duration_ms`。
+client_id 是调用方 UUID。成功回执与变更同事务提交；同身份、同参数重试返回回执，参数不同返回 409 IdempotencyConflict。已确认失败的新尝试使用新 ID，未知结果保留原 ID。重试仍检查实时权限，回执按 task_retention 清理。Web 每批 20 项、选择限当前页；关闭浏览器不保留未确认的操作编号。
 
-- completed 包括成功、失败和取消；failed 包括 HTTP 4xx/5xx、流错误及 HTTP 200 中的延迟 XML 错误，与 canceled 互斥。`failure_rate=(failed+canceled)/completed`。
-- client_errors/server_errors 按已产生的 HTTP 状态计数，后端组两项为 0。HTTP bytes 是交给 HTTP 层的响应体字节，不含请求、头部及网络开销，不保证客户端已收到。
-- HTTP 耗时从收到完整请求头到响应结束／错误／取消；HEAD 和空响应在生成时结束。后端耗时从取得名额开始，GET 包含整个区块读取及 SDK 重试，不含解码或缓存写入。
-- duration_ms 含 mean/p50/p95/p99。分位数为从 1 ms 起倍增的直方图近似上界；无样本或超过 2^23 ms 的溢出桶为 null。并发快照可能有瞬时差异，不保存历史时序。
+## 上传与传输中心
 
-### 清理结果
-
-`cleanup`：`{running,interval,batch_size,max_duration,deleted_chunk_retention,upload_retention,task_retention,last_run}`，与 `cli cleanup status` 一致。
-
-last_run 首次执行前为 null，此后为 `{started_at,finished_at,duration_ms,deleted,batches,budget_exhausted,last_error}`。deleted 统计 chunks/chunk_locations/packs/uploads/tasks/sessions/integrity_issues 已提交的删除行数；batches 包含删除零行的批次。时限耗尽后保留已提交结果、回滚未完成事务，后续轮次继续；失败时 last_error 为 cleanup_failed，详情见日志。该结果不包含本地 fragment 文件和 extent 清理。
-
-### 容量快照
-
-后台在启动后采集一次，之后按[统计配置](configuration.md#运行统计)调度。每轮使用只读、可重复读事务，最多一个汇总任务及连接，禁用查询并行，work_mem 为每节点 16 MiB，锁等待最多 1 秒；总时限及语句时限由 query_timeout 控制。大表汇总可能产生数据库 I/O 和临时文件。
-
-`storage`：`{snapshot,collecting,last_attempt_at,last_error,age_seconds,stale,refresh_interval_seconds}`。首次成功前 snapshot 为 null；失败保留上次快照，last_error 为 refresh_failed。缺少快照、刷新失败或年龄超过两倍间隔时 stale=true，统计失败不阻止对象服务。
-
-| snapshot 字段 | 口径 |
+| 方法与路径 | 用途 |
 | --- | --- |
-| as_of / collected_at | 数据库一致性快照时间 / 汇总完成时间 |
-| objects / logical_bytes | 当前可见对象数量 / 原始字节总和，不含旧版本和未完成分片 |
-| buckets / buckets_truncated | `{id,name,objects,logical_bytes}` 数组，含空桶，按 UUID 排序，最多 1000 桶；截断时全局总数仍包含全部桶 |
-| chunks.states | 各状态区块行数，包括保留的 deleted 元数据 |
-| chunks.stored_bytes | ready/retired/deleting 物理来源的编码大小，包含过渡副本与待回收数据 |
-| chunks.unconfirmed_bytes | preparing/uploading 物理来源已记录的编码大小，远端是否存在尚不确定 |
-| physical | 按 kind（chunk/pack）、state 分组的 objects/stored_bytes |
-| live | 可见对象引用的唯一块数 chunks、引用区间总长 reference_bytes、唯一块原始大小 raw_bytes、尚无远端来源的 pending_raw_bytes、编码大小 stored_bytes、扣标签后的 payload_bytes |
-| unreferenced | chunks/eligible_chunks 为无 extent 引用的逻辑块数及过宽限、无 owner_stream 的数量；stored_bytes 为无引用独立来源及退役物理来源字节，eligible_bytes 按物理来源宽限筛选。部分闲置区块包的剩余占用在 physical 中，实际回收还受引用和活跃保护约束 |
-| tasks / uploads | 按状态计数的任务 / active、completing 上传 |
-| cleanup | chunks/uploads/tasks/sessions/integrity_issues 到期历史的 `{eligible,oldest_at}`；时间分别为 deleted_at/touched_at/updated_at/expires_at，巡检异常使用所属任务 updated_at；排除仍有 extent 的块和仍有 part 的上传，可能含被锁或活跃保护暂缓的行 |
-| database | `{table,total_bytes,index_bytes,live_rows_estimate,dead_rows_estimate,last_autovacuum,last_autoanalyze}`；大小含索引和 TOAST，行数为估计，维护时间可为 null |
+| `POST /api/buckets/{bucket}/uploads` | client_id、key、file_name、size、content_type、可选 modified_at/public_read/overwrite；幂等创建 |
+| `GET /api/uploads`、`GET /api/uploads/{id}` | 分页目录 / 详情及后端落盘状态 |
+| `GET /api/uploads/{id}/parts` | 已接收分片及 SHA-256，每页最多 1000 |
+| `PUT /api/uploads/{id}/parts/{number}` | 原始字节和 Base64 `X-Content-SHA256` |
+| `POST /api/uploads/{id}/complete` | 完整有序清单 `{parts:[{number,etag,sha256}]}` |
+| `DELETE /api/uploads/{id}` | 终止上传 |
 
-去重节省量为 `live.reference_bytes-live.raw_bytes`；编码节省量为 `live.raw_bytes-live.pending_raw_bytes-live.payload_bytes`。物理大小按唯一可见来源计数：一个区块包即使只剩部分成员仍在使用，也计入整个包；过渡副本另外计入 physical。每个加密物理载荷扣 16 字节标签，none 为 0；分母为 0 时比例为 null。部分引用、索引开销可使节省为负，不按桶分摊共享来源。
+上传使用现有 multipart/配额/发布流程，不下发 S3 secret。默认每片 16 MiB，随文件大小增大以符合最多 10000 片、每片最多 5 GiB。列表支持 bucket/state/source/own/after/limit，每页最多 100；来源为 web/s3。
 
-物理统计来自数据库，不遍历后端，不包含未索引对象、meta.json、提供商对象版本或账单规则；上传和删除期间可能短暂不一致。
-
-## 区块包
-
-`POST /api/cache/flush` 返回 `{task_id}`，使用相同的会话、Origin 和 CSRF 验证。它将任务创建前的积压写成独立来源，在维护模式也可显式执行；通过现有任务 API 暂停/恢复。完成不阻止后续请求产生新积压，备份需先阻止写入。
-
-对象区块的 source 可为 pending，表示目前依赖本地待上传来源；此时 stored_size 为空，independent_size_hint 仅是编码提示。巡检对本地唯一来源进行读取校验，不能宣称已确认后端存在。
-
-| 方法与路径 | 输入 | 成功响应 |
-| --- | --- | --- |
-| `GET /api/packs` | after 默认 0；limit 默认 100，1～200 | `{status,packs,next_after}`，按 ID 升序 |
-| `GET /api/packs/{id}` | 正 bigint 十进制 ID | `{pack,members}`，成员含逻辑区块及当前映射标志 |
-
-pack_id 与 all=true 必须二选一；全部拆包要求 pack.enabled=false。包及成员的大整数 ID 使用字符串，避免浏览器精度损失。区块包页面可查看列表、成员、维护入口与拆包预览；写接口遵守会话、Origin、CSRF 和维护模式。操作、冷却和回收语义见[CLI](cli-reference.md#区块包维护)。
-
-任务 detail.last_rewrite 保存最近一次成功切换的 before_bytes/output_bytes/temporary_added_bytes/transition_bytes，分别为旧布局、新布局、本批新增载荷及新旧并存大小；不包含更早批次仍在 GC 宽限内的副本，部署总占用以 physical 汇总为准。
-
-区块包状态含 range_optimization；Range 任务的 detail.evaluated 为已评估包数，last_range 含 pack_id、applied、reason、partial_downloads，以及 benefit 的 observed_bytes/projected_bytes/rewrite_bytes/extra_gets/request_penalty_bytes/net_savings_bytes。收益是按历史窗口外推的预计值，重写大小采用实际编码结果，不承诺未来命中率。区块包的 range_checked_at 是最近评估时间。
-
-## 后台任务
-
-| 方法与路径 | 输入 | 成功响应 |
-| --- | --- | --- |
-| `GET /api/tasks` | state、kind、bucket、actor、token 可选；limit 默认 50，范围 1～200 | 200 `{tasks,next_token}`，按 created_at、id 降序 |
-| `GET /api/tasks/{id}` | id 为任务 UUID | 200 任务详情 |
-| `POST /api/tasks/{id}/actions` | `{action:"pause"或"resume"}` | 204；非法转换或策略阻止时 409 |
-
-任务字段：`{id,kind,bucket_id,state,cursor,processed,detail,error,created_at,updated_at}`。state 为 queued/running/paused/completed/failed，游标绑定筛选状态。API 状态值使用英语，界面负责翻译。
-
-暂停／继续的适用状态及维护要求见[CLI 任务语义](cli-reference.md#后台任务)。整桶清除与后端清查通过 CLI 创建，Web 可控制已有任务；巡检可直接通过下列 API 创建。
-
-## 完整性巡检
-
-| 方法与路径 | 输入 | 成功响应 |
-| --- | --- | --- |
-| `POST /api/integrity` | `{mode?,bucket?,key?}`，mode 默认 metadata，可选 head/full；bucket 为名称，key 需 bucket | 200 `{task_id}` |
-| `GET /api/tasks/{id}/issues` | after 默认 0，limit 默认 100，范围 1～200 | 200 `{issues,next_after,groups}`；游标为十进制字符串或 null |
-| `GET /api/tasks/{id}/issues/{issue}/objects` | after 可选，为 URL 编码的 JSON `[bucket UUID,key]` | 200 `{objects,next}`，每页 100 项 |
-| `GET /api/tasks/{id}/report` | 仅已完成巡检 | JSONL 附件；其他状态 409，非巡检任务 404 |
-
-创建请求拒绝未知字段／模式及长度不在 1～1024 UTF-8 字节内的 key；桶或精确对象不存在返回 404。最多一个 queued/running 巡检，冲突返回 409；暂停后可启动另一个，继续时仍检查此限制。模式区别见[巡检命令](cli-reference.md#完整性巡检)。
-
-### 进度与覆盖范围
-
-kind 为 integrity，detail 包含：
-
-| 字段 | 含义 |
-| --- | --- |
-| mode / phase | 模式 / metadata、chunks、done |
-| bucket_id / bucket / key | 保存的巡检范围 |
-| upper_chunk_id / upper_object | 创建时的区块 ID 上界（十进制字符串）/ 对象上界 `[bucket UUID,key]` 或 null |
-| objects_checked / chunks_checked / bytes_checked | 已提交批次的对象数 / 区块数 / 下载编码字节 |
-| issues / skipped / finished_at | 异常数 / 因变更跳过数 / 完成时间 |
-
-processed 为对象和区块检查数之和，不是百分比；cursor 是内部 JSON 字符串，可保存对象中途的进度。未提交批次及中断下载的流量不计入 bytes_checked，应结合运行统计判断。
-
-巡检在线检查保存上界内、仍由范围内已发布对象引用的区块。它反映一段时间窗口，不是同一时刻快照；不重算完整对象 ETag，不检查活动上传、未引用块或可丢弃缓存。尚无远端来源的 pending 块在所有模式下校验本地唯一副本。新数据可能在扫描期间进入上界内的范围；晚于上界的新对象／区块不在覆盖范围。
-
-当前批次持有读取保护，解除引用的数据可跳过。异常与进度原子保存，重启不重复登记；权限、连接及超时等执行错误停止任务并保留进度，不记作坏块。`completed` 且 issues>0 表示完成但有异常，`failed` 表示未完成。
-
-### 异常与报告
-
-异常字段：`{id,task_id,subject,code,chunk_id,storage_id,stream_id,bucket_id,object_key,detail,created_at}`；bigint ID 使用十进制字符串。
-
-| code | 含义 |
-| --- | --- |
-| remote_missing / length_mismatch | 远端缺失 / 编码长度异常 |
-| pending_unavailable | 本地待上传唯一副本缺失或损坏，保留现场等待恢复 |
-| chunk_metadata / missing_key | 区块元数据异常 / 缺少历史密钥 |
-| authentication_failed / decompression_failed / hash_mismatch | 认证 / 解压 / 原始长度或哈希校验失败 |
-| object_metadata / mapping_gap / mapping_source / object_length | 对象身份或状态 / 映射缺口或重叠 / 来源 / 总长度异常 |
-
-异常保留检查时的身份和诊断信息，不因对象删除而消失。关联对象返回当前引用的 `{bucket_id,bucket,key,version}`，可包含其他桶的共享引用；已替换或删除的历史版本不在结果中。
-
-报告为 `application/x-ndjson`，首行 `{type:"task",task:...}`，随后逐条 `{type:"issue",issue:...}`，末行 `{type:"end",issues:N}`。每次读取 100 条、不持有长事务；过期清理或中断导致内容不全时不会输出结束行。异常随已完成任务按[保留期](configuration.md#回收与历史清理)分批清理，failed/paused 不自动到期。
+Web 发起者才能续传自己的上传；管理员可查看和终止其他上传。刷新后重新选择原文件，并核对已接收部分的完整校验和。完成仅表示对象已发布；remote_state 区分本地已保存与后端已就绪，上传缓存恢复要求见[备份材料](deployment-and-recovery.md#备份材料)。
 
 ## 存储洞察
 
-| 路径 | 权限与用途 |
+| 方法与路径 | 内容 |
 | --- | --- |
-| `GET /api/insights?bucket=&project=` | 按当前 `storage.inspect` 范围读取空间快照与容量历史；省略范围时管理员看全局、成员看全部获授权桶 |
-| `GET /api/insights/runtime` | 管理员读取运行采样、本地缓存、待上传与近期任务 |
-| `GET /api/storage/packs` | 当前范围的区块包，支持 `bucket/project/after/limit`；管理员可按 state 筛选 |
-| `GET /api/storage/packs/{id}` | 游标分页的获授权成员区块；普通成员不返回全包大小、成员总数、全局序号 |
-| `GET /api/storage/packs/{id}/objects` | 当前引用文件，额外要求 `bucket.list`；支持范围和绑定范围的 cursor |
+| `GET /api/insights` | bucket 或 project 范围快照与容量历史 |
+| `GET /api/insights/runtime` | 管理员可见的运行历史、本地缓存、待上传及近期任务 |
+| `GET /api/storage/packs`、`GET /api/storage/packs/{id}` | 授权范围的区块包及成员分页 |
+| `GET /api/storage/packs/{id}/objects` | 当前引用文件，另需 bucket.list |
+| `GET /api/object/chunks` | bucket/key/version 对象区块，需 storage.inspect；after/limit 分页 |
 
-空间分为原始逻辑量 R、范围内区间并集 U、项目间再桶间均分的内容归属 D、所选物理来源编码占用分摊 A。共享区块包只计算一次，未使用成员占用计入编码成本，允许出现负的编码节省。`R-A=(R-U)+(U-D)+(D-A)`；跨桶统计的 U 重新取并集，不能相加。
+### 容量快照
 
-尚无远端来源的内容计入 pending；此时 A 和编码节省为 null，不伪造零。全局 physical 区分当前选用、额外保留、待回收与未确认来源；索引量不等于供应商账单。归属是空间解释，不是计费。
+按当前 storage.inspect 权限确定范围，省略时管理员看全局、成员看全部获授权桶。成员不获得未授权桶引用、完整共享包大小、全局成员序号或密钥标识。
 
-页面只读后台快照。新授权组合首次显示 collecting；as_of 标示实际时间，超时保留旧快照并显示 stale。容量与运行历史按配置保留，进程重启后的计数断开；未积累采样不绘制趋势。字节、大整数 ID 与计数使用十进制字符串。
+空间口径：R 为原始逻辑量，U 为范围内引用区间并集，D 为先项目间、再桶间均分的内容归属，A 为所选物理来源编码占用的分摊。`R-A=(R-U)+(U-D)+(D-A)`，分别为范围内去重、共享内容和编码节省；U 跨桶不能相加，节省可能为负。归属用于说明空间，不用于收费或逻辑配额。
 
-## 管理页面
+无远端来源时计入 pending，A 和编码节省为 null。全局 physical 区分当前来源、过渡副本、待回收与未确认来源；只统计数据库索引，不含提供商对象版本、未知后端对象或账单规则。
 
-`GET/HEAD /` 提供 Vue 管理应用；媒体库支持桶、目录与对象浏览和授权下载。现有桶设置、任务、区块包和批量操作保留在 `/classic/`。静态资源随二进制提供，无 Node.js 运行服务。
+页面读取后台快照；collecting 表示首次收集中，as_of 是实际采集时间，失败保留旧结果并显示 stale。历史采样有上限和保留期，进程重启处分段，无采样不造趋势。
 
-个人设置支持 en/zh-CN/ja、自动/亮色/暗色、显示名、可选头像、改密和会话管理。语言按需加载，未登录时使用浏览器保存的选择或优先语言，无法匹配回退英语；登录后以账户设置为准，同步浏览器本地偏好。表单离开前提示未保存修改。
+## 运行状态
 
-编译后的哈希资源支持长期缓存与 ETag；HTML 和固定名称素材重验证，API 及私有下载保持 `private, no-store`。SPA 深链接不覆盖未知 API 或静态资源的 404。`--api-only` 镜像不包含页面，详见 [前端构建](../web/README.md)。
+`GET /api/status` 与 `cli status` 相同；`GET /api/service/status` 提供页面使用的进程、连接池、资源预算、读写名额、后端 read/upload/control 队列和目录索引状态。`GET /api/service/config` 提供脱敏配置、来源和重启要求，不读取秘密文件内容。
 
-经典控制台：
-
-- 支持 zh-CN/en：首次按浏览器语言选择，中文以外回退英语；选择保存在 localStorage，切换保留未提交表单。名称、元数据和错误内容始终按文本显示。
-- URL 保存 page、bucket、prefix、recursive、token、key、section、state、task、taskToken、`pack`、packAfter，支持刷新、前进后退和复制链接。section 为 cors/website，page 为 objects/settings/status/tasks/packs；访问仍需登录。
-- 对象每页 100 项，可按前缀／完整 key 定位；勾选仅限当前页，上一页使用本标签页历史。支持图片／视频预览和原文件下载；批量操作先列出目标，再显示逐项结果。
-- 任务可每 5 秒刷新，页面隐藏或离开任务页时停止；用户可关闭。暂停或终止的巡检详情停止自动轮询，可手动刷新、查看关联对象和导出报告。
-- 状态页刷新只读取运行计数和已缓存的容量快照。库存通过分页浏览，不设累计对象数量上限。
-## 存储桶工作流
-
-`GET /api/bucket-projects` 返回当前身份可以创建桶的项目；`POST /api/buckets` 接收 `name`、可选 `project_id`。管理员可创建任意项目的桶；项目允许创建时，维护成员可创建，选择范围成员会获得新桶的全部桶权限。普通 API Token 不提供创建桶能力。
-
-`GET/PUT /api/buckets/{bucket}/settings` 统一读取、保存 CORS、网站、公共 URL、域名和新上传暂停状态。保存必须带读取时的 `revision`；发生并发更改返回 412。成员需要 `bucket.settings`，只能修改 CORS 与网站；域名、公共 URL、暂停由管理员管理。`public_base_url` 只用于公开对象链接，不配置 DNS/TLS。域名冲突返回 `DomainInUse`，不会自动抢占其他桶的域名。
-
-以下操作限管理员，并在执行时检查近期身份验证：
-
-| 操作 | 预览与确认 |
-| --- | --- |
-| 删除空桶 | `POST /api/buckets/{bucket}/purge/preview` 后 `DELETE /api/buckets/{bucket}`，传 `confirm_name` 和预览的 `confirmation`；桶必须无数据流和上传历史 |
-| 清空并删除 | 同一预览后 `POST /api/buckets/{bucket}/purge`，传同样确认字段，返回持久 `task_id`；数据按现有 GC/保留策略回收 |
-| 项目转移 | `POST /api/buckets/{bucket}/transfer/preview` 传 `target_project`；执行 `/transfer` 再传 `confirm_name`、`confirmation` |
-
-转移必须先暂停新上传并排空已有写入、活动分片及配额预留；读取和已开始的 multipart 可以继续。执行原子检查目标项目的容量和桶数配额、迁移用量、撤销此桶原有成员/S3 密钥/Token 授权，并按目标项目角色重新计算访问权限。公共域名和桶限额保留，成功后恢复新上传。关闭确认窗口不会自动恢复先前暂停的上传。
+运行计数本进程累计、重启归零：HTTP started/completed/active/failed/canceled、4xx/5xx、字节及延时；缓存命中/查找、后端请求/字节、GC 成败。失败率为 `(failed+canceled)/completed`，耗时分位数是倍增直方图的近似上界。统计不是账单或逐请求日志；Linux RSS 也不等于含页缓存的容器内存。
 
 ## 整理工作台与服务诊断
 
-所有入口仅管理员或明确的 system Token 可访问；写入受实时身份和权限检查。任务记录包含 kind/policy、来源、发起者、开始时间、处理计数和阻止原因。
+以下入口限管理员或明确签发的 system Token。
 
-| 入口 | 合约 |
+| 方法与路径 | 用途 |
 | --- | --- |
-| `GET /api/maintenance` | 七类策略、当前/最近任务、周期、有效打包开关和排空信息 |
-| `POST /api/maintenance/{kind}/actions` | `{action:pause/resume/run}`；返回可空 task_id |
-| `POST /api/maintenance/mode`、`pack-creation` | `{enabled}`；需要近期身份确认；204 |
-| `POST /api/maintenance/flush` | 发起上传缓存落盘任务；维护模式可执行 |
-| `POST /api/maintenance/sweep` | `{older_than}`；仅扫描，返回 task_id |
-| `POST /api/maintenance/sweep/preview` | `{task_id}`，引用已完成的只读扫描 |
-| `POST /api/maintenance/unpack/preview` | `{pack_id}` 或 `{all:true}`；全量需停止新包生成 |
-| `POST /api/maintenance/{operation}/execute` | `{preview_id,confirmation}`，operation 为 unpack/sweep；近期身份确认后返回 task_id |
-| `GET /api/service/status` | 进程、连接池、资源预算、后端队列及索引状态 |
-| `GET /api/service/config` | 脱敏配置值、来源和是否需重启；只读 |
-| `POST /api/service/key-material` | 近期身份确认后生成新的 256 位密钥，仅本次返回 secret；不读取或修改已有密钥 |
+| `GET /api/maintenance` | 七类策略、周期、当前/最近任务、下次检查、打包开关和排空状态 |
+| `POST /api/maintenance/{kind}/actions` | pause/resume/run；kind 为 pack/reuse/reclaim/repack/range/gc/cleanup |
+| `POST /api/maintenance/mode`、`pack-creation` | `{enabled}`；维护模式 / 是否允许新包生成 |
+| `POST /api/maintenance/flush` | 将已有上传缓存写入后端 |
+| `POST /api/maintenance/sweep`、`sweep/preview` | 只读清查 / 根据已完成扫描准备删除确认 |
+| `POST /api/maintenance/unpack/preview` | 单包 `{pack_id}` 或全部 `{all:true}` 拆包预览 |
+| `POST /api/maintenance/{operation}/execute` | `{preview_id,confirmation}`，operation 为 unpack/sweep |
+| `POST /api/service/key-material` | 生成新的 256 位随机密钥，仅返回一次，不读取/修改密钥文件 |
 
-预览绑定账号及 Token，十分钟内有效；执行时核对范围，重复请求返回同一任务。拆包先写新来源再切换引用，旧来源继续遵守回收宽限和最低存储期。破坏性 sweep 需要维护模式、排空操作及非空索引；执行前后都会核对前提。配置页不代替外部配置文件或数据库备份恢复。
+暂停在工作边界生效，已经发出的请求可完成。新包开关覆盖上传与所有维护路径；全部拆包需停止生成并等 preparing 包排空，未完成的全部拆包阻止恢复生成。旧载荷仍受 GC 宽限和最低存储期保护。
+
+执行预览绑定账号/Token 和影响范围，十分钟有效，重复请求返回同一任务。破坏性 sweep 另需维护模式、排空操作及非空索引，每次删除前再次查询数据库。CLI 对应命令和恢复步骤见[维护参考](cli-reference.md#状态与维护)。
+
+## 后台任务
+
+`GET /api/tasks` 支持 state/kind/bucket/actor/token、分页游标和 limit（默认 50，最多 200），返回 tasks/next_token。`GET /api/tasks/{id}` 返回状态、来源、发起者、处理计数、阻止原因及 detail。`POST /api/tasks/{id}/actions` 提交 pause/resume。
+
+状态为 queued/running/paused/completed/failed。暂停不回滚已提交批次；重启将 running 重排，paused 保持暂停。维护前提和策略可能阻止继续。任务创建成功只表示排队，不代表完成。
+
+## 完整性巡检
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `POST /api/integrity` | `{mode?,bucket?,key?}`；metadata/head/full，key 需 bucket |
+| `GET /api/tasks/{id}/issues` | after/limit/code，异常及分组，每页最多 200 |
+| `GET /api/tasks/{id}/issues/{issue}/objects` | 当前关联文件，每页 100；after 为返回的游标 |
+| `GET /api/tasks/{id}/report` | 已完成巡检的 JSONL 下载 |
+
+metadata 检查对象映射与区块身份，head 增加后端存在性和长度，full 下载并认证、解压、校验 BLAKE3。pending 的本地唯一副本在所有模式下检查。巡检绕过可丢弃缓存、不修复或删除数据；不重算整文件 ETag，不覆盖活动上传或无引用块。在线扫描保存上界，期间变化可被跳过，不是瞬时一致性快照。
+
+异常代码包含 remote_missing、length_mismatch、pending_unavailable、chunk_metadata、missing_key、authentication_failed、decompression_failed、hash_mismatch、object_metadata、mapping_gap、mapping_source、object_length。网络/权限/超时让任务 failed 并保留进度，不记作坏块。completed 仍须查看异常数。
+
+报告首行为 `{type:"task",task:...}`，随后为 issue，完整末行为 `{type:"end",issues:N}`。中断或清理造成缺失时没有结束行。异常随已完成任务到期；failed/paused 不自动删除。
+
+## 兼容入口
+
+以下接口保留共同权限检查；新客户端使用上文的带类型接口。
+
+| 路径 | 行为 |
+| --- | --- |
+| `GET /api/objects`、`GET /api/object` | 旧目录和对象查询，bucket/key 查询参数 |
+| `POST /api/objects/actions` | delete/private/public-read，逐项版本检查，无新操作回执 |
+| `GET /api/download` | bucket/key/preview 下载 |
+| `GET /api/packs`、`GET /api/packs/{id}` | 管理员物理包列表与成员 |
+| `POST /api/cache/flush` | 与 maintenance/flush 相同的后端落盘任务 |
+
+页面为 Vue 静态资源，运行无需 Node.js。带内容哈希的资源可长期缓存，入口 HTML 和品牌素材需重新验证，私有 API 不缓存。三语按需加载、明暗主题与账户同步规则见[管理指南](management.md)。

@@ -55,7 +55,7 @@ ACL 变更对新请求生效，已接纳的读取可以完成；CDN 已缓存内
 
 每桶默认关闭，CLI/Web 保存的同一组规则应用于 S3 和公共读；字段见[CORS 设置](manage-api-reference.md#cors-设置)。
 
-- Web 的 Wasabi 风格预设：任意来源和请求头、暴露全部响应头，方法为 GET/HEAD/POST/PUT/DELETE/OPTIONS，预检缓存 86400 秒。
+- Web 预设：任意来源和请求头、暴露全部响应头，方法为 GET/HEAD/POST/PUT/DELETE/OPTIONS，预检缓存 86400 秒。
 - 公共读和匿名 Host 映射仅允许 GET/HEAD 的预检；规则不启用跨域 Cookie 凭据，不改变 ACL 或签名校验。
 - 成功、304 和对象错误响应均应用匹配规则；未匹配预检返回 403。开启 CORS 时带 `Vary: Origin`，预检另区分请求方法和请求头。
 

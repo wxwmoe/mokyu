@@ -242,26 +242,7 @@ try:
     assert get() == raw
     print('PASS pack disabled / Range enabled outputs only independent chunks, including zero-cache reads', flush=True)
 
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page(locale='en-US')
-        errors = []
-        page.on('pageerror', lambda error: errors.append(str(error)))
-        page.goto(os.environ['MOKYU_TEST_WEB'])
-        page.get_by_label('Username', exact=True).fill('tester')
-        page.get_by_label('Password', exact=True).fill(os.environ['MOKYU_TEST_PASSWORD'])
-        page.get_by_role('button', name='Sign in', exact=True).click()
-        page.locator('#browser:not([hidden])').wait_for()
-        page.locator('#packs-tab').click()
-        page.get_by_role('button', name='Optimize cold Range reads', exact=True).wait_for()
-        assert page.get_by_role('button', name='Pack eligible chunks', exact=True).count() == 0
-        page.locator('#language').select_option('zh-CN')
-        page.get_by_role('button', name='优化 Range 回源', exact=True).wait_for()
-        page.screenshot(path=str(Path(os.environ['MOKYU_TEST_RESULTS']) / 'range-pack-off-zh.png'), full_page=True)
-        assert not errors, errors
-        browser.close()
-    print('PASS Range management in both locales while pack creation is disabled', flush=True)
+    # The shared maintenance UI is verified in web/tests/maintenance.spec.ts.
 
     restart(original + '\n[pack]\nrange_optimization=false\n')
     assert not cli('pack', 'status')['range_optimization']

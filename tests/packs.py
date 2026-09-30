@@ -196,38 +196,11 @@ page=session.get(web+'/api/packs',params={'limit':1});page.raise_for_status()
 assert len(page.json()['packs'])==1 and isinstance(page.json()['packs'][0]['id'],str)
 assert session.get(web+'/api/packs?limit=0').status_code==400
 assert requests.get(web+'/api/packs').status_code==403
-assert session.post(web+'/api/packs/run',json={'kind':'pack'}).status_code==403
-assert session.post(web+'/api/packs/run',headers=headers,json={'kind':'invalid'}).status_code==400
-assert session.post(web+'/api/packs/unpack',headers=headers,json={'pack_id':'9007199254740993'}).status_code in (200,404)
+assert session.post(web+'/api/maintenance/pack/actions',json={'action':'run'}).status_code==403
+assert session.post(web+'/api/maintenance/invalid/actions',headers=headers,json={'action':'run'}).status_code==400
+assert session.post(web+'/api/maintenance/unpack/preview',headers=headers,json={'pack_id':'9007199254740993'}).status_code in (200,404)
 assert db.execute('SELECT count(*) FROM pack_inputs').fetchone()[0]==0
 
-# Both locales render the same pack operations and preserve browser navigation.
-from playwright.sync_api import sync_playwright
-with sync_playwright() as playwright:
-    browser=playwright.chromium.launch()
-    page=browser.new_page(locale='en-US',viewport={'width':1280,'height':900})
-    errors=[]
-    page.on('pageerror',lambda error: errors.append(str(error)))
-    page.goto(web)
-    page.get_by_label('Username',exact=True).fill('tester')
-    page.get_by_label('Password',exact=True).fill(os.environ['MOKYU_TEST_PASSWORD'])
-    page.get_by_role('button',name='Sign in',exact=True).click()
-    page.locator('#browser:not([hidden])').wait_for()
-    page.locator('#packs-tab').click()
-    page.get_by_role('button',name='Pack eligible chunks',exact=True).wait_for()
-    assert page.evaluate("async () => { const {messages} = await import('/i18n.js'); return JSON.stringify(Object.keys(messages.en).sort()) === JSON.stringify(Object.keys(messages['zh-CN']).sort()); }")
-    active=str(db.execute("SELECT id FROM packs WHERE state='ready' ORDER BY id LIMIT 1").fetchone()[0])
-    page.locator('#task-list').get_by_role('button',name=active,exact=True).click()
-    page.get_by_role('button',name='Unpack',exact=True).wait_for()
-    page.get_by_role('button',name='Unpack',exact=True).click()
-    page.locator('dialog[open]').wait_for()
-    page.keyboard.press('Escape')
-    page.locator('#language').select_option('zh-CN')
-    page.get_by_role('button',name='拆成独立区块',exact=True).wait_for()
-    page.screenshot(path=str(Path(os.environ['MOKYU_TEST_RESULTS'])/'pack-detail-zh.png'),full_page=True)
-    page.set_viewport_size({'width':390,'height':844})
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
-    assert not errors,errors
-    browser.close()
+# Browser workflows are covered by web/tests/insights.spec.ts and maintenance.spec.ts.
 print('PASS pack creation, zero-cache reads, partial reuse, physical GC, unpack and maintenance')
 print('PASS physical inspection, access statistics, cooldown/coalescing, CDC pack limits, independent compression hints, sweep and management access')

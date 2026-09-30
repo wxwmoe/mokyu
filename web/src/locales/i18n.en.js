@@ -470,7 +470,7 @@ export default {
   workspace: 'Workspace', administration: 'Administration', media: 'Media library', account: 'Personal settings',
   cozy: 'A cozy home for your media', moreLove: 'Room for a little more love.', gently: 'Your media, gently cared for.',
   skip: 'Skip to content', navigation: 'Open navigation', accountMenu: 'Account menu', yourWorkspace: 'Your workspace',
-  classic: 'Classic console', signOut: 'Sign out', lightSwitch: 'Switch to light', darkSwitch: 'Switch to dark',
+  signOut: 'Sign out', lightSwitch: 'Switch to light', darkSwitch: 'Switch to dark',
   language: 'Language', language_en: 'English', 'language_zh-CN': '简体中文', language_ja: '日本語',
   languageSaved: 'Language updated',
   theme: 'Appearance', auto: 'Automatic', light: 'Light', dark: 'Dark', followBrowser: 'Follow browser',

@@ -470,7 +470,7 @@ export default {
   workspace: 'ワークスペース', administration: '管理', media: 'メディアライブラリ', account: '個人設定',
   cozy: 'メディアに、ほっとする居場所を', moreLove: 'もうひとつの「好き」をここに', gently: 'mochi がそっと見守っています',
   skip: '本文へ移動', navigation: 'ナビゲーションを開く', accountMenu: 'アカウントメニュー', yourWorkspace: 'あなたのワークスペース',
-  classic: 'クラシックコンソール', signOut: 'ログアウト', lightSwitch: 'ライトに切り替え', darkSwitch: 'ダークに切り替え',
+  signOut: 'ログアウト', lightSwitch: 'ライトに切り替え', darkSwitch: 'ダークに切り替え',
   language: '言語', language_en: 'English', 'language_zh-CN': '简体中文', language_ja: '日本語',
   languageSaved: '言語を切り替えました',
   theme: '外観', auto: '自動', light: 'ライト', dark: 'ダーク', followBrowser: 'ブラウザーに合わせる',

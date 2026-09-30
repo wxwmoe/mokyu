@@ -43,7 +43,7 @@ def read(key, **kwargs):
 
 
 def ordinary():
-    for key, data in [("empty", b""), ("space +/中文%2F.jpg", b"abc"),
+    for key, data in [("empty", b""), ("space +/\u4e2d\u6587%2F.jpg", b"abc"),
                       ("nested/random", os.urandom(9 * 1024 * 1024 + 17))]:
         digest = base64.b64encode(hashlib.md5(data).digest()).decode()
         response = s3.put_object(Bucket=bucket, Key=key, Body=data, ContentMD5=digest,
@@ -122,7 +122,7 @@ def multipart():
 
 def http_acl():
     public = os.environ["MOKYU_TEST_PUBLIC"]
-    key = "space +/中文%2F.jpg"
+    key = "space +/\u4e2d\u6587%2F.jpg"
     url = f"{public}/{quote(key, safe='/')}"
     headers = {"Host": "media.test"}
     assert requests.get(url, headers=headers).status_code == 403

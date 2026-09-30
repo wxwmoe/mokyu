@@ -17,7 +17,14 @@ schema = schema.json()
 assert schema['openapi'].startswith('3.')
 for path, method in [('/api/info', 'get'), ('/api/login', 'post'), ('/api/logout', 'post'),
                      ('/api/session', 'get'), ('/api/buckets', 'get'),
-                     ('/api/buckets/{bucket}/website', 'put')]:
+                     ('/api/buckets/{bucket}/website', 'put'),
+                     ('/api/users', 'post'), ('/api/projects', 'post'),
+                     ('/api/tokens', 'post'), ('/api/credentials', 'post'),
+                     ('/api/quotas/{kind}/{id}', 'put'), ('/api/audit', 'get'),
+                     ('/api/buckets/{bucket}/objects', 'get'),
+                     ('/api/buckets/{bucket}/uploads', 'post'),
+                     ('/api/media/actions', 'post'), ('/api/insights', 'get'),
+                     ('/api/maintenance', 'get'), ('/api/service/config', 'get')]:
     assert method in schema['paths'][path]
 
 
@@ -55,7 +62,8 @@ buckets.raise_for_status()
 assert isinstance(buckets.json(), list)
 for bucket in buckets.json():
     assert set(bucket) == {'id', 'name', 'state', 'cors', 'website_enabled',
-                           'index_document', 'error_document', 'created_at', 'project_id', 'actions'}
+                           'index_document', 'error_document', 'created_at', 'project_id', 'actions',
+                           'revision', 'uploads_paused', 'public_base_url'}
 
 if binary := os.environ.get('MOKYU_TEST_BINARY'):
     exported = subprocess.run([binary, '--config', '/missing/config.toml', 'api-schema'],

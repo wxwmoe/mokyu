@@ -38,7 +38,6 @@ pub(super) async fn serve(request: Request) -> Response {
         }
         let path = match path {
             "/" => "/index.html",
-            "/classic" | "/classic/" => "/classic/index.html",
             "/favicon.ico" => "/assets/favicon.ico",
             value => value,
         };

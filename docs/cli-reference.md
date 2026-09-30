@@ -13,12 +13,12 @@
 | 命令 | 作用与返回 |
 | --- | --- |
 | `bucket list` | 返回[桶信息](manage-api-reference.md#存储桶)数组 |
-| `bucket create NAME` | 创建空逻辑桶，返回桶信息 |
+| `bucket create NAME [--project UUID]` | 创建空逻辑桶，默认内置项目，返回桶信息 |
 | `bucket delete NAME` | 删除空桶，返回 deleted UUID；仍有对象、上传或待清理版本时拒绝 |
 | `bucket cors NAME FILE` | 用 JSON 文件替换 CORS，返回实际规则；`[]` 关闭 |
 | `bucket purge NAME [--execute]` | 默认预览对象、活跃上传和桶 UUID；确认执行后封桶并返回 task_id |
 | `domain list` | 列出公共 Host 与桶名映射 |
-| `domain set HOST BUCKET` | 新增或替换映射；Host 转小写，可含端口 |
+| `domain set HOST BUCKET` | 绑定域名；Host 转小写，可含端口；拒绝占用其他桶的映射 |
 | `domain delete HOST` | 删除域名映射 |
 
 CORS 文件示例，字段规则见[CORS 设置](manage-api-reference.md#cors-设置)：
@@ -155,8 +155,6 @@ docker exec -it mokyu cli bucket purge media --execute
 
 执行需要维护模式、已完成的预览、排空的活跃操作、非空区块索引及真实终端；按提示确认前缀，再输入 `DELETE`。预览过期后需重新生成。
 
-旧 chunks-only 预览不能用于扩大范围后的清查；重新生成预览，不复用旧任务的确认范围。
-
 ```sh
 docker exec mokyu cli maintenance enable
 docker exec mokyu cli backend sweep
@@ -201,5 +199,7 @@ docker exec mokyu cli task resume TASK_UUID
 | 命令 | 作用 |
 | --- | --- |
 | `docker run --rm wxwmoe/mokyu:latest keygen` | 生成 32 字节随机密钥，以 64 个十六进制字符表示 |
+| `mokyu api-schema` | 离线导出管理 OpenAPI，不读取配置或数据库 |
 | `mokyu serve --maintenance` | 在监听前设置维护状态，供[数据库恢复](deployment-and-recovery.md#恢复步骤)使用 |
-桶管理也可在 Web 的“存储桶设置”完成。`bucket create NAME --project UUID` 可指定项目，省略使用默认项目。`domain set HOST BUCKET` 拒绝占用其他桶的域名；需先显式删除旧映射再设置。CLI 和 Web 复用创建、删除、域名修改及清桶服务。
+
+全部在线管理能力在 Web 有对应入口，见[管理指南](management.md)；生成随机密钥材料也可在“服务状态”完成。配置文件安装、数据库备份恢复及停止状态的救援仍在部署环境执行。

@@ -73,7 +73,7 @@ try:
     put('website-r2/exact', b'exact')
     put('website-r2/exact/index.html', b'not exact')
     put('/website-r2/double/index.html', nested)
-    put('website-r2/中文 +%2F/index.html', nested)
+    put('website-r2/\u4e2d\u6587 +%2F/index.html', nested)
     save(website_enabled=False)
     assert get('/').status_code == 404
     save(website_enabled=True)

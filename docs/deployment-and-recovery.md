@@ -10,6 +10,10 @@
 
 默认构建 Debian slim 镜像，标签为 `wxwmoe/mokyu:latest` 及项目版本号。可用 `./build.sh --alpine` 构建 Alpine 镜像，标签为 `:alpine` 及带 `-alpine` 后缀的版本号；`--no-cache` 禁用构建缓存。
 
+构建会安装并编译 Vue 静态资源，再嵌入 Rust 二进制；运行不需要 Node.js。`--api-only` 省略内嵌前端，标签为 `:api` / 版本号加 `-api`；与 `--alpine` 组合使用 `:alpine-api` / 版本号加 `-alpine-api`。仓库不包含构建后的镜像。
+
+独立前端使用 [web](../web/README.md) 的 `dist/`，将 `/api/` 同源反代至管理端口，只有前端页面使用 SPA fallback。管理 Origin 必须是浏览器实际访问的地址；管理 API 不应缓存，也不使用桶的 CORS 规则。首次设置、头像与安全头要求与内嵌部署相同。
+
 下文使用默认镜像。[Compose 示例](../compose.yaml) 使用随源码维护的版本标签；选择 Alpine 时需相应调整服务的 `image`。
 
 ## 准备配置并启动
@@ -63,6 +67,8 @@ docker exec -it mokyu cli user create admin
 ```
 
 凭据的 secret 仅在创建时返回，保存到应用私有配置。不同应用可使用独立逻辑桶、凭据和域名；区块跨桶去重，授权各自独立。
+
+上述在线操作也可在管理页面完成。默认无需启用项目管理；多个应用团队需要分权时，再创建项目与普通成员，并设置桶范围、应用密钥和逻辑额度，见[管理指南](management.md)。
 
 S3 客户端使用网关 endpoint、逻辑桶和生成的凭据，签名 region 与 `listen.region` 一致。寻址、ACL 和上传限制见[S3 兼容性](s3-compatibility.md)。反代配置见[Nginx 示例](../nginx.example.conf)，需替换域名、证书和上游。
 
@@ -140,6 +146,4 @@ wxw-media-gateway 的旧区块和区块包格式不支持直接升级为 Mokyu�
 
 程序不自动降级数据库。回退需按恢复流程还原升级前的一致备份，并确认相关后端区块仍存在。实际 SQL 见[migrations](../migrations)。
 
-支持区块包的服务将匹配身份的后端标识升级为格式 2；维护启动时延后至解除维护。物理来源表保留旧区块的身份和密文，升级不重编码数据。历史 chunks-only sweep 预览不再匹配当前范围，需要重新预览。旧 processing.backend_concurrency 可继续作为读写额度；改用 backend 三个方向的并发项时应删除旧项。
-
-打包功能默认开启，维护改写期间新旧载荷并存，旧载荷在 GC 宽限后删除；为这段临时空间和 S3 请求预留预算。停用时设置 pack.enabled=false，历史数据仍可读；需要消除历史包时执行 `pack unpack --all` 的预览与确认操作。
+打包功能默认开启，维护改写期间新旧载荷并存，旧载荷满足 GC 宽限和最低存储期后删除；为临时空间和 S3 请求预留预算。停用时设置 `pack.enabled=false`，历史数据仍可读。需要消除历史包时，先运行 `maintenance pack-creation stop` 并等待准备中的包收尾，再执行 `pack unpack --all` 的预览与确认操作；Web 整理工作台提供相同流程。

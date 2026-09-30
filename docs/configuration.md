@@ -77,7 +77,7 @@ endpoint、bucket 和 prefix 共同绑定部署身份；已有部署不能直接
 
 | 字段 | 类型 / 默认值 | 说明 |
 | --- | --- | --- |
-| `storage.data` | 路径 / `/data` | 唯一可写数据目录，含 multipart/chunks/gateway.lock |
+| `storage.data` | 路径 / `/data` | 持久数据目录，含 multipart/chunks/thumbnails/gateway.lock |
 | `storage.free_space_floor` | 大小 / `1GiB` | 新文件预留后仍须保留的文件系统空间 |
 | `multipart.local_limit` | 可选大小 / 无单独配额 | 原始尾部及预留总量；显式值至少 4 MiB；始终受文件系统空余空间限制 |
 | `multipart.idle_timeout` | 时间 / `24h` | 无有效上传进展的过期时间；ListParts 不续期 |
@@ -160,6 +160,8 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 | `pack.range_repack_retry_interval` | 时间 / `7d` | 仍有 Range 或统计覆盖不足时的再评估间隔 |
 
 chunk_hint 对含已压缩成员的包完整试压，其他包抽样；最终仍应用全局压缩收益门槛。允许无压缩区块包减少顺序读取请求，但小范围冷读需要整包回源。关闭打包功能不自动拆除历史包，使用[维护命令](cli-reference.md#区块包维护)。
+
+Web/CLI 的七类策略暂停状态单独保存在数据库，重启后保留；运行开关不能越过配置中禁用的功能。停止新包生成会覆盖上传和所有维护路径，适用于全部拆包前排空。配置周期决定检查间隔，排队、资源限制和暂停可让实际执行更晚。
 
 Range 评估只使用实际局部回源；缓存命中、HEAD、完整范围和共享完整下载不触发。按整 CDC 成员估算读取量，扣除旧包读取、新来源写入和额外 GET 每次 64 KiB 的保守等价代价；这不是提供商账单估算。关闭打包功能时 Range 维护只输出独立块。观测按小时聚合，保留期须覆盖两个 Range 窗口；重新合包还要求连续覆盖和近期成功刷盘，统计缺口不视为零访问。
 

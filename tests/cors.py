@@ -24,7 +24,7 @@ auth = {'Origin': manage, 'X-CSRF-Token': reply.json()['csrf_token']}
 bucket_id = next(b['id'] for b in session.get(manage + '/api/buckets').json() if b['name'] == bucket)
 settings = manage + '/api/buckets/' + bucket_id + '/cors'
 original = session.get(settings).json()
-key = 'cors-check/中文 +%2F.bin'
+key = 'cors-check/\u4e2d\u6587 +%2F.bin'
 data = b'public cors and range fixture'
 origin = 'https://browser.test'
 rules = [{'origins': [origin], 'methods': ['GET', 'HEAD', 'PUT'],

@@ -470,7 +470,7 @@ export default {
   workspace: '工作空间', administration: '管理', media: '媒体库', account: '个人设置',
   cozy: '收藏喜欢，也收藏安心', moreLove: '还有空间，装下一点喜欢', gently: '小团子替你好好收着',
   skip: '跳到主要内容', navigation: '打开导航', accountMenu: '账户菜单', yourWorkspace: '你的工作空间',
-  classic: '经典控制台', signOut: '退出登录', lightSwitch: '切换亮色', darkSwitch: '切换暗色',
+  signOut: '退出登录', lightSwitch: '切换亮色', darkSwitch: '切换暗色',
   language: '语言', language_en: 'English', 'language_zh-CN': '简体中文', language_ja: '日本語',
   languageSaved: '语言已切换',
   theme: '外观', auto: '自动', light: '亮色', dark: '暗色', followBrowser: '跟随浏览器',

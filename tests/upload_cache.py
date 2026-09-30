@@ -109,7 +109,6 @@ finally:
     marker.unlink(missing_ok=True)
 
 import requests
-from playwright.sync_api import sync_playwright
 web = os.environ['MOKYU_TEST_WEB']
 session = requests.Session()
 login = session.post(web + '/api/login', headers={'Origin': web}, json={'username': 'tester', 'password': os.environ['MOKYU_TEST_PASSWORD']})
@@ -118,24 +117,4 @@ assert session.post(web + '/api/cache/flush').status_code == 403
 response = session.post(web + '/api/cache/flush', headers={'Origin': web, 'X-CSRF-Token': login.json()['csrf_token']})
 response.raise_for_status()
 assert response.json()['task_id']
-with sync_playwright() as playwright:
-    browser = playwright.chromium.launch()
-    page = browser.new_page(locale='en-US')
-    errors = []
-    page.on('pageerror', lambda error: errors.append(str(error)))
-    page.goto(web)
-    page.get_by_label('Username', exact=True).fill('tester')
-    page.get_by_label('Password', exact=True).fill(os.environ['MOKYU_TEST_PASSWORD'])
-    page.get_by_role('button', name='Sign in', exact=True).click()
-    page.locator('#browser:not([hidden])').wait_for()
-    page.locator('#status').click()
-    page.get_by_role('button', name='Flush upload cache', exact=True).wait_for()
-    assert page.evaluate("async () => { const {messages} = await import('/i18n.js'); return JSON.stringify(Object.keys(messages.en).sort()) === JSON.stringify(Object.keys(messages['zh-CN']).sort()); }")
-    page.locator('#language').select_option('zh-CN')
-    page.get_by_role('button', name='排空上传缓存', exact=True).wait_for()
-    page.set_viewport_size({'width': 390, 'height': 844})
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
-    page.screenshot(path=str(Path(os.environ['MOKYU_TEST_RESULTS']) / 'upload-cache-zh.png'), full_page=True)
-    assert not errors, errors
-    browser.close()
-print('PASS upload cache status in both languages, mobile layout and CSRF', flush=True)
+print('PASS upload cache management authentication and CSRF', flush=True)

@@ -20,10 +20,10 @@ for path in assets:
     assert 'immutable' in reply.headers['cache-control']
     assert requests.get(base + path, headers={'If-None-Match': reply.headers['etag']}).status_code == 304
 assert requests.get(base + '/media', headers={'Accept': 'text/html'}).text == home.text
-for path in ['/api/unknown', '/assets/missing.js', '/missing.css']:
+for path in ['/api/unknown', '/assets/missing.js', '/missing.css', '/classic/app.js']:
     reply = requests.get(base + path, headers={'Accept': 'text/html'})
     assert reply.status_code == 404 and reply.json()['code'] == 'NotFound'
-for path in ['/favicon.ico', '/assets/mokyu-icon.svg', '/site.webmanifest', '/classic/', '/classic/app.js']:
+for path in ['/favicon.ico', '/assets/mokyu-icon.svg', '/site.webmanifest', '/THIRD_PARTY_NOTICES.txt']:
     assert requests.get(base + path).status_code == 200
 assert 'private, no-store' == requests.get(base + '/api/info').headers['cache-control']
-print('PASS static assets, ETags, HEAD, SPA deep links, missing resources, classic routes and private API cache policy')
+print('PASS static assets, ETags, HEAD, SPA deep links, missing resources, license notices and private API cache policy')

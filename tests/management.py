@@ -49,7 +49,7 @@ def change(action, objects, **extra):
 
 try:
     prefix = 'management/'
-    for key in ['a', 'b', 'nested/c', 'odd+%? #中', 'a//b']:
+    for key in ['a', 'b', 'nested/c', 'odd+%? #\u4e2d', 'a//b']:
         s3.put_object(Bucket=bucket, Key=prefix + key, Body=b'shared management data', ContentType='text/plain')
     a, b = selected(prefix + 'a'), selected(prefix + 'b')
     s3.put_object(Bucket=bucket, Key=b['key'], Body=b'replacement')

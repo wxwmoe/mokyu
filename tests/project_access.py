@@ -112,7 +112,8 @@ try:
         assert detail['bucket_grants'] == []
         response = client.get(url + '/api/object/chunks', params={'bucket': bucket['id'], 'key': 'private', 'version': detail['object']['id']})
         assert response.status_code == 200, response.text
-        assert all(not any(key in chunk for key in ['reads', 'range_reads', 'key_id']) for chunk in response.json()['chunks'])
+        assert response.json()['chunks']
+        assert all(chunk.get(key) is None for chunk in response.json()['chunks'] for key in ['reads', 'range_reads', 'key_id'])
         for method in ['get', 'put']:
             response = getattr(client, method)(url + '/api/buckets/' + bucket['id'] + '/cors', **({'json': []} if method == 'put' else {}))
             assert response.status_code == (200 if role == 'maintainer' else 403), (role, response.text)
