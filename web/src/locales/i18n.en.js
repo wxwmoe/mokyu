@@ -1,4 +1,18 @@
 export default {
+  transfers: 'Transfers', uploadEyebrow: 'A little journey home', uploadTitle: 'Upload files', uploadHint: 'Send a little something to your collection.',
+  chooseFiles: 'Choose files', dropFiles: 'Drop your files here', removeFile: 'Remove {name}', uploadDestination: 'A place to call home',
+  uploadPrefix: 'Object path prefix', uploadPrefixPlaceholder: 'gallery/', uploadPathHint: 'The filename is appended exactly. Add a trailing / for a folder.',
+  uploadPublic: 'Allow public reads', uploadOverwrite: 'Replace existing objects', uploadOverwriteHint: 'Off by default. Replacement stops if another writer changes the object during this upload.',
+  uploadSelected: '{count} files · {size}', startUpload: 'Send them home', transferHint: 'Follow each file from your browser to its backend home.',
+  transferStory: 'Little parcels, safely on their way.', transferSafe: 'Parts are checked before they join your collection.', transferSending: 'Sending in this tab', transferWaiting: 'Awaiting backend on this page',
+  allBuckets: 'All buckets', transferFilter: 'Transfer status', transferActive: 'In progress', transferFinished: 'Completed', transferAll: 'All recent transfers', transferScope: 'Shows transfers you can manage.',
+  transfer_queued: 'Queued', transfer_checking: 'Checking parts', transfer_uploading: 'Sending', transfer_paused: 'Paused here', transfer_completing: 'Joining parts', transfer_completed: 'Accepted', transfer_failed: 'Needs attention', transfer_aborted: 'Cancelled', transfer_active: 'In progress',
+  browserUpload: 'Browser', verifiedParts: '{count} parts verified', transferExpires: 'Idle expiry: {date}', remote_stored: 'Stored on backend', remote_pending: 'Accepted locally · backend pending', remote_unavailable: 'Original upload is no longer tracked',
+  pauseUpload: 'Pause upload', pausingUpload: 'Finishing current parts', resumeUpload: 'Resume upload', reselectFile: 'Reselect file', cancelUpload: 'Cancel upload', keepUpload: 'Keep upload',
+  cancelUploadHint: 'Discard the unfinished upload and release its reserved space? Existing objects stay in place.', transfersEmpty: 'All quiet at the parcel desk', transfersEmptyHint: 'New uploads will find their way here.', transferNewest: 'Newest transfers',
+  resumeHint: 'Pausing stops new parts. Keep this tab open to send; after a refresh, reselect the file. Every accepted part is checked against it before continuing. Keep the same original file for the remaining parts.',
+  error_ResumeMismatch: 'This file does not match the upload. Choose the same original file.', error_FileReadFailed: 'This file could not be read. Reselect it and try again.', error_ObjectAlreadyExists: 'An object already exists at this path. Choose another path or explicitly enable replacement.', error_NoSuchUpload: 'This upload expired, was cancelled or is no longer available.', error_BadDigest: 'The part checksum did not match. Retry with the original file.', error_OperationAborted: 'The upload changed or another operation is still finishing. Refresh and try again.',
+  audit_upload_create: 'Started an upload', audit_upload_part: 'Received an upload part', audit_upload_complete: 'Completed an upload', audit_upload_abort: 'Cancelled an upload',
 
   "audit": "Activity journal",
   "auditEyebrow": "Every change leaves a little note",

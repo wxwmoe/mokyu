@@ -1,4 +1,18 @@
 export default {
+  transfers: '転送センター', uploadEyebrow: '好きなものを、おうちへ', uploadTitle: 'ファイルを送る', uploadHint: 'お気に入りを、コレクションに届けましょう。',
+  chooseFiles: 'ファイルを選ぶ', dropFiles: 'ここにそっとドロップ', removeFile: '{name} を取り除く', uploadDestination: 'お気に入りの居場所',
+  uploadPrefix: 'オブジェクトパスの接頭辞', uploadPrefixPlaceholder: 'gallery/', uploadPathHint: 'ファイル名をそのまま末尾に追加します。フォルダーには末尾の / が必要です。',
+  uploadPublic: '公開読み取りを許可', uploadOverwrite: '既存のオブジェクトを置換', uploadOverwriteHint: '既定では置換しません。転送中に他の書き込みがあった場合は置換を中止します。',
+  uploadSelected: '{count} ファイル · {size}', startUpload: 'おうちへ届ける', transferHint: 'ブラウザーからバックエンドまで、お気に入りの旅を見守りましょう。',
+  transferStory: '小さな荷物、安心して出発。', transferSafe: 'パートを確認してからコレクションに加えます。', transferSending: 'このタブで転送中', transferWaiting: 'このページで保存待ち',
+  allBuckets: 'すべてのバケット', transferFilter: '転送の状態', transferActive: '進行中', transferFinished: '完了', transferAll: '最近のすべての転送', transferScope: '管理できる転送だけを表示します。',
+  transfer_queued: '順番待ち', transfer_checking: 'パートを確認中', transfer_uploading: '転送中', transfer_paused: 'このタブで一時停止', transfer_completing: '結合中', transfer_completed: '受信済み', transfer_failed: '確認が必要', transfer_aborted: '中止済み', transfer_active: '進行中',
+  browserUpload: 'ブラウザー', verifiedParts: '{count} パートを確認済み', transferExpires: '未使用時の期限：{date}', remote_stored: 'バックエンドに保存済み', remote_pending: 'ローカル受信済み · 保存待ち', remote_unavailable: '元の転送は追跡されていません',
+  pauseUpload: '転送を一時停止', pausingUpload: '現在のパートを完了中', resumeUpload: '転送を再開', reselectFile: 'ファイルを選び直す', cancelUpload: '転送を中止', keepUpload: '転送を残す',
+  cancelUploadHint: '未完了の転送を破棄して予約容量を解放しますか？既存のオブジェクトは残ります。', transfersEmpty: '小さな受付は、いまは静か', transfersEmptyHint: '新しい転送がここに届きます。', transferNewest: '最新の転送',
+  resumeHint: '一時停止すると新しいパートを送りません。転送中はタブを開いたままにしてください。更新後はファイルを選び直し、受信済みの全パートを照合します。未送信の部分にも同じ元ファイルを使ってください。',
+  error_ResumeMismatch: '転送と一致しません。同じ元ファイルを選んでください。', error_FileReadFailed: 'ファイルを読み取れません。選び直して再試行してください。', error_ObjectAlreadyExists: '同じパスにオブジェクトがあります。別のパスを選ぶか、置換を明示的に許可してください。', error_NoSuchUpload: '転送は期限切れ、中止済み、または利用できません。', error_BadDigest: 'パートのチェックサムが一致しません。元ファイルで再試行してください。', error_OperationAborted: '転送の状態が変わったか、別の処理が完了待ちです。更新して再試行してください。',
+  audit_upload_create: '転送を開始', audit_upload_part: 'パートを受信', audit_upload_complete: '転送を完了', audit_upload_abort: '転送を中止',
 
   "audit": "活動ノート",
   "auditEyebrow": "小さな変更にも、ひとことメモを",

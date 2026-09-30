@@ -692,6 +692,26 @@ impl App {
         if epoch != id || s.state != "writing" {
             return Err(s3_error!(OperationAborted, "write was superseded").into());
         }
+        if let Some((upload, _, _)) = &completion {
+            let expected: Option<(Option<Uuid>, i64)> = sqlx::query_as(
+                "SELECT expected_stream,expected_size FROM web_uploads WHERE upload_id=$1",
+            )
+            .bind(upload)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some((version, size)) = expected {
+                if old != version {
+                    return Err(s3_error!(
+                        PreconditionFailed,
+                        "object changed since upload started"
+                    )
+                    .into());
+                }
+                if s.size != size {
+                    return Err(s3_error!(IncompleteBody).into());
+                }
+            }
+        }
         let previous: Option<String> = if let Some(old) = old {
             Some(
                 sqlx::query_scalar("SELECT etag FROM streams WHERE id=$1")
@@ -736,6 +756,13 @@ impl App {
                 .bind(upload)
                 .execute(&mut *tx)
                 .await?;
+            crate::manage::audit::checkpoint(
+                &mut tx,
+                "upload.complete",
+                &upload.to_string(),
+                serde_json::json!({"bucket_id":s.bucket_id,"key":s.object_key,"size":s.size}),
+            )
+            .await?;
         }
         tx.commit().await?;
         self.wake_gc.notify_one();

@@ -19,6 +19,9 @@ tokio::task_local! { static EVENT: i64; }
 pub(crate) fn active() -> bool {
     EVENT.try_with(|_| ()).is_ok()
 }
+pub(crate) fn current() -> Option<i64> {
+    EVENT.try_with(|id| *id).ok()
+}
 
 pub(crate) async fn begin(
     db: &PgPool,

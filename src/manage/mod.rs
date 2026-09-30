@@ -7,6 +7,7 @@ pub(crate) mod operations;
 pub(crate) mod projects;
 pub(crate) mod quotas;
 pub(crate) mod tokens;
+mod uploads;
 pub(crate) mod users;
 
 use crate::{
@@ -200,6 +201,9 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/download"
                 | "/api/projects"
                 | "/api/quotas/{kind}/{id}"
+                | "/api/uploads"
+                | "/api/uploads/{id}"
+                | "/api/uploads/{id}/parts"
                 | "/api/tokens"
                 | "/api/audit"
                 | "/api/audit/export"
@@ -211,7 +215,11 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/me/reauth"
                 | "/api/objects/actions"
                 | "/api/tokens"
+                | "/api/buckets/{bucket}/uploads"
+                | "/api/uploads/{id}/complete"
         ) | ("PUT", "/api/me")
+            | ("PUT", "/api/uploads/{id}/parts/{number}")
+            | ("DELETE", "/api/uploads/{id}")
             | ("PUT" | "DELETE", "/api/tokens/{id}")
             | ("DELETE", "/api/me/sessions" | "/api/me/sessions/{id}")
             | (

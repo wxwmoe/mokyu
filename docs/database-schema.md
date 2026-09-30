@@ -449,6 +449,12 @@ chunks、extents、streams、objects、uploads、parts、fragments、sessions、
 
 sweep 样本有界，不是可直接执行的删除清单。日常管理通过 CLI/Web 完成；不要手改状态、序列、引用或 nonce 来绕过检查。[数据库恢复](deployment-and-recovery.md#恢复步骤)还需核对历史密钥和后端身份。
 
+## 浏览器上传
+
+`web_uploads` 以 upload_id 为主键，级联关联 uploads；user_id 可空，删除用户后置空，不转移续传身份。字段包括 client_id UUID、request_hash bytea(32)、file_name text、expected_size/part_size bigint、modified_at bigint（浏览器毫秒时间）、expected_stream UUID（开始时对象版本，不设外键）。唯一 `(user_id,client_id)` 约束重复创建。
+
+`uploads.durable_at` 为可空 timestamptz，记录第一次观察到后端副本已就绪的时刻。目录索引 `(created_at DESC,id)` 与 `(bucket_id,created_at DESC,id)` 支持传输分页。Web 发起者写入内部 owner 标识，分片、流、配额与回收仍使用原表。
+
 ## 项目授权
 
 - `projects`：id UUID 主键、name 唯一、description、builtin、allow_bucket_create、created_at；仅一个内置项目。

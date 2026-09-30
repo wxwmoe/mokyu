@@ -227,25 +227,28 @@ impl S3 for Gateway {
         &self,
         req: S3Request<CreateMultipartUploadInput>,
     ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
-        self.0.create_multipart(req).await.map_err(internal)
+        self.0
+            .create_multipart(req, None, None)
+            .await
+            .map_err(internal)
     }
     async fn upload_part(
         &self,
         req: S3Request<UploadPartInput>,
     ) -> S3Result<S3Response<UploadPartOutput>> {
-        self.0.upload_part(req).await.map_err(internal)
+        self.0.upload_part(req, None).await.map_err(internal)
     }
     async fn complete_multipart_upload(
         &self,
         req: S3Request<CompleteMultipartUploadInput>,
     ) -> S3Result<S3Response<CompleteMultipartUploadOutput>> {
-        self.0.complete_multipart(req).await.map_err(internal)
+        self.0.complete_multipart(req, None).await.map_err(internal)
     }
     async fn abort_multipart_upload(
         &self,
         req: S3Request<AbortMultipartUploadInput>,
     ) -> S3Result<S3Response<AbortMultipartUploadOutput>> {
-        self.0.abort_multipart(req).await.map_err(internal)
+        self.0.abort_multipart(req, None).await.map_err(internal)
     }
     async fn list_parts(
         &self,

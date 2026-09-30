@@ -82,6 +82,26 @@ label 为 1～128 字节；grants 最多 1000 个不同桶，actions 使用项�
 
 桶账本需要 storage.inspect；项目成员可以读取共享上限，只有拥有全项目范围的成员可以读取项目汇总，其他成员的汇总字段为 null。受限 Token 只可读取获授权的桶账本。
 
+## 上传与传输中心
+
+浏览器上传复用 S3 分片的接收、额度和发布流程，不向浏览器签发 S3 secret。默认每片 16 MiB，大文件自动增大片段以满足最多 10000 片和每片最多 5 GiB 的协议限制。所有字节数用十进制字符串。
+
+| 方法与路径 | 输入与行为 |
+| --- | --- |
+| `POST /api/buckets/{bucket}/uploads` | `{client_id,key,file_name,size,modified_at?,content_type?,public_read?,overwrite?}`；201 上传记录。client_id 为客户端 UUID，同用户同参数重复调用返回同一上传 |
+| `GET /api/uploads` | `bucket?,state?,source?,own?,after?,limit?`；返回 `{uploads,next}`。默认 active/completing，state 支持 all/active/completing/completed/aborted；source=web/s3；limit 1～100，默认 50 |
+| `GET /api/uploads/{id}` | 上传详情，含 received_bytes、expected_size、part_size、parts、expires_at、can_resume、remote_state |
+| `GET /api/uploads/{id}/parts` | after 为分片号；每页最多 1000 项，返回 `{parts:[{number,size,etag,sha256}],next}` |
+| `PUT /api/uploads/{id}/parts/{number}` | 原始字节正文、`X-Content-SHA256` 为 Base64 SHA-256；必须符合该分片的预期长度。返回 `{number,etag,sha256}` |
+| `POST /api/uploads/{id}/complete` | `{parts:[{number,etag,sha256}]}`，连续完整清单；正文最多 2 MiB。等待发布完成后返回上传记录；相同清单可重试 |
+| `DELETE /api/uploads/{id}` | 终止未完成上传，204；不存在/已结束可能返回状态错误 |
+
+接收与续传仅限发起用户且须保留当前 object.write 权限；受限 Token 另受其动作范围约束。管理员或同时具有 object.write/bucket.settings 的成员可查看和终止其他上传，不能替他人续传。公开上传另需 object.acl。覆盖默认关闭；即使启用，完成时仍比较开始时的对象版本，发生变化返回 412。
+
+`state=completed` 表示对象已发布。remote_state=stored 表示观察到其后端副本就绪，pending 表示仍在等待，unavailable 表示原输出流已不再跟踪；不能用“已接收”代替远端持久化确认。上传空闲期限沿用 multipart.idle_timeout；暂停浏览器不延长期限。
+
+传输中心每个标签页同时发送最多两个分片，文件依次处理。暂停让当前分片收尾；刷新或关闭后需重新选择原文件，续传前在 worker 中逐一校验所有已接收分片。尚未接收的部分没有预存指纹，须继续选择同一份原文件。网络繁忙时分片有限重试；没有后台浏览器上传或永久保存文件权限。
+
 ## 活动审计
 
 `GET /api/audit` 返回 `{events,next}`；`GET /api/audit/{id}` 返回完整详情。支持 `after,limit,actor,action,source,outcome,project,bucket,since,until`：ID 为十进制字符串，after 使用上页 next；limit 默认 50、范围 1～200；actor 匹配账号名称，action 匹配动作前缀；时间为带时区的 RFC3339。source 为 web/token/cli，outcome 为 succeeded/failed/partial/unknown。

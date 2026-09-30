@@ -1,4 +1,18 @@
 export default {
+  transfers: '传输中心', uploadEyebrow: '喜欢的东西，正在回家', uploadTitle: '上传文件', uploadHint: '送一点喜欢，进你的小收藏。',
+  chooseFiles: '选择文件', dropFiles: '把文件轻轻放在这里', removeFile: '移除 {name}', uploadDestination: '给喜欢找个家',
+  uploadPrefix: '对象路径前缀', uploadPrefixPlaceholder: 'gallery/', uploadPathHint: '直接拼接文件名；若要放入目录，请以 / 结尾。',
+  uploadPublic: '允许公共读取', uploadOverwrite: '替换已有对象', uploadOverwriteHint: '默认不替换。如果上传期间对象被其他人改动，会停止替换。',
+  uploadSelected: '{count} 个文件 · {size}', startUpload: '送它们回家', transferHint: '从浏览器到后端，看看每一份喜欢走到哪儿了。',
+  transferStory: '小小包裹，安心出发。', transferSafe: '每片数据校验过，才会加入你的收藏。', transferSending: '本页正在传送', transferWaiting: '本页等待后端存储',
+  allBuckets: '所有存储桶', transferFilter: '传输状态', transferActive: '进行中', transferFinished: '已完成', transferAll: '所有近期传输', transferScope: '仅显示你能管理的传输。',
+  transfer_queued: '排队中', transfer_checking: '核对分片', transfer_uploading: '传送中', transfer_paused: '本页已暂停', transfer_completing: '拼接中', transfer_completed: '已接收', transfer_failed: '需要关注', transfer_aborted: '已取消', transfer_active: '进行中',
+  browserUpload: '浏览器', verifiedParts: '已核对 {count} 个分片', transferExpires: '闲置到期：{date}', remote_stored: '已存入后端', remote_pending: '本地已接收 · 等待后端', remote_unavailable: '原上传记录已不再跟踪',
+  pauseUpload: '暂停上传', pausingUpload: '等待当前分片完成', resumeUpload: '继续上传', reselectFile: '重新选择文件', cancelUpload: '取消上传', keepUpload: '保留上传',
+  cancelUploadHint: '丢弃未完成上传并释放预留空间？已有对象不受影响。', transfersEmpty: '小小收件处，暂时很安静', transfersEmptyHint: '新的上传会在这里和你见面。', transferNewest: '最新传输',
+  resumeHint: '暂停后不再发送新分片。上传时请保持页面打开；刷新后需重新选择文件，会逐一核对已接收分片。尚未上传的部分请继续使用同一份原文件。',
+  error_ResumeMismatch: '这个文件与上传记录不符，请选择同一份原文件。', error_FileReadFailed: '无法读取文件，请重新选择后再试。', error_ObjectAlreadyExists: '这个路径已有对象，请换个路径，或明确启用替换。', error_NoSuchUpload: '上传已过期、已取消或不再可用。', error_BadDigest: '分片校验不一致，请使用原文件重试。', error_OperationAborted: '上传状态已变更，或其他操作尚未结束，请刷新后再试。',
+  audit_upload_create: '开始上传', audit_upload_part: '接收上传分片', audit_upload_complete: '完成上传', audit_upload_abort: '取消上传',
 
   "audit": "活动手记",
   "auditEyebrow": "每一次改变，都留一张小纸条",

@@ -270,6 +270,31 @@ details > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
 
 .key-filter { max-width: 280px; margin: 20px 0; }
+.upload-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(230px, 1fr); gap: 30px; }
+.upload-dropzone { display: flex; flex-direction: column; gap: 10px; width: 100%; min-height: 230px; border: 1.5px dashed var(--rose-line); border-radius: 22px; background: var(--rose-soft); color: var(--rose); padding: 28px; text-align: center; }
+.upload-dropzone.dragging, .upload-dropzone:hover { border-style: solid; box-shadow: inset 0 0 0 4px var(--surface); }
+.upload-cloud { width: 66px; height: 62px; border-radius: 23px; display: grid; place-items: center; background: var(--surface); box-shadow: 0 7px 18px #c6718810; margin-bottom: 5px; }
+.upload-dropzone>span:last-child { font-size: 12px; font-weight: 600; opacity: .8; }
+.upload-picks { max-height: 250px; overflow: auto; scrollbar-width: thin; margin-top: 15px; }
+.upload-pick { display: flex; gap: 12px; align-items: center; padding: 11px 3px; border-bottom: 1px solid var(--line-soft); }
+.upload-pick>div { flex: 1; min-width: 0; display: grid; gap: 3px; }.upload-pick strong { font-size: 12px; overflow-wrap: anywhere; }.upload-pick small { font-size: 11px; color: var(--muted); }
+.upload-options h3 { font-size: 16px; margin: 13px 0 20px; }.upload-options .project-symbol { width: 45px; height: 45px; border-radius: 15px; }
+.upload-total { margin-right: auto; font-size: 12px; color: var(--muted); }
+.transfer-banner { display: flex; align-items: center; gap: 25px; padding: 22px 32px; border: 1px solid var(--rose-line); border-radius: 25px; background: linear-gradient(110deg, var(--rose-soft), var(--surface) 65%, var(--lilac-soft)); margin-bottom: 28px; }
+.transfer-banner h2 { font-size: 21px; margin-bottom: 8px; }.transfer-banner p { font-size: 12px; color: var(--muted); margin: 0; }.transfer-banner>div:nth-child(2) { flex: 1; }
+.transfer-mascot { flex-shrink: 0; transform: rotate(-4deg); }.transfer-mascot img { object-fit: contain; }
+.transfer-count { display: grid; gap: 4px; justify-items: center; border-left: 1px solid var(--rose-line); padding-left: 25px; }.transfer-count strong { font-size: 27px; color: var(--rose); }.transfer-count span { font-size: 10px; color: var(--muted); max-width: 100px; text-align: center; }.transfer-count.remote strong { color: var(--lilac); }
+.transfer-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 20px; }.transfer-toolbar>span { margin-left: auto; font-size: 11px; color: var(--muted); }
+.transfer-row { display: flex; gap: 18px; align-items: center; padding: 24px 4px; border-bottom: 1px solid var(--line-soft); }.transfer-row:last-of-type { border-bottom: 0; }
+.transfer-main { flex: 1; min-width: 0; }.transfer-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 5px; }.transfer-heading strong { font-size: 14px; overflow-wrap: anywhere; }.transfer-heading .badge { flex-shrink: 0; }
+.transfer-context { display: flex; flex-wrap: wrap; align-items: center; gap: 15px; font-size: 11px; color: var(--muted); }.transfer-context a { display: flex; align-items: center; gap: 4px; color: var(--muted); text-decoration: none; }.transfer-context a:hover { color: var(--rose); }
+.transfer-progress { height: 5px; background: var(--rose-soft); border-radius: 10px; overflow: hidden; margin: 15px 0 7px; }.transfer-progress>span { height: 100%; display: block; background: linear-gradient(90deg, var(--rose), var(--lilac)); border-radius: inherit; transition: width .2s ease; }
+.transfer-detail { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }.transfer-actions { display: flex; gap: 6px; margin-left: 10px; }.transfer-actions button { font-size: 11px; }
+.transfer-durability { display: flex; align-items: center; gap: 8px; color: var(--mint); font-size: 11px; margin-top: 14px; }.transfer-durability>span:last-child { margin-left: auto; color: var(--muted); }
+.transfer-row[data-state='failed'] .badge { color: var(--danger); background: var(--danger-soft); }.transfer-row[data-state='completed'] .badge { color: var(--mint); background: var(--mint-soft); }.transfer-row[data-state='paused'] .badge { color: var(--cream); background: var(--cream-soft); }
+.transfer-error { font-size: 12px; color: var(--danger); margin: 10px 0 0; }.transfer-help { padding: 14px 8px; max-width: 900px; line-height: 1.8; }
+@media (max-width: 850px) { .transfer-banner { padding: 22px; gap: 15px; flex-wrap: wrap; }.transfer-count { border-left: 0; padding-left: 0; }.transfer-toolbar { flex-wrap: wrap; }.transfer-toolbar>span { width: 100%; margin: 0; }.upload-layout { grid-template-columns: 1fr; }.upload-options { border-top: 1px solid var(--line); padding-top: 20px; }.upload-dropzone { min-height: 180px; } }
+@media (max-width: 580px) { .transfer-mascot { display: none; }.transfer-banner>div:nth-child(2) { flex-basis: 100%; }.transfer-count { display: flex; gap: 8px; }.transfer-banner h2 { font-size: 19px; }.transfer-row { flex-wrap: wrap; gap: 12px; }.transfer-actions { margin-left: 50px; width: calc(100% - 50px); justify-content: flex-end; }.transfer-heading { align-items: start; }.transfer-heading .badge { font-size: 9px; }.transfer-detail { flex-wrap: wrap; } }
 .key-list { overflow: hidden; }
 .key-row { width: 100%; display: flex; align-items: center; gap: 18px; padding: 21px 24px; border: 0; border-radius: 0; border-bottom: 1px solid var(--line); text-align: left; background: transparent; }
 .key-row:hover { background: var(--surface-soft); }

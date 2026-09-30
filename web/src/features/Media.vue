@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { useRoute, useRouter } from 'vue-router'
 import { TabsRoot, TabsList, TabsTrigger, TabsContent } from 'reka-ui'
-import { RefreshCw, ArrowUpRight, ChevronRight, ChevronLeft, Download, Copy, LockKeyhole, Globe, Home, Heart } from 'lucide-vue-next'
+import { RefreshCw, ArrowUpRight, ChevronRight, ChevronLeft, Download, Copy, LockKeyhole, Globe, Home, Heart, UploadCloud } from 'lucide-vue-next'
 import { api, bytes, params, session, type Bucket } from '../api/client'
 import { copy, notify, report, errorText } from '../app/feedback'
 import { t, date } from '../app/i18n'
@@ -13,6 +13,7 @@ import UiTip from '../components/ui/UiTip.vue'
 import FileIcon from '../components/FileIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import QuotaPanel from '../components/QuotaPanel.vue'
+import UploadDialog from '../components/UploadDialog.vue'
 
 interface MediaObject { id: string; object_key: string; size: number; public_read: boolean; created_at: string }
 interface ObjectPage { objects: MediaObject[]; prefixes: string[]; next_token: string | null }
@@ -27,6 +28,7 @@ const current = computed(() => buckets.data.value?.find(item => item.id === buck
 const objects = useQuery({ queryKey: ['objects', bucket, prefix, cursor, pageSize], enabled: computed(() => !!bucket.value),
   queryFn: ({ signal }) => api<ObjectPage>('/api/objects?' + params({ bucket: bucket.value, prefix: prefix.value, token: cursor.value || undefined, limit: pageSize.value }), { signal }) })
 const selected = ref<MediaObject | null>(null)
+const uploading = ref(false)
 const opened = computed({ get: () => !!selected.value, set: value => { if (!value) selected.value = null } })
 const selectedIndex = computed(() => objects.data.value?.objects.findIndex(item => item.id === selected.value?.id) ?? -1)
 const download = computed(() => '/api/download?' + params({ bucket: bucket.value, key: selected.value?.object_key }))
@@ -41,7 +43,7 @@ async function refresh() {
 </script>
 
 <template>
-  <div class="page-heading"><div><p class="eyebrow">{{ t('collection') }}</p><h1>{{ current?.name || t('media') }}</h1><p>{{ t('everything') }}</p></div><div class="heading-actions"><button :disabled="buckets.isFetching.value || (bucket !== '' && objects.isFetching.value)" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button></div></div>
+  <div class="page-heading"><div><p class="eyebrow">{{ t('collection') }}</p><h1>{{ current?.name || t('media') }}</h1><p>{{ t('everything') }}</p></div><div class="heading-actions"><button :disabled="buckets.isFetching.value || (bucket !== '' && objects.isFetching.value)" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button><button v-if="current?.state === 'active' && current.actions.includes('object.write')" class="primary" @click="uploading = true"><UploadCloud :size="16" />{{ t('uploadTitle') }}</button></div></div>
   <p v-if="buckets.error.value || objects.error.value" class="error" role="alert">{{ errorText(buckets.error.value || objects.error.value) }}</p>
   <QuotaPanel v-if="current?.actions.includes('storage.inspect')" kind="bucket" :id="current.id" />
   <div v-if="!bucket" class="bucket-grid">
@@ -69,4 +71,5 @@ async function refresh() {
       <TabsContent value="access"><dl class="facts"><dt>{{ t('publicAccess') }}</dt><dd>{{ t(selected.public_read ? 'anyone' : 'authorized') }}</dd></dl><p class="field-help">{{ t('sessionDownload') }}</p></TabsContent>
     </TabsRoot></template>
   </UiDialog>
+  <UploadDialog v-model:open="uploading" :buckets="buckets.data.value || []" :bucket="bucket" :prefix="prefix" />
 </template>

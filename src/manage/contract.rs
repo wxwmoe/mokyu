@@ -111,6 +111,20 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::audit::export))
         .routes(routes!(super::audit::get))
         .routes(routes!(super::quotas::get, super::quotas::put))
+        .routes(routes!(super::uploads::create))
+        .routes(routes!(super::uploads::list))
+        .routes(routes!(super::uploads::get, super::uploads::abort))
+        .routes(routes!(super::uploads::parts))
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(super::uploads::put_part))
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(super::uploads::complete))
+                .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
         .merge(
             OpenApiRouter::new()
                 .routes(routes!(super::keys::list, super::keys::create))

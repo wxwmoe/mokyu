@@ -1,6 +1,6 @@
 use crate::{
     app::{Active, App, Extent, StoredStream},
-    authorization::{Action, Permit},
+    authorization::{Action, Permit, Principal},
     codec::{self, Chunk, MAX},
     s3::{canned, checksums, metadata, reject_features, stamp},
     upload::{Integrity, checksum},
@@ -35,6 +35,16 @@ pub struct Seed {
     pub bytes: Vec<u8>,
     pub pins: Vec<Active>,
 }
+pub(crate) struct WebUpload {
+    pub user: Uuid,
+    pub client_id: Uuid,
+    pub request_hash: Vec<u8>,
+    pub file_name: String,
+    pub size: i64,
+    pub part_size: i64,
+    pub modified_at: Option<i64>,
+    pub overwrite: bool,
+}
 impl Seed {
     pub fn empty(upload: Uuid) -> Self {
         Self {
@@ -47,6 +57,27 @@ impl Seed {
 }
 
 impl App {
+    async fn multipart_authority(
+        &self,
+        access: Option<&str>,
+        principal: Option<&Principal>,
+        bucket: Uuid,
+        action: Action,
+    ) -> Result<(String, Permit)> {
+        if let Some(principal) = principal {
+            let user = principal.user_id().ok_or_else(|| s3_error!(AccessDenied))?;
+            Ok((
+                format!("web:{user}"),
+                principal.require(&self.db, bucket, action).await?,
+            ))
+        } else {
+            let access = access.ok_or_else(|| s3_error!(AccessDenied))?;
+            Ok((
+                access.to_owned(),
+                self.authorize(Some(access), bucket, action).await?,
+            ))
+        }
+    }
     pub fn upload_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.upload_locks.lock().unwrap();
         locks.retain(|_, v| v.strong_count() > 0);
@@ -71,17 +102,24 @@ impl App {
     pub async fn create_multipart(
         &self,
         req: S3Request<CreateMultipartUploadInput>,
+        principal: Option<&Principal>,
+        web: Option<WebUpload>,
     ) -> Result<S3Response<CreateMultipartUploadOutput>> {
         reject_features(&req.headers)?;
         let i = req.input;
         let bucket = self.bucket(&i.bucket, true).await?;
-        let key = req
-            .credentials
-            .as_ref()
-            .ok_or_else(|| s3_error!(AccessDenied))?
-            .access_key
-            .as_str();
-        let mut authority = self.authorize(Some(key), bucket.id, Action::Write).await?;
+        let (key, mut authority) = self
+            .multipart_authority(
+                req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                principal,
+                bucket.id,
+                Action::Write,
+            )
+            .await?;
+        ensure!(
+            web.is_some() == principal.is_some(),
+            "missing web upload context"
+        );
         if canned(i.acl.as_ref())? {
             authority.add(bucket.id, Action::Acl);
         }
@@ -128,6 +166,45 @@ impl App {
         if state != "active" {
             return Err(s3_error!(OperationAborted).into());
         }
+        let expected: Option<Uuid> = if let Some(web) = &web {
+            let existing: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
+                "SELECT upload_id,request_hash FROM web_uploads WHERE user_id=$1 AND client_id=$2",
+            )
+            .bind(web.user)
+            .bind(web.client_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some((id, hash)) = existing {
+                if hash != web.request_hash {
+                    return Err(
+                        s3_error!(InvalidRequest, "upload identity was already used").into(),
+                    );
+                }
+                return Ok(S3Response::new(CreateMultipartUploadOutput {
+                    bucket: Some(i.bucket),
+                    key: Some(i.key),
+                    upload_id: Some(id.to_string()),
+                    ..Default::default()
+                }));
+            }
+            let expected: Option<Uuid> =
+                sqlx::query_scalar("SELECT stream_id FROM objects WHERE bucket_id=$1 AND key=$2")
+                    .bind(bucket.id)
+                    .bind(&i.key)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .flatten();
+            if expected.is_some() && !web.overwrite {
+                return Err(crate::http::problem(
+                    hyper::StatusCode::CONFLICT,
+                    "ObjectAlreadyExists",
+                )
+                .0);
+            }
+            expected
+        } else {
+            None
+        };
         if let Some(limit) = self.config.multipart.max_active_uploads {
             let count: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM uploads WHERE state IN ('active','completing')",
@@ -140,6 +217,17 @@ impl App {
         }
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO uploads(id,bucket_id,object_key,access_key,metadata,public_read,checksum_algorithm,checksum_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(id).bind(bucket.id).bind(&i.key).bind(key).bind(serde_json::to_value(metadata!(i))?).bind(canned(i.acl.as_ref())?).bind(&algorithm).bind(&kind).execute(&mut *tx).await?;
+        if let Some(web) = web {
+            sqlx::query("INSERT INTO web_uploads(upload_id,user_id,client_id,request_hash,file_name,expected_size,part_size,modified_at,expected_stream) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+                .bind(id).bind(web.user).bind(web.client_id).bind(web.request_hash).bind(web.file_name).bind(web.size).bind(web.part_size).bind(web.modified_at).bind(expected).execute(&mut *tx).await?;
+            crate::manage::audit::checkpoint(
+                &mut tx,
+                "upload.create",
+                &id.to_string(),
+                json!({"bucket_id":bucket.id,"key":i.key,"size":web.size}),
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(S3Response::new(CreateMultipartUploadOutput {
             bucket: Some(i.bucket),
@@ -153,6 +241,7 @@ impl App {
     pub async fn upload_part(
         &self,
         mut req: S3Request<UploadPartInput>,
+        principal: Option<&Principal>,
     ) -> Result<S3Response<UploadPartOutput>> {
         reject_features(&req.headers)?;
         let _permits = self.admit(true).await?;
@@ -161,14 +250,15 @@ impl App {
             return Err(s3_error!(InvalidArgument).into());
         }
         let b = self.bucket(&i.bucket, true).await?;
-        let access = req
-            .credentials
-            .as_ref()
-            .ok_or_else(|| s3_error!(AccessDenied))?
-            .access_key
-            .as_str();
-        let authority = self.authorize(Some(access), b.id, Action::Write).await?;
-        let u = self.get_upload(&i.upload_id, b.id, &i.key, access).await?;
+        let (access, authority) = self
+            .multipart_authority(
+                req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                principal,
+                b.id,
+                Action::Write,
+            )
+            .await?;
+        let u = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
         let _upin = self.pin(u.id);
         if i.checksum_algorithm.as_ref().is_some_and(|a| {
             u.checksum_algorithm
@@ -277,6 +367,13 @@ impl App {
                 .bind(u.id)
                 .execute(&mut *tx)
                 .await?;
+            crate::manage::audit::checkpoint(
+                &mut tx,
+                "upload.part",
+                &u.id.to_string(),
+                json!({"bucket_id":b.id,"part":i.part_number}),
+            )
+            .await?;
             tx.commit().await?;
         }
         self.seal_uploads(id, false).await?;
@@ -492,22 +589,24 @@ impl App {
     pub async fn complete_multipart(
         self: &Arc<Self>,
         req: S3Request<CompleteMultipartUploadInput>,
+        principal: Option<&Principal>,
     ) -> Result<S3Response<CompleteMultipartUploadOutput>> {
         reject_features(&req.headers)?;
         let permits = self.admit(true).await?;
         let i = &req.input;
         let b = self.bucket(&i.bucket, true).await?;
-        let access = req
-            .credentials
-            .as_ref()
-            .ok_or_else(|| s3_error!(AccessDenied))?
-            .access_key
-            .as_str();
-        let authority = self.authorize(Some(access), b.id, Action::Write).await?;
-        let u = self.get_upload(&i.upload_id, b.id, &i.key, access).await?;
+        let (access, authority) = self
+            .multipart_authority(
+                req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                principal,
+                b.id,
+                Action::Write,
+            )
+            .await?;
+        let u = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
         let lock = self.upload_lock(u.id);
         let guard = lock.lock_owned().await;
-        let u = self.get_upload(&i.upload_id, b.id, &i.key, access).await?;
+        let u = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
         let manifest = i
             .multipart_upload
             .as_ref()
@@ -634,6 +733,7 @@ impl App {
             .cloned();
         let input = req.input;
         let headers = req.headers;
+        let audit = crate::manage::audit::current();
         let work = tokio::spawn(async move {
             let _guard = guard;
             let _pins = pins;
@@ -641,9 +741,8 @@ impl App {
             let _permits = permits;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("multipart-completing").await;
-            let result = app
-                .assemble(&authority, &u, &parts, &input, &headers, total, &etag, &hash)
-                .await;
+            let assembly = app.assemble(&authority, &u, &parts, &input, &headers, total, &etag, &hash);
+            let result = if let Some(id)=audit { crate::manage::audit::scope(id,assembly).await } else { assembly.await };
             if result.is_err() {
                 let _=sqlx::query("UPDATE uploads SET state='active',touched_at=now() WHERE id=$1 AND state='completing'").bind(u.id).execute(&app.db).await;
             }
@@ -783,17 +882,19 @@ impl App {
     pub async fn abort_multipart(
         &self,
         req: S3Request<AbortMultipartUploadInput>,
+        principal: Option<&Principal>,
     ) -> Result<S3Response<AbortMultipartUploadOutput>> {
         let i = req.input;
         let b = self.bucket(&i.bucket, true).await?;
-        let access = req
-            .credentials
-            .as_ref()
-            .ok_or_else(|| s3_error!(AccessDenied))?
-            .access_key
-            .as_str();
-        let authority = self.authorize(Some(access), b.id, Action::Write).await?;
-        let u = self.get_upload(&i.upload_id, b.id, &i.key, access).await?;
+        let (access, authority) = self
+            .multipart_authority(
+                req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                principal,
+                b.id,
+                Action::Write,
+            )
+            .await?;
+        let u = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
         if i.if_match_initiated_time
             .is_some_and(|t| t != stamp(u.created_at))
         {
@@ -826,6 +927,19 @@ impl App {
             .bind(id)
             .execute(&mut *tx)
             .await?;
+        if authority.principal.user_id().is_some() && crate::manage::audit::active() {
+            let bucket: Uuid = sqlx::query_scalar("SELECT bucket_id FROM uploads WHERE id=$1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+            crate::manage::audit::checkpoint(
+                &mut tx,
+                "upload.abort",
+                &id.to_string(),
+                json!({"bucket_id":bucket}),
+            )
+            .await?;
+        }
         tx.commit().await?;
         self.wake_gc.notify_one();
         Ok(())

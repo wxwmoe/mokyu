@@ -80,6 +80,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/buckets/{bucket}/uploads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_web_upload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/buckets/{bucket}/website": {
         parameters: {
             query?: never;
@@ -464,6 +480,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/uploads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_uploads"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/uploads/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_upload"];
+        put?: never;
+        post?: never;
+        delete: operations["abort_upload"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/uploads/{id}/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["complete_web_upload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/uploads/{id}/parts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_web_parts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/uploads/{id}/parts/{number}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["put_web_part"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/users": {
         parameters: {
             query?: never;
@@ -545,6 +641,9 @@ export interface components {
             project_id: string;
             state: string;
             website_enabled: boolean;
+        };
+        Completion: {
+            parts: components["schemas"]["PartReceipt"][];
         };
         CreateUser: {
             must_change_password?: boolean;
@@ -655,6 +754,17 @@ export interface components {
             events: components["schemas"]["Event"][];
             next?: string | null;
         };
+        PartReceipt: {
+            etag: string;
+            /** Format: int32 */
+            number: number;
+            sha256: string;
+        };
+        PartsPage: {
+            /** Format: int32 */
+            next?: number | null;
+            parts: components["schemas"]["ReceivedPart"][];
+        };
         Password: {
             current_password: string;
             new_password: string;
@@ -713,6 +823,13 @@ export interface components {
         };
         Reauthenticate: {
             password: string;
+        };
+        ReceivedPart: {
+            etag: string;
+            /** Format: int32 */
+            number: number;
+            sha256?: string | null;
+            size: string;
         };
         ResetPassword: {
             must_change_password?: boolean;
@@ -780,6 +897,51 @@ export interface components {
         TokenSecret: {
             secret: string;
             token: components["schemas"]["Token"];
+        };
+        Transfer: {
+            /** Format: uuid */
+            bucket_id: string;
+            bucket_name: string;
+            can_resume: boolean;
+            /** Format: date-time */
+            created_at: string;
+            expected_size?: string | null;
+            /** Format: date-time */
+            expires_at?: string | null;
+            file_name?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: int64 */
+            modified_at?: number | null;
+            object_key: string;
+            owner: string;
+            part_size?: string | null;
+            /** Format: int64 */
+            parts: number;
+            received_bytes: string;
+            remote_state: string;
+            source: string;
+            state: string;
+            /** Format: date-time */
+            touched_at: string;
+            /** Format: uuid */
+            user_id?: string | null;
+        };
+        TransferPage: {
+            next?: string | null;
+            uploads: components["schemas"]["Transfer"][];
+        };
+        UploadInput: {
+            /** Format: uuid */
+            client_id: string;
+            content_type?: string;
+            file_name: string;
+            key: string;
+            /** Format: int64 */
+            modified_at?: number | null;
+            overwrite?: boolean;
+            public_read?: boolean;
+            size: string;
         };
         User: {
             /** Format: date-time */
@@ -936,6 +1098,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create_web_upload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UploadInput"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Transfer"];
                 };
             };
         };
@@ -1759,6 +1946,146 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_uploads: {
+        parameters: {
+            query?: {
+                bucket?: string | null;
+                state?: string | null;
+                source?: string | null;
+                own?: boolean | null;
+                after?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TransferPage"];
+                };
+            };
+        };
+    };
+    get_upload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Transfer"];
+                };
+            };
+        };
+    };
+    abort_upload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    complete_web_upload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Completion"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Transfer"];
+                };
+            };
+        };
+    };
+    list_web_parts: {
+        parameters: {
+            query?: {
+                after?: number | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PartsPage"];
+                };
+            };
+        };
+    };
+    put_web_part: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PartReceipt"];
+                };
             };
         };
     };
