@@ -1,3 +1,4 @@
+mod assets;
 mod contract;
 pub(crate) mod operations;
 
@@ -39,10 +40,7 @@ pub fn router(app: Arc<App>) -> Router {
                 async move { ([("content-type", "application/json")], schema) }
             }),
         )
-        .route("/", get(index))
-        .route("/app.js", get(js))
-        .route("/i18n.js", get(i18n))
-        .route("/app.css", get(css))
+        .fallback(assets::serve)
         .route("/api/buckets/{bucket}/cors", get(cors).put(save_cors))
         .route("/api/objects", get(objects))
         .route(
@@ -80,8 +78,13 @@ pub fn router(app: Arc<App>) -> Router {
 }
 async fn web_headers(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let mut response = next.run(request).await;
+    if !response.headers().contains_key("cache-control") {
+        response.headers_mut().insert(
+            "cache-control",
+            HeaderValue::from_static("private, no-store"),
+        );
+    }
     for (name, value) in [
-        ("cache-control", "private, no-store"),
         ("x-content-type-options", "nosniff"),
         ("referrer-policy", "no-referrer"),
         ("x-frame-options", "DENY"),
@@ -97,40 +100,6 @@ fn csrf_token(token: &str) -> String {
     hash.update(b"mokyu-web-csrf-v1\0");
     hash.update(token.as_bytes());
     hash.finalize().to_hex().to_string()
-}
-fn asset(content: &'static str, mime: &'static str) -> Response {
-    let mut r = content.into_response();
-    r.headers_mut()
-        .insert("content-type", HeaderValue::from_static(mime));
-    r.headers_mut().insert("content-security-policy",HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"));
-    r.headers_mut().insert(
-        "x-content-type-options",
-        HeaderValue::from_static("nosniff"),
-    );
-    r.headers_mut()
-        .insert("cache-control", HeaderValue::from_static("no-store"));
-    r
-}
-async fn index() -> Response {
-    asset(
-        include_str!("../../web/index.html"),
-        "text/html; charset=utf-8",
-    )
-}
-async fn js() -> Response {
-    asset(
-        include_str!("../../web/app.js"),
-        "text/javascript; charset=utf-8",
-    )
-}
-async fn css() -> Response {
-    asset(include_str!("../../web/app.css"), "text/css; charset=utf-8")
-}
-async fn i18n() -> Response {
-    asset(
-        include_str!("../../web/i18n.js"),
-        "text/javascript; charset=utf-8",
-    )
 }
 fn origin(app: &App, headers: &HeaderMap) -> Result<(), HttpError> {
     if headers.get("origin").and_then(|v| v.to_str().ok()) != Some(&app.config.manage.origin) {

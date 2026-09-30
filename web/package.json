@@ -1,0 +1,28 @@
+{
+  "name": "mokyu-web",
+  "version": "0.0.3",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.12.0" },
+  "packageManager": "npm@11.19.0",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "check": "vue-tsc --noEmit",
+    "build": "npm run check && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "api:types": "node scripts/update-api.mjs"
+  },
+  "dependencies": {
+    "@tanstack/vue-query": "5.104.0",
+    "vue": "3.5.43",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "@vitejs/plugin-vue": "6.0.9",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.1",
+    "vue-tsc": "3.3.11"
+  }
+}

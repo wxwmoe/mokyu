@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mokyu</title><link rel="stylesheet" href="/classic/app.css"><script type="module" src="/classic/app.js"></script></head>
+<body>
+<header><h1>Mokyu <small>0.0.3</small></h1><div class="header-actions"><label><span data-i18n="language">Language</span> <select id="language"><option value="zh-CN" lang="zh-CN">简体中文</option><option value="en" lang="en">English</option></select></label><button id="logout" data-i18n="logout" hidden>Sign out</button></div></header>
+<main><p id="notice" role="status"></p>
+<form id="login" method="post"><h2 data-i18n="loginTitle">Administration sign in</h2><label><span data-i18n="username">Username</span><input name="username" autocomplete="username" required></label><label><span data-i18n="password">Password</span><input name="password" type="password" autocomplete="current-password" required></label><button data-i18n="login">Sign in</button></form>
+<section id="browser" hidden>
+<nav aria-label="Management" data-i18n-label="navigation"><button id="objects-tab" data-i18n="objectBrowser">Objects</button><button id="settings" data-i18n="bucketSettings">Bucket settings</button><button id="status" data-i18n="status">Service status</button><button id="packs-tab" data-i18n="packs">Packs</button><button id="tasks" data-i18n="tasks">Background tasks</button></nav>
+<div id="bucket-toolbar" class="toolbar"><label><span data-i18n="buckets">Bucket</span> <select id="buckets"></select></label><button id="refresh" data-i18n="refresh">Refresh</button></div>
+<section id="objects-view">
+<form id="search-form" class="toolbar compact"><label><span data-i18n="searchPrefix">Key prefix</span><input id="search-prefix" maxlength="1024"></label><label class="checkbox"><input id="recursive" type="checkbox"><span data-i18n="recursive">Include subfolders</span></label><button data-i18n="search">Search</button></form>
+<form id="locate-form" class="toolbar compact"><label><span data-i18n="exactKey">Full object key</span><input id="exact-key" required maxlength="1024"></label><button data-i18n="locate">Open object</button></form>
+<div id="breadcrumbs" data-i18n-label="path" aria-label="Folder path"></div>
+<div id="bulk-actions" class="toolbar"><span id="selected-count" role="status"></span><button id="bulk-public" data-i18n="makePublic">Make public</button><button id="bulk-private" data-i18n="makePrivate">Make private</button><button id="bulk-delete" class="danger" data-i18n="deleteObjects">Delete objects</button></div>
+<div class="table-scroll"><table id="file-table"><thead><tr><th><input id="select-page" type="checkbox" data-i18n-label="selectPage" aria-label="Select current page"></th><th data-i18n="name">Name</th><th data-i18n="size">Size</th><th data-i18n="access">Access</th><th data-i18n="updated">Last modified</th></tr></thead><tbody id="files"></tbody></table></div>
+<p id="empty-files" data-i18n="emptyFiles" hidden>No objects in this view.</p>
+<button id="previous" data-i18n="previous" hidden>Previous page</button>
+<button id="more" data-i18n="more" hidden>Load next page</button>
+</section>
+<section id="settings-view" hidden><h2 data-i18n="bucketSettings">Bucket settings</h2><div class="toolbar"><button id="website" data-i18n="website">Website settings</button><button id="cors" data-i18n="cors">CORS settings</button></div></section>
+<section id="tasks-view" hidden><h2 data-i18n="tasks">Background tasks</h2><section id="integrity-create" hidden><details><summary data-i18n="startIntegrity">Start integrity check</summary><form id="integrity-form">
+<label for="integrity-mode" data-i18n="integrityMode">Check mode</label><select id="integrity-mode"><option value="metadata" data-i18n="mode_metadata">Metadata</option><option value="head" data-i18n="mode_head">Remote presence and size</option><option value="full" data-i18n="mode_full">Full chunk verification</option></select>
+<label for="integrity-bucket" data-i18n="integrityBucket">Check bucket</label><select id="integrity-bucket"></select>
+<label for="integrity-key" data-i18n="integrityKey">Exact object key (optional)</label><input id="integrity-key" maxlength="1024" disabled>
+<p id="integrity-help" data-i18n="integrityHelp">Checks published objects. HEAD sends one request per chunk; full mode downloads and verifies each chunk. Cache is bypassed. No data is repaired or deleted.</p>
+<button id="integrity-start" data-i18n="startIntegrity">Start integrity check</button></form></details></section><div class="toolbar"><label for="task-state" data-i18n="taskState">State</label><select id="task-state"><option value="" data-i18n="allStates">All states</option><option value="queued" data-i18n="queued">Queued</option><option value="running" data-i18n="running">Running</option><option value="paused" data-i18n="paused">Paused</option><option value="completed" data-i18n="completed">Completed</option><option value="failed" data-i18n="failed">Failed</option></select><button id="refresh-tasks" data-i18n="refresh">Refresh</button><label class="checkbox"><input id="auto-tasks" type="checkbox" checked><span data-i18n="autoRefresh">Refresh every 5 seconds</span></label></div><div id="tasks-table" class="table-scroll"></div><button id="tasks-previous" data-i18n="previous" hidden>Previous page</button><button id="tasks-more" data-i18n="more" hidden>Load next page</button></section>
+
+<section id="detail" hidden><h2 id="detail-title" data-i18n="details">Object details</h2><div id="statistics" hidden></div><dl id="facts"></dl>
+<form id="website-form" hidden>
+<label class="checkbox"><input id="website-enabled" type="checkbox"><span data-i18n="websiteEnabled">Enable website routing</span></label>
+<label><span data-i18n="indexDocument">Index filename</span><input id="index-document" required maxlength="255" value="index.html"></label>
+<label><span data-i18n="errorDocument">Error document key</span><input id="error-document" maxlength="1024" value="404.html" aria-describedby="website-help"></label>
+<p id="website-help" data-i18n="websiteHelp">Documents must allow public read. Leave the error key empty for the built-in 404 page.</p>
+<button id="website-save" type="submit" data-i18n="save">Save</button>
+</form>
+<form id="cors-form" hidden>
+<p id="cors-help" data-i18n="corsHelp">Rules apply to S3 and public reads. No rules disables CORS. Object permissions still apply; changes take effect after saving.</p>
+<div class="form-actions"><button id="cors-preset" type="button" data-i18n="corsPreset">Fill Wasabi-style preset</button><button id="cors-clear" type="button" data-i18n="corsClear">Clear rules</button></div>
+<div id="cors-rules"></div>
+<div class="form-actions"><button id="cors-add" type="button" data-i18n="corsAdd">Add rule</button><button id="cors-save" type="submit" data-i18n="save">Save</button></div>
+</form>
+<div id="task-list"></div><div id="actions"></div><section id="integrity-report" hidden></section><div id="preview"></div><section id="chunks" hidden></section><details><summary data-i18n="rawDetails">API details</summary><pre id="info"></pre></details></section>
+</section></main>
+<dialog id="confirm-dialog" aria-labelledby="confirm-title"><h2 id="confirm-title"></h2><p id="confirm-help"></p><div id="confirm-items" class="table-scroll"></div><p id="confirm-notice" role="status"></p><div class="toolbar"><button id="confirm-cancel" data-i18n="cancel">Cancel</button><button id="confirm-execute" data-i18n="confirm">Confirm</button></div></dialog>
+<dialog id="copy-dialog" aria-labelledby="copy-title"><h2 id="copy-title" data-i18n="copyKey">Copy object key</h2><p data-i18n="copyHelp">Copy the selected text.</p><input id="copy-value" readonly data-i18n-label="objectKey" aria-label="Object key"><button id="copy-close" data-i18n="close">Close</button></dialog>
+</body></html>

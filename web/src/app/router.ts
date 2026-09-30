@@ -1,0 +1,21 @@
+import { createRouter, createWebHistory } from 'vue-router'
+import { refreshSession, session } from '../api/client'
+
+export const router = createRouter({
+  history: createWebHistory(),
+  routes: [
+    { path: '/login', name: 'login', component: () => import('../features/Login.vue') },
+    { path: '/', redirect: '/media' },
+    { path: '/media', name: 'media', component: () => import('../features/Media.vue') },
+    { path: '/media/:bucket', name: 'objects', component: () => import('../features/Media.vue') },
+    { path: '/:pathMatch(.*)*', redirect: '/media' },
+  ],
+  scrollBehavior(to, from, saved) { return saved || (to.path === from.path ? undefined : { top: 0 }) },
+})
+
+let initialized = false
+router.beforeEach(async to => {
+  if (!initialized) { await refreshSession(); initialized = true }
+  if (!session.value && to.name !== 'login') return { name: 'login' }
+  if (session.value && to.name === 'login') return { name: 'media' }
+})

@@ -1,14 +1,24 @@
 # syntax=docker/dockerfile:1
+FROM node:24.21.0-bookworm AS web
+ARG WEB_UI=true
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm if [ "$WEB_UI" = true ]; then npm ci; fi
+COPY web ./
+RUN if [ "$WEB_UI" = true ]; then npm run build; else mkdir -p dist; fi
+
 FROM rust:1.96.0-alpine3.23 AS build
+ARG WEB_UI=true
 RUN apk add --no-cache build-base cmake
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY migrations ./migrations
 COPY src ./src
-COPY web ./web
+COPY --from=web /web/dist ./web/dist
 RUN --mount=type=cache,id=mokyu-alpine-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=mokyu-alpine-target,target=/build/target \
-    cargo build --release --locked --bin mokyu \
+    if [ "$WEB_UI" = true ]; then cargo build --release --locked --bin mokyu; \
+    else cargo build --release --locked --no-default-features --bin mokyu; fi \
     && cp target/release/mokyu /mokyu
 
 FROM alpine:3.23

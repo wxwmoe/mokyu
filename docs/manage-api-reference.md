@@ -256,7 +256,11 @@ processed 为对象和区块检查数之和，不是百分比；cursor 是内部
 
 ## 管理页面
 
-`GET/HEAD /` 提供对象、桶设置、状态、任务和区块包入口；静态资源为 `/app.js`、`/i18n.js`、`/app.css`，随二进制提供，无外部前端服务。
+`GET/HEAD /` 提供 Vue 管理应用；媒体库支持桶、目录与对象浏览和授权下载。现有桶设置、任务、区块包和批量操作保留在 `/classic/`。静态资源随二进制提供，无 Node.js 运行服务。
+
+编译后的哈希资源支持长期缓存与 ETag；HTML 和固定名称素材重验证，API 及私有下载保持 `private, no-store`。SPA 深链接不覆盖未知 API 或静态资源的 404。`--api-only` 镜像不包含页面，详见 [前端构建](../web/README.md)。
+
+经典控制台：
 
 - 支持 zh-CN/en：首次按浏览器语言选择，中文以外回退英语；选择保存在 localStorage，切换保留未提交表单。名称、元数据和错误内容始终按文本显示。
 - URL 保存 page、bucket、prefix、recursive、token、key、section、state、task、taskToken、`pack`、packAfter，支持刷新、前进后退和复制链接。section 为 cors/website，page 为 objects/settings/status/tasks/packs；访问仍需登录。

@@ -1,5 +1,7 @@
 .git
 target
+node_modules
+web/dist
 data
 secrets
 .env

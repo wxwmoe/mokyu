@@ -1,5 +1,14 @@
 # syntax=docker/dockerfile:1
+FROM node:24.21.0-bookworm AS web
+ARG WEB_UI=true
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm if [ "$WEB_UI" = true ]; then npm ci; fi
+COPY web ./
+RUN if [ "$WEB_UI" = true ]; then npm run build; else mkdir -p dist; fi
+
 FROM rust:1.96.0-bookworm AS build
+ARG WEB_UI=true
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends cmake \
     && rm -rf /var/lib/apt/lists/*
@@ -7,10 +16,11 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY migrations ./migrations
 COPY src ./src
-COPY web ./web
+COPY --from=web /web/dist ./web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release --locked --bin mokyu \
+    if [ "$WEB_UI" = true ]; then cargo build --release --locked --bin mokyu; \
+    else cargo build --release --locked --no-default-features --bin mokyu; fi \
     && cp target/release/mokyu /mokyu
 
 FROM debian:bookworm-slim
