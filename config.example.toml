@@ -49,6 +49,7 @@ origin = "https://admin.example.com"
 secure_cookie = true
 session_lifetime = "12h"
 # gravatar_base_url = "https://www.gravatar.com/avatar/"
+# thumbnail_cache_size = "256MiB" # Derived local thumbnails; 0B disables retention.
 
 [storage]
 data = "/data"

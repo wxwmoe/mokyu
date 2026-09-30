@@ -96,6 +96,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/buckets/{bucket}/object": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["media_detail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/buckets/{bucket}/object/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["media_content"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/buckets/{bucket}/object/text": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["media_text"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/buckets/{bucket}/object/thumbnail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["media_thumbnail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/buckets/{bucket}/objects": {
         parameters: {
             query?: never;
@@ -808,6 +872,26 @@ export interface components {
             role: string;
             scope: string;
         };
+        ObjectDetail: {
+            etag: string;
+            item: components["schemas"]["MediaItem"];
+            metadata: components["schemas"]["ObjectMetadata"];
+            preview: string;
+            thumbnail: boolean;
+            /** Format: date-time */
+            touched_at: string;
+        };
+        ObjectMetadata: {
+            cache_control?: string | null;
+            content_disposition?: string | null;
+            content_encoding?: string | null;
+            content_language?: string | null;
+            content_type?: string | null;
+            expires?: string | null;
+            user: {
+                [key: string]: string;
+            };
+        };
         Page: {
             events: components["schemas"]["Event"][];
             next?: string | null;
@@ -920,6 +1004,10 @@ export interface components {
             password: string;
             token: string;
             username: string;
+        };
+        TextPreview: {
+            text: string;
+            truncated: boolean;
         };
         Token: {
             active: boolean;
@@ -1178,6 +1266,121 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["CatalogStatus"];
                 };
+            };
+        };
+    };
+    media_detail: {
+        parameters: {
+            query: {
+                key: string;
+                version: string;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ObjectDetail"];
+                };
+            };
+        };
+    };
+    media_content: {
+        parameters: {
+            query: {
+                key: string;
+                version: string;
+                preview?: boolean;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    media_text: {
+        parameters: {
+            query: {
+                key: string;
+                version: string;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TextPreview"];
+                };
+            };
+        };
+    };
+    media_thumbnail: {
+        parameters: {
+            query: {
+                key: string;
+                version: string;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

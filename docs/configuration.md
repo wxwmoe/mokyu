@@ -30,6 +30,9 @@ Compose 健康检查对应 `["CMD","mokyu","--config","PATH","cli","status"]`。
 | `manage.secure_cookie` | bool / `true` | Cookie Secure；通过 HTTP 访问时需要 false |
 | `manage.session_lifetime` | 时间 / `12h` | 会话固定有效期，不随查询无限续期 |
 | `manage.gravatar_base_url` | 字符串 / `https://www.gravatar.com/avatar/` | 头像服务路径；允许兼容镜像，必须 HTTPS，不含凭据或查询参数。个人头像默认关闭 |
+| `manage.thumbnail_cache_size` | 大小 / `256MiB` | `data/thumbnails` 的可丢弃衍生缓存，最多 4096 项，受磁盘 floor 约束；`0B` 不保留缩略图，仍可按需生成 |
+
+缩略图仅处理 JPEG/PNG/WebP/GIF 静帧，长边最多 384px。单个生成任务复用处理 CPU 和在途内存名额；源文件最多 32 MiB、1600 万像素，两者随可用处理预算降低，单边最多 16384px。读取源文件与生成结果各等待最多 15 秒；超时的解码仍保留资源名额直到实际结束。缓存不上传后端、不计逻辑配额；失败回退文件类型卡片。AVIF 可由浏览器明确打开原图，不生成服务端缩略图。
 
 ## 数据库
 

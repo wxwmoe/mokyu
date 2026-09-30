@@ -532,8 +532,7 @@ async fn public(
         &key,
         request.headers().clone(),
         request.method().clone(),
-        true,
-        None,
+        ReadOptions::public(),
     )
     .await;
     let result = match result {
@@ -573,8 +572,7 @@ async fn website_response(
         } else {
             Method::HEAD
         },
-        true,
-        None,
+        ReadOptions::public(),
     )
     .await;
     match result {
@@ -607,8 +605,7 @@ async fn website_response(
             &bucket.error_document,
             HeaderMap::new(),
             request.method.clone(),
-            true,
-            None,
+            ReadOptions::public(),
         )
         .await
         {
@@ -641,19 +638,42 @@ async fn website_response(
             Body::from(body)
         })?)
 }
+pub(crate) struct ReadOptions {
+    pub public: bool,
+    pub preview: Option<bool>,
+    pub version: Option<uuid::Uuid>,
+}
+impl ReadOptions {
+    fn public() -> Self {
+        Self {
+            public: true,
+            preview: None,
+            version: None,
+        }
+    }
+    pub fn managed(preview: bool, version: Option<uuid::Uuid>) -> Self {
+        Self {
+            public: false,
+            preview: Some(preview),
+            version,
+        }
+    }
+}
 pub(crate) async fn respond(
     app: Arc<App>,
     bucket: Uuid,
     key: &str,
     headers: HeaderMap,
     method: Method,
-    public: bool,
-    preview: Option<bool>,
+    options: ReadOptions,
 ) -> Result<Response, HttpError> {
     let permits = app.admit(false).await?;
     let (s, pin) = app.current(bucket, key).await?;
-    if public && !s.public_read {
+    if options.public && !s.public_read {
         return Err(unauthorized());
+    }
+    if options.version.is_some_and(|id| id != s.id) {
+        return Err(s3s::s3_error!(PreconditionFailed).into());
     }
     let etag = |name: &str| {
         headers
@@ -726,20 +746,33 @@ pub(crate) async fn respond(
         .content_type
         .as_deref()
         .unwrap_or("application/octet-stream");
-    if let Some(preview) = preview {
-        let safe = matches!(
-            mime.split(';').next().unwrap_or(""),
-            "image/jpeg"
-                | "image/png"
-                | "image/gif"
-                | "image/webp"
-                | "image/avif"
-                | "video/mp4"
-                | "video/webm"
-                | "audio/mpeg"
-                | "audio/ogg"
-                | "audio/mp4"
-        );
+    if let Some(preview) = options.preview {
+        let safe = metadata
+            .content_encoding
+            .as_deref()
+            .is_none_or(|v| v.is_empty() || v == "identity")
+            && matches!(
+                mime.split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "image/jpeg"
+                    | "image/png"
+                    | "image/gif"
+                    | "image/webp"
+                    | "image/avif"
+                    | "video/mp4"
+                    | "video/webm"
+                    | "video/ogg"
+                    | "audio/mpeg"
+                    | "audio/ogg"
+                    | "audio/mp4"
+                    | "audio/webm"
+                    | "audio/wav"
+                    | "audio/flac"
+            );
         response = response
             .header("cache-control", "private, no-store")
             .header("vary", "Cookie")

@@ -65,6 +65,7 @@ fn parse_cache_name(name: &str) -> Option<(Uuid, bool)> {
 pub enum Area {
     Multipart = 0,
     Cache = 1,
+    Thumbnails = 2,
 }
 pub async fn read_bounded(path: impl AsRef<std::path::Path>, max: usize) -> Result<Vec<u8>> {
     let f = tokio::fs::File::open(path).await?;
@@ -76,13 +77,13 @@ pub async fn read_bounded(path: impl AsRef<std::path::Path>, max: usize) -> Resu
     Ok(bytes)
 }
 struct Usage {
-    used: [u64; 2],
+    used: [u64; 3],
     reserved: u64,
     upload: u64,
 }
 pub struct Disk {
     pub root: PathBuf,
-    limits: [Option<u64>; 2],
+    limits: [Option<u64>; 3],
     floor: u64,
     upload_limit: Option<u64>,
     usage: Mutex<Usage>,
@@ -98,14 +99,14 @@ impl Drop for Fragment {
         self.disk.pending.lock().unwrap().remove(&self.id);
     }
 }
-struct Reservation {
+pub(crate) struct Reservation {
     disk: Arc<Disk>,
     area: Area,
     bytes: u64,
     committed: bool,
 }
 impl Reservation {
-    fn commit(mut self) {
+    pub(crate) fn commit(mut self) {
         self.disk.usage.lock().unwrap().reserved -= self.bytes;
         self.committed = true;
     }
@@ -151,7 +152,7 @@ impl Disk {
             size,
         })
     }
-    fn reserve(self: &Arc<Self>, area: Area, bytes: u64) -> Result<Reservation> {
+    pub(crate) fn reserve(self: &Arc<Self>, area: Area, bytes: u64) -> Result<Reservation> {
         let mut usage = self.usage.lock().unwrap();
         let next = usage.used[area as usize]
             .checked_add(bytes)
@@ -174,13 +175,13 @@ impl Disk {
             committed: false,
         })
     }
-    pub fn used(&self) -> [u64; 2] {
+    pub fn used(&self) -> [u64; 3] {
         self.usage.lock().unwrap().used
     }
-    fn account_existing(&self, area: Area, bytes: u64) {
+    pub(crate) fn account_existing(&self, area: Area, bytes: u64) {
         self.usage.lock().unwrap().used[area as usize] += bytes;
     }
-    fn release(&self, area: Area, bytes: u64) {
+    pub(crate) fn release(&self, area: Area, bytes: u64) {
         let mut u = self.usage.lock().unwrap();
         u.used[area as usize] = u.used[area as usize].saturating_sub(bytes);
     }
@@ -486,7 +487,7 @@ pub struct Storage {
     prefix: String,
     pub disk: Arc<Disk>,
     pub secrets: Arc<Secrets>,
-    cpu: Arc<Semaphore>,
+    pub(crate) cpu: Arc<Semaphore>,
     pub compression: Arc<crate::compression::Pool>,
     pub reads: Arc<crate::backend::Gate>,
     pub writes: Arc<crate::backend::Gate>,
@@ -534,6 +535,7 @@ impl Storage {
                     .as_deref()
                     .map(config::cache_bytes)
                     .transpose()?,
+                Some(config::cache_bytes(&c.manage.thumbnail_cache_size)?),
             ],
             floor: config::bytes(&c.storage.free_space_floor)?,
             upload_limit: c
@@ -543,7 +545,7 @@ impl Storage {
                 .map(config::cache_bytes)
                 .transpose()?,
             usage: Mutex::new(Usage {
-                used: [0; 2],
+                used: [0; 3],
                 reserved: 0,
                 upload: 0,
             }),

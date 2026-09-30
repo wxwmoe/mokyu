@@ -105,6 +105,7 @@ pub struct App {
     pub secrets: Arc<Secrets>,
     pub db: PgPool,
     pub storage: Arc<Storage>,
+    pub thumbnails: Arc<crate::manage::media::Thumbnails>,
     pub statistics: crate::stats::Statistics,
     pub cleanup_state: crate::lifecycle::Cleanup,
     pub integrity_pacing: std::sync::Mutex<std::time::Instant>,
@@ -169,6 +170,8 @@ impl App {
             }
             tracing::warn!(error=%error,"backend identity unavailable; serving durable local uploads while remote operations wait for verification");
         }
+        let thumbnails =
+            Arc::new(crate::manage::media::Thumbnails::new(&config, storage.disk.clone()).await?);
         let app = Arc::new(Self {
             uploads: Arc::new(Semaphore::new(budget.upload_concurrency)),
             reads: Arc::new(Semaphore::new(budget.read_concurrency)),
@@ -178,6 +181,7 @@ impl App {
             secrets,
             db,
             storage,
+            thumbnails,
             statistics: crate::stats::Statistics::default(),
             cleanup_state: crate::lifecycle::Cleanup::default(),
             integrity_pacing: std::sync::Mutex::new(std::time::Instant::now()),

@@ -245,7 +245,18 @@ algorithm/key_id 是逻辑块的初始编码与去重域；重编码后的实际
 
 ### 预览与下载
 
-preview=false 使用 attachment 和 application/octet-stream；preview=true 仅对 JPEG/PNG/GIF/WebP/AVIF、MP4/WebM 及 MPEG/OGG/MP4 音频 MIME 内联，其余仍下载。HTML/SVG/XML 不在管理同源执行；响应带 nosniff 和 sandbox CSP，始终需要管理员会话。
+以下接口都用查询参数 `key`、`version`（stream UUID）绑定当前对象；对象被覆盖或删除后拒绝旧版本，不能用历史 UUID 绕过当前授权。
+
+| 方法与路径 | 响应与权限 |
+| --- | --- |
+| `GET /api/buckets/{bucket}/object` | 目录项、ETag、HTTP/自定义元数据、可用预览类型；需要 `bucket.list` |
+| `GET /api/buckets/{bucket}/object/content` | 原文件，另接受 `preview` bool；需要 `object.read` |
+| `GET /api/buckets/{bucket}/object/thumbnail` | 按需 PNG 缩略图；每次检查 `object.read`，包含命中本地缓存的请求 |
+| `GET /api/buckets/{bucket}/object/text` | `{text,truncated}`，最多读取前 64 KiB，纯文本/Markdown/CSV/JSON/XML；需要 `object.read` |
+
+preview=false 使用 attachment 和 application/octet-stream；preview=true 仅对 JPEG/PNG/GIF/WebP/AVIF、MP4/WebM/OGG 视频及 MPEG/OGG/MP4/WebM/WAV/FLAC 音频 MIME 内联；带非 identity Content-Encoding 的对象仍下载。HTML/SVG 不嵌入管理页，XML 仅作为文本显示。响应带 nosniff、sandbox CSP 和 private/no-store；需要会话或有效 scoped Token。
+
+缩略图采用独立、可丢弃的本地缓存，范围和资源限制见[管理配置](configuration.md#监听与管理)。不支持的格式、解码失败或超限返回 415；繁忙 503、等待超时 504。图库失败时保留类型图标，不自动下载原图。前端对象 URL 离开时释放，不保存到浏览器持久缓存。
 
 下载可返回 200、单段 Range 206、条件命中 304、条件不符 412 或范围无效 416（含总长）。后续区块损坏可能中止已经开始的响应，不发送损坏块明文；客户端须确认响应完整。
 
@@ -256,7 +267,7 @@ preview=false 使用 attachment 和 application/octet-stream；preview=true 仅�
 | 字段 | 含义 |
 | --- | --- |
 | version / resources | 程序版本 / 生效的[资源预算](configuration.md#自动预算) |
-| local_bytes | `[multipart,chunks]` 本地占用 |
+| local_bytes | `[multipart,chunks,thumbnails]` 本地占用 |
 | upload_cache | enabled、configured_size、effective_cache_bytes、effective_upload_bytes、reserved_bytes、fallbacks；pending 为 entries/bytes/oldest_at/failed_entries；pins 最多 100 项，含字符串 chunk_id、pin_type、owner_id、created_at、attempts、next_retry_at、last_error |
 | gc_paused / maintenance / gc_running | GC 暂停、维护模式、GC 是否运行 |
 | active_streams / data_slots_available | 活跃 stream 数 / 可用在途数据槽 |

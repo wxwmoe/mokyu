@@ -4,6 +4,7 @@ pub(crate) mod audit;
 pub(crate) mod catalog;
 mod contract;
 pub(crate) mod keys;
+pub(crate) mod media;
 pub(crate) mod operations;
 pub(crate) mod projects;
 pub(crate) mod quotas;
@@ -111,7 +112,11 @@ async fn web_headers(
     next: axum::middleware::Next,
 ) -> Response {
     let mut response = next.run(request).await;
-    if response.headers().contains_key("content-security-policy") {
+    if response
+        .headers()
+        .get("content-security-policy")
+        .is_some_and(|value| value == assets::CSP)
+    {
         response
             .headers_mut()
             .insert("content-security-policy", policy);
@@ -204,6 +209,10 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/quotas/{kind}/{id}"
                 | "/api/buckets/{bucket}/objects"
                 | "/api/buckets/{bucket}/catalog"
+                | "/api/buckets/{bucket}/object"
+                | "/api/buckets/{bucket}/object/content"
+                | "/api/buckets/{bucket}/object/thumbnail"
+                | "/api/buckets/{bucket}/object/text"
                 | "/api/uploads"
                 | "/api/uploads/{id}"
                 | "/api/uploads/{id}/parts"
@@ -963,8 +972,7 @@ async fn download(
         &q.key,
         headers,
         method,
-        false,
-        Some(q.preview),
+        crate::http::ReadOptions::managed(q.preview, None),
     )
     .await
 }

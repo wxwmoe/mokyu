@@ -1,4 +1,6 @@
 export default {
+  mediaLayout: '媒体布局', listView: '列表视图', galleryView: '图库视图', folder: '文件夹', quickLook: '凑近看看', expandView: '展开查看', compactView: '回到快速查看', hideInspector: '收起信息面板', showInspector: '展开信息面板', loadOriginal: '看看原图', loadMedia: '打开播放器', actualSize: '原始大小', fitImage: '适应窗口', preview: '预览', fileType: '文件类型', version: '版本', technicalDetails: '技术细节', copyViewLink: '复制查看链接', yourCapabilities: '你在这个桶内的权限', previewUnavailable: '有点神秘，下载后再探索吧。', mediaUnsupported: '这个浏览器暂时无法预览此文件。', previewNeedsRead: '有读取权限后就能预览啦。', textTruncated: '这里只展示前 64 KiB，完整内容可以下载查看。', objectMissing: '这个文件已经不在这里了。',
+  error_PreviewUnavailable: '暂时无法预览这种格式。', error_PreviewTooLarge: '这张图片超出了预览资源限制。', error_PreviewBusy: '预览正在忙碌，稍后再试一下吧。', error_PreviewTimeout: '预览花了太久，可以下载原文件查看。',
   mediaSearch: '搜索这个存储桶', mediaSearchHint: '找一点心心念念的东西…', searchMatch: '匹配方式', matchName: '文件名包含', matchPath: '路径包含', matchPrefix: '路径开头', matchExact: '完整路径',
   fileType: '文件类型', kind_all: '全部收藏', kind_image: '图片', kind_video: '视频', kind_audio: '音频', kind_document: '文档', kind_archive: '压缩包', kind_other: '其他文件',
   moreFilters: '再找得准一点', mediaFilterHint: '缩小范围，让想找的收藏快一点出现。', mediaSort: '排列方式', sortNameAsc: '名称 · 升序', sortNameDesc: '名称 · 降序', sortNewest: '新来的在前', sortOldest: '最早的在前', sortLargest: '大文件在前', sortSmallest: '小文件在前',

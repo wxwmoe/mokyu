@@ -172,6 +172,7 @@ pub struct Manage {
     pub secure_cookie: bool,
     pub session_lifetime: String,
     pub gravatar_base_url: String,
+    pub thumbnail_cache_size: String,
 }
 impl Default for Manage {
     fn default() -> Self {
@@ -180,6 +181,7 @@ impl Default for Manage {
             secure_cookie: true,
             session_lifetime: "12h".into(),
             gravatar_base_url: "https://www.gravatar.com/avatar/".into(),
+            thumbnail_cache_size: "256MiB".into(),
         }
     }
 }
@@ -567,6 +569,7 @@ impl Config {
             );
         }
         bytes(&c.storage.free_space_floor)?;
+        cache_bytes(&c.manage.thumbnail_cache_size)?;
         c.integrity.validate()?;
         ensure!(
             seconds(&c.statistics.query_timeout)? <= i32::MAX as u64 / 1000,

@@ -115,6 +115,10 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::uploads::list))
         .routes(routes!(super::catalog::list))
         .routes(routes!(super::catalog::status))
+        .routes(routes!(super::media::detail))
+        .routes(routes!(super::media::content))
+        .routes(routes!(super::media::thumbnail))
+        .routes(routes!(super::media::text))
         .routes(routes!(super::uploads::get, super::uploads::abort))
         .routes(routes!(super::uploads::parts))
         .merge(
