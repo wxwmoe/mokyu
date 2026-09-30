@@ -1,4 +1,4 @@
-use super::{authenticate, operations, origin, token};
+use super::{Identity, operations, origin, token};
 use crate::{
     app::App,
     http::{HttpError, unauthorized},
@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Context, Result};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode},
 };
 use chrono::{DateTime, Utc};
@@ -23,6 +23,8 @@ pub(crate) const USER_LOCK: i64 = 734922709851002;
 pub(super) struct Profile {
     pub id: Uuid,
     pub username: String,
+    pub role: String,
+    pub project_management: bool,
     pub display_name: String,
     pub locale: Option<String>,
     pub theme: Option<String>,
@@ -33,7 +35,7 @@ pub(super) struct Profile {
 }
 
 pub(super) async fn profile(app: &App, id: Uuid) -> Result<Profile, HttpError> {
-    let mut row: Profile = sqlx::query_as("SELECT id,username,display_name,locale,theme,avatar_email,avatar_enabled FROM web_users WHERE id=$1 AND enabled")
+    let mut row: Profile = sqlx::query_as("SELECT u.id,u.username,u.role,m.project_management,u.display_name,u.locale,u.theme,u.avatar_email,u.avatar_enabled FROM web_users u CROSS JOIN mokyu_meta m WHERE u.id=$1 AND u.enabled")
         .bind(id).fetch_optional(&app.db).await?.ok_or_else(unauthorized)?;
     if row.avatar_enabled && !row.avatar_email.is_empty() {
         let hash = hex::encode(Sha256::digest(
@@ -83,18 +85,19 @@ impl Preferences {
 #[utoipa::path(get, path="/api/me", responses((status=200, body=Profile)))]
 pub(super) async fn me(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
 ) -> Result<Json<Profile>, HttpError> {
-    let (id, _) = authenticate(&app, &headers, false).await?;
+    let id = actor.id;
     Ok(Json(profile(&app, id).await?))
 }
 #[utoipa::path(put, path="/api/me", request_body=Preferences, responses((status=200, body=Profile)))]
 pub(super) async fn save(
     State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
     headers: HeaderMap,
     Json(input): Json<Preferences>,
 ) -> Result<Json<Profile>, HttpError> {
-    let (id, _) = authenticate(&app, &headers, true).await?;
+    let id = actor.id;
     input.validate()?;
     let mut tx = app.db.begin().await?;
     lock_session(&mut tx, &headers, id).await?;
@@ -117,12 +120,7 @@ pub(super) struct Reauthenticate {
     password: String,
 }
 
-async fn verify(
-    app: &App,
-    headers: &HeaderMap,
-    password: String,
-) -> Result<(Uuid, String, i64), HttpError> {
-    let (id, _) = authenticate(app, headers, true).await?;
+async fn verify(app: &App, id: Uuid, password: String) -> Result<(Uuid, String, i64), HttpError> {
     if password.len() > 1024 {
         return Err(unauthorized());
     }
@@ -174,13 +172,14 @@ async fn lock_verified(
 #[utoipa::path(post, path="/api/me/password", request_body=Password, responses((status=204)))]
 pub(super) async fn password(
     State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
     headers: HeaderMap,
     Json(input): Json<Password>,
 ) -> Result<StatusCode, HttpError> {
     if !(12..=1024).contains(&input.new_password.len()) {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    let verified = verify(&app, &headers, input.current_password).await?;
+    let verified = verify(&app, actor.id, input.current_password).await?;
     let hash = operations::password_hash(input.new_password).await?;
     let mut tx = app.db.begin().await?;
     lock_verified(&mut tx, &headers, &verified).await?;
@@ -209,10 +208,11 @@ pub(super) async fn password(
 #[utoipa::path(post, path="/api/me/reauth", request_body=Reauthenticate, responses((status=204)))]
 pub(super) async fn reauthenticate(
     State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
     headers: HeaderMap,
     Json(input): Json<Reauthenticate>,
 ) -> Result<StatusCode, HttpError> {
-    let verified = verify(&app, &headers, input.password).await?;
+    let verified = verify(&app, actor.id, input.password).await?;
     let mut tx = app.db.begin().await?;
     lock_verified(&mut tx, &headers, &verified).await?;
     sqlx::query("UPDATE sessions SET reauthenticated_at=now() WHERE token_hash=$1")
@@ -245,9 +245,10 @@ pub(super) struct SessionList {
 #[utoipa::path(get, path="/api/me/sessions", responses((status=200, body=SessionList)))]
 pub(super) async fn sessions(
     State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
     headers: HeaderMap,
 ) -> Result<Json<SessionList>, HttpError> {
-    let (id, _) = authenticate(&app, &headers, false).await?;
+    let id = actor.id;
     let mut rows = sqlx::query_as("SELECT id,created_at,last_seen_at,expires_at,user_agent,(token_hash=$2) AS current FROM sessions WHERE user_id=$1 AND expires_at>now() ORDER BY created_at DESC,id DESC LIMIT 101")
         .bind(id).bind(blake3::hash(token(&headers)?.as_bytes()).as_bytes().as_slice()).fetch_all(&app.db).await?;
     let more = rows.len() > 100;
@@ -260,10 +261,11 @@ pub(super) async fn sessions(
 #[utoipa::path(delete, path="/api/me/sessions/{id}", params(("id"=Uuid, Path)), responses((status=204)))]
 pub(super) async fn revoke_session(
     State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, HttpError> {
-    let (user, _) = authenticate(&app, &headers, true).await?;
+    let user = actor.id;
     let mut tx = app.db.begin().await?;
     lock_session(&mut tx, &headers, user).await?;
     sqlx::query("DELETE FROM sessions WHERE id=$1 AND user_id=$2")
@@ -277,9 +279,10 @@ pub(super) async fn revoke_session(
 #[utoipa::path(delete, path="/api/me/sessions", responses((status=204)))]
 pub(super) async fn revoke_others(
     State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
     headers: HeaderMap,
 ) -> Result<StatusCode, HttpError> {
-    let (id, _) = authenticate(&app, &headers, true).await?;
+    let id = actor.id;
     let mut tx = app.db.begin().await?;
     lock_session(&mut tx, &headers, id).await?;
     sqlx::query("DELETE FROM sessions WHERE user_id=$1 AND token_hash<>$2")
@@ -398,7 +401,7 @@ pub(super) async fn setup(
     if !allowed {
         return Err(unauthorized());
     }
-    sqlx::query("INSERT INTO web_users(id,username,password_hash) VALUES($1,$2,$3)")
+    sqlx::query("INSERT INTO web_users(id,username,password_hash,role) VALUES($1,$2,$3,'admin')")
         .bind(Uuid::new_v4())
         .bind(input.username)
         .bind(hash)

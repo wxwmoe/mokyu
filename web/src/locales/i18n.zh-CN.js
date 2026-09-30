@@ -1,4 +1,5 @@
 export default {
+  askForBucket: '请联系管理员，为你分配一个小仓库。',
   discardTitle: '要放下这次修改吗？', discardHint: '个人资料还有未保存的修改。', keepEditing: '继续编辑', discard: '放弃修改',
   appName: 'Mokyu', tagline: '为每一份喜欢，留一点空间。', brandNote: '给媒体一个软软的家',
   workspace: '工作空间', administration: '管理', media: '媒体库', account: '个人设置',

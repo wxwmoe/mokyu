@@ -185,7 +185,8 @@ impl App {
                 let Ok(_guard) = lock.try_lock() else {
                     continue;
                 };
-                self.abort_upload_locked(upload, &coord).await?;
+                self.abort_upload_locked(upload, &coord, &crate::authorization::Permit::local())
+                    .await?;
             }
             return Ok(false);
         }

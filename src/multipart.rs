@@ -1,5 +1,6 @@
 use crate::{
     app::{Active, App, Extent, StoredStream},
+    authorization::{Action, Permit},
     codec::{self, Chunk, MAX},
     s3::{canned, checksums, metadata, reject_features, stamp},
     upload::{Integrity, checksum},
@@ -80,7 +81,10 @@ impl App {
             .ok_or_else(|| s3_error!(AccessDenied))?
             .access_key
             .as_str();
-        self.authorize(Some(key), bucket.id, true).await?;
+        let mut authority = self.authorize(Some(key), bucket.id, Action::Write).await?;
+        if canned(i.acl.as_ref())? {
+            authority.add(bucket.id, Action::Acl);
+        }
         if i.key.is_empty() || i.key.len() > 1024 {
             return Err(s3_error!(InvalidArgument).into());
         }
@@ -116,6 +120,7 @@ impl App {
         let _coord = self.coord.lock().await;
         self.writable()?;
         let mut tx = self.db.begin().await?;
+        authority.lock(&mut tx).await?;
         let state: String = sqlx::query_scalar("SELECT state FROM buckets WHERE id=$1 FOR SHARE")
             .bind(bucket.id)
             .fetch_one(&mut *tx)
@@ -162,7 +167,7 @@ impl App {
             .ok_or_else(|| s3_error!(AccessDenied))?
             .access_key
             .as_str();
-        self.authorize(Some(access), b.id, true).await?;
+        let authority = self.authorize(Some(access), b.id, Action::Write).await?;
         let u = self.get_upload(&i.upload_id, b.id, &i.key, access).await?;
         let _upin = self.pin(u.id);
         if i.checksum_algorithm.as_ref().is_some_and(|a| {
@@ -177,12 +182,21 @@ impl App {
             .into());
         }
         let (id, _pin) = self
-            .new_stream(b.id, &i.key, "part", u.metadata.clone(), false, false)
+            .new_stream(
+                &authority,
+                b.id,
+                &i.key,
+                "part",
+                u.metadata.clone(),
+                false,
+                false,
+            )
             .await?;
         {
             let lock = self.upload_lock(u.id);
             let _guard = lock.lock().await;
             let mut tx = self.db.begin().await?;
+            authority.lock(&mut tx).await?;
             let state: String =
                 sqlx::query_scalar("SELECT state FROM uploads WHERE id=$1 FOR UPDATE")
                     .bind(u.id)
@@ -222,6 +236,7 @@ impl App {
             let _coord = self.coord.lock().await;
             self.writable()?;
             let mut tx = self.db.begin().await?;
+            authority.lock(&mut tx).await?;
             let bucket_state: String =
                 sqlx::query_scalar("SELECT state FROM buckets WHERE id=$1 FOR SHARE")
                     .bind(b.id)
@@ -413,6 +428,7 @@ impl App {
         }
         let (work, _pin) = self
             .new_stream(
+                &Permit::local(),
                 left.bucket_id,
                 &left.object_key,
                 "part",
@@ -487,7 +503,7 @@ impl App {
             .ok_or_else(|| s3_error!(AccessDenied))?
             .access_key
             .as_str();
-        self.authorize(Some(access), b.id, true).await?;
+        let authority = self.authorize(Some(access), b.id, Action::Write).await?;
         let u = self.get_upload(&i.upload_id, b.id, &i.key, access).await?;
         let lock = self.upload_lock(u.id);
         let guard = lock.lock_owned().await;
@@ -602,10 +618,13 @@ impl App {
         }
         let etag = format!("{}-{}", hex::encode(etag_hash.finalize()), parts.len());
         let _coord = self.coord.lock().await;
-        let changed=sqlx::query("UPDATE uploads SET state='completing',manifest_hash=$2,touched_at=now() WHERE id=$1 AND state='active'").bind(u.id).bind(&hash).execute(&self.db).await?.rows_affected();
+        let mut tx = self.db.begin().await?;
+        authority.lock(&mut tx).await?;
+        let changed=sqlx::query("UPDATE uploads SET state='completing',manifest_hash=$2,touched_at=now() WHERE id=$1 AND state='active'").bind(u.id).bind(&hash).execute(&mut *tx).await?.rows_affected();
         if changed != 1 {
             return Err(s3_error!(OperationAborted).into());
         }
+        tx.commit().await?;
         drop(_coord);
         let app = self.clone();
         let upin = self.pin(u.id);
@@ -623,7 +642,7 @@ impl App {
             #[cfg(feature = "fault-injection")]
             crate::faults::point("multipart-completing").await;
             let result = app
-                .assemble(&u, &parts, &input, &headers, total, &etag, &hash)
+                .assemble(&authority, &u, &parts, &input, &headers, total, &etag, &hash)
                 .await;
             if result.is_err() {
                 let _=sqlx::query("UPDATE uploads SET state='active',touched_at=now() WHERE id=$1 AND state='completing'").bind(u.id).execute(&app.db).await;
@@ -654,6 +673,7 @@ impl App {
     #[allow(clippy::too_many_arguments)] // Frozen completion inputs are used only by this worker.
     async fn assemble(
         &self,
+        authority: &Permit,
         u: &Upload,
         parts: &[StoredStream],
         i: &CompleteMultipartUploadInput,
@@ -664,6 +684,7 @@ impl App {
     ) -> Result<CompleteMultipartUploadOutput> {
         let (id, _pin) = self
             .new_stream(
+                authority,
                 u.bucket_id,
                 &u.object_key,
                 "object",
@@ -770,7 +791,7 @@ impl App {
             .ok_or_else(|| s3_error!(AccessDenied))?
             .access_key
             .as_str();
-        self.authorize(Some(access), b.id, true).await?;
+        let authority = self.authorize(Some(access), b.id, Action::Write).await?;
         let u = self.get_upload(&i.upload_id, b.id, &i.key, access).await?;
         if i.if_match_initiated_time
             .is_some_and(|t| t != stamp(u.created_at))
@@ -779,19 +800,22 @@ impl App {
         }
         let lock = self.upload_lock(u.id);
         let _guard = lock.lock().await;
-        self.abort_upload(u.id).await?;
+        let coord = self.coord.lock().await;
+        self.abort_upload_locked(u.id, &coord, &authority).await?;
         Ok(S3Response::new(AbortMultipartUploadOutput::default()))
     }
     pub async fn abort_upload(&self, id: Uuid) -> Result<()> {
         let coord = self.coord.lock().await;
-        self.abort_upload_locked(id, &coord).await
+        self.abort_upload_locked(id, &coord, &Permit::local()).await
     }
     pub(crate) async fn abort_upload_locked(
         &self,
         id: Uuid,
         _coord: &tokio::sync::MutexGuard<'_, ()>,
+        authority: &Permit,
     ) -> Result<()> {
         let mut tx = self.db.begin().await?;
+        authority.lock(&mut tx).await?;
         let changed=sqlx::query("UPDATE uploads SET state='aborted',touched_at=now() WHERE id=$1 AND state IN ('active','completing')").bind(id).execute(&mut *tx).await?.rows_affected();
         if changed == 0 {
             return Err(s3_error!(NoSuchUpload).into());
@@ -817,7 +841,7 @@ impl App {
             .ok_or_else(|| s3_error!(AccessDenied))?
             .access_key
             .as_str();
-        self.authorize(Some(access), b.id, false).await?;
+        self.authorize(Some(access), b.id, Action::List).await?;
         let u = self.get_upload(&i.upload_id, b.id, &i.key, access).await?;
         if !matches!(u.state.as_str(), "active" | "completing") {
             return Err(s3_error!(NoSuchUpload).into());
@@ -871,7 +895,7 @@ impl App {
             .ok_or_else(|| s3_error!(AccessDenied))?
             .access_key
             .as_str();
-        self.authorize(Some(access), b.id, false).await?;
+        self.authorize(Some(access), b.id, Action::List).await?;
         if i.encoding_type
             .as_ref()
             .is_some_and(|v| v.as_str() != "url")

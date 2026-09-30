@@ -80,7 +80,7 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | --- | --- | --- | --- | --- |
 | `access_key` | text | 否 | — | 客户端凭据 |
 | `bucket_id` | uuid | 否 | — | 可访问逻辑桶 |
-| `writable` | boolean | 否 | — | false 只读，true 读写 |
+| `actions` | text[] | 否 | — | 七种逐桶动作的子集 |
 
 主键：`(access_key,bucket_id)`；两列分别引用 `credentials`、`buckets`，均随目标删除级联。
 
@@ -419,3 +419,15 @@ chunks、extents、streams、objects、uploads、parts、fragments、sessions、
 | tasks.detail | purge：name/bucket_id；sweep：dry_run/prefix/older_than_seconds/min_storage_duration_seconds/cutoff/candidates/bytes/unrecognized/samples；integrity 见[巡检字段](manage-api-reference.md#完整性巡检) |
 
 sweep 样本有界，不是可直接执行的删除清单。日常管理通过 CLI/Web 完成；不要手改状态、序列、引用或 nonce 来绕过检查。[数据库恢复](deployment-and-recovery.md#恢复步骤)还需核对历史密钥和后端身份。
+
+## 项目授权
+
+- `projects`：id UUID 主键、name 唯一、description、builtin、allow_bucket_create、created_at；仅一个内置项目。
+- `mokyu_meta.project_management`：默认 false。
+- `buckets.project_id`、`credentials.project_id`：引用项目，默认内置项目；有项目索引。
+- `web_users.role`：admin/member，既有用户保留 admin，新行默认 member；`authorization_revision` 为 bigint。
+- `project_members`：主键 (user_id,project_id)，role 为 reader/writer/maintainer，scope 为 all/selected。
+- `member_grants`：主键 (user_id,bucket_id)，保存 project_id/actions；复合外键保证成员与桶属于同项目。
+- `user_bucket_access` 视图：计算项目角色与指定桶动作交集，不复制权限状态。
+- `credentials.authorization_revision`：bigint；成员/授权/身份变更通过触发器推进授权版本。
+- `streams.write_authorization`：内部 JSONB，保存写入身份、授权版本及所需动作，发布前重新校验；不包含密码或令牌。

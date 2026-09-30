@@ -55,7 +55,7 @@ buckets.raise_for_status()
 assert isinstance(buckets.json(), list)
 for bucket in buckets.json():
     assert set(bucket) == {'id', 'name', 'state', 'cors', 'website_enabled',
-                           'index_document', 'error_document', 'created_at'}
+                           'index_document', 'error_document', 'created_at', 'project_id', 'actions'}
 
 if binary := os.environ.get('MOKYU_TEST_BINARY'):
     exported = subprocess.run([binary, '--config', '/missing/config.toml', 'api-schema'],

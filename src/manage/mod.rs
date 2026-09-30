@@ -2,9 +2,11 @@ pub(crate) mod account;
 mod assets;
 mod contract;
 pub(crate) mod operations;
+pub(crate) mod projects;
 
 use crate::{
-    app::{App, Bucket},
+    app::App,
+    authorization::{Action, Permit, Principal},
     config,
     http::{HttpError, observe, respond, unauthorized},
 };
@@ -12,7 +14,7 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, MatchedPath, Path, Query, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -85,6 +87,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/tasks/{id}/report", get(integrity_report))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            access_gate,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
             web_policy,
             web_headers,
         ))
@@ -144,15 +150,114 @@ fn token(headers: &HeaderMap) -> Result<&str, HttpError> {
         .filter(|s| s.len() == 64)
         .ok_or_else(unauthorized)
 }
-async fn authenticate(
-    app: &App,
-    headers: &HeaderMap,
-    csrf: bool,
-) -> Result<(Uuid, String), HttpError> {
+#[derive(Clone)]
+pub(super) struct Identity {
+    id: Uuid,
+    admin: bool,
+    principal: Principal,
+}
+impl Identity {
+    async fn recent(&self, app: &App) -> Result<(), HttpError> {
+        let Principal::User { session, .. } = self.principal else {
+            return Err(unauthorized());
+        };
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=$1 AND user_id=$2 AND reauthenticated_at>now()-interval '5 minutes')").bind(session).bind(self.id).fetch_one(&app.db).await?;
+        if !valid {
+            return Err(crate::http::problem(
+                StatusCode::FORBIDDEN,
+                "ReauthenticationRequired",
+            ));
+        }
+        Ok(())
+    }
+}
+fn member_route(path: &str, method: &Method) -> bool {
+    let method = if method == Method::HEAD {
+        &Method::GET
+    } else {
+        method
+    };
+    matches!(
+        (method.as_str(), path),
+        (
+            "GET",
+            "/api/session"
+                | "/api/me"
+                | "/api/me/sessions"
+                | "/api/buckets"
+                | "/api/objects"
+                | "/api/object"
+                | "/api/object/chunks"
+                | "/api/download"
+                | "/api/projects"
+        ) | (
+            "POST",
+            "/api/logout" | "/api/me/password" | "/api/me/reauth" | "/api/objects/actions"
+        ) | ("PUT", "/api/me")
+            | ("DELETE", "/api/me/sessions" | "/api/me/sessions/{id}")
+            | (
+                "GET" | "PUT",
+                "/api/buckets/{bucket}/cors" | "/api/buckets/{bucket}/website"
+            )
+    )
+}
+async fn access_gate(
+    State(app): State<Arc<App>>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(path) = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|p| p.as_str().to_owned())
+    else {
+        return next.run(request).await;
+    };
+    if !path.starts_with("/api/")
+        || matches!(
+            path.as_str(),
+            "/api/login" | "/api/info" | "/api/openapi.json" | "/api/bootstrap" | "/api/setup"
+        )
+    {
+        return next.run(request).await;
+    }
+    let write = !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    match authenticate(&app, request.headers(), write).await {
+        Ok(identity) if identity.admin || member_route(&path, request.method()) => {
+            request.extensions_mut().insert(identity);
+            next.run(request).await
+        }
+        Ok(_) => unauthorized().into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+#[derive(sqlx::FromRow)]
+struct AuthSession {
+    user_id: Uuid,
+    session_id: Uuid,
+    role: String,
+    authorization_revision: i64,
+    csrf_hash: Vec<u8>,
+    last_seen_at: DateTime<Utc>,
+}
+async fn authenticate(app: &App, headers: &HeaderMap, csrf: bool) -> Result<Identity, HttpError> {
+    if headers.contains_key("authorization") {
+        return Err(unauthorized());
+    }
     let token = token(headers)?;
     let hash = blake3::hash(token.as_bytes());
-    let row:Option<(Uuid,String,Vec<u8>,DateTime<Utc>)>=sqlx::query_as("SELECT u.id,u.username,s.csrf_hash,s.last_seen_at FROM sessions s JOIN web_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.enabled AND s.auth_revision=u.auth_revision").bind(hash.as_bytes().as_slice()).fetch_optional(&app.db).await?;
-    let (id, name, expected, last_seen) = row.ok_or_else(unauthorized)?;
+    let row: Option<AuthSession> = sqlx::query_as("SELECT u.id AS user_id,s.id AS session_id,u.role,u.authorization_revision,s.csrf_hash,s.last_seen_at FROM sessions s JOIN web_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.enabled AND s.auth_revision=u.auth_revision").bind(hash.as_bytes().as_slice()).fetch_optional(&app.db).await?;
+    let AuthSession {
+        user_id: id,
+        session_id: session,
+        role,
+        authorization_revision: revision,
+        csrf_hash: expected,
+        last_seen_at: last_seen,
+    } = row.ok_or_else(unauthorized)?;
     if (Utc::now() - last_seen).num_seconds() >= 300 {
         sqlx::query("UPDATE sessions SET last_seen_at=now() WHERE token_hash=$1 AND last_seen_at<now()-interval '5 minutes'").bind(hash.as_bytes().as_slice()).execute(&app.db).await?;
     }
@@ -168,7 +273,15 @@ async fn authenticate(
             return Err(unauthorized());
         }
     }
-    Ok((id, name))
+    Ok(Identity {
+        id,
+        admin: role == "admin",
+        principal: Principal::User {
+            id,
+            session,
+            revision,
+        },
+    })
 }
 #[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -243,8 +356,12 @@ async fn login(
     Ok(response)
 }
 #[utoipa::path(post, path = "/api/logout", responses((status = 204), (status = 403, body = contract::ErrorBody)))]
-async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Response, HttpError> {
-    let (id, _) = authenticate(&app, &headers, true).await?;
+async fn logout(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let id = actor.id;
     let mut tx = app.db.begin().await?;
     account::lock_session(&mut tx, &headers, id).await?;
     sqlx::query("DELETE FROM sessions WHERE token_hash=$1")
@@ -266,29 +383,29 @@ async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Respo
 #[utoipa::path(get, path = "/api/session", responses((status = 200, body = SessionView), (status = 403, body = contract::ErrorBody)))]
 async fn session(
     State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
     headers: HeaderMap,
 ) -> Result<Json<SessionView>, HttpError> {
-    let (id, _) = authenticate(&app, &headers, false).await?;
+    let id = actor.id;
     Ok(Json(SessionView {
         account: account::profile(&app, id).await?,
         csrf_token: csrf_token(token(&headers)?),
     }))
 }
 #[utoipa::path(get, path = "/api/status", responses((status = 200, body = Value), (status = 403, body = contract::ErrorBody)))]
-async fn status(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
+async fn status(State(app): State<Arc<App>>) -> Result<Json<Value>, HttpError> {
     Ok(Json(app.status().await?))
 }
 #[utoipa::path(get, path = "/api/buckets", responses((status = 200, body = Vec<BucketView>), (status = 403, body = contract::ErrorBody)))]
 async fn buckets(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<BucketView>>, HttpError> {
-    authenticate(&app, &headers, false).await?;
-    let rows: Vec<Bucket> = sqlx::query_as("SELECT * FROM buckets ORDER BY name LIMIT 1000")
+    let rows: Vec<BucketView> = sqlx::query_as("SELECT b.*,CASE WHEN $2 THEN ARRAY['bucket.list','object.read','object.write','object.delete','object.acl','bucket.settings','storage.inspect'] ELSE a.actions END AS actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=$1 WHERE $2 OR 'bucket.list'=ANY(a.actions) ORDER BY b.name LIMIT 1000")
+        .bind(actor.id).bind(actor.admin)
         .fetch_all(&app.db)
         .await?;
-    Ok(Json(rows.into_iter().map(BucketView::from).collect()))
+    Ok(Json(rows))
 }
 #[derive(Deserialize, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -299,10 +416,13 @@ struct Website {
 }
 async fn cors(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Path(bucket): Path<Uuid>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
+    actor
+        .principal
+        .require(&app.db, bucket, Action::Settings)
+        .await?;
     let rules = sqlx::query_scalar("SELECT cors FROM buckets WHERE id=$1")
         .bind(bucket)
         .fetch_optional(&app.db)
@@ -312,12 +432,11 @@ async fn cors(
 }
 async fn save_cors(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Path(bucket): Path<Uuid>,
     Json(rules): Json<Value>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, true).await?;
-    Ok(Json(app.set_cors(bucket, rules).await?))
+    Ok(Json(app.set_cors(&actor.principal, bucket, rules).await?))
 }
 impl Website {
     fn validate(&self) -> Result<(), HttpError> {
@@ -342,10 +461,13 @@ impl Website {
 #[utoipa::path(get, path = "/api/buckets/{bucket}/website", params(("bucket" = Uuid, Path)), responses((status = 200, body = Website), (status = 403, body = contract::ErrorBody)))]
 async fn website(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Path(bucket): Path<Uuid>,
 ) -> Result<Json<Website>, HttpError> {
-    authenticate(&app, &headers, false).await?;
+    actor
+        .principal
+        .require(&app.db, bucket, Action::Settings)
+        .await?;
     let row = sqlx::query_as(
         "SELECT website_enabled,index_document,error_document FROM buckets WHERE id=$1",
     )
@@ -358,16 +480,20 @@ async fn website(
 #[utoipa::path(put, path = "/api/buckets/{bucket}/website", params(("bucket" = Uuid, Path)), request_body = Website, responses((status = 200, body = Website), (status = 400, body = contract::ErrorBody)))]
 async fn save_website(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Path(bucket): Path<Uuid>,
     Json(input): Json<Website>,
 ) -> Result<Json<Website>, HttpError> {
-    authenticate(&app, &headers, true).await?;
     app.writable()?;
     input.validate()?;
+    let mut tx = app.db.begin().await?;
+    Permit::for_action(actor.principal, bucket, Action::Settings)
+        .lock(&mut tx)
+        .await?;
     let row = sqlx::query_as("UPDATE buckets SET website_enabled=$2,index_document=$3,error_document=$4 WHERE id=$1 AND state='active' RETURNING website_enabled,index_document,error_document")
         .bind(bucket).bind(input.website_enabled).bind(input.index_document).bind(input.error_document)
-        .fetch_optional(&app.db).await?.ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+        .fetch_optional(&mut *tx).await?.ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    tx.commit().await?;
     Ok(Json(row))
 }
 #[derive(Deserialize)]
@@ -382,10 +508,13 @@ struct Browse {
 }
 async fn objects(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Query(q): Query<Browse>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
+    actor
+        .principal
+        .require(&app.db, q.bucket, Action::List)
+        .await?;
     let page = app
         .list(
             q.bucket,
@@ -409,15 +538,19 @@ struct ObjectQuery {
 }
 async fn object(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Query(q): Query<ObjectQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
+    actor
+        .principal
+        .require(&app.db, q.bucket, Action::Read)
+        .await?;
     let (s, _pin) = app.current(q.bucket, &q.key).await?;
     let grants: Vec<(String, bool)> = sqlx::query_as(
-        "SELECT access_key,writable FROM grants WHERE bucket_id=$1 ORDER BY access_key",
+        "SELECT access_key,'object.write'=ANY(actions) AS writable FROM grants WHERE bucket_id=$1 AND $2 ORDER BY access_key",
     )
     .bind(q.bucket)
+    .bind(actor.admin)
     .fetch_all(&app.db)
     .await?;
     Ok(Json(
@@ -430,8 +563,9 @@ async fn limit_object_actions(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if let Err(error) = authenticate(&app, request.headers(), true).await {
-        return error.into_response();
+    let _ = app;
+    if request.extensions().get::<Identity>().is_none() {
+        return unauthorized().into_response();
     }
     let Ok(_permit) = OBJECT_ACTIONS.try_acquire() else {
         return HttpError(s3s::s3_error!(SlowDown).into()).into_response();
@@ -467,11 +601,11 @@ struct ObjectActions {
 }
 async fn object_actions(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     axum::extract::Extension(context): axum::extract::Extension<crate::stats::RequestContext>,
     Json(input): Json<ObjectActions>,
 ) -> Result<Json<Value>, HttpError> {
-    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let user_id = actor.id;
     let mut keys = std::collections::HashSet::new();
     if input.objects.is_empty()
         || input.objects.len() > 1000
@@ -490,7 +624,13 @@ async fn object_actions(
     let mut results = Vec::with_capacity(input.objects.len());
     for object in &input.objects {
         let status = match app
-            .change_object(input.bucket, &object.key, Some(object.version), public)
+            .change_object(
+                &actor.principal,
+                input.bucket,
+                &object.key,
+                Some(object.version),
+                public,
+            )
             .await
         {
             Ok(()) => 200,
@@ -516,10 +656,13 @@ struct ChunkQuery {
 }
 async fn object_chunks(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Query(q): Query<ChunkQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
+    actor
+        .principal
+        .require(&app.db, q.bucket, Action::Inspect)
+        .await?;
     let limit = q.limit.unwrap_or(100);
     if !(1..=200).contains(&limit) || q.after.is_some_and(|a| a < 0) {
         return Err(s3s::s3_error!(InvalidArgument).into());
@@ -532,6 +675,15 @@ async fn object_chunks(
         .bind(object.id).bind(q.after.unwrap_or(-1)).bind(limit + 1).fetch_all(&app.db).await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
+    if !actor.admin {
+        for row in &mut rows {
+            if let Some(row) = row.as_object_mut() {
+                for key in ["reads", "range_reads", "key_id"] {
+                    row.remove(key);
+                }
+            }
+        }
+    }
     let next = more.then(|| rows.last().unwrap()["offset_bytes"].clone());
     Ok(Json(json!({"chunks":rows,"next_offset":next})))
 }
@@ -549,10 +701,9 @@ struct TaskCursor {
 }
 async fn tasks(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(_actor): Extension<Identity>,
     Query(q): Query<TasksQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
     let limit = q.limit.unwrap_or(100);
     if !(1..=200).contains(&limit)
         || q.state
@@ -606,10 +757,9 @@ async fn tasks(
 }
 async fn task(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(_actor): Extension<Identity>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
     let task = sqlx::query_scalar("SELECT to_jsonb(t) FROM tasks t WHERE id=$1")
         .bind(id)
         .fetch_optional(&app.db)
@@ -630,11 +780,11 @@ struct TaskChange {
 }
 async fn task_action(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Path(id): Path<Uuid>,
     Json(input): Json<TaskChange>,
 ) -> Result<Json<Value>, HttpError> {
-    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let user_id = actor.id;
     let result = app
         .task_change(id, matches!(input.action, TaskAction::Resume))
         .await;
@@ -643,11 +793,15 @@ async fn task_action(
 }
 async fn download(
     State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
     headers: HeaderMap,
     method: Method,
     Query(q): Query<ObjectQuery>,
 ) -> Result<Response, HttpError> {
-    authenticate(&app, &headers, false).await?;
+    actor
+        .principal
+        .require(&app.db, q.bucket, Action::Read)
+        .await?;
     respond(
         app,
         q.bucket,
@@ -661,20 +815,19 @@ async fn download(
 }
 async fn start_integrity(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Json(input): Json<crate::integrity::Request>,
 ) -> Result<Json<Value>, HttpError> {
-    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let user_id = actor.id;
     let result = app.integrity_start(input).await;
     tracing::info!(%user_id,success=result.is_ok(),task_id=?result.as_ref().ok().and_then(|r|r.get("task_id")),"management integrity check");
     Ok(Json(result?))
 }
 async fn packs(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(_actor): Extension<Identity>,
     Query(q): Query<IssueQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
     let limit = q.limit.unwrap_or(100);
     if !(1..=200).contains(&limit) || q.after.is_some_and(|id| id < 0) {
         return Err(s3s::s3_error!(InvalidArgument).into());
@@ -692,10 +845,9 @@ async fn packs(
 }
 async fn pack_detail(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(_actor): Extension<Identity>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
     let pack: Value = sqlx::query_scalar(
         "SELECT to_jsonb(p)||jsonb_build_object('id',p.id::text) FROM packs p WHERE id=$1",
     )
@@ -713,19 +865,19 @@ struct PackRun {
 }
 async fn cache_flush(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
 ) -> Result<Json<Value>, HttpError> {
-    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let user_id = actor.id;
     let result = app.cache_flush_start().await;
     tracing::info!(%user_id,success=result.is_ok(),"management upload cache flush");
     Ok(Json(result?))
 }
 async fn pack_run(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Json(input): Json<PackRun>,
 ) -> Result<Json<Value>, HttpError> {
-    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let user_id = actor.id;
     let result = app.pack_start(&input.kind).await;
     tracing::info!(%user_id,kind=%input.kind,success=result.is_ok(),"management pack maintenance");
     Ok(Json(result?))
@@ -741,10 +893,10 @@ struct PackUnpack {
 }
 async fn pack_unpack(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<Identity>,
     Json(input): Json<PackUnpack>,
 ) -> Result<Json<Value>, HttpError> {
-    let (user_id, _) = authenticate(&app, &headers, true).await?;
+    let user_id = actor.id;
     let id = input
         .pack_id
         .as_deref()
@@ -762,11 +914,10 @@ struct IssueQuery {
 }
 async fn integrity_issues(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(_actor): Extension<Identity>,
     Path(id): Path<Uuid>,
     Query(q): Query<IssueQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
     Ok(Json(
         app.integrity_issues(id, q.after.unwrap_or(0), q.limit.unwrap_or(100))
             .await?,
@@ -778,11 +929,10 @@ struct IssueObjectsQuery {
 }
 async fn integrity_objects(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(_actor): Extension<Identity>,
     Path((id, issue)): Path<(Uuid, i64)>,
     Query(q): Query<IssueObjectsQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    authenticate(&app, &headers, false).await?;
     let after = q
         .after
         .map(|s| serde_json::from_str::<(Uuid, String)>(&s))
@@ -792,10 +942,9 @@ async fn integrity_objects(
 }
 async fn integrity_report(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
+    Extension(_actor): Extension<Identity>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, HttpError> {
-    authenticate(&app, &headers, false).await?;
     let task: Value =
         sqlx::query_scalar("SELECT to_jsonb(t) FROM tasks t WHERE id=$1 AND kind='integrity'")
             .bind(id)

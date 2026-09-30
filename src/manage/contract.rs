@@ -27,9 +27,12 @@ pub(super) struct SessionView {
     pub csrf_token: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
 pub(super) struct BucketView {
     id: Uuid,
+    project_id: Uuid,
+    #[schema(value_type = Vec<crate::authorization::Action>)]
+    actions: Vec<String>,
     name: String,
     state: String,
     cors: Value,
@@ -43,6 +46,11 @@ impl From<Bucket> for BucketView {
     fn from(bucket: Bucket) -> Self {
         Self {
             id: bucket.id,
+            project_id: bucket.project_id,
+            actions: crate::authorization::Action::ALL
+                .iter()
+                .map(|a| a.name().into())
+                .collect(),
             name: bucket.name,
             state: bucket.state,
             cors: bucket.cors,
@@ -89,6 +97,12 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::account::revoke_session))
         .routes(routes!(super::account::bootstrap))
         .routes(routes!(super::account::setup))
+        .routes(routes!(super::projects::list, super::projects::create))
+        .routes(routes!(super::projects::update, super::projects::delete))
+        .routes(routes!(
+            super::projects::get_mode,
+            super::projects::set_mode
+        ))
         .split_for_parts();
     api.info.title = "Mokyu management API".into();
     api.info.description = Some("Management endpoints use a session cookie. Mutations require the configured Origin and X-CSRF-Token. S3 and public reads use separate listeners.".into());

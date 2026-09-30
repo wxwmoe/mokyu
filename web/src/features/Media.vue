@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/vue-query'
 import { useRoute, useRouter } from 'vue-router'
 import { TabsRoot, TabsList, TabsTrigger, TabsContent } from 'reka-ui'
 import { RefreshCw, ArrowUpRight, ChevronRight, ChevronLeft, Download, Copy, LockKeyhole, Globe, Home, Heart } from 'lucide-vue-next'
-import { api, bytes, params, type Bucket } from '../api/client'
+import { api, bytes, params, session, type Bucket } from '../api/client'
 import { copy, notify, report, errorText } from '../app/feedback'
 import { t, date } from '../app/i18n'
 import UiSelect from '../components/ui/UiSelect.vue'
@@ -44,7 +44,7 @@ async function refresh() {
   <p v-if="buckets.error.value || objects.error.value" class="error" role="alert">{{ errorText(buckets.error.value || objects.error.value) }}</p>
   <div v-if="!bucket" class="bucket-grid">
     <RouterLink v-for="item in buckets.data.value" :key="item.id" class="bucket-card" :to="`/media/${item.id}`"><img src="/assets/mokyu-pack.svg" alt="" width="64" height="64"><h2>{{ item.name }}</h2><span>{{ t(item.state) }}</span><ArrowUpRight class="bucket-arrow" :size="19" /></RouterLink>
-    <EmptyState v-if="!buckets.isPending.value && !buckets.error.value && !buckets.data.value?.length" :title="t('fresh')" :description="t('firstBucket')" />
+    <EmptyState v-if="!buckets.isPending.value && !buckets.error.value && !buckets.data.value?.length" :title="t('fresh')" :description="t(session?.role === 'admin' ? 'firstBucket' : 'askForBucket')" />
   </div>
   <section v-else class="surface">
     <div class="media-toolbar"><nav class="breadcrumbs" :aria-label="t('folderPath')"><RouterLink to="/media"><Home :size="15" />{{ t('media') }}</RouterLink><ChevronRight :size="13" /><button @click="folder('')">{{ current?.name }}</button><span v-if="prefix" class="path-text">/ {{ prefix }}</span></nav>
@@ -61,7 +61,7 @@ async function refresh() {
   <UiDialog v-model:open="opened" :title="selected?.object_key.split('/').pop() || t('objectDetails')" drawer>
     <template v-if="selected"><div class="preview-heading"><span class="badge" :class="{ public: selected.public_read }">{{ t(selected.public_read ? 'public' : 'private') }}</span><div><button class="icon-button" :aria-label="t('previousObject')" :disabled="selectedIndex <= 0" @click="step(-1)"><ChevronLeft :size="17" /></button><button class="icon-button" :aria-label="t('nextObject')" :disabled="selectedIndex >= (objects.data.value?.objects.length || 0) - 1" @click="step(1)"><ChevronRight :size="17" /></button></div></div>
     <div class="preview-placeholder"><FileIcon :name="selected.object_key" large /></div>
-    <div class="actions"><a class="button primary" :href="download"><Download :size="16" />{{ t('download') }}</a><UiTip :text="t('copyPath')"><button class="icon-button" :aria-label="t('copyPath')" @click="copy(selected.object_key)"><Copy :size="18" /></button></UiTip></div>
+    <div class="actions"><a v-if="current?.actions.includes('object.read')" class="button primary" :href="download"><Download :size="16" />{{ t('download') }}</a><UiTip :text="t('copyPath')"><button class="icon-button" :aria-label="t('copyPath')" @click="copy(selected.object_key)"><Copy :size="18" /></button></UiTip></div>
     <TabsRoot default-value="information"><TabsList class="tabs-list" :aria-label="t('objectDetails')"><TabsTrigger class="tab-trigger" value="information">{{ t('information') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="access">{{ t('access') }}</TabsTrigger></TabsList>
       <TabsContent value="information"><dl class="facts"><dt>{{ t('size') }}</dt><dd>{{ bytes(selected.size) }}</dd><dt>{{ t('updated') }}</dt><dd>{{ date(selected.created_at) }}</dd><dt>{{ t('bucket') }}</dt><dd>{{ current?.name }}</dd></dl><details><summary>{{ t('fullPath') }}</summary><p class="object-path">{{ selected.object_key }}</p></details></TabsContent>
       <TabsContent value="access"><dl class="facts"><dt>{{ t('publicAccess') }}</dt><dd>{{ t(selected.public_read ? 'anyone' : 'authorized') }}</dd></dl><p class="field-help">{{ t('sessionDownload') }}</p></TabsContent>

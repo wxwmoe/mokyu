@@ -29,6 +29,8 @@ pub enum Command {
     #[command(subcommand)]
     User(Users),
     #[command(subcommand)]
+    Project(Projects),
+    #[command(subcommand)]
     Gc(Gc),
     #[command(subcommand)]
     Cleanup(Cleanup),
@@ -172,6 +174,27 @@ pub enum Domains {
     List,
     Set { host: String, bucket: String },
     Delete { host: String },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Projects {
+    List,
+    Create {
+        name: String,
+    },
+    Update {
+        id: Uuid,
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long)]
+        allow_bucket_create: bool,
+    },
+    Delete {
+        id: Uuid,
+    },
+    Mode {
+        enabled: bool,
+    },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Users {

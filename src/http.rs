@@ -28,9 +28,7 @@ impl<E: Into<anyhow::Error>> From<E> for HttpError {
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let status = if let Some(e) = self.0.downcast_ref::<s3s::S3Error>() {
-            e.code()
-                .status_code()
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+            e.status_code().unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
@@ -63,6 +61,11 @@ impl IntoResponse for HttpError {
 }
 pub(crate) fn unauthorized() -> HttpError {
     s3s::s3_error!(AccessDenied).into()
+}
+pub(crate) fn problem(status: StatusCode, code: &'static str) -> HttpError {
+    let mut error = s3s::S3Error::new(s3s::S3ErrorCode::Custom(code.into()));
+    error.set_status_code(status);
+    error.into()
 }
 impl HttpError {
     fn has_code(&self, code: s3s::S3ErrorCode) -> bool {

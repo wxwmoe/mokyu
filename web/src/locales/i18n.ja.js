@@ -1,4 +1,5 @@
 export default {
+  askForBucket: '管理者にバケットへのアクセスを依頼してください。',
   discardTitle: '変更を残さずに移動しますか？', discardHint: 'プロフィールに未保存の変更があります。', keepEditing: '編集を続ける', discard: '変更を破棄',
   appName: 'Mokyu', tagline: '大切な「好き」に、ちいさな居場所を。', brandNote: 'メディアのやさしいおうち',
   workspace: 'ワークスペース', administration: '管理', media: 'メディアライブラリ', account: '個人設定',

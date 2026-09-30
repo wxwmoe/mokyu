@@ -1,5 +1,6 @@
 use crate::{
     app::{App, Metadata, StoredStream, internal},
+    authorization::Action,
     codec,
     listing::encode_key,
     upload::checksum,
@@ -265,7 +266,7 @@ impl S3 for Gateway {
                 .authorize(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
                     b.id,
-                    false,
+                    Action::List,
                 )
                 .await?;
             Ok(S3Response::new(HeadBucketOutput {
@@ -286,7 +287,7 @@ impl S3 for Gateway {
                 .authorize(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
                     b.id,
-                    false,
+                    Action::List,
                 )
                 .await?;
             Ok(S3Response::new(GetBucketLocationOutput {
@@ -312,7 +313,7 @@ impl S3 for Gateway {
         let i=req.input;let limit=i.max_buckets.unwrap_or(1000);if !(1..=10000).contains(&limit){return Err(s3_error!(InvalidArgument).into());}
         let prefix=i.prefix.as_deref().unwrap_or("");
         let after=if let Some(token)=i.continuation_token{let bytes=URL_SAFE_NO_PAD.decode(token).map_err(|_|s3_error!(InvalidArgument))?;let (access,p,r,last):(String,String,Option<String>,String)=serde_json::from_slice(&bytes).map_err(|_|s3_error!(InvalidArgument))?;if access!=key||p!=prefix||r!=i.bucket_region{return Err(s3_error!(InvalidArgument,"continuation token belongs to another listing").into());}last}else{String::new()};
-        let mut rows:Vec<crate::app::Bucket>=sqlx::query_as("SELECT b.* FROM buckets b JOIN grants g ON g.bucket_id=b.id JOIN credentials c USING(access_key) WHERE g.access_key=$1 AND c.enabled AND starts_with(b.name,$2) AND b.name>$3 AND ($4::text IS NULL OR $4=$5) ORDER BY b.name LIMIT $6").bind(key).bind(prefix).bind(after).bind(&i.bucket_region).bind(&self.0.config.listen.region).bind(limit as i64+1).fetch_all(&self.0.db).await?;
+        let mut rows:Vec<crate::app::Bucket>=sqlx::query_as("SELECT b.* FROM buckets b JOIN grants g ON g.bucket_id=b.id JOIN credentials c USING(access_key) WHERE g.access_key=$1 AND c.enabled AND c.project_id=b.project_id AND 'bucket.list'=ANY(g.actions) AND starts_with(b.name,$2) AND b.name>$3 AND ($4::text IS NULL OR $4=$5) ORDER BY b.name LIMIT $6").bind(key).bind(prefix).bind(after).bind(&i.bucket_region).bind(&self.0.config.listen.region).bind(limit as i64+1).fetch_all(&self.0.db).await?;
         let truncated=rows.len()>limit as usize;rows.truncate(limit as usize);
         let token=if truncated{Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&(key,prefix,&i.bucket_region,&rows.last().unwrap().name))?))}else{None};
         Ok(S3Response::new(ListBucketsOutput{buckets:Some(rows.into_iter().map(|b|Bucket{name:Some(b.name),creation_date:Some(stamp(b.created_at)),bucket_region:Some(self.0.config.listen.region.clone()),..Default::default()}).collect()),continuation_token:token,prefix:i.prefix,..Default::default()}))
@@ -327,16 +328,18 @@ impl S3 for Gateway {
             let _permits = self.0.admit(true).await?;
             let i = &req.input;
             let b = self.0.bucket(&i.bucket, true).await?;
-            self.0
+            let authority = self
+                .0
                 .authorize(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
                     b.id,
-                    true,
+                    Action::Write,
                 )
                 .await?;
             let (id, _pin) = self
                 .0
                 .new_stream(
+                    &authority,
                     b.id,
                     &i.key,
                     "object",
@@ -403,7 +406,7 @@ impl S3 for Gateway {
                     .authorize(
                         req.credentials.as_ref().map(|c| c.access_key.as_str()),
                         b.id,
-                        false,
+                        Action::Read,
                     )
                     .await?;
             }
@@ -475,7 +478,7 @@ impl S3 for Gateway {
                     .authorize(
                         req.credentials.as_ref().map(|c| c.access_key.as_str()),
                         b.id,
-                        false,
+                        Action::Read,
                     )
                     .await?;
             }
@@ -525,14 +528,17 @@ impl S3 for Gateway {
                 return Err(s3_error!(NotImplemented).into());
             }
             let b = self.0.bucket(&i.bucket, true).await?;
-            self.0
+            let authority = self
+                .0
                 .authorize(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
                     b.id,
-                    true,
+                    Action::Delete,
                 )
                 .await?;
-            self.0.delete_object(b.id, &i.key).await?;
+            self.0
+                .delete_object(&authority.principal, b.id, &i.key)
+                .await?;
             Ok(S3Response::new(DeleteObjectOutput::default()))
         }
         .await
@@ -545,11 +551,12 @@ impl S3 for Gateway {
         async {
             let i = req.input;
             let b = self.0.bucket(&i.bucket, true).await?;
-            self.0
+            let authority = self
+                .0
                 .authorize(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
                     b.id,
-                    true,
+                    Action::Delete,
                 )
                 .await?;
             if i.delete.objects.len() > 1000 {
@@ -570,7 +577,11 @@ impl S3 for Gateway {
                     });
                     continue;
                 }
-                match self.0.delete_object(b.id, &o.key).await {
+                match self
+                    .0
+                    .delete_object(&authority.principal, b.id, &o.key)
+                    .await
+                {
                     Ok(()) => {
                         if i.delete.quiet != Some(true) {
                             deleted.push(DeletedObject {
@@ -610,7 +621,7 @@ impl S3 for Gateway {
                 .authorize(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
                     b.id,
-                    false,
+                    Action::List,
                 )
                 .await?;
             let n = i.max_keys.unwrap_or(1000);
@@ -686,7 +697,7 @@ impl S3 for Gateway {
                 .authorize(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
                     b.id,
-                    false,
+                    Action::Read,
                 )
                 .await?;
             let (s, _pin) = self.0.current(b.id, &i.key).await?;
@@ -732,11 +743,12 @@ impl S3 for Gateway {
             reject_features(&req.headers)?;
             let i = req.input;
             let b = self.0.bucket(&i.bucket, true).await?;
-            self.0
+            let authority = self
+                .0
                 .authorize(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
                     b.id,
-                    true,
+                    Action::Acl,
                 )
                 .await?;
             if i.access_control_policy.is_some() {
@@ -746,7 +758,7 @@ impl S3 for Gateway {
             }
             let public = canned(i.acl.as_ref())?;
             self.0
-                .change_object(b.id, &i.key, None, Some(public))
+                .change_object(&authority.principal, b.id, &i.key, None, Some(public))
                 .await?;
             Ok(S3Response::new(PutObjectAclOutput::default()))
         }
@@ -779,7 +791,7 @@ impl S3 for Gateway {
             {
                 return Err(s3_error!(NotImplemented, "unsupported copy directive").into());
             }
-            self.0.authorize(access, b.id, true).await?;
+            let mut authority = self.0.authorize(access, b.id, Action::Write).await?;
             let CopySource::Bucket {
                 bucket,
                 key,
@@ -789,7 +801,10 @@ impl S3 for Gateway {
                 return Err(s3_error!(NotImplemented).into());
             };
             let source_bucket = self.0.bucket(bucket, false).await?;
-            self.0.authorize(access, source_bucket.id, false).await?;
+            self.0
+                .authorize(access, source_bucket.id, Action::Read)
+                .await?;
+            authority.add(source_bucket.id, Action::Read);
             let (source, _source_pin) = self.0.current(source_bucket.id, key).await?;
             conditions(
                 &source,
@@ -810,7 +825,15 @@ impl S3 for Gateway {
             };
             let (id, _pin) = self
                 .0
-                .new_stream(b.id, &i.key, "object", meta, canned(i.acl.as_ref())?, true)
+                .new_stream(
+                    &authority,
+                    b.id,
+                    &i.key,
+                    "object",
+                    meta,
+                    canned(i.acl.as_ref())?,
+                    true,
+                )
                 .await?;
             let mut offset = 0;
             while offset < source.size {

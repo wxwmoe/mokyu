@@ -31,13 +31,23 @@ CORS 文件示例，字段规则见[CORS 设置](manage-api-reference.md#cors-�
 docker exec mokyu cli bucket cors media /config/cors.json
 ```
 
+## 项目
+
+| 命令 | 作用 |
+| --- | --- |
+| `project list` | 列出项目 |
+| `project create NAME` | 创建项目并开启项目管理 |
+| `project update ID NAME [--description TEXT] [--allow-bucket-create]` | 更新项目设置 |
+| `project delete ID` | 删除无桶、凭据和成员的非内置项目 |
+| `project mode true/false` | 设置项目管理开关；关闭前需清理依赖 |
+
 ## 凭据与用户
 
 | 命令 | 作用与返回 |
 | --- | --- |
 | `credential list` | 返回 access_key/enabled 数组，不含 secret |
 | `credential create BUCKET [--read-only]` | 生成 access_key/secret_key 并授权该桶，默认读写；secret 仅返回一次 |
-| `credential grant ACCESS_KEY BUCKET [--read-only]` | 添加或替换桶授权，默认读写，返回 granted |
+| `credential grant ACCESS_KEY BUCKET [--read-only]` | 添加或替换同项目桶授权，默认读写，返回 granted |
 | `credential revoke ACCESS_KEY BUCKET` | 撤销桶授权，返回 revoked |
 | `credential disable ACCESS_KEY` | 禁用凭据及其全部桶授权 |
 | `user list` | 返回 id/username/enabled，不含密码哈希 |

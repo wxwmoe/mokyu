@@ -126,7 +126,7 @@ try:
         keys.extend(o['object_key'] for o in listing['objects']); token = listing['next_token']
     assert keys == sorted(set(keys)) and prefix + 'nested/c' in keys
 
-    db.execute("SELECT setval(pg_get_serial_sequence('chunks','id'),9007199254740992)")
+    db.execute("SELECT setval(pg_get_serial_sequence('chunks','id'),GREATEST(nextval(pg_get_serial_sequence('chunks','id')),COALESCE((SELECT max(id) FROM chunks),0),9007199254740992))")
     content = b'chunk-page-fixture-' * 1_000_000
     key = prefix + 'chunks'
     s3.put_object(Bucket=bucket, Key=key, Body=content)
@@ -161,7 +161,8 @@ try:
         found.extend(t['id'] for t in page['tasks'])
         if not page['next_token']: break
         page = get('/api/tasks', state='paused', limit=17, token=page['next_token'])
-    assert len(found) == 112 == len(set(found))
+    expected = {str(task_id) for i, task_id in enumerate(ids) if i % 2}
+    assert expected <= set(found) and len(expected) == 112 and len(found) == len(set(found))
     task_id = str(ids[0])
     assert get('/api/tasks/' + task_id)['error'].startswith('<script>')
     assert session.post(url + '/api/tasks/' + task_id + '/actions', json={'action': 'resume'}).status_code == 403
@@ -187,4 +188,6 @@ try:
     subprocess.run(command + ['maintenance', 'disable'], check=True, capture_output=True)
     print('PASS task pagination, tied timestamps, state filters, CSRF and resumable worker', flush=True)
 finally:
+    if 'ids' in locals():
+        db.execute('DELETE FROM tasks WHERE id=ANY(%s)', (ids,))
     db.close()

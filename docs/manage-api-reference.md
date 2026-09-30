@@ -1,6 +1,6 @@
 # 管理页面与 API
 
-管理端口默认 9002。所有登录用户均为部署管理员，可访问全部桶和私有对象。管理员由 [CLI](cli-reference.md#凭据与用户) 或首次安装引导创建，无默认账户。
+管理端口默认 9002。部署管理员可访问全部桶和私有对象；普通成员仅能访问获授权的项目与桶。管理员由 [CLI](cli-reference.md#凭据与用户) 或首次安装引导创建，无默认账户。
 
 导航：[会话](#会话) · [存储桶](#存储桶) · [对象](#对象) · [运行状态](#运行状态) · [后台任务](#后台任务) · [完整性巡检](#完整性巡检) · [页面](#管理页面)
 
@@ -43,13 +43,32 @@
 
 新标签页和刷新后可通过 session 取得 CSRF token。密码哈希与验证共享最多两个并行任务，失败不泄露用户名是否存在。改密、重置、撤销和登录在提交前重新校验用户与会话状态。
 
-个人资料包含 `id,username,display_name,locale,theme,avatar_email,avatar_enabled,avatar_url`。display_name 最多 240 UTF-8 字节；avatar_email 最多 320 字节，开启头像时必填。locale 为 `en/zh-CN/ja/null`，theme 为 `auto/light/dark/null`；null 表示跟随浏览器。头像默认关闭，启用后返回规范化邮箱的 SHA-256 Gravatar URL，不上传图片。
+个人资料包含 `id,username,role,project_management,display_name,locale,theme,avatar_email,avatar_enabled,avatar_url`。display_name 最多 240 UTF-8 字节；avatar_email 最多 320 字节，开启头像时必填。locale 为 `en/zh-CN/ja/null`，theme 为 `auto/light/dark/null`；null 表示跟随浏览器。头像默认关闭，启用后返回规范化邮箱的 SHA-256 Gravatar URL，不上传图片。
 
 会话条目为 `{id,created_at,last_seen_at,expires_at,user_agent,current}`，按创建时间倒序；不返回认证凭据。last_seen_at 最多每五分钟刷新一次，不延长会话寿命。新密码为 12～1024 UTF-8 字节。
 
 ### 首次安装
 
 `GET /api/bootstrap` 返回 `{setup_required}`。只有数据库没有任何用户时，服务才在管理 socket 旁写入权限 0600 的 `setup-token`，默认 `/run/mokyu/setup-token`。`POST /api/setup` 接收 `{token,username,password}` 并返回 201；成功后令牌失效并删除文件。并发初始化只允许一次成功；CLI 创建首个用户也会关闭此入口。令牌不得放入 URL。
+
+## 项目与权限
+
+默认使用内置 Default 项目，项目管理关闭；创建额外项目会开启项目管理。关闭前必须移除额外项目、普通成员与成员关系，不会自动提升权限。桶和 S3 服务凭据各属于一个项目，凭据不能跨项目授权。
+
+| 方法与路径 | 输入与行为 |
+| --- | --- |
+| `GET /api/projects` | 管理员列出全部项目；成员列出所属项目，最多 1000 个 |
+| `POST /api/projects` | `{name,description?,allow_bucket_create?}`，返回 201 项目 |
+| `PUT /api/projects/{id}` | 同上，更新项目；返回 200 |
+| `DELETE /api/projects/{id}` | 删除空项目；内置项目不可删除；返回 204 |
+| `GET /api/settings/projects` | 返回 `{enabled}` |
+| `PUT /api/settings/projects` | `{enabled}`，设置项目管理开关 |
+
+项目写操作仅管理员可用，要求最近五分钟验证密码；否则返回 403 `ReauthenticationRequired`，先调用 `/api/me/reauth`。name 为 1～128 UTF-8 字节，description 最多 2000 字节。
+
+动作：`bucket.list`、`object.read`、`object.write`、`object.delete`、`object.acl`、`bucket.settings`、`storage.inspect`。reader 允许列举、读取和存储详情；writer 增加写入、删除和 ACL；maintainer 再增加桶设置。成员可访问项目全部桶或仅指定桶；指定动作与角色权限取交集。桶列表返回当前身份的有效 actions。
+
+S3、管理页面和 CLI 共用存储变更逻辑。PUT、分片及异步完成在发布前复核授权版本；撤权后的旧写请求不能发布。已接收数据的后台落盘可继续。匿名 public-read 不受项目成员关系限制。全局状态、任务和维护接口仅管理员可用；成员的区块详情不暴露全局读取计数或密钥标识。
 
 ## 存储桶
 
@@ -61,7 +80,7 @@
 | `GET /api/buckets/{bucket}/cors` | bucket 为 UUID | 200 CORS 规则数组 |
 | `PUT /api/buckets/{bucket}/cors` | 规则数组，`[]` 关闭 | 200 保存后的规则 |
 
-桶信息：`{id,name,state,cors,website_enabled,index_document,error_document,created_at}`。设置仅在桶 active 且非维护模式时可写；创建、删除和清空桶使用 CLI。
+桶信息：`{id,project_id,actions,name,state,cors,website_enabled,index_document,error_document,created_at}`。设置仅在桶 active 且非维护模式时可写；创建、删除和清空桶使用 CLI。
 
 ### 网站设置
 

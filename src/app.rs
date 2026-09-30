@@ -1,4 +1,5 @@
 use crate::{
+    authorization::{Action, Permit, Principal},
     codec::{Chunk, MAX},
     config::{self, Budget, Config, Secrets},
     storage::Storage,
@@ -21,6 +22,7 @@ use uuid::Uuid;
 #[derive(Clone, sqlx::FromRow, Serialize)]
 pub struct Bucket {
     pub id: Uuid,
+    pub project_id: Uuid,
     pub name: String,
     pub state: String,
     pub cors: Value,
@@ -209,17 +211,28 @@ impl App {
         }
         Ok(())
     }
-    pub async fn set_cors(&self, bucket: Uuid, rules: Value) -> Result<Value> {
+    pub async fn set_cors(
+        &self,
+        principal: &Principal,
+        bucket: Uuid,
+        rules: Value,
+    ) -> Result<Value> {
         self.writable()?;
         crate::http::validate_cors(&rules).map_err(|e| s3_error!(InvalidArgument, "{e}"))?;
-        sqlx::query_scalar(
+        let mut tx = self.db.begin().await?;
+        Permit::for_action(principal.clone(), bucket, Action::Settings)
+            .lock(&mut tx)
+            .await?;
+        let result = sqlx::query_scalar(
             "UPDATE buckets SET cors=$2 WHERE id=$1 AND state='active' RETURNING cors",
         )
         .bind(bucket)
         .bind(rules)
-        .fetch_optional(&self.db)
+        .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| s3_error!(NoSuchBucket).into())
+        .ok_or_else(|| s3_error!(NoSuchBucket))?;
+        tx.commit().await?;
+        Ok(result)
     }
     pub async fn admit(
         &self,
@@ -251,13 +264,17 @@ impl App {
         }
         Ok(bucket)
     }
-    pub async fn authorize(&self, key: Option<&str>, bucket: Uuid, write: bool) -> Result<()> {
+    pub async fn authorize(
+        &self,
+        key: Option<&str>,
+        bucket: Uuid,
+        action: Action,
+    ) -> Result<Permit> {
         let key = key.ok_or_else(|| s3_error!(AccessDenied))?;
-        let grant:Option<bool>=sqlx::query_scalar("SELECT g.writable FROM grants g JOIN credentials c USING(access_key) WHERE g.access_key=$1 AND g.bucket_id=$2 AND c.enabled").bind(key).bind(bucket).fetch_optional(&self.db).await?;
-        if !grant.is_some_and(|w| !write || w) {
-            return Err(s3_error!(AccessDenied).into());
-        }
-        Ok(())
+        Principal::service(&self.db, key)
+            .await?
+            .require(&self.db, bucket, action)
+            .await
     }
     pub async fn current(&self, bucket: Uuid, key: &str) -> Result<(StoredStream, Active)> {
         let _guard = self.coord.lock().await;
@@ -265,8 +282,10 @@ impl App {
         let pin = self.pin(stream.id);
         Ok((stream, pin))
     }
+    #[allow(clippy::too_many_arguments)]
     pub async fn new_stream(
         &self,
+        authority: &Permit,
         bucket: Uuid,
         key: &str,
         kind: &str,
@@ -282,6 +301,12 @@ impl App {
         let id = Uuid::new_v4();
         self.writable()?;
         let mut tx = self.db.begin().await?;
+        let mut authority = authority.clone();
+        authority.add(bucket, Action::Write);
+        if public {
+            authority.add(bucket, Action::Acl);
+        }
+        authority.lock(&mut tx).await?;
         let state: String = sqlx::query_scalar("SELECT state FROM buckets WHERE id=$1 FOR SHARE")
             .bind(bucket)
             .fetch_one(&mut *tx)
@@ -289,7 +314,7 @@ impl App {
         if state != "active" {
             return Err(s3_error!(OperationAborted).into());
         }
-        sqlx::query("INSERT INTO streams(id,bucket_id,object_key,kind,state,metadata,public_read) VALUES($1,$2,$3,$4,'writing',$5,$6)").bind(id).bind(bucket).bind(key).bind(kind).bind(metadata).bind(public).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO streams(id,bucket_id,object_key,kind,state,metadata,public_read,write_authorization) VALUES($1,$2,$3,$4,'writing',$5,$6,$7)").bind(id).bind(bucket).bind(key).bind(kind).bind(metadata).bind(public).bind(sqlx::types::Json(authority)).execute(&mut *tx).await?;
         if claim_object {
             sqlx::query("INSERT INTO objects(bucket_id,key,write_epoch) VALUES($1,$2,$3) ON CONFLICT(bucket_id,key) DO UPDATE SET write_epoch=excluded.write_epoch").bind(bucket).bind(key).bind(id).execute(&mut *tx).await?;
         }
@@ -633,6 +658,12 @@ impl App {
         let _coord = self.coord.lock().await;
         self.writable()?;
         let mut tx = self.db.begin().await?;
+        let authority: sqlx::types::Json<Permit> =
+            sqlx::query_scalar("SELECT write_authorization FROM streams WHERE id=$1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        authority.lock(&mut tx).await?;
         let s: StoredStream = sqlx::query_as("SELECT * FROM streams WHERE id=$1 FOR UPDATE")
             .bind(id)
             .fetch_one(&mut *tx)
@@ -706,11 +737,17 @@ impl App {
         crate::faults::point("object-published").await;
         Ok(())
     }
-    pub async fn delete_object(&self, bucket: Uuid, key: &str) -> Result<()> {
-        self.change_object(bucket, key, None, None).await
+    pub async fn delete_object(
+        &self,
+        principal: &Principal,
+        bucket: Uuid,
+        key: &str,
+    ) -> Result<()> {
+        self.change_object(principal, bucket, key, None, None).await
     }
     pub async fn change_object(
         &self,
+        principal: &Principal,
         bucket: Uuid,
         key: &str,
         expected: Option<Uuid>,
@@ -720,6 +757,17 @@ impl App {
         let _coord = self.coord.lock().await;
         self.writable()?;
         let mut tx = self.db.begin().await?;
+        Permit::for_action(
+            principal.clone(),
+            bucket,
+            if public.is_some() {
+                Action::Acl
+            } else {
+                Action::Delete
+            },
+        )
+        .lock(&mut tx)
+        .await?;
         let state: String = sqlx::query_scalar("SELECT state FROM buckets WHERE id=$1 FOR SHARE")
             .bind(bucket)
             .fetch_optional(&mut *tx)

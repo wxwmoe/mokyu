@@ -1,4 +1,5 @@
 export default {
+  askForBucket: 'Ask your administrator to give you access to a bucket.',
   discardTitle: 'Leave these changes behind?', discardHint: 'Your profile has changes that have not been saved.', keepEditing: 'Keep editing', discard: 'Discard changes',
   appName: 'Mokyu', tagline: 'Little chunks, lots of love.', brandNote: 'made for your media',
   workspace: 'Workspace', administration: 'Administration', media: 'Media library', account: 'Personal settings',

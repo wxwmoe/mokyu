@@ -1,9 +1,10 @@
 use crate::{
     admin::{
         Backend, Buckets, Cache, Cleanup, Command, Credentials, Domains, Gc, Integrity,
-        Maintenance, Packs, Tasks, Users, random_secret,
+        Maintenance, Packs, Projects, Tasks, Users, random_secret,
     },
     app::{App, Bucket},
+    authorization::{Action, Principal},
     codec,
 };
 use anyhow::{Context, Result, ensure};
@@ -54,6 +55,51 @@ pub async fn password_hash(password: String) -> Result<String> {
 }
 pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
     match command {
+        Command::Project(project) => {
+            use super::projects::{self, ProjectInput};
+            match project {
+                Projects::List => Ok(serde_json::to_value(projects::list_all(&app.db).await?)?),
+                Projects::Create { name } => Ok(serde_json::to_value(
+                    projects::save(
+                        app,
+                        &Principal::Local,
+                        None,
+                        ProjectInput {
+                            name,
+                            description: String::new(),
+                            allow_bucket_create: false,
+                        },
+                    )
+                    .await?,
+                )?),
+                Projects::Update {
+                    id,
+                    name,
+                    description,
+                    allow_bucket_create,
+                } => Ok(serde_json::to_value(
+                    projects::save(
+                        app,
+                        &Principal::Local,
+                        Some(id),
+                        ProjectInput {
+                            name,
+                            description,
+                            allow_bucket_create,
+                        },
+                    )
+                    .await?,
+                )?),
+                Projects::Delete { id } => {
+                    projects::remove(app, &Principal::Local, id).await?;
+                    Ok(json!({"deleted": id}))
+                }
+                Projects::Mode { enabled } => {
+                    projects::mode(app, &Principal::Local, enabled).await?;
+                    Ok(json!({"enabled": enabled}))
+                }
+            }
+        }
         Command::Status => app.status().await,
         Command::Cache(Cache::Status) => app.upload_cache_status().await,
         Command::Cache(Cache::Flush) => app.cache_flush_start().await,
@@ -212,7 +258,7 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
         Command::Bucket(Buckets::Cors { name, document, .. }) => {
             let b = app.bucket(&name, true).await?;
             let rules = document.context("missing CORS document")?;
-            app.set_cors(b.id, rules).await
+            app.set_cors(&Principal::Local, b.id, rules).await
         }
         Command::Credential(Credentials::List) => {
             let rows: Vec<(String, bool)> =
@@ -235,15 +281,23 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
                 access.as_bytes(),
             )?;
             let mut tx = app.db.begin().await?;
-            sqlx::query("INSERT INTO credentials(access_key,secret_encrypted) VALUES($1,$2)")
-                .bind(&access)
-                .bind(protected)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("INSERT INTO grants(access_key,bucket_id,writable) VALUES($1,$2,$3)")
+            sqlx::query(
+                "INSERT INTO credentials(access_key,secret_encrypted,project_id) VALUES($1,$2,$3)",
+            )
+            .bind(&access)
+            .bind(protected)
+            .bind(b.project_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO grants(access_key,bucket_id,actions) VALUES($1,$2,$3)")
                 .bind(&access)
                 .bind(b.id)
-                .bind(!read_only)
+                .bind(
+                    Action::role(if read_only { "reader" } else { "writer" })
+                        .iter()
+                        .map(|a| a.name())
+                        .collect::<Vec<_>>(),
+                )
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -257,7 +311,19 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
             read_only,
         }) => {
             let b = app.bucket(&bucket, true).await?;
-            sqlx::query("INSERT INTO grants(access_key,bucket_id,writable) VALUES($1,$2,$3) ON CONFLICT(access_key,bucket_id) DO UPDATE SET writable=excluded.writable").bind(access_key).bind(b.id).bind(!read_only).execute(&app.db).await?;
+            let mut tx = app.db.begin().await?;
+            let project: Uuid = sqlx::query_scalar(
+                "SELECT project_id FROM credentials WHERE access_key=$1 FOR UPDATE",
+            )
+            .bind(&access_key)
+            .fetch_one(&mut *tx)
+            .await?;
+            ensure!(
+                project == b.project_id,
+                "service key and bucket must belong to the same project"
+            );
+            sqlx::query("INSERT INTO grants(access_key,bucket_id,actions) VALUES($1,$2,$3) ON CONFLICT(access_key,bucket_id) DO UPDATE SET actions=excluded.actions").bind(access_key).bind(b.id).bind(Action::role(if read_only { "reader" } else { "writer" }).iter().map(|a| a.name()).collect::<Vec<_>>()).execute(&mut *tx).await?;
+            tx.commit().await?;
             Ok(json!({"granted":true}))
         }
         Command::Credential(Credentials::Revoke { access_key, bucket }) => {
@@ -330,12 +396,14 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
                 .bind(super::account::USER_LOCK)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("INSERT INTO web_users(id,username,password_hash) VALUES($1,$2,$3)")
-                .bind(id)
-                .bind(&username)
-                .bind(hash)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "INSERT INTO web_users(id,username,password_hash,role) VALUES($1,$2,$3,'admin')",
+            )
+            .bind(id)
+            .bind(&username)
+            .bind(hash)
+            .execute(&mut *tx)
+            .await?;
             sqlx::query("DELETE FROM manage_setup")
                 .execute(&mut *tx)
                 .await?;
