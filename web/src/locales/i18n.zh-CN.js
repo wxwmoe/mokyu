@@ -247,4 +247,10 @@ export default {
   error_InternalError: '服务未能完成这次请求。', error_Network: '未能建立连接，请稍后重试。',
   error_NotFound: '没有找到这个项目。', error_NoSuchKey: '没有找到这个对象。', error_NoSuchBucket: '没有找到这个存储桶。',
   error_PreconditionFailed: '内容已经变化，请刷新后再试。', error_RequestTimeout: '请求等待过久，请重试。',
+  quotaTitle: '留一点生长的空间', quotaEdit: '空间额度', quotaUnlimited: '不设上限', quotaExceeded: '已超额度', quotaSaved: '空间额度已更新',
+  quotaScoped: '项目额度由大家共享，这里仅展示你有权查看的存储桶用量。', quotaHint: '额度按文件原始大小计算，去重和编码节省会单独展示。',
+  quotaOverHint: '已有文件会妥善保留，仍可读取、删除，或替换成不增加用量的文件。', quotaReserved: '已预留 {value}', quotaInFlight: '上传途中 {value}', quotaBuckets: '{used} / {limit} 个存储桶',
+  quotaEditHint: '所有上传都遵守这些额度，包括管理员和 S3 请求。', quotaLogicalLimit: '逻辑存储上限', quotaInflightLimit: '在途上传预算', quotaBucketLimit: '存储桶数量上限', quotaUnit: '容量单位',
+  quotaInflightHint: '包含未完成的分片和并发覆盖，即使覆盖可以扣抵旧文件空间，也会计入这个预算。', quotaZeroHint: '留空表示不限；0 表示没有额外空间。调低额度不会删除文件。', quotaInvalid: '请输入非负容量，最多三位小数；存储桶数量需要是整数。',
+  error_QuotaExceeded: '这次上传会超过空间额度或在途预算，请释放空间，或请管理员调整额度。',
 }

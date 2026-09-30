@@ -12,6 +12,7 @@ import UiDialog from '../components/ui/UiDialog.vue'
 import UiTip from '../components/ui/UiTip.vue'
 import FileIcon from '../components/FileIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
+import QuotaPanel from '../components/QuotaPanel.vue'
 
 interface MediaObject { id: string; object_key: string; size: number; public_read: boolean; created_at: string }
 interface ObjectPage { objects: MediaObject[]; prefixes: string[]; next_token: string | null }
@@ -42,6 +43,7 @@ async function refresh() {
 <template>
   <div class="page-heading"><div><p class="eyebrow">{{ t('collection') }}</p><h1>{{ current?.name || t('media') }}</h1><p>{{ t('everything') }}</p></div><div class="heading-actions"><button :disabled="buckets.isFetching.value || (bucket !== '' && objects.isFetching.value)" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button></div></div>
   <p v-if="buckets.error.value || objects.error.value" class="error" role="alert">{{ errorText(buckets.error.value || objects.error.value) }}</p>
+  <QuotaPanel v-if="current?.actions.includes('storage.inspect')" kind="bucket" :id="current.id" />
   <div v-if="!bucket" class="bucket-grid">
     <RouterLink v-for="item in buckets.data.value" :key="item.id" class="bucket-card" :to="`/media/${item.id}`"><img src="/assets/mokyu-pack.svg" alt="" width="64" height="64"><h2>{{ item.name }}</h2><span>{{ t(item.state) }}</span><ArrowUpRight class="bucket-arrow" :size="19" /></RouterLink>
     <EmptyState v-if="!buckets.isPending.value && !buckets.error.value && !buckets.data.value?.length" :title="t('fresh')" :description="t(session?.role === 'admin' ? 'firstBucket' : 'askForBucket')" />

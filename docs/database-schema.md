@@ -289,6 +289,19 @@ credentials 另有：label text=''、可空 xpires_at/last_used_at timestamptz�
 
 Token 范围、有效期及撤销变更推进授权 revision；用户安全 revision 改变使旧 Token 永久失效。权限检查同时锁定用户和 Token，防止撤权前的校验结果被用于稍后提交。
 
+## 配额账本
+
+| 表 | 字段与约束 |
+| --- | --- |
+| `quota_accounts` | `(kind text,id uuid)` 主键，kind=project/bucket；`used_bytes,reserved_bytes,inflight_bytes,object_count,bucket_count bigint=0` 非负；`byte_limit,inflight_limit,bucket_limit bigint` 可空非负 |
+| `quota_reservations` | `id uuid` 主键；`bucket_id uuid` 外键、`object_key text COLLATE C`；唯一可空 `stream_id/upload_id uuid` 外键二选一；唯一可空 `output_stream uuid` 外键；可空 `base_stream uuid` 绑定扣抵版本；`credit_bytes,logical_bytes,inflight_bytes bigint=0` 非负；`closed boolean=false` 表示只等待未结束接收的清理 |
+| `quota_writes` | `stream_id uuid` 主键外键，`reservation_id uuid` 外键；`allocated_bytes,contribution_bytes bigint=0` 非负，分别表示接收预留和对父预留的逻辑增量 |
+| `parts.quota_size` | `bigint=0` 非负，当前已接受分片的原始大小 |
+
+预留的 stream/upload 删除级联，output_stream 删除置空；写入的两外键均级联。每个 `(bucket_id,object_key,base_stream)` 只有一个非空扣抵，旧版本空间不能被并发重复领取；bucket 与 reservation 有反向索引。
+
+额度行独立于授权行，固定先锁项目再锁桶。共享接收器调用 `quota_reserve`；对象、分片、上传和流状态触发器原子维护发布、覆盖、删除、终止和恢复计数。已关闭上传仍保留活跃接收的在途预算，直到流清理。迁移回填可见对象与已接受分片；账本不是可丢弃的运行统计。
+
 ## audit_events
 
 `id bigint identity` 主键；`created_at timestamptz=now()`、可空 `finished_at timestamptz`；可空 `actor_id/token_id uuid`，`actor_label text` 保留操作时账号名称；`source text` 为 web/token/cli。`action/target text`、可空 `project_id/bucket_id uuid` 表示动作与范围；`outcome text='unknown'` 为 unknown/succeeded/failed/partial；可空 `request_id text/status integer`，`detail jsonb='{}'` 仅含显式脱敏业务字段。

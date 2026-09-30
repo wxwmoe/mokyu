@@ -27,6 +27,16 @@ impl<E: Into<anyhow::Error>> From<E> for HttpError {
 }
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
+        let Self(error) = self;
+        let error = crate::quota::database_error(&error)
+            .map(anyhow::Error::from)
+            .unwrap_or(error);
+        let this = Self(error);
+        this.response()
+    }
+}
+impl HttpError {
+    fn response(self) -> Response {
         let status = if let Some(e) = self.0.downcast_ref::<s3s::S3Error>() {
             e.status_code().unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
         } else {

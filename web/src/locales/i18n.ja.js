@@ -247,4 +247,10 @@ export default {
   error_InternalError: 'リクエストを完了できませんでした。', error_Network: '接続できませんでした。もう一度お試しください。',
   error_NotFound: '項目が見つかりません。', error_NoSuchKey: 'オブジェクトが見つかりません。', error_NoSuchBucket: 'バケットが見つかりません。',
   error_PreconditionFailed: '内容が変更されました。更新してからお試しください。', error_RequestTimeout: '時間がかかりすぎたため中断しました。もう一度お試しください。',
+  quotaTitle: '育つための余白', quotaEdit: '容量の上限', quotaUnlimited: '上限なし', quotaExceeded: '上限を超過', quotaSaved: '容量の上限を更新しました',
+  quotaScoped: 'プロジェクトの上限は共有されます。使用量はアクセスできるバケットだけに表示されます。', quotaHint: '元のファイルサイズで計算します。重複排除と圧縮の節約量は別に表示されます。',
+  quotaOverHint: '既存のファイルは保持されます。読み取り、削除、使用量が増えない置換は引き続き可能です。', quotaReserved: '{value} を予約中', quotaInFlight: '転送中 {value}', quotaBuckets: 'バケット {used} / {limit}',
+  quotaEditHint: '管理者や S3 からのアップロードにも適用されます。', quotaLogicalLimit: '論理容量の上限', quotaInflightLimit: '未完了アップロードの上限', quotaBucketLimit: 'バケット数の上限', quotaUnit: '容量の単位',
+  quotaInflightHint: '未完了のパートと同時置換を含みます。既存ファイルの容量を差し引ける場合も対象です。', quotaZeroHint: '空欄は上限なし、0 は追加容量なしです。上限を下げてもファイルは削除されません。', quotaInvalid: '小数点以下 3 桁以内の非負の容量と、整数のバケット数を入力してください。',
+  error_QuotaExceeded: '容量または未完了アップロードの上限を超えます。空きを確保するか管理者にご相談ください。',
 }

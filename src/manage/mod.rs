@@ -5,6 +5,7 @@ mod contract;
 pub(crate) mod keys;
 pub(crate) mod operations;
 pub(crate) mod projects;
+pub(crate) mod quotas;
 pub(crate) mod tokens;
 pub(crate) mod users;
 
@@ -198,6 +199,7 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/object/chunks"
                 | "/api/download"
                 | "/api/projects"
+                | "/api/quotas/{kind}/{id}"
                 | "/api/tokens"
                 | "/api/audit"
                 | "/api/audit/export"

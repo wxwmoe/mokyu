@@ -31,6 +31,15 @@ CORS 文件示例，字段规则见[CORS 设置](manage-api-reference.md#cors-�
 docker exec mokyu cli bucket cors media /config/cors.json
 ```
 
+## 存储额度
+
+| 命令 | 作用 |
+| --- | --- |
+| `quota show KIND ID` | 读取 project/bucket 额度及用量 |
+| `quota set KIND ID FILE` | 用 JSON 完整替换上限，写入审计 |
+
+文件示例：`{"byte_limit":"10737418240","inflight_limit":"2147483648","bucket_limit":"10"}`。null 不限，`"0"` 为零；bucket 仅设置 byte_limit，其余字段为 null。调低额度不会删除现有文件。
+
 ## 活动审计
 
 `audit [--after ID] [--actor NAME] [--action PREFIX]` 返回 `{events,next}`，每页最多 50 条，不含密码或 secret。管理写命令以 Local CLI 记入同一审计记录。

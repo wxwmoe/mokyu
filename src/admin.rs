@@ -41,6 +41,8 @@ pub enum Command {
     #[command(subcommand)]
     Project(Projects),
     #[command(subcommand)]
+    Quota(Quotas),
+    #[command(subcommand)]
     Gc(Gc),
     #[command(subcommand)]
     Cleanup(Cleanup),
@@ -248,6 +250,7 @@ impl Command {
             | Self::Domain(Domains::List)
             | Self::User(Users::List)
             | Self::Project(Projects::List)
+            | Self::Quota(Quotas::Show { .. })
             | Self::Gc(Gc::Status)
             | Self::Cleanup(Cleanup::Status)
             | Self::Task(Tasks::List | Tasks::Show { .. })
@@ -260,6 +263,7 @@ impl Command {
             Self::Domain(_) => Some("domain.change"),
             Self::User(_) => Some("user.change"),
             Self::Project(_) => Some("project.change"),
+            Self::Quota(_) => Some("quota.update"),
             Self::Gc(_) => Some("gc.change"),
             Self::Cleanup(_) => Some("cleanup.run"),
             Self::Maintenance(_) => Some("maintenance.change"),
@@ -276,6 +280,22 @@ pub enum Domains {
     List,
     Set { host: String, bucket: String },
     Delete { host: String },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Quotas {
+    Show {
+        #[arg(value_parser=["project","bucket"])]
+        kind: String,
+        id: Uuid,
+    },
+    Set {
+        #[arg(value_parser=["project","bucket"])]
+        kind: String,
+        id: Uuid,
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Projects {
@@ -370,6 +390,7 @@ async fn receive_frame(socket: &mut UnixStream) -> Result<Vec<u8>> {
 pub async fn client(path: &Path, mut command: Command) -> Result<()> {
     match &mut command {
         Command::User(Users::Membership { file, document, .. })
+        | Command::Quota(Quotas::Set { file, document, .. })
         | Command::Token(
             Tokens::Create { file, document, .. } | Tokens::Update { file, document, .. },
         )

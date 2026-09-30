@@ -17,6 +17,7 @@ mod manage;
 mod multipart;
 mod pack;
 mod pack_tasks;
+mod quota;
 mod range;
 mod s3;
 mod stats;

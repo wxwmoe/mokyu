@@ -247,4 +247,10 @@ export default {
   error_InternalError: 'The service could not complete this request.', error_Network: 'The connection could not be completed.',
   error_NotFound: 'This item could not be found.', error_NoSuchKey: 'This item could not be found.', error_NoSuchBucket: 'This bucket could not be found.',
   error_PreconditionFailed: 'This item changed. Refresh before trying again.', error_RequestTimeout: 'The request took too long. Please try again.',
+  quotaTitle: 'Room to grow', quotaEdit: 'Storage limits', quotaUnlimited: 'No limit', quotaExceeded: 'Over limit', quotaSaved: 'Storage limits updated',
+  quotaScoped: 'Project limits are shared. Usage is shown only for buckets you can access.', quotaHint: 'Original file sizes count toward this limit. Deduplication and encoding savings stay separate.',
+  quotaOverHint: 'Existing files are safe. Reads, deletions and replacements that do not grow usage still work.', quotaReserved: '{value} reserved', quotaInFlight: '{value} in flight', quotaBuckets: '{used} / {limit} buckets',
+  quotaEditHint: 'Limits apply to every upload, including administrator and S3 requests.', quotaLogicalLimit: 'Logical storage limit', quotaInflightLimit: 'In-flight upload budget', quotaBucketLimit: 'Bucket count limit', quotaUnit: 'Size unit',
+  quotaInflightHint: 'Includes unfinished multipart data and concurrent replacements, even when they reuse old storage allowance.', quotaZeroHint: 'Leave blank for no limit. Zero allows no additional space. Lowering a limit never deletes files.', quotaInvalid: 'Use a non-negative size with up to three decimal places and a whole bucket count.',
+  error_QuotaExceeded: 'This upload would exceed a storage or in-flight limit. Free space or ask an administrator to adjust the limit.',
 }

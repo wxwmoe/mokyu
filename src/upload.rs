@@ -245,6 +245,9 @@ impl App {
             return Err(s3_error!(EntityTooLarge).into());
         }
         let mut received = 0i64;
+        let mut reserved = self
+            .reserve_quota(stream, declared.unwrap_or(0), false, upload)
+            .await?;
         let mut offset = 0i64;
         let mut window = Vec::with_capacity(MAX);
         let mut seed = if let Some((id, number)) = upload {
@@ -270,6 +273,9 @@ impl App {
                 .context("object size overflow")?;
             if received > 5 * 1024 * 1024 * 1024 || declared.is_some_and(|n| received > n) {
                 return Err(s3_error!(EntityTooLarge).into());
+            }
+            if received > reserved {
+                reserved = self.reserve_quota(stream, received, true, upload).await?;
             }
             check.update(&data);
             let mut rest = data.as_ref();
@@ -309,6 +315,9 @@ impl App {
             return Err(s3_error!(IncompleteBody).into());
         }
         let (etag, sums) = check.finish(trailers)?;
+        if reserved != received {
+            self.reserve_quota(stream, received, false, upload).await?;
+        }
         if upload.is_some() {
             let prefix = seed.spans.iter().map(|s| s.2).sum::<usize>();
             self.tail(stream, offset, &window[prefix..]).await?;

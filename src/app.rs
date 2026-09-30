@@ -855,6 +855,9 @@ pub fn check_write_conditions(
     Ok(())
 }
 pub fn internal(error: anyhow::Error) -> s3s::S3Error {
+    if let Some(error) = crate::quota::database_error(&error) {
+        return error;
+    }
     match error.downcast::<s3s::S3Error>() {
         Ok(e) => e,
         Err(e) => {

@@ -693,6 +693,7 @@ impl App {
                 true,
             )
             .await?;
+        self.complete_quota(u.id, id, total).await?;
         let should_compress = self
             .config
             .compression

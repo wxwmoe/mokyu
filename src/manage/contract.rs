@@ -110,6 +110,7 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::audit::list))
         .routes(routes!(super::audit::export))
         .routes(routes!(super::audit::get))
+        .routes(routes!(super::quotas::get, super::quotas::put))
         .merge(
             OpenApiRouter::new()
                 .routes(routes!(super::keys::list, super::keys::create))

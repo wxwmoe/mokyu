@@ -352,6 +352,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/quotas/{kind}/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get"];
+        put: operations["put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -608,6 +624,11 @@ export interface components {
             /** Format: uuid */
             token_id?: string | null;
         };
+        Limits: {
+            bucket_limit?: string | null;
+            byte_limit?: string | null;
+            inflight_limit?: string | null;
+        };
         Login: {
             password: string;
             username: string;
@@ -676,6 +697,19 @@ export interface components {
         };
         ProjectMode: {
             enabled: boolean;
+        };
+        Quota: {
+            bucket_count?: string | null;
+            bucket_limit?: string | null;
+            byte_limit?: string | null;
+            /** Format: uuid */
+            id: string;
+            inflight_bytes?: string | null;
+            inflight_limit?: string | null;
+            kind: string;
+            object_count?: string | null;
+            reserved_bytes?: string | null;
+            used_bytes?: string | null;
         };
         Reauthenticate: {
             password: string;
@@ -1470,6 +1504,54 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Quota"];
+                };
+            };
+        };
+    };
+    put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Limits"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Quota"];
+                };
             };
         };
     };

@@ -839,6 +839,7 @@ impl S3 for Gateway {
                 )
                 .await?;
             let mut offset = 0;
+            self.0.reserve_quota(id, source.size, false, None).await?;
             while offset < source.size {
                 let rows = self.0.extents(source.id, offset, source.size).await?;
                 if rows.is_empty() {

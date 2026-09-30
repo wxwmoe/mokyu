@@ -65,6 +65,27 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
 }
 async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
     match command {
+        Command::Quota(command) => {
+            use crate::admin::Quotas;
+            let result = match command {
+                Quotas::Show { kind, id } => {
+                    super::quotas::read(app, &Principal::Local, &kind, id).await?
+                }
+                Quotas::Set {
+                    kind, id, document, ..
+                } => {
+                    super::quotas::save(
+                        app,
+                        &Principal::Local,
+                        &kind,
+                        id,
+                        serde_json::from_value(document.context("missing quota document")?)?,
+                    )
+                    .await?
+                }
+            };
+            Ok(serde_json::to_value(result)?)
+        }
         Command::Audit {
             after,
             actor,

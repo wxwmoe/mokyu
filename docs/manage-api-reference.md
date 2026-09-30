@@ -74,6 +74,14 @@ label 为 1～128 字节；grants 最多 1000 个不同桶，actions 使用项�
 
 `expires_in` 接受 `30d` 等时长，范围大于零且不超过 3650 天；应用密钥省略/null 表示不过期，Token 省略默认 90 天、null 表示不过期。更新时 `keep_expiry=true,expires_in=null` 保留原时间；轮换 overlap 为 0～30 天。密钥与 Token 正文上限 512 KiB。撤销或缩减权限会阻止尚未提交的写操作，已获授权的读取正文可继续完成。
 
+## 存储额度
+
+`GET /api/quotas/{kind}/{id}` 读取 project 或 bucket 的账本；`PUT` 完整替换 `{byte_limit,inflight_limit,bucket_limit}`，需要管理员及近期验证。值为非负十进制字符串或 null，null 不限、`"0"` 为零；桶仅支持 byte_limit。读取返回同名上限及 `used_bytes,reserved_bytes,inflight_bytes,object_count,bucket_count` 字符串。
+
+项目按当前可见对象的原始字节计费，去重和压缩不抵扣额度。接收前预留、覆盖扣抵旧版本、完成时转为已用；在途预算另外包含未完成分片与并发覆盖。低于当前用量的新上限不会删文件，仍允许读取、删除和不增加用量的替换。超过上限返回 HTTP 403、`QuotaExceeded`。
+
+桶账本需要 storage.inspect；项目成员可以读取共享上限，只有拥有全项目范围的成员可以读取项目汇总，其他成员的汇总字段为 null。受限 Token 只可读取获授权的桶账本。
+
 ## 活动审计
 
 `GET /api/audit` 返回 `{events,next}`；`GET /api/audit/{id}` 返回完整详情。支持 `after,limit,actor,action,source,outcome,project,bucket,since,until`：ID 为十进制字符串，after 使用上页 next；limit 默认 50、范围 1～200；actor 匹配账号名称，action 匹配动作前缀；时间为带时区的 RFC3339。source 为 web/token/cli，outcome 为 succeeded/failed/partial/unknown。
