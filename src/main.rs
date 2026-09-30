@@ -105,6 +105,7 @@ fn main() -> Result<()> {
         let(app,mut owner)=app::App::new(config,secrets,budget,start_maintenance).await?;
         tokio::spawn(async move{loop{tokio::time::sleep(Duration::from_secs(1)).await;let alive=tokio::time::timeout(Duration::from_secs(3),sqlx::query("SELECT 1").execute(&mut owner)).await;if !matches!(alive,Ok(Ok(_))){tracing::error!("database ownership connection lost; terminating");std::process::exit(1);}}});
         app.recover().await?;
+        manage::account::initialize(&app).await?;
         let s3_listener=TcpListener::bind(&app.config.listen.s3).await.context("S3 listener")?;
         let web_listener=TcpListener::bind(&app.config.listen.web).await.context("web listener")?;
         let manage_listener=TcpListener::bind(&app.config.listen.manage).await.context("manage listener")?;

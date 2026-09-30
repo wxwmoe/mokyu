@@ -1,3 +1,4 @@
+pub(crate) mod account;
 mod assets;
 mod contract;
 pub(crate) mod operations;
@@ -29,6 +30,18 @@ pub fn schema() -> utoipa::openapi::OpenApi {
 }
 
 pub fn router(app: Arc<App>) -> Router {
+    let avatar_origin = app
+        .config
+        .manage
+        .gravatar_origin()
+        .expect("validated Gravatar origin");
+    let web_policy: HeaderValue = assets::CSP
+        .replace(
+            "img-src 'self' blob: data:;",
+            &format!("img-src 'self' blob: data: {avatar_origin};"),
+        )
+        .parse()
+        .expect("validated content security policy");
     let (api, schema) = contract::routes();
     let schema = bytes::Bytes::from(serde_json::to_vec(&schema).expect("serializable API schema"));
     Router::new()
@@ -71,13 +84,25 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/api/tasks/{id}/report", get(integrity_report))
         .layer(DefaultBodyLimit::max(16 * 1024))
-        .layer(axum::middleware::from_fn(web_headers))
+        .layer(axum::middleware::from_fn_with_state(
+            web_policy,
+            web_headers,
+        ))
         .layer(axum::middleware::from_fn(contract::errors))
         .with_state(app.clone())
         .layer(axum::middleware::from_fn_with_state((app, 2usize), observe))
 }
-async fn web_headers(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+async fn web_headers(
+    State(policy): State<HeaderValue>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
     let mut response = next.run(request).await;
+    if response.headers().contains_key("content-security-policy") {
+        response
+            .headers_mut()
+            .insert("content-security-policy", policy);
+    }
     if !response.headers().contains_key("cache-control") {
         response.headers_mut().insert(
             "cache-control",
@@ -126,8 +151,11 @@ async fn authenticate(
 ) -> Result<(Uuid, String), HttpError> {
     let token = token(headers)?;
     let hash = blake3::hash(token.as_bytes());
-    let row:Option<(Uuid,String,Vec<u8>)>=sqlx::query_as("SELECT u.id,u.username,s.csrf_hash FROM sessions s JOIN web_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.enabled").bind(hash.as_bytes().as_slice()).fetch_optional(&app.db).await?;
-    let (id, name, expected) = row.ok_or_else(unauthorized)?;
+    let row:Option<(Uuid,String,Vec<u8>,DateTime<Utc>)>=sqlx::query_as("SELECT u.id,u.username,s.csrf_hash,s.last_seen_at FROM sessions s JOIN web_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.enabled AND s.auth_revision=u.auth_revision").bind(hash.as_bytes().as_slice()).fetch_optional(&app.db).await?;
+    let (id, name, expected, last_seen) = row.ok_or_else(unauthorized)?;
+    if (Utc::now() - last_seen).num_seconds() >= 300 {
+        sqlx::query("UPDATE sessions SET last_seen_at=now() WHERE token_hash=$1 AND last_seen_at<now()-interval '5 minutes'").bind(hash.as_bytes().as_slice()).execute(&app.db).await?;
+    }
     if csrf {
         origin(app, headers)?;
         let supplied = headers
@@ -148,7 +176,7 @@ struct Login {
     username: String,
     password: String,
 }
-static LOGIN_JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
 #[utoipa::path(post, path = "/api/login", request_body = Login, responses((status = 200, body = LoginReply), (status = 403, body = contract::ErrorBody)))]
 async fn login(
     State(app): State<Arc<App>>,
@@ -159,32 +187,22 @@ async fn login(
     if input.username.len() > 64 || input.password.len() > 1024 {
         return Err(unauthorized());
     }
-    let job = LOGIN_JOBS
-        .try_acquire()
-        .map_err(|_| HttpError(s3s::s3_error!(SlowDown).into()))?;
-    let row: Option<(Uuid, String)> =
-        sqlx::query_as("SELECT id,password_hash FROM web_users WHERE username=$1 AND enabled")
-            .bind(input.username)
-            .fetch_optional(&app.db)
-            .await?;
+    let row: Option<(Uuid, String, i64)> = sqlx::query_as(
+        "SELECT id,password_hash,auth_revision FROM web_users WHERE username=$1 AND enabled",
+    )
+    .bind(input.username)
+    .fetch_optional(&app.db)
+    .await?;
     let started = tokio::time::Instant::now();
-    let verified = if let Some((id, hash)) = row {
-        tokio::task::spawn_blocking(move || {
-            let _job = job;
-            use argon2::{Argon2, PasswordHash, PasswordVerifier};
-            let valid = PasswordHash::new(&hash).ok().is_some_and(|hash| {
-                Argon2::default()
-                    .verify_password(input.password.as_bytes(), &hash)
-                    .is_ok()
-            });
-            valid.then_some((id, hash))
-        })
-        .await?
+    let verified = if let Some((id, hash, revision)) = row {
+        operations::password_matches(hash.clone(), input.password)
+            .await?
+            .then_some((id, hash, revision))
     } else {
         None
     };
     tokio::time::sleep_until(started + Duration::from_millis(300)).await;
-    let (user, verified_hash) = verified.ok_or_else(unauthorized)?;
+    let (user, verified_hash, revision) = verified.ok_or_else(unauthorized)?;
     #[cfg(feature = "fault-injection")]
     crate::faults::point("login-verified").await;
     let token = crate::admin::random_secret()?;
@@ -192,17 +210,20 @@ async fn login(
     let seconds = config::seconds(&app.config.manage.session_lifetime)?;
     let mut tx = app.db.begin().await?;
     // Password reset and disable update this same row before revoking sessions.
-    let current: Option<(String, bool)> =
-        sqlx::query_as("SELECT password_hash,enabled FROM web_users WHERE id=$1 FOR UPDATE")
-            .bind(user)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if !current.is_some_and(|(hash, enabled)| enabled && hash == verified_hash) {
+    let current: Option<(String, bool, i64)> = sqlx::query_as(
+        "SELECT password_hash,enabled,auth_revision FROM web_users WHERE id=$1 FOR UPDATE",
+    )
+    .bind(user)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if !current.is_some_and(|(hash, enabled, current_revision)| {
+        enabled && hash == verified_hash && current_revision == revision
+    }) {
         return Err(unauthorized());
     }
     #[cfg(feature = "fault-injection")]
     crate::faults::point("login-before-session").await;
-    sqlx::query("INSERT INTO sessions(token_hash,user_id,csrf_hash,expires_at) VALUES($1,$2,$3,now()+$4*interval '1 second')").bind(blake3::hash(token.as_bytes()).as_bytes().as_slice()).bind(user).bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice()).bind(seconds as f64).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,csrf_hash,expires_at,auth_revision,user_agent) VALUES($1,$2,$3,now()+$4*interval '1 second',$5,$6)").bind(blake3::hash(token.as_bytes()).as_bytes().as_slice()).bind(user).bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice()).bind(seconds as f64).bind(revision).bind(headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("").chars().filter(|c| !c.is_control()).take(128).collect::<String>()).execute(&mut *tx).await?;
     tx.commit().await?;
     let mut response = Json(LoginReply { csrf_token: csrf }).into_response();
     let secure = if app.config.manage.secure_cookie {
@@ -223,15 +244,18 @@ async fn login(
 }
 #[utoipa::path(post, path = "/api/logout", responses((status = 204), (status = 403, body = contract::ErrorBody)))]
 async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Response, HttpError> {
-    authenticate(&app, &headers, true).await?;
+    let (id, _) = authenticate(&app, &headers, true).await?;
+    let mut tx = app.db.begin().await?;
+    account::lock_session(&mut tx, &headers, id).await?;
     sqlx::query("DELETE FROM sessions WHERE token_hash=$1")
         .bind(
             blake3::hash(token(&headers)?.as_bytes())
                 .as_bytes()
                 .as_slice(),
         )
-        .execute(&app.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     let mut r = StatusCode::NO_CONTENT.into_response();
     r.headers_mut().insert(
         "set-cookie",
@@ -244,10 +268,9 @@ async fn session(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
 ) -> Result<Json<SessionView>, HttpError> {
-    let (id, username) = authenticate(&app, &headers, false).await?;
+    let (id, _) = authenticate(&app, &headers, false).await?;
     Ok(Json(SessionView {
-        id,
-        username,
+        account: account::profile(&app, id).await?,
         csrf_token: csrf_token(token(&headers)?),
     }))
 }

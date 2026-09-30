@@ -1,20 +1,20 @@
 # 管理页面与 API
 
-管理端口默认 9002。所有登录用户均为部署管理员，可访问全部桶和私有对象。管理员由 [CLI](cli-reference.md#凭据与用户) 创建，无默认账户。
+管理端口默认 9002。所有登录用户均为部署管理员，可访问全部桶和私有对象。管理员由 [CLI](cli-reference.md#凭据与用户) 或首次安装引导创建，无默认账户。
 
 导航：[会话](#会话) · [存储桶](#存储桶) · [对象](#对象) · [运行状态](#运行状态) · [后台任务](#后台任务) · [完整性巡检](#完整性巡检) · [页面](#管理页面)
 
 ## 通用约定
 
-- 除登录、`GET /api/info` 和 `GET /api/openapi.json` 外，API 均需有效会话 Cookie。登录要求 `Origin` 精确匹配 `manage.origin`；其他写请求还要求 `X-CSRF-Token`。桶 CORS 不作用于管理端口。
-- Cookie 为 `mokyu_session`，HttpOnly、SameSite=Strict；Secure 和固定有效期由[配置](configuration.md#监听与管理)决定。更改密码、禁用或删除用户会撤销会话。
+- 除登录、安装引导、`GET /api/info` 和 `GET /api/openapi.json` 外，API 均需有效会话 Cookie。登录和安装引导要求 `Origin` 精确匹配 `manage.origin`；其他写请求还要求 `X-CSRF-Token`。桶 CORS 不作用于管理端口。
+- Cookie 为 `mokyu_session`，HttpOnly、SameSite=Strict；Secure 和固定有效期由[配置](configuration.md#监听与管理)决定。自行改密保留当前会话、撤销其余会话；CLI 重置密码、禁用或删除用户撤销全部会话。
 - JSON 请求体上限 16 KiB，批量对象操作另有说明。GET 路由也接受 HEAD，HEAD 不返回响应体。
 - 查询参数按 UTF-8 编码；key 原样保留，不规范化斜杠、空格或路径。分页 token 不应解析或跨范围复用；并发变更期间不提供跨请求快照。
 - 响应使用 `Cache-Control: private, no-store`，下载另带 `Vary: Cookie`；页面 CSP 限制外部脚本、插件和被嵌入。失败可用响应头 `X-Request-ID` 排查，见[请求标识](s3-compatibility.md#请求标识)。
 
 错误统一返回 `{error,code,request_id}`：error 为标准 HTTP 原因，code 为稳定错误标识，request_id 与响应头一致；不会回显密码、数据库错误或请求正文。调用方同时检查 HTTP 状态和 code。
 
-`GET /api/info` 返回产品、程序版本与管理契约标识。`GET /api/openapi.json` 提供从 Rust 类型和路由生成的契约，目前覆盖会话、状态、桶列表与网站设置；其余接口以本文为准。可使用 `mokyu api-schema` 离线导出同一文档，无需配置、数据库或运行服务。
+`GET /api/info` 返回产品、程序版本与管理契约标识。`GET /api/openapi.json` 提供从 Rust 类型和路由生成的契约，目前覆盖账户、会话、安装引导、状态、桶列表与网站设置；其余接口以本文为准。可使用 `mokyu api-schema` 离线导出同一文档，无需配置、数据库或运行服务。
 
 | 状态 | 常见原因 |
 | --- | --- |
@@ -32,9 +32,24 @@
 | --- | --- | --- |
 | `POST /api/login` | `{username,password}`，需 Origin | 200 `{csrf_token}`，设置 Cookie |
 | `POST /api/logout` | 无 | 204，撤销会话并清除 Cookie |
-| `GET /api/session` | 无 | 200 `{id,username,csrf_token}` |
+| `GET /api/session` | 无 | 200 个人资料及 `csrf_token` |
+| `GET /api/me` | 无 | 200 个人资料 |
+| `PUT /api/me` | `{display_name,locale,theme,avatar_email,avatar_enabled}` | 200 保存后的个人资料 |
+| `POST /api/me/password` | `{current_password,new_password}` | 204，保留当前会话 |
+| `POST /api/me/reauth` | `{password}` | 204，更新近期验证时间 |
+| `GET /api/me/sessions` | 无 | 200 `{sessions,more}`，最多 100 个有效会话 |
+| `DELETE /api/me/sessions/{id}` | 会话 UUID | 204，仅能撤销自己的会话 |
+| `DELETE /api/me/sessions` | 无 | 204，撤销其余会话 |
 
-新标签页和刷新后可通过 session 取得 CSRF token。登录最多同时进行两个密码哈希任务，失败不泄露用户名是否存在。
+新标签页和刷新后可通过 session 取得 CSRF token。密码哈希与验证共享最多两个并行任务，失败不泄露用户名是否存在。改密、重置、撤销和登录在提交前重新校验用户与会话状态。
+
+个人资料包含 `id,username,display_name,locale,theme,avatar_email,avatar_enabled,avatar_url`。display_name 最多 240 UTF-8 字节；avatar_email 最多 320 字节，开启头像时必填。locale 为 `en/zh-CN/ja/null`，theme 为 `auto/light/dark/null`；null 表示跟随浏览器。头像默认关闭，启用后返回规范化邮箱的 SHA-256 Gravatar URL，不上传图片。
+
+会话条目为 `{id,created_at,last_seen_at,expires_at,user_agent,current}`，按创建时间倒序；不返回认证凭据。last_seen_at 最多每五分钟刷新一次，不延长会话寿命。新密码为 12～1024 UTF-8 字节。
+
+### 首次安装
+
+`GET /api/bootstrap` 返回 `{setup_required}`。只有数据库没有任何用户时，服务才在管理 socket 旁写入权限 0600 的 `setup-token`，默认 `/run/mokyu/setup-token`。`POST /api/setup` 接收 `{token,username,password}` 并返回 201；成功后令牌失效并删除文件。并发初始化只允许一次成功；CLI 创建首个用户也会关闭此入口。令牌不得放入 URL。
 
 ## 存储桶
 
@@ -257,6 +272,8 @@ processed 为对象和区块检查数之和，不是百分比；cursor 是内部
 ## 管理页面
 
 `GET/HEAD /` 提供 Vue 管理应用；媒体库支持桶、目录与对象浏览和授权下载。现有桶设置、任务、区块包和批量操作保留在 `/classic/`。静态资源随二进制提供，无 Node.js 运行服务。
+
+个人设置支持 en/zh-CN/ja、自动/亮色/暗色、显示名、可选头像、改密和会话管理。语言按需加载，未登录时使用浏览器保存的选择或优先语言，无法匹配回退英语；登录后以账户设置为准，同步浏览器本地偏好。表单离开前提示未保存修改。
 
 编译后的哈希资源支持长期缓存与 ETag；HTML 和固定名称素材重验证，API 及私有下载保持 `private, no-store`。SPA 深链接不覆盖未知 API 或静态资源的 404。`--api-only` 镜像不包含页面，详见 [前端构建](../web/README.md)。
 

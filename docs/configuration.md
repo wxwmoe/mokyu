@@ -29,6 +29,7 @@ Compose 健康检查对应 `["CMD","mokyu","--config","PATH","cli","status"]`。
 | `manage.origin` | 字符串 / `http://localhost:9002` | 浏览器看到的完整 origin，无末尾 `/`；登录和写操作严格匹配 |
 | `manage.secure_cookie` | bool / `true` | Cookie Secure；通过 HTTP 访问时需要 false |
 | `manage.session_lifetime` | 时间 / `12h` | 会话固定有效期，不随查询无限续期 |
+| `manage.gravatar_base_url` | 字符串 / `https://www.gravatar.com/avatar/` | 头像服务路径；允许兼容镜像，必须 HTTPS，不含凭据或查询参数。个人头像默认关闭 |
 
 ## 数据库
 

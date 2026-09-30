@@ -22,8 +22,8 @@ pub(super) struct LoginReply {
 
 #[derive(Serialize, ToSchema)]
 pub(super) struct SessionView {
-    pub id: Uuid,
-    pub username: String,
+    #[serde(flatten)]
+    pub account: super::account::Profile,
     pub csrf_token: String,
 }
 
@@ -79,6 +79,16 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::status))
         .routes(routes!(super::buckets))
         .routes(routes!(super::website, super::save_website))
+        .routes(routes!(super::account::me, super::account::save))
+        .routes(routes!(super::account::password))
+        .routes(routes!(super::account::reauthenticate))
+        .routes(routes!(
+            super::account::sessions,
+            super::account::revoke_others
+        ))
+        .routes(routes!(super::account::revoke_session))
+        .routes(routes!(super::account::bootstrap))
+        .routes(routes!(super::account::setup))
         .split_for_parts();
     api.info.title = "Mokyu management API".into();
     api.info.description = Some("Management endpoints use a session cookie. Mutations require the configured Origin and X-CSRF-Token. S3 and public reads use separate listeners.".into());
@@ -154,7 +164,7 @@ mod tests {
             assert!(schema["paths"][path][method].is_object(), "{method} {path}");
         }
         let schemas = &schema["components"]["schemas"];
-        assert_eq!(schemas["SessionView"]["properties"]["id"]["format"], "uuid");
+        assert_eq!(schemas["Profile"]["properties"]["id"]["format"], "uuid");
         assert!(
             schemas["BucketView"]["properties"]
                 .get("secret_key")

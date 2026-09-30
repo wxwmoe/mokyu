@@ -10,12 +10,32 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
+static PASSWORD_JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+pub async fn password_matches(hash: String, password: String) -> Result<bool> {
+    let job = PASSWORD_JOBS
+        .try_acquire()
+        .map_err(|_| s3s::s3_error!(SlowDown))?;
+    Ok(tokio::task::spawn_blocking(move || {
+        let _job = job;
+        use argon2::{Argon2, PasswordHash, PasswordVerifier};
+        PasswordHash::new(&hash).ok().is_some_and(|hash| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &hash)
+                .is_ok()
+        })
+    })
+    .await?)
+}
 pub async fn password_hash(password: String) -> Result<String> {
     ensure!(
         password.len() >= 12 && password.len() <= 1024,
         "password must contain 12..1024 bytes"
     );
+    let job = PASSWORD_JOBS
+        .try_acquire()
+        .map_err(|_| s3s::s3_error!(SlowDown))?;
     tokio::task::spawn_blocking(move || {
+        let _job = job;
         use argon2::{
             Argon2,
             password_hash::{PasswordHasher, SaltString},
@@ -305,12 +325,21 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
             );
             let hash = password_hash(password.context("missing password")?).await?;
             let id = Uuid::new_v4();
+            let mut tx = app.db.begin().await?;
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(super::account::USER_LOCK)
+                .execute(&mut *tx)
+                .await?;
             sqlx::query("INSERT INTO web_users(id,username,password_hash) VALUES($1,$2,$3)")
                 .bind(id)
                 .bind(&username)
                 .bind(hash)
-                .execute(&app.db)
+                .execute(&mut *tx)
                 .await?;
+            sqlx::query("DELETE FROM manage_setup")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
             Ok(json!({"id":id,"username":username}))
         }
         Command::User(Users::Password {
@@ -319,7 +348,7 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
             let hash = password_hash(password.context("missing password")?).await?;
             let mut tx = app.db.begin().await?;
             let id: Uuid = sqlx::query_scalar(
-                "UPDATE web_users SET password_hash=$2 WHERE username=$1 RETURNING id",
+                "UPDATE web_users SET password_hash=$2,auth_revision=auth_revision+1 WHERE username=$1 RETURNING id",
             )
             .bind(&username)
             .bind(hash)
@@ -336,7 +365,7 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
         Command::User(Users::Disable { username }) => {
             let mut tx = app.db.begin().await?;
             let id: Uuid = sqlx::query_scalar(
-                "UPDATE web_users SET enabled=false WHERE username=$1 RETURNING id",
+                "UPDATE web_users SET enabled=false,auth_revision=auth_revision+1 WHERE username=$1 RETURNING id",
             )
             .bind(&username)
             .fetch_optional(&mut *tx)

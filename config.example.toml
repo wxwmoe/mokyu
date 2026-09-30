@@ -48,6 +48,7 @@ credential_key_file = "secrets/credential-key"
 origin = "https://admin.example.com"
 secure_cookie = true
 session_lifetime = "12h"
+# gravatar_base_url = "https://www.gravatar.com/avatar/"
 
 [storage]
 data = "/data"

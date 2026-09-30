@@ -53,6 +53,8 @@ Compose 将配置只读挂载、数据目录可写挂载，CLI socket 使用 tmp
 
 ## 初始化与接入
 
+首次打开管理页可创建管理员：先运行 `docker exec mokyu cat /run/mokyu/setup-token`，将令牌填入页面。该文件与 CLI socket 同目录，只在尚无用户时有效；也可使用下方 CLI 命令创建管理员。账户设置支持语言、外观、可选 Gravatar、改密和会话撤销。
+
 ```sh
 docker exec mokyu cli bucket create media
 docker exec mokyu cli credential create media

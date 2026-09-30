@@ -171,6 +171,7 @@ pub struct Manage {
     pub origin: String,
     pub secure_cookie: bool,
     pub session_lifetime: String,
+    pub gravatar_base_url: String,
 }
 impl Default for Manage {
     fn default() -> Self {
@@ -178,7 +179,29 @@ impl Default for Manage {
             origin: "http://localhost:9002".into(),
             secure_cookie: true,
             session_lifetime: "12h".into(),
+            gravatar_base_url: "https://www.gravatar.com/avatar/".into(),
         }
+    }
+}
+impl Manage {
+    pub fn gravatar_origin(&self) -> Result<String> {
+        let uri: hyper::Uri = self
+            .gravatar_base_url
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid manage.gravatar_base_url"))?;
+        let authority = uri.authority().context("Gravatar URL requires a host")?;
+        ensure!(
+            uri.scheme_str() == Some("https")
+                && !authority.as_str().contains('@')
+                && authority
+                    .as_str()
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-_:[]".contains(&b))
+                && uri.query().is_none()
+                && !self.gravatar_base_url.contains('#'),
+            "Gravatar URL requires an HTTPS host without credentials, query parameters or fragments"
+        );
+        Ok(format!("https://{authority}"))
     }
 }
 #[derive(Deserialize)]
@@ -434,6 +457,7 @@ impl Config {
             anyhow::anyhow!("invalid TOML configuration, unknown field or wrong type")
         })?;
         let base = path.parent().unwrap_or(Path::new("."));
+        c.manage.gravatar_origin()?;
         c.compression.validate()?;
         c.pack.validate()?;
         seconds(&c.processing.read_idle_timeout)?;
@@ -820,6 +844,30 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn avatar_mirror_requires_a_safe_https_origin() {
+        let mut manage = Manage::default();
+        assert_eq!(
+            manage.gravatar_origin().unwrap(),
+            "https://www.gravatar.com"
+        );
+        manage.gravatar_base_url = "https://avatar.example:8443/gravatar/".into();
+        assert_eq!(
+            manage.gravatar_origin().unwrap(),
+            "https://avatar.example:8443"
+        );
+        for invalid in [
+            "http://avatar.example/avatar",
+            "https://user@avatar.example/avatar",
+            "https://avatar.example/avatar?size=1",
+            "https://avatar.example/avatar#fragment",
+            "https://*/avatar",
+            "https://avatar.example;script-src/avatar",
+        ] {
+            manage.gravatar_base_url = invalid.into();
+            assert!(manage.gravatar_origin().is_err(), "{invalid}");
+        }
+    }
     #[test]
     fn backend_minimum_age_is_optional_and_allows_zero() {
         let mut backend: Backend =

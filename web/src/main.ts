@@ -5,5 +5,7 @@ import { router } from './app/router'
 import { queries } from './api/client'
 import '@fontsource-variable/nunito'
 import './app/styles.css'
+import { initializeLocale } from './app/i18n'
 
+await initializeLocale()
 createApp(App).use(router).use(VueQueryPlugin, { queryClient: queries }).mount('#app')

@@ -8,6 +8,7 @@ export const router = createRouter({
     { path: '/login', name: 'login', component: () => import('../features/Login.vue') },
     { path: '/', redirect: '/media' },
     { path: '/media', name: 'media', component: () => import('../features/Media.vue') },
+    { path: '/account', name: 'account', component: () => import('../features/Account.vue') },
     { path: '/media/:bucket', name: 'objects', component: () => import('../features/Media.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/media' },
   ],
@@ -19,7 +20,7 @@ export const startupError = ref('')
 router.beforeEach(async to => {
   if (!initialized) {
     try { await refreshSession() }
-    catch { startupError.value = 'The workspace could not be reached. Check your connection and try again.' }
+    catch { startupError.value = 'unreachable' }
     initialized = true
   }
   if (!session.value && to.name !== 'login') return { name: 'login' }

@@ -287,6 +287,12 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | `username` | text | 否 | — | 用户名 |
 | `password_hash` | text | 否 | — | 带参数与 salt 的 Argon2 哈希 |
 | `enabled` | boolean | 否 | `true` | 可否登录/使用会话 |
+| `display_name` | text | 否 | `''` | 显示名，最多 240 UTF-8 字节 |
+| `locale` | text | 是 | — | en/zh-CN/ja，NULL 跟随浏览器 |
+| `theme` | text | 是 | — | auto/light/dark，NULL 跟随浏览器 |
+| `avatar_email` | text | 否 | `''` | Gravatar 邮箱，最多 320 UTF-8 字节 |
+| `avatar_enabled` | boolean | 否 | `false` | 用户主动开启外部头像 |
+| `auth_revision` | bigint | 否 | `0` | 密码重置或禁用递增，防止旧验证结果生成有效会话 |
 | `created_at` | timestamptz | 否 | `now()` | 创建时间 |
 
 主键：`id`；`username` 唯一。
@@ -296,15 +302,30 @@ SQLx 管理的迁移历史，纳入数据库备份，不应手动修改。
 | 字段 | 类型 | 可空 | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
 | `token_hash` | bytea | 否 | — | cookie token 的 BLAKE3，不存明文 token |
+| `id` | uuid | 否 | `gen_random_uuid()` | 对外会话标识，唯一，不用于认证 |
 | `user_id` | uuid | 否 | — | 所属 Web 用户 |
 | `csrf_hash` | bytea | 否 | — | CSRF token 的 BLAKE3 |
 | `expires_at` | timestamptz | 否 | — | 固定到期时间 |
+| `created_at` / `last_seen_at` / `reauthenticated_at` | timestamptz | 否 | `now()` | 创建、最近活动、最近密码验证时间 |
+| `auth_revision` | bigint | 否 | `0` | 必须匹配用户当前认证修订号 |
+| `user_agent` | text | 否 | `''` | 浏览器描述，最多 512 UTF-8 字节，不用于鉴权 |
 
 主键：`token_hash`；两个 hash 均固定 32 字节；`user_id` 引用 `web_users`，随用户删除级联。
 
 | 索引 | 列与条件 |
 | --- | --- |
 | `sessions_expiry` | `(expires_at)` |
+| `sessions_user` | `(user_id,created_at DESC,id)` |
+
+## manage_setup
+
+| 字段 | 类型 | 可空 | 默认值 | 含义 |
+| --- | --- | --- | --- | --- |
+| `singleton` | boolean | 否 | `true` | 固定 true，主键 |
+| `token_hash` | bytea | 否 | — | 首次安装令牌的 BLAKE3，32 字节 |
+| `created_at` | timestamptz | 否 | `now()` | 生成时间 |
+
+首个用户创建后删除该行；令牌明文仅在管理 socket 旁的 0600 文件中保存。
 
 ## tasks
 

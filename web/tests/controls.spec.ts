@@ -1,5 +1,15 @@
 import { readFileSync } from 'node:fs'
 import { test, expect, type Page } from '@playwright/test'
+import zh from '../src/locales/i18n.zh-CN.js'
+import ja from '../src/locales/i18n.ja.js'
+test.beforeEach(async ({ request }) => {
+  const password = process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8').trim()
+  const login = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
+  expect(login.ok()).toBe(true)
+  const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await login.json()).csrf_token }
+  expect((await request.put('/api/me', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })).ok()).toBe(true)
+  await request.post('/api/logout', { headers })
+})
 
 async function login(page: Page) {
   await page.goto('/')
@@ -8,7 +18,7 @@ async function login(page: Page) {
   await page.getByRole('textbox', { name: 'Password', exact: true }).fill(password.trim())
   await page.getByRole('button', { name: 'Come on in', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Media library', exact: true })).toBeVisible()
-  await page.getByRole('link', { name: 'media active', exact: true }).click()
+  await page.getByRole('link', { name: 'media Active', exact: true }).click()
   await expect(page.getByRole('button', { name: 'small-part', exact: true })).toBeVisible()
 }
 
@@ -42,6 +52,41 @@ test('styled select, drawer, focus restoration, notification and persisted theme
   await page.reload()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
   await expect(page.getByRole('button', { name: 'small-part', exact: true })).toBeVisible()
+  expect(errors).toEqual([])
+})
+
+test('account locale, appearance, profile guard and avatar fallback', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  await login(page)
+  await page.getByRole('button', { name: 'Account menu', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Personal settings', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Display name', exact: true }).fill('Mochi keeper')
+  await page.getByRole('link', { name: 'Media library', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Leave these changes behind?' })).toBeVisible()
+  await page.getByRole('button', { name: 'Keep editing', exact: true }).click()
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click()
+  await expect(page.getByText('All tucked away', { exact: true }).first()).toBeVisible()
+  await page.getByRole('combobox', { name: 'Appearance', exact: true }).click()
+  await page.getByRole('option', { name: 'Dark', exact: true }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+  await page.getByRole('button', { name: 'Language', exact: true }).click()
+  await page.getByRole('menuitem', { name: zh['language_zh-CN'], exact: true }).click()
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
+  await expect(page.getByRole('heading', { name: zh.account, exact: true })).toBeVisible()
+  await page.reload()
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
+  await page.getByRole('button', { name: zh.language, exact: true }).click()
+  await page.getByRole('menuitem', { name: ja.language_ja, exact: true }).click()
+  await expect(page.locator('html')).toHaveAttribute('lang', 'ja')
+  await page.getByRole('button', { name: ja.language, exact: true }).click()
+  await page.getByRole('menuitem', { name: 'English', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Gravatar email', exact: true }).fill('missing-avatar@example.test')
+  await page.getByRole('switch', { name: 'Use my Gravatar', exact: true }).click()
+  await page.route('https://www.gravatar.com/**', route => route.fulfill({ status: 404 }))
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click()
+  await expect(page.locator('.profile-intro .avatar-fallback')).toHaveText('MK')
+  await expect(page.getByText('This session', { exact: true })).toBeVisible()
   expect(errors).toEqual([])
 })
 
