@@ -6,13 +6,15 @@
 
 ## 通用约定
 
-- 除登录外，API 均需有效会话 Cookie。登录要求 `Origin` 精确匹配 `manage.origin`；其他写请求还要求 `X-CSRF-Token`。桶 CORS 不作用于管理端口。
+- 除登录、`GET /api/info` 和 `GET /api/openapi.json` 外，API 均需有效会话 Cookie。登录要求 `Origin` 精确匹配 `manage.origin`；其他写请求还要求 `X-CSRF-Token`。桶 CORS 不作用于管理端口。
 - Cookie 为 `mokyu_session`，HttpOnly、SameSite=Strict；Secure 和固定有效期由[配置](configuration.md#监听与管理)决定。更改密码、禁用或删除用户会撤销会话。
 - JSON 请求体上限 16 KiB，批量对象操作另有说明。GET 路由也接受 HEAD，HEAD 不返回响应体。
 - 查询参数按 UTF-8 编码；key 原样保留，不规范化斜杠、空格或路径。分页 token 不应解析或跨范围复用；并发变更期间不提供跨请求快照。
 - 响应使用 `Cache-Control: private, no-store`，下载另带 `Vary: Cookie`；页面 CSP 限制外部脚本、插件和被嵌入。失败可用响应头 `X-Request-ID` 排查，见[请求标识](s3-compatibility.md#请求标识)。
 
-业务错误返回 `{"error":"标准 HTTP 原因"}`；格式错误由框架返回，调用方应以 HTTP 状态判断。
+错误统一返回 `{error,code,request_id}`：error 为标准 HTTP 原因，code 为稳定错误标识，request_id 与响应头一致；不会回显密码、数据库错误或请求正文。调用方同时检查 HTTP 状态和 code。
+
+`GET /api/info` 返回产品、程序版本与管理契约标识。`GET /api/openapi.json` 提供从 Rust 类型和路由生成的契约，目前覆盖会话、状态、桶列表与网站设置；其余接口以本文为准。可使用 `mokyu api-schema` 离线导出同一文档，无需配置、数据库或运行服务。
 
 | 状态 | 常见原因 |
 | --- | --- |

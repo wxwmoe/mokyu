@@ -6,6 +6,8 @@
 
 成功向 stdout 输出 JSON、退出 0；执行或连接失败向 stderr 输出错误并非零退出，参数错误退出 2。管理帧最多 1 MiB，RPC 等待 60 秒。任务创建成功表示已排队，后续结果通过 `task show` 查看。
 
+离线命令 `mokyu api-schema` 输出管理 API 的 OpenAPI JSON，不访问配置、数据库或 Unix socket；可用于生成客户端类型。
+
 ## 桶与域名
 
 | 命令 | 作用与返回 |

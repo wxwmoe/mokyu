@@ -12,6 +12,7 @@ mod http;
 mod integrity;
 mod lifecycle;
 mod listing;
+mod manage;
 mod multipart;
 mod pack;
 mod pack_tasks;
@@ -47,6 +48,8 @@ enum Command {
     },
     /// Generate fresh 32-byte key material without accessing service state.
     Keygen,
+    /// Print the management API schema without accessing service state.
+    ApiSchema,
     Cli {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -65,6 +68,10 @@ fn main() -> Result<()> {
         .init();
     if matches!(args.command, Some(Command::Keygen)) {
         println!("{}", admin::random_secret()?);
+        return Ok(());
+    }
+    if matches!(args.command, Some(Command::ApiSchema)) {
+        println!("{}", serde_json::to_string_pretty(&manage::schema())?);
         return Ok(());
     }
     let start_maintenance = matches!(&args.command, Some(Command::Serve { maintenance: true }));
@@ -111,7 +118,7 @@ fn main() -> Result<()> {
         tokio::select! {
             result=serve_s3(s3_listener,s3,connections.clone(),app.clone())=>result?,
             result=serve_router(web_listener,http::public_router(app.clone()),connections.clone())=>result?,
-            result=serve_router(manage_listener,http::manage_router(app.clone()),connections)=>result?,
+            result=serve_router(manage_listener,manage::router(app.clone()),connections)=>result?,
             result=admin::serve(app.clone())=>result?,
             result=lifecycle::run(app.clone())=>result?,
             result=lifecycle::run_history(app.clone())=>result?,

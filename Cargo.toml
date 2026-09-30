@@ -43,6 +43,8 @@ toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+utoipa = { version = "=6.0.0", features = ["chrono", "uuid", "axum_extras"] }
+utoipa-axum = "=0.3.0"
 zstd = { version = "=0.14.0", features = ["experimental"] }
 
 [profile.release]
