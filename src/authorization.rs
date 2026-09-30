@@ -103,9 +103,9 @@ impl Principal {
                 revision,
             } => {
                 let query = if lock {
-                    "SELECT u.role,u.authorization_revision FROM web_users u JOIN sessions s ON s.user_id=u.id WHERE u.id=$1 AND s.id=$2 AND u.enabled AND s.expires_at>now() AND s.auth_revision=u.auth_revision FOR SHARE OF u"
+                    "SELECT u.role,u.authorization_revision FROM web_users u JOIN sessions s ON s.user_id=u.id WHERE u.id=$1 AND s.id=$2 AND u.enabled AND NOT u.must_change_password AND s.expires_at>now() AND s.auth_revision=u.auth_revision FOR SHARE OF u"
                 } else {
-                    "SELECT u.role,u.authorization_revision FROM web_users u JOIN sessions s ON s.user_id=u.id WHERE u.id=$1 AND s.id=$2 AND u.enabled AND s.expires_at>now() AND s.auth_revision=u.auth_revision"
+                    "SELECT u.role,u.authorization_revision FROM web_users u JOIN sessions s ON s.user_id=u.id WHERE u.id=$1 AND s.id=$2 AND u.enabled AND NOT u.must_change_password AND s.expires_at>now() AND s.auth_revision=u.auth_revision"
                 };
                 let row: Option<(String, i64)> = sqlx::query_as(query)
                     .bind(id)

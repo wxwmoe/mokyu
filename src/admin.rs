@@ -201,6 +201,10 @@ pub enum Users {
     List,
     Create {
         username: String,
+        #[arg(long, default_value="admin", value_parser=["admin","member"])]
+        role: String,
+        #[arg(long)]
+        require_change: bool,
         #[arg(long)]
         password_stdin: bool,
         #[arg(skip)]
@@ -209,12 +213,33 @@ pub enum Users {
     Password {
         username: String,
         #[arg(long)]
+        require_change: bool,
+        #[arg(long)]
         password_stdin: bool,
         #[arg(skip)]
         password: Option<String>,
     },
     Disable {
         username: String,
+    },
+    Enable {
+        username: String,
+    },
+    Role {
+        username: String,
+        #[arg(value_parser=["admin","member"])]
+        role: String,
+    },
+    Membership {
+        username: String,
+        project: Uuid,
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    Leave {
+        username: String,
+        project: Uuid,
     },
     Delete {
         username: String,
@@ -242,6 +267,13 @@ async fn receive_frame(socket: &mut UnixStream) -> Result<Vec<u8>> {
 }
 pub async fn client(path: &Path, mut command: Command) -> Result<()> {
     match &mut command {
+        Command::User(Users::Membership { file, document, .. }) => {
+            ensure!(
+                std::fs::metadata(&file)?.len() <= 512 * 1024,
+                "membership file too large"
+            );
+            *document = Some(serde_json::from_slice(&std::fs::read(file)?)?);
+        }
         Command::Bucket(Buckets::Purge {
             name,
             execute: true,

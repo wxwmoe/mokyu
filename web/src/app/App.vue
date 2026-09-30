@@ -2,12 +2,13 @@
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { TooltipProvider, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from 'reka-ui'
-import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ArrowUpRight, ChevronDown, Settings2 } from 'lucide-vue-next'
+import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ArrowUpRight, ChevronDown, Settings2, Users, FolderHeart } from 'lucide-vue-next'
 import { session, signOut, savePreferences } from '../api/client'
 import { appearance, setTheme } from './theme'
 import { report } from './feedback'
 import { startupError } from './router'
 import Notices from '../components/Notices.vue'
+import SecurityPrompt from '../components/SecurityPrompt.vue'
 import UiMenu from '../components/ui/UiMenu.vue'
 import UiTip from '../components/ui/UiTip.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
@@ -27,11 +28,12 @@ async function toggleTheme() { try { const value = appearance.value === 'dark' ?
     <aside class="sidebar">
       <RouterLink class="brand" to="/"><img src="/assets/mokyu-icon.svg" alt="" width="48" height="48"><span>Mokyu<small>{{ t('brandNote') }}</small></span></RouterLink>
       <p class="nav-label">{{ t('workspace') }}</p>
-      <nav :aria-label="t('workspace')"><RouterLink to="/media"><Images :size="19" />{{ t('media') }}<span class="nav-dot" /></RouterLink></nav>
+      <nav :aria-label="t('workspace')"><RouterLink to="/media"><Images :size="19" />{{ t('media') }}<span class="nav-dot" /></RouterLink><RouterLink v-if="session.role !== 'admin' && session.project_management" to="/projects"><FolderHeart :size="19" />{{ t('projects') }}</RouterLink></nav>
+      <template v-if="session.role === 'admin'"><p class="nav-label">{{ t('administration') }}</p><nav :aria-label="t('administration')"><RouterLink to="/users"><Users :size="19" />{{ t('users') }}</RouterLink><RouterLink v-if="session.project_management" to="/projects"><FolderHeart :size="19" />{{ t('projects') }}</RouterLink></nav></template>
       <div class="sidebar-bottom"><div class="mochi-note"><Sparkles class="note-sparkle" :size="18" /><img src="/assets/mokyu-mochi.svg" alt="" width="124" height="116"><p>{{ t('moreLove') }}</p><span>{{ t('gently') }}</span></div></div>
     </aside>
     <div class="workspace">
-      <header class="topbar"><div class="topbar-location"><button class="icon-button mobile-nav" :aria-label="t('navigation')" @click="navigation = true"><Menu :size="21" /></button><span class="location-icon"><Images :size="18" /></span><span>{{ t('workspace') }} <span class="crumb-slash">/</span> <strong>{{ t(route.name === 'account' ? 'account' : 'media') }}</strong></span></div><div class="topbar-actions">
+      <header class="topbar"><div class="topbar-location"><button class="icon-button mobile-nav" :aria-label="t('navigation')" @click="navigation = true"><Menu :size="21" /></button><span class="location-icon"><Images :size="18" /></span><span>{{ t('workspace') }} <span class="crumb-slash">/</span> <strong>{{ t(['account', 'users', 'projects'].includes(String(route.name)) ? String(route.name) : 'media') }}</strong></span></div><div class="topbar-actions">
         <LocaleMenu />
         <UiTip :text="t(appearance === 'dark' ? 'lightSwitch' : 'darkSwitch')"><button class="icon-button" :aria-label="t(appearance === 'dark' ? 'lightSwitch' : 'darkSwitch')" @click="toggleTheme"><Sun v-if="appearance === 'dark'" :size="19" /><Moon v-else :size="19" /></button></UiTip>
         <span class="topbar-divider" />
@@ -42,6 +44,7 @@ async function toggleTheme() { try { const value = appearance.value === 'dark' ?
     </div>
   </div>
   <main v-else id="main" tabindex="-1"><RouterView /></main>
-  <UiDialog v-model:open="navigation" :title="t('yourWorkspace')"><nav class="mobile-menu"><RouterLink to="/media" @click="navigation = false"><Images :size="20" />{{ t('media') }}</RouterLink></nav></UiDialog>
+  <UiDialog v-model:open="navigation" :title="t('yourWorkspace')"><nav class="mobile-menu"><RouterLink to="/media" @click="navigation = false"><Images :size="20" />{{ t('media') }}</RouterLink><RouterLink v-if="session?.role === 'admin'" to="/users" @click="navigation = false"><Users :size="20" />{{ t('users') }}</RouterLink><RouterLink v-if="session?.project_management" to="/projects" @click="navigation = false"><FolderHeart :size="20" />{{ t('projects') }}</RouterLink></nav></UiDialog>
   <Notices />
+  <SecurityPrompt />
 </TooltipProvider></template>

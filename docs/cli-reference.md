@@ -51,10 +51,16 @@ docker exec mokyu cli bucket cors media /config/cors.json
 | `credential revoke ACCESS_KEY BUCKET` | 撤销桶授权，返回 revoked |
 | `credential disable ACCESS_KEY` | 禁用凭据及其全部桶授权 |
 | `user list` | 返回 id/username/enabled，不含密码哈希 |
-| `user create USERNAME [--password-stdin]` | 创建 Web 管理员；无默认账户，密码 12～1024 字节 |
-| `user password USERNAME [--password-stdin]` | 更新密码并撤销全部会话 |
+| `user create USERNAME [--role admin/member] [--require-change] [--password-stdin]` | 创建账户，默认管理员；密码 12～1024 字节 |
+| `user password USERNAME [--require-change] [--password-stdin]` | 更新密码并撤销全部会话 |
+| `user enable USERNAME` | 重新允许登录 |
+| `user role USERNAME admin/member` | 调整角色并退出已有会话 |
+| `user membership USERNAME PROJECT_ID FILE` | 用 JSON 完整替换项目授权，格式见管理 API |
+| `user leave USERNAME PROJECT_ID` | 移除项目授权 |
 | `user disable USERNAME` | 禁用用户并撤销全部会话 |
 | `user delete USERNAME` | 删除用户及其会话 |
+
+最后一个启用的管理员不可被禁用、降级或删除。`--require-change` 要求下次登录先改密。`user list` 包含角色、启用状态和改密要求。
 
 创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入并再次确认，使用 `docker exec -it`；非终端须指定 `--password-stdin`。不接受明文命令参数，自动化时可从 stdin 读取一行：
 

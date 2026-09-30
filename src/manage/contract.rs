@@ -99,6 +99,22 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::account::setup))
         .routes(routes!(super::projects::list, super::projects::create))
         .routes(routes!(super::projects::update, super::projects::delete))
+        .routes(routes!(super::users::list, super::users::create))
+        .routes(routes!(
+            super::users::get,
+            super::users::update,
+            super::users::delete
+        ))
+        .routes(routes!(super::users::reset))
+        .routes(routes!(super::users::members))
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(
+                    super::users::put_member,
+                    super::users::remove_member
+                ))
+                .layer(axum::extract::DefaultBodyLimit::max(512 * 1024)),
+        )
         .routes(routes!(
             super::projects::get_mode,
             super::projects::set_mode
@@ -185,5 +201,13 @@ mod tests {
                 .is_none()
         );
         assert_eq!(schemas["Login"]["additionalProperties"], false);
+        let mut ids = std::collections::HashSet::new();
+        for path in schema["paths"].as_object().unwrap().values() {
+            for operation in path.as_object().unwrap().values() {
+                if let Some(id) = operation["operationId"].as_str() {
+                    assert!(ids.insert(id), "duplicate operation ID: {id}");
+                }
+            }
+        }
     }
 }

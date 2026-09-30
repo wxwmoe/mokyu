@@ -43,13 +43,33 @@
 
 新标签页和刷新后可通过 session 取得 CSRF token。密码哈希与验证共享最多两个并行任务，失败不泄露用户名是否存在。改密、重置、撤销和登录在提交前重新校验用户与会话状态。
 
-个人资料包含 `id,username,role,project_management,display_name,locale,theme,avatar_email,avatar_enabled,avatar_url`。display_name 最多 240 UTF-8 字节；avatar_email 最多 320 字节，开启头像时必填。locale 为 `en/zh-CN/ja/null`，theme 为 `auto/light/dark/null`；null 表示跟随浏览器。头像默认关闭，启用后返回规范化邮箱的 SHA-256 Gravatar URL，不上传图片。
+个人资料包含 `id,username,role,project_management,must_change_password,display_name,locale,theme,avatar_email,avatar_enabled,avatar_url`。display_name 最多 240 UTF-8 字节；avatar_email 最多 320 字节，开启头像时必填。locale 为 `en/zh-CN/ja/null`，theme 为 `auto/light/dark/null`；null 表示跟随浏览器。头像默认关闭，启用后返回规范化邮箱的 SHA-256 Gravatar URL，不上传图片。
 
 会话条目为 `{id,created_at,last_seen_at,expires_at,user_agent,current}`，按创建时间倒序；不返回认证凭据。last_seen_at 最多每五分钟刷新一次，不延长会话寿命。新密码为 12～1024 UTF-8 字节。
 
 ### 首次安装
 
 `GET /api/bootstrap` 返回 `{setup_required}`。只有数据库没有任何用户时，服务才在管理 socket 旁写入权限 0600 的 `setup-token`，默认 `/run/mokyu/setup-token`。`POST /api/setup` 接收 `{token,username,password}` 并返回 201；成功后令牌失效并删除文件。并发初始化只允许一次成功；CLI 创建首个用户也会关闭此入口。令牌不得放入 URL。
+
+## 用户与成员
+
+以下接口仅管理员可用，写操作需要近期密码验证。用户记录不包含密码、哈希或头像邮箱。修改角色/状态、重置密码和删除会撤销该用户的会话；不删除项目媒体与 S3 应用密钥。
+
+| 方法与路径 | 输入与行为 |
+| --- | --- |
+| `GET /api/users` | `q?,role?,after?,limit?`；按用户名 C 排序，limit 1～100，返回 `{users,next}`，after 使用上页 next |
+| `POST /api/users` | `{username,password,role,must_change_password?}`；role 为 admin/member，改密要求默认 true；返回 201 用户 |
+| `GET /api/users/{id}` | 返回单个用户记录 |
+| `PATCH /api/users/{id}` | `{role?,enabled?}`，至少一项；返回 200 用户 |
+| `DELETE /api/users/{id}` | 删除账户、会话及成员授权；返回 204 |
+| `POST /api/users/{id}/reset-password` | `{password,must_change_password?}`；改密要求默认 true；返回 204 |
+| `GET /api/projects/{id}/members` | 返回 `{user_id,username,display_name,enabled,role,scope,grants}` 数组，最多 1000 项 |
+| `PUT /api/projects/{id}/members/{user}` | `{role,scope,grants:[{bucket_id,actions}]}`，完整替换此项目授权；返回 204 |
+| `DELETE /api/projects/{id}/members/{user}` | 仅移除该项目授权；返回 204 |
+
+创建普通成员会开启项目管理。成员授权请求体上限 512 KiB，最多 1000 个桶。all 范围的 grants 必须为空；selected 范围只接受项目内的不同桶，动作不得超出角色上限。管理员无需成员授权；提升为管理员会移除旧成员关系，再降级时需重新分配。
+
+最后一个已启用管理员不可被禁用、降级或删除；Web 与 CLI 的并发操作共用保护，返回 409 `LastAdministrator`。must_change_password 用户可登录、查看个人设置和修改密码，其余业务 API 返回 403 `PasswordChangeRequired`；自行改密后解除。
 
 ## 项目与权限
 

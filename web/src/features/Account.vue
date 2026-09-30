@@ -4,7 +4,7 @@ import { onBeforeRouteLeave } from 'vue-router'
 import { useQuery } from '@tanstack/vue-query'
 import { SwitchRoot, SwitchThumb } from 'reka-ui'
 import { Heart, ShieldCheck, Laptop, LogOut, Palette, Save } from 'lucide-vue-next'
-import { api, write, session, savePreferences } from '../api/client'
+import { api, write, session, savePreferences, refreshSession } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date, locales } from '../app/i18n'
 import { notify, report, errorText } from '../app/feedback'
@@ -34,7 +34,7 @@ async function password() {
   try {
     await write('/api/me/password', { current_password: currentPassword.value, new_password: newPassword.value })
     currentPassword.value = ''; newPassword.value = ''; confirmPassword.value = ''
-    await sessions.refetch(); notify(t('passwordChanged'))
+    await refreshSession(); await sessions.refetch(); notify(t('passwordChanged'))
   } catch (error) { report(error) } finally { passwordBusy.value = false }
 }
 async function revoke(id = '') {
@@ -54,6 +54,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
 
 <template>
   <div class="page-heading"><div><p class="eyebrow">{{ t('preferences') }}</p><h1>{{ t('account') }}</h1><p>{{ t('preferenceHint') }}</p></div><span class="page-sticker"><Heart :size="26" /></span></div>
+  <p v-if="session?.must_change_password" class="info-callout" role="status">{{ t('passwordRequired') }}</p>
   <div class="settings-grid">
     <section class="surface settings-card"><h2><Heart :size="20" />{{ t('profile') }}</h2>
       <div class="profile-intro"><Avatar :name="session?.display_name || session?.username || ''" :src="session?.avatar_url" large /><div><strong>{{ session?.display_name || session?.username }}</strong><p class="field-help">{{ t('avatarUnavailable') }}</p></div></div>

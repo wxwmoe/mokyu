@@ -24,6 +24,7 @@ pub(super) struct Profile {
     pub id: Uuid,
     pub username: String,
     pub role: String,
+    pub must_change_password: bool,
     pub project_management: bool,
     pub display_name: String,
     pub locale: Option<String>,
@@ -35,7 +36,7 @@ pub(super) struct Profile {
 }
 
 pub(super) async fn profile(app: &App, id: Uuid) -> Result<Profile, HttpError> {
-    let mut row: Profile = sqlx::query_as("SELECT u.id,u.username,u.role,m.project_management,u.display_name,u.locale,u.theme,u.avatar_email,u.avatar_enabled FROM web_users u CROSS JOIN mokyu_meta m WHERE u.id=$1 AND u.enabled")
+    let mut row: Profile = sqlx::query_as("SELECT u.id,u.username,u.role,u.must_change_password,m.project_management,u.display_name,u.locale,u.theme,u.avatar_email,u.avatar_enabled FROM web_users u CROSS JOIN mokyu_meta m WHERE u.id=$1 AND u.enabled")
         .bind(id).fetch_optional(&app.db).await?.ok_or_else(unauthorized)?;
     if row.avatar_enabled && !row.avatar_email.is_empty() {
         let hash = hex::encode(Sha256::digest(
@@ -183,7 +184,7 @@ pub(super) async fn password(
     let hash = operations::password_hash(input.new_password).await?;
     let mut tx = app.db.begin().await?;
     lock_verified(&mut tx, &headers, &verified).await?;
-    sqlx::query("UPDATE web_users SET password_hash=$2,auth_revision=auth_revision+1 WHERE id=$1")
+    sqlx::query("UPDATE web_users SET password_hash=$2,auth_revision=auth_revision+1,must_change_password=false WHERE id=$1")
         .bind(verified.0)
         .bind(hash)
         .execute(&mut *tx)

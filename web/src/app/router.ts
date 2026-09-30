@@ -8,6 +8,8 @@ export const router = createRouter({
     { path: '/login', name: 'login', component: () => import('../features/Login.vue') },
     { path: '/', redirect: '/media' },
     { path: '/media', name: 'media', component: () => import('../features/Media.vue') },
+    { path: '/users', name: 'users', meta: { admin: true }, component: () => import('../features/Users.vue') },
+    { path: '/projects', name: 'projects', component: () => import('../features/Projects.vue') },
     { path: '/account', name: 'account', component: () => import('../features/Account.vue') },
     { path: '/media/:bucket', name: 'objects', component: () => import('../features/Media.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/media' },
@@ -24,5 +26,7 @@ router.beforeEach(async to => {
     initialized = true
   }
   if (!session.value && to.name !== 'login') return { name: 'login' }
+  if (session.value?.must_change_password && to.name !== 'account') return { name: 'account' }
+  if (to.meta.admin && session.value?.role !== 'admin') return { name: 'media' }
   if (session.value && to.name === 'login') return { name: 'media' }
 })

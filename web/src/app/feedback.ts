@@ -9,6 +9,7 @@ export function notify(title: string, description?: string, tone: Notice['tone']
 }
 export function dismiss(id: number) { notices.value = notices.value.filter(item => item.id !== id) }
 export function report(error: unknown) {
+  if (error instanceof ApiError && error.code === 'Cancelled') return
   const failure = error instanceof ApiError
   notices.value = [...notices.value.slice(-2), { id: ++id, tone: 'error', title: t('attention'),
     description: errorText(error), requestId: failure ? error.requestId : undefined }]

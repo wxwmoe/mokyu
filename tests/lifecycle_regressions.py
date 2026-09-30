@@ -215,7 +215,7 @@ left = b'L' * (8 * 1024 * 1024 + 100 * 1024)
 for shared in (False, True):
     found = False
     for seed in range(8):
-        right = random.Random(seed).randbytes(6 * 1024 * 1024)
+        right = random.Random(f'{prefix}-{shared}-{seed}').randbytes(6 * 1024 * 1024)
         key = f'boundary-{shared}-{seed}'
         upload = s3.create_multipart_upload(Bucket=bucket, Key=key)['UploadId']
         s3.upload_part(Bucket=bucket, Key=key, UploadId=upload, PartNumber=2, Body=right)

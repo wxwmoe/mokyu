@@ -61,8 +61,7 @@ pub(crate) async fn save(
     input: ProjectInput,
 ) -> Result<Project> {
     input.validate()?;
-    let mut tx = app.db.begin().await?;
-    principal.lock_admin(&mut tx).await?;
+    let mut tx = super::users::admin_transaction(app, principal).await?;
     sqlx::query("SELECT singleton FROM mokyu_meta FOR UPDATE")
         .execute(&mut *tx)
         .await?;
@@ -93,8 +92,7 @@ pub(crate) async fn remove(app: &App, principal: &Principal, id: Uuid) -> Result
     if id == DEFAULT_PROJECT {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
-    let mut tx = app.db.begin().await?;
-    principal.lock_admin(&mut tx).await?;
+    let mut tx = super::users::admin_transaction(app, principal).await?;
     let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM projects WHERE id=$1 FOR UPDATE")
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -114,8 +112,7 @@ pub(crate) async fn remove(app: &App, principal: &Principal, id: Uuid) -> Result
     Ok(())
 }
 pub(crate) async fn mode(app: &App, principal: &Principal, enabled: bool) -> Result<()> {
-    let mut tx = app.db.begin().await?;
-    principal.lock_admin(&mut tx).await?;
+    let mut tx = super::users::admin_transaction(app, principal).await?;
     sqlx::query("SELECT singleton FROM mokyu_meta FOR UPDATE")
         .execute(&mut *tx)
         .await?;

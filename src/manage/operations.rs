@@ -373,85 +373,129 @@ pub async fn execute(app: &Arc<App>, command: Command) -> Result<Value> {
                 .await?;
             Ok(json!({"deleted":true}))
         }
-        Command::User(Users::List) => {
-            let rows: Vec<(Uuid, String, bool)> =
-                sqlx::query_as("SELECT id,username,enabled FROM web_users ORDER BY username")
-                    .fetch_all(&app.db)
+        Command::User(user) => {
+            use super::users::{self, CreateUser, ResetPassword, UserPatch};
+            let local = Principal::Local;
+            match user {
+                Users::List => {
+                    let rows: Vec<users::User> =
+                        sqlx::query_as("SELECT * FROM web_users ORDER BY username LIMIT 1000")
+                            .fetch_all(&app.db)
+                            .await?;
+                    Ok(serde_json::to_value(rows)?)
+                }
+                Users::Create {
+                    username,
+                    password,
+                    role,
+                    require_change,
+                    ..
+                } => Ok(serde_json::to_value(
+                    users::create_user(
+                        app,
+                        &local,
+                        CreateUser {
+                            username,
+                            password: password.context("missing password")?,
+                            role,
+                            must_change_password: require_change,
+                        },
+                    )
+                    .await?,
+                )?),
+                Users::Password {
+                    username,
+                    password,
+                    require_change,
+                    ..
+                } => {
+                    let user = users::find(app, &username).await?;
+                    users::reset_password(
+                        app,
+                        &local,
+                        user.id,
+                        ResetPassword {
+                            password: password.context("missing password")?,
+                            must_change_password: require_change,
+                        },
+                    )
                     .await?;
-            Ok(json!(rows.into_iter().map(|(id,username,enabled)|json!({"id":id,"username":username,"enabled":enabled})).collect::<Vec<_>>()))
-        }
-        Command::User(Users::Create {
-            username, password, ..
-        }) => {
-            ensure!(
-                !username.is_empty()
-                    && username.len() <= 64
-                    && !username.chars().any(char::is_control),
-                "invalid username"
-            );
-            let hash = password_hash(password.context("missing password")?).await?;
-            let id = Uuid::new_v4();
-            let mut tx = app.db.begin().await?;
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(super::account::USER_LOCK)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query(
-                "INSERT INTO web_users(id,username,password_hash,role) VALUES($1,$2,$3,'admin')",
-            )
-            .bind(id)
-            .bind(&username)
-            .bind(hash)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query("DELETE FROM manage_setup")
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(json!({"id":id,"username":username}))
-        }
-        Command::User(Users::Password {
-            username, password, ..
-        }) => {
-            let hash = password_hash(password.context("missing password")?).await?;
-            let mut tx = app.db.begin().await?;
-            let id: Uuid = sqlx::query_scalar(
-                "UPDATE web_users SET password_hash=$2,auth_revision=auth_revision+1 WHERE username=$1 RETURNING id",
-            )
-            .bind(&username)
-            .bind(hash)
-            .fetch_optional(&mut *tx)
-            .await?
-            .context("user not found")?;
-            sqlx::query("DELETE FROM sessions WHERE user_id=$1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(json!({"updated":username}))
-        }
-        Command::User(Users::Disable { username }) => {
-            let mut tx = app.db.begin().await?;
-            let id: Uuid = sqlx::query_scalar(
-                "UPDATE web_users SET enabled=false,auth_revision=auth_revision+1 WHERE username=$1 RETURNING id",
-            )
-            .bind(&username)
-            .fetch_optional(&mut *tx)
-            .await?
-            .context("user not found")?;
-            sqlx::query("DELETE FROM sessions WHERE user_id=$1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(json!({"disabled":username}))
-        }
-        Command::User(Users::Delete { username }) => {
-            sqlx::query("DELETE FROM web_users WHERE username=$1")
-                .bind(&username)
-                .execute(&app.db)
-                .await?;
-            Ok(json!({"deleted":username}))
+                    Ok(json!({"updated":username}))
+                }
+                Users::Enable { username } => {
+                    let user = users::find(app, &username).await?;
+                    Ok(serde_json::to_value(
+                        users::update_user(
+                            app,
+                            &local,
+                            user.id,
+                            UserPatch {
+                                enabled: Some(true),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
+                    )?)
+                }
+                Users::Disable { username } => {
+                    let user = users::find(app, &username).await?;
+                    users::update_user(
+                        app,
+                        &local,
+                        user.id,
+                        UserPatch {
+                            enabled: Some(false),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                    Ok(json!({"disabled":username}))
+                }
+                Users::Role { username, role } => {
+                    let user = users::find(app, &username).await?;
+                    Ok(serde_json::to_value(
+                        users::update_user(
+                            app,
+                            &local,
+                            user.id,
+                            UserPatch {
+                                role: Some(role),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
+                    )?)
+                }
+                Users::Delete { username } => {
+                    let user = users::find(app, &username).await?;
+                    users::delete_user(app, &local, user.id).await?;
+                    Ok(json!({"deleted":username}))
+                }
+                Users::Membership {
+                    username,
+                    project,
+                    document,
+                    ..
+                } => {
+                    let user = users::find(app, &username).await?;
+                    users::save_member(
+                        app,
+                        &local,
+                        project,
+                        user.id,
+                        Some(serde_json::from_value(
+                            document.context("missing membership document")?,
+                        )?),
+                    )
+                    .await?;
+                    Ok(json!({"updated":username,"project_id":project}))
+                }
+                Users::Leave { username, project } => {
+                    let user = users::find(app, &username).await?;
+                    users::save_member(app, &local, project, user.id, None).await?;
+                    Ok(json!({"removed":username,"project_id":project}))
+                }
+            }
         }
     }
 }

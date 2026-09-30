@@ -431,3 +431,4 @@ sweep 样本有界，不是可直接执行的删除清单。日常管理通过 C
 - `user_bucket_access` 视图：计算项目角色与指定桶动作交集，不复制权限状态。
 - `credentials.authorization_revision`：bigint；成员/授权/身份变更通过触发器推进授权版本。
 - `streams.write_authorization`：内部 JSONB，保存写入身份、授权版本及所需动作，发布前重新校验；不包含密码或令牌。
+`web_users.must_change_password`：boolean NOT NULL DEFAULT false，限制账户先完成密码修改；目录索引为 `username COLLATE "C"`。用户身份和项目授权写入共享管理事务锁；数据流写入不占用此锁。

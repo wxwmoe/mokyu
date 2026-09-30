@@ -3,6 +3,7 @@ mod assets;
 mod contract;
 pub(crate) mod operations;
 pub(crate) mod projects;
+pub(crate) mod users;
 
 use crate::{
     app::App,
@@ -154,6 +155,7 @@ fn token(headers: &HeaderMap) -> Result<&str, HttpError> {
 pub(super) struct Identity {
     id: Uuid,
     admin: bool,
+    password_change: bool,
     principal: Principal,
 }
 impl Identity {
@@ -226,6 +228,20 @@ async fn access_gate(
         Method::GET | Method::HEAD | Method::OPTIONS
     );
     match authenticate(&app, request.headers(), write).await {
+        Ok(identity)
+            if identity.password_change
+                && !matches!(
+                    path.as_str(),
+                    "/api/session"
+                        | "/api/me"
+                        | "/api/me/password"
+                        | "/api/me/sessions"
+                        | "/api/me/sessions/{id}"
+                        | "/api/logout"
+                ) =>
+        {
+            crate::http::problem(StatusCode::FORBIDDEN, "PasswordChangeRequired").into_response()
+        }
         Ok(identity) if identity.admin || member_route(&path, request.method()) => {
             request.extensions_mut().insert(identity);
             next.run(request).await
@@ -239,6 +255,7 @@ struct AuthSession {
     user_id: Uuid,
     session_id: Uuid,
     role: String,
+    must_change_password: bool,
     authorization_revision: i64,
     csrf_hash: Vec<u8>,
     last_seen_at: DateTime<Utc>,
@@ -249,11 +266,12 @@ async fn authenticate(app: &App, headers: &HeaderMap, csrf: bool) -> Result<Iden
     }
     let token = token(headers)?;
     let hash = blake3::hash(token.as_bytes());
-    let row: Option<AuthSession> = sqlx::query_as("SELECT u.id AS user_id,s.id AS session_id,u.role,u.authorization_revision,s.csrf_hash,s.last_seen_at FROM sessions s JOIN web_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.enabled AND s.auth_revision=u.auth_revision").bind(hash.as_bytes().as_slice()).fetch_optional(&app.db).await?;
+    let row: Option<AuthSession> = sqlx::query_as("SELECT u.id AS user_id,s.id AS session_id,u.role,u.must_change_password,u.authorization_revision,s.csrf_hash,s.last_seen_at FROM sessions s JOIN web_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.enabled AND s.auth_revision=u.auth_revision").bind(hash.as_bytes().as_slice()).fetch_optional(&app.db).await?;
     let AuthSession {
         user_id: id,
         session_id: session,
         role,
+        must_change_password,
         authorization_revision: revision,
         csrf_hash: expected,
         last_seen_at: last_seen,
@@ -276,6 +294,7 @@ async fn authenticate(app: &App, headers: &HeaderMap, csrf: bool) -> Result<Iden
     Ok(Identity {
         id,
         admin: role == "admin",
+        password_change: must_change_password,
         principal: Principal::User {
             id,
             session,

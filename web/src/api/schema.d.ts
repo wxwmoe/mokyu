@@ -208,6 +208,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["members"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{id}/members/{user}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["put_member"];
+        post?: never;
+        delete: operations["remove_member"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -272,6 +304,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["users_list"];
+        put?: never;
+        post: operations["users_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["users_get"];
+        put?: never;
+        post?: never;
+        delete: operations["users_delete"];
+        options?: never;
+        head?: never;
+        patch: operations["users_update"];
+        trace?: never;
+    };
+    "/api/users/{id}/reset-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["reset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -285,6 +365,11 @@ export interface components {
         };
         Bootstrap: {
             setup_required: boolean;
+        };
+        BucketGrant: {
+            actions: components["schemas"]["Action"][];
+            /** Format: uuid */
+            bucket_id: string;
         };
         BucketView: {
             actions: components["schemas"]["Action"][];
@@ -301,6 +386,12 @@ export interface components {
             state: string;
             website_enabled: boolean;
         };
+        CreateUser: {
+            must_change_password?: boolean;
+            password: string;
+            role: string;
+            username: string;
+        };
         ErrorBody: {
             code: string;
             error: string;
@@ -312,6 +403,21 @@ export interface components {
         };
         LoginReply: {
             csrf_token: string;
+        };
+        Member: {
+            display_name: string;
+            enabled: boolean;
+            grants: components["schemas"]["BucketGrant"][];
+            role: string;
+            scope: string;
+            /** Format: uuid */
+            user_id: string;
+            username: string;
+        };
+        Membership: {
+            grants?: components["schemas"]["BucketGrant"][];
+            role: string;
+            scope: string;
         };
         Password: {
             current_password: string;
@@ -332,6 +438,7 @@ export interface components {
             /** Format: uuid */
             id: string;
             locale?: string | null;
+            must_change_password: boolean;
             project_management: boolean;
             role: string;
             theme?: string | null;
@@ -358,6 +465,10 @@ export interface components {
         Reauthenticate: {
             password: string;
         };
+        ResetPassword: {
+            must_change_password?: boolean;
+            password: string;
+        };
         Session: {
             /** Format: date-time */
             created_at: string;
@@ -381,6 +492,25 @@ export interface components {
             password: string;
             token: string;
             username: string;
+        };
+        User: {
+            /** Format: date-time */
+            created_at: string;
+            display_name: string;
+            enabled: boolean;
+            /** Format: uuid */
+            id: string;
+            must_change_password: boolean;
+            role: string;
+            username: string;
+        };
+        UserPage: {
+            next?: string | null;
+            users: components["schemas"]["User"][];
+        };
+        UserPatch: {
+            enabled?: boolean | null;
+            role?: string | null;
         };
         Website: {
             error_document: string;
@@ -804,6 +934,71 @@ export interface operations {
             };
         };
     };
+    members: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Member"][];
+                };
+            };
+        };
+    };
+    put_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                user: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Membership"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                user: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     session: {
         parameters: {
             query?: never;
@@ -918,6 +1113,141 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
+            };
+        };
+    };
+    users_list: {
+        parameters: {
+            query?: {
+                q?: string | null;
+                role?: string | null;
+                after?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserPage"];
+                };
+            };
+        };
+    };
+    users_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUser"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+        };
+    };
+    users_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+        };
+    };
+    users_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    users_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserPatch"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+        };
+    };
+    reset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResetPassword"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
