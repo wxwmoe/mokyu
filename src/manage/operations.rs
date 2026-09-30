@@ -168,15 +168,11 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
         Command::Cleanup(Cleanup::Run) => app.cleanup_history().await,
         Command::Gc(Gc::Status) => app.gc_status().await,
         Command::Gc(Gc::Pause) => {
-            sqlx::query("UPDATE mokyu_meta SET gc_paused=true")
-                .execute(&app.db)
-                .await?;
+            app.maintenance_change("gc", true).await?;
             app.gc_status().await
         }
         Command::Gc(Gc::Resume) => {
-            sqlx::query("UPDATE mokyu_meta SET gc_paused=false")
-                .execute(&app.db)
-                .await?;
+            app.maintenance_change("gc", false).await?;
             app.gc_status().await
         }
         Command::Gc(Gc::Run) => {
@@ -186,8 +182,24 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 json!({"local_cleaned":cleaned,"chunks_reclaimed":reclaimed,"batch_size":app.config.gc.batch_size}),
             )
         }
-        Command::Maintenance(mode) => {
+        Command::Maintenance(Maintenance::Status) => app.maintenance_status().await,
+        Command::Maintenance(Maintenance::Pause { kind }) => {
+            app.maintenance_change(&kind, true).await
+        }
+        Command::Maintenance(Maintenance::Resume { kind }) => {
+            app.maintenance_change(&kind, false).await
+        }
+        Command::Maintenance(Maintenance::Run { kind }) => app.maintenance_start(&kind).await,
+        Command::Maintenance(Maintenance::PackCreation { action }) => {
+            anyhow::ensure!(
+                ["stop", "resume"].contains(&action.as_str()),
+                "invalid pack creation action"
+            );
+            app.pack_creation_change(action == "stop").await
+        }
+        Command::Maintenance(mode @ (Maintenance::Enable | Maintenance::Disable)) => {
             let enabled = matches!(mode, Maintenance::Enable);
+            let _coord = app.coord.lock().await;
             if !enabled {
                 let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE kind='sweep' AND detail->>'dry_run'='false' AND state IN ('queued','running'))").fetch_one(&app.db).await?;
                 ensure!(
@@ -195,7 +207,6 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                     "pause or finish destructive sweep before disabling maintenance"
                 );
             }
-            let _coord = app.coord.lock().await;
             if !enabled {
                 app.storage.check_identity(&app.db, false).await?;
             }
@@ -206,8 +217,15 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 .await?;
             if enabled {
                 sqlx::query("UPDATE tasks SET state='paused',updated_at=now() WHERE kind IN ('purge','pack','unpack') AND state IN ('queued','running')")
-                    .execute(&mut *tx).await?;
+                      .execute(&mut *tx).await?;
             }
+            super::audit::checkpoint(
+                &mut tx,
+                "maintenance.mode",
+                "deployment",
+                json!({"enabled":enabled}),
+            )
+            .await?;
             tx.commit().await?;
             app.maintenance
                 .store(enabled, std::sync::atomic::Ordering::Release);

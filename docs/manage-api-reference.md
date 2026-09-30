@@ -354,8 +354,6 @@ last_run 首次执行前为 null，此后为 `{started_at,finished_at,duration_m
 | --- | --- | --- |
 | `GET /api/packs` | after 默认 0；limit 默认 100，1～200 | `{status,packs,next_after}`，按 ID 升序 |
 | `GET /api/packs/{id}` | 正 bigint 十进制 ID | `{pack,members}`，成员含逻辑区块及当前映射标志 |
-| `POST /api/packs/run` | `{kind}`：pack/reuse/reclaim/range/repack | `{task_id}`，已有同类任务可返回 existing=true |
-| `POST /api/packs/unpack` | `{pack_id?:字符串,all?:bool,execute?:bool}` | 默认返回 preview/packs/raw_bytes/effect；execute=true 返回 task_id |
 
 pack_id 与 all=true 必须二选一；全部拆包要求 pack.enabled=false。包及成员的大整数 ID 使用字符串，避免浏览器精度损失。区块包页面可查看列表、成员、维护入口与拆包预览；写接口遵守会话、Origin、CSRF 和维护模式。操作、冷却和回收语义见[CLI](cli-reference.md#区块包维护)。
 
@@ -367,9 +365,9 @@ pack_id 与 all=true 必须二选一；全部拆包要求 pack.enabled=false。�
 
 | 方法与路径 | 输入 | 成功响应 |
 | --- | --- | --- |
-| `GET /api/tasks` | state、token 可选；limit 默认 100，范围 1～200 | 200 `{tasks,next_token}`，按 created_at、id 降序 |
+| `GET /api/tasks` | state、kind、bucket、actor、token 可选；limit 默认 50，范围 1～200 | 200 `{tasks,next_token}`，按 created_at、id 降序 |
 | `GET /api/tasks/{id}` | id 为任务 UUID | 200 任务详情 |
-| `POST /api/tasks/{id}/actions` | `{action:"pause"或"resume"}` | 200 `{task_id,state}`，非法转换 409 |
+| `POST /api/tasks/{id}/actions` | `{action:"pause"或"resume"}` | 204；非法转换或策略阻止时 409 |
 
 任务字段：`{id,kind,bucket_id,state,cursor,processed,detail,error,created_at,updated_at}`。state 为 queued/running/paused/completed/failed，游标绑定筛选状态。API 状态值使用英语，界面负责翻译。
 
@@ -380,7 +378,7 @@ pack_id 与 all=true 必须二选一；全部拆包要求 pack.enabled=false。�
 | 方法与路径 | 输入 | 成功响应 |
 | --- | --- | --- |
 | `POST /api/integrity` | `{mode?,bucket?,key?}`，mode 默认 metadata，可选 head/full；bucket 为名称，key 需 bucket | 200 `{task_id}` |
-| `GET /api/tasks/{id}/issues` | after 默认 0，limit 默认 100，范围 1～200 | 200 `{issues,next_after}`；游标为十进制字符串或 null |
+| `GET /api/tasks/{id}/issues` | after 默认 0，limit 默认 100，范围 1～200 | 200 `{issues,next_after,groups}`；游标为十进制字符串或 null |
 | `GET /api/tasks/{id}/issues/{issue}/objects` | after 可选，为 URL 编码的 JSON `[bucket UUID,key]` | 200 `{objects,next}`，每页 100 项 |
 | `GET /api/tasks/{id}/report` | 仅已完成巡检 | JSONL 附件；其他状态 409，非巡检任务 404 |
 
@@ -466,3 +464,23 @@ processed 为对象和区块检查数之和，不是百分比；cursor 是内部
 | 项目转移 | `POST /api/buckets/{bucket}/transfer/preview` 传 `target_project`；执行 `/transfer` 再传 `confirm_name`、`confirmation` |
 
 转移必须先暂停新上传并排空已有写入、活动分片及配额预留；读取和已开始的 multipart 可以继续。执行原子检查目标项目的容量和桶数配额、迁移用量、撤销此桶原有成员/S3 密钥/Token 授权，并按目标项目角色重新计算访问权限。公共域名和桶限额保留，成功后恢复新上传。关闭确认窗口不会自动恢复先前暂停的上传。
+
+## 整理工作台与服务诊断
+
+所有入口仅管理员或明确的 system Token 可访问；写入受实时身份和权限检查。任务记录包含 kind/policy、来源、发起者、开始时间、处理计数和阻止原因。
+
+| 入口 | 合约 |
+| --- | --- |
+| `GET /api/maintenance` | 七类策略、当前/最近任务、周期、有效打包开关和排空信息 |
+| `POST /api/maintenance/{kind}/actions` | `{action:pause/resume/run}`；返回可空 task_id |
+| `POST /api/maintenance/mode`、`pack-creation` | `{enabled}`；需要近期身份确认；204 |
+| `POST /api/maintenance/flush` | 发起上传缓存落盘任务；维护模式可执行 |
+| `POST /api/maintenance/sweep` | `{older_than}`；仅扫描，返回 task_id |
+| `POST /api/maintenance/sweep/preview` | `{task_id}`，引用已完成的只读扫描 |
+| `POST /api/maintenance/unpack/preview` | `{pack_id}` 或 `{all:true}`；全量需停止新包生成 |
+| `POST /api/maintenance/{operation}/execute` | `{preview_id,confirmation}`，operation 为 unpack/sweep；近期身份确认后返回 task_id |
+| `GET /api/service/status` | 进程、连接池、资源预算、后端队列及索引状态 |
+| `GET /api/service/config` | 脱敏配置值、来源和是否需重启；只读 |
+| `POST /api/service/key-material` | 近期身份确认后生成新的 256 位密钥，仅本次返回 secret；不读取或修改已有密钥 |
+
+预览绑定账号及 Token，十分钟内有效；执行时核对范围，重复请求返回同一任务。拆包先写新来源再切换引用，旧来源继续遵守回收宽限和最低存储期。破坏性 sweep 需要维护模式、排空操作及非空索引；执行前后都会核对前提。配置页不代替外部配置文件或数据库备份恢复。

@@ -4,6 +4,21 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
+tokio::task_local! { pub(crate) static REQUEST_ID: Uuid; }
+
+pub(crate) async fn insert(
+    db: &mut sqlx::PgConnection,
+    kind: &str,
+    bucket: Option<Uuid>,
+    detail: Value,
+) -> Result<Uuid> {
+    let id = REQUEST_ID
+        .try_with(|id| *id)
+        .unwrap_or_else(|_| Uuid::new_v4());
+    sqlx::query("INSERT INTO tasks(id,kind,bucket_id,state,detail,created_by,source) VALUES($1,$2,$3,'queued',$4,coalesce((SELECT actor_label FROM audit_events WHERE id=$5),'Scheduler'),coalesce((SELECT source FROM audit_events WHERE id=$5),'system'))")
+        .bind(id).bind(kind).bind(bucket).bind(detail).bind(crate::manage::audit::current()).execute(db).await?;
+    Ok(id)
+}
 
 impl App {
     pub async fn purge_preview(&self, name: &str) -> Result<Value> {
@@ -52,14 +67,12 @@ impl App {
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        let task = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO tasks(id,kind,bucket_id,state,detail) VALUES($1,'purge',$2,'queued',$3)",
+        let task = insert(
+            &mut tx,
+            "purge",
+            Some(id),
+            json!({"bucket_id":id,"name":name}),
         )
-        .bind(task)
-        .bind(id)
-        .bind(json!({"bucket_id":id,"name":name}))
-        .execute(&mut *tx)
         .await?;
         crate::manage::audit::checkpoint(
             &mut tx,
@@ -79,6 +92,7 @@ impl App {
         confirm_prefix: Option<&str>,
         older_than: &str,
     ) -> Result<Value> {
+        let _coord = self.coord.lock().await;
         let age = config::seconds(older_than)?;
         ensure!(age <= i64::MAX as u64 / 1000, "age too large");
         let minimum = self.config.backend.min_storage_seconds()?;
@@ -126,16 +140,11 @@ impl App {
                 "wait for active uploads, completions and reads to drain"
             );
         }
-        let id = Uuid::new_v4();
         let cutoff = chrono::Utc::now()
             .checked_sub_signed(chrono::TimeDelta::seconds(age.max(minimum) as i64))
             .context("age too large")?;
         let detail = json!({"dry_run":!execute,"prefix":prefix,"older_than_seconds":age,"min_storage_duration_seconds":minimum,"cutoff":cutoff.to_rfc3339(),"candidates":0,"bytes":0,"unrecognized":0,"samples":[]});
-        sqlx::query("INSERT INTO tasks(id,kind,state,detail) VALUES($1,'sweep','queued',$2)")
-            .bind(id)
-            .bind(detail)
-            .execute(&self.db)
-            .await?;
+        let id = insert(&mut *self.db.acquire().await?, "sweep", None, detail).await?;
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id,"dry_run":!execute}))
     }
@@ -148,6 +157,24 @@ impl App {
                     .fetch_optional(&self.db)
                     .await?
                     .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+            let policy = if kind == "pack" {
+                detail["kind"].as_str().unwrap_or("")
+            } else {
+                &kind
+            };
+            if self
+                .maintenance_schedule()
+                .iter()
+                .any(|(k, _, _)| *k == policy)
+                && (self.maintenance_paused(policy).await?
+                    || (matches!(policy, "pack" | "repack") && !self.pack_creation_allowed()))
+            {
+                return Err(s3s::s3_error!(
+                    OperationAborted,
+                    "resume the maintenance policy and pack creation first"
+                )
+                .into());
+            }
             if kind == "sweep" && detail["dry_run"] == false {
                 if !self.maintenance.load(std::sync::atomic::Ordering::Acquire) {
                     return Err(s3s::s3_error!(
@@ -156,7 +183,7 @@ impl App {
                     )
                     .into());
                 }
-            } else if matches!(kind.as_str(), "purge" | "pack" | "unpack" | "upload") {
+            } else if matches!(kind.as_str(), "purge" | "pack" | "unpack" | "upload" | "gc") {
                 self.writable()?;
             } else if kind == "integrity" {
                 let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE kind='integrity' AND state IN ('queued','running') AND id<>$1)").bind(id).fetch_one(&self.db).await?;
@@ -320,6 +347,19 @@ impl App {
                 continue;
             }
             if destructive {
+                let _coord = self.coord.lock().await;
+                let running: bool =
+                    sqlx::query_scalar("SELECT state='running' FROM tasks WHERE id=$1")
+                        .bind(id)
+                        .fetch_one(&self.db)
+                        .await?;
+                if !running {
+                    return Ok(false);
+                }
+                ensure!(
+                    self.maintenance.load(std::sync::atomic::Ordering::Acquire),
+                    "maintenance was disabled; sweep stopped"
+                );
                 self.storage.delete_path(&row.location).await?;
             }
             detail["candidates"] = json!(detail["candidates"].as_u64().unwrap_or(0) + 1);
@@ -367,7 +407,7 @@ async fn worker(
         let id = {
             let mut active = active.lock().await;
             let ids: Vec<Uuid> = active.iter().copied().collect();
-            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',updated_at=now() WHERE id=(SELECT id FROM tasks WHERE state IN ('queued','running') AND CASE WHEN kind IN ('pack','unpack') THEN 1 WHEN kind IN ('upload','cache_flush') THEN 2 ELSE 0 END=$1 AND NOT(id=ANY($2)) ORDER BY updated_at,id LIMIT 1) AND state IN ('queued','running') RETURNING id").bind(class).bind(ids).fetch_optional(&app.db).await?;
+            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE t.state IN ('queued','running') AND CASE WHEN t.kind IN ('pack','unpack') THEN 1 WHEN t.kind IN ('upload','cache_flush') THEN 2 ELSE 0 END=$1 AND NOT(t.id=ANY($2)) AND NOT (m.maintenance AND t.kind IN ('pack','unpack','purge','gc')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.kind=CASE WHEN t.kind='pack' THEN t.detail->>'kind' ELSE t.kind END AND CASE WHEN c.kind='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.kind='pack' AND t.detail->>'kind' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND state IN ('queued','running') RETURNING id").bind(class).bind(ids).fetch_optional(&app.db).await?;
             if let Some(id) = id {
                 active.insert(id);
             }
@@ -399,7 +439,9 @@ async fn worker(
                 active.lock().await.remove(&id);
                 continue;
             }
-            let result = if kind == "purge" {
+            let result = if matches!(kind.as_str(), "gc" | "cleanup") {
+                app.lifecycle_batch(id, &kind).await
+            } else if kind == "purge" {
                 app.purge_batch(
                     id,
                     bucket.context("purge bucket disappeared")?,
@@ -446,6 +488,11 @@ async fn worker(
             } else {
                 Err(anyhow::anyhow!("unknown maintenance task kind"))
             };
+            if kind == "gc" && result.is_err() {
+                app.statistics
+                    .gc_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if class != 0 {
                 if class == 1 && result.is_err() {
                     sqlx::query("UPDATE pack_changes SET next_check_at=now()+$2*interval '1 second' WHERE pack_id IN (SELECT c.pack_id FROM pack_inputs i JOIN chunks c ON c.id=i.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.pack.reuse_interval)? as f64).execute(&app.db).await?;

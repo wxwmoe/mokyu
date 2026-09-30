@@ -14,7 +14,7 @@ pub const MAX_MEMBERS: usize = 4096;
 pub const MAX_PAYLOAD: usize = MAX_RAW + 12 + MAX_MEMBERS * 44;
 const MAGIC: &[u8; 8] = b"MOKYU\x00\x00\x02";
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompressionStrategy {
     Always,
@@ -23,7 +23,7 @@ pub enum CompressionStrategy {
     ChunkHint,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub enabled: bool,

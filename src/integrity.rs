@@ -13,7 +13,7 @@ use std::{
 };
 use uuid::Uuid;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub concurrency: usize,
@@ -52,7 +52,17 @@ impl Config {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug, Deserialize, Serialize, clap::ValueEnum, PartialEq)]
+#[derive(
+    Clone,
+    Copy,
+    Default,
+    Debug,
+    Deserialize,
+    Serialize,
+    clap::ValueEnum,
+    utoipa::ToSchema,
+    PartialEq,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     #[default]
@@ -61,7 +71,7 @@ pub enum Mode {
     Full,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     #[serde(default)]
@@ -164,7 +174,6 @@ impl App {
         let upper: i64 = sqlx::query_scalar("SELECT COALESCE(max(id),0) FROM chunks")
             .fetch_one(&self.db)
             .await?;
-        let id = Uuid::new_v4();
         let mut detail = Detail {
             mode: input.mode,
             phase: "metadata".into(),
@@ -186,7 +195,13 @@ impl App {
         scope(&mut query, &detail);
         query.push(" ORDER BY o.bucket_id DESC,o.key DESC LIMIT 1");
         detail.upper_object = query.build_query_as().fetch_optional(&self.db).await?;
-        sqlx::query("INSERT INTO tasks(id,kind,bucket_id,state,detail) VALUES($1,'integrity',$2,'queued',$3)").bind(id).bind(detail.bucket_id).bind(serde_json::to_value(detail)?).execute(&self.db).await?;
+        let id = crate::tasks::insert(
+            &mut *self.db.acquire().await?,
+            "integrity",
+            detail.bucket_id,
+            serde_json::to_value(detail)?,
+        )
+        .await?;
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id}))
     }
@@ -516,6 +531,18 @@ impl App {
     }
 
     pub async fn integrity_issues(&self, id: Uuid, after: i64, limit: i64) -> Result<Value> {
+        self.integrity_issues_filtered(id, after, limit, None).await
+    }
+    pub(crate) async fn integrity_issues_filtered(
+        &self,
+        id: Uuid,
+        after: i64,
+        limit: i64,
+        code: Option<&str>,
+    ) -> Result<Value> {
+        if code.is_some_and(|s| s.len() > 64) {
+            return Err(s3s::s3_error!(InvalidArgument).into());
+        }
         if after < 0 || !(1..=200).contains(&limit) {
             return Err(s3s::s3_error!(InvalidArgument).into());
         }
@@ -528,11 +555,14 @@ impl App {
         if !exists {
             return Err(s3s::s3_error!(NoSuchKey).into());
         }
-        let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(i)||jsonb_build_object('id',i.id::text,'chunk_id',i.chunk_id::text) FROM integrity_issues i WHERE task_id=$1 AND id>$2 ORDER BY id LIMIT $3").bind(id).bind(after).bind(limit+1).fetch_all(&self.db).await?;
+        let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(i)||jsonb_build_object('id',i.id::text,'chunk_id',i.chunk_id::text) FROM integrity_issues i WHERE task_id=$1 AND id>$2 AND ($4::text IS NULL OR code=$4) ORDER BY id LIMIT $3").bind(id).bind(after).bind(limit+1).bind(code).fetch_all(&self.db).await?;
         let more = rows.len() > limit as usize;
         rows.truncate(limit as usize);
         let next = more.then(|| rows.last().unwrap()["id"].clone());
-        Ok(json!({"issues":rows,"next_after":next}))
+        let groups:Vec<(String,String)>=sqlx::query_as("SELECT code,count(*)::text FROM integrity_issues WHERE task_id=$1 GROUP BY code ORDER BY code").bind(id).fetch_all(&self.db).await?;
+        Ok(
+            json!({"issues":rows,"next_after":next,"groups":groups.into_iter().collect::<std::collections::BTreeMap<_,_>>()}),
+        )
     }
 
     pub async fn integrity_objects(

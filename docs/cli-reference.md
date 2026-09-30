@@ -107,6 +107,10 @@ docker exec -i mokyu cli user create admin --password-stdin < /secure/password-f
 | `maintenance enable` | 持久禁止新写入和远端 GC，暂停清桶、打包和拆包任务，返回 active_operations；须等待已接纳操作排空 |
 | `maintenance disable` | 恢复写入；须先暂停或完成破坏性 sweep |
 
+`maintenance status` 返回七类定时策略、当前/最近任务、周期、下一次检查和新包生成状态。`maintenance pause KIND` / `resume KIND` 持久暂停或恢复对应策略，`maintenance run KIND` 发起单次任务；KIND 为 pack/reuse/reclaim/repack/range/gc/cleanup。暂停策略不丢失进度，当前批次可完成。
+
+`maintenance pack-creation stop` 停止即时上传、异步上传及各维护路径发布新包；已有 preparing 包收尾后才允许全部拆包。`maintenance pack-creation resume` 恢复生成，但未完成的全部拆包任务会阻止恢复。配置 pack.enabled=false 时，运行开关不能越过配置启用。
+
 ## 后台任务
 
 | 命令 | 作用与返回 |
@@ -125,7 +129,7 @@ docker exec -i mokyu cli user create admin --password-stdin < /secure/password-f
 | `pack status` | 开关、大小上限，以及各状态的数量和字节 |
 | `pack run [--kind KIND]` | KIND 为 `pack`（默认）、reuse、reclaim、range、repack；分别为创建、复用拆分、无引用成员回收、Range 回源优化、碎片合并 |
 | `pack unpack ID [--execute]` | 默认预览；execute 创建将指定包拆成独立区块的任务 |
-| `pack unpack --all [--execute]` | 拆除全部历史包；先关闭 pack.enabled 并重启 |
+| `pack unpack --all [--execute]` | 拆除全部历史包；先 `maintenance pack-creation stop` 并等待 preparing 数量归零 |
 
 手动维护仍遵守引用、冷却、收益、维护模式和资源限制；run 返回 task_id，可用 task 命令暂停、恢复、查看错误。拆包先写新来源再切换映射，旧包按 GC 宽限回收，临时占用会增加。关闭打包功能后 reuse/reclaim 仍可执行，但只输出独立块。
 

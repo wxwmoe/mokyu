@@ -9,6 +9,8 @@ use std::{
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip)]
+    pub configured_fields: std::collections::BTreeSet<String>,
     #[serde(default)]
     pub listen: Listen,
     pub database: Database,
@@ -40,7 +42,7 @@ pub struct Config {
     pub pack: crate::pack::Config,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Statistics {
     pub scope_limit: usize,
@@ -69,7 +71,7 @@ impl Default for Statistics {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Listen {
     pub s3: String,
@@ -175,7 +177,7 @@ fn backend_retries() -> usize {
 pub struct Security {
     pub credential_key_file: PathBuf,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Manage {
     pub origin: String,
@@ -216,7 +218,7 @@ impl Manage {
         Ok(format!("https://{authority}"))
     }
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Storage {
     pub data: PathBuf,
@@ -230,7 +232,7 @@ impl Default for Storage {
         }
     }
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Processing {
     pub cpu_jobs: Option<usize>,
@@ -261,7 +263,7 @@ impl Default for Processing {
         }
     }
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Multipart {
     pub local_limit: Option<String>,
@@ -281,7 +283,7 @@ impl Default for Multipart {
         }
     }
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cache {
     pub max_size: Option<String>,
@@ -315,7 +317,7 @@ impl Default for Encryption {
         }
     }
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Gc {
     pub unreferenced_grace: String,
@@ -332,7 +334,7 @@ impl Default for Gc {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cleanup {
     pub interval: String,
@@ -467,9 +469,20 @@ impl Config {
     pub fn load(path: &Path) -> Result<(Self, Secrets, Budget)> {
         let text = fs::read_to_string(path).context("cannot read configuration")?;
         // TOML errors may include the offending line; never include configuration values in errors.
-        let c: Self = toml::from_str(&text).map_err(|_| {
+        let mut c: Self = toml::from_str(&text).map_err(|_| {
             anyhow::anyhow!("invalid TOML configuration, unknown field or wrong type")
         })?;
+        let raw: toml::Value =
+            toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid TOML configuration"))?;
+        if let Some(sections) = raw.as_table() {
+            for (section, value) in sections {
+                if let Some(fields) = value.as_table() {
+                    for field in fields.keys() {
+                        c.configured_fields.insert(format!("{section}.{field}"));
+                    }
+                }
+            }
+        }
         let base = path.parent().unwrap_or(Path::new("."));
         c.manage.gravatar_origin()?;
         c.compression.validate()?;

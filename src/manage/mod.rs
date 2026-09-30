@@ -7,10 +7,12 @@ pub(crate) mod catalog;
 mod contract;
 pub(crate) mod insights;
 pub(crate) mod keys;
+mod maintenance;
 pub(crate) mod media;
 pub(crate) mod operations;
 pub(crate) mod projects;
 pub(crate) mod quotas;
+mod service;
 mod storage_catalog;
 pub(crate) mod tokens;
 mod uploads;
@@ -31,7 +33,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use contract::{BucketView, LoginReply, SessionView};
 use serde::{Deserialize, Serialize};
@@ -78,20 +79,9 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/api/object", get(object))
         .route("/api/download", get(download))
-        .route("/api/tasks", get(tasks))
-        .route("/api/tasks/{id}", get(task))
-        .route("/api/tasks/{id}/actions", post(task_action))
-        .route("/api/integrity", post(start_integrity))
         .route("/api/packs", get(packs))
         .route("/api/packs/{id}", get(pack_detail))
-        .route("/api/packs/run", post(pack_run))
         .route("/api/cache/flush", post(cache_flush))
-        .route("/api/packs/unpack", post(pack_unpack))
-        .route("/api/tasks/{id}/issues", get(integrity_issues))
-        .route(
-            "/api/tasks/{id}/issues/{issue}/objects",
-            get(integrity_objects),
-        )
         .route("/api/tasks/{id}/report", get(integrity_report))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(axum::middleware::from_fn_with_state(
@@ -869,110 +859,6 @@ async fn object_chunks(
         next_offset,
     }))
 }
-#[derive(Deserialize)]
-struct TasksQuery {
-    state: Option<String>,
-    token: Option<String>,
-    limit: Option<i64>,
-}
-#[derive(Deserialize, Serialize)]
-struct TaskCursor {
-    state: Option<String>,
-    created_at: DateTime<Utc>,
-    id: Uuid,
-}
-async fn tasks(
-    State(app): State<Arc<App>>,
-    Extension(_actor): Extension<Identity>,
-    Query(q): Query<TasksQuery>,
-) -> Result<Json<Value>, HttpError> {
-    let limit = q.limit.unwrap_or(100);
-    if !(1..=200).contains(&limit)
-        || q.state
-            .as_deref()
-            .is_some_and(|s| !["queued", "running", "paused", "completed", "failed"].contains(&s))
-    {
-        return Err(s3s::s3_error!(InvalidArgument).into());
-    }
-    let cursor = q
-        .token
-        .as_ref()
-        .map(|token| -> Result<TaskCursor> {
-            let bytes = URL_SAFE_NO_PAD.decode(token)?;
-            Ok(serde_json::from_slice(&bytes)?)
-        })
-        .transpose()
-        .map_err(|_| s3s::s3_error!(InvalidArgument))?;
-    if cursor.as_ref().is_some_and(|c| c.state != q.state) {
-        return Err(s3s::s3_error!(InvalidArgument).into());
-    }
-    let mut query =
-        sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT to_jsonb(t) FROM tasks t WHERE true");
-    if let Some(state) = &q.state {
-        query.push(" AND state=").push_bind(state);
-    }
-    if let Some(cursor) = cursor {
-        query
-            .push(" AND (created_at,id)<(")
-            .push_bind(cursor.created_at)
-            .push(",")
-            .push_bind(cursor.id)
-            .push(")");
-    }
-    query
-        .push(" ORDER BY created_at DESC,id DESC LIMIT ")
-        .push_bind(limit + 1);
-    let mut rows: Vec<Value> = query.build_query_scalar().fetch_all(&app.db).await?;
-    let more = rows.len() > limit as usize;
-    rows.truncate(limit as usize);
-    let next = if more {
-        let last = rows.last().unwrap();
-        Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&TaskCursor {
-            state: q.state,
-            created_at: serde_json::from_value(last["created_at"].clone())?,
-            id: serde_json::from_value(last["id"].clone())?,
-        })?))
-    } else {
-        None
-    };
-    Ok(Json(json!({"tasks":rows,"next_token":next})))
-}
-async fn task(
-    State(app): State<Arc<App>>,
-    Extension(_actor): Extension<Identity>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Value>, HttpError> {
-    let task = sqlx::query_scalar("SELECT to_jsonb(t) FROM tasks t WHERE id=$1")
-        .bind(id)
-        .fetch_optional(&app.db)
-        .await?
-        .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
-    Ok(Json(task))
-}
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "lowercase")]
-enum TaskAction {
-    Pause,
-    Resume,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TaskChange {
-    action: TaskAction,
-}
-async fn task_action(
-    State(app): State<Arc<App>>,
-    Extension(actor): Extension<Identity>,
-    Path(id): Path<Uuid>,
-    Json(input): Json<TaskChange>,
-) -> Result<Json<Value>, HttpError> {
-    let user_id = actor.id;
-    let result = app
-        .task_change(id, matches!(input.action, TaskAction::Resume))
-        .await;
-    tracing::info!(%user_id, task_id=%id, action=?input.action, success=result.is_ok(), "management task action");
-    Ok(Json(result?))
-}
 async fn download(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -994,15 +880,19 @@ async fn download(
     )
     .await
 }
+#[utoipa::path(post,path="/api/integrity",request_body=crate::integrity::Request,responses((status=200,body=maintenance::TaskStarted)))]
 async fn start_integrity(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
     Json(input): Json<crate::integrity::Request>,
-) -> Result<Json<Value>, HttpError> {
+) -> Result<Json<maintenance::TaskStarted>, HttpError> {
+    let mut guard = app.db.begin().await?;
+    actor.principal.lock_admin(&mut guard).await?;
     let user_id = actor.id;
     let result = app.integrity_start(input).await;
     tracing::info!(%user_id,success=result.is_ok(),task_id=?result.as_ref().ok().and_then(|r|r.get("task_id")),"management integrity check");
-    Ok(Json(result?))
+    guard.commit().await?;
+    Ok(Json(serde_json::from_value(result?)?))
 }
 async fn packs(
     State(app): State<Arc<App>>,
@@ -1039,11 +929,6 @@ async fn pack_detail(
     let members:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('ordinal',m.ordinal,'chunk_id',m.chunk_id::text,'offset',m.offset_bytes,'raw_size',c.raw_size,'current',c.pack_id=m.pack_id) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 ORDER BY ordinal LIMIT 4096").bind(id).fetch_all(&app.db).await?;
     Ok(Json(json!({"pack":pack,"members":members})))
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PackRun {
-    kind: String,
-}
 async fn cache_flush(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -1053,73 +938,79 @@ async fn cache_flush(
     tracing::info!(%user_id,success=result.is_ok(),"management upload cache flush");
     Ok(Json(result?))
 }
-async fn pack_run(
-    State(app): State<Arc<App>>,
-    Extension(actor): Extension<Identity>,
-    Json(input): Json<PackRun>,
-) -> Result<Json<Value>, HttpError> {
-    let user_id = actor.id;
-    let result = app.pack_start(&input.kind).await;
-    tracing::info!(%user_id,kind=%input.kind,success=result.is_ok(),"management pack maintenance");
-    Ok(Json(result?))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PackUnpack {
-    pack_id: Option<String>,
-    #[serde(default)]
-    all: bool,
-    #[serde(default)]
-    execute: bool,
-}
-async fn pack_unpack(
-    State(app): State<Arc<App>>,
-    Extension(actor): Extension<Identity>,
-    Json(input): Json<PackUnpack>,
-) -> Result<Json<Value>, HttpError> {
-    let user_id = actor.id;
-    let id = input
-        .pack_id
-        .as_deref()
-        .map(str::parse::<i64>)
-        .transpose()
-        .map_err(|_| s3s::s3_error!(InvalidArgument))?;
-    let result = app.unpack_start(id, input.all, input.execute).await;
-    tracing::info!(%user_id,success=result.is_ok(),"management pack unpack");
-    Ok(Json(result?))
-}
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct IssueQuery {
     after: Option<i64>,
     limit: Option<i64>,
+    code: Option<String>,
 }
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
+struct IntegrityIssue {
+    id: String,
+    task_id: Uuid,
+    code: String,
+    chunk_id: Option<String>,
+    storage_id: Option<Uuid>,
+    stream_id: Option<Uuid>,
+    bucket_id: Option<Uuid>,
+    object_key: Option<String>,
+    detail: Value,
+    created_at: DateTime<Utc>,
+}
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
+struct IssuePage {
+    issues: Vec<IntegrityIssue>,
+    next_after: Option<String>,
+    groups: std::collections::BTreeMap<String, String>,
+}
+#[utoipa::path(get,path="/api/tasks/{id}/issues",params(("id"=Uuid,Path),IssueQuery),responses((status=200,body=IssuePage)))]
 async fn integrity_issues(
     State(app): State<Arc<App>>,
     Extension(_actor): Extension<Identity>,
     Path(id): Path<Uuid>,
     Query(q): Query<IssueQuery>,
-) -> Result<Json<Value>, HttpError> {
-    Ok(Json(
-        app.integrity_issues(id, q.after.unwrap_or(0), q.limit.unwrap_or(100))
-            .await?,
-    ))
+) -> Result<Json<IssuePage>, HttpError> {
+    let value = app
+        .integrity_issues_filtered(
+            id,
+            q.after.unwrap_or(0),
+            q.limit.unwrap_or(100),
+            q.code.as_deref(),
+        )
+        .await?;
+    Ok(Json(serde_json::from_value(value)?))
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct IssueObjectsQuery {
     after: Option<String>,
 }
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
+struct IssueObject {
+    bucket_id: Uuid,
+    bucket: String,
+    key: String,
+    version: Uuid,
+}
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
+struct IssueObjects {
+    objects: Vec<IssueObject>,
+    next: Option<(Uuid, String)>,
+}
+#[utoipa::path(get,path="/api/tasks/{id}/issues/{issue}/objects",params(("id"=Uuid,Path),("issue"=i64,Path),IssueObjectsQuery),responses((status=200,body=IssueObjects)))]
 async fn integrity_objects(
     State(app): State<Arc<App>>,
     Extension(_actor): Extension<Identity>,
     Path((id, issue)): Path<(Uuid, i64)>,
     Query(q): Query<IssueObjectsQuery>,
-) -> Result<Json<Value>, HttpError> {
+) -> Result<Json<IssueObjects>, HttpError> {
     let after = q
         .after
         .map(|s| serde_json::from_str::<(Uuid, String)>(&s))
         .transpose()
         .map_err(|_| s3s::s3_error!(InvalidArgument))?;
-    Ok(Json(app.integrity_objects(id, issue, after).await?))
+    Ok(Json(serde_json::from_value(
+        app.integrity_objects(id, issue, after).await?,
+    )?))
 }
 async fn integrity_report(
     State(app): State<Arc<App>>,

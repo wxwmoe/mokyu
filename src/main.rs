@@ -13,6 +13,7 @@ mod http;
 mod integrity;
 mod lifecycle;
 mod listing;
+mod maintenance;
 mod manage;
 mod multipart;
 mod pack;
@@ -124,9 +125,8 @@ fn main() -> Result<()> {
             result=serve_router(manage_listener,manage::router(app.clone()),connections)=>result?,
             result=admin::serve(app.clone())=>result?,
             result=lifecycle::run(app.clone())=>result?,
-            result=lifecycle::run_history(app.clone())=>result?,
             result=tasks::run(app.clone())=>result?,
-            result=pack_tasks::run(app.clone())=>result?,
+            result=maintenance::run(app.clone())=>result?,
             result=stats::run(app.clone())=>result?,
             result=manage::insights::runtime_loop(app.clone())=>result?,
             result=manage::catalog::run(app.clone())=>result?,

@@ -3,12 +3,14 @@ import { computed, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { TabsRoot, TabsList, TabsTrigger, TabsContent } from 'reka-ui'
 import { Layers3, Images, ArrowUpRight, ChevronRight } from 'lucide-vue-next'
-import { api, params, bytes } from '../api/client'
+import { api, params, bytes, session } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
 import { errorText } from '../app/feedback'
 import UiDialog from './ui/UiDialog.vue'
 import FileIcon from './FileIcon.vue'
+import MaintenanceConfirm from './MaintenanceConfirm.vue'
+const confirm = ref(false)
 const props = defineProps<{ id: string; bucket?: string; project?: string }>()
 const open = defineModel<boolean>('open', { required: true })
 const after = ref(''), cursor = ref(''), tab = ref('members')
@@ -23,4 +25,5 @@ const objects = useQuery({ queryKey: ['pack-objects', () => props.id, objectQuer
     <TabsRoot v-model="tab"><TabsList class="tabs-list" :aria-label="t('packDetails')"><TabsTrigger value="members" class="tab-trigger"><Layers3 :size="15" />{{ t('chunks') }}</TabsTrigger><TabsTrigger value="objects" class="tab-trigger"><Images :size="15" />{{ t('referencingFiles') }}</TabsTrigger></TabsList><TabsContent value="members"><div class="pack-member-list"><div v-for="(member, index) in detail.data.value.members" :key="member.chunk_id" class="pack-member"><span class="chunk-bead" :class="['rose', 'lilac', 'sky', 'mint'][index % 4]"><Layers3 :size="16" /></span><div><strong>{{ t('chunkNumber', { id: member.chunk_id }) }}</strong><small>{{ t(member.current_source ? 'primaryPackSource' : 'alternativeSource') }}</small></div><span>{{ bytes(Number(member.visible_bytes)) }}<small>{{ t('visibleContent') }}</small></span></div></div><div class="table-footer"><button v-if="after" @click="after = ''">{{ t('firstPage') }}</button><button v-if="detail.data.value.next" @click="after = detail.data.value.next!">{{ t('nextPage') }}<ChevronRight :size="15" /></button></div></TabsContent>
       <TabsContent value="objects"><p class="field-help">{{ t('packObjectsHint') }}</p><p v-if="objects.error.value" class="error">{{ errorText(objects.error.value) }}</p><div class="pack-file-links"><RouterLink v-for="object in objects.data.value?.objects" :key="object.bucket_id + object.key" :to="{ path: '/media/' + object.bucket_id, query: { object: object.key, version: object.version } }" @click="open = false"><FileIcon :name="object.key" /><span><strong>{{ object.key }}</strong><small>{{ object.bucket_name }} · {{ bytes(Number(object.size)) }}</small></span><ArrowUpRight :size="15" /></RouterLink></div><p v-if="objects.data.value && !objects.data.value.objects.length" class="field-help">{{ t('noVisibleReferences') }}</p><div class="table-footer"><button v-if="cursor" @click="cursor = ''">{{ t('firstPage') }}</button><button v-if="objects.data.value?.next" @click="cursor = objects.data.value.next">{{ t('nextPage') }}<ChevronRight :size="15" /></button></div></TabsContent></TabsRoot>
   </template>
-</UiDialog></template>
+  <template v-if="session?.role === 'admin' && detail.data.value?.pack.state === 'ready'" #footer><button @click="confirm = true">{{ t('unpackOne') }}</button></template>
+</UiDialog><MaintenanceConfirm v-model:open="confirm" operation="unpack" :input="{ pack_id: id }" /></template>

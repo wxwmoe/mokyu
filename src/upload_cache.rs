@@ -108,7 +108,7 @@ impl App {
     }
     pub async fn seal_uploads(&self, stream: Uuid, eof: bool) -> Result<()> {
         // Only complete CDC chunks enter this queue. A partial multipart tail remains a fragment.
-        let ready = if eof || !self.config.pack.enabled {
+        let ready = if eof || !self.pack_creation_allowed() {
             sqlx::query("UPDATE pending_uploads SET next_retry_at=LEAST(next_retry_at,now()) WHERE owner_task IS NULL AND chunk_id IN (SELECT chunk_id FROM extents WHERE stream_id=$1)").bind(stream).execute(&self.db).await?;
             true
         } else {
@@ -152,8 +152,13 @@ impl App {
     pub async fn cache_flush_start(&self) -> Result<Value> {
         let _coord = self.coord.lock().await;
         if let Some(id)=sqlx::query_scalar::<_,Uuid>("SELECT id FROM tasks WHERE kind='cache_flush' AND state IN ('queued','running') LIMIT 1").fetch_optional(&self.db).await? {return Ok(json!({"task_id":id,"existing":true}));}
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO tasks(id,kind,state,detail) VALUES($1,'cache_flush','queued',jsonb_build_object('upper_time',now()))").bind(id).execute(&self.db).await?;
+        let id = crate::tasks::insert(
+            &mut *self.db.acquire().await?,
+            "cache_flush",
+            None,
+            json!({"upper_time":chrono::Utc::now()}),
+        )
+        .await?;
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id}))
     }
@@ -174,12 +179,13 @@ impl App {
         let Some((first, stream, source)) = row else {
             return Ok(false);
         };
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO tasks(id,kind,state,detail) VALUES($1,'upload','queued',$2)")
-            .bind(id)
-            .bind(json!({"first":first,"stream_id":stream,"source_pack":source}))
-            .execute(&mut *tx)
-            .await?;
+        let id = crate::tasks::insert(
+            &mut tx,
+            "upload",
+            None,
+            json!({"first":first,"stream_id":stream,"source_pack":source}),
+        )
+        .await?;
         let candidates:Vec<(i64,i64,i32)>=sqlx::query_as("SELECT p.chunk_id,p.offset_bytes,c.raw_size FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE p.owner_task IS NULL AND (p.chunk_id=$1 OR ($2::uuid IS NOT NULL AND p.stream_id=$2 AND p.source_pack IS NOT DISTINCT FROM $3)) ORDER BY p.offset_bytes LIMIT 1026")
             .bind(first).bind(stream).bind(source).fetch_all(&mut *tx).await?;
         let mut ids = Vec::new();
@@ -319,7 +325,7 @@ impl App {
                     &ReadContext::default(),
                     content_type,
                     key,
-                    self.config.pack.enabled && !flush && !expired,
+                    self.pack_creation_allowed() && !flush && !expired,
                 )
                 .await?;
             self.commit_outputs(task, &rows, &outputs, false).await?;

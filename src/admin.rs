@@ -140,6 +140,20 @@ pub enum Cleanup {
 pub enum Maintenance {
     Enable,
     Disable,
+    Status,
+    Pause {
+        kind: String,
+    },
+    Resume {
+        kind: String,
+    },
+    Run {
+        kind: String,
+    },
+    PackCreation {
+        #[arg(value_parser=["stop","resume"])]
+        action: String,
+    },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Tasks {
@@ -255,6 +269,7 @@ impl Command {
             | Self::Quota(Quotas::Show { .. })
             | Self::Gc(Gc::Status)
             | Self::Cleanup(Cleanup::Status)
+            | Self::Maintenance(Maintenance::Status)
             | Self::Task(Tasks::List | Tasks::Show { .. })
             | Self::Integrity(Integrity::Issues { .. })
             | Self::Pack(Packs::Status)

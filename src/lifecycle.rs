@@ -24,6 +24,10 @@ impl App {
     }
 
     pub async fn cleanup_history(&self) -> Result<Value> {
+        anyhow::ensure!(
+            !self.maintenance_paused("cleanup").await?,
+            "history cleanup is paused"
+        );
         let Ok(guard) = self.cleanup_state.running.try_lock() else {
             return Ok(self.cleanup_status());
         };
@@ -32,9 +36,14 @@ impl App {
         let start = Instant::now();
         let duration = Duration::from_secs(config::seconds(&c.max_duration)?);
         let batch = c.batch_size as i64;
-        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"integrity_issues":0,"packs":0,"chunk_locations":0,"audit_events":0,"media_operations":0});
+        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"integrity_issues":0,"packs":0,"chunk_locations":0,"audit_events":0,"media_operations":0,"maintenance_previews":0});
         let mut batches = 0;
         let queries = [
+            (
+                "maintenance_previews",
+                0.0,
+                "DELETE FROM maintenance_previews WHERE id IN (SELECT id FROM maintenance_previews WHERE expires_at<now()-$1*interval '1 second' ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
+            ),
             (
                 "media_operations",
                 config::seconds(&c.task_retention)? as f64,
@@ -86,6 +95,9 @@ impl App {
             loop {
                 let mut full = false;
                 for (table, age, sql) in queries {
+                    if self.maintenance_paused("cleanup").await? {
+                        return Ok(());
+                    }
                     let mut tx = self.db.begin().await?;
                     sqlx::raw_sql("SET LOCAL lock_timeout='100ms'; SET LOCAL work_mem='4MB'")
                         .execute(&mut *tx)
@@ -494,44 +506,12 @@ pub async fn run(app: Arc<App>) -> Result<()> {
         &app.config.multipart.sweep_interval,
     )?));
     local.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut remote = tokio::time::interval(Duration::from_secs(config::seconds(
-        &app.config.gc.interval,
-    )?));
-    remote.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        let gc = tokio::select! {_=app.wake_gc.notified()=>false,_=local.tick()=>false,_=remote.tick()=>true};
+        tokio::select! {_=app.wake_gc.notified()=>{},_=local.tick()=>{}}
         if let Err(e) = app.cleanup().await {
             app.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(error=%e,"local cleanup failed; retaining recoverable state");
         }
-        if gc {
-            loop {
-                match app.reclaim().await {
-                    Ok(n) if n == app.config.gc.batch_size as usize => {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                    Ok(_) => break,
-                    Err(e) => {
-                        app.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
-                        tracing::error!(error=%e,"remote GC failed; retaining deletion journal");
-                        break;
-                    }
-                }
-            }
-        }
         tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-}
-
-pub async fn run_history(app: Arc<App>) -> Result<()> {
-    let mut timer = tokio::time::interval(Duration::from_secs(config::seconds(
-        &app.config.cleanup.interval,
-    )?));
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        timer.tick().await;
-        if let Err(e) = app.cleanup_history().await {
-            tracing::error!(error=%e,"database history cleanup failed; retrying next interval");
-        }
     }
 }

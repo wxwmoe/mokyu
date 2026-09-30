@@ -8,10 +8,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use serde_json::{Value, json};
-use std::{
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
-};
+use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
 #[derive(Clone, sqlx::FromRow)]
@@ -97,13 +94,13 @@ impl App {
     pub async fn pack_status(&self) -> Result<Value> {
         let rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('state',state,'count',count(*),'raw_bytes',COALESCE(sum(raw_size),0),'stored_bytes',COALESCE(sum(stored_size),0)) FROM packs GROUP BY state").fetch_all(&self.db).await?;
         Ok(
-            json!({"enabled":self.config.pack.enabled,"range_optimization":self.config.pack.range_optimization,"packs":rows,"max_size":self.config.pack.max_size}),
+            json!({"enabled":self.pack_creation_allowed(),"range_optimization":self.config.pack.range_optimization,"packs":rows,"max_size":self.config.pack.max_size}),
         )
     }
     pub async fn pack_start(&self, kind: &str) -> Result<Value> {
         self.start_pack(kind, false).await
     }
-    async fn start_pack(&self, kind: &str, automatic: bool) -> Result<Value> {
+    pub(crate) async fn start_pack(&self, kind: &str, automatic: bool) -> Result<Value> {
         self.writable()?;
         if !["pack", "reuse", "reclaim", "repack", "range"].contains(&kind) {
             return Err(s3s::s3_error!(InvalidArgument, "unknown pack maintenance kind").into());
@@ -111,35 +108,52 @@ impl App {
         if kind == "range" && !self.config.pack.range_optimization {
             return Err(s3s::s3_error!(OperationAborted, "Range optimization is disabled").into());
         }
-        if matches!(kind, "pack" | "repack") && !self.config.pack.enabled {
+        if matches!(kind, "pack" | "repack") && !self.pack_creation_allowed() {
             return Err(s3s::s3_error!(OperationAborted, "pack creation is disabled").into());
         }
         let _coord = self.coord.lock().await;
+        self.writable()?;
+        if self.maintenance_paused(kind).await?
+            || (matches!(kind, "pack" | "repack") && !self.pack_creation_allowed())
+        {
+            return Err(s3s::s3_error!(OperationAborted, "maintenance policy is paused").into());
+        }
         let existing:Option<Uuid>=sqlx::query_scalar("SELECT id FROM tasks WHERE kind='pack' AND detail->>'kind'=$1 AND state IN ('queued','running') LIMIT 1")
             .bind(kind).fetch_optional(&self.db).await?;
         if let Some(id) = existing {
             return Ok(json!({"task_id":id,"existing":true}));
         }
         if automatic && let Some(id)=sqlx::query_scalar::<_,Uuid>("SELECT id FROM tasks WHERE kind='pack' AND detail->>'kind'=$1 AND state='failed' AND updated_at>now()-$2*interval '1 second' ORDER BY updated_at DESC LIMIT 1").bind(kind).bind(config::seconds(&self.config.pack.reuse_interval)? as f64).fetch_optional(&self.db).await? {return Ok(json!({"task_id":id,"retry_pending":true}));}
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO tasks(id,kind,state,detail) VALUES($1,'pack','queued',$2)")
-            .bind(id)
-            .bind(json!({"kind":kind,"upper_time":chrono::Utc::now(),"automatic":automatic}))
-            .execute(&self.db)
-            .await?;
+        let id = crate::tasks::insert(
+            &mut *self.db.acquire().await?,
+            "pack",
+            None,
+            json!({"kind":kind,"upper_time":chrono::Utc::now(),"automatic":automatic}),
+        )
+        .await?;
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id}))
     }
     pub async fn unpack_start(&self, pack: Option<i64>, all: bool, execute: bool) -> Result<Value> {
+        self.unpack_checked(pack, all, execute, None).await
+    }
+    pub(crate) async fn unpack_checked(
+        &self,
+        pack: Option<i64>,
+        all: bool,
+        execute: bool,
+        expected: Option<&str>,
+    ) -> Result<Value> {
+        let _coord = self.coord.lock().await;
         if all == pack.is_some() || pack.is_some_and(|id| id <= 0) {
             return Err(
                 s3s::s3_error!(InvalidArgument, "specify one positive pack ID or --all").into(),
             );
         }
-        if all && self.config.pack.enabled {
+        if all && self.pack_creation_allowed() {
             return Err(s3s::s3_error!(
                 OperationAborted,
-                "disable pack.enabled before unpacking all packs"
+                "stop new pack creation before unpacking all packs"
             )
             .into());
         }
@@ -148,18 +162,39 @@ impl App {
         }
         let (count,bytes):(i64,i64)=sqlx::query_as("SELECT count(*),COALESCE(sum(raw_size),0)::bigint FROM packs WHERE state='ready' AND ($1::bigint IS NULL OR id=$1)")
             .bind(pack).fetch_one(&self.db).await?;
+        let (upper,ids):(String,String)=sqlx::query_as("SELECT coalesce(max(id),0)::text,coalesce(sum(id),0)::text FROM packs WHERE state='ready' AND ($1::bigint IS NULL OR id=$1)").bind(pack).fetch_one(&self.db).await?;
+        let preview = json!({"preview":true,"packs":count,"raw_bytes":bytes,"upper_id":upper,"identity_sum":ids,"effect":"write independent chunk sources; old packs retain GC grace"});
         if !execute {
-            return Ok(
-                json!({"preview":true,"packs":count,"raw_bytes":bytes,"effect":"write independent chunk sources; old packs retain GC grace"}),
-            );
+            return Ok(preview);
+        }
+        if let Some(expected) = expected
+            && expected
+                != blake3::hash(&serde_json::to_vec(&preview)?)
+                    .to_hex()
+                    .as_str()
+        {
+            return Err(s3s::s3_error!(PreconditionFailed).into());
         }
         self.writable()?;
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO tasks(id,kind,state,detail) VALUES($1,'unpack','queued',$2)")
-            .bind(id)
-            .bind(json!({"pack_id":pack,"all":all}))
-            .execute(&self.db)
-            .await?;
+        let preparing: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM packs WHERE state='preparing')")
+                .fetch_one(&self.db)
+                .await?;
+        if all && preparing {
+            return Err(s3s::s3_error!(
+                OperationAborted,
+                "wait for current pack generation to drain"
+            )
+            .into());
+        }
+        if let Some(id)=sqlx::query_scalar::<_,Uuid>("SELECT id FROM tasks WHERE kind='unpack' AND state IN ('queued','running','paused','failed') AND detail->>'all'=$1 AND detail->>'pack_id' IS NOT DISTINCT FROM $2 LIMIT 1").bind(all.to_string()).bind(pack.map(|v|v.to_string())).fetch_optional(&self.db).await? { return Ok(json!({"task_id":id,"existing":true})); }
+        let id = crate::tasks::insert(
+            &mut *self.db.acquire().await?,
+            "unpack",
+            None,
+            json!({"pack_id":pack,"all":all}),
+        )
+        .await?;
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id}))
     }
@@ -238,7 +273,7 @@ impl App {
             let raw = self.storage.get_with(&row.chunk, Some(context)).await?;
             data.push((row.chunk.clone(), Bytes::copy_from_slice(&raw)));
         }
-        if rows.len() == 1 || !allow_pack {
+        if rows.len() == 1 || !allow_pack || !self.pack_creation_allowed() {
             let mut outputs = Vec::new();
             for (c, raw) in data {
                 outputs.push(self.independent_output(task, &c, raw).await?);
@@ -277,11 +312,16 @@ impl App {
         content_type: Option<&str>,
         key: &str,
     ) -> Result<Option<Output>> {
+        let coord = self.coord.lock().await;
+        if !self.pack_creation_allowed() {
+            return Ok(None);
+        }
         let raw_size: i64 = rows.iter().map(|r| i64::from(r.chunk.raw_size)).sum();
         let first = &rows[0].chunk;
         let (algorithm, key_id) = self.physical_encoding(first)?;
         let p:Pack=sqlx::query_as("INSERT INTO packs(storage_id,algorithm,key_id,raw_size,member_count,state,unreferenced_at,owner_task) VALUES($1,$2,$3,$4,$5,'preparing',now(),$6) RETURNING *")
             .bind(Uuid::new_v4()).bind(&algorithm).bind(&key_id).bind(raw_size).bind(rows.len() as i32).bind(task).fetch_one(&self.db).await?;
+        drop(coord);
         let strategy = match self.config.pack.compression_strategy {
             None => self.config.compression.strategy,
             Some(CompressionStrategy::Always) => crate::compression::Strategy::Always,
@@ -352,6 +392,10 @@ impl App {
         crate::faults::point("pack-before-publish").await;
         let _coord = self.coord.lock().await;
         self.storage_writable()?;
+        anyhow::ensure!(
+            self.pack_creation_allowed() || outputs.iter().all(|o| o.pack.is_none()),
+            "new pack creation was stopped; retry as chunks"
+        );
         let _sources = self.storage.source_gate.write().await;
         let mut ids: Vec<i64> = rows.iter().map(|r| r.chunk.id).collect();
         ids.sort_unstable();
@@ -486,6 +530,7 @@ impl App {
         }
         let writing:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM extents e JOIN chunks c ON c.id=e.chunk_id JOIN streams s ON s.id=e.stream_id WHERE c.pack_id=$1 AND s.state='writing')").bind(id).fetch_one(&self.db).await?;
         if writing
+            && !unpack
             && crate::backend::PRIORITY
                 .try_with(|p| *p)
                 .unwrap_or(crate::backend::FOREGROUND)
@@ -549,7 +594,7 @@ impl App {
                 groups.push(vec![row.clone()]);
             }
         }
-        if groups.is_empty()
+        if (groups.is_empty() && !unpack)
             || (!unpack && dead_bytes == 0 && groups.len() == 1 && groups[0].len() == rows.len())
         {
             return Ok(0);
@@ -570,7 +615,7 @@ impl App {
                     &context,
                     None,
                     "",
-                    self.config.pack.enabled && !unpack,
+                    self.pack_creation_allowed() && !unpack,
                 )
                 .await?,
             );
@@ -763,7 +808,7 @@ impl App {
         let next = if unpack || matches!(kind, "reuse" | "reclaim") {
             if detail["all"] == true {
                 ensure!(
-                    !self.config.pack.enabled,
+                    !self.pack_creation_allowed(),
                     "disable pack.enabled while unpacking all packs"
                 );
             }
@@ -777,7 +822,7 @@ impl App {
                 None
             }
         } else {
-            ensure!(self.config.pack.enabled, "pack creation is disabled");
+            ensure!(self.pack_creation_allowed(), "pack creation is disabled");
             let (after, offset) = if let Some(c) = cursor {
                 let (a, b) = c.split_once(':').context("invalid pack cursor")?;
                 (Uuid::parse_str(a)?, b.parse::<i64>()?)
@@ -852,41 +897,5 @@ impl App {
         };
         sqlx::query("UPDATE tasks SET cursor=$2,processed=processed+$3,state=CASE WHEN $2::text IS NULL THEN 'completed' ELSE state END,updated_at=now() WHERE id=$1 AND state='running'").bind(id).bind(&next).bind(processed as i64).execute(&self.db).await?;
         Ok(next.is_some())
-    }
-}
-
-pub async fn run(app: Arc<App>) -> Result<()> {
-    let mut last = [std::time::Instant::now(); 5];
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        if app.maintenance.load(Ordering::Acquire) {
-            continue;
-        }
-        let changed:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pack_changes WHERE reason='reuse' AND next_check_at<=now())").fetch_one(&app.db).await?;
-        if changed && let Err(e) = app.start_pack("reuse", true).await {
-            tracing::warn!(error=%e,"pack reuse scheduling deferred");
-        }
-        for (i, (kind, interval)) in [
-            ("pack", &app.config.pack.interval),
-            ("reuse", &app.config.pack.reuse_interval),
-            ("reclaim", &app.config.pack.reclaim_interval),
-            ("repack", &app.config.pack.repack_interval),
-            ("range", &app.config.pack.range_interval),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if last[i].elapsed() >= Duration::from_secs(config::seconds(interval)?) {
-                last[i] = std::time::Instant::now();
-                if (if kind == "range" {
-                    app.config.pack.range_optimization
-                } else {
-                    app.config.pack.enabled || matches!(kind, "reuse" | "reclaim")
-                }) && let Err(e) = app.start_pack(kind, true).await
-                {
-                    tracing::warn!(error=%e,kind,"pack schedule failed");
-                }
-            }
-        }
     }
 }

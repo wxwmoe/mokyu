@@ -432,6 +432,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/integrity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["start_integrity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/login": {
         parameters: {
             query?: never;
@@ -458,6 +474,150 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["maintenance_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance/flush": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["flush"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance/mode": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["mode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance/pack-creation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["creation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance/sweep": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["sweep"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance/sweep/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["sweep_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance/unpack/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["unpack_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance/{kind}/actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["policy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance/{operation}/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["execute"];
         delete?: never;
         options?: never;
         head?: never;
@@ -656,6 +816,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/service/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["service_config"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/service/key-material": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["key_material"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/service/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["service_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -760,6 +968,86 @@ export interface paths {
             cookie?: never;
         };
         get: operations["storage_pack_objects"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["jobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["task"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/{id}/actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["task_action"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/{id}/issues": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["integrity_issues"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/{id}/issues/{issue}/objects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["integrity_objects"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1036,6 +1324,12 @@ export interface components {
         Completion: {
             parts: components["schemas"]["PartReceipt"][];
         };
+        ConfigField: {
+            key: string;
+            restart: boolean;
+            source: string;
+            value: string;
+        };
         ConfirmBucket: {
             confirm_name: string;
             confirmation: string;
@@ -1131,6 +1425,50 @@ export interface components {
             /** Format: uuid */
             token_id?: string | null;
         };
+        ExecutePreview: {
+            confirmation: string;
+            /** Format: uuid */
+            preview_id: string;
+        };
+        IntegrityIssue: {
+            /** Format: uuid */
+            bucket_id?: string | null;
+            chunk_id?: string | null;
+            code: string;
+            /** Format: date-time */
+            created_at: string;
+            detail: unknown;
+            id: string;
+            object_key?: string | null;
+            /** Format: uuid */
+            storage_id?: string | null;
+            /** Format: uuid */
+            stream_id?: string | null;
+            /** Format: uuid */
+            task_id: string;
+        };
+        IssueObject: {
+            bucket: string;
+            /** Format: uuid */
+            bucket_id: string;
+            key: string;
+            /** Format: uuid */
+            version: string;
+        };
+        IssueObjects: {
+            next?: [
+                string,
+                string
+            ] | null;
+            objects: components["schemas"]["IssueObject"][];
+        };
+        IssuePage: {
+            groups: {
+                [key: string]: string;
+            };
+            issues: components["schemas"]["IntegrityIssue"][];
+            next_after?: string | null;
+        };
         Item: {
             /** Format: uuid */
             client_id: string;
@@ -1147,6 +1485,35 @@ export interface components {
             key: string;
             replayed: boolean;
         };
+        Job: {
+            blocked?: string | null;
+            /** Format: uuid */
+            bucket_id?: string | null;
+            bucket_name?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            created_by: string;
+            detail: unknown;
+            error?: string | null;
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            policy: string;
+            processed: string;
+            source: string;
+            /** Format: date-time */
+            started_at?: string | null;
+            state: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        JobPage: {
+            next_token?: string | null;
+            tasks: components["schemas"]["Job"][];
+        };
+        KeyMaterial: {
+            secret: string;
+        };
         /** @enum {string} */
         Kind: "delete" | "private" | "public-read" | "copy" | "move" | "metadata";
         Limits: {
@@ -1160,6 +1527,30 @@ export interface components {
         };
         LoginReply: {
             csrf_token: string;
+        };
+        MaintenancePreview: {
+            confirmation: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: uuid */
+            id: string;
+            impact: unknown;
+        };
+        MaintenanceResult: {
+            /** Format: uuid */
+            task_id?: string | null;
+        };
+        MaintenanceStatus: {
+            active_operations: number;
+            backend_prefix: string;
+            concurrency: number;
+            controls: components["schemas"]["Policy"][];
+            maintenance: boolean;
+            min_storage_duration: string;
+            pack_configured: boolean;
+            pack_creation_enabled: boolean;
+            pack_creation_paused: boolean;
+            preparing_packs: string;
         };
         MediaItem: {
             content_type: string;
@@ -1194,6 +1585,8 @@ export interface components {
             role: string;
             scope: string;
         };
+        /** @enum {string} */
+        Mode: "metadata" | "head" | "full";
         ObjectChunk: {
             algorithm: string;
             compression: string;
@@ -1278,6 +1671,10 @@ export interface components {
             next?: string | null;
             packs: components["schemas"]["PackSummary"][];
         };
+        PackScope: {
+            all?: boolean;
+            pack_id?: string | null;
+        };
         PackSummary: {
             compressed: boolean;
             /** Format: date-time */
@@ -1316,6 +1713,20 @@ export interface components {
             retained_bytes: string;
             selected_bytes: string;
             unconfirmed_bytes: string;
+        };
+        Policy: {
+            active?: components["schemas"]["Job"] | null;
+            enabled: boolean;
+            /** Format: int64 */
+            interval_seconds: number;
+            kind: string;
+            latest?: components["schemas"]["Job"] | null;
+            /** Format: date-time */
+            next_run_at?: string | null;
+            paused: boolean;
+        };
+        PolicyAction: {
+            action: string;
         };
         Preferences: {
             avatar_email: string;
@@ -1379,6 +1790,11 @@ export interface components {
             sha256?: string | null;
             size: string;
         };
+        Request: {
+            bucket?: string | null;
+            key?: string | null;
+            mode?: components["schemas"]["Mode"];
+        };
         ResetPassword: {
             must_change_password?: boolean;
             password: string;
@@ -1386,6 +1802,10 @@ export interface components {
         RotateCredential: {
             expires_in?: string | null;
             overlap: string;
+        };
+        RuntimeCounter: {
+            key: string;
+            value: string;
         };
         RuntimeInsights: {
             current: components["schemas"]["RuntimePoint"];
@@ -1415,6 +1835,18 @@ export interface components {
             thumbnail_bytes: string;
             upload_bytes: string;
             upload_limit: string;
+        };
+        ServiceStatus: {
+            backend_operations: unknown;
+            backend_queues: unknown;
+            catalog: unknown;
+            counters: components["schemas"]["RuntimeCounter"][];
+            inventory_as_of?: string | null;
+            inventory_error?: string | null;
+            inventory_stale: boolean;
+            maintenance: boolean;
+            started_at: string;
+            version: string;
         };
         Session: {
             /** Format: date-time */
@@ -1479,9 +1911,23 @@ export interface components {
             shared_savings: string;
             unique_bytes: string;
         };
+        SweepRequest: {
+            older_than: string;
+        };
+        SweepTask: {
+            /** Format: uuid */
+            task_id: string;
+        };
+        TaskStarted: {
+            /** Format: uuid */
+            task_id: string;
+        };
         TextPreview: {
             text: string;
             truncated: boolean;
+        };
+        Toggle: {
+            enabled: boolean;
         };
         Token: {
             active: boolean;
@@ -2424,6 +2870,29 @@ export interface operations {
             };
         };
     };
+    start_integrity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Request"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskStarted"];
+                };
+            };
+        };
+    };
     login: {
         parameters: {
             query?: never;
@@ -2476,6 +2945,205 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    maintenance_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenanceStatus"];
+                };
+            };
+        };
+    };
+    flush: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskStarted"];
+                };
+            };
+        };
+    };
+    mode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Toggle"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    creation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Toggle"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    sweep: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SweepRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskStarted"];
+                };
+            };
+        };
+    };
+    sweep_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SweepTask"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenancePreview"];
+                };
+            };
+        };
+    };
+    unpack_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PackScope"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenancePreview"];
+                };
+            };
+        };
+    };
+    policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicyAction"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenanceResult"];
+                };
+            };
+        };
+    };
+    execute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                operation: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExecutePreview"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskStarted"];
                 };
             };
         };
@@ -2866,6 +3534,63 @@ export interface operations {
             };
         };
     };
+    service_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigField"][];
+                };
+            };
+        };
+    };
+    key_material: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyMaterial"];
+                };
+            };
+        };
+    };
+    service_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceStatus"];
+                };
+            };
+        };
+    };
     session: {
         parameters: {
             query?: never;
@@ -3055,6 +3780,125 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PackObjects"];
+                };
+            };
+        };
+    };
+    jobs: {
+        parameters: {
+            query?: {
+                state?: string | null;
+                kind?: string | null;
+                bucket?: string | null;
+                actor?: string | null;
+                token?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobPage"];
+                };
+            };
+        };
+    };
+    task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+        };
+    };
+    task_action: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicyAction"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    integrity_issues: {
+        parameters: {
+            query?: {
+                after?: number | null;
+                limit?: number | null;
+                code?: string | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuePage"];
+                };
+            };
+        };
+    };
+    integrity_objects: {
+        parameters: {
+            query?: {
+                after?: string | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+                issue: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueObjects"];
                 };
             };
         };

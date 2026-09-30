@@ -271,7 +271,7 @@ pub(super) async fn runtime(
     let mut tx = app.db.begin().await?;
     actor.principal.lock_admin(&mut tx).await?;
     let history:Vec<sqlx::types::Json<RuntimePoint>>=sqlx::query_scalar("SELECT data FROM (SELECT at,data FROM runtime_history ORDER BY at DESC LIMIT 2048) h ORDER BY at").fetch_all(&mut *tx).await?;
-    let work=sqlx::query_as("SELECT id,kind,state,processed::text,updated_at FROM tasks WHERE state IN ('queued','running','paused','failed') ORDER BY CASE state WHEN 'running' THEN 0 WHEN 'failed' THEN 1 WHEN 'paused' THEN 2 ELSE 3 END,updated_at DESC LIMIT 5").fetch_all(&mut *tx).await?;
+    let work=sqlx::query_as("SELECT id,coalesce(detail->>'kind',kind) kind,state,processed::text,updated_at FROM tasks WHERE state IN ('queued','running','paused') ORDER BY CASE state WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,updated_at DESC LIMIT 5").fetch_all(&mut *tx).await?;
     let (pending_entries,pending_bytes,oldest_pending,failed_uploads):(String,String,Option<DateTime<Utc>>,String)=sqlx::query_as("SELECT count(*)::text,coalesce(sum(cache_size),0)::text,min(created_at),count(*) FILTER(WHERE last_error IS NOT NULL)::text FROM pending_uploads").fetch_one(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(RuntimeInsights {

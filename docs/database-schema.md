@@ -492,3 +492,11 @@ objects 增加可空 `catalog_size bigint`、`catalog_modified timestamptz`、`c
 迁移 `0019_bucket_management.sql` 增加 `buckets.settings_revision bigint`、`uploads_paused boolean` 和 `public_base_url text`。CORS、网站、域名、归属和状态变化推进配置修订号，供并发编辑检查；不是对象版本。
 
 项目转移复用 `quota_accounts`：锁定来源和目标项目配额行，在同一事务内迁移逻辑用量、对象数和桶数，保留桶限额。活动预留阻止转移。成员和凭据授权的撤销也在此事务中完成。
+
+## 维护控制与确认
+
+`maintenance_controls(kind)` 保存七类策略的 paused、last_scheduled_at、updated_at。`mokyu_meta.pack_creation_paused` 独立于配置开关，控制所有路径发布新包。
+
+`tasks` 增加 created_by、source、started_at，支持 gc/cleanup 类型；索引 `(coalesce(detail->>'kind',kind),created_at DESC,id DESC)` 用于策略最近运行记录。
+
+`maintenance_previews(id)` 保存 actor_id、可空 token_id、action、parameters、fingerprint、expires_at 和可空 task_id。预览绑定身份和影响范围，十分钟到期；task_id 为持久执行回执，过期记录由历史清理任务删除。不存在密钥或密码字段。

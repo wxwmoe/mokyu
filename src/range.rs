@@ -103,7 +103,7 @@ impl App {
         let mut groups: Vec<Vec<Mapping>> = Vec::new();
         for row in &rows {
             let join = if let Some(last) = groups.last().and_then(|g| g.last()) {
-                self.config.pack.enabled
+                self.pack_creation_allowed()
                     && hits.contains_key(&last.chunk.id) == hits.contains_key(&row.chunk.id)
                     && last.offset_bytes + i64::from(last.chunk.raw_size) == row.offset_bytes
                     && groups
@@ -187,8 +187,15 @@ impl App {
         let mut outputs: Vec<Output> = Vec::new();
         for group in &groups {
             outputs.extend(
-                self.pack_output(task, group, &context, None, "", self.config.pack.enabled)
-                    .await?,
+                self.pack_output(
+                    task,
+                    group,
+                    &context,
+                    None,
+                    "",
+                    self.pack_creation_allowed(),
+                )
+                .await?,
             );
         }
         let actual = evaluate(

@@ -119,6 +119,7 @@ pub struct App {
     pub reads: Arc<Semaphore>,
     pub slots: Arc<Semaphore>,
     pub maintenance: Arc<std::sync::atomic::AtomicBool>,
+    pub pack_creation_paused: std::sync::atomic::AtomicBool,
     pub gc_running: std::sync::atomic::AtomicBool,
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: tokio::sync::Notify,
@@ -152,6 +153,10 @@ impl App {
             .fetch_one(&db)
             .await?;
         let maintenance = Arc::new(std::sync::atomic::AtomicBool::new(maintenance));
+        let pack_creation_paused: bool =
+            sqlx::query_scalar("SELECT pack_creation_paused FROM mokyu_meta")
+                .fetch_one(&db)
+                .await?;
         let secrets = Arc::new(secrets);
         let storage = Arc::new(
             Storage::new(
@@ -192,6 +197,7 @@ impl App {
             coord: tokio::sync::Mutex::new(()),
             active: Arc::new(Mutex::new(HashMap::new())),
             maintenance,
+            pack_creation_paused: pack_creation_paused.into(),
             gc_running: false.into(),
             wake_gc: Arc::new(tokio::sync::Notify::new()),
             wake_tasks: tokio::sync::Notify::new(),
