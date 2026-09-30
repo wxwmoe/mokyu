@@ -181,7 +181,7 @@ impl App {
         let uploads:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM uploads WHERE bucket_id=$1 AND state IN ('active','completing') ORDER BY id LIMIT $2").bind(bucket).bind(batch).fetch_all(&self.db).await?;
         if !uploads.is_empty() {
             for upload in uploads {
-                let lock = self.upload_lock(upload);
+                let lock = self.operation_lock(upload);
                 let Ok(_guard) = lock.try_lock() else {
                     continue;
                 };

@@ -120,7 +120,7 @@ pub struct App {
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: tokio::sync::Notify,
     hashes: Mutex<HashMap<[u8; 32], Weak<tokio::sync::Mutex<()>>>>,
-    pub upload_locks: Mutex<HashMap<Uuid, Weak<tokio::sync::Mutex<()>>>>,
+    pub operation_locks: Mutex<HashMap<Uuid, Weak<tokio::sync::Mutex<()>>>>,
     _file_lock: std::fs::File,
 }
 impl App {
@@ -193,7 +193,7 @@ impl App {
             wake_gc: Arc::new(tokio::sync::Notify::new()),
             wake_tasks: tokio::sync::Notify::new(),
             hashes: Mutex::new(HashMap::new()),
-            upload_locks: Mutex::new(HashMap::new()),
+            operation_locks: Mutex::new(HashMap::new()),
             _file_lock: lock,
         });
         Ok((app, owner))
@@ -537,6 +537,57 @@ impl App {
         self.extent_bytes_with(e, &crate::storage::ReadContext::default())
             .await
     }
+    pub(crate) async fn copy_extents(
+        &self,
+        destination: Uuid,
+        source: &StoredStream,
+    ) -> Result<()> {
+        let mut offset = 0;
+        while offset < source.size {
+            let rows: Vec<Extent> = sqlx::query_as("SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2 ORDER BY offset_bytes LIMIT 500")
+                .bind(source.id).bind(offset).fetch_all(&self.db).await?;
+            ensure!(!rows.is_empty(), "source mapping is incomplete");
+            let mut end = offset;
+            let mut chunks = Vec::with_capacity(rows.len());
+            for row in &rows {
+                ensure!(
+                    row.offset_bytes == end && row.fragment_id.is_none(),
+                    "invalid copy mapping"
+                );
+                chunks.push(row.chunk_id.context("copy source has no chunk")?);
+                end += i64::from(row.length);
+            }
+            ensure!(end <= source.size, "copy mapping exceeds source");
+            chunks.sort_unstable();
+            chunks.dedup();
+            let mut tx = self.db.begin().await?;
+            let locked: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM chunks WHERE id=ANY($1) AND state='ready' ORDER BY id FOR UPDATE",
+            )
+            .bind(&chunks)
+            .fetch_all(&mut *tx)
+            .await?;
+            ensure!(locked.len() == chunks.len(), "copy source is not ready");
+            sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id,source_offset) SELECT $1,offset_bytes,length,chunk_id,source_offset FROM extents WHERE stream_id=$2 AND offset_bytes>=$3 AND offset_bytes<$4")
+                .bind(destination).bind(source.id).bind(offset).bind(end).execute(&mut *tx).await?;
+            sqlx::query("UPDATE chunks SET unreferenced_at=NULL WHERE id=ANY($1)")
+                .bind(&chunks)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO cache_pins(chunk_id,pin_type,owner_id) SELECT chunk_id,CASE WHEN source_pack IS NULL THEN 'upload' ELSE 'pack' END,$2 FROM pending_uploads WHERE chunk_id=ANY($1) ON CONFLICT DO NOTHING")
+                .bind(&chunks).bind(destination).execute(&mut *tx).await?;
+            sqlx::query(
+                "UPDATE streams SET size=$2,touched_at=now() WHERE id=$1 AND state='writing'",
+            )
+            .bind(destination)
+            .bind(end)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            offset = end;
+        }
+        Ok(())
+    }
     pub async fn extent_bytes_with(
         &self,
         e: &Extent,
@@ -836,6 +887,7 @@ impl App {
                 .bind(public)
                 .execute(&mut *tx)
                 .await?;
+            crate::manage::actions::complete(&mut tx, Some(id)).await?;
             tx.commit().await?;
             return Ok(());
         }
@@ -846,6 +898,7 @@ impl App {
                 .execute(&mut *tx)
                 .await?;
         }
+        crate::manage::actions::complete(&mut tx, None).await?;
         tx.commit().await?;
         self.wake_gc.notify_one();
         Ok(())

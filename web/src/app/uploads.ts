@@ -1,5 +1,5 @@
 import { markRaw, reactive, watch } from 'vue'
-import { api, ApiError, queries, session } from '../api/client'
+import { api, ApiError, queries, session, uuid } from '../api/client'
 import type { components } from '../api/schema'
 
 export type Transfer = components['schemas']['Transfer']
@@ -36,11 +36,6 @@ function hash(blob: Blob, signal: AbortSignal): Promise<string> {
     hashes.set(id, { resolve, reject, cleanup: () => signal.removeEventListener('abort', abort) })
     worker!.postMessage({ id, blob })
   })
-}
-function uuid() {
-  const value = crypto.getRandomValues(new Uint8Array(16)); value[6] = (value[6]! & 15) | 64; value[8] = (value[8]! & 63) | 128
-  const hex = Array.from(value, v => v.toString(16).padStart(2, '0')).join('')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 function valid(job: UploadJob) { job.controller.signal.throwIfAborted(); if (session.value?.id !== job.owner) throw new ApiError(401, 'Unauthorized') }
 function json<T>(job: UploadJob, path: string, body: unknown): Promise<T> {

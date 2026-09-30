@@ -449,6 +449,10 @@ chunks、extents、streams、objects、uploads、parts、fragments、sessions、
 
 sweep 样本有界，不是可直接执行的删除清单。日常管理通过 CLI/Web 完成；不要手改状态、序列、引用或 nonce 来绕过检查。[数据库恢复](deployment-and-recovery.md#恢复步骤)还需核对历史密钥和后端身份。
 
+## 对象操作回执
+
+`media_operations` 保存对象变更结果：id/user_id/client_id UUID、可空 token_id UUID、32 字节 request_hash、可空 result JSONB、created_at。`(user_id,token_id,client_id)` 使用 NULLS NOT DISTINCT 唯一约束。成功回执与对象变更同事务提交；失败回执独立记录。用户删除时级联清理，常规历史清理由 cleanup.task_retention 控制。
+
 ## 当前媒体目录
 
 objects 增加可空 `catalog_size bigint`、`catalog_modified timestamptz`、`catalog_type/catalog_kind text`、`catalog_public boolean`。摘要由对象/流触发器同步维护；旧记录在后台每批 500 行回填。仅修改摘要不会触发配额记账。

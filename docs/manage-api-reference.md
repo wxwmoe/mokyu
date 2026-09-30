@@ -104,6 +104,22 @@ label 为 1～128 字节；grants 最多 1000 个不同桶，actions 使用项�
 
 目录摘要与发布、覆盖、ACL 变更及删除同事务更新。升级后逐批回填旧对象并并发建索引；中断后自动继续，不在启动迁移里重建整个库存。管理状态和 `cli status` 包含 catalog 进度。
 
+## 对象操作
+
+`POST /api/media/actions` 接受 `bucket`、`action`、`objects`。每项为 `{client_id,key,version,target_key?,target_version?}`；`client_id` 是调用方生成的 UUID。单次最多 1000 项、2 MiB，共享两个操作名额与 60 秒请求期限。返回 `results`，每项包含原 client_id/key、status、code、output_version、replayed；批次 HTTP 200 不代表每项都成功。
+
+| action | 附加字段与权限 |
+| --- | --- |
+| delete | `object.delete` |
+| private / public-read | `object.acl` |
+| copy | `target_bucket`，源 `object.read`、目标 `object.write`；副本默认私有，可显式 `public_read=true`，另需目标 `object.acl` |
+| move | `target_bucket`，源读取/删除、目标写入；保留原 ACL，移动公开对象另需目标 ACL 权限 |
+| metadata | `metadata` 包含 HTTP 字段和 `user` 字典，源读取/写入，公开对象另需 ACL 权限 |
+
+复制/移动必须提供 target_key；目标不存在时省略 target_version，替换已存在对象时提供其当前 UUID。源或目标变化返回逐项 412。复制复用区块引用，元数据编辑产生新版本；移动原子调整对象归属，按源/目标净变化记账。同项目移动不临时占用双份逻辑配额；跨项目移动仍受目标额度约束。
+
+成功结果与变更同事务落库。相同用户/Token 下使用同一 client_id 和参数重试会返回已记录结果；不同参数返回 409 IdempotencyConflict。已确认失败后再次尝试使用新的 client_id；未知结果使用原 client_id。重试仍检查当前权限，操作记录按 cleanup.task_retention 清理。Web 每批发送 20 项，选择仅限当前页；对话框保留未确认项的操作编号以处理断线重试。
+
 ## 上传与传输中心
 
 浏览器上传复用 S3 分片的接收、额度和发布流程，不向浏览器签发 S3 secret。默认每片 16 MiB，大文件自动增大片段以满足最多 10000 片和每片最多 5 GiB 的协议限制。所有字节数用十进制字符串。

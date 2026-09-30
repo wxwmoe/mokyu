@@ -500,7 +500,7 @@ pub(super) async fn abort(
     if row.user_id != Some(actor.id) {
         permit.add(row.bucket_id, Action::Settings);
     }
-    let lock = app.upload_lock(id);
+    let lock = app.operation_lock(id);
     let _guard = lock.lock().await;
     let coord = app.coord.lock().await;
     app.abort_upload_locked(id, &coord, &permit).await?;

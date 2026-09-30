@@ -32,9 +32,14 @@ impl App {
         let start = Instant::now();
         let duration = Duration::from_secs(config::seconds(&c.max_duration)?);
         let batch = c.batch_size as i64;
-        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"integrity_issues":0,"packs":0,"chunk_locations":0,"audit_events":0});
+        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"integrity_issues":0,"packs":0,"chunk_locations":0,"audit_events":0,"media_operations":0});
         let mut batches = 0;
         let queries = [
+            (
+                "media_operations",
+                config::seconds(&c.task_retention)? as f64,
+                "DELETE FROM media_operations WHERE id IN (SELECT id FROM media_operations WHERE created_at<now()-$1*interval '1 second' ORDER BY created_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+            ),
             (
                 "audit_events",
                 config::seconds(&c.audit_retention)? as f64,
@@ -220,7 +225,7 @@ impl App {
             if Instant::now() >= deadline {
                 break;
             }
-            let lock = self.upload_lock(id);
+            let lock = self.operation_lock(id);
             let Ok(_guard) = lock.try_lock() else {
                 continue;
             };

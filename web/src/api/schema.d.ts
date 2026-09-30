@@ -400,6 +400,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/media/actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["media_actions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects": {
         parameters: {
             query?: never;
@@ -715,6 +731,19 @@ export interface components {
             product: string;
             version: string;
         };
+        Batch: {
+            action: components["schemas"]["Kind"];
+            /** Format: uuid */
+            bucket: string;
+            metadata?: components["schemas"]["ObjectMetadata"] | null;
+            objects: components["schemas"]["Item"][];
+            public_read?: boolean | null;
+            /** Format: uuid */
+            target_bucket?: string | null;
+        };
+        BatchResult: {
+            results: components["schemas"]["ItemResult"][];
+        };
         Bootstrap: {
             setup_required: boolean;
         };
@@ -827,6 +856,24 @@ export interface components {
             /** Format: uuid */
             token_id?: string | null;
         };
+        Item: {
+            /** Format: uuid */
+            client_id: string;
+            key: string;
+            target_key?: string | null;
+            /** Format: uuid */
+            target_version?: string | null;
+            /** Format: uuid */
+            version: string;
+        };
+        ItemResult: components["schemas"]["Outcome"] & {
+            /** Format: uuid */
+            client_id: string;
+            key: string;
+            replayed: boolean;
+        };
+        /** @enum {string} */
+        Kind: "delete" | "private" | "public-read" | "copy" | "move" | "metadata";
         Limits: {
             bucket_limit?: string | null;
             byte_limit?: string | null;
@@ -888,9 +935,16 @@ export interface components {
             content_language?: string | null;
             content_type?: string | null;
             expires?: string | null;
-            user: {
+            user?: {
                 [key: string]: string;
             };
+        };
+        Outcome: {
+            code?: string | null;
+            /** Format: uuid */
+            output_version?: string | null;
+            /** Format: int32 */
+            status: number;
         };
         Page: {
             events: components["schemas"]["Event"][];
@@ -1859,6 +1913,29 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    media_actions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Batch"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchResult"];
+                };
             };
         };
     };

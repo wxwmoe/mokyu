@@ -32,6 +32,16 @@ try:
     assert reply.status_code == 200, reply.text
     assert (reply.json()['state'], reply.json()['remote_state']) == ('completed', 'pending'), reply.json()
     assert client.get(url + '/api/download', params={'bucket': bucket['id'], 'key': 'pending'}).content == data
+    source = client.get(url + '/api/buckets/' + bucket['id'] + '/objects', params={'q': 'pending', 'mode': 'exact'}).json()['objects'][0]
+    for action, key, target in [('copy', 'pending', 'copy'), ('move', 'pending', 'moved')]:
+        result = client.post(url + '/api/media/actions', json={'bucket': bucket['id'], 'action': action, 'target_bucket': bucket['id'],
+            'objects': [{'client_id': str(uuid.uuid4()), 'key': key, 'version': source['id'], 'target_key': target}]}).json()['results'][0]
+        assert result['status'] == 200, result
+        assert client.get(url + '/api/download', params={'bucket': bucket['id'], 'key': target}).content == data
+    result = client.post(url + '/api/media/actions', json={'bucket': bucket['id'], 'action': 'delete',
+        'objects': [{'client_id': str(uuid.uuid4()), 'key': 'moved', 'version': source['id']}]}).json()['results'][0]
+    assert result['status'] == 200
+    assert client.get(url + '/api/download', params={'bucket': bucket['id'], 'key': 'copy'}).content == data
     marker.unlink()
     for _ in range(200):
         row = client.get(path).json()
@@ -40,7 +50,7 @@ try:
         time.sleep(.1)
     else:
         raise AssertionError(row)
-    assert client.get(url + '/api/download', params={'bucket': bucket['id'], 'key': 'pending'}).content == data
-    print('PASS completed web upload remains locally readable and changes from pending to stored only after backend flush', flush=True)
+    assert client.get(url + '/api/download', params={'bucket': bucket['id'], 'key': 'copy'}).content == data
+    print('PASS pending upload copy/move/delete retain shared local data and become stored only after backend flush', flush=True)
 finally:
     marker.unlink(missing_ok=True)

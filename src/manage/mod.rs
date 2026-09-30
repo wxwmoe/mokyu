@@ -1,4 +1,5 @@
 pub(crate) mod account;
+pub(crate) mod actions;
 mod assets;
 pub(crate) mod audit;
 pub(crate) mod catalog;
@@ -70,10 +71,7 @@ pub fn router(app: Arc<App>) -> Router {
             "/api/objects/actions",
             post(object_actions)
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
-                .layer(axum::middleware::from_fn_with_state(
-                    app.clone(),
-                    limit_object_actions,
-                )),
+                .layer(axum::middleware::from_fn(limit_object_actions)),
         )
         .route("/api/object", get(object))
         .route("/api/object/chunks", get(object_chunks))
@@ -226,6 +224,7 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/me/password"
                 | "/api/me/reauth"
                 | "/api/objects/actions"
+                | "/api/media/actions"
                 | "/api/tokens"
                 | "/api/buckets/{bucket}/uploads"
                 | "/api/uploads/{id}/complete"
@@ -715,11 +714,9 @@ async fn object(
 }
 static OBJECT_ACTIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 async fn limit_object_actions(
-    State(app): State<Arc<App>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let _ = app;
     if request.extensions().get::<Identity>().is_none() {
         return unauthorized().into_response();
     }

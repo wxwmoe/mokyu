@@ -78,8 +78,8 @@ impl App {
             ))
         }
     }
-    pub fn upload_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.upload_locks.lock().unwrap();
+    pub fn operation_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.operation_locks.lock().unwrap();
         locks.retain(|_, v| v.strong_count() > 0);
         if let Some(lock) = locks.get(&id).and_then(Weak::upgrade) {
             lock
@@ -283,7 +283,7 @@ impl App {
             )
             .await?;
         {
-            let lock = self.upload_lock(u.id);
+            let lock = self.operation_lock(u.id);
             let _guard = lock.lock().await;
             let mut tx = self.db.begin().await?;
             authority.lock(&mut tx).await?;
@@ -321,7 +321,7 @@ impl App {
             )
             .await?;
         {
-            let lock = self.upload_lock(u.id);
+            let lock = self.operation_lock(u.id);
             let _guard = lock.lock().await;
             let _coord = self.coord.lock().await;
             self.writable()?;
@@ -390,7 +390,7 @@ impl App {
         Ok(S3Response::new(out))
     }
     pub async fn multipart_seed(&self, upload: Uuid, number: i32) -> Result<Seed> {
-        let lock = self.upload_lock(upload);
+        let lock = self.operation_lock(upload);
         let _guard = lock.lock().await;
         let mut seed = Seed::empty(upload);
         let mut number = number - 1;
@@ -444,7 +444,7 @@ impl App {
         }
         #[cfg(feature = "fault-injection")]
         crate::faults::point("multipart-before-seed").await;
-        let lock = self.upload_lock(seed.upload);
+        let lock = self.operation_lock(seed.upload);
         let _guard = lock.lock().await;
         let _coord = self.coord.lock().await;
         let mut tx = self.db.begin().await?;
@@ -489,7 +489,7 @@ impl App {
         Ok(consumed - prefix)
     }
     pub async fn stitch_pair(&self, upload: Uuid, number: i32) -> Result<()> {
-        let lock = self.upload_lock(upload);
+        let lock = self.operation_lock(upload);
         let _guard = lock.lock().await;
         let metadata: Option<Value> =
             sqlx::query_scalar("SELECT metadata FROM uploads WHERE id=$1 AND state='active'")
@@ -604,7 +604,7 @@ impl App {
             )
             .await?;
         let u = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
-        let lock = self.upload_lock(u.id);
+        let lock = self.operation_lock(u.id);
         let guard = lock.lock_owned().await;
         let u = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
         let manifest = i
@@ -900,7 +900,7 @@ impl App {
         {
             return Err(s3_error!(PreconditionFailed).into());
         }
-        let lock = self.upload_lock(u.id);
+        let lock = self.operation_lock(u.id);
         let _guard = lock.lock().await;
         let coord = self.coord.lock().await;
         self.abort_upload_locked(u.id, &coord, &authority).await?;

@@ -841,22 +841,8 @@ impl S3 for Gateway {
                     true,
                 )
                 .await?;
-            let mut offset = 0;
             self.0.reserve_quota(id, source.size, false, None).await?;
-            while offset < source.size {
-                let rows = self.0.extents(source.id, offset, source.size).await?;
-                if rows.is_empty() {
-                    return Err(anyhow::anyhow!("source mapping incomplete"));
-                }
-                for row in rows {
-                    let chunk = sqlx::query_as("SELECT * FROM chunks WHERE id=$1")
-                        .bind(row.chunk_id)
-                        .fetch_one(&self.0.db)
-                        .await?;
-                    self.0.reference(id, row.offset_bytes, &chunk).await?;
-                    offset = row.offset_bytes + row.length as i64;
-                }
-            }
+            self.0.copy_extents(id, &source).await?;
             self.0
                 .finish_stream(id, source.size, &source.etag, source.checksums)
                 .await?;

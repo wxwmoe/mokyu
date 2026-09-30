@@ -9,6 +9,11 @@ export type Bucket = components['schemas']['BucketView']
 export type Profile = components['schemas']['Profile']
 type Preferences = components['schemas']['Preferences']
 export const session = shallowRef<Session | null>(null)
+export function uuid() {
+  const value = crypto.getRandomValues(new Uint8Array(16)); value[6] = (value[6]! & 15) | 64; value[8] = (value[8]! & 63) | 128
+  const hex = Array.from(value, v => v.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
 export const queries = new QueryClient({ defaultOptions: { queries: { staleTime: 15_000, retry: 1, refetchOnWindowFocus: false } } })
 
 export class ApiError extends Error {

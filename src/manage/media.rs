@@ -163,15 +163,17 @@ pub(super) struct ContentQuery {
     #[serde(default)]
     preview: bool,
 }
-#[derive(Serialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ObjectMetadata {
-    content_type: Option<String>,
-    cache_control: Option<String>,
-    content_disposition: Option<String>,
-    content_encoding: Option<String>,
-    content_language: Option<String>,
-    expires: Option<String>,
-    user: std::collections::HashMap<String, String>,
+    pub content_type: Option<String>,
+    pub cache_control: Option<String>,
+    pub content_disposition: Option<String>,
+    pub content_encoding: Option<String>,
+    pub content_language: Option<String>,
+    pub expires: Option<String>,
+    #[serde(default)]
+    pub user: std::collections::BTreeMap<String, String>,
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct ObjectDetail {
@@ -258,7 +260,7 @@ pub(super) async fn detail(
             content_encoding: metadata.content_encoding,
             content_language: metadata.content_language,
             expires: metadata.expires,
-            user: metadata.user.unwrap_or_default(),
+            user: metadata.user.unwrap_or_default().into_iter().collect(),
         },
     }))
 }

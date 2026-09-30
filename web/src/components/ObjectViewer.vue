@@ -5,14 +5,15 @@ import { DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, Di
 import { X, ChevronLeft, ChevronRight, Maximize2, Minimize2, Download, Copy, Globe, LockKeyhole, Info, ShieldCheck, Play, ZoomIn, ZoomOut, Image, PanelRightClose, PanelRightOpen, Link } from 'lucide-vue-next'
 import { api, bytes, params, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
-import { mediaUrl, type MediaItem } from '../app/media'
+import { mediaUrl, type MediaItem, type MediaAction } from '../app/media'
 import { copy, errorText } from '../app/feedback'
 import { t, date } from '../app/i18n'
 import MediaThumbnail from './MediaThumbnail.vue'
 import FileIcon from './FileIcon.vue'
+import MediaActionsMenu from './MediaActionsMenu.vue'
 
 const props = defineProps<{ bucket: Bucket; item: MediaItem | null; previous: boolean; next: boolean }>()
-const emit = defineEmits<{ close: []; step: [delta: number] }>()
+const emit = defineEmits<{ close: []; step: [delta: number]; action: [kind: MediaAction] }>()
 const opened = computed({ get: () => !!props.item, set: value => { if (!value) emit('close') } })
 const wide = ref(false), original = ref(false), zoom = ref(false), inspector = ref(true), failed = ref(false)
 const canRead = computed(() => props.bucket.actions.includes('object.read'))
@@ -51,7 +52,7 @@ function permalink() { const url = new URL(location.href); url.searchParams.set(
           <template v-else><FileIcon :name="item.object_key" large /><p class="preview-message">{{ t('previewNeedsRead') }}</p></template>
         </section>
         <aside class="object-inspector"><div class="object-identity"><h2 :title="name">{{ name }}</h2><div class="object-tags"><span>{{ bytes(Number(item.size)) }}</span><span class="badge" :class="{ public: item.public_read }"><Globe v-if="item.public_read" :size="11" /><LockKeyhole v-else :size="11" />{{ t(item.public_read ? 'public' : 'private') }}</span></div></div>
-          <div class="object-primary-actions"><a v-if="canRead" class="button primary" :href="mediaUrl(bucket.id, item)" :download="name"><Download :size="16" />{{ t('download') }}</a><button class="icon-button" :aria-label="t('copyPath')" @click="copy(item.object_key)"><Copy :size="17" /></button><button class="icon-button" :aria-label="t('copyViewLink')" @click="permalink"><Link :size="17" /></button></div>
+          <div class="object-primary-actions"><a v-if="canRead" class="button primary" :href="mediaUrl(bucket.id, item)" :download="name"><Download :size="16" />{{ t('download') }}</a><button class="icon-button" :aria-label="t('copyPath')" @click="copy(item.object_key)"><Copy :size="17" /></button><button class="icon-button" :aria-label="t('copyViewLink')" @click="permalink"><Link :size="17" /></button><MediaActionsMenu :bucket="bucket" :items="[item]" @action="emit('action', $event)" /></div>
           <TabsRoot default-value="information"><TabsList class="tabs-list" :aria-label="t('objectDetails')"><TabsTrigger class="tab-trigger" value="information"><Info :size="14" />{{ t('information') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="access"><ShieldCheck :size="14" />{{ t('access') }}</TabsTrigger></TabsList>
             <TabsContent value="information"><dl class="facts object-facts"><dt>{{ t('fileType') }}</dt><dd class="break-anywhere">{{ item.content_type }}</dd><dt>{{ t('updated') }}</dt><dd>{{ date(item.modified_at) }}</dd><dt>{{ t('bucket') }}</dt><dd>{{ bucket.name }}</dd></dl><details class="object-fold"><summary>{{ t('fullPath') }}</summary><p class="object-path">{{ item.object_key }}</p></details><details v-if="detail.data.value" class="object-fold"><summary>{{ t('technicalDetails') }}</summary><dl class="facts object-facts"><dt>{{ t('version') }}</dt><dd class="object-path">{{ item.id }}</dd><dt>ETag</dt><dd class="object-path">{{ detail.data.value.etag }}</dd></dl><dl class="metadata-fields"><template v-for="(value, key) in detail.data.value.metadata" :key="key"><template v-if="value && key !== 'user'"><dt>{{ key }}</dt><dd>{{ value }}</dd></template></template><template v-for="(value, key) in detail.data.value.metadata.user" :key="key"><dt>{{ key }}</dt><dd>{{ value }}</dd></template></dl></details></TabsContent>
             <TabsContent value="access"><div class="access-note"><Globe v-if="item.public_read" :size="24" /><LockKeyhole v-else :size="24" /><div><strong>{{ t(item.public_read ? 'anyone' : 'authorized') }}</strong><p>{{ t('sessionDownload') }}</p></div></div><p class="field-help">{{ t('yourCapabilities') }}</p><div class="capability-list"><span v-for="action in bucket.actions" :key="action" class="badge">{{ t('action_' + action) }}</span></div></TabsContent>
