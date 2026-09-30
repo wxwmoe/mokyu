@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, write, refreshSession, ApiError } from '../api/client'
+import { startupError } from '../app/router'
 const username = ref(''), password = ref(''), busy = ref(false), error = ref('')
 const router = useRouter()
 async function login() {
@@ -12,6 +13,7 @@ async function login() {
     await write('/api/login', { username: username.value, password: password.value })
     password.value = ''
     await refreshSession()
+    startupError.value = ''
     await router.replace('/media')
   } catch (failure) {
     error.value = failure instanceof ApiError ? `${failure.code} · ${failure.requestId || ''}` : String(failure)

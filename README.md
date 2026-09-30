@@ -78,6 +78,10 @@ docker exec -it mokyu cli user create admin
 - [argon2 / MIT OR Apache-2.0][14]
 - [serde / MIT OR Apache-2.0][15]
 - [clap / MIT OR Apache-2.0][16]
+- [Vue / MIT](https://github.com/vuejs/core)、[Reka UI / MIT](https://github.com/unovue/reka-ui)、[TanStack Query / MIT](https://github.com/TanStack/query)
+- [Lucide / ISC](https://github.com/lucide-icons/lucide)、[Nunito / SIL Open Font License 1.1](https://github.com/googlefonts/nunito)
+
+前端分发包含 `THIRD_PARTY_NOTICES.txt`，保留所用包与字体的许可证文本。
 
 ###### 引用的项目与相关依赖保留各自的版权及许可证
 

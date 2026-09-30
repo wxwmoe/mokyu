@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { ref } from 'vue'
 import { refreshSession, session } from '../api/client'
 
 export const router = createRouter({
@@ -14,8 +15,13 @@ export const router = createRouter({
 })
 
 let initialized = false
+export const startupError = ref('')
 router.beforeEach(async to => {
-  if (!initialized) { await refreshSession(); initialized = true }
+  if (!initialized) {
+    try { await refreshSession() }
+    catch { startupError.value = 'The workspace could not be reached. Check your connection and try again.' }
+    initialized = true
+  }
   if (!session.value && to.name !== 'login') return { name: 'login' }
   if (session.value && to.name === 'login') return { name: 'media' }
 })
