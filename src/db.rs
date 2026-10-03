@@ -50,12 +50,16 @@ pub async fn connect(
         sqlx::query_scalar("SELECT to_regclass('public.mokyu_meta')::text")
             .fetch_one(&pool)
             .await?;
-    let backend = format!(
-        "{}|{}|{}",
-        c.backend.endpoint,
-        c.backend.bucket,
-        c.backend.prefix.trim_end_matches('/')
-    );
+    let backend = if c.backend.enabled {
+        format!(
+            "{}|{}|{}",
+            c.backend.endpoint,
+            c.backend.bucket,
+            c.backend.prefix.trim_end_matches('/')
+        )
+    } else {
+        "none".into()
+    };
     let latest = MIGRATIONS
         .iter()
         .last()
@@ -141,5 +145,35 @@ pub async fn connect(
         required.iter().all(|id| secrets.keys.contains_key(id)),
         "keyring is missing a historical chunk key"
     );
+    if c.backend.enabled {
+        let target_id: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT id FROM storage_targets WHERE name='default'")
+                .fetch_optional(&pool)
+                .await?;
+        if target_id.is_none() {
+            let id = uuid::Uuid::new_v4();
+            let access = crate::codec::protect(
+                secrets.backend_access.as_bytes(),
+                &secrets.credential_key,
+                format!("storage-target-{id}-access").as_bytes(),
+            )?;
+            let secret = crate::codec::protect(
+                secrets.backend_secret.as_bytes(),
+                &secrets.credential_key,
+                format!("storage-target-{id}-secret").as_bytes(),
+            )?;
+            sqlx::query("INSERT INTO storage_targets(id,name,type,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata) VALUES($1,'default','s3',$2,$3,$4,$5,$6,$7,$8)")
+                .bind(id)
+                .bind(&c.backend.endpoint)
+                .bind(&c.backend.bucket)
+                .bind(&c.backend.region)
+                .bind(&c.backend.prefix)
+                .bind(access)
+                .bind(secret)
+                .bind(serde_json::json!({"source":"config"}))
+                .execute(&pool)
+                .await?;
+        }
+    }
     Ok((pool, owner))
 }

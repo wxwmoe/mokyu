@@ -2,12 +2,12 @@ use crate::{
     codec::{self, Chunk, MAX},
     config::{self, Budget, Config, Secrets},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::{
     ClientOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, RetryConfig,
-    aws::AmazonS3Builder, path::Path,
+    aws::AmazonS3Builder, local::LocalFileSystem, memory::InMemory, path::Path,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
@@ -482,6 +482,8 @@ pub struct Storage {
     pack_work: Arc<Semaphore>,
     inspection: tokio::sync::Mutex<()>,
     backend: Arc<dyn ObjectStore>,
+    backend_enabled: bool,
+    pub target_id: Option<Uuid>,
     identity_ready: std::sync::atomic::AtomicBool,
     identity_check: tokio::sync::Mutex<()>,
     prefix: String,
@@ -552,30 +554,103 @@ impl Storage {
             io: Arc::new(Semaphore::new(budget.cpu_jobs)),
             pending: Mutex::new(HashSet::new()),
         });
-        let backend = AmazonS3Builder::new()
-            .with_endpoint(&c.backend.endpoint)
-            .with_region(&c.backend.region)
-            .with_bucket_name(&c.backend.bucket)
-            .with_access_key_id(&secrets.backend_access)
-            .with_secret_access_key(&secrets.backend_secret)
-            .with_allow_http(c.backend.allow_http)
-            .with_virtual_hosted_style_request(false)
-            .with_client_options(
-                ClientOptions::new()
-                    .with_allow_http(c.backend.allow_http)
-                    .with_connect_timeout(Duration::from_secs(config::seconds(
-                        &c.backend.connect_timeout,
-                    )?))
-                    .with_timeout(Duration::from_secs(config::seconds(
-                        &c.backend.request_timeout,
-                    )?)),
-            )
-            .with_retry(RetryConfig {
-                max_retries: c.backend.max_retries,
-                retry_timeout: Duration::from_secs(config::seconds(&c.backend.retry_timeout)?),
-                ..Default::default()
-            })
-            .build()?;
+        let target: Option<(
+            Uuid,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+        )> = sqlx::query_as(
+            "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted FROM storage_targets WHERE enabled ORDER BY created_at,id LIMIT 1",
+        )
+        .fetch_optional(&db)
+        .await?;
+        let (target_id, target_type, path, endpoint, bucket, region, prefix, access, secret) =
+            match target {
+                Some((id, kind, path, endpoint, bucket, region, prefix, access, secret)) => (
+                    Some(id),
+                    kind,
+                    path,
+                    endpoint,
+                    bucket,
+                    region,
+                    prefix,
+                    access,
+                    secret,
+                ),
+                None => (
+                    None,
+                    String::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    String::new(),
+                    None,
+                    None,
+                ),
+            };
+        let (backend, backend_enabled): (Arc<dyn ObjectStore>, bool) = match target_id {
+            None => (Arc::new(InMemory::new()), false),
+            Some(_) if target_type == "local" => {
+                let path = path.context("local storage target path is missing")?;
+                tokio::fs::create_dir_all(&path).await?;
+                (Arc::new(LocalFileSystem::new_with_prefix(path)?), true)
+            }
+            Some(_) => {
+                let endpoint = endpoint.context("S3 storage target endpoint is missing")?;
+                let bucket = bucket.context("S3 storage target bucket is missing")?;
+                let region = region.context("S3 storage target region is missing")?;
+                let access = access.context("S3 storage target access key is missing")?;
+                let secret = secret.context("S3 storage target secret key is missing")?;
+                let target_id = target_id.context("storage target ID is missing")?;
+                let access = crate::codec::unprotect(
+                    &access,
+                    &secrets.credential_key,
+                    format!("storage-target-{target_id}-access").as_bytes(),
+                )?;
+                let secret = crate::codec::unprotect(
+                    &secret,
+                    &secrets.credential_key,
+                    format!("storage-target-{target_id}-secret").as_bytes(),
+                )?;
+                (
+                    Arc::new(
+                        AmazonS3Builder::new()
+                            .with_endpoint(endpoint)
+                            .with_region(region)
+                            .with_bucket_name(bucket)
+                            .with_access_key_id(access)
+                            .with_secret_access_key(secret)
+                            .with_allow_http(true)
+                            .with_virtual_hosted_style_request(false)
+                            .with_client_options(
+                                ClientOptions::new()
+                                    .with_allow_http(true)
+                                    .with_connect_timeout(Duration::from_secs(config::seconds(
+                                        &c.backend.connect_timeout,
+                                    )?))
+                                    .with_timeout(Duration::from_secs(config::seconds(
+                                        &c.backend.request_timeout,
+                                    )?)),
+                            )
+                            .with_retry(RetryConfig {
+                                max_retries: c.backend.max_retries,
+                                retry_timeout: Duration::from_secs(config::seconds(
+                                    &c.backend.retry_timeout,
+                                )?),
+                                ..Default::default()
+                            })
+                            .build()?,
+                    ),
+                    true,
+                )
+            }
+        };
         let s = Self {
             maintenance,
             access: Arc::new(crate::access::Access::new(
@@ -590,10 +665,12 @@ impl Storage {
             pack_memory_units: pack_units,
             pack_work: Arc::new(Semaphore::new(pack_units as usize)),
             inspection: tokio::sync::Mutex::new(()),
-            backend: Arc::new(backend),
+            backend,
+            backend_enabled,
             identity_ready: false.into(),
             identity_check: tokio::sync::Mutex::new(()),
-            prefix: c.backend.prefix.trim_end_matches('/').into(),
+            prefix: prefix.trim_end_matches('/').into(),
+            target_id,
             disk,
             secrets,
             cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
@@ -653,6 +730,9 @@ impl Storage {
             "cpu_slots_available":self.cpu.available_permits(),"backend_queues":{"read":self.reads.snapshot(),"upload":self.writes.snapshot(),"control":self.controls.snapshot()},
             "cache_limit_bytes":self.capacity,"multipart_limit_bytes":self.disk.limits[0]})
     }
+    pub fn enabled(&self) -> bool {
+        self.backend_enabled
+    }
     pub fn path(&self, id: Uuid) -> Path {
         Path::from(format!("{}{}", self.prefix(), chunk_name(id)))
     }
@@ -711,6 +791,9 @@ impl Storage {
         Ok(())
     }
     pub async fn check_identity(&self, db: &sqlx::PgPool, maintenance: bool) -> Result<()> {
+        if !self.backend_enabled {
+            bail!("no storage target is configured")
+        }
         let (deployment_id, created_at, initialized): (Uuid, chrono::DateTime<chrono::Utc>, bool) =
             sqlx::query_as("SELECT deployment_id,created_at,backend_initialized FROM mokyu_meta")
                 .fetch_one(db)
@@ -843,6 +926,7 @@ impl Storage {
         self.identity_ready.store(true, Ordering::Release);
         Ok(())
     }
+
     fn cache_path(&self, id: Uuid, compressed: bool) -> PathBuf {
         self.disk
             .root

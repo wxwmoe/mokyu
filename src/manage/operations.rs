@@ -1,7 +1,7 @@
 use crate::{
     admin::{
         Backend, Buckets, Cache, Cleanup, Command, Credentials, Domains, Gc, Integrity,
-        Maintenance, Packs, Projects, Tasks, Users,
+        Maintenance, Packs, Projects, Stores, Tasks, Users,
     },
     app::{App, Bucket},
     authorization::{Action, Principal},
@@ -150,6 +150,132 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
             }
         }
         Command::Status => app.status().await,
+        Command::Stores(command) => {
+            type Row = (
+                uuid::Uuid,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                String,
+                bool,
+                chrono::DateTime<chrono::Utc>,
+            );
+            let public = |row: Row| {
+                json!({
+                    "id": row.0,
+                    "name": row.1,
+                    "type": row.2,
+                    "path": row.3,
+                    "endpoint": row.4,
+                    "bucket": row.5,
+                    "region": row.6,
+                    "prefix": row.7,
+                    "enabled": row.8,
+                    "updated_at": row.9,
+                })
+            };
+            match command {
+                Stores::List => {
+                    let rows: Vec<Row> = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,enabled,updated_at FROM storage_targets ORDER BY name")
+                        .fetch_all(&app.db)
+                        .await?;
+                    Ok(json!(rows.into_iter().map(public).collect::<Vec<_>>()))
+                }
+                Stores::Check { name } => {
+                    let row: Row = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,enabled,updated_at FROM storage_targets WHERE name=$1")
+                        .bind(&name)
+                        .fetch_optional(&app.db)
+                        .await?
+                        .context("storage target not found")?;
+                    Ok(public(row))
+                }
+                Stores::Create {
+                    name,
+                    r#type,
+                    path,
+                    endpoint,
+                    bucket,
+                    region,
+                    prefix,
+                    access_key,
+                    secret_key,
+                } => {
+                    ensure!(
+                        (1..=128).contains(&name.trim().len()),
+                        "storage name must contain 1..128 bytes"
+                    );
+                    let id = uuid::Uuid::new_v4();
+                    let (path, endpoint, bucket, region, access, secret) = if r#type == "local" {
+                        ensure!(
+                            endpoint.is_none()
+                                && bucket.is_none()
+                                && region.is_none()
+                                && access_key.is_none()
+                                && secret_key.is_none(),
+                            "local stores cannot include S3 settings"
+                        );
+                        (
+                            Some(path.unwrap_or_else(|| "/data/storage".into())),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    } else {
+                        let endpoint = endpoint.context("S3 endpoint is required")?;
+                        let bucket = bucket.context("S3 bucket is required")?;
+                        let region = region.context("S3 region is required")?;
+                        let access_key = access_key.context("S3 access key is required")?;
+                        let secret_key = secret_key.context("S3 secret key is required")?;
+                        ensure!(
+                            !endpoint.is_empty() && !bucket.is_empty() && !region.is_empty(),
+                            "S3 connection settings must not be empty"
+                        );
+                        let encrypted_access = crate::codec::protect(
+                            access_key.as_bytes(),
+                            &app.secrets.credential_key,
+                            format!("storage-target-{id}-access").as_bytes(),
+                        )?;
+                        let encrypted_secret = crate::codec::protect(
+                            secret_key.as_bytes(),
+                            &app.secrets.credential_key,
+                            format!("storage-target-{id}-secret").as_bytes(),
+                        )?;
+                        (
+                            None,
+                            Some(endpoint),
+                            Some(bucket),
+                            Some(region),
+                            Some(encrypted_access),
+                            Some(encrypted_secret),
+                        )
+                    };
+                    let path = path.map(|value| value.to_string_lossy().into_owned());
+                    sqlx::query("INSERT INTO storage_targets(id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
+                        .bind(id)
+                        .bind(name.trim())
+                        .bind(&r#type)
+                        .bind(path)
+                        .bind(endpoint)
+                        .bind(bucket)
+                        .bind(region)
+                        .bind(prefix)
+                        .bind(access)
+                        .bind(secret)
+                        .execute(&app.db)
+                        .await?;
+                    let row: Row = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,enabled,updated_at FROM storage_targets WHERE id=$1")
+                        .bind(id)
+                        .fetch_one(&app.db)
+                        .await?;
+                    Ok(public(row))
+                }
+            }
+        }
         Command::Cache(Cache::Status) => app.upload_cache_status().await,
         Command::Cache(Cache::Flush) => app.cache_flush_start().await,
         Command::Pack(Packs::Status) => app.pack_status().await,

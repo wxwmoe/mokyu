@@ -24,6 +24,8 @@ pub struct Bucket {
     pub id: Uuid,
     pub project_id: Uuid,
     pub name: String,
+    #[serde(skip)]
+    pub storage_target_id: Option<Uuid>,
     pub state: String,
     pub settings_revision: i64,
     pub uploads_paused: bool,
@@ -168,15 +170,21 @@ impl App {
             )
             .await?,
         );
-        if let Err(error) = storage
-            .check_identity(&db, maintenance.load(std::sync::atomic::Ordering::Acquire))
-            .await
-        {
-            let pending:bool=sqlx::query_scalar("SELECT backend_initialized AND EXISTS(SELECT 1 FROM pending_uploads) FROM mokyu_meta").fetch_one(&db).await?;
-            if !pending || error.downcast_ref::<object_store::Error>().is_none() {
-                return Err(error);
+        if storage.enabled() {
+            if let Err(error) = storage
+                .check_identity(&db, maintenance.load(std::sync::atomic::Ordering::Acquire))
+                .await
+            {
+                let pending:bool=sqlx::query_scalar("SELECT backend_initialized AND EXISTS(SELECT 1 FROM pending_uploads) FROM mokyu_meta").fetch_one(&db).await?;
+                if !pending || error.downcast_ref::<object_store::Error>().is_none() {
+                    return Err(error);
+                }
+                tracing::warn!(error=%error,"backend identity unavailable; serving durable local uploads while remote operations wait for verification");
             }
-            tracing::warn!(error=%error,"backend identity unavailable; serving durable local uploads while remote operations wait for verification");
+        } else {
+            tracing::info!(
+                "no storage target configured; configure a store before accepting objects"
+            );
         }
         let thumbnails =
             Arc::new(crate::manage::media::Thumbnails::new(&config, storage.disk.clone()).await?);

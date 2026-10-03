@@ -15,7 +15,9 @@ pub struct Config {
     #[serde(default)]
     pub listen: Listen,
     pub database: Database,
+    #[serde(default)]
     pub backend: Backend,
+    #[serde(default)]
     pub security: Security,
     #[serde(default)]
     pub manage: Manage,
@@ -119,13 +121,20 @@ fn postgres_ssl_mode() -> String {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Backend {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
     pub endpoint: String,
+    #[serde(default)]
     pub region: String,
+    #[serde(default)]
     pub bucket: String,
     #[serde(default)]
     pub prefix: String,
+    #[serde(default)]
     pub access_key: Option<String>,
     pub access_key_file: Option<PathBuf>,
+    #[serde(default)]
     pub secret_key: Option<String>,
     pub secret_key_file: Option<PathBuf>,
     #[serde(default)]
@@ -145,6 +154,31 @@ pub struct Backend {
     pub priority_aging: String,
     #[serde(default = "no_minimum_storage_duration")]
     pub min_storage_duration: String,
+}
+impl Default for Backend {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: String::new(),
+            region: "us-east-1".into(),
+            bucket: String::new(),
+            prefix: String::new(),
+            access_key: None,
+            access_key_file: None,
+            secret_key: None,
+            secret_key_file: None,
+            allow_http: false,
+            read_concurrency: None,
+            upload_concurrency: None,
+            control_concurrency: None,
+            connect_timeout: connect_timeout(),
+            request_timeout: request_timeout(),
+            max_retries: backend_retries(),
+            retry_timeout: retry_timeout(),
+            priority_aging: priority_aging(),
+            min_storage_duration: no_minimum_storage_duration(),
+        }
+    }
 }
 impl Backend {
     pub fn min_storage_seconds(&self) -> Result<u64> {
@@ -178,6 +212,13 @@ fn backend_retries() -> usize {
 pub struct Security {
     #[serde(default)]
     pub credential_key_file: Option<PathBuf>,
+}
+impl Default for Security {
+    fn default() -> Self {
+        Self {
+            credential_key_file: None,
+        }
+    }
 }
 #[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -496,6 +537,13 @@ impl Config {
                 }
             }
         }
+        if !c.configured_fields.contains("backend.enabled")
+            && c.configured_fields
+                .iter()
+                .any(|field| field.starts_with("backend."))
+        {
+            c.backend.enabled = true;
+        }
         let base = path.parent().unwrap_or(Path::new("."));
         c.manage.gravatar_origin()?;
         c.compression.validate()?;
@@ -510,15 +558,17 @@ impl Config {
                     .max(7 * 24 * 3600),
             "statistics.access_retention must cover seven days and the configured Range windows"
         );
-        for value in [
-            c.backend.read_concurrency,
-            c.backend.upload_concurrency,
-            c.backend.control_concurrency,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            ensure!(value > 0, "backend concurrency must be positive");
+        if c.backend.enabled {
+            for value in [
+                c.backend.read_concurrency,
+                c.backend.upload_concurrency,
+                c.backend.control_concurrency,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                ensure!(value > 0, "backend concurrency must be positive");
+            }
         }
         ensure!(
             c.processing.backend_concurrency.is_none()
@@ -557,16 +607,18 @@ impl Config {
             .ssl_mode
             .parse::<sqlx::postgres::PgSslMode>()
             .map_err(|_| anyhow::anyhow!("invalid database.ssl_mode"))?;
-        ensure!(
-            c.backend.endpoint.starts_with("https://")
-                || (c.backend.allow_http && c.backend.endpoint.starts_with("http://")),
-            "backend requires HTTPS unless allow_http is enabled"
-        );
-        ensure!(
-            !c.backend.prefix.starts_with('/')
-                && !c.backend.prefix.split('/').any(|p| p == "." || p == ".."),
-            "backend prefix must be relative and cannot contain . or .. segments"
-        );
+        if c.backend.enabled {
+            ensure!(
+                c.backend.endpoint.starts_with("https://")
+                    || (c.backend.allow_http && c.backend.endpoint.starts_with("http://")),
+                "backend requires HTTPS unless allow_http is enabled"
+            );
+            ensure!(
+                !c.backend.prefix.starts_with('/')
+                    && !c.backend.prefix.split('/').any(|p| p == "." || p == ".."),
+                "backend prefix must be relative and cannot contain . or .. segments"
+            );
+        }
         ensure!(
             c.manage.origin.starts_with("https://") || c.manage.origin.starts_with("http://"),
             "manage.origin must be an absolute HTTP origin"
@@ -582,7 +634,9 @@ impl Config {
             ),
             "unknown encryption algorithm"
         );
-        c.backend.min_storage_seconds()?;
+        if c.backend.enabled {
+            c.backend.min_storage_seconds()?;
+        }
         for value in [
             &c.multipart.idle_timeout,
             &c.multipart.sweep_interval,
@@ -718,22 +772,27 @@ impl Config {
                 base,
                 "database.password",
             )?,
-            backend_access: secret_value(
-                c.backend.access_key.as_deref(),
-                c.backend.access_key_file.as_deref(),
-                base,
-                "backend.access_key",
-            )?,
-            backend_secret: secret_value(
-                c.backend.secret_key.as_deref(),
-                c.backend.secret_key_file.as_deref(),
-                base,
-                "backend.secret_key",
-            )?,
-            credential_key: crate::codec::Key::new(
-                "aes-256-gcm",
-                credential_material,
-            )?,
+            backend_access: if c.backend.enabled {
+                secret_value(
+                    c.backend.access_key.as_deref(),
+                    c.backend.access_key_file.as_deref(),
+                    base,
+                    "backend.access_key",
+                )?
+            } else {
+                String::new()
+            },
+            backend_secret: if c.backend.enabled {
+                secret_value(
+                    c.backend.secret_key.as_deref(),
+                    c.backend.secret_key_file.as_deref(),
+                    base,
+                    "backend.secret_key",
+                )?
+            } else {
+                String::new()
+            },
+            credential_key: crate::codec::Key::new("aes-256-gcm", credential_material)?,
             active_key,
             keys,
         };

@@ -32,7 +32,7 @@ hyper-util = { version = "0.1", features = ["tokio", "service"] }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 log = "0.4"
 md-5 = "0.10"
-object_store = { version = "=0.14.2", default-features = false, features = ["aws"] }
+object_store = { version = "=0.14.2", default-features = false, features = ["aws", "fs"] }
 rpassword = "7.5"
 rustls = { version = "=0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 s3s = "=0.16.1"

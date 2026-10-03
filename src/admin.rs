@@ -53,6 +53,8 @@ pub enum Command {
     #[command(subcommand)]
     Backend(Backend),
     #[command(subcommand)]
+    Stores(Stores),
+    #[command(subcommand)]
     Integrity(Integrity),
     #[command(subcommand)]
     Pack(Packs),
@@ -176,6 +178,32 @@ pub enum Backend {
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
+pub enum Stores {
+    List,
+    Create {
+        name: String,
+        #[arg(value_parser = ["local", "s3"])]
+        r#type: String,
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        bucket: Option<String>,
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long, default_value = "")]
+        prefix: String,
+        #[arg(long)]
+        access_key: Option<String>,
+        #[arg(long)]
+        secret_key: Option<String>,
+    },
+    Check {
+        name: String,
+    },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
 pub enum Credentials {
     List {
         #[arg(long)]
@@ -273,7 +301,8 @@ impl Command {
             | Self::Task(Tasks::List | Tasks::Show { .. })
             | Self::Integrity(Integrity::Issues { .. })
             | Self::Pack(Packs::Status)
-            | Self::Cache(Cache::Status) => None,
+            | Self::Cache(Cache::Status)
+            | Self::Stores(Stores::List) => None,
             Self::Bucket(_) => Some("bucket.change"),
             Self::Credential(_) => Some("credential.change"),
             Self::Token(_) => Some("token.change"),
@@ -286,6 +315,7 @@ impl Command {
             Self::Maintenance(_) => Some("maintenance.change"),
             Self::Task(_) => Some("task.change"),
             Self::Backend(_) => Some("backend.sweep"),
+            Self::Stores(_) => Some("storage.change"),
             Self::Integrity(_) => Some("integrity.check"),
             Self::Pack(_) => Some("pack.change"),
             Self::Cache(_) => Some("cache.flush"),

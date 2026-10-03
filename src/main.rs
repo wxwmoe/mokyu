@@ -83,7 +83,12 @@ fn main() -> Result<()> {
         println!("{}", admin::deployment_key()?);
         return Ok(());
     }
-    if matches!(args.command, Some(Command::Key { command: KeyCommand::Generate })) {
+    if matches!(
+        args.command,
+        Some(Command::Key {
+            command: KeyCommand::Generate
+        })
+    ) {
         println!("{}", admin::deployment_key()?);
         return Ok(());
     }
