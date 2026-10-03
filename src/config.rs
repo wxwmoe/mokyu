@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail, ensure};
+use base64::Engine;
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -175,7 +176,8 @@ fn backend_retries() -> usize {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Security {
-    pub credential_key_file: PathBuf,
+    #[serde(default)]
+    pub credential_key_file: Option<PathBuf>,
 }
 #[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -307,12 +309,15 @@ impl Default for Cache {
 #[serde(default, deny_unknown_fields)]
 pub struct Encryption {
     pub algorithm: String,
+    #[serde(default)]
+    pub deployment_key: Option<String>,
     pub keyring_file: Option<PathBuf>,
 }
 impl Default for Encryption {
     fn default() -> Self {
         Self {
             algorithm: "aes-256-gcm".into(),
+            deployment_key: None,
             keyring_file: None,
         }
     }
@@ -463,6 +468,14 @@ fn key(value: &str) -> Result<[u8; 32]> {
         .ok()
         .and_then(|b| b.try_into().ok())
         .context("key must be 64 hexadecimal characters")
+}
+
+fn deployment_key(value: &str) -> Result<[u8; 32]> {
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value.as_bytes())
+        .context("deployment_key must be URL-safe base64")?;
+    ensure!(raw.len() == 48, "deployment_key must encode 48 bytes");
+    Ok(*blake3::hash(&raw).as_bytes())
 }
 
 impl Config {
@@ -687,6 +700,17 @@ impl Config {
             );
             (String::new(), BTreeMap::new())
         };
+        ensure!(
+            !(c.encryption.deployment_key.is_some() && c.security.credential_key_file.is_some()),
+            "configure deployment_key instead of credential_key_file"
+        );
+        let credential_material = if let Some(value) = &c.encryption.deployment_key {
+            deployment_key(value)?
+        } else if let Some(file) = &c.security.credential_key_file {
+            key(&secret(file, base)?)?
+        } else {
+            bail!("encryption.deployment_key is required")
+        };
         let secrets = Secrets {
             database_password: secret_value(
                 c.database.password.as_deref(),
@@ -708,7 +732,7 @@ impl Config {
             )?,
             credential_key: crate::codec::Key::new(
                 "aes-256-gcm",
-                key(&secret(&c.security.credential_key_file, base)?)?,
+                credential_material,
             )?,
             active_key,
             keys,

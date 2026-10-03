@@ -135,7 +135,7 @@ pub(super) async fn config(
         .unwrap_or_else(|| "[redacted]".into());
     // Only explicitly selected non-secret sections are serialized. Secret-bearing sections use an allowlist.
     let sections = json!({"listen":c.listen,"manage":c.manage,"storage":c.storage,"processing":c.processing,"multipart":c.multipart,"cache":c.cache,"compression":c.compression,"gc":c.gc,"cleanup":c.cleanup,"statistics":c.statistics,"integrity":c.integrity,"pack":c.pack,
-        "encryption":{"algorithm":c.encryption.algorithm,"keyring_file":"[redacted]"},"security":{"credential_key_file":"[redacted]"},
+        "encryption":{"algorithm":c.encryption.algorithm,"deployment_key":"[redacted]","keyring_file":"[redacted]"},"security":{"credential_key_file":"[redacted]"},
         "database":{"host":d.host,"port":d.port,"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode,"max_connections":d.max_connections},
         "backend":{"endpoint":endpoint,"region":b.region,"bucket":b.bucket,"prefix":b.prefix,"allow_http":b.allow_http,"access_key":"[redacted]","access_key_file":"[redacted]","secret_key":"[redacted]","secret_key_file":"[redacted]","read_concurrency":b.read_concurrency,"upload_concurrency":b.upload_concurrency,"control_concurrency":b.control_concurrency,"connect_timeout":b.connect_timeout,"request_timeout":b.request_timeout,"max_retries":b.max_retries,"retry_timeout":b.retry_timeout,"priority_aging":b.priority_aging,"min_storage_duration":b.min_storage_duration}});
     let mut fields = Vec::new();

@@ -390,6 +390,13 @@ pub fn random_secret() -> Result<String> {
     aws_lc_rs::rand::fill(&mut bytes).map_err(|_| anyhow::anyhow!("randomness unavailable"))?;
     Ok(hex::encode(bytes))
 }
+
+pub fn deployment_key() -> Result<String> {
+    let mut bytes = [0; 48];
+    aws_lc_rs::rand::fill(&mut bytes).map_err(|_| anyhow::anyhow!("randomness unavailable"))?;
+    use base64::Engine;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
 async fn send_frame(socket: &mut UnixStream, value: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     ensure!(bytes.len() <= 1024 * 1024, "admin message exceeds limit");

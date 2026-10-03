@@ -97,6 +97,22 @@ pub async fn connect(
         i64::from(version) == latest,
         "schema version does not match the migration history"
     );
+    let deployment_fingerprint = blake3::hash(&secrets.credential_key.material);
+    let saved: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT deployment_key_fingerprint FROM mokyu_meta WHERE singleton")
+            .fetch_one(&pool)
+            .await?;
+    if let Some(saved) = saved {
+        ensure!(
+            saved == deployment_fingerprint.as_bytes(),
+            "deployment key does not match this database"
+        );
+    } else {
+        sqlx::query("UPDATE mokyu_meta SET deployment_key_fingerprint=$1 WHERE singleton")
+            .bind(deployment_fingerprint.as_bytes().as_slice())
+            .execute(&pool)
+            .await?;
+    }
     for (id, alg, material) in secrets
         .keys
         .iter()

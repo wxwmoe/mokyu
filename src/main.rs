@@ -50,7 +50,13 @@ enum Command {
         maintenance: bool,
     },
     /// Generate fresh 32-byte key material without accessing service state.
+    #[command(name = "keygen", hide = true)]
     Keygen,
+    /// Generate a deployment key without accessing service state.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
     /// Print the management API schema without accessing service state.
     ApiSchema,
     Cli {
@@ -59,6 +65,10 @@ enum Command {
         #[command(subcommand)]
         command: admin::Command,
     },
+}
+#[derive(Subcommand)]
+enum KeyCommand {
+    Generate,
 }
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -70,7 +80,11 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
     if matches!(args.command, Some(Command::Keygen)) {
-        println!("{}", admin::random_secret()?);
+        println!("{}", admin::deployment_key()?);
+        return Ok(());
+    }
+    if matches!(args.command, Some(Command::Key { command: KeyCommand::Generate })) {
+        println!("{}", admin::deployment_key()?);
         return Ok(());
     }
     if matches!(args.command, Some(Command::ApiSchema)) {
