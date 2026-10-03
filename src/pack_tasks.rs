@@ -118,19 +118,26 @@ impl App {
         {
             return Err(s3s::s3_error!(OperationAborted, "maintenance policy is paused").into());
         }
+        let mut tx = self.db.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mokyu:pack:{kind}"))
+            .execute(&mut *tx)
+            .await?;
         let existing:Option<Uuid>=sqlx::query_scalar("SELECT id FROM tasks WHERE kind='pack' AND detail->>'kind'=$1 AND state IN ('queued','running') LIMIT 1")
-            .bind(kind).fetch_optional(&self.db).await?;
+            .bind(kind).fetch_optional(&mut *tx).await?;
         if let Some(id) = existing {
+            tx.commit().await?;
             return Ok(json!({"task_id":id,"existing":true}));
         }
-        if automatic && let Some(id)=sqlx::query_scalar::<_,Uuid>("SELECT id FROM tasks WHERE kind='pack' AND detail->>'kind'=$1 AND state='failed' AND updated_at>now()-$2*interval '1 second' ORDER BY updated_at DESC LIMIT 1").bind(kind).bind(config::seconds(&self.config.pack.reuse_interval)? as f64).fetch_optional(&self.db).await? {return Ok(json!({"task_id":id,"retry_pending":true}));}
+        if automatic && let Some(id)=sqlx::query_scalar::<_,Uuid>("SELECT id FROM tasks WHERE kind='pack' AND detail->>'kind'=$1 AND state='failed' AND updated_at>now()-$2*interval '1 second' ORDER BY updated_at DESC LIMIT 1").bind(kind).bind(config::seconds(&self.config.pack.reuse_interval)? as f64).fetch_optional(&mut *tx).await? {tx.commit().await?; return Ok(json!({"task_id":id,"retry_pending":true}));}
         let id = crate::tasks::insert(
-            &mut *self.db.acquire().await?,
+            &mut *tx,
             "pack",
             None,
             json!({"kind":kind,"upper_time":chrono::Utc::now(),"automatic":automatic}),
         )
         .await?;
+        tx.commit().await?;
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id}))
     }

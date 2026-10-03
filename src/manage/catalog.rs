@@ -41,12 +41,19 @@ const INDEXES: [(&str, &str); 4] = [
 ];
 
 pub(crate) async fn run(app: Arc<App>) -> Result<()> {
+    const LEADER_KEY: i64 = 734922709851033;
     loop {
+        let Some(leader) = crate::cluster::try_leader(&app, LEADER_KEY).await? else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        };
         if app.maintenance.load(Ordering::Acquire) {
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
-        match build(&app).await {
+        let result = build(&app).await;
+        leader.commit().await?;
+        match result {
             Ok(true) => return std::future::pending().await,
             Ok(false) => tokio::time::sleep(Duration::from_millis(100)).await,
             Err(error) => {

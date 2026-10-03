@@ -493,9 +493,14 @@ async fn collect(app: &App) -> Result<Value> {
 }
 
 pub async fn run(app: Arc<App>) -> Result<()> {
+    const LEADER_KEY: i64 = 734922709851031;
     let interval = Duration::from_secs(config::seconds(&app.config.statistics.refresh_interval)?);
     let timeout = Duration::from_secs(config::seconds(&app.config.statistics.query_timeout)?);
     loop {
+        let Some(leader) = crate::cluster::try_leader(&app, LEADER_KEY).await? else {
+            tokio::time::sleep(interval).await;
+            continue;
+        };
         {
             let mut saved = app.statistics.inventory.lock().unwrap();
             saved["collecting"] = json!(true);
@@ -523,6 +528,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             _ = tokio::time::sleep(interval) => (),
             _ = app.statistics.wake.notified() => tokio::time::sleep(Duration::from_secs(5)).await,
         }
+        leader.commit().await?;
     }
 }
 

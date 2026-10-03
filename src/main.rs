@@ -207,8 +207,11 @@ fn main() -> Result<()> {
                 }
             }
         });
-        if !matches!(role, Role::Control) {
+        if matches!(role, Role::Single) {
             app.recover().await?;
+        }
+        if matches!(role, Role::Worker) {
+            tasks::recover_stale(&app).await?;
         }
         if matches!(role, Role::Single | Role::Control) {
             manage::account::initialize(&app).await?;

@@ -144,11 +144,16 @@ impl App {
             )
             .into());
         }
+        let mut tx = self.db.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mokyu:maintenance:{kind}"))
+            .execute(&mut *tx)
+            .await?;
         if let Some(id) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tasks WHERE kind=$1 AND state IN ('queued','running','paused') ORDER BY created_at LIMIT 1")
-            .bind(kind).fetch_optional(&self.db).await? {
+            .bind(kind).fetch_optional(&mut *tx).await? {
+            tx.commit().await?;
             return Ok(json!({"task_id":id,"existing":true}));
         }
-        let mut tx = self.db.begin().await?;
         let id = crate::tasks::insert(&mut tx, kind, None, json!({})).await?;
         sqlx::query("UPDATE maintenance_controls SET last_scheduled_at=now() WHERE kind=$1")
             .bind(kind)
@@ -186,7 +191,12 @@ impl App {
 }
 
 pub async fn run(app: Arc<App>) -> Result<()> {
+    const LEADER_KEY: i64 = 734922709851034;
     loop {
+        let Some(leader) = crate::cluster::try_leader(&app, LEADER_KEY).await? else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        };
         {
             let controls: Vec<(String, bool, Option<f64>)> = sqlx::query_as("SELECT c.kind,CASE WHEN c.kind='gc' THEN m.gc_paused ELSE c.paused END,extract(epoch FROM now()-c.last_scheduled_at)::double precision FROM maintenance_controls c CROSS JOIN mokyu_meta m")
                 .fetch_all(&app.db).await?;
@@ -220,6 +230,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 }
             }
         }
+        leader.commit().await?;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }

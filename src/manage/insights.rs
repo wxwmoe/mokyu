@@ -285,10 +285,15 @@ pub(super) async fn runtime(
     }))
 }
 pub(crate) async fn runtime_loop(app: Arc<App>) -> Result<()> {
+    const LEADER_KEY: i64 = 734922709851032;
     let interval = Duration::from_secs(config::seconds(
         &app.config.statistics.runtime_sample_interval,
     )?);
     loop {
+        let Some(leader) = crate::cluster::try_leader(&app, LEADER_KEY).await? else {
+            tokio::time::sleep(interval).await;
+            continue;
+        };
         let result: Result<()> = async {
             let point = runtime_point(&app).await?;
             let mut tx = app.db.begin().await?;
@@ -308,6 +313,7 @@ pub(crate) async fn runtime_loop(app: Arc<App>) -> Result<()> {
         if let Err(error) = result {
             tracing::warn!(%error,"runtime sample failed");
         }
+        leader.commit().await?;
         tokio::time::sleep(interval).await;
     }
 }

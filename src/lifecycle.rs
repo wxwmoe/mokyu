@@ -172,7 +172,7 @@ impl App {
         sqlx::query("UPDATE uploads SET state='active' WHERE state='completing'")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE tasks SET state=CASE WHEN kind IN ('purge','pack','unpack','upload','cache_flush') AND $1 THEN 'paused' ELSE 'queued' END,updated_at=now() WHERE state='running' OR (kind IN ('purge','pack','unpack','upload','cache_flush') AND state='queued' AND $1)")
+        sqlx::query("UPDATE tasks SET state=CASE WHEN kind IN ('purge','pack','unpack','upload','cache_flush') AND $1 THEN 'paused' ELSE 'queued' END,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE state='running' OR (kind IN ('purge','pack','unpack','upload','cache_flush') AND state='queued' AND $1)")
             .bind(self.maintenance.load(Ordering::Acquire))
             .execute(&mut *tx)
             .await?;

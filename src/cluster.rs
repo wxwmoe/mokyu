@@ -72,6 +72,29 @@ pub(crate) async fn read_state(path: &Path) -> Result<Option<NodeState>> {
     Ok(Some(state))
 }
 
+pub(crate) async fn local_node_id(app: &App) -> Result<Option<Uuid>> {
+    Ok(read_state(&node_state_path(app))
+        .await?
+        .map(|state| state.node_id))
+}
+
+pub(crate) async fn try_leader(
+    app: &App,
+    key: i64,
+) -> Result<Option<sqlx::Transaction<'static, sqlx::Postgres>>> {
+    let mut transaction = app.db.begin().await?;
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(key)
+        .fetch_one(&mut *transaction)
+        .await?;
+    if locked {
+        Ok(Some(transaction))
+    } else {
+        transaction.rollback().await?;
+        Ok(None)
+    }
+}
+
 async fn write_state(path: &Path, state: &NodeState) -> Result<()> {
     let temporary = path.with_extension("json.tmp");
     tokio::fs::write(&temporary, serde_json::to_vec(state)?).await?;
@@ -371,6 +394,15 @@ pub async fn node_loop(app: Arc<App>, role: &'static str) -> Result<()> {
         .await?
         .context("node state is missing")?;
     loop {
+        if let Err(error) = sqlx::query(
+            "UPDATE nodes SET last_seen_at=now(),updated_at=now() WHERE id=$1 AND enabled",
+        )
+        .bind(state.node_id)
+        .execute(&app.db)
+        .await
+        {
+            tracing::warn!(%error, "node database heartbeat failed; retrying");
+        }
         if let Err(error) = validate_node(&app, &state, role).await {
             tracing::warn!(%error, "node validation failed; retrying");
             tokio::time::sleep(Duration::from_secs(10)).await;

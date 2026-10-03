@@ -375,7 +375,16 @@ impl App {
         Ok(false)
     }
 }
+
+pub async fn recover_stale(app: &App) -> Result<u64> {
+    let result = sqlx::query("UPDATE tasks SET state='queued',lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE state='running' AND (lease_expires_at IS NULL OR lease_expires_at<now())")
+        .execute(&app.db)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn run(app: Arc<App>) -> Result<()> {
+    let lease_node_id = crate::cluster::local_node_id(&app).await?;
     let active = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
     let mut workers = futures_util::stream::FuturesUnordered::new();
     for class in std::iter::once(0)
@@ -391,23 +400,44 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 .clamp(1, 4),
         ))
     {
-        workers.push(worker(app.clone(), active.clone(), class));
+        workers.push(worker(app.clone(), active.clone(), class, lease_node_id));
     }
     workers
         .next()
         .await
         .context("maintenance workers stopped")?
 }
+
+fn renew_lease(app: Arc<App>, id: Uuid, token: Uuid) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            if let Err(error) = sqlx::query(
+                "UPDATE tasks SET lease_expires_at=now()+interval '5 minutes' WHERE id=$1 AND state='running' AND lease_token=$2",
+            )
+            .bind(id)
+            .bind(token)
+            .execute(&app.db)
+            .await
+            {
+                tracing::warn!(task_id=%id, %error, "task lease renewal failed");
+            }
+        }
+    })
+}
+
 async fn worker(
     app: Arc<App>,
     active: Arc<tokio::sync::Mutex<std::collections::HashSet<Uuid>>>,
     class: i32,
+    lease_node_id: Option<Uuid>,
 ) -> Result<()> {
+    let lease_token = Uuid::new_v4();
     loop {
         let id = {
             let mut active = active.lock().await;
             let ids: Vec<Uuid> = active.iter().copied().collect();
-            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE t.state IN ('queued','running') AND CASE WHEN t.kind IN ('pack','unpack') THEN 1 WHEN t.kind IN ('upload','cache_flush') THEN 2 ELSE 0 END=$1 AND NOT(t.id=ANY($2)) AND NOT (m.maintenance AND t.kind IN ('pack','unpack','purge','gc')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.kind=CASE WHEN t.kind='pack' THEN t.detail->>'kind' ELSE t.kind END AND CASE WHEN c.kind='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.kind='pack' AND t.detail->>'kind' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND state IN ('queued','running') RETURNING id").bind(class).bind(ids).fetch_optional(&app.db).await?;
+            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=now()+interval '5 minutes',updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='running' AND t.lease_expires_at<now())) AND CASE WHEN t.kind IN ('pack','unpack') THEN 1 WHEN t.kind IN ('upload','cache_flush') THEN 2 ELSE 0 END=$1 AND NOT(t.id=ANY($2)) AND NOT (m.maintenance AND t.kind IN ('pack','unpack','purge','gc')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.kind=CASE WHEN t.kind='pack' THEN t.detail->>'kind' ELSE t.kind END AND CASE WHEN c.kind='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.kind='pack' AND t.detail->>'kind' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='running' AND lease_expires_at<now())) RETURNING id").bind(class).bind(ids).bind(lease_node_id).bind(lease_token).fetch_optional(&app.db).await?;
             if let Some(id) = id {
                 active.insert(id);
             }
@@ -425,20 +455,32 @@ async fn worker(
             continue;
         };
         {
-            let (kind, state, bucket, cursor, detail): (
+            let (kind, state, bucket, cursor, detail, task_lease): (
                 String,
                 String,
                 Option<Uuid>,
                 Option<String>,
                 Value,
-            ) = sqlx::query_as("SELECT kind,state,bucket_id,cursor,detail FROM tasks WHERE id=$1")
+                Option<Uuid>,
+            ) = sqlx::query_as(
+                "SELECT kind,state,bucket_id,cursor,detail,lease_token FROM tasks WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&app.db)
+            .await?;
+            let owned = sqlx::query_scalar::<_, bool>("UPDATE tasks SET lease_expires_at=now()+interval '5 minutes' WHERE id=$1 AND state='running' AND lease_token=$2 RETURNING true")
                 .bind(id)
-                .fetch_one(&app.db)
-                .await?;
-            if state != "running" {
+                .bind(lease_token)
+                .fetch_optional(&app.db)
+                .await?
+                .is_some_and(|value| value)
+                && state == "running"
+                && task_lease == Some(lease_token);
+            if !owned {
                 active.lock().await.remove(&id);
                 continue;
             }
+            let renewal = renew_lease(app.clone(), id, lease_token);
             let result = if matches!(kind.as_str(), "gc" | "cleanup") {
                 app.lifecycle_batch(id, &kind).await
             } else if kind == "purge" {
@@ -488,6 +530,7 @@ async fn worker(
             } else {
                 Err(anyhow::anyhow!("unknown maintenance task kind"))
             };
+            renewal.abort();
             if kind == "gc" && result.is_err() {
                 app.statistics
                     .gc_failures
@@ -512,7 +555,7 @@ async fn worker(
                     if class == 2 {
                         app.upload_retry(id, &e.to_string()).await?;
                     } else {
-                        sqlx::query("UPDATE tasks SET state='failed',error=$2,updated_at=now() WHERE id=$1 AND state='running'").bind(id).bind(e.to_string()).execute(&app.db).await?;
+                        sqlx::query("UPDATE tasks SET state='failed',error=$2,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$3").bind(id).bind(e.to_string()).bind(lease_token).execute(&app.db).await?;
                     }
                 }
             }
