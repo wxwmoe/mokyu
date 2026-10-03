@@ -632,16 +632,16 @@ impl Storage {
                                 ClientOptions::new()
                                     .with_allow_http(true)
                                     .with_connect_timeout(Duration::from_secs(config::seconds(
-                                        &c.backend.connect_timeout,
+                                        &c.storage.connect_timeout,
                                     )?))
                                     .with_timeout(Duration::from_secs(config::seconds(
-                                        &c.backend.request_timeout,
+                                        &c.storage.request_timeout,
                                     )?)),
                             )
                             .with_retry(RetryConfig {
-                                max_retries: c.backend.max_retries,
+                                max_retries: c.storage.max_retries,
                                 retry_timeout: Duration::from_secs(config::seconds(
-                                    &c.backend.retry_timeout,
+                                    &c.storage.retry_timeout,
                                 )?),
                                 ..Default::default()
                             })
@@ -679,22 +679,22 @@ impl Storage {
                 budget.cpu_jobs,
             )?),
             reads: crate::backend::Gate::new(
-                c.backend
+                c.storage
                     .read_concurrency
-                    .unwrap_or(budget.backend_concurrency),
-                Duration::from_secs(config::seconds(&c.backend.priority_aging)?),
+                    .unwrap_or(budget.storage_concurrency),
+                Duration::from_secs(config::seconds(&c.storage.priority_aging)?),
             ),
             writes: crate::backend::Gate::new(
-                c.backend
+                c.storage
                     .upload_concurrency
-                    .unwrap_or(budget.backend_concurrency),
-                Duration::from_secs(config::seconds(&c.backend.priority_aging)?),
+                    .unwrap_or(budget.storage_concurrency),
+                Duration::from_secs(config::seconds(&c.storage.priority_aging)?),
             ),
             controls: crate::backend::Gate::new(
-                c.backend
+                c.storage
                     .control_concurrency
                     .unwrap_or(budget.available_cpus.clamp(1, 8)),
-                Duration::from_secs(config::seconds(&c.backend.priority_aging)?),
+                Duration::from_secs(config::seconds(&c.storage.priority_aging)?),
             ),
             fifo: tokio::sync::Mutex::new(Fifo::default()),
             cache_writes: tokio::sync::Mutex::new(()),
@@ -829,6 +829,7 @@ impl Storage {
             Err(e) => return Err(e.into()),
         };
         drop(read_permit);
+        let marker;
         if let Some((mut meta, version)) = saved {
             ensure!(
                 meta.deployment_id == deployment_id,
@@ -859,6 +860,7 @@ impl Storage {
                     .await
                     .context("cannot upgrade backend marker conditionally")?;
             }
+            marker = meta;
         } else {
             ensure!(
                 !maintenance,
@@ -918,6 +920,14 @@ impl Storage {
                 )
                 .await
                 .context("cannot create backend meta.json without overwriting")?;
+            marker = meta;
+        }
+        if let Some(target_id) = self.target_id {
+            sqlx::query("UPDATE storage_targets SET metadata=$2,updated_at=now() WHERE id=$1")
+                .bind(target_id)
+                .bind(serde_json::to_value(&marker)?)
+                .execute(db)
+                .await?;
         }
         // A crash after the S3 write is recoverable using this database's committed deployment ID.
         sqlx::query("UPDATE mokyu_meta SET backend_initialized=true WHERE NOT backend_initialized")

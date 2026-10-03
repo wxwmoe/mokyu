@@ -51,8 +51,6 @@ pub enum Command {
     #[command(subcommand)]
     Task(Tasks),
     #[command(subcommand)]
-    Backend(Backend),
-    #[command(subcommand)]
     Stores(Stores),
     #[command(subcommand)]
     Keys(Keys),
@@ -167,19 +165,6 @@ pub enum Tasks {
     Resume { id: Uuid },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
-pub enum Backend {
-    Sweep {
-        #[arg(long)]
-        execute: bool,
-        #[arg(long)]
-        preview: Option<Uuid>,
-        #[arg(skip)]
-        confirm_prefix: Option<String>,
-        #[arg(long, default_value = "48h")]
-        older_than: String,
-    },
-}
-#[derive(Subcommand, Serialize, Deserialize)]
 pub enum Stores {
     List,
     Create {
@@ -203,6 +188,16 @@ pub enum Stores {
     },
     Check {
         name: String,
+    },
+    Sweep {
+        #[arg(long)]
+        execute: bool,
+        #[arg(long)]
+        preview: Option<Uuid>,
+        #[arg(skip)]
+        confirm_prefix: Option<String>,
+        #[arg(long, default_value = "48h")]
+        older_than: String,
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
@@ -329,7 +324,6 @@ impl Command {
             Self::Cleanup(_) => Some("cleanup.run"),
             Self::Maintenance(_) => Some("maintenance.change"),
             Self::Task(_) => Some("task.change"),
-            Self::Backend(_) => Some("backend.sweep"),
             Self::Stores(_) => Some("storage.change"),
             Self::Keys(_) => Some("managed_key.change"),
             Self::Integrity(_) => Some("integrity.check"),
@@ -500,7 +494,7 @@ pub async fn client(path: &Path, mut command: Command) -> Result<()> {
             *confirm_bucket = Some(id);
             *confirmed = true;
         }
-        Command::Backend(Backend::Sweep {
+        Command::Stores(Stores::Sweep {
             execute: true,
             preview,
             confirm_prefix,

@@ -407,7 +407,7 @@ impl App {
         Ok(count)
     }
     async fn reclaim_physical(&self, grace: f64) -> Result<usize> {
-        let minimum = self.config.backend.min_storage_seconds()? as f64;
+        let minimum = self.config.storage.min_storage_seconds()? as f64;
         sqlx::query("UPDATE packs p SET state='retired',unreferenced_at=COALESCE(unreferenced_at,(SELECT max(c.unreferenced_at) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=p.id),now()) WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id AND state='ready')").execute(&self.db).await?;
         let mut count = 0;
         for table in ["chunk_locations", "packs"] {
@@ -480,7 +480,7 @@ impl App {
                 .fetch_one(&self.db)
                 .await?;
         Ok(
-            json!({"paused":paused,"maintenance":maintenance,"running":self.gc_running.load(Ordering::Acquire),"chunks":counts,"grace":self.config.gc.unreferenced_grace,"interval":self.config.gc.interval,"min_storage_duration":self.config.backend.min_storage_duration}),
+            json!({"paused":paused,"maintenance":maintenance,"running":self.gc_running.load(Ordering::Acquire),"chunks":counts,"grace":self.config.gc.unreferenced_grace,"interval":self.config.gc.interval,"min_storage_duration":self.config.storage.min_storage_duration}),
         )
     }
 }

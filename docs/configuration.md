@@ -48,30 +48,21 @@ Compose 健康检查对应 `["CMD","mokyu","--config","PATH","cli","status"]`。
 
 直接密码由 SQLx 连接参数传递，无需 URL 转义。密码与密码文件二选一，文件内容是密码文本。
 
-## S3 后端
+## 存储目标与运行参数
+
+S3 连接和本地存储路径保存在数据库的存储目标中，通过 `mokyu cli stores create` 或 `/api/stores` 管理。新安装没有存储目标；创建桶之前必须先添加目标。TOML 不再接受 `[backend]`。目标凭据用部署密钥加密，查询不会返回明文。
 
 | 字段 | 类型 / 默认值 | 说明 |
 | --- | --- | --- |
-| `backend.endpoint` | 字符串 / 必填 | 带 scheme 的 S3 endpoint，默认要求 HTTPS |
-| `backend.region` | 字符串 / 必填 | 后端签名区域 |
-| `backend.bucket` | 字符串 / 必填 | 已存在的私有后端桶 |
-| `backend.prefix` | 字符串 / `""` | 可省略；省略或空字符串使用后端桶根目录，非空时使用部署专用前缀。不允许前导 `/` 或 `.` / `..` 路径段 |
-| `backend.access_key` / `backend.access_key_file` | 字符串 / 路径，二选一必填 | 后端 access key 或其文本文件 |
-| `backend.secret_key` / `backend.secret_key_file` | 字符串 / 路径，二选一必填 | 后端 secret key 或其文本文件 |
-| `backend.allow_http` | bool / `false` | 可信网络内可显式允许 HTTP 后端 |
-| `backend.read_concurrency` / `backend.upload_concurrency` | 可选正整数 / 自动 | 全部后端 GET / PUT 的共享并发，含即时请求与维护任务 |
-| `backend.control_concurrency` | 可选正整数 / 自动 | HEAD、LIST、DELETE 的共享并发 |
-| `backend.connect_timeout` / `backend.request_timeout` | 时间 / `5s` / `30s` | 连接时限 / 单次 HTTP 尝试时限 |
-| `backend.max_retries` | 非负整数 / `3` | 每轮 SDK 最大重试次数 |
-| `backend.retry_timeout` | 时间 / `120s` | SDK 重试窗口，不是严格整体截止 |
-| `backend.priority_aging` | 时间 / `30s` | 老请求提升调度优先级的等待时间 |
-| `backend.min_storage_duration` | 时间 / `0s` | 区块和区块包从远端写入成功起的最低存储期限；省略或 `0s` 不额外保留，示例为注释的 `30d` |
+| `storage.read_concurrency` / `storage.upload_concurrency` | 可选正整数 / 自动 | GET / PUT 的共享并发，含即时请求与维护任务 |
+| `storage.control_concurrency` | 可选正整数 / 自动 | HEAD、LIST、DELETE 的共享并发 |
+| `storage.connect_timeout` / `storage.request_timeout` | 时间 / `5s` / `30s` | 连接时限 / 单次 HTTP 尝试时限 |
+| `storage.max_retries` | 非负整数 / `3` | 每轮 SDK 最大重试次数 |
+| `storage.retry_timeout` | 时间 / `120s` | SDK 重试窗口 |
+| `storage.priority_aging` | 时间 / `30s` | 老请求提升调度优先级的等待时间 |
+| `storage.min_storage_duration` | 时间 / `0s` | 区块和区块包从存储写入成功起的最低存储期限 |
 
-endpoint、bucket 和 prefix 共同绑定部署身份；已有部署不能直接修改它们来搬迁数据。根目录和空前缀规则见[后端布局](storage-format.md#后端布局)。
-
-后端名额用满时排队，前端请求优先、维护请求随后；已发出的请求不抢占，老等待者避免长期饥饿。排队计入前端无进展超时；SDK 重试期间仍持有同一后端名额。取消等待不占用执行名额。
-
-物理 GC 必须同时满足最低存储期限与 `gc.unreferenced_grace`；backend sweep 也遵守最低期限。旧数据缺少写入时间时，GC 查询后端 `Last-Modified`，查询失败则延后删除。该设置只延迟物理删除，不延长逻辑去重窗口，也不阻止区块包重写产生新旧载荷重叠占用；不是备份保留或 S3 Object Lock。
+物理 GC 必须同时满足最低存储期限与 `gc.unreferenced_grace`。存储清查也遵守最低期限；该设置不代替备份。
 
 ## 数据目录与上传
 
@@ -105,7 +96,7 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 | `processing.inflight_bytes` | 大小 / 自动 | 在途数据槽预算，非进程 RSS 硬限制 |
 | `processing.upload_concurrency` | 正整数 / 自动 | PUT/part/完成操作的并发上限；完成操作持续占用名额直到后台合并结束 |
 | `processing.read_concurrency` | 正整数 / 自动 | 同时流式读取上限 |
-| `processing.backend_concurrency` | 可选正整数 / 自动 | 兼容旧配置，分别作为后端读/写额度；不能与 backend 的三个并发字段并用 |
+| `processing.storage_concurrency` | 可选正整数 / 自动 | 作为 storage 读/写额度；不能与 storage 的三个并发字段并用 |
 | `processing.connections` | 正整数 / 自动 | 三入口合计连接上限 |
 | `processing.read_idle_timeout` / `processing.upload_idle_timeout` | 时间 / `120s` | 读出下一块 / 上传下一块的无进展时限，包含数据库、资源及后端排队；multipart 重建也受上传时限约束 |
 
@@ -122,7 +113,7 @@ multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。�
 | processing.cpu_jobs | min(C,N) | ≤ N |
 | processing.upload_concurrency | max(1,min(C,N/2)) | < N |
 | processing.read_concurrency | max(1,min(2C,N)) | ≤ N |
-| processing.backend_concurrency | min(4C,2N) | 正整数 |
+| processing.storage_concurrency | min(4C,2N) | 正整数 |
 | processing.connections | max(32,16N) | 正整数 |
 | database.max_connections | min(2C+4,64) | 正整数；池最少 0 个连接，闲置 60 秒释放 |
 | cache.max_entries | M/64/256 | ≤ M/256/8 |
@@ -203,7 +194,7 @@ Range 评估只使用实际局部回源；缓存命中、HEAD、完整范围和�
 
 | 字段 | 类型 / 默认值 | 说明 |
 | --- | --- | --- |
-| `security.credential_key_file` | 路径 / 必填 | 64 个十六进制字符，保护数据库内 S3 客户端 secret；与区块密钥不同 |
+| `encryption.deployment_key` | 字符串 / 必填 | `mokyu key generate` 生成的 64 字符部署密钥；保护数据库秘密项，同一部署所有实例必须相同且不可替换 |
 | `encryption.algorithm` | 枚举 / `aes-256-gcm` | `none` / `aes-256-gcm` / `chacha20-poly1305`；只决定新写入 |
 | `encryption.keyring_file` | 可选路径 / 加密时必填 | 当前写密钥与历史读密钥 |
 

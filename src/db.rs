@@ -50,36 +50,37 @@ pub async fn connect(
         sqlx::query_scalar("SELECT to_regclass('public.mokyu_meta')::text")
             .fetch_one(&pool)
             .await?;
-    let backend = if c.backend.enabled {
-        format!(
-            "{}|{}|{}",
-            c.backend.endpoint,
-            c.backend.bucket,
-            c.backend.prefix.trim_end_matches('/')
-        )
-    } else {
-        "none".into()
-    };
+    let storage_identity = "storage-registry";
     let latest = MIGRATIONS
         .iter()
         .last()
         .context("no embedded database migrations")?
         .version;
     if exists.is_some() {
-        let (version, identity): (i32, String) = sqlx::query_as(
-            "SELECT schema_version,backend_identity FROM mokyu_meta WHERE singleton",
-        )
-        .fetch_one(&pool)
-        .await?;
+        let version: i32 =
+            sqlx::query_scalar("SELECT schema_version FROM mokyu_meta WHERE singleton")
+                .fetch_one(&pool)
+                .await?;
         ensure!(
             i64::from(version) <= latest,
             "database schema is newer than this binary; downgrade is unsupported"
         );
         ensure!(version >= 1, "unsupported database schema version");
-        ensure!(
-            identity == backend,
-            "backend identity changed; restore its configuration before startup"
-        );
+        if version < 22 {
+            ensure!(
+                version == 21,
+                "0.0.4 requires a fresh database or an empty 0.0.3 schema"
+            );
+            let used: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM buckets) OR EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM projects WHERE id <> '00000000-0000-0000-0000-000000000001') OR EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM uploads) OR EXISTS(SELECT 1 FROM sessions) OR EXISTS(SELECT 1 FROM tasks) OR EXISTS(SELECT 1 FROM web_users) OR EXISTS(SELECT 1 FROM manage_setup)",
+            )
+            .fetch_one(&pool)
+            .await?;
+            ensure!(
+                !used,
+                "0.0.3 data is not importable; start with a fresh database and migrate files manually"
+            );
+        }
     }
     // Migrate on the database owner connection, before listeners or background work start.
     sqlx::raw_sql("SET synchronous_commit = on; SET lock_timeout = '30s'")
@@ -87,7 +88,7 @@ pub async fn connect(
         .await?;
     // The immutable baseline reads this historical migration parameter.
     sqlx::query("SELECT set_config('media_gateway.backend_identity',$1,false)")
-        .bind(&backend)
+        .bind(storage_identity)
         .execute(&mut owner)
         .await?;
     MIGRATIONS
@@ -101,6 +102,10 @@ pub async fn connect(
         i64::from(version) == latest,
         "schema version does not match the migration history"
     );
+    sqlx::query("UPDATE mokyu_meta SET backend_identity=$1 WHERE singleton")
+        .bind(storage_identity)
+        .execute(&pool)
+        .await?;
     let deployment_fingerprint = blake3::hash(&secrets.credential_key.material);
     let saved: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT deployment_key_fingerprint FROM mokyu_meta WHERE singleton")
@@ -145,35 +150,5 @@ pub async fn connect(
         required.iter().all(|id| secrets.keys.contains_key(id)),
         "keyring is missing a historical chunk key"
     );
-    if c.backend.enabled {
-        let target_id: Option<uuid::Uuid> =
-            sqlx::query_scalar("SELECT id FROM storage_targets WHERE name='default'")
-                .fetch_optional(&pool)
-                .await?;
-        if target_id.is_none() {
-            let id = uuid::Uuid::new_v4();
-            let access = crate::codec::protect(
-                secrets.backend_access.as_bytes(),
-                &secrets.credential_key,
-                format!("storage-target-{id}-access").as_bytes(),
-            )?;
-            let secret = crate::codec::protect(
-                secrets.backend_secret.as_bytes(),
-                &secrets.credential_key,
-                format!("storage-target-{id}-secret").as_bytes(),
-            )?;
-            sqlx::query("INSERT INTO storage_targets(id,name,type,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata) VALUES($1,'default','s3',$2,$3,$4,$5,$6,$7,$8)")
-                .bind(id)
-                .bind(&c.backend.endpoint)
-                .bind(&c.backend.bucket)
-                .bind(&c.backend.region)
-                .bind(&c.backend.prefix)
-                .bind(access)
-                .bind(secret)
-                .bind(serde_json::json!({"source":"config"}))
-                .execute(&pool)
-                .await?;
-        }
-    }
     Ok((pool, owner))
 }

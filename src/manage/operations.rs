@@ -1,7 +1,7 @@
 use crate::{
     admin::{
-        Backend, Buckets, Cache, Cleanup, Command, Credentials, Domains, Gc, Integrity, Keys,
-        Maintenance, Packs, Projects, Stores, Tasks, Users,
+        Buckets, Cache, Cleanup, Command, Credentials, Domains, Gc, Integrity, Keys, Maintenance,
+        Packs, Projects, Stores, Tasks, Users,
     },
     app::{App, Bucket},
     authorization::{Action, Principal},
@@ -274,6 +274,15 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                         .await?;
                     Ok(public(row))
                 }
+                Stores::Sweep {
+                    execute,
+                    preview,
+                    confirm_prefix,
+                    older_than,
+                } => {
+                    app.sweep_start(execute, preview, confirm_prefix.as_deref(), &older_than)
+                        .await
+                }
             }
         }
         Command::Keys(command) => match command {
@@ -396,15 +405,6 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
         }
         Command::Task(Tasks::Pause { id }) => app.task_change(id, false).await,
         Command::Task(Tasks::Resume { id }) => app.task_change(id, true).await,
-        Command::Backend(Backend::Sweep {
-            execute,
-            preview,
-            confirm_prefix,
-            older_than,
-        }) => {
-            app.sweep_start(execute, preview, confirm_prefix.as_deref(), &older_than)
-                .await
-        }
         Command::Bucket(Buckets::Purge {
             name,
             execute: false,

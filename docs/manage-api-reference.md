@@ -78,7 +78,7 @@
 
 S3 密钥由管理员管理，属于项目，不随创建者删除；只能授权同项目桶。Token 权限与用户当前权限取交集，空 grants 没有桶权限。`system=true` 仅管理员可签发，必须空 grants，允许全实例管理；仍不能调用 Cookie 专属入口。普通 Token 无全局任务、审计和用户管理权限。
 
-secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 credential-key 加密。label 1～128 字节，授权最多 1000 桶。`expires_in` 为正时长、最多 3650 天：密钥省略或 null 不到期；Token 省略为 90 天、null 不到期。更新的 `keep_expiry=true` 保留原时间；轮换 overlap 为 0～30 天。最近使用最多五分钟落库一次。
+secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployment key 加密。label 1～128 字节，授权最多 1000 桶。`expires_in` 为正时长、最多 3650 天：密钥省略或 null 不到期；Token 省略为 90 天、null 不到期。更新的 `keep_expiry=true` 保留原时间；轮换 overlap 为 0～30 天。最近使用最多五分钟落库一次。
 
 ## 存储桶
 
@@ -163,7 +163,7 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 | 方法与路径 | 用途 |
 | --- | --- |
 | `POST /api/buckets/{bucket}/uploads` | client_id、key、file_name、size、content_type、可选 modified_at/public_read/overwrite；幂等创建 |
-| `GET /api/uploads`、`GET /api/uploads/{id}` | 分页目录 / 详情及后端落盘状态 |
+| `GET /api/uploads`、`GET /api/uploads/{id}` | 分页目录 / 详情及存储落盘状态 |
 | `GET /api/uploads/{id}/parts` | 已接收分片及 SHA-256，每页最多 1000 |
 | `PUT /api/uploads/{id}/parts/{number}` | 原始字节和 Base64 `X-Content-SHA256` |
 | `POST /api/uploads/{id}/complete` | 完整有序清单 `{parts:[{number,etag,sha256}]}` |
@@ -171,7 +171,7 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 
 上传使用现有 multipart/配额/发布流程，不下发 S3 secret。默认每片 16 MiB，随文件大小增大以符合最多 10000 片、每片最多 5 GiB。列表支持 bucket/state/source/own/after/limit，每页最多 100；来源为 web/s3。
 
-Web 发起者才能续传自己的上传；管理员可查看和终止其他上传。刷新后重新选择原文件，并核对已接收部分的完整校验和。完成仅表示对象已发布；remote_state 区分本地已保存与后端已就绪，上传缓存恢复要求见[备份材料](deployment-and-recovery.md#备份材料)。
+Web 发起者才能续传自己的上传；管理员可查看和终止其他上传。刷新后重新选择原文件，并核对已接收部分的完整校验和。完成仅表示对象已发布；remote_state 区分本地已保存与存储已就绪，上传缓存恢复要求见[备份材料](deployment-and-recovery.md#备份材料)。
 
 ## 存储洞察
 
@@ -189,15 +189,15 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 
 空间口径：R 为原始逻辑量，U 为范围内引用区间并集，D 为先项目间、再桶间均分的内容归属，A 为所选物理来源编码占用的分摊。`R-A=(R-U)+(U-D)+(D-A)`，分别为范围内去重、共享内容和编码节省；U 跨桶不能相加，节省可能为负。归属用于说明空间，不用于收费或逻辑配额。
 
-无远端来源时计入 pending，A 和编码节省为 null。全局 physical 区分当前来源、过渡副本、待回收与未确认来源；只统计数据库索引，不含提供商对象版本、未知后端对象或账单规则。
+无远端来源时计入 pending，A 和编码节省为 null。全局 physical 区分当前来源、过渡副本、待回收与未确认来源；只统计数据库索引，不含提供商对象版本、未知存储对象或账单规则。
 
 页面读取后台快照；collecting 表示首次收集中，as_of 是实际采集时间，失败保留旧结果并显示 stale。历史采样有上限和保留期，进程重启处分段，无采样不造趋势。
 
 ## 运行状态
 
-`GET /api/status` 与 `cli status` 相同；`GET /api/service/status` 提供页面使用的进程、连接池、资源预算、读写名额、后端 read/upload/control 队列和目录索引状态。`GET /api/service/config` 提供脱敏配置、来源和重启要求，不读取秘密文件内容。
+`GET /api/status` 与 `cli status` 相同；`GET /api/service/status` 提供页面使用的进程、连接池、资源预算、读写名额、存储 read/upload/control 队列和目录索引状态。`GET /api/service/config` 提供脱敏配置、来源和重启要求，不读取秘密文件内容。
 
-运行计数本进程累计、重启归零：HTTP started/completed/active/failed/canceled、4xx/5xx、字节及延时；缓存命中/查找、后端请求/字节、GC 成败。失败率为 `(failed+canceled)/completed`，耗时分位数是倍增直方图的近似上界。统计不是账单或逐请求日志；Linux RSS 也不等于含页缓存的容器内存。
+运行计数本进程累计、重启归零：HTTP started/completed/active/failed/canceled、4xx/5xx、字节及延时；缓存命中/查找、存储请求/字节、GC 成败。失败率为 `(failed+canceled)/completed`，耗时分位数是倍增直方图的近似上界。统计不是账单或逐请求日志；Linux RSS 也不等于含页缓存的容器内存。
 
 ## 整理工作台与服务诊断
 
@@ -208,7 +208,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | `GET /api/maintenance` | 七类策略、周期、当前/最近任务、下次检查、打包开关和排空状态 |
 | `POST /api/maintenance/{kind}/actions` | pause/resume/run；kind 为 pack/reuse/reclaim/repack/range/gc/cleanup |
 | `POST /api/maintenance/mode`、`pack-creation` | `{enabled}`；维护模式 / 是否允许新包生成 |
-| `POST /api/maintenance/flush` | 将已有上传缓存写入后端 |
+| `POST /api/maintenance/flush` | 将已有上传缓存写入存储 |
 | `POST /api/maintenance/sweep`、`sweep/preview` | 只读清查 / 根据已完成扫描准备删除确认 |
 | `POST /api/maintenance/unpack/preview` | 单包 `{pack_id}` 或全部 `{all:true}` 拆包预览 |
 | `POST /api/maintenance/{operation}/execute` | `{preview_id,confirmation}`，operation 为 unpack/sweep |
@@ -233,7 +233,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | `GET /api/tasks/{id}/issues/{issue}/objects` | 当前关联文件，每页 100；after 为返回的游标 |
 | `GET /api/tasks/{id}/report` | 已完成巡检的 JSONL 下载 |
 
-metadata 检查对象映射与区块身份，head 增加后端存在性和长度，full 下载并认证、解压、校验 BLAKE3。pending 的本地唯一副本在所有模式下检查。巡检绕过可丢弃缓存、不修复或删除数据；不重算整文件 ETag，不覆盖活动上传或无引用块。在线扫描保存上界，期间变化可被跳过，不是瞬时一致性快照。
+metadata 检查对象映射与区块身份，head 增加存储存在性和长度，full 下载并认证、解压、校验 BLAKE3。pending 的本地唯一副本在所有模式下检查。巡检绕过可丢弃缓存、不修复或删除数据；不重算整文件 ETag，不覆盖活动上传或无引用块。在线扫描保存上界，期间变化可被跳过，不是瞬时一致性快照。
 
 异常代码包含 remote_missing、length_mismatch、pending_unavailable、chunk_metadata、missing_key、authentication_failed、decompression_failed、hash_mismatch、object_metadata、mapping_gap、mapping_source、object_length。网络/权限/超时让任务 failed 并保留进度，不记作坏块。completed 仍须查看异常数。
 
@@ -249,6 +249,6 @@ metadata 检查对象映射与区块身份，head 增加后端存在性和长度
 | `POST /api/objects/actions` | delete/private/public-read，逐项版本检查，无新操作回执 |
 | `GET /api/download` | bucket/key/preview 下载 |
 | `GET /api/packs`、`GET /api/packs/{id}` | 管理员物理包列表与成员 |
-| `POST /api/cache/flush` | 与 maintenance/flush 相同的后端落盘任务 |
+| `POST /api/cache/flush` | 与 maintenance/flush 相同的存储落盘任务 |
 
 页面为 Vue 静态资源，运行无需 Node.js。带内容哈希的资源可长期缓存，入口 HTML 和品牌素材需重新验证，私有 API 不缓存。三语按需加载、明暗主题与账户同步规则见[管理指南](management.md)。

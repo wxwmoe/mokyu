@@ -363,8 +363,6 @@ mod tests {
     fn secrets_for(algorithm: &str) -> Secrets {
         Secrets {
             database_password: String::new(),
-            backend_access: String::new(),
-            backend_secret: String::new(),
             credential_key: Key::new("aes-256-gcm", [8; 32]).unwrap(),
             active_key: "test-key".into(),
             keys: if algorithm == "none" {

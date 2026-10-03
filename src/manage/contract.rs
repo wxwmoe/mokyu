@@ -106,6 +106,8 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::maintenance::key_material))
         .routes(routes!(super::service::status))
         .routes(routes!(super::service::config))
+        .routes(routes!(super::stores::list, super::stores::create))
+        .routes(routes!(super::stores::check, super::stores::update))
         .routes(routes!(
             super::managed_keys::list,
             super::managed_keys::create

@@ -15,6 +15,7 @@ pub(crate) mod projects;
 pub(crate) mod quotas;
 mod service;
 mod storage_catalog;
+pub(crate) mod stores;
 pub(crate) mod tokens;
 mod uploads;
 pub(crate) mod users;

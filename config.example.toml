@@ -18,32 +18,6 @@ password = "YOUR_POSTGRES_PASSWORD"
 ssl_mode = "prefer"
 # max_connections = 12
 
-[backend]
-endpoint = "https://YOUR-ENDPOINT"
-region = "YOUR-REGION"
-bucket = "YOUR-PRIVATE-BACKEND-BUCKET"
-# Omit prefix or set it to "" to use the backend bucket root.
-prefix = "mokyu"
-access_key = "YOUR_ACCESS_KEY"
-secret_key = "YOUR_SECRET_KEY"
-# Use each *_file instead of its direct value, never both.
-# access_key_file = "secrets/backend-access-key"
-# secret_key_file = "secrets/backend-secret-key"
-# Omit concurrency limits for automatic budgets shared by all backend work.
-# read_concurrency = 16
-# upload_concurrency = 4
-# control_concurrency = 2
-connect_timeout = "5s"
-request_timeout = "30s"
-max_retries = 3
-retry_timeout = "120s"
-priority_aging = "30s"
-# Minimum age of remote chunks/packs before physical deletion; omit for no minimum.
-# min_storage_duration = "30d"
-
-[security]
-credential_key_file = "secrets/credential-key"
-
 [manage]
 origin = "https://admin.example.com"
 secure_cookie = true
@@ -54,6 +28,17 @@ session_lifetime = "12h"
 [storage]
 data = "/data"
 free_space_floor = "1GiB"
+# Configure local and S3 storage connections through `mokyu cli stores` or the management API.
+# Omit concurrency limits for automatic budgets shared by all storage work.
+# read_concurrency = 16
+# upload_concurrency = 4
+# control_concurrency = 2
+connect_timeout = "5s"
+request_timeout = "30s"
+max_retries = 3
+retry_timeout = "120s"
+priority_aging = "30s"
+# min_storage_duration = "30d"
 
 [processing]
 # Omit resource limits for finite automatic budgets based on cgroup/host resources.
@@ -121,6 +106,7 @@ repack_cooldown = "1h"
 reclaim_min_savings_bytes = "4MiB"
 
 [encryption]
+deployment_key = "REPLACE_WITH_MOKYU_KEY_GENERATE_OUTPUT"
 algorithm = "aes-256-gcm"
 keyring_file = "keys/keyring.toml"
 

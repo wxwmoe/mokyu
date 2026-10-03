@@ -1,6 +1,6 @@
 # 数据库结构
 
-PostgreSQL 保存对象、权限、引用和任务；载荷位于后端或受保护的本地上传缓存。此页列出当前表、字段和关键约束，完整类型、默认值、外键及索引以 [migrations](../migrations) 的 SQL 为准。
+PostgreSQL 保存对象、权限、引用和任务；载荷位于存储或受保护的本地上传缓存。此页列出当前表、字段和关键约束，完整类型、默认值、外键及索引以 [migrations](../migrations) 的 SQL 为准。
 
 全新安装顺序执行所有迁移，升级只执行未应用项。已发布迁移不可修改、改号或删除；schema_version 用于兼容检查，不可手改。每个服务独占数据库和 data。
 
@@ -28,7 +28,7 @@ PostgreSQL 保存对象、权限、引用和任务；载荷位于后端或受保
 | `grants` (access_key, bucket_id) | `access_key`、`bucket_id`、`actions` | S3 逐桶动作，随凭据或桶删除 |
 | `token_grants` (token_id, bucket_id) | `token_id`、`bucket_id`、`actions` | 个人 Token 逐桶动作，空授权无数据访问 |
 
-`user_bucket_access` 和 `token_bucket_access` 视图计算有效动作，不复制权限状态。密码、角色、启用状态和授权变更推进相应修订号；写入发布前复核。S3 secret 由独立 credential-key 加密，个人 Token 不保存明文。
+`user_bucket_access` 和 `token_bucket_access` 视图计算有效动作，不复制权限状态。密码、角色、启用状态和授权变更推进相应修订号；写入发布前复核。S3 secret 由独立 deployment key 加密，个人 Token 不保存明文。
 
 ## 存储桶与对象
 

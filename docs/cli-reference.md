@@ -148,18 +148,18 @@ docker exec -it mokyu cli bucket purge media --execute
 
 | 命令 | 作用 |
 | --- | --- |
-| `backend sweep [--older-than 48h]` | 默认预览；扫描部署 chunks/packs 规范路径，统计未被数据库任何物理状态索引的载荷 |
-| `backend sweep --execute --preview UUID [--older-than 48h]` | 按相同前缀和年龄阈值重新扫描，每次删除前重新查询数据库 |
+| `stores sweep [--older-than 48h]` | 默认预览；扫描部署 chunks/packs 规范路径，统计未被数据库任何物理状态索引的载荷 |
+| `stores sweep --execute --preview UUID [--older-than 48h]` | 按相同前缀和年龄阈值重新扫描，每次删除前重新查询数据库 |
 
-预览和执行均以远端 `Last-Modified` 计算年龄，取 `--older-than` 与 `backend.min_storage_duration` 中较长者。最低期限改变后须重新预览；继续旧任务也不会绕过当前最低期限。
+预览和执行均以远端 `Last-Modified` 计算年龄，取 `--older-than` 与 `storage.min_storage_duration` 中较长者。最低期限改变后须重新预览；继续旧任务也不会绕过当前最低期限。
 
 执行需要维护模式、已完成的预览、排空的活跃操作、非空区块索引及真实终端；按提示确认前缀，再输入 `DELETE`。预览过期后需重新生成。
 
 ```sh
 docker exec mokyu cli maintenance enable
-docker exec mokyu cli backend sweep
+docker exec mokyu cli stores sweep
 docker exec mokyu cli task show PREVIEW_UUID
-docker exec -it mokyu cli backend sweep --execute --preview PREVIEW_UUID
+docker exec -it mokyu cli stores sweep --execute --preview PREVIEW_UUID
 ```
 
 ## 完整性巡检

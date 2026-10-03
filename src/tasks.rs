@@ -95,7 +95,7 @@ impl App {
         let _coord = self.coord.lock().await;
         let age = config::seconds(older_than)?;
         ensure!(age <= i64::MAX as u64 / 1000, "age too large");
-        let minimum = self.config.backend.min_storage_seconds()?;
+        let minimum = self.config.storage.min_storage_seconds()?;
         let prefix = self.storage.namespace().to_string();
         if execute {
             let indexed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunks)")
@@ -314,7 +314,7 @@ impl App {
         )?
         .with_timezone(&chrono::Utc);
         // A resumed task may have been created under a shorter retention policy.
-        let minimum = self.config.backend.min_storage_seconds()?;
+        let minimum = self.config.storage.min_storage_seconds()?;
         let cutoff = cutoff.min(
             chrono::Utc::now()
                 .checked_sub_signed(chrono::TimeDelta::seconds(minimum as i64))

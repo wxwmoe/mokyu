@@ -365,8 +365,6 @@ mod tests {
             let key_id = if algorithm == "none" { "" } else { "test" };
             let secrets = Secrets {
                 database_password: String::new(),
-                backend_access: String::new(),
-                backend_secret: String::new(),
                 credential_key: codec::Key::new("aes-256-gcm", [4; 32]).unwrap(),
                 active_key: key_id.into(),
                 keys: if key_id.is_empty() {

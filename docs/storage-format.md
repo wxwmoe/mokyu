@@ -1,6 +1,6 @@
 # 存储格式
 
-PostgreSQL 保存对象路径、权限和引用，后端保存区块或区块包，不能单独重建对象索引。当前区块格式 ID 为 1、区块包格式 ID 为 2，后端标识 `format_version=2`；这些编号独立于数据库结构编号和程序版本。
+PostgreSQL 保存对象路径、权限和引用，后端保存区块或区块包，不能单独重建对象索引。当前区块格式 ID 为 1、区块包格式 ID 为 2，存储标识 `format_version=2`；这些编号独立于数据库结构编号和程序版本。
 
 ## 分块与编码
 
@@ -44,21 +44,21 @@ u32((type << 27) | UTC_YYYYMMDD).to_be_bytes() || u64(physical_id).to_be_bytes()
 
 完整块先认证，再有界解压，最后校验原始长度和 BLAKE3。ID、长度、压缩和密钥信息均受 AAD 绑定，不能互换元数据。
 
-后端 PUT 结果不明时，可对同一 key 重传完全相同的编码字节；重新加密需新 ID 和 storage_id。数据库恢复、序列回滚或独立克隆后，恢复写入前必须换用**新的实际写密钥**，保留历史读密钥；具体步骤见[恢复说明](deployment-and-recovery.md#恢复步骤)。
+存储 PUT 结果不明时，可对同一 key 重传完全相同的编码字节；重新加密需新 ID 和 storage_id。数据库恢复、序列回滚或独立克隆后，恢复写入前必须换用**新的实际写密钥**，保留历史读密钥；具体步骤见[恢复说明](deployment-and-recovery.md#恢复步骤)。
 
-## 后端布局
+## 存储布局
 
 ```text
-<backend.prefix>/meta.json
-<backend.prefix>/chunks/<UUID 前两位>/<32 位小写 storage UUID>
-<backend.prefix>/packs/<UUID 前两位>/<32 位小写 storage UUID>
+<store.prefix>/meta.json
+<store.prefix>/chunks/<UUID 前两位>/<32 位小写 storage UUID>
+<store.prefix>/packs/<UUID 前两位>/<32 位小写 storage UUID>
 ```
 
 例如 `chunks/08/084f2ff912ff4c6daef1b416fee7b800`。物理 key 不可变且永不复用；两位分组共有 256 个前缀。sweep 只识别分组与 UUID 一致的规范路径，其他对象计入 unrecognized，不删除。
 
 省略 prefix 或设为 `""` 时使用桶根，无前导斜杠；首次初始化要求整个桶为空。非空 prefix 只检查该命名空间。prefix 属于部署身份，修改它不会自动搬迁数据。
 
-### 后端标识
+### 存储标识
 
 | meta.json 字段 | 含义 |
 | --- | --- |
@@ -71,7 +71,7 @@ u32((type << 27) | UTC_YYYYMMDD).to_be_bytes() || u64(physical_id).to_be_bytes()
 
 启动时先校验标识，再恢复上传、监听和运行 GC。标识上限 16 KiB；身份冲突、未知格式、损坏或已初始化后丢失均拒绝启动。已有正确标识不因 created_by 变化而重写。
 
-仅数据库未初始化、无对象／区块且后端范围为空时，使用 `If-None-Match` 条件创建标识，失败不降级为覆盖写。S3 已写入但数据库确认前中断时，重启使用已提交的 deployment_id 完成确认。
+仅数据库未初始化、无对象／区块且存储目标范围为空时，使用 `If-None-Match` 条件创建标识，失败不降级为覆盖写。S3 已写入但数据库确认前中断时，重启使用已提交的 deployment_id 完成确认。
 
 标识不保存密钥、对象索引或引用计数，不属于载荷清查范围，也不能替代备份或跨数据库写锁。匹配身份的格式 1 标识使用条件写入升级到 2，维护模式下延后至解除维护。旧载荷不重写；不支持格式 2 的读取者不得继续写入。
 
@@ -109,7 +109,7 @@ GET/Range 每批读取最多 64 条映射，最多并行预读范围内两个块
 
 待上传唯一块和复用拆包输入共享上传额度；相同缓存文件多个 owner 仅计一次。后端输出及来源映射提交后解除 pin，文件留给 S3-FIFO。年龄、超额或关闭功能均不能删除仍需的唯一来源。先前物理输出已提交但清 pin 中断时，重试复用已提交来源；未发布的输出退役，重新编码消耗新物理身份。
 
-后台按当前不可变 stream 中的完整连续 CDC 块形成至多 pack.max_size 的段；跨 part 合包等待接续或 Complete 建立连续映射，超时先落独立块，尚未确定的尾部留在 multipart。任务复用既有编解码池、工作内存和 backend 上传并发；缓存不可用时当前请求转同步，后续不来回切换。
+后台按当前不可变 stream 中的完整连续 CDC 块形成至多 pack.max_size 的段；跨 part 合包等待接续或 Complete 建立连续映射，超时先落独立块，尚未确定的尾部留在 multipart。任务复用既有编解码池、工作内存和 存储上传并发；缓存不可用时当前请求转同步，后续不来回切换。
 
 multipart 片段先写文件并 fsync 文件及父目录，再提交 sealed 和映射。**仍被引用的片段不能因陈旧或缓存压力删除**；Abort／过期释放引用后才清理。已发布对象不依赖该目录。
 

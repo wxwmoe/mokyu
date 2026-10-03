@@ -116,28 +116,12 @@ pub(super) async fn config(
     let mut tx = app.db.begin().await?;
     actor.principal.lock_admin(&mut tx).await?;
     let c = &app.config;
-    let b = &c.backend;
     let d = &c.database;
-    let endpoint = b
-        .endpoint
-        .parse::<hyper::Uri>()
-        .ok()
-        .and_then(|u| {
-            u.host().map(|host| {
-                format!(
-                    "{}://{}{}",
-                    u.scheme_str().unwrap_or("https"),
-                    host,
-                    u.port_u16().map(|p| format!(":{p}")).unwrap_or_default()
-                )
-            })
-        })
-        .unwrap_or_else(|| "[redacted]".into());
     // Only explicitly selected non-secret sections are serialized. Secret-bearing sections use an allowlist.
-    let sections = json!({"listen":c.listen,"manage":c.manage,"storage":c.storage,"processing":c.processing,"multipart":c.multipart,"cache":c.cache,"compression":c.compression,"gc":c.gc,"cleanup":c.cleanup,"statistics":c.statistics,"integrity":c.integrity,"pack":c.pack,
-        "encryption":{"algorithm":c.encryption.algorithm,"deployment_key":"[redacted]","keyring_file":"[redacted]"},"security":{"credential_key_file":"[redacted]"},
+    let sections = json!({"listen":c.listen,"manage":c.manage,"processing":c.processing,"multipart":c.multipart,"cache":c.cache,"compression":c.compression,"gc":c.gc,"cleanup":c.cleanup,"statistics":c.statistics,"integrity":c.integrity,"pack":c.pack,
+        "encryption":{"algorithm":c.encryption.algorithm,"deployment_key":"[redacted]","keyring_file":"[redacted]"},
         "database":{"host":d.host,"port":d.port,"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode,"max_connections":d.max_connections},
-        "backend":{"endpoint":endpoint,"region":b.region,"bucket":b.bucket,"prefix":b.prefix,"allow_http":b.allow_http,"access_key":"[redacted]","access_key_file":"[redacted]","secret_key":"[redacted]","secret_key_file":"[redacted]","read_concurrency":b.read_concurrency,"upload_concurrency":b.upload_concurrency,"control_concurrency":b.control_concurrency,"connect_timeout":b.connect_timeout,"request_timeout":b.request_timeout,"max_retries":b.max_retries,"retry_timeout":b.retry_timeout,"priority_aging":b.priority_aging,"min_storage_duration":b.min_storage_duration}});
+        "storage":{"data":c.storage.data,"free_space_floor":c.storage.free_space_floor,"read_concurrency":c.storage.read_concurrency,"upload_concurrency":c.storage.upload_concurrency,"control_concurrency":c.storage.control_concurrency,"connect_timeout":c.storage.connect_timeout,"request_timeout":c.storage.request_timeout,"max_retries":c.storage.max_retries,"retry_timeout":c.storage.retry_timeout,"priority_aging":c.storage.priority_aging,"min_storage_duration":c.storage.min_storage_duration}});
     let mut fields = Vec::new();
     for (section, values) in sections.as_object().unwrap() {
         for (field, value) in values.as_object().unwrap() {

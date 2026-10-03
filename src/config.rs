@@ -16,10 +16,6 @@ pub struct Config {
     pub listen: Listen,
     pub database: Database,
     #[serde(default)]
-    pub backend: Backend,
-    #[serde(default)]
-    pub security: Security,
-    #[serde(default)]
     pub manage: Manage,
     #[serde(default)]
     pub storage: Storage,
@@ -118,27 +114,11 @@ fn postgres_port() -> u16 {
 fn postgres_ssl_mode() -> String {
     "prefer".into()
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Backend {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub endpoint: String,
-    #[serde(default)]
-    pub region: String,
-    #[serde(default)]
-    pub bucket: String,
-    #[serde(default)]
-    pub prefix: String,
-    #[serde(default)]
-    pub access_key: Option<String>,
-    pub access_key_file: Option<PathBuf>,
-    #[serde(default)]
-    pub secret_key: Option<String>,
-    pub secret_key_file: Option<PathBuf>,
-    #[serde(default)]
-    pub allow_http: bool,
+#[derive(Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Storage {
+    pub data: PathBuf,
+    pub free_space_floor: String,
     pub read_concurrency: Option<usize>,
     pub upload_concurrency: Option<usize>,
     pub control_concurrency: Option<usize>,
@@ -155,19 +135,11 @@ pub struct Backend {
     #[serde(default = "no_minimum_storage_duration")]
     pub min_storage_duration: String,
 }
-impl Default for Backend {
+impl Default for Storage {
     fn default() -> Self {
         Self {
-            enabled: false,
-            endpoint: String::new(),
-            region: "us-east-1".into(),
-            bucket: String::new(),
-            prefix: String::new(),
-            access_key: None,
-            access_key_file: None,
-            secret_key: None,
-            secret_key_file: None,
-            allow_http: false,
+            data: "/data".into(),
+            free_space_floor: "1GiB".into(),
             read_concurrency: None,
             upload_concurrency: None,
             control_concurrency: None,
@@ -180,12 +152,12 @@ impl Default for Backend {
         }
     }
 }
-impl Backend {
+impl Storage {
     pub fn min_storage_seconds(&self) -> Result<u64> {
         if self.min_storage_duration == "0s" {
             Ok(0)
         } else {
-            seconds(&self.min_storage_duration).context("invalid backend.min_storage_duration")
+            seconds(&self.min_storage_duration).context("invalid storage.min_storage_duration")
         }
     }
 }
@@ -206,19 +178,6 @@ fn priority_aging() -> String {
 }
 fn backend_retries() -> usize {
     3
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Security {
-    #[serde(default)]
-    pub credential_key_file: Option<PathBuf>,
-}
-impl Default for Security {
-    fn default() -> Self {
-        Self {
-            credential_key_file: None,
-        }
-    }
 }
 #[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -263,26 +222,12 @@ impl Manage {
 }
 #[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Storage {
-    pub data: PathBuf,
-    pub free_space_floor: String,
-}
-impl Default for Storage {
-    fn default() -> Self {
-        Self {
-            data: "/data".into(),
-            free_space_floor: "1GiB".into(),
-        }
-    }
-}
-#[derive(Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
 pub struct Processing {
     pub cpu_jobs: Option<usize>,
     pub inflight_bytes: Option<String>,
     pub upload_concurrency: Option<usize>,
     pub read_concurrency: Option<usize>,
-    pub backend_concurrency: Option<usize>,
+    pub storage_concurrency: Option<usize>,
     pub connections: Option<usize>,
     #[serde(default = "data_idle")]
     pub read_idle_timeout: String,
@@ -299,7 +244,7 @@ impl Default for Processing {
             inflight_bytes: None,
             upload_concurrency: None,
             read_concurrency: None,
-            backend_concurrency: None,
+            storage_concurrency: None,
             connections: None,
             read_idle_timeout: data_idle(),
             upload_idle_timeout: data_idle(),
@@ -419,8 +364,6 @@ struct KeyEntry {
 }
 pub struct Secrets {
     pub database_password: String,
-    pub backend_access: String,
-    pub backend_secret: String,
     pub credential_key: crate::codec::Key,
     pub active_key: String,
     pub keys: BTreeMap<String, crate::codec::Key>,
@@ -434,7 +377,7 @@ pub struct Budget {
     pub slot_bytes: u64,
     pub upload_concurrency: usize,
     pub read_concurrency: usize,
-    pub backend_concurrency: usize,
+    pub storage_concurrency: usize,
     pub connections: usize,
     pub db_connections: u32,
     pub cache_entries: usize,
@@ -537,13 +480,6 @@ impl Config {
                 }
             }
         }
-        if !c.configured_fields.contains("backend.enabled")
-            && c.configured_fields
-                .iter()
-                .any(|field| field.starts_with("backend."))
-        {
-            c.backend.enabled = true;
-        }
         let base = path.parent().unwrap_or(Path::new("."));
         c.manage.gravatar_origin()?;
         c.compression.validate()?;
@@ -558,30 +494,28 @@ impl Config {
                     .max(7 * 24 * 3600),
             "statistics.access_retention must cover seven days and the configured Range windows"
         );
-        if c.backend.enabled {
-            for value in [
-                c.backend.read_concurrency,
-                c.backend.upload_concurrency,
-                c.backend.control_concurrency,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                ensure!(value > 0, "backend concurrency must be positive");
-            }
+        for value in [
+            c.storage.read_concurrency,
+            c.storage.upload_concurrency,
+            c.storage.control_concurrency,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            ensure!(value > 0, "storage concurrency must be positive");
         }
         ensure!(
-            c.processing.backend_concurrency.is_none()
-                || (c.backend.read_concurrency.is_none()
-                    && c.backend.upload_concurrency.is_none()
-                    && c.backend.control_concurrency.is_none()),
-            "replace processing.backend_concurrency before setting backend direction limits"
+            c.processing.storage_concurrency.is_none()
+                || (c.storage.read_concurrency.is_none()
+                    && c.storage.upload_concurrency.is_none()
+                    && c.storage.control_concurrency.is_none()),
+            "replace processing.storage_concurrency before setting storage direction limits"
         );
         for value in [
-            &c.backend.connect_timeout,
-            &c.backend.request_timeout,
-            &c.backend.retry_timeout,
-            &c.backend.priority_aging,
+            &c.storage.connect_timeout,
+            &c.storage.request_timeout,
+            &c.storage.retry_timeout,
+            &c.storage.priority_aging,
         ] {
             seconds(value)?;
         }
@@ -607,18 +541,6 @@ impl Config {
             .ssl_mode
             .parse::<sqlx::postgres::PgSslMode>()
             .map_err(|_| anyhow::anyhow!("invalid database.ssl_mode"))?;
-        if c.backend.enabled {
-            ensure!(
-                c.backend.endpoint.starts_with("https://")
-                    || (c.backend.allow_http && c.backend.endpoint.starts_with("http://")),
-                "backend requires HTTPS unless allow_http is enabled"
-            );
-            ensure!(
-                !c.backend.prefix.starts_with('/')
-                    && !c.backend.prefix.split('/').any(|p| p == "." || p == ".."),
-                "backend prefix must be relative and cannot contain . or .. segments"
-            );
-        }
         ensure!(
             c.manage.origin.starts_with("https://") || c.manage.origin.starts_with("http://"),
             "manage.origin must be an absolute HTTP origin"
@@ -634,9 +556,7 @@ impl Config {
             ),
             "unknown encryption algorithm"
         );
-        if c.backend.enabled {
-            c.backend.min_storage_seconds()?;
-        }
+        c.storage.min_storage_seconds()?;
         for value in [
             &c.multipart.idle_timeout,
             &c.multipart.sweep_interval,
@@ -754,17 +674,13 @@ impl Config {
             );
             (String::new(), BTreeMap::new())
         };
-        ensure!(
-            !(c.encryption.deployment_key.is_some() && c.security.credential_key_file.is_some()),
-            "configure deployment_key instead of credential_key_file"
-        );
-        let credential_material = if let Some(value) = &c.encryption.deployment_key {
-            deployment_key(value)?
-        } else if let Some(file) = &c.security.credential_key_file {
-            key(&secret(file, base)?)?
-        } else {
-            bail!("encryption.deployment_key is required")
-        };
+        let credential_material = c
+            .encryption
+            .deployment_key
+            .as_deref()
+            .map(deployment_key)
+            .transpose()?
+            .context("encryption.deployment_key is required")?;
         let secrets = Secrets {
             database_password: secret_value(
                 c.database.password.as_deref(),
@@ -772,26 +688,6 @@ impl Config {
                 base,
                 "database.password",
             )?,
-            backend_access: if c.backend.enabled {
-                secret_value(
-                    c.backend.access_key.as_deref(),
-                    c.backend.access_key_file.as_deref(),
-                    base,
-                    "backend.access_key",
-                )?
-            } else {
-                String::new()
-            },
-            backend_secret: if c.backend.enabled {
-                secret_value(
-                    c.backend.secret_key.as_deref(),
-                    c.backend.secret_key_file.as_deref(),
-                    base,
-                    "backend.secret_key",
-                )?
-            } else {
-                String::new()
-            },
             credential_key: crate::codec::Key::new("aes-256-gcm", credential_material)?,
             active_key,
             keys,
@@ -925,7 +821,7 @@ impl Config {
             .unwrap_or((cpus * 2).min(slots).max(1));
         let backend = self
             .processing
-            .backend_concurrency
+            .storage_concurrency
             .unwrap_or((cpus * 4).min(slots * 2));
         let connections = self.processing.connections.unwrap_or((slots * 16).max(32));
         let entries = self
@@ -965,7 +861,7 @@ impl Config {
             slot_bytes,
             upload_concurrency: uploads,
             read_concurrency: reads,
-            backend_concurrency: backend,
+            storage_concurrency: backend,
             connections,
             db_connections: db,
             cache_entries: entries,
@@ -1002,16 +898,14 @@ mod tests {
         }
     }
     #[test]
-    fn backend_minimum_age_is_optional_and_allows_zero() {
-        let mut backend: Backend =
-            toml::from_str("endpoint='https://s3.example'\nregion='local'\nbucket='backend'")
-                .unwrap();
-        assert_eq!(backend.min_storage_seconds().unwrap(), 0);
-        backend.min_storage_duration = "30d".into();
-        assert_eq!(backend.min_storage_seconds().unwrap(), 30 * 86400);
+    fn storage_minimum_age_is_optional_and_allows_zero() {
+        let mut storage: Storage = toml::from_str("").unwrap();
+        assert_eq!(storage.min_storage_seconds().unwrap(), 0);
+        storage.min_storage_duration = "30d".into();
+        assert_eq!(storage.min_storage_seconds().unwrap(), 30 * 86400);
         for invalid in ["", "-1d", "30", "30days", "18446744073709551615d"] {
-            backend.min_storage_duration = invalid.into();
-            assert!(backend.min_storage_seconds().is_err());
+            storage.min_storage_duration = invalid.into();
+            assert!(storage.min_storage_seconds().is_err());
         }
     }
     #[test]

@@ -297,7 +297,7 @@ pub(super) struct SweepTask {
 async fn sweep_impact(app: &App, id: Uuid) -> Result<Value> {
     let detail:Value=sqlx::query_scalar("SELECT detail FROM tasks WHERE id=$1 AND kind='sweep' AND state='completed' AND detail->>'dry_run'='true'").bind(id).fetch_optional(&app.db).await?.ok_or_else(||s3s::s3_error!(InvalidArgument))?;
     Ok(
-        json!({"task_id":id,"summary":detail,"backend_prefix":app.storage.namespace(),"minimum_storage_seconds":app.config.backend.min_storage_seconds()?}),
+        json!({"task_id":id,"summary":detail,"backend_prefix":app.storage.namespace(),"minimum_storage_seconds":app.config.storage.min_storage_seconds()?}),
     )
 }
 #[utoipa::path(post,path="/api/maintenance/sweep/preview",request_body=SweepTask,responses((status=200,body=MaintenancePreview)))]

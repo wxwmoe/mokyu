@@ -92,7 +92,7 @@ impl App {
             json!({"maintenance":global,"controls":rows,"concurrency":self.config.pack.maintenance_concurrency,
             "pack_configured":self.config.pack.enabled,"pack_creation_paused":self.pack_creation_paused.load(Ordering::Acquire),
             "pack_creation_enabled":self.pack_creation_allowed(),"preparing_packs":preparing,"active_operations":self.active.lock().unwrap().len(),
-            "backend_prefix":self.storage.namespace(),"min_storage_duration":self.config.backend.min_storage_duration}),
+            "backend_prefix":self.storage.namespace(),"min_storage_duration":self.config.storage.min_storage_duration}),
         )
     }
 
