@@ -135,6 +135,7 @@ impl App {
         secrets: Secrets,
         budget: Budget,
         start_maintenance: bool,
+        use_storage: bool,
     ) -> Result<(Arc<Self>, sqlx::PgConnection)> {
         tokio::fs::create_dir_all(&config.storage.data).await?;
         let lock = std::fs::OpenOptions::new()
@@ -167,6 +168,7 @@ impl App {
                 &budget,
                 db.clone(),
                 maintenance.clone(),
+                use_storage,
             )
             .await?,
         );

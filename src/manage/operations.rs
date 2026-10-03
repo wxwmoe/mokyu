@@ -1,7 +1,7 @@
 use crate::{
     admin::{
-        Buckets, Cache, Cleanup, Command, Credentials, Domains, Gc, Integrity, Keys, Maintenance,
-        Packs, Projects, Stores, Tasks, Users,
+        Buckets, Cache, Cleanup, Cluster, Command, Credentials, Domains, Gc, Integrity, Keys,
+        Maintenance, Packs, Projects, Stores, Tasks, Users,
     },
     app::{App, Bucket},
     authorization::{Action, Principal},
@@ -150,6 +150,147 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
             }
         }
         Command::Status => app.status().await,
+        Command::Cluster(command) => match command {
+            Cluster::Status => {
+                let mode: String =
+                    sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE singleton")
+                        .fetch_one(&app.db)
+                        .await?;
+                let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM nodes WHERE enabled")
+                    .fetch_one(&app.db)
+                    .await?;
+                let local_targets: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM storage_targets WHERE type='local'")
+                        .fetch_one(&app.db)
+                        .await?;
+                Ok(json!({"mode": mode, "enabled_nodes": nodes, "local_targets": local_targets}))
+            }
+            Cluster::Mode { mode } => {
+                let current: String =
+                    sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE singleton")
+                        .fetch_one(&app.db)
+                        .await?;
+                if current == mode {
+                    return Ok(json!({"mode": mode}));
+                }
+                if mode == "cluster" {
+                    let local: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM storage_targets WHERE type='local')",
+                    )
+                    .fetch_one(&app.db)
+                    .await?;
+                    ensure!(
+                        !local,
+                        "local storage targets exist; migrate them to S3 and update their store before enabling cluster mode"
+                    );
+                } else {
+                    let other_nodes: bool =
+                        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes WHERE enabled)")
+                            .fetch_one(&app.db)
+                            .await?;
+                    ensure!(
+                        !other_nodes,
+                        "disable all registered cluster nodes before returning to single mode"
+                    );
+                }
+                sqlx::query("UPDATE mokyu_meta SET deployment_mode=$1 WHERE singleton")
+                    .bind(&mode)
+                    .execute(&app.db)
+                    .await?;
+                Ok(json!({"mode": mode}))
+            }
+            Cluster::Nodes => {
+                let rows: Vec<(
+                    uuid::Uuid,
+                    String,
+                    String,
+                    Option<String>,
+                    bool,
+                    Option<chrono::DateTime<chrono::Utc>>,
+                    chrono::DateTime<chrono::Utc>,
+                )> = sqlx::query_as(
+                    "SELECT id,name,kind,advertise_url,enabled,last_seen_at,created_at FROM nodes ORDER BY name",
+                )
+                .fetch_all(&app.db)
+                .await?;
+                Ok(json!(rows
+                    .into_iter()
+                    .map(|(id, name, kind, advertise_url, enabled, last_seen_at, created_at)| {
+                        json!({"id":id,"name":name,"kind":kind,"advertise_url":advertise_url,"enabled":enabled,"last_seen_at":last_seen_at,"created_at":created_at})
+                    })
+                    .collect::<Vec<_>>()))
+            }
+            Cluster::Token {
+                name,
+                kind,
+                advertise_url,
+                expires_in,
+            } => {
+                ensure!(
+                    (1..=128).contains(&name.trim().len())
+                        && !name.chars().any(char::is_control)
+                        && !name.contains('/'),
+                    "node name must contain 1..128 safe bytes"
+                );
+                ensure!(
+                    kind != "control" || advertise_url.is_some(),
+                    "control nodes require --advertise-url"
+                );
+                if let Some(url) = &advertise_url {
+                    let uri: hyper::Uri = url.parse().context("invalid advertise URL")?;
+                    ensure!(
+                        uri.scheme_str().is_some() && uri.authority().is_some(),
+                        "advertise URL must be absolute"
+                    );
+                }
+                let seconds = crate::config::seconds(&expires_in)?;
+                ensure!(
+                    (60..=30 * 86400).contains(&seconds),
+                    "token lifetime must be 1m..30d"
+                );
+                let token = crate::cluster::join_token()?;
+                let hash = crate::cluster::join_token_hash(&token)?;
+                let id = uuid::Uuid::new_v4();
+                let expires_at = chrono::Utc::now()
+                    + chrono::Duration::seconds(
+                        i64::try_from(seconds).context("token lifetime overflow")?,
+                    );
+                let mut tx = app.db.begin().await?;
+                sqlx::query("INSERT INTO nodes(id,name,kind,advertise_url) VALUES($1,$2,$3,$4)")
+                    .bind(id)
+                    .bind(name.trim())
+                    .bind(&kind)
+                    .bind(advertise_url)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("INSERT INTO node_join_tokens(id,node_id,token_hash,expires_at) VALUES($1,$2,$3,$4)")
+                    .bind(uuid::Uuid::new_v4())
+                    .bind(id)
+                    .bind(hash.as_slice())
+                    .bind(expires_at)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok(
+                    json!({"node_id":id,"name":name.trim(),"kind":kind,"token":token,"expires_at":expires_at}),
+                )
+            }
+            Cluster::Revoke { id } => {
+                let changed = sqlx::query(
+                    "UPDATE nodes SET enabled=false,updated_at=now() WHERE id=$1 AND enabled",
+                )
+                .bind(id)
+                .execute(&app.db)
+                .await?
+                .rows_affected();
+                ensure!(changed == 1, "node not found or already disabled");
+                sqlx::query("UPDATE node_join_tokens SET consumed_at=coalesce(consumed_at,now()) WHERE node_id=$1 AND consumed_at IS NULL")
+                    .bind(id)
+                    .execute(&app.db)
+                    .await?;
+                Ok(json!({"revoked": id}))
+            }
+        },
         Command::Stores(command) => {
             type Row = (
                 uuid::Uuid,

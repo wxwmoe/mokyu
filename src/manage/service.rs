@@ -121,7 +121,8 @@ pub(super) async fn config(
     let sections = json!({"listen":c.listen,"manage":c.manage,"processing":c.processing,"multipart":c.multipart,"cache":c.cache,"compression":c.compression,"gc":c.gc,"cleanup":c.cleanup,"statistics":c.statistics,"integrity":c.integrity,"pack":c.pack,
         "encryption":{"algorithm":c.encryption.algorithm,"deployment_key":"[redacted]","keyring_file":"[redacted]"},
         "database":{"host":d.host,"port":d.port,"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode,"max_connections":d.max_connections},
-        "storage":{"data":c.storage.data,"free_space_floor":c.storage.free_space_floor,"read_concurrency":c.storage.read_concurrency,"upload_concurrency":c.storage.upload_concurrency,"control_concurrency":c.storage.control_concurrency,"connect_timeout":c.storage.connect_timeout,"request_timeout":c.storage.request_timeout,"max_retries":c.storage.max_retries,"retry_timeout":c.storage.retry_timeout,"priority_aging":c.storage.priority_aging,"min_storage_duration":c.storage.min_storage_duration}});
+        "storage":{"data":c.storage.data,"free_space_floor":c.storage.free_space_floor,"read_concurrency":c.storage.read_concurrency,"upload_concurrency":c.storage.upload_concurrency,"control_concurrency":c.storage.control_concurrency,"connect_timeout":c.storage.connect_timeout,"request_timeout":c.storage.request_timeout,"max_retries":c.storage.max_retries,"retry_timeout":c.storage.retry_timeout,"priority_aging":c.storage.priority_aging,"min_storage_duration":c.storage.min_storage_duration},
+        "cluster":{"control_url":c.cluster.control_url,"join_token":"[redacted]","node_name":c.cluster.node_name,"advertise_url":c.cluster.advertise_url}});
     let mut fields = Vec::new();
     for (section, values) in sections.as_object().unwrap() {
         for (field, value) in values.as_object().unwrap() {

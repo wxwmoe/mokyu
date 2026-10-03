@@ -4,6 +4,7 @@ mod assets;
 pub(crate) mod audit;
 pub(crate) mod buckets;
 pub(crate) mod catalog;
+pub(crate) mod cluster;
 mod contract;
 pub(crate) mod insights;
 pub(crate) mod keys;
@@ -96,7 +97,14 @@ pub fn router(app: Arc<App>) -> Router {
         ))
         .layer(axum::middleware::from_fn(contract::errors))
         .with_state(app.clone())
-        .layer(axum::middleware::from_fn_with_state((app, 2usize), observe))
+        .layer(axum::middleware::from_fn_with_state(
+            (app.clone(), 2usize),
+            observe,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            app,
+            crate::cluster::forward_if_standby,
+        ))
 }
 async fn web_headers(
     State(policy): State<HeaderValue>,
@@ -256,7 +264,13 @@ async fn access_gate(
     if !path.starts_with("/api/")
         || matches!(
             path.as_str(),
-            "/api/login" | "/api/info" | "/api/openapi.json" | "/api/bootstrap" | "/api/setup"
+            "/api/login"
+                | "/api/info"
+                | "/api/openapi.json"
+                | "/api/bootstrap"
+                | "/api/setup"
+                | "/api/cluster/join"
+                | "/api/cluster/heartbeat"
         )
     {
         return next.run(request).await;

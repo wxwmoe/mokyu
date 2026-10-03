@@ -519,6 +519,7 @@ impl Storage {
         budget: &Budget,
         db: sqlx::PgPool,
         maintenance: Arc<std::sync::atomic::AtomicBool>,
+        use_target: bool,
     ) -> Result<Self> {
         let pack_units = budget.pack_memory_units;
         for name in ["multipart", "chunks"] {
@@ -564,11 +565,15 @@ impl Storage {
             String,
             Option<Vec<u8>>,
             Option<Vec<u8>>,
-        )> = sqlx::query_as(
-            "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted FROM storage_targets WHERE enabled ORDER BY created_at,id LIMIT 1",
-        )
-        .fetch_optional(&db)
-        .await?;
+        )> = if use_target {
+            sqlx::query_as(
+                "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted FROM storage_targets WHERE enabled ORDER BY created_at,id LIMIT 1",
+            )
+            .fetch_optional(&db)
+            .await?
+        } else {
+            None
+        };
         let (target_id, target_type, path, endpoint, bucket, region, prefix, access, secret) =
             match target {
                 Some((id, kind, path, endpoint, bucket, region, prefix, access, secret)) => (

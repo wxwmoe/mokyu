@@ -19,10 +19,6 @@ pub async fn connect(
     let mut owner = PgConnection::connect_with(&options)
         .await
         .map_err(|_| anyhow::anyhow!("cannot connect to PostgreSQL"))?;
-    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(734922709851001)")
-        .fetch_one(&mut owner)
-        .await?;
-    ensure!(locked, "another gateway owns this database");
     let pool = PgPoolOptions::new()
         .min_connections(0)
         .max_connections(budget.db_connections)
@@ -50,6 +46,34 @@ pub async fn connect(
         sqlx::query_scalar("SELECT to_regclass('public.mokyu_meta')::text")
             .fetch_one(&pool)
             .await?;
+    let previous_version: Option<i32> = if exists.is_some() {
+        Some(
+            sqlx::query_scalar("SELECT schema_version FROM mokyu_meta WHERE singleton")
+                .fetch_one(&pool)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let cluster_mode = if previous_version.is_some_and(|version| version >= 22) {
+        sqlx::query_scalar::<_, String>("SELECT deployment_mode FROM mokyu_meta WHERE singleton")
+            .fetch_optional(&pool)
+            .await?
+            .as_deref()
+            == Some("cluster")
+    } else {
+        false
+    };
+    if cluster_mode {
+        sqlx::query("SELECT pg_advisory_lock(734922709851001)")
+            .execute(&mut owner)
+            .await?;
+    } else {
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(734922709851001)")
+            .fetch_one(&mut owner)
+            .await?;
+        ensure!(locked, "another gateway owns this database");
+    }
     let storage_identity = "storage-registry";
     let latest = MIGRATIONS
         .iter()
@@ -150,5 +174,10 @@ pub async fn connect(
         required.iter().all(|id| secrets.keys.contains_key(id)),
         "keyring is missing a historical chunk key"
     );
+    if cluster_mode {
+        sqlx::query("SELECT pg_advisory_unlock(734922709851001)")
+            .execute(&mut owner)
+            .await?;
+    }
     Ok((pool, owner))
 }

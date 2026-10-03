@@ -39,6 +39,60 @@ pub struct Config {
     pub integrity: crate::integrity::Config,
     #[serde(default)]
     pub pack: crate::pack::Config,
+    #[serde(default)]
+    pub cluster: Cluster,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Cluster {
+    pub control_url: Option<String>,
+    pub join_token: Option<String>,
+    pub node_name: Option<String>,
+    pub advertise_url: Option<String>,
+}
+impl Default for Cluster {
+    fn default() -> Self {
+        Self {
+            control_url: None,
+            join_token: None,
+            node_name: None,
+            advertise_url: None,
+        }
+    }
+}
+impl Cluster {
+    pub fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("cluster.control_url", self.control_url.as_deref()),
+            ("cluster.advertise_url", self.advertise_url.as_deref()),
+        ] {
+            if let Some(value) = value {
+                let uri: hyper::Uri = value
+                    .parse()
+                    .with_context(|| format!("{name} must be an absolute HTTP URL"))?;
+                ensure!(
+                    uri.scheme_str().is_some() && uri.authority().is_some(),
+                    "{name} must be an absolute HTTP URL"
+                );
+            }
+        }
+        if let Some(name) = &self.node_name {
+            ensure!(
+                (1..=128).contains(&name.trim().len())
+                    && !name.chars().any(char::is_control)
+                    && !name.contains('/'),
+                "cluster.node_name must contain 1..128 safe bytes"
+            );
+        }
+        if let Some(token) = &self.join_token {
+            let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(token.as_bytes())
+                .context("cluster.join_token must be URL-safe base64")?;
+            ensure!(raw.len() == 48, "cluster.join_token must encode 48 bytes");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -482,6 +536,7 @@ impl Config {
         }
         let base = path.parent().unwrap_or(Path::new("."));
         c.manage.gravatar_origin()?;
+        c.cluster.validate()?;
         c.compression.validate()?;
         c.pack.validate()?;
         seconds(&c.processing.read_idle_timeout)?;

@@ -113,6 +113,11 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
             super::managed_keys::create
         ))
         .routes(routes!(super::managed_keys::revoke))
+        .routes(routes!(super::cluster::status, super::cluster::mode))
+        .routes(routes!(super::cluster::nodes, super::cluster::token))
+        .routes(routes!(super::cluster::revoke))
+        .routes(routes!(super::cluster::join))
+        .routes(routes!(super::cluster::heartbeat))
         .routes(routes!(super::start_integrity))
         .routes(routes!(super::integrity_issues))
         .routes(routes!(super::integrity_objects))

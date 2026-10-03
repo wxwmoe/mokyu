@@ -55,6 +55,8 @@ pub enum Command {
     #[command(subcommand)]
     Keys(Keys),
     #[command(subcommand)]
+    Cluster(Cluster),
+    #[command(subcommand)]
     Integrity(Integrity),
     #[command(subcommand)]
     Pack(Packs),
@@ -213,6 +215,27 @@ pub enum Keys {
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
+pub enum Cluster {
+    Status,
+    Mode {
+        #[arg(value_parser = ["single", "cluster"])]
+        mode: String,
+    },
+    Nodes,
+    Token {
+        name: String,
+        #[arg(value_parser = ["control", "worker", "data"])]
+        kind: String,
+        #[arg(long)]
+        advertise_url: Option<String>,
+        #[arg(long, default_value = "1h")]
+        expires_in: String,
+    },
+    Revoke {
+        id: Uuid,
+    },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
 pub enum Credentials {
     List {
         #[arg(long)]
@@ -312,7 +335,8 @@ impl Command {
             | Self::Pack(Packs::Status)
             | Self::Cache(Cache::Status)
             | Self::Stores(Stores::List)
-            | Self::Keys(Keys::List) => None,
+            | Self::Keys(Keys::List)
+            | Self::Cluster(Cluster::Status | Cluster::Nodes) => None,
             Self::Bucket(_) => Some("bucket.change"),
             Self::Credential(_) => Some("credential.change"),
             Self::Token(_) => Some("token.change"),
@@ -326,6 +350,7 @@ impl Command {
             Self::Task(_) => Some("task.change"),
             Self::Stores(_) => Some("storage.change"),
             Self::Keys(_) => Some("managed_key.change"),
+            Self::Cluster(_) => Some("cluster.change"),
             Self::Integrity(_) => Some("integrity.check"),
             Self::Pack(_) => Some("pack.change"),
             Self::Cache(_) => Some("cache.flush"),

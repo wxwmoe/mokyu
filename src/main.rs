@@ -3,6 +3,7 @@ mod admin;
 mod app;
 mod authorization;
 mod backend;
+mod cluster;
 mod codec;
 mod compression;
 mod config;
@@ -44,8 +45,24 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    #[command(name = "serve", hide = true)]
     Serve {
         /// Start with writes and remote GC disabled, including after a database restore.
+        #[arg(long)]
+        maintenance: bool,
+    },
+    /// Run the management/control role.
+    Control {
+        #[arg(long)]
+        maintenance: bool,
+    },
+    /// Run the background worker role.
+    Worker {
+        #[arg(long)]
+        maintenance: bool,
+    },
+    /// Run the S3 and public-read data role.
+    Data {
         #[arg(long)]
         maintenance: bool,
     },
@@ -70,6 +87,41 @@ enum Command {
 enum KeyCommand {
     Generate,
 }
+#[derive(Clone, Copy)]
+enum Role {
+    Single,
+    Control,
+    Worker,
+    Data,
+}
+impl Role {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::Control => "control",
+            Self::Worker => "worker",
+            Self::Data => "data",
+        }
+    }
+    fn uses_storage(self) -> bool {
+        !matches!(self, Self::Control)
+    }
+    fn maintenance(self, command: Option<&Command>) -> bool {
+        match command {
+            Some(Command::Serve { maintenance })
+            | Some(Command::Control { maintenance })
+            | Some(Command::Worker { maintenance })
+            | Some(Command::Data { maintenance }) => *maintenance,
+            _ => false,
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+fn set_process_title(role: &str) {
+    let _ = std::fs::write("/proc/self/comm", format!("mokyu: {role}"));
+}
+#[cfg(not(target_os = "linux"))]
+fn set_process_title(_role: &str) {}
 fn main() -> Result<()> {
     let args = Args::parse();
     tracing_subscriber::fmt()
@@ -96,8 +148,16 @@ fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&manage::schema())?);
         return Ok(());
     }
-    let start_maintenance = matches!(&args.command, Some(Command::Serve { maintenance: true }));
+    let role = match args.command.as_ref() {
+        Some(Command::Control { .. }) => Role::Control,
+        Some(Command::Worker { .. }) => Role::Worker,
+        Some(Command::Data { .. }) => Role::Data,
+        _ => Role::Single,
+    };
+    set_process_title(role.title());
+    let start_maintenance = role.maintenance(args.command.as_ref());
     if let Some(Command::Cli { socket, command }) = args.command {
+        set_process_title("cli");
         let socket = if let Some(socket) = socket {
             socket
         } else if args.config.exists() {
@@ -124,39 +184,161 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let(app,mut owner)=app::App::new(config,secrets,budget,start_maintenance).await?;
-        tokio::spawn(async move{loop{tokio::time::sleep(Duration::from_secs(1)).await;let alive=tokio::time::timeout(Duration::from_secs(3),sqlx::query("SELECT 1").execute(&mut owner)).await;if !matches!(alive,Ok(Ok(_))){tracing::error!("database ownership connection lost; terminating");std::process::exit(1);}}});
-        app.recover().await?;
-        manage::account::initialize(&app).await?;
-        let s3_listener=TcpListener::bind(&app.config.listen.s3).await.context("S3 listener")?;
-        let web_listener=TcpListener::bind(&app.config.listen.web).await.context("web listener")?;
-        let manage_listener=TcpListener::bind(&app.config.listen.manage).await.context("manage listener")?;
-        let connections=Arc::new(Semaphore::new(app.budget.connections));
-        let mut builder=s3s::service::S3ServiceBuilder::new(s3::Gateway(app.clone()));
-        builder.set_auth(s3::Gateway(app.clone()));builder.set_access(s3::Gateway(app.clone()));
-        if let Some(domain)=&app.config.listen.s3_domain{builder.set_host(s3s::host::SingleDomain::new(domain)?.with_cname_fallback(false));}
-        let mut cfg=s3s::config::S3Config::default();cfg.xml_max_body_size=2*1024*1024;cfg.aws_chunked_stream_max_chunk_size=config::bytes(&app.config.listen.aws_chunk_limit)? as usize;cfg.enable_sig_v2=false;cfg.sig_v4_allowed_services=vec!["s3".into()];cfg.expected_region=Some(app.config.listen.region.parse()?);
-        builder.set_config(Arc::new(s3s::config::StaticConfigProvider::new(Arc::new(cfg))));
-        let s3=builder.build();
-        tokio::select! {
-            result=serve_s3(s3_listener,s3,connections.clone(),app.clone())=>result?,
-            result=serve_router(web_listener,http::public_router(app.clone()),connections.clone())=>result?,
-            result=serve_router(manage_listener,manage::router(app.clone()),connections)=>result?,
-            result=admin::serve(app.clone())=>result?,
-            result=lifecycle::run(app.clone())=>result?,
-            result=tasks::run(app.clone())=>result?,
-            result=maintenance::run(app.clone())=>result?,
-            result=stats::run(app.clone())=>result?,
-            result=manage::insights::runtime_loop(app.clone())=>result?,
-            result=manage::catalog::run(app.clone())=>result?,
-            result=access::run(app.clone())=>result?,
-            result=app.storage.compression.run()=>result?,
-            _=shutdown_signal()=>{tracing::info!("stopping listeners; draining active data operations");}
+        let (app, mut owner) = app::App::new(
+            config,
+            secrets,
+            budget,
+            start_maintenance,
+            role.uses_storage(),
+        )
+        .await?;
+        cluster::initialize(&app, role.title()).await?;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let alive = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    sqlx::query("SELECT 1").execute(&mut owner),
+                )
+                .await;
+                if !matches!(alive, Ok(Ok(_))) {
+                    tracing::error!("database ownership connection lost; terminating");
+                    std::process::exit(1);
+                }
+            }
+        });
+        if !matches!(role, Role::Control) {
+            app.recover().await?;
         }
-        app.maintenance.store(true,std::sync::atomic::Ordering::Release);
-        let drain=async{while !app.active.lock().unwrap().is_empty(){tokio::time::sleep(Duration::from_millis(100)).await;}};
-        let _=tokio::time::timeout(Duration::from_secs(30),drain).await;Ok(())
+        if matches!(role, Role::Single | Role::Control) {
+            manage::account::initialize(&app).await?;
+        }
+        run_role(app.clone(), role).await?;
+        Ok(())
     })
+}
+fn build_s3(app: Arc<app::App>) -> Result<s3s::service::S3Service> {
+    let mut builder = s3s::service::S3ServiceBuilder::new(s3::Gateway(app.clone()));
+    builder.set_auth(s3::Gateway(app.clone()));
+    builder.set_access(s3::Gateway(app.clone()));
+    if let Some(domain) = &app.config.listen.s3_domain {
+        builder.set_host(s3s::host::SingleDomain::new(domain)?.with_cname_fallback(false));
+    }
+    let mut cfg = s3s::config::S3Config::default();
+    cfg.xml_max_body_size = 2 * 1024 * 1024;
+    cfg.aws_chunked_stream_max_chunk_size =
+        config::bytes(&app.config.listen.aws_chunk_limit)? as usize;
+    cfg.enable_sig_v2 = false;
+    cfg.sig_v4_allowed_services = vec!["s3".into()];
+    cfg.expected_region = Some(app.config.listen.region.parse()?);
+    builder.set_config(Arc::new(s3s::config::StaticConfigProvider::new(Arc::new(
+        cfg,
+    ))));
+    Ok(builder.build())
+}
+
+async fn run_role(app: Arc<app::App>, role: Role) -> Result<()> {
+    match role {
+        Role::Single => run_single(app).await,
+        Role::Control => run_control(app).await,
+        Role::Worker => run_worker(app).await,
+        Role::Data => run_data(app).await,
+    }
+}
+
+async fn run_single(app: Arc<app::App>) -> Result<()> {
+    let s3_listener = TcpListener::bind(&app.config.listen.s3)
+        .await
+        .context("S3 listener")?;
+    let web_listener = TcpListener::bind(&app.config.listen.web)
+        .await
+        .context("public listener")?;
+    let manage_listener = TcpListener::bind(&app.config.listen.manage)
+        .await
+        .context("manage listener")?;
+    let connections = Arc::new(Semaphore::new(app.budget.connections));
+    let s3 = build_s3(app.clone())?;
+    tokio::select! {
+        result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
+        result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
+        result = serve_router(manage_listener, manage::router(app.clone()), connections.clone()) => result?,
+        result = admin::serve(app.clone()) => result?,
+        result = lifecycle::run(app.clone()) => result?,
+        result = tasks::run(app.clone()) => result?,
+        result = maintenance::run(app.clone()) => result?,
+        result = stats::run(app.clone()) => result?,
+        result = manage::insights::runtime_loop(app.clone()) => result?,
+        result = manage::catalog::run(app.clone()) => result?,
+        result = access::run(app.clone()) => result?,
+        result = app.storage.compression.run() => result?,
+        _ = shutdown_signal() => tracing::info!(role="single", "stopping listeners; draining active operations"),
+    }
+    drain(app).await
+}
+
+async fn run_control(app: Arc<app::App>) -> Result<()> {
+    let manage_listener = TcpListener::bind(&app.config.listen.manage)
+        .await
+        .context("manage listener")?;
+    let connections = Arc::new(Semaphore::new(app.budget.connections));
+    tokio::select! {
+        result = cluster::control_loop(app.clone()) => result?,
+        result = serve_router(manage_listener, manage::router(app.clone()), connections) => result?,
+        result = admin::serve(app.clone()) => result?,
+        result = manage::insights::runtime_loop(app.clone()) => result?,
+        _ = shutdown_signal() => tracing::info!(role="control", "stopping listeners; draining active operations"),
+    }
+    drain(app).await
+}
+
+async fn run_worker(app: Arc<app::App>) -> Result<()> {
+    tokio::select! {
+        result = cluster::node_loop(app.clone(), "worker") => result?,
+        result = admin::serve(app.clone()) => result?,
+        result = lifecycle::run(app.clone()) => result?,
+        result = tasks::run(app.clone()) => result?,
+        result = maintenance::run(app.clone()) => result?,
+        result = stats::run(app.clone()) => result?,
+        result = manage::catalog::run(app.clone()) => result?,
+        result = manage::insights::runtime_loop(app.clone()) => result?,
+        result = app.storage.compression.run() => result?,
+        _ = shutdown_signal() => tracing::info!(role="worker", "stopping listeners; draining active operations"),
+    }
+    drain(app).await
+}
+
+async fn run_data(app: Arc<app::App>) -> Result<()> {
+    let s3_listener = TcpListener::bind(&app.config.listen.s3)
+        .await
+        .context("S3 listener")?;
+    let web_listener = TcpListener::bind(&app.config.listen.web)
+        .await
+        .context("public listener")?;
+    let connections = Arc::new(Semaphore::new(app.budget.connections));
+    let s3 = build_s3(app.clone())?;
+    tokio::select! {
+        result = cluster::node_loop(app.clone(), "data") => result?,
+        result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
+        result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
+        result = admin::serve(app.clone()) => result?,
+        result = access::run(app.clone()) => result?,
+        result = manage::insights::runtime_loop(app.clone()) => result?,
+        result = app.storage.compression.run() => result?,
+        _ = shutdown_signal() => tracing::info!(role="data", "stopping listeners; draining active operations"),
+    }
+    drain(app).await
+}
+
+async fn drain(app: Arc<app::App>) -> Result<()> {
+    app.maintenance
+        .store(true, std::sync::atomic::Ordering::Release);
+    let drain = async {
+        while !app.active.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(30), drain).await;
+    Ok(())
 }
 async fn shutdown_signal() {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
