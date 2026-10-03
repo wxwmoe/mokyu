@@ -1,6 +1,6 @@
 use crate::{
     admin::{
-        Backend, Buckets, Cache, Cleanup, Command, Credentials, Domains, Gc, Integrity,
+        Backend, Buckets, Cache, Cleanup, Command, Credentials, Domains, Gc, Integrity, Keys,
         Maintenance, Packs, Projects, Stores, Tasks, Users,
     },
     app::{App, Bucket},
@@ -276,6 +276,28 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 }
             }
         }
+        Command::Keys(command) => match command {
+            Keys::List => Ok(serde_json::to_value(
+                super::managed_keys::list_rows(&app.db).await?,
+            )?),
+            Keys::Create { name, purpose } => Ok(serde_json::to_value(
+                super::managed_keys::create_record(
+                    app,
+                    &crate::authorization::Principal::Local,
+                    super::managed_keys::ManagedKeyInput { name, purpose },
+                )
+                .await?,
+            )?),
+            Keys::Revoke { id } => {
+                super::managed_keys::revoke_record(
+                    app,
+                    &crate::authorization::Principal::Local,
+                    id,
+                )
+                .await?;
+                Ok(json!({"revoked": id}))
+            }
+        },
         Command::Cache(Cache::Status) => app.upload_cache_status().await,
         Command::Cache(Cache::Flush) => app.cache_flush_start().await,
         Command::Pack(Packs::Status) => app.pack_status().await,

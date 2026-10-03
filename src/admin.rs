@@ -55,6 +55,8 @@ pub enum Command {
     #[command(subcommand)]
     Stores(Stores),
     #[command(subcommand)]
+    Keys(Keys),
+    #[command(subcommand)]
     Integrity(Integrity),
     #[command(subcommand)]
     Pack(Packs),
@@ -204,6 +206,18 @@ pub enum Stores {
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
+pub enum Keys {
+    List,
+    Create {
+        name: String,
+        #[arg(value_parser = ["access", "signing", "encryption"])]
+        purpose: String,
+    },
+    Revoke {
+        id: Uuid,
+    },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
 pub enum Credentials {
     List {
         #[arg(long)]
@@ -302,7 +316,8 @@ impl Command {
             | Self::Integrity(Integrity::Issues { .. })
             | Self::Pack(Packs::Status)
             | Self::Cache(Cache::Status)
-            | Self::Stores(Stores::List) => None,
+            | Self::Stores(Stores::List)
+            | Self::Keys(Keys::List) => None,
             Self::Bucket(_) => Some("bucket.change"),
             Self::Credential(_) => Some("credential.change"),
             Self::Token(_) => Some("token.change"),
@@ -316,6 +331,7 @@ impl Command {
             Self::Task(_) => Some("task.change"),
             Self::Backend(_) => Some("backend.sweep"),
             Self::Stores(_) => Some("storage.change"),
+            Self::Keys(_) => Some("managed_key.change"),
             Self::Integrity(_) => Some("integrity.check"),
             Self::Pack(_) => Some("pack.change"),
             Self::Cache(_) => Some("cache.flush"),

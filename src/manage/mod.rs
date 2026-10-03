@@ -8,6 +8,7 @@ mod contract;
 pub(crate) mod insights;
 pub(crate) mod keys;
 mod maintenance;
+pub(crate) mod managed_keys;
 pub(crate) mod media;
 pub(crate) mod operations;
 pub(crate) mod projects;

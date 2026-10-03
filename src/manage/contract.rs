@@ -106,6 +106,11 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::maintenance::key_material))
         .routes(routes!(super::service::status))
         .routes(routes!(super::service::config))
+        .routes(routes!(
+            super::managed_keys::list,
+            super::managed_keys::create
+        ))
+        .routes(routes!(super::managed_keys::revoke))
         .routes(routes!(super::start_integrity))
         .routes(routes!(super::integrity_issues))
         .routes(routes!(super::integrity_objects))
