@@ -19,7 +19,7 @@ async function login() {
   busy.value = true; error.value = ''
   try {
     const info = await api<{ contract: string }>('/api/info')
-    if (info.contract !== 'mokyu-manage-1') throw new Error(t('incompatible'))
+    if (info.contract !== 'mokyu-control-1') throw new Error(t('incompatible'))
     if (setup.value) {
       if (confirm.value !== password.value) throw new Error(t('passwordMismatch'))
       await write('/api/setup', { token: setupToken.value.trim(), username: username.value, password: password.value })

@@ -99,7 +99,7 @@ pub(crate) async fn create_user(
     let row: Option<User> = sqlx::query_as("INSERT INTO web_users(id,username,password_hash,role,must_change_password) VALUES($1,$2,$3,$4,$5) ON CONFLICT(username) DO NOTHING RETURNING *")
         .bind(Uuid::new_v4()).bind(input.username).bind(hash).bind(input.role).bind(input.must_change_password).fetch_optional(&mut *tx).await?;
     let row = row.ok_or_else(|| s3s::s3_error!(OperationAborted))?;
-    sqlx::query("DELETE FROM manage_setup")
+    sqlx::query("DELETE FROM admin_setup")
         .execute(&mut *tx)
         .await?;
     super::audit::checkpoint(

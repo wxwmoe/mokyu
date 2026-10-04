@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::manage::operations::execute;
+use crate::control::operations::execute;
 use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};

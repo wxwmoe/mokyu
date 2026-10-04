@@ -53,7 +53,7 @@ ACL 变更对新请求生效，已接纳的读取可以完成；CDN 已缓存内
 
 ## CORS
 
-每桶默认关闭，CLI/Web 保存的同一组规则应用于 S3 和公共读；字段见[CORS 设置](manage-api-reference.md#cors-设置)。
+每桶默认关闭，CLI/Web 保存的同一组规则应用于 S3 和公共读；字段见[CORS 设置](control-api-reference.md#cors-设置)。
 
 - Web 预设：任意来源和请求头、暴露全部响应头，方法为 GET/HEAD/POST/PUT/DELETE/OPTIONS，预检缓存 86400 秒。
 - 公共读和匿名 Host 映射仅允许 GET/HEAD 的预检；规则不启用跨域 Cookie 凭据，不改变 ACL 或签名校验。
@@ -92,7 +92,7 @@ GetObject、公共读和管理下载支持单段 `bytes=a-b`、`bytes=a-`、`byt
 4. 对象／首页不存在时，使用桶根相对 error_document 的公开内容；仍返回 404、Cache-Control: no-store，忽略 Range 和 If-*。
 5. 错误页缺失、私有或配置为空时使用内置 404，不递归回退。
 
-数据库、权限和后端故障不伪装成 404；未知 Host 不返回其他桶内容。配置入口见[网站设置](manage-api-reference.md#网站设置)。
+数据库、权限和后端故障不伪装成 404；未知 Host 不返回其他桶内容。配置入口见[网站设置](control-api-reference.md#网站设置)。
 
 ## 请求标识
 

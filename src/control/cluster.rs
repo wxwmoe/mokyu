@@ -16,7 +16,7 @@ use uuid::Uuid;
 pub(crate) struct ClusterStatus {
     mode: String,
     enabled_nodes: i64,
-    local_targets: i64,
+    local_stores: i64,
 }
 
 #[derive(Serialize, sqlx::FromRow, ToSchema)]
@@ -127,8 +127,8 @@ pub(crate) async fn status(
         enabled_nodes: sqlx::query_scalar("SELECT count(*) FROM nodes WHERE enabled")
             .fetch_one(&app.db)
             .await?,
-        local_targets: sqlx::query_scalar(
-            "SELECT count(*) FROM storage_targets WHERE type='local'",
+        local_stores: sqlx::query_scalar(
+            "SELECT count(*) FROM stores WHERE type='local'",
         )
         .fetch_one(&app.db)
         .await?,
@@ -153,13 +153,13 @@ pub(crate) async fn mode(
     if current != input.mode {
         if input.mode == "cluster" {
             let local: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM storage_targets WHERE type='local')",
+                "SELECT EXISTS(SELECT 1 FROM stores WHERE type='local')",
             )
             .fetch_one(&mut *tx)
             .await?;
             if local {
                 return Err(anyhow::anyhow!(
-                    "local storage targets exist; migrate them to S3 before enabling cluster mode"
+                    "local stores exist; migrate them to S3 before enabling cluster mode"
                 )
                 .into());
             }

@@ -73,7 +73,7 @@ pub(super) async fn status(
             value: text(value),
         });
     }
-    for listener in ["s3", "web", "manage"] {
+    for listener in ["s3", "web", "control"] {
         for key in ["started", "active", "failed"] {
             counters.push(RuntimeCounter {
                 key: format!("{listener}.{key}"),
@@ -118,7 +118,7 @@ pub(super) async fn config(
     let c = &app.config;
     let d = &c.database;
     // Only explicitly selected non-secret sections are serialized. Secret-bearing sections use an allowlist.
-    let sections = json!({"listen":c.listen,"manage":c.manage,"processing":c.processing,"multipart":c.multipart,"cache":c.cache,"compression":c.compression,"gc":c.gc,"cleanup":c.cleanup,"statistics":c.statistics,"integrity":c.integrity,"pack":c.pack,
+    let sections = json!({"listen":c.listen,"control":c.control,"processing":c.processing,"multipart":c.multipart,"cache":c.cache,"compression":c.compression,"gc":c.gc,"cleanup":c.cleanup,"statistics":c.statistics,"integrity":c.integrity,"pack":c.pack,
         "encryption":{"algorithm":c.encryption.algorithm,"deployment_key":"[redacted]"},
         "database":{"host":d.host,"port":d.port,"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode,"max_connections":d.max_connections},
         "storage":{"data":c.storage.data,"free_space_floor":c.storage.free_space_floor,"read_concurrency":c.storage.read_concurrency,"upload_concurrency":c.storage.upload_concurrency,"control_concurrency":c.storage.control_concurrency,"connect_timeout":c.storage.connect_timeout,"request_timeout":c.storage.request_timeout,"max_retries":c.storage.max_retries,"retry_timeout":c.storage.retry_timeout,"priority_aging":c.storage.priority_aging,"min_storage_duration":c.storage.min_storage_duration},

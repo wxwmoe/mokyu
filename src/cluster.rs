@@ -411,8 +411,8 @@ pub async fn node_loop(app: Arc<App>, role: &'static str) -> Result<()> {
             tokio::time::sleep(Duration::from_secs(10)).await;
             continue;
         }
-        if let Err(error) = app.storage.refresh_targets().await {
-            tracing::warn!(%error, "storage target refresh failed; retrying");
+        if let Err(error) = app.storage.refresh_stores().await {
+            tracing::warn!(%error, "store refresh failed; retrying");
         }
         let reply: Result<HeartbeatReply> = post_json(
             control,

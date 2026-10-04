@@ -5,7 +5,7 @@
 ## 通用约定
 
 - 认证使用 `mokyu_session` Cookie 或 `Authorization: Bearer TOKEN`，不能混用，令牌不能放入 URL。Cookie 为 HttpOnly、SameSite=Strict，Secure 和固定寿命见[配置](configuration.md#监听与管理)。
-- Cookie 写请求要求 `Origin` 精确匹配 `manage.origin`，并提交 `X-CSRF-Token`；登录、安装引导要求 Origin。`GET /api/session` 返回 CSRF token。Bearer 不使用 CSRF，桶 CORS 不作用于管理接口。
+- Cookie 写请求要求 `Origin` 精确匹配 `control.origin`，并提交 `X-CSRF-Token`；登录、安装引导要求 Origin。`GET /api/session` 返回 CSRF token。Bearer 不使用 CSRF，桶 CORS 不作用于管理接口。
 - 登录、首次安装状态、安装提交、info 和 OpenAPI 无需已有会话，其余入口默认拒绝未认证请求。账户与 Token 自助管理仅接受 Cookie；管理员明确签发的 system Token 可调用实例管理入口。
 - 敏感管理写操作要求最近五分钟验证密码；收到 `ReauthenticationRequired` 后调用 `/api/me/reauth` 再重试。system Token 不使用交互式密码验证。
 - JSON 默认上限 16 KiB；桶设置 128 KiB、授权与密钥 512 KiB、对象批量操作和上传完成 2 MiB。UploadPart 按预期分片大小校验。
@@ -154,7 +154,7 @@ secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployme
 | move | 源 read/delete、目标 write；保留 ACL，公开对象另需目标 acl |
 | metadata | 源 read/write；公开对象另需 acl，产生新版本 |
 
-复制/移动使用 target_bucket 和逐项 target_key；替换目标须提供 target_version。源/目标变化返回逐项 412。复制仅复用引用；同项目移动按逻辑净变化记账，跨项目受目标额度约束。源桶与目标桶绑定不同 storage target 时，未确认返回逐项 409 `StorageMigrationConfirmationRequired`；确认后返回逐项 status 202 和 task_id，创建 `storage_migration` 后台任务，将区块重新编码到目标存储。跨存储复制不共享去重，移动只在目标发布成功后退休源对象；任务失败会保留源对象。
+复制/移动使用 target_bucket 和逐项 target_key；替换目标须提供 target_version。源/目标变化返回逐项 412。复制仅复用引用；同项目移动按逻辑净变化记账，跨项目受目标额度约束。源桶与目标桶绑定不同 store 时，未确认返回逐项 409 `StorageMigrationConfirmationRequired`；确认后返回逐项 status 202 和 task_id，创建 `storage_migration` 后台任务，将区块重新编码到目标存储。跨存储复制不共享去重，移动只在目标发布成功后退休源对象；任务失败会保留源对象。
 
 client_id 是调用方 UUID。成功回执与变更同事务提交；同身份、同参数重试返回回执，参数不同返回 409 IdempotencyConflict。已确认失败的新尝试使用新 ID，未知结果保留原 ID。重试仍检查实时权限，回执按 task_retention 清理。Web 每批 20 项、选择限当前页；关闭浏览器不保留未确认的操作编号。
 

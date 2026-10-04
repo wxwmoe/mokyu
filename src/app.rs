@@ -24,7 +24,7 @@ pub struct Bucket {
     pub id: Uuid,
     pub project_id: Uuid,
     pub name: String,
-    pub storage_target_id: Option<Uuid>,
+    pub store_id: Option<Uuid>,
     pub state: String,
     pub settings_revision: i64,
     pub uploads_paused: bool,
@@ -109,7 +109,7 @@ pub struct App {
     pub secrets: Arc<Secrets>,
     pub db: PgPool,
     pub storage: Arc<Storage>,
-    pub thumbnails: Arc<crate::manage::media::Thumbnails>,
+    pub thumbnails: Arc<crate::control::media::Thumbnails>,
     pub statistics: crate::stats::Statistics,
     pub cleanup_state: crate::lifecycle::Cleanup,
     pub integrity_pacing: std::sync::Mutex<std::time::Instant>,
@@ -176,7 +176,7 @@ impl App {
                 .check_identity(&db, maintenance.load(std::sync::atomic::Ordering::Acquire))
                 .await
             {
-                let pending:bool=sqlx::query_scalar("SELECT backend_initialized AND EXISTS(SELECT 1 FROM pending_uploads) FROM mokyu_meta").fetch_one(&db).await?;
+                let pending:bool=sqlx::query_scalar("SELECT storage_initialized AND EXISTS(SELECT 1 FROM pending_uploads) FROM mokyu_meta").fetch_one(&db).await?;
                 if !pending || error.downcast_ref::<object_store::Error>().is_none() {
                     return Err(error);
                 }
@@ -184,11 +184,11 @@ impl App {
             }
         } else {
             tracing::info!(
-                "no storage target configured; configure a store before accepting objects"
+                "no store configured; configure a store before accepting objects"
             );
         }
         let thumbnails =
-            Arc::new(crate::manage::media::Thumbnails::new(&config, storage.disk.clone()).await?);
+            Arc::new(crate::control::media::Thumbnails::new(&config, storage.disk.clone()).await?);
         let app = Arc::new(Self {
             uploads: Arc::new(Semaphore::new(budget.upload_concurrency)),
             reads: Arc::new(Semaphore::new(budget.read_concurrency)),
@@ -242,7 +242,7 @@ impl App {
         self.writable()?;
         crate::http::validate_cors(&rules).map_err(|e| s3_error!(InvalidArgument, "{e}"))?;
         let mut tx = self.db.begin().await?;
-        crate::manage::buckets::lock_settings(&mut tx, principal, bucket).await?;
+        crate::control::buckets::lock_settings(&mut tx, principal, bucket).await?;
         let result = sqlx::query_scalar(
             "UPDATE buckets SET cors=$2 WHERE id=$1 AND state='active' RETURNING cors",
         )
@@ -251,7 +251,7 @@ impl App {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| s3_error!(NoSuchBucket))?;
-        crate::manage::audit::checkpoint(
+        crate::control::audit::checkpoint(
             &mut tx,
             "bucket.cors",
             &bucket.to_string(),
@@ -415,21 +415,21 @@ impl App {
     ) -> Result<Chunk> {
         ensure!(!raw.is_empty() && raw.len() <= MAX, "invalid chunk length");
         let hash = *blake3::hash(&raw).as_bytes();
-        let target_id: Uuid = sqlx::query_scalar::<_, Option<Uuid>>(
-            "SELECT b.storage_target_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
+        let store_id: Uuid = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT b.store_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
         )
         .bind(stream)
         .fetch_one(&self.db)
         .await?
-        .context("stream has no storage target")?;
+        .context("stream has no store")?;
         let mutex = {
             let mut m = self.hashes.lock().unwrap();
             m.retain(|_, v| v.strong_count() > 0);
-            if let Some(l) = m.get(&(target_id, hash)).and_then(Weak::upgrade) {
+            if let Some(l) = m.get(&(store_id, hash)).and_then(Weak::upgrade) {
                 l
             } else {
                 let l = Arc::new(tokio::sync::Mutex::new(()));
-                m.insert((target_id, hash), Arc::downgrade(&l));
+                m.insert((store_id, hash), Arc::downgrade(&l));
                 l
             }
         };
@@ -443,16 +443,16 @@ impl App {
         // Rollback releases the claim on every return and cancellation path.
         let mut hash_lock = self.db.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || encode($2,'hex'), 734922709851001))")
-            .bind(target_id)
+            .bind(store_id)
             .bind(hash.as_slice())
             .execute(&mut *hash_lock)
             .await?;
-        sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE storage_target_id=$1 AND hash=$2 AND raw_size=$3 AND algorithm=$4 AND key_id=$5 AND state IN ('preparing','uploading')")
-            .bind(target_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).execute(&self.db).await?;
+        sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE store_id=$1 AND hash=$2 AND raw_size=$3 AND algorithm=$4 AND key_id=$5 AND state IN ('preparing','uploading')")
+            .bind(store_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).execute(&self.db).await?;
         let c: Chunk = loop {
             let mut tx = self.db.begin().await?;
-            let old: Option<Chunk> = sqlx::query_as("SELECT * FROM chunks WHERE storage_target_id=$1 AND hash=$2 AND raw_size=$3 AND algorithm=$4 AND key_id=$5 AND state='ready'")
-                .bind(target_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).fetch_optional(&mut *tx).await?;
+            let old: Option<Chunk> = sqlx::query_as("SELECT * FROM chunks WHERE store_id=$1 AND hash=$2 AND raw_size=$3 AND algorithm=$4 AND key_id=$5 AND state='ready'")
+                .bind(store_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).fetch_optional(&mut *tx).await?;
             if let Some(c) = old {
                 tx.commit().await?;
                 if self.config.cache.upload_cache {
@@ -476,8 +476,8 @@ impl App {
                     Err(e) => return Err(e),
                 }
             }
-            let inserted: Option<Chunk> = sqlx::query_as("INSERT INTO chunks(storage_id,storage_target_id,hash,raw_size,algorithm,key_id,owner_stream,state,unreferenced_at) VALUES($1,$2,$3,$4,$5,$6,$7,'preparing',now()) ON CONFLICT DO NOTHING RETURNING *")
-                .bind(Uuid::new_v4()).bind(target_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).bind(stream).fetch_optional(&mut *tx).await?;
+            let inserted: Option<Chunk> = sqlx::query_as("INSERT INTO chunks(storage_id,store_id,hash,raw_size,algorithm,key_id,owner_stream,state,unreferenced_at) VALUES($1,$2,$3,$4,$5,$6,$7,'preparing',now()) ON CONFLICT DO NOTHING RETURNING *")
+                .bind(Uuid::new_v4()).bind(store_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).bind(stream).fetch_optional(&mut *tx).await?;
             tx.commit().await?;
             if let Some(c) = inserted {
                 break c;
@@ -591,19 +591,19 @@ impl App {
         source: &StoredStream,
     ) -> Result<()> {
         let source_target: Uuid = sqlx::query_scalar::<_, Option<Uuid>>(
-            "SELECT b.storage_target_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
+            "SELECT b.store_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
         )
         .bind(source.id)
         .fetch_one(&self.db)
         .await?
-        .context("source stream has no storage target")?;
+        .context("source stream has no store")?;
         let destination_target: Uuid = sqlx::query_scalar::<_, Option<Uuid>>(
-            "SELECT b.storage_target_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
+            "SELECT b.store_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
         )
         .bind(destination)
         .fetch_one(&self.db)
         .await?
-        .context("destination stream has no storage target")?;
+        .context("destination stream has no store")?;
         if source_target != destination_target {
             let mut offset = 0;
             while offset < source.size {
@@ -894,7 +894,7 @@ impl App {
                 .bind(upload)
                 .execute(&mut *tx)
                 .await?;
-            crate::manage::audit::checkpoint(
+            crate::control::audit::checkpoint(
                 &mut tx,
                 "upload.complete",
                 &upload.to_string(),
@@ -970,7 +970,7 @@ impl App {
                 .bind(public)
                 .execute(&mut *tx)
                 .await?;
-            crate::manage::actions::complete(&mut tx, Some(id)).await?;
+            crate::control::actions::complete(&mut tx, Some(id)).await?;
             tx.commit().await?;
             return Ok(());
         }
@@ -981,7 +981,7 @@ impl App {
                 .execute(&mut *tx)
                 .await?;
         }
-        crate::manage::actions::complete(&mut tx, None).await?;
+        crate::control::actions::complete(&mut tx, None).await?;
         tx.commit().await?;
         self.wake_gc.notify_one();
         Ok(())
@@ -994,7 +994,7 @@ impl App {
         let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":paused,"maintenance":maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":self.db.size(),"db_pool_idle":self.db.num_idle(),"data_slots_available":self.slots.available_permits(),"active_streams":self.active.lock().unwrap().len()});
         status["runtime"] = self.statistics.runtime();
         status["cleanup"] = self.cleanup_status();
-        status["catalog"] = serde_json::to_value(crate::manage::catalog::progress(self).await?)?;
+        status["catalog"] = serde_json::to_value(crate::control::catalog::progress(self).await?)?;
         status["storage"] = self.statistics.inventory(crate::config::seconds(
             &self.config.statistics.refresh_interval,
         )?);

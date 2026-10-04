@@ -22,7 +22,7 @@ use uuid::Uuid;
 pub(crate) struct CreateBucket {
     pub name: String,
     pub project_id: Option<Uuid>,
-    pub storage_target_id: Option<Uuid>,
+    pub store_id: Option<Uuid>,
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct BucketSettings {
@@ -234,19 +234,19 @@ pub(crate) async fn create_bucket(
         selected = scope == "selected";
     }
     let available: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM storage_targets WHERE enabled ORDER BY created_at,id")
+        sqlx::query_scalar("SELECT id FROM stores WHERE enabled ORDER BY created_at,id")
             .fetch_all(&mut *tx)
             .await?;
-    let storage_target_id = match input.storage_target_id {
+    let store_id = match input.store_id {
         Some(id) if available.contains(&id) => id,
-        Some(_) => return Err(anyhow::anyhow!("storage target is unavailable").into()),
+        Some(_) => return Err(anyhow::anyhow!("store is unavailable").into()),
         None if available.len() == 1 => available[0],
         None if available.is_empty() => {
-            return Err(anyhow::anyhow!("no storage target configured").into());
+            return Err(anyhow::anyhow!("no store configured").into());
         }
-        None => return Err(anyhow::anyhow!("storage target must be selected").into()),
+        None => return Err(anyhow::anyhow!("store must be selected").into()),
     };
-    let row:Option<Bucket>=sqlx::query_as("INSERT INTO buckets(id,name,project_id,storage_target_id) VALUES($1,$2,$3,$4) ON CONFLICT(name) DO NOTHING RETURNING *").bind(Uuid::new_v4()).bind(&input.name).bind(project).bind(storage_target_id).fetch_optional(&mut *tx).await?;
+    let row:Option<Bucket>=sqlx::query_as("INSERT INTO buckets(id,name,project_id,store_id) VALUES($1,$2,$3,$4) ON CONFLICT(name) DO NOTHING RETURNING *").bind(Uuid::new_v4()).bind(&input.name).bind(project).bind(store_id).fetch_optional(&mut *tx).await?;
     let row = row.ok_or_else(|| conflict("BucketAlreadyExists"))?;
     if selected {
         sqlx::query(
@@ -438,7 +438,7 @@ pub(super) async fn options(
         .fetch_all(&app.db)
         .await?;
     let stores: Vec<BucketStore> = sqlx::query_as(
-        "SELECT id,name,type AS store_type FROM storage_targets WHERE enabled ORDER BY name",
+        "SELECT id,name,type AS store_type FROM stores WHERE enabled ORDER BY name",
     )
     .fetch_all(&app.db)
     .await?;

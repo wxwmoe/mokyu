@@ -29,7 +29,7 @@ pub(crate) async fn insert(
         .try_with(|id| *id)
         .unwrap_or_else(|_| Uuid::new_v4());
     sqlx::query("INSERT INTO tasks(id,kind,bucket_id,state,detail,created_by,source) VALUES($1,$2,$3,'queued',$4,coalesce((SELECT actor_label FROM audit_events WHERE id=$5),'Scheduler'),coalesce((SELECT source FROM audit_events WHERE id=$5),'system'))")
-        .bind(id).bind(kind).bind(bucket).bind(detail).bind(crate::manage::audit::current()).execute(db).await?;
+        .bind(id).bind(kind).bind(bucket).bind(detail).bind(crate::control::audit::current()).execute(db).await?;
     Ok(id)
 }
 
@@ -51,7 +51,7 @@ impl App {
         self.writable()?;
         let _coord = self.coord.lock().await;
         self.writable()?;
-        let mut tx = crate::manage::users::admin_transaction(self, principal).await?;
+        let mut tx = crate::control::users::admin_transaction(self, principal).await?;
         let found: Option<Uuid> =
             sqlx::query_scalar("SELECT id FROM buckets WHERE name=$1 AND id=$2 FOR UPDATE")
                 .bind(name)
@@ -71,8 +71,8 @@ impl App {
             return Ok(json!({"task_id":task,"existing":true}));
         }
         if let Some(expected) = confirmation {
-            let preview = crate::manage::buckets::impact(&mut tx, id).await?;
-            if crate::manage::buckets::fingerprint(&preview, None)? != expected {
+            let preview = crate::control::buckets::impact(&mut tx, id).await?;
+            if crate::control::buckets::fingerprint(&preview, None)? != expected {
                 return Err(s3s::s3_error!(PreconditionFailed).into());
             }
         }
@@ -87,7 +87,7 @@ impl App {
             json!({"bucket_id":id,"name":name}),
         )
         .await?;
-        crate::manage::audit::checkpoint(
+        crate::control::audit::checkpoint(
             &mut tx,
             "bucket.purge",
             name,
@@ -104,14 +104,14 @@ impl App {
         preview: Option<Uuid>,
         confirm_prefix: Option<&str>,
         older_than: &str,
-        target_id: Option<Uuid>,
+        store_id: Option<Uuid>,
     ) -> Result<Value> {
         let _coord = self.coord.lock().await;
         let age = config::seconds(older_than)?;
         ensure!(age <= i64::MAX as u64 / 1000, "age too large");
         let minimum = self.config.storage.min_storage_seconds()?;
-        let target_id = self.storage.select_target(target_id)?;
-        let prefix = self.storage.namespace_for(target_id)?;
+        let store_id = self.storage.select_store(store_id)?;
+        let prefix = self.storage.namespace_for(store_id)?;
         if execute {
             let indexed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunks)")
                 .fetch_one(&self.db)
@@ -135,13 +135,13 @@ impl App {
                 previous["dry_run"] == true && previous["prefix"] == prefix,
                 "preview scope mismatch"
             );
-            let previous_target: Uuid = previous["storage_target_id"]
+            let previous_target: Uuid = previous["store_id"]
                 .as_str()
-                .context("preview storage target is missing")?
+                .context("preview store is missing")?
                 .parse()?;
             ensure!(
-                previous_target == target_id,
-                "preview storage target mismatch"
+                previous_target == store_id,
+                "preview store mismatch"
             );
             ensure!(
                 previous["older_than_seconds"].as_u64() == Some(age),
@@ -166,7 +166,7 @@ impl App {
         let cutoff = chrono::Utc::now()
             .checked_sub_signed(chrono::TimeDelta::seconds(age.max(minimum) as i64))
             .context("age too large")?;
-        let detail = json!({"dry_run":!execute,"storage_target_id":target_id,"prefix":prefix,"older_than_seconds":age,"min_storage_duration_seconds":minimum,"cutoff":cutoff.to_rfc3339(),"candidates":0,"bytes":0,"unrecognized":0,"samples":[]});
+        let detail = json!({"dry_run":!execute,"store_id":store_id,"prefix":prefix,"older_than_seconds":age,"min_storage_duration_seconds":minimum,"cutoff":cutoff.to_rfc3339(),"candidates":0,"bytes":0,"unrecognized":0,"samples":[]});
         let id = insert(&mut *self.db.acquire().await?, "sweep", None, detail).await?;
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id,"dry_run":!execute}))
@@ -302,10 +302,10 @@ impl App {
             .execute(&mut *tx)
             .await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(crate::manage::account::USER_LOCK)
+            .bind(crate::control::account::USER_LOCK)
             .execute(&mut *tx)
             .await?;
-        crate::manage::buckets::lock_dependents(&mut tx, bucket).await?;
+        crate::control::buckets::lock_dependents(&mut tx, bucket).await?;
         sqlx::query("DELETE FROM buckets WHERE id=$1 AND state='purging'")
             .bind(bucket)
             .execute(&mut *tx)
@@ -333,11 +333,11 @@ impl App {
                 "wait for current GC batch"
             );
         }
-        let target_id: Uuid = detail["storage_target_id"]
+        let store_id: Uuid = detail["store_id"]
             .as_str()
-            .context("missing sweep storage target")?
+            .context("missing sweep store")?
             .parse()?;
-        let prefix = self.storage.namespace_for(target_id)?;
+        let prefix = self.storage.namespace_for(store_id)?;
         ensure!(detail["prefix"] == prefix, "backend namespace changed");
         let cutoff = chrono::DateTime::parse_from_rfc3339(
             detail["cutoff"].as_str().context("missing sweep cutoff")?,
@@ -352,7 +352,7 @@ impl App {
         );
         let rows = self
             .storage
-            .list_physical_for(target_id, cursor, self.config.gc.batch_size as usize)
+            .list_physical_for(store_id, cursor, self.config.gc.batch_size as usize)
             .await?;
         let Some(last) = rows.last().map(|r| r.location.to_string()) else {
             sqlx::query("UPDATE tasks SET state='completed',updated_at=now() WHERE id=$1 AND state='running'").bind(id).execute(&self.db).await?;
@@ -363,7 +363,7 @@ impl App {
                 continue;
             }
             let name = row.location.as_ref();
-            let Some(storage) = self.storage.parse_physical_path_for(target_id, name)? else {
+            let Some(storage) = self.storage.parse_physical_path_for(store_id, name)? else {
                 detail["unrecognized"] = json!(detail["unrecognized"].as_u64().unwrap_or(0) + 1);
                 continue;
             };
@@ -391,7 +391,7 @@ impl App {
                     "maintenance was disabled; sweep stopped"
                 );
                 self.storage
-                    .delete_path_for(target_id, &row.location)
+                    .delete_path_for(store_id, &row.location)
                     .await?;
             }
             detail["candidates"] = json!(detail["candidates"].as_u64().unwrap_or(0) + 1);
@@ -443,14 +443,14 @@ impl App {
             let _coord = self.coord.lock().await;
             self.writable()?;
             let mut tx = self.db.begin().await?;
-            let source_current = crate::manage::actions::selected(
+            let source_current = crate::control::actions::selected(
                 &mut tx,
                 job.source_bucket,
                 &job.source_key,
                 Some(job.source_version),
             )
             .await?;
-            let old = crate::manage::actions::selected(
+            let old = crate::control::actions::selected(
                 &mut tx,
                 job.target_bucket,
                 &job.target_key,

@@ -224,7 +224,7 @@ impl App {
         if let Some(web) = web {
             sqlx::query("INSERT INTO web_uploads(upload_id,user_id,client_id,request_hash,file_name,expected_size,part_size,modified_at,expected_stream) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
                 .bind(id).bind(web.user).bind(web.client_id).bind(web.request_hash).bind(web.file_name).bind(web.size).bind(web.part_size).bind(web.modified_at).bind(expected).execute(&mut *tx).await?;
-            crate::manage::audit::checkpoint(
+            crate::control::audit::checkpoint(
                 &mut tx,
                 "upload.create",
                 &id.to_string(),
@@ -372,7 +372,7 @@ impl App {
                 .bind(u.id)
                 .execute(&mut *tx)
                 .await?;
-            crate::manage::audit::checkpoint(
+            crate::control::audit::checkpoint(
                 &mut tx,
                 "upload.part",
                 &u.id.to_string(),
@@ -739,7 +739,7 @@ impl App {
             .cloned();
         let input = req.input;
         let headers = req.headers;
-        let audit = crate::manage::audit::current();
+        let audit = crate::control::audit::current();
         let work = tokio::spawn(async move {
             let _guard = guard;
             let _pins = pins;
@@ -748,7 +748,7 @@ impl App {
             #[cfg(feature = "fault-injection")]
             crate::faults::point("multipart-completing").await;
             let assembly = app.assemble(&authority, &u, &parts, &input, &headers, total, &etag, &hash);
-            let result = if let Some(id)=audit { crate::manage::audit::scope(id,assembly).await } else { assembly.await };
+            let result = if let Some(id)=audit { crate::control::audit::scope(id,assembly).await } else { assembly.await };
             if result.is_err() {
                 let _=sqlx::query("UPDATE uploads SET state='active',touched_at=now() WHERE id=$1 AND state='completing'").bind(u.id).execute(&app.db).await;
             }
@@ -934,12 +934,12 @@ impl App {
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        if authority.principal.user_id().is_some() && crate::manage::audit::active() {
+        if authority.principal.user_id().is_some() && crate::control::audit::active() {
             let bucket: Uuid = sqlx::query_scalar("SELECT bucket_id FROM uploads WHERE id=$1")
                 .bind(id)
                 .fetch_one(&mut *tx)
                 .await?;
-            crate::manage::audit::checkpoint(
+            crate::control::audit::checkpoint(
                 &mut tx,
                 "upload.abort",
                 &id.to_string(),

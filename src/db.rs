@@ -180,7 +180,7 @@ pub async fn connect(
         "schema version does not match the migration history"
     );
     load_database_keys(&pool, secrets, &c.encryption.algorithm).await?;
-    sqlx::query("UPDATE mokyu_meta SET backend_identity=$1 WHERE singleton")
+    sqlx::query("UPDATE mokyu_meta SET storage_identity=$1 WHERE singleton")
         .bind(storage_identity)
         .execute(&pool)
         .await?;

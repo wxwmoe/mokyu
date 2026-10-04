@@ -112,7 +112,7 @@ impl Config {
 pub struct Pack {
     pub id: i64,
     pub storage_id: Uuid,
-    pub storage_target_id: Option<Uuid>,
+    pub store_id: Option<Uuid>,
     pub algorithm: String,
     pub key_id: String,
     pub raw_size: i64,
@@ -387,7 +387,7 @@ mod tests {
                             id,
                             encoding_id: id,
                             storage_id: Uuid::new_v4(),
-                            storage_target_id: None,
+                            store_id: None,
                             hash: blake3::hash(&raw).as_bytes().to_vec(),
                             raw_size: raw.len() as i32,
                             stored_size: None,
@@ -406,7 +406,7 @@ mod tests {
             let p = Pack {
                 id: 7,
                 storage_id: Uuid::new_v4(),
-                storage_target_id: None,
+                store_id: None,
                 algorithm: algorithm.into(),
                 key_id: key_id.into(),
                 raw_size: members.iter().map(|(c, _)| c.raw_size as i64).sum(),

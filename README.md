@@ -49,7 +49,7 @@ docker exec -it mokyu cli user create admin
 | [配置](docs/configuration.md) | 全部 TOML 字段、默认值、资源预算和秘密文件 |
 | [CLI](docs/cli-reference.md) | 完整命令、参数、输出、危险确认和任务语义 |
 | [管理指南](docs/management.md) | 媒体、项目授权、密钥、配额、空间洞察与维护流程 |
-| [管理 API](docs/manage-api-reference.md) | 方法、路径、认证、分页、并发条件和生成契约 |
+| [管理 API](docs/control-api-reference.md) | 方法、路径、认证、分页、并发条件和生成契约 |
 | [S3 兼容性](docs/s3-compatibility.md) | 已实现操作、校验、Range、ACL 和明确不支持项 |
 | [数据库](docs/database-schema.md) | 表与字段清单、关键约束、状态和迁移规则 |
 | [存储格式](docs/storage-format.md) | CDC、AEAD/AAD、nonce、物理路径和恢复规则 |

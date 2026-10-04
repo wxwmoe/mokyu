@@ -28,7 +28,7 @@ impl App {
             .bind(paused)
             .execute(&mut *tx)
             .await?;
-        crate::manage::audit::checkpoint(
+        crate::control::audit::checkpoint(
             &mut tx,
             "maintenance.pack_creation",
             "pack",
@@ -90,7 +90,7 @@ impl App {
                 .await?;
         let backend_prefixes: Vec<Value> = self
             .storage
-            .target_ids()
+            .store_ids()
             .into_iter()
             .filter_map(|id| {
                 self.storage
@@ -128,7 +128,7 @@ impl App {
             .bind(paused)
             .execute(&mut *tx)
             .await?;
-        crate::manage::audit::checkpoint(
+        crate::control::audit::checkpoint(
             &mut tx,
             "maintenance.policy",
             kind,

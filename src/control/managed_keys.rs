@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[derive(Serialize, ToSchema)]
-pub(crate) struct ManagedKeyView {
+pub(crate) struct ControldKeyView {
     pub id: Uuid,
     pub name: String,
     pub purpose: String,
@@ -26,7 +26,7 @@ pub(crate) struct ManagedKeyView {
 
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ManagedKeyInput {
+pub(crate) struct ControldKeyInput {
     pub name: String,
     pub purpose: String,
 }
@@ -61,8 +61,8 @@ fn view(
         DateTime<Utc>,
         Option<DateTime<Utc>>,
     ),
-) -> ManagedKeyView {
-    ManagedKeyView {
+) -> ControldKeyView {
+    ControldKeyView {
         id,
         name,
         purpose,
@@ -74,7 +74,7 @@ fn view(
     }
 }
 
-pub(crate) async fn list_rows(db: &sqlx::PgPool) -> Result<Vec<ManagedKeyView>> {
+pub(crate) async fn list_rows(db: &sqlx::PgPool) -> Result<Vec<ControldKeyView>> {
     let rows: Vec<(
         Uuid,
         String,
@@ -95,8 +95,8 @@ pub(crate) async fn list_rows(db: &sqlx::PgPool) -> Result<Vec<ManagedKeyView>> 
 pub(crate) async fn create_record(
     app: &App,
     principal: &Principal,
-    input: ManagedKeyInput,
-) -> Result<ManagedKeyView> {
+    input: ControldKeyInput,
+) -> Result<ControldKeyView> {
     validate_name(&input.name)?;
     validate_purpose(&input.purpose)?;
     let id = Uuid::new_v4();
@@ -203,23 +203,23 @@ pub(crate) async fn activate_record(app: &App, principal: &Principal, id: Uuid) 
     Ok(())
 }
 
-#[utoipa::path(get, operation_id = "managed_keys", path = "/api/keys", responses((status = 200, body = Vec<ManagedKeyView>)))]
+#[utoipa::path(get, operation_id = "managed_keys", path = "/api/keys", responses((status = 200, body = Vec<ControldKeyView>)))]
 pub(crate) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
-) -> Result<Json<Vec<ManagedKeyView>>, HttpError> {
+) -> Result<Json<Vec<ControldKeyView>>, HttpError> {
     let tx = users::admin_transaction(&app, &actor.principal).await?;
     tx.commit().await?;
     let rows = list_rows(&app.db).await?;
     Ok(Json(rows))
 }
 
-#[utoipa::path(post, operation_id = "managed_key_create", path = "/api/keys", request_body = ManagedKeyInput, responses((status = 201, body = ManagedKeyView)))]
+#[utoipa::path(post, operation_id = "managed_key_create", path = "/api/keys", request_body = ControldKeyInput, responses((status = 201, body = ControldKeyView)))]
 pub(crate) async fn create(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
-    Json(input): Json<ManagedKeyInput>,
-) -> Result<(StatusCode, Json<ManagedKeyView>), HttpError> {
+    Json(input): Json<ControldKeyInput>,
+) -> Result<(StatusCode, Json<ControldKeyView>), HttpError> {
     actor.recent(&app).await?;
     Ok((
         StatusCode::CREATED,

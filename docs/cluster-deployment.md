@@ -73,7 +73,7 @@ admin.example.com A <control-b-ip>
 
 每个 control 的 `cluster.advertise_url` 必须是只指向该节点的可达 URL，例如 `https://control-a.example.com` 和 `https://control-b.example.com`。不要把所有 control 的 `advertise_url` 都写成同一个会随机解析的地址，否则 standby 转发可能再次落回 standby。已注册节点的 `cluster.control_url` 可以写共享的多 IP 管理地址；请求命中 standby 时，standby 会按租约转发到 active control。首次加入一个新的 control 时，建议临时把 `control_url` 写成可直达 active 的 URL，完成注册后再改为共享地址。
 
-反向代理只需要把管理域名转发到 `listen.manage`，把数据域名转发到 `listen.s3` 或 `listen.web`。control、worker 和 data 之间的注册请求走 `cluster.control_url`；data 的对象读写不会经过 control。
+反向代理只需要把管理域名转发到 `listen.control`，把数据域名转发到 `listen.s3` 或 `listen.web`。control、worker 和 data 之间的注册请求走 `cluster.control_url`；data 的对象读写不会经过 control。
 
 ## 首次安装
 
@@ -145,10 +145,10 @@ docker exec mokyu-control cli cluster revoke <node-id>
 群集模式禁用 local 存储目标。single 转 cluster 时，Mokyu 只检查是否仍存在 local 目标，不会替部署管理员上传文件：
 
 1. 手动把 local 目录中的规范 S3 文件结构迁移到目标 S3 前缀或供应商。
-2. 在 Web/CLI 修改该 storage target 的连接信息，保存时让 Mokyu 核对远端 meta；空 meta 会拒绝保存，避免把没有对应区块的目标接入。
-3. 确认所有 local target 已改为 S3 后再执行 `cluster mode cluster`。
+2. 在 Web/CLI 修改该 store 的连接信息，保存时让 Mokyu 核对远端 meta；空 meta 会拒绝保存，避免把没有对应区块的目标接入。
+3. 确认所有 local store 已改为 S3 后再执行 `cluster mode cluster`。
 
-桶绑定的 `storage_target_id` 永久不变；同一 storage target 的桶共享去重，不跨 target 去重。storage target 自身可以更换连接信息，但实际文件迁移由部署管理员负责。已绑定不同 target 的 Copy/Move 会要求二次确认并排入 `storage_migration` 后台任务，Move 完成后才退休源对象。
+桶绑定的 `store_id` 永久不变；同一 store 的桶共享去重，不跨 store 去重。store 自身可以更换连接信息，但实际文件迁移由部署管理员负责。已绑定不同 store 的 Copy/Move 会要求二次确认并排入 `storage_migration` 后台任务，Move 完成后才退休源对象。
 
 ## 返回单机
 
@@ -158,7 +158,7 @@ docker exec mokyu-control cli cluster revoke <node-id>
 docker exec mokyu-control cli cluster mode single
 ```
 
-然后停止 split roles，使用默认命令启动单容器。切回 single 不会自动把 S3 文件下载成本地；如需 local target，先由管理员完成反向迁移并在 Web/CLI 更新 target 连接信息。
+然后停止 split roles，使用默认命令启动单容器。切回 single 不会自动把 S3 文件下载成本地；如需 local store，先由管理员完成反向迁移并在 Web/CLI 更新 store 连接信息。
 
 ## 备份、升级和故障边界
 

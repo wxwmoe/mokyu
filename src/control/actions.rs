@@ -408,13 +408,13 @@ pub(crate) async fn selected(
 async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit) -> Result<()> {
     let target = input.target_bucket.unwrap();
     let source_target: Option<Uuid> =
-        sqlx::query_scalar("SELECT storage_target_id FROM buckets WHERE id=$1")
+        sqlx::query_scalar("SELECT store_id FROM buckets WHERE id=$1")
             .bind(input.bucket)
             .fetch_optional(&app.db)
             .await?
             .flatten();
     let target_target: Option<Uuid> =
-        sqlx::query_scalar("SELECT storage_target_id FROM buckets WHERE id=$1")
+        sqlx::query_scalar("SELECT store_id FROM buckets WHERE id=$1")
             .bind(target)
             .fetch_optional(&app.db)
             .await?
@@ -498,13 +498,13 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         )
     };
     let source_target: Uuid =
-        sqlx::query_scalar::<_, Option<Uuid>>("SELECT storage_target_id FROM buckets WHERE id=$1")
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT store_id FROM buckets WHERE id=$1")
             .bind(input.bucket)
             .fetch_one(&app.db)
             .await?
             .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
     let target_target: Uuid =
-        sqlx::query_scalar::<_, Option<Uuid>>("SELECT storage_target_id FROM buckets WHERE id=$1")
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT store_id FROM buckets WHERE id=$1")
             .bind(target)
             .fetch_one(&app.db)
             .await?

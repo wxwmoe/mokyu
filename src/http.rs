@@ -227,7 +227,7 @@ pub(crate) async fn observe(
     use tracing::Instrument;
     let observation = crate::stats::Request::new(
         &app.statistics.http[index],
-        if index == 1 { "web" } else { "manage" },
+        if index == 1 { "web" } else { "control" },
         request.method().clone(),
     );
     request.extensions_mut().insert(observation.context.clone());

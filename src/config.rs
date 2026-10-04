@@ -16,7 +16,7 @@ pub struct Config {
     pub listen: Listen,
     pub database: Database,
     #[serde(default)]
-    pub manage: Manage,
+    pub control: Control,
     #[serde(default)]
     pub storage: Storage,
     #[serde(default)]
@@ -129,7 +129,7 @@ impl Default for Statistics {
 pub struct Listen {
     pub s3: String,
     pub web: String,
-    pub manage: String,
+    pub control: String,
     pub admin_socket: PathBuf,
     pub s3_domain: Option<String>,
     pub region: String,
@@ -140,7 +140,7 @@ impl Default for Listen {
         Self {
             s3: "0.0.0.0:9000".into(),
             web: "0.0.0.0:9001".into(),
-            manage: "0.0.0.0:9002".into(),
+            control: "0.0.0.0:9002".into(),
             admin_socket: "/run/mokyu/admin.sock".into(),
             s3_domain: None,
             region: "us-east-1".into(),
@@ -235,14 +235,14 @@ fn backend_retries() -> usize {
 }
 #[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Manage {
+pub struct Control {
     pub origin: String,
     pub secure_cookie: bool,
     pub session_lifetime: String,
     pub gravatar_base_url: String,
     pub thumbnail_cache_size: String,
 }
-impl Default for Manage {
+impl Default for Control {
     fn default() -> Self {
         Self {
             origin: "http://localhost:9002".into(),
@@ -253,12 +253,12 @@ impl Default for Manage {
         }
     }
 }
-impl Manage {
+impl Control {
     pub fn gravatar_origin(&self) -> Result<String> {
         let uri: hyper::Uri = self
             .gravatar_base_url
             .parse()
-            .map_err(|_| anyhow::anyhow!("invalid manage.gravatar_base_url"))?;
+            .map_err(|_| anyhow::anyhow!("invalid control.gravatar_base_url"))?;
         let authority = uri.authority().context("Gravatar URL requires a host")?;
         ensure!(
             uri.scheme_str() == Some("https")
@@ -514,7 +514,7 @@ impl Config {
             }
         }
         let base = path.parent().unwrap_or(Path::new("."));
-        c.manage.gravatar_origin()?;
+        c.control.gravatar_origin()?;
         c.cluster.validate()?;
         c.compression.validate()?;
         c.pack.validate()?;
@@ -553,15 +553,15 @@ impl Config {
         ] {
             seconds(value)?;
         }
-        for listen in [&c.listen.s3, &c.listen.web, &c.listen.manage] {
+        for listen in [&c.listen.s3, &c.listen.web, &c.listen.control] {
             listen
                 .parse::<std::net::SocketAddr>()
                 .context("invalid listen address")?;
         }
         ensure!(
             c.listen.s3 != c.listen.web
-                && c.listen.s3 != c.listen.manage
-                && c.listen.web != c.listen.manage,
+                && c.listen.s3 != c.listen.control
+                && c.listen.web != c.listen.control,
             "listeners must be distinct"
         );
         ensure!(
@@ -576,12 +576,12 @@ impl Config {
             .parse::<sqlx::postgres::PgSslMode>()
             .map_err(|_| anyhow::anyhow!("invalid database.ssl_mode"))?;
         ensure!(
-            c.manage.origin.starts_with("https://") || c.manage.origin.starts_with("http://"),
-            "manage.origin must be an absolute HTTP origin"
+            c.control.origin.starts_with("https://") || c.control.origin.starts_with("http://"),
+            "control.origin must be an absolute HTTP origin"
         );
         ensure!(
-            !c.manage.origin.ends_with('/'),
-            "manage.origin must not have a trailing slash"
+            !c.control.origin.ends_with('/'),
+            "control.origin must not have a trailing slash"
         );
         ensure!(
             matches!(
@@ -603,7 +603,7 @@ impl Config {
             &c.cleanup.upload_retention,
             &c.cleanup.task_retention,
             &c.cleanup.audit_retention,
-            &c.manage.session_lifetime,
+            &c.control.session_lifetime,
             &c.statistics.refresh_interval,
             &c.statistics.query_timeout,
         ] {
@@ -613,7 +613,7 @@ impl Config {
             );
         }
         bytes(&c.storage.free_space_floor)?;
-        cache_bytes(&c.manage.thumbnail_cache_size)?;
+        cache_bytes(&c.control.thumbnail_cache_size)?;
         c.integrity.validate()?;
         ensure!(
             seconds(&c.statistics.query_timeout)? <= i32::MAX as u64 / 1000,
@@ -866,14 +866,14 @@ mod tests {
     use super::*;
     #[test]
     fn avatar_mirror_requires_a_safe_https_origin() {
-        let mut manage = Manage::default();
+        let mut control = Control::default();
         assert_eq!(
-            manage.gravatar_origin().unwrap(),
+            control.gravatar_origin().unwrap(),
             "https://www.gravatar.com"
         );
-        manage.gravatar_base_url = "https://avatar.example:8443/gravatar/".into();
+        control.gravatar_base_url = "https://avatar.example:8443/gravatar/".into();
         assert_eq!(
-            manage.gravatar_origin().unwrap(),
+            control.gravatar_origin().unwrap(),
             "https://avatar.example:8443"
         );
         for invalid in [
@@ -884,8 +884,8 @@ mod tests {
             "https://*/avatar",
             "https://avatar.example;script-src/avatar",
         ] {
-            manage.gravatar_base_url = invalid.into();
-            assert!(manage.gravatar_origin().is_err(), "{invalid}");
+            control.gravatar_base_url = invalid.into();
+            assert!(control.gravatar_origin().is_err(), "{invalid}");
         }
     }
     #[test]

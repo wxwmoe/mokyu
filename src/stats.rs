@@ -356,7 +356,7 @@ impl Default for Statistics {
 impl Statistics {
     pub fn runtime(&self) -> Value {
         json!({"started_at":self.started_at,"uptime_seconds":self.started.elapsed().as_secs(),
-            "http":{"s3":self.http[0].snapshot(),"web":self.http[1].snapshot(),"manage":self.http[2].snapshot()},
+            "http":{"s3":self.http[0].snapshot(),"web":self.http[1].snapshot(),"control":self.http[2].snapshot()},
             "gc_deleted":self.gc_deleted.load(Relaxed),"gc_failures":self.gc_failures.load(Relaxed)})
     }
     pub fn inventory(&self, interval: u64) -> Value {
@@ -482,7 +482,7 @@ async fn collect(app: &App) -> Result<Value> {
             AND relname IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions','integrity_issues','chunk_locations','packs','pack_members','pack_maintenance','pack_changes','pack_inputs','chunk_access_stats','chunk_access_windows','pack_access_windows','pack_member_access_windows','integrity_packs','pending_uploads','cache_pins')
          ORDER BY relname")
         .fetch_all(&mut *tx).await?;
-    crate::manage::insights::collect(app, &mut tx).await?;
+    crate::control::insights::collect(app, &mut tx).await?;
     tx.commit().await?;
     Ok(
         json!({"as_of":as_of,"collected_at":Utc::now(),"objects":buckets[0]["objects"],

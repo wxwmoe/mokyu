@@ -12,7 +12,7 @@
 
 | 命令 | 作用与返回 |
 | --- | --- |
-| `bucket list` | 返回[桶信息](manage-api-reference.md#存储桶)数组 |
+| `bucket list` | 返回[桶信息](control-api-reference.md#存储桶)数组 |
 | `bucket create NAME [--project UUID]` | 创建空逻辑桶，默认内置项目，返回桶信息 |
 | `bucket delete NAME` | 删除空桶，返回 deleted UUID；仍有对象、上传或待清理版本时拒绝 |
 | `bucket cors NAME FILE` | 用 JSON 文件替换 CORS，返回实际规则；`[]` 关闭 |
@@ -21,7 +21,7 @@
 | `domain set HOST BUCKET` | 绑定域名；Host 转小写，可含端口；拒绝占用其他桶的映射 |
 | `domain delete HOST` | 删除域名映射 |
 
-CORS 文件示例，字段规则见[CORS 设置](manage-api-reference.md#cors-设置)：
+CORS 文件示例，字段规则见[CORS 设置](control-api-reference.md#cors-设置)：
 
 ```json
 [{"origins":["https://app.example.com"],"methods":["GET","HEAD"],"headers":["range"],"expose":["ETag","Content-Range"],"max_age":3600}]
@@ -94,7 +94,7 @@ docker exec mokyu cli bucket cors media /config/cors.json
 | `keys activate UUID` | 切换 active encryption 密钥；重启实例让进程加载新密钥 |
 | `keys revoke UUID` | 撤销密钥并阻止再次激活；历史区块仍使用数据库中的密钥材料读取 |
 
-凭据/Token 设置文件上限 512 KiB。JSON 中的权限与有效期语义见[管理 API](manage-api-reference.md#应用密钥与-api-token)。创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入并再次确认，使用 `docker exec -it`；非终端须指定 `--password-stdin`。不接受明文命令参数，自动化时可从 stdin 读取一行：
+凭据/Token 设置文件上限 512 KiB。JSON 中的权限与有效期语义见[管理 API](control-api-reference.md#应用密钥与-api-token)。创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入并再次确认，使用 `docker exec -it`；非终端须指定 `--password-stdin`。不接受明文命令参数，自动化时可从 stdin 读取一行：
 
 ```sh
 docker exec -i mokyu cli user create admin --password-stdin < /secure/password-file
@@ -106,7 +106,7 @@ docker exec -i mokyu cli user create admin --password-stdin < /secure/password-f
 
 | 命令 | 作用与返回 |
 | --- | --- |
-| `status` | 返回[运行状态和容量快照](manage-api-reference.md#运行状态)，读取不触发全表汇总 |
+| `status` | 返回[运行状态和容量快照](control-api-reference.md#运行状态)，读取不触发全表汇总 |
 | `gc status` | 返回 paused/maintenance/running、区块状态计数、宽限、间隔和 min_storage_duration |
 | `gc mark-unreferenced` | 在维护模式且活跃操作已排空时，为没有引用的 ready 区块补上回收时间标记 |
 | `gc run` | 执行一批本地清理与远端回收，返回计数；遵守暂停、维护、宽限及后端最低存储期限 |
@@ -126,7 +126,7 @@ docker exec -i mokyu cli user create admin --password-stdin < /secure/password-f
 | 命令 | 作用与返回 |
 | --- | --- |
 | `cluster status` | 返回 deployment mode、enabled 节点数和 local 存储目标数 |
-| `cluster mode single/cluster` | 切换数据库部署模式；进入 cluster 前必须已迁移并移除所有 local target，回到 single 前必须禁用所有节点 |
+| `cluster mode single/cluster` | 切换数据库部署模式；进入 cluster 前必须已迁移并移除所有 local store，回到 single 前必须禁用所有节点 |
 | `cluster nodes` | 列出节点 id、名称、角色、advertise URL、启用状态和最近 heartbeat |
 | `cluster token NAME KIND [--advertise-url URL] [--expires-in 1h]` | 为 control/worker/data 创建一次性 join token；control 必须提供只指向该节点的 advertise URL；token 只在本次输出返回 |
 | `cluster revoke UUID` | 禁用节点并使未消费的 join token 失效 |
@@ -197,7 +197,7 @@ docker exec -it mokyu cli stores sweep --execute --preview PREVIEW_UUID
 | `head` | metadata，加后端存在性及编码长度 |
 | `full` | metadata，加远端下载、认证、解压、长度及 BLAKE3 校验 |
 
-巡检只报告，不修复或删除数据；远端检查绕过且不填充缓存，共享物理块每轮只检查一次。没有远端来源的 pending 块在所有模式下校验本地唯一副本。`completed` 仍可能有异常，应查看 `detail.issues`；网络、权限及超时使任务 `failed`，可恢复后继续。覆盖边界、异常代码和 JSONL 导出见[巡检 API](manage-api-reference.md#完整性巡检)，并发和限速见[配置](configuration.md#完整性巡检)。
+巡检只报告，不修复或删除数据；远端检查绕过且不填充缓存，共享物理块每轮只检查一次。没有远端来源的 pending 块在所有模式下校验本地唯一副本。`completed` 仍可能有异常，应查看 `detail.issues`；网络、权限及超时使任务 `failed`，可恢复后继续。覆盖边界、异常代码和 JSONL 导出见[巡检 API](control-api-reference.md#完整性巡检)，并发和限速见[配置](configuration.md#完整性巡检)。
 
 ```sh
 docker exec mokyu cli integrity check --mode full --bucket media

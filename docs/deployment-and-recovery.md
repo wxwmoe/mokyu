@@ -36,7 +36,7 @@
    | --- | --- |
    | `database` | 主机、端口、数据库和用户；删除示例 `password`，启用 `password_file = "secrets/postgres-password"`，与 Compose 共用密码文件 |
    | `stores` | 通过 CLI 或管理 API 创建 local / S3 存储目标；S3 目标需具备对应范围的 Get / Put / Delete / List 和条件创建权限 |
-   | `manage` | 浏览器访问的完整 `origin`；通过 HTTP 访问时将 `secure_cookie` 设为 `false` |
+   | `control` | 浏览器访问的完整 `origin`；通过 HTTP 访问时将 `secure_cookie` 设为 `false` |
    | `encryption` | 填写部署密钥并选择新写入区块的算法；区块密钥由数据库管理 |
 
    `deployment-key` 必须在同一部署的所有容器中保持不变。首次启动后用 `cli keys create NAME encryption` 创建区块密钥；密钥材料只在数据库中保存加密副本，CLI 和 Web 永不返回明文。完整字段和资源限制见[配置参考](configuration.md)。

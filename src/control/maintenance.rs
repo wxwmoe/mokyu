@@ -275,7 +275,7 @@ pub(super) async fn unpack_preview(
 #[serde(deny_unknown_fields)]
 pub(super) struct SweepRequest {
     older_than: String,
-    storage_target_id: Option<Uuid>,
+    store_id: Option<Uuid>,
 }
 #[utoipa::path(post,path="/api/maintenance/sweep",request_body=SweepRequest,responses((status=200,body=TaskStarted)))]
 pub(super) async fn sweep(
@@ -290,7 +290,7 @@ pub(super) async fn sweep(
             None,
             None,
             &input.older_than,
-            input.storage_target_id,
+            input.store_id,
         )
         .await?;
     tx.commit().await?;
@@ -404,7 +404,7 @@ pub(super) async fn execute(
         let seconds = impact["summary"]["older_than_seconds"]
             .as_u64()
             .ok_or_else(|| s3s::s3_error!(InvalidArgument))?;
-        let target_id: Uuid = impact["summary"]["storage_target_id"]
+        let store_id: Uuid = impact["summary"]["store_id"]
             .as_str()
             .ok_or_else(|| s3s::s3_error!(InvalidArgument))?
             .parse()?;
@@ -419,7 +419,7 @@ pub(super) async fn execute(
                     Some(id),
                     Some(prefix),
                     &format!("{seconds}s"),
-                    Some(target_id),
+                    Some(store_id),
                 ),
             )
             .await?

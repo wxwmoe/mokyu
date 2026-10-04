@@ -15,7 +15,7 @@ mod integrity;
 mod lifecycle;
 mod listing;
 mod maintenance;
-mod manage;
+mod control;
 mod multipart;
 mod pack;
 mod pack_tasks;
@@ -145,7 +145,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if matches!(args.command, Some(Command::ApiSchema)) {
-        println!("{}", serde_json::to_string_pretty(&manage::schema())?);
+        println!("{}", serde_json::to_string_pretty(&control::schema())?);
         return Ok(());
     }
     let role = match args.command.as_ref() {
@@ -214,7 +214,7 @@ fn main() -> Result<()> {
             tasks::recover_stale(&app).await?;
         }
         if matches!(role, Role::Single | Role::Control) {
-            manage::account::initialize(&app).await?;
+            control::account::initialize(&app).await?;
         }
         run_role(app.clone(), role).await?;
         Ok(())
@@ -256,22 +256,22 @@ async fn run_single(app: Arc<app::App>) -> Result<()> {
     let web_listener = TcpListener::bind(&app.config.listen.web)
         .await
         .context("public listener")?;
-    let manage_listener = TcpListener::bind(&app.config.listen.manage)
+    let control_listener = TcpListener::bind(&app.config.listen.control)
         .await
-        .context("manage listener")?;
+        .context("control listener")?;
     let connections = Arc::new(Semaphore::new(app.budget.connections));
     let s3 = build_s3(app.clone())?;
     tokio::select! {
         result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
         result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
-        result = serve_router(manage_listener, manage::router(app.clone()), connections.clone()) => result?,
+        result = serve_router(control_listener, control::router(app.clone()), connections.clone()) => result?,
         result = admin::serve(app.clone()) => result?,
         result = lifecycle::run(app.clone()) => result?,
         result = tasks::run(app.clone()) => result?,
         result = maintenance::run(app.clone()) => result?,
         result = stats::run(app.clone()) => result?,
-        result = manage::insights::runtime_loop(app.clone()) => result?,
-        result = manage::catalog::run(app.clone()) => result?,
+        result = control::insights::runtime_loop(app.clone()) => result?,
+        result = control::catalog::run(app.clone()) => result?,
         result = access::run(app.clone()) => result?,
         result = app.storage.compression.run() => result?,
         _ = shutdown_signal() => tracing::info!(role="single", "stopping listeners; draining active operations"),
@@ -280,15 +280,15 @@ async fn run_single(app: Arc<app::App>) -> Result<()> {
 }
 
 async fn run_control(app: Arc<app::App>) -> Result<()> {
-    let manage_listener = TcpListener::bind(&app.config.listen.manage)
+    let control_listener = TcpListener::bind(&app.config.listen.control)
         .await
-        .context("manage listener")?;
+        .context("control listener")?;
     let connections = Arc::new(Semaphore::new(app.budget.connections));
     tokio::select! {
         result = cluster::control_loop(app.clone()) => result?,
-        result = serve_router(manage_listener, manage::router(app.clone()), connections) => result?,
+        result = serve_router(control_listener, control::router(app.clone()), connections) => result?,
         result = admin::serve(app.clone()) => result?,
-        result = manage::insights::runtime_loop(app.clone()) => result?,
+        result = control::insights::runtime_loop(app.clone()) => result?,
         _ = shutdown_signal() => tracing::info!(role="control", "stopping listeners; draining active operations"),
     }
     drain(app).await
@@ -302,8 +302,8 @@ async fn run_worker(app: Arc<app::App>) -> Result<()> {
         result = tasks::run(app.clone()) => result?,
         result = maintenance::run(app.clone()) => result?,
         result = stats::run(app.clone()) => result?,
-        result = manage::catalog::run(app.clone()) => result?,
-        result = manage::insights::runtime_loop(app.clone()) => result?,
+        result = control::catalog::run(app.clone()) => result?,
+        result = control::insights::runtime_loop(app.clone()) => result?,
         result = app.storage.compression.run() => result?,
         _ = shutdown_signal() => tracing::info!(role="worker", "stopping listeners; draining active operations"),
     }
@@ -325,7 +325,7 @@ async fn run_data(app: Arc<app::App>) -> Result<()> {
         result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
         result = admin::serve(app.clone()) => result?,
         result = access::run(app.clone()) => result?,
-        result = manage::insights::runtime_loop(app.clone()) => result?,
+        result = control::insights::runtime_loop(app.clone()) => result?,
         result = app.storage.compression.run() => result?,
         _ = shutdown_signal() => tracing::info!(role="data", "stopping listeners; draining active operations"),
     }

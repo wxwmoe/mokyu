@@ -31,7 +31,7 @@ pub(super) struct SessionView {
 pub(super) struct BucketView {
     id: Uuid,
     project_id: Uuid,
-    storage_target_id: Option<Uuid>,
+    store_id: Option<Uuid>,
     #[schema(value_type = Vec<crate::authorization::Action>)]
     pub(super) actions: Vec<String>,
     name: String,
@@ -51,7 +51,7 @@ impl From<Bucket> for BucketView {
         Self {
             id: bucket.id,
             project_id: bucket.project_id,
-            storage_target_id: bucket.storage_target_id,
+            store_id: bucket.store_id,
             actions: crate::authorization::Action::ALL
                 .iter()
                 .map(|a| a.name().into())
@@ -82,7 +82,7 @@ async fn info() -> Json<ApiInfo> {
     Json(ApiInfo {
         product: "Mokyu",
         version: env!("CARGO_PKG_VERSION"),
-        contract: "mokyu-manage-1",
+        contract: "mokyu-control-1",
     })
 }
 
@@ -217,7 +217,7 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         ))
         .split_for_parts();
     api.info.title = "Mokyu management API".into();
-    api.info.description = Some("Management endpoints accept a session cookie or a scoped Bearer token. Cookie mutations require the configured Origin and X-CSRF-Token. Account and token management require a session. S3 and public reads use separate listeners.".into());
+    api.info.description = Some("Control endpoints accept a session cookie or a scoped Bearer token. Cookie mutations require the configured Origin and X-CSRF-Token. Account and token management require a session. S3 and public reads use separate listeners.".into());
     (router, api)
 }
 

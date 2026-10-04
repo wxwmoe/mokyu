@@ -50,7 +50,7 @@ pub fn schema() -> utoipa::openapi::OpenApi {
 pub fn router(app: Arc<App>) -> Router {
     let avatar_origin = app
         .config
-        .manage
+        .control
         .gravatar_origin()
         .expect("validated Gravatar origin");
     let web_policy: HeaderValue = assets::CSP
@@ -145,7 +145,7 @@ fn csrf_token(token: &str) -> String {
     hash.finalize().to_hex().to_string()
 }
 fn origin(app: &App, headers: &HeaderMap) -> Result<(), HttpError> {
-    if headers.get("origin").and_then(|v| v.to_str().ok()) != Some(&app.config.manage.origin) {
+    if headers.get("origin").and_then(|v| v.to_str().ok()) != Some(&app.config.control.origin) {
         return Err(unauthorized());
     }
     Ok(())
@@ -488,7 +488,7 @@ async fn login(
     crate::faults::point("login-verified").await;
     let token = crate::admin::random_secret()?;
     let csrf = csrf_token(&token);
-    let seconds = config::seconds(&app.config.manage.session_lifetime)?;
+    let seconds = config::seconds(&app.config.control.session_lifetime)?;
     let mut tx = app.db.begin().await?;
     // Password reset and disable update this same row before revoking sessions.
     let current: Option<(String, bool, i64)> = sqlx::query_as(
@@ -508,7 +508,7 @@ async fn login(
     audit::security(&mut tx, user, "session.login", true, &context.id).await?;
     tx.commit().await?;
     let mut response = Json(LoginReply { csrf_token: csrf }).into_response();
-    let secure = if app.config.manage.secure_cookie {
+    let secure = if app.config.control.secure_cookie {
         "; Secure"
     } else {
         ""

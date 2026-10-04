@@ -2,8 +2,8 @@ use crate::{
     codec::{self, Chunk, MAX},
     config::{self, Budget, Config, Secrets},
 };
-pub(crate) mod target;
-use self::target::{Options as TargetOptionsV2, Record as TargetRecord, Target as VerifiedTarget};
+pub(crate) mod store;
+use self::store::{Options as StoreOptionsV2, Record as StoreRecord, Store as VerifiedStore};
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
@@ -457,7 +457,7 @@ struct PackFetch {
     priority: Arc<AtomicUsize>,
 }
 
-struct TargetBackend {
+struct StoreBackend {
     backend: Arc<dyn ObjectStore>,
     prefix: String,
     revision: chrono::DateTime<chrono::Utc>,
@@ -466,7 +466,7 @@ struct TargetBackend {
     identity_check: tokio::sync::Mutex<()>,
 }
 
-type TargetOptions = TargetOptionsV2;
+type StoreOptions = StoreOptionsV2;
 
 pub struct Storage {
     pub access: Arc<crate::access::Access>,
@@ -480,9 +480,9 @@ pub struct Storage {
     pack_memory_units: u32,
     pack_work: Arc<Semaphore>,
     inspection: tokio::sync::Mutex<()>,
-    targets: RwLock<HashMap<Uuid, Arc<TargetBackend>>>,
-    target_options: TargetOptions,
-    pub target_id: Option<Uuid>,
+    targets: RwLock<HashMap<Uuid, Arc<StoreBackend>>>,
+    store_options: StoreOptions,
+    pub store_id: Option<Uuid>,
     pub disk: Arc<Disk>,
     pub secrets: Arc<Secrets>,
     pub(crate) cpu: Arc<Semaphore>,
@@ -509,7 +509,7 @@ pub struct Storage {
     operations: [Arc<crate::stats::Counters>; 4],
 }
 
-pub(crate) type TargetRow = (
+pub(crate) type StoreRow = (
     Uuid,
     String,
     Option<String>,
@@ -523,14 +523,14 @@ pub(crate) type TargetRow = (
     chrono::DateTime<chrono::Utc>,
 );
 
-async fn build_target(
-    options: TargetOptions,
+async fn build_store(
+    options: StoreOptions,
     secrets: &Secrets,
-    row: TargetRow,
-) -> Result<Arc<TargetBackend>> {
+    row: StoreRow,
+) -> Result<Arc<StoreBackend>> {
     let (
         id,
-        target_type,
+        store_type,
         path,
         endpoint,
         bucket,
@@ -541,10 +541,10 @@ async fn build_target(
         metadata,
         revision,
     ) = row;
-    let record = TargetRecord {
+    let record = StoreRecord {
         id,
         name: String::new(),
-        r#type: target_type,
+        r#type: store_type,
         path,
         endpoint_url: endpoint,
         remote_bucket: bucket,
@@ -555,8 +555,8 @@ async fn build_target(
         metadata: metadata.clone(),
         enabled: true,
     };
-    let target = VerifiedTarget::build(&record, options, secrets)?;
-    Ok(Arc::new(TargetBackend {
+    let target = VerifiedStore::build(&record, options, secrets)?;
+    Ok(Arc::new(StoreBackend {
         backend: target.backend,
         prefix: prefix.trim_matches('/').into(),
         revision,
@@ -592,7 +592,7 @@ impl Storage {
                     .as_deref()
                     .map(config::cache_bytes)
                     .transpose()?,
-                Some(config::cache_bytes(&c.manage.thumbnail_cache_size)?),
+                Some(config::cache_bytes(&c.control.thumbnail_cache_size)?),
             ],
             floor: config::bytes(&c.storage.free_space_floor)?,
             upload_limit: c
@@ -609,21 +609,21 @@ impl Storage {
             io: Arc::new(Semaphore::new(budget.cpu_jobs)),
             pending: Mutex::new(HashSet::new()),
         });
-        let rows: Vec<TargetRow> = if use_target {
+        let rows: Vec<StoreRow> = if use_target {
             sqlx::query_as(
-                "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at FROM storage_targets WHERE enabled ORDER BY created_at,id",
+                "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at FROM stores WHERE enabled ORDER BY created_at,id",
             )
             .fetch_all(&db)
             .await?
         } else {
             Vec::new()
         };
-        let target_options = TargetOptions::new(&c.storage)?;
-        let target_id = rows.first().map(|row| row.0);
+        let store_options = StoreOptions::new(&c.storage)?;
+        let store_id = rows.first().map(|row| row.0);
         let mut targets = HashMap::with_capacity(rows.len());
         for row in rows {
             let id = row.0;
-            targets.insert(id, build_target(target_options, &secrets, row).await?);
+            targets.insert(id, build_store(store_options, &secrets, row).await?);
         }
         let s = Self {
             maintenance,
@@ -640,8 +640,8 @@ impl Storage {
             pack_work: Arc::new(Semaphore::new(pack_units as usize)),
             inspection: tokio::sync::Mutex::new(()),
             targets: RwLock::new(targets),
-            target_options,
-            target_id,
+            store_options,
+            store_id,
             disk,
             secrets,
             cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
@@ -704,40 +704,40 @@ impl Storage {
     pub fn enabled(&self) -> bool {
         !self.targets.read().unwrap().is_empty()
     }
-    pub fn target_ids(&self) -> Vec<Uuid> {
+    pub fn store_ids(&self) -> Vec<Uuid> {
         self.targets.read().unwrap().keys().copied().collect()
     }
-    fn target_backend(&self, target_id: Uuid) -> Result<Arc<TargetBackend>> {
+    fn store_backend(&self, store_id: Uuid) -> Result<Arc<StoreBackend>> {
         self.targets
             .read()
             .unwrap()
-            .get(&target_id)
+            .get(&store_id)
             .cloned()
-            .with_context(|| format!("storage target {target_id} is not enabled"))
+            .with_context(|| format!("store {store_id} is not enabled"))
     }
-    pub async fn refresh_target(&self, target_id: Uuid) -> Result<()> {
-        let row: Option<TargetRow> = sqlx::query_as(
-            "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at FROM storage_targets WHERE id=$1 AND enabled",
+    pub async fn refresh_store(&self, store_id: Uuid) -> Result<()> {
+        let row: Option<StoreRow> = sqlx::query_as(
+            "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at FROM stores WHERE id=$1 AND enabled",
         )
-        .bind(target_id)
+        .bind(store_id)
         .fetch_optional(&self.db)
         .await?;
         let backend = if let Some(row) = row {
-            Some(build_target(self.target_options, &self.secrets, row).await?)
+            Some(build_store(self.store_options, &self.secrets, row).await?)
         } else {
             None
         };
         let mut targets = self.targets.write().unwrap();
         if let Some(backend) = backend {
-            targets.insert(target_id, backend);
+            targets.insert(store_id, backend);
         } else {
-            targets.remove(&target_id);
+            targets.remove(&store_id);
         }
         Ok(())
     }
-    pub async fn refresh_targets(&self) -> Result<()> {
+    pub async fn refresh_stores(&self) -> Result<()> {
         let rows: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT id,updated_at FROM storage_targets WHERE enabled ORDER BY created_at,id",
+            "SELECT id,updated_at FROM stores WHERE enabled ORDER BY created_at,id",
         )
         .fetch_all(&self.db)
         .await?;
@@ -750,51 +750,51 @@ impl Storage {
             .collect();
         for (id, revision) in rows {
             if known.get(&id) != Some(&revision) {
-                self.refresh_target(id).await?;
+                self.refresh_store(id).await?;
             }
         }
         for id in known.keys().copied().collect::<Vec<_>>() {
             let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM storage_targets WHERE id=$1 AND enabled)",
+                "SELECT EXISTS(SELECT 1 FROM stores WHERE id=$1 AND enabled)",
             )
             .bind(id)
             .fetch_one(&self.db)
             .await?;
             if !exists {
-                self.refresh_target(id).await?;
+                self.refresh_store(id).await?;
             }
         }
         Ok(())
     }
-    fn default_target(&self) -> Result<Uuid> {
-        self.target_id
+    fn default_store(&self) -> Result<Uuid> {
+        self.store_id
             .filter(|id| self.targets.read().unwrap().contains_key(id))
             .or_else(|| self.targets.read().unwrap().keys().next().copied())
-            .context("no storage target is configured")
+            .context("no store is configured")
     }
-    pub(crate) fn select_target(&self, target_id: Option<Uuid>) -> Result<Uuid> {
-        match target_id {
+    pub(crate) fn select_store(&self, store_id: Option<Uuid>) -> Result<Uuid> {
+        match store_id {
             Some(id) => {
-                let _ = self.target_backend(id)?;
+                let _ = self.store_backend(id)?;
                 Ok(id)
             }
-            None => self.default_target(),
+            None => self.default_store(),
         }
     }
-    pub fn namespace_for(&self, target_id: Uuid) -> Result<String> {
-        let prefix = self.target_backend(target_id)?.prefix.clone();
+    pub fn namespace_for(&self, store_id: Uuid) -> Result<String> {
+        let prefix = self.store_backend(store_id)?.prefix.clone();
         Ok(if prefix.is_empty() {
             String::new()
         } else {
             format!("{prefix}/")
         })
     }
-    pub fn path_for(&self, target_id: Uuid, id: Uuid) -> Result<Path> {
-        let _ = self.target_backend(target_id)?;
+    pub fn path_for(&self, store_id: Uuid, id: Uuid) -> Result<Path> {
+        let _ = self.store_backend(store_id)?;
         Ok(Path::from(chunk_name(id)))
     }
-    pub fn pack_path_for(&self, target_id: Uuid, id: Uuid) -> Result<Path> {
-        let _ = self.target_backend(target_id)?;
+    pub fn pack_path_for(&self, store_id: Uuid, id: Uuid) -> Result<Path> {
+        let _ = self.store_backend(store_id)?;
         Ok(Path::from(format!("packs/{}", chunk_name(id))))
     }
     fn parse_path(path: &str) -> Option<Uuid> {
@@ -803,20 +803,20 @@ impl Storage {
     fn parse_physical_path(path: &str) -> Option<Uuid> {
         Self::parse_path(path).or_else(|| parse_chunk_name(path.strip_prefix("packs/")?))
     }
-    pub fn parse_physical_path_for(&self, target_id: Uuid, path: &str) -> Result<Option<Uuid>> {
-        let _ = self.target_backend(target_id)?;
+    pub fn parse_physical_path_for(&self, store_id: Uuid, path: &str) -> Result<Option<Uuid>> {
+        let _ = self.store_backend(store_id)?;
         Ok(Self::parse_physical_path(path))
     }
     pub async fn list_physical_for(
         &self,
-        target_id: Uuid,
+        store_id: Uuid,
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Vec<object_store::ObjectMeta>> {
         let _permit = crate::backend::PRIORITY
             .scope(crate::backend::MAINTENANCE, self.controls.acquire())
             .await?;
-        let target = self.target_backend(target_id)?;
+        let target = self.store_backend(store_id)?;
         let offset = Path::parse(cursor.unwrap_or(""))?;
         Ok(target
             .backend
@@ -825,15 +825,15 @@ impl Storage {
             .try_collect()
             .await?)
     }
-    async fn ensure_target_identity(&self, target_id: Uuid) -> Result<()> {
-        let target = self.target_backend(target_id)?;
+    async fn ensure_store_identity(&self, store_id: Uuid) -> Result<()> {
+        let target = self.store_backend(store_id)?;
         if target.identity_ready.load(Ordering::Acquire) {
             return Ok(());
         }
         let _check = target.identity_check.lock().await;
         if !target.identity_ready.load(Ordering::Acquire) {
-            self.check_target_identity_inner(
-                target_id,
+            self.check_store_identity_inner(
+                store_id,
                 &target,
                 &self.db,
                 self.maintenance.load(Ordering::Acquire),
@@ -845,48 +845,48 @@ impl Storage {
         Ok(())
     }
     pub async fn check_identity(&self, _db: &sqlx::PgPool, maintenance: bool) -> Result<()> {
-        let ids = self.target_ids();
-        ensure!(!ids.is_empty(), "no storage target is configured");
+        let ids = self.store_ids();
+        ensure!(!ids.is_empty(), "no store is configured");
         for id in ids {
-            self.check_target_identity(id, maintenance).await?;
+            self.check_store_identity(id, maintenance).await?;
         }
         Ok(())
     }
-    pub async fn check_target_identity(&self, target_id: Uuid, maintenance: bool) -> Result<()> {
-        let target = self.target_backend(target_id)?;
+    pub async fn check_store_identity(&self, store_id: Uuid, maintenance: bool) -> Result<()> {
+        let target = self.store_backend(store_id)?;
         let _check = target.identity_check.lock().await;
         target.identity_ready.store(false, Ordering::Release);
-        self.check_target_identity_inner(target_id, &target, &self.db, maintenance, true, true)
+        self.check_store_identity_inner(store_id, &target, &self.db, maintenance, true, true)
             .await?;
         Ok(())
     }
-    pub(crate) async fn initialize_target(&self, record: TargetRecord) -> Result<()> {
+    pub(crate) async fn initialize_store(&self, record: StoreRecord) -> Result<()> {
         if record.r#type == "local" {
             tokio::fs::create_dir_all(
                 record
                     .path
                     .as_deref()
-                    .context("local storage target path is missing")?,
+                    .context("local store path is missing")?,
             )
             .await?;
         }
-        let target = VerifiedTarget::build(&record, self.target_options, &self.secrets)?;
+        let target = VerifiedStore::build(&record, self.store_options, &self.secrets)?;
         let _permit = crate::backend::PRIORITY
             .scope(crate::backend::MAINTENANCE, self.controls.acquire())
             .await?;
         target.initialize().await
     }
-    pub(crate) async fn verify_target_record(&self, record: TargetRecord) -> Result<()> {
-        let target = VerifiedTarget::build(&record, self.target_options, &self.secrets)?;
+    pub(crate) async fn verify_store_record(&self, record: StoreRecord) -> Result<()> {
+        let target = VerifiedStore::build(&record, self.store_options, &self.secrets)?;
         let _permit = crate::backend::PRIORITY
             .scope(crate::backend::MAINTENANCE, self.controls.acquire())
             .await?;
         target.verify().await
     }
-    async fn check_target_identity_inner(
+    async fn check_store_identity_inner(
         &self,
-        _target_id: Uuid,
-        target: &TargetBackend,
+        _store_id: Uuid,
+        target: &StoreBackend,
         _db: &sqlx::PgPool,
         _maintenance: bool,
         _allow_initialize: bool,
@@ -1176,9 +1176,9 @@ impl Storage {
         .await?
     }
     pub async fn put(self: &Arc<Self>, c: &Chunk, encoded: Vec<u8>, cache: Bytes) -> Result<()> {
-        let target_id = c.storage_target_id.context("chunk has no storage target")?;
-        self.ensure_target_identity(target_id).await?;
-        let target = self.target_backend(target_id)?;
+        let store_id = c.store_id.context("chunk has no store")?;
+        self.ensure_store_identity(store_id).await?;
+        let target = self.store_backend(store_id)?;
         ensure!(
             Some(encoded.len() as i32) == c.stored_size,
             "encoded length mismatch"
@@ -1190,7 +1190,7 @@ impl Storage {
         let result = target
             .backend
             .put(
-                &self.path_for(target_id, c.storage_id)?,
+                &self.path_for(store_id, c.storage_id)?,
                 Bytes::from(encoded).into(),
             )
             .await;
@@ -1449,8 +1449,8 @@ impl Storage {
         }
     }
     pub async fn register_location(&self, c: &Chunk) -> Result<()> {
-        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,storage_target_id,stored_size,compressed,nonce,state,created_at,unreferenced_at,algorithm,key_id) VALUES($1,$2,$3,$4,$5,$6,$7,'uploading',$8,now(),$9,$10)")
-            .bind(c.encoding_id).bind(c.id).bind(c.storage_id).bind(c.storage_target_id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).bind(c.created_at).bind(&c.algorithm).bind(&c.key_id).execute(&self.db).await?;
+        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,store_id,stored_size,compressed,nonce,state,created_at,unreferenced_at,algorithm,key_id) VALUES($1,$2,$3,$4,$5,$6,$7,'uploading',$8,now(),$9,$10)")
+            .bind(c.encoding_id).bind(c.id).bind(c.storage_id).bind(c.store_id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).bind(c.created_at).bind(&c.algorithm).bind(&c.key_id).execute(&self.db).await?;
         Ok(())
     }
     fn physical_pin(&self, id: Uuid) -> CachePin {
@@ -1477,7 +1477,7 @@ impl Storage {
     }
     async fn source(&self, id: i64) -> Result<Source> {
         let _gate = self.source_gate.read().await;
-        let physical:Option<Chunk>=sqlx::query_as("SELECT c.id,l.id encoding_id,l.storage_id,c.storage_target_id,c.hash,c.raw_size,l.stored_size,l.algorithm,l.key_id,l.compressed,l.nonce,c.format,c.state,l.created_at FROM chunk_locations l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready'")
+        let physical:Option<Chunk>=sqlx::query_as("SELECT c.id,l.id encoding_id,l.storage_id,c.store_id,c.hash,c.raw_size,l.stored_size,l.algorithm,l.key_id,l.compressed,l.nonce,c.format,c.state,l.created_at FROM chunk_locations l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready'")
             .bind(id).fetch_optional(&self.db).await?;
         if let Some(c) = physical {
             let pin = self.physical_pin(c.storage_id);
@@ -1529,9 +1529,9 @@ impl Storage {
         })
         .await?
     }
-    pub async fn put_path_for(&self, target_id: Uuid, path: &Path, data: Vec<u8>) -> Result<()> {
-        self.ensure_target_identity(target_id).await?;
-        let target = self.target_backend(target_id)?;
+    pub async fn put_path_for(&self, store_id: Uuid, path: &Path, data: Vec<u8>) -> Result<()> {
+        self.ensure_store_identity(store_id).await?;
+        let target = self.store_backend(store_id)?;
         let _permit = self.writes.acquire().await?;
         self.background_writable()?;
         let mut operation = self.operations[1].begin();
@@ -1544,9 +1544,9 @@ impl Storage {
         self.backend_write_bytes.fetch_add(size, Ordering::Relaxed);
         Ok(())
     }
-    pub async fn delete_path_for(&self, target_id: Uuid, path: &Path) -> Result<()> {
-        self.ensure_target_identity(target_id).await?;
-        let target = self.target_backend(target_id)?;
+    pub async fn delete_path_for(&self, store_id: Uuid, path: &Path) -> Result<()> {
+        self.ensure_store_identity(store_id).await?;
+        let target = self.store_backend(store_id)?;
         let _permit = self.controls.acquire().await?;
         self.background_writable()?;
         let mut operation = self.operations[2].begin();
@@ -1603,8 +1603,8 @@ impl Storage {
             .result
             .get_or_init(|| async {
                 let result: Result<Arc<LoadedPack>> = async {
-                    let target_id = p.storage_target_id.context("pack has no storage target")?;
-                    self.ensure_target_identity(target_id).await?;
+                    let store_id = p.store_id.context("pack has no store")?;
+                    self.ensure_store_identity(store_id).await?;
                     let memory = self.pack_memory(p.payload_size()?).await?;
                     let read_permit = self
                         .reads
@@ -1614,8 +1614,8 @@ impl Storage {
                     crate::faults::point("pack-download").await;
                     let encoded = self
                         .read_path_permitted(
-                            target_id,
-                            &self.pack_path_for(target_id, p.storage_id)?,
+                            store_id,
+                            &self.pack_path_for(store_id, p.storage_id)?,
                             p.payload_size()? + 16,
                         )
                         .await?;
@@ -1698,19 +1698,19 @@ impl Storage {
         Ok((raw, false))
     }
     pub(crate) async fn head(&self, c: &Chunk) -> Result<u64> {
-        let target_id = c.storage_target_id.context("chunk has no storage target")?;
+        let store_id = c.store_id.context("chunk has no store")?;
         Ok(self
-            .head_path_for(target_id, &self.path_for(target_id, c.storage_id)?)
+            .head_path_for(store_id, &self.path_for(store_id, c.storage_id)?)
             .await?
             .size)
     }
     pub(crate) async fn head_path_for(
         &self,
-        target_id: Uuid,
+        store_id: Uuid,
         path: &Path,
     ) -> Result<object_store::ObjectMeta> {
-        self.ensure_target_identity(target_id).await?;
-        let target = self.target_backend(target_id)?;
+        self.ensure_store_identity(store_id).await?;
+        let target = self.store_backend(store_id)?;
         let _permit = self.controls.acquire().await?;
         let mut operation = self.operations[3].begin();
         let result = target.backend.head(path).await;
@@ -1795,13 +1795,13 @@ impl Storage {
                     ensure!(offset==p.raw_size,codec::IntegrityError::Metadata);
                     if matches!(mode,crate::integrity::Mode::Metadata) {return Ok(0);}
                     if matches!(mode,crate::integrity::Mode::Head) {
-                        let target_id = p.storage_target_id.context(codec::IntegrityError::Metadata)?;
-                        let meta=self.head_path_for(target_id, &self.pack_path_for(target_id, p.storage_id)?).await?;
+                        let store_id = p.store_id.context(codec::IntegrityError::Metadata)?;
+                        let meta=self.head_path_for(store_id, &self.pack_path_for(store_id, p.storage_id)?).await?;
                         ensure!(Some(meta.size as i64)==p.stored_size,codec::IntegrityError::Length);return Ok(0);
                     }
                     let _memory=self.pack_memory(capacity).await?;
-                    let target_id = p.storage_target_id.context(codec::IntegrityError::Metadata)?;
-                    let data=self.read_path_for(target_id, &self.pack_path_for(target_id, p.storage_id)?,capacity+16).await?;
+                    let store_id = p.store_id.context(codec::IntegrityError::Metadata)?;
+                    let data=self.read_path_for(store_id, &self.pack_path_for(store_id, p.storage_id)?,capacity+16).await?;
                     let size=data.len() as u64;
                     let permit=self.cpu.clone().acquire_owned().await?;let pool=self.compression.clone();let secrets=self.secrets.clone();let pack=p.clone();
                     tokio::task::spawn_blocking(move||{
@@ -1833,31 +1833,31 @@ impl Storage {
     }
     // Shared bounded remote read. Inspection must not use or populate the cache.
     pub(crate) async fn read_backend(&self, c: &Chunk) -> Result<Vec<u8>> {
-        let target_id = c.storage_target_id.context("chunk has no storage target")?;
+        let store_id = c.store_id.context("chunk has no store")?;
         self.read_path_for(
-            target_id,
-            &self.path_for(target_id, c.storage_id)?,
+            store_id,
+            &self.path_for(store_id, c.storage_id)?,
             MAX + 16,
         )
         .await
     }
     pub async fn read_path_for(
         &self,
-        target_id: Uuid,
+        store_id: Uuid,
         path: &Path,
         bound: usize,
     ) -> Result<Vec<u8>> {
-        self.ensure_target_identity(target_id).await?;
+        self.ensure_store_identity(store_id).await?;
         let _permit = self.reads.acquire().await?;
-        self.read_path_permitted(target_id, path, bound).await
+        self.read_path_permitted(store_id, path, bound).await
     }
     async fn read_path_permitted(
         &self,
-        target_id: Uuid,
+        store_id: Uuid,
         path: &Path,
         bound: usize,
     ) -> Result<Vec<u8>> {
-        let target = self.target_backend(target_id)?;
+        let target = self.store_backend(store_id)?;
         let mut operation = self.operations[0].begin();
         self.backend_gets
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

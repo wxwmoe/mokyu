@@ -13,7 +13,7 @@ import UiCheckbox from '../components/ui/UiCheckbox.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
 
-type Store = components['schemas']['StorageTargetView']
+type Store = components['schemas']['StoreView']
 const stores = useQuery({ queryKey: ['stores'], queryFn: ({ signal }) => api<Store[]>('/api/stores', { signal }) })
 const open = ref(false), editing = ref<Store | null>(null), busy = ref(false), checking = ref('')
 const draft = reactive({ name: '', type: 'local', path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '', enabled: true })

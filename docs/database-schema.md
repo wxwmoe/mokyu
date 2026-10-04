@@ -15,9 +15,9 @@ PostgreSQL 保存对象、权限、引用和任务；载荷位于存储或受保
 | 表 / 主键 | 字段 | 关键规则 |
 | --- | --- | --- |
 | `_sqlx_migrations` (version) | `version`、`description`、`installed_on`、`success`、`checksum`、`execution_time` | SQLx 历史与 SHA-384 校验和，不参与日常清理 |
-| `mokyu_meta` (singleton) | `singleton`、`schema_version`、`deployment_id`、`backend_identity`、`backend_initialized`、`gc_paused`、`maintenance`、`created_at`、`access_coverage_since`、`access_flushed_at`、`project_management`、`pack_creation_paused` | 单例部署身份和持久开关 |
+| `mokyu_meta` (singleton) | `singleton`、`schema_version`、`deployment_id`、`storage_identity`、`storage_initialized`、`gc_paused`、`maintenance`、`created_at`、`access_coverage_since`、`access_flushed_at`、`project_management`、`pack_creation_paused` | 单例部署身份和持久开关 |
 | `key_fingerprints` (key_id) | `key_id`、`algorithm`、`fingerprint` | 密钥指纹，禁止同 ID 换材料，不自动回收 |
-| `manage_setup` (singleton) | `singleton`、`token_hash`、`created_at` | 首次初始化令牌哈希，成功后移除 |
+| `admin_setup` (singleton) | `singleton`、`token_hash`、`created_at` | 首次初始化令牌哈希，成功后移除 |
 | `web_users` (id) | `id`、`username`、`password_hash`、`enabled`、`created_at`、`display_name`、`locale`、`theme`、`avatar_email`、`avatar_enabled`、`auth_revision`、`role`、`authorization_revision`、`must_change_password` | username 唯一；admin/member；认证与授权修订号独立 |
 | `sessions` (token_hash) | `token_hash`、`user_id`、`csrf_hash`、`expires_at`、`id`、`created_at`、`last_seen_at`、`reauthenticated_at`、`auth_revision`、`user_agent` | 只保存 Cookie/CSRF 哈希；id 不用于认证；随用户删除 |
 | `api_tokens` (id) | `id`、`user_id`、`label`、`token_hash`、`prefix`、`system`、`auth_revision`、`authorization_revision`、`created_at`、`expires_at`、`last_used_at`、`revoked_at` | token_hash 唯一；权限与用户当前权限取交集 |
@@ -83,7 +83,7 @@ pending 的 cache_size/cache_compressed 表示实际 .raw/.zst 文件。pin 随 
 | --- | --- | --- |
 | `maintenance_controls` (kind) | `kind`、`paused`、`last_scheduled_at`、`updated_at` | 七类持久策略和最近调度时间 |
 | `maintenance_previews` (id) | `id`、`actor_id`、`token_id`、`action`、`parameters`、`fingerprint`、`expires_at`、`task_id` | 身份/Token 绑定的十分钟预览，task_id 保存执行回执 |
-| `tasks` (id) | `id`、`kind`、`bucket_id`、`state`、`cursor`、`processed`、`detail`、`error`、`created_at`、`updated_at`、`created_by`、`source`、`started_at` | 持久游标、来源、发起者；queued/running/paused/completed/failed；`storage_migration` detail 保存跨 target 的源/目标对象 |
+| `tasks` (id) | `id`、`kind`、`bucket_id`、`state`、`cursor`、`processed`、`detail`、`error`、`created_at`、`updated_at`、`created_by`、`source`、`started_at` | 持久游标、来源、发起者；queued/running/paused/completed/failed；`storage_migration` detail 保存跨 store 的源/目标对象 |
 | `integrity_issues` (id) | `id`、`task_id`、`subject`、`code`、`chunk_id`、`storage_id`、`stream_id`、`bucket_id`、`object_key`、`detail`、`created_at` | 保留检查时身份，对象删除不抹除异常 |
 | `integrity_packs` (task_id, pack_id) | `task_id`、`pack_id`、`error_code` | 避免一轮巡检重复验证共享包 |
 | `audit_events` (id) | `id`、`created_at`、`finished_at`、`actor_id`、`actor_label`、`token_id`、`source`、`action`、`target`、`project_id`、`bucket_id`、`outcome`、`request_id`、`status`、`detail` | 持久意图与显式结果，用户删除不级联删除历史 |
@@ -123,7 +123,7 @@ pending 的 cache_size/cache_compressed 表示实际 .raw/.zst 文件。pin 随 
 | streams.write_authorization | 内部身份、修订号、所需动作，无认证秘密 |
 | buckets.cors | origins/methods/headers/expose/max_age 规则数组 |
 | uploads.result | Complete 的 ETag、时间等，与 manifest_hash 用于重试 |
-| tasks.detail | 范围、批次进度及诊断，见[任务 API](manage-api-reference.md#后台任务) |
+| tasks.detail | 范围、批次进度及诊断，见[任务 API](control-api-reference.md#后台任务) |
 | media_operations.result | 逐项结果和新版本身份 |
 | storage_insights.data / storage_history.data | 同口径 R/U/D/A 及物理来源快照 |
 | audit_events.detail | 显式允许的结果，不含完整请求、密码或密钥 |

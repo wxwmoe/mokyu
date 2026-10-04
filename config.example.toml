@@ -1,7 +1,7 @@
 [listen]
 s3 = "0.0.0.0:9000"
 web = "0.0.0.0:9001"
-manage = "0.0.0.0:9002"
+control = "0.0.0.0:9002"
 admin_socket = "/run/mokyu/admin.sock"
 region = "us-east-1"
 aws_chunk_limit = "8MiB"
@@ -18,7 +18,7 @@ password = "YOUR_POSTGRES_PASSWORD"
 ssl_mode = "prefer"
 # max_connections = 12
 
-[manage]
+[control]
 origin = "https://admin.example.com"
 secure_cookie = true
 session_lifetime = "12h"
@@ -28,7 +28,7 @@ session_lifetime = "12h"
 [storage]
 data = "/data"
 free_space_floor = "1GiB"
-# Configure local and S3 storage connections through `mokyu cli stores` or the management API.
+# Configure local and S3 storage connections through `mokyu cli stores` or the control API.
 # Omit concurrency limits for automatic budgets shared by all storage work.
 # read_concurrency = 16
 # upload_concurrency = 4
@@ -111,7 +111,7 @@ algorithm = "aes-256-gcm"
 
 [cluster]
 # The first control needs only advertise_url; it starts without control_url or join_token.
-# Other controls, workers and data nodes use the management URL and one-time token
+# Other controls, workers and data nodes use the control URL and one-time token
 # created by `mokyu cli cluster token`.
 # control_url = "https://control.example.com"
 # join_token = "PASTE_ONE_TIME_TOKEN_HERE"
@@ -131,7 +131,7 @@ max_duration = "5s"
 deleted_chunk_retention = "7d"
 upload_retention = "24h"
 task_retention = "30d"
-# Management activity and security events; independent of object retention.
+# Control-plane activity and security events; independent of object retention.
 audit_retention = "90d"
 
 [statistics]

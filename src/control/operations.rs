@@ -159,11 +159,11 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM nodes WHERE enabled")
                     .fetch_one(&app.db)
                     .await?;
-                let local_targets: i64 =
-                    sqlx::query_scalar("SELECT count(*) FROM storage_targets WHERE type='local'")
+                let local_stores: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM stores WHERE type='local'")
                         .fetch_one(&app.db)
                         .await?;
-                Ok(json!({"mode": mode, "enabled_nodes": nodes, "local_targets": local_targets}))
+                Ok(json!({"mode": mode, "enabled_nodes": nodes, "local_stores": local_stores}))
             }
             Cluster::Mode { mode } => {
                 let mut tx = app.db.begin().await?;
@@ -178,13 +178,13 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 }
                 if mode == "cluster" {
                     let local: bool = sqlx::query_scalar(
-                        "SELECT EXISTS(SELECT 1 FROM storage_targets WHERE type='local')",
+                        "SELECT EXISTS(SELECT 1 FROM stores WHERE type='local')",
                     )
                     .fetch_one(&mut *tx)
                     .await?;
                     ensure!(
                         !local,
-                        "local storage targets exist; migrate them to S3 and update their store before enabling cluster mode"
+                        "local stores exist; migrate them to S3 and update their store before enabling cluster mode"
                     );
                 } else {
                     let other_nodes: bool =
@@ -324,20 +324,20 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
             };
             match command {
                 Stores::List => {
-                    let rows: Vec<Row> = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,enabled,updated_at FROM storage_targets ORDER BY name")
+                    let rows: Vec<Row> = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,enabled,updated_at FROM stores ORDER BY name")
                         .fetch_all(&app.db)
                         .await?;
                     Ok(json!(rows.into_iter().map(public).collect::<Vec<_>>()))
                 }
                 Stores::Check { name } => {
-                    let row: Row = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,enabled,updated_at FROM storage_targets WHERE name=$1")
+                    let row: Row = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,enabled,updated_at FROM stores WHERE name=$1")
                         .bind(&name)
                         .fetch_optional(&app.db)
                         .await?
-                        .context("storage target not found")?;
-                    app.storage.refresh_target(row.0).await?;
-                    ensure!(row.8, "storage target is disabled");
-                    app.storage.check_target_identity(row.0, false).await?;
+                        .context("store not found")?;
+                    app.storage.refresh_store(row.0).await?;
+                    ensure!(row.8, "store is disabled");
+                    app.storage.check_store_identity(row.0, false).await?;
                     Ok(public(row))
                 }
                 Stores::Create {
@@ -353,9 +353,9 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 } => {
                     let row = super::stores::create_record(
                         app,
-                        super::stores::StorageTargetInput {
+                        super::stores::StoreInput {
                             name,
-                            target_type: r#type,
+                            store_type: r#type,
                             path: path.map(|value| value.to_string_lossy().into_owned()),
                             endpoint,
                             bucket,
@@ -383,8 +383,8 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                     let row = super::stores::update_record(
                         app,
                         name,
-                        super::stores::StorageTargetPatch {
-                            target_type: r#type,
+                        super::stores::StorePatch {
+                            store_type: r#type,
                             path: path.map(|value| value.to_string_lossy().into_owned()),
                             endpoint,
                             bucket,
@@ -424,7 +424,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 super::managed_keys::create_record(
                     app,
                     &crate::authorization::Principal::Local,
-                    super::managed_keys::ManagedKeyInput { name, purpose },
+                    super::managed_keys::ControldKeyInput { name, purpose },
                 )
                 .await?,
             )?),
@@ -586,7 +586,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 super::buckets::CreateBucket {
                     name,
                     project_id: project,
-                    storage_target_id: store,
+                    store_id: store,
                 },
             )
             .await?;

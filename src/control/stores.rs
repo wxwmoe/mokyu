@@ -3,7 +3,7 @@ use crate::{
     app::App,
     codec,
     http::HttpError,
-    storage::target::{Record as TargetRecord, metadata as target_metadata},
+    storage::store::{Record as StoreRecord, metadata as store_metadata},
 };
 use anyhow::Context;
 use axum::{
@@ -18,11 +18,11 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[derive(Serialize, sqlx::FromRow, ToSchema)]
-pub(crate) struct StorageTargetView {
+pub(crate) struct StoreView {
     id: Uuid,
     name: String,
     #[serde(rename = "type")]
-    target_type: String,
+    store_type: String,
     path: Option<String>,
     endpoint: Option<String>,
     bucket: Option<String>,
@@ -35,10 +35,10 @@ pub(crate) struct StorageTargetView {
 
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StorageTargetInput {
+pub(crate) struct StoreInput {
     pub(crate) name: String,
     #[serde(rename = "type")]
-    pub(crate) target_type: String,
+    pub(crate) store_type: String,
     pub(crate) path: Option<String>,
     pub(crate) endpoint: Option<String>,
     pub(crate) bucket: Option<String>,
@@ -51,9 +51,9 @@ pub(crate) struct StorageTargetInput {
 
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StorageTargetPatch {
+pub(crate) struct StorePatch {
     #[serde(rename = "type")]
-    pub(crate) target_type: Option<String>,
+    pub(crate) store_type: Option<String>,
     pub(crate) path: Option<String>,
     pub(crate) endpoint: Option<String>,
     pub(crate) bucket: Option<String>,
@@ -65,7 +65,7 @@ pub(crate) struct StorageTargetPatch {
 }
 
 #[derive(Clone, sqlx::FromRow)]
-struct TargetRow {
+struct StoreRow {
     id: Uuid,
     name: String,
     r#type: String,
@@ -86,7 +86,7 @@ fn validate_name(value: &str) -> anyhow::Result<String> {
         (1..=128).contains(&value.len())
             && !value.contains('/')
             && !value.chars().any(char::is_control),
-        "storage target name must contain 1..128 safe bytes"
+        "store name must contain 1..128 safe bytes"
     );
     Ok(value.to_owned())
 }
@@ -94,7 +94,7 @@ fn validate_name(value: &str) -> anyhow::Result<String> {
 fn validate_type(value: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(value, "local" | "s3"),
-        "storage target type is local or s3"
+        "store type is local or s3"
     );
     Ok(())
 }
@@ -110,7 +110,7 @@ fn normalize_prefix(value: String) -> anyhow::Result<String> {
             && !value
                 .split('/')
                 .any(|part| part.is_empty() || part == "." || part == ".."),
-        "storage target prefix is invalid"
+        "store prefix is invalid"
     );
     Ok(value)
 }
@@ -132,11 +132,11 @@ fn endpoint(value: String) -> anyhow::Result<String> {
     Ok(value)
 }
 
-const VIEW_ORDERED: &str = "SELECT id,name,type AS target_type,path,endpoint_url AS endpoint,remote_bucket AS bucket,region,prefix,enabled,created_at,updated_at FROM storage_targets ORDER BY name";
-const VIEW_BY_ID: &str = "SELECT id,name,type AS target_type,path,endpoint_url AS endpoint,remote_bucket AS bucket,region,prefix,enabled,created_at,updated_at FROM storage_targets WHERE id=$1";
+const VIEW_ORDERED: &str = "SELECT id,name,type AS store_type,path,endpoint_url AS endpoint,remote_bucket AS bucket,region,prefix,enabled,created_at,updated_at FROM stores ORDER BY name";
+const VIEW_BY_ID: &str = "SELECT id,name,type AS store_type,path,endpoint_url AS endpoint,remote_bucket AS bucket,region,prefix,enabled,created_at,updated_at FROM stores WHERE id=$1";
 
-fn row_record(row: &TargetRow) -> TargetRecord {
-    TargetRecord {
+fn row_record(row: &StoreRow) -> StoreRecord {
+    StoreRecord {
         id: row.id,
         name: row.name.clone(),
         r#type: row.r#type.clone(),
@@ -165,7 +165,7 @@ fn build_record(
     access_key: Option<String>,
     secret_key: Option<String>,
     metadata: serde_json::Value,
-) -> anyhow::Result<TargetRecord> {
+) -> anyhow::Result<StoreRecord> {
     let (path, endpoint_url, remote_bucket, region, access, secret) = if kind == "local" {
         anyhow::ensure!(
             endpoint_value.is_none()
@@ -173,7 +173,7 @@ fn build_record(
                 && region.is_none()
                 && access_key.is_none()
                 && secret_key.is_none(),
-            "local storage targets cannot include S3 settings"
+            "local stores cannot include S3 settings"
         );
         (
             Some(required(
@@ -189,7 +189,7 @@ fn build_record(
     } else {
         anyhow::ensure!(
             path.is_none(),
-            "S3 storage targets cannot include a local path"
+            "S3 stores cannot include a local path"
         );
         let access_key = required(access_key, "S3 access key")?;
         let secret_key = required(secret_key, "S3 secret key")?;
@@ -210,7 +210,7 @@ fn build_record(
             )?),
         )
     };
-    Ok(TargetRecord {
+    Ok(StoreRecord {
         id,
         name,
         r#type: kind,
@@ -239,19 +239,19 @@ async fn lock_mode(
 async fn load_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     name: &str,
-) -> anyhow::Result<TargetRow> {
-    Ok(sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,enabled FROM storage_targets WHERE name=$1 FOR UPDATE").bind(name).fetch_optional(&mut **tx).await?.context("storage target was not found")?)
+) -> anyhow::Result<StoreRow> {
+    Ok(sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,enabled FROM stores WHERE name=$1 FOR UPDATE").bind(name).fetch_optional(&mut **tx).await?.context("store was not found")?)
 }
 
-async fn list_rows(db: &sqlx::PgPool) -> anyhow::Result<Vec<StorageTargetView>> {
+async fn list_rows(db: &sqlx::PgPool) -> anyhow::Result<Vec<StoreView>> {
     Ok(sqlx::query_as(VIEW_ORDERED).fetch_all(db).await?)
 }
 
-#[utoipa::path(get, operation_id = "stores", path = "/api/stores", responses((status = 200, body = Vec<StorageTargetView>)))]
+#[utoipa::path(get, operation_id = "stores", path = "/api/stores", responses((status = 200, body = Vec<StoreView>)))]
 pub(crate) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
-) -> Result<Json<Vec<StorageTargetView>>, HttpError> {
+) -> Result<Json<Vec<StoreView>>, HttpError> {
     let tx = super::users::admin_transaction(&app, &actor.principal).await?;
     tx.commit().await?;
     Ok(Json(list_rows(&app.db).await?))
@@ -259,22 +259,22 @@ pub(crate) async fn list(
 
 pub(crate) async fn create_record(
     app: &App,
-    input: StorageTargetInput,
-) -> anyhow::Result<StorageTargetView> {
+    input: StoreInput,
+) -> anyhow::Result<StoreView> {
     let mut tx = app.db.begin().await?;
     let (deployment_id, mode) = lock_mode(&mut tx).await?;
     let name = validate_name(&input.name)?;
-    validate_type(&input.target_type)?;
+    validate_type(&input.store_type)?;
     anyhow::ensure!(
-        !(mode == "cluster" && input.target_type == "local"),
-        "local storage targets are unavailable in cluster mode"
+        !(mode == "cluster" && input.store_type == "local"),
+        "local stores are unavailable in cluster mode"
     );
     let id = Uuid::new_v4();
     let record = build_record(
         app,
         id,
         name,
-        input.target_type,
+        input.store_type,
         input.path,
         input.endpoint,
         input.bucket,
@@ -282,24 +282,24 @@ pub(crate) async fn create_record(
         normalize_prefix(input.prefix)?,
         input.access_key,
         input.secret_key,
-        target_metadata(deployment_id, id)?,
+        store_metadata(deployment_id, id)?,
     )?;
-    app.storage.initialize_target(record.clone()).await?;
-    sqlx::query("INSERT INTO storage_targets(id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)").bind(record.id).bind(&record.name).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket).bind(&record.region).bind(&record.prefix).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(&record.metadata).execute(&mut *tx).await?;
+    app.storage.initialize_store(record.clone()).await?;
+    sqlx::query("INSERT INTO stores(id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)").bind(record.id).bind(&record.name).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket).bind(&record.region).bind(&record.prefix).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(&record.metadata).execute(&mut *tx).await?;
     tx.commit().await?;
-    app.storage.refresh_target(record.id).await?;
+    app.storage.refresh_store(record.id).await?;
     Ok(sqlx::query_as(VIEW_BY_ID)
         .bind(record.id)
         .fetch_one(&app.db)
         .await?)
 }
 
-#[utoipa::path(post, operation_id = "storage_target_create", path = "/api/stores", request_body = StorageTargetInput, responses((status = 201, body = StorageTargetView)))]
+#[utoipa::path(post, operation_id = "store_create", path = "/api/stores", request_body = StoreInput, responses((status = 201, body = StoreView)))]
 pub(crate) async fn create(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
-    Json(input): Json<StorageTargetInput>,
-) -> Result<(StatusCode, Json<StorageTargetView>), HttpError> {
+    Json(input): Json<StoreInput>,
+) -> Result<(StatusCode, Json<StoreView>), HttpError> {
     actor.recent(&app).await?;
     let tx = super::users::admin_transaction(&app, &actor.principal).await?;
     tx.commit().await?;
@@ -309,23 +309,23 @@ pub(crate) async fn create(
 pub(crate) async fn update_record(
     app: &App,
     name: String,
-    input: StorageTargetPatch,
-) -> anyhow::Result<StorageTargetView> {
+    input: StorePatch,
+) -> anyhow::Result<StoreView> {
     let mut tx = app.db.begin().await?;
     let (_deployment_id, mode) = lock_mode(&mut tx).await?;
     let row = load_row(&mut tx, &name).await?;
     anyhow::ensure!(
         row.metadata != serde_json::json!({}),
-        "storage target metadata is empty; initialize and check it before changing the connection"
+        "store metadata is empty; initialize and check it before changing the connection"
     );
     let kind = input
-        .target_type
+        .store_type
         .clone()
         .unwrap_or_else(|| row.r#type.clone());
     validate_type(&kind)?;
     anyhow::ensure!(
         !(mode == "cluster" && kind == "local"),
-        "local storage targets are unavailable in cluster mode"
+        "local stores are unavailable in cluster mode"
     );
     let prefix = normalize_prefix(input.prefix.clone().unwrap_or_else(|| row.prefix.clone()))?;
     let mut record = if kind == "local" {
@@ -335,7 +335,7 @@ pub(crate) async fn update_record(
                 && input.region.is_none()
                 && input.access_key.is_none()
                 && input.secret_key.is_none(),
-            "local storage targets cannot include S3 settings"
+            "local stores cannot include S3 settings"
         );
         build_record(
             app,
@@ -354,7 +354,7 @@ pub(crate) async fn update_record(
     } else {
         anyhow::ensure!(
             input.path.is_none(),
-            "S3 storage targets cannot include a local path"
+            "S3 stores cannot include a local path"
         );
         let access = match input.access_key {
             Some(value) => value,
@@ -392,40 +392,40 @@ pub(crate) async fn update_record(
         )?
     };
     record.enabled = input.enabled.unwrap_or(row.enabled);
-    app.storage.verify_target_record(record.clone()).await?;
-    sqlx::query("UPDATE storage_targets SET type=$2,path=$3,endpoint_url=$4,remote_bucket=$5,region=$6,prefix=$7,access_key_encrypted=$8,secret_key_encrypted=$9,enabled=$10,updated_at=now() WHERE id=$1").bind(row.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket).bind(&record.region).bind(&record.prefix).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(record.enabled).execute(&mut *tx).await?;
+    app.storage.verify_store_record(record.clone()).await?;
+    sqlx::query("UPDATE stores SET type=$2,path=$3,endpoint_url=$4,remote_bucket=$5,region=$6,prefix=$7,access_key_encrypted=$8,secret_key_encrypted=$9,enabled=$10,updated_at=now() WHERE id=$1").bind(row.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket).bind(&record.region).bind(&record.prefix).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(record.enabled).execute(&mut *tx).await?;
     tx.commit().await?;
-    app.storage.refresh_target(row.id).await?;
+    app.storage.refresh_store(row.id).await?;
     Ok(sqlx::query_as(VIEW_BY_ID)
         .bind(row.id)
         .fetch_one(&app.db)
         .await?)
 }
 
-#[utoipa::path(put, operation_id = "storage_target_update", path = "/api/stores/{name}", params(("name" = String, Path)), request_body = StorageTargetPatch, responses((status = 200, body = StorageTargetView)))]
+#[utoipa::path(put, operation_id = "store_update", path = "/api/stores/{name}", params(("name" = String, Path)), request_body = StorePatch, responses((status = 200, body = StoreView)))]
 pub(crate) async fn update(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
     Path(name): Path<String>,
-    Json(input): Json<StorageTargetPatch>,
-) -> Result<Json<StorageTargetView>, HttpError> {
+    Json(input): Json<StorePatch>,
+) -> Result<Json<StoreView>, HttpError> {
     actor.recent(&app).await?;
     let tx = super::users::admin_transaction(&app, &actor.principal).await?;
     tx.commit().await?;
     Ok(Json(update_record(&app, name, input).await?))
 }
 
-#[utoipa::path(post, operation_id = "storage_target_check", path = "/api/stores/{name}/check", params(("name" = String, Path)), responses((status = 200, body = StorageTargetView)))]
+#[utoipa::path(post, operation_id = "store_check", path = "/api/stores/{name}/check", params(("name" = String, Path)), responses((status = 200, body = StoreView)))]
 pub(crate) async fn check(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
     Path(name): Path<String>,
-) -> Result<Json<StorageTargetView>, HttpError> {
+) -> Result<Json<StoreView>, HttpError> {
     actor.recent(&app).await?;
     let tx = super::users::admin_transaction(&app, &actor.principal).await?;
     tx.commit().await?;
-    let row: TargetRow = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,enabled,created_at,updated_at FROM storage_targets WHERE name=$1").bind(&name).fetch_optional(&app.db).await?.context("storage target was not found")?;
-    app.storage.verify_target_record(row_record(&row)).await?;
+    let row: StoreRow = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,enabled,created_at,updated_at FROM stores WHERE name=$1").bind(&name).fetch_optional(&app.db).await?.context("store was not found")?;
+    app.storage.verify_store_record(row_record(&row)).await?;
     Ok(Json(
         sqlx::query_as(VIEW_BY_ID)
             .bind(row.id)

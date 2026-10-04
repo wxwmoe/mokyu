@@ -1129,7 +1129,7 @@ export interface paths {
         };
         get: operations["stores"];
         put?: never;
-        post: operations["storage_target_create"];
+        post: operations["store_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1144,7 +1144,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        put: operations["storage_target_update"];
+        put: operations["store_update"];
         post?: never;
         delete?: never;
         options?: never;
@@ -1161,7 +1161,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["storage_target_check"];
+        post: operations["store_check"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1505,7 +1505,7 @@ export interface components {
             revision: string;
             state: string;
             /** Format: uuid */
-            storage_target_id?: string | null;
+            store_id?: string | null;
             uploads_paused: boolean;
             website_enabled: boolean;
         };
@@ -1530,7 +1530,7 @@ export interface components {
             /** Format: int64 */
             enabled_nodes: number;
             /** Format: int64 */
-            local_targets: number;
+            local_stores: number;
             mode: string;
         };
         Completion: {
@@ -1546,6 +1546,23 @@ export interface components {
             confirm_name: string;
             confirmation: string;
         };
+        ControldKeyInput: {
+            name: string;
+            purpose: string;
+        };
+        ControldKeyView: {
+            active: boolean;
+            algorithm: string;
+            /** Format: date-time */
+            created_at: string;
+            fingerprint: string;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            purpose: string;
+            /** Format: date-time */
+            revoked_at?: string | null;
+        };
         CorsRule: {
             expose?: string[];
             headers?: string[];
@@ -1559,7 +1576,7 @@ export interface components {
             /** Format: uuid */
             project_id?: string | null;
             /** Format: uuid */
-            storage_target_id?: string | null;
+            store_id?: string | null;
         };
         CreateUser: {
             must_change_password?: boolean;
@@ -1780,23 +1797,6 @@ export interface components {
             pack_creation_enabled: boolean;
             pack_creation_paused: boolean;
             preparing_packs: string;
-        };
-        ManagedKeyInput: {
-            name: string;
-            purpose: string;
-        };
-        ManagedKeyView: {
-            active: boolean;
-            algorithm: string;
-            /** Format: date-time */
-            created_at: string;
-            fingerprint: string;
-            /** Format: uuid */
-            id: string;
-            name: string;
-            purpose: string;
-            /** Format: date-time */
-            revoked_at?: string | null;
         };
         MediaItem: {
             content_type: string;
@@ -2158,44 +2158,6 @@ export interface components {
             stale: boolean;
             usage?: components["schemas"]["StorageUsage"] | null;
         };
-        StorageTargetInput: {
-            access_key?: string | null;
-            bucket?: string | null;
-            endpoint?: string | null;
-            name: string;
-            path?: string | null;
-            prefix?: string;
-            region?: string | null;
-            secret_key?: string | null;
-            type: string;
-        };
-        StorageTargetPatch: {
-            access_key?: string | null;
-            bucket?: string | null;
-            enabled?: boolean | null;
-            endpoint?: string | null;
-            path?: string | null;
-            prefix?: string | null;
-            region?: string | null;
-            secret_key?: string | null;
-            type?: string | null;
-        };
-        StorageTargetView: {
-            bucket?: string | null;
-            /** Format: date-time */
-            created_at: string;
-            enabled: boolean;
-            endpoint?: string | null;
-            /** Format: uuid */
-            id: string;
-            name: string;
-            path?: string | null;
-            prefix: string;
-            region?: string | null;
-            type: string;
-            /** Format: date-time */
-            updated_at: string;
-        };
         StorageUsage: {
             attributed_raw_bytes: string;
             buckets: string;
@@ -2213,10 +2175,48 @@ export interface components {
             shared_savings: string;
             unique_bytes: string;
         };
+        StoreInput: {
+            access_key?: string | null;
+            bucket?: string | null;
+            endpoint?: string | null;
+            name: string;
+            path?: string | null;
+            prefix?: string;
+            region?: string | null;
+            secret_key?: string | null;
+            type: string;
+        };
+        StorePatch: {
+            access_key?: string | null;
+            bucket?: string | null;
+            enabled?: boolean | null;
+            endpoint?: string | null;
+            path?: string | null;
+            prefix?: string | null;
+            region?: string | null;
+            secret_key?: string | null;
+            type?: string | null;
+        };
+        StoreView: {
+            bucket?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            enabled: boolean;
+            endpoint?: string | null;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            path?: string | null;
+            prefix: string;
+            region?: string | null;
+            type: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         SweepRequest: {
             older_than: string;
             /** Format: uuid */
-            storage_target_id?: string | null;
+            store_id?: string | null;
         };
         SweepTask: {
             /** Format: uuid */
@@ -3369,7 +3369,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ManagedKeyView"][];
+                    "application/json": components["schemas"]["ControldKeyView"][];
                 };
             };
         };
@@ -3383,7 +3383,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ManagedKeyInput"];
+                "application/json": components["schemas"]["ControldKeyInput"];
             };
         };
         responses: {
@@ -3392,7 +3392,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ManagedKeyView"];
+                    "application/json": components["schemas"]["ControldKeyView"];
                 };
             };
         };
@@ -4321,12 +4321,12 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["StorageTargetView"][];
+                    "application/json": components["schemas"]["StoreView"][];
                 };
             };
         };
     };
-    storage_target_create: {
+    store_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -4335,7 +4335,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["StorageTargetInput"];
+                "application/json": components["schemas"]["StoreInput"];
             };
         };
         responses: {
@@ -4344,12 +4344,12 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["StorageTargetView"];
+                    "application/json": components["schemas"]["StoreView"];
                 };
             };
         };
     };
-    storage_target_update: {
+    store_update: {
         parameters: {
             query?: never;
             header?: never;
@@ -4360,7 +4360,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["StorageTargetPatch"];
+                "application/json": components["schemas"]["StorePatch"];
             };
         };
         responses: {
@@ -4369,12 +4369,12 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["StorageTargetView"];
+                    "application/json": components["schemas"]["StoreView"];
                 };
             };
         };
     };
-    storage_target_check: {
+    store_check: {
         parameters: {
             query?: never;
             header?: never;
@@ -4390,7 +4390,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["StorageTargetView"];
+                    "application/json": components["schemas"]["StoreView"];
                 };
             };
         };

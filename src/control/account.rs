@@ -44,7 +44,7 @@ pub(super) async fn profile(app: &App, id: Uuid) -> Result<Profile, HttpError> {
         ));
         row.avatar_url = Some(format!(
             "{}/{hash}?s=128&r=g&d=404",
-            app.config.manage.gravatar_base_url.trim_end_matches('/')
+            app.config.control.gravatar_base_url.trim_end_matches('/')
         ));
     }
     Ok(row)
@@ -350,7 +350,7 @@ pub(crate) async fn initialize(app: &App) -> Result<()> {
         .await?;
     let path = setup_path(app)?;
     if has_users {
-        sqlx::query("DELETE FROM manage_setup")
+        sqlx::query("DELETE FROM admin_setup")
             .execute(&app.db)
             .await?;
         let _ = tokio::fs::remove_file(path).await;
@@ -379,7 +379,7 @@ pub(crate) async fn initialize(app: &App) -> Result<()> {
         }
         Err(error) => return Err(error.into()),
     };
-    sqlx::query("INSERT INTO manage_setup(singleton,token_hash) VALUES(true,$1) ON CONFLICT(singleton) DO UPDATE SET token_hash=excluded.token_hash")
+    sqlx::query("INSERT INTO admin_setup(singleton,token_hash) VALUES(true,$1) ON CONFLICT(singleton) DO UPDATE SET token_hash=excluded.token_hash")
         .bind(blake3::hash(secret.as_bytes()).as_bytes().as_slice()).execute(&app.db).await?;
     tracing::info!(path=%path.display(), "first administrator setup token is available in the private local file");
     Ok(())
@@ -420,7 +420,7 @@ pub(super) async fn setup(
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     let expected: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT token_hash FROM manage_setup WHERE singleton")
+        sqlx::query_scalar("SELECT token_hash FROM admin_setup WHERE singleton")
             .fetch_optional(&app.db)
             .await?;
     let supplied = blake3::hash(input.token.as_bytes());
@@ -434,7 +434,7 @@ pub(super) async fn setup(
         .bind(USER_LOCK)
         .execute(&mut *tx)
         .await?;
-    let allowed: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM web_users) AND EXISTS(SELECT 1 FROM manage_setup WHERE token_hash=$1)").bind(supplied.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
+    let allowed: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM web_users) AND EXISTS(SELECT 1 FROM admin_setup WHERE token_hash=$1)").bind(supplied.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
     if !allowed {
         return Err(unauthorized());
     }
@@ -446,7 +446,7 @@ pub(super) async fn setup(
         .execute(&mut *tx)
         .await?;
     super::audit::security(&mut tx, user, "account.setup", true, &context.id).await?;
-    sqlx::query("DELETE FROM manage_setup")
+    sqlx::query("DELETE FROM admin_setup")
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

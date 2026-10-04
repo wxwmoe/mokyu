@@ -27,7 +27,7 @@ let pendingLeave: ((value: boolean) => void) | undefined
 const copyMove = computed(() => ['copy', 'move'].includes(props.action))
 const current = computed(() => props.buckets.find(bucket => bucket.id === target.value))
 const options = computed(() => props.buckets.filter(bucket => bucket.state === 'active' && bucket.actions.includes('object.write') && (props.action !== 'move' || !props.items.some(item => item.public_read) || bucket.actions.includes('object.acl'))).map(bucket => ({ value: bucket.id, label: bucket.name })))
-const crossStore = computed(() => copyMove.value && !!current.value && current.value.storage_target_id !== props.bucket.storage_target_id)
+const crossStore = computed(() => copyMove.value && !!current.value && current.value.store_id !== props.bucket.store_id)
 const state = () => JSON.stringify([target.value, path.value, overwrite.value, publicRead.value, meta, custom.value])
 const dirty = computed(() => open.value && initialized.value && !attempted.value && state() !== snapshot.value)
 const completed = computed(() => rows.value.filter(row => row.outcome && row.outcome.status >= 200 && row.outcome.status < 300).length)

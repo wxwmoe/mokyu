@@ -36,7 +36,8 @@ pub(crate) struct Record {
 struct Metadata {
     format_version: u32,
     deployment_id: Uuid,
-    storage_target_id: Uuid,
+    #[serde(alias = "storage_target_id")]
+    store_id: Uuid,
     chunk_layout: String,
     pack_layout: String,
     created_at: DateTime<Utc>,
@@ -47,7 +48,7 @@ pub(crate) fn metadata(deployment: Uuid, id: Uuid) -> Result<Value> {
     Ok(serde_json::to_value(Metadata {
         format_version: 3,
         deployment_id: deployment,
-        storage_target_id: id,
+        store_id: id,
         chunk_layout: "uuid-prefix2".into(),
         pack_layout: "uuid-prefix2-v1".into(),
         created_at: Utc::now(),
@@ -74,19 +75,19 @@ impl Options {
     }
 }
 
-pub(crate) struct Target {
+pub(crate) struct Store {
     pub backend: Arc<dyn ObjectStore>,
     metadata: Value,
     verified: tokio::sync::OnceCell<()>,
 }
 
-impl Target {
+impl Store {
     pub fn build(row: &Record, options: Options, secrets: &Secrets) -> Result<Self> {
         let meta: Metadata = serde_json::from_value(row.metadata.clone())
             .context("storage metadata is missing or invalid")?;
         ensure!(
             meta.format_version == 3
-                && meta.storage_target_id == row.id
+                && meta.store_id == row.id
                 && meta.chunk_layout == "uuid-prefix2"
                 && meta.pack_layout == "uuid-prefix2-v1",
             "unsupported storage metadata"
@@ -171,9 +172,11 @@ impl Target {
             );
             data.extend_from_slice(&bytes);
         }
-        let actual: Value = serde_json::from_slice(&data).context("invalid storage meta.json")?;
+        let actual: Metadata = serde_json::from_slice(&data).context("invalid storage meta.json")?;
+        let expected: Metadata = serde_json::from_value(self.metadata.clone())
+            .context("invalid configured storage metadata")?;
         ensure!(
-            actual == self.metadata,
+            actual == expected,
             "storage meta.json does not match this store"
         );
         Ok(())
@@ -214,7 +217,7 @@ mod tests {
         let store = object_store::memory::InMemory::new();
         let id = Uuid::new_v4();
         let expected = metadata(Uuid::new_v4(), id).unwrap();
-        let target = Target {
+        let target = Store {
             backend: Arc::new(PrefixStore::new(store, "test/nested")),
             metadata: expected.clone(),
             verified: tokio::sync::OnceCell::new(),
@@ -223,7 +226,7 @@ mod tests {
         target.initialize().await.unwrap();
         assert!(target.initialize().await.is_err());
         let mut wrong = expected;
-        wrong["storage_target_id"] = serde_json::json!(Uuid::new_v4());
+        wrong["store_id"] = serde_json::json!(Uuid::new_v4());
         target
             .backend
             .put(

@@ -21,16 +21,16 @@ Compose 健康检查对应 `["CMD","mokyu","--config","PATH","cli","status"]`。
 | --- | --- | --- |
 | `listen.s3` | 字符串 / `0.0.0.0:9000` | S3 监听 SocketAddr |
 | `listen.web` | 字符串 / `0.0.0.0:9001` | 给反代的公共读和可选网站入口 |
-| `listen.manage` | 字符串 / `0.0.0.0:9002` | 管理入口；三个监听地址必须不同 |
+| `listen.control` | 字符串 / `0.0.0.0:9002` | 管理入口；三个监听地址必须不同 |
 | `listen.admin_socket` | 路径 / `/run/mokyu/admin.sock` | CLI 的 Unix socket；权限 0600 |
 | `listen.s3_domain` | 可选字符串 / 无 | 启用此域名的 virtual-hosted 寻址；否则使用 path-style |
 | `listen.region` | 字符串 / `us-east-1` | 客户端签名区域；与后端区域相互独立 |
 | `listen.aws_chunk_limit` | 大小 / `8MiB` | 单个 AWS 签名传输 chunk 上限；不是对象或 UploadPart 大小上限 |
-| `manage.origin` | 字符串 / `http://localhost:9002` | 浏览器看到的完整 origin，无末尾 `/`；登录和写操作严格匹配 |
-| `manage.secure_cookie` | bool / `true` | Cookie Secure；通过 HTTP 访问时需要 false |
-| `manage.session_lifetime` | 时间 / `12h` | 会话固定有效期，不随查询无限续期 |
-| `manage.gravatar_base_url` | 字符串 / `https://www.gravatar.com/avatar/` | 头像服务路径；允许兼容镜像，必须 HTTPS，不含凭据或查询参数。个人头像默认关闭 |
-| `manage.thumbnail_cache_size` | 大小 / `256MiB` | `data/thumbnails` 的可丢弃衍生缓存，最多 4096 项，受磁盘 floor 约束；`0B` 不保留缩略图，仍可按需生成 |
+| `control.origin` | 字符串 / `http://localhost:9002` | 浏览器看到的完整 origin，无末尾 `/`；登录和写操作严格匹配 |
+| `control.secure_cookie` | bool / `true` | Cookie Secure；通过 HTTP 访问时需要 false |
+| `control.session_lifetime` | 时间 / `12h` | 会话固定有效期，不随查询无限续期 |
+| `control.gravatar_base_url` | 字符串 / `https://www.gravatar.com/avatar/` | 头像服务路径；允许兼容镜像，必须 HTTPS，不含凭据或查询参数。个人头像默认关闭 |
+| `control.thumbnail_cache_size` | 大小 / `256MiB` | `data/thumbnails` 的可丢弃衍生缓存，最多 4096 项，受磁盘 floor 约束；`0B` 不保留缩略图，仍可按需生成 |
 
 缩略图仅处理 JPEG/PNG/WebP/GIF 静帧，长边最多 384px。单个生成任务复用处理 CPU 和在途内存名额；源文件最多 32 MiB、1600 万像素，两者随可用处理预算降低，单边最多 16384px。读取源文件与生成结果各等待最多 15 秒；超时的解码仍保留资源名额直到实际结束。缓存不上传后端、不计逻辑配额；失败回退文件类型卡片。AVIF 可由浏览器明确打开原图，不生成服务端缩略图。
 
@@ -61,7 +61,7 @@ Compose 健康检查对应 `["CMD","mokyu","--config","PATH","cli","status"]`。
 
 ## 存储目标与运行参数
 
-S3 连接和本地存储路径保存在数据库的存储目标中，通过 `mokyu cli stores create` 或 `/api/stores` 管理。新安装没有存储目标；创建桶之前必须先添加目标。TOML 不再接受 `[backend]`。目标凭据用部署密钥加密，查询不会返回明文。
+S3 连接和本地存储路径保存在数据库的存储中，通过 `mokyu cli stores create` 或 `/api/stores` 管理。新安装没有存储；创建桶之前必须先添加存储。TOML 不再接受 `[backend]`。存储凭据用部署密钥加密，查询不会返回明文。
 
 | 字段 | 类型 / 默认值 | 说明 |
 | --- | --- | --- |
@@ -241,7 +241,7 @@ Range 评估只使用实际局部回源；缓存命中、HEAD、完整范围和�
 | `statistics.access_flush_interval` | 时间 / `1m` | 有界内存访问计数批量写入数据库的间隔 |
 | `statistics.access_retention` | 时间 / `14d` | 小时访问窗口保留期，至少 7d 且覆盖两个 Range 窗口；累计区块计数随区块保留 |
 
-query_timeout 最多 2,147,483 秒。后台汇总失败时保留上次成功结果；大库可增加间隔并按数据库能力调整时限。字段、统计口径和过期标识见[容量快照](manage-api-reference.md#容量快照)。
+query_timeout 最多 2,147,483 秒。后台汇总失败时保留上次成功结果；大库可增加间隔并按数据库能力调整时限。字段、统计口径和过期标识见[容量快照](control-api-reference.md#容量快照)。
 
 两种采样间隔至少 1 分钟，保留期不少于采样间隔且最多 90 天；每次查询最多返回最近 2048 点。统计只由单个后台 worker 执行，SQL work_mem 为 16 MiB，复杂汇总会使用 PostgreSQL 临时磁盘，应为数据库预留空间。
 

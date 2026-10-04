@@ -44,7 +44,7 @@ impl Thumbnails {
         let cache = Self {
             root: config.storage.data.join("thumbnails"),
             disk,
-            capacity: config::cache_bytes(&config.manage.thumbnail_cache_size)?,
+            capacity: config::cache_bytes(&config.control.thumbnail_cache_size)?,
             entries: Mutex::new(VecDeque::new()),
             job: Arc::new(Semaphore::new(1)),
         };

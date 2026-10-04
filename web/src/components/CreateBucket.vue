@@ -17,7 +17,7 @@ const open = ref(false), busy = ref(false), name = ref(''), project = ref(''), s
 watch(open, value => { if (value) { name.value = ''; project.value = choices.value[0]?.value || ''; store.value = stores.value.length === 1 ? stores.value[0]!.value : '' } })
 async function create() {
   busy.value = true
-  try { const bucket = await write<Bucket>('/api/buckets', { name: name.value, project_id: project.value, storage_target_id: store.value || undefined }); await queries.invalidateQueries({ queryKey: ['buckets'] }); await queries.invalidateQueries({ queryKey: ['quota'] }); open.value = false; notify(t('bucketCreated')); emit('created', bucket) }
+  try { const bucket = await write<Bucket>('/api/buckets', { name: name.value, project_id: project.value, store_id: store.value || undefined }); await queries.invalidateQueries({ queryKey: ['buckets'] }); await queries.invalidateQueries({ queryKey: ['quota'] }); open.value = false; notify(t('bucketCreated')); emit('created', bucket) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 </script>
