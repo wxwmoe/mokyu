@@ -45,6 +45,7 @@ docker exec -it mokyu cli user create admin
 | 文档 | 内容 |
 | --- | --- |
 | [部署与恢复](docs/deployment-and-recovery.md) | 从源码构建、Compose、Nginx、初始化、升级和备份恢复 |
+| [群集部署](docs/cluster-deployment.md) | control/worker/data 拓扑、节点加入、控制主备和多 IP DNS |
 | [配置](docs/configuration.md) | 全部 TOML 字段、默认值、资源预算和秘密文件 |
 | [CLI](docs/cli-reference.md) | 完整命令、参数、输出、危险确认和任务语义 |
 | [管理指南](docs/management.md) | 媒体、项目授权、密钥、配额、空间洞察与维护流程 |

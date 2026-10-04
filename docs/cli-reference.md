@@ -121,6 +121,18 @@ docker exec -i mokyu cli user create admin --password-stdin < /secure/password-f
 
 `maintenance pack-creation stop` 停止即时上传、异步上传及各维护路径发布新包；已有 preparing 包收尾后才允许全部拆包。`maintenance pack-creation resume` 恢复生成，但未完成的全部拆包任务会阻止恢复。配置 pack.enabled=false 时，运行开关不能越过配置启用。
 
+## 群集
+
+| 命令 | 作用与返回 |
+| --- | --- |
+| `cluster status` | 返回 deployment mode、enabled 节点数和 local 存储目标数 |
+| `cluster mode single/cluster` | 切换数据库部署模式；进入 cluster 前必须已迁移并移除所有 local target，回到 single 前必须禁用所有节点 |
+| `cluster nodes` | 列出节点 id、名称、角色、advertise URL、启用状态和最近 heartbeat |
+| `cluster token NAME KIND [--advertise-url URL] [--expires-in 1h]` | 为 control/worker/data 创建一次性 join token；control 必须提供只指向该节点的 advertise URL；token 只在本次输出返回 |
+| `cluster revoke UUID` | 禁用节点并使未消费的 join token 失效 |
+
+新 control、worker 或 data 将 `cluster token` 的输出写入自己的配置，第一次启动后凭据保存到 `storage.data/node.json`。第一台 control 不需要 join token，但必须在配置中设置 `cluster.advertise_url`。控制主备、DNS 和角色安排见[群集部署](cluster-deployment.md)。
+
 ## 后台任务
 
 | 命令 | 作用与返回 |

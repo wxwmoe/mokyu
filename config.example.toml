@@ -110,11 +110,12 @@ deployment_key = "REPLACE_WITH_MOKYU_KEY_GENERATE_OUTPUT"
 algorithm = "aes-256-gcm"
 
 [cluster]
-# Cluster workers/data nodes use the management URL and one-time token created by
-# `mokyu cli cluster token`; the first control starts without either value.
+# The first control needs only advertise_url; it starts without control_url or join_token.
+# Other controls, workers and data nodes use the management URL and one-time token
+# created by `mokyu cli cluster token`.
 # control_url = "https://control.example.com"
 # join_token = "PASTE_ONE_TIME_TOKEN_HERE"
-# node_name = "data-1"
+# node_name = "control-1"
 # advertise_url = "https://control-2.example.com"
 
 [gc]

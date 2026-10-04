@@ -48,6 +48,17 @@ Compose 健康检查对应 `["CMD","mokyu","--config","PATH","cli","status"]`。
 
 直接密码由 SQLx 连接参数传递，无需 URL 转义。密码与密码文件二选一，文件内容是密码文本。
 
+## 群集注册
+
+| 字段 | 类型 / 默认值 | 说明 |
+| --- | --- | --- |
+| `cluster.control_url` | 绝对 URL / 空 | 加入节点和后续 heartbeat 使用的 control 地址；第一台 control 可省略 |
+| `cluster.join_token` | 一次性 URL-safe 字符串 / 空 | `cli cluster token` 为新 control、worker 或 data 生成的令牌；首次加入后写入 `storage.data/node.json`，可从配置删除 |
+| `cluster.node_name` | 安全字符串 / 空 | 只用于没有 join token 的第一台 control；省略时为 `control-1`，加入节点名称由令牌绑定 |
+| `cluster.advertise_url` | 绝对 URL / 空 | 第一台 control 必填；每台 control 应填写只指向本机的可达地址，供 standby 转发 |
+
+启动命令决定角色：默认命令为 single，`control` 只监听管理端口，`worker` 执行后台任务，`data` 监听 S3 和公共读。群集模式要求 PostgreSQL、部署密钥和数据库连接在每个容器配置中直接提供；节点不会从 control 读取数据库地址。详见[群集部署](cluster-deployment.md)。
+
 ## 存储目标与运行参数
 
 S3 连接和本地存储路径保存在数据库的存储目标中，通过 `mokyu cli stores create` 或 `/api/stores` 管理。新安装没有存储目标；创建桶之前必须先添加目标。TOML 不再接受 `[backend]`。目标凭据用部署密钥加密，查询不会返回明文。
