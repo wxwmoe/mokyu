@@ -43,6 +43,8 @@ pub(super) struct Batch {
     bucket: Uuid,
     action: Kind,
     target_bucket: Option<Uuid>,
+    #[serde(default)]
+    confirm_storage_migration: bool,
     public_read: Option<bool>,
     metadata: Option<ObjectMetadata>,
     objects: Vec<Item>,
@@ -52,6 +54,7 @@ pub(super) struct Outcome {
     status: u16,
     code: Option<String>,
     output_version: Option<Uuid>,
+    task_id: Option<Uuid>,
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct ItemResult {
@@ -78,14 +81,35 @@ pub(crate) async fn complete(
     tx: &mut Transaction<'_, Postgres>,
     version: Option<Uuid>,
 ) -> Result<()> {
-    if let Ok((id, bucket, key, action, count)) =
-        RECEIPT.try_with(|r| (r.id, r.bucket, r.key.clone(), r.action, r.count))
-    {
-        let result = Outcome {
+    record(
+        tx,
+        Outcome {
             status: 200,
             code: None,
             output_version: version,
-        };
+            task_id: None,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn queued(tx: &mut Transaction<'_, Postgres>, task_id: Uuid) -> Result<()> {
+    record(
+        tx,
+        Outcome {
+            status: 202,
+            code: None,
+            output_version: None,
+            task_id: Some(task_id),
+        },
+    )
+    .await
+}
+
+async fn record(tx: &mut Transaction<'_, Postgres>, result: Outcome) -> Result<()> {
+    if let Ok((id, bucket, key, action, count)) =
+        RECEIPT.try_with(|r| (r.id, r.bucket, r.key.clone(), r.action, r.count))
+    {
         let changed =
             sqlx::query("UPDATE media_operations SET result=$2 WHERE id=$1 AND result IS NULL")
                 .bind(id)
@@ -98,7 +122,7 @@ pub(crate) async fn complete(
             tx,
             "object.change",
             &key,
-            json!({"bucket_id":bucket,"operation":action,"version":version,"operation_id":id}),
+            json!({"bucket_id":bucket,"operation":action,"version":result.output_version,"task_id":result.task_id,"operation_id":id}),
         )
         .await?;
         if count > 1 {
@@ -252,6 +276,7 @@ fn failure(error: anyhow::Error) -> Outcome {
             .get::<crate::http::ErrorCode>()
             .map(|c| c.0.clone()),
         output_version: None,
+        task_id: None,
     }
 }
 async fn apply(
@@ -266,6 +291,7 @@ async fn apply(
         input.bucket,
         input.action,
         input.target_bucket,
+        input.confirm_storage_migration,
         input.public_read,
         &input.metadata,
         item,
@@ -360,7 +386,7 @@ async fn scope(tx: &mut Transaction<'_, Postgres>, permit: &Permit) -> Result<()
     .await?;
     Ok(())
 }
-async fn selected(
+pub(crate) async fn selected(
     tx: &mut Transaction<'_, Postgres>,
     bucket: Uuid,
     key: &str,
@@ -380,6 +406,25 @@ async fn selected(
     Ok(actual)
 }
 async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit) -> Result<()> {
+    let target = input.target_bucket.unwrap();
+    let source_target: Option<Uuid> =
+        sqlx::query_scalar("SELECT storage_target_id FROM buckets WHERE id=$1")
+            .bind(input.bucket)
+            .fetch_optional(&app.db)
+            .await?
+            .flatten();
+    let target_target: Option<Uuid> =
+        sqlx::query_scalar("SELECT storage_target_id FROM buckets WHERE id=$1")
+            .bind(target)
+            .fetch_optional(&app.db)
+            .await?
+            .flatten();
+    if source_target.is_none() || target_target.is_none() {
+        return Err(s3s::s3_error!(NoSuchBucket).into());
+    }
+    if source_target != target_target {
+        return copy_object(app, input, item, permit).await;
+    }
     app.writable()?;
     #[cfg(feature = "fault-injection")]
     crate::faults::point("media-before-publish").await;
@@ -388,7 +433,6 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
     let mut tx = app.db.begin().await?;
     scope(&mut tx, permit).await?;
     selected(&mut tx, input.bucket, &item.key, Some(item.version)).await?;
-    let target = input.target_bucket.unwrap();
     let key = item.target_key.as_deref().unwrap();
     let old = selected(&mut tx, target, key, item.target_version).await?;
     let public: bool = sqlx::query_scalar("SELECT public_read FROM streams WHERE id=$1")
@@ -445,10 +489,60 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
             input.target_bucket.unwrap(),
             item.target_key.as_deref().unwrap(),
             item.target_version,
-            input.public_read.unwrap_or(false),
+            if input.action == Kind::Move {
+                source.public_read
+            } else {
+                input.public_read.unwrap_or(false)
+            },
             source.metadata.clone(),
         )
     };
+    let source_target: Uuid =
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT storage_target_id FROM buckets WHERE id=$1")
+            .bind(input.bucket)
+            .fetch_one(&app.db)
+            .await?
+            .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    let target_target: Uuid =
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT storage_target_id FROM buckets WHERE id=$1")
+            .bind(target)
+            .fetch_one(&app.db)
+            .await?
+            .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    if source_target != target_target {
+        if !input.confirm_storage_migration {
+            return Err(problem(StatusCode::CONFLICT, "StorageMigrationConfirmationRequired").0);
+        }
+        let _coord = app.coord.lock().await;
+        let mut tx = app.db.begin().await?;
+        let mut authority = permit.clone();
+        if public {
+            authority.add(target, Action::Acl);
+        }
+        scope(&mut tx, &authority).await?;
+        selected(&mut tx, input.bucket, &item.key, Some(item.version)).await?;
+        selected(&mut tx, target, key, expected).await?;
+        let task = crate::tasks::insert(
+            &mut tx,
+            "storage_migration",
+            Some(target),
+            json!({
+                "source_bucket": input.bucket,
+                "source_key": item.key,
+                "source_version": item.version,
+                "target_bucket": target,
+                "target_key": key,
+                "target_version": expected,
+                "action": if input.action == Kind::Move { "move" } else { "copy" },
+                "public_read": public,
+            }),
+        )
+        .await?;
+        queued(&mut tx, task).await?;
+        tx.commit().await?;
+        app.wake_tasks.notify_one();
+        return Ok(());
+    }
     let (id, _pin) = app
         .new_stream(permit, target, key, "object", meta, public, false, None)
         .await?;

@@ -144,7 +144,7 @@ secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployme
 
 ## 对象操作
 
-`POST /api/media/actions`：bucket、action、objects；每项 `{client_id,key,version,target_key?,target_version?}`。最多 1000 项、共享两个操作名额、60 秒请求期限。HTTP 200 返回 results，须逐项检查 status/code/output_version/replayed。
+`POST /api/media/actions`：bucket、action、objects；每项 `{client_id,key,version,target_key?,target_version?}`。跨存储复制或移动还要显式提交 `confirm_storage_migration:true`。最多 1000 项、共享两个操作名额、60 秒请求期限。HTTP 200 返回 results，须逐项检查 status/code/output_version/task_id/replayed。
 
 | action | 权限与语义 |
 | --- | --- |
@@ -154,7 +154,7 @@ secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployme
 | move | 源 read/delete、目标 write；保留 ACL，公开对象另需目标 acl |
 | metadata | 源 read/write；公开对象另需 acl，产生新版本 |
 
-复制/移动使用 target_bucket 和逐项 target_key；替换目标须提供 target_version。源/目标变化返回逐项 412。复制仅复用引用；同项目移动按逻辑净变化记账，跨项目受目标额度约束。
+复制/移动使用 target_bucket 和逐项 target_key；替换目标须提供 target_version。源/目标变化返回逐项 412。复制仅复用引用；同项目移动按逻辑净变化记账，跨项目受目标额度约束。源桶与目标桶绑定不同 storage target 时，未确认返回逐项 409 `StorageMigrationConfirmationRequired`；确认后返回逐项 status 202 和 task_id，创建 `storage_migration` 后台任务，将区块重新编码到目标存储。跨存储复制不共享去重，移动只在目标发布成功后退休源对象；任务失败会保留源对象。
 
 client_id 是调用方 UUID。成功回执与变更同事务提交；同身份、同参数重试返回回执，参数不同返回 409 IdempotencyConflict。已确认失败的新尝试使用新 ID，未知结果保留原 ID。重试仍检查实时权限，回执按 task_retention 清理。Web 每批 20 项、选择限当前页；关闭浏览器不保留未确认的操作编号。
 
@@ -225,7 +225,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 
 `GET /api/tasks` 支持 state/kind/bucket/actor/token、分页游标和 limit（默认 50，最多 200），返回 tasks/next_token。`GET /api/tasks/{id}` 返回状态、来源、发起者、处理计数、阻止原因及 detail。`POST /api/tasks/{id}/actions` 提交 pause/resume。
 
-状态为 queued/running/paused/completed/failed。暂停不回滚已提交批次；重启将 running 重排，paused 保持暂停。维护前提和策略可能阻止继续。任务创建成功只表示排队，不代表完成。
+状态为 queued/running/paused/completed/failed。暂停不回滚已提交批次；重启将 running 重排，paused 保持暂停。维护前提和策略可能阻止继续。任务创建成功只表示排队，不代表完成。`storage_migration` 的 detail 保存源/目标桶、对象版本、目标键和 copy/move 动作；可用同一任务接口查看、暂停和恢复。
 
 ## 完整性巡检
 

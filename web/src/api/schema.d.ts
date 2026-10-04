@@ -1423,6 +1423,7 @@ export interface components {
             action: components["schemas"]["Kind"];
             /** Format: uuid */
             bucket: string;
+            confirm_storage_migration?: boolean;
             metadata?: components["schemas"]["ObjectMetadata"] | null;
             objects: components["schemas"]["Item"][];
             public_read?: boolean | null;
@@ -1897,6 +1898,8 @@ export interface components {
             output_version?: string | null;
             /** Format: int32 */
             status: number;
+            /** Format: uuid */
+            task_id?: string | null;
         };
         PackDetail: {
             members: components["schemas"]["PackMember"][];

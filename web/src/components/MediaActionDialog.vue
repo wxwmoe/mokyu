@@ -22,15 +22,17 @@ const busy = ref(false), loading = ref(false), attempted = ref(false), error = r
 const target = ref(''), path = ref(''), overwrite = ref(false), publicRead = ref(false)
 const meta = reactive<Record<string, string>>({}), custom = ref<{ key: string; value: string }[]>([])
 const fields = ['content_type', 'cache_control', 'content_disposition', 'content_encoding', 'content_language', 'expires'] as const
-const snapshot = ref(''), initialized = ref(false), discardOpen = ref(false)
+const snapshot = ref(''), initialized = ref(false), discardOpen = ref(false), migrationOpen = ref(false), migrationConfirmed = ref(false)
 let pendingLeave: ((value: boolean) => void) | undefined
 const copyMove = computed(() => ['copy', 'move'].includes(props.action))
 const current = computed(() => props.buckets.find(bucket => bucket.id === target.value))
 const options = computed(() => props.buckets.filter(bucket => bucket.state === 'active' && bucket.actions.includes('object.write') && (props.action !== 'move' || !props.items.some(item => item.public_read) || bucket.actions.includes('object.acl'))).map(bucket => ({ value: bucket.id, label: bucket.name })))
+const crossStore = computed(() => copyMove.value && !!current.value && current.value.storage_target_id !== props.bucket.storage_target_id)
 const state = () => JSON.stringify([target.value, path.value, overwrite.value, publicRead.value, meta, custom.value])
 const dirty = computed(() => open.value && initialized.value && !attempted.value && state() !== snapshot.value)
-const completed = computed(() => rows.value.filter(row => row.outcome?.status === 200).length)
-const failures = computed(() => rows.value.filter(row => row.outcome && row.outcome.status !== 200).length)
+const completed = computed(() => rows.value.filter(row => row.outcome && row.outcome.status >= 200 && row.outcome.status < 300).length)
+const failures = computed(() => rows.value.filter(row => row.outcome && row.outcome.status >= 400).length)
+const queued = computed(() => rows.value.some(row => row.outcome?.status === 202))
 const unconfirmed = computed(() => rows.value.some(row => !row.outcome))
 function closing(value: boolean) {
   if (value || busy.value) return
@@ -45,7 +47,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', unloading); p
 watch(open, async (value, _, cleanup) => {
   if (!value) return
   const controller = new AbortController(); cleanup(() => controller.abort())
-  initialized.value = false; attempted.value = false; rows.value = []; error.value = undefined
+  initialized.value = false; attempted.value = false; rows.value = []; error.value = undefined; migrationOpen.value = false; migrationConfirmed.value = false
   target.value = options.value.some(option => option.value === props.bucket.id) ? props.bucket.id : options.value[0]?.value || ''
   path.value = props.items.length === 1 ? props.items[0]!.object_key : props.prefix; overwrite.value = false; publicRead.value = false
   for (const field of fields) meta[field] = ''
@@ -69,6 +71,7 @@ function metadata(): Metadata {
   return { ...Object.fromEntries(fields.map(field => [field, meta[field] || null])), user: Object.fromEntries(custom.value.map((pair, index) => [names[index]!, pair.value])) }
 }
 async function execute(retryFailed = false) {
+  if (crossStore.value && !migrationConfirmed.value) { migrationOpen.value = true; return }
   busy.value = true; error.value = undefined
   try {
     const value = props.action === 'metadata' ? metadata() : undefined
@@ -95,6 +98,7 @@ async function execute(retryFailed = false) {
       const group = pending.slice(start, start + 20)
       const result = await write<components['schemas']['BatchResult']>('/api/media/actions', { bucket: props.bucket.id, action: props.action,
         ...(copyMove.value ? { target_bucket: target.value } : {}), ...(props.action === 'copy' ? { public_read: publicRead.value } : {}),
+        ...(crossStore.value ? { confirm_storage_migration: true } : {}),
         ...(value ? { metadata: value } : {}), objects: group.map(row => row.item) })
       for (const row of group) row.outcome = result.results.find(outcome => outcome.client_id === row.item.client_id)
     }
@@ -113,10 +117,11 @@ function explain(row: Entry) { return row.outcome ? errorText(new ApiError(row.o
     <template v-else>
       <fieldset v-if="copyMove && !attempted" class="action-fields" :disabled="busy || attempted"><label class="field">{{ t('targetBucket') }}<UiSelect v-model="target" :disabled="attempted" :label="t('targetBucket')" :options="options" /></label><label class="field">{{ t(items.length === 1 ? 'targetPath' : 'targetFolder') }}<input v-model="path" maxlength="1024" :aria-label="t(items.length === 1 ? 'targetPath' : 'targetFolder')"></label><UiCheckbox v-if="current?.actions.includes('bucket.list')" v-model="overwrite" :disabled="attempted" :label="t('actionOverwrite')" /><UiCheckbox v-if="action === 'copy' && current?.actions.includes('object.acl')" v-model="publicRead" :disabled="attempted" :label="t('actionPublicCopy')" /><p v-if="action === 'move'" class="field-help">{{ t('moveAccessHint') }}</p></fieldset>
       <fieldset v-if="action === 'metadata' && !attempted" class="action-fields" :disabled="busy || attempted"><div class="metadata-editor"><label v-for="field in fields" :key="field" class="field">{{ t('metadata_' + field) }}<input v-model="meta[field]" maxlength="2048"></label></div><h3>{{ t('customMetadata') }}</h3><div v-for="(pair, index) in custom" :key="index" class="metadata-pair"><input v-model="pair.key" :aria-label="t('metadataName')" maxlength="256"><input v-model="pair.value" :aria-label="t('metadataValue')" maxlength="2048"><button class="icon-button" :aria-label="t('removeField')" @click="custom.splice(index, 1)"><Trash2 :size="15" /></button></div><button @click="custom.push({ key: '', value: '' })"><Plus :size="15" />{{ t('addField') }}</button><p class="field-help">{{ t('metadataHint') }}</p></fieldset>
-      <p v-if="copyMove && attempted" class="field-help break-anywhere">{{ current?.name }} · {{ path }}</p><div v-if="attempted" class="action-progress" role="status"><span class="status-orb" :class="{ warning: failures }"><LoaderCircle v-if="busy" class="spinning" :size="22" /><CircleAlert v-else-if="failures || unconfirmed" :size="22" /><Check v-else :size="22" /></span><div><strong>{{ t('actionProgress', { completed, total: rows.length }) }}</strong><p>{{ t(unconfirmed ? 'actionRetryHint' : failures ? 'actionFailureHint' : 'actionDoneHint') }}</p></div></div>
-      <div class="action-object-list"><div v-for="(item, index) in items" :key="item.id" class="action-object"><FileIcon :name="item.object_key" /><div><strong>{{ item.object_key }}</strong><span v-if="copyMove"><ArrowRight :size="12" />{{ destination(item) }}</span><p v-if="rows[index]?.outcome?.status !== 200 && attempted" class="field-help">{{ explain(rows[index]!) }}</p></div><Check v-if="rows[index]?.outcome?.status === 200" class="success-text" :size="17" /><CircleAlert v-else-if="rows[index]?.outcome" class="danger" :size="17" /></div></div>
+      <p v-if="copyMove && attempted" class="field-help break-anywhere">{{ current?.name }} · {{ path }}</p><div v-if="attempted" class="action-progress" role="status"><span class="status-orb" :class="{ warning: failures }"><LoaderCircle v-if="busy" class="spinning" :size="22" /><CircleAlert v-else-if="failures || unconfirmed" :size="22" /><Check v-else :size="22" /></span><div><strong>{{ t('actionProgress', { completed, total: rows.length }) }}</strong><p>{{ t(unconfirmed ? 'actionRetryHint' : failures ? 'actionFailureHint' : queued ? 'actionQueuedHint' : 'actionDoneHint') }}</p></div></div>
+      <div class="action-object-list"><div v-for="(item, index) in items" :key="item.id" class="action-object"><FileIcon :name="item.object_key" /><div><strong>{{ item.object_key }}</strong><span v-if="copyMove"><ArrowRight :size="12" />{{ destination(item) }}</span><p v-if="rows[index]?.outcome && rows[index]!.outcome!.status >= 400 && attempted" class="field-help">{{ explain(rows[index]!) }}</p></div><Check v-if="rows[index]?.outcome && rows[index]!.outcome!.status >= 200 && rows[index]!.outcome!.status < 300" class="success-text" :size="17" /><CircleAlert v-else-if="rows[index]?.outcome" class="danger" :size="17" /></div></div>
     </template>
     <template #footer><button :disabled="busy" @click="closing(false)">{{ t(attempted ? 'close' : 'cancel') }}</button><button v-if="!attempted" :class="action === 'delete' ? 'danger' : 'primary'" :disabled="busy || loading || !initialized || (copyMove && !target)" @click="execute()">{{ t(busy ? 'saving' : 'mediaAction_' + action) }}</button><button v-else-if="unconfirmed" class="primary" :disabled="busy" @click="execute()">{{ t('resumeAction') }}</button><button v-else-if="failures" class="primary" :disabled="busy" @click="execute(true)">{{ t('retryFailed') }}</button></template>
   </UiDialog>
+  <UiDialog v-model:open="migrationOpen" :title="t('confirmStorageMigration')" :description="t('confirmStorageMigrationHint')"><p class="info-callout">{{ t('storageMigrationWarning') }}</p><template #footer><button @click="migrationOpen = false">{{ t('cancel') }}</button><button class="danger-button" @click="migrationConfirmed = true; migrationOpen = false; execute()">{{ t('confirmStorageMigration') }}</button></template></UiDialog>
   <UiDialog v-model:open="discardOpen" :title="t('discardTitle')" :description="t('actionDiscardHint')"><template #footer><button @click="discard(false)">{{ t('keepEditing') }}</button><button class="primary" @click="discard(true)">{{ t('discard') }}</button></template></UiDialog>
 </template>

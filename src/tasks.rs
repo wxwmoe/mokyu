@@ -1,10 +1,23 @@
 use crate::{app::App, config};
 use anyhow::{Context, Result, ensure};
 use futures_util::StreamExt;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 tokio::task_local! { pub(crate) static REQUEST_ID: Uuid; }
+
+#[derive(Deserialize)]
+struct StorageMigration {
+    source_bucket: Uuid,
+    source_key: String,
+    source_version: Uuid,
+    target_bucket: Uuid,
+    target_key: String,
+    target_version: Option<Uuid>,
+    action: String,
+    public_read: bool,
+}
 
 pub(crate) async fn insert(
     db: &mut sqlx::PgConnection,
@@ -193,7 +206,10 @@ impl App {
                     )
                     .into());
                 }
-            } else if matches!(kind.as_str(), "purge" | "pack" | "unpack" | "upload" | "gc") {
+            } else if matches!(
+                kind.as_str(),
+                "purge" | "pack" | "unpack" | "upload" | "gc" | "storage_migration"
+            ) {
                 self.writable()?;
             } else if kind == "integrity" {
                 let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE kind='integrity' AND state IN ('queued','running') AND id<>$1)").bind(id).fetch_one(&self.db).await?;
@@ -390,6 +406,107 @@ impl App {
         sqlx::query("UPDATE tasks SET cursor=$2,processed=processed+$3,detail=$4,updated_at=now() WHERE id=$1").bind(id).bind(last).bind(rows.len()as i64).bind(detail).execute(&self.db).await?;
         Ok(false)
     }
+
+    async fn storage_migration_batch(&self, id: Uuid, detail: Value) -> Result<bool> {
+        let job: StorageMigration = serde_json::from_value(detail)?;
+        ensure!(
+            matches!(job.action.as_str(), "copy" | "move"),
+            "invalid storage migration action"
+        );
+        let (source, _source_pin) = self.current(job.source_bucket, &job.source_key).await?;
+        ensure!(
+            source.id == job.source_version,
+            "source object changed before storage migration"
+        );
+        let authority = crate::authorization::Permit::local();
+        let (destination, _destination_pin) = self
+            .new_stream(
+                &authority,
+                job.target_bucket,
+                &job.target_key,
+                "object",
+                source.metadata.clone(),
+                job.public_read,
+                false,
+                None,
+            )
+            .await?;
+        let result: Result<()> = async {
+            self.copy_extents(destination, &source).await?;
+            self.finish_stream(
+                destination,
+                source.size,
+                &source.etag,
+                source.checksums.clone(),
+            )
+            .await?;
+            let _coord = self.coord.lock().await;
+            self.writable()?;
+            let mut tx = self.db.begin().await?;
+            let source_current = crate::manage::actions::selected(
+                &mut tx,
+                job.source_bucket,
+                &job.source_key,
+                Some(job.source_version),
+            )
+            .await?;
+            let old = crate::manage::actions::selected(
+                &mut tx,
+                job.target_bucket,
+                &job.target_key,
+                job.target_version,
+            )
+            .await?;
+            ensure!(
+                source_current == Some(job.source_version),
+                "source object changed during storage migration"
+            );
+            sqlx::query("UPDATE streams SET state='ready',touched_at=now() WHERE id=$1 AND state='writing'")
+                .bind(destination)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO objects(bucket_id,key,stream_id,write_epoch) VALUES($1,$2,$3,$3) ON CONFLICT(bucket_id,key) DO UPDATE SET stream_id=excluded.stream_id,write_epoch=excluded.write_epoch")
+                .bind(job.target_bucket)
+                .bind(&job.target_key)
+                .bind(destination)
+                .execute(&mut *tx)
+                .await?;
+            if job.action == "move" {
+                sqlx::query("UPDATE objects SET stream_id=NULL,write_epoch=$3 WHERE bucket_id=$1 AND key=$2")
+                    .bind(job.source_bucket)
+                    .bind(&job.source_key)
+                    .bind(Uuid::new_v4())
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id=$1")
+                    .bind(job.source_version)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            if let Some(old) = old {
+                sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id=$1")
+                    .bind(old)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            sqlx::query("UPDATE tasks SET state='completed',processed=processed+1,updated_at=now() WHERE id=$1 AND state='running'")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            sqlx::query("UPDATE streams SET state='abandoned',touched_at=now() WHERE id=$1 AND state='writing'")
+                .bind(destination)
+                .execute(&self.db)
+                .await?;
+        }
+        result?;
+        self.wake_gc.notify_one();
+        Ok(true)
+    }
 }
 
 pub async fn recover_stale(app: &App) -> Result<u64> {
@@ -453,7 +570,7 @@ async fn worker(
         let id = {
             let mut active = active.lock().await;
             let ids: Vec<Uuid> = active.iter().copied().collect();
-            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=now()+interval '5 minutes',updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='running' AND t.lease_expires_at<now())) AND CASE WHEN t.kind IN ('pack','unpack') THEN 1 WHEN t.kind IN ('upload','cache_flush') THEN 2 ELSE 0 END=$1 AND NOT(t.id=ANY($2)) AND NOT (m.maintenance AND t.kind IN ('pack','unpack','purge','gc')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.kind=CASE WHEN t.kind='pack' THEN t.detail->>'kind' ELSE t.kind END AND CASE WHEN c.kind='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.kind='pack' AND t.detail->>'kind' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='running' AND lease_expires_at<now())) RETURNING id").bind(class).bind(ids).bind(lease_node_id).bind(lease_token).fetch_optional(&app.db).await?;
+            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=now()+interval '5 minutes',updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='running' AND t.lease_expires_at<now())) AND CASE WHEN t.kind IN ('pack','unpack') THEN 1 WHEN t.kind IN ('upload','cache_flush','storage_migration') THEN 2 ELSE 0 END=$1 AND NOT(t.id=ANY($2)) AND NOT (m.maintenance AND t.kind IN ('pack','unpack','purge','gc','storage_migration')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.kind=CASE WHEN t.kind='pack' THEN t.detail->>'kind' ELSE t.kind END AND CASE WHEN c.kind='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.kind='pack' AND t.detail->>'kind' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='running' AND lease_expires_at<now())) RETURNING id").bind(class).bind(ids).bind(lease_node_id).bind(lease_token).fetch_optional(&app.db).await?;
             if let Some(id) = id {
                 active.insert(id);
             }
@@ -543,6 +660,13 @@ async fn worker(
                         ),
                     )
                     .await
+            } else if kind == "storage_migration" {
+                crate::backend::PRIORITY
+                    .scope(
+                        crate::backend::UPLOAD,
+                        app.storage_migration_batch(id, detail),
+                    )
+                    .await
             } else {
                 Err(anyhow::anyhow!("unknown maintenance task kind"))
             };
@@ -553,11 +677,13 @@ async fn worker(
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             if class != 0 {
-                if class == 1 && result.is_err() {
+                if class == 1 && result.is_err() && matches!(kind.as_str(), "pack" | "unpack") {
                     sqlx::query("UPDATE pack_changes SET next_check_at=now()+$2*interval '1 second' WHERE pack_id IN (SELECT c.pack_id FROM pack_inputs i JOIN chunks c ON c.id=i.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.pack.reuse_interval)? as f64).execute(&app.db).await?;
                     sqlx::query("UPDATE pack_maintenance SET next_check_at=now()+$2*interval '1 second' WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.pack.reuse_interval)? as f64).execute(&app.db).await?;
                 }
-                app.finish_pack_work(id).await?;
+                if matches!(kind.as_str(), "pack" | "unpack") {
+                    app.finish_pack_work(id).await?;
+                }
             }
             match result {
                 Ok(true) => {
@@ -568,7 +694,7 @@ async fn worker(
                 Ok(false) => {}
                 Err(e) => {
                     tracing::error!(task_id=%id,error=%e,"maintenance task stopped");
-                    if class == 2 {
+                    if class == 2 && matches!(kind.as_str(), "upload" | "cache_flush") {
                         app.upload_retry(id, &e.to_string()).await?;
                     } else {
                         sqlx::query("UPDATE tasks SET state='failed',error=$2,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$3").bind(id).bind(e.to_string()).bind(lease_token).execute(&app.db).await?;

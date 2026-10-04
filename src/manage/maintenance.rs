@@ -464,7 +464,7 @@ pub(super) struct JobPage {
     tasks: Vec<Job>,
     next_token: Option<String>,
 }
-const JOB_SQL: &str = "SELECT to_jsonb(t)||jsonb_build_object('bucket_name',b.name,'blocked',CASE WHEN c.paused OR (coalesce(c.kind,'')='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.kind IN ('pack','unpack','purge','gc','upload') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.kind='pack' AND t.detail->>'kind' IN ('pack','repack') THEN 'PackCreationStopped' END) FROM tasks t LEFT JOIN buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.kind=CASE WHEN t.kind='pack' THEN t.detail->>'kind' ELSE t.kind END";
+const JOB_SQL: &str = "SELECT to_jsonb(t)||jsonb_build_object('bucket_name',b.name,'blocked',CASE WHEN c.paused OR (coalesce(c.kind,'')='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.kind IN ('pack','unpack','purge','gc','upload','storage_migration') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.kind='pack' AND t.detail->>'kind' IN ('pack','repack') THEN 'PackCreationStopped' END) FROM tasks t LEFT JOIN buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.kind=CASE WHEN t.kind='pack' THEN t.detail->>'kind' ELSE t.kind END";
 #[utoipa::path(get,path="/api/tasks",params(JobQuery),responses((status=200,body=JobPage)))]
 pub(super) async fn jobs(
     State(app): State<Arc<App>>,

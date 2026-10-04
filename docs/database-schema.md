@@ -83,7 +83,7 @@ pending 的 cache_size/cache_compressed 表示实际 .raw/.zst 文件。pin 随 
 | --- | --- | --- |
 | `maintenance_controls` (kind) | `kind`、`paused`、`last_scheduled_at`、`updated_at` | 七类持久策略和最近调度时间 |
 | `maintenance_previews` (id) | `id`、`actor_id`、`token_id`、`action`、`parameters`、`fingerprint`、`expires_at`、`task_id` | 身份/Token 绑定的十分钟预览，task_id 保存执行回执 |
-| `tasks` (id) | `id`、`kind`、`bucket_id`、`state`、`cursor`、`processed`、`detail`、`error`、`created_at`、`updated_at`、`created_by`、`source`、`started_at` | 持久游标、来源、发起者；queued/running/paused/completed/failed |
+| `tasks` (id) | `id`、`kind`、`bucket_id`、`state`、`cursor`、`processed`、`detail`、`error`、`created_at`、`updated_at`、`created_by`、`source`、`started_at` | 持久游标、来源、发起者；queued/running/paused/completed/failed；`storage_migration` detail 保存跨 target 的源/目标对象 |
 | `integrity_issues` (id) | `id`、`task_id`、`subject`、`code`、`chunk_id`、`storage_id`、`stream_id`、`bucket_id`、`object_key`、`detail`、`created_at` | 保留检查时身份，对象删除不抹除异常 |
 | `integrity_packs` (task_id, pack_id) | `task_id`、`pack_id`、`error_code` | 避免一轮巡检重复验证共享包 |
 | `audit_events` (id) | `id`、`created_at`、`finished_at`、`actor_id`、`actor_label`、`token_id`、`source`、`action`、`target`、`project_id`、`bucket_id`、`outcome`、`request_id`、`status`、`detail` | 持久意图与显式结果，用户删除不级联删除历史 |

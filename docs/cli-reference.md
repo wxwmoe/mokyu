@@ -130,7 +130,7 @@ docker exec -i mokyu cli user create admin --password-stdin < /secure/password-f
 | `task pause UUID` | 暂停 queued/running 任务，允许当前批次结束 |
 | `task resume UUID` | 从持久进度继续 paused/failed 任务，清除旧错误 |
 
-重启后此前运行的任务自动继续，paused 保持暂停。维护模式下 purge/pack/unpack/upload 会持久暂停，退出维护后需显式 `task resume`。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge/pack/unpack/upload 需要退出维护模式，只读 sweep、巡检和显式 cache flush 可在维护模式下运行。
+重启后此前运行的任务自动继续，paused 保持暂停。维护模式下 purge/pack/unpack/upload/storage_migration 会持久暂停，退出维护后需显式 `task resume`。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge/pack/unpack/upload/storage_migration 需要退出维护模式，只读 sweep、巡检和显式 cache flush 可在维护模式下运行。
 
 ### 区块包维护
 
