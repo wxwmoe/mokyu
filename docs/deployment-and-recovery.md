@@ -92,14 +92,14 @@ docker exec mokyu cli task list
 
 ### 补齐无引用区块的回收标记
 
-若数据库中存在 `ready`、无引用且 `unreferenced_at` 为空的遗留区块，可先启用维护模式并停止网关，再用 PostgreSQL 客户端执行仓库内的脚本：
+若数据库中存在 `ready`、无引用且 `unreferenced_at` 为空的遗留区块，先启用维护模式并等待活跃操作排空，再运行 CLI：
 
 ```sh
-psql -X -h DB_HOST -U DB_USER -d DB_NAME -f scripts/mark-unreferenced-chunks.sql
+docker exec mokyu cli maintenance enable
+docker exec mokyu cli gc mark-unreferenced
 ```
 
-[脚本](../scripts/mark-unreferenced-chunks.sql) 取得网关数据库独占锁，每批最多检查 1000 条记录并提交，可中断后重跑。它只补时间标记，不访问后端；重新启动并退出维护后，区块按正常 GC 宽限回收。有引用的区块和已有时间标记保持不变。无需日常执行，勿使用 `--single-transaction`。
-
+命令取得数据库锁，只补时间标记，不访问存储后端；退出维护后，区块按正常 GC 宽限回收。有引用的区块和已有时间标记保持不变。
 ## 备份材料
 
 项目不备份后端 S3 区块或区块包。可用 pgBackRest 备份 PostgreSQL/WAL、restic 备份配置，亦可选用其他满足恢复要求的工具。

@@ -88,11 +88,22 @@ impl App {
             sqlx::query_scalar("SELECT count(*)::text FROM packs WHERE state='preparing'")
                 .fetch_one(&self.db)
                 .await?;
+        let backend_prefixes: Vec<Value> = self
+            .storage
+            .target_ids()
+            .into_iter()
+            .filter_map(|id| {
+                self.storage
+                    .namespace_for(id)
+                    .ok()
+                    .map(|prefix| json!({"id": id, "prefix": prefix}))
+            })
+            .collect();
         Ok(
             json!({"maintenance":global,"controls":rows,"concurrency":self.config.pack.maintenance_concurrency,
             "pack_configured":self.config.pack.enabled,"pack_creation_paused":self.pack_creation_paused.load(Ordering::Acquire),
             "pack_creation_enabled":self.pack_creation_allowed(),"preparing_packs":preparing,"active_operations":self.active.lock().unwrap().len(),
-            "backend_prefix":self.storage.namespace(),"min_storage_duration":self.config.storage.min_storage_duration}),
+            "backend_prefixes":backend_prefixes,"min_storage_duration":self.config.storage.min_storage_duration}),
         )
     }
 

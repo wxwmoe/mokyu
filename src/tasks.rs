@@ -91,12 +91,14 @@ impl App {
         preview: Option<Uuid>,
         confirm_prefix: Option<&str>,
         older_than: &str,
+        target_id: Option<Uuid>,
     ) -> Result<Value> {
         let _coord = self.coord.lock().await;
         let age = config::seconds(older_than)?;
         ensure!(age <= i64::MAX as u64 / 1000, "age too large");
         let minimum = self.config.storage.min_storage_seconds()?;
-        let prefix = self.storage.namespace().to_string();
+        let target_id = self.storage.select_target(target_id)?;
+        let prefix = self.storage.namespace_for(target_id)?;
         if execute {
             let indexed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunks)")
                 .fetch_one(&self.db)
@@ -119,6 +121,14 @@ impl App {
             ensure!(
                 previous["dry_run"] == true && previous["prefix"] == prefix,
                 "preview scope mismatch"
+            );
+            let previous_target: Uuid = previous["storage_target_id"]
+                .as_str()
+                .context("preview storage target is missing")?
+                .parse()?;
+            ensure!(
+                previous_target == target_id,
+                "preview storage target mismatch"
             );
             ensure!(
                 previous["older_than_seconds"].as_u64() == Some(age),
@@ -143,7 +153,7 @@ impl App {
         let cutoff = chrono::Utc::now()
             .checked_sub_signed(chrono::TimeDelta::seconds(age.max(minimum) as i64))
             .context("age too large")?;
-        let detail = json!({"dry_run":!execute,"prefix":prefix,"older_than_seconds":age,"min_storage_duration_seconds":minimum,"cutoff":cutoff.to_rfc3339(),"candidates":0,"bytes":0,"unrecognized":0,"samples":[]});
+        let detail = json!({"dry_run":!execute,"storage_target_id":target_id,"prefix":prefix,"older_than_seconds":age,"min_storage_duration_seconds":minimum,"cutoff":cutoff.to_rfc3339(),"candidates":0,"bytes":0,"unrecognized":0,"samples":[]});
         let id = insert(&mut *self.db.acquire().await?, "sweep", None, detail).await?;
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id,"dry_run":!execute}))
@@ -307,7 +317,11 @@ impl App {
                 "wait for current GC batch"
             );
         }
-        let prefix = self.storage.namespace().to_string();
+        let target_id: Uuid = detail["storage_target_id"]
+            .as_str()
+            .context("missing sweep storage target")?
+            .parse()?;
+        let prefix = self.storage.namespace_for(target_id)?;
         ensure!(detail["prefix"] == prefix, "backend namespace changed");
         let cutoff = chrono::DateTime::parse_from_rfc3339(
             detail["cutoff"].as_str().context("missing sweep cutoff")?,
@@ -322,7 +336,7 @@ impl App {
         );
         let rows = self
             .storage
-            .list_physical(cursor, self.config.gc.batch_size as usize)
+            .list_physical_for(target_id, cursor, self.config.gc.batch_size as usize)
             .await?;
         let Some(last) = rows.last().map(|r| r.location.to_string()) else {
             sqlx::query("UPDATE tasks SET state='completed',updated_at=now() WHERE id=$1 AND state='running'").bind(id).execute(&self.db).await?;
@@ -333,7 +347,7 @@ impl App {
                 continue;
             }
             let name = row.location.as_ref();
-            let Some(storage) = self.storage.parse_physical_path(name) else {
+            let Some(storage) = self.storage.parse_physical_path_for(target_id, name)? else {
                 detail["unrecognized"] = json!(detail["unrecognized"].as_u64().unwrap_or(0) + 1);
                 continue;
             };
@@ -360,7 +374,9 @@ impl App {
                     self.maintenance.load(std::sync::atomic::Ordering::Acquire),
                     "maintenance was disabled; sweep stopped"
                 );
-                self.storage.delete_path(&row.location).await?;
+                self.storage
+                    .delete_path_for(target_id, &row.location)
+                    .await?;
             }
             detail["candidates"] = json!(detail["candidates"].as_u64().unwrap_or(0) + 1);
             detail["bytes"] = json!(detail["bytes"].as_u64().unwrap_or(0) + row.size);

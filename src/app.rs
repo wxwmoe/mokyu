@@ -24,7 +24,6 @@ pub struct Bucket {
     pub id: Uuid,
     pub project_id: Uuid,
     pub name: String,
-    #[serde(skip)]
     pub storage_target_id: Option<Uuid>,
     pub state: String,
     pub settings_revision: i64,
@@ -125,7 +124,7 @@ pub struct App {
     pub gc_running: std::sync::atomic::AtomicBool,
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: tokio::sync::Notify,
-    hashes: Mutex<HashMap<[u8; 32], Weak<tokio::sync::Mutex<()>>>>,
+    hashes: Mutex<HashMap<(Uuid, [u8; 32]), Weak<tokio::sync::Mutex<()>>>>,
     pub operation_locks: Mutex<HashMap<Uuid, Weak<tokio::sync::Mutex<()>>>>,
     _file_lock: std::fs::File,
 }
@@ -416,14 +415,21 @@ impl App {
     ) -> Result<Chunk> {
         ensure!(!raw.is_empty() && raw.len() <= MAX, "invalid chunk length");
         let hash = *blake3::hash(&raw).as_bytes();
+        let target_id: Uuid = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT b.storage_target_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
+        )
+        .bind(stream)
+        .fetch_one(&self.db)
+        .await?
+        .context("stream has no storage target")?;
         let mutex = {
             let mut m = self.hashes.lock().unwrap();
             m.retain(|_, v| v.strong_count() > 0);
-            if let Some(l) = m.get(&hash).and_then(Weak::upgrade) {
+            if let Some(l) = m.get(&(target_id, hash)).and_then(Weak::upgrade) {
                 l
             } else {
                 let l = Arc::new(tokio::sync::Mutex::new(()));
-                m.insert(hash, Arc::downgrade(&l));
+                m.insert((target_id, hash), Arc::downgrade(&l));
                 l
             }
         };
@@ -434,38 +440,51 @@ impl App {
         } else {
             &self.secrets.active_key
         };
-        let old:Option<Chunk>=sqlx::query_as("SELECT * FROM chunks WHERE hash=$1 AND raw_size=$2 AND algorithm=$3 AND key_id=$4 AND state='ready'")
-            .bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).fetch_optional(&self.db).await?;
-        if let Some(c) = old {
-            if self.config.cache.upload_cache {
-                let packed:bool=sqlx::query_scalar("SELECT pack_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=$1) FROM chunks WHERE id=$1")
-                    .bind(c.id).fetch_one(&self.db).await?;
-                if packed {
-                    let (data, compressed) = self
-                        .storage
-                        .cache_payload(&c, Bytes::copy_from_slice(&raw))
-                        .await?;
-                    if self
-                        .stage_chunk(stream, offset, &c, data, compressed, false)
-                        .await?
-                    {
-                        return Ok(c);
+        // Keep the advisory lock on a dedicated connection until the physical write is durable.
+        // A transaction-scoped lock would allow another process to observe the preparing row.
+        let mut hash_lock = self.db.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1::text || ':' || encode($2,'hex'), 734922709851001))")
+            .bind(target_id)
+            .bind(hash.as_slice())
+            .execute(&mut *hash_lock)
+            .await?;
+        let c: Chunk = loop {
+            let mut tx = self.db.begin().await?;
+            let old: Option<Chunk> = sqlx::query_as("SELECT * FROM chunks WHERE storage_target_id=$1 AND hash=$2 AND raw_size=$3 AND algorithm=$4 AND key_id=$5 AND state='ready'")
+                .bind(target_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).fetch_optional(&mut *tx).await?;
+            if let Some(c) = old {
+                tx.commit().await?;
+                if self.config.cache.upload_cache {
+                    let packed: bool = sqlx::query_scalar("SELECT pack_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=$1) FROM chunks WHERE id=$1")
+                        .bind(c.id).fetch_one(&self.db).await?;
+                    if packed {
+                        let (data, compressed) = self
+                            .storage
+                            .cache_payload(&c, Bytes::copy_from_slice(&raw))
+                            .await?;
+                        if self
+                            .stage_chunk(stream, offset, &c, data, compressed, false)
+                            .await?
+                        {
+                            return Ok(c);
+                        }
                     }
                 }
+                match self.reference(stream, offset, &c).await {
+                    Ok(()) => return Ok(c),
+                    Err(e) => return Err(e),
+                }
             }
-            match self.reference(stream, offset, &c).await {
-                Ok(()) => return Ok(c),
-                Err(e) if e.downcast_ref::<s3s::S3Error>().is_some() => {}
-                Err(e) => return Err(e),
+            let inserted: Option<Chunk> = sqlx::query_as("INSERT INTO chunks(storage_id,storage_target_id,hash,raw_size,algorithm,key_id,owner_stream,state,unreferenced_at) VALUES($1,$2,$3,$4,$5,$6,$7,'preparing',now()) ON CONFLICT DO NOTHING RETURNING *")
+                .bind(Uuid::new_v4()).bind(target_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).bind(stream).fetch_optional(&mut *tx).await?;
+            tx.commit().await?;
+            if let Some(c) = inserted {
+                break c;
             }
-        }
-        // A lost request never re-encrypts its previous ID or physical object key.
-        sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=COALESCE(unreferenced_at,now()) WHERE hash=$1 AND raw_size=$2 AND algorithm=$3 AND key_id=$4 AND state IN ('preparing','uploading')")
-            .bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).execute(&self.db).await?;
-        let mut tx = self.db.begin().await?;
-        let c:Chunk=sqlx::query_as("INSERT INTO chunks(storage_id,hash,raw_size,algorithm,key_id,owner_stream,state,unreferenced_at) VALUES($1,$2,$3,$4,$5,$6,'preparing',now()) RETURNING *")
-            .bind(Uuid::new_v4()).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).bind(stream).fetch_one(&mut *tx).await?;
-        tx.commit().await?;
+            return Err(
+                s3_error!(OperationAborted, "chunk allocation is already in progress").into(),
+            );
+        };
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-allocated").await;
         let (c, encoded, cache) = self.storage.encode(c, raw, should_compress).await?;
@@ -570,6 +589,41 @@ impl App {
         destination: Uuid,
         source: &StoredStream,
     ) -> Result<()> {
+        let source_target: Uuid = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT b.storage_target_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
+        )
+        .bind(source.id)
+        .fetch_one(&self.db)
+        .await?
+        .context("source stream has no storage target")?;
+        let destination_target: Uuid = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT b.storage_target_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
+        )
+        .bind(destination)
+        .fetch_one(&self.db)
+        .await?
+        .context("destination stream has no storage target")?;
+        if source_target != destination_target {
+            let mut offset = 0;
+            while offset < source.size {
+                let rows: Vec<Extent> = sqlx::query_as(
+                    "SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2 ORDER BY offset_bytes LIMIT 500",
+                )
+                .bind(source.id)
+                .bind(offset)
+                .fetch_all(&self.db)
+                .await?;
+                ensure!(!rows.is_empty(), "source mapping is incomplete");
+                for row in rows {
+                    ensure!(row.offset_bytes == offset, "invalid copy mapping");
+                    let data = self.extent_bytes(&row).await?;
+                    self.put_chunk(destination, offset, data.to_vec(), true)
+                        .await?;
+                    offset += i64::from(row.length);
+                }
+            }
+            return Ok(());
+        }
         let mut offset = 0;
         while offset < source.size {
             let rows: Vec<Extent> = sqlx::query_as("SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2 ORDER BY offset_bytes LIMIT 500")

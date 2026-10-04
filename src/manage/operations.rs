@@ -166,18 +166,21 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 Ok(json!({"mode": mode, "enabled_nodes": nodes, "local_targets": local_targets}))
             }
             Cluster::Mode { mode } => {
-                let current: String =
-                    sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE singleton")
-                        .fetch_one(&app.db)
-                        .await?;
+                let mut tx = app.db.begin().await?;
+                let current: String = sqlx::query_scalar(
+                    "SELECT deployment_mode FROM mokyu_meta WHERE singleton FOR UPDATE",
+                )
+                .fetch_one(&mut *tx)
+                .await?;
                 if current == mode {
+                    tx.rollback().await?;
                     return Ok(json!({"mode": mode}));
                 }
                 if mode == "cluster" {
                     let local: bool = sqlx::query_scalar(
                         "SELECT EXISTS(SELECT 1 FROM storage_targets WHERE type='local')",
                     )
-                    .fetch_one(&app.db)
+                    .fetch_one(&mut *tx)
                     .await?;
                     ensure!(
                         !local,
@@ -186,7 +189,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 } else {
                     let other_nodes: bool =
                         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes WHERE enabled)")
-                            .fetch_one(&app.db)
+                            .fetch_one(&mut *tx)
                             .await?;
                     ensure!(
                         !other_nodes,
@@ -195,8 +198,9 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 }
                 sqlx::query("UPDATE mokyu_meta SET deployment_mode=$1 WHERE singleton")
                     .bind(&mode)
-                    .execute(&app.db)
+                    .execute(&mut *tx)
                     .await?;
+                tx.commit().await?;
                 Ok(json!({"mode": mode}))
             }
             Cluster::Nodes => {
@@ -331,6 +335,9 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                         .fetch_optional(&app.db)
                         .await?
                         .context("storage target not found")?;
+                    app.storage.refresh_target(row.0).await?;
+                    ensure!(row.8, "storage target is disabled");
+                    app.storage.check_target_identity(row.0, false).await?;
                     Ok(public(row))
                 }
                 Stores::Create {
@@ -344,85 +351,68 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                     access_key,
                     secret_key,
                 } => {
-                    ensure!(
-                        (1..=128).contains(&name.trim().len()),
-                        "storage name must contain 1..128 bytes"
-                    );
-                    let id = uuid::Uuid::new_v4();
-                    let (path, endpoint, bucket, region, access, secret) = if r#type == "local" {
-                        ensure!(
-                            endpoint.is_none()
-                                && bucket.is_none()
-                                && region.is_none()
-                                && access_key.is_none()
-                                && secret_key.is_none(),
-                            "local stores cannot include S3 settings"
-                        );
-                        (
-                            Some(path.unwrap_or_else(|| "/data/storage".into())),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    } else {
-                        let endpoint = endpoint.context("S3 endpoint is required")?;
-                        let bucket = bucket.context("S3 bucket is required")?;
-                        let region = region.context("S3 region is required")?;
-                        let access_key = access_key.context("S3 access key is required")?;
-                        let secret_key = secret_key.context("S3 secret key is required")?;
-                        ensure!(
-                            !endpoint.is_empty() && !bucket.is_empty() && !region.is_empty(),
-                            "S3 connection settings must not be empty"
-                        );
-                        let encrypted_access = crate::codec::protect(
-                            access_key.as_bytes(),
-                            &app.secrets.credential_key,
-                            format!("storage-target-{id}-access").as_bytes(),
-                        )?;
-                        let encrypted_secret = crate::codec::protect(
-                            secret_key.as_bytes(),
-                            &app.secrets.credential_key,
-                            format!("storage-target-{id}-secret").as_bytes(),
-                        )?;
-                        (
-                            None,
-                            Some(endpoint),
-                            Some(bucket),
-                            Some(region),
-                            Some(encrypted_access),
-                            Some(encrypted_secret),
-                        )
-                    };
-                    let path = path.map(|value| value.to_string_lossy().into_owned());
-                    sqlx::query("INSERT INTO storage_targets(id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
-                        .bind(id)
-                        .bind(name.trim())
-                        .bind(&r#type)
-                        .bind(path)
-                        .bind(endpoint)
-                        .bind(bucket)
-                        .bind(region)
-                        .bind(prefix)
-                        .bind(access)
-                        .bind(secret)
-                        .execute(&app.db)
-                        .await?;
-                    let row: Row = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,enabled,updated_at FROM storage_targets WHERE id=$1")
-                        .bind(id)
-                        .fetch_one(&app.db)
-                        .await?;
-                    Ok(public(row))
+                    let row = super::stores::create_record(
+                        app,
+                        super::stores::StorageTargetInput {
+                            name,
+                            target_type: r#type,
+                            path: path.map(|value| value.to_string_lossy().into_owned()),
+                            endpoint,
+                            bucket,
+                            region,
+                            prefix,
+                            access_key,
+                            secret_key,
+                        },
+                    )
+                    .await?;
+                    Ok(serde_json::to_value(row)?)
+                }
+                Stores::Update {
+                    name,
+                    r#type,
+                    path,
+                    endpoint,
+                    bucket,
+                    region,
+                    prefix,
+                    access_key,
+                    secret_key,
+                    enabled,
+                } => {
+                    let row = super::stores::update_record(
+                        app,
+                        name,
+                        super::stores::StorageTargetPatch {
+                            target_type: r#type,
+                            path: path.map(|value| value.to_string_lossy().into_owned()),
+                            endpoint,
+                            bucket,
+                            region,
+                            prefix,
+                            access_key,
+                            secret_key,
+                            enabled,
+                        },
+                    )
+                    .await?;
+                    Ok(serde_json::to_value(row)?)
                 }
                 Stores::Sweep {
+                    store,
                     execute,
                     preview,
                     confirm_prefix,
                     older_than,
                 } => {
-                    app.sweep_start(execute, preview, confirm_prefix.as_deref(), &older_than)
-                        .await
+                    app.sweep_start(
+                        execute,
+                        preview,
+                        confirm_prefix.as_deref(),
+                        &older_than,
+                        store,
+                    )
+                    .await
                 }
             }
         }
@@ -465,6 +455,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
         Command::Cleanup(Cleanup::Status) => Ok(app.cleanup_status()),
         Command::Cleanup(Cleanup::Run) => app.cleanup_history().await,
         Command::Gc(Gc::Status) => app.gc_status().await,
+        Command::Gc(Gc::MarkUnreferenced) => Ok(json!({"marked": app.mark_unreferenced().await?})),
         Command::Gc(Gc::Pause) => {
             app.maintenance_change("gc", true).await?;
             app.gc_status().await
@@ -575,13 +566,18 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 .await?;
             Ok(serde_json::to_value(buckets)?)
         }
-        Command::Bucket(Buckets::Create { name, project }) => {
+        Command::Bucket(Buckets::Create {
+            name,
+            project,
+            store,
+        }) => {
             let row = super::buckets::create_bucket(
                 app,
                 &Principal::Local,
                 super::buckets::CreateBucket {
                     name,
                     project_id: project,
+                    storage_target_id: store,
                 },
             )
             .await?;

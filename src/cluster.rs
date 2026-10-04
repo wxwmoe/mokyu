@@ -404,9 +404,15 @@ pub async fn node_loop(app: Arc<App>, role: &'static str) -> Result<()> {
             tracing::warn!(%error, "node database heartbeat failed; retrying");
         }
         if let Err(error) = validate_node(&app, &state, role).await {
+            if error.downcast_ref::<sqlx::Error>().is_none() {
+                return Err(error);
+            }
             tracing::warn!(%error, "node validation failed; retrying");
             tokio::time::sleep(Duration::from_secs(10)).await;
             continue;
+        }
+        if let Err(error) = app.storage.refresh_targets().await {
+            tracing::warn!(%error, "storage target refresh failed; retrying");
         }
         let reply: Result<HeartbeatReply> = post_json(
             control,
@@ -419,7 +425,7 @@ pub async fn node_loop(app: Arc<App>, role: &'static str) -> Result<()> {
         .await;
         match reply {
             Ok(reply) if reply.kind == role && reply.enabled => {}
-            Ok(_) => tracing::warn!("control rejected node heartbeat; retrying"),
+            Ok(_) => return Err(anyhow::anyhow!("control rejected node heartbeat")),
             Err(error) => tracing::warn!(%error, "control heartbeat failed; retrying"),
         }
         tokio::time::sleep(Duration::from_secs(10)).await;

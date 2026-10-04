@@ -145,16 +145,17 @@ pub(crate) async fn mode(
     if !matches!(input.mode.as_str(), "single" | "cluster") {
         return Err(anyhow::anyhow!("mode must be single or cluster").into());
     }
+    let mut tx = app.db.begin().await?;
     let current: String =
-        sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE singleton")
-            .fetch_one(&app.db)
+        sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE singleton FOR UPDATE")
+            .fetch_one(&mut *tx)
             .await?;
     if current != input.mode {
         if input.mode == "cluster" {
             let local: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM storage_targets WHERE type='local')",
             )
-            .fetch_one(&app.db)
+            .fetch_one(&mut *tx)
             .await?;
             if local {
                 return Err(anyhow::anyhow!(
@@ -165,7 +166,7 @@ pub(crate) async fn mode(
         } else {
             let nodes: bool =
                 sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes WHERE enabled)")
-                    .fetch_one(&app.db)
+                    .fetch_one(&mut *tx)
                     .await?;
             if nodes {
                 return Err(anyhow::anyhow!(
@@ -176,9 +177,10 @@ pub(crate) async fn mode(
         }
         sqlx::query("UPDATE mokyu_meta SET deployment_mode=$1 WHERE singleton")
             .bind(&input.mode)
-            .execute(&app.db)
+            .execute(&mut *tx)
             .await?;
     }
+    tx.commit().await?;
     status(State(app), Extension(actor)).await
 }
 

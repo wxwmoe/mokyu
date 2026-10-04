@@ -2,18 +2,17 @@ use crate::{
     codec::{self, Chunk, MAX},
     config::{self, Budget, Config, Secrets},
 };
-use anyhow::{Context, Result, bail, ensure};
+pub(crate) mod target;
+use self::target::{Options as TargetOptionsV2, Record as TargetRecord, Target as VerifiedTarget};
+use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
-use object_store::{
-    ClientOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, RetryConfig,
-    aws::AmazonS3Builder, local::LocalFileSystem, memory::InMemory, path::Path,
-};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 use tokio::{
@@ -21,17 +20,6 @@ use tokio::{
     sync::Semaphore,
 };
 use uuid::Uuid;
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct BackendMeta {
-    format_version: u32,
-    deployment_id: Uuid,
-    chunk_layout: String,
-    #[serde(default)]
-    pack_layout: Option<String>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    created_by: String,
-}
 
 fn chunk_name(id: Uuid) -> String {
     let id = id.simple().to_string();
@@ -469,6 +457,17 @@ struct PackFetch {
     priority: Arc<AtomicUsize>,
 }
 
+struct TargetBackend {
+    backend: Arc<dyn ObjectStore>,
+    prefix: String,
+    revision: chrono::DateTime<chrono::Utc>,
+    metadata: serde_json::Value,
+    identity_ready: std::sync::atomic::AtomicBool,
+    identity_check: tokio::sync::Mutex<()>,
+}
+
+type TargetOptions = TargetOptionsV2;
+
 pub struct Storage {
     pub access: Arc<crate::access::Access>,
     maintenance: Arc<std::sync::atomic::AtomicBool>,
@@ -481,12 +480,9 @@ pub struct Storage {
     pack_memory_units: u32,
     pack_work: Arc<Semaphore>,
     inspection: tokio::sync::Mutex<()>,
-    backend: Arc<dyn ObjectStore>,
-    backend_enabled: bool,
+    targets: RwLock<HashMap<Uuid, Arc<TargetBackend>>>,
+    target_options: TargetOptions,
     pub target_id: Option<Uuid>,
-    identity_ready: std::sync::atomic::AtomicBool,
-    identity_check: tokio::sync::Mutex<()>,
-    prefix: String,
     pub disk: Arc<Disk>,
     pub secrets: Arc<Secrets>,
     pub(crate) cpu: Arc<Semaphore>,
@@ -512,6 +508,64 @@ pub struct Storage {
     cache_lookups: std::sync::atomic::AtomicU64,
     operations: [Arc<crate::stats::Counters>; 4],
 }
+
+pub(crate) type TargetRow = (
+    Uuid,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    serde_json::Value,
+    chrono::DateTime<chrono::Utc>,
+);
+
+async fn build_target(
+    options: TargetOptions,
+    secrets: &Secrets,
+    row: TargetRow,
+) -> Result<Arc<TargetBackend>> {
+    let (
+        id,
+        target_type,
+        path,
+        endpoint,
+        bucket,
+        region,
+        prefix,
+        access,
+        secret,
+        metadata,
+        revision,
+    ) = row;
+    let record = TargetRecord {
+        id,
+        name: String::new(),
+        r#type: target_type,
+        path,
+        endpoint_url: endpoint,
+        remote_bucket: bucket,
+        region,
+        prefix: prefix.clone(),
+        access_key_encrypted: access,
+        secret_key_encrypted: secret,
+        metadata: metadata.clone(),
+        enabled: true,
+    };
+    let target = VerifiedTarget::build(&record, options, secrets)?;
+    Ok(Arc::new(TargetBackend {
+        backend: target.backend,
+        prefix: prefix.trim_matches('/').into(),
+        revision,
+        metadata,
+        identity_ready: false.into(),
+        identity_check: tokio::sync::Mutex::new(()),
+    }))
+}
+
 impl Storage {
     pub async fn new(
         c: &Config,
@@ -555,107 +609,22 @@ impl Storage {
             io: Arc::new(Semaphore::new(budget.cpu_jobs)),
             pending: Mutex::new(HashSet::new()),
         });
-        let target: Option<(
-            Uuid,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<Vec<u8>>,
-            Option<Vec<u8>>,
-        )> = if use_target {
+        let rows: Vec<TargetRow> = if use_target {
             sqlx::query_as(
-                "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted FROM storage_targets WHERE enabled ORDER BY created_at,id LIMIT 1",
+                "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at FROM storage_targets WHERE enabled ORDER BY created_at,id",
             )
-            .fetch_optional(&db)
+            .fetch_all(&db)
             .await?
         } else {
-            None
+            Vec::new()
         };
-        let (target_id, target_type, path, endpoint, bucket, region, prefix, access, secret) =
-            match target {
-                Some((id, kind, path, endpoint, bucket, region, prefix, access, secret)) => (
-                    Some(id),
-                    kind,
-                    path,
-                    endpoint,
-                    bucket,
-                    region,
-                    prefix,
-                    access,
-                    secret,
-                ),
-                None => (
-                    None,
-                    String::new(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    String::new(),
-                    None,
-                    None,
-                ),
-            };
-        let (backend, backend_enabled): (Arc<dyn ObjectStore>, bool) = match target_id {
-            None => (Arc::new(InMemory::new()), false),
-            Some(_) if target_type == "local" => {
-                let path = path.context("local storage target path is missing")?;
-                tokio::fs::create_dir_all(&path).await?;
-                (Arc::new(LocalFileSystem::new_with_prefix(path)?), true)
-            }
-            Some(_) => {
-                let endpoint = endpoint.context("S3 storage target endpoint is missing")?;
-                let bucket = bucket.context("S3 storage target bucket is missing")?;
-                let region = region.context("S3 storage target region is missing")?;
-                let access = access.context("S3 storage target access key is missing")?;
-                let secret = secret.context("S3 storage target secret key is missing")?;
-                let target_id = target_id.context("storage target ID is missing")?;
-                let access = crate::codec::unprotect(
-                    &access,
-                    &secrets.credential_key,
-                    format!("storage-target-{target_id}-access").as_bytes(),
-                )?;
-                let secret = crate::codec::unprotect(
-                    &secret,
-                    &secrets.credential_key,
-                    format!("storage-target-{target_id}-secret").as_bytes(),
-                )?;
-                (
-                    Arc::new(
-                        AmazonS3Builder::new()
-                            .with_endpoint(endpoint)
-                            .with_region(region)
-                            .with_bucket_name(bucket)
-                            .with_access_key_id(access)
-                            .with_secret_access_key(secret)
-                            .with_allow_http(true)
-                            .with_virtual_hosted_style_request(false)
-                            .with_client_options(
-                                ClientOptions::new()
-                                    .with_allow_http(true)
-                                    .with_connect_timeout(Duration::from_secs(config::seconds(
-                                        &c.storage.connect_timeout,
-                                    )?))
-                                    .with_timeout(Duration::from_secs(config::seconds(
-                                        &c.storage.request_timeout,
-                                    )?)),
-                            )
-                            .with_retry(RetryConfig {
-                                max_retries: c.storage.max_retries,
-                                retry_timeout: Duration::from_secs(config::seconds(
-                                    &c.storage.retry_timeout,
-                                )?),
-                                ..Default::default()
-                            })
-                            .build()?,
-                    ),
-                    true,
-                )
-            }
-        };
+        let target_options = TargetOptions::new(&c.storage)?;
+        let target_id = rows.first().map(|row| row.0);
+        let mut targets = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let id = row.0;
+            targets.insert(id, build_target(target_options, &secrets, row).await?);
+        }
         let s = Self {
             maintenance,
             access: Arc::new(crate::access::Access::new(
@@ -670,11 +639,8 @@ impl Storage {
             pack_memory_units: pack_units,
             pack_work: Arc::new(Semaphore::new(pack_units as usize)),
             inspection: tokio::sync::Mutex::new(()),
-            backend,
-            backend_enabled,
-            identity_ready: false.into(),
-            identity_check: tokio::sync::Mutex::new(()),
-            prefix: prefix.trim_end_matches('/').into(),
+            targets: RwLock::new(targets),
+            target_options,
             target_id,
             disk,
             secrets,
@@ -736,212 +702,224 @@ impl Storage {
             "cache_limit_bytes":self.capacity,"multipart_limit_bytes":self.disk.limits[0]})
     }
     pub fn enabled(&self) -> bool {
-        self.backend_enabled
+        !self.targets.read().unwrap().is_empty()
     }
-    pub fn path(&self, id: Uuid) -> Path {
-        Path::from(format!("{}{}", self.prefix(), chunk_name(id)))
+    pub fn target_ids(&self) -> Vec<Uuid> {
+        self.targets.read().unwrap().keys().copied().collect()
     }
-    pub fn prefix(&self) -> String {
-        format!("{}chunks/", self.namespace())
+    fn target_backend(&self, target_id: Uuid) -> Result<Arc<TargetBackend>> {
+        self.targets
+            .read()
+            .unwrap()
+            .get(&target_id)
+            .cloned()
+            .with_context(|| format!("storage target {target_id} is not enabled"))
     }
-    pub fn namespace(&self) -> String {
-        if self.prefix.is_empty() {
-            String::new()
+    pub async fn refresh_target(&self, target_id: Uuid) -> Result<()> {
+        let row: Option<TargetRow> = sqlx::query_as(
+            "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at FROM storage_targets WHERE id=$1 AND enabled",
+        )
+        .bind(target_id)
+        .fetch_optional(&self.db)
+        .await?;
+        let backend = if let Some(row) = row {
+            Some(build_target(self.target_options, &self.secrets, row).await?)
         } else {
-            format!("{}/", self.prefix)
+            None
+        };
+        let mut targets = self.targets.write().unwrap();
+        if let Some(backend) = backend {
+            targets.insert(target_id, backend);
+        } else {
+            targets.remove(&target_id);
+        }
+        Ok(())
+    }
+    pub async fn refresh_targets(&self) -> Result<()> {
+        let rows: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT id,updated_at FROM storage_targets WHERE enabled ORDER BY created_at,id",
+        )
+        .fetch_all(&self.db)
+        .await?;
+        let known: HashMap<Uuid, chrono::DateTime<chrono::Utc>> = self
+            .targets
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(id, target)| (*id, target.revision))
+            .collect();
+        for (id, revision) in rows {
+            if known.get(&id) != Some(&revision) {
+                self.refresh_target(id).await?;
+            }
+        }
+        for id in known.keys().copied().collect::<Vec<_>>() {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM storage_targets WHERE id=$1 AND enabled)",
+            )
+            .bind(id)
+            .fetch_one(&self.db)
+            .await?;
+            if !exists {
+                self.refresh_target(id).await?;
+            }
+        }
+        Ok(())
+    }
+    fn default_target(&self) -> Result<Uuid> {
+        self.target_id
+            .filter(|id| self.targets.read().unwrap().contains_key(id))
+            .or_else(|| self.targets.read().unwrap().keys().next().copied())
+            .context("no storage target is configured")
+    }
+    pub(crate) fn select_target(&self, target_id: Option<Uuid>) -> Result<Uuid> {
+        match target_id {
+            Some(id) => {
+                let _ = self.target_backend(id)?;
+                Ok(id)
+            }
+            None => self.default_target(),
         }
     }
-    pub fn parse_path(&self, path: &str) -> Option<Uuid> {
-        let prefix = Path::from(self.prefix());
-        parse_chunk_name(path.strip_prefix(&format!("{prefix}/"))?)
-    }
-    pub fn parse_physical_path(&self, path: &str) -> Option<Uuid> {
-        self.parse_path(path).or_else(|| {
-            parse_chunk_name(path.strip_prefix(&format!("{}packs/", self.namespace()))?)
+    pub fn namespace_for(&self, target_id: Uuid) -> Result<String> {
+        let prefix = self.target_backend(target_id)?.prefix.clone();
+        Ok(if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix}/")
         })
     }
-    pub async fn list_physical(
+    pub fn path_for(&self, target_id: Uuid, id: Uuid) -> Result<Path> {
+        let _ = self.target_backend(target_id)?;
+        Ok(Path::from(chunk_name(id)))
+    }
+    pub fn pack_path_for(&self, target_id: Uuid, id: Uuid) -> Result<Path> {
+        let _ = self.target_backend(target_id)?;
+        Ok(Path::from(format!("packs/{}", chunk_name(id))))
+    }
+    fn parse_path(path: &str) -> Option<Uuid> {
+        parse_chunk_name(path.strip_prefix("chunks/")?)
+    }
+    fn parse_physical_path(path: &str) -> Option<Uuid> {
+        Self::parse_path(path).or_else(|| parse_chunk_name(path.strip_prefix("packs/")?))
+    }
+    pub fn parse_physical_path_for(&self, target_id: Uuid, path: &str) -> Result<Option<Uuid>> {
+        let _ = self.target_backend(target_id)?;
+        Ok(Self::parse_physical_path(path))
+    }
+    pub async fn list_physical_for(
         &self,
+        target_id: Uuid,
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Vec<object_store::ObjectMeta>> {
-        self.ensure_identity().await?;
         let _permit = crate::backend::PRIORITY
             .scope(crate::backend::MAINTENANCE, self.controls.acquire())
             .await?;
-        let prefix = Path::from(self.namespace());
+        let target = self.target_backend(target_id)?;
         let offset = Path::parse(cursor.unwrap_or(""))?;
-        Ok(self
+        Ok(target
             .backend
-            .list_with_offset(Some(&prefix), &offset)
-            .filter(|r| {
-                std::future::ready(
-                    r.as_ref()
-                        .map_or(true, |m| m.location.as_ref().starts_with(&self.namespace())),
-                )
-            })
+            .list_with_offset(None, &offset)
             .take(limit)
             .try_collect()
             .await?)
     }
-    async fn ensure_identity(&self) -> Result<()> {
-        if self.identity_ready.load(Ordering::Acquire) {
+    async fn ensure_target_identity(&self, target_id: Uuid) -> Result<()> {
+        let target = self.target_backend(target_id)?;
+        if target.identity_ready.load(Ordering::Acquire) {
             return Ok(());
         }
-        let _check = self.identity_check.lock().await;
-        if !self.identity_ready.load(Ordering::Acquire) {
-            self.check_identity(&self.db, self.maintenance.load(Ordering::Acquire))
-                .await?;
-        }
-        Ok(())
-    }
-    pub async fn check_identity(&self, db: &sqlx::PgPool, maintenance: bool) -> Result<()> {
-        if !self.backend_enabled {
-            bail!("no storage target is configured")
-        }
-        let (deployment_id, created_at, initialized): (Uuid, chrono::DateTime<chrono::Utc>, bool) =
-            sqlx::query_as("SELECT deployment_id,created_at,backend_initialized FROM mokyu_meta")
-                .fetch_one(db)
-                .await?;
-        let path = Path::from(format!("{}meta.json", self.namespace()));
-        let read_permit = self.reads.acquire().await?;
-        let saved = match self.backend.get(&path).await {
-            Ok(result) => {
-                ensure!(
-                    result.meta.size <= 16 * 1024,
-                    "backend meta.json exceeds limit"
-                );
-                let version = object_store::UpdateVersion {
-                    e_tag: result.meta.e_tag.clone(),
-                    version: result.meta.version.clone(),
-                };
-                let mut stream = result.into_stream();
-                let mut data = Vec::new();
-                while let Some(bytes) = stream.try_next().await? {
-                    ensure!(
-                        data.len() + bytes.len() <= 16 * 1024,
-                        "backend meta.json exceeds limit"
-                    );
-                    data.extend_from_slice(&bytes);
-                }
-                Some((
-                    serde_json::from_slice::<BackendMeta>(&data)
-                        .context("invalid backend meta.json")?,
-                    version,
-                ))
-            }
-            Err(object_store::Error::NotFound { .. }) => None,
-            Err(e) => return Err(e.into()),
-        };
-        drop(read_permit);
-        let marker;
-        if let Some((mut meta, version)) = saved {
-            ensure!(
-                meta.deployment_id == deployment_id,
-                "backend deployment ID differs from database"
-            );
-            ensure!(
-                (meta.format_version == 1
-                    || (meta.format_version == 2
-                        && meta.pack_layout.as_deref() == Some("uuid-prefix2-v1")))
-                    && meta.chunk_layout == "uuid-prefix2",
-                "unsupported backend storage format"
-            );
-            if meta.format_version == 1 && !maintenance {
-                meta.format_version = 2;
-                meta.pack_layout = Some("uuid-prefix2-v1".into());
-                meta.created_by =
-                    format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-                let _permit = self.writes.acquire().await?;
-                self.backend
-                    .put_opts(
-                        &path,
-                        Bytes::from(serde_json::to_vec_pretty(&meta)?).into(),
-                        PutOptions {
-                            mode: PutMode::Update(version),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .context("cannot upgrade backend marker conditionally")?;
-            }
-            marker = meta;
-        } else {
-            ensure!(
-                !maintenance,
-                "backend marker is missing; initialize outside maintenance mode"
-            );
-            ensure!(
-                !initialized,
-                "backend meta.json is missing; restore the matching marker before startup"
-            );
-            let used: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM objects)",
+        let _check = target.identity_check.lock().await;
+        if !target.identity_ready.load(Ordering::Acquire) {
+            self.check_target_identity_inner(
+                target_id,
+                &target,
+                &self.db,
+                self.maintenance.load(Ordering::Acquire),
+                true,
+                true,
             )
-            .fetch_one(db)
             .await?;
-            ensure!(
-                !used,
-                "cannot initialize backend marker for an existing database"
-            );
-            let prefix = Path::from(self.prefix.clone());
-            let namespace = if self.prefix.is_empty() {
-                String::new()
-            } else {
-                format!("{prefix}/")
-            };
-            let control_permit = self.controls.acquire().await?;
-            let mut objects = self.backend.list(if self.prefix.is_empty() {
-                None
-            } else {
-                Some(&prefix)
-            });
-            while let Some(object) = objects.try_next().await? {
-                ensure!(
-                    !object.location.as_ref().starts_with(&namespace),
-                    "backend namespace is not empty; refusing initialization"
-                );
-            }
-            drop(objects);
-            drop(control_permit);
-            let meta = BackendMeta {
-                format_version: 2,
-                deployment_id,
-                chunk_layout: "uuid-prefix2".into(),
-                pack_layout: Some("uuid-prefix2-v1".into()),
-                created_at,
-                created_by: format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
-            };
-            // Create-only protects an existing marker if another database races initialization.
-            let _write_permit = self.writes.acquire().await?;
-            self.backend
-                .put_opts(
-                    &path,
-                    Bytes::from(serde_json::to_vec_pretty(&meta)?).into(),
-                    PutOptions {
-                        mode: PutMode::Create,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .context("cannot create backend meta.json without overwriting")?;
-            marker = meta;
         }
-        if let Some(target_id) = self.target_id {
-            sqlx::query("UPDATE storage_targets SET metadata=$2,updated_at=now() WHERE id=$1")
-                .bind(target_id)
-                .bind(serde_json::to_value(&marker)?)
-                .execute(db)
-                .await?;
-        }
-        // A crash after the S3 write is recoverable using this database's committed deployment ID.
-        sqlx::query("UPDATE mokyu_meta SET backend_initialized=true WHERE NOT backend_initialized")
-            .execute(db)
-            .await?;
-        self.identity_ready.store(true, Ordering::Release);
         Ok(())
     }
-
+    pub async fn check_identity(&self, _db: &sqlx::PgPool, maintenance: bool) -> Result<()> {
+        let ids = self.target_ids();
+        ensure!(!ids.is_empty(), "no storage target is configured");
+        for id in ids {
+            self.check_target_identity(id, maintenance).await?;
+        }
+        Ok(())
+    }
+    pub async fn check_target_identity(&self, target_id: Uuid, maintenance: bool) -> Result<()> {
+        let target = self.target_backend(target_id)?;
+        let _check = target.identity_check.lock().await;
+        target.identity_ready.store(false, Ordering::Release);
+        self.check_target_identity_inner(target_id, &target, &self.db, maintenance, true, true)
+            .await?;
+        Ok(())
+    }
+    pub(crate) async fn initialize_target(&self, record: TargetRecord) -> Result<()> {
+        if record.r#type == "local" {
+            tokio::fs::create_dir_all(
+                record
+                    .path
+                    .as_deref()
+                    .context("local storage target path is missing")?,
+            )
+            .await?;
+        }
+        let target = VerifiedTarget::build(&record, self.target_options, &self.secrets)?;
+        let _permit = crate::backend::PRIORITY
+            .scope(crate::backend::MAINTENANCE, self.controls.acquire())
+            .await?;
+        target.initialize().await
+    }
+    pub(crate) async fn verify_target_record(&self, record: TargetRecord) -> Result<()> {
+        let target = VerifiedTarget::build(&record, self.target_options, &self.secrets)?;
+        let _permit = crate::backend::PRIORITY
+            .scope(crate::backend::MAINTENANCE, self.controls.acquire())
+            .await?;
+        target.verify().await
+    }
+    async fn check_target_identity_inner(
+        &self,
+        _target_id: Uuid,
+        target: &TargetBackend,
+        _db: &sqlx::PgPool,
+        _maintenance: bool,
+        _allow_initialize: bool,
+        _persist: bool,
+    ) -> Result<()> {
+        let _permit = self.reads.acquire().await?;
+        let result = target
+            .backend
+            .get(&Path::from("meta.json"))
+            .await
+            .context("storage meta.json is required; restore it before using this store")?;
+        ensure!(
+            result.meta.size <= 16 * 1024,
+            "storage meta.json exceeds limit"
+        );
+        let mut data = Vec::new();
+        let mut stream = result.into_stream();
+        while let Some(bytes) = stream.try_next().await? {
+            ensure!(
+                data.len() + bytes.len() <= 16 * 1024,
+                "storage meta.json exceeds limit"
+            );
+            data.extend_from_slice(&bytes);
+        }
+        let actual: serde_json::Value =
+            serde_json::from_slice(&data).context("invalid storage meta.json")?;
+        ensure!(
+            actual == target.metadata,
+            "storage meta.json does not match this store"
+        );
+        target.identity_ready.store(true, Ordering::Release);
+        Ok(())
+    }
     fn cache_path(&self, id: Uuid, compressed: bool) -> PathBuf {
         self.disk
             .root
@@ -1198,7 +1176,9 @@ impl Storage {
         .await?
     }
     pub async fn put(self: &Arc<Self>, c: &Chunk, encoded: Vec<u8>, cache: Bytes) -> Result<()> {
-        self.ensure_identity().await?;
+        let target_id = c.storage_target_id.context("chunk has no storage target")?;
+        self.ensure_target_identity(target_id).await?;
+        let target = self.target_backend(target_id)?;
         ensure!(
             Some(encoded.len() as i32) == c.stored_size,
             "encoded length mismatch"
@@ -1207,9 +1187,12 @@ impl Storage {
         let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
         let size = encoded.len();
-        let result = self
+        let result = target
             .backend
-            .put(&self.path(c.storage_id), Bytes::from(encoded).into())
+            .put(
+                &self.path_for(target_id, c.storage_id)?,
+                Bytes::from(encoded).into(),
+            )
             .await;
         operation.finish(result.is_err());
         result?;
@@ -1466,8 +1449,8 @@ impl Storage {
         }
     }
     pub async fn register_location(&self, c: &Chunk) -> Result<()> {
-        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,stored_size,compressed,nonce,state,created_at,unreferenced_at,algorithm,key_id) VALUES($1,$2,$3,$4,$5,$6,'uploading',$7,now(),$8,$9)")
-            .bind(c.encoding_id).bind(c.id).bind(c.storage_id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).bind(c.created_at).bind(&c.algorithm).bind(&c.key_id).execute(&self.db).await?;
+        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,storage_target_id,stored_size,compressed,nonce,state,created_at,unreferenced_at,algorithm,key_id) VALUES($1,$2,$3,$4,$5,$6,$7,'uploading',$8,now(),$9,$10)")
+            .bind(c.encoding_id).bind(c.id).bind(c.storage_id).bind(c.storage_target_id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).bind(c.created_at).bind(&c.algorithm).bind(&c.key_id).execute(&self.db).await?;
         Ok(())
     }
     fn physical_pin(&self, id: Uuid) -> CachePin {
@@ -1494,7 +1477,7 @@ impl Storage {
     }
     async fn source(&self, id: i64) -> Result<Source> {
         let _gate = self.source_gate.read().await;
-        let physical:Option<Chunk>=sqlx::query_as("SELECT c.id,l.id encoding_id,l.storage_id,c.hash,c.raw_size,l.stored_size,l.algorithm,l.key_id,l.compressed,l.nonce,c.format,c.state,l.created_at FROM chunk_locations l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready'")
+        let physical:Option<Chunk>=sqlx::query_as("SELECT c.id,l.id encoding_id,l.storage_id,c.storage_target_id,c.hash,c.raw_size,l.stored_size,l.algorithm,l.key_id,l.compressed,l.nonce,c.format,c.state,l.created_at FROM chunk_locations l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready'")
             .bind(id).fetch_optional(&self.db).await?;
         if let Some(c) = physical {
             let pin = self.physical_pin(c.storage_id);
@@ -1504,9 +1487,6 @@ impl Storage {
             .bind(id).fetch_optional(&self.db).await?.context(codec::IntegrityError::Metadata)?;
         let pin = self.physical_pin(p.storage_id);
         Ok(Source::Pack(p, pin))
-    }
-    pub fn pack_path(&self, id: Uuid) -> Path {
-        Path::from(format!("{}packs/{}", self.namespace(), chunk_name(id)))
     }
     pub async fn pack_memory(&self, size: usize) -> Result<tokio::sync::OwnedSemaphorePermit> {
         let workspace = self.compression.workspace_bytes()?;
@@ -1549,27 +1529,29 @@ impl Storage {
         })
         .await?
     }
-    pub async fn put_path(&self, path: &Path, data: Vec<u8>) -> Result<()> {
-        self.ensure_identity().await?;
+    pub async fn put_path_for(&self, target_id: Uuid, path: &Path, data: Vec<u8>) -> Result<()> {
+        self.ensure_target_identity(target_id).await?;
+        let target = self.target_backend(target_id)?;
         let _permit = self.writes.acquire().await?;
         self.background_writable()?;
         let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
         let size = data.len() as u64;
-        let result = self.backend.put(path, Bytes::from(data).into()).await;
+        let result = target.backend.put(path, Bytes::from(data).into()).await;
         operation.finish(result.is_err());
         result?;
         self.operations[1].bytes(size);
         self.backend_write_bytes.fetch_add(size, Ordering::Relaxed);
         Ok(())
     }
-    pub async fn delete_path(&self, path: &Path) -> Result<()> {
-        self.ensure_identity().await?;
+    pub async fn delete_path_for(&self, target_id: Uuid, path: &Path) -> Result<()> {
+        self.ensure_target_identity(target_id).await?;
+        let target = self.target_backend(target_id)?;
         let _permit = self.controls.acquire().await?;
         self.background_writable()?;
         let mut operation = self.operations[2].begin();
         self.backend_deletes.fetch_add(1, Ordering::Relaxed);
-        let result = self.backend.delete(path).await;
+        let result = target.backend.delete(path).await;
         operation.finish(result.is_err());
         result?;
         Ok(())
@@ -1621,7 +1603,8 @@ impl Storage {
             .result
             .get_or_init(|| async {
                 let result: Result<Arc<LoadedPack>> = async {
-                    self.ensure_identity().await?;
+                    let target_id = p.storage_target_id.context("pack has no storage target")?;
+                    self.ensure_target_identity(target_id).await?;
                     let memory = self.pack_memory(p.payload_size()?).await?;
                     let read_permit = self
                         .reads
@@ -1630,7 +1613,11 @@ impl Storage {
                     #[cfg(feature = "fault-injection")]
                     crate::faults::point("pack-download").await;
                     let encoded = self
-                        .read_path_permitted(&self.pack_path(p.storage_id), p.payload_size()? + 16)
+                        .read_path_permitted(
+                            target_id,
+                            &self.pack_path_for(target_id, p.storage_id)?,
+                            p.payload_size()? + 16,
+                        )
                         .await?;
                     drop(read_permit);
                     let permit = self.cpu.clone().acquire_owned().await?;
@@ -1711,13 +1698,22 @@ impl Storage {
         Ok((raw, false))
     }
     pub(crate) async fn head(&self, c: &Chunk) -> Result<u64> {
-        Ok(self.head_path(&self.path(c.storage_id)).await?.size)
+        let target_id = c.storage_target_id.context("chunk has no storage target")?;
+        Ok(self
+            .head_path_for(target_id, &self.path_for(target_id, c.storage_id)?)
+            .await?
+            .size)
     }
-    pub(crate) async fn head_path(&self, path: &Path) -> Result<object_store::ObjectMeta> {
-        self.ensure_identity().await?;
+    pub(crate) async fn head_path_for(
+        &self,
+        target_id: Uuid,
+        path: &Path,
+    ) -> Result<object_store::ObjectMeta> {
+        self.ensure_target_identity(target_id).await?;
+        let target = self.target_backend(target_id)?;
         let _permit = self.controls.acquire().await?;
         let mut operation = self.operations[3].begin();
-        let result = self.backend.head(path).await;
+        let result = target.backend.head(path).await;
         operation.finish(result.is_err());
         Ok(result?)
     }
@@ -1799,11 +1795,13 @@ impl Storage {
                     ensure!(offset==p.raw_size,codec::IntegrityError::Metadata);
                     if matches!(mode,crate::integrity::Mode::Metadata) {return Ok(0);}
                     if matches!(mode,crate::integrity::Mode::Head) {
-                        let meta=self.head_path(&self.pack_path(p.storage_id)).await?;
+                        let target_id = p.storage_target_id.context(codec::IntegrityError::Metadata)?;
+                        let meta=self.head_path_for(target_id, &self.pack_path_for(target_id, p.storage_id)?).await?;
                         ensure!(Some(meta.size as i64)==p.stored_size,codec::IntegrityError::Length);return Ok(0);
                     }
                     let _memory=self.pack_memory(capacity).await?;
-                    let data=self.read_path(&self.pack_path(p.storage_id),capacity+16).await?;
+                    let target_id = p.storage_target_id.context(codec::IntegrityError::Metadata)?;
+                    let data=self.read_path_for(target_id, &self.pack_path_for(target_id, p.storage_id)?,capacity+16).await?;
                     let size=data.len() as u64;
                     let permit=self.cpu.clone().acquire_owned().await?;let pool=self.compression.clone();let secrets=self.secrets.clone();let pack=p.clone();
                     tokio::task::spawn_blocking(move||{
@@ -1835,19 +1833,36 @@ impl Storage {
     }
     // Shared bounded remote read. Inspection must not use or populate the cache.
     pub(crate) async fn read_backend(&self, c: &Chunk) -> Result<Vec<u8>> {
-        self.read_path(&self.path(c.storage_id), MAX + 16).await
+        let target_id = c.storage_target_id.context("chunk has no storage target")?;
+        self.read_path_for(
+            target_id,
+            &self.path_for(target_id, c.storage_id)?,
+            MAX + 16,
+        )
+        .await
     }
-    pub async fn read_path(&self, path: &Path, bound: usize) -> Result<Vec<u8>> {
-        self.ensure_identity().await?;
+    pub async fn read_path_for(
+        &self,
+        target_id: Uuid,
+        path: &Path,
+        bound: usize,
+    ) -> Result<Vec<u8>> {
+        self.ensure_target_identity(target_id).await?;
         let _permit = self.reads.acquire().await?;
-        self.read_path_permitted(path, bound).await
+        self.read_path_permitted(target_id, path, bound).await
     }
-    async fn read_path_permitted(&self, path: &Path, bound: usize) -> Result<Vec<u8>> {
+    async fn read_path_permitted(
+        &self,
+        target_id: Uuid,
+        path: &Path,
+        bound: usize,
+    ) -> Result<Vec<u8>> {
+        let target = self.target_backend(target_id)?;
         let mut operation = self.operations[0].begin();
         self.backend_gets
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let result: Result<Vec<u8>> = async {
-            let result = self.backend.get(path).await?;
+            let result = target.backend.get(path).await?;
             ensure!(
                 result.meta.size <= bound as u64,
                 codec::IntegrityError::Length

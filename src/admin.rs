@@ -108,6 +108,8 @@ pub enum Buckets {
         name: String,
         #[arg(long)]
         project: Option<Uuid>,
+        #[arg(long)]
+        store: Option<Uuid>,
     },
     Delete {
         name: String,
@@ -131,6 +133,7 @@ pub enum Buckets {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Gc {
     Status,
+    MarkUnreferenced,
     Run,
     Pause,
     Resume,
@@ -188,10 +191,33 @@ pub enum Stores {
         #[arg(long)]
         secret_key: Option<String>,
     },
+    Update {
+        name: String,
+        #[arg(long, value_parser = ["local", "s3"])]
+        r#type: Option<String>,
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        bucket: Option<String>,
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long)]
+        access_key: Option<String>,
+        #[arg(long)]
+        secret_key: Option<String>,
+        #[arg(long)]
+        enabled: Option<bool>,
+    },
     Check {
         name: String,
     },
     Sweep {
+        #[arg(long)]
+        store: Option<Uuid>,
         #[arg(long)]
         execute: bool,
         #[arg(long)]

@@ -1,5 +1,5 @@
 use crate::{app::App, config};
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex, atomic::Ordering},
@@ -411,16 +411,17 @@ impl App {
         sqlx::query("UPDATE packs p SET state='retired',unreferenced_at=COALESCE(unreferenced_at,(SELECT max(c.unreferenced_at) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=p.id),now()) WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id AND state='ready')").execute(&self.db).await?;
         let mut count = 0;
         for table in ["chunk_locations", "packs"] {
-            let rows:Vec<(i64,Uuid,bool)>=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT id,storage_id,stored_at IS NULL FROM {table} WHERE state IN ('retired','deleting') AND unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second') ORDER BY unreferenced_at,id LIMIT $2")))
+            let rows:Vec<(i64,Uuid,Option<Uuid>,bool)>=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT id,storage_id,storage_target_id,stored_at IS NULL FROM {table} WHERE state IN ('retired','deleting') AND unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second') ORDER BY unreferenced_at,id LIMIT $2")))
                 .bind(grace).bind(self.config.gc.batch_size as i64).bind(minimum).fetch_all(&self.db).await?;
-            for (id, storage, unknown_age) in rows {
+            for (id, storage, target_id, unknown_age) in rows {
+                let target_id = target_id.context("physical storage has no target")?;
                 let path = if table == "packs" {
-                    self.storage.pack_path(storage)
+                    self.storage.pack_path_for(target_id, storage)?
                 } else {
-                    self.storage.path(storage)
+                    self.storage.path_for(target_id, storage)?
                 };
                 if minimum > 0.0 && unknown_age {
-                    match self.storage.head_path(&path).await {
+                    match self.storage.head_path_for(target_id, &path).await {
                         Ok(meta) => {
                             sqlx::query(sqlx::AssertSqlSafe(format!(
                                 "UPDATE {table} SET stored_at=COALESCE(stored_at,$2) WHERE id=$1"
@@ -456,7 +457,7 @@ impl App {
                 if changed == 0 {
                     continue;
                 }
-                match self.storage.delete_path(&path).await {
+                match self.storage.delete_path_for(target_id, &path).await {
                     Ok(()) => {
                         sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleted',deleted_at=now() WHERE id=$1 AND state='deleting'"))).bind(id).execute(&self.db).await?;
                         count += 1;
@@ -482,6 +483,28 @@ impl App {
         Ok(
             json!({"paused":paused,"maintenance":maintenance,"running":self.gc_running.load(Ordering::Acquire),"chunks":counts,"grace":self.config.gc.unreferenced_grace,"interval":self.config.gc.interval,"min_storage_duration":self.config.storage.min_storage_duration}),
         )
+    }
+    pub async fn mark_unreferenced(&self) -> Result<usize> {
+        ensure!(
+            self.maintenance.load(Ordering::Acquire),
+            "enable maintenance before marking unreferenced chunks"
+        );
+        ensure!(
+            self.active.lock().unwrap().is_empty(),
+            "active data operations have not drained"
+        );
+        let _coord = self.coord.lock().await;
+        let mut tx = self.db.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(crate::manage::account::USER_LOCK)
+            .execute(&mut *tx)
+            .await?;
+        let changed = sqlx::query("UPDATE chunks c SET unreferenced_at=clock_timestamp() WHERE c.state='ready' AND c.owner_stream IS NULL AND c.unreferenced_at IS NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected() as usize;
+        tx.commit().await?;
+        Ok(changed)
     }
 }
 pub(crate) async fn mark_unreferenced(

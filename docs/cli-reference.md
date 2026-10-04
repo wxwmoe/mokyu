@@ -99,6 +99,7 @@ docker exec -i mokyu cli user create admin --password-stdin < /secure/password-f
 | --- | --- |
 | `status` | 返回[运行状态和容量快照](manage-api-reference.md#运行状态)，读取不触发全表汇总 |
 | `gc status` | 返回 paused/maintenance/running、区块状态计数、宽限、间隔和 min_storage_duration |
+| `gc mark-unreferenced` | 在维护模式且活跃操作已排空时，为没有引用的 ready 区块补上回收时间标记 |
 | `gc run` | 执行一批本地清理与远端回收，返回计数；遵守暂停、维护、宽限及后端最低存储期限 |
 | `gc pause` | 持久暂停后续远端 GC，已发出的请求可能完成 |
 | `gc resume` | 解除暂停；需要立即执行时再调用 `gc run` |

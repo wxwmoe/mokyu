@@ -31,6 +31,7 @@ pub(super) struct SessionView {
 pub(super) struct BucketView {
     id: Uuid,
     project_id: Uuid,
+    storage_target_id: Option<Uuid>,
     #[schema(value_type = Vec<crate::authorization::Action>)]
     pub(super) actions: Vec<String>,
     name: String,
@@ -50,6 +51,7 @@ impl From<Bucket> for BucketView {
         Self {
             id: bucket.id,
             project_id: bucket.project_id,
+            storage_target_id: bucket.storage_target_id,
             actions: crate::authorization::Action::ALL
                 .iter()
                 .map(|a| a.name().into())

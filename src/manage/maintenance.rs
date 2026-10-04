@@ -275,6 +275,7 @@ pub(super) async fn unpack_preview(
 #[serde(deny_unknown_fields)]
 pub(super) struct SweepRequest {
     older_than: String,
+    storage_target_id: Option<Uuid>,
 }
 #[utoipa::path(post,path="/api/maintenance/sweep",request_body=SweepRequest,responses((status=200,body=TaskStarted)))]
 pub(super) async fn sweep(
@@ -284,7 +285,13 @@ pub(super) async fn sweep(
 ) -> Result<Json<TaskStarted>, HttpError> {
     let tx = guard(&app, &actor).await?;
     let result = app
-        .sweep_start(false, None, None, &input.older_than)
+        .sweep_start(
+            false,
+            None,
+            None,
+            &input.older_than,
+            input.storage_target_id,
+        )
         .await?;
     tx.commit().await?;
     Ok(Json(serde_json::from_value(result)?))
@@ -297,7 +304,7 @@ pub(super) struct SweepTask {
 async fn sweep_impact(app: &App, id: Uuid) -> Result<Value> {
     let detail:Value=sqlx::query_scalar("SELECT detail FROM tasks WHERE id=$1 AND kind='sweep' AND state='completed' AND detail->>'dry_run'='true'").bind(id).fetch_optional(&app.db).await?.ok_or_else(||s3s::s3_error!(InvalidArgument))?;
     Ok(
-        json!({"task_id":id,"summary":detail,"backend_prefix":app.storage.namespace(),"minimum_storage_seconds":app.config.storage.min_storage_seconds()?}),
+        json!({"task_id":id,"summary":detail,"backend_prefix":detail["prefix"],"minimum_storage_seconds":app.config.storage.min_storage_seconds()?}),
     )
 }
 #[utoipa::path(post,path="/api/maintenance/sweep/preview",request_body=SweepTask,responses((status=200,body=MaintenancePreview)))]
@@ -308,7 +315,7 @@ pub(super) async fn sweep_preview(
 ) -> Result<Json<MaintenancePreview>, HttpError> {
     let mut tx = guard(&app, &actor).await?;
     let impact = sweep_impact(&app, input.task_id).await?;
-    let prefix = app.storage.namespace();
+    let prefix = impact["backend_prefix"].as_str().unwrap_or("").to_owned();
     let phrase = if prefix.is_empty() {
         "/".into()
     } else {
@@ -397,14 +404,22 @@ pub(super) async fn execute(
         let seconds = impact["summary"]["older_than_seconds"]
             .as_u64()
             .ok_or_else(|| s3s::s3_error!(InvalidArgument))?;
+        let target_id: Uuid = impact["summary"]["storage_target_id"]
+            .as_str()
+            .ok_or_else(|| s3s::s3_error!(InvalidArgument))?
+            .parse()?;
+        let prefix = impact["backend_prefix"]
+            .as_str()
+            .ok_or_else(|| s3s::s3_error!(InvalidArgument))?;
         crate::tasks::REQUEST_ID
             .scope(
                 input.preview_id,
                 app.sweep_start(
                     true,
                     Some(id),
-                    Some(&app.storage.namespace()),
+                    Some(prefix),
                     &format!("{seconds}s"),
+                    Some(target_id),
                 ),
             )
             .await?

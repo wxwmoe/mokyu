@@ -239,8 +239,8 @@ impl App {
         physical.created_at = chrono::Utc::now();
         physical.nonce = None;
         // A newly encoded physical copy always consumes a fresh persisted identity.
-        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,compressed,state,created_at,unreferenced_at,owner_task,algorithm,key_id) VALUES($1,$2,$3,false,'uploading',$4,now(),$5,$6,$7)")
-            .bind(physical.encoding_id).bind(c.id).bind(physical.storage_id).bind(physical.created_at).bind(task).bind(&physical.algorithm).bind(&physical.key_id).execute(&self.db).await?;
+        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,storage_target_id,compressed,state,created_at,unreferenced_at,owner_task,algorithm,key_id) VALUES($1,$2,$3,$4,false,'uploading',$5,now(),$6,$7,$8)")
+            .bind(physical.encoding_id).bind(c.id).bind(physical.storage_id).bind(physical.storage_target_id).bind(physical.created_at).bind(task).bind(&physical.algorithm).bind(&physical.key_id).execute(&self.db).await?;
         let (physical, encoded, _) = self
             .storage
             .encode(physical, raw.to_vec(), c.compressed)
@@ -252,8 +252,17 @@ impl App {
             .bind(&physical.nonce)
             .execute(&self.db)
             .await?;
+        let storage_target_id = physical
+            .storage_target_id
+            .context("chunk has no storage target")?;
         self.storage
-            .put_path(&self.storage.path(physical.storage_id), encoded)
+            .put_path_for(
+                storage_target_id,
+                &self
+                    .storage
+                    .path_for(storage_target_id, physical.storage_id)?,
+                encoded,
+            )
             .await?;
         Ok(Output {
             chunks: vec![c.id],
@@ -326,8 +335,16 @@ impl App {
         let raw_size: i64 = rows.iter().map(|r| i64::from(r.chunk.raw_size)).sum();
         let first = &rows[0].chunk;
         let (algorithm, key_id) = self.physical_encoding(first)?;
-        let p:Pack=sqlx::query_as("INSERT INTO packs(storage_id,algorithm,key_id,raw_size,member_count,state,unreferenced_at,owner_task) VALUES($1,$2,$3,$4,$5,'preparing',now(),$6) RETURNING *")
-            .bind(Uuid::new_v4()).bind(&algorithm).bind(&key_id).bind(raw_size).bind(rows.len() as i32).bind(task).fetch_one(&self.db).await?;
+        let storage_target_id = first
+            .storage_target_id
+            .context("pack member has no storage target")?;
+        ensure!(
+            rows.iter()
+                .all(|row| row.chunk.storage_target_id == Some(storage_target_id)),
+            "pack members must use one storage target"
+        );
+        let p:Pack=sqlx::query_as("INSERT INTO packs(storage_id,storage_target_id,algorithm,key_id,raw_size,member_count,state,unreferenced_at,owner_task) VALUES($1,$2,$3,$4,$5,$6,'preparing',now(),$7) RETURNING *")
+            .bind(Uuid::new_v4()).bind(storage_target_id).bind(&algorithm).bind(&key_id).bind(raw_size).bind(rows.len() as i32).bind(task).fetch_one(&self.db).await?;
         drop(coord);
         let strategy = match self.config.pack.compression_strategy {
             None => self.config.compression.strategy,
@@ -370,8 +387,15 @@ impl App {
             .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("pack-prepared").await;
+        let storage_target_id = p.storage_target_id.context("pack has no storage target")?;
         self.storage
-            .put_path(&self.storage.pack_path(p.storage_id), encoded)
+            .put_path_for(
+                storage_target_id,
+                &self
+                    .storage
+                    .pack_path_for(storage_target_id, p.storage_id)?,
+                encoded,
+            )
             .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("pack-stored").await;
