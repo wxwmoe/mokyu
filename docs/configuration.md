@@ -195,19 +195,9 @@ Range 评估只使用实际局部回源；缓存命中、HEAD、完整范围和�
 | 字段 | 类型 / 默认值 | 说明 |
 | --- | --- | --- |
 | `encryption.deployment_key` | 字符串 / 必填 | `mokyu key generate` 生成的 64 字符部署密钥；保护数据库秘密项，同一部署所有实例必须相同且不可替换 |
-| `encryption.algorithm` | 枚举 / `aes-256-gcm` | `none` / `aes-256-gcm` / `chacha20-poly1305`；只决定新写入 |
-| `encryption.keyring_file` | 可选路径 / 加密时必填 | 当前写密钥与历史读密钥 |
+| `encryption.algorithm` | 枚举 / `aes-256-gcm` | `none` / `aes-256-gcm` / `chacha20-poly1305`；决定新写入使用的数据库密钥算法 |
 
-keyring 示例：
-
-```toml
-active = "write-1"
-[keys.write-1]
-algorithm = "aes-256-gcm"
-key = "REPLACE_WITH_64_HEX_CHARACTERS"
-```
-
-key ID 为 1～128 字节，不同 ID 必须使用不同实际密钥。更换算法时配置匹配的新 active key，历史密钥保留供读取。使用 `none` 时可省略 keyring；仍有旧加密区块时必须提供其密钥。数据库恢复的换密钥要求见[恢复步骤](deployment-and-recovery.md#恢复步骤)。
+区块加密密钥保存在 PostgreSQL 的 `managed_keys` 表中，密文由部署密钥保护。用 `docker exec mokyu cli keys create NAME encryption` 生成密钥；命令只接受名称和用途，不接受外部密文，也不会返回密钥材料。第一把加密密钥自动设为 active，之后可用 `keys activate UUID` 切换；切换后重启实例使所有进程加载同一组密钥。历史密钥保留在数据库中供读取，撤销只阻止再次激活。部署密钥丢失或变更会使数据库秘密和区块密钥无法恢复。
 
 ## 回收与历史清理
 

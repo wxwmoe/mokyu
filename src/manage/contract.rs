@@ -105,7 +105,6 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::maintenance::jobs))
         .routes(routes!(super::maintenance::task))
         .routes(routes!(super::maintenance::task_action))
-        .routes(routes!(super::maintenance::key_material))
         .routes(routes!(super::service::status))
         .routes(routes!(super::service::config))
         .routes(routes!(super::stores::list, super::stores::create))
@@ -115,6 +114,7 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
             super::managed_keys::create
         ))
         .routes(routes!(super::managed_keys::revoke))
+        .routes(routes!(super::managed_keys::activate))
         .routes(routes!(super::cluster::status, super::cluster::mode))
         .routes(routes!(super::cluster::nodes, super::cluster::token))
         .routes(routes!(super::cluster::revoke))

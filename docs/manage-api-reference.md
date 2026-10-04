@@ -212,7 +212,10 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | `POST /api/maintenance/sweep`、`sweep/preview` | 只读清查 / 根据已完成扫描准备删除确认 |
 | `POST /api/maintenance/unpack/preview` | 单包 `{pack_id}` 或全部 `{all:true}` 拆包预览 |
 | `POST /api/maintenance/{operation}/execute` | `{preview_id,confirmation}`，operation 为 unpack/sweep |
-| `POST /api/service/key-material` | 生成新的 256 位随机密钥，仅返回一次，不读取/修改密钥文件 |
+| `GET /api/keys` | 列出数据库密钥元数据，不返回密钥材料 |
+| `POST /api/keys` | 只按名称和用途生成数据库密钥 |
+| `POST /api/keys/{id}/activate` | 激活 encryption 密钥，重启实例后生效 |
+| `DELETE /api/keys/{id}` | 撤销数据库密钥；历史密钥仍保留用于读取 |
 
 暂停在工作边界生效，已经发出的请求可完成。新包开关覆盖上传与所有维护路径；全部拆包需停止生成并等 preparing 包排空，未完成的全部拆包阻止恢复生成。旧载荷仍受 GC 宽限和最低存储期保护。
 

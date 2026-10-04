@@ -5,7 +5,6 @@ import os
 import signal
 import subprocess
 import time
-import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -112,11 +111,10 @@ try:
     s3.put_object(Bucket=bucket, Key='rotated-pending', Body=raw)
     ids = [r[0] for r in db.execute('SELECT chunk_id FROM pending_uploads').fetchall()]
     assert len(ids) > 1
+    rotated = cli('keys', 'create', 'rotated', 'encryption')
+    cli('keys', 'activate', rotated['id'])
     kill()
     (faults / 'upload-before-work').unlink()
-    keyring = Path(tomllib.loads(config.read_text())['encryption']['keyring_file'])
-    keys = keyring.read_text().replace('active="test"', 'active="rotated"')
-    keyring.write_text(keys + '\n[keys.rotated]\nalgorithm="aes-256-gcm"\nkey="' + '82' * 32 + '"\n')
     start()
     assert s3.get_object(Bucket=bucket, Key='rotated-pending')['Body'].read() == raw
     done(cli('cache', 'flush')['task_id'])

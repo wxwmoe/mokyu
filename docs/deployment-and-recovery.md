@@ -23,13 +23,11 @@
 1. 创建配置、密钥和数据目录：
 
    ```sh
-   mkdir -p config/secrets config/keys data
-   chmod 700 config config/secrets config/keys data
+   mkdir -p config/secrets data
+   chmod 700 config config/secrets data
    cp config.example.toml config/config.toml
-   cp keyring.example.toml config/keys/keyring.toml
-   docker run --rm wxwmoe/mokyu:latest keygen > config/secrets/postgres-password
-   docker run --rm wxwmoe/mokyu:latest keygen > config/secrets/deployment-key
-   docker run --rm wxwmoe/mokyu:latest keygen > config/keys/new-chunk-key
+   docker run --rm wxwmoe/mokyu:latest key generate > config/secrets/postgres-password
+   docker run --rm wxwmoe/mokyu:latest key generate > config/secrets/deployment-key
    ```
 
 2. 编辑 `config/config.toml`：
@@ -39,14 +37,14 @@
    | `database` | 主机、端口、数据库和用户；删除示例 `password`，启用 `password_file = "secrets/postgres-password"`，与 Compose 共用密码文件 |
    | `stores` | 通过 CLI 或管理 API 创建 local / S3 存储目标；S3 目标需具备对应范围的 Get / Put / Delete / List 和条件创建权限 |
    | `manage` | 浏览器访问的完整 `origin`；通过 HTTP 访问时将 `secure_cookie` 设为 `false` |
-   | `encryption` | 选择算法和 keyring 路径，确保与 keyring 的 active key 算法一致 |
+   | `encryption` | 填写部署密钥并选择新写入区块的算法；区块密钥由数据库管理 |
 
-   将 `new-chunk-key` 的内容填入 keyring 后移除临时文件。`deployment-key` 必须与区块密钥不同。完整字段和资源限制见[配置参考](configuration.md)。
+   `deployment-key` 必须在同一部署的所有容器中保持不变。首次启动后用 `cli keys create NAME encryption` 创建区块密钥；密钥材料只在数据库中保存加密副本，CLI 和 Web 永不返回明文。完整字段和资源限制见[配置参考](configuration.md)。
 
 3. 设置权限并启动：
 
    ```sh
-   chmod 600 config/config.toml config/secrets/* config/keys/*
+   chmod 600 config/config.toml config/secrets/*
    chown -R 10001:10001 config data
    docker compose up -d
    docker compose ps
@@ -107,7 +105,7 @@ docker exec mokyu cli gc mark-unreferenced
 | 材料 | 恢复用途 |
 | --- | --- |
 | 数据库一致备份及所需 WAL | 对象索引、权限、引用和上传状态 |
-| 配置、全部历史区块密钥、`deployment-key` | 后端身份、解密区块及客户端凭据 |
+| 配置、`deployment-key` | 后端身份、解密数据库中的历史区块密钥及客户端凭据 |
 | 仍存在的后端区块和区块包 | 实际对象内容 |
 | `data/multipart` 的一致快照 | 恢复已确认但尚未 Complete 的分片上传 |
 | `data/chunks` | 包含待上传唯一副本；有积压时必须与数据库一致保存 |
@@ -127,8 +125,8 @@ docker exec mokyu cli gc mark-unreferenced
 
 1. 停止所有会写同一数据库或后端范围的网关，保留现场，核对备份所属部署。
 2. 恢复数据库、配置和全部历史密钥；一并恢复该恢复点依赖的 multipart、chunks 待上传快照。只有确认恢复点不存在待上传数据时，chunks 才可以为空。
-3. **生成新的实际区块写密钥**，加入 keyring 并设为 active，保留旧密钥供读取。数据库 ID 可能回滚，只改 key ID 或日期不能防止 nonce 重用。`deployment-key` 仍须与恢复的数据库匹配。
-4. 在 Compose 中临时设置 `command: ["serve", "--maintenance"]` 后启动，使维护状态在监听前生效。
+3. 保持恢复数据库对应的 `deployment-key` 不变。在 Compose 中临时设置 `command: ["serve", "--maintenance"]` 后启动，使维护状态在监听前生效。
+4. **生成新的实际区块写密钥**：用 `cli keys create NAME encryption` 创建，再用 `cli keys activate UUID` 切换并重启所有实例，保留历史读密钥。数据库 ID 可能回滚；只改名称或日期不能防止 nonce 重用。完成这一步前不要运行会重新编码区块的维护任务或恢复写入。
 5. 确认 `cli status` 的 `maintenance=true`，核对后端身份、历史密钥、旧对象和 Range 读取；可运行巡检。清桶任务会保持暂停，须在核验并退出维护后显式恢复。缺失 multipart 尾部的未完成上传需重传，已发布对象不依赖该目录。
 6. 如需清理恢复点之后遗留的未知区块，保持维护并排空活跃操作，先[预览后端清查](cli-reference.md#后端清查)，核对后再确认执行；并非每次恢复都需清查。
 7. 移除 Compose 的临时启动参数，再用 `cli maintenance disable` 恢复写入；验证新上传和旧对象读取。切换 active 后仍应保留历史读密钥。

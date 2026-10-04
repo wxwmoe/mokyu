@@ -59,13 +59,19 @@ try:
     member = login(name, password)
     for path in ['/api/maintenance','/api/tasks','/api/service/config','/api/service/status']:
         assert member.get(url + path).status_code == 403, path
-    assert member.post(url + '/api/service/key-material').status_code == 403
+    assert member.get(url + '/api/keys').status_code == 403
+    assert member.post(url + '/api/keys', json={'name': 'denied', 'purpose': 'access'}).status_code == 403
     fields = admin.get(url + '/api/service/config').json()
-    assert fields and all(f['value'] == '[redacted]' for f in fields if f['key'] in ['database.password','backend.access_key','backend.secret_key','security.credential_key_file'])
+    for secret_field in ['database.password', 'encryption.deployment_key']:
+        assert any(f['key'] == secret_field and f['value'] == '[redacted]' for f in fields)
     assert any(f['source'] == 'computed' for f in fields)
-    material = post('/api/service/key-material')['secret']
-    assert len(material) == 64 and material not in admin.get(url + '/api/audit?limit=5').text
-    print('PASS seven shared policies, task provenance, scoped denial, redacted configuration and fresh key material', flush=True)
+    managed = post('/api/keys', {'name': 'maintenance-' + uuid.uuid4().hex, 'purpose': 'access'}, 201)
+    assert managed['purpose'] == 'access' and managed['algorithm'] == 'raw' and not managed['active']
+    assert 'secret' not in managed and 'secret_encrypted' not in managed
+    listed = admin.get(url + '/api/keys').json()
+    assert any(row['id'] == managed['id'] and row['fingerprint'] == managed['fingerprint'] for row in listed)
+    assert admin.delete(url + '/api/keys/' + managed['id']).status_code == 204
+    print('PASS seven shared policies, task provenance, scoped denial, redacted configuration and database key metadata', flush=True)
 
     post('/api/maintenance/pack-creation', {'enabled': True}, 204)
     post('/api/maintenance/unpack/preview', {'all': True}, 409)

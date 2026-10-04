@@ -239,6 +239,9 @@ pub enum Keys {
     Revoke {
         id: Uuid,
     },
+    Activate {
+        id: Uuid,
+    },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Cluster {

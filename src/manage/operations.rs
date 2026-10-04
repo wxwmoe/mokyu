@@ -437,6 +437,15 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 .await?;
                 Ok(json!({"revoked": id}))
             }
+            Keys::Activate { id } => {
+                super::managed_keys::activate_record(
+                    app,
+                    &crate::authorization::Principal::Local,
+                    id,
+                )
+                .await?;
+                Ok(json!({"active": id, "restart_required": true}))
+            }
         },
         Command::Cache(Cache::Status) => app.upload_cache_status().await,
         Command::Cache(Cache::Flush) => app.cache_flush_start().await,

@@ -85,6 +85,15 @@ docker exec mokyu cli bucket cors media /config/cors.json
 
 最后一个启用的管理员不可被禁用、降级或删除。`--require-change` 要求下次登录先改密。`user list` 包含角色、启用状态和改密要求。
 
+## 数据库密钥
+
+| 命令 | 作用 |
+| --- | --- |
+| `keys list` | 列出名称、用途、算法、指纹和 active/revoked 状态，不返回密钥材料 |
+| `keys create NAME PURPOSE` | 在数据库生成不可读的随机密钥；PURPOSE 为 access/signing/encryption，第一把 encryption 密钥自动 active |
+| `keys activate UUID` | 切换 active encryption 密钥；重启实例让进程加载新密钥 |
+| `keys revoke UUID` | 撤销密钥并阻止再次激活；历史区块仍使用数据库中的密钥材料读取 |
+
 凭据/Token 设置文件上限 512 KiB。JSON 中的权限与有效期语义见[管理 API](manage-api-reference.md#应用密钥与-api-token)。创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入并再次确认，使用 `docker exec -it`；非终端须指定 `--password-stdin`。不接受明文命令参数，自动化时可从 stdin 读取一行：
 
 ```sh
@@ -199,8 +208,8 @@ docker exec mokyu cli task resume TASK_UUID
 
 | 命令 | 作用 |
 | --- | --- |
-| `docker run --rm wxwmoe/mokyu:latest keygen` | 生成 32 字节随机密钥，以 64 个十六进制字符表示 |
+| `docker run --rm wxwmoe/mokyu:latest key generate` | 生成部署密钥；只输出一次，必须保存到配置文件 |
 | `mokyu api-schema` | 离线导出管理 OpenAPI，不读取配置或数据库 |
 | `mokyu serve --maintenance` | 在监听前设置维护状态，供[数据库恢复](deployment-and-recovery.md#恢复步骤)使用 |
 
-全部在线管理能力在 Web 有对应入口，见[管理指南](management.md)；生成随机密钥材料也可在“服务状态”完成。配置文件安装、数据库备份恢复及停止状态的救援仍在部署环境执行。
+全部在线管理能力在 Web 有对应入口，见[管理指南](management.md)；部署密钥生成、配置文件安装、数据库备份恢复及停止状态的救援仍在部署环境执行。

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { test, expect } from '@playwright/test'
 import en from '../src/locales/i18n.en.js'
 
-test('maintenance policies, task history, service configuration and key generation', async ({ page, request }) => {
+test('maintenance policies, task history, service configuration and database keys', async ({ page, request }) => {
   test.setTimeout(60000)
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
   const login = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
@@ -37,18 +37,25 @@ test('maintenance policies, task history, service configuration and key generati
     await page.goto('/service'); await expect(page.locator('.queue-card')).toHaveCount(3)
     await expect(page.locator('.service-metric')).toHaveCount(3)
     await page.getByRole('tab', { name: en.runtimeConfig, exact: true }).click()
-    await page.getByRole('textbox', { name: en.searchConfiguration }).fill('backend.secret_key')
-    await expect(page.locator('.config-fields article')).toHaveCount(2)
+    await page.getByRole('textbox', { name: en.searchConfiguration }).fill('encryption.deployment_key')
+    await expect(page.locator('.config-fields article')).toHaveCount(1)
     await expect(page.locator('.config-fields article').first()).toContainText(en.redactedValue)
     await page.getByRole('tab', { name: en.administratorTools, exact: true }).click()
-    await page.getByRole('button', { name: en.generateKeyMaterial, exact: true }).click()
+    await expect(page.getByRole('heading', { name: en.managedKeys, exact: true })).toBeVisible()
+    await page.getByRole('button', { name: en.createKey, exact: true }).click()
     const auth = page.getByRole('dialog').filter({ has: page.getByRole('textbox', { name: en.currentPassword, exact: true }) })
-    await expect(auth.or(page.getByRole('dialog', { name: en.saveSecret, exact: true }))).toBeVisible()
+    const editor = page.getByRole('dialog', { name: en.createKey, exact: true })
+    await expect(editor).toBeVisible(); const keyName = 'playwright-' + Date.now()
+    await editor.getByRole('textbox', { name: en.keyName, exact: true }).fill(keyName)
+    await editor.getByRole('combobox', { name: en.keyPurpose, exact: true }).click()
+    await page.getByRole('option', { name: en.keyPurpose_access, exact: true }).click()
+    await editor.getByRole('button', { name: en.createKey, exact: true }).click()
+    const row = page.locator('.managed-key-row').filter({ hasText: keyName })
+    await expect(auth.or(row)).toBeVisible()
     if (await auth.isVisible()) { await auth.getByRole('textbox', { name: en.currentPassword, exact: true }).fill(password); await auth.getByRole('button', { name: en.continue, exact: true }).click() }
-    const secret = page.getByRole('dialog', { name: en.saveSecret, exact: true })
-    await expect(secret).toBeVisible(); await expect(secret.getByRole('textbox', { name: en.secretValue })).toHaveValue(/^[a-f0-9]{64}$/)
-    await page.keyboard.press('Escape'); await expect(secret).toBeVisible()
-    await secret.getByRole('checkbox', { name: en.secretSaved }).check(); await secret.getByRole('button', { name: en.done, exact: true }).click()
+    await expect(row).toBeVisible()
+    await expect(row.locator('code')).toHaveText(/^[a-f0-9]{64}$/)
+    await expect(page.getByRole('textbox', { name: en.secretValue })).toHaveCount(0)
     await page.goto('/maintenance'); await page.setViewportSize({ width: 390, height: 844 })
     await expect(page.locator('.policy-card')).toHaveCount(7)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)

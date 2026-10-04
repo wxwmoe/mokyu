@@ -131,7 +131,7 @@ pub struct App {
 impl App {
     pub async fn new(
         config: Config,
-        secrets: Secrets,
+        mut secrets: Secrets,
         budget: Budget,
         start_maintenance: bool,
         use_storage: bool,
@@ -145,7 +145,7 @@ impl App {
             .open(config.storage.data.join("gateway.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("another gateway owns this data directory")?;
-        let (db, owner) = crate::db::connect(&config, &secrets, &budget).await?;
+        let (db, owner) = crate::db::connect(&config, &mut secrets, &budget).await?;
         if start_maintenance {
             sqlx::query("UPDATE mokyu_meta SET maintenance=true")
                 .execute(&db)
@@ -440,14 +440,15 @@ impl App {
         } else {
             &self.secrets.active_key
         };
-        // Keep the advisory lock on a dedicated connection until the physical write is durable.
-        // A transaction-scoped lock would allow another process to observe the preparing row.
-        let mut hash_lock = self.db.acquire().await?;
-        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1::text || ':' || encode($2,'hex'), 734922709851001))")
+        // Rollback releases the claim on every return and cancellation path.
+        let mut hash_lock = self.db.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || encode($2,'hex'), 734922709851001))")
             .bind(target_id)
             .bind(hash.as_slice())
             .execute(&mut *hash_lock)
             .await?;
+        sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE storage_target_id=$1 AND hash=$2 AND raw_size=$3 AND algorithm=$4 AND key_id=$5 AND state IN ('preparing','uploading')")
+            .bind(target_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).execute(&self.db).await?;
         let c: Chunk = loop {
             let mut tx = self.db.begin().await?;
             let old: Option<Chunk> = sqlx::query_as("SELECT * FROM chunks WHERE storage_target_id=$1 AND hash=$2 AND raw_size=$3 AND algorithm=$4 AND key_id=$5 AND state='ready'")

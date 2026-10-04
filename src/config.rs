@@ -351,14 +351,12 @@ pub struct Encryption {
     pub algorithm: String,
     #[serde(default)]
     pub deployment_key: Option<String>,
-    pub keyring_file: Option<PathBuf>,
 }
 impl Default for Encryption {
     fn default() -> Self {
         Self {
             algorithm: "aes-256-gcm".into(),
             deployment_key: None,
-            keyring_file: None,
         }
     }
 }
@@ -404,18 +402,6 @@ impl Default for Cleanup {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeyFile {
-    active: String,
-    keys: BTreeMap<String, KeyEntry>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeyEntry {
-    algorithm: String,
-    key: String,
-}
 pub struct Secrets {
     pub database_password: String,
     pub credential_key: crate::codec::Key,
@@ -501,13 +487,6 @@ fn secret_value(
     ensure!(!value.is_empty(), "{name} must not be empty");
     Ok(value)
 }
-fn key(value: &str) -> Result<[u8; 32]> {
-    hex::decode(value)
-        .ok()
-        .and_then(|b| b.try_into().ok())
-        .context("key must be 64 hexadecimal characters")
-}
-
 fn deployment_key(value: &str) -> Result<[u8; 32]> {
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(value.as_bytes())
@@ -693,42 +672,6 @@ impl Config {
             c.multipart.max_active_uploads.is_none_or(|n| n > 0),
             "max_active_uploads must be positive"
         );
-        let (active_key, keys) = if let Some(file) = &c.encryption.keyring_file {
-            let raw = secret(file, base)?;
-            let ring: KeyFile =
-                toml::from_str(&raw).map_err(|_| anyhow::anyhow!("invalid keyring TOML"))?;
-            let mut keys = BTreeMap::<String, crate::codec::Key>::new();
-            for (id, entry) in ring.keys {
-                ensure!(!id.is_empty() && id.len() <= 128, "invalid key ID");
-                ensure!(
-                    matches!(
-                        entry.algorithm.as_str(),
-                        "aes-256-gcm" | "chacha20-poly1305"
-                    ),
-                    "invalid key algorithm"
-                );
-                let material = key(&entry.key)?;
-                ensure!(
-                    !keys.values().any(|k| k.material == material),
-                    "each encryption key must have distinct material"
-                );
-                keys.insert(id, crate::codec::Key::new(&entry.algorithm, material)?);
-            }
-            if c.encryption.algorithm != "none" {
-                ensure!(
-                    keys.get(&ring.active)
-                        .is_some_and(|k| k.algorithm == c.encryption.algorithm),
-                    "active key missing or algorithm mismatch"
-                );
-            }
-            (ring.active, keys)
-        } else {
-            ensure!(
-                c.encryption.algorithm == "none",
-                "encryption.keyring_file is required"
-            );
-            (String::new(), BTreeMap::new())
-        };
         let credential_material = c
             .encryption
             .deployment_key
@@ -744,16 +687,9 @@ impl Config {
                 "database.password",
             )?,
             credential_key: crate::codec::Key::new("aes-256-gcm", credential_material)?,
-            active_key,
-            keys,
+            active_key: String::new(),
+            keys: BTreeMap::new(),
         };
-        ensure!(
-            !secrets
-                .keys
-                .values()
-                .any(|k| k.material == secrets.credential_key.material),
-            "credential protection and chunk keys must differ"
-        );
         let budget = c.budget()?;
         Ok((c, secrets, budget))
     }

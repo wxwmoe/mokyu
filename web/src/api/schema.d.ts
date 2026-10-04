@@ -320,6 +320,118 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cluster": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["cluster_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cluster/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cluster_heartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cluster/join": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cluster_join"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cluster/mode": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cluster_mode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cluster/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["cluster_nodes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cluster/nodes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["cluster_node_revoke"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cluster/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cluster_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/credentials": {
         parameters: {
             query?: never;
@@ -442,6 +554,54 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["start_integrity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["managed_keys"];
+        put?: never;
+        post: operations["managed_key_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/keys/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["managed_key_revoke"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/keys/{id}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["managed_key_activate"];
         delete?: never;
         options?: never;
         head?: never;
@@ -832,22 +992,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/service/key-material": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["key_material"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/service/status": {
         parameters: {
             query?: never;
@@ -970,6 +1114,54 @@ export interface paths {
         get: operations["storage_pack_objects"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stores": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["stores"];
+        put?: never;
+        post: operations["storage_target_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stores/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["storage_target_update"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stores/{name}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_target_check"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1243,6 +1435,10 @@ export interface components {
         Bootstrap: {
             setup_required: boolean;
         };
+        BucketCreationOptions: {
+            projects: components["schemas"]["BucketProject"][];
+            stores: components["schemas"]["BucketStore"][];
+        };
         BucketGrant: {
             actions: components["schemas"]["Action"][];
             /** Format: uuid */
@@ -1281,6 +1477,12 @@ export interface components {
             bucket: components["schemas"]["BucketView"];
             domains: string[];
         };
+        BucketStore: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            type: string;
+        };
         BucketTask: {
             existing?: boolean;
             /** Format: uuid */
@@ -1301,6 +1503,8 @@ export interface components {
             public_base_url: string;
             revision: string;
             state: string;
+            /** Format: uuid */
+            storage_target_id?: string | null;
             uploads_paused: boolean;
             website_enabled: boolean;
         };
@@ -1320,6 +1524,13 @@ export interface components {
         ChunkPage: {
             chunks: components["schemas"]["ObjectChunk"][];
             next_offset?: string | null;
+        };
+        ClusterStatus: {
+            /** Format: int64 */
+            enabled_nodes: number;
+            /** Format: int64 */
+            local_targets: number;
+            mode: string;
         };
         Completion: {
             parts: components["schemas"]["PartReceipt"][];
@@ -1346,6 +1557,8 @@ export interface components {
             name: string;
             /** Format: uuid */
             project_id?: string | null;
+            /** Format: uuid */
+            storage_target_id?: string | null;
         };
         CreateUser: {
             must_change_password?: boolean;
@@ -1430,6 +1643,15 @@ export interface components {
             /** Format: uuid */
             preview_id: string;
         };
+        HeartbeatInput: {
+            credential: string;
+            /** Format: uuid */
+            node_id: string;
+        };
+        HeartbeatView: {
+            enabled: boolean;
+            kind: string;
+        };
         IntegrityIssue: {
             /** Format: uuid */
             bucket_id?: string | null;
@@ -1511,8 +1733,14 @@ export interface components {
             next_token?: string | null;
             tasks: components["schemas"]["Job"][];
         };
-        KeyMaterial: {
-            secret: string;
+        JoinInput: {
+            token: string;
+        };
+        JoinView: {
+            credential: string;
+            kind: string;
+            /** Format: uuid */
+            node_id: string;
         };
         /** @enum {string} */
         Kind: "delete" | "private" | "public-read" | "copy" | "move" | "metadata";
@@ -1552,6 +1780,23 @@ export interface components {
             pack_creation_paused: boolean;
             preparing_packs: string;
         };
+        ManagedKeyInput: {
+            name: string;
+            purpose: string;
+        };
+        ManagedKeyView: {
+            active: boolean;
+            algorithm: string;
+            /** Format: date-time */
+            created_at: string;
+            fingerprint: string;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            purpose: string;
+            /** Format: date-time */
+            revoked_at?: string | null;
+        };
         MediaItem: {
             content_type: string;
             /** Format: uuid */
@@ -1587,6 +1832,22 @@ export interface components {
         };
         /** @enum {string} */
         Mode: "metadata" | "head" | "full";
+        ModeInput: {
+            /** @example cluster */
+            mode: string;
+        };
+        NodeView: {
+            advertise_url?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            enabled: boolean;
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            /** Format: date-time */
+            last_seen_at?: string | null;
+            name: string;
+        };
         ObjectChunk: {
             algorithm: string;
             compression: string;
@@ -1894,6 +2155,44 @@ export interface components {
             stale: boolean;
             usage?: components["schemas"]["StorageUsage"] | null;
         };
+        StorageTargetInput: {
+            access_key?: string | null;
+            bucket?: string | null;
+            endpoint?: string | null;
+            name: string;
+            path?: string | null;
+            prefix?: string;
+            region?: string | null;
+            secret_key?: string | null;
+            type: string;
+        };
+        StorageTargetPatch: {
+            access_key?: string | null;
+            bucket?: string | null;
+            enabled?: boolean | null;
+            endpoint?: string | null;
+            path?: string | null;
+            prefix?: string | null;
+            region?: string | null;
+            secret_key?: string | null;
+            type?: string | null;
+        };
+        StorageTargetView: {
+            bucket?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            enabled: boolean;
+            endpoint?: string | null;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            path?: string | null;
+            prefix: string;
+            region?: string | null;
+            type: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         StorageUsage: {
             attributed_raw_bytes: string;
             buckets: string;
@@ -1913,6 +2212,8 @@ export interface components {
         };
         SweepRequest: {
             older_than: string;
+            /** Format: uuid */
+            storage_target_id?: string | null;
         };
         SweepTask: {
             /** Format: uuid */
@@ -1949,11 +2250,11 @@ export interface components {
             user_id: string;
         };
         TokenInput: {
-            expires_in?: string | null;
-            grants?: components["schemas"]["BucketGrant"][];
-            keep_expiry?: boolean;
-            label: string;
-            system?: boolean;
+            advertise_url?: string | null;
+            expires_in?: string;
+            /** @example data */
+            kind: string;
+            name: string;
         };
         TokenPage: {
             /** Format: uuid */
@@ -1963,6 +2264,15 @@ export interface components {
         TokenSecret: {
             secret: string;
             token: components["schemas"]["Token"];
+        };
+        TokenView: {
+            /** Format: date-time */
+            expires_at: string;
+            kind: string;
+            name: string;
+            /** Format: uuid */
+            node_id: string;
+            token: string;
         };
         Transfer: {
             /** Format: uuid */
@@ -2190,7 +2500,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BucketProject"][];
+                    "application/json": components["schemas"]["BucketCreationOptions"];
                 };
             };
         };
@@ -2670,6 +2980,155 @@ export interface operations {
             };
         };
     };
+    cluster_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterStatus"];
+                };
+            };
+        };
+    };
+    cluster_heartbeat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HeartbeatInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HeartbeatView"];
+                };
+            };
+        };
+    };
+    cluster_join: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JoinInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JoinView"];
+                };
+            };
+        };
+    };
+    cluster_mode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModeInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterStatus"];
+                };
+            };
+        };
+    };
+    cluster_nodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeView"][];
+                };
+            };
+        };
+    };
+    cluster_node_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cluster_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TokenInput"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenView"];
+                };
+            };
+        };
+    };
     credentials_list: {
         parameters: {
             query?: {
@@ -2890,6 +3349,86 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskStarted"];
                 };
+            };
+        };
+    };
+    managed_keys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedKeyView"][];
+                };
+            };
+        };
+    };
+    managed_key_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManagedKeyInput"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedKeyView"];
+                };
+            };
+        };
+    };
+    managed_key_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    managed_key_activate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -3553,25 +4092,6 @@ export interface operations {
             };
         };
     };
-    key_material: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["KeyMaterial"];
-                };
-            };
-        };
-    };
     service_status: {
         parameters: {
             query?: never;
@@ -3780,6 +4300,94 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PackObjects"];
+                };
+            };
+        };
+    };
+    stores: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageTargetView"][];
+                };
+            };
+        };
+    };
+    storage_target_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageTargetInput"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageTargetView"];
+                };
+            };
+        };
+    };
+    storage_target_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageTargetPatch"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageTargetView"];
+                };
+            };
+        };
+    };
+    storage_target_check: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageTargetView"];
                 };
             };
         };

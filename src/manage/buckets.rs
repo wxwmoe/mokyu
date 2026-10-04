@@ -34,6 +34,18 @@ pub(super) struct BucketProject {
     id: Uuid,
     name: String,
 }
+#[derive(Serialize, sqlx::FromRow, ToSchema)]
+pub(super) struct BucketStore {
+    id: Uuid,
+    name: String,
+    #[serde(rename = "type")]
+    store_type: String,
+}
+#[derive(Serialize, ToSchema)]
+pub(super) struct BucketCreationOptions {
+    projects: Vec<BucketProject>,
+    stores: Vec<BucketStore>,
+}
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SettingsInput {
@@ -414,13 +426,23 @@ pub(super) async fn create(
         Json(create_bucket(&app, &actor.principal, input).await?.into()),
     ))
 }
-#[utoipa::path(get,operation_id="bucket_creation_options",path="/api/bucket-projects",responses((status=200,body=Vec<BucketProject>)))]
+#[utoipa::path(get,operation_id="bucket_creation_options",path="/api/bucket-projects",responses((status=200,body=BucketCreationOptions)))]
 pub(super) async fn options(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
-) -> Result<Json<Vec<BucketProject>>, HttpError> {
-    Ok(Json(sqlx::query_as("SELECT id,name FROM projects p WHERE $1 OR ($3 AND allow_bucket_create AND EXISTS(SELECT 1 FROM project_members WHERE project_id=p.id AND user_id=$2 AND role='maintainer')) ORDER BY builtin DESC,name LIMIT 1000")
-        .bind(actor.admin).bind(actor.id).bind(matches!(actor.principal,Principal::User{..})).fetch_all(&app.db).await?))
+) -> Result<Json<BucketCreationOptions>, HttpError> {
+    let projects: Vec<BucketProject> = sqlx::query_as("SELECT id,name FROM projects p WHERE $1 OR ($3 AND allow_bucket_create AND EXISTS(SELECT 1 FROM project_members WHERE project_id=p.id AND user_id=$2 AND role='maintainer')) ORDER BY builtin DESC,name LIMIT 1000")
+        .bind(actor.admin)
+        .bind(actor.id)
+        .bind(matches!(actor.principal,Principal::User{..}))
+        .fetch_all(&app.db)
+        .await?;
+    let stores: Vec<BucketStore> = sqlx::query_as(
+        "SELECT id,name,type AS store_type FROM storage_targets WHERE enabled ORDER BY name",
+    )
+    .fetch_all(&app.db)
+    .await?;
+    Ok(Json(BucketCreationOptions { projects, stores }))
 }
 #[utoipa::path(get,operation_id="bucket_settings",path="/api/buckets/{bucket}/settings",params(("bucket"=Uuid,Path)),responses((status=200,body=BucketSettings)))]
 pub(super) async fn get(

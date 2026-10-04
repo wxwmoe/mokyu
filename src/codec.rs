@@ -341,19 +341,24 @@ pub fn protect(secret: &[u8], key: &Key, binding: &[u8]) -> Result<Vec<u8>> {
     result.extend_from_slice(&data);
     Ok(result)
 }
-pub fn unprotect(data: &[u8], key: &Key, binding: &[u8]) -> Result<String> {
+pub fn unprotect_bytes(data: &[u8], key: &Key, binding: &[u8]) -> Result<Vec<u8>> {
     ensure!(data.len() >= 28, "invalid protected credential");
     let nonce: [u8; 12] = data[..12].try_into()?;
     let mut data = data[12..].to_vec();
-    let plain = key
+    let plain_len = key
         .cipher
         .open_in_place(
             Nonce::assume_unique_for_key(nonce),
             Aad::from(binding),
             &mut data,
         )
-        .map_err(|_| anyhow::anyhow!("credential authentication failed"))?;
-    Ok(std::str::from_utf8(plain)?.to_string())
+        .map_err(|_| anyhow::anyhow!("credential authentication failed"))?
+        .len();
+    data.truncate(plain_len);
+    Ok(data)
+}
+pub fn unprotect(data: &[u8], key: &Key, binding: &[u8]) -> Result<String> {
+    Ok(String::from_utf8(unprotect_bytes(data, key, binding)?)?)
 }
 
 #[cfg(test)]

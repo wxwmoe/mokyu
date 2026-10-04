@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { TooltipProvider, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from 'reka-ui'
-import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ChevronDown, Settings2, Users, FolderHeart, KeyRound, BookHeart, UploadCloud, HouseHeart, Package, Flower2, ListChecks, HeartPulse } from 'lucide-vue-next'
+import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ChevronDown, Settings2, Users, FolderHeart, KeyRound, BookHeart, UploadCloud, HouseHeart, Package, Flower2, ListChecks, HeartPulse, HardDrive } from 'lucide-vue-next'
 import { session, signOut, savePreferences, refreshSession, queries } from '../api/client'
 import { appearance, setTheme } from './theme'
 import { report, notices } from './feedback'
@@ -27,6 +27,7 @@ const destinations = [
   { key: 'tasks', icon: ListChecks, group: 'administration', admin: true },
   { key: 'audit', icon: BookHeart, group: 'administration' },
   { key: 'service', icon: HeartPulse, group: 'administration', admin: true },
+  { key: 'stores', icon: HardDrive, group: 'administration', admin: true },
 ]
 const groups = computed(() => ['workspace', 'administration'].map(name => ({ name, entries: destinations.filter(item => (session.value?.role === 'admin' ? item.group === name : name === 'workspace' && !item.admin) && (!item.projects || session.value?.project_management)) })).filter(group => group.entries.length))
 const current = computed(() => destinations.find(item => item.key === route.name) || { key: route.name === 'login' ? 'signIn' : ['account', 'tokens'].includes(String(route.name)) ? String(route.name) : 'media', icon: route.name === 'account' ? Settings2 : Images, group: 'workspace' })

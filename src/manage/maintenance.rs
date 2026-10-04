@@ -577,25 +577,3 @@ pub(super) async fn task_action(
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
-#[derive(Serialize, ToSchema)]
-pub(super) struct KeyMaterial {
-    secret: String,
-}
-#[utoipa::path(post,path="/api/service/key-material",responses((status=200,body=KeyMaterial)))]
-pub(super) async fn key_material(
-    State(app): State<Arc<App>>,
-    Extension(actor): Extension<Identity>,
-) -> Result<Json<KeyMaterial>, HttpError> {
-    actor.recent(&app).await?;
-    let mut tx = guard(&app, &actor).await?;
-    let secret = crate::admin::random_secret()?;
-    audit::checkpoint(
-        &mut tx,
-        "service.key_material",
-        "new key",
-        json!({"generated":true}),
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(Json(KeyMaterial { secret }))
-}
