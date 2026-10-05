@@ -1,7 +1,7 @@
 use crate::{
     admin::{
-        Buckets, Cache, Cleanup, Cluster, Command, Credentials, Domains, Gc, Integrity, Keys,
-        Maintenance, Packs, Projects, Stores, Tasks, Users,
+        Buckets, Cache, Cleanup, Cluster, Command, ControlSettings, Credentials, Domains, Gc,
+        Integrity, Keys, Maintenance, Packs, Projects, Settings, Stores, Tasks, Users,
     },
     app::{App, Bucket},
     authorization::{Action, Principal},
@@ -350,6 +350,9 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                     prefix,
                     access_key,
                     secret_key,
+                    read_concurrency,
+                    upload_concurrency,
+                    control_concurrency,
                 } => {
                     let row = super::stores::create_record(
                         app,
@@ -363,6 +366,9 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                             prefix,
                             access_key,
                             secret_key,
+                            read_concurrency,
+                            upload_concurrency,
+                            control_concurrency,
                         },
                     )
                     .await?;
@@ -379,6 +385,9 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                     access_key,
                     secret_key,
                     enabled,
+                    read_concurrency,
+                    upload_concurrency,
+                    control_concurrency,
                 } => {
                     let row = super::stores::update_record(
                         app,
@@ -393,6 +402,9 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                             access_key,
                             secret_key,
                             enabled,
+                            read_concurrency,
+                            upload_concurrency,
+                            control_concurrency,
                         },
                     )
                     .await?;
@@ -416,6 +428,47 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 }
             }
         }
+        Command::Settings(Settings::Get { section }) => {
+            super::settings::get_section_value(app, section.trim()).await
+        }
+        Command::Settings(Settings::Set { section, revision, document, .. }) => {
+            super::settings::set_section_value(
+                app,
+                &Principal::Local,
+                &section,
+                revision,
+                document.context("missing runtime settings document")?,
+            )
+            .await
+        }
+        Command::Settings(Settings::Reset { section }) => {
+            super::settings::reset_section_value(app, &Principal::Local, &section).await
+        }
+        Command::Settings(Settings::Control(command)) => match command {
+            ControlSettings::Show => Ok(serde_json::to_value(super::settings::read(app).await?)?),
+            ControlSettings::Set {
+                origin,
+                secure_cookie,
+                session_lifetime,
+                gravatar_base_url,
+                thumbnail_cache_size,
+                revision,
+            } => Ok(serde_json::to_value(
+                super::settings::update(
+                    app,
+                    &Principal::Local,
+                    super::settings::ControlSettingsPatch {
+                        origin,
+                        secure_cookie,
+                        session_lifetime,
+                        gravatar_base_url,
+                        thumbnail_cache_size,
+                        revision,
+                    },
+                )
+                .await?,
+            )?),
+        },
         Command::Keys(command) => match command {
             Keys::List => Ok(serde_json::to_value(
                 super::managed_keys::list_rows(&app.db).await?,
@@ -424,7 +477,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 super::managed_keys::create_record(
                     app,
                     &crate::authorization::Principal::Local,
-                    super::managed_keys::ControldKeyInput { name, purpose },
+                    super::managed_keys::ManagedKeyInput { name, purpose },
                 )
                 .await?,
             )?),

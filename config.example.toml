@@ -1,12 +1,3 @@
-[listen]
-s3 = "0.0.0.0:9000"
-web = "0.0.0.0:9001"
-control = "0.0.0.0:9002"
-admin_socket = "/run/mokyu/admin.sock"
-region = "us-east-1"
-aws_chunk_limit = "8MiB"
-# s3_domain = "s3.example.com"
-
 [database]
 host = "postgres"
 port = 5432
@@ -16,140 +7,42 @@ password = "YOUR_POSTGRES_PASSWORD"
 # Use password_file instead of password for Docker secrets.
 # password_file = "secrets/postgres-password"
 ssl_mode = "prefer"
-# max_connections = 12
 
-[control]
-origin = "https://admin.example.com"
-secure_cookie = true
-session_lifetime = "12h"
-# gravatar_base_url = "https://www.gravatar.com/avatar/"
-# thumbnail_cache_size = "256MiB" # Derived local thumbnails; 0B disables retention.
+[cluster]
+# The first control does not need a join token. Other roles use a one-time
+# token created by `mokyu cli cluster token` and keep the resulting node.json.
+# control_url = "https://control.example.com"
+# join_token = "PASTE_ONE_TIME_TOKEN_HERE"
+# node_name = "data-1"
+# advertise_url = "https://control-1.example.com"
 
-[storage]
-data = "/data"
-free_space_floor = "1GiB"
-# Configure local and S3 storage connections through `mokyu cli stores` or the control API.
-# Omit concurrency limits for automatic budgets shared by all storage work.
-# read_concurrency = 16
-# upload_concurrency = 4
-# control_concurrency = 2
-connect_timeout = "5s"
-request_timeout = "30s"
-max_retries = 3
-retry_timeout = "120s"
-priority_aging = "30s"
-# min_storage_duration = "30d"
+[instance]
+listen_s3 = "0.0.0.0:9000"
+listen_web = "0.0.0.0:9001"
+listen_control = "0.0.0.0:9002"
+listen_socket = "/run/mokyu/admin.sock"
+data_path = "/data"
+min_free_space = "1GiB"
+# Generate once with `mokyu key generate`; keep it identical for every role.
+deployment_key = "REPLACE_WITH_MOKYU_KEY_GENERATE_OUTPUT"
 
-[processing]
-# Omit resource limits for finite automatic budgets based on cgroup/host resources.
+# Omit resource limits for finite budgets derived from cgroup resources.
 # cpu_jobs = 2
 # inflight_bytes = "128MiB"
 # upload_concurrency = 2
 # read_concurrency = 4
 # connections = 128
-read_idle_timeout = "120s"
-upload_idle_timeout = "120s"
-
-[multipart]
-# local_limit = "2GB"
-idle_timeout = "24h"
-sweep_interval = "5m"
-client_idle_timeout = "120s"
-# max_active_uploads = 10000
-
-[cache]
-upload_cache = true
-# Pending uploads share the chunk cache; omit for 20% of its effective capacity.
+# db_connections = 12
+# storage_read_concurrency = 16
+# storage_upload_concurrency = 4
+# storage_control_concurrency = 2
+# cache_size = "10GiB"
+# cache_entries = 65536
 # upload_cache_size = "2GiB"
-# max_size = "10GiB"
-# Set max_size = "0B" to disable persistent chunk caching.
-# max_entries = 65536
-# Keep decrypted Zstd payloads only when they save at least this percentage.
-min_compression_savings_percent = 20
-
-[compression]
-# Screening only: always tries every new chunk; sample probes four regions;
-# file_type skips known compressed MIME types. Deduplicated chunks stay unchanged.
-strategy = "always"
-level = 6
-# sample only: independent probe level; 0 means the Zstd default (3) for either level.
-sample_level = 3
-# Both savings thresholds must be met, excluding encryption overhead.
-min_savings_percent = 2
-min_savings_bytes = 256
-# Release idle Zstd compression/decompression contexts and scratch buffers; 0s disables retention.
-context_idle_timeout = "30s"
-# file_type only: omit for built-in types, replace with an array, or [] to skip none.
-# skip_mime_types = ["image/jpeg", "image/png", "video/mp4", "application/zip"]
-
-[pack]
-enabled = true
-max_size = "32MiB"
-upload_cache_timeout = "60s"
-range_optimization = true
-range_interval = "15m"
-range_window = "24h"
-range_min_downloads = 8
-range_min_savings_percent = 50
-range_min_savings_bytes = "64MiB"
-range_repack_after = "30d"
-range_repack_window = "7d"
-range_repack_retry_interval = "7d"
-# Omit to inherit compression.strategy; always / sample / file_type / chunk_hint.
-# compression_strategy = "chunk_hint"
-maintenance_concurrency = 1
-interval = "1h"
-reuse_interval = "5m"
-reclaim_interval = "30m"
-repack_interval = "24h"
-repack_cooldown = "1h"
-reclaim_min_savings_bytes = "4MiB"
-
-[encryption]
-deployment_key = "REPLACE_WITH_MOKYU_KEY_GENERATE_OUTPUT"
-algorithm = "aes-256-gcm"
-
-[cluster]
-# The first control needs only advertise_url; it starts without control_url or join_token.
-# Other controls, workers and data nodes use the control URL and one-time token
-# created by `mokyu cli cluster token`.
-# control_url = "https://control.example.com"
-# join_token = "PASTE_ONE_TIME_TOKEN_HERE"
-# node_name = "control-1"
-# advertise_url = "https://control-2.example.com"
-
-[gc]
-unreferenced_grace = "48h"
-interval = "30m"
-batch_size = 128
-
-[cleanup]
-# Database history only; independent of remote GC grace and upload idle timeout.
-interval = "5m"
-batch_size = 1000
-max_duration = "5s"
-deleted_chunk_retention = "7d"
-upload_retention = "24h"
-task_retention = "30d"
-# Control-plane activity and security events; independent of object retention.
-audit_retention = "90d"
-
-[statistics]
-scope_limit = 64
-storage_sample_interval = "15m"
-storage_retention = "7d"
-runtime_sample_interval = "1m"
-runtime_retention = "24h"
-# Background database inventory; page refreshes only read the cached snapshot.
-refresh_interval = "15m"
-query_timeout = "2m"
-access_flush_interval = "1m"
-access_retention = "14d"
-
-[integrity]
-# Manual checks only. Effective concurrency also respects the shared resource budget.
-concurrency = 1
-request_timeout = "30s"
-# Optional average limits, with bursts up to one concurrent batch.
-# requests_per_second = 10
-# bandwidth = "10MiB"
+thumbnail_cache_size = "256MiB"
+# multipart_limit = "2GB"
+compression_idle_timeout = "30s"
+pack_concurrency = 1
+integrity_concurrency = 1
+# integrity_rps = 10
+# integrity_bandwidth = "10MiB"

@@ -67,7 +67,7 @@ async function removeProject() {
 }
 async function mode() {
   busy.value = true
-  try { await secure(() => write('/api/settings/projects', { enabled: !session.value?.project_management }, 'PUT')); await changed() }
+  try { await secure(() => write('/api/projects/settings', { enabled: !session.value?.project_management }, 'PUT')); await changed() }
   catch (error) { report(error) } finally { busy.value = false }
 }
 </script>

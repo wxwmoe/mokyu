@@ -162,9 +162,9 @@ fn main() -> Result<()> {
             socket
         } else if args.config.exists() {
             let text = std::fs::read_to_string(&args.config)?;
-            let config: config::Config =
+            let config: config::FileConfig =
                 toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid TOML configuration"))?;
-            config.listen.admin_socket
+            config.instance.listen_socket
         } else {
             PathBuf::from("/run/mokyu/admin.sock")
         };

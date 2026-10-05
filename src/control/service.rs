@@ -127,7 +127,9 @@ pub(super) async fn config(
     for (section, values) in sections.as_object().unwrap() {
         for (field, value) in values.as_object().unwrap() {
             let key = format!("{section}.{field}");
-            let source = if c.configured_fields.contains(&key) {
+            let source = if section == "control" {
+                "database"
+            } else if c.configured_fields.contains(&key) {
                 "config"
             } else {
                 "default"

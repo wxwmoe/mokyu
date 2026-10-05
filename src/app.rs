@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, RwLock, Weak},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
@@ -105,6 +105,7 @@ impl Drop for Active {
 }
 pub struct App {
     pub config: Config,
+    pub runtime_revisions: RwLock<HashMap<String, i64>>,
     pub budget: Budget,
     pub secrets: Arc<Secrets>,
     pub db: PgPool,
@@ -130,7 +131,7 @@ pub struct App {
 }
 impl App {
     pub async fn new(
-        config: Config,
+        mut config: Config,
         mut secrets: Secrets,
         budget: Budget,
         start_maintenance: bool,
@@ -146,6 +147,15 @@ impl App {
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("another gateway owns this data directory")?;
         let (db, owner) = crate::db::connect(&config, &mut secrets, &budget).await?;
+        crate::db::ensure_runtime_settings(&db, &config).await?;
+        config.control = crate::db::load_control_settings(&db, &config.control).await?;
+        let runtime_revisions: HashMap<String, i64> = sqlx::query_as(
+            "SELECT section,revision FROM runtime_settings",
+        )
+        .fetch_all(&db)
+        .await?
+        .into_iter()
+        .collect();
         if start_maintenance {
             sqlx::query("UPDATE mokyu_meta SET maintenance=true")
                 .execute(&db)
@@ -194,6 +204,7 @@ impl App {
             reads: Arc::new(Semaphore::new(budget.read_concurrency)),
             slots: Arc::new(Semaphore::new(budget.data_slots)),
             config,
+            runtime_revisions: RwLock::new(runtime_revisions),
             budget,
             secrets,
             db,

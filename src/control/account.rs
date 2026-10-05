@@ -337,8 +337,8 @@ pub(super) async fn revoke_others(
 fn setup_path(app: &App) -> Result<PathBuf> {
     Ok(app
         .config
-        .listen
-        .admin_socket
+        .instance
+        .listen_socket
         .parent()
         .context("admin socket directory is required")?
         .join("setup-token"))

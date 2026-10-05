@@ -1,9 +1,131 @@
-use crate::config::{Budget, Config, Secrets};
+use crate::config::{Budget, Config, Control, Secrets};
 use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 
 static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+#[derive(sqlx::FromRow)]
+struct RuntimeSettingsRow {
+    value: Value,
+}
+
+pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "web",
+            json!({
+                "origin": configured.control.origin.clone(),
+                "secure_cookie": configured.control.secure_cookie,
+                "session_lifetime": configured.control.session_lifetime.clone(),
+                "avatar_url": configured.control.gravatar_base_url.clone(),
+                "thumbnail_cache_size": configured.control.thumbnail_cache_size.clone(),
+            }),
+        ),
+        (
+            "s3",
+            json!({
+                "domain": configured.listen.s3_domain.clone(),
+                "signature_region": configured.listen.region.clone(),
+                "max_stream_chunk_size": configured.listen.aws_chunk_limit.clone(),
+            }),
+        ),
+        (
+            "storage",
+            json!({
+                "connect_timeout": configured.storage.connect_timeout.clone(),
+                "request_timeout": configured.storage.request_timeout.clone(),
+                "max_retries": configured.storage.max_retries,
+                "retry_timeout": configured.storage.retry_timeout.clone(),
+                "priority_aging": configured.storage.priority_aging.clone(),
+                "min_retention": configured.storage.min_storage_duration.clone(),
+            }),
+        ),
+        (
+            "requests",
+            json!({
+                "read_idle_timeout": configured.processing.read_idle_timeout.clone(),
+                "upload_idle_timeout": configured.processing.upload_idle_timeout.clone(),
+            }),
+        ),
+        (
+            "uploads",
+            json!({
+                "idle_timeout": configured.multipart.idle_timeout.clone(),
+                "sweep_interval": configured.multipart.sweep_interval.clone(),
+                "client_idle_timeout": configured.multipart.client_idle_timeout.clone(),
+                "max_active": configured.multipart.max_active_uploads,
+            }),
+        ),
+        (
+            "cache",
+            json!({
+                "upload_enabled": configured.cache.upload_cache,
+                "min_savings_percent": configured.cache.min_compression_savings_percent,
+            }),
+        ),
+        ("compression", serde_json::to_value(&configured.compression).unwrap_or_default()),
+        (
+            "packing",
+            serde_json::to_value(&configured.pack).unwrap_or_default(),
+        ),
+        (
+            "garbage_collection",
+            serde_json::to_value(&configured.gc).unwrap_or_default(),
+        ),
+        (
+            "retention",
+            serde_json::to_value(&configured.cleanup).unwrap_or_default(),
+        ),
+        (
+            "statistics",
+            serde_json::to_value(&configured.statistics).unwrap_or_default(),
+        ),
+        (
+            "integrity",
+            serde_json::to_value(&configured.integrity).unwrap_or_default(),
+        ),
+    ]
+}
+
+pub fn runtime_default(configured: &Config, section: &str) -> Option<Value> {
+    runtime_defaults(configured)
+        .into_iter()
+        .find_map(|(name, value)| (name == section).then_some(value))
+}
+
+pub async fn ensure_runtime_settings(pool: &PgPool, configured: &Config) -> Result<()> {
+    for (section, value) in runtime_defaults(configured) {
+        sqlx::query(
+            "INSERT INTO runtime_settings(section,value) VALUES($1,$2) ON CONFLICT (section) DO NOTHING",
+        )
+        .bind(section)
+        .bind(value)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+pub async fn load_control_settings(pool: &PgPool, configured: &Control) -> Result<Control> {
+    let _ = configured;
+    let row: RuntimeSettingsRow = sqlx::query_as(
+        "SELECT value FROM runtime_settings WHERE section='web'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let value = row.value;
+    let settings = Control {
+        origin: value.get("origin").and_then(Value::as_str).unwrap_or("http://localhost:9002").to_owned(),
+        secure_cookie: value.get("secure_cookie").and_then(Value::as_bool).unwrap_or(true),
+        session_lifetime: value.get("session_lifetime").and_then(Value::as_str).unwrap_or("12h").to_owned(),
+        gravatar_base_url: value.get("avatar_url").and_then(Value::as_str).unwrap_or("https://www.gravatar.com/avatar/").to_owned(),
+        thumbnail_cache_size: value.get("thumbnail_cache_size").and_then(Value::as_str).unwrap_or("256MiB").to_owned(),
+    };
+    settings.validate()?;
+    Ok(settings)
+}
 
 async fn load_database_keys(pool: &PgPool, secrets: &mut Secrets, algorithm: &str) -> Result<()> {
     let rows: Vec<(uuid::Uuid, String, String, String, Vec<u8>, Vec<u8>, bool)> = sqlx::query_as(
@@ -149,7 +271,7 @@ pub async fn connect(
                 "0.0.4 requires a fresh database or an empty 0.0.3 schema"
             );
             let used: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM buckets) OR EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM projects WHERE id <> '00000000-0000-0000-0000-000000000001') OR EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM uploads) OR EXISTS(SELECT 1 FROM sessions) OR EXISTS(SELECT 1 FROM tasks) OR EXISTS(SELECT 1 FROM web_users) OR EXISTS(SELECT 1 FROM manage_setup)",
+                "SELECT EXISTS(SELECT 1 FROM buckets) OR EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM projects WHERE id <> '00000000-0000-0000-0000-000000000001') OR EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM uploads) OR EXISTS(SELECT 1 FROM sessions) OR EXISTS(SELECT 1 FROM tasks) OR EXISTS(SELECT 1 FROM web_users) OR EXISTS(SELECT 1 FROM admin_setup)",
             )
             .fetch_one(&pool)
             .await?;

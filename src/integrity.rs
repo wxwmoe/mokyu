@@ -13,7 +13,7 @@ use std::{
 };
 use uuid::Uuid;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub concurrency: usize,

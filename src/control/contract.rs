@@ -107,6 +107,10 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::maintenance::task_action))
         .routes(routes!(super::service::status))
         .routes(routes!(super::service::config))
+        .routes(routes!(super::settings::list))
+        .routes(routes!(super::settings::get_section))
+        .routes(routes!(super::settings::save_section))
+        .routes(routes!(super::settings::reset_section))
         .routes(routes!(super::stores::list, super::stores::create))
         .routes(routes!(super::stores::check, super::stores::update))
         .routes(routes!(

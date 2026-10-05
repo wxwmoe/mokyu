@@ -53,6 +53,8 @@ pub enum Command {
     #[command(subcommand)]
     Stores(Stores),
     #[command(subcommand)]
+    Settings(Settings),
+    #[command(subcommand)]
     Keys(Keys),
     #[command(subcommand)]
     Cluster(Cluster),
@@ -190,6 +192,12 @@ pub enum Stores {
         access_key: Option<String>,
         #[arg(long)]
         secret_key: Option<String>,
+        #[arg(long)]
+        read_concurrency: Option<i32>,
+        #[arg(long)]
+        upload_concurrency: Option<i32>,
+        #[arg(long)]
+        control_concurrency: Option<i32>,
     },
     Update {
         name: String,
@@ -211,6 +219,12 @@ pub enum Stores {
         secret_key: Option<String>,
         #[arg(long)]
         enabled: Option<bool>,
+        #[arg(long)]
+        read_concurrency: Option<i32>,
+        #[arg(long)]
+        upload_concurrency: Option<i32>,
+        #[arg(long)]
+        control_concurrency: Option<i32>,
     },
     Check {
         name: String,
@@ -226,6 +240,44 @@ pub enum Stores {
         confirm_prefix: Option<String>,
         #[arg(long, default_value = "48h")]
         older_than: String,
+    },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Settings {
+    Get {
+        section: String,
+    },
+    Set {
+        section: String,
+        file: PathBuf,
+        #[arg(long)]
+        revision: i64,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    Reset {
+        section: String,
+    },
+    #[command(subcommand)]
+    #[command(name = "web")]
+    Control(ControlSettings),
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum ControlSettings {
+    Show,
+    Set {
+        #[arg(long)]
+        origin: Option<String>,
+        #[arg(long)]
+        secure_cookie: Option<bool>,
+        #[arg(long)]
+        session_lifetime: Option<String>,
+        #[arg(long)]
+        gravatar_base_url: Option<String>,
+        #[arg(long)]
+        thumbnail_cache_size: Option<String>,
+        #[arg(long)]
+        revision: Option<i64>,
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
@@ -364,6 +416,7 @@ impl Command {
             | Self::Pack(Packs::Status)
             | Self::Cache(Cache::Status)
             | Self::Stores(Stores::List)
+            | Self::Settings(Settings::Control(ControlSettings::Show) | Settings::Get { .. })
             | Self::Keys(Keys::List)
             | Self::Cluster(Cluster::Status | Cluster::Nodes) => None,
             Self::Bucket(_) => Some("bucket.change"),
@@ -378,6 +431,7 @@ impl Command {
             Self::Maintenance(_) => Some("maintenance.change"),
             Self::Task(_) => Some("task.change"),
             Self::Stores(_) => Some("storage.change"),
+            Self::Settings(_) => Some("runtime.settings"),
             Self::Keys(_) => Some("managed_key.change"),
             Self::Cluster(_) => Some("cluster.change"),
             Self::Integrity(_) => Some("integrity.check"),
@@ -515,7 +569,8 @@ pub async fn client(path: &Path, mut command: Command) -> Result<()> {
         | Command::Credential(
             Credentials::Update { file, document, .. }
             | Credentials::Permissions { file, document, .. },
-        ) => {
+        )
+        | Command::Settings(Settings::Set { file, document, .. }) => {
             ensure!(
                 std::fs::metadata(&file)?.len() <= 512 * 1024,
                 "JSON file too large"
@@ -647,7 +702,7 @@ async fn rpc(path: &Path, command: &Command) -> Result<Value> {
     Ok(reply["result"].clone())
 }
 pub async fn serve(app: Arc<App>) -> Result<()> {
-    let path = &app.config.listen.admin_socket;
+    let path = &app.config.instance.listen_socket;
     tokio::fs::create_dir_all(
         path.parent()
             .context("admin socket needs a parent directory")?,

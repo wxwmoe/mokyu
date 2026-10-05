@@ -912,6 +912,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_mode"];
+        put: operations["set_mode"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{id}": {
         parameters: {
             query?: never;
@@ -1024,16 +1040,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/settings/projects": {
+    "/api/settings": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["get_mode"];
-        put: operations["set_mode"];
+        get: operations["runtime_settings"];
+        put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/{section}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["runtime_settings_section"];
+        put: operations["runtime_settings_save"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/{section}/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["runtime_settings_reset"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1546,23 +1594,6 @@ export interface components {
             confirm_name: string;
             confirmation: string;
         };
-        ControldKeyInput: {
-            name: string;
-            purpose: string;
-        };
-        ControldKeyView: {
-            active: boolean;
-            algorithm: string;
-            /** Format: date-time */
-            created_at: string;
-            fingerprint: string;
-            /** Format: uuid */
-            id: string;
-            name: string;
-            purpose: string;
-            /** Format: date-time */
-            revoked_at?: string | null;
-        };
         CorsRule: {
             expose?: string[];
             headers?: string[];
@@ -1797,6 +1828,23 @@ export interface components {
             pack_creation_enabled: boolean;
             pack_creation_paused: boolean;
             preparing_packs: string;
+        };
+        ManagedKeyInput: {
+            name: string;
+            purpose: string;
+        };
+        ManagedKeyView: {
+            active: boolean;
+            algorithm: string;
+            /** Format: date-time */
+            created_at: string;
+            fingerprint: string;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            purpose: string;
+            /** Format: date-time */
+            revoked_at?: string | null;
         };
         MediaItem: {
             content_type: string;
@@ -2100,6 +2148,21 @@ export interface components {
             upload_bytes: string;
             upload_limit: string;
         };
+        RuntimeSettingsPatch: {
+            /** Format: int64 */
+            revision: number;
+            value: unknown;
+        };
+        RuntimeSettingsView: {
+            /** Format: int64 */
+            applied_revision: number;
+            restart_required: boolean;
+            /** Format: int64 */
+            revision: number;
+            scope: string;
+            section: string;
+            value: unknown;
+        };
         ServiceStatus: {
             backend_operations: unknown;
             backend_queues: unknown;
@@ -2178,27 +2241,41 @@ export interface components {
         StoreInput: {
             access_key?: string | null;
             bucket?: string | null;
+            /** Format: int32 */
+            control_concurrency?: number | null;
             endpoint?: string | null;
             name: string;
             path?: string | null;
             prefix?: string;
+            /** Format: int32 */
+            read_concurrency?: number | null;
             region?: string | null;
             secret_key?: string | null;
             type: string;
+            /** Format: int32 */
+            upload_concurrency?: number | null;
         };
         StorePatch: {
             access_key?: string | null;
             bucket?: string | null;
+            /** Format: int32 */
+            control_concurrency?: number | null;
             enabled?: boolean | null;
             endpoint?: string | null;
             path?: string | null;
             prefix?: string | null;
+            /** Format: int32 */
+            read_concurrency?: number | null;
             region?: string | null;
             secret_key?: string | null;
             type?: string | null;
+            /** Format: int32 */
+            upload_concurrency?: number | null;
         };
         StoreView: {
             bucket?: string | null;
+            /** Format: int32 */
+            control_concurrency?: number | null;
             /** Format: date-time */
             created_at: string;
             enabled: boolean;
@@ -2208,10 +2285,14 @@ export interface components {
             name: string;
             path?: string | null;
             prefix: string;
+            /** Format: int32 */
+            read_concurrency?: number | null;
             region?: string | null;
             type: string;
             /** Format: date-time */
             updated_at: string;
+            /** Format: int32 */
+            upload_concurrency?: number | null;
         };
         SweepRequest: {
             older_than: string;
@@ -3369,7 +3450,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ControldKeyView"][];
+                    "application/json": components["schemas"]["ManagedKeyView"][];
                 };
             };
         };
@@ -3383,7 +3464,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ControldKeyInput"];
+                "application/json": components["schemas"]["ManagedKeyInput"];
             };
         };
         responses: {
@@ -3392,7 +3473,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ControldKeyView"];
+                    "application/json": components["schemas"]["ManagedKeyView"];
                 };
             };
         };
@@ -3919,6 +4000,48 @@ export interface operations {
             };
         };
     };
+    get_mode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectMode"];
+                };
+            };
+        };
+    };
+    set_mode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectMode"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectMode"];
+                };
+            };
+        };
+    };
     update: {
         parameters: {
             query?: never;
@@ -4141,7 +4264,7 @@ export interface operations {
             };
         };
     };
-    get_mode: {
+    runtime_settings: {
         parameters: {
             query?: never;
             header?: never;
@@ -4155,21 +4278,44 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectMode"];
+                    "application/json": components["schemas"]["RuntimeSettingsView"][];
                 };
             };
         };
     };
-    set_mode: {
+    runtime_settings_section: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                section: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeSettingsView"];
+                };
+            };
+        };
+    };
+    runtime_settings_save: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                section: string;
+            };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ProjectMode"];
+                "application/json": components["schemas"]["RuntimeSettingsPatch"];
             };
         };
         responses: {
@@ -4178,7 +4324,28 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectMode"];
+                    "application/json": components["schemas"]["RuntimeSettingsView"];
+                };
+            };
+        };
+    };
+    runtime_settings_reset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                section: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeSettingsView"];
                 };
             };
         };

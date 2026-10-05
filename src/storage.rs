@@ -464,6 +464,9 @@ struct StoreBackend {
     metadata: serde_json::Value,
     identity_ready: std::sync::atomic::AtomicBool,
     identity_check: tokio::sync::Mutex<()>,
+    reads: Arc<crate::backend::Gate>,
+    writes: Arc<crate::backend::Gate>,
+    controls: Arc<crate::backend::Gate>,
 }
 
 type StoreOptions = StoreOptionsV2;
@@ -482,6 +485,8 @@ pub struct Storage {
     inspection: tokio::sync::Mutex<()>,
     targets: RwLock<HashMap<Uuid, Arc<StoreBackend>>>,
     store_options: StoreOptions,
+    store_defaults: (usize, usize, usize),
+    store_aging: Duration,
     pub store_id: Option<Uuid>,
     pub disk: Arc<Disk>,
     pub secrets: Arc<Secrets>,
@@ -521,12 +526,17 @@ pub(crate) type StoreRow = (
     Option<Vec<u8>>,
     serde_json::Value,
     chrono::DateTime<chrono::Utc>,
+    Option<i32>,
+    Option<i32>,
+    Option<i32>,
 );
 
 async fn build_store(
     options: StoreOptions,
     secrets: &Secrets,
     row: StoreRow,
+    defaults: (usize, usize, usize),
+    aging: Duration,
 ) -> Result<Arc<StoreBackend>> {
     let (
         id,
@@ -540,6 +550,9 @@ async fn build_store(
         secret,
         metadata,
         revision,
+        read_limit,
+        upload_limit,
+        control_limit,
     ) = row;
     let record = StoreRecord {
         id,
@@ -563,6 +576,9 @@ async fn build_store(
         metadata,
         identity_ready: false.into(),
         identity_check: tokio::sync::Mutex::new(()),
+        reads: crate::backend::Gate::new(read_limit.map_or(defaults.0, |n| n as usize), aging),
+        writes: crate::backend::Gate::new(upload_limit.map_or(defaults.1, |n| n as usize), aging),
+        controls: crate::backend::Gate::new(control_limit.map_or(defaults.2, |n| n as usize), aging),
     }))
 }
 
@@ -609,9 +625,15 @@ impl Storage {
             io: Arc::new(Semaphore::new(budget.cpu_jobs)),
             pending: Mutex::new(HashSet::new()),
         });
+        let aging = Duration::from_secs(config::seconds(&c.storage.priority_aging)?);
+        let defaults = (
+            c.storage.read_concurrency.unwrap_or(budget.storage_concurrency),
+            c.storage.upload_concurrency.unwrap_or(budget.storage_concurrency),
+            c.storage.control_concurrency.unwrap_or(budget.available_cpus.clamp(1, 8)),
+        );
         let rows: Vec<StoreRow> = if use_target {
             sqlx::query_as(
-                "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at FROM stores WHERE enabled ORDER BY created_at,id",
+                "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at,read_concurrency,upload_concurrency,control_concurrency FROM stores WHERE enabled ORDER BY created_at,id",
             )
             .fetch_all(&db)
             .await?
@@ -623,7 +645,7 @@ impl Storage {
         let mut targets = HashMap::with_capacity(rows.len());
         for row in rows {
             let id = row.0;
-            targets.insert(id, build_store(store_options, &secrets, row).await?);
+            targets.insert(id, build_store(store_options, &secrets, row, defaults, aging).await?);
         }
         let s = Self {
             maintenance,
@@ -641,6 +663,8 @@ impl Storage {
             inspection: tokio::sync::Mutex::new(()),
             targets: RwLock::new(targets),
             store_options,
+            store_defaults: defaults,
+            store_aging: aging,
             store_id,
             disk,
             secrets,
@@ -653,19 +677,19 @@ impl Storage {
                 c.storage
                     .read_concurrency
                     .unwrap_or(budget.storage_concurrency),
-                Duration::from_secs(config::seconds(&c.storage.priority_aging)?),
+                aging,
             ),
             writes: crate::backend::Gate::new(
                 c.storage
                     .upload_concurrency
                     .unwrap_or(budget.storage_concurrency),
-                Duration::from_secs(config::seconds(&c.storage.priority_aging)?),
+                aging,
             ),
             controls: crate::backend::Gate::new(
                 c.storage
                     .control_concurrency
                     .unwrap_or(budget.available_cpus.clamp(1, 8)),
-                Duration::from_secs(config::seconds(&c.storage.priority_aging)?),
+                aging,
             ),
             fifo: tokio::sync::Mutex::new(Fifo::default()),
             cache_writes: tokio::sync::Mutex::new(()),
@@ -717,13 +741,13 @@ impl Storage {
     }
     pub async fn refresh_store(&self, store_id: Uuid) -> Result<()> {
         let row: Option<StoreRow> = sqlx::query_as(
-            "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at FROM stores WHERE id=$1 AND enabled",
+            "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at,read_concurrency,upload_concurrency,control_concurrency FROM stores WHERE id=$1 AND enabled",
         )
         .bind(store_id)
         .fetch_optional(&self.db)
         .await?;
         let backend = if let Some(row) = row {
-            Some(build_store(self.store_options, &self.secrets, row).await?)
+            Some(build_store(self.store_options, &self.secrets, row, self.store_defaults, self.store_aging).await?)
         } else {
             None
         };
@@ -813,10 +837,10 @@ impl Storage {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Vec<object_store::ObjectMeta>> {
-        let _permit = crate::backend::PRIORITY
-            .scope(crate::backend::MAINTENANCE, self.controls.acquire())
-            .await?;
         let target = self.store_backend(store_id)?;
+        let _permit = crate::backend::PRIORITY
+            .scope(crate::backend::MAINTENANCE, target.controls.acquire())
+            .await?;
         let offset = Path::parse(cursor.unwrap_or(""))?;
         Ok(target
             .backend
@@ -892,7 +916,7 @@ impl Storage {
         _allow_initialize: bool,
         _persist: bool,
     ) -> Result<()> {
-        let _permit = self.reads.acquire().await?;
+        let _permit = target.reads.acquire().await?;
         let result = target
             .backend
             .get(&Path::from("meta.json"))
@@ -1183,7 +1207,7 @@ impl Storage {
             Some(encoded.len() as i32) == c.stored_size,
             "encoded length mismatch"
         );
-        let permit = self.writes.acquire().await?;
+        let permit = target.writes.acquire().await?;
         let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
         let size = encoded.len();
@@ -1532,7 +1556,7 @@ impl Storage {
     pub async fn put_path_for(&self, store_id: Uuid, path: &Path, data: Vec<u8>) -> Result<()> {
         self.ensure_store_identity(store_id).await?;
         let target = self.store_backend(store_id)?;
-        let _permit = self.writes.acquire().await?;
+        let _permit = target.writes.acquire().await?;
         self.background_writable()?;
         let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
@@ -1547,7 +1571,7 @@ impl Storage {
     pub async fn delete_path_for(&self, store_id: Uuid, path: &Path) -> Result<()> {
         self.ensure_store_identity(store_id).await?;
         let target = self.store_backend(store_id)?;
-        let _permit = self.controls.acquire().await?;
+        let _permit = target.controls.acquire().await?;
         self.background_writable()?;
         let mut operation = self.operations[2].begin();
         self.backend_deletes.fetch_add(1, Ordering::Relaxed);
@@ -1711,7 +1735,7 @@ impl Storage {
     ) -> Result<object_store::ObjectMeta> {
         self.ensure_store_identity(store_id).await?;
         let target = self.store_backend(store_id)?;
-        let _permit = self.controls.acquire().await?;
+        let _permit = target.controls.acquire().await?;
         let mut operation = self.operations[3].begin();
         let result = target.backend.head(path).await;
         operation.finish(result.is_err());
@@ -1848,7 +1872,8 @@ impl Storage {
         bound: usize,
     ) -> Result<Vec<u8>> {
         self.ensure_store_identity(store_id).await?;
-        let _permit = self.reads.acquire().await?;
+        let target = self.store_backend(store_id)?;
+        let _permit = target.reads.acquire().await?;
         self.read_path_permitted(store_id, path, bound).await
     }
     async fn read_path_permitted(

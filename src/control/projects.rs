@@ -190,7 +190,7 @@ pub(super) async fn delete(
 pub(crate) struct ProjectMode {
     enabled: bool,
 }
-#[utoipa::path(get, path="/api/settings/projects", responses((status=200, body=ProjectMode)))]
+#[utoipa::path(get, path="/api/projects/settings", responses((status=200, body=ProjectMode)))]
 pub(super) async fn get_mode(State(app): State<Arc<App>>) -> Result<Json<ProjectMode>, HttpError> {
     Ok(Json(ProjectMode {
         enabled: sqlx::query_scalar("SELECT project_management FROM mokyu_meta")
@@ -198,7 +198,7 @@ pub(super) async fn get_mode(State(app): State<Arc<App>>) -> Result<Json<Project
             .await?,
     }))
 }
-#[utoipa::path(put, path="/api/settings/projects", request_body=ProjectMode, responses((status=200, body=ProjectMode)))]
+#[utoipa::path(put, path="/api/projects/settings", request_body=ProjectMode, responses((status=200, body=ProjectMode)))]
 pub(super) async fn set_mode(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

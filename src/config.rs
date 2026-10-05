@@ -9,7 +9,141 @@ use std::{
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct FileConfig {
+    pub database: Database,
+    #[serde(default)]
+    pub cluster: Cluster,
+    #[serde(default)]
+    pub instance: Instance,
+}
+
+#[derive(Clone, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Instance {
+    pub listen_s3: String,
+    pub listen_web: String,
+    pub listen_control: String,
+    pub listen_socket: PathBuf,
+    pub data_path: PathBuf,
+    pub min_free_space: String,
+    #[serde(skip_serializing)]
+    pub deployment_key: Option<String>,
+    pub cpu_jobs: Option<usize>,
+    pub inflight_bytes: Option<String>,
+    pub upload_concurrency: Option<usize>,
+    pub read_concurrency: Option<usize>,
+    pub connections: Option<usize>,
+    pub db_connections: Option<u32>,
+    pub storage_read_concurrency: Option<usize>,
+    pub storage_upload_concurrency: Option<usize>,
+    pub storage_control_concurrency: Option<usize>,
+    pub cache_size: Option<String>,
+    pub cache_entries: Option<usize>,
+    pub upload_cache_size: Option<String>,
+    pub thumbnail_cache_size: String,
+    pub multipart_limit: Option<String>,
+    pub compression_idle_timeout: String,
+    pub pack_concurrency: usize,
+    pub integrity_concurrency: usize,
+    pub integrity_rps: Option<u32>,
+    pub integrity_bandwidth: Option<String>,
+}
+
+impl Default for Instance {
+    fn default() -> Self {
+        let listen = Listen::default();
+        Self {
+            listen_s3: listen.s3,
+            listen_web: listen.web,
+            listen_control: listen.control,
+            listen_socket: listen.admin_socket,
+            data_path: "/data".into(),
+            min_free_space: "1GiB".into(),
+            deployment_key: None,
+            cpu_jobs: None,
+            inflight_bytes: None,
+            upload_concurrency: None,
+            read_concurrency: None,
+            connections: None,
+            db_connections: None,
+            storage_read_concurrency: None,
+            storage_upload_concurrency: None,
+            storage_control_concurrency: None,
+            cache_size: None,
+            cache_entries: None,
+            upload_cache_size: None,
+            thumbnail_cache_size: "256MiB".into(),
+            multipart_limit: None,
+            compression_idle_timeout: "30s".into(),
+            pack_concurrency: 1,
+            integrity_concurrency: 1,
+            integrity_rps: None,
+            integrity_bandwidth: None,
+        }
+    }
+}
+
+impl FileConfig {
+    pub fn into_config(mut self) -> Config {
+        let instance = self.instance;
+        self.database.max_connections = instance.db_connections;
+        Config {
+            configured_fields: Default::default(),
+            listen: Listen {
+                s3: instance.listen_s3.clone(),
+                web: instance.listen_web.clone(),
+                control: instance.listen_control.clone(),
+                admin_socket: instance.listen_socket.clone(),
+                ..Listen::default()
+            },
+            database: self.database,
+            cluster: self.cluster,
+            control: Control { thumbnail_cache_size: instance.thumbnail_cache_size.clone(), ..Control::default() },
+            storage: Storage {
+                data: instance.data_path.clone(),
+                free_space_floor: instance.min_free_space.clone(),
+                read_concurrency: instance.storage_read_concurrency,
+                upload_concurrency: instance.storage_upload_concurrency,
+                control_concurrency: instance.storage_control_concurrency,
+                ..Storage::default()
+            },
+            processing: Processing {
+                cpu_jobs: instance.cpu_jobs,
+                inflight_bytes: instance.inflight_bytes.clone(),
+                upload_concurrency: instance.upload_concurrency,
+                read_concurrency: instance.read_concurrency,
+                connections: instance.connections,
+                ..Processing::default()
+            },
+            multipart: Multipart { local_limit: instance.multipart_limit.clone(), ..Multipart::default() },
+            cache: Cache {
+                max_size: instance.cache_size.clone(),
+                max_entries: instance.cache_entries,
+                upload_cache_size: instance.upload_cache_size.clone(),
+                ..Cache::default()
+            },
+            compression: crate::compression::Config { context_idle_timeout: instance.compression_idle_timeout.clone(), ..Default::default() },
+            encryption: Encryption { deployment_key: instance.deployment_key.clone(), ..Default::default() },
+            gc: Gc::default(),
+            cleanup: Cleanup::default(),
+            statistics: Statistics::default(),
+            integrity: crate::integrity::Config {
+                concurrency: instance.integrity_concurrency,
+                requests_per_second: instance.integrity_rps,
+                bandwidth: instance.integrity_bandwidth.clone(),
+                ..Default::default()
+            },
+            pack: crate::pack::Config { maintenance_concurrency: instance.pack_concurrency, ..Default::default() },
+            instance,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip)]
+    pub instance: Instance,
     #[serde(skip)]
     pub configured_fields: std::collections::BTreeSet<String>,
     #[serde(default)]
@@ -43,7 +177,7 @@ pub struct Config {
     pub cluster: Cluster,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cluster {
     pub control_url: Option<String>,
@@ -95,7 +229,7 @@ impl Cluster {
     }
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Statistics {
     pub scope_limit: usize,
@@ -124,7 +258,7 @@ impl Default for Statistics {
     }
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Listen {
     pub s3: String,
@@ -148,7 +282,7 @@ impl Default for Listen {
         }
     }
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Database {
     pub host: String,
@@ -160,6 +294,7 @@ pub struct Database {
     pub password_file: Option<PathBuf>,
     #[serde(default = "postgres_ssl_mode")]
     pub ssl_mode: String,
+    #[serde(skip)]
     pub max_connections: Option<u32>,
 }
 fn postgres_port() -> u16 {
@@ -168,7 +303,7 @@ fn postgres_port() -> u16 {
 fn postgres_ssl_mode() -> String {
     "prefer".into()
 }
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Storage {
     pub data: PathBuf,
@@ -233,7 +368,7 @@ fn priority_aging() -> String {
 fn backend_retries() -> usize {
     3
 }
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Control {
     pub origin: String,
@@ -254,6 +389,24 @@ impl Default for Control {
     }
 }
 impl Control {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.origin.starts_with("https://") || self.origin.starts_with("http://"),
+            "control.origin must be an absolute HTTP origin"
+        );
+        ensure!(
+            !self.origin.ends_with('/'),
+            "control.origin must not have a trailing slash"
+        );
+        self.gravatar_origin()?;
+        ensure!(
+            (1..=30 * 86400).contains(&seconds(&self.session_lifetime)?),
+            "control.session_lifetime must be 1s..30d"
+        );
+        cache_bytes(&self.thumbnail_cache_size)?;
+        Ok(())
+    }
+
     pub fn gravatar_origin(&self) -> Result<String> {
         let uri: hyper::Uri = self
             .gravatar_base_url
@@ -274,7 +427,7 @@ impl Control {
         Ok(format!("https://{authority}"))
     }
 }
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Processing {
     pub cpu_jobs: Option<usize>,
@@ -305,7 +458,7 @@ impl Default for Processing {
         }
     }
 }
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Multipart {
     pub local_limit: Option<String>,
@@ -325,7 +478,7 @@ impl Default for Multipart {
         }
     }
 }
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cache {
     pub max_size: Option<String>,
@@ -345,7 +498,7 @@ impl Default for Cache {
         }
     }
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Encryption {
     pub algorithm: String,
@@ -360,7 +513,7 @@ impl Default for Encryption {
         }
     }
 }
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Gc {
     pub unreferenced_grace: String,
@@ -377,7 +530,7 @@ impl Default for Gc {
     }
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cleanup {
     pub interval: String,
@@ -499,9 +652,10 @@ impl Config {
     pub fn load(path: &Path) -> Result<(Self, Secrets, Budget)> {
         let text = fs::read_to_string(path).context("cannot read configuration")?;
         // TOML errors may include the offending line; never include configuration values in errors.
-        let mut c: Self = toml::from_str(&text).map_err(|_| {
+        let file: FileConfig = toml::from_str(&text).map_err(|_| {
             anyhow::anyhow!("invalid TOML configuration, unknown field or wrong type")
         })?;
+        let mut c = file.into_config();
         let raw: toml::Value =
             toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid TOML configuration"))?;
         if let Some(sections) = raw.as_table() {
@@ -514,7 +668,32 @@ impl Config {
             }
         }
         let base = path.parent().unwrap_or(Path::new("."));
-        c.control.gravatar_origin()?;
+        c.validate()?;
+        let credential_material = c
+            .encryption
+            .deployment_key
+            .as_deref()
+            .map(deployment_key)
+            .transpose()?
+            .context("instance.deployment_key is required")?;
+        let secrets = Secrets {
+            database_password: secret_value(
+                c.database.password.as_deref(),
+                c.database.password_file.as_deref(),
+                base,
+                "database.password",
+            )?,
+            credential_key: crate::codec::Key::new("aes-256-gcm", credential_material)?,
+            active_key: String::new(),
+            keys: BTreeMap::new(),
+        };
+        let budget = c.budget()?;
+        Ok((c, secrets, budget))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let c = self;
+        c.control.validate()?;
         c.cluster.validate()?;
         c.compression.validate()?;
         c.pack.validate()?;
@@ -576,14 +755,6 @@ impl Config {
             .parse::<sqlx::postgres::PgSslMode>()
             .map_err(|_| anyhow::anyhow!("invalid database.ssl_mode"))?;
         ensure!(
-            c.control.origin.starts_with("https://") || c.control.origin.starts_with("http://"),
-            "control.origin must be an absolute HTTP origin"
-        );
-        ensure!(
-            !c.control.origin.ends_with('/'),
-            "control.origin must not have a trailing slash"
-        );
-        ensure!(
             matches!(
                 c.encryption.algorithm.as_str(),
                 "none" | "aes-256-gcm" | "chacha20-poly1305"
@@ -603,7 +774,6 @@ impl Config {
             &c.cleanup.upload_retention,
             &c.cleanup.task_retention,
             &c.cleanup.audit_retention,
-            &c.control.session_lifetime,
             &c.statistics.refresh_interval,
             &c.statistics.query_timeout,
         ] {
@@ -613,7 +783,6 @@ impl Config {
             );
         }
         bytes(&c.storage.free_space_floor)?;
-        cache_bytes(&c.control.thumbnail_cache_size)?;
         c.integrity.validate()?;
         ensure!(
             seconds(&c.statistics.query_timeout)? <= i32::MAX as u64 / 1000,
@@ -672,29 +841,10 @@ impl Config {
             c.multipart.max_active_uploads.is_none_or(|n| n > 0),
             "max_active_uploads must be positive"
         );
-        let credential_material = c
-            .encryption
-            .deployment_key
-            .as_deref()
-            .map(deployment_key)
-            .transpose()?
-            .context("encryption.deployment_key is required")?;
-        let secrets = Secrets {
-            database_password: secret_value(
-                c.database.password.as_deref(),
-                c.database.password_file.as_deref(),
-                base,
-                "database.password",
-            )?,
-            credential_key: crate::codec::Key::new("aes-256-gcm", credential_material)?,
-            active_key: String::new(),
-            keys: BTreeMap::new(),
-        };
-        let budget = c.budget()?;
-        Ok((c, secrets, budget))
+        Ok(())
     }
 
-    fn budget(&self) -> Result<Budget> {
+    pub fn budget(&self) -> Result<Budget> {
         let mut cpus = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1);

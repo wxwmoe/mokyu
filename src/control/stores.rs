@@ -28,6 +28,9 @@ pub(crate) struct StoreView {
     bucket: Option<String>,
     region: Option<String>,
     prefix: String,
+    read_concurrency: Option<i32>,
+    upload_concurrency: Option<i32>,
+    control_concurrency: Option<i32>,
     enabled: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -45,6 +48,9 @@ pub(crate) struct StoreInput {
     pub(crate) region: Option<String>,
     #[serde(default)]
     pub(crate) prefix: String,
+    pub(crate) read_concurrency: Option<i32>,
+    pub(crate) upload_concurrency: Option<i32>,
+    pub(crate) control_concurrency: Option<i32>,
     pub(crate) access_key: Option<String>,
     pub(crate) secret_key: Option<String>,
 }
@@ -62,6 +68,9 @@ pub(crate) struct StorePatch {
     pub(crate) access_key: Option<String>,
     pub(crate) secret_key: Option<String>,
     pub(crate) enabled: Option<bool>,
+    pub(crate) read_concurrency: Option<i32>,
+    pub(crate) upload_concurrency: Option<i32>,
+    pub(crate) control_concurrency: Option<i32>,
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -77,6 +86,9 @@ struct StoreRow {
     access_key_encrypted: Option<Vec<u8>>,
     secret_key_encrypted: Option<Vec<u8>>,
     metadata: serde_json::Value,
+    read_concurrency: Option<i32>,
+    upload_concurrency: Option<i32>,
+    control_concurrency: Option<i32>,
     enabled: bool,
 }
 
@@ -115,6 +127,11 @@ fn normalize_prefix(value: String) -> anyhow::Result<String> {
     Ok(value)
 }
 
+fn validate_concurrency(value: Option<i32>, field: &'static str) -> anyhow::Result<()> {
+    anyhow::ensure!(value.is_none_or(|n| n > 0), "{field} concurrency must be positive");
+    Ok(())
+}
+
 fn required(value: Option<String>, field: &'static str) -> anyhow::Result<String> {
     let value = value.context(field)?;
     anyhow::ensure!(!value.trim().is_empty(), "{field} must not be empty");
@@ -132,8 +149,8 @@ fn endpoint(value: String) -> anyhow::Result<String> {
     Ok(value)
 }
 
-const VIEW_ORDERED: &str = "SELECT id,name,type AS store_type,path,endpoint_url AS endpoint,remote_bucket AS bucket,region,prefix,enabled,created_at,updated_at FROM stores ORDER BY name";
-const VIEW_BY_ID: &str = "SELECT id,name,type AS store_type,path,endpoint_url AS endpoint,remote_bucket AS bucket,region,prefix,enabled,created_at,updated_at FROM stores WHERE id=$1";
+const VIEW_ORDERED: &str = "SELECT id,name,type AS store_type,path,endpoint_url AS endpoint,remote_bucket AS bucket,region,prefix,read_concurrency,upload_concurrency,control_concurrency,enabled,created_at,updated_at FROM stores ORDER BY name";
+const VIEW_BY_ID: &str = "SELECT id,name,type AS store_type,path,endpoint_url AS endpoint,remote_bucket AS bucket,region,prefix,read_concurrency,upload_concurrency,control_concurrency,enabled,created_at,updated_at FROM stores WHERE id=$1";
 
 fn row_record(row: &StoreRow) -> StoreRecord {
     StoreRecord {
@@ -240,7 +257,7 @@ async fn load_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     name: &str,
 ) -> anyhow::Result<StoreRow> {
-    Ok(sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,enabled FROM stores WHERE name=$1 FOR UPDATE").bind(name).fetch_optional(&mut **tx).await?.context("store was not found")?)
+    Ok(sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,read_concurrency,upload_concurrency,control_concurrency,enabled FROM stores WHERE name=$1 FOR UPDATE").bind(name).fetch_optional(&mut **tx).await?.context("store was not found")?)
 }
 
 async fn list_rows(db: &sqlx::PgPool) -> anyhow::Result<Vec<StoreView>> {
@@ -265,6 +282,9 @@ pub(crate) async fn create_record(
     let (deployment_id, mode) = lock_mode(&mut tx).await?;
     let name = validate_name(&input.name)?;
     validate_type(&input.store_type)?;
+    validate_concurrency(input.read_concurrency, "read")?;
+    validate_concurrency(input.upload_concurrency, "upload")?;
+    validate_concurrency(input.control_concurrency, "control")?;
     anyhow::ensure!(
         !(mode == "cluster" && input.store_type == "local"),
         "local stores are unavailable in cluster mode"
@@ -285,7 +305,7 @@ pub(crate) async fn create_record(
         store_metadata(deployment_id, id)?,
     )?;
     app.storage.initialize_store(record.clone()).await?;
-    sqlx::query("INSERT INTO stores(id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)").bind(record.id).bind(&record.name).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket).bind(&record.region).bind(&record.prefix).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(&record.metadata).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO stores(id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,read_concurrency,upload_concurrency,control_concurrency) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)").bind(record.id).bind(&record.name).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket).bind(&record.region).bind(&record.prefix).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(&record.metadata).bind(input.read_concurrency).bind(input.upload_concurrency).bind(input.control_concurrency).execute(&mut *tx).await?;
     tx.commit().await?;
     app.storage.refresh_store(record.id).await?;
     Ok(sqlx::query_as(VIEW_BY_ID)
@@ -328,6 +348,9 @@ pub(crate) async fn update_record(
         "local stores are unavailable in cluster mode"
     );
     let prefix = normalize_prefix(input.prefix.clone().unwrap_or_else(|| row.prefix.clone()))?;
+    validate_concurrency(input.read_concurrency.or(row.read_concurrency), "read")?;
+    validate_concurrency(input.upload_concurrency.or(row.upload_concurrency), "upload")?;
+    validate_concurrency(input.control_concurrency.or(row.control_concurrency), "control")?;
     let mut record = if kind == "local" {
         anyhow::ensure!(
             input.endpoint.is_none()
@@ -393,7 +416,7 @@ pub(crate) async fn update_record(
     };
     record.enabled = input.enabled.unwrap_or(row.enabled);
     app.storage.verify_store_record(record.clone()).await?;
-    sqlx::query("UPDATE stores SET type=$2,path=$3,endpoint_url=$4,remote_bucket=$5,region=$6,prefix=$7,access_key_encrypted=$8,secret_key_encrypted=$9,enabled=$10,updated_at=now() WHERE id=$1").bind(row.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket).bind(&record.region).bind(&record.prefix).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(record.enabled).execute(&mut *tx).await?;
+    sqlx::query("UPDATE stores SET type=$2,path=$3,endpoint_url=$4,remote_bucket=$5,region=$6,prefix=$7,access_key_encrypted=$8,secret_key_encrypted=$9,read_concurrency=$10,upload_concurrency=$11,control_concurrency=$12,enabled=$13,updated_at=now() WHERE id=$1").bind(row.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket).bind(&record.region).bind(&record.prefix).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(input.read_concurrency.or(row.read_concurrency)).bind(input.upload_concurrency.or(row.upload_concurrency)).bind(input.control_concurrency.or(row.control_concurrency)).bind(record.enabled).execute(&mut *tx).await?;
     tx.commit().await?;
     app.storage.refresh_store(row.id).await?;
     Ok(sqlx::query_as(VIEW_BY_ID)
@@ -424,7 +447,7 @@ pub(crate) async fn check(
     actor.recent(&app).await?;
     let tx = super::users::admin_transaction(&app, &actor.principal).await?;
     tx.commit().await?;
-    let row: StoreRow = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,enabled,created_at,updated_at FROM stores WHERE name=$1").bind(&name).fetch_optional(&app.db).await?.context("store was not found")?;
+    let row: StoreRow = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,read_concurrency,upload_concurrency,control_concurrency,enabled FROM stores WHERE name=$1").bind(&name).fetch_optional(&app.db).await?.context("store was not found")?;
     app.storage.verify_store_record(row_record(&row)).await?;
     Ok(Json(
         sqlx::query_as(VIEW_BY_ID)
