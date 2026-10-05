@@ -40,18 +40,18 @@ Mokyu 的群集模式让多个进程共享同一个 PostgreSQL 数据库和部�
 启动命令是镜像的唯一角色开关：
 
 ```sh
-mokyu                 # 未指定命令，单容器模式
+mokyu                 # 未指定命令，单容器模式（single）
 mokyu control         # 管理/control
 mokyu worker          # 后台任务/worker
 mokyu data            # S3 和公共读/data
-mokyu cli ...         # 通过本地 Unix socket 执行管理命令
+mokyu cli ...         # 通过本地 Unix socket 执行 CLI 命令
 ```
 
-Linux 的 `htop` 会读取进程的 comm 名称，启动后应显示 `mokyu: single`、`mokyu: control`、`mokyu: worker` 或 `mokyu: data`。完整命令行仍可在详细视图中看到。
+群集模式下，data/worker 容器的本地 socket 只支持 `cli status`。其他管理命令在单容器模式或 control 容器执行。
 
 ## 网络和 DNS
 
-Mokyu 不判断 URL 是内网、远程、HTTP 还是 HTTPS，只要求配置值是绝对 URL。示例使用 HTTPS，是因为 TLS、证书和反向代理应由部署环境提供。
+Mokyu 只要求 URL 是绝对 URL，支持 HTTP 和 HTTPS。文档示例使用 HTTPS。
 
 数据面可以直接使用多 IP A 记录：
 
@@ -71,7 +71,7 @@ admin.example.com A <control-a-ip>
 admin.example.com A <control-b-ip>
 ```
 
-每个 control 的 `cluster.advertise_url` 必须是只指向该节点的可达 URL，例如 `https://control-a.example.com` 和 `https://control-b.example.com`。不要把所有 control 的 `advertise_url` 都写成同一个会随机解析的地址，否则 standby 转发可能再次落回 standby。已注册节点的 `cluster.control_url` 可以写共享的多 IP 管理地址；请求命中 standby 时，standby 会按租约转发到 active control。首次加入一个新的 control 时，建议临时把 `control_url` 写成可直达 active 的 URL，完成注册后再改为共享地址。
+每个 control 的 `cluster.advertise_url` 必须是只指向该节点的可达 URL，例如 `https://control-a.example.com` 和 `https://control-b.example.com`。已注册节点的 `cluster.control_url` 可以写共享的多 IP 管理地址；请求命中 standby 时，standby 会按租约转发到 active control。新的 control 首次注册时，`control_url` 需要能够命中已注册 control；注册完成后可以改为共享管理地址。
 
 反向代理只需要把管理域名转发到 `listen.control`，把数据域名转发到 `listen.s3` 或 `listen.web`。control、worker 和 data 之间的注册请求走 `cluster.control_url`；data 的对象读写不会经过 control。
 
@@ -115,7 +115,7 @@ control_url = "https://admin.example.com"
 join_token = "<one-time-token>"
 ```
 
-新容器第一次启动会调用 `/api/cluster/join`，得到节点凭据并写入自己的 `storage.data/node.json`。后续重启使用该凭据 heartbeat，不会重复消耗令牌；确认节点已加入后可以从配置文件删除 `join_token`。control token 还可以在配置中写 `advertise_url` 覆盖注册时的 URL，worker/data 不需要该字段。data/worker 可以直接使用 shared `control_url`，命中已注册 standby 时由 standby 转发；新的 control 首次 join 仍应确保该 URL 能到达 active。
+新容器第一次启动会调用 `/api/cluster/join`，得到节点凭据并写入自己的 `storage.data/node.json`。后续重启使用该凭据 heartbeat，不会重复消耗令牌；确认节点已加入后可以从配置文件删除 `join_token`。将每个节点的 `node.json` 纳入备份，重建容器时先恢复它。文件丢失时，先撤销原节点，再使用 `cluster reissue` 为同一节点生成一次性令牌。control token 还可以在配置中写 `advertise_url` 覆盖注册时的 URL，worker/data 不需要该字段。data/worker 可以直接使用 shared `control_url`，命中已注册 standby 时由 standby 转发。
 
 节点管理命令：
 
@@ -123,9 +123,10 @@ join_token = "<one-time-token>"
 docker exec mokyu-control cli cluster status
 docker exec mokyu-control cli cluster nodes
 docker exec mokyu-control cli cluster revoke <node-id>
+docker exec mokyu-control cli cluster reissue <node-id>
 ```
 
-撤销会立即禁止节点 heartbeat 和任务领取；重新加入需要生成新的节点令牌。数据库中的节点注册状态是控制面事实来源，配置文件不需要互相校验或保持相同文件内容。
+撤销会立即禁止节点 heartbeat 和任务领取。数据库中的节点注册状态是控制面事实来源，配置文件不需要互相校验或保持相同文件内容。
 
 ## 控制主备和请求转发
 
@@ -142,10 +143,10 @@ docker exec mokyu-control cli cluster revoke <node-id>
 
 ## 存储限制与迁移
 
-群集模式禁用 local 存储目标。single 转 cluster 时，Mokyu 只检查是否仍存在 local 目标，不会替部署管理员上传文件：
+群集模式禁用 local 存储目标。单容器模式切换到群集模式时，Mokyu 只检查是否仍存在 local 目标，不会替部署管理员上传文件：
 
 1. 手动把 local 目录中的规范 S3 文件结构迁移到目标 S3 前缀或供应商。
-2. 在 Web/CLI 修改该 store 的连接信息，保存时让 Mokyu 核对远端 meta；空 meta 会拒绝保存，避免把没有对应区块的目标接入。
+2. 在 Web/CLI 修改该 store 的连接信息。保存时核对远端 `meta.json`；文件缺失或内容不匹配时拒绝保存。
 3. 确认所有 local store 已改为 S3 后再执行 `cluster mode cluster`。
 
 桶绑定的 `store_id` 永久不变；同一 store 的桶共享去重，不跨 store 去重。store 自身可以更换连接信息，但实际文件迁移由部署管理员负责。已绑定不同 store 的 Copy/Move 会要求二次确认并排入 `storage_migration` 后台任务，Move 完成后才退休源对象。
@@ -158,10 +159,10 @@ docker exec mokyu-control cli cluster revoke <node-id>
 docker exec mokyu-control cli cluster mode single
 ```
 
-然后停止 split roles，使用默认命令启动单容器。切回 single 不会自动把 S3 文件下载成本地；如需 local store，先由管理员完成反向迁移并在 Web/CLI 更新 store 连接信息。
+然后停止 control、worker、data 容器，使用默认命令启动单容器。切回单容器模式不会自动把 S3 文件下载成本地；如需 local store，先由管理员完成反向迁移并在 Web/CLI 更新 store 连接信息。
 
 ## 备份、升级和故障边界
 
-PostgreSQL 数据库、WAL、部署密钥、每个容器的 data 目录和后端区块仍按[部署与恢复](deployment-and-recovery.md)的要求备份。0.0.4 不支持 0.0.3 原地升级；应使用全新数据库和目录，再通过 S3 接口或手动存储迁移导入数据。
+PostgreSQL 数据库、WAL、部署密钥、每个容器的 data 目录（尤其是 `node.json`）和后端区块仍按[部署与恢复](deployment-and-recovery.md)的要求备份。升级或重建前确认这些备份可用，并按部署与恢复文档执行。
 
 群集部署只改变进程职责，不改变 S3 兼容接口、存储格式或 PostgreSQL 的恢复责任。真实云 S3、DNS 健康检查、TLS 终止和 PostgreSQL 主备切换均由部署环境验证和维护。

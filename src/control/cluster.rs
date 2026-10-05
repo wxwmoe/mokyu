@@ -1,5 +1,5 @@
 use super::Identity;
-use crate::{app::App, cluster, config, http::HttpError};
+use crate::{app::App, authorization::Principal, cluster, config, control::users, http::HttpError};
 use anyhow::{Context, ensure};
 use axum::{
     Json,
@@ -44,6 +44,13 @@ pub(crate) struct TokenInput {
     #[schema(example = "data")]
     kind: String,
     advertise_url: Option<String>,
+    #[serde(default = "default_expiry")]
+    expires_in: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReissueInput {
     #[serde(default = "default_expiry")]
     expires_in: String,
 }
@@ -104,6 +111,16 @@ fn validate_url(value: &str) -> anyhow::Result<()> {
         "advertise URL must be absolute"
     );
     Ok(())
+}
+
+fn issue_token(expires_in: &str) -> anyhow::Result<(String, [u8; 32], DateTime<Utc>)> {
+    let seconds = config::seconds(expires_in)?;
+    ensure!((60..=30 * 86400).contains(&seconds), "token lifetime must be 1m..30d");
+    let token = cluster::join_token()?;
+    let hash = cluster::join_token_hash(&token)?;
+    let expires_at = Utc::now()
+        + chrono::Duration::seconds(i64::try_from(seconds).context("token lifetime overflow")?);
+    Ok((token, hash, expires_at))
 }
 
 async fn admin(actor: &Identity, app: &App) -> Result<(), HttpError> {
@@ -215,15 +232,8 @@ pub(crate) async fn token(
     if let Some(url) = &input.advertise_url {
         validate_url(url)?;
     }
-    let seconds = config::seconds(&input.expires_in)?;
-    if !(60..=30 * 86400).contains(&seconds) {
-        return Err(anyhow::anyhow!("token lifetime must be 1m..30d").into());
-    }
-    let token = cluster::join_token()?;
-    let hash = cluster::join_token_hash(&token)?;
+    let (token, hash, expires_at) = issue_token(&input.expires_in)?;
     let node_id = Uuid::new_v4();
-    let expires_at = Utc::now()
-        + chrono::Duration::seconds(i64::try_from(seconds).context("token lifetime overflow")?);
     let mut tx = app.db.begin().await?;
     sqlx::query("INSERT INTO nodes(id,name,kind,advertise_url) VALUES($1,$2,$3,$4)")
         .bind(node_id)
@@ -260,21 +270,114 @@ pub(crate) async fn revoke(
     Extension(actor): Extension<Identity>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
-    admin(&actor, &app).await?;
-    let changed =
-        sqlx::query("UPDATE nodes SET enabled=false,updated_at=now() WHERE id=$1 AND enabled")
-            .bind(id)
-            .execute(&app.db)
-            .await?
-            .rows_affected();
-    if changed != 1 {
-        return Err(anyhow::anyhow!("node not found or already disabled").into());
-    }
-    sqlx::query("UPDATE node_join_tokens SET consumed_at=coalesce(consumed_at,now()) WHERE node_id=$1 AND consumed_at IS NULL")
-        .bind(id)
-        .execute(&app.db)
-        .await?;
+    actor.recent(&app).await?;
+    revoke_record(&app, &actor.principal, id).await?;
     Ok(Json(serde_json::json!({"revoked": id})))
+}
+
+pub(crate) async fn revoke_record(app: &App, principal: &Principal, id: Uuid) -> anyhow::Result<()> {
+    let mut tx = users::admin_transaction(app, principal).await?;
+    let changed = sqlx::query(
+        "UPDATE nodes SET enabled=false,credential_encrypted=NULL,last_seen_at=NULL,updated_at=now() WHERE id=$1 AND enabled",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    ensure!(changed == 1, "node not found or already disabled");
+    sqlx::query(
+        "UPDATE node_join_tokens SET consumed_at=coalesce(consumed_at,now()) WHERE node_id=$1 AND consumed_at IS NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE control_leases SET node_id=NULL,lease_token=gen_random_uuid(),expires_at=now(),updated_at=now() WHERE singleton AND node_id=$1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE tasks SET state='queued',lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE lease_node_id=$1 AND state='running'")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    super::audit::checkpoint(&mut tx, "cluster.node.revoke", &id.to_string(), serde_json::json!({})).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn reissue_record(
+    app: &App,
+    principal: &Principal,
+    id: Uuid,
+    expires_in: &str,
+) -> anyhow::Result<TokenView> {
+    let (token, hash, expires_at) = issue_token(expires_in)?;
+    let mut tx = users::admin_transaction(app, principal).await?;
+    let row: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT name,kind,enabled FROM nodes WHERE id=$1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (name, kind, enabled) = row.ok_or_else(|| anyhow::anyhow!("node not found"))?;
+    ensure!(!enabled, "revoke the node before reissuing its access");
+    sqlx::query(
+        "UPDATE node_join_tokens SET consumed_at=coalesce(consumed_at,now()) WHERE node_id=$1 AND consumed_at IS NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE nodes SET enabled=true,credential_encrypted=NULL,last_seen_at=NULL,updated_at=now() WHERE id=$1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE control_leases SET node_id=NULL,lease_token=gen_random_uuid(),expires_at=now(),updated_at=now() WHERE singleton AND node_id=$1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO node_join_tokens(id,node_id,token_hash,expires_at) VALUES($1,$2,$3,$4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(id)
+    .bind(hash.as_slice())
+    .bind(expires_at)
+    .execute(&mut *tx)
+    .await?;
+    super::audit::checkpoint(
+        &mut tx,
+        "cluster.node.reissue",
+        &id.to_string(),
+        serde_json::json!({"expires_at":expires_at}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(TokenView {
+        node_id: id,
+        name,
+        kind,
+        token,
+        expires_at,
+    })
+}
+
+#[utoipa::path(post, operation_id = "cluster_node_reissue", path = "/api/cluster/nodes/{id}/reissue", params(("id" = Uuid, Path)), request_body = ReissueInput, responses((status = 201, body = TokenView)))]
+pub(crate) async fn reissue(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<ReissueInput>,
+) -> Result<(StatusCode, Json<TokenView>), HttpError> {
+    actor.recent(&app).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(reissue_record(&app, &actor.principal, id, &input.expires_in).await?),
+    ))
 }
 
 #[utoipa::path(post, operation_id = "cluster_join", path = "/api/cluster/join", request_body = JoinInput, responses((status = 200, body = JoinView)))]

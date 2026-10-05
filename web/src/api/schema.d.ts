@@ -416,6 +416,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cluster/nodes/{id}/reissue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cluster_node_reissue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/cluster/tokens": {
         parameters: {
             query?: never;
@@ -2102,6 +2118,9 @@ export interface components {
             sha256?: string | null;
             size: string;
         };
+        ReissueInput: {
+            expires_in?: string;
+        };
         Request: {
             bucket?: string | null;
             key?: string | null;
@@ -3187,6 +3206,31 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    cluster_node_reissue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReissueInput"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenView"];
+                };
             };
         };
     };

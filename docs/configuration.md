@@ -57,7 +57,7 @@ Compose 健康检查对应 `["CMD","mokyu","--config","PATH","cli","status"]`。
 | `cluster.node_name` | 安全字符串 / 空 | 只用于没有 join token 的第一台 control；省略时为 `control-1`，加入节点名称由令牌绑定 |
 | `cluster.advertise_url` | 绝对 URL / 空 | 第一台 control 必填；每台 control 应填写只指向本机的可达地址，供 standby 转发 |
 
-启动命令决定角色：默认命令为 single，`control` 只监听管理端口，`worker` 执行后台任务，`data` 监听 S3 和公共读。群集模式要求 PostgreSQL、部署密钥和数据库连接在每个容器配置中直接提供；节点不会从 control 读取数据库地址。详见[群集部署](cluster-deployment.md)。
+启动命令决定角色：默认命令为 `single`（单容器模式），`control` 只监听管理端口，`worker` 执行后台任务，`data` 监听 S3 和公共读。群集模式要求 PostgreSQL、部署密钥和数据库连接在每个容器配置中直接提供；节点不会从 control 读取数据库地址。详见[群集部署](cluster-deployment.md)。
 
 ## 存储目标与运行参数
 

@@ -109,6 +109,7 @@ pub struct App {
     pub budget: Budget,
     pub secrets: Arc<Secrets>,
     pub db: PgPool,
+    pub node: std::sync::OnceLock<crate::cluster::NodeState>,
     pub storage: Arc<Storage>,
     pub thumbnails: Arc<crate::control::media::Thumbnails>,
     pub statistics: crate::stats::Statistics,
@@ -208,6 +209,7 @@ impl App {
             budget,
             secrets,
             db,
+            node: std::sync::OnceLock::new(),
             storage,
             thumbnails,
             statistics: crate::stats::Statistics::default(),
@@ -331,6 +333,7 @@ impl App {
         public: bool,
         claim_object: bool,
         completion: Option<Uuid>,
+        owner: Option<(Uuid, Uuid)>,
     ) -> Result<(Uuid, Active)> {
         self.writable()?;
         if key.is_empty() || key.len() > 1024 {
@@ -340,6 +343,14 @@ impl App {
         let id = Uuid::new_v4();
         self.writable()?;
         let mut tx = self.db.begin().await?;
+        if let Some((task, token)) = owner {
+            let owned: Option<Uuid> = sqlx::query_scalar("SELECT id FROM tasks WHERE id=$1 AND state='running' AND lease_token=$2 AND lease_expires_at>clock_timestamp() FOR SHARE")
+                .bind(task)
+                .bind(token)
+                .fetch_optional(&mut *tx)
+                .await?;
+            ensure!(owned.is_some(), "storage migration lease lost");
+        }
         let mut authority = authority.clone();
         authority.add(bucket, Action::Write);
         if public {
@@ -363,7 +374,7 @@ impl App {
                 );
             }
         }
-        sqlx::query("INSERT INTO streams(id,bucket_id,object_key,kind,state,metadata,public_read,write_authorization) VALUES($1,$2,$3,$4,'writing',$5,$6,$7)").bind(id).bind(bucket).bind(key).bind(kind).bind(metadata).bind(public).bind(sqlx::types::Json(authority)).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO streams(id,bucket_id,object_key,kind,state,metadata,public_read,write_authorization,owner_task,owner_lease) VALUES($1,$2,$3,$4,'writing',$5,$6,$7,$8,$9)").bind(id).bind(bucket).bind(key).bind(kind).bind(metadata).bind(public).bind(sqlx::types::Json(authority)).bind(owner.map(|value| value.0)).bind(owner.map(|value| value.1)).execute(&mut *tx).await?;
         if claim_object {
             sqlx::query("INSERT INTO objects(bucket_id,key,write_epoch) VALUES($1,$2,$3) ON CONFLICT(bucket_id,key) DO UPDATE SET write_epoch=excluded.write_epoch").bind(bucket).bind(key).bind(id).execute(&mut *tx).await?;
         }
@@ -417,6 +428,27 @@ impl App {
         .await
         .map_err(|_| s3_error!(RequestTimeout, "upload processing made no progress"))?
     }
+    pub(crate) async fn store_encoding(&self, store_id: Uuid) -> Result<(String, String)> {
+        let key: Option<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT k.id,k.name,k.algorithm FROM stores s JOIN managed_keys k ON k.id=s.current_key_id WHERE s.id=$1 AND k.purpose='block' AND k.revoked_at IS NULL",
+        )
+        .bind(store_id)
+        .fetch_optional(&self.db)
+        .await?;
+        let Some((_id, name, algorithm)) = key else {
+            return Ok(("none".into(), String::new()));
+        };
+        if self.secrets.key(&name).is_none() {
+            crate::db::load_runtime_key(&self.db, &self.secrets, &name).await?;
+        }
+        let loaded = self
+            .secrets
+            .key(&name)
+            .with_context(|| format!("missing store block key {name}"))?;
+        ensure!(loaded.algorithm == algorithm, "store block key algorithm mismatch");
+        Ok((algorithm, name))
+    }
+
     async fn put_chunk_inner(
         &self,
         stream: Uuid,
@@ -445,12 +477,7 @@ impl App {
             }
         };
         let _guard = mutex.lock().await;
-        let algorithm = &self.config.encryption.algorithm;
-        let key_id = if algorithm == "none" {
-            ""
-        } else {
-            &self.secrets.active_key
-        };
+        let (algorithm, key_id) = self.store_encoding(store_id).await?;
         // Rollback releases the claim on every return and cancellation path.
         let mut hash_lock = self.db.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || encode($2,'hex'), 734922709851001))")
@@ -458,12 +485,12 @@ impl App {
             .bind(hash.as_slice())
             .execute(&mut *hash_lock)
             .await?;
-        sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE store_id=$1 AND hash=$2 AND raw_size=$3 AND algorithm=$4 AND key_id=$5 AND state IN ('preparing','uploading')")
-            .bind(store_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).execute(&self.db).await?;
+        sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE store_id=$1 AND hash=$2 AND raw_size=$3 AND state IN ('preparing','uploading')")
+            .bind(store_id).bind(hash.as_slice()).bind(raw.len() as i32).execute(&self.db).await?;
         let c: Chunk = loop {
             let mut tx = self.db.begin().await?;
-            let old: Option<Chunk> = sqlx::query_as("SELECT * FROM chunks WHERE store_id=$1 AND hash=$2 AND raw_size=$3 AND algorithm=$4 AND key_id=$5 AND state='ready'")
-                .bind(store_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).fetch_optional(&mut *tx).await?;
+            let old: Option<Chunk> = sqlx::query_as("SELECT * FROM chunks WHERE store_id=$1 AND hash=$2 AND raw_size=$3 AND state='ready' ORDER BY id LIMIT 1")
+                .bind(store_id).bind(hash.as_slice()).bind(raw.len() as i32).fetch_optional(&mut *tx).await?;
             if let Some(c) = old {
                 tx.commit().await?;
                 if self.config.cache.upload_cache {
@@ -487,8 +514,8 @@ impl App {
                     Err(e) => return Err(e),
                 }
             }
-            let inserted: Option<Chunk> = sqlx::query_as("INSERT INTO chunks(storage_id,store_id,hash,raw_size,algorithm,key_id,owner_stream,state,unreferenced_at) VALUES($1,$2,$3,$4,$5,$6,$7,'preparing',now()) ON CONFLICT DO NOTHING RETURNING *")
-                .bind(Uuid::new_v4()).bind(store_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(algorithm).bind(key_id).bind(stream).fetch_optional(&mut *tx).await?;
+            let inserted: Option<Chunk> = sqlx::query_as("INSERT INTO chunks(storage_id,store_id,hash,raw_size,algorithm,key_id,owner_stream,state,unreferenced_at) VALUES($1,$2,$3,$4,$5,$6,$7,'preparing',now()) ON CONFLICT (store_id,hash,raw_size) WHERE state IN ('preparing','uploading','ready') DO NOTHING RETURNING *")
+                .bind(Uuid::new_v4()).bind(store_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(&algorithm).bind(&key_id).bind(stream).fetch_optional(&mut *tx).await?;
             tx.commit().await?;
             if let Some(c) = inserted {
                 break c;

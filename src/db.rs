@@ -127,16 +127,15 @@ pub async fn load_control_settings(pool: &PgPool, configured: &Control) -> Resul
     Ok(settings)
 }
 
-async fn load_database_keys(pool: &PgPool, secrets: &mut Secrets, algorithm: &str) -> Result<()> {
-    let rows: Vec<(uuid::Uuid, String, String, String, Vec<u8>, Vec<u8>, bool)> = sqlx::query_as(
-        "SELECT id,name,purpose,algorithm,secret_encrypted,fingerprint,active FROM managed_keys ORDER BY id",
+async fn load_database_keys(pool: &PgPool, secrets: &mut Secrets) -> Result<()> {
+    let rows: Vec<(uuid::Uuid, String, String, String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT id,name,purpose,algorithm,secret_encrypted,fingerprint FROM managed_keys WHERE secret_encrypted IS NOT NULL ORDER BY id",
     )
     .fetch_all(pool)
     .await?;
     let mut keys = BTreeMap::new();
     let mut materials = HashSet::new();
-    let mut active = None;
-    for (id, name, purpose, key_algorithm, encrypted, fingerprint, enabled) in rows {
+    for (id, name, purpose, key_algorithm, encrypted, fingerprint) in rows {
         let material = crate::codec::unprotect_bytes(
             &encrypted,
             &secrets.credential_key,
@@ -150,8 +149,7 @@ async fn load_database_keys(pool: &PgPool, secrets: &mut Secrets, algorithm: &st
             "managed key fingerprint mismatch"
         );
         ensure!(materials.insert(material), "managed keys must be unique");
-        if purpose != "encryption" {
-            ensure!(!enabled, "only encryption keys can be active");
+        if purpose != "block" {
             continue;
         }
         ensure!(
@@ -159,24 +157,43 @@ async fn load_database_keys(pool: &PgPool, secrets: &mut Secrets, algorithm: &st
             "invalid managed encryption key algorithm"
         );
         let key = crate::codec::Key::new(&key_algorithm, material)?;
-        if enabled {
-            ensure!(active.is_none(), "multiple active encryption keys");
-            active = Some(name.clone());
-        }
         keys.insert(name, key);
     }
-    if let Some(active_key) = active.as_deref() {
-        ensure!(
-            algorithm == "none"
-                || keys
-                    .get(active_key)
-                    .is_some_and(|key| key.algorithm == algorithm),
-            "active database key algorithm does not match encryption.algorithm"
-        );
-    }
-    secrets.active_key = active.unwrap_or_default();
     secrets.keys = keys;
+    secrets
+        .runtime_keys
+        .write()
+        .map_err(|_| anyhow::anyhow!("key registry is unavailable"))?
+        .clear();
     Ok(())
+}
+
+pub(crate) async fn load_runtime_key(pool: &PgPool, secrets: &Secrets, name: &str) -> Result<()> {
+    if secrets.key(name).is_some() {
+        return Ok(());
+    }
+    let row: Option<(uuid::Uuid, String, String, String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT id,name,purpose,algorithm,secret_encrypted,fingerprint FROM managed_keys WHERE name=$1 AND secret_encrypted IS NOT NULL",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?;
+    let (id, stored_name, purpose, algorithm, encrypted, fingerprint) =
+        row.context("managed key was not found")?;
+    ensure!(purpose == "block", "managed key is not a block key");
+    let material = crate::codec::unprotect_bytes(
+        &encrypted,
+        &secrets.credential_key,
+        format!("managed-key-{id}").as_bytes(),
+    )?;
+    let material: [u8; 32] = material
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("managed key material must be 32 bytes"))?;
+    ensure!(
+        fingerprint == blake3::hash(&material).as_bytes(),
+        "managed key fingerprint mismatch"
+    );
+    secrets.publish_key(stored_name, crate::codec::Key::new(&algorithm, material)?)
 }
 
 pub async fn connect(
@@ -301,7 +318,7 @@ pub async fn connect(
         i64::from(version) == latest,
         "schema version does not match the migration history"
     );
-    load_database_keys(&pool, secrets, &c.encryption.algorithm).await?;
+    load_database_keys(&pool, secrets).await?;
     sqlx::query("UPDATE mokyu_meta SET storage_identity=$1 WHERE singleton")
         .bind(storage_identity)
         .execute(&pool)
@@ -345,7 +362,7 @@ pub async fn connect(
             "key ID changed algorithm or material"
         );
     }
-    let required: Vec<String> = sqlx::query_scalar("SELECT DISTINCT key_id FROM chunks WHERE algorithm <> 'none' AND state NOT IN ('deleted','failed')").fetch_all(&pool).await?;
+    let required: Vec<String> = sqlx::query_scalar("SELECT DISTINCT key_id FROM (SELECT key_id FROM chunk_locations WHERE algorithm<>'none' AND state<>'deleted' UNION SELECT key_id FROM packs WHERE algorithm<>'none' AND state<>'deleted' UNION SELECT key_id FROM chunks WHERE algorithm<>'none' AND EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id)) keys").fetch_all(&pool).await?;
     ensure!(
         required.iter().all(|id| secrets.keys.contains_key(id)),
         "database is missing a historical chunk key"

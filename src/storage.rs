@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
@@ -457,6 +457,127 @@ struct PackFetch {
     priority: Arc<AtomicUsize>,
 }
 
+struct SharedStorePermit {
+    db: sqlx::PgPool,
+    token: Uuid,
+    alive: Arc<AtomicBool>,
+}
+
+impl Drop for SharedStorePermit {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::Release);
+        let db = self.db.clone();
+        let token = self.token;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = sqlx::query("DELETE FROM store_permits WHERE token=$1")
+                    .bind(token)
+                    .execute(&db)
+                    .await;
+            });
+        }
+    }
+}
+
+struct StorePermit {
+    _local: crate::backend::Permit,
+    _shared: Option<SharedStorePermit>,
+}
+
+struct StoreGate {
+    local: Arc<crate::backend::Gate>,
+    db: sqlx::PgPool,
+    store_id: Uuid,
+    direction: &'static str,
+    cluster_limit: Option<i32>,
+    holder: Uuid,
+}
+
+impl StoreGate {
+    fn new(
+        db: &sqlx::PgPool,
+        store_id: Uuid,
+        direction: &'static str,
+        local_limit: usize,
+        cluster_limit: Option<i32>,
+        aging: Duration,
+        holder: Uuid,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            local: crate::backend::Gate::new(local_limit, aging),
+            db: db.clone(),
+            store_id,
+            direction,
+            cluster_limit,
+            holder,
+        })
+    }
+
+    async fn acquire_shared(&self, limit: i32) -> Result<SharedStorePermit> {
+        loop {
+            let token = Uuid::new_v4();
+            let mut tx = self.db.begin().await?;
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            )
+            .bind(format!("mokyu:store:{}:{}", self.store_id, self.direction))
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM store_permits WHERE store_id=$1 AND direction=$2 AND expires_at<=now()")
+                .bind(self.store_id)
+                .bind(self.direction)
+                .execute(&mut *tx)
+                .await?;
+            let active: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM store_permits WHERE store_id=$1 AND direction=$2",
+            )
+            .bind(self.store_id)
+            .bind(self.direction)
+            .fetch_one(&mut *tx)
+            .await?;
+            if active < i64::from(limit) {
+                sqlx::query("INSERT INTO store_permits(token,store_id,direction,holder,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 minute')")
+                    .bind(token)
+                    .bind(self.store_id)
+                    .bind(self.direction)
+                    .bind(self.holder)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                let alive = Arc::new(AtomicBool::new(true));
+                let renew_alive = alive.clone();
+                let db = self.db.clone();
+                tokio::spawn(async move {
+                    while renew_alive.load(Ordering::Acquire) {
+                        tokio::time::sleep(Duration::from_secs(20)).await;
+                        if !renew_alive.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let _ = sqlx::query(
+                            "UPDATE store_permits SET expires_at=now()+interval '1 minute' WHERE token=$1",
+                        )
+                        .bind(token)
+                        .execute(&db)
+                        .await;
+                    }
+                });
+                return Ok(SharedStorePermit { db: self.db.clone(), token, alive });
+            }
+            tx.rollback().await?;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn acquire(self: &Arc<Self>) -> Result<StorePermit> {
+        let local = self.local.acquire().await?;
+        let shared = match self.cluster_limit {
+            Some(limit) => Some(self.acquire_shared(limit).await?),
+            None => None,
+        };
+        Ok(StorePermit { _local: local, _shared: shared })
+    }
+}
+
 struct StoreBackend {
     backend: Arc<dyn ObjectStore>,
     prefix: String,
@@ -464,9 +585,9 @@ struct StoreBackend {
     metadata: serde_json::Value,
     identity_ready: std::sync::atomic::AtomicBool,
     identity_check: tokio::sync::Mutex<()>,
-    reads: Arc<crate::backend::Gate>,
-    writes: Arc<crate::backend::Gate>,
-    controls: Arc<crate::backend::Gate>,
+    reads: Arc<StoreGate>,
+    writes: Arc<StoreGate>,
+    controls: Arc<StoreGate>,
 }
 
 type StoreOptions = StoreOptionsV2;
@@ -487,6 +608,7 @@ pub struct Storage {
     store_options: StoreOptions,
     store_defaults: (usize, usize, usize),
     store_aging: Duration,
+    permit_holder: Uuid,
     pub store_id: Option<Uuid>,
     pub disk: Arc<Disk>,
     pub secrets: Arc<Secrets>,
@@ -534,9 +656,11 @@ pub(crate) type StoreRow = (
 async fn build_store(
     options: StoreOptions,
     secrets: &Secrets,
+    db: &sqlx::PgPool,
     row: StoreRow,
     defaults: (usize, usize, usize),
     aging: Duration,
+    permit_holder: Uuid,
 ) -> Result<Arc<StoreBackend>> {
     let (
         id,
@@ -576,9 +700,33 @@ async fn build_store(
         metadata,
         identity_ready: false.into(),
         identity_check: tokio::sync::Mutex::new(()),
-        reads: crate::backend::Gate::new(read_limit.map_or(defaults.0, |n| n as usize), aging),
-        writes: crate::backend::Gate::new(upload_limit.map_or(defaults.1, |n| n as usize), aging),
-        controls: crate::backend::Gate::new(control_limit.map_or(defaults.2, |n| n as usize), aging),
+        reads: StoreGate::new(
+            db,
+            id,
+            "read",
+            read_limit.map_or(defaults.0, |n| n as usize),
+            read_limit,
+            aging,
+            permit_holder,
+        ),
+        writes: StoreGate::new(
+            db,
+            id,
+            "upload",
+            upload_limit.map_or(defaults.1, |n| n as usize),
+            upload_limit,
+            aging,
+            permit_holder,
+        ),
+        controls: StoreGate::new(
+            db,
+            id,
+            "control",
+            control_limit.map_or(defaults.2, |n| n as usize),
+            control_limit,
+            aging,
+            permit_holder,
+        ),
     }))
 }
 
@@ -642,10 +790,23 @@ impl Storage {
         };
         let store_options = StoreOptions::new(&c.storage)?;
         let store_id = rows.first().map(|row| row.0);
+        let permit_holder = Uuid::new_v4();
         let mut targets = HashMap::with_capacity(rows.len());
         for row in rows {
             let id = row.0;
-            targets.insert(id, build_store(store_options, &secrets, row, defaults, aging).await?);
+            targets.insert(
+                id,
+                build_store(
+                    store_options,
+                    &secrets,
+                    &db,
+                    row,
+                    defaults,
+                    aging,
+                    permit_holder,
+                )
+                .await?,
+            );
         }
         let s = Self {
             maintenance,
@@ -665,6 +826,7 @@ impl Storage {
             store_options,
             store_defaults: defaults,
             store_aging: aging,
+            permit_holder,
             store_id,
             disk,
             secrets,
@@ -747,7 +909,18 @@ impl Storage {
         .fetch_optional(&self.db)
         .await?;
         let backend = if let Some(row) = row {
-            Some(build_store(self.store_options, &self.secrets, row, self.store_defaults, self.store_aging).await?)
+            Some(
+                build_store(
+                    self.store_options,
+                    &self.secrets,
+                    &self.db,
+                    row,
+                    self.store_defaults,
+                    self.store_aging,
+                    self.permit_holder,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -1437,6 +1610,7 @@ impl Storage {
         }
         match self.source(c.id).await? {
             Source::Chunk(physical, _pin) => {
+                self.ensure_key_loaded(&physical.key_id).await?;
                 let encoded = self.read_backend(&physical).await?;
                 let (raw, cache) = self.decode(&physical, encoded).await?;
                 let fill = if physical.compressed == c.compressed
@@ -1592,7 +1766,14 @@ impl Storage {
         );
         Ok(())
     }
-    async fn load_pack(self: &Arc<Self>, p: crate::pack::Pack) -> Result<Arc<LoadedPack>> {
+    pub(crate) async fn ensure_key_loaded(&self, name: &str) -> Result<()> {
+        if name.is_empty() || self.secrets.key(name).is_some() {
+            return Ok(());
+        }
+        crate::db::load_runtime_key(&self.db, &self.secrets, name).await
+    }
+
+    pub(crate) async fn load_pack(self: &Arc<Self>, p: crate::pack::Pack) -> Result<Arc<LoadedPack>> {
         if let Some(live) = self
             .pack_live
             .lock()
@@ -1629,6 +1810,7 @@ impl Storage {
                 let result: Result<Arc<LoadedPack>> = async {
                     let store_id = p.store_id.context("pack has no store")?;
                     self.ensure_store_identity(store_id).await?;
+                    self.ensure_key_loaded(&p.key_id).await?;
                     let memory = self.pack_memory(p.payload_size()?).await?;
                     let read_permit = self
                         .reads

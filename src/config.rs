@@ -5,6 +5,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
 };
 
 #[derive(Deserialize)]
@@ -558,8 +559,25 @@ impl Default for Cleanup {
 pub struct Secrets {
     pub database_password: String,
     pub credential_key: crate::codec::Key,
-    pub active_key: String,
     pub keys: BTreeMap<String, crate::codec::Key>,
+    pub runtime_keys: Arc<RwLock<BTreeMap<String, crate::codec::Key>>>,
+}
+
+impl Secrets {
+    pub fn key(&self, name: &str) -> Option<crate::codec::Key> {
+        if let Some(key) = self.runtime_keys.read().ok()?.get(name) {
+            return Some(key.clone());
+        }
+        self.keys.get(name).cloned()
+    }
+
+    pub fn publish_key(&self, name: String, key: crate::codec::Key) -> Result<()> {
+        self.runtime_keys
+            .write()
+            .map_err(|_| anyhow::anyhow!("key registry is unavailable"))?
+            .insert(name, key);
+        Ok(())
+    }
 }
 #[derive(Clone, serde::Serialize)]
 pub struct Budget {
@@ -684,8 +702,8 @@ impl Config {
                 "database.password",
             )?,
             credential_key: crate::codec::Key::new("aes-256-gcm", credential_material)?,
-            active_key: String::new(),
             keys: BTreeMap::new(),
+            runtime_keys: Arc::new(RwLock::new(BTreeMap::new())),
         };
         let budget = c.budget()?;
         Ok((c, secrets, budget))
@@ -755,11 +773,8 @@ impl Config {
             .parse::<sqlx::postgres::PgSslMode>()
             .map_err(|_| anyhow::anyhow!("invalid database.ssl_mode"))?;
         ensure!(
-            matches!(
-                c.encryption.algorithm.as_str(),
-                "none" | "aes-256-gcm" | "chacha20-poly1305"
-            ),
-            "unknown encryption algorithm"
+            c.encryption.algorithm == "aes-256-gcm",
+            "deployment key protection algorithm is fixed to AES-256-GCM"
         );
         c.storage.min_storage_seconds()?;
         for value in [

@@ -8,7 +8,7 @@ use axum::{
 };
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 use uuid::Uuid;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -73,9 +73,7 @@ pub(crate) async fn read_state(path: &Path) -> Result<Option<NodeState>> {
 }
 
 pub(crate) async fn local_node_id(app: &App) -> Result<Option<Uuid>> {
-    Ok(read_state(&node_state_path(app))
-        .await?
-        .map(|state| state.node_id))
+    Ok(app.node.get().map(|state| state.node_id))
 }
 
 pub(crate) async fn try_leader(
@@ -97,9 +95,20 @@ pub(crate) async fn try_leader(
 
 async fn write_state(path: &Path, state: &NodeState) -> Result<()> {
     let temporary = path.with_extension("json.tmp");
-    tokio::fs::write(&temporary, serde_json::to_vec(state)?).await?;
-    tokio::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600)).await?;
-    tokio::fs::rename(temporary, path).await?;
+    let _ = tokio::fs::remove_file(&temporary).await;
+    let data = serde_json::to_vec(state)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)
+        .await?;
+    tokio::io::AsyncWriteExt::write_all(&mut file, &data).await?;
+    file.sync_all().await?;
+    drop(file);
+    tokio::fs::rename(&temporary, path).await?;
+    let parent = path.parent().context("node state needs a parent directory")?;
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -200,74 +209,35 @@ async fn bootstrap_control(app: &App) -> Result<()> {
         .node_name
         .as_deref()
         .unwrap_or("control-1");
-    let advertise_url = app
-        .config
-        .cluster
-        .advertise_url
-        .as_deref()
-        .context("cluster.advertise_url is required for the first control node")?;
+    let advertise_url = app.config.cluster.advertise_url.as_deref();
     let path = node_state_path(app);
     let mut tx = app.db.begin().await?;
-    let existing: Option<(Uuid, String, bool, Option<Vec<u8>>)> = sqlx::query_as(
-        "SELECT id,kind,enabled,credential_encrypted FROM nodes WHERE name=$1 FOR UPDATE",
+    sqlx::query("SELECT singleton FROM mokyu_meta WHERE singleton FOR UPDATE")
+        .execute(&mut *tx)
+        .await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM nodes WHERE kind='control')",
     )
-    .bind(name)
-    .fetch_optional(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-    let (node_id, credential) = match existing {
-        Some((id, kind, enabled, encrypted)) => {
-            ensure!(
-                kind == "control",
-                "configured control node name belongs to another role"
-            );
-            ensure!(enabled, "configured control node is disabled");
-            let credential = encrypted
-                .as_deref()
-                .map(|data| {
-                    codec::unprotect(
-                        data,
-                        &app.secrets.credential_key,
-                        credential_binding(id).as_bytes(),
-                    )
-                })
-                .transpose()?
-                .context("control node credential is missing")?;
-            sqlx::query(
-                "UPDATE nodes SET advertise_url=$2,last_seen_at=now(),updated_at=now() WHERE id=$1",
-            )
-            .bind(id)
-            .bind(advertise_url)
-            .execute(&mut *tx)
-            .await?;
-            (id, credential)
-        }
-        None => {
-            let other: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM nodes WHERE kind='control' AND enabled)",
-            )
-            .fetch_one(&mut *tx)
-            .await?;
-            ensure!(
-                !other,
-                "an active control node already exists; use a join token"
-            );
-            let id = Uuid::new_v4();
-            let credential = join_token()?;
-            let encrypted = codec::protect(
-                credential.as_bytes(),
-                &app.secrets.credential_key,
-                credential_binding(id).as_bytes(),
-            )?;
-            sqlx::query("INSERT INTO nodes(id,name,kind,advertise_url,credential_encrypted,last_seen_at) VALUES($1,$2,'control',$3,$4,now())")
-                .bind(id)
-                .bind(name)
-                .bind(advertise_url)
-                .bind(encrypted)
-                .execute(&mut *tx)
-                .await?;
-            (id, credential)
-        }
-    };
+    ensure!(
+        !exists,
+        "control nodes are already registered; restore node.json or use a reissued join token"
+    );
+    let node_id = Uuid::new_v4();
+    let credential = join_token()?;
+    let encrypted = codec::protect(
+        credential.as_bytes(),
+        &app.secrets.credential_key,
+        credential_binding(node_id).as_bytes(),
+    )?;
+    sqlx::query("INSERT INTO nodes(id,name,kind,advertise_url,credential_encrypted,last_seen_at) VALUES($1,$2,'control',$3,$4,now())")
+        .bind(node_id)
+        .bind(name)
+        .bind(advertise_url)
+        .bind(encrypted)
+        .execute(&mut *tx)
+        .await?;
     let lease: Option<Uuid> = sqlx::query_scalar(
         "UPDATE control_leases SET node_id=$1,lease_token=gen_random_uuid(),expires_at=now()+interval '30 seconds',updated_at=now() WHERE singleton AND (node_id=$1 OR node_id IS NULL OR expires_at<now()) RETURNING lease_token",
     )
@@ -305,35 +275,40 @@ pub async fn initialize(app: &App, role: &str) -> Result<()> {
         mode == "cluster",
         "set cluster mode before starting a split service role"
     );
-    if let Some(state) = read_state(&node_state_path(app)).await? {
-        validate_node(app, &state, role).await?;
-        if role == "control" {
-            if let Some(url) = app.config.cluster.advertise_url.as_deref() {
-                sqlx::query("UPDATE nodes SET advertise_url=$2 WHERE id=$1")
-                    .bind(state.node_id)
-                    .bind(url)
-                    .execute(&app.db)
-                    .await?;
-            }
+    if read_state(&node_state_path(app)).await?.is_none() {
+        if role == "control" && app.config.cluster.join_token.is_none() {
+            bootstrap_control(app).await?;
+        } else {
+            join_remote(app, role).await?;
         }
-        return Ok(());
     }
-    if role == "control" && app.config.cluster.join_token.is_none() {
-        bootstrap_control(app).await
-    } else {
-        ensure!(
-            matches!(role, "control" | "worker" | "data"),
-            "unknown service role"
-        );
-        join_remote(app, role).await
+    let state = read_state(&node_state_path(app)).await?.context("node state is missing")?;
+    let mut tx = app.db.begin().await?;
+    validate_node(app, &mut *tx, &state, role).await?;
+    if role == "control"
+        && let Some(url) = app.config.cluster.advertise_url.as_deref()
+    {
+        sqlx::query("UPDATE nodes SET advertise_url=$2 WHERE id=$1")
+            .bind(state.node_id)
+            .bind(url)
+            .execute(&mut *tx)
+            .await?;
     }
+    tx.commit().await?;
+    ensure!(app.node.set(state).is_ok(), "node identity was already initialized");
+    Ok(())
 }
 
-async fn validate_node(app: &App, state: &NodeState, role: &str) -> Result<()> {
+pub(crate) async fn validate_node(
+    app: &App,
+    db: &mut sqlx::PgConnection,
+    state: &NodeState,
+    role: &str,
+) -> Result<()> {
     let record: Option<(String, bool, Option<Vec<u8>>)> =
-        sqlx::query_as("SELECT kind,enabled,credential_encrypted FROM nodes WHERE id=$1")
+        sqlx::query_as("SELECT kind,enabled,credential_encrypted FROM nodes WHERE id=$1 FOR UPDATE")
             .bind(state.node_id)
-            .fetch_optional(&app.db)
+            .fetch_optional(&mut *db)
             .await?;
     let (kind, enabled, encrypted) = record.context("registered node no longer exists")?;
     ensure!(
@@ -357,20 +332,20 @@ async fn validate_node(app: &App, state: &NodeState, role: &str) -> Result<()> {
 }
 
 pub async fn control_loop(app: Arc<App>) -> Result<()> {
-    let state = read_state(&node_state_path(&app))
-        .await?
-        .context("control node state is missing")?;
+    let state = app.node.get().context("control node state is missing")?;
     loop {
         let renewal: Result<()> = async {
-            let updated = sqlx::query("UPDATE nodes SET last_seen_at=now(),updated_at=now() WHERE id=$1 AND kind='control' AND enabled")
-            .bind(state.node_id)
-            .execute(&app.db)
-            .await?;
-            ensure!(updated.rows_affected() == 1, "control node is disabled");
-            sqlx::query("UPDATE control_leases SET node_id=$1,lease_token=CASE WHEN node_id=$1 AND expires_at>now() THEN lease_token ELSE gen_random_uuid() END,expires_at=now()+interval '30 seconds',updated_at=now() WHERE singleton AND (node_id=$1 OR node_id IS NULL OR expires_at<now()) AND EXISTS(SELECT 1 FROM nodes WHERE id=$1 AND enabled)")
+            let mut tx = app.db.begin().await?;
+            validate_node(&app, &mut *tx, state, "control").await?;
+            sqlx::query("UPDATE nodes SET last_seen_at=now(),updated_at=now() WHERE id=$1")
                 .bind(state.node_id)
-                .execute(&app.db)
+                .execute(&mut *tx)
                 .await?;
+            sqlx::query("UPDATE control_leases SET node_id=$1,lease_token=CASE WHEN node_id=$1 AND expires_at>now() THEN lease_token ELSE gen_random_uuid() END,expires_at=now()+interval '30 seconds',updated_at=now() WHERE singleton AND (node_id=$1 OR node_id IS NULL OR expires_at<now())")
+                .bind(state.node_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
             Ok(())
         }.await;
         if let Err(error) = renewal {
@@ -390,20 +365,19 @@ pub async fn node_loop(app: Arc<App>, role: &'static str) -> Result<()> {
         .control_url
         .as_deref()
         .context("cluster.control_url is required for node heartbeat")?;
-    let state = read_state(&node_state_path(&app))
-        .await?
-        .context("node state is missing")?;
+    let state = app.node.get().context("node state is missing")?;
     loop {
-        if let Err(error) = sqlx::query(
-            "UPDATE nodes SET last_seen_at=now(),updated_at=now() WHERE id=$1 AND enabled",
-        )
-        .bind(state.node_id)
-        .execute(&app.db)
-        .await
-        {
-            tracing::warn!(%error, "node database heartbeat failed; retrying");
-        }
-        if let Err(error) = validate_node(&app, &state, role).await {
+        let heartbeat: Result<()> = async {
+            let mut tx = app.db.begin().await?;
+            validate_node(&app, &mut *tx, state, role).await?;
+            sqlx::query("UPDATE nodes SET last_seen_at=now(),updated_at=now() WHERE id=$1")
+                .bind(state.node_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok(())
+        }.await;
+        if let Err(error) = heartbeat {
             if error.downcast_ref::<sqlx::Error>().is_none() {
                 return Err(error);
             }
@@ -534,17 +508,19 @@ pub async fn forward_if_standby(
         return crate::http::problem(StatusCode::SERVICE_UNAVAILABLE, "ControlUnavailable")
             .into_response();
     }
-    let Some(state) = (match read_state(&node_state_path(&app)).await {
-        Ok(state) => state,
-        Err(error) => {
-            tracing::warn!(error=%error, "cannot read control node state");
-            return crate::http::problem(StatusCode::SERVICE_UNAVAILABLE, "ControlUnavailable")
-                .into_response();
-        }
-    }) else {
+    let Some(state) = app.node.get() else {
         return crate::http::problem(StatusCode::SERVICE_UNAVAILABLE, "ControlUnavailable")
             .into_response();
     };
+    let validation: Result<()> = async {
+        let mut connection = app.db.acquire().await?;
+        validate_node(&app, &mut *connection, state, "control").await
+    }.await;
+    if let Err(error) = validation {
+        tracing::warn!(error=%error, "control node credential is not valid for forwarding");
+        return crate::http::problem(StatusCode::SERVICE_UNAVAILABLE, "ControlUnavailable")
+            .into_response();
+    }
     let lease: Option<(Option<Uuid>, bool, Option<String>)> = match sqlx::query_as(
         "SELECT l.node_id,l.expires_at>now() AND COALESCE(n.enabled,false),n.advertise_url FROM control_leases l LEFT JOIN nodes n ON n.id=l.node_id WHERE l.singleton",
     )

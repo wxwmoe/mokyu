@@ -229,6 +229,19 @@ pub enum Stores {
     Check {
         name: String,
     },
+    Key {
+        #[command(subcommand)]
+        command: StoreKey,
+    },
+    Rekey {
+        store: Uuid,
+        #[arg(long)]
+        target_key: Option<String>,
+        #[arg(long)]
+        execute: bool,
+        #[arg(long)]
+        confirm: Option<String>,
+    },
     Sweep {
         #[arg(long)]
         store: Option<Uuid>,
@@ -241,6 +254,11 @@ pub enum Stores {
         #[arg(long, default_value = "48h")]
         older_than: String,
     },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum StoreKey {
+    Set { store: String, key: String },
+    Clear { store: String },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Settings {
@@ -285,13 +303,12 @@ pub enum Keys {
     List,
     Create {
         name: String,
-        #[arg(value_parser = ["access", "signing", "encryption"])]
+        #[arg(value_parser = ["access", "signing", "block"])]
         purpose: String,
+        #[arg(long, value_parser = ["aes-256-gcm", "chacha20-poly1305"])]
+        algorithm: Option<String>,
     },
     Revoke {
-        id: Uuid,
-    },
-    Activate {
         id: Uuid,
     },
 }
@@ -314,6 +331,11 @@ pub enum Cluster {
     },
     Revoke {
         id: Uuid,
+    },
+    Reissue {
+        id: Uuid,
+        #[arg(long, default_value = "1h")]
+        expires_in: String,
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
@@ -701,7 +723,7 @@ async fn rpc(path: &Path, command: &Command) -> Result<Value> {
     }
     Ok(reply["result"].clone())
 }
-pub async fn serve(app: Arc<App>) -> Result<()> {
+pub async fn serve(app: Arc<App>, management: bool) -> Result<()> {
     let path = &app.config.instance.listen_socket;
     tokio::fs::create_dir_all(
         path.parent()
@@ -728,6 +750,10 @@ pub async fn serve(app: Arc<App>) -> Result<()> {
                     tokio::time::timeout(Duration::from_secs(10), receive_frame(&mut socket))
                         .await??;
                 let command: Command = serde_json::from_slice(&data)?;
+                ensure!(
+                    management || matches!(&command, Command::Status),
+                    "this role only exposes status"
+                );
                 execute(&app, command).await
             }
             .await;

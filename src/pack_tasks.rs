@@ -38,20 +38,8 @@ impl Output {
 }
 
 impl App {
-    fn physical_encoding(&self, c: &Chunk) -> Result<(String, String)> {
-        let algorithm = &self.config.encryption.algorithm;
-        ensure!(
-            c.algorithm == "none" || algorithm != "none",
-            "an active encryption key is required to rewrite previously encrypted data"
-        );
-        Ok((
-            algorithm.clone(),
-            if algorithm == "none" {
-                String::new()
-            } else {
-                self.secrets.active_key.clone()
-            },
-        ))
+    async fn physical_encoding(&self, c: &Chunk) -> Result<(String, String)> {
+        self.store_encoding(c.store_id.context("chunk has no store")?).await
     }
     pub(crate) async fn pin_pack_inputs(&self, task: Uuid, rows: &[Mapping]) -> Result<()> {
         let _coord = self.coord.lock().await;
@@ -231,7 +219,7 @@ impl App {
             });
         }
         let mut physical = c.clone();
-        (physical.algorithm, physical.key_id) = self.physical_encoding(c)?;
+        (physical.algorithm, physical.key_id) = self.physical_encoding(c).await?;
         physical.encoding_id = sqlx::query_scalar("SELECT nextval('chunk_locations_id_seq')")
             .fetch_one(&self.db)
             .await?;
@@ -334,7 +322,7 @@ impl App {
         }
         let raw_size: i64 = rows.iter().map(|r| i64::from(r.chunk.raw_size)).sum();
         let first = &rows[0].chunk;
-        let (algorithm, key_id) = self.physical_encoding(first)?;
+        let (algorithm, key_id) = self.physical_encoding(first).await?;
         let store_id = first
             .store_id
             .context("pack member has no store")?;

@@ -353,6 +353,7 @@ impl S3 for Gateway {
                     canned(i.acl.as_ref())?,
                     true,
                     None,
+                    None,
                 )
                 .await?;
             let should_compress = self
@@ -840,6 +841,7 @@ impl S3 for Gateway {
                     meta,
                     canned(i.acl.as_ref())?,
                     true,
+                    None,
                     None,
                 )
                 .await?;

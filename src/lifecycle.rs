@@ -160,7 +160,7 @@ impl App {
         sqlx::query("UPDATE mokyu_meta SET access_coverage_since=now(),access_flushed_at=now()")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE streams SET state='abandoned',touched_at=now() WHERE state='writing'")
+        sqlx::query("UPDATE streams SET state='abandoned',owner_task=NULL,owner_lease=NULL,touched_at=now() WHERE state='writing'")
             .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=COALESCE(unreferenced_at,now()) WHERE state IN ('preparing','uploading')").execute(&mut *tx).await?;
@@ -251,7 +251,7 @@ impl App {
             }
         }
         let active: Vec<Uuid> = self.active.lock().unwrap().keys().copied().collect();
-        let candidates:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM streams s WHERE state IN ('retired','abandoned','writing') AND NOT (id=ANY($1)) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) ORDER BY touched_at,id LIMIT $2").bind(&active).bind(batch).fetch_all(&self.db).await?;
+        let candidates:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM streams s WHERE state IN ('retired','abandoned','writing') AND NOT (id=ANY($1)) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task AND t.state='running' AND t.lease_token=s.owner_lease AND t.lease_expires_at>now()) ORDER BY touched_at,id LIMIT $2").bind(&active).bind(batch).fetch_all(&self.db).await?;
         for id in candidates {
             if Instant::now() >= deadline {
                 break;
@@ -266,7 +266,7 @@ impl App {
             sqlx::raw_sql("SET LOCAL lock_timeout='100ms'; SET LOCAL statement_timeout='1s'")
                 .execute(&mut *tx)
                 .await?;
-            let claimed = sqlx::query("UPDATE streams s SET state='abandoned' WHERE id=$1 AND state IN ('retired','abandoned','writing') AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id)")
+            let claimed = sqlx::query("UPDATE streams s SET state='abandoned',owner_task=NULL,owner_lease=NULL WHERE id=$1 AND state IN ('retired','abandoned','writing') AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task AND t.state='running' AND t.lease_token=s.owner_lease AND t.lease_expires_at>now())")
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;

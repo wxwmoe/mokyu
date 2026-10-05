@@ -265,7 +265,7 @@ async fn run_single(app: Arc<app::App>) -> Result<()> {
         result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
         result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
         result = serve_router(control_listener, control::router(app.clone()), connections.clone()) => result?,
-        result = admin::serve(app.clone()) => result?,
+        result = admin::serve(app.clone(), true) => result?,
         result = lifecycle::run(app.clone()) => result?,
         result = tasks::run(app.clone()) => result?,
         result = maintenance::run(app.clone()) => result?,
@@ -287,7 +287,7 @@ async fn run_control(app: Arc<app::App>) -> Result<()> {
     tokio::select! {
         result = cluster::control_loop(app.clone()) => result?,
         result = serve_router(control_listener, control::router(app.clone()), connections) => result?,
-        result = admin::serve(app.clone()) => result?,
+        result = admin::serve(app.clone(), true) => result?,
         result = control::insights::runtime_loop(app.clone()) => result?,
         _ = shutdown_signal() => tracing::info!(role="control", "stopping listeners; draining active operations"),
     }
@@ -297,7 +297,7 @@ async fn run_control(app: Arc<app::App>) -> Result<()> {
 async fn run_worker(app: Arc<app::App>) -> Result<()> {
     tokio::select! {
         result = cluster::node_loop(app.clone(), "worker") => result?,
-        result = admin::serve(app.clone()) => result?,
+        result = admin::serve(app.clone(), false) => result?,
         result = lifecycle::run(app.clone()) => result?,
         result = tasks::run(app.clone()) => result?,
         result = maintenance::run(app.clone()) => result?,
@@ -323,7 +323,7 @@ async fn run_data(app: Arc<app::App>) -> Result<()> {
         result = cluster::node_loop(app.clone(), "data") => result?,
         result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
         result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
-        result = admin::serve(app.clone()) => result?,
+        result = admin::serve(app.clone(), false) => result?,
         result = access::run(app.clone()) => result?,
         result = control::insights::runtime_loop(app.clone()) => result?,
         result = app.storage.compression.run() => result?,

@@ -210,6 +210,11 @@ impl App {
             return Err(s3_error!(OperationAborted).into());
         }
         if let Some(limit) = self.config.multipart.max_active_uploads {
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(hashtextextended('mokyu:uploads:max-active', 0))",
+            )
+            .execute(&mut *tx)
+            .await?;
             let count: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM uploads WHERE state IN ('active','completing')",
             )
@@ -284,6 +289,7 @@ impl App {
                 u.metadata.clone(),
                 false,
                 false,
+                None,
                 None,
             )
             .await?;
@@ -537,6 +543,7 @@ impl App {
                 metadata,
                 false,
                 false,
+                None,
                 None,
             )
             .await?;
@@ -797,6 +804,7 @@ impl App {
                 u.public_read,
                 true,
                 Some(u.id),
+                None,
             )
             .await?;
         self.complete_quota(u.id, id, total).await?;

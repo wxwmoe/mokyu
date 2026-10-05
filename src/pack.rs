@@ -144,8 +144,7 @@ impl Pack {
             );
         } else {
             let key = secrets
-                .keys
-                .get(&self.key_id)
+                .key(&self.key_id)
                 .context(codec::IntegrityError::MissingKey)?;
             ensure!(
                 key.algorithm == self.algorithm
@@ -264,7 +263,7 @@ pub fn encode(
     let mut encoded = compressed.unwrap_or(raw);
     p.stored_size = Some(encoded.len() as i64 + if p.algorithm == "none" { 0 } else { 16 });
     if p.algorithm != "none" {
-        let key = secrets.keys.get(&p.key_id).context("missing pack key")?;
+        let key = secrets.key(&p.key_id).context("missing pack key")?;
         ensure!(key.algorithm == p.algorithm, "pack key algorithm mismatch");
         let n = codec::typed_nonce(p.created_at, p.id, 1)?;
         p.nonce = Some(n.to_vec());
@@ -287,8 +286,7 @@ pub fn decode(p: &Pack, mut data: Vec<u8>, secrets: &Secrets, pool: &Pool) -> Re
     let aad = p.aad().context(codec::IntegrityError::Metadata)?;
     if p.algorithm != "none" {
         let key = secrets
-            .keys
-            .get(&p.key_id)
+            .key(&p.key_id)
             .context(codec::IntegrityError::MissingKey)?;
         ensure!(
             key.algorithm == p.algorithm,
@@ -367,7 +365,6 @@ mod tests {
             let secrets = Secrets {
                 database_password: String::new(),
                 credential_key: codec::Key::new("aes-256-gcm", [4; 32]).unwrap(),
-                active_key: key_id.into(),
                 keys: if key_id.is_empty() {
                     Default::default()
                 } else {
@@ -376,6 +373,9 @@ mod tests {
                         codec::Key::new(algorithm, [7; 32]).unwrap(),
                     )])
                 },
+                runtime_keys: std::sync::Arc::new(std::sync::RwLock::new(
+                    std::collections::BTreeMap::new(),
+                )),
             };
             let pool = Pool::new(Default::default(), 1).unwrap();
             let date = "2026-09-28T00:00:00Z".parse().unwrap();

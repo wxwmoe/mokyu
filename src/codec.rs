@@ -4,6 +4,7 @@ use aws_lc_rs::aead::{AES_256_GCM, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, U
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Utc};
 use serde::Serialize;
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub const MIN: usize = 256 * 1024;
@@ -77,10 +78,7 @@ pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
             IntegrityError::Metadata
         );
     } else {
-        let key = secrets
-            .keys
-            .get(&c.key_id)
-            .context(IntegrityError::MissingKey)?;
+        let key = secrets.key(&c.key_id).context(IntegrityError::MissingKey)?;
         ensure!(
             key.algorithm == c.algorithm && c.nonce.as_ref().is_some_and(|n| n.len() == 12),
             IntegrityError::Metadata
@@ -131,7 +129,16 @@ pub fn typed_nonce(date: DateTime<Utc>, id: i64, kind: u8) -> Result<[u8; 12]> {
 pub struct Key {
     pub algorithm: String,
     pub material: [u8; 32],
-    cipher: LessSafeKey,
+    cipher: Arc<LessSafeKey>,
+}
+impl Clone for Key {
+    fn clone(&self) -> Self {
+        Self {
+            algorithm: self.algorithm.clone(),
+            material: self.material,
+            cipher: self.cipher.clone(),
+        }
+    }
 }
 impl Key {
     pub fn seal(&self, nonce: [u8; 12], aad: &[u8], data: &mut Vec<u8>) -> Result<()> {
@@ -157,10 +164,10 @@ impl Key {
         Ok(Self {
             algorithm: algorithm.into(),
             material,
-            cipher: LessSafeKey::new(
+            cipher: Arc::new(LessSafeKey::new(
                 UnboundKey::new(a, &material)
                     .map_err(|_| anyhow::anyhow!("invalid encryption key"))?,
-            ),
+            )),
         })
     }
 }
@@ -222,7 +229,7 @@ pub fn encode(
         Bytes::from(input)
     };
     if c.algorithm != "none" {
-        let key = secrets.keys.get(&c.key_id).context("missing chunk key")?;
+        let key = secrets.key(&c.key_id).context("missing chunk key")?;
         ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
         let n = nonce(c.created_at, c.encoding_id)?;
         c.nonce = Some(n.to_vec());
@@ -257,10 +264,7 @@ pub fn decode(
         );
         encoded.len()
     } else {
-        let key = secrets
-            .keys
-            .get(&c.key_id)
-            .context(IntegrityError::MissingKey)?;
+        let key = secrets.key(&c.key_id).context(IntegrityError::MissingKey)?;
         ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
         let n: [u8; 12] = c
             .nonce
@@ -370,12 +374,12 @@ mod tests {
         Secrets {
             database_password: String::new(),
             credential_key: Key::new("aes-256-gcm", [8; 32]).unwrap(),
-            active_key: "test-key".into(),
             keys: if algorithm == "none" {
                 BTreeMap::new()
             } else {
                 BTreeMap::from([("test-key".into(), Key::new(algorithm, [7; 32]).unwrap())])
             },
+            runtime_keys: std::sync::Arc::new(std::sync::RwLock::new(BTreeMap::new())),
         }
     }
     #[test]
@@ -581,7 +585,6 @@ mod tests {
             "next-key".into(),
             Key::new("chacha20-poly1305", [9; 32]).unwrap(),
         );
-        secrets.active_key = "next-key".into();
         let compression = crate::compression::Pool::new(Default::default(), 4).unwrap();
         std::thread::scope(|scope| {
             for worker in 0..4 {

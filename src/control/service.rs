@@ -117,17 +117,36 @@ pub(super) async fn config(
     actor.principal.lock_admin(&mut tx).await?;
     let c = &app.config;
     let d = &c.database;
-    // Only explicitly selected non-secret sections are serialized. Secret-bearing sections use an allowlist.
-    let sections = json!({"listen":c.listen,"control":c.control,"processing":c.processing,"multipart":c.multipart,"cache":c.cache,"compression":c.compression,"gc":c.gc,"cleanup":c.cleanup,"statistics":c.statistics,"integrity":c.integrity,"pack":c.pack,
-        "encryption":{"algorithm":c.encryption.algorithm,"deployment_key":"[redacted]"},
-        "database":{"host":d.host,"port":d.port,"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode,"max_connections":d.max_connections},
-        "storage":{"data":c.storage.data,"free_space_floor":c.storage.free_space_floor,"read_concurrency":c.storage.read_concurrency,"upload_concurrency":c.storage.upload_concurrency,"control_concurrency":c.storage.control_concurrency,"connect_timeout":c.storage.connect_timeout,"request_timeout":c.storage.request_timeout,"max_retries":c.storage.max_retries,"retry_timeout":c.storage.retry_timeout,"priority_aging":c.storage.priority_aging,"min_storage_duration":c.storage.min_storage_duration},
-        "cluster":{"control_url":c.cluster.control_url,"join_token":"[redacted]","node_name":c.cluster.node_name,"advertise_url":c.cluster.advertise_url}});
+    // Only current file sections and database-backed runtime sections are serialized. Secret-bearing fields use an allowlist.
+    let mut sections = serde_json::Map::new();
+    let mut instance = serde_json::to_value(&c.instance)?;
+    instance["deployment_key"] = json!("[redacted]");
+    sections.insert("instance".into(), instance);
+    sections.insert(
+        "database".into(),
+        json!({"host":d.host,"port":d.port,"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode}),
+    );
+    let mut cluster = serde_json::to_value(&c.cluster)?;
+    cluster["join_token"] = json!("[redacted]");
+    sections.insert("cluster".into(), cluster);
+    let runtime: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        "SELECT section,value FROM runtime_settings ORDER BY section",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    for (section, value) in runtime {
+        sections.insert(section, value);
+    }
+    let runtime_sections: std::collections::HashSet<&str> = sections
+        .keys()
+        .filter(|key| !matches!(key.as_str(), "instance" | "database" | "cluster"))
+        .map(String::as_str)
+        .collect();
     let mut fields = Vec::new();
-    for (section, values) in sections.as_object().unwrap() {
+    for (section, values) in &sections {
         for (field, value) in values.as_object().unwrap() {
             let key = format!("{section}.{field}");
-            let source = if section == "control" {
+            let source = if runtime_sections.contains(section.as_str()) {
                 "database"
             } else if c.configured_fields.contains(&key) {
                 "config"

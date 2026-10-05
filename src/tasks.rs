@@ -1,4 +1,4 @@
-use crate::{app::App, config};
+use crate::{app::App, codec::Chunk, config};
 use anyhow::{Context, Result, ensure};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -19,6 +19,16 @@ struct StorageMigration {
     public_read: bool,
 }
 
+#[derive(Deserialize)]
+struct RekeyTask {
+    store_id: Uuid,
+    #[serde(default)]
+    upper_chunk_id: i64,
+    target_key_id: Option<Uuid>,
+    target_key: String,
+    target_algorithm: String,
+}
+
 pub(crate) async fn insert(
     db: &mut sqlx::PgConnection,
     kind: &str,
@@ -34,6 +44,268 @@ pub(crate) async fn insert(
 }
 
 impl App {
+    pub async fn rekey_start(
+        &self,
+        store_id: Uuid,
+        target_key: Option<&str>,
+        execute: bool,
+        confirmation: Option<&str>,
+    ) -> Result<Value> {
+        let target: Option<(Uuid, String, String)> = if let Some(name) = target_key {
+            Some(
+                sqlx::query_as(
+                    "SELECT id,name,algorithm FROM managed_keys WHERE (id=$1::uuid OR name=$2) AND purpose='block' AND revoked_at IS NULL",
+                )
+                .bind(name.parse::<Uuid>().ok())
+                .bind(name)
+                .fetch_optional(&self.db)
+                .await?
+                .context("active block key was not found")?,
+            )
+        } else {
+            None
+        };
+        if let Some((_, name, _)) = target.as_ref() {
+            self.storage.ensure_key_loaded(name).await?;
+        }
+        let target_algorithm = target
+            .as_ref()
+            .map(|(_, _, algorithm)| algorithm.as_str())
+            .unwrap_or("none");
+        let target_name = target
+            .as_ref()
+            .map(|(_, name, _)| name.as_str())
+            .unwrap_or("");
+        let (loose, packed): (i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE c.pack_id IS NULL AND (l.id IS NULL OR l.algorithm<>$2 OR l.key_id<>$3)), count(*) FILTER (WHERE c.pack_id IS NOT NULL AND (p.algorithm<>$2 OR p.key_id<>$3)) FROM chunks c LEFT JOIN chunk_locations l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready' WHERE c.store_id=$1 AND c.state='ready'",
+        )
+        .bind(store_id)
+        .bind(target_algorithm)
+        .bind(target_name)
+        .fetch_one(&self.db)
+        .await?;
+        let preview = json!({"store_id":store_id,"target_key":target_name,"target_algorithm":target_algorithm,"loose_chunks":loose,"packed_chunks":packed,"effect":"rewrite physical encodings and retain old sources until GC"});
+        if !execute {
+            let confirmation = blake3::hash(&serde_json::to_vec(&preview)?).to_hex().to_string();
+            return Ok(json!({"preview":preview,"confirmation":confirmation}));
+        }
+        if confirmation != Some(blake3::hash(&serde_json::to_vec(&preview)?).to_hex().as_str()) {
+            return Err(s3s::s3_error!(PreconditionFailed).into());
+        }
+        let mut tx = self.db.begin().await?;
+        sqlx::query("SELECT id FROM stores WHERE id=$1 AND enabled FOR UPDATE")
+            .bind(store_id).fetch_optional(&mut *tx).await?.context("enabled store was not found")?;
+        let exists: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM tasks WHERE kind='rekey' AND detail->>'store_id'=$1 AND state IN ('queued','running','paused') LIMIT 1",
+        )
+        .bind(store_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(id) = exists {
+            tx.commit().await?;
+            return Ok(json!({"task_id":id,"existing":true}));
+        }
+        let upper_chunk_id: i64 = sqlx::query_scalar("SELECT coalesce(max(id),0) FROM chunks WHERE store_id=$1")
+            .bind(store_id).fetch_one(&mut *tx).await?;
+        let id = insert(
+            &mut tx,
+            "rekey",
+            None,
+            json!({"store_id":store_id,"upper_chunk_id":upper_chunk_id,"target_key_id":target.as_ref().map(|v|v.0),"target_key":target_name,"target_algorithm":target_algorithm}),
+        )
+        .await?;
+        tx.commit().await?;
+        self.wake_tasks.notify_one();
+        Ok(json!({"task_id":id,"preview":preview}))
+    }
+
+    async fn rekey_batch(&self, id: Uuid, token: Uuid, cursor: Option<&str>, detail: Value) -> Result<bool> {
+        let job: RekeyTask = serde_json::from_value(detail)?;
+        let after = cursor.unwrap_or("0").parse::<i64>()?;
+        if let Some(key_id) = job.target_key_id {
+            let current: Option<(String, String)> = sqlx::query_as(
+                "SELECT name,algorithm FROM managed_keys WHERE id=$1 AND purpose='block' AND revoked_at IS NULL",
+            )
+            .bind(key_id)
+            .fetch_optional(&self.db)
+            .await?;
+            ensure!(
+                current.as_ref().is_some_and(|(name, algorithm)| {
+                    name == &job.target_key && algorithm == &job.target_algorithm
+                }),
+                "rekey target key was removed or changed"
+            );
+            self.storage.ensure_key_loaded(&job.target_key).await?;
+        }
+        let row: Option<Chunk> = sqlx::query_as(
+            "SELECT c.id,l.id encoding_id,l.storage_id,c.store_id,c.hash,c.raw_size,l.stored_size,l.algorithm,l.key_id,l.compressed,l.nonce,c.format,c.state,l.created_at FROM chunks c JOIN chunk_locations l ON l.chunk_id=c.id AND l.state='ready' WHERE c.id>$1 AND c.id<=$2 AND c.store_id=$3 AND c.state='ready' AND c.pack_id IS NULL AND (l.algorithm<>$4 OR l.key_id<>$5) ORDER BY c.id LIMIT 1",
+        )
+        .bind(after)
+        .bind(job.upper_chunk_id)
+        .bind(job.store_id)
+        .bind(&job.target_algorithm)
+        .bind(&job.target_key)
+        .fetch_optional(&self.db)
+        .await?;
+        let packed_candidate: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT min(c.id),p.id FROM chunks c JOIN packs p ON p.id=c.pack_id AND p.state='ready' WHERE c.store_id=$1 AND c.state='ready' AND c.id>$2 AND c.id<=$3 AND (p.algorithm<>$4 OR p.key_id<>$5) GROUP BY p.id ORDER BY min(c.id) LIMIT 1",
+        )
+        .bind(job.store_id)
+        .bind(after)
+        .bind(job.upper_chunk_id)
+        .bind(&job.target_algorithm)
+        .bind(&job.target_key)
+        .fetch_optional(&self.db)
+        .await?;
+        let process_loose = row.as_ref().is_some_and(|source| {
+            packed_candidate
+                .as_ref()
+                .is_none_or(|(first_id, _)| source.id < *first_id)
+        });
+        if process_loose {
+            let source = row.expect("rekey loose candidate disappeared");
+            self.pin_pack_inputs(id, &[crate::pack_tasks::Mapping { chunk: source.clone(), offset_bytes: 0, pack_id: None }]).await?;
+            let raw = self.storage.get_with(&source, None).await?;
+            let mut physical = source.clone();
+            physical.encoding_id = sqlx::query_scalar("SELECT nextval('chunk_locations_id_seq')").fetch_one(&self.db).await?;
+            physical.storage_id = Uuid::new_v4();
+            physical.algorithm = job.target_algorithm.clone();
+            physical.key_id = job.target_key.clone();
+            physical.created_at = chrono::Utc::now();
+            physical.nonce = None;
+            sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,store_id,compressed,state,created_at,unreferenced_at,owner_task,algorithm,key_id) VALUES($1,$2,$3,$4,false,'uploading',$5,now(),$6,$7,$8)")
+                .bind(physical.encoding_id).bind(source.id).bind(physical.storage_id).bind(job.store_id).bind(physical.created_at).bind(id).bind(&physical.algorithm).bind(&physical.key_id).execute(&self.db).await?;
+            let (physical, encoded, _) = self.storage.encode(physical, raw.to_vec(), source.compressed).await?;
+            self.storage.put_path_for(job.store_id, &self.storage.path_for(job.store_id, physical.storage_id)?, encoded).await?;
+            let mut tx = self.db.begin().await?;
+            Self::rekey_lease(&mut tx, id, token).await?;
+            self.storage_writable()?;
+            let _gate = self.storage.source_gate.write().await;
+            let current: Option<Option<i64>> = sqlx::query_scalar("SELECT pack_id FROM chunks WHERE id=$1 AND state='ready' FOR UPDATE")
+                .bind(source.id).fetch_optional(&mut *tx).await?;
+            ensure!(current == Some(None), "chunk source changed during rekey");
+            let changed = sqlx::query("UPDATE chunk_locations SET state='retired',unreferenced_at=now() WHERE id=$1 AND state='ready'")
+                .bind(source.encoding_id).execute(&mut *tx).await?.rows_affected();
+            ensure!(changed == 1, "source encoding changed during rekey");
+            sqlx::query("UPDATE chunk_locations SET stored_size=$2,compressed=$3,nonce=$4,state='ready',unreferenced_at=NULL,stored_at=clock_timestamp(),owner_task=NULL WHERE id=$1 AND state='uploading'")
+                .bind(physical.encoding_id).bind(physical.stored_size).bind(physical.compressed).bind(&physical.nonce).execute(&mut *tx).await?;
+            sqlx::query("UPDATE tasks SET cursor=$2,processed=processed+1,updated_at=now() WHERE id=$1")
+                .bind(id).bind(source.id.to_string()).execute(&mut *tx).await?;
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        if let Some((first_id, pack_id)) = packed_candidate {
+            let old: crate::pack::Pack = sqlx::query_as("SELECT * FROM packs WHERE id=$1 AND state='ready'")
+                .bind(pack_id)
+                .fetch_one(&self.db)
+                .await?;
+            let members: Vec<Chunk> = sqlx::query_as(
+                "SELECT c.* FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 ORDER BY m.ordinal",
+            )
+            .bind(pack_id)
+            .fetch_all(&self.db)
+            .await?;
+            ensure!(members.len() == old.member_count as usize, "pack member count changed during rekey");
+            let current_members: Vec<i64> = sqlx::query_scalar("SELECT c.id FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 AND c.state='ready' ORDER BY m.ordinal")
+                .bind(old.id).fetch_all(&self.db).await?;
+            let mappings: Vec<_> = members.iter().filter(|c| current_members.contains(&c.id)).map(|c| crate::pack_tasks::Mapping { chunk:c.clone(),offset_bytes:0,pack_id:Some(old.id) }).collect();
+            self.pin_pack_inputs(id, &mappings).await?;
+            let _work = self.storage.pack_work(old.payload_size()?).await?;
+            let loaded = self.storage.load_pack(old.clone()).await?;
+            let mut encoded_members = Vec::with_capacity(members.len());
+            for mut member in members {
+                let raw = loaded.data.chunk(&member)?;
+                member.algorithm = job.target_algorithm.clone();
+                member.key_id = job.target_key.clone();
+                encoded_members.push((member, raw));
+            }
+            let new_storage_id = Uuid::new_v4();
+            let new_pack: crate::pack::Pack = sqlx::query_as(
+                "INSERT INTO packs(storage_id,store_id,algorithm,key_id,raw_size,member_count,state,unreferenced_at,owner_task) VALUES($1,$2,$3,$4,$5,$6,'preparing',now(),$7) RETURNING *",
+            )
+            .bind(new_storage_id)
+            .bind(job.store_id)
+            .bind(&job.target_algorithm)
+            .bind(&job.target_key)
+            .bind(old.raw_size)
+            .bind(old.member_count)
+            .bind(id)
+            .fetch_one(&self.db)
+            .await?;
+            let (new_pack, encoded) = self
+                .storage
+                .encode_pack(
+                    new_pack,
+                    encoded_members.clone(),
+                    crate::compression::Strategy::Always,
+                    old.compressed,
+                )
+                .await?;
+            self.storage
+                .put_path_for(
+                    job.store_id,
+                    &self.storage.pack_path_for(job.store_id, new_storage_id)?,
+                    encoded,
+                )
+                .await?;
+            let mut tx = self.db.begin().await?;
+            Self::rekey_lease(&mut tx, id, token).await?;
+            self.storage_writable()?;
+            let _gate = self.storage.source_gate.write().await;
+            let locked: Vec<i64> = sqlx::query_scalar("SELECT id FROM chunks WHERE pack_id=$1 AND state='ready' ORDER BY id FOR UPDATE")
+                .bind(old.id).fetch_all(&mut *tx).await?;
+            ensure!(locked == current_members, "pack membership changed during rekey");
+            let updated = sqlx::query("UPDATE packs SET stored_size=$2,compressed=$3,nonce=$4,digest=$5,state='ready',unreferenced_at=NULL,stored_at=clock_timestamp(),owner_task=NULL WHERE id=$1 AND state='preparing'")
+                .bind(new_pack.id).bind(new_pack.stored_size).bind(new_pack.compressed).bind(&new_pack.nonce).bind(&new_pack.digest).execute(&mut *tx).await?.rows_affected();
+            ensure!(updated == 1, "new pack was changed during rekey");
+            for (ordinal, member) in encoded_members.iter().enumerate() {
+                sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) VALUES($1,$2,$3,$4)")
+                    .bind(new_pack.id)
+                    .bind(ordinal as i32)
+                    .bind(member.0.id)
+                    .bind(encoded_members[..ordinal].iter().map(|(c, _)| i64::from(c.raw_size)).sum::<i64>())
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let changed = sqlx::query("UPDATE chunks SET pack_id=$2 WHERE pack_id=$1 AND state='ready'")
+                .bind(old.id)
+                .bind(new_pack.id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            ensure!(changed == current_members.len() as u64, "pack membership changed during rekey");
+            let retired = sqlx::query("UPDATE packs SET state='retired',unreferenced_at=now(),owner_task=NULL WHERE id=$1 AND state='ready'")
+                .bind(old.id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            ensure!(retired == 1, "source pack changed during rekey");
+            let last_id: i64 = sqlx::query_scalar("SELECT max(chunk_id) FROM pack_members WHERE pack_id=$1")
+                .bind(new_pack.id)
+                .fetch_one(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE tasks SET cursor=$2,processed=processed+1,updated_at=now() WHERE id=$1")
+                .bind(id)
+                .bind(last_id.max(first_id).to_string())
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+            sqlx::query("UPDATE tasks SET state='completed',updated_at=now(),cursor=$2,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL WHERE id=$1 AND state='running' AND lease_token=$3 AND lease_expires_at>clock_timestamp()")
+                .bind(id).bind(after.to_string()).bind(token).execute(&self.db).await?;
+            return Ok(true);
+    }
+
+    async fn rekey_lease(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: Uuid, token: Uuid) -> Result<()> {
+        let owned: Option<Uuid> = sqlx::query_scalar("SELECT id FROM tasks WHERE id=$1 AND state='running' AND lease_token=$2 AND lease_expires_at>clock_timestamp() FOR UPDATE")
+            .bind(id).bind(token).fetch_optional(&mut **tx).await?;
+        ensure!(owned.is_some(), "rekey task was paused or lost its lease");
+        Ok(())
+    }
+
     pub async fn purge_preview(&self, name: &str) -> Result<Value> {
         let b = self.bucket(name, false).await?;
         let (objects,uploads):(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM objects WHERE bucket_id=$1 AND stream_id IS NOT NULL),(SELECT count(*) FROM uploads WHERE bucket_id=$1 AND state IN ('active','completing'))").bind(b.id).fetch_one(&self.db).await?;
@@ -208,7 +480,7 @@ impl App {
                 }
             } else if matches!(
                 kind.as_str(),
-                "purge" | "pack" | "unpack" | "upload" | "gc" | "storage_migration"
+                "purge" | "pack" | "unpack" | "upload" | "gc" | "storage_migration" | "rekey"
             ) {
                 self.writable()?;
             } else if kind == "integrity" {
@@ -407,7 +679,12 @@ impl App {
         Ok(false)
     }
 
-    async fn storage_migration_batch(&self, id: Uuid, detail: Value) -> Result<bool> {
+    async fn storage_migration_batch(
+        &self,
+        id: Uuid,
+        lease_token: Uuid,
+        detail: Value,
+    ) -> Result<bool> {
         let job: StorageMigration = serde_json::from_value(detail)?;
         ensure!(
             matches!(job.action.as_str(), "copy" | "move"),
@@ -429,6 +706,7 @@ impl App {
                 job.public_read,
                 false,
                 None,
+                Some((id, lease_token)),
             )
             .await?;
         let result: Result<()> = async {
@@ -440,9 +718,17 @@ impl App {
                 source.checksums.clone(),
             )
             .await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("migration-before-publish").await;
             let _coord = self.coord.lock().await;
             self.writable()?;
             let mut tx = self.db.begin().await?;
+            let owned: Option<Uuid> = sqlx::query_scalar("SELECT id FROM tasks WHERE id=$1 AND state='running' AND lease_token=$2 AND lease_expires_at>clock_timestamp() FOR UPDATE")
+                .bind(id)
+                .bind(lease_token)
+                .fetch_optional(&mut *tx)
+                .await?;
+            ensure!(owned.is_some(), "storage migration lease lost before publish");
             let source_current = crate::control::actions::selected(
                 &mut tx,
                 job.source_bucket,
@@ -461,10 +747,13 @@ impl App {
                 source_current == Some(job.source_version),
                 "source object changed during storage migration"
             );
-            sqlx::query("UPDATE streams SET state='ready',touched_at=now() WHERE id=$1 AND state='writing'")
+            let published = sqlx::query("UPDATE streams SET state='ready',owner_task=NULL,owner_lease=NULL,touched_at=now() WHERE id=$1 AND state='writing' AND owner_task=$2 AND owner_lease=$3")
                 .bind(destination)
+                .bind(id)
+                .bind(lease_token)
                 .execute(&mut *tx)
                 .await?;
+            ensure!(published.rows_affected() == 1, "storage migration stream was reclaimed");
             sqlx::query("INSERT INTO objects(bucket_id,key,stream_id,write_epoch) VALUES($1,$2,$3,$3) ON CONFLICT(bucket_id,key) DO UPDATE SET stream_id=excluded.stream_id,write_epoch=excluded.write_epoch")
                 .bind(job.target_bucket)
                 .bind(&job.target_key)
@@ -489,16 +778,21 @@ impl App {
                     .execute(&mut *tx)
                     .await?;
             }
-            sqlx::query("UPDATE tasks SET state='completed',processed=processed+1,updated_at=now() WHERE id=$1 AND state='running'")
+            let completed = sqlx::query("UPDATE tasks SET state='completed',processed=processed+1,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$2 AND lease_expires_at>clock_timestamp()")
                 .bind(id)
+                .bind(lease_token)
                 .execute(&mut *tx)
                 .await?;
+            ensure!(
+                completed.rows_affected() == 1,
+                "storage migration lease lost before publish"
+            );
             tx.commit().await?;
             Ok(())
         }
         .await;
         if result.is_err() {
-            sqlx::query("UPDATE streams SET state='abandoned',touched_at=now() WHERE id=$1 AND state='writing'")
+            sqlx::query("UPDATE streams SET state='abandoned',owner_task=NULL,owner_lease=NULL,touched_at=now() WHERE id=$1 AND state='writing'")
                 .bind(destination)
                 .execute(&self.db)
                 .await?;
@@ -510,9 +804,29 @@ impl App {
 }
 
 pub async fn recover_stale(app: &App) -> Result<u64> {
-    let result = sqlx::query("UPDATE tasks SET state='queued',lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE state='running' AND (lease_expires_at IS NULL OR lease_expires_at<now())")
-        .execute(&app.db)
-        .await?;
+    let mut tx = app.db.begin().await?;
+    let stale: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM tasks WHERE state='running' AND (lease_expires_at IS NULL OR lease_expires_at<now()) FOR UPDATE",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if stale.is_empty() {
+        tx.commit().await?;
+        return Ok(0);
+    }
+    sqlx::query(
+        "UPDATE streams SET state='abandoned',owner_task=NULL,owner_lease=NULL,touched_at=now() WHERE state='writing' AND owner_task=ANY($1)",
+    )
+    .bind(&stale)
+    .execute(&mut *tx)
+    .await?;
+    let result = sqlx::query(
+        "UPDATE tasks SET state='queued',lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=ANY($1) AND state='running'",
+    )
+    .bind(&stale)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
@@ -545,15 +859,22 @@ fn renew_lease(app: Arc<App>, id: Uuid, token: Uuid) -> tokio::task::JoinHandle<
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            if let Err(error) = sqlx::query(
-                "UPDATE tasks SET lease_expires_at=now()+interval '5 minutes' WHERE id=$1 AND state='running' AND lease_token=$2",
+            let result = sqlx::query(
+                "UPDATE tasks SET lease_expires_at=now()+interval '5 minutes' WHERE id=$1 AND state='running' AND lease_token=$2 AND lease_expires_at>now()",
             )
             .bind(id)
             .bind(token)
             .execute(&app.db)
-            .await
-            {
-                tracing::warn!(task_id=%id, %error, "task lease renewal failed");
+            .await;
+            match result {
+                Ok(result) if result.rows_affected() == 1 => {}
+                Ok(_) => {
+                    tracing::warn!(task_id=%id, "task lease was lost; result will be discarded");
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(task_id=%id, %error, "task lease renewal failed");
+                }
             }
         }
     })
@@ -565,12 +886,17 @@ async fn worker(
     class: i32,
     lease_node_id: Option<Uuid>,
 ) -> Result<()> {
-    let lease_token = Uuid::new_v4();
     loop {
+        let lease_token = Uuid::new_v4();
         let id = {
             let mut active = active.lock().await;
             let ids: Vec<Uuid> = active.iter().copied().collect();
-            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=now()+interval '5 minutes',updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='running' AND t.lease_expires_at<now())) AND CASE WHEN t.kind IN ('pack','unpack') THEN 1 WHEN t.kind IN ('upload','cache_flush','storage_migration') THEN 2 ELSE 0 END=$1 AND NOT(t.id=ANY($2)) AND NOT (m.maintenance AND t.kind IN ('pack','unpack','purge','gc','storage_migration')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.kind=CASE WHEN t.kind='pack' THEN t.detail->>'kind' ELSE t.kind END AND CASE WHEN c.kind='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.kind='pack' AND t.detail->>'kind' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='running' AND lease_expires_at<now())) RETURNING id").bind(class).bind(ids).bind(lease_node_id).bind(lease_token).fetch_optional(&app.db).await?;
+            let mut tx = app.db.begin().await?;
+            if let Some(state) = app.node.get() {
+                crate::cluster::validate_node(&app, &mut *tx, state, "worker").await?;
+            }
+            let id:Option<Uuid>=sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=now()+interval '5 minutes',updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='running' AND t.lease_expires_at<now())) AND CASE WHEN t.kind IN ('pack','unpack') THEN 1 WHEN t.kind IN ('upload','cache_flush','storage_migration','rekey') THEN 2 ELSE 0 END=$1 AND NOT(t.id=ANY($2)) AND NOT (m.maintenance AND t.kind IN ('pack','unpack','purge','gc','storage_migration','rekey')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.kind=CASE WHEN t.kind='pack' THEN t.detail->>'kind' ELSE t.kind END AND CASE WHEN c.kind='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.kind='pack' AND t.detail->>'kind' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='running' AND lease_expires_at<now())) RETURNING id").bind(class).bind(ids).bind(lease_node_id).bind(lease_token).fetch_optional(&mut *tx).await?;
+            tx.commit().await?;
             if let Some(id) = id {
                 active.insert(id);
             }
@@ -664,9 +990,24 @@ async fn worker(
                 crate::backend::PRIORITY
                     .scope(
                         crate::backend::UPLOAD,
-                        app.storage_migration_batch(id, detail),
+                        app.storage_migration_batch(id, lease_token, detail),
                     )
                     .await
+            } else if kind == "rekey" {
+                let result = crate::backend::PRIORITY
+                    .scope(
+                        crate::backend::MAINTENANCE,
+                        app.rekey_batch(id, lease_token, cursor.as_deref(), detail),
+                    )
+                    .await;
+                if matches!(result, Ok(false)) {
+                    sqlx::query("UPDATE tasks SET state='queued',lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$2")
+                        .bind(id)
+                        .bind(lease_token)
+                        .execute(&app.db)
+                        .await?;
+                }
+                result
             } else {
                 Err(anyhow::anyhow!("unknown maintenance task kind"))
             };
@@ -681,7 +1022,7 @@ async fn worker(
                     sqlx::query("UPDATE pack_changes SET next_check_at=now()+$2*interval '1 second' WHERE pack_id IN (SELECT c.pack_id FROM pack_inputs i JOIN chunks c ON c.id=i.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.pack.reuse_interval)? as f64).execute(&app.db).await?;
                     sqlx::query("UPDATE pack_maintenance SET next_check_at=now()+$2*interval '1 second' WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.pack.reuse_interval)? as f64).execute(&app.db).await?;
                 }
-                if matches!(kind.as_str(), "pack" | "unpack") {
+                if matches!(kind.as_str(), "pack" | "unpack" | "rekey") {
                     app.finish_pack_work(id).await?;
                 }
             }

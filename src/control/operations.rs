@@ -1,7 +1,7 @@
 use crate::{
     admin::{
         Buckets, Cache, Cleanup, Cluster, Command, ControlSettings, Credentials, Domains, Gc,
-        Integrity, Keys, Maintenance, Packs, Projects, Settings, Stores, Tasks, Users,
+        Integrity, Keys, Maintenance, Packs, Projects, Settings, StoreKey, Stores, Tasks, Users,
     },
     app::{App, Bucket},
     authorization::{Action, Principal},
@@ -280,20 +280,12 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 )
             }
             Cluster::Revoke { id } => {
-                let changed = sqlx::query(
-                    "UPDATE nodes SET enabled=false,updated_at=now() WHERE id=$1 AND enabled",
-                )
-                .bind(id)
-                .execute(&app.db)
-                .await?
-                .rows_affected();
-                ensure!(changed == 1, "node not found or already disabled");
-                sqlx::query("UPDATE node_join_tokens SET consumed_at=coalesce(consumed_at,now()) WHERE node_id=$1 AND consumed_at IS NULL")
-                    .bind(id)
-                    .execute(&app.db)
-                    .await?;
+                super::cluster::revoke_record(app, &Principal::Local, id).await?;
                 Ok(json!({"revoked": id}))
             }
+            Cluster::Reissue { id, expires_in } => Ok(serde_json::to_value(
+                super::cluster::reissue_record(app, &Principal::Local, id, &expires_in).await?,
+            )?),
         },
         Command::Stores(command) => {
             type Row = (
@@ -340,6 +332,22 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                     app.storage.check_store_identity(row.0, false).await?;
                     Ok(public(row))
                 }
+                Stores::Key { command } => match command {
+                    StoreKey::Set { store, key } => Ok(serde_json::to_value(
+                        super::stores::set_current_key(app, store, Some(key)).await?,
+                    )?),
+                    StoreKey::Clear { store } => Ok(serde_json::to_value(
+                        super::stores::set_current_key(app, store, None).await?,
+                    )?),
+                },
+                Stores::Rekey {
+                    store,
+                    target_key,
+                    execute,
+                    confirm,
+                } => app
+                    .rekey_start(store, target_key.as_deref(), execute, confirm.as_deref())
+                    .await,
                 Stores::Create {
                     name,
                     r#type,
@@ -364,6 +372,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                             bucket,
                             region,
                             prefix,
+                            current_key_id: None,
                             access_key,
                             secret_key,
                             read_concurrency,
@@ -399,6 +408,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                             bucket,
                             region,
                             prefix,
+                            current_key_id: None,
                             access_key,
                             secret_key,
                             enabled,
@@ -473,11 +483,11 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
             Keys::List => Ok(serde_json::to_value(
                 super::managed_keys::list_rows(&app.db).await?,
             )?),
-            Keys::Create { name, purpose } => Ok(serde_json::to_value(
+            Keys::Create { name, purpose, algorithm } => Ok(serde_json::to_value(
                 super::managed_keys::create_record(
                     app,
                     &crate::authorization::Principal::Local,
-                    super::managed_keys::ManagedKeyInput { name, purpose },
+                    super::managed_keys::ManagedKeyInput { name, purpose, algorithm },
                 )
                 .await?,
             )?),
@@ -489,15 +499,6 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 )
                 .await?;
                 Ok(json!({"revoked": id}))
-            }
-            Keys::Activate { id } => {
-                super::managed_keys::activate_record(
-                    app,
-                    &crate::authorization::Principal::Local,
-                    id,
-                )
-                .await?;
-                Ok(json!({"active": id, "restart_required": true}))
             }
         },
         Command::Cache(Cache::Status) => app.upload_cache_status().await,

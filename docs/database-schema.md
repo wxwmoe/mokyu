@@ -2,7 +2,7 @@
 
 PostgreSQL 保存对象、权限、引用和任务；载荷位于存储或受保护的本地上传缓存。此页列出当前表、字段和关键约束，完整类型、默认值、外键及索引以 [migrations](../migrations) 的 SQL 为准。
 
-全新安装顺序执行所有迁移，升级只执行未应用项。已发布迁移不可修改、改号或删除；schema_version 用于兼容检查，不可手改。single 部署独占数据库和 data；cluster 部署的 control、worker、data 进程共享同一数据库，但各自使用独立 data 目录。
+全新安装顺序执行所有迁移，升级只执行未应用项。已发布迁移不可修改、改号或删除；schema_version 用于兼容检查，不可手改。单容器模式独占数据库和 data；群集模式的 control、worker、data 进程共享同一数据库，但各自使用独立 data 目录。
 
 ## 约定
 
@@ -16,6 +16,7 @@ PostgreSQL 保存对象、权限、引用和任务；载荷位于存储或受保
 | --- | --- | --- |
 | `_sqlx_migrations` (version) | `version`、`description`、`installed_on`、`success`、`checksum`、`execution_time` | SQLx 历史与 SHA-384 校验和，不参与日常清理 |
 | `mokyu_meta` (singleton) | `singleton`、`schema_version`、`deployment_id`、`storage_identity`、`storage_initialized`、`gc_paused`、`maintenance`、`created_at`、`access_coverage_since`、`access_flushed_at`、`project_management`、`pack_creation_paused` | 单例部署身份和持久开关 |
+| `control_settings` (singleton) | `singleton`、`origin`、`secure_cookie`、`session_lifetime`、`gravatar_base_url`、`thumbnail_cache_size`、`updated_at` | 所有角色共享的控制面设置；首次启动由配置文件种子，之后通过 Web/CLI 修改 |
 | `key_fingerprints` (key_id) | `key_id`、`algorithm`、`fingerprint` | 密钥指纹，禁止同 ID 换材料，不自动回收 |
 | `admin_setup` (singleton) | `singleton`、`token_hash`、`created_at` | 首次初始化令牌哈希，成功后移除 |
 | `web_users` (id) | `id`、`username`、`password_hash`、`enabled`、`created_at`、`display_name`、`locale`、`theme`、`avatar_email`、`avatar_enabled`、`auth_revision`、`role`、`authorization_revision`、`must_change_password` | username 唯一；admin/member；认证与授权修订号独立 |
@@ -37,7 +38,7 @@ PostgreSQL 保存对象、权限、引用和任务；载荷位于存储或受保
 | `buckets` (id) | `id`、`name`、`state`、`cors`、`website_enabled`、`index_document`、`error_document`、`created_at`、`project_id`、`settings_revision`、`uploads_paused`、`public_base_url` | name 唯一；active/purging；设置变化推进修订号 |
 | `domains` (host) | `host`、`bucket_id` | 小写 Host 映射，随桶删除，不自动抢占域名 |
 | `objects` (bucket_id, key) | `bucket_id`、`key`、`stream_id`、`write_epoch`、`catalog_size`、`catalog_modified`、`catalog_type`、`catalog_kind`、`catalog_public` | stream_id 唯一；NULL 为未发布占位；write_epoch 防迟到覆盖 |
-| `streams` (id) | `id`、`bucket_id`、`object_key`、`kind`、`state`、`size`、`etag`、`metadata`、`public_read`、`checksums`、`created_at`、`touched_at`、`upload_cache_bypass`、`write_authorization` | object/part 内容版本，包含无认证秘密的写入授权快照 |
+| `streams` (id) | `id`、`bucket_id`、`object_key`、`kind`、`state`、`size`、`etag`、`metadata`、`public_read`、`checksums`、`created_at`、`touched_at`、`upload_cache_bypass`、`write_authorization`、`owner_task`、`owner_lease` | object/part 内容版本；后台迁移临时流记录创建它的任务租约 |
 | `extents` (stream_id, offset_bytes) | `stream_id`、`offset_bytes`、`length`、`chunk_id`、`fragment_id`、`source_offset` | chunk_id 与 fragment_id 恰一非空，source_offset 支持子区间 |
 | `fragments` (id) | `id`、`owner_stream`、`sealed`、`size`、`hash`、`created_at` | multipart 原始片段；sealed 后才发布映射 |
 | `catalog_build` (singleton) | `singleton`、`phase`、`cursor_bucket`、`cursor_key`、`scanned`、`current_index`、`last_error`、`updated_at` | indexes/backfill/ready，回填游标与批次同事务 |
@@ -83,7 +84,7 @@ pending 的 cache_size/cache_compressed 表示实际 .raw/.zst 文件。pin 随 
 | --- | --- | --- |
 | `maintenance_controls` (kind) | `kind`、`paused`、`last_scheduled_at`、`updated_at` | 七类持久策略和最近调度时间 |
 | `maintenance_previews` (id) | `id`、`actor_id`、`token_id`、`action`、`parameters`、`fingerprint`、`expires_at`、`task_id` | 身份/Token 绑定的十分钟预览，task_id 保存执行回执 |
-| `tasks` (id) | `id`、`kind`、`bucket_id`、`state`、`cursor`、`processed`、`detail`、`error`、`created_at`、`updated_at`、`created_by`、`source`、`started_at` | 持久游标、来源、发起者；queued/running/paused/completed/failed；`storage_migration` detail 保存跨 store 的源/目标对象 |
+| `tasks` (id) | `id`、`kind`、`bucket_id`、`state`、`cursor`、`processed`、`detail`、`error`、`created_at`、`updated_at`、`created_by`、`source`、`started_at`、`lease_node_id`、`lease_token`、`lease_expires_at` | 持久游标、来源、发起者和 worker 租约；queued/running/paused/completed/failed；`storage_migration` detail 保存跨 store 的源/目标对象，发布目标和完成任务都要求当前租约仍有效 |
 | `integrity_issues` (id) | `id`、`task_id`、`subject`、`code`、`chunk_id`、`storage_id`、`stream_id`、`bucket_id`、`object_key`、`detail`、`created_at` | 保留检查时身份，对象删除不抹除异常 |
 | `integrity_packs` (task_id, pack_id) | `task_id`、`pack_id`、`error_code` | 避免一轮巡检重复验证共享包 |
 | `audit_events` (id) | `id`、`created_at`、`finished_at`、`actor_id`、`actor_label`、`token_id`、`source`、`action`、`target`、`project_id`、`bucket_id`、`outcome`、`request_id`、`status`、`detail` | 持久意图与显式结果，用户删除不级联删除历史 |

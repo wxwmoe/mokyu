@@ -121,17 +121,29 @@ docker exec -i mokyu cli user create admin --password-stdin < /secure/password-f
 
 `maintenance pack-creation stop` 停止即时上传、异步上传及各维护路径发布新包；已有 preparing 包收尾后才允许全部拆包。`maintenance pack-creation resume` 恢复生成，但未完成的全部拆包任务会阻止恢复。配置 pack.enabled=false 时，运行开关不能越过配置启用。
 
+## 控制设置
+
+| 命令 | 作用与返回 |
+| --- | --- |
+| `settings control show` | 显示 PostgreSQL 中的控制设置；不返回秘密 |
+| `settings control set [--origin URL] [--secure-cookie true/false] [--session-lifetime 12h] [--gravatar-base-url URL] [--thumbnail-cache-size 256MiB]` | 修改指定的控制设置；未提供的字段保持不变 |
+
+控制设置由所有角色共享。首次启动空数据库时，配置文件中的 `[control]` 值只作为种子；之后用 Web 或上述 CLI 修改。保存成功后重启 control、worker 和 data 进程，使它们加载新的运行值。
+
 ## 群集
 
 | 命令 | 作用与返回 |
 | --- | --- |
-| `cluster status` | 返回 deployment mode、enabled 节点数和 local 存储目标数 |
-| `cluster mode single/cluster` | 切换数据库部署模式；进入 cluster 前必须已迁移并移除所有 local store，回到 single 前必须禁用所有节点 |
+| `cluster status` | 返回 deployment mode、enabled 节点数和 local store 数 |
+| `cluster mode single/cluster` | 切换数据库部署模式；进入 cluster（群集模式）前必须已迁移并移除所有 local store，回到 single（单容器模式）前必须禁用所有节点 |
 | `cluster nodes` | 列出节点 id、名称、角色、advertise URL、启用状态和最近 heartbeat |
 | `cluster token NAME KIND [--advertise-url URL] [--expires-in 1h]` | 为 control/worker/data 创建一次性 join token；control 必须提供只指向该节点的 advertise URL；token 只在本次输出返回 |
 | `cluster revoke UUID` | 禁用节点并使未消费的 join token 失效 |
+| `cluster reissue UUID [--expires-in 1h]` | 为已撤销节点重新生成一次性 join token；保留节点名称、角色和 advertise URL |
 
 新 control、worker 或 data 将 `cluster token` 的输出写入自己的配置，第一次启动后凭据保存到 `storage.data/node.json`。第一台 control 不需要 join token，但必须在配置中设置 `cluster.advertise_url`。控制主备、DNS 和角色安排见[群集部署](cluster-deployment.md)。
+
+群集模式下，data/worker 容器的本地 CLI 只支持 `status`；其他管理命令在单容器模式或 control 容器执行。
 
 ## 后台任务
 
