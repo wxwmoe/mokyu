@@ -608,22 +608,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/keys/{id}/activate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["managed_key_activate"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/login": {
         parameters: {
             query?: never;
@@ -1846,17 +1830,18 @@ export interface components {
             preparing_packs: string;
         };
         ManagedKeyInput: {
+            algorithm?: string | null;
             name: string;
             purpose: string;
         };
         ManagedKeyView: {
-            active: boolean;
             algorithm: string;
             /** Format: date-time */
             created_at: string;
             fingerprint: string;
             /** Format: uuid */
             id: string;
+            in_use: boolean;
             name: string;
             purpose: string;
             /** Format: date-time */
@@ -2262,6 +2247,8 @@ export interface components {
             bucket?: string | null;
             /** Format: int32 */
             control_concurrency?: number | null;
+            /** Format: uuid */
+            current_key_id?: string | null;
             endpoint?: string | null;
             name: string;
             path?: string | null;
@@ -2279,6 +2266,8 @@ export interface components {
             bucket?: string | null;
             /** Format: int32 */
             control_concurrency?: number | null;
+            /** Format: uuid */
+            current_key_id?: string | null;
             enabled?: boolean | null;
             endpoint?: string | null;
             path?: string | null;
@@ -2297,6 +2286,8 @@ export interface components {
             control_concurrency?: number | null;
             /** Format: date-time */
             created_at: string;
+            /** Format: uuid */
+            current_key_id?: string | null;
             enabled: boolean;
             endpoint?: string | null;
             /** Format: uuid */
@@ -3523,25 +3514,6 @@ export interface operations {
         };
     };
     managed_key_revoke: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    managed_key_activate: {
         parameters: {
             query?: never;
             header?: never;
