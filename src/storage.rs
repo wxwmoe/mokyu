@@ -2,6 +2,7 @@ use crate::{
     codec::{self, Chunk, MAX},
     config::{self, Budget, Config, Secrets},
 };
+pub(crate) mod resource_gate;
 pub(crate) mod store;
 use self::store::{Options as StoreOptionsV2, Record as StoreRecord, Store as VerifiedStore};
 use anyhow::{Context, Result, ensure};
@@ -480,12 +481,12 @@ impl Drop for SharedStorePermit {
 }
 
 struct StorePermit {
-    _local: crate::backend::Permit,
+    _local: crate::storage::resource_gate::Permit,
     _shared: Option<SharedStorePermit>,
 }
 
 struct StoreGate {
-    local: Arc<crate::backend::Gate>,
+    local: Arc<crate::storage::resource_gate::Gate>,
     db: sqlx::PgPool,
     store_id: Uuid,
     direction: &'static str,
@@ -504,7 +505,7 @@ impl StoreGate {
         holder: Uuid,
     ) -> Arc<Self> {
         Arc::new(Self {
-            local: crate::backend::Gate::new(local_limit, aging),
+            local: crate::storage::resource_gate::Gate::new(local_limit, aging),
             db: db.clone(),
             store_id,
             direction,
@@ -614,9 +615,9 @@ pub struct Storage {
     pub secrets: Arc<Secrets>,
     pub(crate) cpu: Arc<Semaphore>,
     pub compression: Arc<crate::compression::Pool>,
-    pub reads: Arc<crate::backend::Gate>,
-    pub writes: Arc<crate::backend::Gate>,
-    pub controls: Arc<crate::backend::Gate>,
+    pub reads: Arc<crate::storage::resource_gate::Gate>,
+    pub writes: Arc<crate::storage::resource_gate::Gate>,
+    pub controls: Arc<crate::storage::resource_gate::Gate>,
     fifo: tokio::sync::Mutex<Fifo>,
     cache_writes: tokio::sync::Mutex<()>,
     upload_pins: Mutex<HashMap<Uuid, UploadPin>>,
@@ -835,19 +836,19 @@ impl Storage {
                 c.compression.clone(),
                 budget.cpu_jobs,
             )?),
-            reads: crate::backend::Gate::new(
+            reads: crate::storage::resource_gate::Gate::new(
                 c.storage
                     .read_concurrency
                     .unwrap_or(budget.storage_concurrency),
                 aging,
             ),
-            writes: crate::backend::Gate::new(
+            writes: crate::storage::resource_gate::Gate::new(
                 c.storage
                     .upload_concurrency
                     .unwrap_or(budget.storage_concurrency),
                 aging,
             ),
-            controls: crate::backend::Gate::new(
+            controls: crate::storage::resource_gate::Gate::new(
                 c.storage
                     .control_concurrency
                     .unwrap_or(budget.available_cpus.clamp(1, 8)),
@@ -1011,8 +1012,8 @@ impl Storage {
         limit: usize,
     ) -> Result<Vec<object_store::ObjectMeta>> {
         let target = self.store_backend(store_id)?;
-        let _permit = crate::backend::PRIORITY
-            .scope(crate::backend::MAINTENANCE, target.controls.acquire())
+        let _permit = crate::storage::resource_gate::PRIORITY
+            .scope(crate::storage::resource_gate::MAINTENANCE, target.controls.acquire())
             .await?;
         let offset = Path::parse(cursor.unwrap_or(""))?;
         Ok(target
@@ -1068,15 +1069,15 @@ impl Storage {
             .await?;
         }
         let target = VerifiedStore::build(&record, self.store_options, &self.secrets)?;
-        let _permit = crate::backend::PRIORITY
-            .scope(crate::backend::MAINTENANCE, self.controls.acquire())
+        let _permit = crate::storage::resource_gate::PRIORITY
+            .scope(crate::storage::resource_gate::MAINTENANCE, self.controls.acquire())
             .await?;
         target.initialize().await
     }
     pub(crate) async fn verify_store_record(&self, record: StoreRecord) -> Result<()> {
         let target = VerifiedStore::build(&record, self.store_options, &self.secrets)?;
-        let _permit = crate::backend::PRIORITY
-            .scope(crate::backend::MAINTENANCE, self.controls.acquire())
+        let _permit = crate::storage::resource_gate::PRIORITY
+            .scope(crate::storage::resource_gate::MAINTENANCE, self.controls.acquire())
             .await?;
         target.verify().await
     }
@@ -1758,10 +1759,10 @@ impl Storage {
         ensure!(
             !self.maintenance.load(Ordering::Acquire)
                 || crate::upload_cache::FLUSH.try_with(|f| *f).unwrap_or(false)
-                || crate::backend::PRIORITY
+                || crate::storage::resource_gate::PRIORITY
                     .try_with(|p| *p)
-                    .unwrap_or(crate::backend::FOREGROUND)
-                    == crate::backend::FOREGROUND,
+                    .unwrap_or(crate::storage::resource_gate::FOREGROUND)
+                    == crate::storage::resource_gate::FOREGROUND,
             "background writes are paused for maintenance"
         );
         Ok(())
@@ -1791,16 +1792,16 @@ impl Storage {
                 .unwrap_or_else(|| {
                     let cell = Arc::new(PackFetch {
                         result: tokio::sync::OnceCell::new(),
-                        priority: Arc::new(AtomicUsize::new(crate::backend::MAINTENANCE)),
+                        priority: Arc::new(AtomicUsize::new(crate::storage::resource_gate::MAINTENANCE)),
                     });
                     map.insert(p.id, Arc::downgrade(&cell));
                     cell
                 })
         };
         lock.priority.fetch_min(
-            crate::backend::PRIORITY
+            crate::storage::resource_gate::PRIORITY
                 .try_with(|p| *p)
-                .unwrap_or(crate::backend::FOREGROUND),
+                .unwrap_or(crate::storage::resource_gate::FOREGROUND),
             Ordering::Relaxed,
         );
         self.reads.refresh();

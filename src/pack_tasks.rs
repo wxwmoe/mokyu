@@ -529,10 +529,10 @@ impl App {
     pub(crate) async fn rewrite_pack(&self, task: Uuid, id: i64, unpack: bool) -> Result<usize> {
         self.storage_writable()?;
         if !unpack
-            && crate::backend::PRIORITY
+            && crate::storage::resource_gate::PRIORITY
                 .try_with(|p| *p)
-                .unwrap_or(crate::backend::FOREGROUND)
-                != crate::backend::UPLOAD
+                .unwrap_or(crate::storage::resource_gate::FOREGROUND)
+                != crate::storage::resource_gate::UPLOAD
             && sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack=$1)",
             )
@@ -550,10 +550,10 @@ impl App {
         let writing:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM extents e JOIN chunks c ON c.id=e.chunk_id JOIN streams s ON s.id=e.stream_id WHERE c.pack_id=$1 AND s.state='writing')").bind(id).fetch_one(&self.db).await?;
         if writing
             && !unpack
-            && crate::backend::PRIORITY
+            && crate::storage::resource_gate::PRIORITY
                 .try_with(|p| *p)
-                .unwrap_or(crate::backend::FOREGROUND)
-                != crate::backend::UPLOAD
+                .unwrap_or(crate::storage::resource_gate::FOREGROUND)
+                != crate::storage::resource_gate::UPLOAD
         {
             return Ok(0);
         }

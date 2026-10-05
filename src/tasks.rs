@@ -957,8 +957,8 @@ async fn worker(
             } else if kind == "integrity" {
                 match tokio::time::timeout(
                     Duration::from_secs(config::seconds(&app.config.integrity.request_timeout)?),
-                    crate::backend::PRIORITY.scope(
-                        crate::backend::MAINTENANCE,
+                    crate::storage::resource_gate::PRIORITY.scope(
+                        crate::storage::resource_gate::MAINTENANCE,
                         app.integrity_batch(id, cursor.as_deref(), detail),
                     ),
                 )
@@ -970,16 +970,16 @@ async fn worker(
                     )),
                 }
             } else if kind == "pack" || kind == "unpack" {
-                crate::backend::PRIORITY
+                crate::storage::resource_gate::PRIORITY
                     .scope(
-                        crate::backend::MAINTENANCE,
+                        crate::storage::resource_gate::MAINTENANCE,
                         app.pack_batch(id, cursor.as_deref(), detail, kind == "unpack"),
                     )
                     .await
             } else if kind == "upload" || kind == "cache_flush" {
-                crate::backend::PRIORITY
+                crate::storage::resource_gate::PRIORITY
                     .scope(
-                        crate::backend::UPLOAD,
+                        crate::storage::resource_gate::UPLOAD,
                         crate::upload_cache::FLUSH.scope(
                             kind == "cache_flush",
                             app.upload_batch(id, detail, kind == "cache_flush"),
@@ -987,16 +987,16 @@ async fn worker(
                     )
                     .await
             } else if kind == "storage_migration" {
-                crate::backend::PRIORITY
+                crate::storage::resource_gate::PRIORITY
                     .scope(
-                        crate::backend::UPLOAD,
+                        crate::storage::resource_gate::UPLOAD,
                         app.storage_migration_batch(id, lease_token, detail),
                     )
                     .await
             } else if kind == "rekey" {
-                let result = crate::backend::PRIORITY
+                let result = crate::storage::resource_gate::PRIORITY
                     .scope(
-                        crate::backend::MAINTENANCE,
+                        crate::storage::resource_gate::MAINTENANCE,
                         app.rekey_batch(id, lease_token, cursor.as_deref(), detail),
                     )
                     .await;

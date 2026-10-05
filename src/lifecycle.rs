@@ -343,8 +343,8 @@ impl App {
         Ok(removed)
     }
     pub async fn reclaim(&self) -> Result<usize> {
-        crate::backend::PRIORITY
-            .scope(crate::backend::MAINTENANCE, self.reclaim_inner())
+        crate::storage::resource_gate::PRIORITY
+            .scope(crate::storage::resource_gate::MAINTENANCE, self.reclaim_inner())
             .await
     }
     async fn reclaim_inner(&self) -> Result<usize> {
