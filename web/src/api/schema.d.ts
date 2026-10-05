@@ -1216,6 +1216,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/stores/{name}/rekey": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["store_rekey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tasks": {
         parameters: {
             query?: never;
@@ -2106,6 +2122,11 @@ export interface components {
         ReissueInput: {
             expires_in?: string;
         };
+        RekeyRequest: {
+            action: string;
+            confirmation?: string | null;
+            target_key?: string | null;
+        };
         Request: {
             bucket?: string | null;
             key?: string | null;
@@ -2250,6 +2271,7 @@ export interface components {
             /** Format: uuid */
             current_key_id?: string | null;
             endpoint?: string | null;
+            initialize: boolean;
             name: string;
             path?: string | null;
             prefix?: string;
@@ -4574,6 +4596,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StoreView"];
+                };
+            };
+        };
+    };
+    store_rekey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RekeyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };

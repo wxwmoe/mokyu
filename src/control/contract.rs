@@ -113,6 +113,7 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::settings::reset_section))
         .routes(routes!(super::stores::list, super::stores::create))
         .routes(routes!(super::stores::check, super::stores::update))
+        .routes(routes!(super::stores::rekey))
         .routes(routes!(
             super::managed_keys::list,
             super::managed_keys::create

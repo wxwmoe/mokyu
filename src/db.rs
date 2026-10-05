@@ -1,14 +1,46 @@
-use crate::config::{Budget, Config, Control, Secrets};
+use crate::config::{Budget, Config, Secrets};
 use anyhow::{Context, Result, ensure};
+use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-#[derive(sqlx::FromRow)]
-struct RuntimeSettingsRow {
-    value: Value,
+fn without_fields(mut value: Value, fields: &[&str]) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        for field in fields {
+            object.remove(*field);
+        }
+    }
+    value
+}
+
+fn overlay<T>(current: &T, patch: &Value) -> Result<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let mut value = serde_json::to_value(current)?;
+    let object = value
+        .as_object_mut()
+        .context("runtime settings target must be an object")?;
+    let patch = patch
+        .as_object()
+        .context("runtime settings value must be an object")?;
+    for (key, value) in patch {
+        object.insert(key.clone(), value.clone());
+    }
+    Ok(serde_json::from_value(value)?)
+}
+
+fn rename_fields(value: &mut Value, names: &[(&str, &str)]) {
+    if let Some(object) = value.as_object_mut() {
+        for (from, to) in names {
+            if let Some(value) = object.remove(*from) {
+                object.insert((*to).into(), value);
+            }
+        }
+    }
 }
 
 pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
@@ -20,7 +52,6 @@ pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
                 "secure_cookie": configured.control.secure_cookie,
                 "session_lifetime": configured.control.session_lifetime.clone(),
                 "avatar_url": configured.control.gravatar_base_url.clone(),
-                "thumbnail_cache_size": configured.control.thumbnail_cache_size.clone(),
             }),
         ),
         (
@@ -65,34 +96,56 @@ pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
                 "min_savings_percent": configured.cache.min_compression_savings_percent,
             }),
         ),
-        ("compression", serde_json::to_value(&configured.compression).unwrap_or_default()),
+        (
+            "compression",
+            without_fields(
+                serde_json::to_value(&configured.compression).unwrap_or_default(),
+                &["context_idle_timeout"],
+            ),
+        ),
         (
             "packing",
-            serde_json::to_value(&configured.pack).unwrap_or_default(),
+            without_fields(
+                {
+                    let mut value = serde_json::to_value(&configured.pack).unwrap_or_default();
+                    rename_fields(&mut value, &[("range_optimization", "range_enabled")]);
+                    value
+                },
+                &["maintenance_concurrency"],
+            ),
         ),
         (
             "garbage_collection",
-            serde_json::to_value(&configured.gc).unwrap_or_default(),
+            {
+                let mut value = serde_json::to_value(&configured.gc).unwrap_or_default();
+                rename_fields(&mut value, &[("unreferenced_grace", "grace_period")]);
+                value
+            },
         ),
         (
             "retention",
-            serde_json::to_value(&configured.cleanup).unwrap_or_default(),
+            {
+                let mut value = serde_json::to_value(&configured.cleanup).unwrap_or_default();
+                rename_fields(&mut value, &[("deleted_chunk_retention", "deleted_chunks"), ("upload_retention", "uploads"), ("task_retention", "tasks"), ("audit_retention", "audit")]);
+                value
+            },
         ),
         (
             "statistics",
-            serde_json::to_value(&configured.statistics).unwrap_or_default(),
+            {
+                let mut value = serde_json::to_value(&configured.statistics).unwrap_or_default();
+                rename_fields(&mut value, &[("storage_sample_interval", "storage_interval"), ("runtime_sample_interval", "runtime_interval")]);
+                value
+            },
         ),
         (
             "integrity",
-            serde_json::to_value(&configured.integrity).unwrap_or_default(),
+            without_fields(
+                serde_json::to_value(&configured.integrity).unwrap_or_default(),
+                &["concurrency", "requests_per_second", "bandwidth"],
+            ),
         ),
     ]
-}
-
-pub fn runtime_default(configured: &Config, section: &str) -> Option<Value> {
-    runtime_defaults(configured)
-        .into_iter()
-        .find_map(|(name, value)| (name == section).then_some(value))
 }
 
 pub async fn ensure_runtime_settings(pool: &PgPool, configured: &Config) -> Result<()> {
@@ -108,23 +161,72 @@ pub async fn ensure_runtime_settings(pool: &PgPool, configured: &Config) -> Resu
     Ok(())
 }
 
-pub async fn load_control_settings(pool: &PgPool, configured: &Control) -> Result<Control> {
-    let _ = configured;
-    let row: RuntimeSettingsRow = sqlx::query_as(
-        "SELECT value FROM runtime_settings WHERE section='web'",
-    )
-    .fetch_one(pool)
-    .await?;
-    let value = row.value;
-    let settings = Control {
-        origin: value.get("origin").and_then(Value::as_str).unwrap_or("http://localhost:9002").to_owned(),
-        secure_cookie: value.get("secure_cookie").and_then(Value::as_bool).unwrap_or(true),
-        session_lifetime: value.get("session_lifetime").and_then(Value::as_str).unwrap_or("12h").to_owned(),
-        gravatar_base_url: value.get("avatar_url").and_then(Value::as_str).unwrap_or("https://www.gravatar.com/avatar/").to_owned(),
-        thumbnail_cache_size: value.get("thumbnail_cache_size").and_then(Value::as_str).unwrap_or("256MiB").to_owned(),
-    };
-    settings.validate()?;
-    Ok(settings)
+pub async fn load_runtime_settings(pool: &PgPool, config: &mut Config) -> Result<HashMap<String, i64>> {
+    let rows: Vec<(String, Value, i64)> =
+        sqlx::query_as("SELECT section,value,revision FROM runtime_settings ORDER BY section")
+            .fetch_all(pool)
+            .await?;
+    let mut revisions = HashMap::new();
+    for (section, value, revision) in rows {
+        apply_runtime_section(config, &section, value)?;
+        revisions.insert(section, revision);
+    }
+    config.validate()?;
+    Ok(revisions)
+}
+
+pub(crate) fn apply_runtime_section(config: &mut Config, section: &str, mut value: Value) -> Result<()> {
+        match section {
+            "web" => {
+                value = without_fields(value, &["thumbnail_cache_size"]);
+                rename_fields(&mut value, &[("avatar_url", "gravatar_base_url")]);
+                config.control = overlay(&config.control, &value)?;
+            }
+            "s3" => {
+                rename_fields(&mut value, &[("domain", "s3_domain"), ("signature_region", "region"), ("max_stream_chunk_size", "aws_chunk_limit")]);
+                config.listen = overlay(&config.listen, &value)?;
+            }
+            "storage" => {
+                rename_fields(&mut value, &[("min_retention", "min_storage_duration")]);
+                config.storage = overlay(&config.storage, &value)?;
+            }
+            "requests" => config.processing = overlay(&config.processing, &value)?,
+            "uploads" => {
+                rename_fields(&mut value, &[("max_active", "max_active_uploads")]);
+                config.multipart = overlay(&config.multipart, &value)?;
+            }
+            "cache" => {
+                rename_fields(&mut value, &[("upload_enabled", "upload_cache"), ("min_savings_percent", "min_compression_savings_percent")]);
+                config.cache = overlay(&config.cache, &value)?;
+            }
+            "compression" => {
+                value = without_fields(value, &["context_idle_timeout"]);
+                config.compression = overlay(&config.compression, &value)?;
+            }
+            "packing" => {
+                value = without_fields(value, &["maintenance_concurrency"]);
+                rename_fields(&mut value, &[("range_enabled", "range_optimization")]);
+                config.pack = overlay(&config.pack, &value)?;
+            }
+            "garbage_collection" => {
+                rename_fields(&mut value, &[("grace_period", "unreferenced_grace")]);
+                config.gc = overlay(&config.gc, &value)?;
+            }
+            "retention" => {
+                rename_fields(&mut value, &[("deleted_chunks", "deleted_chunk_retention"), ("uploads", "upload_retention"), ("tasks", "task_retention"), ("audit", "audit_retention")]);
+                config.cleanup = overlay(&config.cleanup, &value)?;
+            }
+            "statistics" => {
+                rename_fields(&mut value, &[("storage_interval", "storage_sample_interval"), ("runtime_interval", "runtime_sample_interval")]);
+                config.statistics = overlay(&config.statistics, &value)?;
+            }
+            "integrity" => {
+                value = without_fields(value, &["concurrency", "requests_per_second", "bandwidth"]);
+                config.integrity = overlay(&config.integrity, &value)?;
+            }
+            _ => anyhow::bail!("unknown runtime settings section {section}"),
+        }
+    Ok(())
 }
 
 async fn load_database_keys(pool: &PgPool, secrets: &mut Secrets) -> Result<()> {

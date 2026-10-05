@@ -121,14 +121,11 @@ fn endpoint(base: &str, path: &str) -> String {
 }
 
 pub(crate) async fn post_json<T: Serialize, R: for<'de> Deserialize<'de>>(
+    client: &reqwest::Client,
     base: &str,
     path: &str,
     value: &T,
 ) -> Result<R> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
     let response = client
         .post(endpoint(base, path))
         .json(value)
@@ -154,6 +151,7 @@ async fn join_remote(app: &App, role: &str) -> Result<()> {
     let path = node_state_path(app);
     if let Some(state) = read_state(&path).await? {
         let reply: HeartbeatReply = post_json(
+            &app.control_client,
             control,
             "/api/cluster/heartbeat",
             &HeartbeatRequest {
@@ -175,7 +173,7 @@ async fn join_remote(app: &App, role: &str) -> Result<()> {
         .join_token
         .as_deref()
         .context("cluster.join_token is required for a new node")?;
-    let reply: JoinReply = post_json(control, "/api/cluster/join", &JoinRequest { token }).await?;
+    let reply: JoinReply = post_json(&app.control_client, control, "/api/cluster/join", &JoinRequest { token }).await?;
     ensure!(
         reply.kind == role,
         "join token role does not match this process"
@@ -389,6 +387,7 @@ pub async fn node_loop(app: Arc<App>, role: &'static str) -> Result<()> {
             tracing::warn!(%error, "store refresh failed; retrying");
         }
         let reply: Result<HeartbeatReply> = post_json(
+            &app.control_client,
             control,
             "/api/cluster/heartbeat",
             &HeartbeatRequest {
@@ -423,7 +422,7 @@ fn hop_by_hop(name: &str) -> bool {
     )
 }
 
-async fn forward_request(target: &str, request: axum::extract::Request) -> Response {
+async fn forward_request(client: &reqwest::Client, target: &str, request: axum::extract::Request) -> Response {
     let (parts, body) = request.into_parts();
     let bytes = match to_bytes(body, 32 * 1024 * 1024).await {
         Ok(bytes) => bytes,
@@ -439,18 +438,6 @@ async fn forward_request(target: &str, request: axum::extract::Request) -> Respo
         .map(|value| value.as_str())
         .unwrap_or("/");
     let url = format!("{}{}", target.trim_end_matches('/'), path);
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::error!(error=%error, "cannot create control forwarding client");
-            return crate::http::problem(StatusCode::BAD_GATEWAY, "ControlForwardFailed")
-                .into_response();
-        }
-    };
     let mut builder = client.request(parts.method, url);
     for (name, value) in &parts.headers {
         if !hop_by_hop(name.as_str()) {
@@ -553,5 +540,5 @@ pub async fn forward_if_standby(
         return crate::http::problem(StatusCode::SERVICE_UNAVAILABLE, "ControlUnavailable")
             .into_response();
     };
-    forward_request(&target, request).await
+    forward_request(&app.control_client, &target, request).await
 }

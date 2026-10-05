@@ -28,6 +28,7 @@ pub enum CompressionStrategy {
 pub struct Config {
     pub enabled: bool,
     pub max_size: String,
+    #[serde(rename = "upload_flush_timeout")]
     pub upload_cache_timeout: String,
     pub compression_strategy: Option<CompressionStrategy>,
     pub maintenance_concurrency: usize,

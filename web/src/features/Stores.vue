@@ -3,7 +3,7 @@ import ErrorNotice from '../components/ErrorNotice.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { computed, reactive, ref } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { Cloud, Database, HardDrive, Pencil, Plus, RefreshCw, ShieldCheck } from 'lucide-vue-next'
+import { Cloud, Database, HardDrive, Pencil, Plus, RefreshCw, ShieldCheck, WandSparkles } from 'lucide-vue-next'
 import { api, queries, write } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
@@ -18,13 +18,14 @@ type ManagedKey = components['schemas']['ManagedKeyView']
 const stores = useQuery({ queryKey: ['stores'], queryFn: ({ signal }) => api<Store[]>('/api/stores', { signal }) })
 const keys = useQuery({ queryKey: ['managed-keys'], queryFn: ({ signal }) => api<ManagedKey[]>('/api/keys', { signal }) })
 const open = ref(false), editing = ref<Store | null>(null), busy = ref(false), checking = ref('')
-const draft = reactive({ name: '', type: 'local', path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '', current_key_id: '', read_concurrency: null as number | null, upload_concurrency: null as number | null, control_concurrency: null as number | null, enabled: true })
+const rekeyOpen = ref(false), rekeyStore = ref<Store | null>(null), rekeyPreview = ref<Record<string, any> | null>(null), rekeyPhrase = ref(''), rekeyBusy = ref(false), rekeyError = ref('')
+const draft = reactive({ name: '', type: 'local', path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '', current_key_id: '', read_concurrency: null as number | null, upload_concurrency: null as number | null, control_concurrency: null as number | null, enabled: true, initialize: true })
 const types = computed(() => ['local', 's3'].map(value => ({ value, label: t('storeType_' + value) })))
 const keyOptions = computed(() => [{ value: '', label: t('storeNoEncryption') }, ...(keys.data.value || []).filter(row => row.purpose === 'block' && !row.revoked_at).map(row => ({ value: row.id, label: `${row.name} · ${row.algorithm}` }))])
 
 function edit(row?: Store) {
   editing.value = row || null
-  Object.assign(draft, { name: row?.name || '', type: row?.type || 'local', path: row?.path || '/data/storage', endpoint: row?.endpoint || '', bucket: row?.bucket || '', region: row?.region || '', prefix: row?.prefix || '', access_key: '', secret_key: '', current_key_id: row?.current_key_id || '', read_concurrency: row?.read_concurrency ?? null, upload_concurrency: row?.upload_concurrency ?? null, control_concurrency: row?.control_concurrency ?? null, enabled: row?.enabled ?? true })
+  Object.assign(draft, { name: row?.name || '', type: row?.type || 'local', path: row?.path || '/data/storage', endpoint: row?.endpoint || '', bucket: row?.bucket || '', region: row?.region || '', prefix: row?.prefix || '', access_key: '', secret_key: '', current_key_id: row?.current_key_id || '', read_concurrency: row?.read_concurrency ?? null, upload_concurrency: row?.upload_concurrency ?? null, control_concurrency: row?.control_concurrency ?? null, enabled: row?.enabled ?? true, initialize: true })
   open.value = true
 }
 function input() {
@@ -35,13 +36,24 @@ function input() {
 async function save() {
   busy.value = true
   try {
-    const body = editing.value ? input() : { name: draft.name.trim(), ...input() }
+    const body = editing.value ? input() : { name: draft.name.trim(), initialize: draft.initialize, ...input() }
     await secure(() => write<Store>('/api/stores' + (editing.value ? '/' + encodeURIComponent(editing.value.name) : ''), body, editing.value ? 'PUT' : 'POST'))
     open.value = false
     await queries.invalidateQueries({ queryKey: ['stores'] })
     await queries.invalidateQueries({ queryKey: ['bucket-projects'] })
     notify(t(editing.value ? 'storeSaved' : 'storeCreated'))
   } catch (error) { report(error) } finally { busy.value = false }
+}
+async function rekey(row: Store) {
+  rekeyStore.value = row; rekeyPreview.value = null; rekeyPhrase.value = ''; rekeyError.value = ''; rekeyOpen.value = true; rekeyBusy.value = true
+  try { rekeyPreview.value = await write<Record<string, any>>(`/api/stores/${encodeURIComponent(row.name)}/rekey`, { action: 'preview', target_key: row.current_key_id }) }
+  catch (error) { rekeyError.value = String(error) } finally { rekeyBusy.value = false }
+}
+async function startRekey() {
+  if (!rekeyStore.value || !rekeyPreview.value) return
+  rekeyBusy.value = true; rekeyError.value = ''
+  try { await secure(() => write(`/api/stores/${encodeURIComponent(rekeyStore.value!.name)}/rekey`, { action: 'start', target_key: rekeyStore.value!.current_key_id, confirmation: rekeyPhrase.value })); rekeyOpen.value = false; notify(t('storeRekeyStarted')) }
+  catch (error) { rekeyError.value = String(error) } finally { rekeyBusy.value = false }
 }
 async function check(row: Store) {
   checking.value = row.name
@@ -64,11 +76,12 @@ async function toggle(row: Store) {
       <div class="store-type"><Database :size="16" />{{ t('storeType_' + row.type) }}</div>
       <dl class="facts"><template v-if="row.type === 'local'"><dt>{{ t('storePath') }}</dt><dd><code>{{ row.path }}</code></dd></template><template v-else><dt>{{ t('storeEndpoint') }}</dt><dd><code>{{ row.endpoint }}</code></dd><dt>{{ t('storeBucket') }}</dt><dd>{{ row.bucket }}</dd><dt>{{ t('storeRegion') }}</dt><dd>{{ row.region }}</dd><dt>{{ t('storePrefix') }}</dt><dd>{{ row.prefix || '—' }}</dd></template><dt>{{ t('storeCurrentKey') }}</dt><dd><code>{{ row.current_key_id || t('storeNoEncryption') }}</code></dd><dt>{{ t('storeReadConcurrency') }}</dt><dd>{{ row.read_concurrency || '—' }}</dd><dt>{{ t('storeUploadConcurrency') }}</dt><dd>{{ row.upload_concurrency || '—' }}</dd><dt>{{ t('storeControlConcurrency') }}</dt><dd>{{ row.control_concurrency || '—' }}</dd><dt>{{ t('updatedAt') }}</dt><dd>{{ date(row.updated_at) }}</dd></dl>
       <p class="field-help"><ShieldCheck :size="14" />{{ t('storeSecretsHint') }}</p>
-      <div class="actions"><button @click="edit(row)"><Pencil :size="15" />{{ t('editStore') }}</button><button :disabled="checking === row.name" @click="check(row)"><ShieldCheck :size="15" />{{ t('checkStore') }}</button><button :disabled="checking === row.name" @click="toggle(row)">{{ t(row.enabled ? 'disableStore' : 'enableStore') }}</button></div>
+      <div class="actions"><button @click="edit(row)"><Pencil :size="15" />{{ t('editStore') }}</button><button :disabled="checking === row.name" @click="check(row)"><ShieldCheck :size="15" />{{ t('checkStore') }}</button><button :disabled="checking === row.name" @click="rekey(row)"><WandSparkles :size="15" />{{ t('storeRekey') }}</button><button :disabled="checking === row.name" @click="toggle(row)">{{ t(row.enabled ? 'disableStore' : 'enableStore') }}</button></div>
     </article>
   </div>
   <EmptyState v-else :title="t('noStores')" :description="t('noStoresHint')"><button class="primary" @click="edit()"><Plus :size="17" />{{ t('createStore') }}</button></EmptyState>
   <UiDialog v-model:open="open" :title="t(editing ? 'editStore' : 'createStore')" :description="t('storeEditorHint')" :busy="busy" wide>
-    <form @submit.prevent="save"><div class="store-form-grid"><label v-if="!editing">{{ t('storeName') }}<input v-model="draft.name" required maxlength="128" autocomplete="off" :disabled="busy"></label><label>{{ t('storeType') }}<UiSelect v-model="draft.type" :options="types" :label="t('storeType')" :disabled="busy" /></label><label class="store-form-wide">{{ t('storeCurrentKey') }}<UiSelect v-model="draft.current_key_id" :options="keyOptions" :label="t('storeCurrentKey')" :disabled="busy" /></label><label>{{ t('storeReadConcurrency') }}<input v-model.number="draft.read_concurrency" type="number" min="1" autocomplete="off" :placeholder="t('storeLimitHint')" :disabled="busy"></label><label>{{ t('storeUploadConcurrency') }}<input v-model.number="draft.upload_concurrency" type="number" min="1" autocomplete="off" :placeholder="t('storeLimitHint')" :disabled="busy"></label><label>{{ t('storeControlConcurrency') }}<input v-model.number="draft.control_concurrency" type="number" min="1" autocomplete="off" :placeholder="t('storeLimitHint')" :disabled="busy"></label><label v-if="draft.type === 'local'" class="store-form-wide">{{ t('storePath') }}<input v-model="draft.path" required maxlength="4096" autocomplete="off" :disabled="busy"></label><template v-else><label class="store-form-wide">{{ t('storeEndpoint') }}<input v-model="draft.endpoint" required type="url" placeholder="https://s3.example.com" autocomplete="url" :disabled="busy"></label><label>{{ t('storeBucket') }}<input v-model="draft.bucket" required autocomplete="off" :disabled="busy"></label><label>{{ t('storeRegion') }}<input v-model="draft.region" required autocomplete="off" :disabled="busy"></label><label class="store-form-wide">{{ t('storePrefix') }}<input v-model="draft.prefix" autocomplete="off" :disabled="busy"></label><label>{{ t('storeAccessKey') }}<input v-model="draft.access_key" autocomplete="off" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label><label>{{ t('storeSecretKey') }}<input v-model="draft.secret_key" type="password" autocomplete="new-password" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label></template></div><UiCheckbox v-if="editing" v-model="draft.enabled" :label="t('storeEnabled')" :disabled="busy" /><p class="field-help">{{ t(draft.type === 'local' ? 'localStoreHint' : 's3StoreHint') }}</p><div class="form-footer"><button type="button" :disabled="busy" @click="open = false">{{ t('cancel') }}</button><button class="primary" :disabled="busy">{{ t('save') }}</button></div></form>
+    <form @submit.prevent="save"><div class="store-form-grid"><label v-if="!editing">{{ t('storeName') }}<input v-model="draft.name" required maxlength="128" autocomplete="off" :disabled="busy"></label><label>{{ t('storeType') }}<UiSelect v-model="draft.type" :options="types" :label="t('storeType')" :disabled="busy" /></label><label class="store-form-wide">{{ t('storeCurrentKey') }}<UiSelect v-model="draft.current_key_id" :options="keyOptions" :label="t('storeCurrentKey')" :disabled="busy" /></label><label>{{ t('storeReadConcurrency') }}<input v-model.number="draft.read_concurrency" type="number" min="1" autocomplete="off" :placeholder="t('storeLimitHint')" :disabled="busy"></label><label>{{ t('storeUploadConcurrency') }}<input v-model.number="draft.upload_concurrency" type="number" min="1" autocomplete="off" :placeholder="t('storeLimitHint')" :disabled="busy"></label><label>{{ t('storeControlConcurrency') }}<input v-model.number="draft.control_concurrency" type="number" min="1" autocomplete="off" :placeholder="t('storeLimitHint')" :disabled="busy"></label><label v-if="draft.type === 'local'" class="store-form-wide">{{ t('storePath') }}<input v-model="draft.path" required maxlength="4096" autocomplete="off" :disabled="busy"></label><template v-else><label class="store-form-wide">{{ t('storeEndpoint') }}<input v-model="draft.endpoint" required type="url" placeholder="https://s3.example.com" autocomplete="url" :disabled="busy"></label><label>{{ t('storeBucket') }}<input v-model="draft.bucket" required autocomplete="off" :disabled="busy"></label><label>{{ t('storeRegion') }}<input v-model="draft.region" required autocomplete="off" :disabled="busy"></label><label class="store-form-wide">{{ t('storePrefix') }}<input v-model="draft.prefix" autocomplete="off" :disabled="busy"></label><label>{{ t('storeAccessKey') }}<input v-model="draft.access_key" autocomplete="off" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label><label>{{ t('storeSecretKey') }}<input v-model="draft.secret_key" type="password" autocomplete="new-password" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label></template></div><UiCheckbox v-if="!editing" v-model="draft.initialize" :label="t('initializeStore')" :disabled="busy" /><UiCheckbox v-if="editing" v-model="draft.enabled" :label="t('storeEnabled')" :disabled="busy" /><p class="field-help">{{ t(draft.type === 'local' ? 'localStoreHint' : 's3StoreHint') }}</p><div class="form-footer"><button type="button" :disabled="busy" @click="open = false">{{ t('cancel') }}</button><button class="primary" :disabled="busy">{{ t('save') }}</button></div></form>
   </UiDialog>
+  <UiDialog v-model:open="rekeyOpen" :title="t('storeRekey')" :description="t('storeRekeyHint')" :busy="rekeyBusy"><p v-if="rekeyError" class="error">{{ rekeyError }}</p><pre v-if="rekeyPreview" class="object-path">{{ JSON.stringify(rekeyPreview.preview || rekeyPreview, null, 2) }}</pre><form v-if="rekeyPreview?.confirmation" @submit.prevent="startRekey"><label>{{ t('typeConfirmation', { value: rekeyPreview.confirmation }) }}<input v-model="rekeyPhrase" autocomplete="off" spellcheck="false" :disabled="rekeyBusy"></label><div class="form-footer"><button type="button" :disabled="rekeyBusy" @click="rekeyOpen = false">{{ t('cancel') }}</button><button class="primary" :disabled="rekeyBusy || rekeyPhrase !== rekeyPreview.confirmation">{{ t('startTask') }}</button></div></form></UiDialog>
 </template>

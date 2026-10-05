@@ -42,7 +42,6 @@ pub(crate) struct ControlSettingsView {
     secure_cookie: bool,
     session_lifetime: String,
     gravatar_base_url: String,
-    thumbnail_cache_size: String,
     revision: i64,
     applied_revision: i64,
     scope: &'static str,
@@ -56,7 +55,6 @@ pub(crate) struct ControlSettingsPatch {
     pub(crate) secure_cookie: Option<bool>,
     pub(crate) session_lifetime: Option<String>,
     pub(crate) gravatar_base_url: Option<String>,
-    pub(crate) thumbnail_cache_size: Option<String>,
     pub(crate) revision: Option<i64>,
 }
 
@@ -82,87 +80,33 @@ fn valid_section(section: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_value(section: &str, value: &Value) -> Result<()> {
+fn validate_value(configured: &crate::config::Config, section: &str, value: &Value) -> Result<()> {
     valid_section(section)?;
     let object = value
         .as_object()
         .context("runtime settings value must be an object")?;
     let allowed: &[&str] = match section {
-        "web" => &["origin", "secure_cookie", "session_lifetime", "avatar_url", "thumbnail_cache_size"],
+        "web" => &["origin", "secure_cookie", "session_lifetime", "avatar_url"],
         "s3" => &["domain", "signature_region", "max_stream_chunk_size"],
         "storage" => &["connect_timeout", "request_timeout", "max_retries", "retry_timeout", "priority_aging", "min_retention"],
         "requests" => &["read_idle_timeout", "upload_idle_timeout"],
         "uploads" => &["idle_timeout", "sweep_interval", "client_idle_timeout", "max_active"],
         "cache" => &["upload_enabled", "min_savings_percent"],
-        "compression" => &["strategy", "level", "sample_level", "min_savings_percent", "min_savings_bytes", "context_idle_timeout", "skip_mime_types"],
-        "packing" => &["enabled", "max_size", "upload_flush_timeout", "range_optimization", "range_interval", "range_window", "range_min_downloads", "range_min_savings_percent", "range_min_savings_bytes", "range_repack_after", "range_repack_window", "range_repack_retry_interval", "compression_strategy", "maintenance_concurrency", "interval", "reuse_interval", "reclaim_interval", "repack_interval", "repack_cooldown", "reclaim_min_savings_bytes"],
-        "garbage_collection" => &["unreferenced_grace", "interval", "batch_size"],
-        "retention" => &["interval", "batch_size", "max_duration", "deleted_chunk_retention", "upload_retention", "task_retention", "audit_retention"],
-        "statistics" => &["scope_limit", "storage_sample_interval", "storage_retention", "runtime_sample_interval", "runtime_retention", "refresh_interval", "query_timeout", "access_flush_interval", "access_retention"],
-        "integrity" => &["concurrency", "request_timeout", "requests_per_second", "bandwidth"],
+        "compression" => &["strategy", "level", "sample_level", "min_savings_percent", "min_savings_bytes", "skip_mime_types"],
+        "packing" => &["enabled", "max_size", "upload_flush_timeout", "range_enabled", "range_interval", "range_window", "range_min_downloads", "range_min_savings_percent", "range_min_savings_bytes", "range_repack_after", "range_repack_window", "range_repack_retry_interval", "compression_strategy", "interval", "reuse_interval", "reclaim_interval", "repack_interval", "repack_cooldown", "reclaim_min_savings_bytes"],
+        "garbage_collection" => &["grace_period", "interval", "batch_size"],
+        "retention" => &["interval", "batch_size", "max_duration", "deleted_chunks", "uploads", "tasks", "audit"],
+        "statistics" => &["scope_limit", "storage_interval", "storage_retention", "runtime_interval", "runtime_retention", "refresh_interval", "query_timeout", "access_flush_interval", "access_retention"],
+        "integrity" => &["request_timeout"],
         _ => &[],
     };
     for key in object.keys() {
         anyhow::ensure!(allowed.contains(&key.as_str()), "unknown field in runtime settings");
     }
-    match section {
-        "web" => {
-            let control = Control {
-                origin: object.get("origin").and_then(Value::as_str).unwrap_or_default().to_owned(),
-                secure_cookie: object.get("secure_cookie").and_then(Value::as_bool).unwrap_or(false),
-                session_lifetime: object.get("session_lifetime").and_then(Value::as_str).unwrap_or_default().to_owned(),
-                gravatar_base_url: object.get("avatar_url").and_then(Value::as_str).unwrap_or_default().to_owned(),
-                thumbnail_cache_size: object.get("thumbnail_cache_size").and_then(Value::as_str).unwrap_or_default().to_owned(),
-            };
-            control.validate()?;
-        }
-        "compression" => serde_json::from_value::<crate::compression::Config>(value.clone())?.validate()?,
-        "packing" => serde_json::from_value::<crate::pack::Config>(value.clone())?.validate()?,
-        "garbage_collection" => {
-            let config: crate::config::Gc = serde_json::from_value(value.clone())?;
-            anyhow::ensure!(config.batch_size > 0 && config.batch_size <= 10_000, "garbage_collection.batch_size must be 1..10000");
-            crate::config::seconds(&config.interval)?;
-            crate::config::seconds(&config.unreferenced_grace)?;
-        }
-        "retention" => {
-            let config: crate::config::Cleanup = serde_json::from_value(value.clone())?;
-            anyhow::ensure!(config.batch_size > 0 && config.batch_size <= 10_000, "retention.batch_size must be 1..10000");
-            for item in [&config.interval, &config.max_duration, &config.deleted_chunk_retention, &config.upload_retention, &config.task_retention, &config.audit_retention] {
-                crate::config::seconds(item)?;
-            }
-            anyhow::ensure!(crate::config::seconds(&config.max_duration)? <= 30, "retention.max_duration must be 1s..30s");
-        }
-        "statistics" => {
-            let config: crate::config::Statistics = serde_json::from_value(value.clone())?;
-            anyhow::ensure!((1..=256).contains(&config.scope_limit), "statistics.scope_limit must be 1..256");
-            for item in [&config.storage_sample_interval, &config.storage_retention, &config.runtime_sample_interval, &config.runtime_retention, &config.refresh_interval, &config.query_timeout, &config.access_flush_interval, &config.access_retention] {
-                crate::config::seconds(item)?;
-            }
-        }
-        "integrity" => serde_json::from_value::<crate::integrity::Config>(value.clone())?.validate()?,
-        "storage" => {
-            for key in ["connect_timeout", "request_timeout", "retry_timeout", "priority_aging", "min_retention"] {
-                if let Some(item) = object.get(key).and_then(Value::as_str) { crate::config::seconds(item)?; }
-            }
-            anyhow::ensure!(object.get("max_retries").and_then(Value::as_u64).is_some_and(|n| n <= 100), "storage.max_retries must be 0..100");
-        }
-        "requests" => {
-            for key in ["read_idle_timeout", "upload_idle_timeout"] {
-                crate::config::seconds(object.get(key).and_then(Value::as_str).unwrap_or_default())?;
-            }
-        }
-        "uploads" => {
-            for key in ["idle_timeout", "sweep_interval", "client_idle_timeout"] {
-                crate::config::seconds(object.get(key).and_then(Value::as_str).unwrap_or_default())?;
-            }
-            anyhow::ensure!(object.get("max_active").is_none_or(|n| n.is_null() || n.as_i64().is_some_and(|n| n > 0)), "uploads.max_active must be positive");
-        }
-        "cache" => anyhow::ensure!(object.get("min_savings_percent").and_then(Value::as_u64).is_some_and(|n| n <= 100), "cache.min_savings_percent must be 0..100"),
-        "s3" => {
-            crate::config::bytes(object.get("max_stream_chunk_size").and_then(Value::as_str).unwrap_or_default())?;
-        }
-        _ => {}
-    }
+    let mut config = configured.clone();
+    crate::db::apply_runtime_section(&mut config, section, value.clone())?;
+    config.validate()?;
+    config.budget()?;
     Ok(())
 }
 
@@ -199,7 +143,7 @@ pub(crate) async fn set_section_value(
     revision: i64,
     value: Value,
 ) -> Result<Value> {
-    validate_value(section, &value)?;
+    validate_value(&app.config, section, &value)?;
     let mut tx = super::users::admin_transaction(app, principal).await?;
     let updated: Option<Value> = sqlx::query_scalar(
         "UPDATE runtime_settings SET value=$2,revision=revision+1,updated_at=now(),updated_by=$3 WHERE section=$1 AND revision=$4 RETURNING value",
@@ -223,7 +167,7 @@ pub(crate) async fn reset_section_value(
     section: &str,
 ) -> Result<Value> {
     valid_section(section)?;
-    let value = crate::db::runtime_default(&app.config, section)
+    let value = app.runtime_defaults.get(section).cloned()
         .context("runtime settings default is unavailable")?;
     let mut tx = super::users::admin_transaction(app, principal).await?;
     let value: Value = sqlx::query_scalar(
@@ -241,13 +185,12 @@ pub(crate) async fn reset_section_value(
 impl RuntimeSettingsRow {
     fn control(&self) -> Result<Control> {
         let value = self.value.as_object().cloned().unwrap_or_default();
-        Ok(Control {
-            origin: value.get("origin").and_then(Value::as_str).context("runtime web origin is missing")?.to_owned(),
-            secure_cookie: value.get("secure_cookie").and_then(Value::as_bool).context("runtime web secure_cookie is missing")?,
-            session_lifetime: value.get("session_lifetime").and_then(Value::as_str).context("runtime web session_lifetime is missing")?.to_owned(),
-            gravatar_base_url: value.get("avatar_url").and_then(Value::as_str).context("runtime web avatar_url is missing")?.to_owned(),
-            thumbnail_cache_size: value.get("thumbnail_cache_size").and_then(Value::as_str).context("runtime web thumbnail_cache_size is missing")?.to_owned(),
-        })
+        let mut control = Control::default();
+        control.origin = value.get("origin").and_then(Value::as_str).context("runtime web origin is missing")?.to_owned();
+        control.secure_cookie = value.get("secure_cookie").and_then(Value::as_bool).context("runtime web secure_cookie is missing")?;
+        control.session_lifetime = value.get("session_lifetime").and_then(Value::as_str).context("runtime web session_lifetime is missing")?.to_owned();
+        control.gravatar_base_url = value.get("avatar_url").and_then(Value::as_str).context("runtime web avatar_url is missing")?.to_owned();
+        Ok(control)
     }
 }
 
@@ -255,14 +198,12 @@ fn view(app: &App, control: Control, revision: i64) -> ControlSettingsView {
     let restart_required = control.origin != app.config.control.origin
         || control.secure_cookie != app.config.control.secure_cookie
         || control.session_lifetime != app.config.control.session_lifetime
-        || control.gravatar_base_url != app.config.control.gravatar_base_url
-        || control.thumbnail_cache_size != app.config.control.thumbnail_cache_size;
+        || control.gravatar_base_url != app.config.control.gravatar_base_url;
     ControlSettingsView {
         origin: control.origin,
         secure_cookie: control.secure_cookie,
         session_lifetime: control.session_lifetime,
         gravatar_base_url: control.gravatar_base_url,
-        thumbnail_cache_size: control.thumbnail_cache_size,
         revision,
         applied_revision: if restart_required { 0 } else { revision },
         scope: "deployment",
@@ -308,9 +249,6 @@ pub(crate) async fn update(
     if let Some(value) = input.gravatar_base_url {
         control.gravatar_base_url = value;
     }
-    if let Some(value) = input.thumbnail_cache_size {
-        control.thumbnail_cache_size = value;
-    }
     control.validate()?;
     if let Some(revision) = input.revision {
         anyhow::ensure!(revision == current.revision, "settings revision conflict; reload before saving");
@@ -320,7 +258,6 @@ pub(crate) async fn update(
         "secure_cookie": control.secure_cookie,
         "session_lifetime": control.session_lifetime,
         "avatar_url": control.gravatar_base_url,
-        "thumbnail_cache_size": control.thumbnail_cache_size,
     });
     let next_revision = current.revision.checked_add(1).context("settings revision overflow")?;
     sqlx::query(
@@ -341,7 +278,6 @@ pub(crate) async fn update(
             "secure_cookie": control.secure_cookie,
             "session_lifetime": control.session_lifetime,
             "gravatar_base_url": control.gravatar_base_url,
-            "thumbnail_cache_size": control.thumbnail_cache_size,
         }),
     )
     .await?;
@@ -394,7 +330,7 @@ pub(super) async fn save_section(
     Json(input): Json<RuntimeSettingsPatch>,
 ) -> Result<Json<RuntimeSettingsView>, HttpError> {
     actor.recent(&app).await?;
-    validate_value(&section, &input.value)?;
+    validate_value(&app.config, &section, &input.value)?;
     let mut tx = super::users::admin_transaction(&app, &actor.principal).await?;
     let changed: Option<(Value, i64)> = sqlx::query_as(
         "UPDATE runtime_settings SET value=$2,revision=revision+1,updated_at=now(),updated_by=$3 WHERE section=$1 AND revision=$4 RETURNING value,revision",
@@ -426,7 +362,7 @@ pub(super) async fn reset_section(
     Path(section): Path<String>,
 ) -> Result<Json<RuntimeSettingsView>, HttpError> {
     valid_section(&section)?;
-    let value = crate::db::runtime_default(&app.config, &section)
+    let value = app.runtime_defaults.get(&section).cloned()
         .context("runtime settings default is unavailable")?;
     let mut tx = super::users::admin_transaction(&app, &actor.principal).await?;
     let row: (Value, i64) = sqlx::query_as(

@@ -550,7 +550,6 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                         secure_cookie,
                         session_lifetime,
                         gravatar_base_url,
-                        thumbnail_cache_size: None,
                         revision,
                     },
                 )

@@ -105,10 +105,12 @@ impl Drop for Active {
 }
 pub struct App {
     pub config: Config,
+    pub runtime_defaults: HashMap<String, Value>,
     pub runtime_revisions: RwLock<HashMap<String, i64>>,
     pub budget: Budget,
     pub secrets: Arc<Secrets>,
     pub db: PgPool,
+    pub control_client: reqwest::Client,
     pub node: std::sync::OnceLock<crate::cluster::NodeState>,
     pub storage: Arc<Storage>,
     pub thumbnails: Arc<crate::control::media::Thumbnails>,
@@ -148,15 +150,13 @@ impl App {
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("another gateway owns this data directory")?;
         let (db, owner) = crate::db::connect(&config, &mut secrets, &budget).await?;
+        let runtime_defaults = crate::db::runtime_defaults(&config)
+            .into_iter()
+            .map(|(section, value)| (section.to_owned(), value))
+            .collect();
         crate::db::ensure_runtime_settings(&db, &config).await?;
-        config.control = crate::db::load_control_settings(&db, &config.control).await?;
-        let runtime_revisions: HashMap<String, i64> = sqlx::query_as(
-            "SELECT section,revision FROM runtime_settings",
-        )
-        .fetch_all(&db)
-        .await?
-        .into_iter()
-        .collect();
+        let runtime_revisions = crate::db::load_runtime_settings(&db, &mut config).await?;
+        let budget = config.budget()?;
         if start_maintenance {
             sqlx::query("UPDATE mokyu_meta SET maintenance=true")
                 .execute(&db)
@@ -198,6 +198,10 @@ impl App {
                 "no store configured; configure a store before accepting objects"
             );
         }
+        let control_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         let thumbnails =
             Arc::new(crate::control::media::Thumbnails::new(&config, storage.disk.clone()).await?);
         let app = Arc::new(Self {
@@ -205,10 +209,12 @@ impl App {
             reads: Arc::new(Semaphore::new(budget.read_concurrency)),
             slots: Arc::new(Semaphore::new(budget.data_slots)),
             config,
+            runtime_defaults,
             runtime_revisions: RwLock::new(runtime_revisions),
             budget,
             secrets,
             db,
+            control_client,
             node: std::sync::OnceLock::new(),
             storage,
             thumbnails,

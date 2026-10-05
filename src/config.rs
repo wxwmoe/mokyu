@@ -715,6 +715,12 @@ impl Config {
         c.cluster.validate()?;
         c.compression.validate()?;
         c.pack.validate()?;
+        bytes(&c.listen.aws_chunk_limit)?;
+        ensure!(!c.listen.region.trim().is_empty(), "s3.signature_region must not be empty");
+        if let Some(domain) = &c.listen.s3_domain {
+            s3s::host::SingleDomain::new(domain)?;
+        }
+        ensure!(c.storage.max_retries <= 100, "storage.max_retries must be 0..100");
         seconds(&c.processing.read_idle_timeout)?;
         seconds(&c.processing.upload_idle_timeout)?;
         seconds(&c.statistics.access_flush_interval)?;
