@@ -47,7 +47,7 @@ try:
             pass
         time.sleep(.05)
     assert response is not None and response.json() == {'setup_required': True}
-    member = subprocess.run([os.environ['MOKYU_TEST_BINARY'], '--config', str(config_path), 'cli', 'user', 'create', 'first-member', '--role', 'member', '--password-stdin'],
+    member = subprocess.run([os.environ['MOKYU_TEST_BINARY'], '--config', str(config_path), 'cli', 'user', 'create', 'first-member', '--role', 'member', '--stdin'],
                             input='Temporary-member-password\n', capture_output=True, text=True)
     assert member.returncode != 0 and 'LastAdministrator' in member.stderr
     assert requests.get(url + '/api/bootstrap').json() == {'setup_required': True}

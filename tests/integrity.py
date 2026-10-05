@@ -25,7 +25,7 @@ def cli(*args):
 
 bucket = 'integrity-' + uuid.uuid4().hex[:10]
 cli('bucket', 'create', bucket)
-credential = cli('credential', 'create', bucket)
+credential = cli('cred', 'create', bucket)
 client_config = Config(s3={'addressing_style': 'path'}, retries={'max_attempts': 0},
     request_checksum_calculation='when_required', response_checksum_validation='when_required')
 s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',

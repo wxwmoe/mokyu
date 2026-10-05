@@ -38,7 +38,7 @@ def png(width, height, rows=b''):
 
 admin = login('tester', os.environ['MOKYU_TEST_PASSWORD'])
 bucket = cli('bucket', 'create', name)
-credential = cli('credential', 'create', name)
+credential = cli('cred', 'create', name)
 s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
                   config=Config(signature_version='s3v4', s3={'addressing_style': 'path'}, retries={'max_attempts': 0}, request_checksum_calculation='when_required'))

@@ -94,7 +94,7 @@ try:
     assert complete(empty['id'], [part(empty['id'], 1, b'')]).json()['state'] == 'completed'
     conflict = admin.post(url + '/api/buckets/' + bucket['id'] + '/uploads', json={**body, 'client_id': str(uuid.uuid4())})
     assert conflict.status_code == 409 and conflict.json()['code'] == 'ObjectAlreadyExists'
-    key = cli('credential', 'create', prefix)
+    key = cli('cred', 'create', prefix)
     s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                       aws_access_key_id=key['access_key'], aws_secret_access_key=key['secret_key'],
                       config=Config(signature_version='s3v4', s3={'addressing_style': 'path'}, retries={'max_attempts': 0}, request_checksum_calculation='when_required'))
@@ -106,7 +106,7 @@ try:
     assert denied.json()['code'] == 'PreconditionFailed'
     assert admin.get(url + '/api/download', params={'bucket': bucket['id'], 'key': 'replace'}).content == b'abc'
     assert admin.delete(url + '/api/uploads/' + replacement['id']).status_code == 204
-    cli('credential', 'disable', key['access_key'])
+    cli('cred', 'disable', key['access_key'])
     print('PASS empty object, explicit overwrite and generation protection despite identical old ETag', flush=True)
 
     waiting, _ = start('quota', 1)

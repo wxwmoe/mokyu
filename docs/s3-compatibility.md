@@ -39,7 +39,7 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | 入口 | 寻址及权限 |
 | --- | --- |
 | S3 path-style | `https://s3.example.com/<bucket>/<key>`，默认可用 |
-| S3 virtual-hosted | 配置 listen.s3_domain 后启用，受该域名限制 |
+| S3 virtual-hosted | 在 Web/CLI 的 `s3.domain` 设置中启用，受该域名限制 |
 | S3 匿名 Host 映射 | Host 等于已有桶名时，GET/HEAD 读取该桶的公开对象，无需 domains 记录 |
 | 公共读 | 按 CLI 配置的 Host→桶映射，只接受 GET/HEAD/OPTIONS；路径解码一次后作为完整 key |
 
@@ -84,7 +84,7 @@ GetObject、公共读和管理下载支持单段 `bytes=a-b`、`bytes=a-`、`byt
 
 ## 公共网站
 
-仅 `listen.web` 按桶网站设置执行以下路由，S3 入口不执行：
+仅 `instance.listen_web` 按桶网站设置执行以下路由，S3 入口不执行：
 
 1. 精确对象优先；私有对象返回 403，不回退。
 2. 缺失的 `/` 或 `/dir/` 查找该目录的 index_document，支持 HEAD、Range 和条件请求。

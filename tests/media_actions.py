@@ -42,7 +42,7 @@ buckets = [cli('bucket', 'create', name + suffix) for suffix in ['-a', '-b']]
 for bucket in buckets:
     db.execute('UPDATE buckets SET project_id=%s WHERE id=%s', (project, bucket['id']))
 a, b = [bucket['id'] for bucket in buckets]
-credential = cli('credential', 'create', buckets[0]['name'])
+credential = cli('cred', 'create', buckets[0]['name'])
 s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
                   config=Config(signature_version='s3v4', s3={'addressing_style': 'path'}, retries={'max_attempts': 0}, request_checksum_calculation='when_required'))

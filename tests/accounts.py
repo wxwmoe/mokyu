@@ -32,7 +32,7 @@ def login(secret=password):
 
 
 db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
-user = cli('user', 'create', username, '--password-stdin', secret=password + '\n')['id']
+user = cli('user', 'create', username, '--stdin', secret=password + '\n')['id']
 try:
     first, second = login(), login()
     assert first.get(url + '/api/bootstrap').json() == {'setup_required': False}

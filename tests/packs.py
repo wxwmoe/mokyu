@@ -55,7 +55,7 @@ assert get('pack-source') == raw
 assert get('pack-source', Range='bytes=500000-600001') == raw[500000:600002]
 # Full ordered reuse retains the existing physical pack.
 s3.copy_object(Bucket=bucket,Key='pack-whole-copy',CopySource={'Bucket':bucket,'Key':'pack-source'})
-task('pack','run','--kind','reuse')
+task('pack','run','--mode','reuse')
 assert db.execute("SELECT state FROM packs WHERE id=%s",(original_pack,)).fetchone()[0]=='ready'
 s3.delete_object(Bucket=bucket,Key='pack-whole-copy')
 wait(lambda: (cli('gc','run'),db.execute("SELECT count(*)=0 FROM streams WHERE object_key='pack-whole-copy'").fetchone()[0])[1])
@@ -97,7 +97,7 @@ start = members[1][0]
 end = members[2][0] + members[2][1]
 shared = raw[start:end]
 s3.put_object(Bucket=bucket, Key='pack-shared', Body=shared)
-task('pack', 'run', '--kind', 'reuse')
+task('pack', 'run', '--mode', 'reuse')
 assert get('pack-source') == raw
 assert get('pack-shared') == shared
 shared_packs = db.execute('SELECT DISTINCT pack_id FROM chunks WHERE id=ANY(%s)', ([members[1][2], members[2][2]],)).fetchall()
@@ -129,10 +129,10 @@ cli('maintenance', 'disable')
 s3.delete_object(Bucket=bucket,Key='pack-shared')
 wait(lambda: (cli('gc','run'),db.execute("SELECT count(*)=0 FROM streams WHERE object_key='pack-shared'").fetchone()[0])[1])
 before_layout=db.execute("SELECT c.id,c.pack_id FROM chunks c JOIN extents e ON e.chunk_id=c.id JOIN objects o ON o.stream_id=e.stream_id WHERE o.key='pack-source' ORDER BY c.id").fetchall()
-task('pack','run','--kind','repack')
+task('pack','run','--mode','repack')
 assert before_layout==db.execute("SELECT c.id,c.pack_id FROM chunks c JOIN extents e ON e.chunk_id=c.id JOIN objects o ON o.stream_id=e.stream_id WHERE o.key='pack-source' ORDER BY c.id").fetchall()
 db.execute("UPDATE chunks SET repack_after=now()-interval '2 hours',reference_changed_at=now()-interval '2 hours' WHERE id=ANY(%s)",([r[0] for r in before_layout],))
-task('pack','run','--kind','repack')
+task('pack','run','--mode','repack')
 assert get('pack-source')==raw
 assert db.execute("SELECT count(DISTINCT c.pack_id)=1 AND bool_and(c.pack_id IS NOT NULL) FROM chunks c JOIN extents e ON e.chunk_id=c.id JOIN objects o ON o.stream_id=e.stream_id WHERE o.key='pack-source'").fetchone()[0]
 
@@ -175,7 +175,7 @@ with db.transaction():
 cli('maintenance','disable')
 cli('gc','run')
 assert db.execute('SELECT bool_and(pack_id IS NULL) FROM chunks WHERE id=ANY(%s)',([r[2] for r in rows[2:]],)).fetchone()[0]
-task('pack','run','--kind','reclaim')
+task('pack','run','--mode','reclaim')
 assert db.execute('SELECT state FROM packs WHERE id=%s',(old_pack,)).fetchone()[0]=='retired'
 assert get('pack-gc-first')==reclaim[:cut]
 
@@ -185,7 +185,7 @@ backend=boto3.client('s3',endpoint_url=configuration['endpoint'],region_name=con
 orphan=configuration['prefix']+'/packs/aa/'+'a'*32
 backend.put_object(Bucket=configuration['bucket'],Key=orphan,Body=b'orphan')
 time.sleep(1.2)
-swept=task('backend','sweep','--older-than','1s')
+swept=task('storage','sweep','--age','1s')
 assert swept['detail']['candidates']==1,swept
 assert orphan in swept['detail']['samples']
 

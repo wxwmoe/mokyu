@@ -38,7 +38,7 @@ use tracing::Instrument;
 #[derive(Parser)]
 #[command(version, about = "S3-compatible media gateway")]
 struct Args {
-    #[arg(long, global = true, default_value = "/config/config.toml")]
+    #[arg(short = 'c', long, global = true, default_value = "/config/config.toml")]
     config: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,
@@ -66,26 +66,23 @@ enum Command {
         #[arg(long)]
         maintenance: bool,
     },
-    /// Generate fresh 32-byte key material without accessing service state.
-    #[command(name = "keygen", hide = true)]
-    Keygen,
-    /// Generate a deployment key without accessing service state.
-    Key {
+    /// Run an offline tool without accessing service state.
+    #[command(name = "tool")]
+    Tool {
         #[command(subcommand)]
-        command: KeyCommand,
+        command: ToolCommand,
     },
-    /// Print the management API schema without accessing service state.
-    ApiSchema,
     Cli {
-        #[arg(long)]
-        socket: Option<PathBuf>,
         #[command(subcommand)]
         command: admin::Command,
     },
 }
 #[derive(Subcommand)]
-enum KeyCommand {
-    Generate,
+enum ToolCommand {
+    /// Generate a deployment key without accessing service state.
+    Keygen,
+    /// Print the management API schema without accessing service state.
+    Openapi,
 }
 #[derive(Clone, Copy)]
 enum Role {
@@ -131,21 +128,11 @@ fn main() -> Result<()> {
         )
         .with_target(false)
         .init();
-    if matches!(args.command, Some(Command::Keygen)) {
-        println!("{}", admin::deployment_key()?);
-        return Ok(());
-    }
-    if matches!(
-        args.command,
-        Some(Command::Key {
-            command: KeyCommand::Generate
-        })
-    ) {
-        println!("{}", admin::deployment_key()?);
-        return Ok(());
-    }
-    if matches!(args.command, Some(Command::ApiSchema)) {
-        println!("{}", serde_json::to_string_pretty(&control::schema())?);
+    if let Some(Command::Tool { command }) = args.command.as_ref() {
+        match command {
+            ToolCommand::Keygen => println!("{}", admin::deployment_key()?),
+            ToolCommand::Openapi => println!("{}", serde_json::to_string_pretty(&control::schema())?),
+        }
         return Ok(());
     }
     let role = match args.command.as_ref() {
@@ -156,11 +143,9 @@ fn main() -> Result<()> {
     };
     set_process_title(role.title());
     let start_maintenance = role.maintenance(args.command.as_ref());
-    if let Some(Command::Cli { socket, command }) = args.command {
+    if let Some(Command::Cli { command }) = args.command {
         set_process_title("cli");
-        let socket = if let Some(socket) = socket {
-            socket
-        } else if args.config.exists() {
+        let socket = if args.config.exists() {
             let text = std::fs::read_to_string(&args.config)?;
             let config: config::FileConfig =
                 toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid TOML configuration"))?;

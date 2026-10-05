@@ -66,7 +66,7 @@ for bucket in buckets.json():
                            'revision', 'uploads_paused', 'public_base_url'}
 
 if binary := os.environ.get('MOKYU_TEST_BINARY'):
-    exported = subprocess.run([binary, '--config', '/missing/config.toml', 'api-schema'],
+    exported = subprocess.run([binary, '--config', '/missing/config.toml', 'tool', 'openapi'],
                               check=True, capture_output=True, text=True)
     assert json.loads(exported.stdout) == schema
 print('PASS generated contract, typed responses, safe errors, request IDs and offline schema export')

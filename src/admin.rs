@@ -5,7 +5,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    io::IsTerminal,
+    io::{IsTerminal, Read},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
@@ -22,6 +22,7 @@ pub enum Command {
     Status,
     #[command(subcommand)]
     Bucket(Buckets),
+    #[command(name = "cred")]
     #[command(subcommand)]
     Credential(Credentials),
     #[command(subcommand)]
@@ -50,14 +51,18 @@ pub enum Command {
     Maintenance(Maintenance),
     #[command(subcommand)]
     Task(Tasks),
+    #[command(name = "storage")]
     #[command(subcommand)]
     Stores(Stores),
     #[command(subcommand)]
     Settings(Settings),
+    #[command(name = "key")]
     #[command(subcommand)]
     Keys(Keys),
     #[command(subcommand)]
     Cluster(Cluster),
+    #[command(subcommand)]
+    Setup(Setup),
     #[command(subcommand)]
     Integrity(Integrity),
     #[command(subcommand)]
@@ -74,8 +79,8 @@ pub enum Cache {
 pub enum Packs {
     Status,
     Run {
-        #[arg(long, default_value = "pack")]
-        kind: String,
+        #[arg(long = "mode", default_value = "pack")]
+        mode: String,
     },
     Unpack {
         id: Option<i64>,
@@ -151,13 +156,13 @@ pub enum Maintenance {
     Disable,
     Status,
     Pause {
-        kind: String,
+        task: String,
     },
     Resume {
-        kind: String,
+        task: String,
     },
     Run {
-        kind: String,
+        task: String,
     },
     PackCreation {
         #[arg(value_parser=["stop","resume"])]
@@ -178,25 +183,29 @@ pub enum Stores {
         name: String,
         #[arg(value_parser = ["local", "s3"])]
         r#type: String,
+        #[arg(long = "init")]
+        initialize: bool,
+        #[arg(long)]
+        key: Option<String>,
         #[arg(long)]
         path: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(short = 'e', long)]
         endpoint: Option<String>,
-        #[arg(long)]
+        #[arg(short = 'b', long)]
         bucket: Option<String>,
-        #[arg(long)]
+        #[arg(short = 'r', long)]
         region: Option<String>,
-        #[arg(long, default_value = "")]
+        #[arg(short = 'p', long, default_value = "")]
         prefix: String,
-        #[arg(long)]
+        #[arg(short = 'a', long = "access")]
         access_key: Option<String>,
-        #[arg(long)]
+        #[arg(short = 's', long = "secret")]
         secret_key: Option<String>,
-        #[arg(long)]
+        #[arg(long = "read")]
         read_concurrency: Option<i32>,
-        #[arg(long)]
+        #[arg(long = "upload")]
         upload_concurrency: Option<i32>,
-        #[arg(long)]
+        #[arg(long = "control")]
         control_concurrency: Option<i32>,
     },
     Update {
@@ -206,41 +215,49 @@ pub enum Stores {
         #[arg(long)]
         path: Option<PathBuf>,
         #[arg(long)]
+        key: Option<String>,
+        #[arg(short = 'e', long)]
         endpoint: Option<String>,
-        #[arg(long)]
+        #[arg(short = 'b', long)]
         bucket: Option<String>,
-        #[arg(long)]
+        #[arg(short = 'r', long)]
         region: Option<String>,
-        #[arg(long)]
+        #[arg(short = 'p', long)]
         prefix: Option<String>,
-        #[arg(long)]
+        #[arg(short = 'a', long = "access")]
         access_key: Option<String>,
-        #[arg(long)]
+        #[arg(short = 's', long = "secret")]
         secret_key: Option<String>,
         #[arg(long)]
         enabled: Option<bool>,
-        #[arg(long)]
+        #[arg(long = "read")]
         read_concurrency: Option<i32>,
         #[arg(long)]
+        clear_read_concurrency: bool,
+        #[arg(long = "upload")]
         upload_concurrency: Option<i32>,
         #[arg(long)]
+        clear_upload_concurrency: bool,
+        #[arg(long = "control")]
         control_concurrency: Option<i32>,
+        #[arg(long)]
+        clear_control_concurrency: bool,
     },
     Check {
+        name: String,
+    },
+    Show {
         name: String,
     },
     Key {
         #[command(subcommand)]
         command: StoreKey,
     },
+    #[command(name = "rewrite")]
     Rekey {
-        store: Uuid,
-        #[arg(long)]
-        target_key: Option<String>,
-        #[arg(long)]
-        execute: bool,
-        #[arg(long)]
-        confirm: Option<String>,
+        store: String,
+        #[command(subcommand)]
+        command: RekeyCommand,
     },
     Sweep {
         #[arg(long)]
@@ -251,7 +268,7 @@ pub enum Stores {
         preview: Option<Uuid>,
         #[arg(skip)]
         confirm_prefix: Option<String>,
-        #[arg(long, default_value = "48h")]
+        #[arg(long = "age", default_value = "48h")]
         older_than: String,
     },
 }
@@ -261,6 +278,23 @@ pub enum StoreKey {
     Clear { store: String },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
+pub enum RekeyCommand {
+    Preview {
+        #[arg(long = "key")]
+        target_key: Option<String>,
+    },
+    Start {
+        #[arg(long = "key")]
+        target_key: Option<String>,
+        #[arg(long)]
+        confirm: String,
+    },
+    Status,
+    Pause,
+    Resume,
+    Retry,
+}
+#[derive(Subcommand, Serialize, Deserialize)]
 pub enum Settings {
     Get {
         section: String,
@@ -268,7 +302,7 @@ pub enum Settings {
     Set {
         section: String,
         file: PathBuf,
-        #[arg(long)]
+        #[arg(long = "rev")]
         revision: i64,
         #[arg(skip)]
         document: Option<Value>,
@@ -292,9 +326,7 @@ pub enum ControlSettings {
         session_lifetime: Option<String>,
         #[arg(long)]
         gravatar_base_url: Option<String>,
-        #[arg(long)]
-        thumbnail_cache_size: Option<String>,
-        #[arg(long)]
+        #[arg(long = "rev")]
         revision: Option<i64>,
     },
 }
@@ -305,7 +337,7 @@ pub enum Keys {
         name: String,
         #[arg(value_parser = ["access", "signing", "block"])]
         purpose: String,
-        #[arg(long, value_parser = ["aes-256-gcm", "chacha20-poly1305"])]
+        #[arg(short = 'a', long, value_parser = ["aes-256-gcm", "chacha20-poly1305"])]
         algorithm: Option<String>,
     },
     Revoke {
@@ -339,6 +371,10 @@ pub enum Cluster {
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
+pub enum Setup {
+    Token,
+}
+#[derive(Subcommand, Serialize, Deserialize)]
 pub enum Credentials {
     List {
         #[arg(long)]
@@ -350,7 +386,7 @@ pub enum Credentials {
         read_only: bool,
         #[arg(long)]
         label: Option<String>,
-        #[arg(long)]
+        #[arg(long = "ttl")]
         expires_in: Option<String>,
     },
     Grant {
@@ -379,7 +415,7 @@ pub enum Credentials {
         access_key: String,
         #[arg(long, default_value = "24h")]
         overlap: String,
-        #[arg(long)]
+        #[arg(long = "ttl")]
         expires_in: Option<String>,
     },
     Update {
@@ -437,9 +473,10 @@ impl Command {
             | Self::Integrity(Integrity::Issues { .. })
             | Self::Pack(Packs::Status)
             | Self::Cache(Cache::Status)
-            | Self::Stores(Stores::List)
+            | Self::Stores(Stores::List | Stores::Show { .. })
             | Self::Settings(Settings::Control(ControlSettings::Show) | Settings::Get { .. })
             | Self::Keys(Keys::List)
+            | Self::Setup(Setup::Token)
             | Self::Cluster(Cluster::Status | Cluster::Nodes) => None,
             Self::Bucket(_) => Some("bucket.change"),
             Self::Credential(_) => Some("credential.change"),
@@ -470,14 +507,15 @@ pub enum Domains {
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Quotas {
+    #[command(name = "get")]
     Show {
         #[arg(value_parser=["project","bucket"])]
-        kind: String,
+        scope: String,
         id: Uuid,
     },
     Set {
         #[arg(value_parser=["project","bucket"])]
-        kind: String,
+        scope: String,
         id: Uuid,
         file: PathBuf,
         #[arg(skip)]
@@ -514,7 +552,7 @@ pub enum Users {
         role: String,
         #[arg(long)]
         require_change: bool,
-        #[arg(long)]
+        #[arg(long = "stdin")]
         password_stdin: bool,
         #[arg(skip)]
         password: Option<String>,
@@ -523,7 +561,7 @@ pub enum Users {
         username: String,
         #[arg(long)]
         require_change: bool,
-        #[arg(long)]
+        #[arg(long = "stdin")]
         password_stdin: bool,
         #[arg(skip)]
         password: Option<String>,
@@ -567,6 +605,19 @@ pub fn deployment_key() -> Result<String> {
     use base64::Engine;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
+fn read_json(path: &Path, limit: usize, label: &str) -> Result<Value> {
+    let bytes = if path == Path::new("-") {
+        let mut bytes = Vec::new();
+        let mut stdin = std::io::stdin();
+        stdin.read_to_end(&mut bytes)?;
+        bytes
+    } else {
+        ensure!(std::fs::metadata(path)?.len() <= limit as u64, "{label} too large");
+        std::fs::read(path)?
+    };
+    ensure!(bytes.len() <= limit, "{label} too large");
+    Ok(serde_json::from_slice(&bytes)?)
+}
 async fn send_frame(socket: &mut UnixStream, value: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     ensure!(bytes.len() <= 1024 * 1024, "admin message exceeds limit");
@@ -593,11 +644,7 @@ pub async fn client(path: &Path, mut command: Command) -> Result<()> {
             | Credentials::Permissions { file, document, .. },
         )
         | Command::Settings(Settings::Set { file, document, .. }) => {
-            ensure!(
-                std::fs::metadata(&file)?.len() <= 512 * 1024,
-                "JSON file too large"
-            );
-            *document = Some(serde_json::from_slice(&std::fs::read(file)?)?);
+            *document = Some(read_json(file, 512 * 1024, "JSON file")?);
         }
         Command::Bucket(Buckets::Purge {
             name,
@@ -674,7 +721,7 @@ pub async fn client(path: &Path, mut command: Command) -> Result<()> {
             } else {
                 ensure!(
                     std::io::stdin().is_terminal(),
-                    "password input requires a terminal; use docker exec -it or --password-stdin"
+                    "password input requires a terminal; use docker exec -it or --stdin"
                 );
                 let text = rpassword::prompt_password("Password: ")?;
                 let confirmation = rpassword::prompt_password("Confirm password: ")?;
@@ -683,9 +730,7 @@ pub async fn client(path: &Path, mut command: Command) -> Result<()> {
             });
         }
         Command::Bucket(Buckets::Cors { file, document, .. }) => {
-            let meta = std::fs::metadata(&file)?;
-            ensure!(meta.len() <= 64 * 1024, "CORS file too large");
-            *document = Some(serde_json::from_slice(&std::fs::read(file)?)?);
+            *document = Some(read_json(file, 64 * 1024, "CORS file")?);
         }
         _ => {}
     }

@@ -61,7 +61,7 @@ def wait(fn, seconds=30):
 
 
 def client(bucket):
-    value = cli('credential', 'create', bucket)
+    value = cli('cred', 'create', bucket)
     return boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
                         aws_access_key_id=value['access_key'], aws_secret_access_key=value['secret_key'],
                         config=config)
@@ -123,11 +123,11 @@ print('PASS cross-bucket dedup, purge, last-reference grace, paused and resumed 
 
 # A destructive sweep requires a completed preview, exact prefix and maintenance.
 cli('maintenance', 'enable')
-preview = cli('backend', 'sweep', '--older-than', '1s')['task_id']
+preview = cli('storage', 'sweep', '--age', '1s')['task_id']
 wait(lambda: task_done(preview))
 scope = cli('task', 'show', preview)['detail']['prefix']
-task = danger(scope, 'backend', 'sweep', '--execute', '--preview', preview,
-              '--older-than', '1s')['task_id']
+task = danger(scope, 'storage', 'sweep', '--execute', '--preview', preview,
+              '--age', '1s')['task_id']
 wait(lambda: task_done(task))
 cli('maintenance', 'disable')
 creds = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())

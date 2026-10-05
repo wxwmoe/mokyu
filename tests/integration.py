@@ -1,7 +1,7 @@
 """S3/HTTP contract checks against an isolated gateway; never point at production.
 
 Requires boto3 and requests. MOKYU_TEST_CREDENTIALS points to the JSON returned by
-`cli credential create`; that credential must only grant the empty test bucket.
+`cli cred create`; that credential must only grant the empty test bucket.
 """
 import base64
 import hashlib

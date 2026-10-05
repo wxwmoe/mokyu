@@ -98,7 +98,7 @@ try:
 
     # The two remaining administrators cannot both be disabled, even through local CLI.
     backup = prefix + '-admin'
-    record = cli('user', 'create', backup, '--password-stdin', secret=password + '\n')
+    record = cli('user', 'create', backup, '--stdin', secret=password + '\n')
     created.append(record)
     db.execute('UPDATE web_users SET enabled=false WHERE id=ANY(%s)', (other_admins,))
     isolated_admins = True

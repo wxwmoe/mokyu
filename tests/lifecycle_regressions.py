@@ -110,8 +110,8 @@ interactive(['user', 'password', user], [(old + '\n').encode(), (new + '\n').enc
 assert login(user, new)[1].status_code == 200
 interactive(['user', 'create', prefix + '-eof'], [b'\x04'], False)
 assert scalar('SELECT count(*) FROM web_users WHERE username=%s', (prefix + '-eof',)) == 0
-assert '--password-stdin' in cli('user', 'create', prefix + '-pipe', password=old + '\n', success=False)
-cli('user', 'create', prefix + '-pipe', '--password-stdin', password=old + '\n')
+assert '--stdin' in cli('user', 'create', prefix + '-pipe', password=old + '\n', success=False)
+cli('user', 'create', prefix + '-pipe', '--stdin', password=old + '\n')
 assert login(prefix + '-pipe', old)[1].status_code == 200
 print('PASS hidden create/reset, mismatch, EOF, echo restoration and stdin input', flush=True)
 
@@ -119,7 +119,7 @@ print('PASS hidden create/reset, mismatch, EOF, echo restoration and stdin input
 with ThreadPoolExecutor(max_workers=2) as pool:
     for action in ('password', 'disable', 'delete'):
         user = prefix + '-' + action
-        cli('user', 'create', user, '--password-stdin', password=old + '\n')
+        cli('user', 'create', user, '--stdin', password=old + '\n')
         existing, response = login(user, old)
         assert response.status_code == 200
         marker = arm('login-verified')
@@ -128,7 +128,7 @@ with ThreadPoolExecutor(max_workers=2) as pool:
             wait(lambda: marker.with_suffix('.hit').exists())
             args = ['user', action, user]
             if action == 'password':
-                args.append('--password-stdin')
+                args.append('--stdin')
             cli(*args, password=new + '\n' if action == 'password' else None)
             assert existing.get(web + '/api/session').status_code == 403
         finally:
@@ -140,12 +140,12 @@ with ThreadPoolExecutor(max_workers=2) as pool:
 
     # Login owns the row first: reset waits and then revokes that new session.
     user = prefix + '-login-first'
-    cli('user', 'create', user, '--password-stdin', password=old + '\n')
+    cli('user', 'create', user, '--stdin', password=old + '\n')
     marker = arm('login-before-session')
     pending = pool.submit(login, user, old)
     try:
         wait(lambda: marker.with_suffix('.hit').exists())
-        resetting = pool.submit(cli, 'user', 'password', user, '--password-stdin', password=new + '\n')
+        resetting = pool.submit(cli, 'user', 'password', user, '--stdin', password=new + '\n')
         wait(lambda: scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'UPDATE web_users SET password_hash%')"))
     finally:
         marker.unlink(missing_ok=True)
@@ -158,7 +158,7 @@ print('PASS password reset, disable and delete races in both transaction orders'
 
 
 def client(bucket):
-    credentials = cli('credential', 'create', bucket)
+    credentials = cli('cred', 'create', bucket)
     return boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                         aws_access_key_id=credentials['access_key'], aws_secret_access_key=credentials['secret_key'],
                         config=Config(retries={'max_attempts': 0}, read_timeout=30,
@@ -195,7 +195,7 @@ for task, bid in tasks:
     cli('task', 'resume', str(task), success=False)
 assert scalar('SELECT count(*) FROM objects WHERE bucket_id=%s AND stream_id IS NOT NULL', (tasks[0][1],)) == 1
 assert scalar("SELECT count(*) FROM uploads WHERE bucket_id=%s AND state='active'", (tasks[1][1],)) == 1
-preview = cli('backend', 'sweep')['task_id']
+preview = cli('storage', 'sweep')['task_id']
 wait(lambda: scalar('SELECT state FROM tasks WHERE id=%s', (preview,)) == 'completed')
 cli('maintenance', 'disable')
 for task, bid in tasks:

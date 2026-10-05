@@ -75,7 +75,7 @@ def member(suffix, role, scope='selected', grants=None):
 
 
 def s3_client(bucket):
-    key = cli('credential', 'create', bucket['name'])
+    key = cli('cred', 'create', bucket['name'])
     result = admin.put(url + '/api/credentials/' + key['access_key'] + '/grants', json=[{'bucket_id': bucket['id'], 'actions': ['bucket.list', 'object.read', 'object.write', 'object.delete', 'object.acl', 'bucket.settings', 'storage.inspect']}])
     assert result.status_code == 200, result.text
     return boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1', aws_access_key_id=key['access_key'], aws_secret_access_key=key['secret_key'], config=Config(signature_version='s3v4', s3={'addressing_style': 'path'}, retries={'max_attempts': 0}, request_checksum_calculation='when_required'))

@@ -37,7 +37,7 @@ test('maintenance policies, task history, service configuration and database key
     await page.goto('/service'); await expect(page.locator('.queue-card')).toHaveCount(3)
     await expect(page.locator('.service-metric')).toHaveCount(3)
     await page.getByRole('tab', { name: en.runtimeConfig, exact: true }).click()
-    await page.getByRole('textbox', { name: en.searchConfiguration }).fill('encryption.deployment_key')
+    await page.getByRole('textbox', { name: en.searchConfiguration }).fill('instance.deployment_key')
     await expect(page.locator('.config-fields article')).toHaveCount(1)
     await expect(page.locator('.config-fields article').first()).toContainText(en.redactedValue)
     await page.getByRole('tab', { name: en.administratorTools, exact: true }).click()

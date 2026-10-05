@@ -57,8 +57,8 @@ def task(*args):
 
 def execute_sweep(preview, expected_error=None):
     master, slave = pty.openpty()
-    child = subprocess.Popen(command + ['backend', 'sweep', '--execute', '--preview', preview,
-                                         '--older-than', '1s'], stdin=slave,
+    child = subprocess.Popen(command + ['storage', 'sweep', '--execute', '--preview', preview,
+                                         '--age', '1s'], stdin=slave,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     os.close(slave)
     try:
@@ -192,14 +192,14 @@ try:
     backend.put_object(Bucket=settings['bucket'], Key=orphan, Body=b'unindexed')
     time.sleep(1.2)
     cli('maintenance', 'enable')
-    preview = task('backend', 'sweep', '--older-than', '1s')
+    preview = task('storage', 'sweep', '--age', '1s')
     assert preview['detail']['candidates'] == 0
     assert preview['detail']['min_storage_duration_seconds'] == 30 * 86400
     assert execute_sweep(preview['id'])['detail']['candidates'] == 0
     stop()
     start('0s')
     execute_sweep(preview['id'], expected_error='preview again')
-    preview = task('backend', 'sweep', '--older-than', '1s')
+    preview = task('storage', 'sweep', '--age', '1s')
     assert preview['detail']['candidates'] == 1
     # Persist an approved task before restart under a longer minimum.
     resumed = uuid.uuid4()
@@ -212,7 +212,7 @@ try:
     backend.head_object(Bucket=settings['bucket'], Key=orphan)
     stop()
     start('0s')
-    preview = task('backend', 'sweep', '--older-than', '1s')
+    preview = task('storage', 'sweep', '--age', '1s')
     assert execute_sweep(preview['id'])['detail']['candidates'] == 1
     cli('maintenance', 'disable')
     cli('gc', 'run')

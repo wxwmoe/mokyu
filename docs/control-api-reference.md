@@ -1,6 +1,6 @@
 # 管理页面与 API
 
-管理端口默认 `9002`。页面使用同源 `/api/`，接口与 CLI 复用授权、发布和维护服务。日常使用见[管理指南](management.md)；请求与响应类型以 `GET /api/openapi.json` 为准，亦可运行 `mokyu api-schema` 离线导出。`GET /api/info` 返回产品、程序版本和契约标识。
+管理端口默认 `9002`。页面使用同源 `/api/`，接口与 CLI 复用授权、发布和维护服务。日常使用见[管理指南](management.md)；请求与响应类型以 `GET /api/openapi.json` 为准，亦可运行 `mokyu tool openapi` 离线导出。`GET /api/info` 返回产品、程序版本和契约标识。
 
 ## 通用约定
 
@@ -39,7 +39,7 @@
 
 密码为 12～1024 UTF-8 字节，哈希与验证共用两个并行名额。密码验证和会话创建同步检查用户版本，不能用重置前的验证结果创建新会话。`last_seen_at` 最多五分钟更新一次，不延长会话寿命。
 
-首次安装仅在没有用户时开放。服务在管理 socket 旁写入 0600 的 `setup-token`；`POST /api/setup` 接收 `{token,username,password}`，成功后立即失效并移除文件。CLI 创建首个管理员也会关闭初始化入口。
+首次安装仅在没有用户时开放。使用 `mokyu cli setup token` 生成一次性 token；数据库只保存哈希和一小时有效期，`POST /api/setup` 接收 `{token,username,password}`，成功后立即失效。CLI 创建首个管理员也会关闭初始化入口。
 
 ## 项目与权限
 
@@ -84,14 +84,15 @@ secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployme
 
 | 方法与路径 | 用途 |
 | --- | --- |
-| `GET/POST /api/buckets` | 可见桶目录 / 创建桶，目录最多 1000 项 |
+| `GET/POST /api/buckets` | 可见桶目录 / 创建桶；请求可含 `name`、`project_id`、`store_id`，目录最多 1000 项 |
 | `GET /api/bucket-projects` | 当前用户可创建桶的项目及额度 |
 | `GET/PUT /api/buckets/{bucket}/settings` | 带 revision 的统一设置 |
-| `GET/PUT /api/buckets/{bucket}/cors`、`website` | 单独读取或替换 CORS / 网站设置 |
+| `GET /api/buckets/{bucket}/cors`、`PUT /api/buckets/{bucket}/cors` | 读取或替换 CORS 设置 |
+| `GET /api/buckets/{bucket}/website`、`PUT /api/buckets/{bucket}/website` | 读取或替换网站设置 |
 | `POST /api/buckets/{bucket}/purge/preview` | 空桶删除或清桶的影响预览 |
 | `DELETE /api/buckets/{bucket}` | 删除空桶 |
 | `POST /api/buckets/{bucket}/purge` | 清空并删除，返回 task_id |
-| `POST /api/buckets/{bucket}/transfer/preview`、`transfer` | 预览 / 执行项目转移 |
+| `POST /api/buckets/{bucket}/transfer/preview`、`POST /api/buckets/{bucket}/transfer` | 预览 / 执行项目转移 |
 
 桶信息含 id、name、project_id、actions、state、revision、uploads_paused、public_base_url、CORS 和网站设置。统一保存携带读取时的 revision；并发改变返回 412。成员需要 bucket.settings，只能改 CORS 与网站；域名、公共 URL 和暂停新上传限管理员。
 
@@ -173,6 +174,22 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 
 Web 发起者才能续传自己的上传；管理员可查看和终止其他上传。刷新后重新选择原文件，并核对已接收部分的完整校验和。完成仅表示对象已发布；remote_state 区分本地已保存与存储已就绪，上传缓存恢复要求见[备份材料](deployment-and-recovery.md#备份材料)。
 
+## 存储
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /api/stores` | 列出存储；返回 id、name、type、连接范围、prefix、current_key_id、三项并发上限、enabled、created_at、updated_at，不返回凭据 |
+| `POST /api/stores` | 创建存储；请求 `{name,type,initialize,path?,endpoint?,bucket?,region?,prefix?,current_key_id?,read_concurrency?,upload_concurrency?,control_concurrency?,access_key?,secret_key?}`，type 为 `local` 或 `s3`；`initialize` 必须明确为 `true` |
+| `PUT /api/stores/{name}` | 修改 type、连接字段、prefix、current_key_id、三项并发上限或 enabled；name 和 id 不可修改 |
+| `POST /api/stores/{name}/check` | 读取并核对已有 `meta.json`，无请求体 |
+| `POST /api/stores/{name}/rekey` | 对存量物理编码执行 `preview`、`start`、`status`、`pause`、`resume` 或 `retry`；`start` 必须提交预览 confirmation |
+
+`local` 请求使用 `path`（省略时为 `/data/storage`），`s3` 请求需要 endpoint、bucket、region、access_key 和 secret_key；prefix 默认为空。创建前目标命名空间必须为空并写入身份标识。更新连接信息只接受与已有身份标识匹配的目标，不会为缺失的 `meta.json` 初始化目标；凭据只用于写入，响应不会返回明文。存储名称为 1～128 字节且不能含 `/` 或控制字符，endpoint 必须是无查询串或片段的 HTTP(S) URL。
+
+创建桶时，零个启用存储会失败，一个启用存储会自动绑定，多个启用存储必须在请求中提供 `store_id`；桶绑定后不可更改。同一存储内的桶共享去重，不同存储之间不共享。群集模式拒绝 local 存储。存储管理限管理员或 system Token，并按通用约定要求最近验证密码。
+
+请求中的 type、字段组合或存储名称无效时不会写入数据库；存储不存在、命名空间非空、`meta.json` 缺失或身份不匹配也会拒绝操作并返回错误。确认具体错误时使用响应中的 `code` 和 `request_id`；不要通过重复创建来初始化已有存储。
+
 ## 存储洞察
 
 | 方法与路径 | 内容 |
@@ -199,6 +216,29 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 
 运行计数本进程累计、重启归零：HTTP started/completed/active/failed/canceled、4xx/5xx、字节及延时；缓存命中/查找、存储请求/字节、GC 成败。失败率为 `(failed+canceled)/completed`，耗时分位数是倍增直方图的近似上界。统计不是账单或逐请求日志；Linux RSS 也不等于含页缓存的容器内存。
 
+## 控制设置
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /api/settings` | 列出 PostgreSQL 中共享的 runtime settings 分组和 `restart_required` 状态 |
+| `GET /api/settings/{section}` | 读取一个 runtime settings 分组 |
+| `PUT /api/settings/{section}` | 管理员按 revision 替换一个分组；值按当前 Rust schema 校验 |
+| `POST /api/settings/{section}/reset` | 恢复一个分组的当前代码默认值 |
+
+runtime settings 首次从空数据库启动时由当前配置生成，之后由数据库统一保存。保存后响应只标记需要重启的字段；监听地址、数据库连接、部署密钥和资源预算不属于此 API，重启前请求继续使用旧值。
+
+## 群集注册
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /api/cluster` | 读取 deployment mode、enabled 节点数和 local store 数 |
+| `GET /api/cluster/nodes` | 列出节点名称、角色、advertise URL、启用状态和 heartbeat |
+| `POST /api/cluster/tokens` | 管理员创建一次性 control/worker/data join token |
+| `DELETE /api/cluster/nodes/{id}` | 撤销节点并使旧凭据及未消费令牌失效 |
+| `POST /api/cluster/nodes/{id}/reissue` | 仅对已撤销节点生成替换 join token；重新注册后旧凭据不可用 |
+
+reissue 的响应只返回一次性 token。节点丢失 `node.json` 时先撤销，再把新 token 写入容器配置并启动注册。
+
 ## 整理工作台与服务诊断
 
 以下入口限管理员或明确签发的 system Token。
@@ -207,9 +247,11 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | --- | --- |
 | `GET /api/maintenance` | 七类策略、周期、当前/最近任务、下次检查、打包开关和排空状态 |
 | `POST /api/maintenance/{kind}/actions` | pause/resume/run；kind 为 pack/reuse/reclaim/repack/range/gc/cleanup |
-| `POST /api/maintenance/mode`、`pack-creation` | `{enabled}`；维护模式 / 是否允许新包生成 |
+| `POST /api/maintenance/mode` | `{enabled}`；启用或退出维护模式 |
+| `POST /api/maintenance/pack-creation` | `{enabled}`；允许或停止新包生成 |
 | `POST /api/maintenance/flush` | 将已有上传缓存写入存储 |
-| `POST /api/maintenance/sweep`、`sweep/preview` | 只读清查 / 根据已完成扫描准备删除确认 |
+| `POST /api/maintenance/sweep` | 发起只读存储清查 |
+| `POST /api/maintenance/sweep/preview` | 根据已完成清查准备删除确认 |
 | `POST /api/maintenance/unpack/preview` | 单包 `{pack_id}` 或全部 `{all:true}` 拆包预览 |
 | `POST /api/maintenance/{operation}/execute` | `{preview_id,confirmation}`，operation 为 unpack/sweep |
 | `GET /api/keys` | 列出数据库密钥元数据，不返回密钥材料 |

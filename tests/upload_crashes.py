@@ -111,8 +111,8 @@ try:
     s3.put_object(Bucket=bucket, Key='rotated-pending', Body=raw)
     ids = [r[0] for r in db.execute('SELECT chunk_id FROM pending_uploads').fetchall()]
     assert len(ids) > 1
-    rotated = cli('keys', 'create', 'rotated', 'encryption')
-    cli('keys', 'activate', rotated['id'])
+    rotated = cli('key', 'create', 'rotated', 'encryption')
+    cli('key', 'activate', rotated['id'])
     kill()
     (faults / 'upload-before-work').unlink()
     start()

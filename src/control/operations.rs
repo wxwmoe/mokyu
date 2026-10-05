@@ -1,7 +1,7 @@
 use crate::{
     admin::{
         Buckets, Cache, Cleanup, Cluster, Command, ControlSettings, Credentials, Domains, Gc,
-        Integrity, Keys, Maintenance, Packs, Projects, Settings, StoreKey, Stores, Tasks, Users,
+        Integrity, Keys, Maintenance, Packs, Projects, RekeyCommand, Settings, Setup, StoreKey, Stores, Tasks, Users,
     },
     app::{App, Bucket},
     authorization::{Action, Principal},
@@ -67,16 +67,16 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
         Command::Quota(command) => {
             use crate::admin::Quotas;
             let result = match command {
-                Quotas::Show { kind, id } => {
-                    super::quotas::read(app, &Principal::Local, &kind, id).await?
+                Quotas::Show { scope, id } => {
+                    super::quotas::read(app, &Principal::Local, &scope, id).await?
                 }
                 Quotas::Set {
-                    kind, id, document, ..
+                    scope, id, document, ..
                 } => {
                     super::quotas::save(
                         app,
                         &Principal::Local,
-                        &kind,
+                        &scope,
                         id,
                         serde_json::from_value(document.context("missing quota document")?)?,
                     )
@@ -287,6 +287,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 super::cluster::reissue_record(app, &Principal::Local, id, &expires_in).await?,
             )?),
         },
+        Command::Setup(Setup::Token) => Ok(json!({"token": super::account::setup_token(app).await?})),
         Command::Stores(command) => {
             type Row = (
                 uuid::Uuid,
@@ -297,6 +298,10 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 Option<String>,
                 Option<String>,
                 String,
+                Option<uuid::Uuid>,
+                Option<i32>,
+                Option<i32>,
+                Option<i32>,
                 bool,
                 chrono::DateTime<chrono::Utc>,
             );
@@ -310,26 +315,38 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                     "bucket": row.5,
                     "region": row.6,
                     "prefix": row.7,
-                    "enabled": row.8,
-                    "updated_at": row.9,
+                    "current_key_id": row.8,
+                    "read_concurrency": row.9,
+                    "upload_concurrency": row.10,
+                    "control_concurrency": row.11,
+                    "enabled": row.12,
+                    "updated_at": row.13,
                 })
             };
             match command {
                 Stores::List => {
-                    let rows: Vec<Row> = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,enabled,updated_at FROM stores ORDER BY name")
+                    let rows: Vec<Row> = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,current_key_id,read_concurrency,upload_concurrency,control_concurrency,enabled,updated_at FROM stores ORDER BY name")
                         .fetch_all(&app.db)
                         .await?;
                     Ok(json!(rows.into_iter().map(public).collect::<Vec<_>>()))
                 }
                 Stores::Check { name } => {
-                    let row: Row = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,enabled,updated_at FROM stores WHERE name=$1")
+                    let row: Row = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,current_key_id,read_concurrency,upload_concurrency,control_concurrency,enabled,updated_at FROM stores WHERE name=$1")
                         .bind(&name)
                         .fetch_optional(&app.db)
                         .await?
                         .context("store not found")?;
                     app.storage.refresh_store(row.0).await?;
-                    ensure!(row.8, "store is disabled");
+                    ensure!(row.12, "store is disabled");
                     app.storage.check_store_identity(row.0, false).await?;
+                    Ok(public(row))
+                }
+                Stores::Show { name } => {
+                    let row: Row = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket,region,prefix,current_key_id,read_concurrency,upload_concurrency,control_concurrency,enabled,updated_at FROM stores WHERE name=$1")
+                        .bind(&name)
+                        .fetch_optional(&app.db)
+                        .await?
+                        .context("store not found")?;
                     Ok(public(row))
                 }
                 Stores::Key { command } => match command {
@@ -340,17 +357,47 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                         super::stores::set_current_key(app, store, None).await?,
                     )?),
                 },
-                Stores::Rekey {
-                    store,
-                    target_key,
-                    execute,
-                    confirm,
-                } => app
-                    .rekey_start(store, target_key.as_deref(), execute, confirm.as_deref())
-                    .await,
+                Stores::Rekey { store, command } => {
+                    let store_id: uuid::Uuid = sqlx::query_scalar(
+                        "SELECT id FROM stores WHERE name=$1 OR id=$2::uuid",
+                    )
+                    .bind(&store)
+                    .bind(store.parse::<uuid::Uuid>().ok())
+                    .fetch_optional(&app.db)
+                    .await?
+                    .context("store not found")?;
+                    match command {
+                        RekeyCommand::Preview { target_key } => {
+                            app.rekey_start(store_id, target_key.as_deref(), false, None).await
+                        }
+                        RekeyCommand::Start { target_key, confirm } => {
+                            app.rekey_start(store_id, target_key.as_deref(), true, Some(&confirm)).await
+                        }
+                        RekeyCommand::Status => Ok(sqlx::query_scalar::<_, serde_json::Value>(
+                            "SELECT to_jsonb(t) FROM tasks t WHERE kind='rekey' AND detail->>'store_id'=$1 ORDER BY created_at DESC LIMIT 1",
+                        )
+                        .bind(store_id.to_string())
+                        .fetch_optional(&app.db)
+                        .await?
+                        .context("rekey task not found")?),
+                        RekeyCommand::Pause | RekeyCommand::Resume | RekeyCommand::Retry => {
+                            let task: uuid::Uuid = sqlx::query_scalar(
+                                "SELECT id FROM tasks WHERE kind='rekey' AND detail->>'store_id'=$1 ORDER BY created_at DESC LIMIT 1",
+                            )
+                            .bind(store_id.to_string())
+                            .fetch_optional(&app.db)
+                            .await?
+                            .context("rekey task not found")?;
+                            let resume = matches!(command, RekeyCommand::Resume | RekeyCommand::Retry);
+                            app.task_change(task, resume).await
+                        }
+                    }
+                }
                 Stores::Create {
                     name,
                     r#type,
+                    initialize,
+                    key,
                     path,
                     endpoint,
                     bucket,
@@ -362,6 +409,19 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                     upload_concurrency,
                     control_concurrency,
                 } => {
+                    let current_key_id = if let Some(key) = key {
+                        sqlx::query_scalar::<_, uuid::Uuid>(
+                            "SELECT id FROM managed_keys WHERE purpose='block' AND revoked_at IS NULL AND (name=$1 OR id=$2)",
+                        )
+                        .bind(&key)
+                        .bind(key.parse::<uuid::Uuid>().ok())
+                        .fetch_optional(&app.db)
+                        .await?
+                        .map(Some)
+                        .context("active block key not found")?
+                    } else {
+                        None
+                    };
                     let row = super::stores::create_record(
                         app,
                         super::stores::StoreInput {
@@ -372,7 +432,8 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                             bucket,
                             region,
                             prefix,
-                            current_key_id: None,
+                            current_key_id,
+                            initialize,
                             access_key,
                             secret_key,
                             read_concurrency,
@@ -386,6 +447,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 Stores::Update {
                     name,
                     r#type,
+                    key,
                     path,
                     endpoint,
                     bucket,
@@ -395,9 +457,26 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                     secret_key,
                     enabled,
                     read_concurrency,
+                    clear_read_concurrency,
                     upload_concurrency,
+                    clear_upload_concurrency,
                     control_concurrency,
+                    clear_control_concurrency,
                 } => {
+                    let current_key_id = if let Some(key) = key {
+                        Some(
+                            sqlx::query_scalar::<_, uuid::Uuid>(
+                                "SELECT id FROM managed_keys WHERE purpose='block' AND revoked_at IS NULL AND (name=$1 OR id=$2)",
+                            )
+                            .bind(&key)
+                            .bind(key.parse::<uuid::Uuid>().ok())
+                            .fetch_optional(&app.db)
+                            .await?
+                            .context("active block key not found")?,
+                        )
+                    } else {
+                        None
+                    };
                     let row = super::stores::update_record(
                         app,
                         name,
@@ -408,13 +487,13 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                             bucket,
                             region,
                             prefix,
-                            current_key_id: None,
+                            current_key_id: current_key_id.map(Some),
                             access_key,
                             secret_key,
                             enabled,
-                            read_concurrency,
-                            upload_concurrency,
-                            control_concurrency,
+                            read_concurrency: if clear_read_concurrency { Some(None) } else { read_concurrency.map(Some) },
+                            upload_concurrency: if clear_upload_concurrency { Some(None) } else { upload_concurrency.map(Some) },
+                            control_concurrency: if clear_control_concurrency { Some(None) } else { control_concurrency.map(Some) },
                         },
                     )
                     .await?;
@@ -461,7 +540,6 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                 secure_cookie,
                 session_lifetime,
                 gravatar_base_url,
-                thumbnail_cache_size,
                 revision,
             } => Ok(serde_json::to_value(
                 super::settings::update(
@@ -472,7 +550,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
                         secure_cookie,
                         session_lifetime,
                         gravatar_base_url,
-                        thumbnail_cache_size,
+                        thumbnail_cache_size: None,
                         revision,
                     },
                 )
@@ -504,7 +582,7 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
         Command::Cache(Cache::Status) => app.upload_cache_status().await,
         Command::Cache(Cache::Flush) => app.cache_flush_start().await,
         Command::Pack(Packs::Status) => app.pack_status().await,
-        Command::Pack(Packs::Run { kind }) => app.pack_start(&kind).await,
+        Command::Pack(Packs::Run { mode }) => app.pack_start(&mode).await,
         Command::Pack(Packs::Unpack { id, all, execute }) => {
             app.unpack_start(id, all, execute).await
         }
@@ -535,13 +613,13 @@ async fn execute_inner(app: &Arc<App>, command: Command) -> Result<Value> {
             )
         }
         Command::Maintenance(Maintenance::Status) => app.maintenance_status().await,
-        Command::Maintenance(Maintenance::Pause { kind }) => {
-            app.maintenance_change(&kind, true).await
+        Command::Maintenance(Maintenance::Pause { task }) => {
+            app.maintenance_change(&task, true).await
         }
-        Command::Maintenance(Maintenance::Resume { kind }) => {
-            app.maintenance_change(&kind, false).await
+        Command::Maintenance(Maintenance::Resume { task }) => {
+            app.maintenance_change(&task, false).await
         }
-        Command::Maintenance(Maintenance::Run { kind }) => app.maintenance_start(&kind).await,
+        Command::Maintenance(Maintenance::Run { task }) => app.maintenance_start(&task).await,
         Command::Maintenance(Maintenance::PackCreation { action }) => {
             anyhow::ensure!(
                 ["stop", "resume"].contains(&action.as_str()),

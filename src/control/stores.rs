@@ -50,6 +50,7 @@ pub(crate) struct StoreInput {
     #[serde(default)]
     pub(crate) prefix: String,
     pub(crate) current_key_id: Option<Uuid>,
+    pub(crate) initialize: bool,
     pub(crate) read_concurrency: Option<i32>,
     pub(crate) upload_concurrency: Option<i32>,
     pub(crate) control_concurrency: Option<i32>,
@@ -71,9 +72,12 @@ pub(crate) struct StorePatch {
     pub(crate) access_key: Option<String>,
     pub(crate) secret_key: Option<String>,
     pub(crate) enabled: Option<bool>,
-    pub(crate) read_concurrency: Option<i32>,
-    pub(crate) upload_concurrency: Option<i32>,
-    pub(crate) control_concurrency: Option<i32>,
+    #[serde(default)]
+    pub(crate) read_concurrency: Option<Option<i32>>,
+    #[serde(default)]
+    pub(crate) upload_concurrency: Option<Option<i32>>,
+    #[serde(default)]
+    pub(crate) control_concurrency: Option<Option<i32>>,
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -289,6 +293,7 @@ pub(crate) async fn create_record(
     validate_concurrency(input.read_concurrency, "read")?;
     validate_concurrency(input.upload_concurrency, "upload")?;
     validate_concurrency(input.control_concurrency, "control")?;
+    anyhow::ensure!(input.initialize, "store initialization must be explicit");
     anyhow::ensure!(
         !(mode == "cluster" && input.store_type == "local"),
         "local stores are unavailable in cluster mode"
@@ -352,9 +357,12 @@ pub(crate) async fn update_record(
         "local stores are unavailable in cluster mode"
     );
     let prefix = normalize_prefix(input.prefix.clone().unwrap_or_else(|| row.prefix.clone()))?;
-    validate_concurrency(input.read_concurrency.or(row.read_concurrency), "read")?;
-    validate_concurrency(input.upload_concurrency.or(row.upload_concurrency), "upload")?;
-    validate_concurrency(input.control_concurrency.or(row.control_concurrency), "control")?;
+    let read_concurrency = input.read_concurrency.unwrap_or(row.read_concurrency);
+    let upload_concurrency = input.upload_concurrency.unwrap_or(row.upload_concurrency);
+    let control_concurrency = input.control_concurrency.unwrap_or(row.control_concurrency);
+    validate_concurrency(read_concurrency, "read")?;
+    validate_concurrency(upload_concurrency, "upload")?;
+    validate_concurrency(control_concurrency, "control")?;
     let mut record = if kind == "local" {
         anyhow::ensure!(
             input.endpoint.is_none()
@@ -421,7 +429,7 @@ pub(crate) async fn update_record(
     record.enabled = input.enabled.unwrap_or(row.enabled);
     app.storage.verify_store_record(record.clone()).await?;
     let current_key_id = input.current_key_id.unwrap_or(row.current_key_id);
-    sqlx::query("UPDATE stores SET type=$2,path=$3,endpoint_url=$4,remote_bucket=$5,region=$6,prefix=$7,current_key_id=$8,access_key_encrypted=$9,secret_key_encrypted=$10,read_concurrency=$11,upload_concurrency=$12,control_concurrency=$13,enabled=$14,updated_at=now() WHERE id=$1").bind(row.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket).bind(&record.region).bind(&record.prefix).bind(current_key_id).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(input.read_concurrency.or(row.read_concurrency)).bind(input.upload_concurrency.or(row.upload_concurrency)).bind(input.control_concurrency.or(row.control_concurrency)).bind(record.enabled).execute(&mut *tx).await?;
+    sqlx::query("UPDATE stores SET type=$2,path=$3,endpoint_url=$4,remote_bucket=$5,region=$6,prefix=$7,current_key_id=$8,access_key_encrypted=$9,secret_key_encrypted=$10,read_concurrency=$11,upload_concurrency=$12,control_concurrency=$13,enabled=$14,updated_at=now() WHERE id=$1").bind(row.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket).bind(&record.region).bind(&record.prefix).bind(current_key_id).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(read_concurrency).bind(upload_concurrency).bind(control_concurrency).bind(record.enabled).execute(&mut *tx).await?;
     tx.commit().await?;
     app.storage.refresh_store(row.id).await?;
     Ok(sqlx::query_as(VIEW_BY_ID)
@@ -501,4 +509,66 @@ pub(crate) async fn check(
             .fetch_one(&app.db)
             .await?,
     ))
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RekeyRequest {
+    action: String,
+    target_key: Option<String>,
+    confirmation: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "store_rekey",
+    path = "/api/stores/{name}/rekey",
+    params(("name" = String, Path)),
+    request_body = RekeyRequest,
+    responses((status = 200, body = Value))
+)]
+pub(crate) async fn rekey(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(name): Path<String>,
+    Json(input): Json<RekeyRequest>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    actor.recent(&app).await?;
+    let store_id: Uuid = sqlx::query_scalar("SELECT id FROM stores WHERE name=$1")
+        .bind(&name)
+        .fetch_optional(&app.db)
+        .await?
+        .context("store was not found")?;
+    let value = match input.action.as_str() {
+        "preview" => app
+            .rekey_start(store_id, input.target_key.as_deref(), false, None)
+            .await?,
+        "start" => app
+            .rekey_start(
+                store_id,
+                input.target_key.as_deref(),
+                true,
+                input.confirmation.as_deref(),
+            )
+            .await?,
+        "status" => sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT to_jsonb(t) FROM tasks t WHERE kind='rekey' AND detail->>'store_id'=$1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(store_id.to_string())
+        .fetch_optional(&app.db)
+        .await?
+        .context("rekey task not found")?,
+        "pause" | "resume" | "retry" => {
+            let task: Uuid = sqlx::query_scalar(
+                "SELECT id FROM tasks WHERE kind='rekey' AND detail->>'store_id'=$1 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(store_id.to_string())
+            .fetch_optional(&app.db)
+            .await?
+            .context("rekey task not found")?;
+            app.task_change(task, input.action != "pause").await?
+        }
+        _ => return Err(s3s::s3_error!(InvalidArgument).into()),
+    };
+    Ok(Json(value))
 }

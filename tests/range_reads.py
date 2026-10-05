@@ -103,7 +103,7 @@ try:
     assert cli('status')['backend_gets'] == before
     time.sleep(1.3)
     assert count(pack) == (0, 0)
-    assert task('pack', 'run', '--kind', 'range')['processed'] == 0
+    assert task('pack', 'run', '--mode', 'range')['processed'] == 0
     for full_span in (None, f'bytes=0-{len(raw) - 1}'):
         evict()
         previous = count(pack)[0]
@@ -142,7 +142,7 @@ try:
         assert all(f.result(timeout=30) == expected for f in others)
     wait(lambda: count(pack)[0] == previous[0] + 1)
     assert count(pack)[1] == previous[1] + 1
-    assert task('pack', 'run', '--kind', 'range')['processed'] == 0
+    assert task('pack', 'run', '--mode', 'range')['processed'] == 0
     print('PASS three Range waiters count as one download; one cold download does not split', flush=True)
 
     for _ in range(7):
@@ -153,7 +153,7 @@ try:
     publish = faults / 'pack-before-publish'
     publish.with_suffix('.hit').unlink(missing_ok=True)
     publish.touch()
-    job = cli('pack', 'run', '--kind', 'range')['task_id']
+    job = cli('pack', 'run', '--mode', 'range')['task_id']
     wait(publish.with_suffix('.hit').exists)
     cli('maintenance', 'enable')
     restart(original, maintenance=True)
@@ -183,7 +183,7 @@ try:
     print('PASS repeated cold 64 KiB reads split only a beneficial layout:', json.dumps(report), flush=True)
 
     layout = [(r[0], r[1]) for r in sources]
-    task('pack', 'run', '--kind', 'repack')
+    task('pack', 'run', '--mode', 'repack')
     assert sorted(db.execute('SELECT id,pack_id FROM chunks WHERE id=ANY(%s)', (ids,)).fetchall()) == sorted(layout)
     # Old physical metadata and completed task history do not own the cooldown.
     db.execute('DELETE FROM packs WHERE id=%s', (pack,))
@@ -194,16 +194,16 @@ try:
 
     expire()
     db.execute("UPDATE mokyu_meta SET access_coverage_since=now()-interval '8 days',access_flushed_at=now()")
-    task('pack', 'run', '--kind', 'repack')
+    task('pack', 'run', '--mode', 'repack')
     assert db.execute("SELECT repack_after>now()+interval '6 days' FROM chunks WHERE id=%s", (target[1],)).fetchone()[0]
     db.execute('DELETE FROM chunk_access_windows WHERE chunk_id=ANY(%s)', (ids,))
     expire()
     db.execute('UPDATE mokyu_meta SET access_coverage_since=now()')
-    task('pack', 'run', '--kind', 'repack')
+    task('pack', 'run', '--mode', 'repack')
     assert db.execute("SELECT bool_and(repack_after>now()+interval '6 days') FROM chunks WHERE id=ANY(%s)", (ids,)).fetchone()[0]
     expire()
     db.execute("UPDATE mokyu_meta SET access_coverage_since=now()-interval '8 days',access_flushed_at=now()")
-    task('pack', 'run', '--kind', 'repack')
+    task('pack', 'run', '--mode', 'repack')
     packed = db.execute('SELECT DISTINCT pack_id,range_split_at FROM chunks WHERE id=ANY(%s)', (ids,)).fetchall()
     assert len(packed) == 1 and packed[0][0] is not None and packed[0][1] is None, packed
     assert get() == raw
@@ -222,7 +222,7 @@ try:
         assert s3.get_object(Bucket=bucket, Key='compressed-ranges', Range='bytes=0-65535')['Body'].read() == compressible[:65536]
         wait(lambda: count(compressed_pack)[1] == previous + 1)
     before_puts = cli('status')['backend_puts']
-    result = task('pack', 'run', '--kind', 'range')
+    result = task('pack', 'run', '--mode', 'range')
     assert result['processed'] == 0 and result['detail']['last_range']['reason'] == 'insufficient_net_savings', result
     assert cli('status')['backend_puts'] == before_puts
     del compressible
@@ -235,7 +235,7 @@ try:
         previous = count(pack)[1]
         assert get(span) == expected
         wait(lambda: count(pack)[1] == previous + 1)
-    result = task('pack', 'run', '--kind', 'range')
+    result = task('pack', 'run', '--mode', 'range')
     assert result['processed'] == len(members), result
     assert db.execute('SELECT bool_and(pack_id IS NULL) FROM chunks WHERE id=ANY(%s)', (ids,)).fetchone()[0]
     assert db.execute('SELECT count(*) FROM packs').fetchone()[0] == initial_packs
@@ -246,7 +246,7 @@ try:
 
     restart(original + '\n[pack]\nrange_optimization=false\n')
     assert not cli('pack', 'status')['range_optimization']
-    assert subprocess.run(command + ['cli', 'pack', 'run', '--kind', 'range'], capture_output=True).returncode != 0
+    assert subprocess.run(command + ['cli', 'pack', 'run', '--mode', 'range'], capture_output=True).returncode != 0
     print('PASS disabled Range optimization rejects manual scheduling', flush=True)
 finally:
     (faults / 'pack-download').unlink(missing_ok=True)

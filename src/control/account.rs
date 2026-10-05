@@ -3,7 +3,7 @@ use crate::{
     app::App,
     http::{HttpError, unauthorized},
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::{
     Json,
     extract::{Extension, Path, State},
@@ -12,8 +12,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{path::PathBuf, sync::Arc};
-use tokio::io::AsyncWriteExt;
+use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -334,55 +333,34 @@ pub(super) async fn revoke_others(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn setup_path(app: &App) -> Result<PathBuf> {
-    Ok(app
-        .config
-        .instance
-        .listen_socket
-        .parent()
-        .context("admin socket directory is required")?
-        .join("setup-token"))
-}
-
 pub(crate) async fn initialize(app: &App) -> Result<()> {
     let has_users: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM web_users)")
         .fetch_one(&app.db)
         .await?;
-    let path = setup_path(app)?;
     if has_users {
         sqlx::query("DELETE FROM admin_setup")
             .execute(&app.db)
             .await?;
-        let _ = tokio::fs::remove_file(path).await;
-        return Ok(());
     }
-    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
-    let secret = match tokio::fs::read_to_string(&path).await {
-        Ok(value) => {
-            anyhow::ensure!(
-                value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()),
-                "invalid setup token file; remove it to generate a new token"
-            );
-            value
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let value = crate::admin::random_secret()?;
-            let mut file = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-                .await?;
-            file.write_all(value.as_bytes()).await?;
-            file.sync_all().await?;
-            value
-        }
-        Err(error) => return Err(error.into()),
-    };
-    sqlx::query("INSERT INTO admin_setup(singleton,token_hash) VALUES(true,$1) ON CONFLICT(singleton) DO UPDATE SET token_hash=excluded.token_hash")
-        .bind(blake3::hash(secret.as_bytes()).as_bytes().as_slice()).execute(&app.db).await?;
-    tracing::info!(path=%path.display(), "first administrator setup token is available in the private local file");
     Ok(())
+}
+
+pub(crate) async fn setup_token(app: &App) -> Result<String> {
+    let mut tx = app.db.begin().await?;
+    sqlx::query("SELECT singleton FROM mokyu_meta WHERE singleton FOR UPDATE")
+        .execute(&mut *tx)
+        .await?;
+    let has_users: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM web_users)")
+        .fetch_one(&mut *tx)
+        .await?;
+    anyhow::ensure!(!has_users, "an administrator already exists");
+    let token = crate::admin::random_secret()?;
+    sqlx::query("INSERT INTO admin_setup(singleton,token_hash,expires_at) VALUES(true,$1,now()+interval '1 hour') ON CONFLICT(singleton) DO UPDATE SET token_hash=excluded.token_hash,created_at=now(),expires_at=excluded.expires_at")
+        .bind(blake3::hash(token.as_bytes()).as_bytes().as_slice())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(token)
 }
 
 #[derive(Serialize, ToSchema)]
@@ -420,7 +398,7 @@ pub(super) async fn setup(
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     let expected: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT token_hash FROM admin_setup WHERE singleton")
+        sqlx::query_scalar("SELECT token_hash FROM admin_setup WHERE singleton AND expires_at>now()")
             .fetch_optional(&app.db)
             .await?;
     let supplied = blake3::hash(input.token.as_bytes());
@@ -450,6 +428,5 @@ pub(super) async fn setup(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    let _ = tokio::fs::remove_file(setup_path(&app)?).await;
     Ok(StatusCode::CREATED)
 }

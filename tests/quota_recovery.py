@@ -32,7 +32,7 @@ prefix = 'quota-restart-' + uuid.uuid4().hex[:10]
 project = admin.post(url + '/api/projects', json={'name': prefix}).json()['id']
 bucket = cli('bucket', 'create', prefix)
 db.execute('UPDATE buckets SET project_id=%s WHERE id=%s', (project, bucket['id']))
-credential = cli('credential', 'create', prefix)
+credential = cli('cred', 'create', prefix)
 s3 = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
                   config=Config(signature_version='s3v4', s3={'addressing_style': 'path'}, retries={'max_attempts': 0},

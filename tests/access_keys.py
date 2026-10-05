@@ -88,13 +88,13 @@ try:
     db.execute("UPDATE credentials SET expires_at=now()-interval '1 second' WHERE access_key=%s", (original['access_key'],))
     denied(client.list_buckets)
     replacement.list_buckets()
-    cli('credential', 'disable', rotation['access_key'])
+    cli('cred', 'disable', rotation['access_key'])
     denied(replacement.list_buckets)
-    cli('credential', 'enable', rotation['access_key'])
+    cli('cred', 'enable', rotation['access_key'])
     replacement.list_buckets()
     wrong = {**key_input, 'grants': [{'bucket_id': str(uuid.uuid4()), 'actions': ['object.read']}]}
     assert admin.post(url + '/api/credentials', json=wrong).status_code == 400
-    assert cli('credential', 'show', rotation['access_key'])['grants'] == [grant]
+    assert cli('cred', 'show', rotation['access_key'])['grants'] == [grant]
     print('PASS S3 key secrecy, scoped permissions, expiration, overlapping rotation and CLI enable/disable', flush=True)
 
     # Admin-owned restricted tokens do not inherit instance-wide access.
@@ -131,7 +131,7 @@ try:
 
     # Revocation wins while an admitted mutation is waiting before its final transaction.
     if os.environ.get('MOKYU_TEST_FAULT_DIR'):
-        key = cli('credential', 'create', 'media', '--label', prefix + '-write')
+        key = cli('cred', 'create', 'media', '--label', prefix + '-write')
         credentials.append(key['access_key'])
         writer = s3(key)
         writer.put_object(Bucket='media', Key=prefix, Body=b'private key regression')

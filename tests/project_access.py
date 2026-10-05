@@ -78,7 +78,7 @@ try:
     assert admin.post(url + '/api/me/reauth', json={'password': os.environ['MOKYU_TEST_PASSWORD']}).status_code == 204
 
     bucket = buckets[0]
-    credential = cli('credential', 'create', bucket['name'])
+    credential = cli('cred', 'create', bucket['name'])
     keys.append(credential['access_key'])
     s3 = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
                       aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
@@ -89,7 +89,7 @@ try:
     clients = {}
     for role in ['reader', 'writer', 'maintainer']:
         name = prefix + '-' + role
-        user = cli('user', 'create', name, '--password-stdin', secret=password + '\n')['id']
+        user = cli('user', 'create', name, '--stdin', secret=password + '\n')['id']
         users.append(name)
         db.execute("UPDATE web_users SET role='member' WHERE id=%s", (user,))
         db.execute("INSERT INTO project_members(user_id,project_id,role,scope) VALUES(%s,%s,%s,'selected')", (user, projects[0], role))
@@ -203,5 +203,5 @@ finally:
     for name in users:
         cli('user', 'delete', name)
     for key in keys:
-        cli('credential', 'disable', key)
+        cli('cred', 'disable', key)
     db.close()
