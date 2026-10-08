@@ -408,7 +408,7 @@ pub(super) async fn list(
     sql.push_bind(bucket);
     if !q.prefix.is_empty() {
         sql.push(" AND key>=").push_bind(&q.prefix);
-        if let Some(end) = crate::listing::successor(&q.prefix) {
+        if let Some(end) = crate::app::listing::successor(&q.prefix) {
             sql.push(" AND key<").push_bind(end);
         }
     }
@@ -421,7 +421,7 @@ pub(super) async fn list(
             "prefix" => {
                 let prefix = format!("{}{}", q.prefix, q.q);
                 sql.push(" AND key>=").push_bind(prefix.clone());
-                if let Some(end) = crate::listing::successor(&prefix) {
+                if let Some(end) = crate::app::listing::successor(&prefix) {
                     sql.push(" AND key<").push_bind(end);
                 }
             }

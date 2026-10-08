@@ -1,7 +1,7 @@
 use crate::{
     authorization::{Action, Permit, Principal},
-    codec::{Chunk, MAX},
     config::{self, Budget, Config, Secrets},
+    content::codec::{Chunk, MAX},
     storage::Storage,
 };
 use anyhow::{Context, Result, ensure};
@@ -22,7 +22,9 @@ use uuid::Uuid;
 pub(crate) mod buckets;
 pub(crate) mod chunks;
 pub(crate) mod extents;
+pub(crate) mod listing;
 pub(crate) mod publish;
+pub(crate) mod quota;
 pub(crate) mod streams;
 
 #[derive(Clone, sqlx::FromRow, Serialize)]
@@ -122,8 +124,8 @@ pub struct App {
     pub node: std::sync::OnceLock<crate::cluster::NodeState>,
     pub storage: Arc<Storage>,
     pub thumbnails: Arc<crate::control::media::Thumbnails>,
-    pub statistics: crate::stats::Statistics,
-    pub cleanup_state: crate::lifecycle::Cleanup,
+    pub statistics: crate::status::stats::Statistics,
+    pub cleanup_state: crate::worker::lifecycle::Cleanup,
     pub integrity_pacing: std::sync::Mutex<std::time::Instant>,
     pub local_cleanup: tokio::sync::Mutex<()>,
     pub coord: tokio::sync::Mutex<()>,
@@ -158,13 +160,13 @@ impl App {
             .open(config.instance.data_path.join("gateway.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("another gateway owns this data directory")?;
-        let (db, owner) = crate::db::connect(&config, &mut secrets, &budget, role).await?;
-        let runtime_defaults = crate::db::runtime_defaults(&config)
+        let (db, owner) = crate::database::connect(&config, &mut secrets, &budget, role).await?;
+        let runtime_defaults = crate::database::runtime_defaults(&config)
             .into_iter()
             .map(|(section, value)| (section.to_owned(), value))
             .collect();
-        crate::db::ensure_runtime_settings(&db, &config).await?;
-        let runtime_revisions = crate::db::load_runtime_settings(&db, &mut config).await?;
+        crate::database::ensure_runtime_settings(&db, &config).await?;
+        let runtime_revisions = crate::database::load_runtime_settings(&db, &mut config).await?;
         let budget = config.budget()?;
         if start_maintenance {
             sqlx::query("UPDATE mokyu_meta SET maintenance=true")
@@ -226,8 +228,8 @@ impl App {
             node: std::sync::OnceLock::new(),
             storage,
             thumbnails,
-            statistics: crate::stats::Statistics::default(),
-            cleanup_state: crate::lifecycle::Cleanup::default(),
+            statistics: crate::status::stats::Statistics::default(),
+            cleanup_state: crate::worker::lifecycle::Cleanup::default(),
             integrity_pacing: std::sync::Mutex::new(std::time::Instant::now()),
             local_cleanup: tokio::sync::Mutex::new(()),
             coord: tokio::sync::Mutex::new(()),
@@ -318,7 +320,7 @@ impl App {
         )?);
         status["io"] = self.storage.statistics();
         status["upload_cache"] = self.upload_cache_status().await?;
-        status["process_memory"] = crate::stats::process_memory().await;
+        status["process_memory"] = crate::status::stats::process_memory().await;
         status["gc_running"] = json!(self.gc_running.load(std::sync::atomic::Ordering::Relaxed));
         status["upload_slots_available"] = json!(self.uploads.available_permits());
         status["read_slots_available"] = json!(self.reads.available_permits());
@@ -359,7 +361,7 @@ pub(super) fn check_write_conditions(
     Ok(())
 }
 pub fn internal(error: anyhow::Error) -> s3s::S3Error {
-    if let Some(error) = crate::quota::database_error(&error) {
+    if let Some(error) = crate::app::quota::database_error(&error) {
         return error;
     }
     match error.downcast::<s3s::S3Error>() {

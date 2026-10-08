@@ -93,7 +93,7 @@ pub enum Packs {
 pub enum Integrity {
     Check {
         #[arg(long, value_enum, default_value = "metadata")]
-        mode: crate::integrity::Mode,
+        mode: crate::worker::integrity::Mode,
         #[arg(long)]
         bucket: Option<String>,
         #[arg(long, requires = "bucket")]

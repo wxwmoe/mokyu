@@ -1,4 +1,5 @@
 pub(crate) mod errors;
+pub(crate) mod gateway;
 pub(crate) mod public;
 pub(crate) mod s3;
 

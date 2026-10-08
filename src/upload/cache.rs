@@ -1,4 +1,6 @@
-use crate::{app::App, codec::Chunk, config, storage::ReadContext, worker::packing::Mapping};
+use crate::{
+    app::App, config, content::codec::Chunk, storage::ReadContext, worker::packing::Mapping,
+};
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use serde_json::{Value, json};

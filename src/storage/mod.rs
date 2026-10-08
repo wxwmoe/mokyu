@@ -1,6 +1,6 @@
 use crate::{
-    codec::{self, Chunk, MAX},
     config::{self, Budget, Config, Secrets},
+    content::codec::{self, Chunk, MAX},
 };
 pub(crate) mod cache;
 pub(crate) mod local;
@@ -38,7 +38,7 @@ pub(crate) const STAGING_PREFIX: &str = "__mokyu/multipart/";
 const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 
 pub struct Storage {
-    pub access: Arc<crate::access::Access>,
+    pub access: Arc<crate::status::access::Access>,
     maintenance: Arc<std::sync::atomic::AtomicBool>,
     pub db: sqlx::PgPool,
     pub source_gate: tokio::sync::RwLock<()>,
@@ -60,10 +60,10 @@ pub struct Storage {
     cluster_mode: bool,
     pub secrets: Arc<Secrets>,
     pub(crate) cpu: Arc<Semaphore>,
-    pub compression: Arc<crate::compression::Pool>,
+    pub compression: Arc<crate::content::compression::Pool>,
     compression_enabled: bool,
     base_storage: config::BackendDefaults,
-    base_compression: crate::compression::Config,
+    base_compression: crate::content::compression::Config,
     cpu_jobs: usize,
     pub reads: Arc<crate::storage::resource_gate::Gate>,
     pub writes: Arc<crate::storage::resource_gate::Gate>,
@@ -84,7 +84,7 @@ pub struct Storage {
     pub backend_write_bytes: std::sync::atomic::AtomicU64,
     pub cache_hit_bytes: std::sync::atomic::AtomicU64,
     cache_lookups: std::sync::atomic::AtomicU64,
-    operations: [Arc<crate::stats::Counters>; 4],
+    operations: [Arc<crate::status::stats::Counters>; 4],
 }
 
 pub(crate) type StoreRow = (
@@ -107,7 +107,7 @@ async fn build_store(
     db: &sqlx::PgPool,
     row: StoreRow,
     profile: &StorageProfile,
-    base_compression: &crate::compression::Config,
+    base_compression: &crate::content::compression::Config,
     cpu_jobs: usize,
     default_cache_entries: usize,
     defaults: (usize, usize, usize),
@@ -143,7 +143,7 @@ async fn build_store(
         enabled: true,
     };
     let target = VerifiedStore::build(&record, options, secrets)?;
-    let compression = Arc::new(crate::compression::Pool::new(
+    let compression = Arc::new(crate::content::compression::Pool::new(
         profile.compression_config(base_compression),
         cpu_jobs,
     )?);
@@ -340,7 +340,7 @@ impl Storage {
         }
         let s = Self {
             maintenance,
-            access: Arc::new(crate::access::Access::new(
+            access: Arc::new(crate::status::access::Access::new(
                 budget.cache_entries.clamp(128, 8192),
             )),
             db,
@@ -368,7 +368,7 @@ impl Storage {
             cluster_mode,
             secrets,
             cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
-            compression: Arc::new(crate::compression::Pool::new(
+            compression: Arc::new(crate::content::compression::Pool::new(
                 compression.clone(),
                 budget.cpu_jobs,
             )?),
@@ -409,7 +409,7 @@ impl Storage {
     pub fn statistics(&self) -> serde_json::Value {
         let lookups = self.cache_lookups.load(Ordering::Relaxed);
         serde_json::json!({"backend":{"get":self.operations[0].snapshot(),"put":self.operations[1].snapshot(),"delete":self.operations[2].snapshot(),"head":self.operations[3].snapshot()},
-            "cache_lookups":lookups,"cache_hit_rate":crate::stats::ratio(self.cache_hits.load(Ordering::Relaxed),lookups).map(|v| v.min(1.0)),
+            "cache_lookups":lookups,"cache_hit_rate":crate::status::stats::ratio(self.cache_hits.load(Ordering::Relaxed),lookups).map(|v| v.min(1.0)),
             "cpu_slots_available":self.cpu.available_permits(),"backend_queues":{"read":self.reads.snapshot(),"upload":self.writes.snapshot(),"control":self.controls.snapshot()},
             "cache_limit_bytes":self.capacity,"multipart_limit_bytes":self.disk.limits[0]})
     }
@@ -448,7 +448,7 @@ impl Storage {
     fn compression_for(
         &self,
         storage_id: Option<Uuid>,
-    ) -> (Arc<crate::compression::Pool>, bool, u8) {
+    ) -> (Arc<crate::content::compression::Pool>, bool, u8) {
         storage_id
             .and_then(|id| self.targets.read().unwrap().get(&id).cloned())
             .map(|target| {
@@ -1000,7 +1000,7 @@ impl Storage {
         let (compression, _, _) = self.compression_for(c.storage_id);
         Ok(tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            crate::codec::decode_cache(&c, data, true, &compression)
+            crate::content::codec::decode_cache(&c, data, true, &compression)
         })
         .await??)
     }
@@ -1584,7 +1584,7 @@ impl Storage {
             let pin = self.physical_pin(c.location_id);
             return Ok(Source::Chunk(c, pin));
         }
-        let p:crate::pack::Pack=sqlx::query_as("SELECT p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=$1 AND c.state='ready' AND p.state='ready'")
+        let p:crate::content::pack::Pack=sqlx::query_as("SELECT p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=$1 AND c.state='ready' AND p.state='ready'")
             .bind(id).fetch_optional(&self.db).await?.context(codec::IntegrityError::Metadata)?;
         let pin = self.physical_pin(p.location_id);
         Ok(Source::Pack(p, pin))
@@ -1616,17 +1616,17 @@ impl Storage {
     }
     pub async fn encode_pack(
         &self,
-        p: crate::pack::Pack,
+        p: crate::content::pack::Pack,
         members: Vec<(Chunk, Bytes)>,
-        strategy: crate::compression::Strategy,
+        strategy: crate::content::compression::Strategy,
         should_try: bool,
-    ) -> Result<(crate::pack::Pack, Vec<u8>)> {
+    ) -> Result<(crate::content::pack::Pack, Vec<u8>)> {
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
         let (pool, compression_enabled, _) = self.compression_for(p.storage_id);
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            crate::pack::encode(
+            crate::content::pack::encode(
                 p,
                 &members,
                 &secrets,
@@ -1685,18 +1685,18 @@ impl Storage {
         if self.secrets.key(&name).is_some() {
             return Ok(());
         }
-        crate::db::load_runtime_key(&self.db, &self.secrets, &name).await
+        crate::database::load_runtime_key(&self.db, &self.secrets, &name).await
     }
     pub(crate) async fn ensure_key_loaded_name(&self, name: &str) -> Result<()> {
         if name.is_empty() || self.secrets.key(name).is_some() {
             return Ok(());
         }
-        crate::db::load_runtime_key(&self.db, &self.secrets, name).await
+        crate::database::load_runtime_key(&self.db, &self.secrets, name).await
     }
 
     pub(crate) async fn load_pack(
         self: &Arc<Self>,
-        p: crate::pack::Pack,
+        p: crate::content::pack::Pack,
     ) -> Result<Arc<LoadedPack>> {
         if let Some(live) = self
             .pack_live
@@ -1760,7 +1760,7 @@ impl Storage {
                     let pack = p.clone();
                     let data = tokio::task::spawn_blocking(move || {
                         let _permit = permit;
-                        crate::pack::decode(&pack, encoded, &secrets, &pool)
+                        crate::content::pack::decode(&pack, encoded, &secrets, &pool)
                     })
                     .await??;
                     let loaded = Arc::new(LoadedPack {
@@ -1828,7 +1828,7 @@ impl Storage {
             let input = raw.clone();
             let compressed = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                pool.compress_with(&input, true, crate::compression::Strategy::Always)
+                pool.compress_with(&input, true, crate::content::compression::Strategy::Always)
             })
             .await??;
             if let Some(data) = compressed {
@@ -1861,7 +1861,7 @@ impl Storage {
         &self,
         task: Uuid,
         c: &Chunk,
-        mode: crate::integrity::Mode,
+        mode: crate::worker::integrity::Mode,
         physical_detail: &mut serde_json::Value,
     ) -> Result<u64> {
         let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'))").bind(c.id).fetch_one(&self.db).await?;
@@ -1878,8 +1878,8 @@ impl Storage {
                 *physical_detail = serde_json::json!({"source":"chunk","encoding_id":physical.encoding_id.to_string(),"location_id":physical.location_id});
                 codec::validate_metadata(&physical, &self.secrets)?;
                 match mode {
-                    crate::integrity::Mode::Metadata => Ok(0),
-                    crate::integrity::Mode::Head => {
+                    crate::worker::integrity::Mode::Metadata => Ok(0),
+                    crate::worker::integrity::Mode::Head => {
                         let size = self.head(&physical).await?;
                         ensure!(
                             Some(size as i32) == physical.stored_size,
@@ -1887,7 +1887,7 @@ impl Storage {
                         );
                         Ok(0)
                     }
-                    crate::integrity::Mode::Full => {
+                    crate::worker::integrity::Mode::Full => {
                         let data = self.read_backend(&physical).await?;
                         let size = data.len() as u64;
                         self.decode(&physical, data).await?;
@@ -1933,8 +1933,8 @@ impl Storage {
                     ensure!(members.len()==p.member_count as usize,codec::IntegrityError::Metadata);
                     for (c,start) in &members {ensure!(*start==offset && c.raw_size>0,codec::IntegrityError::Metadata);offset+=i64::from(c.raw_size);}
                     ensure!(offset==p.raw_size,codec::IntegrityError::Metadata);
-                    if matches!(mode,crate::integrity::Mode::Metadata) {return Ok(0);}
-                    if matches!(mode,crate::integrity::Mode::Head) {
+                    if matches!(mode,crate::worker::integrity::Mode::Metadata) {return Ok(0);}
+                    if matches!(mode,crate::worker::integrity::Mode::Head) {
                         let storage_id = p.storage_id.context(codec::IntegrityError::Metadata)?;
                         let meta=self.head_path_for(storage_id, &self.pack_path_for(storage_id, p.location_id)?).await?;
                         ensure!(Some(meta.size as i64)==p.stored_size,codec::IntegrityError::Length);return Ok(0);
@@ -1945,7 +1945,7 @@ impl Storage {
                     let size=data.len() as u64;
                     let permit=self.cpu.clone().acquire_owned().await?;let pool=self.compression.clone();let secrets=self.secrets.clone();let pack=p.clone();
                     tokio::task::spawn_blocking(move||{
-                        let _permit=permit;let decoded=crate::pack::decode(&pack,data,&secrets,&pool)?;
+                        let _permit=permit;let decoded=crate::content::pack::decode(&pack,data,&secrets,&pool)?;
                         for ((c,offset),member) in members.iter().zip(&decoded.members) {
                             ensure!(member.id==c.id && member.hash.as_slice()==c.hash && member.len==c.raw_size as usize && member.start==12+44*members.len()+*offset as usize,codec::IntegrityError::Metadata);
                         }

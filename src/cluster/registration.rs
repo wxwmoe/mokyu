@@ -1,7 +1,7 @@
 use super::identity::{
     NodeState, credential, credential_binding, node_state_path, read_state, role_name, write_state,
 };
-use crate::{app::App, codec};
+use crate::{app::App, content::codec};
 use anyhow::{Context, Result, ensure};
 use uuid::Uuid;
 

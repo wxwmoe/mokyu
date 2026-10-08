@@ -139,7 +139,7 @@ async fn load_database_keys(pool: &PgPool, secrets: &mut Secrets) -> Result<()> 
     let mut key_names = BTreeMap::new();
     let mut materials = HashSet::new();
     for (id, name, purpose, key_algorithm, encrypted, fingerprint) in rows {
-        let material = crate::codec::unprotect_bytes(
+        let material = crate::content::codec::unprotect_bytes(
             &encrypted,
             &secrets.credential_key,
             format!("managed-key-{id}").as_bytes(),
@@ -159,7 +159,7 @@ async fn load_database_keys(pool: &PgPool, secrets: &mut Secrets) -> Result<()> 
             matches!(key_algorithm.as_str(), "aes-256-gcm" | "chacha20-poly1305"),
             "invalid managed encryption key algorithm"
         );
-        let key = crate::codec::Key::new(&key_algorithm, material)?;
+        let key = crate::content::codec::Key::new(&key_algorithm, material)?;
         key_names.insert(id, name.clone());
         keys.insert(name, key);
     }
@@ -189,7 +189,7 @@ pub(crate) async fn load_runtime_key(pool: &PgPool, secrets: &Secrets, name: &st
     let (id, stored_name, purpose, algorithm, encrypted, fingerprint) =
         row.context("managed key was not found")?;
     ensure!(purpose == "block", "managed key is not a block key");
-    let material = crate::codec::unprotect_bytes(
+    let material = crate::content::codec::unprotect_bytes(
         &encrypted,
         &secrets.credential_key,
         format!("managed-key-{id}").as_bytes(),
@@ -204,7 +204,7 @@ pub(crate) async fn load_runtime_key(pool: &PgPool, secrets: &Secrets, name: &st
     secrets.publish_key_with_id(
         Some(id),
         stored_name,
-        crate::codec::Key::new(&algorithm, material)?,
+        crate::content::codec::Key::new(&algorithm, material)?,
     )
 }
 

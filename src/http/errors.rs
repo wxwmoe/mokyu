@@ -17,7 +17,7 @@ impl<E: Into<anyhow::Error>> From<E> for HttpError {
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let Self(error) = self;
-        let error = crate::quota::database_error(&error)
+        let error = crate::app::quota::database_error(&error)
             .map(anyhow::Error::from)
             .unwrap_or(error);
         let this = Self(error);

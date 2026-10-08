@@ -1,7 +1,7 @@
 use crate::{
     app::{Active, App, StoredStream},
-    codec::{Chunk, IntegrityError},
     config,
+    content::codec::{Chunk, IntegrityError},
 };
 use anyhow::{Context, Result, ensure};
 use futures_util::{StreamExt, TryStreamExt};

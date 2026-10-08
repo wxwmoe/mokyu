@@ -417,7 +417,7 @@ pub(super) struct Setup {
 #[utoipa::path(post, path="/api/v1/auth/setup", request_body=Setup, responses((status=201)))]
 pub(super) async fn setup(
     State(app): State<Arc<App>>,
-    Extension(context): Extension<crate::stats::RequestContext>,
+    Extension(context): Extension<crate::status::stats::RequestContext>,
     headers: HeaderMap,
     Json(input): Json<Setup>,
 ) -> Result<StatusCode, HttpError> {

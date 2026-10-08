@@ -41,7 +41,7 @@ pub(super) async fn cli(
         None
     };
     let principal = if let Some((role, encrypted)) = row {
-        let expected = crate::codec::unprotect(
+        let expected = crate::content::codec::unprotect(
             &encrypted,
             &app.secrets.credential_key,
             crate::cluster::credential_binding(node_id.expect("node id present")).as_bytes(),

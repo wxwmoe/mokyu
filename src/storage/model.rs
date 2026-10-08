@@ -1,6 +1,6 @@
 use crate::{
-    codec,
     config::{self, Secrets},
+    content::codec,
     storage::profile::StorageProfile,
 };
 use anyhow::{Context, Result, ensure};

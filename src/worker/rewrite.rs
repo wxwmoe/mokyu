@@ -1,6 +1,6 @@
 use crate::{
     app::App,
-    codec::Chunk,
+    content::codec::Chunk,
     worker::{insert, insert_child},
 };
 use anyhow::{Context, Result, ensure};
@@ -191,9 +191,9 @@ impl App {
             .profile_permit(job.storage_id, "maintenance")
             .await?;
         let strategy = match profile.compression_strategy.as_str() {
-            "never" => crate::compression::Strategy::Never,
-            "sample" => crate::compression::Strategy::Sample,
-            _ => crate::compression::Strategy::Always,
+            "never" => crate::content::compression::Strategy::Never,
+            "sample" => crate::content::compression::Strategy::Sample,
+            _ => crate::content::compression::Strategy::Always,
         };
         ensure!(
             job.profile_revision == 0 || job.profile_revision == profile.revision,
@@ -312,7 +312,7 @@ impl App {
         }
 
         if let Some((first_id, pack_id)) = packed_candidate {
-            let old: crate::pack::Pack =
+            let old: crate::content::pack::Pack =
                 sqlx::query_as("SELECT * FROM packs WHERE id=$1 AND state='ready'")
                     .bind(pack_id)
                     .fetch_one(&self.db)
@@ -349,7 +349,7 @@ impl App {
                 encoded_members.push((member, raw));
             }
             let new_storage_id = Uuid::new_v4();
-            let new_pack: crate::pack::Pack = sqlx::query_as(
+            let new_pack: crate::content::pack::Pack = sqlx::query_as(
                 "INSERT INTO packs(location_id,storage_id,encryption_algorithm,block_key_id,raw_size,member_count,state,unreferenced_at,owner_task) VALUES($1,$2,$3,$4,$5,$6,'preparing',now(),$7) RETURNING *",
             )
             .bind(new_storage_id)
@@ -367,7 +367,8 @@ impl App {
                     new_pack,
                     encoded_members.clone(),
                     strategy,
-                    profile.compression_enabled && strategy != crate::compression::Strategy::Never,
+                    profile.compression_enabled
+                        && strategy != crate::content::compression::Strategy::Never,
                 )
                 .await?;
             self.storage

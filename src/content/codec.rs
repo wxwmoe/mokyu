@@ -219,7 +219,7 @@ pub fn encode(
     input: Vec<u8>,
     secrets: &Secrets,
     min_savings_percent: u8,
-    compression: &crate::compression::Pool,
+    compression: &crate::content::compression::Pool,
     should_compress: bool,
 ) -> Result<(Chunk, Vec<u8>, Bytes)> {
     ensure!(
@@ -264,7 +264,7 @@ pub fn decode(
     mut encoded: Vec<u8>,
     secrets: &Secrets,
     min_savings_percent: u8,
-    compression: &crate::compression::Pool,
+    compression: &crate::content::compression::Pool,
 ) -> Result<(Bytes, Bytes)> {
     ensure!(
         encoded.len() <= MAX + 16 && Some(encoded.len() as i32) == c.stored_size,
@@ -311,7 +311,7 @@ pub fn decode_cache(
     c: &Chunk,
     data: Bytes,
     compressed: bool,
-    compression: &crate::compression::Pool,
+    compression: &crate::content::compression::Pool,
 ) -> Result<Bytes> {
     ensure!(
         c.format == 1 && c.hash.len() == 32 && (1..=MAX as i32).contains(&c.raw_size),
@@ -405,7 +405,7 @@ mod tests {
     }
     #[test]
     fn fixed_format_vectors() {
-        let compression = crate::compression::Pool::new(Default::default(), 1).unwrap();
+        let compression = crate::content::compression::Pool::new(Default::default(), 1).unwrap();
         let input = b"mokyu-v1";
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
             let key_id = if algorithm == "none" { "" } else { "test-key" };
@@ -454,8 +454,8 @@ mod tests {
             );
 
             // Older writers stored even small gains, below the current default savings gate.
-            let legacy = crate::compression::Pool::new(
-                crate::compression::Config {
+            let legacy = crate::content::compression::Pool::new(
+                crate::content::compression::Config {
                     min_savings_percent: 0,
                     min_savings_bytes: 0,
                     ..Default::default()
@@ -487,7 +487,7 @@ mod tests {
     }
     #[test]
     fn formats_authenticate_all_metadata_and_payload() {
-        let compression = crate::compression::Pool::new(Default::default(), 1).unwrap();
+        let compression = crate::content::compression::Pool::new(Default::default(), 1).unwrap();
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
             let key_id = if algorithm == "none" { "" } else { "test-key" };
             let secrets = secrets_for(algorithm);
@@ -606,7 +606,7 @@ mod tests {
             "next-key".into(),
             Key::new("chacha20-poly1305", [9; 32]).unwrap(),
         );
-        let compression = crate::compression::Pool::new(Default::default(), 4).unwrap();
+        let compression = crate::content::compression::Pool::new(Default::default(), 4).unwrap();
         std::thread::scope(|scope| {
             for worker in 0..4 {
                 let (secrets, compression) = (&secrets, &compression);

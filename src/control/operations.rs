@@ -676,7 +676,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             app.unpack_start(id, all, execute).await
         }
         Command::Integrity(Integrity::Check { mode, bucket, key }) => {
-            app.integrity_start(crate::integrity::Request { mode, bucket, key })
+            app.integrity_start(crate::worker::integrity::Request { mode, bucket, key })
                 .await
         }
         Command::Integrity(Integrity::Issues { id, after, limit }) => {

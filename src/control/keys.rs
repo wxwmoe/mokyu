@@ -2,7 +2,7 @@ use super::{
     Identity,
     users::{self, BucketGrant},
 };
-use crate::{app::App, authorization::Principal, codec, http::HttpError};
+use crate::{app::App, authorization::Principal, content::codec, http::HttpError};
 use anyhow::Result;
 use axum::{
     Json,

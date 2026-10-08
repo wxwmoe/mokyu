@@ -1,6 +1,6 @@
 use crate::{
-    codec::{Chunk, MAX},
     config,
+    content::codec::{Chunk, MAX},
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -69,7 +69,7 @@ impl App {
             return Ok(("none".into(), None));
         };
         if self.secrets.key(&name).is_none() {
-            crate::db::load_runtime_key(&self.db, &self.secrets, &name).await?;
+            crate::database::load_runtime_key(&self.db, &self.secrets, &name).await?;
         }
         let loaded = self
             .secrets
@@ -170,7 +170,7 @@ impl App {
                 offset,
                 &c,
                 cache.clone(),
-                crate::codec::cache_compressed(
+                crate::content::codec::cache_compressed(
                     &c,
                     self.config.local_cache.min_compression_savings_percent,
                 ),

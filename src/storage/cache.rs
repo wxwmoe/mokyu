@@ -1,5 +1,5 @@
 use super::local::Disk;
-use crate::codec::Chunk;
+use crate::content::codec::Chunk;
 use bytes::Bytes;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -45,11 +45,11 @@ pub(crate) struct UploadPin {
     pub staging_object_key: String,
 }
 pub(crate) struct LoadedPack {
-    pub pack: crate::pack::Pack,
-    pub data: crate::pack::Decoded,
+    pub pack: crate::content::pack::Pack,
+    pub data: crate::content::pack::Decoded,
     pub(crate) _memory: tokio::sync::OwnedSemaphorePermit,
     pub(crate) used: Mutex<DownloadUsage>,
-    pub(crate) access: Arc<crate::access::Access>,
+    pub(crate) access: Arc<crate::status::access::Access>,
 }
 #[derive(Default)]
 pub(crate) struct DownloadUsage {
@@ -114,7 +114,7 @@ impl ReadContext {
 }
 pub(crate) enum Source {
     Chunk(Chunk, CachePin),
-    Pack(crate::pack::Pack, CachePin),
+    Pack(crate::content::pack::Pack, CachePin),
 }
 #[derive(sqlx::FromRow)]
 pub(crate) struct InspectionMember {

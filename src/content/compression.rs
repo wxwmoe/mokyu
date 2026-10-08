@@ -1,6 +1,6 @@
 use crate::{
-    codec::{MAX, MIN},
     config,
+    content::codec::{MAX, MIN},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -216,7 +216,7 @@ impl Pool {
         strategy: Strategy,
     ) -> Result<Option<Vec<u8>>> {
         ensure!(
-            !input.is_empty() && input.len() <= crate::pack::MAX_PAYLOAD,
+            !input.is_empty() && input.len() <= crate::content::pack::MAX_PAYLOAD,
             "pack compression exceeds bound"
         );
         if !self.config.enabled || !should_try || strategy == Strategy::Never {
@@ -251,8 +251,8 @@ impl Pool {
     }
     pub fn decompress_pack(&self, input: &[u8], capacity: usize) -> Result<Vec<u8>> {
         ensure!(
-            input.len() <= crate::pack::MAX_PAYLOAD
-                && (1..=crate::pack::MAX_PAYLOAD).contains(&capacity),
+            input.len() <= crate::content::pack::MAX_PAYLOAD
+                && (1..=crate::content::pack::MAX_PAYLOAD).contains(&capacity),
             "pack decompression exceeds bound"
         );
         let cached = self.decoders.lock().unwrap().pop();

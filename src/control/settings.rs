@@ -119,7 +119,7 @@ fn validate_value(configured: &crate::config::Config, section: &str, value: &Val
         );
     }
     let mut config = configured.clone();
-    crate::db::apply_runtime_section(&mut config, section, value.clone())?;
+    crate::database::apply_runtime_section(&mut config, section, value.clone())?;
     config.validate()?;
     config.budget()?;
     Ok(())

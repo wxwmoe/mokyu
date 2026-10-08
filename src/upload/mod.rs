@@ -3,8 +3,8 @@ pub(crate) mod multipart;
 
 use crate::{
     app::App,
-    codec::{self, MAX},
     config,
+    content::codec::{self, MAX},
 };
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};

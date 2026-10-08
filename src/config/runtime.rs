@@ -332,14 +332,14 @@ impl Default for Maintenance {
 
 pub struct Secrets {
     pub database_password: String,
-    pub credential_key: crate::codec::Key,
-    pub keys: BTreeMap<String, crate::codec::Key>,
-    pub runtime_keys: Arc<RwLock<BTreeMap<String, crate::codec::Key>>>,
+    pub credential_key: crate::content::codec::Key,
+    pub keys: BTreeMap<String, crate::content::codec::Key>,
+    pub runtime_keys: Arc<RwLock<BTreeMap<String, crate::content::codec::Key>>>,
     pub key_names: Arc<RwLock<BTreeMap<Uuid, String>>>,
 }
 
 impl Secrets {
-    pub fn key(&self, name: &str) -> Option<crate::codec::Key> {
+    pub fn key(&self, name: &str) -> Option<crate::content::codec::Key> {
         if let Some(key) = self.runtime_keys.read().ok()?.get(name) {
             return Some(key.clone());
         }
@@ -351,11 +351,11 @@ impl Secrets {
         self.key_names.read().ok()?.get(&id).cloned()
     }
 
-    pub fn key_for_id(&self, id: Option<Uuid>) -> Option<crate::codec::Key> {
+    pub fn key_for_id(&self, id: Option<Uuid>) -> Option<crate::content::codec::Key> {
         self.key_name(id).and_then(|name| self.key(&name))
     }
 
-    pub fn publish_key(&self, name: String, key: crate::codec::Key) -> Result<()> {
+    pub fn publish_key(&self, name: String, key: crate::content::codec::Key) -> Result<()> {
         self.publish_key_with_id(None, name, key)
     }
 
@@ -363,7 +363,7 @@ impl Secrets {
         &self,
         id: Option<Uuid>,
         name: String,
-        key: crate::codec::Key,
+        key: crate::content::codec::Key,
     ) -> Result<()> {
         if let Some(id) = id {
             self.key_names

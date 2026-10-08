@@ -27,7 +27,7 @@ impl FileConfig {
             instance: self.instance.clone(),
             backend_defaults: BackendDefaults::default(),
             local_cache: LocalCache::default(),
-            local_compression: crate::compression::Config {
+            local_compression: crate::content::compression::Config {
                 context_idle_timeout: self.instance.compression_idle_timeout.clone(),
                 ..Default::default()
             },
@@ -105,7 +105,7 @@ impl Config {
                 base,
                 "database.password",
             )?,
-            credential_key: crate::codec::Key::new("aes-256-gcm", credential_material)?,
+            credential_key: crate::content::codec::Key::new("aes-256-gcm", credential_material)?,
             keys: BTreeMap::new(),
             runtime_keys: Arc::new(RwLock::new(BTreeMap::new())),
             key_names: Arc::new(RwLock::new(BTreeMap::new())),

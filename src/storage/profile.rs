@@ -67,14 +67,14 @@ pub(crate) struct StorageProfile {
 impl StorageProfile {
     pub(crate) fn compression_config(
         &self,
-        base: &crate::compression::Config,
-    ) -> crate::compression::Config {
+        base: &crate::content::compression::Config,
+    ) -> crate::content::compression::Config {
         let mut config = base.clone();
         config.enabled = self.compression_enabled;
         config.strategy = match self.compression_strategy.as_str() {
-            "never" => crate::compression::Strategy::Never,
-            "sample" => crate::compression::Strategy::Sample,
-            _ => crate::compression::Strategy::Always,
+            "never" => crate::content::compression::Strategy::Never,
+            "sample" => crate::content::compression::Strategy::Sample,
+            _ => crate::content::compression::Strategy::Always,
         };
         config.level = self.compression_level;
         config.sample_level = self.compression_sample_level;

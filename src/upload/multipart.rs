@@ -1,8 +1,8 @@
 use crate::{
     app::{Active, App, Extent, StoredStream},
     authorization::{Action, Permit, Principal},
-    codec::{self, Chunk, MAX},
-    s3::{canned, checksums, metadata, reject_features, stamp},
+    content::codec::{self, Chunk, MAX},
+    http::gateway::{canned, checksums, metadata, reject_features, stamp},
     upload::{Integrity, checksum},
 };
 use anyhow::{Context, Result, ensure};
@@ -487,7 +487,7 @@ impl App {
                 .bind(offset)
                 .execute(&mut *tx)
                 .await?;
-            crate::lifecycle::mark_unreferenced(&mut tx, &[c.id]).await?;
+            crate::worker::lifecycle::mark_unreferenced(&mut tx, &[c.id]).await?;
         } else {
             sqlx::query("UPDATE extents SET source_offset=$3,length=$4 WHERE stream_id=$1 AND offset_bytes=$2").bind(stream).bind(offset).bind(prefix as i32).bind((consumed-prefix) as i32).execute(&mut *tx).await?;
         }
@@ -743,7 +743,7 @@ impl App {
         let upin = self.pin(u.id);
         let context = req
             .extensions
-            .get::<crate::stats::RequestContext>()
+            .get::<crate::status::stats::RequestContext>()
             .cloned();
         let input = req.input;
         let headers = req.headers;
@@ -1058,7 +1058,7 @@ impl App {
         let mut truncated = false;
         let encode = |s: String| {
             if i.encoding_type.is_some() {
-                crate::listing::encode_key(&s)
+                crate::app::listing::encode_key(&s)
             } else {
                 s
             }
@@ -1085,7 +1085,7 @@ impl App {
                             .map(|n| u.object_key[..prefix.len() + n + delimiter.len()].to_string())
                     };
                     if let Some(group) = group {
-                        let after = crate::listing::successor(&group);
+                        let after = crate::app::listing::successor(&group);
                         cursor = after.clone().unwrap_or_default();
                         inclusive = true;
                         cursor_id = None;
@@ -1195,7 +1195,7 @@ async fn replace_range(
     ensure!(covered == end, "extent replacement incomplete");
     sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id,source_offset) VALUES($1,$2,$3,$4,$5)").bind(stream).bind(offset).bind(length as i32).bind(chunk).bind(source as i32).execute(&mut **tx).await?;
     // Retained slices and references from other streams still protect the old chunk.
-    crate::lifecycle::mark_unreferenced(tx, &previous).await?;
+    crate::worker::lifecycle::mark_unreferenced(tx, &previous).await?;
     Ok(())
 }
 async fn insert_extent(

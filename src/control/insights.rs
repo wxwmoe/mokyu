@@ -238,7 +238,7 @@ pub(crate) async fn collect(app: &App, tx: &mut Transaction<'_, Postgres>) -> Re
 async fn runtime_point(app: &App) -> Result<RuntimePoint> {
     let runtime = app.statistics.runtime();
     let io = app.storage.statistics();
-    let memory = crate::stats::process_memory().await;
+    let memory = crate::status::stats::process_memory().await;
     let (cache_limit, upload_limit, upload_bytes) = app.storage.disk.upload_capacity()?;
     let local = app.storage.disk.used();
     let total = |key: &str| {

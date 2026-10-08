@@ -36,7 +36,7 @@ impl Benefit {
                 .saturating_sub(penalty),
         }
     }
-    fn worthwhile(&self, c: &crate::pack::Config) -> Result<bool> {
+    fn worthwhile(&self, c: &crate::content::pack::Config) -> Result<bool> {
         Ok(self.net_savings_bytes > 0
             && self.net_savings_bytes as u64 >= config::bytes(&c.range_min_savings_bytes)?
             && i128::from(self.net_savings_bytes) * 100
@@ -227,7 +227,7 @@ mod tests {
     use super::*;
     #[test]
     fn range_benefit_includes_rewrite_and_extra_requests() {
-        let c = crate::pack::Config::default();
+        let c = crate::content::pack::Config::default();
         let mib = 1024 * 1024;
         assert!(
             Benefit::new(8 * 32 * mib, 8 * mib, 64 * mib, 0)

@@ -23,11 +23,11 @@ pub struct Config {
     #[serde(skip)]
     pub local_cache: LocalCache,
     #[serde(skip)]
-    pub local_compression: crate::compression::Config,
+    pub local_compression: crate::content::compression::Config,
     #[serde(skip)]
-    pub local_integrity: crate::integrity::Config,
+    pub local_integrity: crate::worker::integrity::Config,
     #[serde(skip)]
-    pub local_pack: crate::pack::Config,
+    pub local_pack: crate::content::pack::Config,
     #[serde(flatten)]
     pub runtime: RuntimeSettings,
 }

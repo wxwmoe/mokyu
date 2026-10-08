@@ -15,11 +15,11 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
-#[utoipa::path(post,path="/api/v1/integrity",request_body=crate::integrity::Request,responses((status=200,body=maintenance::TaskStarted)))]
+#[utoipa::path(post,path="/api/v1/integrity",request_body=crate::worker::integrity::Request,responses((status=200,body=maintenance::TaskStarted)))]
 pub(super) async fn start_integrity(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
-    Json(input): Json<crate::integrity::Request>,
+    Json(input): Json<crate::worker::integrity::Request>,
 ) -> Result<Json<maintenance::TaskStarted>, HttpError> {
     let mut guard = app.db.begin().await?;
     actor.principal.lock_admin(&mut guard).await?;

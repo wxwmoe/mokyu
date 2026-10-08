@@ -252,7 +252,7 @@ pub(crate) async fn errors(
     use axum::response::IntoResponse;
     let request_id = request
         .extensions()
-        .get::<crate::stats::RequestContext>()
+        .get::<crate::status::stats::RequestContext>()
         .map(|c| c.id.clone());
     let response = next.run(request).await;
     let status = response.status();

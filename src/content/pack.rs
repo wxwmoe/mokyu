@@ -1,7 +1,7 @@
 use crate::{
-    codec::{self, Chunk},
-    compression::{Pool, Strategy},
     config::{self, Secrets},
+    content::codec::{self, Chunk},
+    content::compression::{Pool, Strategy},
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;

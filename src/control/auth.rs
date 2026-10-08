@@ -198,7 +198,7 @@ pub(super) async fn access_gate(
             let event = if write {
                 let request_id = request
                     .extensions()
-                    .get::<crate::stats::RequestContext>()
+                    .get::<crate::status::stats::RequestContext>()
                     .map(|c| c.id.as_str());
                 match audit::begin(
                     &app.db,
@@ -216,7 +216,7 @@ pub(super) async fn access_gate(
             };
             let context = request
                 .extensions()
-                .get::<crate::stats::RequestContext>()
+                .get::<crate::status::stats::RequestContext>()
                 .cloned();
             request.extensions_mut().insert(identity);
             if let Some(id) = event {
@@ -241,7 +241,7 @@ pub(super) async fn access_gate(
                     &format!("{} {}", request.method(), path),
                     request
                         .extensions()
-                        .get::<crate::stats::RequestContext>()
+                        .get::<crate::status::stats::RequestContext>()
                         .map(|c| c.id.as_str()),
                 )
                 .await
@@ -343,7 +343,7 @@ pub(crate) struct Login {
 #[utoipa::path(post, path = "/api/v1/auth/login", request_body = Login, responses((status = 200, body = LoginReply), (status = 403, body = contract::ErrorBody)))]
 pub(super) async fn login(
     State(app): State<Arc<App>>,
-    Extension(context): Extension<crate::stats::RequestContext>,
+    Extension(context): Extension<crate::status::stats::RequestContext>,
     headers: HeaderMap,
     Json(input): Json<Login>,
 ) -> Result<Response, HttpError> {

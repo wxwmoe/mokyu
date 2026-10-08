@@ -2,7 +2,8 @@ use super::errors::{HttpError, unauthorized};
 use super::public::cors_headers;
 use crate::{
     app::{App, Bucket, Metadata},
-    config, s3,
+    config,
+    http::gateway,
 };
 use anyhow::{Context, Result, ensure};
 use axum::{
@@ -302,7 +303,7 @@ pub(crate) async fn respond(
             .and_then(|s| s.to_str().ok())
             .and_then(|s| Timestamp::parse(TimestampFormat::HttpDate, s).ok())
     };
-    let condition = s3::conditions(
+    let condition = gateway::conditions(
         &s,
         etag("if-match")?.as_ref(),
         etag("if-none-match")?.as_ref(),
@@ -317,7 +318,10 @@ pub(crate) async fn respond(
             return Ok(Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header("etag", format!("\"{}\"", s.etag))
-                .header("last-modified", s3::http_date(s3::stamp(s.touched_at))?)
+                .header(
+                    "last-modified",
+                    gateway::http_date(gateway::stamp(s.touched_at))?,
+                )
                 .body(Body::empty())?);
         }
         return Err(e.into());
@@ -326,8 +330,8 @@ pub(crate) async fn respond(
         .get("range")
         .map(|h| Range::parse(h.to_str().unwrap_or("")))
         .transpose()
-        .map_err(|_| HttpError(s3::invalid_range(s.size).into()))?;
-    let requested = if s3::if_range_matches(&s, &headers) {
+        .map_err(|_| HttpError(gateway::invalid_range(s.size).into()))?;
+    let requested = if gateway::if_range_matches(&s, &headers) {
         requested
     } else {
         None
@@ -335,7 +339,7 @@ pub(crate) async fn respond(
     let range = requested
         .map(|r| {
             r.check(s.size as u64)
-                .map_err(|_| HttpError(s3::invalid_range(s.size).into()))
+                .map_err(|_| HttpError(gateway::invalid_range(s.size).into()))
         })
         .transpose()?;
     let span = range.clone().unwrap_or(0..s.size as u64);
@@ -348,7 +352,10 @@ pub(crate) async fn respond(
     response = response
         .header("content-length", (span.end - span.start).to_string())
         .header("etag", format!("\"{}\"", s.etag))
-        .header("last-modified", s3::http_date(s3::stamp(s.touched_at))?)
+        .header(
+            "last-modified",
+            gateway::http_date(gateway::stamp(s.touched_at))?,
+        )
         .header("accept-ranges", "bytes")
         .header("x-content-type-options", "nosniff");
     if range.is_some() {

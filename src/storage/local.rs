@@ -1,5 +1,5 @@
 use super::cache::UploadCharge;
-use crate::codec::MAX;
+use crate::content::codec::MAX;
 use anyhow::{Context, Result, ensure};
 use std::{
     collections::HashSet,

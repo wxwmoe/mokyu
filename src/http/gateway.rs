@@ -1,8 +1,8 @@
 use crate::{
+    app::listing::encode_key,
     app::{App, Metadata, StoredStream, internal},
     authorization::Action,
-    codec,
-    listing::encode_key,
+    content::codec,
     upload::checksum,
 };
 use anyhow::Result;

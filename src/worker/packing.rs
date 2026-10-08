@@ -1,8 +1,8 @@
 use crate::{
     app::App,
-    codec::Chunk,
     config,
-    pack::{CompressionStrategy, Pack},
+    content::codec::Chunk,
+    content::pack::{CompressionStrategy, Pack},
     storage::ReadContext,
 };
 use anyhow::{Context, Result, ensure};
@@ -396,9 +396,9 @@ impl App {
         drop(coord);
         let strategy = match self.config.local_pack.compression_strategy {
             None => self.config.local_compression.strategy,
-            Some(CompressionStrategy::Never) => crate::compression::Strategy::Never,
-            Some(CompressionStrategy::Always) => crate::compression::Strategy::Always,
-            Some(CompressionStrategy::Sample) => crate::compression::Strategy::Sample,
+            Some(CompressionStrategy::Never) => crate::content::compression::Strategy::Never,
+            Some(CompressionStrategy::Always) => crate::content::compression::Strategy::Always,
+            Some(CompressionStrategy::Sample) => crate::content::compression::Strategy::Sample,
         };
         let mut compression = self.config.local_compression.clone();
         compression.strategy = strategy;

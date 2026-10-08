@@ -17,7 +17,7 @@ pub(crate) struct StoreBackend {
     pub(crate) integrity: Arc<StoreGate>,
     pub(crate) maintenance: Arc<StoreGate>,
     pub(crate) migration: Arc<StoreGate>,
-    pub(crate) compression: Arc<crate::compression::Pool>,
+    pub(crate) compression: Arc<crate::content::compression::Pool>,
     pub(crate) compression_enabled: bool,
     pub(crate) min_compression_savings_percent: u8,
     pub(crate) cache_enabled: bool,

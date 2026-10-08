@@ -1,7 +1,7 @@
 use super::Identity;
 use crate::{
     app::App,
-    codec,
+    content::codec,
     http::HttpError,
     storage::{
         model::{Record as BackendRecord, identity_marker as storage_identity_marker},
@@ -421,7 +421,7 @@ fn validate_profile(profile: &StorageProfile, storage_type: &str) -> anyhow::Res
         "compression strategy must be never, always, or sample"
     );
     profile
-        .compression_config(&crate::compression::Config::default())
+        .compression_config(&crate::content::compression::Config::default())
         .validate()?;
     for duration in [
         &profile.connect_timeout,

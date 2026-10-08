@@ -207,7 +207,7 @@ async fn check(permit: &Permit, app: &App) -> Result<()> {
 pub(super) async fn batch(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
-    Extension(context): Extension<crate::stats::RequestContext>,
+    Extension(context): Extension<crate::status::stats::RequestContext>,
     Json(input): Json<Batch>,
 ) -> Result<Json<BatchResult>, HttpError> {
     let copy = matches!(input.action, Kind::Copy | Kind::Move);

@@ -190,7 +190,7 @@ pub(crate) async fn observe(
     next: axum::middleware::Next,
 ) -> Response {
     use tracing::Instrument;
-    let observation = crate::stats::Request::new(
+    let observation = crate::status::stats::Request::new(
         &app.statistics.http[index],
         if index == 1 { "web" } else { "control" },
         request.method().clone(),

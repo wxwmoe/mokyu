@@ -290,9 +290,9 @@ impl Config {
         let mut compression_budget = self.local_compression.clone();
         if matches!(
             self.local_pack.compression_strategy,
-            Some(crate::pack::CompressionStrategy::Sample)
+            Some(crate::content::pack::CompressionStrategy::Sample)
         ) {
-            compression_budget.strategy = crate::compression::Strategy::Sample;
+            compression_budget.strategy = crate::content::compression::Strategy::Sample;
         }
         let slot_bytes = SLOT_BYTES
             .checked_add(compression_budget.workspace_bytes()?)
@@ -320,7 +320,7 @@ impl Config {
             .min(u32::MAX as u64) as u32;
         if self.local_pack.enabled {
             let maximum = bytes(&self.local_pack.max_size)?;
-            let payload = maximum + 12 + 44 * (maximum / crate::codec::MIN as u64 + 1);
+            let payload = maximum + 12 + 44 * (maximum / crate::content::codec::MIN as u64 + 1);
             ensure!(
                 (payload * 4 + compression_budget.workspace_bytes()?).div_ceil(1024 * 1024)
                     <= u64::from(pack_memory_units),

@@ -1,6 +1,6 @@
 use crate::{
-    codec::{Chunk, MAX},
     config,
+    content::codec::{Chunk, MAX},
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
