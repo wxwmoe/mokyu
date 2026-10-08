@@ -31,7 +31,7 @@ def cli(*args):
 
 def start(binary=None):
     global process
-    process = subprocess.Popen([binary or command[0], *command[1:], 'serve'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen([binary or command[0], *command[1:]], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
 
 def stopped_with(message):
@@ -89,32 +89,28 @@ try:
     assert history() == []
     print('PASS interrupted migration rolls back schema and can be retried', flush=True)
 
-    # An initialized legacy backend or any business data must block the format change.
+    # A non-empty 0.0.3 schema is deliberately rejected; an empty schema may
+    # continue through the append-only migrations so operators can migrate
+    # files manually.
     with db.transaction():
-        db.execute("SELECT set_config('media_gateway.backend_identity','legacy-test',false)")
         for path in sorted(migrations.glob('*.sql')):
             version = int(path.stem.split('_')[0])
-            if version > 8:
+            if version > 21:
                 continue
             db.execute(path.read_text())
             db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
                        (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
     legacy_history = history()
-    for setup, cleanup in [
-        ('UPDATE gateway_meta SET backend_initialized=true', 'UPDATE gateway_meta SET backend_initialized=false'),
-        ("INSERT INTO buckets(id,name) VALUES(gen_random_uuid(),'legacy-preserved')", "DELETE FROM buckets WHERE name='legacy-preserved'"),
-    ]:
-        db.execute(setup)
-        legacy_meta = db.execute('SELECT * FROM gateway_meta').fetchone()
-        legacy_buckets = db.execute('SELECT * FROM buckets').fetchall()
-        start()
-        stopped_with('legacy storage format cannot be upgraded to Mokyu')
-        assert db.execute("SELECT to_regclass('mokyu_meta')").fetchone()[0] is None
-        assert db.execute('SELECT * FROM gateway_meta').fetchone() == legacy_meta
-        assert db.execute('SELECT * FROM buckets').fetchall() == legacy_buckets
-        assert history() == legacy_history
-        db.execute(cleanup)
-    print('PASS legacy backend and business data reject rename without changing tables, data or history', flush=True)
+    db.execute("INSERT INTO buckets(id,name) VALUES(gen_random_uuid(),'legacy-preserved')")
+    legacy_buckets = db.execute('SELECT * FROM buckets').fetchall()
+    start()
+    stopped_with('0.0.3 data is not importable')
+    assert db.execute("SELECT to_regclass('mokyu_meta')").fetchone()[0] == 'mokyu_meta'
+    assert db.execute('SELECT * FROM buckets').fetchall() == legacy_buckets
+    assert history() == legacy_history
+    db.execute("DROP SCHEMA public CASCADE")
+    db.execute("CREATE SCHEMA public")
+    print('PASS non-empty 0.0.3 schema rejects import without changing data or history', flush=True)
     with db.transaction():
         db.execute('DROP SCHEMA public CASCADE')
         db.execute('CREATE SCHEMA public')

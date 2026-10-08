@@ -4,7 +4,7 @@ import { params } from '../api/client'
 export type MediaItem = components['schemas']['MediaItem']
 export type MediaAction = components['schemas']['Kind']
 export function mediaUrl(bucket: string, item: MediaItem, action = 'content', preview = false) {
-  return `/api/buckets/${bucket}/object/${action}?` + params({ key: item.object_key, version: item.id, ...(action === 'content' ? { preview: String(preview) } : {}) })
+  return `/api/v1/buckets/${bucket}/object/${action}?` + params({ key: item.object_key, version: item.id, ...(action === 'content' ? { preview: String(preview) } : {}) })
 }
 export function hasThumbnail(item: MediaItem) {
   return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(item.content_type.split(';')[0]!.trim().toLowerCase()) && BigInt(item.size) <= 32n * 1024n * 1024n

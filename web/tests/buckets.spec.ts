@@ -5,12 +5,12 @@ import en from '../src/locales/i18n.en.js'
 
 test('bucket creation, settings conflicts, CORS, website, paused transfer and deletion', async ({ page, request }) => {
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
-  const login = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
+  const login = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await login.json()).csrf_token }
-  await request.put('/api/me', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
-  await request.post('/api/me/reauth', { headers, data: { password } })
+  await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
+  await request.post('/api/v1/account/reauth', { headers, data: { password } })
   const name = 'ui-bucket-' + randomUUID().slice(0, 8), projectName = name + '-project'
-  const project = await (await request.post('/api/projects', { headers, data: { name: projectName } })).json()
+  const project = await (await request.post('/api/v1/projects', { headers, data: { name: projectName } })).json()
   let id = ''
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
@@ -27,7 +27,7 @@ test('bucket creation, settings conflicts, CORS, website, paused transfer and de
     await dialog.getByRole('button', { name: en.createBucket, exact: true }).click()
     await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
     id = page.url().split('/').pop()!
-    const path = `/api/buckets/${id}/settings`
+    const path = `/api/v1/buckets/${id}/settings`
     await page.getByRole('textbox', { name: en.publicBaseUrl, exact: true }).fill('https://media.example.test/')
     await page.getByRole('textbox', { name: en.bucketDomains, exact: true }).fill(name + '.test\n' + name + '-two.test')
     await page.getByRole('button', { name: en.save, exact: true }).click()
@@ -74,7 +74,7 @@ test('bucket creation, settings conflicts, CORS, website, paused transfer and de
     expect((await request.get(path)).status()).toBe(404)
     expect(errors).toEqual([])
   } finally {
-    if (id) await request.delete('/api/buckets/' + id, { headers, data: { confirm_name: name, confirmation: '' } })
-    await request.delete('/api/projects/' + project.id, { headers })
+    if (id) await request.delete('/api/v1/buckets/' + id, { headers, data: { confirm_name: name, confirmation: '' } })
+    await request.delete('/api/v1/projects/' + project.id, { headers })
   }
 })

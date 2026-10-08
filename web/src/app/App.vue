@@ -27,7 +27,7 @@ const destinations = [
   { key: 'tasks', icon: ListChecks, group: 'administration', admin: true },
   { key: 'audit', icon: BookHeart, group: 'administration' },
   { key: 'service', icon: HeartPulse, group: 'administration', admin: true },
-  { key: 'stores', icon: HardDrive, group: 'administration', admin: true },
+  { key: 'storages', icon: HardDrive, group: 'administration', admin: true },
 ]
 const groups = computed(() => ['workspace', 'administration'].map(name => ({ name, entries: destinations.filter(item => (session.value?.role === 'admin' ? item.group === name : name === 'workspace' && !item.admin) && (!item.projects || session.value?.project_management)) })).filter(group => group.entries.length))
 const current = computed(() => destinations.find(item => item.key === route.name) || { key: route.name === 'login' ? 'signIn' : ['account', 'tokens'].includes(String(route.name)) ? String(route.name) : 'media', icon: route.name === 'account' ? Settings2 : Images, group: 'workspace' })

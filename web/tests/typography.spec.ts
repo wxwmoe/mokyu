@@ -72,20 +72,20 @@ test('unavailable font files keep the localized login usable', async ({ page }) 
 
 test('closed selects translate immediately and searchable choices retain their selection', async ({ page }) => {
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
-  const auth = await page.request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
+  const auth = await page.request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
   expect(auth.ok()).toBe(true)
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await auth.json()).csrf_token }
-  const profile = await (await page.request.get('/api/me')).json()
+  const profile = await (await page.request.get('/api/v1/account')).json()
   const original = Object.fromEntries(['display_name', 'locale', 'theme', 'avatar_email', 'avatar_enabled'].map(key => [key, profile[key]]))
-  const buckets = await (await page.request.get('/api/buckets')).json()
+  const buckets = await (await page.request.get('/api/v1/buckets')).json()
   const bucket = buckets.find((item: { actions: string[] }) => item.actions.includes('storage.inspect'))
   expect(bucket).toBeTruthy()
-  await page.route('**/api/projects', route => route.fulfill({ json: [] }))
+  await page.route('**/api/v1/projects', route => route.fulfill({ json: [] }))
   try {
     for (const searchable of [false, true]) {
-      await page.request.put('/api/me', { headers, data: { ...original, locale: 'en' } })
+      await page.request.put('/api/v1/account', { headers, data: { ...original, locale: 'en' } })
       const options = searchable ? Array.from({ length: 11 }, (_, index) => ({ ...bucket, id: index ? `test-${index}` : bucket.id, name: index ? `other-${index}` : bucket.name })) : [bucket]
-      await page.route('**/api/buckets', route => route.fulfill({ json: options }))
+      await page.route('**/api/v1/buckets', route => route.fulfill({ json: options }))
       await page.goto('/overview')
       const scope = page.locator(`.scope-picker ${searchable ? 'input' : 'button'}[role="combobox"]`)
       async function selected(label: string) {
@@ -119,10 +119,10 @@ test('closed selects translate immediately and searchable choices retain their s
       await expect(page.locator('html')).toHaveAttribute('lang', 'ja')
       await selected(bucket.name)
       await expect(page).toHaveURL(url)
-      await page.unroute('**/api/buckets')
+      await page.unroute('**/api/v1/buckets')
     }
   } finally {
-    await page.request.put('/api/me', { headers, data: original })
-    await page.request.post('/api/logout', { headers })
+    await page.request.put('/api/v1/account', { headers, data: original })
+    await page.request.post('/api/v1/auth/logout', { headers })
   }
 })

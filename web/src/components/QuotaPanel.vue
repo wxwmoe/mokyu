@@ -12,11 +12,11 @@ import UiDialog from './ui/UiDialog.vue'
 import UiSelect from './ui/UiSelect.vue'
 type Quota = components['schemas']['Quota']
 const props = defineProps<{ kind: 'project' | 'bucket'; id: string }>()
-const path = computed(() => `/api/quotas/${props.kind}/${props.id}`)
+const path = computed(() => `/api/v1/quotas/${props.kind}/${props.id}`)
 const quota = useQuery({ queryKey: ['quota', path], queryFn: ({ signal }) => api<Quota>(path.value, { signal }), refetchInterval: 30000 })
 const row = computed(() => quota.data.value)
 const used = computed(() => row.value?.used_bytes == null ? null : Number(row.value.used_bytes))
-const limit = computed(() => row.value?.byte_limit == null ? null : Number(row.value.byte_limit))
+const limit = computed(() => row.value?.logical_bytes_limit == null ? null : Number(row.value.logical_bytes_limit))
 const reserved = computed(() => Number(row.value?.reserved_bytes || 0))
 const percent = computed(() => limit.value == null ? 0 : limit.value === 0 ? used.value || reserved.value ? 100 : 0 : Math.min(100, ((used.value || 0) + reserved.value) / limit.value * 100))
 const over = computed(() => used.value != null && limit.value != null && used.value + reserved.value > limit.value)
@@ -29,13 +29,13 @@ function input(value: string | null | undefined) {
   return [String(size / BigInt(unit.value)), unit.value] as const
 }
 function edit() {
-  [draft.bytes, draft.byteUnit] = input(row.value?.byte_limit)
-  ;[draft.inflight, draft.inflightUnit] = input(row.value?.inflight_limit)
-  draft.buckets = row.value?.bucket_limit || ''; invalid.value = false; open.value = true
+  [draft.bytes, draft.byteUnit] = input(row.value?.logical_bytes_limit)
+  ;[draft.inflight, draft.inflightUnit] = input(row.value?.inflight_bytes_limit)
+  draft.buckets = row.value?.bucket_count_limit || ''; invalid.value = false; open.value = true
 }
 async function save() {
   let limits
-  try { limits = { byte_limit: parseBytes(draft.bytes, draft.byteUnit), inflight_limit: props.kind === 'project' ? parseBytes(draft.inflight, draft.inflightUnit) : null, bucket_limit: props.kind === 'project' ? parseBytes(draft.buckets) : null } }
+  try { limits = { logical_bytes_limit: parseBytes(draft.bytes, draft.byteUnit), inflight_bytes_limit: props.kind === 'project' ? parseBytes(draft.inflight, draft.inflightUnit) : null, bucket_count_limit: props.kind === 'project' ? parseBytes(draft.buckets) : null } }
   catch { invalid.value = true; return }
   busy.value = true
   try { await secure(() => write(path.value, limits, 'PUT')); open.value = false; await quota.refetch(); notify(t('quotaSaved')) }
@@ -49,7 +49,7 @@ async function save() {
     <template v-if="row"><div v-if="used != null" class="quota-reading"><strong>{{ bytes(used) }}</strong><span>/ {{ limit == null ? t('quotaUnlimited') : bytes(limit) }}</span><span v-if="over" class="badge">{{ t('quotaExceeded') }}</span></div>
       <p v-else class="field-help">{{ t('quotaScoped') }}</p>
       <div v-if="used != null && limit != null" class="quota-meter" role="progressbar" :aria-label="t('quotaTitle')" :aria-valuenow="Math.round(percent)" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: percent + '%' }" /></div>
-      <div v-if="used != null" class="quota-details"><span v-if="reserved"><Clock3 :size="13" />{{ t('quotaReserved', { value: bytes(reserved) }) }}</span><span v-if="Number(row.inflight_bytes)">{{ t('quotaInFlight', { value: bytes(Number(row.inflight_bytes)) }) }}</span><span v-if="kind === 'project' && row.bucket_limit != null">{{ t('quotaBuckets', { used: row.bucket_count || '0', limit: row.bucket_limit }) }}</span></div>
+      <div v-if="used != null" class="quota-details"><span v-if="reserved"><Clock3 :size="13" />{{ t('quotaReserved', { value: bytes(reserved) }) }}</span><span v-if="Number(row.inflight_bytes)">{{ t('quotaInFlight', { value: bytes(Number(row.inflight_bytes)) }) }}</span><span v-if="kind === 'project' && row.bucket_count_limit != null">{{ t('quotaBuckets', { used: row.bucket_count || '0', limit: row.bucket_count_limit }) }}</span></div>
       <p class="field-help">{{ t(over ? 'quotaOverHint' : 'quotaHint') }}</p>
     </template>
   </section>

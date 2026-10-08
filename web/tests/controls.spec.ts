@@ -4,11 +4,11 @@ import zh from '../src/locales/i18n.zh-CN.js'
 import ja from '../src/locales/i18n.ja.js'
 test.beforeEach(async ({ request }) => {
   const password = process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8').trim()
-  const login = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
+  const login = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
   expect(login.ok()).toBe(true)
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await login.json()).csrf_token }
-  expect((await request.put('/api/me', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })).ok()).toBe(true)
-  await request.post('/api/logout', { headers })
+  expect((await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })).ok()).toBe(true)
+  await request.post('/api/v1/auth/logout', { headers })
 })
 
 async function login(page: Page) {

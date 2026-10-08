@@ -4,9 +4,9 @@ import en from '../src/locales/i18n.en.js'
 
 test('real storage insights, scope selection, pack detail and responsive charts', async ({ page, request }) => {
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
-  const login = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
+  const login = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await login.json()).csrf_token }
-  await request.put('/api/me', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
+  await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   await page.goto('/login')
@@ -27,9 +27,9 @@ test('real storage insights, scope selection, pack detail and responsive charts'
   await expect(page.locator('.space-story')).toBeVisible({ timeout: 20000 })
   await page.goto('/storage')
   await expect(page.locator('.bridge-total')).toBeVisible()
-  const packs = await (await request.get('/api/storage/packs?limit=1')).json()
-  expect(packs.packs.length).toBeGreaterThan(0)
-  await page.goto('/storage?pack=' + packs.packs[0].id)
+  const packs = await (await request.get('/api/v1/storage/packs?limit=1')).json()
+  expect(packs.items.length).toBeGreaterThan(0)
+  await page.goto('/storage?pack=' + packs.items[0].id)
   await expect(page.getByRole('dialog')).toBeVisible()
   await page.getByRole('tab', { name: en.referencingFiles, exact: true }).click()
   await page.keyboard.press('Escape')

@@ -1,138 +1,70 @@
 # 数据库结构
 
-PostgreSQL 保存对象、权限、引用和任务；载荷位于存储或受保护的本地上传缓存。此页列出当前表、字段和关键约束，完整类型、默认值、外键及索引以 [migrations](../migrations) 的 SQL 为准。
+PostgreSQL 保存对象目录、权限、存储映射、任务和运行状态；载荷位于 storage 或受保护的暂存目录。本文只列出当前公开语义，完整类型、约束、索引和触发器以 [`migrations/`](../migrations) 为准。
 
-全新安装顺序执行所有迁移，升级只执行未应用项。已发布迁移不可修改、改号或删除；schema_version 用于兼容检查，不可手改。单容器模式独占数据库和 data；群集模式的 control、worker、data 进程共享同一数据库，但各自使用独立 data 目录。
+全新安装按编号执行全部迁移，已发布迁移不可修改。单容器模式和群集模式使用同一套表；群集中的 control、worker、data 共享数据库，但每个节点保留独立 `instance.data_path` 和 `node.json`。
 
-## 约定
+## 部署、运行设置与身份
 
-- UUID 用于对象、用户、上传及任务；bigint 用于区块、物理编码、区块包和审计。总字节及偏移为 bigint，单区块大小为 integer，时间为 timestamptz。
-- key 使用 C 排序，长度 1～1024 UTF-8 字节，不折叠路径。身份、状态、动作由数据库约束和应用共同校验。
-- 下表括号为主键。字段保留真实名称；JSONB 含义和发布规则见文末。
-
-## 部署与身份
-
-| 表 / 主键 | 字段 | 关键规则 |
+| 表 | 关键字段 | 用途 |
 | --- | --- | --- |
-| `_sqlx_migrations` (version) | `version`、`description`、`installed_on`、`success`、`checksum`、`execution_time` | SQLx 历史与 SHA-384 校验和，不参与日常清理 |
-| `mokyu_meta` (singleton) | `singleton`、`schema_version`、`deployment_id`、`deployment_mode`、`deployment_key_fingerprint`、`storage_identity`、`storage_initialized`、`gc_paused`、`maintenance`、`created_at`、`access_coverage_since`、`access_flushed_at`、`project_management`、`pack_creation_paused` | 部署身份、单容器模式/群集模式和持久开关；部署密钥只保存指纹 |
-| `runtime_settings` (section) | `section`、`value`、`revision`、`updated_at`、`updated_by` | 按分组保存部署级运行设置；JSONB 由 Rust schema 校验，Web/CLI 按 revision 更新 |
-| `key_fingerprints` (key_id) | `key_id`、`algorithm`、`fingerprint` | 密钥指纹，禁止同 ID 换材料，不自动回收 |
-| `managed_keys` (id) | `id`、`name`、`purpose`、`algorithm`、`secret_encrypted`、`fingerprint`、`created_at`、`revoked_at` | 数据库生成的 access/signing/block 密钥；block 支持 AES-256-GCM/ChaCha20-Poly1305，材料由部署密钥保护；当前 key 由 stores 绑定 |
-| `admin_setup` (singleton) | `singleton`、`token_hash`、`created_at`、`expires_at` | Web 首次管理员 setup token 的哈希和一小时有效期，成功后移除；CLI 初始化不需要该 token |
-| `web_users` (id) | `id`、`username`、`password_hash`、`enabled`、`created_at`、`display_name`、`locale`、`theme`、`avatar_email`、`avatar_enabled`、`auth_revision`、`role`、`authorization_revision`、`must_change_password` | username 唯一；admin/member；认证与授权修订号独立 |
-| `sessions` (token_hash) | `token_hash`、`user_id`、`csrf_hash`、`expires_at`、`id`、`created_at`、`last_seen_at`、`reauthenticated_at`、`auth_revision`、`user_agent` | 只保存 Cookie/CSRF 哈希；id 不用于认证；随用户删除 |
-| `api_tokens` (id) | `id`、`user_id`、`label`、`token_hash`、`prefix`、`system`、`auth_revision`、`authorization_revision`、`created_at`、`expires_at`、`last_used_at`、`revoked_at` | token_hash 唯一；权限与用户当前权限取交集 |
-| `projects` (id) | `id`、`name`、`description`、`builtin`、`allow_bucket_create`、`created_at` | name 唯一，仅一个 builtin 默认项目 |
-| `project_members` (user_id, project_id) | `user_id`、`project_id`、`role`、`scope` | reader/writer/maintainer；all/selected |
-| `member_grants` (user_id, bucket_id) | `user_id`、`project_id`、`bucket_id`、`actions` | 复合外键保证成员与桶同项目 |
-| `credentials` (access_key) | `access_key`、`secret_encrypted`、`enabled`、`created_at`、`project_id`、`authorization_revision`、`label`、`expires_at`、`last_used_at`、`created_by` | S3 应用密钥属于项目；创建者删除仅置空 created_by |
-| `grants` (access_key, bucket_id) | `access_key`、`bucket_id`、`actions` | S3 逐桶动作，随凭据或桶删除 |
-| `token_grants` (token_id, bucket_id) | `token_id`、`bucket_id`、`actions` | 个人 Token 逐桶动作，空授权无数据访问 |
-| `stores` (id) | `id`、`name`、`type`、`path`、`endpoint_url`、`remote_bucket`、`region`、`prefix`、`access_key_encrypted`、`secret_key_encrypted`、`metadata`、`current_key_id`、`read_concurrency`、`upload_concurrency`、`control_concurrency`、`enabled`、`created_at`、`updated_at` | `local` 使用 path，`s3` 使用远端字段；凭据由部署密钥加密，`metadata` 保存并核对 `meta.json` 身份；current_key_id 绑定存储，三个并发字段是群集总上限，可空 |
-| `store_permits` (token) | `token`、`store_id`、`direction`、`holder`、`acquired_at`、`expires_at` | PostgreSQL 中的短租约；按存储和 read/upload/control 方向共享并发，节点退出后由过期清理释放 |
-| `nodes` (id) | `id`、`name`、`kind`、`advertise_url`、`credential_encrypted`、`enabled`、`last_seen_at`、`created_at`、`updated_at` | control/worker/data 注册信息；需要被其他 control 转发的 control 必须有 advertise URL，单 control 可为空 |
-| `node_join_tokens` (id) | `id`、`node_id`、`token_hash`、`expires_at`、`consumed_at`、`created_at` | 一次性加入令牌只保存哈希，绑定节点并在消费或撤销后失效 |
-| `control_leases` (singleton) | `singleton`、`node_id`、`lease_token`、`expires_at`、`updated_at` | control 主备租约，单例行由 PostgreSQL 协调 |
+| `mokyu_meta` | `schema_version`、`deployment_id`、`deployment_mode`、`deployment_mode_revision`、`deployment_key_fingerprint`、`gc_paused`、`maintenance`、`project_management`、`pack_creation_paused` | 部署身份、single/cluster 模式和持久开关；不保存 deployment key 明文 |
+| `runtime_settings` | `section`、`value`、`revision`、`updated_at`、`updated_by_user_id` | 类型化的 `web`、`requests`、`uploads`、`metrics`、`maintenance` 分组；Web/CLI 按 revision 更新 |
+| `managed_keys` | `id`、`name`、`purpose`、`key_algorithm`、`secret_encrypted`、`fingerprint`、`created_at`、`revoked_at` | 数据库生成的 access/signing/block key；密文由 deployment key 保护，block 支持 AES-256-GCM、ChaCha20-Poly1305 和无加密 |
+| `setup_tokens` | `token_hash`、`created_at`、`expires_at` | Web 首次管理员设置的一次性 token；CLI 初始化不依赖它 |
+| `web_users`、`sessions`、`api_tokens` | 用户、会话和个人 API token 字段 | Web 认证、CSRF、授权修订和会话撤销 |
+| `nodes` | `id`、`name`、`role`、`credential_encrypted`、`enabled`、`status`、`recovery_required`、`lease_expires_at`、`load_score` | control/worker/data 节点注册、凭据、状态和低频负载；节点直接连接 PostgreSQL |
 
-`user_bucket_access` 和 `token_bucket_access` 视图计算有效动作，不复制权限状态。密码、角色、启用状态和授权变更推进相应修订号；写入发布前复核。S3 secret 由独立 deployment key 加密，个人 Token 不保存明文。
+节点凭据只写入本节点 `node.json`。释放节点时会清除其凭据、回收任务 lease 并允许同名节点重新注册；部署密钥丢失或改变不能作为普通升级处理。
 
-## 存储桶与对象
+## storage、桶与对象
 
-| 表 / 主键 | 字段 | 关键规则 |
+| 表 | 关键字段 | 约束 |
 | --- | --- | --- |
-| `buckets` (id) | `id`、`name`、`state`、`cors`、`website_enabled`、`index_document`、`error_document`、`created_at`、`project_id`、`store_id`、`settings_revision`、`uploads_paused`、`public_base_url` | name 唯一；store_id 必填且绑定后不可变；active/purging；设置变化推进修订号 |
-| `domains` (host) | `host`、`bucket_id` | 小写 Host 映射，随桶删除，不自动抢占域名 |
-| `objects` (bucket_id, key) | `bucket_id`、`key`、`stream_id`、`write_epoch`、`catalog_size`、`catalog_modified`、`catalog_type`、`catalog_kind`、`catalog_public` | stream_id 唯一；NULL 为未发布占位；write_epoch 防迟到覆盖 |
-| `streams` (id) | `id`、`bucket_id`、`object_key`、`kind`、`state`、`size`、`etag`、`metadata`、`public_read`、`checksums`、`created_at`、`touched_at`、`upload_cache_bypass`、`write_authorization`、`owner_task`、`owner_lease` | object/part 内容版本；后台迁移临时流记录创建它的任务租约 |
-| `extents` (stream_id, offset_bytes) | `stream_id`、`offset_bytes`、`length`、`chunk_id`、`fragment_id`、`source_offset` | chunk_id 与 fragment_id 恰一非空，source_offset 支持子区间 |
-| `fragments` (id) | `id`、`owner_stream`、`sealed`、`size`、`hash`、`created_at` | multipart 原始片段；sealed 后才发布映射 |
-| `catalog_build` (singleton) | `singleton`、`phase`、`cursor_bucket`、`cursor_key`、`scanned`、`current_index`、`last_error`、`updated_at` | indexes/backfill/ready，回填游标与批次同事务 |
+| `storages` | `id`、`name`、`type`、`path`、`endpoint_url`、`remote_bucket_name`、`region`、`prefix`、加密凭据、`identity_marker`、`block_key_id`、`enabled` | `type` 为 `local` 或 `s3`；保存连接信息时核对已有 `meta.json`，不会把空目标隐式初始化 |
+| `storage_profiles` | `storage_id`、`revision`、连接/重试、cache、compression、pack、integrity、migration、并发和字节预算字段 | 每个 storage 一行类型化策略；storage 级读写/control/维护及完整性预算在群集内共享 |
+| `storage_permits` | `token`、`storage_id`、`direction`、`holder_id`、`acquired_at`、`expires_at` | 短租约，按 storage 和方向限制群集总并发 |
+| `buckets` | `id`、`name`、`project_id`、`storage_id`、设置和状态字段 | `storage_id` 创建时绑定且不可修改；同一 storage 内去重，跨 storage 不去重 |
+| `bucket_domains` | `host`、`bucket_id` | 公共 Host 到桶的唯一映射 |
+| `objects`、`streams`、`extents`、`fragments` | `object_key`、`stream_type`、`write_token`、范围映射、片段状态 | 对象目录和版本发布；完整 ready stream 才能发布 |
 
-objects.catalog_* 摘要与对象变更同事务更新，不重复计入配额。旧对象每批回填 500 行；桶内大小、日期、类型索引和 pg_trgm GIN 逐个并发构建。中断的无效索引重建，需要额外数据库磁盘空间。
+storage 连接和 profile 修改只改变后续写入及新请求的策略。存量载荷的加密、压缩或区块包转换必须显式启动 `storage rewrite` 或 `storage unpack` 任务。
 
-## 区块与物理来源
+## 逻辑区块和物理来源
 
-| 表 / 主键 | 字段 | 关键规则 |
+| 表 | 关键字段 | 说明 |
 | --- | --- | --- |
-| `chunks` (id) | `id`、`storage_id`、`store_id`、`owner_stream`、`hash`、`raw_size`、`stored_size`、`algorithm`、`key_id`、`compressed`、`nonce`、`format`、`state`、`created_at`、`unreferenced_at`、`deleted_at`、`encoding_id`、`pack_id`、`reference_changed_at`、`split_at`、`range_split_at`、`repack_after` | 明文 BLAKE3 去重身份限定在同一 store_id；raw_size 为 1 B～4 MiB；保留初始独立压缩提示 |
-| `chunk_locations` (id) | `id`、`chunk_id`、`storage_id`、`store_id`、`stored_size`、`compressed`、`nonce`、`state`、`created_at`、`unreferenced_at`、`deleted_at`、`owner_task`、`algorithm`、`key_id`、`stored_at` | storage_id 唯一；store_id 必须与父 chunk 一致；每个逻辑块最多一个 ready 独立来源 |
-| `packs` (id) | `id`、`storage_id`、`store_id`、`algorithm`、`key_id`、`raw_size`、`stored_size`、`compressed`、`nonce`、`digest`、`member_count`、`state`、`created_at`、`unreferenced_at`、`deleted_at`、`owner_task`、`range_checked_at`、`stored_at` | storage_id 唯一；pack 成员必须来自同一 store_id；至少两个完整 CDC 成员，压缩标记独立于成员 |
-| `pack_members` (pack_id, ordinal) | `pack_id`、`ordinal`、`chunk_id`、`offset_bytes` | 唯一 (pack_id,chunk_id)，偏移相对解压后的载荷 |
-| `pack_inputs` (task_id, chunk_id) | `task_id`、`chunk_id`、`created_at` | chunk_id 唯一，保护重写输入并避免任务争用 |
-| `pack_maintenance` (stream_id) | `stream_id`、`cursor`、`generation`、`next_check_at`、`updated_at`、`reason` | 待打包/合包候选，generation 防丢并发事件 |
-| `pack_changes` (pack_id) | `pack_id`、`generation`、`next_check_at`、`reason` | reuse/reclaim 候选，同样按 generation 处理 |
+| `chunks` | `id`、`storage_id`、`hash`、`raw_size`、`standalone_size`、`encryption_algorithm`、`block_key_id`、`standalone_compressed`、`current_encoding_id`、`pack_id`、状态和回收时间 | 按 `storage_id + hash + raw_size` 去重；逻辑区块身份不因重写改变 |
+| `chunk_encodings` | `encoding_id`、`chunk_id`、`location_id`、`storage_id`、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce`、`encoding_fingerprint`、状态和发布时间 | 独立区块的实际物理来源；同一逻辑区块最多一个 ready 独立来源 |
+| `packs`、`pack_members` | pack 的 `location_id`、`storage_id`、加密/压缩字段、`pack_fingerprint` 及成员偏移 | 区块包来源和成员映射；只收纳同一 storage 的完整区块 |
+| `pack_inputs`、`pack_maintenance`、`pack_changes` | 任务输入保护、游标、generation 和下一次检查时间 | 使打包、复用、回收和 Range 优化可恢复 |
 
-读取实际独立载荷使用 chunk_locations，包使用 packs/pack_members；chunks.stored_size/compressed 只是独立压缩提示。重编码分配新物理 ID/storage_id，不复用 nonce 身份。stored_at 是远端成功发布时间，复用不重置；未知时在回收前查询 Last-Modified。
+`encoding_fingerprint` 和 `pack_fingerprint` 由 key、算法、压缩及对应 profile 计算。保存 profile 不自动重写存量；rewrite 根据 fingerprint 跳过已符合策略的来源。
 
-物理来源只有 ready 可选。独立来源为 uploading/ready/retired/deleting/deleted；区块包为 preparing/ready/retired/deleting/deleted。切换后的旧来源仍受 GC 宽限与最低存储期保护。
+## 上传、暂存和配额
 
-## 上传、缓存与额度
-
-| 表 / 主键 | 字段 | 关键规则 |
+| 表 | 关键字段 | 用途 |
 | --- | --- | --- |
-| `uploads` (id) | `id`、`bucket_id`、`object_key`、`access_key`、`state`、`metadata`、`public_read`、`checksum_algorithm`、`checksum_type`、`manifest_hash`、`result`、`output_stream`、`created_at`、`touched_at`、`durable_at` | active/completing/completed/aborted；Complete 清单及幂等结果 |
-| `parts` (upload_id, part_number) | `upload_id`、`part_number`、`stream_id`、`write_epoch`、`quota_size` | 当前 part stream；write_epoch 防替换竞态，quota_size 记录接收量 |
-| `web_uploads` (upload_id) | `upload_id`、`user_id`、`client_id`、`request_hash`、`file_name`、`expected_size`、`part_size`、`modified_at`、`expected_stream` | 唯一 (user_id,client_id)；用户删除不转移续传身份 |
-| `pending_uploads` (chunk_id) | `chunk_id`、`stream_id`、`offset_bytes`、`cache_size`、`cache_compressed`、`source_pack`、`created_at`、`next_retry_at`、`attempts`、`last_error`、`owner_task` | 每逻辑块一份本地待上传来源，字节只计一次 |
-| `cache_pins` (chunk_id, pin_type, owner_id) | `chunk_id`、`pin_type`、`owner_id`、`created_at` | upload/pack 共同保护 pending 文件，年龄不触发淘汰 |
-| `quota_accounts` (kind, id) | `kind`、`id`、`used_bytes`、`reserved_bytes`、`inflight_bytes`、`object_count`、`bucket_count`、`byte_limit`、`inflight_limit`、`bucket_limit` | project/bucket 账本；非负用量，NULL 不限，0 为零 |
-| `quota_reservations` (id) | `id`、`bucket_id`、`object_key`、`stream_id`、`upload_id`、`output_stream`、`closed`、`base_stream`、`credit_bytes`、`logical_bytes`、`inflight_bytes` | stream/upload 恰一非空；同一被覆盖内容版本只允许一份覆盖抵扣 |
-| `quota_writes` (stream_id) | `stream_id`、`reservation_id`、`allocated_bytes`、`contribution_bytes` | 已分配预留及贡献，随预留删除 |
+| `uploads`、`parts`、`web_uploads` | 上传状态、`write_token`、清单、校验和及暂存 storage/object key | S3 multipart 和 Web 上传的幂等、分片及共享暂存 |
+| `pending_uploads` | `chunk_id`、`stream_id`、`staged_size`、`source_pack_id`、重试和 lease 字段 | 尚未发布的独立来源；群集暂存对象位于 `uploads` runtime 设置选择的 storage 的 `__mokyu/multipart/` 前缀 |
+| `staging_objects` | `storage_id`、`object_key`、`bytes`、`created_at` | 群集共享暂存的数据库字节账本 |
+| `quota_scopes` | `scope`、`scope_id`、用量、`logical_bytes_limit`、`inflight_bytes_limit`、`bucket_count_limit`、`cached_bytes` | project/bucket 配额；NULL 表示不限，0 表示禁止新增 |
+| `quota_reservations`、`quota_writes` | reservation、预留、inflight 和替换对象字段 | 接收、覆盖、发布、取消和恢复过程中的事务记账 |
 
-配额先锁项目再锁桶，接收、发布、覆盖、删除与归还都在事务中记账。按当前对象原始大小计算，与去重和压缩无关。桶转移原子移动账本并撤销原桶专属授权。
+配额按原始逻辑字节计量，与去重和压缩无关。数据库函数在同一事务中锁定 project 和 bucket 账本，保证并发上传不会超额。
 
-pending 的 cache_size/cache_compressed 表示实际 .raw/.zst 文件。pin 随 pending 删除；降配、重启或超时不能删除唯一已确认副本。uploads.durable_at 记录首次观察到远端来源已全部就绪的时刻。
+## 任务、审计与统计
 
-## 任务、审计与回执
-
-| 表 / 主键 | 字段 | 关键规则 |
+| 表 | 关键字段 | 用途 |
 | --- | --- | --- |
-| `maintenance_controls` (kind) | `kind`、`paused`、`last_scheduled_at`、`updated_at` | 七类持久策略和最近调度时间 |
-| `maintenance_previews` (id) | `id`、`actor_id`、`token_id`、`action`、`parameters`、`fingerprint`、`expires_at`、`task_id` | 身份/Token 绑定的十分钟预览，task_id 保存执行回执 |
-| `tasks` (id) | `id`、`kind`、`bucket_id`、`state`、`cursor`、`processed`、`detail`、`error`、`created_at`、`updated_at`、`created_by`、`source`、`started_at`、`lease_node_id`、`lease_token`、`lease_expires_at` | 持久游标、来源、发起者和 worker 租约；queued/running/paused/completed/failed；`storage_migration` detail 保存跨 store 的源/目标对象，发布目标和完成任务都要求当前租约仍有效 |
-| `integrity_issues` (id) | `id`、`task_id`、`subject`、`code`、`chunk_id`、`storage_id`、`stream_id`、`bucket_id`、`object_key`、`detail`、`created_at` | 保留检查时身份，对象删除不抹除异常 |
-| `integrity_packs` (task_id, pack_id) | `task_id`、`pack_id`、`error_code` | 避免一轮巡检重复验证共享包 |
-| `audit_events` (id) | `id`、`created_at`、`finished_at`、`actor_id`、`actor_label`、`token_id`、`source`、`action`、`target`、`project_id`、`bucket_id`、`outcome`、`request_id`、`status`、`detail` | 持久意图与显式结果，用户删除不级联删除历史 |
-| `media_operations` (id) | `id`、`user_id`、`token_id`、`client_id`、`request_hash`、`result`、`created_at` | 唯一 (user_id,token_id,client_id)，NULLS NOT DISTINCT；成功回执与变更同事务 |
+| `tasks` | `task_type`、`parent_task_id`、`execution_scope`、`target_node_id`、`batch_cursor`、`batch_total`、`batch_completed`、状态和 lease 字段 | 父任务拆分为可恢复的批次子任务；不依赖本机目录的任务由所有 worker 平等领取 |
+| `maintenance_controls`、`maintenance_previews` | 策略暂停状态、预览参数、确认指纹和 task 回执 | GC、pack、rewrite、迁移、清查和破坏性操作的安全控制 |
+| `integrity_issues`、`integrity_packs` | 巡检对象、位置、错误和共享 pack 记录 | 完整性任务只报告问题，不自动修复 |
+| `audit_events`、`media_operations` | actor、来源、请求、结果和幂等回执 | 管理操作审计与媒体操作幂等 |
+| `usage_summary`、`usage_history`、`runtime_samples` | 范围摘要、历史采样和进程指标 | Web/CLI 统计展示，不参与权限或配额准入 |
 
-## 访问与容量统计
+任务在节点关闭、模式切换或 lease 过期时回到可恢复状态。涉及某个 Data 本机目录的任务固定 `target_node_id`；共享 S3、数据库和 storage profile 的任务可由任意 worker 承担。
 
-| 表 / 主键 | 字段 | 关键规则 |
-| --- | --- | --- |
-| `chunk_access_stats` (chunk_id) | `chunk_id`、`reads`、`range_reads`、`bytes`、`last_read_at` | 累计读取量，不是逐请求审计 |
-| `chunk_access_windows` (chunk_id, window_start) | `chunk_id`、`window_start`、`reads`、`range_reads`、`bytes`、`range_origin_reads` | UTC 小时窗口，含缓存和回源 Range |
-| `pack_access_windows` (pack_id, window_start) | `pack_id`、`window_start`、`downloads`、`downloaded_bytes`、`partial_downloads`、`useful_bytes`、`partial_bytes`、`updated_at` | 实际包下载与局部有效字节，共享下载计一次 |
-| `pack_member_access_windows` (window_start, pack_id, chunk_id) | `window_start`、`pack_id`、`chunk_id`、`downloads` | 局部回源涉及的成员，供收益估计 |
-| `storage_insights` (id) | `id`、`bucket_ids`、`requested_at`、`as_of`、`data` | 按实时权限形成的范围摘要，global 的 bucket_ids 为 NULL |
-| `storage_history` (scope_id, at) | `scope_id`、`at`、`data` | 同口径容量历史，随范围清理 |
-| `runtime_history` (at) | `at`、`data` | 进程计数与缓存历史，重启处分段 |
+## 迁移和历史
 
-访问先在有界内存计数，再批量落库；异常退出可丢失未刷盘观测。access_coverage_since/access_flushed_at 防止将重启或统计缺口视为零访问。范围数量、历史点数及保留期有上限，统计不参与权限或配额准入。
-
-## 状态与清理
-
-- streams：writing → ready → retired，未完成写入恢复为 abandoned。objects 只发布完整 ready 流；已接纳读取固定版本，不受后来覆盖影响。
-- chunks：preparing → uploading → ready，不确定失败为 failed；逻辑退役后 deleting → deleted。最后引用消失设置 unreferenced_at，重新引用清空；删除认领与新引用互斥。
-- part 可混合片段和区块，最终对象必须全部引用 ready 区块、映射连续且总长正确。先持久写文件，再提交 sealed 与引用。
-- Complete 冻结清单、发布并保存结果；相同清单可重试。未提交的 completing 重启后回到 active。
-- 重启重排 running 任务，paused 保持暂停；已完成历史按保留期清理。外键、owner_stream、pack_inputs 和活跃读写共同保护仍需要的记录。
-- 逻辑行清理等待物理日志和包成员索引不再需要它；identity 序列与密钥指纹不回收。删除桶不会删除其他桶仍引用的区块。
-
-保持 PostgreSQL autovacuum/ANALYZE 启用，程序不自动 VACUUM FULL。保留期见[配置](configuration.md#回收与历史清理)；不要手改状态、引用、序列或 nonce 绕过检查。
-
-## JSONB 结构
-
-| 字段 | 内容 |
-| --- | --- |
-| streams.metadata / uploads.metadata | content_type/cache_control/content_disposition/content_encoding/content_language/expires；user 为自定义 S3 元数据字典 |
-| streams.checksums | S3 校验值及 checksum_type，与内部 BLAKE3 独立 |
-| streams.write_authorization | 内部身份、修订号、所需动作，无认证秘密 |
-| buckets.cors | origins/methods/headers/expose/max_age 规则数组 |
-| uploads.result | Complete 的 ETag、时间等，与 manifest_hash 用于重试 |
-| tasks.detail | 范围、批次进度及诊断，见[任务 API](control-api-reference.md#后台任务) |
-| media_operations.result | 逐项结果和新版本身份 |
-| storage_insights.data / storage_history.data | 同口径 R/U/D/A 及物理来源快照 |
-| audit_events.detail | 显式允许的结果，不含完整请求、密码或密钥 |
-
-结构不是备份；恢复仍需[一致的数据库、密钥及实际载荷](deployment-and-recovery.md#备份材料)。
+迁移 `0001`–`0041` 保持追加顺序；`0037` 完成 storage/location、quota、task、credential 和 runtime 字段的最终词汇，`0038`–`0040` 完成物理 fingerprint、共享 staging 和 rewrite 压缩策略，`0041` 删除部署级的历史 storage identity/initialization 字段。新安装执行完整链；发布文档负责说明旧版本迁移边界。

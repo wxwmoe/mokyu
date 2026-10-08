@@ -21,14 +21,14 @@ type Grant = components['schemas']['BucketGrant']
 type Action = components['schemas']['Action']
 const route = useRoute(), service = computed(() => route.name === 'credentials'), after = ref(''), project = ref('')
 const owner = computed(() => !service.value && session.value?.role === 'admin' ? String(route.query.user || '') : '')
-const endpoint = computed(() => service.value ? '/api/credentials' : '/api/tokens')
+const endpoint = computed(() => service.value ? '/api/v1/s3-credentials' : '/api/v1/api-tokens')
 const rows = useQuery({ queryKey: ['access-keys', service, project, after, owner], queryFn: async ({ signal }) => {
   const q = params({ after: after.value || undefined, project: service.value ? project.value || undefined : undefined, user: owner.value || undefined })
-  if (service.value) { const page = await api<components['schemas']['CredentialPage']>(endpoint.value + '?' + q, { signal }); return { rows: page.credentials as Row[], next: page.next } }
-  const page = await api<components['schemas']['TokenPage']>(endpoint.value + '?' + q, { signal }); return { rows: page.tokens as Row[], next: page.next }
+  if (service.value) { const page = await api<components['schemas']['CredentialPage']>(endpoint.value + '?' + q, { signal }); return { rows: page.items as Row[], next: page.next_cursor } }
+  const page = await api<components['schemas']['TokenPage']>(endpoint.value + '?' + q, { signal }); return { rows: page.items as Row[], next: page.next_cursor }
 } })
-const projects = useQuery({ queryKey: ['projects'], enabled: service, queryFn: ({ signal }) => api<components['schemas']['Project'][]>('/api/projects', { signal }) })
-const buckets = useQuery({ queryKey: ['buckets'], queryFn: ({ signal }) => api<Bucket[]>('/api/buckets', { signal }) })
+const projects = useQuery({ queryKey: ['projects'], enabled: service, queryFn: ({ signal }) => api<components['schemas']['Project'][]>('/api/v1/projects', { signal }) })
+const buckets = useQuery({ queryKey: ['buckets'], queryFn: ({ signal }) => api<Bucket[]>('/api/v1/buckets', { signal }) })
 const title = computed(() => t(service.value ? 'credentials' : 'tokens'))
 const options = computed(() => projects.data.value?.map(item => ({ value: item.id, label: item.name })) || [])
 const editOpen = ref(false), selected = ref<Row | null>(null), busy = ref(false), detail = ref<Row | null>(null)

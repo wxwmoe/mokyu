@@ -34,10 +34,10 @@
 
 ```sh
 docker compose up -d
-docker exec mokyu cli status
-docker exec mokyu cli bucket create media
-docker exec mokyu cli credential create media
-docker exec -it mokyu cli user create admin
+docker exec mokyu mokyu cli status
+docker exec mokyu mokyu cli bucket create media
+docker exec mokyu mokyu cli credential create media
+docker exec -it mokyu mokyu cli user create admin
 ```
 
 ## 实际接口和运维文档

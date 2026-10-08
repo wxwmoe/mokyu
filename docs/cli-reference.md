@@ -1,12 +1,21 @@
 # CLI 参考
 
-在线命令通过常驻服务执行，统一前缀为 `docker exec mokyu cli`。命令和输出使用英语；每层命令均支持 `--help`，下表的 `[]` 表示可选参数。
+在线命令通过常驻服务执行，统一前缀为 `docker exec mokyu mokyu cli`。命令和输出使用英语；每层命令均支持 `--help`，下表的 `[]` 表示可选参数。
 
 默认读取 `/config/config.toml`，可用 `mokyu -c PATH cli ...` 或 `mokyu --config PATH cli ...` 指定配置。
 
 成功向 stdout 输出 JSON、退出 0；执行或连接失败向 stderr 输出错误并非零退出，参数错误退出 2。管理帧最多 1 MiB，RPC 等待 60 秒。任务创建成功表示已排队，后续结果通过 `task show` 查看。
 
 离线命令 `mokyu tool openapi` 输出管理 API 的 OpenAPI JSON，不访问配置、数据库或服务；`mokyu tool keygen` 生成部署 key。
+
+## 首次初始化
+
+| 命令 | 作用与返回 |
+| --- | --- |
+| `init USERNAME [--stdin] [--require-change]` | 在空数据库中创建首个管理员；终端内隐藏输入密码，`--stdin` 从标准输入读取一行 |
+| `setup token` | 生成一次性 Web 首次管理员 token |
+
+`init` 只允许在本机单容器或 control 管理端执行；数据库已有管理员时拒绝重复初始化。
 
 ## 桶与域名
 
@@ -28,7 +37,7 @@ CORS 文件示例，字段规则见[CORS 设置](control-api-reference.md#cors-�
 ```
 
 ```sh
-docker exec mokyu cli bucket cors media /config/cors.json
+docker exec mokyu mokyu cli bucket cors media /config/cors.json
 ```
 
 ## 存储
@@ -43,14 +52,16 @@ docker exec mokyu cli bucket cors media /config/cors.json
 | `storage check NAME` | 读取并核对存储的 `meta.json`，返回检查结果 |
 | `storage key set NAME KEY` | 将存储绑定到未撤销的 block key 名称或 UUID |
 | `storage key clear NAME` | 解除存储的当前 block key，新写入区块不加密 |
+| `storage profile show NAME` | 显示该 storage 的类型化连接、缓存、压缩、打包、巡检和群集共享预算 |
+| `storage profile set NAME FILE` | 用完整 JSON 替换 storage profile；`FILE` 为 `-` 时从 stdin 读取，要求当前 `revision` |
 | `storage rewrite NAME preview [--key KEY]` | 统计需要按目标 key 或无加密重写的物理区块和区块包，返回确认值 |
 | `storage rewrite NAME start --confirm VALUE [--key KEY]` | 使用 preview 返回的确认值创建低优先级重写任务 |
 | `storage rewrite NAME status` | 查看该存储最近的重写任务 |
 | `storage rewrite NAME pause\|resume\|retry` | 暂停、继续或重试该存储最近的重写任务 |
 
-存储名称为 1～128 字节且不能含 `/` 或控制字符；S3 的 endpoint 必须是没有查询串或片段的 HTTP(S) URL。`local` 只接受 path，`s3` 需要 endpoint、bucket、region、access key 和 secret key，并具备对应范围的 Get、Put、Delete、List 和条件创建权限；`prefix` 默认为空。存储创建前，目标命名空间必须为空并会写入身份标识；更新连接信息只接受与已有标识匹配的目标，不会初始化空目标。存储由数据库管理，创建桶时用 `bucket create NAME --store UUID` 绑定；绑定后不可更改。
+存储名称为 1～128 字节且不能含 `/` 或控制字符；S3 的 endpoint 必须是没有查询串或片段的 HTTP(S) URL。`local` 只接受 path，`s3` 需要 endpoint、bucket、region、access key 和 secret key，并具备对应范围的 Get、Put、Delete、List 和条件创建权限；`prefix` 默认为空。存储创建前，目标命名空间必须为空并会写入身份标识；更新连接信息只接受与已有标识匹配的目标，不会初始化空目标。存储由数据库管理，创建桶时用 `bucket create NAME --storage UUID` 绑定；绑定后不可更改。
 
-单容器模式下可以使用本地存储；群集模式必须使用 S3 存储。创建桶前至少要有一个启用的存储，存在多个时必须指定 `--store`。相关 HTTP 接口见[存储](control-api-reference.md#存储)。
+单容器模式下可以使用本地存储；群集模式必须使用 S3 存储。创建桶前至少要有一个启用的存储，存在多个时必须指定 `--storage`。相关 HTTP 接口见[存储](control-api-reference.md#存储)。
 
 ## 存储额度
 
@@ -59,7 +70,7 @@ docker exec mokyu cli bucket cors media /config/cors.json
 | `quota get SCOPE ID` | 读取 project/bucket 额度及用量 |
 | `quota set SCOPE ID FILE` | 用 JSON 完整替换上限，写入审计 |
 
-文件示例：`{"byte_limit":"10737418240","inflight_limit":"2147483648","bucket_limit":"10"}`。null 不限，`"0"` 为零；bucket 仅设置 byte_limit，其余字段为 null。调低额度不会删除现有文件。
+文件示例：`{"logical_bytes_limit":"10737418240","inflight_bytes_limit":"2147483648","bucket_count_limit":"10"}`。null 不限，`"0"` 为零；bucket 仅设置 logical_bytes_limit，其余字段为 null。调低额度不会删除现有文件。
 
 ## 活动审计
 
@@ -117,7 +128,7 @@ docker exec mokyu cli bucket cors media /config/cors.json
 凭据/Token 设置文件上限 512 KiB。JSON 中的权限与有效期语义见[管理 API](control-api-reference.md#应用密钥与-api-token)。创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入并再次确认，使用 `docker exec -it`；非终端须指定 `--stdin`。不接受明文命令参数，自动化时可从 stdin 读取一行：
 
 ```sh
-docker exec -i mokyu cli user create admin --stdin < /secure/password-file
+docker exec -i mokyu mokyu cli user create admin --stdin < /secure/password-file
 ```
 
 首次初始化流程见[部署与接入](deployment-and-recovery.md#初始化与接入)。
@@ -146,7 +157,7 @@ docker exec -i mokyu cli user create admin --stdin < /secure/password-file
 | 命令 | 作用与返回 |
 | --- | --- |
 | `settings get SECTION` | 显示 PostgreSQL 中一个 runtime settings 分组；不返回秘密 |
-| `settings set SECTION FILE --rev REVISION` | 用 JSON 文件完整替换一个分组，要求当前 revision；FILE 为 `-` 时从 stdin 读取 |
+| `settings set SECTION FILE [--rev REVISION]` | 用 JSON 文件完整替换一个分组；省略 `--rev` 时由服务端在当前 revision 上保存，FILE 为 `-` 时从 stdin 读取 |
 | `settings reset SECTION` | 将分组恢复为当前代码默认值 |
 | `settings web show` | 显示 Web 设置兼容视图 |
 | `settings web set [--origin URL] [--secure-cookie true/false] [--session-lifetime 12h] [--gravatar-base-url URL]` | 修改 Web 设置；未提供的字段保持不变 |
@@ -158,14 +169,12 @@ runtime settings 由所有角色共享。保存成功后响应会标记需要重
 | 命令 | 作用与返回 |
 | --- | --- |
 | `setup token` | 生成一次性 Web 首次管理员 setup token；只输出本次明文，保存哈希和一小时有效期 |
-| `cluster status` | 返回 deployment mode、enabled 节点数和 local store 数 |
-| `cluster mode single/cluster` | 切换数据库部署模式；进入 cluster（群集模式）前必须已迁移并移除所有 local store，回到 single（单容器模式）前必须禁用所有节点 |
-| `cluster nodes` | 列出节点 id、名称、角色、advertise URL、启用状态和最近 heartbeat |
-| `cluster token NAME KIND [--advertise-url URL] [--expires-in 1h]` | 为 control/worker/data 创建一次性 join token；control 必须提供只指向该节点的 advertise URL；token 只在本次输出返回 |
-| `cluster revoke UUID` | 禁用节点并使未消费的 join token 失效 |
-| `cluster reissue UUID [--expires-in 1h]` | 为已撤销节点重新生成一次性 join token；保留节点名称、角色和 advertise URL |
+| `cluster status` | 返回 deployment mode、enabled 节点数和 local storage 数 |
+| `cluster mode single/cluster` | 切换数据库部署模式；进入 cluster（群集模式）前必须已迁移并移除所有 local storage，回到 single（单容器模式）前必须禁用所有节点 |
+| `cluster nodes` | 列出节点 id、名称、角色、启用状态和最近 heartbeat |
+| `cluster release NAME --confirm` | 禁用节点并将其持有的任务重新排队 |
 
-新 control、worker 或 data 将 `cluster token` 的输出写入自己的配置，第一次启动后凭据保存到 `instance.data_path/node.json`。第一台 control 不需要 join token 或 advertise URL；需要被其他 control 转发的 control 才需要只指向本节点的 `cluster.advertise_url`。控制主备、DNS 和角色安排见[群集部署](cluster-deployment.md)。
+control、worker 和 data 首次启动时直接向 PostgreSQL 注册，凭据保存到 `instance.data_path/node.json`。节点文件丢失时进入 `recovery_required`，管理员先释放旧节点，再重启角色完成注册。控制节点不使用远程 URL 或主备转发；DNS 和角色安排见[群集部署](cluster-deployment.md)。
 
 群集模式下，data/worker 容器的本地 CLI 只支持 `status`；其他管理命令在单容器模式或 control 容器执行。
 
@@ -196,8 +205,8 @@ range 需要 range_enabled=true；packing.enabled=false 时可优化历史包，
 ### 清空存储桶
 
 ```sh
-docker exec mokyu cli bucket purge media
-docker exec -it mokyu cli bucket purge media --execute
+docker exec mokyu mokyu cli bucket purge media
+docker exec -it mokyu mokyu cli bucket purge media --execute
 ```
 
 执行需要真实终端，依次输入精确桶名和 `DELETE`。任务遍历删除对象及上传；共享区块在失去最后引用并满足 GC 宽限后回收，返回 task_id 时空间不会立即释放。
@@ -206,18 +215,18 @@ docker exec -it mokyu cli bucket purge media --execute
 
 | 命令 | 作用 |
 | --- | --- |
-| `storage sweep [--store UUID] [--age 48h]` | 默认预览；扫描指定存储（省略时按当前选择）chunks/packs 规范路径，统计未被数据库任何物理状态索引的载荷 |
+| `storage sweep [--storage UUID] [--age 48h]` | 默认预览；扫描指定存储（省略时按当前选择）chunks/packs 规范路径，统计未被数据库任何物理状态索引的载荷 |
 | `storage sweep --execute --preview UUID [--age 48h]` | 按相同前缀和年龄阈值重新扫描，每次删除前重新查询数据库 |
 
-预览和执行均按存储对象的修改时间计算年龄，取 `--age` 与 `storage.min_retention` 中较长者。最低期限改变后须重新预览；继续旧任务也不会绕过当前最低期限。
+预览和执行均按存储对象的修改时间计算年龄，取 `--age` 与该 storage profile 的 `min_storage_duration` 中较长者。最低期限改变后须重新预览；继续旧任务也不会绕过当前最低期限。
 
 执行需要维护模式、已完成的预览、排空的活跃操作、非空区块索引及真实终端；按提示确认前缀，再输入 `DELETE`。预览过期后需重新生成。
 
 ```sh
-docker exec mokyu cli maintenance enable
-docker exec mokyu cli storage sweep
-docker exec mokyu cli task show PREVIEW_UUID
-docker exec -it mokyu cli storage sweep --execute --preview PREVIEW_UUID
+docker exec mokyu mokyu cli maintenance enable
+docker exec mokyu mokyu cli storage sweep
+docker exec mokyu mokyu cli task show PREVIEW_UUID
+docker exec -it mokyu mokyu cli storage sweep --execute --preview PREVIEW_UUID
 ```
 
 ## 完整性巡检
@@ -236,11 +245,11 @@ docker exec -it mokyu cli storage sweep --execute --preview PREVIEW_UUID
 巡检只报告，不修复或删除数据；远端检查绕过且不填充缓存，共享物理块每轮只检查一次。没有远端来源的 pending 块在所有模式下校验本地唯一副本。`completed` 仍可能有异常，应查看 `detail.issues`；网络、权限及超时使任务 `failed`，可恢复后继续。覆盖边界、异常代码和 JSONL 导出见[巡检 API](control-api-reference.md#完整性巡检)，并发和限速见[配置](configuration.md#完整性巡检)。
 
 ```sh
-docker exec mokyu cli integrity check --mode full --bucket media
-docker exec mokyu cli task show TASK_UUID
-docker exec mokyu cli integrity issues TASK_UUID
-docker exec mokyu cli task pause TASK_UUID
-docker exec mokyu cli task resume TASK_UUID
+docker exec mokyu mokyu cli integrity check --mode full --bucket media
+docker exec mokyu mokyu cli task show TASK_UUID
+docker exec mokyu mokyu cli integrity issues TASK_UUID
+docker exec mokyu mokyu cli task pause TASK_UUID
+docker exec mokyu mokyu cli task resume TASK_UUID
 ```
 
 ## 上传缓存
@@ -258,6 +267,6 @@ docker exec mokyu cli task resume TASK_UUID
 | --- | --- |
 | `mokyu tool keygen` | 生成部署密钥；只输出一次，必须保存到配置文件 |
 | `mokyu tool openapi` | 离线导出管理 OpenAPI，不读取配置或数据库 |
-| `mokyu serve --maintenance` | 在监听前设置维护状态，供[数据库恢复](deployment-and-recovery.md#恢复步骤)使用 |
+| `mokyu cli maintenance enable` | 通过管理 API 进入维护状态；恢复数据库时先停止写入，再用该命令确认维护状态 |
 
 全部在线管理能力在 Web 有对应入口，见[管理指南](management.md)；部署密钥生成、配置文件安装、数据库备份恢复及停止状态的救援仍在部署环境执行。

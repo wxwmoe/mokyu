@@ -5,10 +5,10 @@ import en from '../src/locales/i18n.en.js'
 test('maintenance policies, task history, service configuration and database keys', async ({ page, request }) => {
   test.setTimeout(60000)
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
-  const login = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
+  const login = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await login.json()).csrf_token }
-  await request.put('/api/me', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
-  const before = await (await request.get('/api/maintenance')).json()
+  await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
+  const before = await (await request.get('/api/v1/maintenance')).json()
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
   await page.goto('/login')
   await page.getByRole('textbox', { name: en.username, exact: true }).fill('tester')
@@ -20,7 +20,7 @@ test('maintenance policies, task history, service configuration and database key
     const cleanup = page.locator('.policy-card').filter({ has: page.getByRole('heading', { name: en.task_cleanup, exact: true }) })
     await cleanup.getByRole('button', { name: before.controls.find((p: any) => p.kind === 'cleanup').paused ? en.resumePolicy : en.pausePolicy, exact: true }).click()
     await expect(cleanup.getByRole('button', { name: before.controls.find((p: any) => p.kind === 'cleanup').paused ? en.pausePolicy : en.resumePolicy, exact: true })).toBeVisible()
-    await request.post('/api/maintenance/cleanup/actions', { headers, data: { action: 'resume' } })
+    await request.post('/api/v1/maintenance/cleanup/actions', { headers, data: { action: 'resume' } })
     await page.reload(); await cleanup.getByRole('button', { name: en.runNow, exact: true }).click()
     await expect(page.getByRole('dialog', { name: en.taskDetails, exact: true })).toBeVisible()
     await expect(page.locator('.task-hero')).toContainText(en.task_cleanup)
@@ -61,5 +61,5 @@ test('maintenance policies, task history, service configuration and database key
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.screenshot({ path: '/results/step16-maintenance-mobile.png', fullPage: true })
     expect(errors).toEqual([])
-  } finally { await request.post('/api/maintenance/cleanup/actions', { headers, data: { action: before.controls.find((p: any) => p.kind === 'cleanup').paused ? 'pause' : 'resume' } }) }
+  } finally { await request.post('/api/v1/maintenance/cleanup/actions', { headers, data: { action: before.controls.find((p: any) => p.kind === 'cleanup').paused ? 'pause' : 'resume' } }) }
 })

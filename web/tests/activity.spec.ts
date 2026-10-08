@@ -5,11 +5,11 @@ import en from '../src/locales/i18n.en.js'
 
 test('filter the journal, inspect an event and export its visible page', async ({ page, request }) => {
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
-  const reply = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
+  const reply = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await reply.json()).csrf_token }
-  await request.put('/api/me', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
+  await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
   const name = 'ui-audit-' + randomUUID().slice(0, 8)
-  const created = await request.post('/api/projects', { headers, data: { name } })
+  const created = await request.post('/api/v1/projects', { headers, data: { name } })
   expect(created.status()).toBe(201)
   const project = (await created.json()).id
   const errors: string[] = []
@@ -43,5 +43,5 @@ test('filter the journal, inspect an event and export its visible page', async (
     expect(lines.some(event => event.detail.name === name)).toBeTruthy()
     expect(lines.every(event => event.action.startsWith('project.'))).toBeTruthy()
     expect(errors).toEqual([])
-  } finally { await request.delete('/api/projects/' + project, { headers }) }
+  } finally { await request.delete('/api/v1/projects/' + project, { headers }) }
 })

@@ -9,7 +9,7 @@ export function useInsights() {
   const route = useRoute()
   const scope = computed(() => ({ bucket: route.query.bucket ? String(route.query.bucket) : undefined, project: route.query.project ? String(route.query.project) : undefined }))
   const query = computed(() => params(scope.value))
-  const statistics = useQuery({ queryKey: ['insights', query], queryFn: ({ signal }) => api<components['schemas']['StorageInsights']>('/api/insights?' + query.value, { signal }), refetchInterval: q => q.state.data?.usage ? 30_000 : 5000 })
+  const statistics = useQuery({ queryKey: ['insights', query], queryFn: ({ signal }) => api<components['schemas']['StorageInsights']>('/api/v1/usage/summary?' + query.value, { signal }), refetchInterval: q => q.state.data?.usage ? 30_000 : 5000 })
   return { scope, query, statistics }
 }
 export const metric = (value: string | null | undefined) => value == null ? null : Number(value)

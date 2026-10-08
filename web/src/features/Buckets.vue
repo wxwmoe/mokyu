@@ -20,10 +20,10 @@ type Settings = components['schemas']['SettingsInput']
 type Rule = components['schemas']['CorsRule']
 const route = useRoute(), router = useRouter(), id = computed(() => String(route.params.bucket || ''))
 const admin = computed(() => session.value?.role === 'admin')
-const buckets = useQuery({ queryKey: ['buckets'], queryFn: ({ signal }) => api<Bucket[]>('/api/buckets', { signal }) })
+const buckets = useQuery({ queryKey: ['buckets'], queryFn: ({ signal }) => api<Bucket[]>('/api/v1/buckets', { signal }) })
 const manageable = computed(() => buckets.data.value?.filter(b => b.actions.includes('bucket.settings')) || [])
 const filter = ref(''), filtered = computed(() => manageable.value.filter(b => b.name.toLowerCase().includes(filter.value.toLowerCase())))
-const settings = useQuery({ queryKey: ['bucket-settings', id], enabled: computed(() => !!id.value), queryFn: ({ signal }) => api<components['schemas']['BucketSettings']>(`/api/buckets/${id.value}/settings`, { signal }) })
+const settings = useQuery({ queryKey: ['bucket-settings', id], enabled: computed(() => !!id.value), queryFn: ({ signal }) => api<components['schemas']['BucketSettings']>(`/api/v1/buckets/${id.value}/settings`, { signal }) })
 const draft = ref<Settings>(), baseline = ref(''), saving = ref(false)
 function reset() {
   const value = settings.data.value
@@ -35,7 +35,7 @@ function reset() {
 const dirty = computed(() => !!draft.value && JSON.stringify(draft.value) !== baseline.value)
 watch(id, () => { draft.value = undefined; baseline.value = '' })
 watch(settings.data, () => { if (!dirty.value) reset() }, { immediate: true })
-const locked = computed(() => saving.value || settings.data.value?.bucket.state !== 'active')
+const locked = computed(() => saving.value || settings.data.value?.bucket.status !== 'active')
 const domains = computed({ get: () => (draft.value?.domains || []).join('\n'), set: value => { if (draft.value) draft.value.domains = lines(value) } })
 const methods = ['GET', 'HEAD', 'PUT', 'POST', 'DELETE', 'OPTIONS']
 function lines(value: string) { return value.split('\n') }
@@ -46,7 +46,7 @@ async function refresh() { if (!await canLeave()) return; baseline.value = JSON.
 async function save() {
   if (!draft.value) return
   saving.value = true
-  try { const value = await write<components['schemas']['BucketSettings']>(`/api/buckets/${id.value}/settings`, { ...draft.value, domains: draft.value.domains ? clean(draft.value.domains) : undefined, cors: draft.value.cors.map(r => ({ ...r, origins: clean(r.origins), headers: clean(r.headers || []), expose: clean(r.expose || []) })) }, 'PUT'); baseline.value = JSON.stringify(draft.value); queries.setQueryData(['bucket-settings', id.value], value); reset(); await queries.invalidateQueries({ queryKey: ['buckets'] }); notify(t('bucketSettingsSaved')) }
+  try { const value = await write<components['schemas']['BucketSettings']>(`/api/v1/buckets/${id.value}/settings`, { ...draft.value, domains: draft.value.domains ? clean(draft.value.domains) : undefined, cors: draft.value.cors.map(r => ({ ...r, origins: clean(r.origins), headers: clean(r.headers || []), expose: clean(r.expose || []) })) }, 'PUT'); baseline.value = JSON.stringify(draft.value); queries.setQueryData(['bucket-settings', id.value], value); reset(); await queries.invalidateQueries({ queryKey: ['buckets'] }); notify(t('bucketSettingsSaved')) }
   catch (error) { report(error) } finally { saving.value = false }
 }
 const discardOpen = ref(false)
@@ -62,8 +62,8 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
 <template>
   <div class="page-heading"><div><p class="eyebrow">{{ t('littleHomes') }}</p><h1>{{ settings.data.value?.bucket.name || t('buckets') }}</h1><p>{{ t('bucketSettingsHint') }}</p></div><div class="heading-actions"><template v-if="id"><RouterLink class="button" :to="`/media/${id}`"><ArrowUpRight :size="16" />{{ t('browseFiles') }}</RouterLink><button :disabled="saving" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button></template><CreateBucket v-else @created="router.push('/buckets/' + $event.id)" /></div></div>
   <ErrorNotice v-if="settings.error.value || buckets.error.value" :error="settings.error.value || buckets.error.value" />
-  <template v-if="!id"><label class="search-field"><span class="sr-only">{{ t('findBucket') }}</span><input v-model="filter" :placeholder="t('findBucket')" type="search"></label><div class="bucket-grid"><RouterLink v-for="bucket in filtered" :key="bucket.id" class="bucket-card" :to="'/buckets/' + bucket.id"><img src="/assets/mokyu-pack.svg" alt="" width="64" height="64"><h2>{{ bucket.name }}</h2><span class="badge">{{ t(bucket.uploads_paused ? 'uploadsPaused' : bucket.state) }}</span><Settings2 class="bucket-arrow" :size="19" /></RouterLink></div><EmptyState v-if="!buckets.isPending.value && !filtered.length" :title="t('noBuckets')" :description="t('bucketSettingsEmpty')" /></template>
-  <template v-else-if="draft && settings.data.value"><nav class="breadcrumbs bucket-back"><RouterLink to="/buckets">{{ t('buckets') }}</RouterLink><span>/</span><span>{{ settings.data.value.bucket.name }}</span><span v-if="settings.data.value.bucket.state !== 'active'" class="badge">{{ t(settings.data.value.bucket.state) }}</span></nav>
+  <template v-if="!id"><label class="search-field"><span class="sr-only">{{ t('findBucket') }}</span><input v-model="filter" :placeholder="t('findBucket')" type="search"></label><div class="bucket-grid"><RouterLink v-for="bucket in filtered" :key="bucket.id" class="bucket-card" :to="'/buckets/' + bucket.id"><img src="/assets/mokyu-pack.svg" alt="" width="64" height="64"><h2>{{ bucket.name }}</h2><span class="badge">{{ t(bucket.uploads_paused ? 'uploadsPaused' : bucket.status) }}</span><Settings2 class="bucket-arrow" :size="19" /></RouterLink></div><EmptyState v-if="!buckets.isPending.value && !filtered.length" :title="t('noBuckets')" :description="t('bucketSettingsEmpty')" /></template>
+  <template v-else-if="draft && settings.data.value"><nav class="breadcrumbs bucket-back"><RouterLink to="/buckets">{{ t('buckets') }}</RouterLink><span>/</span><span>{{ settings.data.value.bucket.name }}</span><span v-if="settings.data.value.bucket.status !== 'active'" class="badge">{{ t(settings.data.value.bucket.status) }}</span></nav>
     <QuotaPanel v-if="settings.data.value.bucket.actions.includes('storage.inspect')" kind="bucket" :id="id" />
     <TabsRoot default-value="connection" class="surface bucket-settings"><TabsList class="tabs-list" :aria-label="t('buckets')"><TabsTrigger class="tab-trigger" value="connection"><Globe :size="16" />{{ t('bucketConnection') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="cors"><ShieldCheck :size="16" />CORS</TabsTrigger><TabsTrigger class="tab-trigger" value="website"><Flower2 :size="16" />{{ t('bucketWebsite') }}</TabsTrigger></TabsList>
       <fieldset class="bucket-fields" :disabled="locked">

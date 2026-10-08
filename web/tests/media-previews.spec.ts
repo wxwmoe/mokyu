@@ -5,10 +5,10 @@ import en from '../src/locales/i18n.en.js'
 
 test('gallery thumbnails, compact and expanded viewer, safe text and versioned deep link', async ({ page, request }) => {
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
-  const reply = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
+  const reply = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await reply.json()).csrf_token }
-  await request.put('/api/me', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
-  const bucket = (await (await request.get('/api/buckets')).json()).find((b: any) => b.name === 'media')
+  await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
+  const bucket = (await (await request.get('/api/v1/buckets')).json()).find((b: any) => b.name === 'media')
   const prefix = 'ui-preview-' + randomUUID().slice(0, 8) + '/'
   const picture = readFileSync('public/assets/apple-touch-icon.png')
   const recording = await page.evaluate(async () => {
@@ -33,12 +33,12 @@ test('gallery thumbnails, compact and expanded viewer, safe text and versioned d
   page.on('request', request => requests.push(request.url()))
   try {
     for (const [name, mime, data] of files) {
-      const created = await request.post(`/api/buckets/${bucket.id}/uploads`, { headers, data: { client_id: randomUUID(), key: prefix + name, file_name: name, size: String(data.length), content_type: mime } })
+      const created = await request.post(`/api/v1/buckets/${bucket.id}/uploads`, { headers, data: { client_id: randomUUID(), key: prefix + name, file_name: name, size: String(data.length), content_type: mime } })
       expect(created.status()).toBe(201)
       const upload = await created.json()
-      const part = await request.put(`/api/uploads/${upload.id}/parts/1`, { headers: { ...headers, 'X-Content-SHA256': createHash('sha256').update(data).digest('base64') }, data })
+      const part = await request.put(`/api/v1/uploads/${upload.id}/parts/1`, { headers: { ...headers, 'X-Content-SHA256': createHash('sha256').update(data).digest('base64') }, data })
       expect(part.ok()).toBe(true)
-      expect((await request.post(`/api/uploads/${upload.id}/complete`, { headers, data: { parts: [await part.json()] } })).ok()).toBe(true)
+      expect((await request.post(`/api/v1/uploads/${upload.id}/complete`, { headers, data: { parts: [await part.json()] } })).ok()).toBe(true)
     }
     await page.goto('/login')
     await page.getByRole('textbox', { name: en.username, exact: true }).fill('tester')
@@ -84,8 +84,8 @@ test('gallery thumbnails, compact and expanded viewer, safe text and versioned d
     await expect(page.locator('.text-preview pre')).toHaveText('<script>document.body.remove()</script>\nA little room for love.')
     await expect(page.locator('body')).toContainText('Mokyu')
     await page.keyboard.press('Escape')
-    const catalog = await (await request.get(`/api/buckets/${bucket.id}/objects?` + new URLSearchParams({ q: prefix + 'mochi.png', mode: 'exact' }))).json()
-    await page.goto(location + '&' + new URLSearchParams({ object: prefix + 'mochi.png', version: catalog.objects[0].id }))
+    const catalog = await (await request.get(`/api/v1/buckets/${bucket.id}/objects?` + new URLSearchParams({ q: prefix + 'mochi.png', mode: 'exact' }))).json()
+    await page.goto(location + '&' + new URLSearchParams({ object: prefix + 'mochi.png', version: catalog.items[0].id }))
     await expect(page.getByRole('dialog', { name: 'mochi.png', exact: true })).toBeVisible()
     await page.keyboard.press('Escape')
     await page.getByRole('button', { name: en.darkSwitch, exact: true }).click()
@@ -99,7 +99,7 @@ test('gallery thumbnails, compact and expanded viewer, safe text and versioned d
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     expect(errors).toEqual([])
   } finally {
-    const result = await (await request.get(`/api/buckets/${bucket.id}/objects?` + new URLSearchParams({ prefix, recursive: 'true' }))).json()
-    if (result.objects?.length) await request.post('/api/objects/actions', { headers, data: { bucket: bucket.id, action: 'delete', objects: result.objects.map((o: any) => ({ key: o.object_key, version: o.id })) } })
+    const result = await (await request.get(`/api/v1/buckets/${bucket.id}/objects?` + new URLSearchParams({ prefix, recursive: 'true' }))).json()
+    if (result.items?.length) await request.post('/api/v1/media/actions', { headers, data: { bucket: bucket.id, action: 'delete', objects: result.items.map((o: any) => ({ key: o.object_key, version: o.id })) } })
   }
 })

@@ -16,9 +16,9 @@ test('create a member, grant one bucket, rotate password and browse as that memb
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', message => { if (message.type() === 'error' && /Content Security Policy|Refused to/i.test(message.text())) errors.push(message.text()) })
   const username = 'ui-' + randomUUID().slice(0, 12), initial = 'UI-account-' + randomUUID()
-  const reply = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password: password() } })
+  const reply = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password: password() } })
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await reply.json()).csrf_token }
-  await request.put('/api/me', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
+  await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
   let id = ''
   const memberContext = await browser.newContext({ baseURL: process.env.MOKYU_TEST_WEB, locale: 'en-US' })
   try {
@@ -31,13 +31,13 @@ test('create a member, grant one bucket, rotate password and browse as that memb
     await expect(creation.getByRole('checkbox', { name: en.requireChange })).toBeChecked()
     // The API expiry boundary is covered separately; exercise the nested retry dialog here.
     let expired = false
-    await page.route('**/api/users', async route => {
+    await page.route('**/api/v1/users', async route => {
       if (route.request().method() === 'POST' && !expired) {
         expired = true
         await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ code: 'ReauthenticationRequired', error: 'Forbidden' }) })
       } else await route.continue()
     })
-    const created = page.waitForResponse(response => response.url().endsWith('/api/users') && response.request().method() === 'POST' && response.status() === 201)
+    const created = page.waitForResponse(response => response.url().endsWith('/api/v1/users') && response.request().method() === 'POST' && response.status() === 201)
     await creation.getByRole('button', { name: en.createUser, exact: true }).click()
     const verification = page.getByRole('dialog', { name: en.verifyIdentity, exact: true })
     await verification.getByRole('textbox', { name: en.currentPassword, exact: true }).fill(password())
@@ -85,6 +85,6 @@ test('create a member, grant one bucket, rotate password and browse as that memb
     expect(errors).toEqual([])
   } finally {
     await memberContext.close()
-    if (id) expect((await request.delete('/api/users/' + id, { headers })).status()).toBe(204)
+    if (id) expect((await request.delete('/api/v1/users/' + id, { headers })).status()).toBe(204)
   }
 })

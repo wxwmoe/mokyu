@@ -13,6 +13,6 @@ npm run build
 
 产物位于 `web/dist/`，独立部署时：
 
-- 静态托管 `dist/`，将 `/api/` 同源反代到 Mokyu，`control.origin` 设为浏览器访问地址
+- 静态托管 `dist/`，将 `/api/v1/` 同源反代到 Mokyu，`control.origin` 设为浏览器访问地址
 - 应用页面使用 SPA fallback；未知 API 和资源返回 404，私有 API 不缓存
 - 后端镜像可在仓库根目录用 `./build.sh --api-only` 构建，也可加 `--alpine`

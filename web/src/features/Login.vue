@@ -11,22 +11,22 @@ const setup = ref(false), ready = ref(false), setupToken = ref(''), confirm = re
 const router = useRouter()
 async function bootstrap() {
   error.value = ''
-  try { setup.value = (await api<{ setup_required: boolean }>('/api/bootstrap')).setup_required; ready.value = true }
+  try { setup.value = (await api<{ setup_required: boolean }>('/api/v1/auth/bootstrap')).setup_required; ready.value = true }
   catch (failure) { error.value = errorText(failure) }
 }
 onMounted(bootstrap)
 async function login() {
   busy.value = true; error.value = ''
   try {
-    const info = await api<{ contract: string }>('/api/info')
-    if (info.contract !== 'mokyu-control-1') throw new Error(t('incompatible'))
+    const info = await api<{ contract: string }>('/api/v1/info')
+    if (info.contract !== 'mokyu-control-v1') throw new Error(t('incompatible'))
     if (setup.value) {
       if (confirm.value !== password.value) throw new Error(t('passwordMismatch'))
-      await write('/api/setup', { token: setupToken.value.trim(), username: username.value, password: password.value })
+      await write('/api/v1/auth/setup', { token: setupToken.value.trim(), username: username.value, password: password.value })
       setupToken.value = ''; confirm.value = ''; setup.value = false
       notify(t('setupDone'))
     }
-    await write('/api/login', { username: username.value, password: password.value })
+    await write('/api/v1/auth/login', { username: username.value, password: password.value })
     password.value = ''
     await refreshSession()
     identityChanged()

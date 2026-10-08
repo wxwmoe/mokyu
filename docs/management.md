@@ -5,7 +5,7 @@ Mokyu 面向应用媒体存储。单管理员可直接管理所有桶；有多�
 ## 第一次使用
 
 1. 按[部署说明](deployment-and-recovery.md) 启动服务，打开管理端口。
-2. 用 `docker exec mokyu cli setup token` 生成一次性初始化令牌，在页面创建管理员；也可执行 `docker exec -it mokyu cli user create admin`。
+2. 用 `docker exec mokyu mokyu cli setup token` 生成一次性初始化令牌，在页面创建管理员；也可执行 `docker exec -it mokyu mokyu cli user create admin`。
 3. 在“存储”中添加本地或 S3 存储；本地存储默认使用 `/data/storage`，S3 连接在保存时核对已有身份标识。新安装没有存储，创建桶前必须先添加至少一个存储。
 4. 在“数据库密钥”中按名称和用途生成第一把 encryption 密钥，再在“存储桶设置”创建桶，在“应用密钥”签发此桶的 S3 凭据，保存只显示一次的 secret。
 5. 将 endpoint、region、桶名和密钥填入应用。默认对象私有；需要公开媒体时，由应用设置 public-read，或在媒体库显式调整 ACL。

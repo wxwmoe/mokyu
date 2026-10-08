@@ -48,7 +48,7 @@ function send(job: UploadJob, part: number, blob: Blob, digest: string): Promise
     const xhr = new XMLHttpRequest(), started = performance.now()
     let loaded = 0
     const abort = () => xhr.abort()
-    xhr.open('PUT', `/api/uploads/${job.transfer!.id}/parts/${part}`)
+    xhr.open('PUT', `/api/v1/uploads/${job.transfer!.id}/parts/${part}`)
     xhr.timeout = 300_000
     xhr.setRequestHeader('X-CSRF-Token', session.value!.csrf_token)
     xhr.setRequestHeader('X-Content-SHA256', digest)
@@ -75,7 +75,7 @@ async function receiptList(job: UploadJob) {
   const parts: Parts['parts'] = []
   let after = 0
   do {
-    const page = await api<Parts>(`/api/uploads/${job.transfer!.id}/parts?after=${after}`, { signal: job.controller.signal })
+    const page = await api<Parts>(`/api/v1/uploads/${job.transfer!.id}/parts?after=${after}`, { signal: job.controller.signal })
     parts.push(...page.parts); after = page.next || 0
   } while (after)
   return parts
@@ -87,11 +87,11 @@ async function run(job: UploadJob) {
   job.running = true; job.error = undefined; job.controller = markRaw(new AbortController())
   try {
     valid(job)
-    if (!job.transfer) job.transfer = await json<Transfer>(job, `/api/buckets/${job.bucket}/uploads`, job.input)
-    const transfer = await api<Transfer>(`/api/uploads/${job.transfer.id}`, { signal: job.controller.signal })
+    if (!job.transfer) job.transfer = await json<Transfer>(job, `/api/v1/buckets/${job.bucket}/uploads`, job.input)
+    const transfer = await api<Transfer>(`/api/v1/uploads/${job.transfer.id}`, { signal: job.controller.signal })
     job.transfer = transfer
-    if (transfer.state === 'completed') { job.state = 'completed'; job.file = undefined; return }
-    if (transfer.state !== 'active') throw new ApiError(409, 'OperationAborted')
+    if (transfer.status === 'completed') { job.state = 'completed'; job.file = undefined; return }
+    if (transfer.status !== 'active') throw new ApiError(409, 'OperationAborted')
     const file = job.file!, size = Number(transfer.part_size), total = Math.max(1, Math.ceil(file.size / size))
     const received = await receiptList(job), receipts = new Map<number, Part>()
     job.accepted = 0; job.verified = 0; job.state = 'checking'
@@ -127,7 +127,7 @@ async function run(job: UploadJob) {
     if (failure) throw failure
     if (job.paused) { job.state = 'paused'; return }
     job.state = 'completing'
-    job.transfer = await json<Transfer>(job, `/api/uploads/${job.transfer.id}/complete`, { parts: [...receipts.values()].sort((a, b) => a.number - b.number) })
+    job.transfer = await json<Transfer>(job, `/api/v1/uploads/${job.transfer.id}/complete`, { parts: [...receipts.values()].sort((a, b) => a.number - b.number) })
     job.state = 'completed'; job.file = undefined
   } catch (error) {
     if (job.state !== 'aborted') { job.state = job.paused ? 'paused' : 'failed'; job.error = error }
@@ -168,7 +168,7 @@ function enqueuePaused(transfer: Transfer, file: File) {
 export async function cancel(job?: UploadJob, transfer?: Transfer) {
   if (job) { job.paused = true; job.state = 'aborted'; job.controller.abort() }
   const id = transfer?.id || job?.transfer?.id
-  try { if (id) await api(`/api/uploads/${id}`, { method: 'DELETE' }); if (job) job.file = undefined }
+  try { if (id) await api(`/api/v1/uploads/${id}`, { method: 'DELETE' }); if (job) job.file = undefined }
   catch (error) { if (job) { job.state = 'failed'; job.error = error }; throw error }
   finally { refresh(); pump() }
 }

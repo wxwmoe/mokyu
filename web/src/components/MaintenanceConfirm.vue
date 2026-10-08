@@ -14,7 +14,7 @@ const preview = ref<components['schemas']['MaintenancePreview'] | null>(null), p
 const impact = computed(() => preview.value?.impact as Record<string, any> | undefined)
 async function load() {
   busy.value = true; error.value = ''; preview.value = null; phrase.value = ''
-  try { preview.value = await write(`/api/maintenance/${props.operation}/preview`, props.input) }
+  try { preview.value = await write(`/api/v1/maintenance/${props.operation}/preview`, props.input) }
   catch (e) { error.value = errorText(e) } finally { busy.value = false }
 }
 watch(open, value => { if (value) load(); else { preview.value = null; phrase.value = '' } })
@@ -22,7 +22,7 @@ async function execute() {
   if (!preview.value) return
   busy.value = true; error.value = ''
   try {
-    const job = await secure(() => write<components['schemas']['TaskStarted']>(`/api/maintenance/${props.operation}/execute`, { preview_id: preview.value!.id, confirmation: phrase.value }))
+    const job = await secure(() => write<components['schemas']['TaskStarted']>(`/api/v1/maintenance/${props.operation}/execute`, { preview_id: preview.value!.id, confirmation: phrase.value }))
     open.value = false; await queries.invalidateQueries({ queryKey: ['maintenance'] }); await router.push({ path: '/tasks', query: { task: job.task_id } })
   } catch (e) { error.value = errorText(e) } finally { busy.value = false }
 }

@@ -20,7 +20,7 @@ const opened = computed({ get: () => !!props.item, set: value => { if (!value) e
 const wide = ref(false), original = ref(false), zoom = ref(false), inspector = ref(true), failed = ref(false)
 const canRead = computed(() => props.bucket.actions.includes('object.read'))
 const query = computed(() => params({ key: props.item?.object_key, version: props.item?.id }))
-const detail = useQuery({ queryKey: ['object', () => props.bucket.id, query], enabled: computed(() => !!props.item), queryFn: ({ signal }) => api<components['schemas']['ObjectDetail']>(`/api/buckets/${props.bucket.id}/object?${query.value}`, { signal }), gcTime: 0 })
+const detail = useQuery({ queryKey: ['object', () => props.bucket.id, query], enabled: computed(() => !!props.item), queryFn: ({ signal }) => api<components['schemas']['ObjectDetail']>(`/api/v1/buckets/${props.bucket.id}/object?${query.value}`, { signal }), gcTime: 0 })
 const text = useQuery({ queryKey: ['object-text', () => props.bucket.id, query], enabled: computed(() => !!props.item && canRead.value && detail.data.value?.preview === 'text'), queryFn: ({ signal }) => api<components['schemas']['TextPreview']>(mediaUrl(props.bucket.id, props.item!, 'text'), { signal }), gcTime: 0 })
 const preview = computed(() => detail.data.value?.preview || 'none')
 const name = computed(() => props.item?.object_key.split('/').pop() || props.item?.object_key || t('objectDetails'))

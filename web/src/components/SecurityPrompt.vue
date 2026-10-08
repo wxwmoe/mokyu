@@ -10,7 +10,7 @@ watch(verifyOpen, value => { password.value = ''; error.value = ''; if (!value) 
 watch(() => session.value?.id, () => verified(false))
 async function submit() {
   busy.value = true; error.value = ''
-  try { await write('/api/me/reauth', { password: password.value }); verified(true) }
+  try { await write('/api/v1/account/reauth', { password: password.value }); verified(true) }
   catch (failure) { error.value = errorText(failure) }
   finally { password.value = ''; busy.value = false }
 }

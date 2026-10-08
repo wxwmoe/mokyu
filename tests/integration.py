@@ -141,16 +141,16 @@ def http_acl():
     web = os.environ["MOKYU_TEST_WEB"]
     assert "<title>Mokyu</title>" in requests.get(web + "/").text
     session = requests.Session()
-    assert session.get(web + "/api/buckets").status_code == 403
-    assert session.post(web + "/api/login", json={"username": "tester", "password": "irrelevant"}).status_code == 403
-    login = session.post(web + "/api/login", headers={"Origin": web},
+    assert session.get(web + "/api/v1/buckets").status_code == 403
+    assert session.post(web + "/api/v1/auth/login", json={"username": "tester", "password": "irrelevant"}).status_code == 403
+    login = session.post(web + "/api/v1/auth/login", headers={"Origin": web},
                          json={"username": "tester", "password": os.environ["MOKYU_TEST_PASSWORD"]})
     assert login.status_code == 200, login.text
     assert len(session.cookies["mokyu_session"]) == 64
-    assert session.get(web + "/api/buckets").status_code == 200
-    assert session.post(web + "/api/logout", headers={"Origin": web}).status_code == 403
-    assert session.post(web + "/api/logout", headers={"Origin": web, "X-CSRF-Token": login.json()["csrf_token"]}).status_code == 204
-    assert session.get(web + "/api/buckets").status_code == 403
+    assert session.get(web + "/api/v1/buckets").status_code == 200
+    assert session.post(web + "/api/v1/auth/logout", headers={"Origin": web}).status_code == 403
+    assert session.post(web + "/api/v1/auth/logout", headers={"Origin": web, "X-CSRF-Token": login.json()["csrf_token"]}).status_code == 204
+    assert session.get(web + "/api/v1/buckets").status_code == 403
     print("PASS ACL, anonymous path, presigned signature, CORS, Web session and CSRF", flush=True)
 
 

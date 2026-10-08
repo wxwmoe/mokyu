@@ -1,261 +1,98 @@
 # 配置参考
 
-主配置为 [TOML](../config.example.toml)，默认路径 `/config/config.toml`，重启后生效。未知字段、错误类型、数值溢出或与内存预算冲突的限制会拒绝启动。
+主配置是 [`config.example.toml`](../config.example.toml)，默认路径 `/config/config.toml`。文件只保存启动前必须可用的 `[database]` 和 `[instance]`；Web、请求、上传、统计、维护和 storage 策略通过 Web 专项表单或 `mokyu cli` 写入 PostgreSQL。
 
-TOML 只保存启动前必须可用的 `[database]`、`[cluster]` 和 `[instance]`。存储连接、Web 设置、请求策略、维护策略和配额保存在 PostgreSQL，通过 Web 或 `mokyu cli settings ...` 管理；保存后响应会标记需要重启的字段，未重启节点继续使用旧值。
+未知字段、错误类型、超范围数值和无法满足本机内存预算的配置会拒绝启动。保存需要重启的字段时只显示 `restart_required`，新值不会阻塞请求，也不会在当前进程中假装已经生效。
 
-使用其他路径时，统一修改服务、CLI 和健康检查：
+## database
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `database.host` | 必填 | PostgreSQL 主机或容器服务名 |
+| `database.port` | `5432` | PostgreSQL 端口 |
+| `database.name` | 必填 | 数据库名 |
+| `database.user` | 必填 | 数据库用户名 |
+| `database.password` / `database.password_file` | 二选一 | 直接密码或密码文件 |
+| `database.ssl_mode` | `prefer` | PostgreSQL SSL 模式 |
+
+每个 control、worker、data 都从自己的 `[database]` 连接 PostgreSQL。Mokyu 不负责 PostgreSQL 故障转移；需要高可用时使用 PostgreSQL 自己的主备或集群地址。
+
+## instance
+
+字段按“身份、监听、本机目录、上传缓存、连接池和资源预算”排列。`instance.name` 是节点注册名；单容器省略时使用 `single`。
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `instance.deployment_key` | 必填 | `mokyu tool keygen` 生成的 64 字符部署密钥；同一部署所有容器必须相同且永久不变 |
+| `instance.name` | 单容器为 `single` | control、worker、data 必须填写部署内唯一名称 |
+| `instance.listen_control` | `0.0.0.0:9002` | 管理 HTTP 监听；CLI 默认访问本机地址 |
+| `instance.listen_web` | `0.0.0.0:9001` | 公共读 Web 监听 |
+| `instance.listen_s3` | `0.0.0.0:9000` | S3 监听 |
+| `instance.data_path` | `/data` | 本节点持久目录，保存 node.json、multipart、缓存和锁 |
+| `instance.min_free_space` | `1GiB` | 本地文件写入后必须保留的空间 |
+| `instance.multipart_limit` | 自动 | 单容器本地 multipart 暂存上限；群集使用共享 staging storage |
+| `instance.cache_size` | 自动 | 本地区块缓存字节上限 |
+| `instance.cache_entries` | 自动 | 本地缓存索引条目上限 |
+| `instance.upload_cache_size` | 自动 | 本地待上传暂存上限 |
+| `instance.thumbnail_cache_size` | `256MiB` | 缩略图缓存上限 |
+| `instance.request_connections` | 自动 | 本节点 HTTP/S3 请求连接池上限 |
+| `instance.database_connections` | 自动 | 本节点 PostgreSQL 连接池上限 |
+| `instance.cpu_jobs` | 自动 | 本节点压缩、哈希和加解密等阻塞计算预算 |
+| `instance.stream_memory_budget` | 自动 | 数据流临时内存预算，不是 RSS 硬限制 |
+| `instance.storage_read_slots` | 自动 | 本节点所有 storage 共享的读槽位 |
+| `instance.storage_upload_slots` | 自动 | 本节点所有 storage 共享的上传槽位 |
+| `instance.storage_control_slots` | 自动 | 本节点所有 storage 共享的控制槽位 |
+| `instance.compression_idle_timeout` | `30s` | 本节点压缩上下文空闲回收时间 |
+
+省略 `request_connections` 和三个 `storage_*_slots` 时，服务按 CPU、内存、文件描述符和连接池自动计算保守但偏宽的本机预算。它们只限制本机；storage profile 的 permit 是所有节点合计的 storage 级预算。显式修改 instance 预算需要重启，保存和请求处理不受阻塞。
+
+群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；multipart 尾块和异步上传使用保留前缀 `__mokyu/multipart/`。单容器模式可使用 `/data/storage` 的 local storage。
+
+## runtime 设置
+
+runtime 设置保存在 `runtime_settings`，只有以下五组。Web 使用固定的可爱专项表单，不提供任意 JSON 编辑器；CLI 可用 `settings get/set/reset` 完整管理。
+
+| 分组 | 主要内容 | 作用范围 |
+| --- | --- | --- |
+| `web` | origin、cookie、session、Gravatar | 部署共享 |
+| `requests` | 读写空闲超时、请求行为 | 部署共享，重启提示按字段显示 |
+| `uploads` | staging storage、共享 staging 字节上限、上传过期与活动上传限制 | 部署共享；群集 storage 共享 |
+| `metrics` | storage/runtime/access 采样间隔、保留期和查询超时 | 部署共享 |
+| `maintenance` | GC、清理、任务保留、审计保留和批量大小 | 部署共享 |
+
+runtime section 使用 revision 乐观并发。冲突返回当前 revision；重置恢复当前版本默认值。设置改变后各节点在请求边界、任务领取边界和低频刷新时重新加载。
+
+## storage profile
+
+存储连接和所有后端行为都在 storage 创建/修改表单中配置。新建默认选择 S3；选择 local 或 S3 只切换未保存的草稿和差异预设，“载入预设”只修改草稿，取消不写数据库。保存已有 storage 时始终读取并核对 `meta.json`，空目标不能被编辑流程隐式初始化。
+
+profile 是类型化字段，不是任意 JSON。字段包括：
+
+- 连接超时、请求超时、重试次数、重试窗口、优先级老化、最低存储期限、未引用宽限和删除保留期；
+- cache 开关、大小和条目、待上传缓存；
+- compression 的 `never`、`always`、`sample`、等级、采样等级和最小节省阈值；
+- pack 开关、大小、刷新/复用/回收/合包/Range 参数；local storage 不创建新区块包，Web 会固定关闭该选项；
+- `pack_concurrency`、`integrity_concurrency`、`integrity_rps`、`integrity_bandwidth`、`integrity_batch_timeout`；
+- storage 级 read/upload/control、pack、integrity、maintenance、migration 并发和字节预算。
+
+这些并发、速率和字节预算在 Web storage 页面及 `storage profile` CLI 中调整，Web 明确标记为“群集共享”。single 模式也使用同一套 storage permit；profile 保存后下一批任务使用新值，不要求重启。
+
+## 加密、压缩与存量维护
+
+block key 在数据库生成，创建后算法和材料不可更改。支持 AES-256-GCM、ChaCha20-Poly1305 和无加密，默认 AES-256-GCM；storage 只绑定已有 block key，未找到匹配算法的 key 时表单提供“在新标签页创建 key”的入口，不会在保存 storage 时隐式生成。
+
+切换 storage 当前 key、压缩规则或区块包策略只影响新写入。`storage rewrite` 是显式、可预览、可确认、可暂停、可重试的低优先级任务，按 encoding/pack fingerprint 重写需要转换的存量来源；保存表单、local/S3 切换和“载入预设”都不会自动启动 rewrite。旧 key 在所有物理来源和任务释放后才可删除。
+
+## 模式与 CLI
+
+入口命令决定角色；配置文件只包含 `[database]` 和 `[instance]`：
 
 ```sh
-mokyu --config PATH
-mokyu --config PATH cli status
+mokyu                 # 单容器模式
+mokyu control         # control
+mokyu worker          # worker
+mokyu data            # data
+mokyu cli status      # 本机 control HTTP
 ```
 
-Compose 健康检查对应 `["CMD","mokyu","--config","PATH","cli","status"]`。
-
-- **省略可选资源项**表示自动预算或无该项配额，不使用 `null`、空字符串或 `auto`。
-- 大小使用正整数加 `B/KB/MB/GB/TB/KiB/MiB/GiB/TiB`；`2GB` 为 2,000,000,000 字节，`2GiB` 为 2,147,483,648 字节。不接受小数、`0` 或 `1G`。
-- 时间使用正整数加 `s/m/h/d`；允许零值的例外在字段表注明。通用时限最多为 `i64::MAX / 1000` 秒，个别字段有更小上限。
-
-## 监听与管理
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `instance.listen_s3` | 字符串 / `0.0.0.0:9000` | S3 监听 SocketAddr |
-| `instance.listen_web` | 字符串 / `0.0.0.0:9001` | 给反代的公共读和可选网站入口 |
-| `instance.listen_control` | 字符串 / `0.0.0.0:9002` | 管理入口；三个监听地址必须不同 |
-| `instance.listen_socket` | 路径 / `/run/mokyu/admin.sock` | CLI 的 Unix socket；权限 0600 |
-| `s3.domain` | 可选字符串 / 无 | 启用此域名的 virtual-hosted 寻址；否则使用 path-style |
-| `s3.signature_region` | 字符串 / `us-east-1` | 客户端签名区域；与存储区域相互独立 |
-| `s3.max_stream_chunk_size` | 大小 / `8MiB` | 单个 AWS 签名传输 chunk 上限；不是对象或 UploadPart 大小上限 |
-| `web.origin` | 字符串 / `http://localhost:9002` | 首次启动种子值；浏览器看到的完整 origin，无末尾 `/`；登录和写操作严格匹配 |
-| `web.secure_cookie` | bool / `true` | 首次启动种子值；Cookie Secure；通过 HTTP 访问时需要 false |
-| `web.session_lifetime` | 时间 / `12h` | 首次启动种子值；会话固定有效期，不随查询无限续期 |
-| `web.avatar_url` | 字符串 / `https://www.gravatar.com/avatar/` | 首次启动种子值；头像服务路径；允许兼容镜像，必须 HTTPS，不含凭据或查询参数。个人头像默认关闭 |
-| `instance.thumbnail_cache_size` | 大小 / `256MiB` | 首次启动种子值；`data/thumbnails` 的可丢弃衍生缓存，最多 4096 项，受磁盘 floor 约束；`0B` 不保留缩略图，仍可按需生成 |
-
-缩略图仅处理 JPEG/PNG/WebP/GIF 静帧，长边最多 384px。单个生成任务复用处理 CPU 和在途内存名额；源文件最多 32 MiB、1600 万像素，两者随可用处理预算降低，单边最多 16384px。读取源文件与生成结果各等待最多 15 秒；超时的解码仍保留资源名额直到实际结束。缓存不上传存储、不计逻辑配额；失败回退文件类型卡片。AVIF 可由浏览器明确打开原图，不生成服务端缩略图。
-
-## 数据库
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `database.host` | 字符串 / 必填 | PostgreSQL 主机或容器服务名 |
-| `database.port` | u16 / 5432 | PostgreSQL 端口，不能为 0 |
-| `database.name` | 字符串 / 必填 | 数据库名 |
-| `database.user` | 字符串 / 必填 | 数据库用户名 |
-| `database.password` / `database.password_file` | 字符串 / 路径，二选一必填 | 直接密码或密码文本文件 |
-| `database.ssl_mode` | 字符串 / `prefer` | disable/allow/prefer/require/verify-ca/verify-full；远程连接按部署需要验证证书 |
-| `instance.db_connections` | 正整数 / 自动 | 业务连接池上限；另有一个独占锁连接 |
-
-直接密码由 SQLx 连接参数传递，无需 URL 转义。密码与密码文件二选一，文件内容是密码文本。
-
-## 群集注册
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `cluster.control_url` | 绝对 URL / 空 | 加入节点和后续 heartbeat 使用的 control 地址；第一台 control 可省略 |
-| `cluster.join_token` | 一次性 URL-safe 字符串 / 空 | `cli cluster token` 为新 control、worker 或 data 生成的令牌；首次加入后写入 `instance.data_path/node.json`，可从配置删除 |
-| `cluster.node_name` | 安全字符串 / 空 | 只用于没有 join token 的第一台 control；省略时为 `control-1`，加入节点名称由令牌绑定 |
-| `cluster.advertise_url` | 绝对 URL / 空 | 单 control 可省略；需要被其他 control 转发的 control 必须填写只指向本机的可达地址 |
-
-启动命令决定角色：不指定子命令的 `mokyu` 进入单容器模式，`control` 只监听管理端口，`worker` 执行后台任务，`data` 监听 S3 和公共读。群集模式要求 PostgreSQL、部署密钥和数据库连接在每个容器配置中直接提供；节点不会从 control 读取数据库地址。详见[群集部署](cluster-deployment.md)。
-
-`instance.deployment_key` 是保护数据库秘密的固定 AES-256-GCM 部署密钥，只能用 `mokyu tool keygen` 在服务外生成；所有角色必须使用同一值。区块密钥属于数据库 managed key，由 Web/CLI 生成并绑定到具体 store。
-
-## 存储与运行参数
-
-S3 连接和本地存储路径保存在数据库中，通过 `mokyu cli storage ...` 或[管理 API 的存储接口](control-api-reference.md#存储)管理。新安装没有存储；创建桶之前必须先添加存储。存储凭据用部署密钥加密，查询不会返回明文。
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `storage.read_concurrency` / `storage.upload_concurrency` | 可选正整数 / 自动 | GET / PUT 的共享并发，含即时请求与维护任务 |
-| `storage.control_concurrency` | 可选正整数 / 自动 | HEAD、LIST、DELETE 的共享并发 |
-| `storage.connect_timeout` / `storage.request_timeout` | 时间 / `5s` / `30s` | 连接时限 / 单次 HTTP 尝试时限 |
-| `storage.max_retries` | 非负整数 / `3` | 每轮 SDK 最大重试次数 |
-| `storage.retry_timeout` | 时间 / `120s` | SDK 重试窗口 |
-| `storage.priority_aging` | 时间 / `30s` | 老请求提升调度优先级的等待时间 |
-| `storage.min_retention` | 时间 / `0s` | 区块和区块包从存储写入成功起的最低存储期限 |
-
-物理 GC 必须同时满足最低存储期限与 `garbage_collection.grace_period`。存储清查也遵守最低期限；该设置不代替备份。
-
-## 数据目录与上传
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `instance.data_path` | 路径 / `/data` | 持久数据目录，含 multipart/chunks/thumbnails/gateway.lock |
-| `instance.min_free_space` | 大小 / `1GiB` | 新文件预留后仍须保留的文件系统空间 |
-| `instance.multipart_limit` | 可选大小 / 无单独配额 | 原始尾部及预留总量；显式值至少 4 MiB；始终受文件系统空余空间限制 |
-| `uploads.idle_timeout` | 时间 / `24h` | 无有效上传进展的过期时间；ListParts 不续期 |
-| `uploads.sweep_interval` | 时间 / `5m` | 本地过期/无引用映射清理间隔，任务完成也会唤醒清理 |
-| `uploads.client_idle_timeout` | 时间 / `120s` | 上传相邻有效数据之间的等待上限 |
-| `uploads.max_active` | 可选正 bigint / 无 | 所有逻辑桶的活跃 multipart 数量配额 |
-
-multipart 保存仍被引用的原始片段，不是可任意淘汰的缓存。目录用途见[本地数据](storage-format.md#本地数据)。
-
-## 区块缓存
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `instance.cache_size` | 可选大小 / 无单独字节配额 | chunks 缓存实际文件字节上限；包括写入预留；`0B` 禁用填充 |
-| `cache.upload_enabled` | bool / `true` | 持久写入本地缓存后确认上传，后台写 S3；关闭后新增内容同步上传，已有积压仍需排空 |
-| `instance.upload_cache_size` | 可选大小 / 有效 chunks 容量的 20% | 待上传及上传触发的拆包输入额度，包含在总缓存内；`0B` 停止新增暂存 |
-| `instance.cache_entries` | 正整数 / 自动 | 缓存文件索引条目预算，ghost 元数据同样有界 |
-| `cache.min_savings_percent` | 整数 0～100 / `20` | 压缩至少节省此百分比才保留 `.zst`，否则保存 `.raw`；0 保留所有已压缩载荷，100 全部缓存原始字节；只影响新填充 |
-
-## 处理资源
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `instance.cpu_jobs` | 正整数 / 自动 | 并行压缩/哈希/加解密等阻塞计算预算 |
-| `instance.inflight_bytes` | 大小 / 自动 | 在途数据槽预算，非进程 RSS 硬限制 |
-| `instance.upload_concurrency` | 正整数 / 自动 | PUT/part/完成操作的并发上限；完成操作持续占用名额直到后台合并结束 |
-| `instance.read_concurrency` | 正整数 / 自动 | 同时流式读取上限 |
-| `instance.storage_read_concurrency` / `instance.storage_upload_concurrency` / `instance.storage_control_concurrency` | 可选正整数 / 自动 | 本机所有存储共享的读、上传、控制资源池 |
-| `instance.connections` | 正整数 / 自动 | 三入口合计连接上限 |
-| `requests.read_idle_timeout` / `requests.upload_idle_timeout` | 时间 / `120s` | 读出下一块 / 上传下一块的无进展时限，包含数据库、资源及存储排队；multipart 重建也受上传时限约束 |
-
-### 自动预算
-
-`C` 为 CPU 亲和性与 cgroup v2 quota 的较小值（quota 向上取整，至少 1）；读取失败时使用 Rust 可用 CPU 估计，再失败回退 1。`M` 为 MemAvailable 与可读 cgroup v2／父级 memory.max 的较小值，探测失败回退 512 MiB。
-
-默认在途预算 `inflight=M/4`。每槽预算 `S=32MiB + W + 2×max(aws_chunk_limit−8MiB,0)`，槽数 `N=floor(inflight/S)`。至少需要两个槽，且 inflight ≤ M/2。
-
-`W` 包含两倍的 Zstd 压缩／解压上下文上界，以及 4 MiB 区块的压缩输出上界和 16 字节标签，覆盖重分配重叠及闲置缓冲。`sample` 使用不同的采样等级时，额外计入采样上下文。提高完整或采样等级可能增大 W；预算不足时可降低等级或增加内存及在途预算。启动日志和状态字段 `slot_bytes/data_slots` 显示实际值。
-
-| 预算 | 自动值 | 显式限制 |
-| --- | --- | --- |
-| instance.cpu_jobs | min(C,N) | ≤ N |
-| instance.upload_concurrency | max(1,min(C,N/2)) | < N |
-| instance.read_concurrency | max(1,min(2C,N)) | ≤ N |
-| instance.storage_read_concurrency / instance.storage_upload_concurrency / instance.storage_control_concurrency | min(4C,2N) / min(4C,2N) / min(C,8) | 正整数 |
-| instance.connections | max(32,16N) | 正整数 |
-| instance.db_connections | min(2C+4,64) | 正整数；池最少 0 个连接，闲置 60 秒释放 |
-| cache.max_entries | M/64/256 | ≤ M/256/8 |
-
-存储读写分别默认 min(4C,2N)，控制请求默认 min(C,8)。区块包读取和准备分别使用剩余预算 `(M−N×S−M/4)/2`，每次按四倍载荷加编解码工作区预留；状态中的 pack_memory_units 以 MiB 表示每组预算。无法容纳配置写入上限时拒绝启动。准备完成的编码数据等待存储名额时仍计入此预算，CPU 名额已释放。
-
-这些是内部工作预算；容器 CPU／内存硬限制由部署配置设置。本地磁盘分别用 `instance.multipart_limit` 和 `instance.cache_size` 限制。
-
-## 区块包维护
-
-`packing.upload_flush_timeout` 默认 `60s`：从连续段最早未上传块开始计时，不因后续上传而续期。到期将完整 CDC 块作为独立块上传；未确定的 multipart 尾部继续保留。它不是存储传输期限。
-
-上传额度按同一磁盘快照计算：有效总容量为 `min(配置上限, chunks 占用 + 文件系统可用空间 − instance.min_free_space − 在途预留)`，省略上限时使用后一项；上传额度为显式值或有效容量的 20%，且不超过总容量。空缓存也有可增长额度。配额不足时，当前请求剩余新块改为同步上传，已暂存数据继续排空。已确认的 pin 不因降配、空间减少或年龄被淘汰；无上传积压时读取缓存可使用全部容量。
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `packing.enabled` | bool / `true` | 自动创建及合并区块包；关闭后历史区块包仍可读取、拆分和回收 |
-| `packing.max_size` | 大小 / `32MiB` | 完整成员原始长度上限，4～256 MiB，另受内存预算限制 |
-| `packing.compression_strategy` | 可选枚举 / 继承 | always / sample / file_type / chunk_hint；省略继承 compression.strategy，其余压缩参数均继承 |
-| `instance.pack_concurrency` | 正整数 / `1` | 同时运行的区块包准备任务，实际 I/O 与 CPU 仍共享全局预算 |
-| `packing.interval` | 时间 / `1h` | 新打包候选检查间隔 |
-| `packing.reuse_interval` | 时间 / `5m` | 复用队列补查及失败退避；正常引用变更直接排队 |
-| `packing.reclaim_interval` | 时间 / `30m` | 包内无引用成员回收检查间隔 |
-| `packing.repack_interval` | 时间 / `24h` | 相邻小包和独立块的碎片合并间隔 |
-| `packing.repack_cooldown` | 时间 / `1h` | 拆分和引用变化后重新合并的冷却 |
-| `packing.reclaim_min_savings_bytes` | 大小 / `4MiB` | 无引用成员重写预计节省的最小编码字节 |
-| `packing.range_enabled` | bool / `true` | 优化反复局部 Range 回源的历史区块包；独立于 packing.enabled |
-| `packing.range_interval` | 时间 / `15m` | Range 候选评估间隔 |
-| `packing.range_window` | 时间 / `24h` | 实际回源收益的观测窗口 |
-| `packing.range_min_downloads` | 正整数 / `8` | 窗口内至少发生的局部区块包下载次数 |
-| `packing.range_min_savings_percent` | 1～100 / `50` | 扣除重写和新增请求代价后的最低节省比例 |
-| `packing.range_min_savings_bytes` | 大小 / `64MiB` | 同时满足的最低预计净流量节省 |
-| `packing.range_repack_after` | 时间 / `30d` | Range 拆分后最早开始重新合包评估 |
-| `packing.range_repack_window` | 时间 / `7d` | 重新合包前检查的近期 Range 窗口，包括缓存命中 |
-| `packing.range_repack_retry_interval` | 时间 / `7d` | 仍有 Range 或统计覆盖不足时的再评估间隔 |
-
-chunk_hint 对含已压缩成员的包完整试压，其他包抽样；最终仍应用全局压缩收益门槛。允许无压缩区块包减少顺序读取请求，但小范围冷读需要整包回源。关闭打包功能不自动拆除历史包，使用[维护命令](cli-reference.md#区块包维护)。
-
-Web/CLI 的七类策略暂停状态单独保存在数据库，重启后保留；运行开关不能越过配置中禁用的功能。停止新包生成会覆盖上传和所有维护路径，适用于全部拆包前排空。配置周期决定检查间隔，排队、资源限制和暂停可让实际执行更晚。
-
-Range 评估只使用实际局部回源；缓存命中、HEAD、完整范围和共享完整下载不触发。按整 CDC 成员估算读取量，扣除旧包读取、新来源写入和额外 GET 每次 64 KiB 的保守等价代价；这不是提供商账单估算。关闭打包功能时 Range 维护只输出独立块。观测按小时聚合，保留期须覆盖两个 Range 窗口；重新合包还要求连续覆盖和近期成功刷盘，统计缺口不视为零访问。
-
-## 压缩策略
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `compression.strategy` | 枚举 / `always` | `always` 全部试压；`sample` 抽样筛选；`file_type` 按对象类型筛选 |
-| `compression.level` | 有符号整数 / `6` | 完整试压等级；支持当前 Zstd 的等级范围，包含负等级；0 使用 Zstd 默认等级 3，不表示关闭压缩 |
-| `compression.sample_level` | 有符号整数 / `3` | 仅 `sample` 的采样试压使用；等级范围及 0 的含义与 `level` 相同，独立于完整试压等级 |
-| `compression.min_savings_percent` | 整数 0～100 / `2` | 存储保存压缩载荷要求的最低节省比例，排除加密标签；与字节门槛同时满足 |
-| `compression.min_savings_bytes` | 非负整数 / `256` | 最低节省字节数；两个门槛均为 0 时仍必须严格缩小 |
-| `instance.compression_idle_timeout` | 时间 / `30s` | Zstd 压缩、解压上下文及试压缓冲区的闲置保留时间；允许 `0s` 表示任务结束即释放 |
-| `compression.skip_mime_types` | 字符串数组 / 内置名单 | 仅 `file_type` 使用；省略采用内置名单，显式数组替换名单，`[]` 不跳过任何类型；仅精确 MIME，忽略大小写，不接受参数或通配符 |
-
-| 策略 | 行为 |
-| --- | --- |
-| `always` | 默认关闭筛选，对所有需新编码的区块完整试压 |
-| `sample` | 小于 256 KiB 直接试压；其他块在头尾及中间两处抽样，任一段变小就完整试压，否则跳过 |
-| `file_type` | 按对象 Content-Type 筛选；缺失、无效或为 application/octet-stream 时按扩展名补充，未知类型仍试压，不叠加抽样 |
-
-抽样每段为块大小的 1/64，限制在 16～64 KiB；1 MiB 块最多采样 64 KiB，4 MiB 块最多采样 256 KiB。抽样使用 `sample_level`，通过筛选后按 `level` 完整试压；低等级抽样及有限窗口可能漏掉压缩收益，需要尽量保留收益时使用 `always`。将两个等级设为相同值可让抽样沿用完整试压等级。
-
-所有策略最终都要求结果严格变小，并同时满足比例、字节门槛。去重命中直接复用；调整策略、等级和门槛不重写已有区块。multipart 使用初始化时的对象类型，UploadPart 无需重复 Content-Type；CopyObject 复用已有区块。
-
-`file_type` 的 MIME 去参数、忽略大小写，只接受精确类型。内置跳过名单：
-
-| 类别 | MIME |
-| --- | --- |
-| 图片 | image/jpeg、image/png、image/apng、image/gif、image/webp、image/avif |
-| 音视频 | video/mp4、video/webm、audio/mp4、audio/mpeg、audio/aac、audio/ogg、video/ogg、application/ogg、audio/flac、audio/x-flac |
-| 压缩文件 | application/zip、application/gzip、application/x-gzip、application/x-7z-compressed、application/vnd.rar、application/x-rar-compressed、application/x-xz、application/x-bzip2、application/zstd |
-
-扩展名补充支持 jpg/jpeg/jpe、png、apng、gif、webp、avif、mp4/m4v、webm、m4a、mp3/mp2、aac、ogg/oga/opus、ogv、ogx、flac、zip、gz/tgz、7z、rar、xz、bz2、zst/zstd；也识别 svg、txt、html/htm、css、js/mjs、json、xml，供自定义名单使用。没有 `image/*` 通配规则，SVG 默认试压。
-
-压缩／解压上下文及试压缓冲按 CPU 并发额度复用，每秒清理到期的闲置工作区；RSS 回落还取决于分配器。采样与完整试压的有效等级相同时共用压缩上下文，否则按需创建独立采样上下文，仍共用输出缓冲。区块仍各自使用独立 Zstd frame，不共享压缩历史。
-
-## 加密与密钥
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `instance.deployment_key` | 字符串 / 必填 | `mokyu tool keygen` 生成的 64 字符部署密钥；保护数据库秘密项，同一部署所有实例必须相同且不可替换 |
-| `managed_keys` / store current key | 枚举 / `aes-256-gcm` | `none` / `aes-256-gcm` / `chacha20-poly1305`；决定新写入使用的数据库密钥算法 |
-
-区块加密密钥保存在 PostgreSQL 的 `managed_keys` 表中，密文由部署密钥保护。用 `docker exec mokyu cli key create NAME block` 生成区块密钥，并在存储设置中选择当前 key；也可以选择无加密。支持 AES-256-GCM 和 ChaCha20-Poly1305，默认 AES-256-GCM。密钥材料由服务生成且不会返回；历史 key 保留用于读取，只有没有引用时才可撤销。显式 `storage rewrite` 任务用于切换存量物理编码。部署密钥丢失或变更会使数据库秘密和区块密钥无法恢复。
-
-## 回收与历史清理
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `garbage_collection.grace_period` | 时间 / `48h` | 失去最后引用/活跃保护后的远端回收宽限 |
-| `garbage_collection.interval` | 时间 / `30m` | 日常远端 GC 空闲检查间隔 |
-| `garbage_collection.batch_size` | 整数 / `128` | GC、清空桶及存储清查的每批工作量，1～10000 |
-| `retention.interval` | 时间 / `5m` | 已结束记录和过期会话的后台清理间隔，启动后也执行一次 |
-| `retention.batch_size` | 整数 / `1000` | 每条历史清理 DELETE 的最多行数，1～10000 |
-| `retention.max_duration` | 时间 / `5s` | 每轮历史清理总时限，1～30 秒；本地引用清理也在批次间检查此预算 |
-| `retention.deleted_chunks` | 时间 / `7d` | 从远端删除成功后的 `deleted_at` 起保留区块日志 |
-| `retention.uploads` | 时间 / `24h` | completed/aborted 上传记录保留时间；与活动上传的 idle_timeout 无关 |
-| `retention.tasks` | 时间 / `30d` | 已完成任务及巡检异常保留时间，包括 sweep 预览 |
-| `retention.audit` | 时间 / `90d` | 管理审计记录的保留时间，独立于对象和任务保留 |
-
-远端 GC 与数据库历史清理独立调度，无需 crontab。历史清理在 GC 暂停及维护模式下仍运行，不删除远端数据；到期行分批提交，达到时限后下一轮继续，被锁或仍被引用／活跃保护的行暂缓。
-
-仅已确认远端删除的区块、completed/aborted 上传、completed 任务及过期会话按年龄清理。Complete 的幂等结果在上传记录保留期内可用；清空桶可能提前移除记录，已发布对象不受影响。sweep 预览过期后需重新预览。
-
-## 运行统计
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `statistics.refresh_interval` | 时间 / `15m` | 后台容量汇总完成后的等待间隔；页面刷新只读取快照 |
-| `statistics.query_timeout` | 时间 / `2m` | 一轮汇总的总时限及 SQL 语句时限 |
-| `statistics.scope_limit` | 整数 / `64` | 缓存的授权范围组合数，1～256；全局另占一项 |
-| `statistics.storage_interval` / `storage_retention` | 时间 / `15m`、`7d` | 容量采样最小间隔与历史保留 |
-| `statistics.runtime_interval` / `runtime_retention` | 时间 / `1m`、`24h` | 运行采样间隔与历史保留 |
-| `statistics.access_flush_interval` | 时间 / `1m` | 有界内存访问计数批量写入数据库的间隔 |
-| `statistics.access_retention` | 时间 / `14d` | 小时访问窗口保留期，至少 7d 且覆盖两个 Range 窗口；累计区块计数随区块保留 |
-
-query_timeout 最多 2,147,483 秒。后台汇总失败时保留上次成功结果；大库可增加间隔并按数据库能力调整时限。字段、统计口径和过期标识见[容量快照](control-api-reference.md#容量快照)。
-
-两种采样间隔至少 1 分钟，保留期不少于采样间隔且最多 90 天；每次查询最多返回最近 2048 点。统计只由单个后台 worker 执行，SQL work_mem 为 16 MiB，复杂汇总会使用 PostgreSQL 临时磁盘，应为数据库预留空间。
-
-## 完整性巡检
-
-| 字段 | 类型 / 默认值 | 说明 |
-| --- | --- | --- |
-| `instance.integrity_concurrency` | 正整数 / `1` | 区块检查并发，实际值不超过读取并发、在途槽数减一及 64；共享 CPU/存储预算 |
-| `instance.integrity_rps` | 可选正整数 / 无额外限速 | 远端巡检逻辑请求的平均速率；SDK 内部重试仍受其重试策略约束 |
-| `instance.integrity_bandwidth` | 可选大小 / 无额外限速 | full 模式平均每秒读取的编码字节，如 `10MiB`；允许一次并发批次的突发 |
-| `integrity.request_timeout` | 时间 / `30s` | 单批检查总时限，1～120 秒，包含数据库、共享资源等待、SDK 重试和解码；超时保留已提交进度 |
-
-巡检由 CLI 或 Web 手动启动。请求和带宽限额为批次间的平均限速，允许一个并发批次的突发；等待期间其他维护任务可继续。重启后，已有任务使用新的配置限额。使用方法见[CLI](cli-reference.md#完整性巡检)。
+`mokyu cli` 优先使用本机 `node.json` 凭据；未指定 control URL 时访问 `127.0.0.1:instance.listen_control`。worker/data 只提供 status。入口与数据库模式不匹配时仍监听管理/状态端口，data 返回 503、worker 和调度暂停；`cluster mode single|cluster` 可在该状态下修正数据库模式，成功后重启入口。

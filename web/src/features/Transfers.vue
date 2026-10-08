@@ -19,16 +19,16 @@ document.addEventListener('visibilitychange', visibility)
 function visibility() { visible.value = !document.hidden }
 import { onUnmounted } from 'vue'
 onUnmounted(() => document.removeEventListener('visibilitychange', visibility))
-const buckets = useQuery({ queryKey: ['buckets'], queryFn: ({ signal }) => api<Bucket[]>('/api/buckets', { signal }) })
+const buckets = useQuery({ queryKey: ['buckets'], queryFn: ({ signal }) => api<Bucket[]>('/api/v1/buckets', { signal }) })
 const options = computed(() => [{ value: 'all', label: t('allBuckets') }, ...(buckets.data.value || []).map(b => ({ value: b.id, label: b.name }))])
-const writable = computed(() => buckets.data.value?.some(b => b.state === 'active' && b.actions.includes('object.write')))
+const writable = computed(() => buckets.data.value?.some(b => b.status === 'active' && b.actions.includes('object.write')))
 const transfers = useQuery({ queryKey: ['transfers', state, bucket, cursor],
-  queryFn: ({ signal }) => api<components['schemas']['TransferPage']>('/api/uploads?' + params({ state: state.value === 'active' ? undefined : state.value, bucket: bucket.value === 'all' ? undefined : bucket.value, after: cursor.value || undefined }), { signal }),
+  queryFn: ({ signal }) => api<components['schemas']['TransferPage']>('/api/v1/uploads?' + params({ state: state.value === 'active' ? undefined : state.value, bucket: bucket.value === 'all' ? undefined : bucket.value, after: cursor.value || undefined }), { signal }),
   refetchInterval: computed(() => visible.value ? 5000 : false) })
 interface Row { id: string; job?: UploadJob; transfer?: Transfer }
 const rows = computed(() => {
   const values = new Map<string, Row>()
-  for (const transfer of transfers.data.value?.uploads || []) values.set(transfer.id, { id: transfer.id, transfer })
+  for (const transfer of transfers.data.value?.items || []) values.set(transfer.id, { id: transfer.id, transfer })
   for (const job of uploads) {
     if (bucket.value !== 'all' && job.bucket !== bucket.value || cursor.value || state.value === 'active' && ['completed', 'aborted'].includes(job.state) || state.value === 'completed' && job.state !== 'completed') continue
     const id = job.transfer?.id || job.client
@@ -39,11 +39,11 @@ const rows = computed(() => {
 })
 watch([state, bucket], () => { cursor.value = '' })
 const active = computed(() => uploads.filter(j => ['queued', 'checking', 'uploading', 'completing'].includes(j.state)).length)
-const pending = computed(() => rows.value.filter(r => r.transfer?.state === 'completed' && r.transfer.remote_state === 'pending').length)
+const pending = computed(() => rows.value.filter(r => r.transfer?.status === 'completed' && r.transfer.remote_state === 'pending').length)
 const picker = ref<HTMLInputElement>(), selected = ref<Transfer>(), removing = ref<Row>(), busy = ref(false)
 const confirming = computed({ get: () => !!removing.value, set: v => { if (!v) removing.value = undefined } })
 function name(row: Row) { return row.transfer?.object_key || row.job?.input.key || '' }
-function status(row: Row) { return row.job?.state || row.transfer?.state || 'active' }
+function status(row: Row) { return row.job?.state || row.transfer?.status || 'active' }
 function needsFile(job: UploadJob) { return job.error instanceof ApiError && ['ResumeMismatch', 'FileReadFailed'].includes(job.error.code) }
 function progress(row: Row) { const size = Number(row.transfer?.expected_size || row.job?.input.size); const sent = row.job ? row.job.accepted + row.job.sending : Number(row.transfer?.received_bytes); return size > 0 ? Math.min(100, 100 * sent / size) : (status(row) === 'completed' ? 100 : 0) }
 function choose(transfer: Transfer) { selected.value = transfer; picker.value?.click() }
@@ -74,7 +74,7 @@ async function remove() {
       </div>
     </article>
     <EmptyState v-if="!transfers.isPending.value && !transfers.error.value && !rows.length" :title="t('transfersEmpty')" :description="t('transfersEmptyHint')" />
-    <div v-if="transfers.data.value?.next || cursor" class="table-footer"><button v-if="cursor" @click="cursor = ''">{{ t('transferNewest') }}</button><button v-if="transfers.data.value?.next" @click="cursor = transfers.data.value.next">{{ t('nextPage') }}<ChevronRight :size="16" /></button></div>
+    <div v-if="transfers.data.value?.next_cursor || cursor" class="table-footer"><button v-if="cursor" @click="cursor = ''">{{ t('transferNewest') }}</button><button v-if="transfers.data.value?.next_cursor" @click="cursor = transfers.data.value.next_cursor">{{ t('nextPage') }}<ChevronRight :size="16" /></button></div>
   </section>
   <p class="field-help transfer-help">{{ t('resumeHint') }}</p>
   <input ref="picker" type="file" hidden :aria-label="t('reselectFile')" @change="picked">

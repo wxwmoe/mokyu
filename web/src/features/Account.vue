@@ -19,7 +19,7 @@ watch(() => session.value?.id, reset, { immediate: true })
 const dirty = computed(() => !!session.value && Object.entries(draft).some(([key, value]) => value !== session.value?.[key as keyof typeof draft]))
 const saving = ref(false), passwordBusy = ref(false), revokeBusy = ref('')
 const currentPassword = ref(''), newPassword = ref(''), confirmPassword = ref('')
-const sessions = useQuery({ queryKey: ['sessions'], queryFn: ({ signal }) => api<components['schemas']['SessionList']>('/api/me/sessions', { signal }) })
+const sessions = useQuery({ queryKey: ['sessions'], queryFn: ({ signal }) => api<components['schemas']['SessionList']>('/api/v1/account/sessions', { signal }) })
 const languageOptions = computed(() => [{ value: 'auto', label: t('followBrowser') }, ...locales.map(value => ({ value, label: t(`language_${value}`) }))])
 const themeOptions = computed(() => ['auto', 'light', 'dark'].map(value => ({ value, label: t(value) })))
 async function save() {
@@ -33,14 +33,14 @@ async function password() {
   if (newPassword.value !== confirmPassword.value) { notify(t('passwordMismatch'), undefined, 'error'); return }
   passwordBusy.value = true
   try {
-    await write('/api/me/password', { current_password: currentPassword.value, new_password: newPassword.value })
+    await write('/api/v1/account/password', { current_password: currentPassword.value, new_password: newPassword.value })
     currentPassword.value = ''; newPassword.value = ''; confirmPassword.value = ''
     await refreshSession(); await sessions.refetch(); notify(t('passwordChanged'))
   } catch (error) { report(error) } finally { passwordBusy.value = false }
 }
 async function revoke(id = '') {
   revokeBusy.value = id || 'others'
-  try { await api('/api/me/sessions' + (id ? '/' + id : ''), { method: 'DELETE' }); await sessions.refetch(); notify(t(id ? 'sessionRevoked' : 'otherSessionsRevoked')) }
+  try { await api('/api/v1/account/sessions' + (id ? '/' + id : ''), { method: 'DELETE' }); await sessions.refetch(); notify(t(id ? 'sessionRevoked' : 'otherSessionsRevoked')) }
   catch (error) { report(error) } finally { revokeBusy.value = '' }
 }
 const discardOpen = ref(false)

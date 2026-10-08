@@ -5,44 +5,37 @@ name = "mokyu"
 user = "mokyu"
 password = "YOUR_POSTGRES_PASSWORD"
 # Use password_file instead of password for Docker secrets.
-# password_file = "secrets/postgres-password"
+#password_file = "secrets/postgres-password"
 ssl_mode = "prefer"
 
-[cluster]
-# The first control does not need a join token. Other roles use a one-time
-# token created by `mokyu cli cluster token` and keep the resulting node.json.
-# control_url = "https://control.example.com"
-# join_token = "PASTE_ONE_TIME_TOKEN_HERE"
-# node_name = "data-1"
-# advertise_url = "https://control-1.example.com"
-
 [instance]
-listen_s3 = "0.0.0.0:9000"
-listen_web = "0.0.0.0:9001"
+# Generate once with `mokyu tool keygen`; use the same key for every role.
+deployment_key = "REPLACE_WITH_MOKYU_TOOL_KEYGEN_OUTPUT"
+# Cluster roles must set a unique name; the single container defaults to `single`.
+#name = "data-1"
+
+# Listeners
 listen_control = "0.0.0.0:9002"
-listen_socket = "/run/mokyu/admin.sock"
+listen_web = "0.0.0.0:9001"
+listen_s3 = "0.0.0.0:9000"
+
+# Local directories
 data_path = "/data"
 min_free_space = "1GiB"
-# Generate once with `mokyu key generate`; keep it identical for every role.
-deployment_key = "REPLACE_WITH_MOKYU_KEY_GENERATE_OUTPUT"
 
-# Omit resource limits for finite budgets derived from cgroup resources.
-# cpu_jobs = 2
-# inflight_bytes = "128MiB"
-# upload_concurrency = 2
-# read_concurrency = 4
-# connections = 128
-# db_connections = 12
-# storage_read_concurrency = 16
-# storage_upload_concurrency = 4
-# storage_control_concurrency = 2
-# cache_size = "10GiB"
-# cache_entries = 65536
-# upload_cache_size = "2GiB"
+# Upload and cache limits
+#multipart_limit = "2GB"
+#cache_size = "10GiB"
+#cache_entries = 65536
+#upload_cache_size = "2GiB"
 thumbnail_cache_size = "256MiB"
-# multipart_limit = "2GB"
+
+# Connection pools and resource budgets
+#request_connections = 128
+#database_connections = 12
+#cpu_jobs = 2
+#stream_memory_budget = "128MiB"
+#storage_read_slots = 16
+#storage_upload_slots = 4
+#storage_control_slots = 2
 compression_idle_timeout = "30s"
-pack_concurrency = 1
-integrity_concurrency = 1
-# integrity_rps = 10
-# integrity_bandwidth = "10MiB"

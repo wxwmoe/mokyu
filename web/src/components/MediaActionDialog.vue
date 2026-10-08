@@ -26,8 +26,8 @@ const snapshot = ref(''), initialized = ref(false), discardOpen = ref(false), mi
 let pendingLeave: ((value: boolean) => void) | undefined
 const copyMove = computed(() => ['copy', 'move'].includes(props.action))
 const current = computed(() => props.buckets.find(bucket => bucket.id === target.value))
-const options = computed(() => props.buckets.filter(bucket => bucket.state === 'active' && bucket.actions.includes('object.write') && (props.action !== 'move' || !props.items.some(item => item.public_read) || bucket.actions.includes('object.acl'))).map(bucket => ({ value: bucket.id, label: bucket.name })))
-const crossStore = computed(() => copyMove.value && !!current.value && current.value.store_id !== props.bucket.store_id)
+const options = computed(() => props.buckets.filter(bucket => bucket.status === 'active' && bucket.actions.includes('object.write') && (props.action !== 'move' || !props.items.some(item => item.public_read) || bucket.actions.includes('object.acl'))).map(bucket => ({ value: bucket.id, label: bucket.name })))
+const crossStore = computed(() => copyMove.value && !!current.value && current.value.storage_id !== props.bucket.storage_id)
 const state = () => JSON.stringify([target.value, path.value, overwrite.value, publicRead.value, meta, custom.value])
 const dirty = computed(() => open.value && initialized.value && !attempted.value && state() !== snapshot.value)
 const completed = computed(() => rows.value.filter(row => row.outcome && row.outcome.status >= 200 && row.outcome.status < 300).length)
@@ -55,7 +55,7 @@ watch(open, async (value, _, cleanup) => {
   if (props.action === 'metadata' && props.items[0]) {
     loading.value = true
     try {
-      const detail = await api<components['schemas']['ObjectDetail']>(`/api/buckets/${props.bucket.id}/object?` + params({ key: props.items[0].object_key, version: props.items[0].id }), { signal: controller.signal })
+      const detail = await api<components['schemas']['ObjectDetail']>(`/api/v1/buckets/${props.bucket.id}/object?` + params({ key: props.items[0].object_key, version: props.items[0].id }), { signal: controller.signal })
       for (const field of fields) meta[field] = detail.metadata[field] || ''
       custom.value = Object.entries(detail.metadata.user || {}).map(([key, value]) => ({ key, value }))
     } catch (failure) { if (!controller.signal.aborted) error.value = failure; return }
@@ -83,8 +83,8 @@ async function execute(retryFailed = false) {
           item.target_key = destination(source)
           if (!target.value || !item.target_key || target.value === props.bucket.id && item.target_key === source.object_key) throw new ApiError(400, 'InvalidArgument')
           if (overwrite.value) {
-            const page = await api<components['schemas']['MediaPage']>(`/api/buckets/${target.value}/objects?` + params({ q: item.target_key, mode: 'exact' }))
-            item.target_version = page.objects[0]?.id || null
+            const page = await api<components['schemas']['MediaPage']>(`/api/v1/buckets/${target.value}/objects?` + params({ q: item.target_key, mode: 'exact' }))
+            item.target_version = page.items[0]?.id || null
           }
         }
         entries.push({ item })
@@ -96,7 +96,7 @@ async function execute(retryFailed = false) {
     const pending = rows.value.filter(row => !row.outcome)
     for (let start = 0; start < pending.length; start += 20) {
       const group = pending.slice(start, start + 20)
-      const result = await write<components['schemas']['BatchResult']>('/api/media/actions', { bucket: props.bucket.id, action: props.action,
+      const result = await write<components['schemas']['BatchResult']>('/api/v1/media/actions', { bucket: props.bucket.id, action: props.action,
         ...(copyMove.value ? { target_bucket: target.value } : {}), ...(props.action === 'copy' ? { public_read: publicRead.value } : {}),
         ...(crossStore.value ? { confirm_storage_migration: true } : {}),
         ...(value ? { metadata: value } : {}), objects: group.map(row => row.item) })

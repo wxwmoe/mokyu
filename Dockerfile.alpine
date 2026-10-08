@@ -24,13 +24,10 @@ RUN --mount=type=cache,id=mokyu-alpine-registry,target=/usr/local/cargo/registry
 FROM alpine:3.23
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /mokyu /usr/local/bin/mokyu
-RUN mkdir -p /data/multipart /data/chunks /run/mokyu /config \
-    && chown -R 10001:10001 /data /run/mokyu \
-    && printf '#!/bin/sh\nexec mokyu cli "$@"\n' > /usr/local/bin/cli \
-    && chmod 755 /usr/local/bin/cli
+RUN mkdir -p /data/multipart /data/chunks /config \
+    && chown -R 10001:10001 /data
 USER 10001:10001
 EXPOSE 9000 9001 9002
 STOPSIGNAL SIGTERM
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD cli status >/dev/null || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD mokyu cli status >/dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/mokyu"]
-CMD []

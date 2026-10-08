@@ -43,7 +43,7 @@ export function write<T>(path: string, body: unknown, method = 'POST'): Promise<
 }
 
 export async function refreshSession() {
-  try { const current = await api<Session>('/api/session'); if (session.value?.id !== current.id) queries.clear(); session.value = current; await applyPreferences(current) }
+  try { const current = await api<Session>('/api/v1/auth/session'); if (session.value?.id !== current.id) queries.clear(); session.value = current; await applyPreferences(current) }
   catch (error) {
     if (!(error instanceof ApiError) || ![401, 403].includes(error.status)) throw error
     session.value = null
@@ -60,7 +60,7 @@ export function savePreferences(changes: Partial<Preferences>) {
     if (!current || current.id !== owner) throw new ApiError(401, 'Unauthorized')
     const input: Preferences = { display_name: current.display_name, locale: current.locale ?? null,
       theme: current.theme ?? null, avatar_email: current.avatar_email, avatar_enabled: current.avatar_enabled, ...changes }
-    const profile = await write<Profile>('/api/me', input, 'PUT')
+    const profile = await write<Profile>('/api/v1/account', input, 'PUT')
     if (session.value?.id === owner) { session.value = { ...session.value, ...profile }; await applyPreferences(profile) }
     saveLocal('mokyu.preferences-change', uuid())
     return profile
@@ -70,7 +70,7 @@ export function savePreferences(changes: Partial<Preferences>) {
 }
 
 export async function signOut() {
-  await api('/api/logout', { method: 'POST' })
+  await api('/api/v1/auth/logout', { method: 'POST' })
   session.value = null
   queries.clear()
   identityChanged()

@@ -5,9 +5,9 @@ import en from '../src/locales/i18n.en.js'
 
 test('create, save and revoke a scoped token through styled controls', async ({ page, request }) => {
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
-  const login = await request.post('/api/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
+  const login = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await login.json()).csrf_token }
-  await request.put('/api/me', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
+  await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
   const label = 'ui-token-' + randomUUID().slice(0, 8), errors: string[] = []
   let tokenId = ''
   page.on('pageerror', error => errors.push(error.message))
@@ -29,7 +29,7 @@ test('create, save and revoke a scoped token through styled controls', async ({ 
     await bucket.getByRole('checkbox', { name: en['action_bucket.list'], exact: true }).check()
     await bucket.getByRole('checkbox', { name: en['action_object.read'], exact: true }).check()
     await expect(dialog.locator('select')).toHaveCount(0)
-    const created = page.waitForResponse(response => response.url().endsWith('/api/tokens') && response.request().method() === 'POST' && response.status() === 201)
+    const created = page.waitForResponse(response => response.url().endsWith('/api/v1/api-tokens') && response.request().method() === 'POST' && response.status() === 201)
     await dialog.getByRole('button', { name: en.createToken, exact: true }).click()
     const data = await (await created).json()
     tokenId = data.token.id
@@ -54,5 +54,5 @@ test('create, save and revoke a scoped token through styled controls', async ({ 
     await expect(revoke).toHaveCount(0)
     await expect(listed.getByText(en.keyInactive, { exact: true })).toBeVisible()
     expect(errors).toEqual([])
-  } finally { if (tokenId) await request.delete('/api/tokens/' + tokenId, { headers }) }
+  } finally { if (tokenId) await request.delete('/api/v1/api-tokens/' + tokenId, { headers }) }
 })
