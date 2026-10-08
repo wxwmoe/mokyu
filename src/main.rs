@@ -1,11 +1,12 @@
 mod access;
-mod admin;
 mod app;
 mod authorization;
+mod cli;
 mod cluster;
 mod codec;
 mod compression;
 mod config;
+mod control;
 mod db;
 #[cfg(feature = "fault-injection")]
 mod faults;
@@ -14,18 +15,16 @@ mod integrity;
 mod lifecycle;
 mod listing;
 mod maintenance;
-mod control;
-mod multipart;
 mod pack;
-mod pack_tasks;
+
 mod quota;
 mod range;
 mod s3;
 mod stats;
 mod storage;
-mod tasks;
+
 mod upload;
-mod upload_cache;
+mod worker;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -37,19 +36,18 @@ use tracing::Instrument;
 #[derive(Parser)]
 #[command(version, about = "S3-compatible media gateway")]
 struct Args {
-    #[arg(short = 'c', long, global = true, default_value = "/config/config.toml")]
+    #[arg(
+        short = 'c',
+        long,
+        global = true,
+        default_value = "/config/config.toml"
+    )]
     config: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,
 }
 #[derive(Subcommand)]
 enum Command {
-    #[command(name = "serve", hide = true)]
-    Serve {
-        /// Start with writes and remote GC disabled, including after a database restore.
-        #[arg(long)]
-        maintenance: bool,
-    },
     /// Run the management/control role.
     Control {
         #[arg(long)]
@@ -73,7 +71,7 @@ enum Command {
     },
     Cli {
         #[command(subcommand)]
-        command: admin::Command,
+        command: cli::Command,
     },
 }
 #[derive(Subcommand)]
@@ -104,8 +102,7 @@ impl Role {
     }
     fn maintenance(self, command: Option<&Command>) -> bool {
         match command {
-            Some(Command::Serve { maintenance })
-            | Some(Command::Control { maintenance })
+            Some(Command::Control { maintenance })
             | Some(Command::Worker { maintenance })
             | Some(Command::Data { maintenance }) => *maintenance,
             _ => false,
@@ -129,8 +126,10 @@ fn main() -> Result<()> {
         .init();
     if let Some(Command::Tool { command }) = args.command.as_ref() {
         match command {
-            ToolCommand::Keygen => println!("{}", admin::deployment_key()?),
-            ToolCommand::Openapi => println!("{}", serde_json::to_string_pretty(&control::schema())?),
+            ToolCommand::Keygen => println!("{}", cli::deployment_key()?),
+            ToolCommand::Openapi => {
+                println!("{}", serde_json::to_string_pretty(&control::schema())?)
+            }
         }
         return Ok(());
     }
@@ -144,18 +143,10 @@ fn main() -> Result<()> {
     let start_maintenance = role.maintenance(args.command.as_ref());
     if let Some(Command::Cli { command }) = args.command {
         set_process_title("cli");
-        let socket = if args.config.exists() {
-            let text = std::fs::read_to_string(&args.config)?;
-            let config: config::FileConfig =
-                toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid TOML configuration"))?;
-            config.instance.listen_socket
-        } else {
-            PathBuf::from("/run/mokyu/admin.sock")
-        };
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
-            .block_on(admin::client(&socket, command));
+            .block_on(cli::client(&args.config, command));
     }
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -174,6 +165,7 @@ fn main() -> Result<()> {
             budget,
             start_maintenance,
             role.uses_storage(),
+            role.title(),
         )
         .await?;
         cluster::initialize(&app, role.title()).await?;
@@ -191,11 +183,12 @@ fn main() -> Result<()> {
                 }
             }
         });
-        if matches!(role, Role::Single) {
+        let startup_blocked = app.mode_mismatch().await? || app.recovery_required();
+        if matches!(role, Role::Single) && !startup_blocked {
             app.recover().await?;
         }
-        if matches!(role, Role::Worker) {
-            tasks::recover_stale(&app).await?;
+        if matches!(role, Role::Worker) && !startup_blocked {
+            worker::scheduler::recover_stale(&app).await?;
         }
         if matches!(role, Role::Single | Role::Control) {
             control::account::initialize(&app).await?;
@@ -208,16 +201,16 @@ fn build_s3(app: Arc<app::App>) -> Result<s3s::service::S3Service> {
     let mut builder = s3s::service::S3ServiceBuilder::new(s3::Gateway(app.clone()));
     builder.set_auth(s3::Gateway(app.clone()));
     builder.set_access(s3::Gateway(app.clone()));
-    if let Some(domain) = &app.config.listen.s3_domain {
+    if let Some(domain) = &app.config.requests.s3_domain {
         builder.set_host(s3s::host::SingleDomain::new(domain)?.with_cname_fallback(false));
     }
     let mut cfg = s3s::config::S3Config::default();
     cfg.xml_max_body_size = 2 * 1024 * 1024;
     cfg.aws_chunked_stream_max_chunk_size =
-        config::bytes(&app.config.listen.aws_chunk_limit)? as usize;
+        config::bytes(&app.config.requests.s3_chunk_limit)? as usize;
     cfg.enable_sig_v2 = false;
     cfg.sig_v4_allowed_services = vec!["s3".into()];
-    cfg.expected_region = Some(app.config.listen.region.parse()?);
+    cfg.expected_region = Some(app.config.requests.s3_region.parse()?);
     builder.set_config(Arc::new(s3s::config::StaticConfigProvider::new(Arc::new(
         cfg,
     ))));
@@ -234,24 +227,26 @@ async fn run_role(app: Arc<app::App>, role: Role) -> Result<()> {
 }
 
 async fn run_single(app: Arc<app::App>) -> Result<()> {
-    let s3_listener = TcpListener::bind(&app.config.listen.s3)
+    if app.mode_mismatch().await? || app.recovery_required() {
+        return run_single_mismatch(app).await;
+    }
+    let s3_listener = TcpListener::bind(&app.config.instance.listen_s3)
         .await
         .context("S3 listener")?;
-    let web_listener = TcpListener::bind(&app.config.listen.web)
+    let web_listener = TcpListener::bind(&app.config.instance.listen_web)
         .await
         .context("public listener")?;
-    let control_listener = TcpListener::bind(&app.config.listen.control)
+    let control_listener = TcpListener::bind(&app.config.instance.listen_control)
         .await
         .context("control listener")?;
-    let connections = Arc::new(Semaphore::new(app.budget.connections));
+    let connections = Arc::new(Semaphore::new(app.budget.request_connections));
     let s3 = build_s3(app.clone())?;
     tokio::select! {
         result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
         result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
         result = serve_router(control_listener, control::router(app.clone()), connections.clone()) => result?,
-        result = admin::serve(app.clone(), true) => result?,
         result = lifecycle::run(app.clone()) => result?,
-        result = tasks::run(app.clone()) => result?,
+        result = worker::scheduler::run(app.clone()) => result?,
         result = maintenance::run(app.clone()) => result?,
         result = stats::run(app.clone()) => result?,
         result = control::insights::runtime_loop(app.clone()) => result?,
@@ -264,28 +259,34 @@ async fn run_single(app: Arc<app::App>) -> Result<()> {
 }
 
 async fn run_control(app: Arc<app::App>) -> Result<()> {
-    let control_listener = TcpListener::bind(&app.config.listen.control)
+    if app.mode_mismatch().await? || app.recovery_required() {
+        return run_control_restricted(app).await;
+    }
+    let control_listener = TcpListener::bind(&app.config.instance.listen_control)
         .await
         .context("control listener")?;
-    let connections = Arc::new(Semaphore::new(app.budget.connections));
+    let connections = Arc::new(Semaphore::new(app.budget.request_connections));
     tokio::select! {
         result = cluster::control_loop(app.clone()) => result?,
         result = serve_router(control_listener, control::router(app.clone()), connections) => result?,
-        result = admin::serve(app.clone(), true) => result?,
-        result = control::insights::runtime_loop(app.clone()) => result?,
+        result = maintenance::run(app.clone()) => result?,
+        result = stats::run(app.clone()) => result?,
         _ = shutdown_signal() => tracing::info!(role="control", "stopping listeners; draining active operations"),
     }
     drain(app).await
 }
 
 async fn run_worker(app: Arc<app::App>) -> Result<()> {
+    if app.mode_mismatch().await? || app.recovery_required() {
+        return run_status(app).await;
+    }
+    let status_listener = TcpListener::bind(&app.config.instance.listen_control)
+        .await
+        .context("status listener")?;
     tokio::select! {
         result = cluster::node_loop(app.clone(), "worker") => result?,
-        result = admin::serve(app.clone(), false) => result?,
-        result = lifecycle::run(app.clone()) => result?,
-        result = tasks::run(app.clone()) => result?,
-        result = maintenance::run(app.clone()) => result?,
-        result = stats::run(app.clone()) => result?,
+        result = serve_router(status_listener, http::status_router(app.clone()), Arc::new(Semaphore::new(4))) => result?,
+        result = worker::scheduler::run(app.clone()) => result?,
         result = control::catalog::run(app.clone()) => result?,
         result = control::insights::runtime_loop(app.clone()) => result?,
         result = app.storage.compression.run() => result?,
@@ -295,25 +296,99 @@ async fn run_worker(app: Arc<app::App>) -> Result<()> {
 }
 
 async fn run_data(app: Arc<app::App>) -> Result<()> {
-    let s3_listener = TcpListener::bind(&app.config.listen.s3)
+    if app.mode_mismatch().await? || app.recovery_required() {
+        return run_data_restricted(app).await;
+    }
+    let s3_listener = TcpListener::bind(&app.config.instance.listen_s3)
         .await
         .context("S3 listener")?;
-    let web_listener = TcpListener::bind(&app.config.listen.web)
+    let web_listener = TcpListener::bind(&app.config.instance.listen_web)
         .await
         .context("public listener")?;
-    let connections = Arc::new(Semaphore::new(app.budget.connections));
+    let status_listener = TcpListener::bind(&app.config.instance.listen_control)
+        .await
+        .context("status listener")?;
+    let connections = Arc::new(Semaphore::new(app.budget.request_connections));
     let s3 = build_s3(app.clone())?;
     tokio::select! {
         result = cluster::node_loop(app.clone(), "data") => result?,
+        result = worker::scheduler::run(app.clone()) => result?,
+        result = control::catalog::run(app.clone()) => result?,
+        result = control::insights::runtime_loop(app.clone()) => result?,
         result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
         result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
-        result = admin::serve(app.clone(), false) => result?,
+        result = serve_router(status_listener, http::status_router(app.clone()), Arc::new(Semaphore::new(4))) => result?,
         result = access::run(app.clone()) => result?,
-        result = control::insights::runtime_loop(app.clone()) => result?,
         result = app.storage.compression.run() => result?,
         _ = shutdown_signal() => tracing::info!(role="data", "stopping listeners; draining active operations"),
     }
     drain(app).await
+}
+
+async fn run_control_restricted(app: Arc<app::App>) -> Result<()> {
+    let control_listener = TcpListener::bind(&app.config.instance.listen_control)
+        .await
+        .context("control listener")?;
+    let connections = Arc::new(Semaphore::new(app.budget.request_connections));
+    tokio::select! {
+        result = serve_router(control_listener, control::router(app.clone()), connections) => result?,
+        _ = shutdown_signal() => tracing::info!(role="control", "stopping restricted listener"),
+    }
+    Ok(())
+}
+
+async fn run_single_mismatch(app: Arc<app::App>) -> Result<()> {
+    let s3_listener = TcpListener::bind(&app.config.instance.listen_s3)
+        .await
+        .context("S3 listener")?;
+    let web_listener = TcpListener::bind(&app.config.instance.listen_web)
+        .await
+        .context("public listener")?;
+    let control_listener = TcpListener::bind(&app.config.instance.listen_control)
+        .await
+        .context("control listener")?;
+    let connections = Arc::new(Semaphore::new(app.budget.request_connections));
+    let s3 = build_s3(app.clone())?;
+    tokio::select! {
+        result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
+        result = serve_router(web_listener, control::router(app.clone()), connections.clone()) => result?,
+        result = serve_router(control_listener, control::router(app.clone()), connections) => result?,
+        _ = shutdown_signal() => tracing::info!(role="single", "stopping mismatch listeners"),
+    }
+    Ok(())
+}
+
+async fn run_data_restricted(app: Arc<app::App>) -> Result<()> {
+    let s3_listener = TcpListener::bind(&app.config.instance.listen_s3)
+        .await
+        .context("S3 listener")?;
+    let web_listener = TcpListener::bind(&app.config.instance.listen_web)
+        .await
+        .context("public listener")?;
+    let control_listener = TcpListener::bind(&app.config.instance.listen_control)
+        .await
+        .context("status listener")?;
+    let connections = Arc::new(Semaphore::new(app.budget.request_connections));
+    let s3 = build_s3(app.clone())?;
+    tokio::select! {
+        result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
+        result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
+        result = serve_router(control_listener, http::status_router(app.clone()), connections) => result?,
+        _ = shutdown_signal() => tracing::info!(role="data", "stopping restricted listeners"),
+    }
+    Ok(())
+}
+
+async fn run_status(app: Arc<app::App>) -> Result<()> {
+    let listener = TcpListener::bind(&app.config.instance.listen_control)
+        .await
+        .context("status listener")?;
+    serve_router(
+        listener,
+        http::status_router(app),
+        Arc::new(Semaphore::new(4)),
+    )
+    .await
 }
 
 async fn drain(app: Arc<app::App>) -> Result<()> {

@@ -17,10 +17,9 @@ const MAGIC: &[u8; 8] = b"MOKYU\x00\x00\x02";
 #[derive(Clone, Copy, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompressionStrategy {
+    Never,
     Always,
     Sample,
-    FileType,
-    ChunkHint,
 }
 
 #[derive(Clone, Deserialize, serde::Serialize)]
@@ -112,12 +111,15 @@ impl Config {
 #[derive(Clone, sqlx::FromRow, Serialize)]
 pub struct Pack {
     pub id: i64,
-    pub storage_id: Uuid,
-    pub store_id: Option<Uuid>,
+    pub location_id: Uuid,
+    pub storage_id: Option<Uuid>,
+    #[sqlx(rename = "encryption_algorithm")]
     pub algorithm: String,
-    pub key_id: String,
+    #[sqlx(rename = "block_key_id")]
+    pub block_key_id: Option<Uuid>,
     pub raw_size: i64,
     pub stored_size: Option<i64>,
+    #[sqlx(rename = "pack_compressed")]
     pub compressed: bool,
     pub nonce: Option<Vec<u8>>,
     pub digest: Option<Vec<u8>>,
@@ -140,12 +142,12 @@ impl Pack {
         );
         if self.algorithm == "none" {
             ensure!(
-                self.key_id.is_empty() && self.nonce.is_none(),
+                self.block_key_id.is_none() && self.nonce.is_none(),
                 codec::IntegrityError::Metadata
             );
         } else {
             let key = secrets
-                .key(&self.key_id)
+                .key_for_id(self.block_key_id)
                 .context(codec::IntegrityError::MissingKey)?;
             ensure!(
                 key.algorithm == self.algorithm
@@ -175,7 +177,7 @@ impl Pack {
         ensure!(digest.len() == 32, "invalid pack digest");
         let mut aad = MAGIC.to_vec();
         aad.extend_from_slice(&self.id.to_be_bytes());
-        aad.extend_from_slice(self.storage_id.as_bytes());
+        aad.extend_from_slice(self.location_id.as_bytes());
         aad.extend_from_slice(&self.raw_size.to_be_bytes());
         aad.extend_from_slice(&stored.to_be_bytes());
         aad.extend_from_slice(&self.member_count.to_be_bytes());
@@ -187,8 +189,14 @@ impl Pack {
             "chacha20-poly1305" => 2,
             _ => anyhow::bail!("invalid pack algorithm"),
         });
-        aad.extend_from_slice(&u16::try_from(self.key_id.len())?.to_be_bytes());
-        aad.extend_from_slice(self.key_id.as_bytes());
+        aad.extend_from_slice(
+            &u16::try_from(self.block_key_id.map_or(0, |id| id.to_string().len()))?.to_be_bytes(),
+        );
+        aad.extend_from_slice(
+            self.block_key_id
+                .map_or_else(|| Vec::new(), |id| id.to_string().into_bytes())
+                .as_slice(),
+        );
         Ok(aad)
     }
 }
@@ -247,7 +255,7 @@ pub fn encode(
                 && data.len() == c.raw_size as usize
                 && blake3::hash(data).as_bytes().as_slice() == c.hash
                 && c.algorithm == members[0].0.algorithm
-                && c.key_id == members[0].0.key_id,
+                && c.block_key_id == members[0].0.block_key_id,
             "invalid pack member"
         );
         raw.extend_from_slice(&c.id.to_be_bytes());
@@ -264,14 +272,16 @@ pub fn encode(
     let mut encoded = compressed.unwrap_or(raw);
     p.stored_size = Some(encoded.len() as i64 + if p.algorithm == "none" { 0 } else { 16 });
     if p.algorithm != "none" {
-        let key = secrets.key(&p.key_id).context("missing pack key")?;
+        let key = secrets
+            .key_for_id(p.block_key_id)
+            .context("missing pack key")?;
         ensure!(key.algorithm == p.algorithm, "pack key algorithm mismatch");
         let n = codec::typed_nonce(p.created_at, p.id, 1)?;
         p.nonce = Some(n.to_vec());
         key.seal(n, &p.aad()?, &mut encoded)?;
     } else {
         ensure!(
-            p.key_id.is_empty() && p.nonce.is_none(),
+            p.block_key_id.is_none() && p.nonce.is_none(),
             "invalid unencrypted pack"
         );
     }
@@ -287,7 +297,7 @@ pub fn decode(p: &Pack, mut data: Vec<u8>, secrets: &Secrets, pool: &Pool) -> Re
     let aad = p.aad().context(codec::IntegrityError::Metadata)?;
     if p.algorithm != "none" {
         let key = secrets
-            .key(&p.key_id)
+            .key_for_id(p.block_key_id)
             .context(codec::IntegrityError::MissingKey)?;
         ensure!(
             key.algorithm == p.algorithm,
@@ -305,7 +315,7 @@ pub fn decode(p: &Pack, mut data: Vec<u8>, secrets: &Secrets, pool: &Pool) -> Re
         .context(codec::IntegrityError::Authentication)?;
     } else {
         ensure!(
-            p.key_id.is_empty() && p.nonce.is_none(),
+            p.block_key_id.is_none() && p.nonce.is_none(),
             codec::IntegrityError::Metadata
         );
     }
@@ -377,6 +387,11 @@ mod tests {
                 runtime_keys: std::sync::Arc::new(std::sync::RwLock::new(
                     std::collections::BTreeMap::new(),
                 )),
+                key_names: std::sync::Arc::new(std::sync::RwLock::new(if key_id.is_empty() {
+                    std::collections::BTreeMap::new()
+                } else {
+                    std::collections::BTreeMap::from([(Uuid::from_u128(0x200), key_id.into())])
+                })),
             };
             let pool = Pool::new(Default::default(), 1).unwrap();
             let date = "2026-09-28T00:00:00Z".parse().unwrap();
@@ -387,13 +402,13 @@ mod tests {
                         Chunk {
                             id,
                             encoding_id: id,
-                            storage_id: Uuid::new_v4(),
-                            store_id: None,
+                            location_id: Uuid::new_v4(),
+                            storage_id: None,
                             hash: blake3::hash(&raw).as_bytes().to_vec(),
                             raw_size: raw.len() as i32,
                             stored_size: None,
                             algorithm: algorithm.into(),
-                            key_id: key_id.into(),
+                            block_key_id: (algorithm != "none").then_some(Uuid::from_u128(0x200)),
                             compressed: false,
                             nonce: None,
                             format: 1,
@@ -406,10 +421,10 @@ mod tests {
                 .collect();
             let p = Pack {
                 id: 7,
-                storage_id: Uuid::new_v4(),
-                store_id: None,
+                location_id: Uuid::new_v4(),
+                storage_id: None,
                 algorithm: algorithm.into(),
-                key_id: key_id.into(),
+                block_key_id: (algorithm != "none").then_some(Uuid::from_u128(0x200)),
                 raw_size: members.iter().map(|(c, _)| c.raw_size as i64).sum(),
                 stored_size: None,
                 compressed: false,

@@ -31,10 +31,11 @@ pub(super) struct SessionView {
 pub(super) struct BucketView {
     id: Uuid,
     project_id: Uuid,
-    store_id: Option<Uuid>,
+    storage_id: Option<Uuid>,
     #[schema(value_type = Vec<crate::authorization::Action>)]
     pub(super) actions: Vec<String>,
     name: String,
+    #[serde(rename = "status")]
     state: String,
     revision: String,
     uploads_paused: bool,
@@ -51,7 +52,7 @@ impl From<Bucket> for BucketView {
         Self {
             id: bucket.id,
             project_id: bucket.project_id,
-            store_id: bucket.store_id,
+            storage_id: bucket.storage_id,
             actions: crate::authorization::Action::ALL
                 .iter()
                 .map(|a| a.name().into())
@@ -77,22 +78,28 @@ pub(crate) struct ErrorBody {
     pub request_id: Option<String>,
 }
 
-#[utoipa::path(get, path = "/api/info", responses((status = 200, body = ApiInfo)))]
+#[utoipa::path(get, path = "/api/v1/info", responses((status = 200, body = ApiInfo)))]
 async fn info() -> Json<ApiInfo> {
     Json(ApiInfo {
         product: "Mokyu",
         version: env!("CARGO_PKG_VERSION"),
-        contract: "mokyu-control-1",
+        contract: "mokyu-control-v1",
     })
 }
 
 pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
     let (router, mut api) = OpenApiRouter::new()
         .routes(routes!(info))
-        .routes(routes!(super::login))
-        .routes(routes!(super::logout))
-        .routes(routes!(super::session))
-        .routes(routes!(super::status))
+        .routes(routes!(super::system::openapi))
+        .routes(routes!(super::cli::cli))
+        .routes(routes!(super::objects::cors, super::objects::save_cors))
+        .routes(routes!(super::tasks::packs))
+        .routes(routes!(super::tasks::pack_detail))
+        .routes(routes!(super::tasks::cache_flush))
+        .routes(routes!(super::tasks::integrity_report))
+        .routes(routes!(super::auth::login))
+        .routes(routes!(super::auth::logout))
+        .routes(routes!(super::auth::session))
         .routes(routes!(super::maintenance::status))
         .routes(routes!(super::maintenance::policy))
         .routes(routes!(super::maintenance::mode))
@@ -111,29 +118,32 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::settings::get_section))
         .routes(routes!(super::settings::save_section))
         .routes(routes!(super::settings::reset_section))
-        .routes(routes!(super::stores::list, super::stores::create))
-        .routes(routes!(super::stores::check, super::stores::update))
-        .routes(routes!(super::stores::rekey))
+        .routes(routes!(super::storage::list, super::storage::create))
+        .routes(routes!(super::storage::check, super::storage::update))
+        .routes(routes!(super::storage::profile))
+        .routes(routes!(super::storage::update_profile_route))
+        .routes(routes!(super::storage::key))
+        .routes(routes!(super::storage::unpack))
+        .routes(routes!(super::storage::rewrite))
         .routes(routes!(
             super::managed_keys::list,
             super::managed_keys::create
         ))
         .routes(routes!(super::managed_keys::revoke))
         .routes(routes!(super::cluster::status, super::cluster::mode))
-        .routes(routes!(super::cluster::nodes, super::cluster::token))
-        .routes(routes!(super::cluster::revoke, super::cluster::reissue))
-        .routes(routes!(super::cluster::join))
-        .routes(routes!(super::cluster::heartbeat))
-        .routes(routes!(super::start_integrity))
-        .routes(routes!(super::integrity_issues))
-        .routes(routes!(super::integrity_objects))
+        .routes(routes!(super::cluster::nodes))
+        .routes(routes!(super::cluster::release))
+        .routes(routes!(super::cluster::recover))
+        .routes(routes!(super::tasks::start_integrity))
+        .routes(routes!(super::tasks::integrity_issues))
+        .routes(routes!(super::tasks::integrity_objects))
         .routes(routes!(super::insights::get))
         .routes(routes!(super::insights::runtime))
         .routes(routes!(super::storage_catalog::packs))
         .routes(routes!(super::storage_catalog::detail))
         .routes(routes!(super::storage_catalog::objects))
-        .routes(routes!(super::object_chunks))
-        .routes(routes!(super::buckets))
+        .routes(routes!(super::objects::object_chunks))
+        .routes(routes!(super::objects::buckets))
         .routes(routes!(super::buckets::create))
         .routes(routes!(super::buckets::options))
         .merge(
@@ -146,7 +156,10 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::buckets::purge))
         .routes(routes!(super::buckets::transfer_preview))
         .routes(routes!(super::buckets::transfer))
-        .routes(routes!(super::website, super::save_website))
+        .routes(routes!(
+            super::objects::website,
+            super::objects::save_website
+        ))
         .routes(routes!(super::account::me, super::account::save))
         .routes(routes!(super::account::password))
         .routes(routes!(super::account::reauthenticate))
@@ -159,6 +172,11 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::account::setup))
         .routes(routes!(super::projects::list, super::projects::create))
         .routes(routes!(super::projects::update, super::projects::delete))
+        .routes(routes!(
+            super::buckets::domains,
+            super::buckets::add_domain,
+            super::buckets::remove_domain
+        ))
         .routes(routes!(super::users::list, super::users::create))
         .routes(routes!(
             super::users::get,
@@ -183,7 +201,9 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
             OpenApiRouter::new()
                 .routes(routes!(super::actions::batch))
                 .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
-                .layer(axum::middleware::from_fn(super::limit_object_actions)),
+                .layer(axum::middleware::from_fn(
+                    super::system::limit_object_actions,
+                )),
         )
         .routes(routes!(super::uploads::get, super::uploads::abort))
         .routes(routes!(super::uploads::parts))
@@ -284,12 +304,27 @@ mod tests {
     fn registered_routes_and_schema_share_the_contract() {
         let schema = serde_json::to_value(super::routes().1).unwrap();
         for (path, method) in [
-            ("/api/info", "get"),
-            ("/api/login", "post"),
-            ("/api/logout", "post"),
-            ("/api/session", "get"),
-            ("/api/buckets", "get"),
-            ("/api/buckets/{bucket}/website", "put"),
+            ("/api/v1/info", "get"),
+            ("/api/v1/openapi.json", "get"),
+            ("/api/v1/auth/login", "post"),
+            ("/api/v1/auth/logout", "post"),
+            ("/api/v1/auth/session", "get"),
+            ("/api/v1/buckets", "get"),
+            ("/api/v1/buckets/{bucket}/website", "put"),
+            ("/api/v1/buckets/{bucket}/cors", "get"),
+            ("/api/v1/buckets/{bucket}/cors", "put"),
+            ("/api/v1/packs", "get"),
+            ("/api/v1/packs/{id}", "get"),
+            ("/api/v1/cache/flush", "post"),
+            ("/api/v1/tasks/{id}/report", "get"),
+            ("/api/v1/cli", "post"),
+            ("/api/v1/storages/{name}/profile", "get"),
+            ("/api/v1/storages/{name}/key", "put"),
+            ("/api/v1/storages/{name}/unpack", "post"),
+            ("/api/v1/domains", "get"),
+            ("/api/v1/domains", "post"),
+            ("/api/v1/domains/{host}", "delete"),
+            ("/api/v1/cluster/recover", "post"),
         ] {
             assert!(schema["paths"][path][method].is_object(), "{method} {path}");
         }

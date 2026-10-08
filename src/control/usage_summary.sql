@@ -23,10 +23,10 @@ WITH ranges AS MATERIALIZED (
 ), chunk_unique AS (
     SELECT chunk_id,sum(hi-lo) AS bytes FROM (SELECT DISTINCT chunk_id,lo,hi FROM coverage) u GROUP BY chunk_id
 ), sources AS MATERIALIZED (
-    SELECT c.id AS chunk_id,CASE WHEN l.id IS NOT NULL THEN 'chunk' WHEN p.id IS NOT NULL THEN 'pack' ELSE 'pending' END AS kind,
-           coalesce(l.id,p.id,c.id) AS source_id,coalesce(l.stored_size,p.stored_size) AS stored_size,u.bytes
+    SELECT c.id AS chunk_id,CASE WHEN l.encoding_id IS NOT NULL THEN 'chunk' WHEN p.id IS NOT NULL THEN 'pack' ELSE 'pending' END AS kind,
+           coalesce(l.encoding_id,p.id,c.id) AS source_id,coalesce(l.standalone_size,p.stored_size) AS stored_size,u.bytes
     FROM chunk_unique u JOIN chunks c ON c.id=u.chunk_id
-    LEFT JOIN chunk_locations l ON l.chunk_id=c.id AND l.state='ready'
+    LEFT JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready'
     LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready'
 ), source_totals AS MATERIALIZED (
     SELECT kind,source_id,sum(bytes) AS raw_bytes,max(stored_size) AS stored_size FROM sources GROUP BY kind,source_id
@@ -35,7 +35,7 @@ WITH ranges AS MATERIALIZED (
            a.raw_bytes/t.raw_bytes*t.stored_size AS encoded_bytes
     FROM allocated a JOIN sources s USING(chunk_id) JOIN source_totals t USING(kind,source_id)
 ), scopes AS MATERIALIZED (
-    SELECT id,bucket_ids FROM storage_insights
+    SELECT id,bucket_ids FROM usage_summary
 ), scope_ranges AS (
     SELECT s.id,r.chunk_id,range_agg(r.spans) AS spans FROM scopes s JOIN ranges r ON s.bucket_ids IS NULL OR r.bucket_id=ANY(s.bucket_ids)
     GROUP BY s.id,r.chunk_id
@@ -53,11 +53,11 @@ WITH ranges AS MATERIALIZED (
 ), scope_logical AS (
     SELECT s.id,count(b.id) AS buckets,coalesce(sum(q.used_bytes),0) AS bytes,coalesce(sum(q.object_count),0) AS objects
     FROM scopes s LEFT JOIN buckets b ON s.bucket_ids IS NULL OR b.id=ANY(s.bucket_ids)
-    LEFT JOIN quota_accounts q ON q.kind='bucket' AND q.id=b.id GROUP BY s.id
+    LEFT JOIN quota_scopes q ON q.scope='bucket' AND q.scope_id=b.id GROUP BY s.id
 ), physical AS (
-    SELECT 'chunk' AS kind,l.id AS source_id,l.state,l.stored_size,
+    SELECT 'chunk' AS kind,l.encoding_id AS source_id,l.state,l.standalone_size AS stored_size,
            l.state IN ('retired','deleting') OR (c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) AS garbage
-    FROM chunk_locations l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('ready','retired','deleting','uploading')
+    FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('ready','retired','deleting','uploading')
     UNION ALL SELECT 'pack',id,state,stored_size,state IN ('retired','deleting') FROM packs WHERE state<>'deleted'
 ), bridge AS (
     SELECT jsonb_build_object(
@@ -83,4 +83,4 @@ WITH ranges AS MATERIALIZED (
         'physical',CASE WHEN l.id='global' THEN (SELECT data FROM bridge) END
     ) AS data FROM scope_logical l LEFT JOIN scope_unique u USING(id) LEFT JOIN scope_allocated a USING(id)
 )
-UPDATE storage_insights i SET as_of=transaction_timestamp(),data=s.data FROM summaries s WHERE s.id=i.id;
+UPDATE usage_summary i SET as_of=transaction_timestamp(),data=s.data FROM summaries s WHERE s.id=i.id;

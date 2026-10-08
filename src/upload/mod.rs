@@ -1,3 +1,6 @@
+pub(crate) mod cache;
+pub(crate) mod multipart;
+
 use crate::{
     app::App,
     codec::{self, MAX},
@@ -253,11 +256,10 @@ impl App {
         let mut seed = if let Some((id, number)) = upload {
             self.multipart_seed(id, number).await?
         } else {
-            crate::multipart::Seed::empty(Uuid::nil())
+            crate::upload::multipart::Seed::empty(Uuid::nil())
         };
         window.append(&mut seed.bytes);
-        let idle =
-            Duration::from_secs(config::seconds(&self.config.multipart.client_idle_timeout)?);
+        let idle = Duration::from_secs(config::seconds(&self.config.uploads.client_idle_timeout)?);
         let mut touch = Instant::now();
         loop {
             // Time spent processing a full window is not client idle time.

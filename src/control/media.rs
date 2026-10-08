@@ -42,9 +42,9 @@ pub struct Thumbnails {
 impl Thumbnails {
     pub async fn new(config: &config::Config, disk: Arc<Disk>) -> Result<Self> {
         let cache = Self {
-            root: config.storage.data.join("thumbnails"),
+            root: config.instance.data_path.join("thumbnails"),
             disk,
-            capacity: config::cache_bytes(&config.control.thumbnail_cache_size)?,
+            capacity: config::cache_bytes(&config.instance.thumbnail_cache_size)?,
             entries: Mutex::new(VecDeque::new()),
             job: Arc::new(Semaphore::new(1)),
         };
@@ -230,7 +230,7 @@ async fn current(
     }
     Ok((stream, pin))
 }
-#[utoipa::path(get, operation_id="media_detail", path="/api/buckets/{bucket}/object", params(("bucket"=Uuid,Path),ObjectQuery), responses((status=200,body=ObjectDetail)))]
+#[utoipa::path(get, operation_id="media_detail", path="/api/v1/buckets/{bucket}/object", params(("bucket"=Uuid,Path),ObjectQuery), responses((status=200,body=ObjectDetail)))]
 pub(super) async fn detail(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -264,7 +264,7 @@ pub(super) async fn detail(
         },
     }))
 }
-#[utoipa::path(get, operation_id="media_content", path="/api/buckets/{bucket}/object/content", params(("bucket"=Uuid,Path),ContentQuery), responses((status=200,content_type="application/octet-stream"),(status=206)))]
+#[utoipa::path(get, operation_id="media_content", path="/api/v1/buckets/{bucket}/object/content", params(("bucket"=Uuid,Path),ContentQuery), responses((status=200,content_type="application/octet-stream"),(status=206)))]
 pub(super) async fn content(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -292,7 +292,7 @@ pub(super) struct TextPreview {
     text: String,
     truncated: bool,
 }
-#[utoipa::path(get, operation_id="media_text", path="/api/buckets/{bucket}/object/text", params(("bucket"=Uuid,Path),ObjectQuery), responses((status=200,body=TextPreview)))]
+#[utoipa::path(get, operation_id="media_text", path="/api/v1/buckets/{bucket}/object/text", params(("bucket"=Uuid,Path),ObjectQuery), responses((status=200,body=TextPreview)))]
 pub(super) async fn text(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -319,7 +319,7 @@ pub(super) async fn text(
         truncated,
     }))
 }
-#[utoipa::path(get, operation_id="media_thumbnail", path="/api/buckets/{bucket}/object/thumbnail", params(("bucket"=Uuid,Path),ObjectQuery), responses((status=200,content_type="image/png"),(status=415),(status=503)))]
+#[utoipa::path(get, operation_id="media_thumbnail", path="/api/v1/buckets/{bucket}/object/thumbnail", params(("bucket"=Uuid,Path),ObjectQuery), responses((status=200,content_type="image/png"),(status=415),(status=503)))]
 pub(super) async fn thumbnail(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

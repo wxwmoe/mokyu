@@ -1,0 +1,238 @@
+use super::local::Disk;
+use crate::codec::Chunk;
+use bytes::Bytes;
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::atomic::{AtomicUsize, Ordering},
+    sync::{Arc, Mutex},
+};
+use uuid::Uuid;
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Queue {
+    Small,
+    Main,
+}
+pub(crate) struct Entry {
+    pub(crate) size: u64,
+    pub(crate) compressed: bool,
+    pub(crate) frequency: u8,
+    pub(crate) pins: Arc<AtomicUsize>,
+    pub(crate) queue: Queue,
+}
+pub(crate) struct CachePin(pub(crate) Arc<AtomicUsize>);
+impl Drop for CachePin {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+pub(crate) struct UploadCharge {
+    pub(crate) disk: Arc<Disk>,
+    pub(crate) size: u64,
+}
+impl Drop for UploadCharge {
+    fn drop(&mut self) {
+        self.disk.usage.lock().unwrap().upload -= self.size;
+    }
+}
+pub(crate) struct UploadPin {
+    pub(crate) _pin: Option<CachePin>,
+    pub(crate) _charge: Option<UploadCharge>,
+    pub size: u64,
+    pub compressed: bool,
+    pub remote: bool,
+    pub staging_storage_id: Option<Uuid>,
+    pub staging_object_key: String,
+}
+pub(crate) struct LoadedPack {
+    pub pack: crate::pack::Pack,
+    pub data: crate::pack::Decoded,
+    pub(crate) _memory: tokio::sync::OwnedSemaphorePermit,
+    pub(crate) used: Mutex<DownloadUsage>,
+    pub(crate) access: Arc<crate::access::Access>,
+}
+#[derive(Default)]
+pub(crate) struct DownloadUsage {
+    pub(crate) members: HashMap<i64, (usize, usize)>,
+    pub(crate) observed: bool,
+    pub(crate) range: bool,
+    pub(crate) full: bool,
+}
+impl LoadedPack {
+    pub(crate) fn touch(&self, c: &Chunk, observe: bool, range: bool) {
+        let mut used = self.used.lock().unwrap();
+        used.observed |= observe;
+        used.range |= observe && range;
+        used.full |= !observe || !range;
+        used.members.insert(
+            c.id,
+            (
+                c.raw_size as usize,
+                c.stored_size.unwrap_or(c.raw_size + 16) as usize,
+            ),
+        );
+    }
+}
+impl Drop for LoadedPack {
+    fn drop(&mut self) {
+        let used = self.used.lock().unwrap();
+        if used.observed {
+            let raw: usize = used.members.values().map(|(n, _)| n).sum();
+            let bytes = self.pack.stored_size.unwrap_or(0) as usize;
+            let useful: usize = used.members.values().map(|(_, n)| n).sum();
+            self.access.pack(
+                self.pack.id,
+                bytes,
+                used.range && !used.full && raw < self.pack.raw_size as usize,
+                useful.min(bytes),
+                used.members.keys().copied(),
+            );
+        }
+    }
+}
+#[derive(Default)]
+pub(crate) struct ReadContext {
+    pub(crate) pack: tokio::sync::Mutex<Option<Arc<LoadedPack>>>,
+    pub(crate) observe: bool,
+    pub(crate) range: bool,
+}
+impl ReadContext {
+    pub fn user(range: bool) -> Self {
+        Self {
+            observe: true,
+            range,
+            ..Default::default()
+        }
+    }
+    pub(crate) async fn touch(&self, c: &Chunk) {
+        if let Some(p) = self.pack.lock().await.as_ref()
+            && p.data.members.iter().any(|m| m.id == c.id)
+        {
+            p.touch(c, self.observe, self.range);
+        }
+    }
+}
+pub(crate) enum Source {
+    Chunk(Chunk, CachePin),
+    Pack(crate::pack::Pack, CachePin),
+}
+#[derive(sqlx::FromRow)]
+pub(crate) struct InspectionMember {
+    #[sqlx(flatten)]
+    pub(crate) chunk: Chunk,
+    pub(crate) offset_bytes: i64,
+}
+#[derive(Default)]
+pub(crate) struct Fifo {
+    pub(crate) entries: HashMap<Uuid, Entry>,
+    pub(crate) small: VecDeque<Uuid>,
+    pub(crate) main: VecDeque<Uuid>,
+    pub(crate) ghost: HashSet<Uuid>,
+    pub(crate) ghosts: VecDeque<Uuid>,
+    pub(crate) small_bytes: u64,
+}
+impl Fifo {
+    pub(crate) fn insert(&mut self, id: Uuid, size: u64, compressed: bool) {
+        if self.entries.contains_key(&id) {
+            return;
+        }
+        let queue = if self.ghost.remove(&id) {
+            Queue::Main
+        } else {
+            Queue::Small
+        };
+        if queue == Queue::Small {
+            self.small.push_back(id);
+            self.small_bytes += size;
+        } else {
+            self.main.push_back(id);
+        }
+        self.entries.insert(
+            id,
+            Entry {
+                size,
+                compressed,
+                frequency: 0,
+                pins: Arc::new(AtomicUsize::new(0)),
+                queue,
+            },
+        );
+    }
+    pub(crate) fn remove(&mut self, id: Uuid) -> Option<Entry> {
+        let e = self.entries.remove(&id)?;
+        if e.queue == Queue::Small {
+            self.small_bytes -= e.size;
+        }
+        Some(e)
+    }
+    pub(crate) fn forget(&mut self, id: Uuid) -> Option<Entry> {
+        let e = self.remove(id)?;
+        self.small.retain(|v| *v != id);
+        self.main.retain(|v| *v != id);
+        Some(e)
+    }
+    pub(crate) fn restore_victim(&mut self, id: Uuid) {
+        match self.entries[&id].queue {
+            Queue::Small => self.small.push_front(id),
+            Queue::Main => self.main.push_front(id),
+        }
+    }
+    // Commit eviction only after the cache file is gone.
+    pub(crate) fn evict(&mut self, id: Uuid, max_ghosts: usize) -> Option<Entry> {
+        let e = self.remove(id)?;
+        if e.queue == Queue::Small {
+            self.ghost.insert(id);
+            self.ghosts.push_back(id);
+            while self.ghosts.len() > max_ghosts {
+                if let Some(old) = self.ghosts.pop_front() {
+                    self.ghost.remove(&old);
+                }
+            }
+        }
+        Some(e)
+    }
+    pub(crate) fn victim(&mut self, capacity: u64) -> Option<Uuid> {
+        // A bounded scan also terminates when every candidate is pinned.
+        for _ in 0..self.entries.len().saturating_mul(5).max(1) {
+            let small = (self.small_bytes > capacity / 10 || self.main.is_empty())
+                && !self.small.is_empty();
+            let id = if small {
+                self.small.pop_front()
+            } else {
+                self.main.pop_front()
+            }?;
+            let Some(e) = self.entries.get_mut(&id) else {
+                continue;
+            };
+            if e.pins.load(Ordering::Relaxed) > 0 {
+                if small {
+                    self.small.push_back(id);
+                } else {
+                    self.main.push_back(id);
+                }
+                continue;
+            }
+            if small && e.frequency > 1 {
+                e.queue = Queue::Main;
+                e.frequency = 0;
+                self.small_bytes -= e.size;
+                self.main.push_back(id);
+                continue;
+            }
+            if !small && e.frequency > 0 {
+                e.frequency -= 1;
+                self.main.push_back(id);
+                continue;
+            }
+            return Some(id);
+        }
+        None
+    }
+}
+
+pub(crate) type FetchResult =
+    tokio::sync::OnceCell<Result<(Bytes, Option<Arc<LoadedPack>>), Arc<anyhow::Error>>>;
+pub(crate) struct PackFetch {
+    pub(crate) result: tokio::sync::OnceCell<Result<Arc<LoadedPack>, Arc<anyhow::Error>>>,
+    pub(crate) priority: Arc<AtomicUsize>,
+}

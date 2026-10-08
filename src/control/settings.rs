@@ -1,10 +1,5 @@
 use super::Identity;
-use crate::{
-    app::App,
-    authorization::Principal,
-    config::Control,
-    http::HttpError,
-};
+use crate::{app::App, authorization::Principal, config::WebSettings, http::HttpError};
 use anyhow::{Context, Result};
 use axum::{
     Json,
@@ -15,20 +10,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use utoipa::ToSchema;
 
-const SECTIONS: &[&str] = &[
-    "web",
-    "s3",
-    "storage",
-    "requests",
-    "uploads",
-    "cache",
-    "compression",
-    "packing",
-    "garbage_collection",
-    "retention",
-    "statistics",
-    "integrity",
-];
+const SECTIONS: &[&str] = &["web", "requests", "uploads", "metrics", "maintenance"];
 
 #[derive(Clone, sqlx::FromRow)]
 struct RuntimeSettingsRow {
@@ -76,7 +58,10 @@ pub(crate) struct RuntimeSettingsPatch {
 }
 
 fn valid_section(section: &str) -> Result<()> {
-    anyhow::ensure!(SECTIONS.contains(&section), "unknown runtime settings section");
+    anyhow::ensure!(
+        SECTIONS.contains(&section),
+        "unknown runtime settings section"
+    );
     Ok(())
 }
 
@@ -86,22 +71,52 @@ fn validate_value(configured: &crate::config::Config, section: &str, value: &Val
         .as_object()
         .context("runtime settings value must be an object")?;
     let allowed: &[&str] = match section {
-        "web" => &["origin", "secure_cookie", "session_lifetime", "avatar_url"],
-        "s3" => &["domain", "signature_region", "max_stream_chunk_size"],
-        "storage" => &["connect_timeout", "request_timeout", "max_retries", "retry_timeout", "priority_aging", "min_retention"],
-        "requests" => &["read_idle_timeout", "upload_idle_timeout"],
-        "uploads" => &["idle_timeout", "sweep_interval", "client_idle_timeout", "max_active"],
-        "cache" => &["upload_enabled", "min_savings_percent"],
-        "compression" => &["strategy", "level", "sample_level", "min_savings_percent", "min_savings_bytes", "skip_mime_types"],
-        "packing" => &["enabled", "max_size", "upload_flush_timeout", "range_enabled", "range_interval", "range_window", "range_min_downloads", "range_min_savings_percent", "range_min_savings_bytes", "range_repack_after", "range_repack_window", "range_repack_retry_interval", "compression_strategy", "interval", "reuse_interval", "reclaim_interval", "repack_interval", "repack_cooldown", "reclaim_min_savings_bytes"],
-        "garbage_collection" => &["grace_period", "interval", "batch_size"],
-        "retention" => &["interval", "batch_size", "max_duration", "deleted_chunks", "uploads", "tasks", "audit"],
-        "statistics" => &["scope_limit", "storage_interval", "storage_retention", "runtime_interval", "runtime_retention", "refresh_interval", "query_timeout", "access_flush_interval", "access_retention"],
-        "integrity" => &["request_timeout"],
+        "web" => &[
+            "origin",
+            "secure_cookie",
+            "session_lifetime",
+            "gravatar_base_url",
+        ],
+        "requests" => &[
+            "s3_domain",
+            "s3_region",
+            "s3_chunk_limit",
+            "read_idle_timeout",
+            "upload_idle_timeout",
+        ],
+        "uploads" => &[
+            "idle_timeout",
+            "sweep_interval",
+            "client_idle_timeout",
+            "max_active_uploads",
+            "staging_storage_id",
+            "staging_bytes_limit",
+        ],
+        "metrics" => &[
+            "scope_limit",
+            "storage_interval",
+            "storage_retention",
+            "runtime_interval",
+            "runtime_retention",
+            "refresh_interval",
+            "query_timeout",
+            "access_flush_interval",
+            "access_retention",
+        ],
+        "maintenance" => &[
+            "interval",
+            "batch_size",
+            "max_duration",
+            "task_retention",
+            "audit_retention",
+        ],
         _ => &[],
     };
     for key in object.keys() {
-        anyhow::ensure!(allowed.contains(&key.as_str()), "unknown field in runtime settings");
+        anyhow::ensure!(
+            allowed.contains(&key.as_str()),
+            "unknown field in runtime settings"
+        );
     }
     let mut config = configured.clone();
     crate::db::apply_runtime_section(&mut config, section, value.clone())?;
@@ -140,13 +155,24 @@ pub(crate) async fn set_section_value(
     app: &App,
     principal: &Principal,
     section: &str,
-    revision: i64,
+    revision: Option<i64>,
     value: Value,
 ) -> Result<Value> {
     validate_value(&app.config, section, &value)?;
     let mut tx = super::users::admin_transaction(app, principal).await?;
+    let revision = match revision {
+        Some(revision) => revision,
+        None => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT revision FROM runtime_settings WHERE section=$1 FOR UPDATE",
+            )
+            .bind(section)
+            .fetch_one(&mut *tx)
+            .await?
+        }
+    };
     let updated: Option<Value> = sqlx::query_scalar(
-        "UPDATE runtime_settings SET value=$2,revision=revision+1,updated_at=now(),updated_by=$3 WHERE section=$1 AND revision=$4 RETURNING value",
+        "UPDATE runtime_settings SET value=$2,revision=revision+1,updated_at=now(),updated_by_user_id=$3 WHERE section=$1 AND revision=$4 RETURNING value",
     )
     .bind(section)
     .bind(value)
@@ -167,11 +193,14 @@ pub(crate) async fn reset_section_value(
     section: &str,
 ) -> Result<Value> {
     valid_section(section)?;
-    let value = app.runtime_defaults.get(section).cloned()
+    let value = app
+        .runtime_defaults
+        .get(section)
+        .cloned()
         .context("runtime settings default is unavailable")?;
     let mut tx = super::users::admin_transaction(app, principal).await?;
     let value: Value = sqlx::query_scalar(
-        "UPDATE runtime_settings SET value=$2,revision=revision+1,updated_at=now(),updated_by=$3 WHERE section=$1 RETURNING value",
+        "UPDATE runtime_settings SET value=$2,revision=revision+1,updated_at=now(),updated_by_user_id=$3 WHERE section=$1 RETURNING value",
     )
     .bind(section)
     .bind(value)
@@ -183,22 +212,37 @@ pub(crate) async fn reset_section_value(
 }
 
 impl RuntimeSettingsRow {
-    fn control(&self) -> Result<Control> {
+    fn control(&self) -> Result<WebSettings> {
         let value = self.value.as_object().cloned().unwrap_or_default();
-        let mut control = Control::default();
-        control.origin = value.get("origin").and_then(Value::as_str).context("runtime web origin is missing")?.to_owned();
-        control.secure_cookie = value.get("secure_cookie").and_then(Value::as_bool).context("runtime web secure_cookie is missing")?;
-        control.session_lifetime = value.get("session_lifetime").and_then(Value::as_str).context("runtime web session_lifetime is missing")?.to_owned();
-        control.gravatar_base_url = value.get("avatar_url").and_then(Value::as_str).context("runtime web avatar_url is missing")?.to_owned();
+        let mut control = WebSettings::default();
+        control.origin = value
+            .get("origin")
+            .and_then(Value::as_str)
+            .context("runtime web origin is missing")?
+            .to_owned();
+        control.secure_cookie = value
+            .get("secure_cookie")
+            .and_then(Value::as_bool)
+            .context("runtime web secure_cookie is missing")?;
+        control.session_lifetime = value
+            .get("session_lifetime")
+            .and_then(Value::as_str)
+            .context("runtime web session_lifetime is missing")?
+            .to_owned();
+        control.gravatar_base_url = value
+            .get("gravatar_base_url")
+            .and_then(Value::as_str)
+            .context("runtime web gravatar_base_url is missing")?
+            .to_owned();
         Ok(control)
     }
 }
 
-fn view(app: &App, control: Control, revision: i64) -> ControlSettingsView {
-    let restart_required = control.origin != app.config.control.origin
-        || control.secure_cookie != app.config.control.secure_cookie
-        || control.session_lifetime != app.config.control.session_lifetime
-        || control.gravatar_base_url != app.config.control.gravatar_base_url;
+fn view(app: &App, control: WebSettings, revision: i64) -> ControlSettingsView {
+    let restart_required = control.origin != app.config.web.origin
+        || control.secure_cookie != app.config.web.secure_cookie
+        || control.session_lifetime != app.config.web.session_lifetime
+        || control.gravatar_base_url != app.config.web.gravatar_base_url;
     ControlSettingsView {
         origin: control.origin,
         secure_cookie: control.secure_cookie,
@@ -212,12 +256,10 @@ fn view(app: &App, control: Control, revision: i64) -> ControlSettingsView {
 }
 
 async fn row(app: &App) -> Result<RuntimeSettingsRow> {
-    sqlx::query_as(
-        "SELECT value,revision FROM runtime_settings WHERE section='web'",
-    )
-    .fetch_one(&app.db)
-    .await
-    .context("control settings are missing")
+    sqlx::query_as("SELECT value,revision FROM runtime_settings WHERE section='web'")
+        .fetch_one(&app.db)
+        .await
+        .context("control settings are missing")
 }
 
 pub(crate) async fn read(app: &App) -> Result<ControlSettingsView> {
@@ -251,17 +293,23 @@ pub(crate) async fn update(
     }
     control.validate()?;
     if let Some(revision) = input.revision {
-        anyhow::ensure!(revision == current.revision, "settings revision conflict; reload before saving");
+        anyhow::ensure!(
+            revision == current.revision,
+            "settings revision conflict; reload before saving"
+        );
     }
     let value = serde_json::json!({
         "origin": control.origin,
         "secure_cookie": control.secure_cookie,
         "session_lifetime": control.session_lifetime,
-        "avatar_url": control.gravatar_base_url,
+        "gravatar_base_url": control.gravatar_base_url,
     });
-    let next_revision = current.revision.checked_add(1).context("settings revision overflow")?;
+    let next_revision = current
+        .revision
+        .checked_add(1)
+        .context("settings revision overflow")?;
     sqlx::query(
-        "UPDATE runtime_settings SET value=$1,revision=$2,updated_at=now(),updated_by=$3 WHERE section='web' AND revision=$4",
+        "UPDATE runtime_settings SET value=$1,revision=$2,updated_at=now(),updated_by_user_id=$3 WHERE section='web' AND revision=$4",
     )
     .bind(value)
     .bind(next_revision)
@@ -285,17 +333,16 @@ pub(crate) async fn update(
     Ok(view(app, control, next_revision))
 }
 
-#[utoipa::path(get, operation_id="runtime_settings", path="/api/settings", responses((status=200, body=Vec<RuntimeSettingsView>)))]
+#[utoipa::path(get, operation_id="runtime_settings", path="/api/v1/runtime-settings", responses((status=200, body=Vec<RuntimeSettingsView>)))]
 pub(super) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<RuntimeSettingsView>>, HttpError> {
     let mut tx = super::users::admin_transaction(&app, &actor.principal).await?;
-    let rows: Vec<(String, Value, i64)> = sqlx::query_as(
-        "SELECT section,value,revision FROM runtime_settings ORDER BY section",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let rows: Vec<(String, Value, i64)> =
+        sqlx::query_as("SELECT section,value,revision FROM runtime_settings ORDER BY section")
+            .fetch_all(&mut *tx)
+            .await?;
     tx.commit().await?;
     Ok(Json(
         rows.into_iter()
@@ -304,7 +351,7 @@ pub(super) async fn list(
     ))
 }
 
-#[utoipa::path(get, operation_id="runtime_settings_section", path="/api/settings/{section}", params(("section" = String, Path)), responses((status=200, body=RuntimeSettingsView)))]
+#[utoipa::path(get, operation_id="runtime_settings_section", path="/api/v1/runtime-settings/{section}", params(("section" = String, Path)), responses((status=200, body=RuntimeSettingsView)))]
 pub(super) async fn get_section(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -312,17 +359,16 @@ pub(super) async fn get_section(
 ) -> Result<Json<RuntimeSettingsView>, HttpError> {
     valid_section(&section)?;
     let mut tx = super::users::admin_transaction(&app, &actor.principal).await?;
-    let row: (Value, i64) = sqlx::query_as(
-        "SELECT value,revision FROM runtime_settings WHERE section=$1",
-    )
-    .bind(&section)
-    .fetch_one(&mut *tx)
-    .await?;
+    let row: (Value, i64) =
+        sqlx::query_as("SELECT value,revision FROM runtime_settings WHERE section=$1")
+            .bind(&section)
+            .fetch_one(&mut *tx)
+            .await?;
     tx.commit().await?;
     Ok(Json(runtime_view(&app, &section, row.0, row.1)))
 }
 
-#[utoipa::path(put, operation_id="runtime_settings_save", path="/api/settings/{section}", params(("section" = String, Path)), request_body=RuntimeSettingsPatch, responses((status=200, body=RuntimeSettingsView)))]
+#[utoipa::path(put, operation_id="runtime_settings_save", path="/api/v1/runtime-settings/{section}", params(("section" = String, Path)), request_body=RuntimeSettingsPatch, responses((status=200, body=RuntimeSettingsView)))]
 pub(super) async fn save_section(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -333,7 +379,7 @@ pub(super) async fn save_section(
     validate_value(&app.config, &section, &input.value)?;
     let mut tx = super::users::admin_transaction(&app, &actor.principal).await?;
     let changed: Option<(Value, i64)> = sqlx::query_as(
-        "UPDATE runtime_settings SET value=$2,revision=revision+1,updated_at=now(),updated_by=$3 WHERE section=$1 AND revision=$4 RETURNING value,revision",
+        "UPDATE runtime_settings SET value=$2,revision=revision+1,updated_at=now(),updated_by_user_id=$3 WHERE section=$1 AND revision=$4 RETURNING value,revision",
     )
     .bind(&section)
     .bind(input.value)
@@ -355,18 +401,21 @@ pub(super) async fn save_section(
     Ok(Json(runtime_view(&app, &section, value, revision)))
 }
 
-#[utoipa::path(post, operation_id="runtime_settings_reset", path="/api/settings/{section}/reset", params(("section" = String, Path)), responses((status=200, body=RuntimeSettingsView)))]
+#[utoipa::path(post, operation_id="runtime_settings_reset", path="/api/v1/runtime-settings/{section}/reset", params(("section" = String, Path)), responses((status=200, body=RuntimeSettingsView)))]
 pub(super) async fn reset_section(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
     Path(section): Path<String>,
 ) -> Result<Json<RuntimeSettingsView>, HttpError> {
     valid_section(&section)?;
-    let value = app.runtime_defaults.get(&section).cloned()
+    let value = app
+        .runtime_defaults
+        .get(&section)
+        .cloned()
         .context("runtime settings default is unavailable")?;
     let mut tx = super::users::admin_transaction(&app, &actor.principal).await?;
     let row: (Value, i64) = sqlx::query_as(
-        "UPDATE runtime_settings SET value=$2,revision=revision+1,updated_at=now(),updated_by=$3 WHERE section=$1 RETURNING value,revision",
+        "UPDATE runtime_settings SET value=$2,revision=revision+1,updated_at=now(),updated_by_user_id=$3 WHERE section=$1 RETURNING value,revision",
     )
     .bind(&section)
     .bind(value)

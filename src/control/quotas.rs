@@ -16,23 +16,23 @@ use uuid::Uuid;
 
 #[derive(Serialize, sqlx::FromRow, ToSchema)]
 pub(crate) struct Quota {
-    kind: String,
-    id: Uuid,
+    scope: String,
+    scope_id: Uuid,
     used_bytes: Option<String>,
     reserved_bytes: Option<String>,
     inflight_bytes: Option<String>,
     object_count: Option<String>,
     bucket_count: Option<String>,
-    byte_limit: Option<String>,
-    inflight_limit: Option<String>,
-    bucket_limit: Option<String>,
+    logical_bytes_limit: Option<String>,
+    inflight_bytes_limit: Option<String>,
+    bucket_count_limit: Option<String>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Limits {
-    pub byte_limit: Option<String>,
-    pub inflight_limit: Option<String>,
-    pub bucket_limit: Option<String>,
+    pub logical_bytes_limit: Option<String>,
+    pub inflight_bytes_limit: Option<String>,
+    pub bucket_count_limit: Option<String>,
 }
 fn number(value: &Option<String>) -> Result<Option<i64>> {
     value
@@ -46,14 +46,14 @@ fn number(value: &Option<String>) -> Result<Option<i64>> {
         })
         .transpose()
 }
-fn kind(value: &str) -> Result<()> {
+fn validate_scope(value: &str) -> Result<()> {
     if !matches!(value, "project" | "bucket") {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     Ok(())
 }
 pub(crate) async fn read(app: &App, principal: &Principal, scope: &str, id: Uuid) -> Result<Quota> {
-    kind(scope)?;
+    validate_scope(scope)?;
     let mut tx = app.db.begin().await?;
     let admin = principal.lock_identity(&mut tx).await?;
     let visible = if scope == "bucket" {
@@ -76,7 +76,7 @@ pub(crate) async fn read(app: &App, principal: &Principal, scope: &str, id: Uuid
         .await?;
         scope.ok_or_else(|| s3s::s3_error!(AccessDenied))? == "all"
     };
-    let result=sqlx::query_as("SELECT kind,id,CASE WHEN $3 THEN used_bytes::text END used_bytes,CASE WHEN $3 THEN reserved_bytes::text END reserved_bytes,CASE WHEN $3 THEN inflight_bytes::text END inflight_bytes,CASE WHEN $3 THEN object_count::text END object_count,CASE WHEN $3 THEN bucket_count::text END bucket_count,byte_limit::text,inflight_limit::text,bucket_limit::text FROM quota_accounts WHERE kind=$1 AND id=$2")
+    let result=sqlx::query_as("SELECT scope,scope_id,CASE WHEN $3 THEN used_bytes::text END used_bytes,CASE WHEN $3 THEN reserved_bytes::text END reserved_bytes,CASE WHEN $3 THEN inflight_bytes::text END inflight_bytes,CASE WHEN $3 THEN object_count::text END object_count,CASE WHEN $3 THEN bucket_count::text END bucket_count,logical_bytes_limit::text logical_bytes_limit,inflight_bytes_limit::text inflight_bytes_limit,bucket_count_limit::text bucket_count_limit FROM quota_scopes WHERE scope=$1 AND scope_id=$2")
         .bind(scope).bind(id).bind(visible).fetch_optional(&mut *tx).await?.ok_or_else(||s3s::s3_error!(NoSuchKey))?;
     tx.commit().await?;
     Ok(result)
@@ -88,17 +88,17 @@ pub(crate) async fn save(
     id: Uuid,
     input: Limits,
 ) -> Result<Quota> {
-    kind(scope)?;
+    validate_scope(scope)?;
     let (bytes, inflight, buckets) = (
-        number(&input.byte_limit)?,
-        number(&input.inflight_limit)?,
-        number(&input.bucket_limit)?,
+        number(&input.logical_bytes_limit)?,
+        number(&input.inflight_bytes_limit)?,
+        number(&input.bucket_count_limit)?,
     );
     if scope == "bucket" && (inflight.is_some() || buckets.is_some()) {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     let mut tx = super::users::admin_transaction(app, principal).await?;
-    let changed=sqlx::query("UPDATE quota_accounts SET byte_limit=$3,inflight_limit=$4,bucket_limit=$5 WHERE kind=$1 AND id=$2")
+    let changed=sqlx::query("UPDATE quota_scopes SET logical_bytes_limit=$3,inflight_bytes_limit=$4,bucket_count_limit=$5 WHERE scope=$1 AND scope_id=$2")
         .bind(scope).bind(id).bind(bytes).bind(inflight).bind(buckets).execute(&mut *tx).await?.rows_affected();
     if changed != 1 {
         return Err(s3s::s3_error!(NoSuchKey).into());
@@ -109,23 +109,25 @@ pub(crate) async fn save(
     tx.commit().await?;
     read(app, principal, scope, id).await
 }
-#[utoipa::path(get, path="/api/quotas/{kind}/{id}",params(("kind"=String,Path),("id"=Uuid,Path)),responses((status=200,body=Quota)))]
+#[utoipa::path(get, path="/api/v1/quotas/{scope_type}/{scope_id}",params(("scope_type"=String,Path),("scope_id"=Uuid,Path)),responses((status=200,body=Quota)))]
 pub(super) async fn get(
     State(app): State<Arc<App>>,
     Extension(identity): Extension<Identity>,
-    Path((kind, id)): Path<(String, Uuid)>,
+    Path((scope_type, scope_id)): Path<(String, Uuid)>,
 ) -> Result<Json<Quota>, HttpError> {
-    Ok(Json(read(&app, &identity.principal, &kind, id).await?))
+    Ok(Json(
+        read(&app, &identity.principal, &scope_type, scope_id).await?,
+    ))
 }
-#[utoipa::path(put, path="/api/quotas/{kind}/{id}",params(("kind"=String,Path),("id"=Uuid,Path)),request_body=Limits,responses((status=200,body=Quota)))]
+#[utoipa::path(put, path="/api/v1/quotas/{scope_type}/{scope_id}",params(("scope_type"=String,Path),("scope_id"=Uuid,Path)),request_body=Limits,responses((status=200,body=Quota)))]
 pub(super) async fn put(
     State(app): State<Arc<App>>,
     Extension(identity): Extension<Identity>,
-    Path((kind, id)): Path<(String, Uuid)>,
+    Path((scope_type, scope_id)): Path<(String, Uuid)>,
     Json(input): Json<Limits>,
 ) -> Result<Json<Quota>, HttpError> {
     identity.recent(&app).await?;
     Ok(Json(
-        save(&app, &identity.principal, &kind, id, input).await?,
+        save(&app, &identity.principal, &scope_type, scope_id, input).await?,
     ))
 }

@@ -43,7 +43,7 @@ pub(super) struct ObjectChunk {
     payload_size: Option<i32>,
     compression: String,
     algorithm: String,
-    key_id: Option<String>,
+    block_key_id: Option<Uuid>,
     pack_id: Option<String>,
     source: String,
     reads: Option<String>,
@@ -51,7 +51,9 @@ pub(super) struct ObjectChunk {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct ChunkPage {
+    #[serde(rename = "items")]
     pub chunks: Vec<ObjectChunk>,
+    #[serde(rename = "next_cursor")]
     pub next_offset: Option<String>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -114,7 +116,9 @@ pub(super) struct StorageInsights {
 #[derive(Serialize, sqlx::FromRow, ToSchema)]
 pub(super) struct WorkSummary {
     id: Uuid,
+    #[serde(rename = "task_type")]
     kind: String,
+    #[serde(rename = "status")]
     state: String,
     processed: String,
     updated_at: DateTime<Utc>,
@@ -144,7 +148,7 @@ pub(super) async fn scope(
     }
     Ok(ids)
 }
-#[utoipa::path(get,operation_id="storage_insights",path="/api/insights",params(ScopeQuery),responses((status=200,body=StorageInsights)))]
+#[utoipa::path(get,operation_id="usage_summary",path="/api/v1/usage/summary",params(ScopeQuery),responses((status=200,body=StorageInsights)))]
 pub(super) async fn get(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -160,39 +164,38 @@ pub(super) async fn get(
             .to_hex()
             .to_string()
     };
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_insights WHERE id=$1)")
-            .bind(&key)
-            .fetch_one(&mut *tx)
-            .await?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM usage_summary WHERE id=$1)")
+        .bind(&key)
+        .fetch_one(&mut *tx)
+        .await?;
     if !exists {
         sqlx::query("SELECT pg_advisory_xact_lock(734922709851030)")
             .execute(&mut *tx)
             .await?;
         // Bound cached permission combinations, including workloads from short-lived tokens.
-        sqlx::query("DELETE FROM storage_insights WHERE id IN (SELECT id FROM storage_insights WHERE id<>'global' ORDER BY requested_at DESC,id OFFSET $1)")
-            .bind(app.config.statistics.scope_limit as i64-1).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM usage_summary WHERE id IN (SELECT id FROM usage_summary WHERE id<>'global' ORDER BY requested_at DESC,id OFFSET $1)")
+            .bind(app.config.metrics.scope_limit as i64-1).execute(&mut *tx).await?;
         sqlx::query(
-            "INSERT INTO storage_insights(id,bucket_ids) VALUES($1,$2) ON CONFLICT DO NOTHING",
+            "INSERT INTO usage_summary(id,bucket_ids) VALUES($1,$2) ON CONFLICT DO NOTHING",
         )
         .bind(&key)
         .bind(&ids)
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("UPDATE storage_insights SET requested_at=now() WHERE id=$1 AND requested_at<now()-interval '1 hour'").bind(&key).execute(&mut *tx).await?;
+    sqlx::query("UPDATE usage_summary SET requested_at=now() WHERE id=$1 AND requested_at<now()-interval '1 hour'").bind(&key).execute(&mut *tx).await?;
     let row: Option<SavedStorage> =
-        sqlx::query_as("SELECT as_of,data FROM storage_insights WHERE id=$1")
+        sqlx::query_as("SELECT as_of,data FROM usage_summary WHERE id=$1")
             .bind(&key)
             .fetch_optional(&mut *tx)
             .await?;
     let SavedStorage { as_of, data } = row.unwrap_or_default();
-    let points:Vec<(DateTime<Utc>,sqlx::types::Json<StorageUsage>)>=sqlx::query_as("SELECT at,data FROM (SELECT at,data FROM storage_history WHERE scope_id=$1 ORDER BY at DESC LIMIT 2048) p ORDER BY at").bind(&key).fetch_all(&mut *tx).await?;
+    let points:Vec<(DateTime<Utc>,sqlx::types::Json<StorageUsage>)>=sqlx::query_as("SELECT snapshot_at,data FROM (SELECT snapshot_at,data FROM usage_history WHERE scope_id=$1 ORDER BY snapshot_at DESC LIMIT 2048) p ORDER BY snapshot_at").bind(&key).fetch_all(&mut *tx).await?;
     tx.commit().await?;
     if !exists {
         app.statistics.wake.notify_one();
     }
-    let interval = config::seconds(&app.config.statistics.refresh_interval)?;
+    let interval = config::seconds(&app.config.metrics.refresh_interval)?;
     let inventory = app.statistics.inventory(interval);
     Ok(Json(StorageInsights {
         scope: if global {
@@ -219,15 +222,15 @@ pub(super) async fn get(
     }))
 }
 pub(crate) async fn collect(app: &App, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::query("DELETE FROM storage_insights WHERE id<>'global' AND requested_at<now()-$1*interval '1 second'")
-        .bind(config::seconds(&app.config.statistics.storage_retention)? as f64).execute(&mut **tx).await?;
-    sqlx::raw_sql(include_str!("storage_insights.sql"))
+    sqlx::query("DELETE FROM usage_summary WHERE id<>'global' AND requested_at<now()-$1*interval '1 second'")
+        .bind(config::seconds(&app.config.metrics.storage_retention)? as f64).execute(&mut **tx).await?;
+    sqlx::raw_sql(include_str!("usage_summary.sql"))
         .execute(&mut **tx)
         .await?;
-    sqlx::query("INSERT INTO storage_history(scope_id,at,data) SELECT i.id,i.as_of,i.data FROM storage_insights i WHERE i.as_of IS NOT NULL AND NOT EXISTS(SELECT 1 FROM storage_history h WHERE h.scope_id=i.id AND h.at>i.as_of-$1*interval '1 second') ON CONFLICT DO NOTHING")
-        .bind(config::seconds(&app.config.statistics.storage_sample_interval)? as f64).execute(&mut **tx).await?;
-    sqlx::query("DELETE FROM storage_history WHERE at<now()-$1*interval '1 second'")
-        .bind(config::seconds(&app.config.statistics.storage_retention)? as f64)
+    sqlx::query("INSERT INTO usage_history(scope_id,snapshot_at,data) SELECT i.id,i.as_of,i.data FROM usage_summary i WHERE i.as_of IS NOT NULL AND NOT EXISTS(SELECT 1 FROM usage_history h WHERE h.scope_id=i.id AND h.snapshot_at>i.as_of-$1*interval '1 second') ON CONFLICT DO NOTHING")
+        .bind(config::seconds(&app.config.metrics.storage_interval)? as f64).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM usage_history WHERE snapshot_at<now()-$1*interval '1 second'")
+        .bind(config::seconds(&app.config.metrics.storage_retention)? as f64)
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -263,16 +266,16 @@ async fn runtime_point(app: &App) -> Result<RuntimePoint> {
         rss_bytes: memory["rss_bytes"].as_u64().map(|v| v.to_string()),
     })
 }
-#[utoipa::path(get,operation_id="runtime_insights",path="/api/insights/runtime",responses((status=200,body=RuntimeInsights)))]
+#[utoipa::path(get,operation_id="runtime_insights",path="/api/v1/usage/runtime",responses((status=200,body=RuntimeInsights)))]
 pub(super) async fn runtime(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<RuntimeInsights>, HttpError> {
     let mut tx = app.db.begin().await?;
     actor.principal.lock_admin(&mut tx).await?;
-    let history:Vec<sqlx::types::Json<RuntimePoint>>=sqlx::query_scalar("SELECT data FROM (SELECT at,data FROM runtime_history ORDER BY at DESC LIMIT 2048) h ORDER BY at").fetch_all(&mut *tx).await?;
-    let work=sqlx::query_as("SELECT id,coalesce(detail->>'kind',kind) kind,state,processed::text,updated_at FROM tasks WHERE state IN ('queued','running','paused') ORDER BY CASE state WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,updated_at DESC LIMIT 5").fetch_all(&mut *tx).await?;
-    let (pending_entries,pending_bytes,oldest_pending,failed_uploads):(String,String,Option<DateTime<Utc>>,String)=sqlx::query_as("SELECT count(*)::text,coalesce(sum(cache_size),0)::text,min(created_at),count(*) FILTER(WHERE last_error IS NOT NULL)::text FROM pending_uploads").fetch_one(&mut *tx).await?;
+    let history:Vec<sqlx::types::Json<RuntimePoint>>=sqlx::query_scalar("SELECT data FROM (SELECT sampled_at,data FROM runtime_samples ORDER BY sampled_at DESC LIMIT 2048) h ORDER BY sampled_at").fetch_all(&mut *tx).await?;
+    let work=sqlx::query_as("SELECT id,coalesce(detail->>'kind',task_type) kind,state,processed::text,updated_at FROM tasks WHERE state IN ('queued','running','paused') ORDER BY CASE state WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,updated_at DESC LIMIT 5").fetch_all(&mut *tx).await?;
+    let (pending_entries,pending_bytes,oldest_pending,failed_uploads):(String,String,Option<DateTime<Utc>>,String)=sqlx::query_as("SELECT count(*)::text,coalesce(sum(staged_size),0)::text,min(created_at),count(*) FILTER(WHERE last_error IS NOT NULL)::text FROM pending_uploads").fetch_one(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(RuntimeInsights {
         current: runtime_point(&app).await?,
@@ -286,9 +289,7 @@ pub(super) async fn runtime(
 }
 pub(crate) async fn runtime_loop(app: Arc<App>) -> Result<()> {
     const LEADER_KEY: i64 = 734922709851032;
-    let interval = Duration::from_secs(config::seconds(
-        &app.config.statistics.runtime_sample_interval,
-    )?);
+    let interval = Duration::from_secs(config::seconds(&app.config.metrics.runtime_interval)?);
     loop {
         let Some(leader) = crate::cluster::try_leader(&app, LEADER_KEY).await? else {
             tokio::time::sleep(interval).await;
@@ -297,15 +298,17 @@ pub(crate) async fn runtime_loop(app: Arc<App>) -> Result<()> {
         let result: Result<()> = async {
             let point = runtime_point(&app).await?;
             let mut tx = app.db.begin().await?;
-            sqlx::query("INSERT INTO runtime_history(at,data) VALUES($1,$2)")
+            sqlx::query("INSERT INTO runtime_samples(sampled_at,data) VALUES($1,$2)")
                 .bind(point.at)
                 .bind(sqlx::types::Json(point))
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("DELETE FROM runtime_history WHERE at<now()-$1*interval '1 second'")
-                .bind(config::seconds(&app.config.statistics.runtime_retention)? as f64)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "DELETE FROM runtime_samples WHERE sampled_at<now()-$1*interval '1 second'",
+            )
+            .bind(config::seconds(&app.config.metrics.runtime_retention)? as f64)
+            .execute(&mut *tx)
+            .await?;
             tx.commit().await?;
             Ok(())
         }

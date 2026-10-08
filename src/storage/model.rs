@@ -1,6 +1,7 @@
 use crate::{
     codec,
     config::{self, Secrets},
+    storage::profile::StorageProfile,
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -22,33 +23,32 @@ pub(crate) struct Record {
     pub r#type: String,
     pub path: Option<String>,
     pub endpoint_url: Option<String>,
-    pub remote_bucket: Option<String>,
+    pub remote_bucket_name: Option<String>,
     pub region: Option<String>,
     pub prefix: String,
     pub access_key_encrypted: Option<Vec<u8>>,
     pub secret_key_encrypted: Option<Vec<u8>>,
-    pub metadata: Value,
+    pub identity_marker: Value,
     pub enabled: bool,
 }
 
 #[derive(Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Metadata {
+struct IdentityMarker {
     format_version: u32,
     deployment_id: Uuid,
-    #[serde(alias = "storage_target_id")]
-    store_id: Uuid,
+    storage_id: Uuid,
     chunk_layout: String,
     pack_layout: String,
     created_at: DateTime<Utc>,
     created_by: String,
 }
 
-pub(crate) fn metadata(deployment: Uuid, id: Uuid) -> Result<Value> {
-    Ok(serde_json::to_value(Metadata {
+pub(crate) fn identity_marker(deployment: Uuid, id: Uuid) -> Result<Value> {
+    Ok(serde_json::to_value(IdentityMarker {
         format_version: 3,
         deployment_id: deployment,
-        store_id: id,
+        storage_id: id,
         chunk_layout: "uuid-prefix2".into(),
         pack_layout: "uuid-prefix2-v1".into(),
         created_at: Utc::now(),
@@ -65,7 +65,7 @@ pub(crate) struct Options {
 }
 
 impl Options {
-    pub fn new(config: &config::Storage) -> Result<Self> {
+    pub fn new(config: &config::BackendDefaults) -> Result<Self> {
         Ok(Self {
             connect_timeout: Duration::from_secs(config::seconds(&config.connect_timeout)?),
             request_timeout: Duration::from_secs(config::seconds(&config.request_timeout)?),
@@ -73,24 +73,33 @@ impl Options {
             max_retries: config.max_retries,
         })
     }
+
+    pub fn from_profile(profile: &StorageProfile) -> Result<Self> {
+        Ok(Self {
+            connect_timeout: Duration::from_secs(config::seconds(&profile.connect_timeout)?),
+            request_timeout: Duration::from_secs(config::seconds(&profile.request_timeout)?),
+            retry_timeout: Duration::from_secs(config::seconds(&profile.retry_timeout)?),
+            max_retries: profile.max_retries as usize,
+        })
+    }
 }
 
 pub(crate) struct Store {
     pub backend: Arc<dyn ObjectStore>,
-    metadata: Value,
+    identity_marker: Value,
     verified: tokio::sync::OnceCell<()>,
 }
 
 impl Store {
     pub fn build(row: &Record, options: Options, secrets: &Secrets) -> Result<Self> {
-        let meta: Metadata = serde_json::from_value(row.metadata.clone())
-            .context("storage metadata is missing or invalid")?;
+        let meta: IdentityMarker = serde_json::from_value(row.identity_marker.clone())
+            .context("storage identity marker is missing or invalid")?;
         ensure!(
             meta.format_version == 3
-                && meta.store_id == row.id
+                && meta.storage_id == row.id
                 && meta.chunk_layout == "uuid-prefix2"
                 && meta.pack_layout == "uuid-prefix2-v1",
-            "unsupported storage metadata"
+            "unsupported storage identity marker"
         );
         let backend: Arc<dyn ObjectStore> = match row.r#type.as_str() {
             "local" => Arc::new(LocalFileSystem::new_with_prefix(
@@ -104,14 +113,14 @@ impl Store {
                         .as_deref()
                         .context("S3 access key is missing")?,
                     &secrets.credential_key,
-                    format!("storage-target-{}-access", row.id).as_bytes(),
+                    format!("storage-{}-access", row.id).as_bytes(),
                 )?;
                 let secret = codec::unprotect(
                     row.secret_key_encrypted
                         .as_deref()
                         .context("S3 secret key is missing")?,
                     &secrets.credential_key,
-                    format!("storage-target-{}-secret", row.id).as_bytes(),
+                    format!("storage-{}-secret", row.id).as_bytes(),
                 )?;
                 Arc::new(
                     AmazonS3Builder::new()
@@ -122,7 +131,7 @@ impl Store {
                         )
                         .with_region(row.region.as_deref().context("S3 region is missing")?)
                         .with_bucket_name(
-                            row.remote_bucket
+                            row.remote_bucket_name
                                 .as_deref()
                                 .context("S3 bucket is missing")?,
                         )
@@ -148,7 +157,7 @@ impl Store {
         };
         Ok(Self {
             backend: Arc::new(PrefixStore::new(backend, Path::parse(&row.prefix)?)),
-            metadata: row.metadata.clone(),
+            identity_marker: row.identity_marker.clone(),
             verified: tokio::sync::OnceCell::new(),
         })
     }
@@ -172,9 +181,10 @@ impl Store {
             );
             data.extend_from_slice(&bytes);
         }
-        let actual: Metadata = serde_json::from_slice(&data).context("invalid storage meta.json")?;
-        let expected: Metadata = serde_json::from_value(self.metadata.clone())
-            .context("invalid configured storage metadata")?;
+        let actual: IdentityMarker =
+            serde_json::from_slice(&data).context("invalid storage meta.json")?;
+        let expected: IdentityMarker = serde_json::from_value(self.identity_marker.clone())
+            .context("invalid configured storage identity marker")?;
         ensure!(
             actual == expected,
             "storage meta.json does not match this store"
@@ -197,7 +207,7 @@ impl Store {
         self.backend
             .put_opts(
                 &Path::from("meta.json"),
-                Bytes::from(serde_json::to_vec_pretty(&self.metadata)?).into(),
+                Bytes::from(serde_json::to_vec_pretty(&self.identity_marker)?).into(),
                 PutOptions {
                     mode: PutMode::Create,
                     ..Default::default()
@@ -216,17 +226,17 @@ mod tests {
     async fn markers_bind_deployment_and_store_without_reinitializing() {
         let store = object_store::memory::InMemory::new();
         let id = Uuid::new_v4();
-        let expected = metadata(Uuid::new_v4(), id).unwrap();
+        let expected = identity_marker(Uuid::new_v4(), id).unwrap();
         let target = Store {
             backend: Arc::new(PrefixStore::new(store, "test/nested")),
-            metadata: expected.clone(),
+            identity_marker: expected.clone(),
             verified: tokio::sync::OnceCell::new(),
         };
         assert!(target.verify().await.is_err());
         target.initialize().await.unwrap();
         assert!(target.initialize().await.is_err());
         let mut wrong = expected;
-        wrong["store_id"] = serde_json::json!(Uuid::new_v4());
+        wrong["storage_id"] = serde_json::json!(Uuid::new_v4());
         target
             .backend
             .put(

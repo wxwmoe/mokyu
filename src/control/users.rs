@@ -99,7 +99,7 @@ pub(crate) async fn create_user(
     let row: Option<User> = sqlx::query_as("INSERT INTO web_users(id,username,password_hash,role,must_change_password) VALUES($1,$2,$3,$4,$5) ON CONFLICT(username) DO NOTHING RETURNING *")
         .bind(Uuid::new_v4()).bind(input.username).bind(hash).bind(input.role).bind(input.must_change_password).fetch_optional(&mut *tx).await?;
     let row = row.ok_or_else(|| s3s::s3_error!(OperationAborted))?;
-    sqlx::query("DELETE FROM admin_setup")
+    sqlx::query("DELETE FROM setup_tokens")
         .execute(&mut *tx)
         .await?;
     super::audit::checkpoint(
@@ -243,10 +243,12 @@ pub(super) struct UserQuery {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct UserPage {
+    #[serde(rename = "items")]
     users: Vec<User>,
+    #[serde(rename = "next_cursor")]
     next: Option<String>,
 }
-#[utoipa::path(get,path="/api/users",operation_id="users_list",params(UserQuery),responses((status=200,body=UserPage)))]
+#[utoipa::path(get,path="/api/v1/users",operation_id="users_list",params(UserQuery),responses((status=200,body=UserPage)))]
 pub(super) async fn list(
     State(app): State<Arc<App>>,
     Query(q): Query<UserQuery>,
@@ -266,7 +268,7 @@ pub(super) async fn list(
     let next = more.then(|| users.last().unwrap().username.clone());
     Ok(Json(UserPage { users, next }))
 }
-#[utoipa::path(get,path="/api/users/{id}",operation_id="users_get",params(("id"=Uuid,Path)),responses((status=200,body=User)))]
+#[utoipa::path(get,path="/api/v1/users/{id}",operation_id="users_get",params(("id"=Uuid,Path)),responses((status=200,body=User)))]
 pub(super) async fn get(
     State(app): State<Arc<App>>,
     Path(id): Path<Uuid>,
@@ -279,7 +281,7 @@ pub(super) async fn get(
             .ok_or_else(|| s3s::s3_error!(NoSuchKey))?,
     ))
 }
-#[utoipa::path(post,path="/api/users",operation_id="users_create",request_body=CreateUser,responses((status=201,body=User)))]
+#[utoipa::path(post,path="/api/v1/users",operation_id="users_create",request_body=CreateUser,responses((status=201,body=User)))]
 pub(super) async fn create(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -291,7 +293,7 @@ pub(super) async fn create(
         Json(create_user(&app, &actor.principal, input).await?),
     ))
 }
-#[utoipa::path(patch,path="/api/users/{id}",operation_id="users_update",params(("id"=Uuid,Path)),request_body=UserPatch,responses((status=200,body=User)))]
+#[utoipa::path(patch,path="/api/v1/users/{id}",operation_id="users_update",params(("id"=Uuid,Path)),request_body=UserPatch,responses((status=200,body=User)))]
 pub(super) async fn update(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -301,7 +303,7 @@ pub(super) async fn update(
     actor.recent(&app).await?;
     Ok(Json(update_user(&app, &actor.principal, id, input).await?))
 }
-#[utoipa::path(delete,path="/api/users/{id}",operation_id="users_delete",params(("id"=Uuid,Path)),responses((status=204)))]
+#[utoipa::path(delete,path="/api/v1/users/{id}",operation_id="users_delete",params(("id"=Uuid,Path)),responses((status=204)))]
 pub(super) async fn delete(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -311,7 +313,7 @@ pub(super) async fn delete(
     delete_user(&app, &actor.principal, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
-#[utoipa::path(post,path="/api/users/{id}/reset-password",params(("id"=Uuid,Path)),request_body=ResetPassword,responses((status=204)))]
+#[utoipa::path(post,path="/api/v1/users/{id}/reset-password",params(("id"=Uuid,Path)),request_body=ResetPassword,responses((status=204)))]
 pub(super) async fn reset(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -404,13 +406,13 @@ pub(crate) async fn save_member(
         }
         sqlx::query("INSERT INTO project_members(user_id,project_id,role,scope) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,project_id) DO UPDATE SET role=excluded.role,scope=excluded.scope")
             .bind(user).bind(project).bind(input.role).bind(input.scope).execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM member_grants WHERE user_id=$1 AND project_id=$2")
+        sqlx::query("DELETE FROM member_bucket_grants WHERE user_id=$1 AND project_id=$2")
             .bind(user)
             .bind(project)
             .execute(&mut *tx)
             .await?;
         for grant in input.grants {
-            sqlx::query("INSERT INTO member_grants(user_id,project_id,bucket_id,actions) VALUES($1,$2,$3,$4)").bind(user).bind(project).bind(grant.bucket_id).bind(grant.actions.iter().map(|a|a.name()).collect::<Vec<_>>()).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO member_bucket_grants(user_id,project_id,bucket_id,actions) VALUES($1,$2,$3,$4)").bind(user).bind(project).bind(grant.bucket_id).bind(grant.actions.iter().map(|a|a.name()).collect::<Vec<_>>()).execute(&mut *tx).await?;
         }
     } else {
         sqlx::query("DELETE FROM project_members WHERE user_id=$1 AND project_id=$2")
@@ -429,14 +431,14 @@ pub(crate) async fn save_member(
     tx.commit().await?;
     Ok(())
 }
-#[utoipa::path(get,path="/api/projects/{id}/members",params(("id"=Uuid,Path)),responses((status=200,body=Vec<Member>)))]
+#[utoipa::path(get,path="/api/v1/projects/{id}/members",params(("id"=Uuid,Path)),responses((status=200,body=Vec<Member>)))]
 pub(super) async fn members(
     State(app): State<Arc<App>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Member>>, HttpError> {
-    Ok(Json(sqlx::query_as("SELECT m.user_id,u.username,u.display_name,u.enabled,m.role,m.scope,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM member_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),'[]'::jsonb) AS grants FROM project_members m JOIN web_users u ON u.id=m.user_id WHERE m.project_id=$1 ORDER BY u.username LIMIT 1000").bind(id).fetch_all(&app.db).await?))
+    Ok(Json(sqlx::query_as("SELECT m.user_id,u.username,u.display_name,u.enabled,m.role,m.scope,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM member_bucket_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),'[]'::jsonb) AS grants FROM project_members m JOIN web_users u ON u.id=m.user_id WHERE m.project_id=$1 ORDER BY u.username LIMIT 1000").bind(id).fetch_all(&app.db).await?))
 }
-#[utoipa::path(put,path="/api/projects/{id}/members/{user}",params(("id"=Uuid,Path),("user"=Uuid,Path)),request_body=Membership,responses((status=204)))]
+#[utoipa::path(put,path="/api/v1/projects/{id}/members/{user}",params(("id"=Uuid,Path),("user"=Uuid,Path)),request_body=Membership,responses((status=204)))]
 pub(super) async fn put_member(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -447,7 +449,7 @@ pub(super) async fn put_member(
     save_member(&app, &actor.principal, id, user, Some(input)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
-#[utoipa::path(delete,path="/api/projects/{id}/members/{user}",params(("id"=Uuid,Path),("user"=Uuid,Path)),responses((status=204)))]
+#[utoipa::path(delete,path="/api/v1/projects/{id}/members/{user}",params(("id"=Uuid,Path),("user"=Uuid,Path)),responses((status=204)))]
 pub(super) async fn remove_member(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

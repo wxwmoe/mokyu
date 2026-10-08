@@ -20,8 +20,10 @@ use uuid::Uuid;
 #[derive(Deserialize, Serialize, ToSchema)]
 pub(super) struct Job {
     id: Uuid,
+    #[serde(rename = "task_type")]
     kind: String,
     policy: String,
+    #[serde(rename = "status")]
     state: String,
     processed: String,
     created_by: String,
@@ -36,6 +38,8 @@ pub(super) struct Job {
     blocked: Option<String>,
 }
 fn job(mut value: Value) -> Result<Job> {
+    value["task_type"] = value["kind"].clone();
+    value["status"] = value["state"].clone();
     value["processed"] = json!(
         value["processed"]
             .as_i64()
@@ -85,7 +89,7 @@ async fn guard<'a>(
     actor.principal.lock_admin(&mut tx).await?;
     Ok(tx)
 }
-#[utoipa::path(get,operation_id="maintenance_status",path="/api/maintenance",responses((status=200,body=MaintenanceStatus)))]
+#[utoipa::path(get,operation_id="maintenance_status",path="/api/v1/maintenance",responses((status=200,body=MaintenanceStatus)))]
 pub(super) async fn status(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -115,7 +119,7 @@ pub(super) struct TaskStarted {
 pub(super) struct MaintenanceResult {
     task_id: Option<Uuid>,
 }
-#[utoipa::path(post,path="/api/maintenance/{kind}/actions",params(("kind"=String,Path)),request_body=PolicyAction,responses((status=200,body=MaintenanceResult)))]
+#[utoipa::path(post,path="/api/v1/maintenance/{kind}/actions",params(("kind"=String,Path)),request_body=PolicyAction,responses((status=200,body=MaintenanceResult)))]
 pub(super) async fn policy(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -149,7 +153,7 @@ pub(super) async fn policy(
 pub(super) struct Toggle {
     enabled: bool,
 }
-#[utoipa::path(post,path="/api/maintenance/mode",request_body=Toggle,responses((status=204)))]
+#[utoipa::path(post,path="/api/v1/maintenance/mode",request_body=Toggle,responses((status=204)))]
 pub(super) async fn mode(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -157,19 +161,20 @@ pub(super) async fn mode(
 ) -> Result<StatusCode, HttpError> {
     actor.recent(&app).await?;
     let tx = guard(&app, &actor).await?;
-    super::operations::execute(
+    super::operations::execute_as(
         &app,
-        crate::admin::Command::Maintenance(if input.enabled {
-            crate::admin::Maintenance::Enable
+        &actor.principal,
+        crate::cli::Command::Maintenance(if input.enabled {
+            crate::cli::Maintenance::Enable
         } else {
-            crate::admin::Maintenance::Disable
+            crate::cli::Maintenance::Disable
         }),
     )
     .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
-#[utoipa::path(post,path="/api/maintenance/pack-creation",request_body=Toggle,responses((status=204)))]
+#[utoipa::path(post,path="/api/v1/maintenance/pack-creation",request_body=Toggle,responses((status=204)))]
 pub(super) async fn creation(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -181,7 +186,7 @@ pub(super) async fn creation(
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
-#[utoipa::path(post,path="/api/maintenance/flush",responses((status=200,body=TaskStarted)))]
+#[utoipa::path(post,path="/api/v1/maintenance/flush",responses((status=200,body=TaskStarted)))]
 pub(super) async fn flush(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -246,7 +251,7 @@ async fn unpack_impact(app: &App, input: &PackScope) -> Result<Value> {
     let id = input.id()?;
     app.unpack_start(id, input.all, false).await
 }
-#[utoipa::path(post,path="/api/maintenance/unpack/preview",request_body=PackScope,responses((status=200,body=MaintenancePreview)))]
+#[utoipa::path(post,path="/api/v1/maintenance/unpack/preview",request_body=PackScope,responses((status=200,body=MaintenancePreview)))]
 pub(super) async fn unpack_preview(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -275,9 +280,9 @@ pub(super) async fn unpack_preview(
 #[serde(deny_unknown_fields)]
 pub(super) struct SweepRequest {
     older_than: String,
-    store_id: Option<Uuid>,
+    storage_id: Option<Uuid>,
 }
-#[utoipa::path(post,path="/api/maintenance/sweep",request_body=SweepRequest,responses((status=200,body=TaskStarted)))]
+#[utoipa::path(post,path="/api/v1/maintenance/sweep",request_body=SweepRequest,responses((status=200,body=TaskStarted)))]
 pub(super) async fn sweep(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -285,13 +290,7 @@ pub(super) async fn sweep(
 ) -> Result<Json<TaskStarted>, HttpError> {
     let tx = guard(&app, &actor).await?;
     let result = app
-        .sweep_start(
-            false,
-            None,
-            None,
-            &input.older_than,
-            input.store_id,
-        )
+        .sweep_start(false, None, None, &input.older_than, input.storage_id)
         .await?;
     tx.commit().await?;
     Ok(Json(serde_json::from_value(result)?))
@@ -302,12 +301,12 @@ pub(super) struct SweepTask {
     task_id: Uuid,
 }
 async fn sweep_impact(app: &App, id: Uuid) -> Result<Value> {
-    let detail:Value=sqlx::query_scalar("SELECT detail FROM tasks WHERE id=$1 AND kind='sweep' AND state='completed' AND detail->>'dry_run'='true'").bind(id).fetch_optional(&app.db).await?.ok_or_else(||s3s::s3_error!(InvalidArgument))?;
+    let detail:Value=sqlx::query_scalar("SELECT detail FROM tasks WHERE id=$1 AND task_type='sweep' AND state='completed' AND detail->>'dry_run'='true'").bind(id).fetch_optional(&app.db).await?.ok_or_else(||s3s::s3_error!(InvalidArgument))?;
     Ok(
-        json!({"task_id":id,"summary":detail,"backend_prefix":detail["prefix"],"minimum_storage_seconds":app.config.storage.min_storage_seconds()?}),
+        json!({"task_id":id,"summary":detail,"backend_prefix":detail["prefix"],"minimum_storage_seconds":app.config.backend_defaults.min_storage_seconds()?}),
     )
 }
-#[utoipa::path(post,path="/api/maintenance/sweep/preview",request_body=SweepTask,responses((status=200,body=MaintenancePreview)))]
+#[utoipa::path(post,path="/api/v1/maintenance/sweep/preview",request_body=SweepTask,responses((status=200,body=MaintenancePreview)))]
 pub(super) async fn sweep_preview(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -339,7 +338,7 @@ pub(super) struct ExecutePreview {
     preview_id: Uuid,
     confirmation: String,
 }
-#[utoipa::path(post,path="/api/maintenance/{operation}/execute",params(("operation"=String,Path)),request_body=ExecutePreview,responses((status=200,body=TaskStarted)))]
+#[utoipa::path(post,path="/api/v1/maintenance/{operation}/execute",params(("operation"=String,Path)),request_body=ExecutePreview,responses((status=200,body=TaskStarted)))]
 pub(super) async fn execute(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -385,7 +384,7 @@ pub(super) async fn execute(
         {
             return Err(s3s::s3_error!(PreconditionFailed).into());
         }
-        crate::tasks::REQUEST_ID
+        crate::worker::REQUEST_ID
             .scope(
                 input.preview_id,
                 app.unpack_checked(scope.id()?, scope.all, true, Some(&fingerprint)),
@@ -404,14 +403,14 @@ pub(super) async fn execute(
         let seconds = impact["summary"]["older_than_seconds"]
             .as_u64()
             .ok_or_else(|| s3s::s3_error!(InvalidArgument))?;
-        let store_id: Uuid = impact["summary"]["store_id"]
+        let storage_id: Uuid = impact["summary"]["storage_id"]
             .as_str()
             .ok_or_else(|| s3s::s3_error!(InvalidArgument))?
             .parse()?;
         let prefix = impact["backend_prefix"]
             .as_str()
             .ok_or_else(|| s3s::s3_error!(InvalidArgument))?;
-        crate::tasks::REQUEST_ID
+        crate::worker::REQUEST_ID
             .scope(
                 input.preview_id,
                 app.sweep_start(
@@ -419,7 +418,7 @@ pub(super) async fn execute(
                     Some(id),
                     Some(prefix),
                     &format!("{seconds}s"),
-                    Some(store_id),
+                    Some(storage_id),
                 ),
             )
             .await?
@@ -461,11 +460,13 @@ struct Cursor {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct JobPage {
+    #[serde(rename = "items")]
     tasks: Vec<Job>,
+    #[serde(rename = "next_cursor")]
     next_token: Option<String>,
 }
-const JOB_SQL: &str = "SELECT to_jsonb(t)||jsonb_build_object('bucket_name',b.name,'blocked',CASE WHEN c.paused OR (coalesce(c.kind,'')='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.kind IN ('pack','unpack','purge','gc','upload','storage_migration') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.kind='pack' AND t.detail->>'kind' IN ('pack','repack') THEN 'PackCreationStopped' END) FROM tasks t LEFT JOIN buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.kind=CASE WHEN t.kind='pack' THEN t.detail->>'kind' ELSE t.kind END";
-#[utoipa::path(get,path="/api/tasks",params(JobQuery),responses((status=200,body=JobPage)))]
+const JOB_SQL: &str = "SELECT to_jsonb(t)||jsonb_build_object('bucket_name',b.name,'blocked',CASE WHEN c.paused OR (coalesce(c.kind,'')='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','upload','storage_migration') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.task_type='pack' AND t.detail->>'kind' IN ('pack','repack') THEN 'PackCreationStopped' END) FROM tasks t LEFT JOIN buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.kind=CASE WHEN t.task_type='pack' THEN t.detail->>'kind' ELSE t.task_type END";
+#[utoipa::path(get,path="/api/v1/tasks",params(JobQuery),responses((status=200,body=JobPage)))]
 pub(super) async fn jobs(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -502,7 +503,7 @@ pub(super) async fn jobs(
         sql.push(" AND t.state=").push_bind(value);
     }
     if let Some(value) = q.kind {
-        sql.push(" AND coalesce(t.detail->>'kind',t.kind)=")
+        sql.push(" AND coalesce(t.detail->>'kind',t.task_type)=")
             .push_bind(value);
     }
     if let Some(value) = q.bucket {
@@ -511,7 +512,7 @@ pub(super) async fn jobs(
     if let Some(value) = q.actor {
         sql.push(" AND position(lower(")
             .push_bind(value)
-            .push(") in lower(t.created_by))>0");
+            .push(") in lower(t.created_by_label))>0");
     }
     if let Some(cursor) = cursor {
         sql.push(" AND (t.created_at,t.id)<(")
@@ -538,7 +539,7 @@ pub(super) async fn jobs(
     tx.commit().await?;
     Ok(Json(JobPage { tasks, next_token }))
 }
-#[utoipa::path(get,path="/api/tasks/{id}",params(("id"=Uuid,Path)),responses((status=200,body=Job)))]
+#[utoipa::path(get,path="/api/v1/tasks/{id}",params(("id"=Uuid,Path)),responses((status=200,body=Job)))]
 pub(super) async fn task(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -555,7 +556,7 @@ pub(super) async fn task(
     tx.commit().await?;
     Ok(Json(job(value)?))
 }
-#[utoipa::path(post,path="/api/tasks/{id}/actions",params(("id"=Uuid,Path)),request_body=PolicyAction,responses((status=204)))]
+#[utoipa::path(post,path="/api/v1/tasks/{id}/actions",params(("id"=Uuid,Path)),request_body=PolicyAction,responses((status=204)))]
 pub(super) async fn task_action(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

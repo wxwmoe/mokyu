@@ -4,7 +4,7 @@ use crate::{
     authorization::{Action, Permit},
     config,
     http::HttpError,
-    multipart::WebUpload,
+    upload::multipart::WebUpload,
 };
 use anyhow::{Context, Result};
 use axum::{
@@ -46,6 +46,7 @@ pub(super) struct Transfer {
     bucket_id: Uuid,
     bucket_name: String,
     object_key: String,
+    #[serde(rename = "status")]
     state: String,
     source: String,
     user_id: Option<Uuid>,
@@ -66,7 +67,9 @@ pub(super) struct Transfer {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct TransferPage {
+    #[serde(rename = "items")]
     uploads: Vec<Transfer>,
+    #[serde(rename = "next_cursor")]
     next: Option<String>,
 }
 #[derive(Default, Deserialize, Serialize, IntoParams)]
@@ -88,7 +91,7 @@ struct Cursor {
     own: Option<bool>,
 }
 
-const VIEW: &str = "SELECT u.id,u.bucket_id,b.name bucket_name,u.object_key,u.state,CASE WHEN w.upload_id IS NULL THEN 's3' ELSE 'web' END source,w.user_id,COALESCE(NULLIF(a.display_name,''),NULLIF(a.username,''),c.label,'S3 application') owner,w.file_name,w.expected_size::text,w.part_size::text,w.modified_at,CASE WHEN u.state='completed' THEN COALESCE(s.size,w.expected_size,0) ELSE COALESCE((SELECT sum(quota_size) FROM parts WHERE upload_id=u.id),0) END::text received_bytes,(SELECT count(*) FROM parts WHERE upload_id=u.id) parts,CASE WHEN u.state<>'completed' THEN 'pending' WHEN u.durable_at IS NOT NULL THEN 'stored' WHEN u.output_stream IS NULL THEN 'unavailable' WHEN EXISTS(SELECT 1 FROM extents e JOIN chunks ch ON ch.id=e.chunk_id WHERE e.stream_id=u.output_stream AND NOT EXISTS(SELECT 1 FROM chunk_locations l WHERE l.chunk_id=ch.id AND l.state='ready') AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=ch.pack_id AND p.state='ready')) THEN 'pending' ELSE 'stored' END remote_state,u.created_at,u.touched_at FROM uploads u JOIN buckets b ON b.id=u.bucket_id LEFT JOIN web_uploads w ON w.upload_id=u.id LEFT JOIN web_users a ON a.id=w.user_id LEFT JOIN credentials c ON c.access_key=u.access_key LEFT JOIN streams s ON s.id=u.output_stream WHERE ";
+const VIEW: &str = "SELECT u.id,u.bucket_id,b.name bucket_name,u.object_key,u.state,CASE WHEN w.upload_id IS NULL THEN 's3' ELSE 'web' END source,w.user_id,COALESCE(NULLIF(a.display_name,''),NULLIF(a.username,''),c.label,'S3 application') owner,w.file_name,w.expected_size::text,w.part_size::text,w.modified_at,CASE WHEN u.state='completed' THEN COALESCE(s.size,w.expected_size,0) ELSE COALESCE((SELECT sum(quota_size) FROM parts WHERE upload_id=u.id),0) END::text received_bytes,(SELECT count(*) FROM parts WHERE upload_id=u.id) parts,CASE WHEN u.state<>'completed' THEN 'pending' WHEN u.durable_at IS NOT NULL THEN 'stored' WHEN u.output_stream IS NULL THEN 'unavailable' WHEN EXISTS(SELECT 1 FROM extents e JOIN chunks ch ON ch.id=e.chunk_id WHERE e.stream_id=u.output_stream AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=ch.id AND l.state='ready') AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=ch.pack_id AND p.state='ready')) THEN 'pending' ELSE 'stored' END remote_state,u.created_at,u.touched_at FROM uploads u JOIN buckets b ON b.id=u.bucket_id LEFT JOIN web_uploads w ON w.upload_id=u.id LEFT JOIN web_users a ON a.id=w.user_id LEFT JOIN s3_credentials c ON c.access_key_id=u.access_key LEFT JOIN streams s ON s.id=u.output_stream WHERE ";
 
 async fn page(app: &App, actor: &Identity, q: Filter, id: Option<Uuid>) -> Result<TransferPage> {
     let limit = q.limit.unwrap_or(50);
@@ -179,7 +182,7 @@ async fn page(app: &App, actor: &Identity, q: Filter, id: Option<Uuid>) -> Resul
             .execute(&mut *tx)
             .await?;
     }
-    let idle = config::seconds(&app.config.multipart.idle_timeout)?;
+    let idle = config::seconds(&app.config.uploads.idle_timeout)?;
     for row in &mut rows {
         row.expires_at = matches!(row.state.as_str(), "active" | "completing")
             .then(|| row.touched_at + chrono::Duration::seconds(idle as i64));
@@ -236,7 +239,7 @@ fn request<T>(input: T) -> S3Request<T> {
     }
 }
 
-#[utoipa::path(post,operation_id="create_web_upload",path="/api/buckets/{bucket}/uploads",params(("bucket"=Uuid,Path)),request_body=UploadInput,responses((status=201,body=Transfer)))]
+#[utoipa::path(post,operation_id="create_web_upload",path="/api/v1/buckets/{bucket}/uploads",params(("bucket"=Uuid,Path)),request_body=UploadInput,responses((status=201,body=Transfer)))]
 pub(super) async fn create(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -310,7 +313,7 @@ pub(super) async fn create(
     )?;
     Ok((StatusCode::CREATED, Json(detail(&app, &actor, id).await?)))
 }
-#[utoipa::path(get,operation_id="list_uploads",path="/api/uploads",params(Filter),responses((status=200,body=TransferPage)))]
+#[utoipa::path(get,operation_id="list_uploads",path="/api/v1/uploads",params(Filter),responses((status=200,body=TransferPage)))]
 pub(super) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -318,7 +321,7 @@ pub(super) async fn list(
 ) -> Result<Json<TransferPage>, HttpError> {
     Ok(Json(page(&app, &actor, q, None).await?))
 }
-#[utoipa::path(get,operation_id="get_upload",path="/api/uploads/{id}",params(("id"=Uuid,Path)),responses((status=200,body=Transfer)))]
+#[utoipa::path(get,operation_id="get_upload",path="/api/v1/uploads/{id}",params(("id"=Uuid,Path)),responses((status=200,body=Transfer)))]
 pub(super) async fn get(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -350,7 +353,7 @@ pub(super) struct PartsPage {
 pub(super) struct PartsFilter {
     after: Option<i32>,
 }
-#[utoipa::path(get,operation_id="list_web_parts",path="/api/uploads/{id}/parts",params(("id"=Uuid,Path),PartsFilter),responses((status=200,body=PartsPage)))]
+#[utoipa::path(get,operation_id="list_web_parts",path="/api/v1/uploads/{id}/parts",params(("id"=Uuid,Path),PartsFilter),responses((status=200,body=PartsPage)))]
 pub(super) async fn parts(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -368,7 +371,7 @@ pub(super) async fn parts(
     let next = more.then(|| parts.last().unwrap().number);
     Ok(Json(PartsPage { parts, next }))
 }
-#[utoipa::path(put,operation_id="put_web_part",path="/api/uploads/{id}/parts/{number}",params(("id"=Uuid,Path),("number"=i32,Path)),request_body(content_type="application/octet-stream",content=String),responses((status=200,body=PartReceipt)))]
+#[utoipa::path(put,operation_id="put_web_part",path="/api/v1/uploads/{id}/parts/{number}",params(("id"=Uuid,Path),("number"=i32,Path)),request_body(content_type="application/octet-stream",content=String),responses((status=200,body=PartReceipt)))]
 pub(super) async fn put_part(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -430,7 +433,7 @@ pub(super) async fn put_part(
 pub(super) struct Completion {
     parts: Vec<PartReceipt>,
 }
-#[utoipa::path(post,operation_id="complete_web_upload",path="/api/uploads/{id}/complete",params(("id"=Uuid,Path)),request_body=Completion,responses((status=200,body=Transfer)))]
+#[utoipa::path(post,operation_id="complete_web_upload",path="/api/v1/uploads/{id}/complete",params(("id"=Uuid,Path)),request_body=Completion,responses((status=200,body=Transfer)))]
 pub(super) async fn complete(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -489,7 +492,7 @@ pub(super) async fn complete(
     }
     Ok(Json(detail(&app, &actor, id).await?))
 }
-#[utoipa::path(delete,operation_id="abort_upload",path="/api/uploads/{id}",params(("id"=Uuid,Path)),responses((status=204)))]
+#[utoipa::path(delete,operation_id="abort_upload",path="/api/v1/uploads/{id}",params(("id"=Uuid,Path)),responses((status=204)))]
 pub(super) async fn abort(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

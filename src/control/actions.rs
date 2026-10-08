@@ -203,7 +203,7 @@ async fn check(permit: &Permit, app: &App) -> Result<()> {
     Ok(())
 }
 
-#[utoipa::path(post,operation_id="media_actions",path="/api/media/actions",request_body=Batch,responses((status=200,body=BatchResult)))]
+#[utoipa::path(post,operation_id="media_actions",path="/api/v1/media/actions",request_body=Batch,responses((status=200,body=BatchResult)))]
 pub(super) async fn batch(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -377,9 +377,9 @@ async fn scope(tx: &mut Transaction<'_, Postgres>, permit: &Permit) -> Result<()
     if blocked {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
-    sqlx::query("SELECT id FROM quota_accounts WHERE kind='project' AND id IN (SELECT project_id FROM buckets WHERE id=ANY($1)) ORDER BY id FOR UPDATE").bind(&buckets).execute(&mut **tx).await?;
+    sqlx::query("SELECT scope_id FROM quota_scopes WHERE scope='project' AND scope_id IN (SELECT project_id FROM buckets WHERE id=ANY($1)) ORDER BY scope_id FOR UPDATE").bind(&buckets).execute(&mut **tx).await?;
     sqlx::query(
-        "SELECT id FROM quota_accounts WHERE kind='bucket' AND id=ANY($1) ORDER BY id FOR UPDATE",
+        "SELECT scope_id FROM quota_scopes WHERE scope='bucket' AND scope_id=ANY($1) ORDER BY scope_id",
     )
     .bind(&buckets)
     .execute(&mut **tx)
@@ -393,7 +393,7 @@ pub(crate) async fn selected(
     expected: Option<Uuid>,
 ) -> Result<Option<Uuid>> {
     let actual: Option<Uuid> = sqlx::query_scalar(
-        "SELECT stream_id FROM objects WHERE bucket_id=$1 AND key=$2 FOR UPDATE",
+        "SELECT stream_id FROM objects WHERE bucket_id=$1 AND object_key=$2 FOR UPDATE",
     )
     .bind(bucket)
     .bind(key)
@@ -408,13 +408,13 @@ pub(crate) async fn selected(
 async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit) -> Result<()> {
     let target = input.target_bucket.unwrap();
     let source_target: Option<Uuid> =
-        sqlx::query_scalar("SELECT store_id FROM buckets WHERE id=$1")
+        sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=$1")
             .bind(input.bucket)
             .fetch_optional(&app.db)
             .await?
             .flatten();
     let target_target: Option<Uuid> =
-        sqlx::query_scalar("SELECT store_id FROM buckets WHERE id=$1")
+        sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=$1")
             .bind(target)
             .fetch_optional(&app.db)
             .await?
@@ -444,19 +444,21 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
             .lock(&mut tx)
             .await?;
     }
-    sqlx::query("UPDATE objects SET stream_id=NULL,write_epoch=$3 WHERE bucket_id=$1 AND key=$2")
-        .bind(input.bucket)
-        .bind(&item.key)
-        .bind(Uuid::new_v4())
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE objects SET stream_id=NULL,write_token=$3 WHERE bucket_id=$1 AND object_key=$2",
+    )
+    .bind(input.bucket)
+    .bind(&item.key)
+    .bind(Uuid::new_v4())
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("UPDATE streams SET bucket_id=$2,object_key=$3 WHERE id=$1")
         .bind(item.version)
         .bind(target)
         .bind(key)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO objects(bucket_id,key,stream_id,write_epoch) VALUES($1,$2,$3,$3) ON CONFLICT(bucket_id,key) DO UPDATE SET stream_id=excluded.stream_id,write_epoch=excluded.write_epoch")
+    sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,$2,$3,$3) ON CONFLICT(bucket_id,object_key) DO UPDATE SET stream_id=excluded.stream_id,write_token=excluded.write_token")
         .bind(target).bind(key).bind(item.version).execute(&mut *tx).await?;
     if let Some(old) = old {
         sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id=$1")
@@ -498,13 +500,13 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         )
     };
     let source_target: Uuid =
-        sqlx::query_scalar::<_, Option<Uuid>>("SELECT store_id FROM buckets WHERE id=$1")
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT storage_id FROM buckets WHERE id=$1")
             .bind(input.bucket)
             .fetch_one(&app.db)
             .await?
             .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
     let target_target: Uuid =
-        sqlx::query_scalar::<_, Option<Uuid>>("SELECT store_id FROM buckets WHERE id=$1")
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT storage_id FROM buckets WHERE id=$1")
             .bind(target)
             .fetch_one(&app.db)
             .await?
@@ -522,7 +524,7 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         scope(&mut tx, &authority).await?;
         selected(&mut tx, input.bucket, &item.key, Some(item.version)).await?;
         selected(&mut tx, target, key, expected).await?;
-        let task = crate::tasks::insert(
+        let task = crate::worker::insert(
             &mut tx,
             "storage_migration",
             Some(target),
@@ -544,7 +546,9 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         return Ok(());
     }
     let (id, _pin) = app
-        .new_stream(permit, target, key, "object", meta, public, false, None, None)
+        .new_stream(
+            permit, target, key, "object", meta, public, false, None, None,
+        )
         .await?;
     let result=async {
         app.copy_extents(id,&source).await?;
@@ -562,7 +566,7 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
             if current!=source.public_read {return Err(s3s::s3_error!(PreconditionFailed).into());}
         }
         sqlx::query("UPDATE streams SET state='ready',touched_at=now() WHERE id=$1 AND state='writing'").bind(id).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO objects(bucket_id,key,stream_id,write_epoch) VALUES($1,$2,$3,$3) ON CONFLICT(bucket_id,key) DO UPDATE SET stream_id=excluded.stream_id,write_epoch=excluded.write_epoch")
+        sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,$2,$3,$3) ON CONFLICT(bucket_id,object_key) DO UPDATE SET stream_id=excluded.stream_id,write_token=excluded.write_token")
             .bind(target).bind(key).bind(id).execute(&mut *tx).await?;
         if let Some(old)=old {sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id=$1").bind(old).execute(&mut *tx).await?;}
         complete(&mut tx,Some(id)).await?;tx.commit().await?;

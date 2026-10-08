@@ -82,6 +82,8 @@ pub struct Request {
 
 #[derive(Deserialize, Serialize)]
 struct Detail {
+    #[serde(default)]
+    storage_id: Option<Uuid>,
     mode: Mode,
     phase: String,
     bucket_id: Option<Uuid>,
@@ -109,7 +111,7 @@ struct Finding {
     subject: String,
     code: String,
     chunk_id: Option<i64>,
-    storage_id: Option<Uuid>,
+    location_id: Option<Uuid>,
     stream_id: Option<Uuid>,
     bucket_id: Option<Uuid>,
     key: Option<String>,
@@ -121,7 +123,7 @@ impl Finding {
             subject: format!("object:{}:{offset}", s.id),
             code: code.into(),
             chunk_id: None,
-            storage_id: None,
+            location_id: None,
             stream_id: Some(s.id),
             bucket_id: Some(s.bucket_id),
             key: Some(s.object_key.clone()),
@@ -133,7 +135,7 @@ impl Finding {
             subject: format!("chunk:{}", c.id),
             code: code.into(),
             chunk_id: Some(c.id),
-            storage_id: Some(c.storage_id),
+            location_id: Some(c.location_id),
             stream_id: None,
             bucket_id: None,
             key: None,
@@ -143,6 +145,64 @@ impl Finding {
 }
 
 impl App {
+    async fn acquire_profile_rate(
+        &self,
+        storage_id: Uuid,
+        profile: &crate::storage::profile::StorageProfile,
+        requests: usize,
+        bytes: i64,
+    ) -> Result<bool> {
+        let mut rates = Vec::new();
+        if let Some(rate) = profile.integrity_rps {
+            rates.push(("integrity_rps", rate as f64, requests as f64));
+        }
+        if let Some(rate) = profile.integrity_bandwidth.as_deref() {
+            rates.push((
+                "integrity_bandwidth",
+                config::bytes(rate)? as f64,
+                bytes.max(0) as f64,
+            ));
+        }
+        if rates.is_empty() {
+            return Ok(true);
+        }
+        let mut tx = self.db.begin().await?;
+        for (metric, rate, amount) in rates {
+            // A single integrity request/chunk may be larger than one second's
+            // configured rate.  Grow the burst capacity for that request so a
+            // byte budget can make progress instead of waiting forever.
+            let capacity = rate.max(amount).max(1.0);
+            sqlx::query("INSERT INTO storage_rate_state(storage_id,metric,tokens,replenished_at,updated_at) VALUES($1,$2,$3::text::numeric,now(),now()) ON CONFLICT(storage_id,metric) DO NOTHING")
+                .bind(storage_id)
+                .bind(metric)
+                .bind(format!("{capacity:.6}"))
+                .execute(&mut *tx)
+                .await?;
+            let (tokens, replenished): (f64, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+                "SELECT tokens::double precision,replenished_at FROM storage_rate_state WHERE storage_id=$1 AND metric=$2 FOR UPDATE",
+            )
+            .bind(storage_id)
+            .bind(metric)
+            .fetch_one(&mut *tx)
+            .await?;
+            let elapsed =
+                (chrono::Utc::now() - replenished).num_milliseconds().max(0) as f64 / 1000.0;
+            let available = (tokens + elapsed * rate).min(capacity);
+            if available < amount {
+                return Ok(false);
+            }
+            let remaining = available - amount;
+            sqlx::query("UPDATE storage_rate_state SET tokens=$3::text::numeric,replenished_at=now(),updated_at=now() WHERE storage_id=$1 AND metric=$2")
+                .bind(storage_id)
+                .bind(metric)
+                .bind(format!("{remaining:.6}"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn integrity_start(&self, input: Request) -> Result<Value> {
         if input
             .key
@@ -165,45 +225,109 @@ impl App {
         }
         let _coord = self.coord.lock().await;
         // Limit queued work as well as running work; repeated clicks must not grow an unbounded queue.
-        let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE kind='integrity' AND state IN ('queued','running'))").fetch_one(&self.db).await?;
+        let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND state IN ('queued','running'))").fetch_one(&self.db).await?;
         if busy {
             return Err(
                 s3s::s3_error!(OperationAborted, "an integrity check is already active").into(),
             );
         }
-        let upper: i64 = sqlx::query_scalar("SELECT COALESCE(max(id),0) FROM chunks")
-            .fetch_one(&self.db)
-            .await?;
-        let mut detail = Detail {
-            mode: input.mode,
-            phase: "metadata".into(),
-            bucket_id: bucket.as_ref().map(|b| b.id),
-            bucket: input.bucket,
-            key: input.key,
-            upper_chunk_id: upper.to_string(),
-            upper_object: None,
-            objects_checked: 0,
-            chunks_checked: 0,
-            bytes_checked: 0,
-            issues: 0,
-            skipped: 0,
-            finished_at: None,
+        let storage_rows: Vec<(Uuid, String)> =
+            if let Some(storage_id) = bucket.as_ref().and_then(|value| value.storage_id) {
+                sqlx::query_as("SELECT id,type FROM storages WHERE id=$1 AND enabled")
+                    .bind(storage_id)
+                    .fetch_all(&self.db)
+                    .await?
+            } else if bucket.is_some() {
+                Vec::new()
+            } else {
+                sqlx::query_as("SELECT id,type FROM storages WHERE enabled ORDER BY created_at,id")
+                    .fetch_all(&self.db)
+                    .await?
+            };
+        let storage_rows = if storage_rows.is_empty() {
+            vec![(Uuid::nil(), "shared".to_owned())]
+        } else {
+            storage_rows
         };
-        let mut query = sqlx::QueryBuilder::new(
-            "SELECT o.bucket_id,o.key FROM objects o WHERE o.stream_id IS NOT NULL",
-        );
-        scope(&mut query, &detail);
-        query.push(" ORDER BY o.bucket_id DESC,o.key DESC LIMIT 1");
-        detail.upper_object = query.build_query_as().fetch_optional(&self.db).await?;
-        let id = crate::tasks::insert(
-            &mut *self.db.acquire().await?,
+        let child_count = storage_rows.len();
+        let mut tx = self.db.begin().await?;
+        let parent_detail = json!({
+            "role": "parent",
+            "mode": input.mode,
+            "bucket": input.bucket.clone(),
+            "key": input.key.clone(),
+            "children": storage_rows.len(),
+        });
+        let parent = crate::worker::insert(
+            &mut *tx,
             "integrity",
-            detail.bucket_id,
-            serde_json::to_value(detail)?,
+            bucket.as_ref().map(|value| value.id),
+            parent_detail,
         )
         .await?;
-        self.wake_tasks.notify_one();
-        Ok(json!({"task_id":id}))
+        for (storage_id, storage_type) in storage_rows {
+            let storage_id = (storage_id != Uuid::nil()).then_some(storage_id);
+            let upper: i64 = if let Some(storage_id) = storage_id {
+                sqlx::query_scalar("SELECT COALESCE(max(id),0) FROM chunks WHERE storage_id=$1")
+                    .bind(storage_id)
+                    .fetch_one(&mut *tx)
+                    .await?
+            } else {
+                sqlx::query_scalar("SELECT COALESCE(max(id),0) FROM chunks")
+                    .fetch_one(&mut *tx)
+                    .await?
+            };
+            let mut detail = Detail {
+                storage_id,
+                mode: input.mode,
+                phase: "metadata".into(),
+                bucket_id: bucket.as_ref().map(|value| value.id),
+                bucket: input.bucket.clone(),
+                key: input.key.clone(),
+                upper_chunk_id: upper.to_string(),
+                upper_object: None,
+                objects_checked: 0,
+                chunks_checked: 0,
+                bytes_checked: 0,
+                issues: 0,
+                skipped: 0,
+                finished_at: None,
+            };
+            let mut query = sqlx::QueryBuilder::new(
+                "SELECT o.bucket_id,o.object_key FROM objects o WHERE o.stream_id IS NOT NULL",
+            );
+            scope(&mut query, &detail);
+            query.push(" ORDER BY o.bucket_id DESC,o.object_key DESC LIMIT 1");
+            detail.upper_object = query.build_query_as().fetch_optional(&mut *tx).await?;
+            let child = crate::worker::insert_child(
+                &mut *tx,
+                "integrity",
+                detail.bucket_id,
+                serde_json::to_value(detail)?,
+            )
+            .await?;
+            let (execution_scope, target_node_id) = if storage_type == "local" {
+                ("node", self.node.get().map(|state| state.node_id))
+            } else {
+                ("cluster", None)
+            };
+            sqlx::query("UPDATE tasks SET parent_task_id=$2,batch_total=$3,execution_scope=$4,target_node_id=$5 WHERE id=$1")
+                .bind(child)
+                .bind(parent)
+                .bind(1_i64)
+                .bind(execution_scope)
+                .bind(target_node_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("UPDATE tasks SET batch_total=$2 WHERE id=$1")
+            .bind(parent)
+            .bind(child_count as i64)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.wake_tasks.notify_waiters();
+        Ok(json!({"task_id":parent,"children":child_count}))
     }
 
     pub async fn integrity_batch(
@@ -218,22 +342,34 @@ impl App {
             .transpose()?
             .unwrap_or_default();
         let mut issues = Vec::new();
+        let profile = if let Some(storage_id) = d.storage_id {
+            Some(crate::storage::profile::StorageProfile::load(&self.db, storage_id).await?)
+        } else {
+            None
+        };
+        let _storage_permit = if let Some(storage_id) = d.storage_id {
+            Some(self.storage.profile_permit(storage_id, "integrity").await?)
+        } else {
+            None
+        };
         if d.phase == "metadata" {
             self.inspect_mapping(&mut d, &mut cursor, &mut issues)
                 .await?;
         } else if d.phase == "chunks" {
-            let count = self
-                .config
-                .integrity
-                .concurrency
+            let count = profile
+                .as_ref()
+                .map_or(self.config.local_integrity.concurrency, |p| {
+                    p.integrity_concurrency as usize
+                })
                 .min(self.budget.read_concurrency)
                 .min(self.budget.data_slots.saturating_sub(1).max(1))
                 .min(64);
             if d.mode != Mode::Metadata && Instant::now() < *self.integrity_pacing.lock().unwrap() {
                 return Ok(false);
             }
-            let mut query =
-                sqlx::QueryBuilder::new("SELECT c.* FROM chunks c WHERE c.state='ready' AND c.id>");
+            let mut query = sqlx::QueryBuilder::new(
+                "SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.location_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE c.state='ready' AND c.id>",
+            );
             query.push_bind(cursor.chunk).push(" AND c.id<=").push_bind(d.upper_chunk_id.parse::<i64>()?).push(" AND EXISTS(SELECT 1 FROM extents e JOIN objects o ON o.stream_id=e.stream_id WHERE e.chunk_id=c.id");
             scope(&mut query, &d);
             query
@@ -243,10 +379,45 @@ impl App {
                 } else {
                     count as i64
                 });
-            let rows: Vec<Chunk> = query.build_query_as().fetch_all(&self.db).await?;
+            let mut rows: Vec<Chunk> = query.build_query_as().fetch_all(&self.db).await?;
+            if let Some(limit) = profile
+                .as_ref()
+                .and_then(|p| p.integrity_byte_budget.as_deref())
+                .map(config::bytes)
+                .transpose()?
+            {
+                let mut used = 0u64;
+                let keep = rows
+                    .iter()
+                    .enumerate()
+                    .take_while(|(_, chunk)| {
+                        let size = chunk.raw_size.max(0) as u64;
+                        if used > 0 && used.saturating_add(size) > limit {
+                            return false;
+                        }
+                        used = used.saturating_add(size);
+                        true
+                    })
+                    .count();
+                rows.truncate(keep.max(1).min(rows.len()));
+            }
             if rows.is_empty() {
                 d.phase = "done".into();
             } else {
+                if let Some(storage_id) = d.storage_id {
+                    let estimated_bytes = rows.iter().map(|chunk| chunk.raw_size as i64).sum();
+                    if !self
+                        .acquire_profile_rate(
+                            storage_id,
+                            profile.as_ref().context("missing storage profile")?,
+                            rows.len(),
+                            estimated_bytes,
+                        )
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                }
                 let started = Instant::now();
                 let requests = rows.len();
                 let results: Vec<_> =
@@ -270,16 +441,21 @@ impl App {
                 }
                 d.bytes_checked += bytes;
                 if d.mode != Mode::Metadata {
-                    let request_delay = self
-                        .config
-                        .integrity
-                        .requests_per_second
-                        .map_or(0.0, |r| requests as f64 / r as f64);
-                    let byte_delay = self
-                        .config
-                        .integrity
-                        .bandwidth
-                        .as_deref()
+                    let request_delay = profile
+                        .as_ref()
+                        .and_then(|p| p.integrity_rps)
+                        .map(|r| r as f64)
+                        .or_else(|| {
+                            self.config
+                                .local_integrity
+                                .requests_per_second
+                                .map(f64::from)
+                        })
+                        .map_or(0.0, |r| requests as f64 / r);
+                    let byte_delay = profile
+                        .as_ref()
+                        .and_then(|p| p.integrity_bandwidth.as_deref())
+                        .or(self.config.local_integrity.bandwidth.as_deref())
                         .map(config::bytes)
                         .transpose()?
                         .map_or(0.0, |r| bytes as f64 / r as f64);
@@ -296,8 +472,8 @@ impl App {
         crate::faults::point("integrity-before-commit").await;
         let mut tx = self.db.begin().await?;
         for i in issues {
-            let inserted = sqlx::query("INSERT INTO integrity_issues(task_id,subject,code,chunk_id,storage_id,stream_id,bucket_id,object_key,detail) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(task_id,subject,code) DO NOTHING")
-                .bind(id).bind(i.subject).bind(&i.code).bind(i.chunk_id).bind(i.storage_id).bind(i.stream_id).bind(i.bucket_id).bind(i.key).bind(i.detail).execute(&mut *tx).await?.rows_affected();
+            let inserted = sqlx::query("INSERT INTO integrity_issues(task_id,subject,code,chunk_id,location_id,stream_id,bucket_id,object_key,detail) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(task_id,subject,code) DO NOTHING")
+                .bind(id).bind(i.subject).bind(&i.code).bind(i.chunk_id).bind(i.location_id).bind(i.stream_id).bind(i.bucket_id).bind(i.key).bind(i.detail).execute(&mut *tx).await?.rows_affected();
             d.issues += inserted;
             if inserted > 0 {
                 tracing::warn!(task_id=%id,chunk_id=?i.chunk_id,stream_id=?i.stream_id,code=%i.code,"integrity finding");
@@ -321,20 +497,20 @@ impl App {
         }
         let coord = self.coord.lock().await;
         let mut query = sqlx::QueryBuilder::new(
-            "SELECT s.*,o.bucket_id AS visible_bucket,o.key AS visible_key FROM objects o JOIN streams s ON s.id=o.stream_id WHERE true",
+            "SELECT s.*,o.bucket_id AS visible_bucket,o.object_key AS visible_key FROM objects o JOIN streams s ON s.id=o.stream_id WHERE true",
         );
         scope(&mut query, d);
         if let Some(stream) = cursor.stream {
             query.push(" AND o.stream_id=").push_bind(stream);
         } else if let (Some(bucket), Some(key)) = (cursor.bucket, &cursor.key) {
             query
-                .push(" AND (o.bucket_id,o.key)>(")
+                .push(" AND (o.bucket_id,o.object_key)>(")
                 .push_bind(bucket)
                 .push(",")
                 .push_bind(key)
                 .push(")");
         }
-        query.push(" ORDER BY o.bucket_id,o.key LIMIT 1");
+        query.push(" ORDER BY o.bucket_id,o.object_key LIMIT 1");
         #[derive(sqlx::FromRow)]
         struct Object {
             #[sqlx(flatten)]
@@ -368,12 +544,12 @@ impl App {
         #[cfg(feature = "fault-injection")]
         crate::faults::point("integrity-mapping-pinned").await;
         let mut found = Vec::new();
-        if identity_mismatch || s.state != "ready" || s.kind != "object" {
+        if identity_mismatch || s.state != "ready" || s.stream_type != "object" {
             found.push(Finding::object(
                 &s,
                 "object_metadata",
                 -1,
-                json!({"state":s.state,"kind":s.kind}),
+                json!({"state":s.state,"stream_type":s.stream_type}),
             ));
         }
         #[derive(sqlx::FromRow)]
@@ -432,7 +608,7 @@ impl App {
             cursor.stream = None;
         }
         let current: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM objects WHERE bucket_id=$1 AND key=$2 AND stream_id=$3)",
+            "SELECT EXISTS(SELECT 1 FROM objects WHERE bucket_id=$1 AND object_key=$2 AND stream_id=$3)",
         )
         .bind(s.bucket_id)
         .bind(&s.object_key)
@@ -485,7 +661,9 @@ impl App {
             Ok::<_, anyhow::Error>(())
         };
         let result = tokio::time::timeout(
-            Duration::from_secs(config::seconds(&self.config.integrity.request_timeout)?),
+            Duration::from_secs(config::seconds(
+                &self.config.local_integrity.request_timeout,
+            )?),
             result,
         )
         .await
@@ -520,7 +698,7 @@ impl App {
                     return Ok(None);
                 }
                 let mut finding = Finding::chunk(c, code);
-                finding.storage_id = physical_detail["storage_id"]
+                finding.location_id = physical_detail["location_id"]
                     .as_str()
                     .and_then(|s| Uuid::parse_str(s).ok());
                 finding.detail = physical_detail;
@@ -547,7 +725,7 @@ impl App {
             return Err(s3s::s3_error!(InvalidArgument).into());
         }
         let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND kind='integrity')",
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND task_type='integrity')",
         )
         .bind(id)
         .fetch_one(&self.db)
@@ -580,7 +758,7 @@ impl App {
         .await?;
         let (chunk, stream) = row.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
         let mut query = sqlx::QueryBuilder::new(
-            "SELECT jsonb_build_object('bucket_id',o.bucket_id,'bucket',b.name,'key',o.key,'version',o.stream_id) FROM objects o JOIN buckets b ON b.id=o.bucket_id WHERE ",
+            "SELECT jsonb_build_object('bucket_id',o.bucket_id,'bucket',b.name,'key',o.object_key,'version',o.stream_id) FROM objects o JOIN buckets b ON b.id=o.bucket_id WHERE ",
         );
         if let Some(chunk) = chunk {
             query
@@ -594,13 +772,13 @@ impl App {
         }
         if let Some((bucket, key)) = after {
             query
-                .push(" AND (o.bucket_id,o.key)>(")
+                .push(" AND (o.bucket_id,o.object_key)>(")
                 .push_bind(bucket)
                 .push(",")
                 .push_bind(key)
                 .push(")");
         }
-        query.push(" ORDER BY o.bucket_id,o.key LIMIT 101");
+        query.push(" ORDER BY o.bucket_id,o.object_key LIMIT 101");
         let mut rows: Vec<Value> = query.build_query_scalar().fetch_all(&self.db).await?;
         let more = rows.len() > 100;
         rows.truncate(100);
@@ -615,15 +793,23 @@ impl App {
 }
 
 fn scope(query: &mut sqlx::QueryBuilder<sqlx::Postgres>, d: &Detail) {
+    if let Some(storage_id) = d.storage_id {
+        query
+            .push(
+                " AND EXISTS (SELECT 1 FROM buckets sb WHERE sb.id=o.bucket_id AND sb.storage_id=",
+            )
+            .push_bind(storage_id)
+            .push(")");
+    }
     if let Some(bucket) = d.bucket_id {
         query.push(" AND o.bucket_id=").push_bind(bucket);
     }
     if let Some(key) = &d.key {
-        query.push(" AND o.key=").push_bind(key);
+        query.push(" AND o.object_key=").push_bind(key);
     }
     if let Some((bucket, key)) = &d.upper_object {
         query
-            .push(" AND (o.bucket_id,o.key)<=(")
+            .push(" AND (o.bucket_id,o.object_key)<=(")
             .push_bind(*bucket)
             .push(",")
             .push_bind(key)

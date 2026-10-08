@@ -9,12 +9,12 @@ use uuid::Uuid;
 
 impl App {
     pub(crate) fn pack_creation_allowed(&self) -> bool {
-        self.config.pack.enabled && !self.pack_creation_paused.load(Ordering::Acquire)
+        self.config.local_pack.enabled && !self.pack_creation_paused.load(Ordering::Acquire)
     }
     pub async fn pack_creation_change(&self, paused: bool) -> Result<Value> {
         let _coord = self.coord.lock().await;
         if !paused {
-            let unpacking:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE kind='unpack' AND detail->>'all'='true' AND state<>'completed')").fetch_one(&self.db).await?;
+            let unpacking:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='unpack' AND detail->>'all'='true' AND state<>'completed')").fetch_one(&self.db).await?;
             if unpacking {
                 return Err(s3s::s3_error!(
                     OperationAborted,
@@ -41,15 +41,15 @@ impl App {
         Ok(json!({"paused":paused,"enabled":self.pack_creation_allowed()}))
     }
     pub(crate) fn maintenance_schedule(&self) -> [(&'static str, &str, bool); 7] {
-        let p = &self.config.pack;
+        let p = &self.config.local_pack;
         [
             ("pack", &p.interval, self.pack_creation_allowed()),
             ("reuse", &p.reuse_interval, true),
             ("reclaim", &p.reclaim_interval, true),
             ("repack", &p.repack_interval, self.pack_creation_allowed()),
             ("range", &p.range_interval, p.range_optimization),
-            ("gc", &self.config.gc.interval, true),
-            ("cleanup", &self.config.cleanup.interval, true),
+            ("gc", &self.config.maintenance.interval, true),
+            ("cleanup", &self.config.maintenance.interval, true),
         ]
     }
 
@@ -59,7 +59,7 @@ impl App {
     }
 
     pub async fn maintenance_status(&self) -> Result<Value> {
-        let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(c)||jsonb_build_object('paused',CASE WHEN c.kind='gc' THEN m.gc_paused ELSE c.paused END,'latest',latest.value,'active',active.value) FROM maintenance_controls c CROSS JOIN mokyu_meta m LEFT JOIN LATERAL (SELECT to_jsonb(t) value FROM tasks t WHERE coalesce(t.detail->>'kind',t.kind)=c.kind ORDER BY created_at DESC,id DESC LIMIT 1) latest ON true LEFT JOIN LATERAL (SELECT to_jsonb(t) value FROM tasks t WHERE coalesce(t.detail->>'kind',t.kind)=c.kind AND t.state IN ('queued','running','paused') ORDER BY created_at,id LIMIT 1) active ON true ORDER BY c.kind")
+        let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(c)||jsonb_build_object('paused',CASE WHEN c.kind='gc' THEN m.gc_paused ELSE c.paused END,'latest',latest.value,'active',active.value) FROM maintenance_controls c CROSS JOIN mokyu_meta m LEFT JOIN LATERAL (SELECT to_jsonb(t) value FROM tasks t WHERE coalesce(t.detail->>'kind',t.task_type)=c.kind ORDER BY created_at DESC,id DESC LIMIT 1) latest ON true LEFT JOIN LATERAL (SELECT to_jsonb(t) value FROM tasks t WHERE coalesce(t.detail->>'kind',t.task_type)=c.kind AND t.state IN ('queued','running','paused') ORDER BY created_at,id LIMIT 1) active ON true ORDER BY c.kind")
             .fetch_all(&self.db).await?;
         let global = self.maintenance.load(Ordering::Acquire);
         for row in &mut rows {
@@ -90,7 +90,7 @@ impl App {
                 .await?;
         let backend_prefixes: Vec<Value> = self
             .storage
-            .store_ids()
+            .storage_ids()
             .into_iter()
             .filter_map(|id| {
                 self.storage
@@ -100,10 +100,10 @@ impl App {
             })
             .collect();
         Ok(
-            json!({"maintenance":global,"controls":rows,"concurrency":self.config.pack.maintenance_concurrency,
-            "pack_configured":self.config.pack.enabled,"pack_creation_paused":self.pack_creation_paused.load(Ordering::Acquire),
+            json!({"maintenance":global,"controls":rows,"concurrency":self.config.local_pack.maintenance_concurrency,
+            "pack_configured":self.config.local_pack.enabled,"pack_creation_paused":self.pack_creation_paused.load(Ordering::Acquire),
             "pack_creation_enabled":self.pack_creation_allowed(),"preparing_packs":preparing,"active_operations":self.active.lock().unwrap().len(),
-            "backend_prefixes":backend_prefixes,"min_storage_duration":self.config.storage.min_storage_duration}),
+            "backend_prefixes":backend_prefixes,"min_storage_duration":self.config.backend_defaults.min_storage_duration}),
         )
     }
 
@@ -160,12 +160,55 @@ impl App {
             .bind(format!("mokyu:maintenance:{kind}"))
             .execute(&mut *tx)
             .await?;
-        if let Some(id) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tasks WHERE kind=$1 AND state IN ('queued','running','paused') ORDER BY created_at LIMIT 1")
+        if let Some(id) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tasks WHERE task_type=$1 AND state IN ('queued','running','paused') ORDER BY created_at LIMIT 1")
             .bind(kind).fetch_optional(&mut *tx).await? {
             tx.commit().await?;
             return Ok(json!({"task_id":id,"existing":true}));
         }
-        let id = crate::tasks::insert(&mut tx, kind, None, json!({})).await?;
+        let storages: Vec<(Uuid, String, i64)> = sqlx::query_as(
+            "SELECT s.id,s.type,sp.revision FROM storages s JOIN storage_profiles sp ON sp.storage_id=s.id WHERE s.enabled ORDER BY s.created_at,s.id",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let id = crate::worker::insert(
+            &mut tx,
+            kind,
+            None,
+            json!({"role":"parent","children":storages.len()}),
+        )
+        .await?;
+        for (storage_id, storage_type, revision) in &storages {
+            let child = crate::worker::insert_child(
+                &mut tx,
+                kind,
+                None,
+                json!({"role":"child","storage_id":storage_id,"profile_revision":revision}),
+            )
+            .await?;
+            let (scope, node) = if storage_type == "local" {
+                ("node", self.node.get().map(|state| state.node_id))
+            } else {
+                ("cluster", None)
+            };
+            sqlx::query("UPDATE tasks SET parent_task_id=$2,batch_total=1,execution_scope=$3,target_node_id=$4 WHERE id=$1")
+                .bind(child)
+                .bind(id)
+                .bind(scope)
+                .bind(node)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("UPDATE tasks SET batch_total=$2 WHERE id=$1")
+            .bind(id)
+            .bind(storages.len() as i64)
+            .execute(&mut *tx)
+            .await?;
+        if storages.is_empty() {
+            sqlx::query("UPDATE tasks SET state='completed',updated_at=now() WHERE id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query("UPDATE maintenance_controls SET last_scheduled_at=now() WHERE kind=$1")
             .bind(kind)
             .execute(&mut *tx)
@@ -175,27 +218,100 @@ impl App {
         Ok(json!({"task_id":id}))
     }
 
-    pub(crate) async fn lifecycle_batch(&self, id: Uuid, kind: &str) -> Result<bool> {
+    pub(crate) async fn lifecycle_batch(
+        &self,
+        id: Uuid,
+        kind: &str,
+        detail: &Value,
+    ) -> Result<bool> {
+        let scoped_storage = detail["storage_id"]
+            .as_str()
+            .and_then(|value| value.parse::<Uuid>().ok());
+        let profile = if let Some(storage_id) = scoped_storage {
+            Some(crate::storage::profile::StorageProfile::load(&self.db, storage_id).await?)
+        } else {
+            None
+        };
+        let _storage_permit = if let Some(storage_id) = scoped_storage {
+            Some(
+                self.storage
+                    .profile_permit(storage_id, "maintenance")
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let batch = profile
+            .as_ref()
+            .and_then(|value| value.maintenance_concurrency)
+            .unwrap_or(self.config.maintenance.batch_size as i32)
+            .max(1) as usize;
+        let maintenance_byte_budget = profile
+            .as_ref()
+            .and_then(|value| value.maintenance_byte_budget.as_deref())
+            .map(config::bytes)
+            .transpose()?;
         let (count, again, report) = if kind == "gc" {
             if self.maintenance.load(Ordering::Acquire) || self.maintenance_paused(kind).await? {
                 return Ok(false);
             }
-            let cleaned = self.cleanup().await?;
-            let count = self.reclaim().await?;
+            let cleaned = if let Some(storage_id) = scoped_storage {
+                self.cleanup_scoped(
+                    storage_id,
+                    batch,
+                    profile
+                        .as_ref()
+                        .map(|value| config::seconds(&value.upload_retention))
+                        .transpose()?
+                        .unwrap_or(config::seconds(&self.config.maintenance.upload_retention)?),
+                )
+                .await?
+            } else {
+                self.cleanup().await?
+            };
+            let count = if let Some(storage_id) = scoped_storage {
+                self.reclaim_scoped(
+                    storage_id,
+                    batch,
+                    profile
+                        .as_ref()
+                        .map(|value| config::seconds(&value.unreferenced_grace))
+                        .transpose()?
+                        .unwrap_or(config::seconds(
+                            &self.config.maintenance.unreferenced_grace,
+                        )?),
+                    maintenance_byte_budget.filter(|value| *value > 0),
+                )
+                .await?
+            } else {
+                self.reclaim().await?
+            };
             (
                 count as i64,
-                count >= self.config.gc.batch_size as usize,
+                count >= batch || cleaned >= batch,
                 json!({"local_cleaned":cleaned,"chunks_reclaimed":count}),
             )
         } else {
-            let report = self.cleanup_history().await?;
-            let count = report["last_run"]["deleted"]
-                .as_object()
-                .map(|v| v.values().filter_map(Value::as_i64).sum())
+            let report = if let Some(storage_id) = scoped_storage {
+                json!({"storage_id":storage_id,"deleted":self.cleanup_scoped(storage_id,batch,profile.as_ref().map(|value| config::seconds(&value.deleted_chunk_retention)).transpose()?.unwrap_or(config::seconds(&self.config.maintenance.deleted_chunk_retention)?)).await?})
+            } else {
+                self.cleanup_history().await?
+            };
+            let count = scoped_storage
+                .and_then(|_| report["deleted"].as_i64())
+                .or_else(|| {
+                    report["last_run"]["deleted"]
+                        .as_object()
+                        .map(|v| v.values().filter_map(Value::as_i64).sum())
+                })
                 .unwrap_or(0);
-            (count, false, report)
+            (
+                count,
+                scoped_storage.is_some_and(|_| count >= batch as i64),
+                report,
+            )
         };
-        sqlx::query("UPDATE tasks SET processed=processed+$2,state=CASE WHEN $3 THEN state ELSE 'completed' END,detail=detail||jsonb_build_object('report',$4::jsonb),updated_at=now() WHERE id=$1 AND state='running'")
+        sqlx::query("UPDATE tasks SET processed=processed+$2,state=CASE WHEN $3 THEN 'queued' ELSE 'completed' END,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,detail=detail||jsonb_build_object('report',$4::jsonb),updated_at=now() WHERE id=$1 AND state='running'")
             .bind(id).bind(count).bind(again).bind(report).execute(&self.db).await?;
         Ok(again)
     }

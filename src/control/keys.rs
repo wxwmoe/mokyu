@@ -53,6 +53,7 @@ pub(super) fn validate_grants(grants: &[BucketGrant]) -> Result<()> {
 }
 #[derive(Serialize, sqlx::FromRow, ToSchema)]
 pub(crate) struct Credential {
+    #[sqlx(rename = "access_key_id")]
     pub access_key: String,
     pub project_id: Uuid,
     pub label: String,
@@ -68,7 +69,7 @@ pub(crate) async fn get_credential(
     connection: &mut PgConnection,
     access: &str,
 ) -> Result<Credential> {
-    Ok(sqlx::query_as("SELECT c.*,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM grants g WHERE g.access_key=c.access_key),'[]'::jsonb) AS grants FROM credentials c WHERE c.access_key=$1")
+    Ok(sqlx::query_as("SELECT c.*,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM s3_credential_grants g WHERE g.access_key=c.access_key_id),'[]'::jsonb) AS grants FROM s3_credentials c WHERE c.access_key_id=$1")
         .bind(access).fetch_optional(connection).await?.ok_or_else(||s3s::s3_error!(NoSuchKey))?)
 }
 #[derive(Serialize, ToSchema)]
@@ -104,17 +105,19 @@ async fn replace_grants(
     if found != ids {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    sqlx::query("DELETE FROM grants WHERE access_key=$1")
+    sqlx::query("DELETE FROM s3_credential_grants WHERE access_key=$1")
         .bind(access)
         .execute(&mut **tx)
         .await?;
     for grant in grants {
-        sqlx::query("INSERT INTO grants(access_key,bucket_id,actions) VALUES($1,$2,$3)")
-            .bind(access)
-            .bind(grant.bucket_id)
-            .bind(grant.actions.iter().map(|a| a.name()).collect::<Vec<_>>())
-            .execute(&mut **tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO s3_credential_grants(access_key,bucket_id,actions) VALUES($1,$2,$3)",
+        )
+        .bind(access)
+        .bind(grant.bucket_id)
+        .bind(grant.actions.iter().map(|a| a.name()).collect::<Vec<_>>())
+        .execute(&mut **tx)
+        .await?;
     }
     Ok(())
 }
@@ -134,14 +137,14 @@ async fn insert(
     if project.is_none() {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    let access = format!("MOKYU{}", &crate::admin::random_secret()?[..24]);
-    let secret = crate::admin::random_secret()?;
+    let access = format!("MOKYU{}", &crate::cli::random_secret()?[..24]);
+    let secret = crate::cli::random_secret()?;
     let protected = codec::protect(
         secret.as_bytes(),
         &app.secrets.credential_key,
         access.as_bytes(),
     )?;
-    sqlx::query("INSERT INTO credentials(access_key,secret_encrypted,project_id,label,expires_at,created_by) VALUES($1,$2,$3,$4,$5,$6)").bind(&access).bind(protected).bind(input.project_id).bind(input.label.trim()).bind(expires).bind(principal.user_id()).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO s3_credentials(access_key_id,secret_encrypted,project_id,label,expires_at,created_by) VALUES($1,$2,$3,$4,$5,$6)").bind(&access).bind(protected).bind(input.project_id).bind(input.label.trim()).bind(expires).bind(principal.user_id()).execute(&mut **tx).await?;
     replace_grants(tx, &access, input.project_id, input.grants).await?;
     let credential = get_credential(tx, &access).await?;
     Ok(CredentialSecret {
@@ -183,7 +186,7 @@ pub(crate) async fn update_credential(
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     let mut tx = users::admin_transaction(app, principal).await?;
-    let changed=sqlx::query("UPDATE credentials SET label=$2,enabled=$3,expires_at=CASE WHEN $5 THEN expires_at ELSE $4 END WHERE access_key=$1").bind(access).bind(input.label.trim()).bind(input.enabled).bind(expires).bind(input.keep_expiry).execute(&mut *tx).await?.rows_affected();
+    let changed=sqlx::query("UPDATE s3_credentials SET label=$2,enabled=$3,expires_at=CASE WHEN $5 THEN expires_at ELSE $4 END WHERE access_key_id=$1").bind(access).bind(input.label.trim()).bind(input.enabled).bind(expires).bind(input.keep_expiry).execute(&mut *tx).await?.rows_affected();
     if changed == 0 {
         return Err(s3s::s3_error!(NoSuchKey).into());
     }
@@ -203,12 +206,13 @@ pub(crate) async fn set_grants(
     grants: Vec<BucketGrant>,
 ) -> Result<Credential> {
     let mut tx = users::admin_transaction(app, principal).await?;
-    let project =
-        sqlx::query_scalar("SELECT project_id FROM credentials WHERE access_key=$1 FOR UPDATE")
-            .bind(access)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+    let project = sqlx::query_scalar(
+        "SELECT project_id FROM s3_credentials WHERE access_key_id=$1 FOR UPDATE",
+    )
+    .bind(access)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
     replace_grants(&mut tx, access, project, grants).await?;
     let row = get_credential(&mut tx, access).await?;
     super::audit::checkpoint(
@@ -227,7 +231,7 @@ pub(crate) async fn revoke_credential(
     access: &str,
 ) -> Result<()> {
     let mut tx = users::admin_transaction(app, principal).await?;
-    sqlx::query("DELETE FROM credentials WHERE access_key=$1")
+    sqlx::query("DELETE FROM s3_credentials WHERE access_key_id=$1")
         .bind(access)
         .execute(&mut *tx)
         .await?;
@@ -242,7 +246,7 @@ pub(crate) async fn enable_credential(
     enabled: bool,
 ) -> Result<()> {
     let mut tx = users::admin_transaction(app, principal).await?;
-    let n = sqlx::query("UPDATE credentials SET enabled=$2 WHERE access_key=$1")
+    let n = sqlx::query("UPDATE s3_credentials SET enabled=$2 WHERE access_key_id=$1")
         .bind(access)
         .bind(enabled)
         .execute(&mut *tx)
@@ -269,10 +273,12 @@ pub(crate) async fn change_grant(
     actions: Vec<crate::authorization::Action>,
 ) -> Result<()> {
     let mut tx = users::admin_transaction(app, principal).await?;
-    sqlx::query("SELECT access_key FROM credentials WHERE access_key=$1 FOR UPDATE")
-        .bind(access)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "SELECT access_key_id AS access_key FROM s3_credentials WHERE access_key_id=$1 FOR UPDATE",
+    )
+    .bind(access)
+    .execute(&mut *tx)
+    .await?;
     let current = get_credential(&mut tx, access).await?;
     let mut grants = current.grants.0;
     grants.retain(|g| g.bucket_id != bucket);
@@ -318,10 +324,12 @@ pub(crate) async fn rotate_credential(
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     let mut tx = users::admin_transaction(app, principal).await?;
-    sqlx::query("SELECT access_key FROM credentials WHERE access_key=$1 FOR UPDATE")
-        .bind(access)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "SELECT access_key_id AS access_key FROM s3_credentials WHERE access_key_id=$1 FOR UPDATE",
+    )
+    .bind(access)
+    .execute(&mut *tx)
+    .await?;
     let current = get_credential(&mut tx, access).await?;
     if !current.enabled {
         return Err(s3s::s3_error!(InvalidArgument).into());
@@ -342,7 +350,7 @@ pub(crate) async fn rotate_credential(
         },
     )
     .await?;
-    sqlx::query("UPDATE credentials SET expires_at=$2 WHERE access_key=$1")
+    sqlx::query("UPDATE s3_credentials SET expires_at=$2 WHERE access_key_id=$1")
         .bind(access)
         .bind(old_expires_at)
         .execute(&mut *tx)
@@ -362,7 +370,9 @@ pub(super) struct CredentialQuery {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct CredentialPage {
+    #[serde(rename = "items")]
     credentials: Vec<Credential>,
+    #[serde(rename = "next_cursor")]
     next: Option<String>,
 }
 pub(crate) async fn list_credentials(
@@ -371,10 +381,10 @@ pub(crate) async fn list_credentials(
     after: &str,
     limit: i64,
 ) -> Result<Vec<Credential>> {
-    Ok(sqlx::query_as("SELECT c.*,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM grants g WHERE g.access_key=c.access_key),'[]'::jsonb) AS grants FROM credentials c WHERE ($1::uuid IS NULL OR c.project_id=$1) AND c.access_key>$2 ORDER BY c.access_key LIMIT $3")
+    Ok(sqlx::query_as("SELECT c.*,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM s3_credential_grants g WHERE g.access_key=c.access_key_id),'[]'::jsonb) AS grants FROM s3_credentials c WHERE ($1::uuid IS NULL OR c.project_id=$1) AND c.access_key_id>$2 ORDER BY c.access_key_id LIMIT $3")
         .bind(project).bind(after).bind(limit).fetch_all(db).await?)
 }
-#[utoipa::path(get,path="/api/credentials",operation_id="credentials_list",params(CredentialQuery),responses((status=200,body=CredentialPage)))]
+#[utoipa::path(get,path="/api/v1/s3-credentials",operation_id="credentials_list",params(CredentialQuery),responses((status=200,body=CredentialPage)))]
 pub(super) async fn list(
     State(app): State<Arc<App>>,
     Query(q): Query<CredentialQuery>,
@@ -390,7 +400,7 @@ pub(super) async fn list(
     let next = more.then(|| credentials.last().unwrap().access_key.clone());
     Ok(Json(CredentialPage { credentials, next }))
 }
-#[utoipa::path(post,path="/api/credentials",operation_id="credentials_create",request_body=CredentialInput,responses((status=201,body=CredentialSecret)))]
+#[utoipa::path(post,path="/api/v1/s3-credentials",operation_id="credentials_create",request_body=CredentialInput,responses((status=201,body=CredentialSecret)))]
 pub(super) async fn create(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -402,7 +412,7 @@ pub(super) async fn create(
         Json(create_credential(&app, &actor.principal, input).await?),
     ))
 }
-#[utoipa::path(put,path="/api/credentials/{key}",operation_id="credentials_update",params(("key"=String,Path)),request_body=CredentialSettings,responses((status=200,body=Credential)))]
+#[utoipa::path(put,path="/api/v1/s3-credentials/{key}",operation_id="credentials_update",params(("key"=String,Path)),request_body=CredentialSettings,responses((status=200,body=Credential)))]
 pub(super) async fn update(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -414,7 +424,7 @@ pub(super) async fn update(
         update_credential(&app, &actor.principal, &key, input).await?,
     ))
 }
-#[utoipa::path(delete,path="/api/credentials/{key}",operation_id="credentials_revoke",params(("key"=String,Path)),responses((status=204)))]
+#[utoipa::path(delete,path="/api/v1/s3-credentials/{key}",operation_id="credentials_revoke",params(("key"=String,Path)),responses((status=204)))]
 pub(super) async fn revoke(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -424,7 +434,7 @@ pub(super) async fn revoke(
     revoke_credential(&app, &actor.principal, &key).await?;
     Ok(StatusCode::NO_CONTENT)
 }
-#[utoipa::path(put,path="/api/credentials/{key}/grants",operation_id="credentials_grants",params(("key"=String,Path)),request_body=Vec<BucketGrant>,responses((status=200,body=Credential)))]
+#[utoipa::path(put,path="/api/v1/s3-credentials/{key}/grants",operation_id="credentials_grants",params(("key"=String,Path)),request_body=Vec<BucketGrant>,responses((status=200,body=Credential)))]
 pub(super) async fn grants(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -434,7 +444,7 @@ pub(super) async fn grants(
     actor.recent(&app).await?;
     Ok(Json(set_grants(&app, &actor.principal, &key, input).await?))
 }
-#[utoipa::path(post,path="/api/credentials/{key}/rotate",operation_id="credentials_rotate",params(("key"=String,Path)),request_body=RotateCredential,responses((status=201,body=CredentialRotation)))]
+#[utoipa::path(post,path="/api/v1/s3-credentials/{key}/rotate",operation_id="credentials_rotate",params(("key"=String,Path)),request_body=RotateCredential,responses((status=201,body=CredentialRotation)))]
 pub(super) async fn rotate(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

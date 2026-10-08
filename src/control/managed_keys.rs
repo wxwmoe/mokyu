@@ -87,7 +87,7 @@ pub(crate) async fn list_rows(db: &sqlx::PgPool) -> Result<Vec<ManagedKeyView>> 
         DateTime<Utc>,
         Option<DateTime<Utc>>,
     )> = sqlx::query_as(
-        "SELECT k.id,k.name,k.purpose,k.algorithm,EXISTS(SELECT 1 FROM stores s WHERE s.current_key_id=k.id),k.fingerprint,k.created_at,k.revoked_at FROM managed_keys k ORDER BY k.name",
+        "SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,EXISTS(SELECT 1 FROM storages s WHERE s.block_key_id=k.id),k.fingerprint,k.created_at,k.revoked_at FROM managed_keys k ORDER BY k.name",
     )
     .fetch_all(db)
     .await?;
@@ -114,10 +114,17 @@ pub(crate) async fn create_record(
         match input.algorithm.as_deref().unwrap_or("aes-256-gcm") {
             "aes-256-gcm" => "aes-256-gcm",
             "chacha20-poly1305" => "chacha20-poly1305",
-            _ => return Err(anyhow::anyhow!("block key algorithm must be aes-256-gcm or chacha20-poly1305")),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "block key algorithm must be aes-256-gcm or chacha20-poly1305"
+                ));
+            }
         }
     } else {
-        anyhow::ensure!(input.algorithm.is_none(), "access and signing keys do not accept an algorithm");
+        anyhow::ensure!(
+            input.algorithm.is_none(),
+            "access and signing keys do not accept an algorithm"
+        );
         "raw"
     };
     let runtime_key = (input.purpose == "block")
@@ -134,7 +141,7 @@ pub(crate) async fn create_record(
         DateTime<Utc>,
         Option<DateTime<Utc>>,
     ) = sqlx::query_as(
-        "INSERT INTO managed_keys(id,name,purpose,algorithm,secret_encrypted,fingerprint) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,purpose,algorithm,false,fingerprint,created_at,revoked_at",
+        "INSERT INTO managed_keys(id,name,purpose,key_algorithm,secret_encrypted,fingerprint) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,purpose,key_algorithm AS algorithm,false,fingerprint,created_at,revoked_at",
     )
     .bind(id)
     .bind(input.name.trim())
@@ -154,20 +161,28 @@ pub(crate) async fn create_record(
     .await?;
     tx.commit().await?;
     if let Some(key) = runtime_key {
-        app.secrets.publish_key(result.name.clone(), key)?;
+        app.secrets
+            .publish_key_with_id(Some(id), result.name.clone(), key)?;
     }
     Ok(result)
 }
 
 pub(crate) async fn revoke_record(app: &App, principal: &Principal, id: Uuid) -> Result<()> {
     let mut tx = users::admin_transaction(app, principal).await?;
-    let name: Option<String> = sqlx::query_scalar("SELECT name FROM managed_keys WHERE id=$1 FOR UPDATE")
-        .bind(id).fetch_optional(&mut *tx).await?;
+    let name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM managed_keys WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
     let name = name.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
-    let used: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM stores WHERE current_key_id=$1) OR EXISTS(SELECT 1 FROM chunk_locations WHERE key_id=$2 AND state<>'deleted') OR EXISTS(SELECT 1 FROM packs WHERE key_id=$2 AND state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.key_id=$2) OR EXISTS(SELECT 1 FROM tasks WHERE detail->>'target_key'=$2 AND state IN ('queued','running','paused','failed'))")
-        .bind(id).bind(&name).fetch_one(&mut *tx).await?;
+    let used: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE block_key_id=$1) OR EXISTS(SELECT 1 FROM chunk_encodings WHERE block_key_id=$2 AND state<>'deleted') OR EXISTS(SELECT 1 FROM packs WHERE block_key_id=$2 AND state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=$2) OR EXISTS(SELECT 1 FROM tasks WHERE detail->>'target_key'=$2 AND state IN ('queued','running','paused','failed'))")
+        .bind(id).bind(id).fetch_one(&mut *tx).await?;
     if used {
-        return Err(s3s::s3_error!(InvalidRequest, "key is still used by a store, physical encoding, pending upload or task").into());
+        return Err(s3s::s3_error!(
+            InvalidRequest,
+            "key is still used by a storage, physical encoding, pending upload or task"
+        )
+        .into());
     }
     let changed = sqlx::query(
         "UPDATE managed_keys SET revoked_at=coalesce(revoked_at,now()),secret_encrypted=NULL WHERE id=$1",
@@ -190,7 +205,7 @@ pub(crate) async fn revoke_record(app: &App, principal: &Principal, id: Uuid) ->
     Ok(())
 }
 
-#[utoipa::path(get, operation_id = "managed_keys", path = "/api/keys", responses((status = 200, body = Vec<ManagedKeyView>)))]
+#[utoipa::path(get, operation_id = "managed_keys", path = "/api/v1/keys", responses((status = 200, body = Vec<ManagedKeyView>)))]
 pub(crate) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -201,7 +216,7 @@ pub(crate) async fn list(
     Ok(Json(rows))
 }
 
-#[utoipa::path(post, operation_id = "managed_key_create", path = "/api/keys", request_body = ManagedKeyInput, responses((status = 201, body = ManagedKeyView)))]
+#[utoipa::path(post, operation_id = "managed_key_create", path = "/api/v1/keys", request_body = ManagedKeyInput, responses((status = 201, body = ManagedKeyView)))]
 pub(crate) async fn create(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -214,7 +229,7 @@ pub(crate) async fn create(
     ))
 }
 
-#[utoipa::path(delete, operation_id = "managed_key_revoke", path = "/api/keys/{id}", params(("id" = Uuid, Path)), responses((status = 204)))]
+#[utoipa::path(delete, operation_id = "managed_key_revoke", path = "/api/v1/keys/{id}", params(("id" = Uuid, Path)), responses((status = 204)))]
 pub(crate) async fn revoke(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

@@ -41,7 +41,10 @@ pub(crate) async fn begin(
     };
     let source = if principal.token_id().is_some() {
         "token"
-    } else if matches!(principal, Principal::Local) {
+    } else if matches!(
+        principal,
+        Principal::System | Principal::Bootstrap | Principal::Node { .. }
+    ) {
         "cli"
     } else {
         "web"
@@ -86,7 +89,7 @@ pub(crate) async fn finish(db: &PgPool, id: i64, status: u16, partial: bool) {
     } else {
         "succeeded"
     };
-    if let Err(error)=sqlx::query("UPDATE audit_events SET outcome=CASE WHEN outcome='unknown' THEN $2 ELSE outcome END,finished_at=COALESCE(finished_at,now()),status=$3 WHERE id=$1")
+    if let Err(error)=sqlx::query("UPDATE audit_events SET outcome=CASE WHEN outcome='unknown' THEN $2 ELSE outcome END,finished_at=COALESCE(finished_at,now()),http_status=$3 WHERE id=$1")
         .bind(id).bind(outcome).bind(i32::from(status)).execute(db).await {
         tracing::warn!(audit_id=id,%error,"audit result could not be saved; durable intent remains");
     }
@@ -132,6 +135,7 @@ pub(crate) struct Event {
     bucket_id: Option<Uuid>,
     outcome: String,
     request_id: Option<String>,
+    #[sqlx(rename = "http_status")]
     status: Option<i32>,
     detail: Value,
 }
@@ -150,7 +154,9 @@ pub(crate) struct Filter {
 }
 #[derive(Serialize, ToSchema)]
 pub(crate) struct Page {
+    #[serde(rename = "items")]
     events: Vec<Event>,
+    #[serde(rename = "next_cursor")]
     next: Option<String>,
 }
 pub(crate) async fn page(
@@ -182,14 +188,14 @@ pub(crate) async fn page(
     {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    let mut events: Vec<Event>=sqlx::query_as("SELECT e.id::text,e.created_at,e.finished_at,e.actor_id,e.actor_label,e.token_id,e.source,e.action,e.target,e.project_id,e.bucket_id,e.outcome,e.request_id,e.status,CASE WHEN $13 OR octet_length(e.detail::text)<=8192 THEN e.detail ELSE '{\"details_available\":true}'::jsonb END AS detail FROM audit_events e WHERE ($1 OR (actor_id=$2 AND ((e.bucket_id IS NULL AND (starts_with(e.action,'account.') OR starts_with(e.action,'session.') OR starts_with(e.action,'token.') OR (e.outcome='failed' AND e.target='' AND e.detail='{}'::jsonb))) OR EXISTS(SELECT 1 FROM user_bucket_access a WHERE a.user_id=$2 AND a.bucket_id=e.bucket_id AND 'bucket.list'=ANY(a.actions))))) AND ($3::bigint IS NULL OR e.id<$3) AND position(lower($4) in lower(e.actor_label))>0 AND starts_with(e.action,$5) AND ($6::text IS NULL OR e.source=$6) AND ($7::text IS NULL OR e.outcome=$7) AND ($8::uuid IS NULL OR e.project_id=$8) AND ($9::uuid IS NULL OR e.bucket_id=$9) AND ($10::timestamptz IS NULL OR e.created_at>=$10) AND ($11::timestamptz IS NULL OR e.created_at<=$11) ORDER BY e.id DESC LIMIT $12")
+    let mut events: Vec<Event>=sqlx::query_as("SELECT e.id::text,e.created_at,e.finished_at,e.actor_id,e.actor_label,e.token_id,e.source,e.action,e.target,e.project_id,e.bucket_id,e.outcome,e.request_id,e.http_status,CASE WHEN $13 OR octet_length(e.detail::text)<=8192 THEN e.detail ELSE '{\"details_available\":true}'::jsonb END AS detail FROM audit_events e WHERE ($1 OR (actor_id=$2 AND ((e.bucket_id IS NULL AND (starts_with(e.action,'account.') OR starts_with(e.action,'session.') OR starts_with(e.action,'token.') OR (e.outcome='failed' AND e.target='' AND e.detail='{}'::jsonb))) OR EXISTS(SELECT 1 FROM user_bucket_access a WHERE a.user_id=$2 AND a.bucket_id=e.bucket_id AND 'bucket.list'=ANY(a.actions))))) AND ($3::bigint IS NULL OR e.id<$3) AND position(lower($4) in lower(e.actor_label))>0 AND starts_with(e.action,$5) AND ($6::text IS NULL OR e.source=$6) AND ($7::text IS NULL OR e.outcome=$7) AND ($8::uuid IS NULL OR e.project_id=$8) AND ($9::uuid IS NULL OR e.bucket_id=$9) AND ($10::timestamptz IS NULL OR e.created_at>=$10) AND ($11::timestamptz IS NULL OR e.created_at<=$11) ORDER BY e.id DESC LIMIT $12")
         .bind(admin).bind(user).bind(before).bind(filter.actor.unwrap_or_default()).bind(filter.action.unwrap_or_default()).bind(filter.source).bind(filter.outcome).bind(filter.project).bind(filter.bucket).bind(filter.since).bind(filter.until).bind(limit+1).bind(export).fetch_all(&app.db).await?;
     let more = events.len() > limit as usize;
     events.truncate(limit as usize);
     let next = more.then(|| events.last().unwrap().id.clone());
     Ok(Page { events, next })
 }
-#[utoipa::path(get,path="/api/audit",operation_id="audit_list",params(Filter),responses((status=200,body=Page)))]
+#[utoipa::path(get,path="/api/v1/audit",operation_id="audit_list",params(Filter),responses((status=200,body=Page)))]
 pub(super) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -199,7 +205,7 @@ pub(super) async fn list(
         page(&app, actor.admin, Some(actor.id), filter, false).await?,
     ))
 }
-#[utoipa::path(get,path="/api/audit/{id}",operation_id="audit_detail",params(("id"=String,Path)),responses((status=200,body=Event)))]
+#[utoipa::path(get,path="/api/v1/audit/{id}",operation_id="audit_detail",params(("id"=String,Path)),responses((status=200,body=Event)))]
 pub(super) async fn get(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -208,11 +214,11 @@ pub(super) async fn get(
     let id = id
         .parse::<i64>()
         .map_err(|_| s3s::s3_error!(InvalidArgument))?;
-    let event=sqlx::query_as("SELECT e.id::text,e.created_at,e.finished_at,e.actor_id,e.actor_label,e.token_id,e.source,e.action,e.target,e.project_id,e.bucket_id,e.outcome,e.request_id,e.status,e.detail FROM audit_events e WHERE e.id=$1 AND ($2 OR (e.actor_id=$3 AND ((e.bucket_id IS NULL AND (starts_with(e.action,'account.') OR starts_with(e.action,'session.') OR starts_with(e.action,'token.') OR (e.outcome='failed' AND e.target='' AND e.detail='{}'::jsonb))) OR EXISTS(SELECT 1 FROM user_bucket_access a WHERE a.user_id=$3 AND a.bucket_id=e.bucket_id AND 'bucket.list'=ANY(a.actions)))))")
+    let event=sqlx::query_as("SELECT e.id::text,e.created_at,e.finished_at,e.actor_id,e.actor_label,e.token_id,e.source,e.action,e.target,e.project_id,e.bucket_id,e.outcome,e.request_id,e.http_status,e.detail FROM audit_events e WHERE e.id=$1 AND ($2 OR (e.actor_id=$3 AND ((e.bucket_id IS NULL AND (starts_with(e.action,'account.') OR starts_with(e.action,'session.') OR starts_with(e.action,'token.') OR (e.outcome='failed' AND e.target='' AND e.detail='{}'::jsonb))) OR EXISTS(SELECT 1 FROM user_bucket_access a WHERE a.user_id=$3 AND a.bucket_id=e.bucket_id AND 'bucket.list'=ANY(a.actions)))))")
         .bind(id).bind(actor.admin).bind(actor.id).fetch_optional(&app.db).await?.ok_or_else(||s3s::s3_error!(NoSuchKey))?;
     Ok(Json(event))
 }
-#[utoipa::path(get,path="/api/audit/export",operation_id="audit_export",params(Filter),responses((status=200,description="Up to 100 JSON Lines; X-Next-Cursor continues the export.")))]
+#[utoipa::path(get,path="/api/v1/audit/export",operation_id="audit_export",params(Filter),responses((status=200,description="Up to 100 JSON Lines; X-Next-Cursor continues the export.")))]
 pub(super) async fn export(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

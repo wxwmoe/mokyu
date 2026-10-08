@@ -12,110 +12,36 @@ use std::{
 #[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Strategy {
+    Never,
     #[default]
     Always,
     Sample,
-    FileType,
 }
 
 #[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub enabled: bool,
     pub strategy: Strategy,
     pub level: i32,
     pub sample_level: i32,
     pub min_savings_percent: u8,
     pub min_savings_bytes: u64,
     pub context_idle_timeout: String,
-    pub skip_mime_types: Vec<String>,
 }
-
-const SKIP_TYPES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/apng",
-    "image/gif",
-    "image/webp",
-    "image/avif",
-    "video/mp4",
-    "video/webm",
-    "audio/mp4",
-    "audio/mpeg",
-    "audio/aac",
-    "audio/ogg",
-    "video/ogg",
-    "application/ogg",
-    "audio/flac",
-    "audio/x-flac",
-    "application/zip",
-    "application/gzip",
-    "application/x-gzip",
-    "application/x-7z-compressed",
-    "application/vnd.rar",
-    "application/x-rar-compressed",
-    "application/x-xz",
-    "application/x-bzip2",
-    "application/zstd",
-];
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            enabled: true,
             strategy: Strategy::Always,
             level: 6,
             sample_level: 3,
             min_savings_percent: 2,
             min_savings_bytes: 256,
             context_idle_timeout: "30s".into(),
-            skip_mime_types: SKIP_TYPES.iter().map(|s| (*s).into()).collect(),
         }
     }
-}
-
-fn valid_mime(value: &str) -> bool {
-    value.split_once('/').is_some_and(|(a, b)| {
-        [a, b].into_iter().all(|s| {
-            !s.is_empty()
-                && s.bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"!#$%&'+-.^_`|~".contains(&c))
-        })
-    })
-}
-
-fn extension_type(key: &str) -> Option<&'static str> {
-    let (_, ext) = key.rsplit('/').next()?.rsplit_once('.')?;
-    Some(match ext.to_ascii_lowercase().as_str() {
-        "jpg" | "jpeg" | "jpe" => "image/jpeg",
-        "png" => "image/png",
-        "apng" => "image/apng",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "avif" => "image/avif",
-        "svg" => "image/svg+xml",
-        "mp4" | "m4v" => "video/mp4",
-        "webm" => "video/webm",
-        "m4a" => "audio/mp4",
-        "mp3" | "mp2" => "audio/mpeg",
-        "aac" => "audio/aac",
-        "ogg" | "oga" | "opus" => "audio/ogg",
-        "ogv" => "video/ogg",
-        "ogx" => "application/ogg",
-        "flac" => "audio/flac",
-        "zip" => "application/zip",
-        "gz" | "tgz" => "application/gzip",
-        "7z" => "application/x-7z-compressed",
-        "rar" => "application/vnd.rar",
-        "xz" => "application/x-xz",
-        "bz2" => "application/x-bzip2",
-        "zst" | "zstd" => "application/zstd",
-        "txt" => "text/plain",
-        "html" | "htm" => "text/html",
-        "css" => "text/css",
-        "js" | "mjs" => "text/javascript",
-        "json" => "application/json",
-        "xml" => "application/xml",
-        _ => return None,
-    })
 }
 
 impl Config {
@@ -146,10 +72,6 @@ impl Config {
         );
         self.idle_timeout()
             .context("invalid compression.context_idle_timeout")?;
-        ensure!(
-            self.skip_mime_types.iter().all(|s| valid_mime(s)),
-            "compression.skip_mime_types requires exact MIME types without parameters or wildcards"
-        );
         Ok(())
     }
 
@@ -190,27 +112,8 @@ impl Config {
             .context("compression workspace budget overflow")
     }
 
-    pub fn should_try(&self, content_type: Option<&str>, key: &str) -> bool {
-        if self.strategy != Strategy::FileType {
-            return true;
-        }
-        let mime = content_type.map(|v| {
-            v.split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase()
-        });
-        let mime = mime
-            .as_deref()
-            .filter(|v| valid_mime(v) && *v != "application/octet-stream")
-            .or_else(|| extension_type(key));
-        mime.is_none_or(|mime| {
-            !self
-                .skip_mime_types
-                .iter()
-                .any(|v| v.eq_ignore_ascii_case(mime))
-        })
+    pub fn should_try(&self, _content_type: Option<&str>, _key: &str) -> bool {
+        self.enabled && self.strategy != Strategy::Never
     }
 
     fn worth_storing(&self, raw: usize, compressed: usize) -> bool {
@@ -250,6 +153,9 @@ impl Workspace {
         Ok(compressor.compress_to_buffer(input, &mut self.output)?)
     }
     fn encode(&mut self, input: &[u8], config: &Config) -> Result<Option<Vec<u8>>> {
+        if config.strategy == Strategy::Never {
+            return Ok(None);
+        }
         if config.strategy == Strategy::Sample && input.len() >= MIN {
             let len = (input.len() / 64).clamp(16 * 1024, 64 * 1024);
             let sample_level = config.separate_sample_level();
@@ -313,7 +219,7 @@ impl Pool {
             !input.is_empty() && input.len() <= crate::pack::MAX_PAYLOAD,
             "pack compression exceeds bound"
         );
-        if !should_try {
+        if !self.config.enabled || !should_try || strategy == Strategy::Never {
             return Ok(None);
         }
         let cached = self.idle.lock().unwrap().pop();
@@ -422,8 +328,6 @@ mod tests {
             "min_savings_percent=101",
             "min_savings_bytes=-1",
             "context_idle_timeout='-1s'",
-            "skip_mime_types=['image/*']",
-            "skip_mime_types=['image/png; x=1']",
         ] {
             assert!(
                 toml::from_str::<Config>(text)
@@ -449,7 +353,7 @@ mod tests {
         }
         c = Config::default();
         let full_budget = c.workspace_bytes().unwrap();
-        for strategy in [Strategy::Always, Strategy::FileType] {
+        for strategy in [Strategy::Never, Strategy::Always] {
             c.strategy = strategy;
             c.sample_level = 12;
             assert_eq!(c.workspace_bytes().unwrap(), full_budget);
@@ -473,24 +377,8 @@ mod tests {
         assert!(c.should_try(Some("image/jpeg"), "a.jpg"));
         c.strategy = Strategy::Sample;
         assert!(c.should_try(Some("image/jpeg"), "a.jpg"));
-        c.strategy = Strategy::FileType;
-        for (mime, key, expected) in [
-            (Some(" IMAGE/JPEG ; charset=x"), "no-extension", false),
-            (Some("application/octet-stream"), "a.MP4", false),
-            (None, "a.jpg", false),
-            (Some("invalid"), "a.png", false),
-            (Some("image/svg+xml"), "a.jpg", true),
-            (None, "a.svg", true),
-            (Some("text/plain"), "a.png", true),
-            (None, "a.unknown", true),
-            (Some("application/octet-stream"), "opaque-id", true),
-        ] {
-            assert_eq!(c.should_try(mime, key), expected, "{mime:?} {key}");
-        }
-        c.skip_mime_types.clear();
-        assert!(c.should_try(Some("image/jpeg"), "a.jpg"));
-        c.skip_mime_types.push("TEXT/PLAIN".into());
-        assert!(!c.should_try(None, "a.txt"));
+        c.strategy = Strategy::Never;
+        assert!(!c.should_try(Some("image/jpeg"), "a.jpg"));
     }
 
     #[test]
@@ -592,14 +480,18 @@ mod tests {
                 assert_eq!(work.sampler.is_some(), separate);
             }
         }
-        for strategy in [Strategy::Always, Strategy::FileType] {
+        for strategy in [Strategy::Never, Strategy::Always] {
             let config = Config {
                 strategy,
                 sample_level: fastest,
                 ..Default::default()
             };
             let mut work = Workspace::new(config.level).unwrap();
-            assert_eq!(work.encode(&input, &config).unwrap().unwrap(), full);
+            let encoded = work.encode(&input, &config).unwrap();
+            assert_eq!(
+                encoded,
+                (strategy == Strategy::Always).then_some(full.clone())
+            );
             assert!(work.sampler.is_none());
         }
     }

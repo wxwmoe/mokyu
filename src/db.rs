@@ -1,20 +1,11 @@
 use crate::config::{Budget, Config, Secrets};
 use anyhow::{Context, Result, ensure};
 use serde::{Serialize, de::DeserializeOwned};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 use serde_json::{Value, json};
+use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-
-fn without_fields(mut value: Value, fields: &[&str]) -> Value {
-    if let Some(object) = value.as_object_mut() {
-        for field in fields {
-            object.remove(*field);
-        }
-    }
-    value
-}
 
 fn overlay<T>(current: &T, patch: &Value) -> Result<T>
 where
@@ -33,117 +24,61 @@ where
     Ok(serde_json::from_value(value)?)
 }
 
-fn rename_fields(value: &mut Value, names: &[(&str, &str)]) {
-    if let Some(object) = value.as_object_mut() {
-        for (from, to) in names {
-            if let Some(value) = object.remove(*from) {
-                object.insert((*to).into(), value);
-            }
-        }
-    }
-}
-
 pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
     vec![
         (
             "web",
             json!({
-                "origin": configured.control.origin.clone(),
-                "secure_cookie": configured.control.secure_cookie,
-                "session_lifetime": configured.control.session_lifetime.clone(),
-                "avatar_url": configured.control.gravatar_base_url.clone(),
-            }),
-        ),
-        (
-            "s3",
-            json!({
-                "domain": configured.listen.s3_domain.clone(),
-                "signature_region": configured.listen.region.clone(),
-                "max_stream_chunk_size": configured.listen.aws_chunk_limit.clone(),
-            }),
-        ),
-        (
-            "storage",
-            json!({
-                "connect_timeout": configured.storage.connect_timeout.clone(),
-                "request_timeout": configured.storage.request_timeout.clone(),
-                "max_retries": configured.storage.max_retries,
-                "retry_timeout": configured.storage.retry_timeout.clone(),
-                "priority_aging": configured.storage.priority_aging.clone(),
-                "min_retention": configured.storage.min_storage_duration.clone(),
+                "origin": configured.web.origin.clone(),
+                "secure_cookie": configured.web.secure_cookie,
+                "session_lifetime": configured.web.session_lifetime.clone(),
+                "gravatar_base_url": configured.web.gravatar_base_url.clone(),
             }),
         ),
         (
             "requests",
             json!({
-                "read_idle_timeout": configured.processing.read_idle_timeout.clone(),
-                "upload_idle_timeout": configured.processing.upload_idle_timeout.clone(),
+                "s3_domain": configured.requests.s3_domain.clone(),
+                "s3_region": configured.requests.s3_region.clone(),
+                "s3_chunk_limit": configured.requests.s3_chunk_limit.clone(),
+                "read_idle_timeout": configured.requests.read_idle_timeout.clone(),
+                "upload_idle_timeout": configured.requests.upload_idle_timeout.clone(),
             }),
         ),
         (
             "uploads",
             json!({
-                "idle_timeout": configured.multipart.idle_timeout.clone(),
-                "sweep_interval": configured.multipart.sweep_interval.clone(),
-                "client_idle_timeout": configured.multipart.client_idle_timeout.clone(),
-                "max_active": configured.multipart.max_active_uploads,
+                "idle_timeout": configured.uploads.idle_timeout.clone(),
+                "sweep_interval": configured.uploads.sweep_interval.clone(),
+                "client_idle_timeout": configured.uploads.client_idle_timeout.clone(),
+                "max_active_uploads": configured.uploads.max_active_uploads,
+                "staging_storage_id": configured.uploads.staging_storage_id,
+                "staging_bytes_limit": configured.uploads.staging_bytes_limit.clone(),
             }),
         ),
         (
-            "cache",
+            "metrics",
             json!({
-                "upload_enabled": configured.cache.upload_cache,
-                "min_savings_percent": configured.cache.min_compression_savings_percent,
+                "scope_limit": configured.metrics.scope_limit,
+                "storage_interval": configured.metrics.storage_interval.clone(),
+                "storage_retention": configured.metrics.storage_retention.clone(),
+                "runtime_interval": configured.metrics.runtime_interval.clone(),
+                "runtime_retention": configured.metrics.runtime_retention.clone(),
+                "refresh_interval": configured.metrics.refresh_interval.clone(),
+                "query_timeout": configured.metrics.query_timeout.clone(),
+                "access_flush_interval": configured.metrics.access_flush_interval.clone(),
+                "access_retention": configured.metrics.access_retention.clone(),
             }),
         ),
         (
-            "compression",
-            without_fields(
-                serde_json::to_value(&configured.compression).unwrap_or_default(),
-                &["context_idle_timeout"],
-            ),
-        ),
-        (
-            "packing",
-            without_fields(
-                {
-                    let mut value = serde_json::to_value(&configured.pack).unwrap_or_default();
-                    rename_fields(&mut value, &[("range_optimization", "range_enabled")]);
-                    value
-                },
-                &["maintenance_concurrency"],
-            ),
-        ),
-        (
-            "garbage_collection",
-            {
-                let mut value = serde_json::to_value(&configured.gc).unwrap_or_default();
-                rename_fields(&mut value, &[("unreferenced_grace", "grace_period")]);
-                value
-            },
-        ),
-        (
-            "retention",
-            {
-                let mut value = serde_json::to_value(&configured.cleanup).unwrap_or_default();
-                rename_fields(&mut value, &[("deleted_chunk_retention", "deleted_chunks"), ("upload_retention", "uploads"), ("task_retention", "tasks"), ("audit_retention", "audit")]);
-                value
-            },
-        ),
-        (
-            "statistics",
-            {
-                let mut value = serde_json::to_value(&configured.statistics).unwrap_or_default();
-                rename_fields(&mut value, &[("storage_sample_interval", "storage_interval"), ("runtime_sample_interval", "runtime_interval")]);
-                value
-            },
-        ),
-        (
-            "integrity",
-            without_fields(
-                serde_json::to_value(&configured.integrity).unwrap_or_default(),
-                &["concurrency", "requests_per_second", "bandwidth"],
-            ),
+            "maintenance",
+            json!({
+                "interval": configured.maintenance.interval.clone(),
+                "batch_size": configured.maintenance.batch_size,
+                "max_duration": configured.maintenance.max_duration.clone(),
+                "task_retention": configured.maintenance.task_retention.clone(),
+                "audit_retention": configured.maintenance.audit_retention.clone(),
+            }),
         ),
     ]
 }
@@ -161,7 +96,10 @@ pub async fn ensure_runtime_settings(pool: &PgPool, configured: &Config) -> Resu
     Ok(())
 }
 
-pub async fn load_runtime_settings(pool: &PgPool, config: &mut Config) -> Result<HashMap<String, i64>> {
+pub async fn load_runtime_settings(
+    pool: &PgPool,
+    config: &mut Config,
+) -> Result<HashMap<String, i64>> {
     let rows: Vec<(String, Value, i64)> =
         sqlx::query_as("SELECT section,value,revision FROM runtime_settings ORDER BY section")
             .fetch_all(pool)
@@ -175,67 +113,30 @@ pub async fn load_runtime_settings(pool: &PgPool, config: &mut Config) -> Result
     Ok(revisions)
 }
 
-pub(crate) fn apply_runtime_section(config: &mut Config, section: &str, mut value: Value) -> Result<()> {
-        match section {
-            "web" => {
-                value = without_fields(value, &["thumbnail_cache_size"]);
-                rename_fields(&mut value, &[("avatar_url", "gravatar_base_url")]);
-                config.control = overlay(&config.control, &value)?;
-            }
-            "s3" => {
-                rename_fields(&mut value, &[("domain", "s3_domain"), ("signature_region", "region"), ("max_stream_chunk_size", "aws_chunk_limit")]);
-                config.listen = overlay(&config.listen, &value)?;
-            }
-            "storage" => {
-                rename_fields(&mut value, &[("min_retention", "min_storage_duration")]);
-                config.storage = overlay(&config.storage, &value)?;
-            }
-            "requests" => config.processing = overlay(&config.processing, &value)?,
-            "uploads" => {
-                rename_fields(&mut value, &[("max_active", "max_active_uploads")]);
-                config.multipart = overlay(&config.multipart, &value)?;
-            }
-            "cache" => {
-                rename_fields(&mut value, &[("upload_enabled", "upload_cache"), ("min_savings_percent", "min_compression_savings_percent")]);
-                config.cache = overlay(&config.cache, &value)?;
-            }
-            "compression" => {
-                value = without_fields(value, &["context_idle_timeout"]);
-                config.compression = overlay(&config.compression, &value)?;
-            }
-            "packing" => {
-                value = without_fields(value, &["maintenance_concurrency"]);
-                rename_fields(&mut value, &[("range_enabled", "range_optimization")]);
-                config.pack = overlay(&config.pack, &value)?;
-            }
-            "garbage_collection" => {
-                rename_fields(&mut value, &[("grace_period", "unreferenced_grace")]);
-                config.gc = overlay(&config.gc, &value)?;
-            }
-            "retention" => {
-                rename_fields(&mut value, &[("deleted_chunks", "deleted_chunk_retention"), ("uploads", "upload_retention"), ("tasks", "task_retention"), ("audit", "audit_retention")]);
-                config.cleanup = overlay(&config.cleanup, &value)?;
-            }
-            "statistics" => {
-                rename_fields(&mut value, &[("storage_interval", "storage_sample_interval"), ("runtime_interval", "runtime_sample_interval")]);
-                config.statistics = overlay(&config.statistics, &value)?;
-            }
-            "integrity" => {
-                value = without_fields(value, &["concurrency", "requests_per_second", "bandwidth"]);
-                config.integrity = overlay(&config.integrity, &value)?;
-            }
-            _ => anyhow::bail!("unknown runtime settings section {section}"),
-        }
+pub(crate) fn apply_runtime_section(
+    config: &mut Config,
+    section: &str,
+    value: Value,
+) -> Result<()> {
+    match section {
+        "web" => config.web = overlay(&config.web, &value)?,
+        "requests" => config.requests = overlay(&config.requests, &value)?,
+        "uploads" => config.uploads = overlay(&config.uploads, &value)?,
+        "metrics" => config.metrics = overlay(&config.metrics, &value)?,
+        "maintenance" => config.maintenance = overlay(&config.maintenance, &value)?,
+        _ => anyhow::bail!("unknown runtime settings section {section}"),
+    }
     Ok(())
 }
 
 async fn load_database_keys(pool: &PgPool, secrets: &mut Secrets) -> Result<()> {
     let rows: Vec<(uuid::Uuid, String, String, String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
-        "SELECT id,name,purpose,algorithm,secret_encrypted,fingerprint FROM managed_keys WHERE secret_encrypted IS NOT NULL ORDER BY id",
+        "SELECT id,name,purpose,key_algorithm,secret_encrypted,fingerprint FROM managed_keys WHERE secret_encrypted IS NOT NULL ORDER BY id",
     )
     .fetch_all(pool)
     .await?;
     let mut keys = BTreeMap::new();
+    let mut key_names = BTreeMap::new();
     let mut materials = HashSet::new();
     for (id, name, purpose, key_algorithm, encrypted, fingerprint) in rows {
         let material = crate::codec::unprotect_bytes(
@@ -259,9 +160,14 @@ async fn load_database_keys(pool: &PgPool, secrets: &mut Secrets) -> Result<()> 
             "invalid managed encryption key algorithm"
         );
         let key = crate::codec::Key::new(&key_algorithm, material)?;
+        key_names.insert(id, name.clone());
         keys.insert(name, key);
     }
     secrets.keys = keys;
+    *secrets
+        .key_names
+        .write()
+        .map_err(|_| anyhow::anyhow!("key registry is unavailable"))? = key_names;
     secrets
         .runtime_keys
         .write()
@@ -275,7 +181,7 @@ pub(crate) async fn load_runtime_key(pool: &PgPool, secrets: &Secrets, name: &st
         return Ok(());
     }
     let row: Option<(uuid::Uuid, String, String, String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
-        "SELECT id,name,purpose,algorithm,secret_encrypted,fingerprint FROM managed_keys WHERE name=$1 AND secret_encrypted IS NOT NULL",
+        "SELECT id,name,purpose,key_algorithm,secret_encrypted,fingerprint FROM managed_keys WHERE name=$1 AND secret_encrypted IS NOT NULL",
     )
     .bind(name)
     .fetch_optional(pool)
@@ -295,13 +201,18 @@ pub(crate) async fn load_runtime_key(pool: &PgPool, secrets: &Secrets, name: &st
         fingerprint == blake3::hash(&material).as_bytes(),
         "managed key fingerprint mismatch"
     );
-    secrets.publish_key(stored_name, crate::codec::Key::new(&algorithm, material)?)
+    secrets.publish_key_with_id(
+        Some(id),
+        stored_name,
+        crate::codec::Key::new(&algorithm, material)?,
+    )
 }
 
 pub async fn connect(
     c: &Config,
     secrets: &mut Secrets,
     budget: &Budget,
+    role: &str,
 ) -> Result<(PgPool, PgConnection)> {
     let options = sqlx::postgres::PgConnectOptions::new()
         .host(&c.database.host)
@@ -315,7 +226,7 @@ pub async fn connect(
         .map_err(|_| anyhow::anyhow!("cannot connect to PostgreSQL"))?;
     let pool = PgPoolOptions::new()
         .min_connections(0)
-        .max_connections(budget.db_connections)
+        .max_connections(budget.database_connections)
         .acquire_timeout(std::time::Duration::from_secs(15))
         .acquire_time_level(log::LevelFilter::Debug)
         .acquire_slow_threshold(std::time::Duration::from_millis(200))
@@ -358,17 +269,12 @@ pub async fn connect(
     } else {
         false
     };
-    if cluster_mode {
-        sqlx::query("SELECT pg_advisory_lock(734922709851001)")
-            .execute(&mut owner)
-            .await?;
-    } else {
+    if role == "single" && !cluster_mode {
         let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(734922709851001)")
             .fetch_one(&mut owner)
             .await?;
         ensure!(locked, "another gateway owns this database");
     }
-    let storage_identity = "storage-registry";
     let latest = MIGRATIONS
         .iter()
         .last()
@@ -390,7 +296,7 @@ pub async fn connect(
                 "0.0.4 requires a fresh database or an empty 0.0.3 schema"
             );
             let used: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM buckets) OR EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM projects WHERE id <> '00000000-0000-0000-0000-000000000001') OR EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM uploads) OR EXISTS(SELECT 1 FROM sessions) OR EXISTS(SELECT 1 FROM tasks) OR EXISTS(SELECT 1 FROM web_users) OR EXISTS(SELECT 1 FROM admin_setup)",
+                "SELECT EXISTS(SELECT 1 FROM buckets) OR EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM projects WHERE id <> '00000000-0000-0000-0000-000000000001') OR EXISTS(SELECT 1 FROM s3_credentials) OR EXISTS(SELECT 1 FROM uploads) OR EXISTS(SELECT 1 FROM sessions) OR EXISTS(SELECT 1 FROM tasks) OR EXISTS(SELECT 1 FROM web_users) OR EXISTS(SELECT 1 FROM setup_tokens)",
             )
             .fetch_one(&pool)
             .await?;
@@ -400,13 +306,14 @@ pub async fn connect(
             );
         }
     }
-    // Migrate on the database owner connection, before listeners or background work start.
+    // Migrate before listeners or background work start. The migrator serializes
+    // concurrent cluster upgrades; cluster roles do not hold a runtime session lock.
     sqlx::raw_sql("SET synchronous_commit = on; SET lock_timeout = '30s'")
         .execute(&mut owner)
         .await?;
     // The immutable baseline reads this historical migration parameter.
     sqlx::query("SELECT set_config('media_gateway.backend_identity',$1,false)")
-        .bind(storage_identity)
+        .bind("storage-registry")
         .execute(&mut owner)
         .await?;
     MIGRATIONS
@@ -421,10 +328,6 @@ pub async fn connect(
         "schema version does not match the migration history"
     );
     load_database_keys(&pool, secrets).await?;
-    sqlx::query("UPDATE mokyu_meta SET storage_identity=$1 WHERE singleton")
-        .bind(storage_identity)
-        .execute(&pool)
-        .await?;
     let deployment_fingerprint = blake3::hash(&secrets.credential_key.material);
     let saved: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT deployment_key_fingerprint FROM mokyu_meta WHERE singleton")
@@ -464,15 +367,12 @@ pub async fn connect(
             "key ID changed algorithm or material"
         );
     }
-    let required: Vec<String> = sqlx::query_scalar("SELECT DISTINCT key_id FROM (SELECT key_id FROM chunk_locations WHERE algorithm<>'none' AND state<>'deleted' UNION SELECT key_id FROM packs WHERE algorithm<>'none' AND state<>'deleted' UNION SELECT key_id FROM chunks WHERE algorithm<>'none' AND EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id)) keys").fetch_all(&pool).await?;
+    let required: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT DISTINCT block_key_id FROM (SELECT block_key_id FROM chunk_encodings WHERE encryption_algorithm<>'none' AND state<>'deleted' UNION SELECT block_key_id FROM packs WHERE encryption_algorithm<>'none' AND state<>'deleted' UNION SELECT block_key_id FROM chunks WHERE encryption_algorithm<>'none' AND EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id)) keys WHERE block_key_id IS NOT NULL").fetch_all(&pool).await?;
     ensure!(
-        required.iter().all(|id| secrets.keys.contains_key(id)),
+        required
+            .iter()
+            .all(|id| secrets.key_for_id(Some(*id)).is_some()),
         "database is missing a historical chunk key"
     );
-    if cluster_mode {
-        sqlx::query("SELECT pg_advisory_unlock(734922709851001)")
-            .execute(&mut owner)
-            .await?;
-    }
     Ok((pool, owner))
 }

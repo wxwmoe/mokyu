@@ -24,19 +24,19 @@ use uuid::Uuid;
 const INDEXES: [(&str, &str); 4] = [
     (
         "objects_catalog_size",
-        "CREATE INDEX CONCURRENTLY objects_catalog_size ON objects(bucket_id,catalog_size,key) WHERE stream_id IS NOT NULL",
+        "CREATE INDEX CONCURRENTLY objects_catalog_size ON objects(bucket_id,catalog_size,object_key) WHERE stream_id IS NOT NULL",
     ),
     (
         "objects_catalog_modified",
-        "CREATE INDEX CONCURRENTLY objects_catalog_modified ON objects(bucket_id,catalog_modified,key) WHERE stream_id IS NOT NULL",
+        "CREATE INDEX CONCURRENTLY objects_catalog_modified ON objects(bucket_id,catalog_modified,object_key) WHERE stream_id IS NOT NULL",
     ),
     (
         "objects_catalog_kind",
-        "CREATE INDEX CONCURRENTLY objects_catalog_kind ON objects(bucket_id,catalog_kind,key) WHERE stream_id IS NOT NULL",
+        "CREATE INDEX CONCURRENTLY objects_catalog_kind ON objects(bucket_id,catalog_kind,object_key) WHERE stream_id IS NOT NULL",
     ),
     (
         "objects_catalog_search",
-        "CREATE INDEX CONCURRENTLY objects_catalog_search ON objects USING gin ((key COLLATE \"default\") gin_trgm_ops) WHERE stream_id IS NOT NULL",
+        "CREATE INDEX CONCURRENTLY objects_catalog_search ON objects USING gin ((object_key COLLATE \"default\") gin_trgm_ops) WHERE stream_id IS NOT NULL",
     ),
 ];
 
@@ -106,30 +106,30 @@ async fn build(app: &App) -> Result<bool> {
     )
     .fetch_one(&mut *tx)
     .await?;
-    let mut scan = QueryBuilder::<Postgres>::new("SELECT bucket_id,key FROM objects");
+    let mut scan = QueryBuilder::<Postgres>::new("SELECT bucket_id,object_key FROM objects");
     if let Some(bucket) = cursor.0 {
-        scan.push(" WHERE (bucket_id,key)>(")
+        scan.push(" WHERE (bucket_id,object_key)>(")
             .push_bind(bucket)
             .push(",")
             .push_bind(&cursor.1)
             .push(")");
     }
-    scan.push(" ORDER BY bucket_id,key LIMIT 500 FOR UPDATE");
+    scan.push(" ORDER BY bucket_id,object_key LIMIT 500 FOR UPDATE");
     let rows: Vec<(Uuid, String)> = scan.build_query_as().fetch_all(&mut *tx).await?;
     if let Some((bucket, key)) = rows.last() {
         let mut update = QueryBuilder::<Postgres>::new(
-            "UPDATE objects o SET catalog_size=s.size,catalog_modified=s.created_at,catalog_type=coalesce(s.metadata->>'content_type','application/octet-stream'),catalog_kind=catalog_kind(o.key,coalesce(s.metadata->>'content_type','application/octet-stream')),catalog_public=s.public_read FROM streams s WHERE o.stream_id=s.id AND o.catalog_size IS NULL",
+            "UPDATE objects o SET catalog_size=s.size,catalog_modified=s.created_at,catalog_type=coalesce(s.metadata->>'content_type','application/octet-stream'),catalog_kind=catalog_kind(o.object_key,coalesce(s.metadata->>'content_type','application/octet-stream')),catalog_public=s.public_read FROM streams s WHERE o.stream_id=s.id AND o.catalog_size IS NULL",
         );
         if let Some(bucket) = cursor.0 {
             update
-                .push(" AND (o.bucket_id,o.key)>(")
+                .push(" AND (o.bucket_id,o.object_key)>(")
                 .push_bind(bucket)
                 .push(",")
                 .push_bind(&cursor.1)
                 .push(")");
         }
         update
-            .push(" AND (o.bucket_id,o.key)<=(")
+            .push(" AND (o.bucket_id,o.object_key)<=(")
             .push_bind(bucket)
             .push(",")
             .push_bind(key)
@@ -158,7 +158,7 @@ pub(crate) struct CatalogStatus {
 pub(crate) async fn progress(app: &App) -> Result<CatalogStatus> {
     Ok(sqlx::query_as("SELECT phase,scanned::text,current_index,last_error,updated_at FROM catalog_build WHERE singleton").fetch_one(&app.db).await?)
 }
-#[utoipa::path(get,operation_id="catalog_status",path="/api/buckets/{bucket}/catalog",params(("bucket"=Uuid,Path)),responses((status=200,body=CatalogStatus)))]
+#[utoipa::path(get,operation_id="catalog_status",path="/api/v1/buckets/{bucket}/catalog",params(("bucket"=Uuid,Path)),responses((status=200,body=CatalogStatus)))]
 pub(super) async fn status(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -251,8 +251,10 @@ impl From<StoredStream> for MediaItem {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct MediaPage {
+    #[serde(rename = "items")]
     objects: Vec<MediaItem>,
     prefixes: Vec<String>,
+    #[serde(rename = "next_cursor")]
     next: Option<String>,
     layout: &'static str,
     search_mode: String,
@@ -279,7 +281,7 @@ fn size(value: &Option<String>) -> Result<Option<i64>> {
         .transpose()
 }
 
-#[utoipa::path(get,operation_id="browse_media",path="/api/buckets/{bucket}/objects",params(("bucket"=Uuid,Path),Filter),responses((status=200,body=MediaPage)))]
+#[utoipa::path(get,operation_id="browse_media",path="/api/v1/buckets/{bucket}/objects",params(("bucket"=Uuid,Path),Filter),responses((status=200,body=MediaPage)))]
 pub(super) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -401,7 +403,7 @@ pub(super) async fn list(
     let mut sql = QueryBuilder::<Postgres>::new(
         "SELECT stream_id id,key object_key,catalog_size::text size,catalog_type content_type,catalog_public public_read,catalog_modified modified_at FROM ",
     );
-    sql.push(if ready {"objects"} else {"(SELECT o.bucket_id,o.key,o.stream_id,s.size catalog_size,s.created_at catalog_modified,coalesce(s.metadata->>'content_type','application/octet-stream') catalog_type,s.public_read catalog_public FROM objects o JOIN streams s ON s.id=o.stream_id) objects"});
+    sql.push(if ready {"objects"} else {"(SELECT o.bucket_id,o.object_key,o.stream_id,s.size catalog_size,s.created_at catalog_modified,coalesce(s.metadata->>'content_type','application/octet-stream') catalog_type,s.public_read catalog_public FROM objects o JOIN streams s ON s.id=o.stream_id) objects"});
     sql.push(" WHERE stream_id IS NOT NULL AND bucket_id=");
     sql.push_bind(bucket);
     if !q.prefix.is_empty() {

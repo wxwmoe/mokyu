@@ -1,25 +1,24 @@
-use crate::app::App;
-use crate::control::operations::execute;
-use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::{
-    io::{IsTerminal, Read},
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
-};
+use serde_json::Value;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Command {
-    Status,
+    Init {
+        username: String,
+        #[arg(long = "stdin")]
+        password_stdin: bool,
+        #[arg(skip)]
+        password: Option<String>,
+        #[arg(long)]
+        require_change: bool,
+    },
+    Status {
+        #[arg(long)]
+        ready: bool,
+    },
     #[command(subcommand)]
     Bucket(Buckets),
     #[command(name = "cred")]
@@ -53,7 +52,7 @@ pub enum Command {
     Task(Tasks),
     #[command(name = "storage")]
     #[command(subcommand)]
-    Stores(Stores),
+    Storages(Storages),
     #[command(subcommand)]
     Settings(Settings),
     #[command(name = "key")]
@@ -116,7 +115,7 @@ pub enum Buckets {
         #[arg(long)]
         project: Option<Uuid>,
         #[arg(long)]
-        store: Option<Uuid>,
+        storage: Option<Uuid>,
     },
     Delete {
         name: String,
@@ -177,7 +176,7 @@ pub enum Tasks {
     Resume { id: Uuid },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
-pub enum Stores {
+pub enum Storages {
     List,
     Create {
         name: String,
@@ -232,15 +231,15 @@ pub enum Stores {
         enabled: Option<bool>,
         #[arg(long = "read")]
         read_concurrency: Option<i32>,
-        #[arg(long)]
+        #[arg(long = "clear-read")]
         clear_read_concurrency: bool,
         #[arg(long = "upload")]
         upload_concurrency: Option<i32>,
-        #[arg(long)]
+        #[arg(long = "clear-upload")]
         clear_upload_concurrency: bool,
         #[arg(long = "control")]
         control_concurrency: Option<i32>,
-        #[arg(long)]
+        #[arg(long = "clear-control")]
         clear_control_concurrency: bool,
     },
     Check {
@@ -251,17 +250,22 @@ pub enum Stores {
     },
     Key {
         #[command(subcommand)]
-        command: StoreKey,
+        command: StorageKey,
+    },
+    #[command(name = "profile")]
+    Profile {
+        #[command(subcommand)]
+        command: StorageProfiles,
     },
     #[command(name = "rewrite")]
-    Rekey {
-        store: String,
+    Rewrite {
+        storage: String,
         #[command(subcommand)]
-        command: RekeyCommand,
+        command: RewriteCommand,
     },
     Sweep {
         #[arg(long)]
-        store: Option<Uuid>,
+        storage: Option<Uuid>,
         #[arg(long)]
         execute: bool,
         #[arg(long)]
@@ -273,12 +277,24 @@ pub enum Stores {
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
-pub enum StoreKey {
-    Set { store: String, key: String },
-    Clear { store: String },
+pub enum StorageKey {
+    Set { storage: String, key: String },
+    Clear { storage: String },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
-pub enum RekeyCommand {
+pub enum StorageProfiles {
+    Show {
+        name: String,
+    },
+    Set {
+        name: String,
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum RewriteCommand {
     Preview {
         #[arg(long = "key")]
         target_key: Option<String>,
@@ -303,7 +319,7 @@ pub enum Settings {
         section: String,
         file: PathBuf,
         #[arg(long = "rev")]
-        revision: i64,
+        revision: Option<i64>,
         #[arg(skip)]
         document: Option<Value>,
     },
@@ -352,22 +368,10 @@ pub enum Cluster {
         mode: String,
     },
     Nodes,
-    Token {
+    Release {
         name: String,
-        #[arg(value_parser = ["control", "worker", "data"])]
-        kind: String,
         #[arg(long)]
-        advertise_url: Option<String>,
-        #[arg(long, default_value = "1h")]
-        expires_in: String,
-    },
-    Revoke {
-        id: Uuid,
-    },
-    Reissue {
-        id: Uuid,
-        #[arg(long, default_value = "1h")]
-        expires_in: String,
+        confirm: bool,
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
@@ -455,9 +459,17 @@ pub enum Tokens {
     },
 }
 impl Command {
+    pub fn allows_bootstrap(&self) -> bool {
+        matches!(
+            self,
+            Self::Init { .. } | Self::Status { .. } | Self::Cluster(Cluster::Release { .. })
+        )
+    }
+
     pub fn audit_action(&self) -> Option<&'static str> {
         match self {
-            Self::Status
+            Self::Init { .. }
+            | Self::Status { .. }
             | Self::Audit { .. }
             | Self::Bucket(Buckets::List)
             | Self::Credential(Credentials::List { .. } | Credentials::Show { .. })
@@ -473,7 +485,10 @@ impl Command {
             | Self::Integrity(Integrity::Issues { .. })
             | Self::Pack(Packs::Status)
             | Self::Cache(Cache::Status)
-            | Self::Stores(Stores::List | Stores::Show { .. })
+            | Self::Storages(Storages::List | Storages::Show { .. })
+            | Self::Storages(Storages::Profile {
+                command: StorageProfiles::Show { .. },
+            })
             | Self::Settings(Settings::Control(ControlSettings::Show) | Settings::Get { .. })
             | Self::Keys(Keys::List)
             | Self::Setup(Setup::Token)
@@ -489,7 +504,7 @@ impl Command {
             Self::Cleanup(_) => Some("cleanup.run"),
             Self::Maintenance(_) => Some("maintenance.change"),
             Self::Task(_) => Some("task.change"),
-            Self::Stores(_) => Some("storage.change"),
+            Self::Storages(_) => Some("storage.change"),
             Self::Settings(_) => Some("runtime.settings"),
             Self::Keys(_) => Some("managed_key.change"),
             Self::Cluster(_) => Some("cluster.change"),
@@ -591,222 +606,4 @@ pub enum Users {
     Delete {
         username: String,
     },
-}
-
-pub fn random_secret() -> Result<String> {
-    let mut bytes = [0; 32];
-    aws_lc_rs::rand::fill(&mut bytes).map_err(|_| anyhow::anyhow!("randomness unavailable"))?;
-    Ok(hex::encode(bytes))
-}
-
-pub fn deployment_key() -> Result<String> {
-    let mut bytes = [0; 48];
-    aws_lc_rs::rand::fill(&mut bytes).map_err(|_| anyhow::anyhow!("randomness unavailable"))?;
-    use base64::Engine;
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
-}
-fn read_json(path: &Path, limit: usize, label: &str) -> Result<Value> {
-    let bytes = if path == Path::new("-") {
-        let mut bytes = Vec::new();
-        let mut stdin = std::io::stdin();
-        stdin.read_to_end(&mut bytes)?;
-        bytes
-    } else {
-        ensure!(std::fs::metadata(path)?.len() <= limit as u64, "{label} too large");
-        std::fs::read(path)?
-    };
-    ensure!(bytes.len() <= limit, "{label} too large");
-    Ok(serde_json::from_slice(&bytes)?)
-}
-async fn send_frame(socket: &mut UnixStream, value: &impl Serialize) -> Result<()> {
-    let bytes = serde_json::to_vec(value)?;
-    ensure!(bytes.len() <= 1024 * 1024, "admin message exceeds limit");
-    socket.write_u32(bytes.len() as u32).await?;
-    socket.write_all(&bytes).await?;
-    Ok(())
-}
-async fn receive_frame(socket: &mut UnixStream) -> Result<Vec<u8>> {
-    let len = socket.read_u32().await?;
-    ensure!(len <= 1024 * 1024, "admin message exceeds limit");
-    let mut bytes = vec![0; len as usize];
-    socket.read_exact(&mut bytes).await?;
-    Ok(bytes)
-}
-pub async fn client(path: &Path, mut command: Command) -> Result<()> {
-    match &mut command {
-        Command::User(Users::Membership { file, document, .. })
-        | Command::Quota(Quotas::Set { file, document, .. })
-        | Command::Token(
-            Tokens::Create { file, document, .. } | Tokens::Update { file, document, .. },
-        )
-        | Command::Credential(
-            Credentials::Update { file, document, .. }
-            | Credentials::Permissions { file, document, .. },
-        )
-        | Command::Settings(Settings::Set { file, document, .. }) => {
-            *document = Some(read_json(file, 512 * 1024, "JSON file")?);
-        }
-        Command::Bucket(Buckets::Purge {
-            name,
-            execute: true,
-            confirm_bucket,
-            confirmed,
-        }) => {
-            ensure!(
-                std::io::stdin().is_terminal(),
-                "destructive commands require a terminal; use docker exec -it"
-            );
-            let preview = rpc(
-                path,
-                &Command::Bucket(Buckets::Purge {
-                    name: name.clone(),
-                    execute: false,
-                    confirm_bucket: None,
-                    confirmed: false,
-                }),
-            )
-            .await?;
-            eprintln!("DANGER: {}", serde_json::to_string_pretty(&preview)?);
-            let id: Uuid = serde_json::from_value(preview["bucket_id"].clone())?;
-            confirm(name)?;
-            *confirm_bucket = Some(id);
-            *confirmed = true;
-        }
-        Command::Stores(Stores::Sweep {
-            execute: true,
-            preview,
-            confirm_prefix,
-            ..
-        }) => {
-            ensure!(
-                std::io::stdin().is_terminal(),
-                "destructive commands require a terminal; use docker exec -it"
-            );
-            let task = rpc(
-                path,
-                &Command::Task(Tasks::Show {
-                    id: preview.context("--preview requires a completed dry-run task")?,
-                }),
-            )
-            .await?;
-            ensure!(
-                task["kind"] == "sweep"
-                    && task["state"] == "completed"
-                    && task["detail"]["dry_run"] == true,
-                "a completed dry-run preview is required"
-            );
-            eprintln!("DANGER: {}", serde_json::to_string_pretty(&task)?);
-            let prefix = task["detail"]["prefix"]
-                .as_str()
-                .context("preview prefix missing")?;
-            confirm(prefix)?;
-            *confirm_prefix = Some(prefix.to_owned());
-        }
-        Command::User(
-            Users::Create {
-                password_stdin,
-                password,
-                ..
-            }
-            | Users::Password {
-                password_stdin,
-                password,
-                ..
-            },
-        ) => {
-            *password = Some(if *password_stdin {
-                let mut text = String::new();
-                std::io::stdin().read_line(&mut text)?;
-                text.trim_end_matches(['\r', '\n']).to_owned()
-            } else {
-                ensure!(
-                    std::io::stdin().is_terminal(),
-                    "password input requires a terminal; use docker exec -it or --stdin"
-                );
-                let text = rpassword::prompt_password("Password: ")?;
-                let confirmation = rpassword::prompt_password("Confirm password: ")?;
-                ensure!(text == confirmation, "passwords do not match");
-                text
-            });
-        }
-        Command::Bucket(Buckets::Cors { file, document, .. }) => {
-            *document = Some(read_json(file, 64 * 1024, "CORS file")?);
-        }
-        _ => {}
-    }
-    let result = rpc(path, &command).await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(())
-}
-fn confirm(identity: &str) -> Result<()> {
-    eprintln!("Type the exact target identity to continue: {identity}");
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    ensure!(
-        answer.trim_end_matches(['\r', '\n']) == identity,
-        "confirmation did not match"
-    );
-    eprintln!("This operation permanently deletes data. Type DELETE to confirm:");
-    answer.clear();
-    std::io::stdin().read_line(&mut answer)?;
-    ensure!(answer.trim() == "DELETE", "confirmation did not match");
-    Ok(())
-}
-async fn rpc(path: &Path, command: &Command) -> Result<Value> {
-    let mut socket = UnixStream::connect(path)
-        .await
-        .context("cannot reach gateway admin socket; is the server running?")?;
-    send_frame(&mut socket, command).await?;
-    let reply: Value = serde_json::from_slice(
-        &tokio::time::timeout(Duration::from_secs(60), receive_frame(&mut socket)).await??,
-    )?;
-    if reply["ok"] != true {
-        anyhow::bail!(
-            "{}",
-            reply["error"].as_str().unwrap_or("admin request failed")
-        );
-    }
-    Ok(reply["result"].clone())
-}
-pub async fn serve(app: Arc<App>, management: bool) -> Result<()> {
-    let path = &app.config.instance.listen_socket;
-    tokio::fs::create_dir_all(
-        path.parent()
-            .context("admin socket needs a parent directory")?,
-    )
-    .await?;
-    if tokio::fs::try_exists(path).await? {
-        tokio::fs::remove_file(path).await?;
-    }
-    let listener = UnixListener::bind(path)?;
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
-    let slots = Arc::new(tokio::sync::Semaphore::new(4));
-    loop {
-        let (mut socket, _) = listener.accept().await?;
-        let permit = match slots.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let app = app.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            let result = async {
-                let data =
-                    tokio::time::timeout(Duration::from_secs(10), receive_frame(&mut socket))
-                        .await??;
-                let command: Command = serde_json::from_slice(&data)?;
-                ensure!(
-                    management || matches!(&command, Command::Status),
-                    "this role only exposes status"
-                );
-                execute(&app, command).await
-            }
-            .await;
-            let reply = match result {
-                Ok(v) => json!({"ok":true,"result":v}),
-                Err(e) => json!({"ok":false,"error":e.to_string()}),
-            };
-            let _ = send_frame(&mut socket, &reply).await;
-        });
-    }
 }

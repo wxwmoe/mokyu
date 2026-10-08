@@ -156,7 +156,7 @@ impl Access {
         }
         sqlx::query("INSERT INTO pack_member_access_windows(pack_id,chunk_id,window_start,downloads) SELECT p.id,c.id,s.hour,s.n FROM unnest($1::bigint[],$2::bigint[],$3::timestamptz[],$4::bigint[]) s(p,c,hour,n) JOIN packs p ON p.id=s.p JOIN chunks c ON c.id=s.c ON CONFLICT(window_start,pack_id,chunk_id) DO UPDATE SET downloads=pack_member_access_windows.downloads+EXCLUDED.downloads")
             .bind(packs).bind(chunks).bind(hours).bind(counts).execute(&mut *tx).await?;
-        let stale = (config::seconds(&app.config.statistics.access_flush_interval)? * 2) as f64;
+        let stale = (config::seconds(&app.config.metrics.access_flush_interval)? * 2) as f64;
         sqlx::query("UPDATE mokyu_meta SET access_coverage_since=CASE WHEN $1 OR access_flushed_at<now()-$2*interval '1 second' THEN now() ELSE access_coverage_since END,access_flushed_at=now()")
             .bind(pending.dropped).bind(stale).execute(&mut *tx).await?;
         tx.commit().await?;
@@ -164,9 +164,7 @@ impl Access {
     }
 }
 pub async fn run(app: Arc<App>) -> Result<()> {
-    let period = Duration::from_secs(config::seconds(
-        &app.config.statistics.access_flush_interval,
-    )?);
+    let period = Duration::from_secs(config::seconds(&app.config.metrics.access_flush_interval)?);
     loop {
         tokio::select! {_=tokio::time::sleep(period)=>{},_=app.storage.access.wake.notified()=>{}}
         if let Err(e) = app.storage.access.flush(&app).await {
@@ -179,8 +177,8 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             "DELETE FROM pack_member_access_windows WHERE (window_start,pack_id,chunk_id) IN (SELECT window_start,pack_id,chunk_id FROM pack_member_access_windows WHERE window_start<now()-$1*interval '1 second' ORDER BY window_start LIMIT $2)",
         ] {
             if let Err(e) = sqlx::query(sql)
-                .bind(config::seconds(&app.config.statistics.access_retention)? as f64)
-                .bind(app.config.cleanup.batch_size as i64)
+                .bind(config::seconds(&app.config.metrics.access_retention)? as f64)
+                .bind(app.config.maintenance.batch_size as i64)
                 .execute(&app.db)
                 .await
             {

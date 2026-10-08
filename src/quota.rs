@@ -54,7 +54,7 @@ impl App {
             .await?;
         // Reuse the accepted parts' reservation, including omitted parts until publication succeeds.
         let changed = sqlx::query(
-            "UPDATE quota_reservations SET output_stream=$2 WHERE id=$1 AND logical_bytes>=$3",
+            "UPDATE quota_reservations SET result_stream_id=$2 WHERE id=$1 AND logical_bytes>=$3",
         )
         .bind(upload)
         .bind(stream)

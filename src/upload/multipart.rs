@@ -188,13 +188,14 @@ impl App {
                     ..Default::default()
                 }));
             }
-            let expected: Option<Uuid> =
-                sqlx::query_scalar("SELECT stream_id FROM objects WHERE bucket_id=$1 AND key=$2")
-                    .bind(bucket.id)
-                    .bind(&i.key)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .flatten();
+            let expected: Option<Uuid> = sqlx::query_scalar(
+                "SELECT stream_id FROM objects WHERE bucket_id=$1 AND object_key=$2",
+            )
+            .bind(bucket.id)
+            .bind(&i.key)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
             if expected.is_some() && !web.overwrite {
                 return Err(crate::http::problem(
                     hyper::StatusCode::CONFLICT,
@@ -209,7 +210,7 @@ impl App {
         if paused {
             return Err(s3_error!(OperationAborted).into());
         }
-        if let Some(limit) = self.config.multipart.max_active_uploads {
+        if let Some(limit) = self.config.uploads.max_active_uploads {
             sqlx::query(
                 "SELECT pg_advisory_xact_lock(hashtextextended('mokyu:uploads:max-active', 0))",
             )
@@ -227,7 +228,7 @@ impl App {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO uploads(id,bucket_id,object_key,access_key,metadata,public_read,checksum_algorithm,checksum_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(id).bind(bucket.id).bind(&i.key).bind(key).bind(serde_json::to_value(metadata!(i))?).bind(canned(i.acl.as_ref())?).bind(&algorithm).bind(&kind).execute(&mut *tx).await?;
         if let Some(web) = web {
-            sqlx::query("INSERT INTO web_uploads(upload_id,user_id,client_id,request_hash,file_name,expected_size,part_size,modified_at,expected_stream) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+            sqlx::query("INSERT INTO web_uploads(upload_id,user_id,client_id,request_hash,file_name,expected_size,part_size,modified_at,expected_stream_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
                 .bind(id).bind(web.user).bind(web.client_id).bind(web.request_hash).bind(web.file_name).bind(web.size).bind(web.part_size).bind(web.modified_at).bind(expected).execute(&mut *tx).await?;
             crate::control::audit::checkpoint(
                 &mut tx,
@@ -306,7 +307,7 @@ impl App {
             if state != "active" {
                 return Err(s3_error!(NoSuchUpload).into());
             }
-            sqlx::query("INSERT INTO parts(upload_id,part_number,write_epoch) VALUES($1,$2,$3) ON CONFLICT(upload_id,part_number) DO UPDATE SET write_epoch=excluded.write_epoch").bind(u.id).bind(i.part_number).bind(id).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO parts(upload_id,part_number,write_token) VALUES($1,$2,$3) ON CONFLICT(upload_id,part_number) DO UPDATE SET write_token=excluded.write_token").bind(u.id).bind(i.part_number).bind(id).execute(&mut *tx).await?;
             tx.commit().await?;
         }
         let body = req
@@ -327,7 +328,7 @@ impl App {
                     .or(i.checksum_algorithm.as_ref().map(|a| a.as_str())),
                 Some((u.id, i.part_number)),
                 self.config
-                    .compression
+                    .local_compression
                     .should_try(u.metadata["content_type"].as_str(), &u.object_key),
             )
             .await?;
@@ -354,7 +355,7 @@ impl App {
             if state != "active" {
                 return Err(s3_error!(NoSuchUpload).into());
             }
-            let (old,epoch):(Option<Uuid>,Uuid)=sqlx::query_as("SELECT stream_id,write_epoch FROM parts WHERE upload_id=$1 AND part_number=$2 FOR UPDATE").bind(u.id).bind(i.part_number).fetch_one(&mut *tx).await?;
+            let (old,epoch):(Option<Uuid>,Uuid)=sqlx::query_as("SELECT stream_id,write_token FROM parts WHERE upload_id=$1 AND part_number=$2 FOR UPDATE").bind(u.id).bind(i.part_number).fetch_one(&mut *tx).await?;
             if epoch != id {
                 return Err(s3_error!(OperationAborted, "part was superseded").into());
             }
@@ -518,7 +519,7 @@ impl App {
         let right = &rows[1];
         let should_compress = self
             .config
-            .compression
+            .local_compression
             .should_try(metadata["content_type"].as_str(), &left.object_key);
         let _lpin = self.pin(left.id);
         let _rpin = self.pin(right.id);
@@ -536,7 +537,7 @@ impl App {
         }
         let (work, _pin) = self
             .new_stream(
-                &Permit::local(),
+                &Permit::system(),
                 left.bucket_id,
                 &left.object_key,
                 "part",
@@ -810,7 +811,7 @@ impl App {
         self.complete_quota(u.id, id, total).await?;
         let should_compress = self
             .config
-            .compression
+            .local_compression
             .should_try(u.metadata["content_type"].as_str(), &u.object_key);
         let mut window = Vec::with_capacity(MAX);
         let mut offset = 0;
@@ -923,7 +924,8 @@ impl App {
     }
     pub async fn abort_upload(&self, id: Uuid) -> Result<()> {
         let coord = self.coord.lock().await;
-        self.abort_upload_locked(id, &coord, &Permit::local()).await
+        self.abort_upload_locked(id, &coord, &Permit::system())
+            .await
     }
     pub(crate) async fn abort_upload_locked(
         &self,

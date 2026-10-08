@@ -2,596 +2,40 @@ use crate::{
     codec::{self, Chunk, MAX},
     config::{self, Budget, Config, Secrets},
 };
+pub(crate) mod cache;
+pub(crate) mod local;
+pub(crate) mod location;
+pub(crate) mod model;
+pub(crate) mod permits;
+pub(crate) mod profile;
 pub(crate) mod resource_gate;
-pub(crate) mod store;
-use self::store::{Options as StoreOptionsV2, Record as StoreRecord, Store as VerifiedStore};
+pub(crate) mod target;
+
+use self::model::{Record as StoreRecord, Store as VerifiedStore};
+use self::profile::StorageProfile;
+pub(crate) use self::{
+    cache::*,
+    local::*,
+    location::{chunk_name, parse_cache_name, parse_chunk_name},
+    permits::*,
+    target::*,
+};
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::Semaphore,
-};
+use tokio::{io::AsyncWriteExt, sync::Semaphore};
 use uuid::Uuid;
 
-fn chunk_name(id: Uuid) -> String {
-    let id = id.simple().to_string();
-    format!("{}/{id}", &id[..2])
-}
-
-fn parse_chunk_name(name: &str) -> Option<Uuid> {
-    let (shard, id) = name.split_once('/')?;
-    if shard.len() != 2
-        || id.len() != 32
-        || !id.starts_with(shard)
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return None;
-    }
-    Uuid::parse_str(id).ok()
-}
-fn parse_cache_name(name: &str) -> Option<(Uuid, bool)> {
-    let (name, extension) = name.rsplit_once('.')?;
-    let compressed = match extension {
-        "raw" => false,
-        "zst" => true,
-        _ => return None,
-    };
-    Some((parse_chunk_name(name)?, compressed))
-}
-
-#[derive(Clone, Copy)]
-pub enum Area {
-    Multipart = 0,
-    Cache = 1,
-    Thumbnails = 2,
-}
-pub async fn read_bounded(path: impl AsRef<std::path::Path>, max: usize) -> Result<Vec<u8>> {
-    let f = tokio::fs::File::open(path).await?;
-    let size = f.metadata().await?.len();
-    ensure!(size <= max as u64, "local file exceeds bound");
-    let mut bytes = Vec::with_capacity(size as usize);
-    f.take(max as u64 + 1).read_to_end(&mut bytes).await?;
-    ensure!(bytes.len() <= max, "local file exceeds bound");
-    Ok(bytes)
-}
-struct Usage {
-    used: [u64; 3],
-    reserved: u64,
-    upload: u64,
-}
-pub struct Disk {
-    pub root: PathBuf,
-    limits: [Option<u64>; 3],
-    floor: u64,
-    upload_limit: Option<u64>,
-    usage: Mutex<Usage>,
-    io: Arc<Semaphore>,
-    pending: Mutex<HashSet<Uuid>>,
-}
-pub struct Fragment {
-    pub id: Uuid,
-    disk: Arc<Disk>,
-}
-impl Drop for Fragment {
-    fn drop(&mut self) {
-        self.disk.pending.lock().unwrap().remove(&self.id);
-    }
-}
-pub(crate) struct Reservation {
-    disk: Arc<Disk>,
-    area: Area,
-    bytes: u64,
-    committed: bool,
-}
-impl Reservation {
-    pub(crate) fn commit(mut self) {
-        self.disk.usage.lock().unwrap().reserved -= self.bytes;
-        self.committed = true;
-    }
-}
-impl Drop for Reservation {
-    fn drop(&mut self) {
-        if !self.committed {
-            let mut u = self.disk.usage.lock().unwrap();
-            u.used[self.area as usize] -= self.bytes;
-            u.reserved -= self.bytes;
-        }
-    }
-}
-impl Disk {
-    fn cache_capacity(&self, usage: &Usage) -> Result<u64> {
-        let capacity = usage.used[1].saturating_add(
-            fs2::available_space(&self.root)?
-                .saturating_sub(self.floor)
-                .saturating_sub(usage.reserved),
-        );
-        Ok(self.limits[1].map_or(capacity, |limit| limit.min(capacity)))
-    }
-    pub fn upload_capacity(&self) -> Result<(u64, u64, u64)> {
-        let usage = self.usage.lock().unwrap();
-        let total = self.cache_capacity(&usage)?;
-        Ok((
-            total,
-            self.upload_limit.unwrap_or(total / 5).min(total),
-            usage.upload,
-        ))
-    }
-    fn claim_upload(self: &Arc<Self>, size: u64) -> Result<UploadCharge> {
-        let mut usage = self.usage.lock().unwrap();
-        let total = self.cache_capacity(&usage)?;
-        let limit = self.upload_limit.unwrap_or(total / 5).min(total);
-        ensure!(
-            usage.upload.saturating_add(size) <= limit,
-            "upload cache quota exhausted"
-        );
-        usage.upload += size;
-        Ok(UploadCharge {
-            disk: self.clone(),
-            size,
-        })
-    }
-    pub(crate) fn reserve(self: &Arc<Self>, area: Area, bytes: u64) -> Result<Reservation> {
-        let mut usage = self.usage.lock().unwrap();
-        let next = usage.used[area as usize]
-            .checked_add(bytes)
-            .context("disk accounting overflow")?;
-        ensure!(
-            self.limits[area as usize].is_none_or(|n| next <= n),
-            "local storage quota exhausted"
-        );
-        let free = fs2::available_space(&self.root)?;
-        ensure!(
-            free.saturating_sub(usage.reserved.saturating_add(bytes)) >= self.floor,
-            "filesystem free-space floor reached"
-        );
-        usage.used[area as usize] = next;
-        usage.reserved += bytes;
-        Ok(Reservation {
-            disk: self.clone(),
-            area,
-            bytes,
-            committed: false,
-        })
-    }
-    pub fn used(&self) -> [u64; 3] {
-        self.usage.lock().unwrap().used
-    }
-    pub(crate) fn account_existing(&self, area: Area, bytes: u64) {
-        self.usage.lock().unwrap().used[area as usize] += bytes;
-    }
-    pub(crate) fn release(&self, area: Area, bytes: u64) {
-        let mut u = self.usage.lock().unwrap();
-        u.used[area as usize] = u.used[area as usize].saturating_sub(bytes);
-    }
-    pub fn fragment_path(&self, id: Uuid) -> PathBuf {
-        self.root.join("multipart").join(id.simple().to_string())
-    }
-    pub fn pending(&self, id: Uuid) -> bool {
-        self.pending.lock().unwrap().contains(&id)
-    }
-    pub async fn write_fragment(self: &Arc<Self>, id: Uuid, data: &[u8]) -> Result<Fragment> {
-        ensure!(
-            !data.is_empty() && data.len() <= MAX,
-            "invalid fragment length"
-        );
-        let permit = self.io.clone().acquire_owned().await?;
-        let ticket = self.reserve(Area::Multipart, data.len() as u64)?;
-        let path = self.fragment_path(id);
-        self.pending.lock().unwrap().insert(id);
-        let lease = Fragment {
-            id,
-            disk: self.clone(),
-        };
-        let data = data.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            use std::io::Write;
-            let result = (|| {
-                let mut f = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)?;
-                f.write_all(&data)?;
-                f.sync_all()?;
-                std::fs::File::open(path.parent().unwrap())?.sync_all()?;
-                Ok::<_, std::io::Error>(())
-            })();
-            if let Err(e) = result {
-                if std::fs::remove_file(&path).is_err() && path.try_exists().unwrap_or(true) {
-                    ticket.commit();
-                }
-                return Err(e.into());
-            }
-            ticket.commit();
-            Ok(lease)
-        })
-        .await?
-    }
-    pub async fn remove_fragment(&self, id: Uuid) -> Result<()> {
-        let path = self.fragment_path(id);
-        match tokio::fs::metadata(&path).await {
-            Ok(m) => {
-                tokio::fs::remove_file(path).await?;
-                self.release(Area::Multipart, m.len());
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Queue {
-    Small,
-    Main,
-}
-struct Entry {
-    size: u64,
-    compressed: bool,
-    frequency: u8,
-    pins: Arc<AtomicUsize>,
-    queue: Queue,
-}
-struct CachePin(Arc<AtomicUsize>);
-impl Drop for CachePin {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-struct UploadCharge {
-    disk: Arc<Disk>,
-    size: u64,
-}
-impl Drop for UploadCharge {
-    fn drop(&mut self) {
-        self.disk.usage.lock().unwrap().upload -= self.size;
-    }
-}
-pub struct UploadPin {
-    _pin: CachePin,
-    _charge: UploadCharge,
-    pub size: u64,
-    pub compressed: bool,
-}
-pub struct LoadedPack {
-    pub pack: crate::pack::Pack,
-    pub data: crate::pack::Decoded,
-    _memory: tokio::sync::OwnedSemaphorePermit,
-    used: Mutex<DownloadUsage>,
-    access: Arc<crate::access::Access>,
-}
-#[derive(Default)]
-struct DownloadUsage {
-    members: HashMap<i64, (usize, usize)>,
-    observed: bool,
-    range: bool,
-    full: bool,
-}
-impl LoadedPack {
-    fn touch(&self, c: &Chunk, observe: bool, range: bool) {
-        let mut used = self.used.lock().unwrap();
-        used.observed |= observe;
-        used.range |= observe && range;
-        used.full |= !observe || !range;
-        used.members.insert(
-            c.id,
-            (
-                c.raw_size as usize,
-                c.stored_size.unwrap_or(c.raw_size + 16) as usize,
-            ),
-        );
-    }
-}
-impl Drop for LoadedPack {
-    fn drop(&mut self) {
-        let used = self.used.lock().unwrap();
-        if used.observed {
-            let raw: usize = used.members.values().map(|(n, _)| n).sum();
-            let bytes = self.pack.stored_size.unwrap_or(0) as usize;
-            let useful: usize = used.members.values().map(|(_, n)| n).sum();
-            self.access.pack(
-                self.pack.id,
-                bytes,
-                used.range && !used.full && raw < self.pack.raw_size as usize,
-                useful.min(bytes),
-                used.members.keys().copied(),
-            );
-        }
-    }
-}
-#[derive(Default)]
-pub struct ReadContext {
-    pack: tokio::sync::Mutex<Option<Arc<LoadedPack>>>,
-    observe: bool,
-    range: bool,
-}
-impl ReadContext {
-    pub fn user(range: bool) -> Self {
-        Self {
-            observe: true,
-            range,
-            ..Default::default()
-        }
-    }
-    async fn touch(&self, c: &Chunk) {
-        if let Some(p) = self.pack.lock().await.as_ref()
-            && p.data.members.iter().any(|m| m.id == c.id)
-        {
-            p.touch(c, self.observe, self.range);
-        }
-    }
-}
-enum Source {
-    Chunk(Chunk, CachePin),
-    Pack(crate::pack::Pack, CachePin),
-}
-#[derive(sqlx::FromRow)]
-struct InspectionMember {
-    #[sqlx(flatten)]
-    chunk: Chunk,
-    offset_bytes: i64,
-}
-#[derive(Default)]
-struct Fifo {
-    entries: HashMap<Uuid, Entry>,
-    small: VecDeque<Uuid>,
-    main: VecDeque<Uuid>,
-    ghost: HashSet<Uuid>,
-    ghosts: VecDeque<Uuid>,
-    small_bytes: u64,
-}
-impl Fifo {
-    fn insert(&mut self, id: Uuid, size: u64, compressed: bool) {
-        if self.entries.contains_key(&id) {
-            return;
-        }
-        let queue = if self.ghost.remove(&id) {
-            Queue::Main
-        } else {
-            Queue::Small
-        };
-        if queue == Queue::Small {
-            self.small.push_back(id);
-            self.small_bytes += size;
-        } else {
-            self.main.push_back(id);
-        }
-        self.entries.insert(
-            id,
-            Entry {
-                size,
-                compressed,
-                frequency: 0,
-                pins: Arc::new(AtomicUsize::new(0)),
-                queue,
-            },
-        );
-    }
-    fn remove(&mut self, id: Uuid) -> Option<Entry> {
-        let e = self.entries.remove(&id)?;
-        if e.queue == Queue::Small {
-            self.small_bytes -= e.size;
-        }
-        Some(e)
-    }
-    fn forget(&mut self, id: Uuid) -> Option<Entry> {
-        let e = self.remove(id)?;
-        self.small.retain(|v| *v != id);
-        self.main.retain(|v| *v != id);
-        Some(e)
-    }
-    fn restore_victim(&mut self, id: Uuid) {
-        match self.entries[&id].queue {
-            Queue::Small => self.small.push_front(id),
-            Queue::Main => self.main.push_front(id),
-        }
-    }
-    // Commit eviction only after the cache file is gone.
-    fn evict(&mut self, id: Uuid, max_ghosts: usize) -> Option<Entry> {
-        let e = self.remove(id)?;
-        if e.queue == Queue::Small {
-            self.ghost.insert(id);
-            self.ghosts.push_back(id);
-            while self.ghosts.len() > max_ghosts {
-                if let Some(old) = self.ghosts.pop_front() {
-                    self.ghost.remove(&old);
-                }
-            }
-        }
-        Some(e)
-    }
-    fn victim(&mut self, capacity: u64) -> Option<Uuid> {
-        // A bounded scan also terminates when every candidate is pinned.
-        for _ in 0..self.entries.len().saturating_mul(5).max(1) {
-            let small = (self.small_bytes > capacity / 10 || self.main.is_empty())
-                && !self.small.is_empty();
-            let id = if small {
-                self.small.pop_front()
-            } else {
-                self.main.pop_front()
-            }?;
-            let Some(e) = self.entries.get_mut(&id) else {
-                continue;
-            };
-            if e.pins.load(Ordering::Relaxed) > 0 {
-                if small {
-                    self.small.push_back(id);
-                } else {
-                    self.main.push_back(id);
-                }
-                continue;
-            }
-            if small && e.frequency > 1 {
-                e.queue = Queue::Main;
-                e.frequency = 0;
-                self.small_bytes -= e.size;
-                self.main.push_back(id);
-                continue;
-            }
-            if !small && e.frequency > 0 {
-                e.frequency -= 1;
-                self.main.push_back(id);
-                continue;
-            }
-            return Some(id);
-        }
-        None
-    }
-}
-
-type FetchResult =
-    tokio::sync::OnceCell<Result<(Bytes, Option<Arc<LoadedPack>>), Arc<anyhow::Error>>>;
-struct PackFetch {
-    result: tokio::sync::OnceCell<Result<Arc<LoadedPack>, Arc<anyhow::Error>>>,
-    priority: Arc<AtomicUsize>,
-}
-
-struct SharedStorePermit {
-    db: sqlx::PgPool,
-    token: Uuid,
-    alive: Arc<AtomicBool>,
-}
-
-impl Drop for SharedStorePermit {
-    fn drop(&mut self) {
-        self.alive.store(false, Ordering::Release);
-        let db = self.db.clone();
-        let token = self.token;
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let _ = sqlx::query("DELETE FROM store_permits WHERE token=$1")
-                    .bind(token)
-                    .execute(&db)
-                    .await;
-            });
-        }
-    }
-}
-
-struct StorePermit {
-    _local: crate::storage::resource_gate::Permit,
-    _shared: Option<SharedStorePermit>,
-}
-
-struct StoreGate {
-    local: Arc<crate::storage::resource_gate::Gate>,
-    db: sqlx::PgPool,
-    store_id: Uuid,
-    direction: &'static str,
-    cluster_limit: Option<i32>,
-    holder: Uuid,
-}
-
-impl StoreGate {
-    fn new(
-        db: &sqlx::PgPool,
-        store_id: Uuid,
-        direction: &'static str,
-        local_limit: usize,
-        cluster_limit: Option<i32>,
-        aging: Duration,
-        holder: Uuid,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            local: crate::storage::resource_gate::Gate::new(local_limit, aging),
-            db: db.clone(),
-            store_id,
-            direction,
-            cluster_limit,
-            holder,
-        })
-    }
-
-    async fn acquire_shared(&self, limit: i32) -> Result<SharedStorePermit> {
-        loop {
-            let token = Uuid::new_v4();
-            let mut tx = self.db.begin().await?;
-            sqlx::query(
-                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            )
-            .bind(format!("mokyu:store:{}:{}", self.store_id, self.direction))
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query("DELETE FROM store_permits WHERE store_id=$1 AND direction=$2 AND expires_at<=now()")
-                .bind(self.store_id)
-                .bind(self.direction)
-                .execute(&mut *tx)
-                .await?;
-            let active: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM store_permits WHERE store_id=$1 AND direction=$2",
-            )
-            .bind(self.store_id)
-            .bind(self.direction)
-            .fetch_one(&mut *tx)
-            .await?;
-            if active < i64::from(limit) {
-                sqlx::query("INSERT INTO store_permits(token,store_id,direction,holder,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 minute')")
-                    .bind(token)
-                    .bind(self.store_id)
-                    .bind(self.direction)
-                    .bind(self.holder)
-                    .execute(&mut *tx)
-                    .await?;
-                tx.commit().await?;
-                let alive = Arc::new(AtomicBool::new(true));
-                let renew_alive = alive.clone();
-                let db = self.db.clone();
-                tokio::spawn(async move {
-                    while renew_alive.load(Ordering::Acquire) {
-                        tokio::time::sleep(Duration::from_secs(20)).await;
-                        if !renew_alive.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let _ = sqlx::query(
-                            "UPDATE store_permits SET expires_at=now()+interval '1 minute' WHERE token=$1",
-                        )
-                        .bind(token)
-                        .execute(&db)
-                        .await;
-                    }
-                });
-                return Ok(SharedStorePermit { db: self.db.clone(), token, alive });
-            }
-            tx.rollback().await?;
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }
-
-    async fn acquire(self: &Arc<Self>) -> Result<StorePermit> {
-        let local = self.local.acquire().await?;
-        let shared = match self.cluster_limit {
-            Some(limit) => Some(self.acquire_shared(limit).await?),
-            None => None,
-        };
-        Ok(StorePermit { _local: local, _shared: shared })
-    }
-}
-
-struct StoreBackend {
-    backend: Arc<dyn ObjectStore>,
-    prefix: String,
-    revision: chrono::DateTime<chrono::Utc>,
-    metadata: serde_json::Value,
-    identity_ready: std::sync::atomic::AtomicBool,
-    identity_check: tokio::sync::Mutex<()>,
-    reads: Arc<StoreGate>,
-    writes: Arc<StoreGate>,
-    controls: Arc<StoreGate>,
-}
-
-type StoreOptions = StoreOptionsV2;
+pub(crate) const STAGING_PREFIX: &str = "__mokyu/multipart/";
+const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 
 pub struct Storage {
     pub access: Arc<crate::access::Access>,
@@ -606,15 +50,21 @@ pub struct Storage {
     pack_work: Arc<Semaphore>,
     inspection: tokio::sync::Mutex<()>,
     targets: RwLock<HashMap<Uuid, Arc<StoreBackend>>>,
-    store_options: StoreOptions,
     store_defaults: (usize, usize, usize),
     store_aging: Duration,
     permit_holder: Uuid,
-    pub store_id: Option<Uuid>,
+    pub storage_id: Option<Uuid>,
     pub disk: Arc<Disk>,
+    staging_storage_id: Option<Uuid>,
+    staging_bytes_limit: Option<u64>,
+    cluster_mode: bool,
     pub secrets: Arc<Secrets>,
     pub(crate) cpu: Arc<Semaphore>,
     pub compression: Arc<crate::compression::Pool>,
+    compression_enabled: bool,
+    base_storage: config::BackendDefaults,
+    base_compression: crate::compression::Config,
+    cpu_jobs: usize,
     pub reads: Arc<crate::storage::resource_gate::Gate>,
     pub writes: Arc<crate::storage::resource_gate::Gate>,
     pub controls: Arc<crate::storage::resource_gate::Gate>,
@@ -648,10 +98,7 @@ pub(crate) type StoreRow = (
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     serde_json::Value,
-    chrono::DateTime<chrono::Utc>,
-    Option<i32>,
-    Option<i32>,
-    Option<i32>,
+    i64,
 );
 
 async fn build_store(
@@ -659,6 +106,10 @@ async fn build_store(
     secrets: &Secrets,
     db: &sqlx::PgPool,
     row: StoreRow,
+    profile: &StorageProfile,
+    base_compression: &crate::compression::Config,
+    cpu_jobs: usize,
+    default_cache_entries: usize,
     defaults: (usize, usize, usize),
     aging: Duration,
     permit_holder: Uuid,
@@ -673,40 +124,43 @@ async fn build_store(
         prefix,
         access,
         secret,
-        metadata,
+        identity_marker,
         revision,
-        read_limit,
-        upload_limit,
-        control_limit,
     ) = row;
+    let is_local = store_type == "local";
     let record = StoreRecord {
         id,
         name: String::new(),
         r#type: store_type,
         path,
         endpoint_url: endpoint,
-        remote_bucket: bucket,
+        remote_bucket_name: bucket,
         region,
         prefix: prefix.clone(),
         access_key_encrypted: access,
         secret_key_encrypted: secret,
-        metadata: metadata.clone(),
+        identity_marker: identity_marker.clone(),
         enabled: true,
     };
     let target = VerifiedStore::build(&record, options, secrets)?;
+    let compression = Arc::new(crate::compression::Pool::new(
+        profile.compression_config(base_compression),
+        cpu_jobs,
+    )?);
     Ok(Arc::new(StoreBackend {
         backend: target.backend,
+        is_local,
         prefix: prefix.trim_matches('/').into(),
         revision,
-        metadata,
+        identity_marker,
         identity_ready: false.into(),
         identity_check: tokio::sync::Mutex::new(()),
         reads: StoreGate::new(
             db,
             id,
             "read",
-            read_limit.map_or(defaults.0, |n| n as usize),
-            read_limit,
+            profile.read_concurrency.map_or(defaults.0, |n| n as usize),
+            profile.read_concurrency,
             aging,
             permit_holder,
         ),
@@ -714,8 +168,10 @@ async fn build_store(
             db,
             id,
             "upload",
-            upload_limit.map_or(defaults.1, |n| n as usize),
-            upload_limit,
+            profile
+                .upload_concurrency
+                .map_or(defaults.1, |n| n as usize),
+            profile.upload_concurrency,
             aging,
             permit_holder,
         ),
@@ -723,11 +179,75 @@ async fn build_store(
             db,
             id,
             "control",
-            control_limit.map_or(defaults.2, |n| n as usize),
-            control_limit,
+            profile
+                .control_concurrency
+                .map_or(defaults.2, |n| n as usize),
+            profile.control_concurrency,
             aging,
             permit_holder,
         ),
+        pack: StoreGate::new(
+            db,
+            id,
+            "pack",
+            profile.pack_concurrency.max(1) as usize,
+            Some(profile.pack_concurrency.max(1)),
+            aging,
+            permit_holder,
+        ),
+        integrity: StoreGate::new(
+            db,
+            id,
+            "integrity",
+            profile.integrity_concurrency.max(1) as usize,
+            Some(profile.integrity_concurrency.max(1)),
+            aging,
+            permit_holder,
+        ),
+        maintenance: StoreGate::new(
+            db,
+            id,
+            "maintenance",
+            profile
+                .maintenance_concurrency
+                .unwrap_or(defaults.2 as i32)
+                .max(1) as usize,
+            profile.maintenance_concurrency,
+            aging,
+            permit_holder,
+        ),
+        migration: StoreGate::new(
+            db,
+            id,
+            "migration",
+            profile
+                .migration_concurrency
+                .unwrap_or(defaults.1 as i32)
+                .max(1) as usize,
+            profile.migration_concurrency,
+            aging,
+            permit_holder,
+        ),
+        compression,
+        compression_enabled: profile.compression_enabled,
+        min_compression_savings_percent: profile.compression_min_savings_percent as u8,
+        cache_enabled: profile.cache_enabled,
+        cache_capacity: profile
+            .cache_soft_limit
+            .as_deref()
+            .map(config::cache_bytes)
+            .transpose()?,
+        cache_entries: profile
+            .cache_entries
+            .map(|value| value.max(1) as usize)
+            .unwrap_or(default_cache_entries),
+        upload_cache: profile.upload_cache,
+        upload_cache_size: profile
+            .upload_cache_size
+            .as_deref()
+            .map(config::cache_bytes)
+            .transpose()?,
+        pack_enabled: profile.pack_enabled,
     }))
 }
 
@@ -738,30 +258,42 @@ impl Storage {
         budget: &Budget,
         db: sqlx::PgPool,
         maintenance: Arc<std::sync::atomic::AtomicBool>,
+        cluster_mode: bool,
         use_target: bool,
     ) -> Result<Self> {
         let pack_units = budget.pack_memory_units;
+        let mut compression = c.local_compression.clone();
+        compression.context_idle_timeout = c.instance.compression_idle_timeout.clone();
+        let rows: Vec<StoreRow> = if use_target {
+            sqlx::query_as(
+                "SELECT s.id,s.type,s.path,s.endpoint_url,s.remote_bucket_name,s.region,s.prefix,s.access_key_encrypted,s.secret_key_encrypted,s.identity_marker,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.enabled ORDER BY s.created_at,s.id",
+            )
+            .fetch_all(&db)
+            .await?
+        } else {
+            Vec::new()
+        };
         for name in ["multipart", "chunks"] {
-            tokio::fs::create_dir_all(c.storage.data.join(name)).await?;
+            tokio::fs::create_dir_all(c.instance.data_path.join(name)).await?;
         }
         let disk = Arc::new(Disk {
-            root: c.storage.data.clone(),
+            root: c.instance.data_path.clone(),
             limits: [
-                c.multipart
-                    .local_limit
+                c.instance
+                    .multipart_limit
                     .as_deref()
                     .map(config::bytes)
                     .transpose()?,
-                c.cache
-                    .max_size
+                c.instance
+                    .cache_size
                     .as_deref()
                     .map(config::cache_bytes)
                     .transpose()?,
-                Some(config::cache_bytes(&c.control.thumbnail_cache_size)?),
+                Some(config::cache_bytes(&c.instance.thumbnail_cache_size)?),
             ],
-            floor: config::bytes(&c.storage.free_space_floor)?,
+            floor: config::bytes(&c.instance.min_free_space)?,
             upload_limit: c
-                .cache
+                .instance
                 .upload_cache_size
                 .as_deref()
                 .map(config::cache_bytes)
@@ -774,34 +306,31 @@ impl Storage {
             io: Arc::new(Semaphore::new(budget.cpu_jobs)),
             pending: Mutex::new(HashSet::new()),
         });
-        let aging = Duration::from_secs(config::seconds(&c.storage.priority_aging)?);
+        let aging = Duration::from_secs(config::seconds(&c.backend_defaults.priority_aging)?);
         let defaults = (
-            c.storage.read_concurrency.unwrap_or(budget.storage_concurrency),
-            c.storage.upload_concurrency.unwrap_or(budget.storage_concurrency),
-            c.storage.control_concurrency.unwrap_or(budget.available_cpus.clamp(1, 8)),
+            budget.storage_read_slots,
+            budget.storage_upload_slots,
+            budget.storage_control_slots,
         );
-        let rows: Vec<StoreRow> = if use_target {
-            sqlx::query_as(
-                "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at,read_concurrency,upload_concurrency,control_concurrency FROM stores WHERE enabled ORDER BY created_at,id",
-            )
-            .fetch_all(&db)
-            .await?
-        } else {
-            Vec::new()
-        };
-        let store_options = StoreOptions::new(&c.storage)?;
-        let store_id = rows.first().map(|row| row.0);
+        let storage_id = rows.first().map(|row| row.0);
         let permit_holder = Uuid::new_v4();
         let mut targets = HashMap::with_capacity(rows.len());
         for row in rows {
             let id = row.0;
+            let profile = StorageProfile::load(&db, id)
+                .await
+                .with_context(|| format!("storage profile is missing for {id}"))?;
             targets.insert(
                 id,
                 build_store(
-                    store_options,
+                    StoreOptions::from_profile(&profile)?,
                     &secrets,
                     &db,
                     row,
+                    &profile,
+                    &compression,
+                    budget.cpu_jobs,
+                    c.instance.cache_entries.unwrap_or(budget.cache_entries),
                     defaults,
                     aging,
                     permit_holder,
@@ -824,48 +353,44 @@ impl Storage {
             pack_work: Arc::new(Semaphore::new(pack_units as usize)),
             inspection: tokio::sync::Mutex::new(()),
             targets: RwLock::new(targets),
-            store_options,
             store_defaults: defaults,
             store_aging: aging,
             permit_holder,
-            store_id,
+            storage_id,
             disk,
+            staging_storage_id: c.uploads.staging_storage_id,
+            staging_bytes_limit: c
+                .uploads
+                .staging_bytes_limit
+                .as_deref()
+                .map(config::cache_bytes)
+                .transpose()?,
+            cluster_mode,
             secrets,
             cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
             compression: Arc::new(crate::compression::Pool::new(
-                c.compression.clone(),
+                compression.clone(),
                 budget.cpu_jobs,
             )?),
-            reads: crate::storage::resource_gate::Gate::new(
-                c.storage
-                    .read_concurrency
-                    .unwrap_or(budget.storage_concurrency),
-                aging,
-            ),
-            writes: crate::storage::resource_gate::Gate::new(
-                c.storage
-                    .upload_concurrency
-                    .unwrap_or(budget.storage_concurrency),
-                aging,
-            ),
-            controls: crate::storage::resource_gate::Gate::new(
-                c.storage
-                    .control_concurrency
-                    .unwrap_or(budget.available_cpus.clamp(1, 8)),
-                aging,
-            ),
+            compression_enabled: c.local_compression.enabled,
+            base_storage: c.backend_defaults.clone(),
+            base_compression: compression,
+            cpu_jobs: budget.cpu_jobs,
+            reads: crate::storage::resource_gate::Gate::new(budget.storage_read_slots, aging),
+            writes: crate::storage::resource_gate::Gate::new(budget.storage_upload_slots, aging),
+            controls: crate::storage::resource_gate::Gate::new(budget.storage_control_slots, aging),
             fifo: tokio::sync::Mutex::new(Fifo::default()),
             cache_writes: tokio::sync::Mutex::new(()),
             upload_pins: Mutex::new(HashMap::new()),
             fills: Arc::new(Semaphore::new(budget.cpu_jobs)),
-            max_entries: budget.cache_entries,
+            max_entries: c.instance.cache_entries.unwrap_or(budget.cache_entries),
             capacity: c
-                .cache
-                .max_size
+                .instance
+                .cache_size
                 .as_deref()
                 .map(config::cache_bytes)
                 .transpose()?,
-            min_compression_savings_percent: c.cache.min_compression_savings_percent,
+            min_compression_savings_percent: c.local_cache.min_compression_savings_percent,
             misses: Mutex::new(HashMap::new()),
             backend_gets: 0.into(),
             cache_hits: 0.into(),
@@ -891,31 +416,101 @@ impl Storage {
     pub fn enabled(&self) -> bool {
         !self.targets.read().unwrap().is_empty()
     }
-    pub fn store_ids(&self) -> Vec<Uuid> {
+    pub fn storage_ids(&self) -> Vec<Uuid> {
         self.targets.read().unwrap().keys().copied().collect()
     }
-    fn store_backend(&self, store_id: Uuid) -> Result<Arc<StoreBackend>> {
+    fn store_backend(&self, storage_id: Uuid) -> Result<Arc<StoreBackend>> {
         self.targets
             .read()
             .unwrap()
-            .get(&store_id)
+            .get(&storage_id)
             .cloned()
-            .with_context(|| format!("store {store_id} is not enabled"))
+            .with_context(|| format!("store {storage_id} is not enabled"))
     }
-    pub async fn refresh_store(&self, store_id: Uuid) -> Result<()> {
+    fn local_cache(&self, storage_id: Option<Uuid>) -> CachePolicy {
+        storage_id
+            .and_then(|id| self.targets.read().unwrap().get(&id).cloned())
+            .map(|target| CachePolicy {
+                enabled: target.cache_enabled,
+                capacity: target.cache_capacity.or(self.capacity),
+                max_entries: target.cache_entries,
+                upload_cache: target.upload_cache,
+                upload_capacity: target.upload_cache_size,
+            })
+            .unwrap_or(CachePolicy {
+                enabled: true,
+                capacity: self.capacity,
+                max_entries: self.max_entries,
+                upload_cache: true,
+                upload_capacity: None,
+            })
+    }
+    fn compression_for(
+        &self,
+        storage_id: Option<Uuid>,
+    ) -> (Arc<crate::compression::Pool>, bool, u8) {
+        storage_id
+            .and_then(|id| self.targets.read().unwrap().get(&id).cloned())
+            .map(|target| {
+                (
+                    target.compression.clone(),
+                    target.compression_enabled,
+                    target.min_compression_savings_percent,
+                )
+            })
+            .unwrap_or((
+                self.compression.clone(),
+                self.compression_enabled,
+                self.min_compression_savings_percent,
+            ))
+    }
+    pub(crate) fn pack_enabled(&self, storage_id: Uuid) -> bool {
+        self.targets
+            .read()
+            .unwrap()
+            .get(&storage_id)
+            .is_none_or(|target| target.pack_enabled)
+    }
+    pub(crate) async fn pack_permit(
+        &self,
+        storage_id: Uuid,
+    ) -> Result<crate::storage::permits::StorePermit> {
+        self.store_backend(storage_id)?.pack.acquire().await
+    }
+    pub(crate) async fn profile_permit(
+        &self,
+        storage_id: Uuid,
+        direction: &str,
+    ) -> Result<crate::storage::permits::StorePermit> {
+        let target = self.store_backend(storage_id)?;
+        match direction {
+            "integrity" => target.integrity.acquire().await,
+            "maintenance" => target.maintenance.acquire().await,
+            "migration" => target.migration.acquire().await,
+            _ => anyhow::bail!("unknown storage permit direction: {direction}"),
+        }
+    }
+    pub async fn refresh_store(&self, storage_id: Uuid) -> Result<()> {
         let row: Option<StoreRow> = sqlx::query_as(
-            "SELECT id,type,path,endpoint_url,remote_bucket,region,prefix,access_key_encrypted,secret_key_encrypted,metadata,updated_at,read_concurrency,upload_concurrency,control_concurrency FROM stores WHERE id=$1 AND enabled",
+            "SELECT s.id,s.type,s.path,s.endpoint_url,s.remote_bucket_name,s.region,s.prefix,s.access_key_encrypted,s.secret_key_encrypted,s.identity_marker,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=$1 AND s.enabled",
         )
-        .bind(store_id)
+        .bind(storage_id)
         .fetch_optional(&self.db)
         .await?;
         let backend = if let Some(row) = row {
+            let profile = StorageProfile::load(&self.db, storage_id)
+                .await
+                .with_context(|| format!("storage profile is missing for {storage_id}"))?;
             Some(
                 build_store(
-                    self.store_options,
+                    StoreOptions::from_profile(&profile)?,
                     &self.secrets,
                     &self.db,
                     row,
+                    &profile,
+                    &self.base_compression,
+                    self.cpu_jobs,
+                    self.max_entries,
                     self.store_defaults,
                     self.store_aging,
                     self.permit_holder,
@@ -927,19 +522,19 @@ impl Storage {
         };
         let mut targets = self.targets.write().unwrap();
         if let Some(backend) = backend {
-            targets.insert(store_id, backend);
+            targets.insert(storage_id, backend);
         } else {
-            targets.remove(&store_id);
+            targets.remove(&storage_id);
         }
         Ok(())
     }
-    pub async fn refresh_stores(&self) -> Result<()> {
-        let rows: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT id,updated_at FROM stores WHERE enabled ORDER BY created_at,id",
+    pub async fn refresh_storages(&self) -> Result<()> {
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            "SELECT s.id,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.enabled ORDER BY s.created_at,s.id",
         )
-        .fetch_all(&self.db)
-        .await?;
-        let known: HashMap<Uuid, chrono::DateTime<chrono::Utc>> = self
+                .fetch_all(&self.db)
+                .await?;
+        let known: HashMap<Uuid, i64> = self
             .targets
             .read()
             .unwrap()
@@ -952,12 +547,11 @@ impl Storage {
             }
         }
         for id in known.keys().copied().collect::<Vec<_>>() {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM stores WHERE id=$1 AND enabled)",
-            )
-            .bind(id)
-            .fetch_one(&self.db)
-            .await?;
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE id=$1 AND enabled)")
+                    .bind(id)
+                    .fetch_one(&self.db)
+                    .await?;
             if !exists {
                 self.refresh_store(id).await?;
             }
@@ -965,13 +559,13 @@ impl Storage {
         Ok(())
     }
     fn default_store(&self) -> Result<Uuid> {
-        self.store_id
+        self.storage_id
             .filter(|id| self.targets.read().unwrap().contains_key(id))
             .or_else(|| self.targets.read().unwrap().keys().next().copied())
             .context("no store is configured")
     }
-    pub(crate) fn select_store(&self, store_id: Option<Uuid>) -> Result<Uuid> {
-        match store_id {
+    pub(crate) fn select_store(&self, storage_id: Option<Uuid>) -> Result<Uuid> {
+        match storage_id {
             Some(id) => {
                 let _ = self.store_backend(id)?;
                 Ok(id)
@@ -979,20 +573,20 @@ impl Storage {
             None => self.default_store(),
         }
     }
-    pub fn namespace_for(&self, store_id: Uuid) -> Result<String> {
-        let prefix = self.store_backend(store_id)?.prefix.clone();
+    pub fn namespace_for(&self, storage_id: Uuid) -> Result<String> {
+        let prefix = self.store_backend(storage_id)?.prefix.clone();
         Ok(if prefix.is_empty() {
             String::new()
         } else {
             format!("{prefix}/")
         })
     }
-    pub fn path_for(&self, store_id: Uuid, id: Uuid) -> Result<Path> {
-        let _ = self.store_backend(store_id)?;
+    pub fn path_for(&self, storage_id: Uuid, id: Uuid) -> Result<Path> {
+        let _ = self.store_backend(storage_id)?;
         Ok(Path::from(chunk_name(id)))
     }
-    pub fn pack_path_for(&self, store_id: Uuid, id: Uuid) -> Result<Path> {
-        let _ = self.store_backend(store_id)?;
+    pub fn pack_path_for(&self, storage_id: Uuid, id: Uuid) -> Result<Path> {
+        let _ = self.store_backend(storage_id)?;
         Ok(Path::from(format!("packs/{}", chunk_name(id))))
     }
     fn parse_path(path: &str) -> Option<Uuid> {
@@ -1001,19 +595,22 @@ impl Storage {
     fn parse_physical_path(path: &str) -> Option<Uuid> {
         Self::parse_path(path).or_else(|| parse_chunk_name(path.strip_prefix("packs/")?))
     }
-    pub fn parse_physical_path_for(&self, store_id: Uuid, path: &str) -> Result<Option<Uuid>> {
-        let _ = self.store_backend(store_id)?;
+    pub fn parse_physical_path_for(&self, storage_id: Uuid, path: &str) -> Result<Option<Uuid>> {
+        let _ = self.store_backend(storage_id)?;
         Ok(Self::parse_physical_path(path))
     }
     pub async fn list_physical_for(
         &self,
-        store_id: Uuid,
+        storage_id: Uuid,
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Vec<object_store::ObjectMeta>> {
-        let target = self.store_backend(store_id)?;
+        let target = self.store_backend(storage_id)?;
         let _permit = crate::storage::resource_gate::PRIORITY
-            .scope(crate::storage::resource_gate::MAINTENANCE, target.controls.acquire())
+            .scope(
+                crate::storage::resource_gate::MAINTENANCE,
+                target.controls.acquire(),
+            )
             .await?;
         let offset = Path::parse(cursor.unwrap_or(""))?;
         Ok(target
@@ -1023,15 +620,15 @@ impl Storage {
             .try_collect()
             .await?)
     }
-    async fn ensure_store_identity(&self, store_id: Uuid) -> Result<()> {
-        let target = self.store_backend(store_id)?;
+    async fn ensure_storage_verified(&self, storage_id: Uuid) -> Result<()> {
+        let target = self.store_backend(storage_id)?;
         if target.identity_ready.load(Ordering::Acquire) {
             return Ok(());
         }
         let _check = target.identity_check.lock().await;
         if !target.identity_ready.load(Ordering::Acquire) {
-            self.check_store_identity_inner(
-                store_id,
+            self.check_storage_inner(
+                storage_id,
                 &target,
                 &self.db,
                 self.maintenance.load(Ordering::Acquire),
@@ -1043,22 +640,30 @@ impl Storage {
         Ok(())
     }
     pub async fn check_identity(&self, _db: &sqlx::PgPool, maintenance: bool) -> Result<()> {
-        let ids = self.store_ids();
+        let ids = self.storage_ids();
         ensure!(!ids.is_empty(), "no store is configured");
         for id in ids {
-            self.check_store_identity(id, maintenance).await?;
+            self.check_storage(id, maintenance).await?;
         }
         Ok(())
     }
-    pub async fn check_store_identity(&self, store_id: Uuid, maintenance: bool) -> Result<()> {
-        let target = self.store_backend(store_id)?;
+    pub async fn check_storage(&self, storage_id: Uuid, maintenance: bool) -> Result<()> {
+        let target = self.store_backend(storage_id)?;
         let _check = target.identity_check.lock().await;
         target.identity_ready.store(false, Ordering::Release);
-        self.check_store_identity_inner(store_id, &target, &self.db, maintenance, true, true)
+        self.check_storage_inner(storage_id, &target, &self.db, maintenance, true, true)
             .await?;
         Ok(())
     }
     pub(crate) async fn initialize_store(&self, record: StoreRecord) -> Result<()> {
+        self.initialize_store_with_profile(record, None).await
+    }
+
+    pub(crate) async fn initialize_store_with_profile(
+        &self,
+        record: StoreRecord,
+        profile: Option<&StorageProfile>,
+    ) -> Result<()> {
         if record.r#type == "local" {
             tokio::fs::create_dir_all(
                 record
@@ -1068,22 +673,47 @@ impl Storage {
             )
             .await?;
         }
-        let target = VerifiedStore::build(&record, self.store_options, &self.secrets)?;
+        let profile_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_profiles WHERE storage_id=$1)")
+                .bind(record.id)
+                .fetch_one(&self.db)
+                .await?;
+        let options = if let Some(profile) = profile {
+            StoreOptions::from_profile(profile)?
+        } else if profile_exists {
+            StoreOptions::from_profile(&StorageProfile::load(&self.db, record.id).await?)?
+        } else {
+            StoreOptions::new(&self.base_storage)?
+        };
+        let target = VerifiedStore::build(&record, options, &self.secrets)?;
         let _permit = crate::storage::resource_gate::PRIORITY
-            .scope(crate::storage::resource_gate::MAINTENANCE, self.controls.acquire())
+            .scope(
+                crate::storage::resource_gate::MAINTENANCE,
+                self.controls.acquire(),
+            )
             .await?;
         target.initialize().await
     }
     pub(crate) async fn verify_store_record(&self, record: StoreRecord) -> Result<()> {
-        let target = VerifiedStore::build(&record, self.store_options, &self.secrets)?;
+        let profile = StorageProfile::load(&self.db, record.id)
+            .await
+            .with_context(|| format!("storage profile is missing for {}", record.id))?;
+        let target = VerifiedStore::build(
+            &record,
+            StoreOptions::from_profile(&profile)?,
+            &self.secrets,
+        )?;
         let _permit = crate::storage::resource_gate::PRIORITY
-            .scope(crate::storage::resource_gate::MAINTENANCE, self.controls.acquire())
+            .scope(
+                crate::storage::resource_gate::MAINTENANCE,
+                self.controls.acquire(),
+            )
             .await?;
         target.verify().await
     }
-    async fn check_store_identity_inner(
+    async fn check_storage_inner(
         &self,
-        _store_id: Uuid,
+        _storage_id: Uuid,
         target: &StoreBackend,
         _db: &sqlx::PgPool,
         _maintenance: bool,
@@ -1112,8 +742,8 @@ impl Storage {
         let actual: serde_json::Value =
             serde_json::from_slice(&data).context("invalid storage meta.json")?;
         ensure!(
-            actual == target.metadata,
-            "storage meta.json does not match this store"
+            actual == target.identity_marker,
+            "storage identity marker does not match this store"
         );
         target.identity_ready.store(true, Ordering::Release);
         Ok(())
@@ -1128,13 +758,27 @@ impl Storage {
     async fn restore_upload_pins(&self) -> Result<()> {
         let mut after = 0i64;
         loop {
-            let rows: Vec<(i64,Uuid,i64,bool)> = sqlx::query_as("SELECT u.chunk_id,c.storage_id,u.cache_size,u.cache_compressed FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE u.chunk_id>$1 ORDER BY u.chunk_id LIMIT 512")
+            let rows: Vec<(i64,Option<Uuid>,Option<String>,i64)> = sqlx::query_as("SELECT u.chunk_id,u.staging_storage_id,u.staging_object_key,u.staged_size FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE u.chunk_id>$1 ORDER BY u.chunk_id LIMIT 512")
                 .bind(after).fetch_all(&self.db).await?;
             if rows.is_empty() {
                 break;
             }
-            for (id, key, expected, compressed) in rows {
+            for (id, staging_storage_id, object_key, expected) in rows {
                 after = id;
+                let Some(object_key) = object_key else {
+                    continue;
+                };
+                if object_key.starts_with(STAGING_PREFIX) {
+                    continue;
+                }
+                let compressed = object_key.ends_with(".zst");
+                let key = object_key
+                    .strip_suffix(".zst")
+                    .or_else(|| object_key.strip_suffix(".raw"))
+                    .and_then(|v| Uuid::parse_str(v).ok());
+                let Some(key) = key else {
+                    continue;
+                };
                 let size = match tokio::fs::metadata(self.cache_path(key, compressed)).await {
                     Ok(m) => m.len(),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
@@ -1149,13 +793,19 @@ impl Storage {
                 self.upload_pins.lock().unwrap().insert(
                     key,
                     UploadPin {
-                        _pin: CachePin(pin),
-                        _charge: UploadCharge {
+                        _pin: Some(CachePin(pin)),
+                        _charge: Some(UploadCharge {
                             disk: self.disk.clone(),
                             size: expected as u64,
-                        },
+                        }),
                         size: expected as u64,
                         compressed,
+                        remote: false,
+                        staging_storage_id,
+                        staging_object_key: format!(
+                            "{key}.{}",
+                            if compressed { "zst" } else { "raw" }
+                        ),
                     },
                 );
             }
@@ -1171,18 +821,222 @@ impl Storage {
     pub fn upload_pin_ids(&self) -> Vec<Uuid> {
         self.upload_pins.lock().unwrap().keys().copied().collect()
     }
+    fn shared_staging_id(&self) -> Result<Uuid> {
+        ensure!(
+            self.cluster_mode,
+            "shared staging is only available in cluster mode"
+        );
+        let id = self
+            .staging_storage_id
+            .context("cluster mode requires uploads.staging_storage_id")?;
+        let target = self.store_backend(id)?;
+        ensure!(
+            !target.is_local,
+            "cluster staging storage must be S3-compatible"
+        );
+        Ok(id)
+    }
+    async fn claim_staging(&self, storage_id: Uuid, key: &str, bytes: u64) -> Result<()> {
+        let limit = self.staging_bytes_limit.unwrap_or(DEFAULT_STAGING_LIMIT);
+        let mut tx = self.db.begin().await?;
+        let lock_key = format!("mokyu:staging:{storage_id}");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+        let existing: Option<i64> = sqlx::query_scalar(
+            "SELECT bytes FROM staging_objects WHERE storage_id=$1 AND object_key=$2 FOR UPDATE",
+        )
+        .bind(storage_id)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = existing {
+            ensure!(existing == bytes as i64, "staging object size changed");
+            tx.commit().await?;
+            return Ok(());
+        }
+        let used: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(bytes),0) FROM staging_objects WHERE storage_id=$1",
+        )
+        .bind(storage_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        ensure!(
+            used >= 0 && (used as u64).saturating_add(bytes) <= limit,
+            "shared staging quota exhausted"
+        );
+        sqlx::query("INSERT INTO staging_objects(storage_id,object_key,bytes) VALUES($1,$2,$3)")
+            .bind(storage_id)
+            .bind(key)
+            .bind(i64::try_from(bytes)?)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    async fn release_staging(&self, storage_id: Uuid, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM staging_objects WHERE storage_id=$1 AND object_key=$2")
+            .bind(storage_id)
+            .bind(key)
+            .execute(&self.db)
+            .await?;
+        Ok(())
+    }
+    async fn put_staged(&self, storage_id: Uuid, key: &str, data: Bytes) -> Result<()> {
+        self.ensure_storage_verified(storage_id).await?;
+        self.claim_staging(storage_id, key, data.len() as u64)
+            .await?;
+        let target = self.store_backend(storage_id)?;
+        let result = target.backend.put(&Path::from(key), data.into()).await;
+        if let Err(error) = result {
+            let _ = self.release_staging(storage_id, key).await;
+            return Err(error.into());
+        }
+        Ok(())
+    }
+    async fn read_staged(&self, storage_id: Uuid, key: &str, bound: usize) -> Result<Vec<u8>> {
+        ensure!(
+            key.starts_with(STAGING_PREFIX),
+            "invalid staging object key"
+        );
+        self.ensure_storage_verified(storage_id).await?;
+        let target = self.store_backend(storage_id)?;
+        let _permit = target.reads.acquire().await?;
+        let result = target.backend.get(&Path::from(key)).await?;
+        ensure!(
+            result.meta.size <= bound as u64,
+            "staging object exceeds bound"
+        );
+        let mut data = Vec::with_capacity(result.meta.size as usize);
+        let mut stream = result.into_stream();
+        while let Some(bytes) = stream.next().await {
+            let bytes = bytes?;
+            ensure!(
+                data.len() + bytes.len() <= bound,
+                "staging object exceeds bound"
+            );
+            data.extend_from_slice(&bytes);
+        }
+        Ok(data)
+    }
+    pub(crate) async fn delete_staged(&self, storage_id: Uuid, key: &str) -> Result<()> {
+        if !key.starts_with(STAGING_PREFIX) {
+            return Ok(());
+        }
+        let target = self.store_backend(storage_id)?;
+        self.ensure_storage_verified(storage_id).await?;
+        let _permit = target.controls.acquire().await?;
+        match target.backend.delete(&Path::from(key)).await {
+            Ok(()) => {}
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.release_staging(storage_id, key).await
+    }
+    pub(crate) async fn shared_staging_ready(&self) -> Result<()> {
+        let _ = self.shared_staging_id()?;
+        ensure!(
+            self.staging_bytes_limit.is_none_or(|n| n > 0),
+            "uploads.staging_bytes_limit must be positive"
+        );
+        Ok(())
+    }
+    pub(crate) async fn write_fragment(
+        &self,
+        id: Uuid,
+        data: &[u8],
+    ) -> Result<(Option<Uuid>, Option<String>, Option<Fragment>)> {
+        if !self.cluster_mode {
+            return Ok((None, None, Some(self.disk.write_fragment(id, data).await?)));
+        }
+        let storage_id = self.shared_staging_id()?;
+        let key = format!("{STAGING_PREFIX}fragment/{}", id.simple());
+        self.put_staged(storage_id, &key, Bytes::copy_from_slice(data))
+            .await?;
+        Ok((Some(storage_id), Some(key), None))
+    }
+    pub(crate) async fn read_fragment(
+        &self,
+        id: Uuid,
+        storage_id: Option<Uuid>,
+        key: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        if let (Some(storage_id), Some(key)) = (storage_id, key) {
+            return self.read_staged(storage_id, key, MAX).await;
+        }
+        read_bounded(self.disk.fragment_path(id), MAX).await
+    }
+    pub(crate) async fn remove_fragment(
+        &self,
+        id: Uuid,
+        storage_id: Option<Uuid>,
+        key: Option<&str>,
+    ) -> Result<()> {
+        if let (Some(storage_id), Some(key)) = (storage_id, key) {
+            return self.delete_staged(storage_id, key).await;
+        }
+        self.disk.remove_fragment(id).await
+    }
+    pub(crate) async fn reconcile_staging(&self) -> Result<()> {
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT s.storage_id,s.object_key FROM staging_objects s WHERE s.created_at < now()-interval '5 minutes' AND NOT EXISTS (SELECT 1 FROM pending_uploads p WHERE p.staging_storage_id=s.storage_id AND p.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.staging_storage_id=s.storage_id AND u.staging_object_key=s.object_key) ORDER BY s.created_at LIMIT 128",
+        )
+        .fetch_all(&self.db)
+        .await?;
+        for (storage_id, key) in rows {
+            if let Err(error) = self.delete_staged(storage_id, &key).await {
+                tracing::warn!(%storage_id, %key, error=%error, "orphan staging object cleanup failed");
+            }
+        }
+        Ok(())
+    }
+    async fn decode_staged_cache(&self, c: &Chunk, data: Bytes, compressed: bool) -> Result<Bytes> {
+        if !compressed {
+            return Ok(data);
+        }
+        let permit = self.cpu.clone().acquire_owned().await?;
+        let c = c.clone();
+        let (compression, _, _) = self.compression_for(c.storage_id);
+        Ok(tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            crate::codec::decode_cache(&c, data, true, &compression)
+        })
+        .await??)
+    }
     pub async fn stage_upload(
         self: &Arc<Self>,
         c: &Chunk,
         data: Bytes,
         compressed: bool,
     ) -> Result<Option<UploadPin>> {
+        let policy = self.local_cache(c.storage_id);
+        if !self.cluster_mode && (!policy.enabled || !policy.upload_cache) {
+            return Ok(None);
+        }
+        if self.cluster_mode {
+            let storage_id = self.shared_staging_id()?;
+            let raw = self.decode_staged_cache(c, data, compressed).await?;
+            let key = format!("{STAGING_PREFIX}pending/{}", c.location_id.simple());
+            self.put_staged(storage_id, &key, raw.clone()).await?;
+            return Ok(Some(UploadPin {
+                _pin: None,
+                _charge: None,
+                size: raw.len() as u64,
+                compressed: false,
+                remote: true,
+                staging_storage_id: Some(storage_id),
+                staging_object_key: key,
+            }));
+        }
         let permit = self.fills.clone().acquire_owned().await?;
         let storage = self.clone();
-        let id = c.storage_id;
+        let id = c.location_id;
         tokio::spawn(async move {
             let _permit = permit;
-            storage.stage_upload_owned(id, data, compressed).await
+            storage
+                .stage_upload_owned(id, data, compressed, policy)
+                .await
         })
         .await?
     }
@@ -1191,6 +1045,7 @@ impl Storage {
         id: Uuid,
         data: Bytes,
         compressed: bool,
+        policy: CachePolicy,
     ) -> Result<Option<UploadPin>> {
         let size = data.len() as u64;
         let _write = self.cache_writes.lock().await;
@@ -1202,7 +1057,10 @@ impl Storage {
         {
             return Ok(None);
         }
-        let Ok(charge) = self.disk.claim_upload(size) else {
+        let Ok(charge) = self
+            .disk
+            .claim_upload_with_limit(size, policy.upload_capacity)
+        else {
             return Ok(None);
         };
         if let Some(e) = fifo.entries.get(&id) {
@@ -1215,12 +1073,12 @@ impl Storage {
             self.disk.release(Area::Cache, e.size);
         }
         let ticket = loop {
-            if fifo.entries.len() < self.max_entries
+            if fifo.entries.len() < policy.max_entries
                 && let Ok(ticket) = self.disk.reserve(Area::Cache, size)
             {
                 break ticket;
             }
-            let capacity = self.capacity.unwrap_or(self.disk.used()[1].max(size));
+            let capacity = policy.capacity.unwrap_or(self.disk.used()[1].max(size));
             let Some(victim) = fifo.victim(capacity) else {
                 return Ok(None);
             };
@@ -1233,7 +1091,7 @@ impl Storage {
                     return Err(e.into());
                 }
             }
-            if let Some(e) = fifo.evict(victim, self.max_entries) {
+            if let Some(e) = fifo.evict(victim, policy.max_entries) {
                 self.disk.release(Area::Cache, e.size);
             }
         };
@@ -1284,10 +1142,13 @@ impl Storage {
         pin.fetch_add(1, Ordering::Relaxed);
         drop(fifo);
         let pin = UploadPin {
-            _pin: CachePin(pin),
-            _charge: charge,
+            _pin: Some(CachePin(pin)),
+            _charge: Some(charge),
             size,
             compressed,
+            remote: false,
+            staging_storage_id: None,
+            staging_object_key: format!("{}.{}", id, if compressed { "zst" } else { "raw" }),
         };
         #[cfg(feature = "fault-injection")]
         crate::faults::point("upload-cache-durable").await;
@@ -1353,11 +1214,17 @@ impl Storage {
     ) -> Result<(Chunk, Vec<u8>, Bytes)> {
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
-        let threshold = self.min_compression_savings_percent;
-        let compression = self.compression.clone();
+        let (compression, compression_enabled, threshold) = self.compression_for(c.storage_id);
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            codec::encode(c, raw, &secrets, threshold, &compression, should_compress)
+            codec::encode(
+                c,
+                raw,
+                &secrets,
+                threshold,
+                &compression,
+                should_compress && compression_enabled,
+            )
         })
         .await?
     }
@@ -1365,8 +1232,7 @@ impl Storage {
         let permit = self.cpu.clone().acquire_owned().await?;
         let c = c.clone();
         let secrets = self.secrets.clone();
-        let threshold = self.min_compression_savings_percent;
-        let compression = self.compression.clone();
+        let (compression, _, threshold) = self.compression_for(c.storage_id);
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             codec::decode(&c, encoded, &secrets, threshold, &compression)
@@ -1374,9 +1240,9 @@ impl Storage {
         .await?
     }
     pub async fn put(self: &Arc<Self>, c: &Chunk, encoded: Vec<u8>, cache: Bytes) -> Result<()> {
-        let store_id = c.store_id.context("chunk has no store")?;
-        self.ensure_store_identity(store_id).await?;
-        let target = self.store_backend(store_id)?;
+        let storage_id = c.storage_id.context("chunk has no store")?;
+        self.ensure_storage_verified(storage_id).await?;
+        let target = self.store_backend(storage_id)?;
         ensure!(
             Some(encoded.len() as i32) == c.stored_size,
             "encoded length mismatch"
@@ -1388,7 +1254,7 @@ impl Storage {
         let result = target
             .backend
             .put(
-                &self.path_for(store_id, c.storage_id)?,
+                &self.path_for(storage_id, c.location_id)?,
                 Bytes::from(encoded).into(),
             )
             .await;
@@ -1404,22 +1270,28 @@ impl Storage {
         Ok(())
     }
     async fn cached(&self, c: &Chunk) -> Result<Option<Bytes>> {
+        if c.location_id.is_nil() {
+            return Ok(None);
+        }
+        if !self.local_cache(c.storage_id).enabled {
+            return Ok(None);
+        }
         let (pin, compressed) = {
             let mut fifo = self.fifo.lock().await;
-            let Some(e) = fifo.entries.get_mut(&c.storage_id) else {
+            let Some(e) = fifo.entries.get_mut(&c.location_id) else {
                 return Ok(None);
             };
             e.pins.fetch_add(1, Ordering::Relaxed);
             e.frequency = e.frequency.saturating_add(1).min(3);
             (CachePin(e.pins.clone()), e.compressed)
         };
-        let data = read_bounded(self.cache_path(c.storage_id, compressed), MAX).await;
+        let data = read_bounded(self.cache_path(c.location_id, compressed), MAX).await;
         drop(pin);
         if let Ok(data) = data {
             let size = data.len() as u64;
             let permit = self.cpu.clone().acquire_owned().await?;
             let chunk = c.clone();
-            let compression = self.compression.clone();
+            let (compression, _, _) = self.compression_for(c.storage_id);
             let decoded = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 codec::decode_cache(&chunk, Bytes::from(data), compressed, &compression)
@@ -1431,14 +1303,33 @@ impl Storage {
                 return Ok(Some(raw));
             }
         }
-        let pending = self.upload_pins.lock().unwrap().contains_key(&c.storage_id);
+        if let Some((storage_id, key)) = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT staging_storage_id,staging_object_key FROM pending_uploads WHERE chunk_id=$1 AND staging_storage_id IS NOT NULL AND staging_object_key LIKE '__mokyu/multipart/%'",
+        )
+        .bind(c.id)
+        .fetch_optional(&self.db)
+        .await?
+        {
+            let raw = self.read_staged(storage_id, &key, c.raw_size as usize).await?;
+            ensure!(
+                raw.len() == c.raw_size as usize
+                    && blake3::hash(&raw).as_bytes() == c.hash.as_slice(),
+                "staged chunk integrity mismatch"
+            );
+            return Ok(Some(Bytes::from(raw)));
+        }
+        let pending = self
+            .upload_pins
+            .lock()
+            .unwrap()
+            .contains_key(&c.location_id);
         if pending
-            && sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_locations WHERE chunk_id=$1 AND state='ready'))")
+            && sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'))")
                 .bind(c.id).fetch_one(&self.db).await? {
             return Err(anyhow::anyhow!("pending upload cache is missing or corrupt for chunk {}; preserve data/chunks and restore its durable source", c.id).context(codec::IntegrityError::PendingUnavailable));
         }
-        if let Err(e) = self.invalidate(c.storage_id).await {
-            tracing::warn!(storage_id=%c.storage_id,error=%e,"cache invalidation failed; falling back to backend");
+        if let Err(e) = self.invalidate(c.location_id).await {
+            tracing::warn!(location_id=%c.location_id,error=%e,"cache invalidation failed; falling back to backend");
         }
         Ok(None)
     }
@@ -1462,21 +1353,32 @@ impl Storage {
         Ok(())
     }
     async fn fill(self: &Arc<Self>, c: &Chunk, data: Bytes) -> Result<()> {
+        let policy = self.local_cache(c.storage_id);
+        if !policy.enabled {
+            return Ok(());
+        }
         let Ok(permit) = self.fills.clone().try_acquire_owned() else {
             return Ok(());
         };
         let storage = self.clone();
-        let id = c.storage_id;
-        let compressed = codec::cache_compressed(c, self.min_compression_savings_percent);
+        let id = c.location_id;
+        let (_, _, threshold) = self.compression_for(c.storage_id);
+        let compressed = codec::cache_compressed(c, threshold);
         tokio::spawn(async move {
             let _permit = permit;
-            storage.fill_owned(id, &data, compressed).await
+            storage.fill_owned(id, &data, compressed, policy).await
         })
         .await?
     }
-    async fn fill_owned(&self, id: Uuid, data: &[u8], compressed: bool) -> Result<()> {
+    async fn fill_owned(
+        &self,
+        id: Uuid,
+        data: &[u8],
+        compressed: bool,
+        policy: CachePolicy,
+    ) -> Result<()> {
         let size = data.len() as u64;
-        if self.capacity.is_some_and(|capacity| size > capacity) {
+        if policy.capacity.is_some_and(|capacity| size > capacity) {
             return Ok(());
         }
         // Serialize publication/invalidation while cache hits only need the FIFO index lock.
@@ -1487,12 +1389,12 @@ impl Storage {
                 return Ok(());
             }
             loop {
-                if fifo.entries.len() < self.max_entries
+                if fifo.entries.len() < policy.max_entries
                     && let Ok(ticket) = self.disk.reserve(Area::Cache, size)
                 {
                     break ticket;
                 }
-                let capacity = self.capacity.unwrap_or(self.disk.used()[1].max(size));
+                let capacity = policy.capacity.unwrap_or(self.disk.used()[1].max(size));
                 let Some(victim) = fifo.victim(capacity) else {
                     return Ok(());
                 };
@@ -1505,7 +1407,7 @@ impl Storage {
                         return Err(e.into());
                     }
                 }
-                if let Some(e) = fifo.evict(victim, self.max_entries) {
+                if let Some(e) = fifo.evict(victim, policy.max_entries) {
                     self.disk.release(Area::Cache, e.size);
                 }
             }
@@ -1572,11 +1474,11 @@ impl Storage {
         let lock = {
             let mut map = self.misses.lock().unwrap();
             map.retain(|_, v| v.strong_count() > 0);
-            if let Some(lock) = map.get(&c.storage_id).and_then(|v| v.upgrade()) {
+            if let Some(lock) = map.get(&c.location_id).and_then(|v| v.upgrade()) {
                 lock
             } else {
                 let lock = Arc::new(tokio::sync::OnceCell::new());
-                map.insert(c.storage_id, Arc::downgrade(&lock));
+                map.insert(c.location_id, Arc::downgrade(&lock));
                 lock
             }
         };
@@ -1611,7 +1513,7 @@ impl Storage {
         }
         match self.source(c.id).await? {
             Source::Chunk(physical, _pin) => {
-                self.ensure_key_loaded(&physical.key_id).await?;
+                self.ensure_key_loaded(physical.block_key_id).await?;
                 let encoded = self.read_backend(&physical).await?;
                 let (raw, cache) = self.decode(&physical, encoded).await?;
                 let fill = if physical.compressed == c.compressed
@@ -1648,8 +1550,8 @@ impl Storage {
         }
     }
     pub async fn register_location(&self, c: &Chunk) -> Result<()> {
-        sqlx::query("INSERT INTO chunk_locations(id,chunk_id,storage_id,store_id,stored_size,compressed,nonce,state,created_at,unreferenced_at,algorithm,key_id) VALUES($1,$2,$3,$4,$5,$6,$7,'uploading',$8,now(),$9,$10)")
-            .bind(c.encoding_id).bind(c.id).bind(c.storage_id).bind(c.store_id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).bind(c.created_at).bind(&c.algorithm).bind(&c.key_id).execute(&self.db).await?;
+        sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,location_id,storage_id,standalone_size,standalone_compressed,nonce,state,created_at,unreferenced_at,encryption_algorithm,block_key_id) VALUES($1,$2,$3,$4,$5,$6,$7,'uploading',$8,now(),$9,$10)")
+            .bind(c.encoding_id).bind(c.id).bind(c.location_id).bind(c.storage_id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).bind(c.created_at).bind(&c.algorithm).bind(c.block_key_id).execute(&self.db).await?;
         Ok(())
     }
     fn physical_pin(&self, id: Uuid) -> CachePin {
@@ -1676,15 +1578,15 @@ impl Storage {
     }
     async fn source(&self, id: i64) -> Result<Source> {
         let _gate = self.source_gate.read().await;
-        let physical:Option<Chunk>=sqlx::query_as("SELECT c.id,l.id encoding_id,l.storage_id,c.store_id,c.hash,c.raw_size,l.stored_size,l.algorithm,l.key_id,l.compressed,l.nonce,c.format,c.state,l.created_at FROM chunk_locations l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready'")
+        let physical:Option<Chunk>=sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size AS standalone_size,l.encryption_algorithm AS encryption_algorithm,l.block_key_id,l.standalone_compressed AS standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready'")
             .bind(id).fetch_optional(&self.db).await?;
         if let Some(c) = physical {
-            let pin = self.physical_pin(c.storage_id);
+            let pin = self.physical_pin(c.location_id);
             return Ok(Source::Chunk(c, pin));
         }
         let p:crate::pack::Pack=sqlx::query_as("SELECT p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=$1 AND c.state='ready' AND p.state='ready'")
             .bind(id).fetch_optional(&self.db).await?.context(codec::IntegrityError::Metadata)?;
-        let pin = self.physical_pin(p.storage_id);
+        let pin = self.physical_pin(p.location_id);
         Ok(Source::Pack(p, pin))
     }
     pub async fn pack_memory(&self, size: usize) -> Result<tokio::sync::OwnedSemaphorePermit> {
@@ -1721,16 +1623,23 @@ impl Storage {
     ) -> Result<(crate::pack::Pack, Vec<u8>)> {
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
-        let pool = self.compression.clone();
+        let (pool, compression_enabled, _) = self.compression_for(p.storage_id);
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            crate::pack::encode(p, &members, &secrets, &pool, strategy, should_try)
+            crate::pack::encode(
+                p,
+                &members,
+                &secrets,
+                &pool,
+                strategy,
+                should_try && compression_enabled,
+            )
         })
         .await?
     }
-    pub async fn put_path_for(&self, store_id: Uuid, path: &Path, data: Vec<u8>) -> Result<()> {
-        self.ensure_store_identity(store_id).await?;
-        let target = self.store_backend(store_id)?;
+    pub async fn put_path_for(&self, storage_id: Uuid, path: &Path, data: Vec<u8>) -> Result<()> {
+        self.ensure_storage_verified(storage_id).await?;
+        let target = self.store_backend(storage_id)?;
         let _permit = target.writes.acquire().await?;
         self.background_writable()?;
         let mut operation = self.operations[1].begin();
@@ -1743,9 +1652,9 @@ impl Storage {
         self.backend_write_bytes.fetch_add(size, Ordering::Relaxed);
         Ok(())
     }
-    pub async fn delete_path_for(&self, store_id: Uuid, path: &Path) -> Result<()> {
-        self.ensure_store_identity(store_id).await?;
-        let target = self.store_backend(store_id)?;
+    pub async fn delete_path_for(&self, storage_id: Uuid, path: &Path) -> Result<()> {
+        self.ensure_storage_verified(storage_id).await?;
+        let target = self.store_backend(storage_id)?;
         let _permit = target.controls.acquire().await?;
         self.background_writable()?;
         let mut operation = self.operations[2].begin();
@@ -1758,7 +1667,9 @@ impl Storage {
     fn background_writable(&self) -> Result<()> {
         ensure!(
             !self.maintenance.load(Ordering::Acquire)
-                || crate::upload_cache::FLUSH.try_with(|f| *f).unwrap_or(false)
+                || crate::upload::cache::FLUSH
+                    .try_with(|f| *f)
+                    .unwrap_or(false)
                 || crate::storage::resource_gate::PRIORITY
                     .try_with(|p| *p)
                     .unwrap_or(crate::storage::resource_gate::FOREGROUND)
@@ -1767,14 +1678,26 @@ impl Storage {
         );
         Ok(())
     }
-    pub(crate) async fn ensure_key_loaded(&self, name: &str) -> Result<()> {
+    pub(crate) async fn ensure_key_loaded(&self, id: Option<Uuid>) -> Result<()> {
+        let Some(name) = self.secrets.key_name(id) else {
+            return Ok(());
+        };
+        if self.secrets.key(&name).is_some() {
+            return Ok(());
+        }
+        crate::db::load_runtime_key(&self.db, &self.secrets, &name).await
+    }
+    pub(crate) async fn ensure_key_loaded_name(&self, name: &str) -> Result<()> {
         if name.is_empty() || self.secrets.key(name).is_some() {
             return Ok(());
         }
         crate::db::load_runtime_key(&self.db, &self.secrets, name).await
     }
 
-    pub(crate) async fn load_pack(self: &Arc<Self>, p: crate::pack::Pack) -> Result<Arc<LoadedPack>> {
+    pub(crate) async fn load_pack(
+        self: &Arc<Self>,
+        p: crate::pack::Pack,
+    ) -> Result<Arc<LoadedPack>> {
         if let Some(live) = self
             .pack_live
             .lock()
@@ -1792,7 +1715,9 @@ impl Storage {
                 .unwrap_or_else(|| {
                     let cell = Arc::new(PackFetch {
                         result: tokio::sync::OnceCell::new(),
-                        priority: Arc::new(AtomicUsize::new(crate::storage::resource_gate::MAINTENANCE)),
+                        priority: Arc::new(AtomicUsize::new(
+                            crate::storage::resource_gate::MAINTENANCE,
+                        )),
                     });
                     map.insert(p.id, Arc::downgrade(&cell));
                     cell
@@ -1804,32 +1729,34 @@ impl Storage {
                 .unwrap_or(crate::storage::resource_gate::FOREGROUND),
             Ordering::Relaxed,
         );
-        self.reads.refresh();
         let result = lock
             .result
             .get_or_init(|| async {
                 let result: Result<Arc<LoadedPack>> = async {
-                    let store_id = p.store_id.context("pack has no store")?;
-                    self.ensure_store_identity(store_id).await?;
-                    self.ensure_key_loaded(&p.key_id).await?;
+                    let storage_id = p.storage_id.context("pack has no store")?;
+                    let target = self.store_backend(storage_id)?;
+                    target.reads.local.refresh();
+                    self.ensure_storage_verified(storage_id).await?;
+                    self.ensure_key_loaded(p.block_key_id).await?;
                     let memory = self.pack_memory(p.payload_size()?).await?;
-                    let read_permit = self
+                    let read_permit = target
                         .reads
+                        .local
                         .acquire_shared(Some(lock.priority.clone()))
                         .await?;
                     #[cfg(feature = "fault-injection")]
                     crate::faults::point("pack-download").await;
                     let encoded = self
                         .read_path_permitted(
-                            store_id,
-                            &self.pack_path_for(store_id, p.storage_id)?,
+                            storage_id,
+                            &self.pack_path_for(storage_id, p.location_id)?,
                             p.payload_size()? + 16,
                         )
                         .await?;
                     drop(read_permit);
                     let permit = self.cpu.clone().acquire_owned().await?;
                     let secrets = self.secrets.clone();
-                    let pool = self.compression.clone();
+                    let (pool, _, _) = self.compression_for(p.storage_id);
                     let pack = p.clone();
                     let data = tokio::task::spawn_blocking(move || {
                         let _permit = permit;
@@ -1872,7 +1799,7 @@ impl Storage {
     async fn fill_pack(self: &Arc<Self>, loaded: &LoadedPack) -> Result<()> {
         let ids: Vec<i64> = loaded.data.members.iter().map(|m| m.id).collect();
         let chunks: Vec<Chunk> =
-            sqlx::query_as("SELECT * FROM chunks WHERE id=ANY($1) AND state='ready'")
+            sqlx::query_as("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.location_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE c.id=ANY($1) AND c.state='ready'")
                 .bind(ids)
                 .fetch_all(&self.db)
                 .await?;
@@ -1882,16 +1809,22 @@ impl Storage {
         Ok(())
     }
     pub async fn fill_raw(&self, c: &Chunk, raw: Bytes) -> Result<()> {
-        if self.capacity == Some(0) {
+        if !self.local_cache(c.storage_id).enabled {
             return Ok(());
         }
         let (data, compressed) = self.cache_payload(c, raw).await?;
-        self.fill_owned(c.storage_id, &data, compressed).await
+        let policy = self.local_cache(c.storage_id);
+        self.fill_owned(c.location_id, &data, compressed, policy)
+            .await
     }
     pub async fn cache_payload(&self, c: &Chunk, raw: Bytes) -> Result<(Bytes, bool)> {
-        if codec::cache_compressed(c, self.min_compression_savings_percent) {
+        let policy = self.local_cache(c.storage_id);
+        if !policy.enabled {
+            return Ok((raw, false));
+        }
+        let (pool, enabled, threshold) = self.compression_for(c.storage_id);
+        if enabled && codec::cache_compressed(c, threshold) {
             let permit = self.cpu.clone().acquire_owned().await?;
-            let pool = self.compression.clone();
             let input = raw.clone();
             let compressed = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
@@ -1905,19 +1838,19 @@ impl Storage {
         Ok((raw, false))
     }
     pub(crate) async fn head(&self, c: &Chunk) -> Result<u64> {
-        let store_id = c.store_id.context("chunk has no store")?;
+        let storage_id = c.storage_id.context("chunk has no store")?;
         Ok(self
-            .head_path_for(store_id, &self.path_for(store_id, c.storage_id)?)
+            .head_path_for(storage_id, &self.path_for(storage_id, c.location_id)?)
             .await?
             .size)
     }
     pub(crate) async fn head_path_for(
         &self,
-        store_id: Uuid,
+        storage_id: Uuid,
         path: &Path,
     ) -> Result<object_store::ObjectMeta> {
-        self.ensure_store_identity(store_id).await?;
-        let target = self.store_backend(store_id)?;
+        self.ensure_storage_verified(storage_id).await?;
+        let target = self.store_backend(storage_id)?;
         let _permit = target.controls.acquire().await?;
         let mut operation = self.operations[3].begin();
         let result = target.backend.head(path).await;
@@ -1931,7 +1864,7 @@ impl Storage {
         mode: crate::integrity::Mode,
         physical_detail: &mut serde_json::Value,
     ) -> Result<u64> {
-        let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_locations WHERE chunk_id=$1 AND state='ready'))").bind(c.id).fetch_one(&self.db).await?;
+        let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'))").bind(c.id).fetch_one(&self.db).await?;
         if pending {
             *physical_detail = serde_json::json!({"source":"pending","storage_id":c.storage_id});
             ensure!(
@@ -1942,7 +1875,7 @@ impl Storage {
         }
         match self.source(c.id).await? {
             Source::Chunk(physical, _pin) => {
-                *physical_detail = serde_json::json!({"source":"chunk","encoding_id":physical.encoding_id.to_string(),"storage_id":physical.storage_id});
+                *physical_detail = serde_json::json!({"source":"chunk","encoding_id":physical.encoding_id.to_string(),"location_id":physical.location_id});
                 codec::validate_metadata(&physical, &self.secrets)?;
                 match mode {
                     crate::integrity::Mode::Metadata => Ok(0),
@@ -1963,7 +1896,7 @@ impl Storage {
                 }
             }
             Source::Pack(p, _pin) => {
-                *physical_detail = serde_json::json!({"source":"pack","pack_id":p.id.to_string(),"storage_id":p.storage_id});
+                *physical_detail = serde_json::json!({"source":"pack","pack_id":p.id.to_string(),"location_id":p.location_id});
                 p.validate(&self.secrets)?;
                 let capacity = p.payload_size().context(codec::IntegrityError::Metadata)?;
                 ensure!(
@@ -1994,7 +1927,7 @@ impl Storage {
                     return Ok(0);
                 }
                 let result:Result<u64>=async {
-                    let members:Vec<(Chunk,i64)>=sqlx::query_as::<_,InspectionMember>("SELECT c.*,m.offset_bytes FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 ORDER BY m.ordinal LIMIT 4097")
+                    let members:Vec<(Chunk,i64)>=sqlx::query_as::<_,InspectionMember>("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.location_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,m.offset_bytes FROM pack_members m JOIN chunks c ON c.id=m.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE m.pack_id=$1 ORDER BY m.ordinal LIMIT 4097")
                         .bind(p.id).fetch_all(&self.db).await?.into_iter().map(|m|(m.chunk,m.offset_bytes)).collect();
                     let mut offset=0i64;
                     ensure!(members.len()==p.member_count as usize,codec::IntegrityError::Metadata);
@@ -2002,13 +1935,13 @@ impl Storage {
                     ensure!(offset==p.raw_size,codec::IntegrityError::Metadata);
                     if matches!(mode,crate::integrity::Mode::Metadata) {return Ok(0);}
                     if matches!(mode,crate::integrity::Mode::Head) {
-                        let store_id = p.store_id.context(codec::IntegrityError::Metadata)?;
-                        let meta=self.head_path_for(store_id, &self.pack_path_for(store_id, p.storage_id)?).await?;
+                        let storage_id = p.storage_id.context(codec::IntegrityError::Metadata)?;
+                        let meta=self.head_path_for(storage_id, &self.pack_path_for(storage_id, p.location_id)?).await?;
                         ensure!(Some(meta.size as i64)==p.stored_size,codec::IntegrityError::Length);return Ok(0);
                     }
                     let _memory=self.pack_memory(capacity).await?;
-                    let store_id = p.store_id.context(codec::IntegrityError::Metadata)?;
-                    let data=self.read_path_for(store_id, &self.pack_path_for(store_id, p.storage_id)?,capacity+16).await?;
+                    let storage_id = p.storage_id.context(codec::IntegrityError::Metadata)?;
+                    let data=self.read_path_for(storage_id, &self.pack_path_for(storage_id, p.location_id)?,capacity+16).await?;
                     let size=data.len() as u64;
                     let permit=self.cpu.clone().acquire_owned().await?;let pool=self.compression.clone();let secrets=self.secrets.clone();let pack=p.clone();
                     tokio::task::spawn_blocking(move||{
@@ -2040,32 +1973,32 @@ impl Storage {
     }
     // Shared bounded remote read. Inspection must not use or populate the cache.
     pub(crate) async fn read_backend(&self, c: &Chunk) -> Result<Vec<u8>> {
-        let store_id = c.store_id.context("chunk has no store")?;
+        let storage_id = c.storage_id.context("chunk has no store")?;
         self.read_path_for(
-            store_id,
-            &self.path_for(store_id, c.storage_id)?,
+            storage_id,
+            &self.path_for(storage_id, c.location_id)?,
             MAX + 16,
         )
         .await
     }
     pub async fn read_path_for(
         &self,
-        store_id: Uuid,
+        storage_id: Uuid,
         path: &Path,
         bound: usize,
     ) -> Result<Vec<u8>> {
-        self.ensure_store_identity(store_id).await?;
-        let target = self.store_backend(store_id)?;
+        self.ensure_storage_verified(storage_id).await?;
+        let target = self.store_backend(storage_id)?;
         let _permit = target.reads.acquire().await?;
-        self.read_path_permitted(store_id, path, bound).await
+        self.read_path_permitted(storage_id, path, bound).await
     }
     async fn read_path_permitted(
         &self,
-        store_id: Uuid,
+        storage_id: Uuid,
         path: &Path,
         bound: usize,
     ) -> Result<Vec<u8>> {
-        let target = self.store_backend(store_id)?;
+        let target = self.store_backend(storage_id)?;
         let mut operation = self.operations[0].begin();
         self.backend_gets
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

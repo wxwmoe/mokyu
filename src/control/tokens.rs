@@ -29,7 +29,7 @@ pub(crate) struct Token {
     pub grants: sqlx::types::Json<Vec<BucketGrant>>,
 }
 pub(crate) async fn get_token(db: &mut PgConnection, id: Uuid) -> Result<Token> {
-    Ok(sqlx::query_as("SELECT t.id,t.user_id,t.label,t.prefix,t.system,t.created_at,t.expires_at,t.last_used_at,t.revoked_at,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AS active,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM token_grants g WHERE g.token_id=t.id),'[]'::jsonb) AS grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.id=$1")
+    Ok(sqlx::query_as("SELECT t.id,t.user_id,t.label,t.prefix,t.system,t.created_at,t.expires_at,t.last_used_at,t.revoked_at,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AS active,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM token_bucket_grants g WHERE g.token_id=t.id),'[]'::jsonb) AS grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.id=$1")
         .bind(id).fetch_optional(db).await?.ok_or_else(||s3s::s3_error!(NoSuchKey))?)
 }
 fn default_expiry() -> Option<String> {
@@ -65,7 +65,7 @@ async fn owner<'a>(
         .execute(&mut *tx)
         .await?;
     let admin = principal.lock_identity(&mut tx).await?;
-    if !matches!(principal, Principal::Local)
+    if !matches!(principal, Principal::System)
         && principal.user_id() != Some(user)
         && !(other && admin)
     {
@@ -120,12 +120,12 @@ async fn grants(
     id: Uuid,
     grants: Vec<BucketGrant>,
 ) -> Result<()> {
-    sqlx::query("DELETE FROM token_grants WHERE token_id=$1")
+    sqlx::query("DELETE FROM token_bucket_grants WHERE token_id=$1")
         .bind(id)
         .execute(&mut **tx)
         .await?;
     for grant in grants {
-        sqlx::query("INSERT INTO token_grants(token_id,bucket_id,actions) VALUES($1,$2,$3)")
+        sqlx::query("INSERT INTO token_bucket_grants(token_id,bucket_id,actions) VALUES($1,$2,$3)")
             .bind(id)
             .bind(grant.bucket_id)
             .bind(grant.actions.iter().map(|a| a.name()).collect::<Vec<_>>())
@@ -147,7 +147,7 @@ pub(crate) async fn create_token(
     let mut tx = owner(app, principal, user, false).await?;
     let revision = scope(&mut tx, user, &input).await?;
     let id = Uuid::new_v4();
-    let secret = format!("mky_{}", crate::admin::random_secret()?);
+    let secret = format!("mky_{}", crate::cli::random_secret()?);
     let hash = blake3::hash(secret.as_bytes());
     sqlx::query("INSERT INTO api_tokens(id,user_id,label,prefix,token_hash,system,auth_revision,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
         .bind(id).bind(user).bind(input.label.trim()).bind(&secret[..12]).bind(hash.as_bytes().as_slice()).bind(input.system).bind(revision).bind(expires).execute(&mut *tx).await?;
@@ -214,7 +214,9 @@ pub(super) struct TokenQuery {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct TokenPage {
+    #[serde(rename = "items")]
     tokens: Vec<Token>,
+    #[serde(rename = "next_cursor")]
     next: Option<Uuid>,
 }
 pub(crate) async fn list_tokens(
@@ -223,11 +225,11 @@ pub(crate) async fn list_tokens(
     after: Option<Uuid>,
     limit: i64,
 ) -> Result<Vec<Token>> {
-    let rows: Vec<Token>=sqlx::query_as("SELECT t.id,t.user_id,t.label,t.prefix,t.system,t.created_at,t.expires_at,t.last_used_at,t.revoked_at,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AS active,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM token_grants g WHERE g.token_id=t.id),'[]'::jsonb) AS grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.user_id=$1 AND ($2::uuid IS NULL OR t.id>$2) ORDER BY t.id LIMIT $3")
+    let rows: Vec<Token>=sqlx::query_as("SELECT t.id,t.user_id,t.label,t.prefix,t.system,t.created_at,t.expires_at,t.last_used_at,t.revoked_at,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AS active,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM token_bucket_grants g WHERE g.token_id=t.id),'[]'::jsonb) AS grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.user_id=$1 AND ($2::uuid IS NULL OR t.id>$2) ORDER BY t.id LIMIT $3")
         .bind(user).bind(after).bind(limit).fetch_all(db).await?;
     Ok(rows)
 }
-#[utoipa::path(get,path="/api/tokens",operation_id="tokens_list",params(TokenQuery),responses((status=200,body=TokenPage)))]
+#[utoipa::path(get,path="/api/v1/api-tokens",operation_id="tokens_list",params(TokenQuery),responses((status=200,body=TokenPage)))]
 pub(super) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -247,7 +249,7 @@ pub(super) async fn list(
     let next = more.then(|| tokens.last().unwrap().id);
     Ok(Json(TokenPage { tokens, next }))
 }
-#[utoipa::path(post,path="/api/tokens",operation_id="tokens_create",request_body=TokenInput,responses((status=201,body=TokenSecret)))]
+#[utoipa::path(post,path="/api/v1/api-tokens",operation_id="tokens_create",request_body=TokenInput,responses((status=201,body=TokenSecret)))]
 pub(super) async fn create(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -259,7 +261,7 @@ pub(super) async fn create(
         Json(create_token(&app, &actor.principal, actor.id, input).await?),
     ))
 }
-#[utoipa::path(put,path="/api/tokens/{id}",operation_id="tokens_update",params(("id"=Uuid,Path)),request_body=TokenInput,responses((status=200,body=Token)))]
+#[utoipa::path(put,path="/api/v1/api-tokens/{id}",operation_id="tokens_update",params(("id"=Uuid,Path)),request_body=TokenInput,responses((status=200,body=Token)))]
 pub(super) async fn update(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -271,7 +273,7 @@ pub(super) async fn update(
         update_token(&app, &actor.principal, actor.id, id, input).await?,
     ))
 }
-#[utoipa::path(delete,path="/api/tokens/{id}",operation_id="tokens_revoke",params(("id"=Uuid,Path)),responses((status=204)))]
+#[utoipa::path(delete,path="/api/v1/api-tokens/{id}",operation_id="tokens_revoke",params(("id"=Uuid,Path)),responses((status=204)))]
 pub(super) async fn revoke(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

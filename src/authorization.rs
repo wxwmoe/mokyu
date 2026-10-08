@@ -60,9 +60,14 @@ impl Action {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "principal_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Principal {
-    Local,
+    System,
+    Bootstrap,
+    Node {
+        id: Uuid,
+        role: String,
+    },
     User {
         id: Uuid,
         session: Uuid,
@@ -106,7 +111,7 @@ impl Principal {
     }
     pub async fn service(db: &PgPool, access_key: &str) -> Result<Self> {
         let revision = sqlx::query_scalar(
-            "SELECT authorization_revision FROM credentials WHERE access_key=$1 AND enabled AND (expires_at IS NULL OR expires_at>now())",
+            "SELECT authorization_revision FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>now())",
         )
         .bind(access_key)
         .fetch_optional(db)
@@ -119,7 +124,19 @@ impl Principal {
     }
     async fn validate(&self, connection: &mut PgConnection, lock: bool) -> Result<bool> {
         match self {
-            Self::Local => Ok(true),
+            Self::System | Self::Bootstrap => Ok(true),
+            Self::Node { id, role } => {
+                let query = if lock {
+                    "SELECT role FROM nodes WHERE id=$1 AND enabled FOR SHARE"
+                } else {
+                    "SELECT role FROM nodes WHERE id=$1 AND enabled"
+                };
+                let current: Option<String> = sqlx::query_scalar(query)
+                    .bind(id)
+                    .fetch_optional(&mut *connection)
+                    .await?;
+                Ok(current.as_deref() == Some(role.as_str()) && role == "control")
+            }
             Self::User {
                 id,
                 session,
@@ -145,9 +162,9 @@ impl Principal {
                 revision,
             } => {
                 let query = if lock {
-                    "SELECT authorization_revision FROM credentials WHERE access_key=$1 AND enabled AND (expires_at IS NULL OR expires_at>now()) FOR SHARE"
+                    "SELECT authorization_revision FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>now()) FOR SHARE"
                 } else {
-                    "SELECT authorization_revision FROM credentials WHERE access_key=$1 AND enabled AND (expires_at IS NULL OR expires_at>now())"
+                    "SELECT authorization_revision FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>now())"
                 };
                 let current: Option<i64> = sqlx::query_scalar(query)
                     .bind(access_key)
@@ -241,7 +258,7 @@ impl Principal {
                     .collect()
             }
             Self::Service { access_key, .. } => {
-                let row: Option<Vec<String>> = sqlx::query_scalar("SELECT g.actions FROM grants g JOIN buckets b ON b.id=g.bucket_id JOIN credentials c ON c.access_key=g.access_key AND c.project_id=b.project_id WHERE g.access_key=$1 AND g.bucket_id=$2")
+                let row: Option<Vec<String>> = sqlx::query_scalar("SELECT g.actions FROM s3_credential_grants g JOIN buckets b ON b.id=g.bucket_id JOIN s3_credentials c ON c.access_key_id=g.access_key AND c.project_id=b.project_id WHERE g.access_key=$1 AND g.bucket_id=$2")
                     .bind(access_key).bind(bucket).fetch_optional(connection).await?;
                 Action::ALL
                     .into_iter()
@@ -251,7 +268,7 @@ impl Principal {
                     })
                     .collect()
             }
-            Self::Local => Action::ALL.to_vec(),
+            Self::System | Self::Bootstrap | Self::Node { .. } => Action::ALL.to_vec(),
         };
         Ok(actions)
     }
@@ -278,9 +295,9 @@ pub struct Permit {
     pub resources: BTreeMap<Uuid, Vec<Action>>,
 }
 impl Permit {
-    pub fn local() -> Self {
+    pub fn system() -> Self {
         Self {
-            principal: Principal::Local,
+            principal: Principal::System,
             resources: BTreeMap::new(),
         }
     }

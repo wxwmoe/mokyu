@@ -1,4 +1,4 @@
-use super::{Identity, operations, origin, token};
+use super::{Identity, audit, operations, origin, token};
 use crate::{
     app::App,
     http::{HttpError, unauthorized},
@@ -43,7 +43,7 @@ pub(super) async fn profile(app: &App, id: Uuid) -> Result<Profile, HttpError> {
         ));
         row.avatar_url = Some(format!(
             "{}/{hash}?s=128&r=g&d=404",
-            app.config.control.gravatar_base_url.trim_end_matches('/')
+            app.config.web.gravatar_base_url.trim_end_matches('/')
         ));
     }
     Ok(row)
@@ -82,7 +82,7 @@ impl Preferences {
     }
 }
 
-#[utoipa::path(get, path="/api/me", responses((status=200, body=Profile)))]
+#[utoipa::path(get, path="/api/v1/account", responses((status=200, body=Profile)))]
 pub(super) async fn me(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -90,7 +90,7 @@ pub(super) async fn me(
     let id = actor.id;
     Ok(Json(profile(&app, id).await?))
 }
-#[utoipa::path(put, path="/api/me", request_body=Preferences, responses((status=200, body=Profile)))]
+#[utoipa::path(put, path="/api/v1/account", request_body=Preferences, responses((status=200, body=Profile)))]
 pub(super) async fn save(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -176,7 +176,7 @@ async fn lock_verified(
     Ok(())
 }
 
-#[utoipa::path(post, path="/api/me/password", request_body=Password, responses((status=204)))]
+#[utoipa::path(post, path="/api/v1/account/password", request_body=Password, responses((status=204)))]
 pub(super) async fn password(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -219,7 +219,7 @@ pub(super) async fn password(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[utoipa::path(post, path="/api/me/reauth", request_body=Reauthenticate, responses((status=204)))]
+#[utoipa::path(post, path="/api/v1/account/reauth", request_body=Reauthenticate, responses((status=204)))]
 pub(super) async fn reauthenticate(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -263,7 +263,7 @@ pub(super) struct SessionList {
     more: bool,
 }
 
-#[utoipa::path(get, path="/api/me/sessions", responses((status=200, body=SessionList)))]
+#[utoipa::path(get, path="/api/v1/account/sessions", responses((status=200, body=SessionList)))]
 pub(super) async fn sessions(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -279,7 +279,7 @@ pub(super) async fn sessions(
         more,
     }))
 }
-#[utoipa::path(delete, path="/api/me/sessions/{id}", params(("id"=Uuid, Path)), responses((status=204)))]
+#[utoipa::path(delete, path="/api/v1/account/sessions/{id}", params(("id"=Uuid, Path)), responses((status=204)))]
 pub(super) async fn revoke_session(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -304,7 +304,7 @@ pub(super) async fn revoke_session(
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
-#[utoipa::path(delete, path="/api/me/sessions", responses((status=204)))]
+#[utoipa::path(delete, path="/api/v1/account/sessions", responses((status=204)))]
 pub(super) async fn revoke_others(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -338,7 +338,7 @@ pub(crate) async fn initialize(app: &App) -> Result<()> {
         .fetch_one(&app.db)
         .await?;
     if has_users {
-        sqlx::query("DELETE FROM admin_setup")
+        sqlx::query("DELETE FROM setup_tokens")
             .execute(&app.db)
             .await?;
     }
@@ -354,8 +354,8 @@ pub(crate) async fn setup_token(app: &App) -> Result<String> {
         .fetch_one(&mut *tx)
         .await?;
     anyhow::ensure!(!has_users, "an administrator already exists");
-    let token = crate::admin::random_secret()?;
-    sqlx::query("INSERT INTO admin_setup(singleton,token_hash,expires_at) VALUES(true,$1,now()+interval '1 hour') ON CONFLICT(singleton) DO UPDATE SET token_hash=excluded.token_hash,created_at=now(),expires_at=excluded.expires_at")
+    let token = crate::cli::random_secret()?;
+    sqlx::query("INSERT INTO setup_tokens(singleton,token_hash,expires_at) VALUES(true,$1,now()+interval '1 hour') ON CONFLICT(singleton) DO UPDATE SET token_hash=excluded.token_hash,created_at=now(),expires_at=excluded.expires_at")
         .bind(blake3::hash(token.as_bytes()).as_bytes().as_slice())
         .execute(&mut *tx)
         .await?;
@@ -363,11 +363,44 @@ pub(crate) async fn setup_token(app: &App) -> Result<String> {
     Ok(token)
 }
 
+pub(crate) async fn initialize_admin(
+    app: &App,
+    username: String,
+    password: String,
+    require_change: bool,
+) -> Result<Uuid> {
+    anyhow::ensure!(
+        !username.is_empty() && username.len() <= 64 && username.chars().all(|c| !c.is_control()),
+        "username must be 1..64 characters without control characters"
+    );
+    let hash = operations::password_hash(password).await?;
+    let mut tx = app.db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(USER_LOCK)
+        .execute(&mut *tx)
+        .await?;
+    let has_users: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM web_users)")
+        .fetch_one(&mut *tx)
+        .await?;
+    anyhow::ensure!(!has_users, "an administrator already exists");
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO web_users(id,username,password_hash,role,must_change_password) VALUES($1,$2,$3,'admin',$4)")
+        .bind(id)
+        .bind(username)
+        .bind(hash)
+        .bind(require_change)
+        .execute(&mut *tx)
+        .await?;
+    audit::security(&mut tx, id, "account.init", true, "cli-init").await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
 #[derive(Serialize, ToSchema)]
 pub(super) struct Bootstrap {
     setup_required: bool,
 }
-#[utoipa::path(get, path="/api/bootstrap", responses((status=200, body=Bootstrap)))]
+#[utoipa::path(get, path="/api/v1/auth/bootstrap", responses((status=200, body=Bootstrap)))]
 pub(super) async fn bootstrap(State(app): State<Arc<App>>) -> Result<Json<Bootstrap>, HttpError> {
     let setup_required = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM web_users)")
         .fetch_one(&app.db)
@@ -381,7 +414,7 @@ pub(super) struct Setup {
     username: String,
     password: String,
 }
-#[utoipa::path(post, path="/api/setup", request_body=Setup, responses((status=201)))]
+#[utoipa::path(post, path="/api/v1/auth/setup", request_body=Setup, responses((status=201)))]
 pub(super) async fn setup(
     State(app): State<Arc<App>>,
     Extension(context): Extension<crate::stats::RequestContext>,
@@ -397,10 +430,11 @@ pub(super) async fn setup(
     {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    let expected: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT token_hash FROM admin_setup WHERE singleton AND expires_at>now()")
-            .fetch_optional(&app.db)
-            .await?;
+    let expected: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT token_hash FROM setup_tokens WHERE singleton AND expires_at>now()",
+    )
+    .fetch_optional(&app.db)
+    .await?;
     let supplied = blake3::hash(input.token.as_bytes());
     use subtle::ConstantTimeEq;
     if !expected.is_some_and(|expected| bool::from(expected.ct_eq(supplied.as_bytes()))) {
@@ -412,7 +446,7 @@ pub(super) async fn setup(
         .bind(USER_LOCK)
         .execute(&mut *tx)
         .await?;
-    let allowed: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM web_users) AND EXISTS(SELECT 1 FROM admin_setup WHERE token_hash=$1)").bind(supplied.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
+    let allowed: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM web_users) AND EXISTS(SELECT 1 FROM setup_tokens WHERE token_hash=$1)").bind(supplied.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
     if !allowed {
         return Err(unauthorized());
     }
@@ -424,7 +458,7 @@ pub(super) async fn setup(
         .execute(&mut *tx)
         .await?;
     super::audit::security(&mut tx, user, "account.setup", true, &context.id).await?;
-    sqlx::query("DELETE FROM admin_setup")
+    sqlx::query("DELETE FROM setup_tokens")
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

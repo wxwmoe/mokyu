@@ -74,11 +74,13 @@ pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
     );
     if c.algorithm == "none" {
         ensure!(
-            c.key_id.is_empty() && c.nonce.is_none(),
+            c.block_key_id.is_none() && c.nonce.is_none(),
             IntegrityError::Metadata
         );
     } else {
-        let key = secrets.key(&c.key_id).context(IntegrityError::MissingKey)?;
+        let key = secrets
+            .key_for_id(c.block_key_id)
+            .context(IntegrityError::MissingKey)?;
         ensure!(
             key.algorithm == c.algorithm && c.nonce.as_ref().is_some_and(|n| n.len() == 12),
             IntegrityError::Metadata
@@ -90,14 +92,20 @@ pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
 #[derive(Clone, sqlx::FromRow, Serialize)]
 pub struct Chunk {
     pub id: i64,
+    #[sqlx(rename = "current_encoding_id")]
     pub encoding_id: i64,
-    pub storage_id: Uuid,
-    pub store_id: Option<Uuid>,
+    #[sqlx(default)]
+    pub location_id: Uuid,
+    pub storage_id: Option<Uuid>,
     pub hash: Vec<u8>,
     pub raw_size: i32,
+    #[sqlx(rename = "standalone_size")]
     pub stored_size: Option<i32>,
+    #[sqlx(rename = "encryption_algorithm")]
     pub algorithm: String,
-    pub key_id: String,
+    #[sqlx(rename = "block_key_id")]
+    pub block_key_id: Option<Uuid>,
+    #[sqlx(rename = "standalone_compressed")]
     pub compressed: bool,
     pub nonce: Option<Vec<u8>>,
     pub format: i32,
@@ -176,10 +184,10 @@ fn aad(c: &Chunk) -> Result<Vec<u8>> {
         c.format == 1 && c.hash.len() == 32 && (1..=MAX as i32).contains(&c.raw_size),
         "invalid chunk metadata"
     );
-    let mut aad = Vec::with_capacity(128 + c.key_id.len());
+    let mut aad = Vec::with_capacity(128 + c.block_key_id.map_or(0, |id| id.to_string().len()));
     aad.extend_from_slice(b"MOKYU\x00\x00\x01");
     aad.extend_from_slice(&c.encoding_id.to_be_bytes());
-    aad.extend_from_slice(c.storage_id.as_bytes());
+    aad.extend_from_slice(c.location_id.as_bytes());
     aad.extend_from_slice(&c.hash);
     aad.extend_from_slice(&c.raw_size.to_be_bytes());
     aad.extend_from_slice(&c.stored_size.context("missing encoded size")?.to_be_bytes());
@@ -190,8 +198,12 @@ fn aad(c: &Chunk) -> Result<Vec<u8>> {
         "chacha20-poly1305" => 2,
         _ => bail!("unknown chunk algorithm"),
     });
-    aad.extend_from_slice(&u16::try_from(c.key_id.len())?.to_be_bytes());
-    aad.extend_from_slice(c.key_id.as_bytes());
+    aad.extend_from_slice(
+        &u16::try_from(c.block_key_id.map_or(0, |id| id.to_string().len()))?.to_be_bytes(),
+    );
+    if let Some(id) = c.block_key_id {
+        aad.extend_from_slice(id.to_string().as_bytes());
+    }
     Ok(aad)
 }
 pub fn cache_compressed(c: &Chunk, min_savings_percent: u8) -> bool {
@@ -229,7 +241,9 @@ pub fn encode(
         Bytes::from(input)
     };
     if c.algorithm != "none" {
-        let key = secrets.key(&c.key_id).context("missing chunk key")?;
+        let key = secrets
+            .key_for_id(c.block_key_id)
+            .context("missing chunk key")?;
         ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
         let n = nonce(c.created_at, c.encoding_id)?;
         c.nonce = Some(n.to_vec());
@@ -259,12 +273,14 @@ pub fn decode(
     let metadata = aad(c).context(IntegrityError::Metadata)?;
     let plain_len = if c.algorithm == "none" {
         ensure!(
-            c.key_id.is_empty() && c.nonce.is_none(),
+            c.block_key_id.is_none() && c.nonce.is_none(),
             "invalid unencrypted chunk metadata"
         );
         encoded.len()
     } else {
-        let key = secrets.key(&c.key_id).context(IntegrityError::MissingKey)?;
+        let key = secrets
+            .key_for_id(c.block_key_id)
+            .context(IntegrityError::MissingKey)?;
         ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
         let n: [u8; 12] = c
             .nonce
@@ -380,6 +396,11 @@ mod tests {
                 BTreeMap::from([("test-key".into(), Key::new(algorithm, [7; 32]).unwrap())])
             },
             runtime_keys: std::sync::Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            key_names: std::sync::Arc::new(std::sync::RwLock::new(if algorithm == "none" {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([(Uuid::from_u128(0x100), "test-key".into())])
+            })),
         }
     }
     #[test]
@@ -392,13 +413,13 @@ mod tests {
             let c = Chunk {
                 id: 42,
                 encoding_id: 42,
-                storage_id: Uuid::from_u128(42),
-                store_id: None,
+                location_id: Uuid::from_u128(42),
+                storage_id: None,
                 hash: blake3::hash(input).as_bytes().to_vec(),
                 raw_size: input.len() as i32,
                 stored_size: None,
                 algorithm: algorithm.into(),
-                key_id: key_id.into(),
+                block_key_id: (algorithm != "none").then_some(Uuid::from_u128(0x100)),
                 compressed: false,
                 nonce: None,
                 format: 1,
@@ -478,13 +499,13 @@ mod tests {
                 let c = Chunk {
                     id: 42,
                     encoding_id: 42,
-                    storage_id: Uuid::from_u128(42),
-                    store_id: None,
+                    location_id: Uuid::from_u128(42),
+                    storage_id: None,
                     hash: blake3::hash(&input).as_bytes().to_vec(),
                     raw_size: input.len() as i32,
                     stored_size: None,
                     algorithm: algorithm.into(),
-                    key_id: key_id.into(),
+                    block_key_id: (algorithm != "none").then_some(Uuid::from_u128(0x100)),
                     compressed: false,
                     nonce: None,
                     format: 1,
@@ -560,7 +581,7 @@ mod tests {
                 assert!(decode(&c, changed, &secrets, 20, &compression).is_err());
                 if algorithm != "none" {
                     let mut changed = c.clone();
-                    changed.storage_id = Uuid::new_v4();
+                    changed.location_id = Uuid::new_v4();
                     assert!(decode(&changed, stored, &secrets, 20, &compression).is_err());
                 }
                 let mut boundary = c.clone();
@@ -595,13 +616,13 @@ mod tests {
                         let c = Chunk {
                             id: 1 + worker * 2 + i as i64,
                             encoding_id: 1 + worker * 2 + i as i64,
-                            storage_id: Uuid::new_v4(),
-                            store_id: None,
+                            location_id: Uuid::new_v4(),
+                            storage_id: None,
                             hash: blake3::hash(&input).as_bytes().to_vec(),
                             raw_size: input.len() as i32,
                             stored_size: None,
                             algorithm: key.algorithm.clone(),
-                            key_id: key_id.clone(),
+                            block_key_id: Some(Uuid::from_u128(0x100)),
                             compressed: false,
                             nonce: None,
                             format: 1,
@@ -618,7 +639,7 @@ mod tests {
                             input
                         );
                         let mut wrong = c;
-                        wrong.key_id = "missing-key".into();
+                        wrong.block_key_id = Some(Uuid::from_u128(0x101));
                         assert!(decode(&wrong, encoded, secrets, 20, compression).is_err());
                         let binding = format!("access-{worker}-{i}");
                         let mut protected = protect(

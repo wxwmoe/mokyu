@@ -34,7 +34,7 @@ fn text(value: &Value) -> String {
         .map(str::to_owned)
         .unwrap_or_else(|| value.to_string())
 }
-#[utoipa::path(get,operation_id="service_status",path="/api/service/status",responses((status=200,body=ServiceStatus)))]
+#[utoipa::path(get,operation_id="service_status",path="/api/v1/system/status",responses((status=200,body=ServiceStatus)))]
 pub(super) async fn status(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -108,7 +108,7 @@ pub(super) struct ConfigField {
     source: &'static str,
     restart: bool,
 }
-#[utoipa::path(get,operation_id="service_config",path="/api/service/config",responses((status=200,body=Vec<ConfigField>)))]
+#[utoipa::path(get,operation_id="service_config",path="/api/v1/system/config",responses((status=200,body=Vec<ConfigField>)))]
 pub(super) async fn config(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -126,20 +126,16 @@ pub(super) async fn config(
         "database".into(),
         json!({"host":d.host,"port":d.port,"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode}),
     );
-    let mut cluster = serde_json::to_value(&c.cluster)?;
-    cluster["join_token"] = json!("[redacted]");
-    sections.insert("cluster".into(), cluster);
-    let runtime: Vec<(String, serde_json::Value)> = sqlx::query_as(
-        "SELECT section,value FROM runtime_settings ORDER BY section",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let runtime: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT section,value FROM runtime_settings ORDER BY section")
+            .fetch_all(&mut *tx)
+            .await?;
     for (section, value) in runtime {
         sections.insert(section, value);
     }
     let runtime_sections: std::collections::HashSet<&str> = sections
         .keys()
-        .filter(|key| !matches!(key.as_str(), "instance" | "database" | "cluster"))
+        .filter(|key| !matches!(key.as_str(), "instance" | "database"))
         .map(String::as_str)
         .collect();
     let mut fields = Vec::new();

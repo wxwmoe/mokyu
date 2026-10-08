@@ -84,7 +84,7 @@ impl App {
         let mut count = 0;
         let mut saved = cursor.clone();
         loop {
-            let rows:Vec<StoredStream>=sqlx::query_as("SELECT s.* FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=$1 AND o.key LIKE $2 AND (o.key>$3 OR ($4 AND o.key=$3)) ORDER BY o.key LIMIT 64")
+            let rows:Vec<StoredStream>=sqlx::query_as("SELECT s.* FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=$1 AND o.object_key LIKE $2 AND (o.object_key>$3 OR ($4 AND o.object_key=$3)) ORDER BY o.object_key LIMIT 64")
                 .bind(bucket).bind(&pattern).bind(&cursor.key).bind(cursor.inclusive).fetch_all(&self.db).await?;
             if rows.is_empty() {
                 break;

@@ -101,7 +101,7 @@ pub(crate) async fn remove(app: &App, principal: &Principal, id: Uuid) -> Result
     if exists.is_none() {
         return Err(s3s::s3_error!(NoSuchKey).into());
     }
-    let dependent: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE project_id=$1) OR EXISTS(SELECT 1 FROM credentials WHERE project_id=$1) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=$1)").bind(id).fetch_one(&mut *tx).await?;
+    let dependent: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE project_id=$1) OR EXISTS(SELECT 1 FROM s3_credentials WHERE project_id=$1) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=$1)").bind(id).fetch_one(&mut *tx).await?;
     if dependent {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
@@ -145,7 +145,7 @@ pub(crate) async fn mode(app: &App, principal: &Principal, enabled: bool) -> Res
     Ok(())
 }
 
-#[utoipa::path(get, path="/api/projects", responses((status=200, body=Vec<Project>)))]
+#[utoipa::path(get, path="/api/v1/projects", responses((status=200, body=Vec<Project>)))]
 pub(super) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -153,7 +153,7 @@ pub(super) async fn list(
     let rows = sqlx::query_as("SELECT p.* FROM projects p WHERE $2 OR CASE WHEN $3::uuid IS NOT NULL THEN EXISTS(SELECT 1 FROM token_bucket_access t JOIN buckets b ON b.id=t.bucket_id WHERE t.token_id=$3 AND b.project_id=p.id AND 'bucket.list'=ANY(t.actions)) ELSE EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=p.id AND m.user_id=$1) END ORDER BY p.builtin DESC,p.name LIMIT 1000").bind(actor.id).bind(actor.admin).bind(actor.principal.token_id()).fetch_all(&app.db).await?;
     Ok(Json(rows))
 }
-#[utoipa::path(post, path="/api/projects", request_body=ProjectInput, responses((status=201, body=Project)))]
+#[utoipa::path(post, path="/api/v1/projects", request_body=ProjectInput, responses((status=201, body=Project)))]
 pub(super) async fn create(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -165,7 +165,7 @@ pub(super) async fn create(
         Json(save(&app, &actor.principal, None, input).await?),
     ))
 }
-#[utoipa::path(put, path="/api/projects/{id}", params(("id"=Uuid, Path)), request_body=ProjectInput, responses((status=200, body=Project)))]
+#[utoipa::path(put, path="/api/v1/projects/{id}", params(("id"=Uuid, Path)), request_body=ProjectInput, responses((status=200, body=Project)))]
 pub(super) async fn update(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -175,7 +175,7 @@ pub(super) async fn update(
     actor.recent(&app).await?;
     Ok(Json(save(&app, &actor.principal, Some(id), input).await?))
 }
-#[utoipa::path(delete, path="/api/projects/{id}", params(("id"=Uuid, Path)), responses((status=204)))]
+#[utoipa::path(delete, path="/api/v1/projects/{id}", params(("id"=Uuid, Path)), responses((status=204)))]
 pub(super) async fn delete(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -190,7 +190,7 @@ pub(super) async fn delete(
 pub(crate) struct ProjectMode {
     enabled: bool,
 }
-#[utoipa::path(get, path="/api/projects/settings", responses((status=200, body=ProjectMode)))]
+#[utoipa::path(get, path="/api/v1/projects/settings", responses((status=200, body=ProjectMode)))]
 pub(super) async fn get_mode(State(app): State<Arc<App>>) -> Result<Json<ProjectMode>, HttpError> {
     Ok(Json(ProjectMode {
         enabled: sqlx::query_scalar("SELECT project_management FROM mokyu_meta")
@@ -198,7 +198,7 @@ pub(super) async fn get_mode(State(app): State<Arc<App>>) -> Result<Json<Project
             .await?,
     }))
 }
-#[utoipa::path(put, path="/api/projects/settings", request_body=ProjectMode, responses((status=200, body=ProjectMode)))]
+#[utoipa::path(put, path="/api/v1/projects/settings", request_body=ProjectMode, responses((status=200, body=ProjectMode)))]
 pub(super) async fn set_mode(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

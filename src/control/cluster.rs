@@ -1,10 +1,10 @@
 use super::Identity;
-use crate::{app::App, authorization::Principal, cluster, config, control::users, http::HttpError};
-use anyhow::{Context, ensure};
+use crate::{app::App, http::HttpError};
+use anyhow::Result;
 use axum::{
     Json,
     extract::{Extension, Path, State},
-    http::StatusCode,
+    http::HeaderMap,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,15 +16,14 @@ use uuid::Uuid;
 pub(crate) struct ClusterStatus {
     mode: String,
     enabled_nodes: i64,
-    local_stores: i64,
+    local_storages: i64,
 }
 
 #[derive(Serialize, sqlx::FromRow, ToSchema)]
 pub(crate) struct NodeView {
     id: Uuid,
     name: String,
-    kind: String,
-    advertise_url: Option<String>,
+    role: String,
     enabled: bool,
     last_seen_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -39,88 +38,16 @@ pub(crate) struct ModeInput {
 
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TokenInput {
-    name: String,
-    #[schema(example = "data")]
-    kind: String,
-    advertise_url: Option<String>,
-    #[serde(default = "default_expiry")]
-    expires_in: String,
+pub(crate) struct ReleaseInput {
+    #[serde(default)]
+    confirm: bool,
 }
 
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ReissueInput {
-    #[serde(default = "default_expiry")]
-    expires_in: String,
-}
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct TokenView {
-    node_id: Uuid,
-    name: String,
-    kind: String,
-    token: String,
-    expires_at: DateTime<Utc>,
-}
-
-#[derive(Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct JoinInput {
-    token: String,
-}
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct JoinView {
-    node_id: Uuid,
-    kind: String,
-    credential: String,
-}
-
-#[derive(Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct HeartbeatInput {
-    node_id: Uuid,
-    credential: String,
-}
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct HeartbeatView {
-    kind: String,
-    enabled: bool,
-}
-
-fn default_expiry() -> String {
-    "1h".into()
-}
-
-fn validate_name(name: &str) -> anyhow::Result<()> {
-    ensure!(
-        (1..=128).contains(&name.trim().len())
-            && !name.chars().any(char::is_control)
-            && !name.contains('/'),
-        "node name must contain 1..128 safe bytes"
-    );
-    Ok(())
-}
-
-fn validate_url(value: &str) -> anyhow::Result<()> {
-    let uri: hyper::Uri = value.parse().context("invalid advertise URL")?;
-    ensure!(
-        uri.scheme_str().is_some() && uri.authority().is_some(),
-        "advertise URL must be absolute"
-    );
-    Ok(())
-}
-
-fn issue_token(expires_in: &str) -> anyhow::Result<(String, [u8; 32], DateTime<Utc>)> {
-    let seconds = config::seconds(expires_in)?;
-    ensure!((60..=30 * 86400).contains(&seconds), "token lifetime must be 1m..30d");
-    let token = cluster::join_token()?;
-    let hash = cluster::join_token_hash(&token)?;
-    let expires_at = Utc::now()
-        + chrono::Duration::seconds(i64::try_from(seconds).context("token lifetime overflow")?);
-    Ok((token, hash, expires_at))
+pub(crate) struct RecoverInput {
+    #[serde(default)]
+    confirm: bool,
 }
 
 async fn admin(actor: &Identity, app: &App) -> Result<(), HttpError> {
@@ -131,7 +58,7 @@ async fn admin(actor: &Identity, app: &App) -> Result<(), HttpError> {
     Ok(())
 }
 
-#[utoipa::path(get, operation_id = "cluster_status", path = "/api/cluster", responses((status = 200, body = ClusterStatus)))]
+#[utoipa::path(get, operation_id = "cluster_status", path = "/api/v1/cluster/status", responses((status = 200, body = ClusterStatus)))]
 pub(crate) async fn status(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -144,15 +71,13 @@ pub(crate) async fn status(
         enabled_nodes: sqlx::query_scalar("SELECT count(*) FROM nodes WHERE enabled")
             .fetch_one(&app.db)
             .await?,
-        local_stores: sqlx::query_scalar(
-            "SELECT count(*) FROM stores WHERE type='local'",
-        )
-        .fetch_one(&app.db)
-        .await?,
+        local_storages: sqlx::query_scalar("SELECT count(*) FROM storages WHERE type='local'")
+            .fetch_one(&app.db)
+            .await?,
     }))
 }
 
-#[utoipa::path(post, operation_id = "cluster_mode", path = "/api/cluster/mode", request_body = ModeInput, responses((status = 200, body = ClusterStatus)))]
+#[utoipa::path(post, operation_id = "cluster_mode", path = "/api/v1/cluster/mode", request_body = ModeInput, responses((status = 200, body = ClusterStatus)))]
 pub(crate) async fn mode(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -169,291 +94,155 @@ pub(crate) async fn mode(
             .await?;
     if current != input.mode {
         if input.mode == "cluster" {
-            let local: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM stores WHERE type='local')",
+            let local: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE type='local')")
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if local {
+                return Err(anyhow::anyhow!(
+                    "local storages exist; migrate them to S3 before enabling cluster mode"
+                )
+                .into());
+            }
+            let staging: Option<Uuid> = sqlx::query_scalar(
+                "SELECT NULLIF(value->>'staging_storage_id','')::uuid FROM runtime_settings WHERE section='uploads'",
             )
             .fetch_one(&mut *tx)
             .await?;
-            if local {
+            let valid_staging: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM storages WHERE id=$1 AND enabled AND type='s3')",
+            )
+            .bind(staging)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !valid_staging {
                 return Err(anyhow::anyhow!(
-                    "local stores exist; migrate them to S3 before enabling cluster mode"
+                    "cluster mode requires an enabled S3 uploads.staging_storage_id"
                 )
                 .into());
             }
         } else {
-            let nodes: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes WHERE enabled)")
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let local_node = match &actor.principal {
+                crate::authorization::Principal::Node { id, role } if role == "control" => {
+                    Some(*id)
+                }
+                _ => None,
+            };
+            let nodes: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM nodes WHERE enabled AND ($1::uuid IS NULL OR id<>$1))",
+            )
+            .bind(local_node)
+            .fetch_one(&mut *tx)
+            .await?;
             if nodes {
                 return Err(anyhow::anyhow!(
-                    "disable all registered cluster nodes before returning to single mode"
+                    "release all registered nodes before returning to single mode"
+                )
+                .into());
+            }
+            let pending: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pending_uploads) OR EXISTS(SELECT 1 FROM fragments WHERE staging_storage_id IS NOT NULL)",
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            if pending {
+                return Err(anyhow::anyhow!(
+                    "complete or cancel active uploads before returning to single mode"
                 )
                 .into());
             }
         }
-        sqlx::query("UPDATE mokyu_meta SET deployment_mode=$1 WHERE singleton")
-            .bind(&input.mode)
-            .execute(&mut *tx)
-            .await?;
+        if input.mode == "single"
+            && let crate::authorization::Principal::Node { id, role } = &actor.principal
+            && role == "control"
+        {
+            sqlx::query("UPDATE nodes SET enabled=false,credential_encrypted=NULL,last_seen_at=NULL,status='released',recovery_required=false,updated_at=now() WHERE id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE tasks SET state=CASE WHEN execution_scope='node' THEN 'paused' ELSE 'queued' END,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE lease_node_id=$1 AND state='running'")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM storage_permits WHERE holder_id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("UPDATE mokyu_meta SET deployment_mode=$1,deployment_mode_revision=deployment_mode_revision+1 WHERE singleton").bind(&input.mode).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     status(State(app), Extension(actor)).await
 }
 
-#[utoipa::path(get, operation_id = "cluster_nodes", path = "/api/cluster/nodes", responses((status = 200, body = Vec<NodeView>)))]
+#[utoipa::path(get, operation_id = "cluster_nodes", path = "/api/v1/cluster/nodes", responses((status = 200, body = Vec<NodeView>)))]
 pub(crate) async fn nodes(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<NodeView>>, HttpError> {
     admin(&actor, &app).await?;
-    let rows: Vec<NodeView> = sqlx::query_as(
-        "SELECT id,name,kind,advertise_url,enabled,last_seen_at,created_at FROM nodes ORDER BY name",
-    )
-    .fetch_all(&app.db)
-    .await?;
-    Ok(Json(rows))
-}
-
-#[utoipa::path(post, operation_id = "cluster_token", path = "/api/cluster/tokens", request_body = TokenInput, responses((status = 201, body = TokenView)))]
-pub(crate) async fn token(
-    State(app): State<Arc<App>>,
-    Extension(actor): Extension<Identity>,
-    Json(input): Json<TokenInput>,
-) -> Result<(StatusCode, Json<TokenView>), HttpError> {
-    admin(&actor, &app).await?;
-    validate_name(&input.name)?;
-    if !matches!(input.kind.as_str(), "control" | "worker" | "data") {
-        return Err(anyhow::anyhow!("node kind is control, worker or data").into());
-    }
-    if input.kind == "control" && input.advertise_url.is_none() {
-        return Err(anyhow::anyhow!("control nodes require advertise_url").into());
-    }
-    if let Some(url) = &input.advertise_url {
-        validate_url(url)?;
-    }
-    let (token, hash, expires_at) = issue_token(&input.expires_in)?;
-    let node_id = Uuid::new_v4();
-    let mut tx = app.db.begin().await?;
-    sqlx::query("INSERT INTO nodes(id,name,kind,advertise_url) VALUES($1,$2,$3,$4)")
-        .bind(node_id)
-        .bind(input.name.trim())
-        .bind(&input.kind)
-        .bind(input.advertise_url)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "INSERT INTO node_join_tokens(id,node_id,token_hash,expires_at) VALUES($1,$2,$3,$4)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(node_id)
-    .bind(hash.as_slice())
-    .bind(expires_at)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(TokenView {
-            node_id,
-            name: input.name,
-            kind: input.kind,
-            token,
-            expires_at,
-        }),
+    Ok(Json(
+        sqlx::query_as(
+            "SELECT id,name,role,enabled,last_seen_at,created_at FROM nodes ORDER BY name",
+        )
+        .fetch_all(&app.db)
+        .await?,
     ))
 }
 
-#[utoipa::path(delete, operation_id = "cluster_node_revoke", path = "/api/cluster/nodes/{id}", params(("id" = Uuid, Path)), responses((status = 200)))]
-pub(crate) async fn revoke(
+#[utoipa::path(post, operation_id = "cluster_release", path = "/api/v1/cluster/nodes/{name}/release", params(("name" = String, Path)), request_body = ReleaseInput, responses((status = 200)))]
+pub(crate) async fn release(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
-    Path(id): Path<Uuid>,
+    Path(name): Path<String>,
+    Json(input): Json<ReleaseInput>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
-    actor.recent(&app).await?;
-    revoke_record(&app, &actor.principal, id).await?;
-    Ok(Json(serde_json::json!({"revoked": id})))
-}
-
-pub(crate) async fn revoke_record(app: &App, principal: &Principal, id: Uuid) -> anyhow::Result<()> {
-    let mut tx = users::admin_transaction(app, principal).await?;
-    let changed = sqlx::query(
-        "UPDATE nodes SET enabled=false,credential_encrypted=NULL,last_seen_at=NULL,updated_at=now() WHERE id=$1 AND enabled",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    ensure!(changed == 1, "node not found or already disabled");
-    sqlx::query(
-        "UPDATE node_join_tokens SET consumed_at=coalesce(consumed_at,now()) WHERE node_id=$1 AND consumed_at IS NULL",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "UPDATE control_leases SET node_id=NULL,lease_token=gen_random_uuid(),expires_at=now(),updated_at=now() WHERE singleton AND node_id=$1",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("UPDATE tasks SET state='queued',lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE lease_node_id=$1 AND state='running'")
+    admin(&actor, &app).await?;
+    if !input.confirm {
+        return Err(anyhow::anyhow!("release requires confirm=true").into());
+    }
+    let mut tx = app.db.begin().await?;
+    let id: Uuid = sqlx::query_scalar("UPDATE nodes SET enabled=false,credential_encrypted=NULL,last_seen_at=NULL,status='released',recovery_required=false,updated_at=now() WHERE name=$1 AND enabled RETURNING id")
+        .bind(&name).fetch_optional(&mut *tx).await?.ok_or_else(|| anyhow::anyhow!("node not found or already released"))?;
+    sqlx::query("UPDATE tasks SET state=CASE WHEN execution_scope='node' THEN 'paused' ELSE 'queued' END,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE lease_node_id=$1 AND state='running'").bind(id).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM storage_permits WHERE holder_id=$1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    super::audit::checkpoint(&mut tx, "cluster.node.revoke", &id.to_string(), serde_json::json!({})).await?;
     tx.commit().await?;
-    Ok(())
+    Ok(Json(serde_json::json!({"released": name})))
 }
 
-pub(crate) async fn reissue_record(
-    app: &App,
-    principal: &Principal,
-    id: Uuid,
-    expires_in: &str,
-) -> anyhow::Result<TokenView> {
-    let (token, hash, expires_at) = issue_token(expires_in)?;
-    let mut tx = users::admin_transaction(app, principal).await?;
-    let row: Option<(String, String, bool)> = sqlx::query_as(
-        "SELECT name,kind,enabled FROM nodes WHERE id=$1 FOR UPDATE",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let (name, kind, enabled) = row.ok_or_else(|| anyhow::anyhow!("node not found"))?;
-    ensure!(!enabled, "revoke the node before reissuing its access");
-    sqlx::query(
-        "UPDATE node_join_tokens SET consumed_at=coalesce(consumed_at,now()) WHERE node_id=$1 AND consumed_at IS NULL",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "UPDATE nodes SET enabled=true,credential_encrypted=NULL,last_seen_at=NULL,updated_at=now() WHERE id=$1",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "UPDATE control_leases SET node_id=NULL,lease_token=gen_random_uuid(),expires_at=now(),updated_at=now() WHERE singleton AND node_id=$1",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO node_join_tokens(id,node_id,token_hash,expires_at) VALUES($1,$2,$3,$4)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(id)
-    .bind(hash.as_slice())
-    .bind(expires_at)
-    .execute(&mut *tx)
-    .await?;
-    super::audit::checkpoint(
-        &mut tx,
-        "cluster.node.reissue",
-        &id.to_string(),
-        serde_json::json!({"expires_at":expires_at}),
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(TokenView {
-        node_id: id,
-        name,
-        kind,
-        token,
-        expires_at,
-    })
-}
-
-#[utoipa::path(post, operation_id = "cluster_node_reissue", path = "/api/cluster/nodes/{id}/reissue", params(("id" = Uuid, Path)), request_body = ReissueInput, responses((status = 201, body = TokenView)))]
-pub(crate) async fn reissue(
+#[utoipa::path(
+    post,
+    operation_id = "cluster_recover",
+    path = "/api/v1/cluster/recover",
+    request_body = RecoverInput,
+    responses((status = 200, body = ClusterStatus), (status = 403, body = crate::control::contract::ErrorBody))
+)]
+pub(crate) async fn recover(
     State(app): State<Arc<App>>,
-    Extension(actor): Extension<Identity>,
-    Path(id): Path<Uuid>,
-    Json(input): Json<ReissueInput>,
-) -> Result<(StatusCode, Json<TokenView>), HttpError> {
-    actor.recent(&app).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(reissue_record(&app, &actor.principal, id, &input.expires_in).await?),
-    ))
-}
-
-#[utoipa::path(post, operation_id = "cluster_join", path = "/api/cluster/join", request_body = JoinInput, responses((status = 200, body = JoinView)))]
-pub(crate) async fn join(
-    State(app): State<Arc<App>>,
-    Json(input): Json<JoinInput>,
-) -> Result<Json<JoinView>, HttpError> {
-    let hash = cluster::join_token_hash(&input.token).map_err(|_| crate::http::unauthorized())?;
-    let mut tx = app.db.begin().await?;
-    let mode: String = sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE singleton")
-        .fetch_one(&mut *tx)
-        .await?;
-    if mode != "cluster" {
-        return Err(crate::http::problem(
-            StatusCode::CONFLICT,
-            "ClusterDisabled",
-        ));
+    headers: HeaderMap,
+    Json(input): Json<RecoverInput>,
+) -> Result<Json<ClusterStatus>, HttpError> {
+    if !input.confirm {
+        return Err(anyhow::anyhow!("recovery requires confirm=true").into());
     }
-    let record: Option<(Uuid, Uuid, String)> = sqlx::query_as(
-        "SELECT t.id,n.id,n.kind FROM node_join_tokens t JOIN nodes n ON n.id=t.node_id WHERE t.token_hash=$1 AND t.consumed_at IS NULL AND t.expires_at>now() AND n.enabled FOR UPDATE OF t,n",
-    )
-    .bind(hash.as_slice())
-    .fetch_optional(&mut *tx)
-    .await?;
-    let (token_id, node_id, kind) = record.ok_or_else(crate::http::unauthorized)?;
-    let credential = cluster::join_token()?;
-    let protected = crate::codec::protect(
-        credential.as_bytes(),
-        &app.secrets.credential_key,
-        cluster::credential_binding(node_id).as_bytes(),
-    )?;
-    sqlx::query("UPDATE node_join_tokens SET consumed_at=now() WHERE id=$1")
-        .bind(token_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "UPDATE nodes SET credential_encrypted=$2,last_seen_at=now(),updated_at=now() WHERE id=$1",
-    )
-    .bind(node_id)
-    .bind(protected)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(Json(JoinView {
-        node_id,
-        kind,
-        credential,
+    let key = headers
+        .get("x-mokyu-deployment-key")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| crate::http::unauthorized())?;
+    crate::cluster::verify_deployment_key(&app, key).map_err(HttpError::from)?;
+    crate::cluster::recover(&app).await?;
+    Ok(Json(ClusterStatus {
+        mode: sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE singleton")
+            .fetch_one(&app.db)
+            .await?,
+        enabled_nodes: sqlx::query_scalar("SELECT count(*) FROM nodes WHERE enabled")
+            .fetch_one(&app.db)
+            .await?,
+        local_storages: sqlx::query_scalar("SELECT count(*) FROM storages WHERE type='local'")
+            .fetch_one(&app.db)
+            .await?,
     }))
-}
-
-#[utoipa::path(post, operation_id = "cluster_heartbeat", path = "/api/cluster/heartbeat", request_body = HeartbeatInput, responses((status = 200, body = HeartbeatView)))]
-pub(crate) async fn heartbeat(
-    State(app): State<Arc<App>>,
-    Json(input): Json<HeartbeatInput>,
-) -> Result<Json<HeartbeatView>, HttpError> {
-    let row: Option<(String, bool, Option<Vec<u8>>)> =
-        sqlx::query_as("SELECT kind,enabled,credential_encrypted FROM nodes WHERE id=$1")
-            .bind(input.node_id)
-            .fetch_optional(&app.db)
-            .await?;
-    let (kind, enabled, encrypted) = row.ok_or_else(crate::http::unauthorized)?;
-    let encrypted = encrypted.ok_or_else(crate::http::unauthorized)?;
-    let expected = crate::codec::unprotect(
-        &encrypted,
-        &app.secrets.credential_key,
-        cluster::credential_binding(input.node_id).as_bytes(),
-    )?;
-    use subtle::ConstantTimeEq;
-    if !bool::from(expected.as_bytes().ct_eq(input.credential.as_bytes())) {
-        return Err(crate::http::unauthorized());
-    }
-    if enabled {
-        sqlx::query("UPDATE nodes SET last_seen_at=now(),updated_at=now() WHERE id=$1 AND enabled")
-            .bind(input.node_id)
-            .execute(&app.db)
-            .await?;
-    }
-    Ok(Json(HeartbeatView { kind, enabled }))
 }
