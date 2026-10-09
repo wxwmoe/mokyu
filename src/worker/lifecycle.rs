@@ -68,9 +68,10 @@ impl App {
         batch: usize,
         grace_seconds: u64,
         byte_budget: Option<u64>,
-    ) -> Result<usize> {
+        min_storage_seconds: u64,
+    ) -> Result<(usize, usize)> {
         if self.gc_running.swap(true, Ordering::AcqRel) {
-            return Ok(0);
+            return Ok((0, 0));
         }
         let _running = Running(&self.gc_running);
         let ids: Vec<(i64, i32)> = sqlx::query_as(
@@ -91,33 +92,17 @@ impl App {
                 }
                 consumed = consumed.saturating_add(bytes);
             }
-            let mut tx = self.db.begin().await?;
-            let changed = sqlx::query(
-                "UPDATE chunks SET state='deleting' WHERE id=$1 AND storage_id=$2 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id)",
-            )
-            .bind(id)
-            .bind(storage_id)
-            .bind(grace_seconds as f64)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            tx.commit().await?;
-            if changed == 0 {
-                continue;
-            }
-            if self.storage.invalidate(storage_id).await.is_ok() {
-                sqlx::query("UPDATE chunks SET state='deleted',deleted_at=now() WHERE id=$1 AND storage_id=$2 AND state='deleting'")
-                    .bind(id)
-                    .bind(storage_id)
-                    .execute(&self.db)
-                    .await?;
+            if self
+                .reclaim_chunk(id, storage_id, grace_seconds as f64)
+                .await?
+            {
                 count += 1;
-                self.statistics.gc_deleted.fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
             }
         }
-        Ok(count)
+        let physical = self
+            .reclaim_physical(grace_seconds as f64, storage_id, batch, min_storage_seconds)
+            .await?;
+        Ok((count, physical))
     }
 
     pub fn cleanup_status(&self) -> Value {
@@ -461,77 +446,108 @@ impl App {
             .await
     }
     async fn reclaim_inner(&self) -> Result<usize> {
-        if self.gc_running.swap(true, Ordering::AcqRel) {
-            return Ok(0);
-        }
-        let _running = Running(&self.gc_running);
         let paused: bool = sqlx::query_scalar("SELECT gc_paused OR maintenance FROM mokyu_meta")
             .fetch_one(&self.db)
             .await?;
         if paused {
             return Ok(0);
         }
-        let grace = config::seconds(&self.config.maintenance.unreferenced_grace)? as f64;
-        let ids:Vec<i64>=sqlx::query_scalar("SELECT id FROM chunks WHERE state IN ('ready','failed','deleting') AND unreferenced_at<now()-$1*interval '1 second' ORDER BY unreferenced_at,id LIMIT $2").bind(grace).bind(self.config.maintenance.batch_size as i64).fetch_all(&self.db).await?;
+        let storages: Vec<Uuid> =
+            sqlx::query_scalar("SELECT storage_id FROM storage_profiles ORDER BY storage_id")
+                .fetch_all(&self.db)
+                .await?;
         let mut count = 0;
-        for id in ids {
-            let coord = self.coord.lock().await;
-            if self.maintenance.load(Ordering::Acquire) {
-                break;
-            }
-            let mut tx = self.db.begin().await?;
-            let row:Option<(Uuid,Option<Uuid>)>=sqlx::query_as("SELECT storage_id,owner_stream FROM chunks WHERE id=$1 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$2*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) FOR UPDATE").bind(id).bind(grace).fetch_optional(&mut *tx).await?;
-            let Some((storage, owner)) = row else {
-                continue;
-            };
-            if owner.is_some_and(|id| self.is_active(id)) {
-                continue;
-            }
-            sqlx::query("UPDATE chunks SET state='deleting' WHERE id=$1")
-                .bind(id)
-                .execute(&mut *tx)
+        for storage_id in storages {
+            let profile =
+                crate::storage::profile::StorageProfile::load(&self.db, storage_id).await?;
+            let (chunks, _) = self
+                .reclaim_scoped(
+                    storage_id,
+                    self.config.maintenance.batch_size as usize,
+                    config::seconds(&profile.unreferenced_grace)
+                        .context("storage unreferenced grace")?,
+                    profile
+                        .maintenance_byte_budget
+                        .as_deref()
+                        .map(config::bytes)
+                        .transpose()?,
+                    profile.min_storage_seconds()?,
+                )
                 .await?;
-            sqlx::query("UPDATE chunk_encodings l SET state='retired',unreferenced_at=COALESCE(l.unreferenced_at,c.unreferenced_at,now()) FROM chunks c WHERE l.chunk_id=c.id AND c.id=$1 AND l.state IN ('ready','uploading')")
-                .bind(id).execute(&mut *tx).await?;
-            sqlx::query("UPDATE chunks SET pack_id=NULL WHERE id=$1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            drop(coord);
-            #[cfg(feature = "fault-injection")]
-            crate::faults::point("chunk-delete-claimed").await;
-            match self.storage.invalidate(storage).await {
-                // The immutable physical key remains journaled until the database records deletion.
-                Ok(()) => {
-                    #[cfg(feature = "fault-injection")]
-                    crate::faults::point("chunk-deleted").await;
-                    sqlx::query("UPDATE chunks SET state='deleted',deleted_at=now() WHERE id=$1 AND state='deleting'").bind(id).execute(&self.db).await?;
-                    count += 1;
-                    self.statistics.gc_deleted.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(e) => {
-                    self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(chunk_id=id,error=%e,"chunk deletion will be retried");
-                }
-            }
+            count += chunks;
         }
-        self.reclaim_physical(grace).await?;
         Ok(count)
     }
-    async fn reclaim_physical(&self, grace: f64) -> Result<usize> {
-        let minimum = self.config.backend_defaults.min_storage_seconds()? as f64;
-        sqlx::query("UPDATE packs p SET state='retired',unreferenced_at=COALESCE(unreferenced_at,(SELECT max(c.unreferenced_at) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=p.id),now()) WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id AND state='ready')").execute(&self.db).await?;
+    async fn reclaim_chunk(&self, id: i64, storage_id: Uuid, grace: f64) -> Result<bool> {
+        let coord = self.coord.lock().await;
+        if self.maintenance.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let mut tx = self.db.begin().await?;
+        let row: Option<(Option<Uuid>,)> = sqlx::query_as("SELECT owner_stream FROM chunks WHERE id=$1 AND storage_id=$2 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) FOR UPDATE")
+            .bind(id).bind(storage_id).bind(grace).fetch_optional(&mut *tx).await?;
+        let Some((owner,)) = row else {
+            return Ok(false);
+        };
+        if owner.is_some_and(|id| self.is_active(id)) {
+            return Ok(false);
+        }
+        sqlx::query(
+            "UPDATE chunks SET state='deleting',pack_id=NULL WHERE id=$1 AND storage_id=$2",
+        )
+        .bind(id)
+        .bind(storage_id)
+        .execute(&mut *tx)
+        .await?;
+        let locations: Vec<Uuid> = sqlx::query_scalar("SELECT location_id FROM chunk_encodings WHERE chunk_id=$1 AND state IN ('ready','uploading','retired','deleting')")
+            .bind(id).fetch_all(&mut *tx).await?;
+        sqlx::query("UPDATE chunk_encodings l SET state='retired',unreferenced_at=COALESCE(l.unreferenced_at,c.unreferenced_at,now()) FROM chunks c WHERE l.chunk_id=c.id AND c.id=$1 AND l.state IN ('ready','uploading')")
+            .bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        drop(coord);
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("chunk-delete-claimed").await;
+        for location_id in locations {
+            if let Err(error) = self.storage.invalidate(location_id).await {
+                self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(chunk_id=id, %location_id, %error, "chunk cache invalidation will be retried");
+                return Ok(false);
+            }
+        }
+        // Physical encodings remain journaled until their retention and deletion finish.
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("chunk-deleted").await;
+        sqlx::query(
+            "UPDATE chunks SET state='deleted',deleted_at=now() WHERE id=$1 AND storage_id=$2 AND state='deleting'",
+        )
+        .bind(id)
+        .bind(storage_id)
+        .execute(&self.db)
+        .await?;
+        self.statistics.gc_deleted.fetch_add(1, Ordering::Relaxed);
+        Ok(true)
+    }
+    async fn reclaim_physical(
+        &self,
+        grace: f64,
+        storage_id: Uuid,
+        batch: usize,
+        min_storage_seconds: u64,
+    ) -> Result<usize> {
+        let minimum = min_storage_seconds as f64;
+        sqlx::query("UPDATE packs p SET state='retired',unreferenced_at=COALESCE(unreferenced_at,(SELECT max(c.unreferenced_at) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=p.id),now()) WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id AND state='ready') AND p.storage_id=$1")
+            .bind(storage_id)
+            .execute(&self.db)
+            .await?;
         let mut count = 0;
         for (table, id_column) in [("chunk_encodings", "encoding_id"), ("packs", "id")] {
-            let rows:Vec<(i64,Uuid,Option<Uuid>,bool)>=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {id_column},storage_id,location_id,stored_at IS NULL FROM {table} WHERE state IN ('retired','deleting') AND unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second') ORDER BY unreferenced_at,{id_column} LIMIT $2")))
-                .bind(grace).bind(self.config.maintenance.batch_size as i64).bind(minimum).fetch_all(&self.db).await?;
-            for (id, storage, storage_id, unknown_age) in rows {
-                let storage_id = storage_id.context("physical storage has no target")?;
+            let rows:Vec<(i64,Uuid,bool)>=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {id_column},location_id,stored_at IS NULL FROM {table} WHERE state IN ('retired','deleting') AND unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second') AND storage_id=$4 ORDER BY unreferenced_at,{id_column} LIMIT $2")))
+                .bind(grace).bind(batch.max(1) as i64).bind(minimum).bind(storage_id).fetch_all(&self.db).await?;
+            for (id, location_id, unknown_age) in rows {
                 let path = if table == "packs" {
-                    self.storage.pack_path_for(storage_id, storage)?
+                    self.storage.pack_path_for(storage_id, location_id)?
                 } else {
-                    self.storage.path_for(storage_id, storage)?
+                    self.storage.path_for(storage_id, location_id)?
                 };
                 if minimum > 0.0 && unknown_age {
                     match self.storage.head_path_for(storage_id, &path).await {
@@ -561,7 +577,7 @@ impl App {
                     return Ok(count);
                 }
                 let sources = self.storage.source_gate.write().await;
-                if self.storage.physical_active(storage) {
+                if self.storage.physical_active(location_id) {
                     continue;
                 }
                 let changed=sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleting' WHERE {id_column}=$1 AND state IN ('retired','deleting') AND unreferenced_at<now()-$2*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second')"))).bind(id).bind(grace).bind(minimum).execute(&self.db).await?.rows_affected();

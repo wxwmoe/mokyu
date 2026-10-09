@@ -83,7 +83,7 @@ impl App {
         ensure!(age <= i64::MAX as u64 / 1000, "age too large");
         let storage_id = self.storage.select_store(storage_id)?;
         let profile = crate::storage::profile::StorageProfile::load(&self.db, storage_id).await?;
-        let minimum = config::seconds(&profile.min_storage_duration)?;
+        let minimum = profile.min_storage_seconds()?;
         let prefix = self.storage.namespace_for(storage_id)?;
         if execute {
             let indexed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunks)")
@@ -266,7 +266,7 @@ impl App {
         .with_timezone(&chrono::Utc);
         // A resumed task may have been created under a shorter retention policy.
         let profile = crate::storage::profile::StorageProfile::load(&self.db, storage_id).await?;
-        let minimum = config::seconds(&profile.min_storage_duration)?;
+        let minimum = profile.min_storage_seconds()?;
         let cutoff = cutoff.min(
             chrono::Utc::now()
                 .checked_sub_signed(chrono::TimeDelta::seconds(minimum as i64))

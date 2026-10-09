@@ -269,27 +269,22 @@ impl App {
             } else {
                 self.cleanup().await?
             };
-            let count = if let Some(storage_id) = scoped_storage {
+            let (count, physical) = if let Some(profile) = profile.as_ref() {
                 self.reclaim_scoped(
-                    storage_id,
+                    profile.storage_id,
                     batch,
-                    profile
-                        .as_ref()
-                        .map(|value| config::seconds(&value.unreferenced_grace))
-                        .transpose()?
-                        .unwrap_or(config::seconds(
-                            &self.config.maintenance.unreferenced_grace,
-                        )?),
+                    config::seconds(&profile.unreferenced_grace)?,
                     maintenance_byte_budget.filter(|value| *value > 0),
+                    profile.min_storage_seconds()?,
                 )
                 .await?
             } else {
-                self.reclaim().await?
+                (self.reclaim().await?, 0)
             };
             (
                 count as i64,
-                count >= batch || cleaned >= batch,
-                json!({"local_cleaned":cleaned,"chunks_reclaimed":count}),
+                count >= batch || physical >= batch || cleaned >= batch,
+                json!({"local_cleaned":cleaned,"chunks_reclaimed":count,"physical_reclaimed":physical}),
             )
         } else {
             let report = if let Some(storage_id) = scoped_storage {

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use utoipa::ToSchema;
@@ -65,6 +65,15 @@ pub(crate) struct StorageProfile {
 }
 
 impl StorageProfile {
+    pub(crate) fn min_storage_seconds(&self) -> Result<u64> {
+        if self.min_storage_duration == "0s" {
+            Ok(0)
+        } else {
+            crate::config::seconds(&self.min_storage_duration)
+                .context("storage min_storage_duration")
+        }
+    }
+
     pub(crate) fn compression_config(
         &self,
         base: &crate::content::compression::Config,
