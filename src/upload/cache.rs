@@ -422,7 +422,7 @@ impl App {
         tx.commit().await?;
         Ok(())
     }
-    pub async fn reconcile_upload_pins(&self) -> Result<()> {
+    pub async fn reconcile_upload_pins(&self, storage_id: Option<Uuid>) -> Result<()> {
         for keys in self.storage.upload_pin_ids().chunks(128) {
             let _coord = self.coord.lock().await;
             let mut tx = self.db.begin().await?;
@@ -430,14 +430,16 @@ impl App {
                 .iter()
                 .flat_map(|key| [format!("{key}.raw"), format!("{key}.zst")])
                 .collect();
-            sqlx::query("SELECT chunk_id FROM pending_uploads WHERE staging_object_key=ANY($1) ORDER BY chunk_id FOR UPDATE")
+            sqlx::query("SELECT u.chunk_id FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE u.staging_object_key=ANY($1) AND ($2::uuid IS NULL OR c.storage_id=$2) ORDER BY u.chunk_id FOR UPDATE")
                 .bind(&names)
+                .bind(storage_id)
                 .execute(&mut *tx)
                 .await?;
             let keep: HashSet<Uuid> = sqlx::query_scalar::<_, String>(
-                "SELECT staging_object_key FROM pending_uploads WHERE staging_object_key=ANY($1)",
+                "SELECT u.staging_object_key FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE u.staging_object_key=ANY($1) AND ($2::uuid IS NULL OR c.storage_id=$2)",
             )
             .bind(&names)
+            .bind(storage_id)
             .fetch_all(&mut *tx)
             .await?
             .into_iter()
@@ -447,14 +449,27 @@ impl App {
                     .and_then(|id| Uuid::parse_str(id).ok())
             })
             .collect();
+            let owned: HashSet<String> = sqlx::query_scalar(
+                "SELECT u.staging_object_key FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE u.staging_object_key=ANY($1) AND ($2::uuid IS NULL OR c.storage_id=$2)",
+            )
+            .bind(&names)
+            .bind(storage_id)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
             for key in keys {
-                if !keep.contains(key) {
+                if !keep.contains(key)
+                    && (storage_id.is_none()
+                        || owned.contains(&format!("{key}.raw"))
+                        || owned.contains(&format!("{key}.zst")))
+                {
                     self.storage.release_upload(*key);
                 }
             }
             tx.commit().await?;
         }
-        let dead:Vec<i64>=sqlx::query_scalar("SELECT chunk_id FROM pending_uploads u WHERE owner_task IS NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=u.chunk_id) ORDER BY chunk_id LIMIT 128").fetch_all(&self.db).await?;
+        let dead:Vec<i64>=sqlx::query_scalar("SELECT u.chunk_id FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE ($1::uuid IS NULL OR c.storage_id=$1) AND u.owner_task IS NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=u.chunk_id) ORDER BY u.chunk_id LIMIT 128").bind(storage_id).fetch_all(&self.db).await?;
         self.release_pending(&dead, false).await?;
         Ok(())
     }

@@ -170,13 +170,28 @@ impl App {
         )
         .fetch_all(&mut *tx)
         .await?;
+        let children = storages.len() + usize::from(kind == "cleanup");
         let id = crate::worker::insert(
             &mut tx,
             kind,
             None,
-            json!({"role":"parent","children":storages.len()}),
+            json!({"role":"parent","children":children}),
         )
         .await?;
+        if kind == "cleanup" {
+            let child = crate::worker::insert_child(
+                &mut tx,
+                kind,
+                None,
+                json!({"role":"child","phase":"history"}),
+            )
+            .await?;
+            sqlx::query("UPDATE tasks SET parent_task_id=$2,batch_total=1,execution_scope='cluster' WHERE id=$1")
+                .bind(child)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
         for (storage_id, storage_type, revision) in &storages {
             let child = crate::worker::insert_child(
                 &mut tx,
@@ -200,10 +215,10 @@ impl App {
         }
         sqlx::query("UPDATE tasks SET batch_total=$2 WHERE id=$1")
             .bind(id)
-            .bind(storages.len() as i64)
+            .bind(children as i64)
             .execute(&mut *tx)
             .await?;
-        if storages.is_empty() {
+        if children == 0 {
             sqlx::query("UPDATE tasks SET state='completed',updated_at=now() WHERE id=$1")
                 .bind(id)
                 .execute(&mut *tx)

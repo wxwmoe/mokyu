@@ -14,53 +14,15 @@ pub struct Cleanup {
 }
 
 impl App {
-    /// Run one bounded lifecycle slice for a single logical storage.  Cluster workers
-    /// use this path so a maintenance task never scans every backend in one lease.
     pub(crate) async fn cleanup_scoped(
         &self,
         storage_id: Uuid,
         batch: usize,
         retention_seconds: u64,
     ) -> Result<usize> {
-        let batch = batch.max(1) as i64;
-        let mut removed = 0;
-        let uploads: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT u.id FROM uploads u JOIN buckets b ON b.id=u.bucket_id WHERE b.storage_id=$1 AND u.state='active' AND u.touched_at<now()-$2*interval '1 second' ORDER BY u.touched_at,u.id LIMIT $3",
-        )
-        .bind(storage_id)
-        .bind(config::seconds(&self.config.uploads.idle_timeout)? as f64)
-        .bind(batch)
-        .fetch_all(&self.db)
-        .await?;
-        for id in uploads {
-            if self.is_active(id) {
-                continue;
-            }
-            self.abort_upload(id).await?;
-            removed += 1;
-        }
-        let mut tx = self.db.begin().await?;
-        let streams = sqlx::query(
-            "DELETE FROM streams s WHERE s.id IN (SELECT s.id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE b.storage_id=$1 AND s.state IN ('retired','abandoned') AND s.touched_at<now()-$2*interval '1 second' AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) ORDER BY s.touched_at,s.id LIMIT $3)",
-        )
-        .bind(storage_id)
-        .bind(retention_seconds as f64)
-        .bind(batch)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        let fragments = sqlx::query(
-            "DELETE FROM fragments f WHERE f.id IN (SELECT f.id FROM fragments f WHERE f.staging_storage_id=$1 AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) ORDER BY f.created_at,f.id LIMIT $2)",
-        )
-        .bind(storage_id)
-        .bind(batch)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        tx.commit().await?;
-        Ok(removed + streams as usize + fragments as usize)
+        self.cleanup_inner(Some(storage_id), batch, Some(retention_seconds))
+            .await
     }
-
     /// Reclaim only chunks owned by one storage and consume one bounded slice.
     pub(crate) async fn reclaim_scoped(
         &self,
@@ -315,17 +277,27 @@ impl App {
         Ok(())
     }
     pub async fn cleanup(&self) -> Result<usize> {
+        self.cleanup_inner(None, self.config.maintenance.batch_size as usize, None)
+            .await
+    }
+
+    async fn cleanup_inner(
+        &self,
+        storage_id: Option<Uuid>,
+        batch_size: usize,
+        retention_seconds: Option<u64>,
+    ) -> Result<usize> {
         let Ok(_running) = self.local_cleanup.try_lock() else {
             return Ok(0);
         };
-        self.reconcile_upload_pins().await?;
-        self.storage.reconcile_staging().await?;
+        self.reconcile_upload_pins(storage_id).await?;
+        self.storage.reconcile_staging(storage_id).await?;
         let deadline = Instant::now()
             + Duration::from_secs(config::seconds(&self.config.maintenance.max_duration)?);
         let mut removed = 0;
-        let batch = self.config.maintenance.batch_size as i64;
+        let batch = batch_size.max(1) as i64;
         let idle = config::seconds(&self.config.uploads.idle_timeout)? as f64;
-        let expired:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM uploads WHERE state='active' AND touched_at<now()-$1*interval '1 second' ORDER BY touched_at,id LIMIT $2").bind(idle).bind(batch).fetch_all(&self.db).await?;
+        let expired:Vec<Uuid>=sqlx::query_scalar("SELECT u.id FROM uploads u JOIN buckets b ON b.id=u.bucket_id WHERE ($3::uuid IS NULL OR b.storage_id=$3) AND u.state='active' AND u.touched_at<now()-$1*interval '1 second' ORDER BY u.touched_at,u.id LIMIT $2").bind(idle).bind(batch).bind(storage_id).fetch_all(&self.db).await?;
         for id in expired {
             if Instant::now() >= deadline {
                 break;
@@ -336,7 +308,7 @@ impl App {
             };
             if !self.is_active(id) {
                 // The upload may have progressed while we waited to claim its lock.
-                let expired: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM uploads WHERE id=$1 AND state='active' AND touched_at<now()-$2*interval '1 second')").bind(id).bind(idle).fetch_one(&self.db).await?;
+                let expired: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM uploads u JOIN buckets b ON b.id=u.bucket_id WHERE u.id=$1 AND ($3::uuid IS NULL OR b.storage_id=$3) AND u.state='active' AND u.touched_at<now()-$2*interval '1 second')").bind(id).bind(idle).bind(storage_id).fetch_one(&self.db).await?;
                 if expired {
                     self.abort_upload(id).await?;
                     removed += 1;
@@ -344,7 +316,7 @@ impl App {
             }
         }
         let active: Vec<Uuid> = self.active.lock().unwrap().keys().copied().collect();
-        let candidates:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM streams s WHERE state IN ('retired','abandoned','writing') AND NOT (id=ANY($1)) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND t.lease_expires_at>now()) ORDER BY touched_at,id LIMIT $2").bind(&active).bind(batch).fetch_all(&self.db).await?;
+        let candidates:Vec<Uuid>=sqlx::query_scalar("SELECT s.id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE ($3::uuid IS NULL OR b.storage_id=$3) AND (s.state IN ('retired','abandoned') OR ($5 AND s.state='writing')) AND ($4::double precision IS NULL OR s.touched_at<now()-$4*interval '1 second') AND NOT (s.id=ANY($1)) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND t.lease_expires_at>now()) ORDER BY s.touched_at,s.id LIMIT $2").bind(&active).bind(batch).bind(storage_id).bind(retention_seconds.map(|value| value as f64)).bind(storage_id.is_none()).fetch_all(&self.db).await?;
         for id in candidates {
             if Instant::now() >= deadline {
                 break;
@@ -359,8 +331,11 @@ impl App {
             sqlx::raw_sql("SET LOCAL lock_timeout='100ms'; SET LOCAL statement_timeout='1s'")
                 .execute(&mut *tx)
                 .await?;
-            let claimed = sqlx::query("UPDATE streams s SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL WHERE id=$1 AND state IN ('retired','abandoned','writing') AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND t.lease_expires_at>now())")
+            let claimed = sqlx::query("UPDATE streams s SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL WHERE id=$1 AND (s.state IN ('retired','abandoned') OR ($2 AND s.state='writing')) AND ($3::double precision IS NULL OR s.touched_at<now()-$3*interval '1 second') AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM buckets b WHERE b.id=s.bucket_id AND b.storage_id=$4)) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND t.lease_expires_at>now())")
                 .bind(id)
+                .bind(storage_id.is_none())
+                .bind(retention_seconds.map(|value| value as f64))
+                .bind(storage_id)
                 .execute(&mut *tx)
                 .await?;
             if claimed.rows_affected() == 0 {
@@ -376,17 +351,18 @@ impl App {
                 .execute(&mut *tx)
                 .await?;
             let detached = sqlx::query("UPDATE chunks c SET owner_stream=NULL,state=CASE WHEN state IN ('preparing','uploading') THEN 'failed' ELSE state END,unreferenced_at=CASE WHEN NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) THEN COALESCE(unreferenced_at,now()) ELSE unreferenced_at END WHERE id IN (SELECT id FROM chunks WHERE owner_stream=$1 ORDER BY id LIMIT $2)").bind(id).bind(batch).execute(&mut *tx).await?.rows_affected();
-            let fragments = sqlx::query("UPDATE fragments SET owner_stream=NULL WHERE id IN (SELECT id FROM fragments WHERE owner_stream=$1 ORDER BY id LIMIT $2)").bind(id).bind(batch).execute(&mut *tx).await?.rows_affected();
             let chunks:Vec<Option<i64>>=sqlx::query_scalar("DELETE FROM extents WHERE stream_id=$1 AND offset_bytes IN (SELECT offset_bytes FROM extents WHERE stream_id=$1 ORDER BY offset_bytes LIMIT $2) RETURNING chunk_id").bind(id).bind(batch).fetch_all(&mut *tx).await?;
             let count = chunks.len();
             let chunks: Vec<i64> = chunks.into_iter().flatten().collect();
             mark_unreferenced(&mut tx, &chunks).await?;
             let streams = sqlx::query("DELETE FROM streams s WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM chunks WHERE owner_stream=s.id) AND NOT EXISTS(SELECT 1 FROM fragments WHERE owner_stream=s.id)").bind(id).execute(&mut *tx).await?.rows_affected();
             tx.commit().await?;
-            removed += count + (detached + fragments + streams) as usize;
+            // Keep fragment ownership until its physical object is removed below so a scoped
+            // cleanup can still resolve the owning storage after this transaction commits.
+            removed += count + (detached + streams) as usize;
         }
         let active: Vec<Uuid> = self.active.lock().unwrap().keys().copied().collect();
-        let fragments:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM fragments f WHERE (sealed OR owner_stream IS NULL OR NOT (owner_stream=ANY($2))) AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) ORDER BY created_at,id LIMIT $1").bind(batch).bind(&active).fetch_all(&self.db).await?;
+        let fragments:Vec<Uuid>=sqlx::query_scalar("SELECT f.id FROM fragments f WHERE ($3::uuid IS NULL OR f.staging_storage_id=$3 OR EXISTS(SELECT 1 FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=f.owner_stream AND b.storage_id=$3)) AND (f.sealed OR f.owner_stream IS NULL OR (NOT (f.owner_stream=ANY($2)) AND NOT EXISTS(SELECT 1 FROM streams s WHERE s.id=f.owner_stream AND s.state='writing'))) AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) ORDER BY f.created_at,f.id LIMIT $1").bind(batch).bind(&active).bind(storage_id).fetch_all(&self.db).await?;
         for id in fragments {
             if Instant::now() >= deadline {
                 break;
@@ -427,7 +403,7 @@ impl App {
                 sqlx::raw_sql("SET LOCAL lock_timeout='100ms'; SET LOCAL statement_timeout='1s'")
                     .execute(&mut *tx)
                     .await?;
-                let count = sqlx::query("DELETE FROM objects WHERE (bucket_id,object_key) IN (SELECT bucket_id,object_key FROM objects o WHERE stream_id IS NULL AND NOT EXISTS(SELECT 1 FROM streams s WHERE s.bucket_id=o.bucket_id AND s.object_key=o.object_key AND s.state='writing') ORDER BY bucket_id,object_key LIMIT $1 FOR UPDATE SKIP LOCKED)").bind(batch).execute(&mut *tx).await?.rows_affected();
+                let count = sqlx::query("DELETE FROM objects WHERE (bucket_id,object_key) IN (SELECT o.bucket_id,o.object_key FROM objects o JOIN buckets b ON b.id=o.bucket_id WHERE ($2::uuid IS NULL OR b.storage_id=$2) AND o.stream_id IS NULL AND NOT EXISTS(SELECT 1 FROM streams s WHERE s.bucket_id=o.bucket_id AND s.object_key=o.object_key AND s.state='writing') ORDER BY o.bucket_id,o.object_key LIMIT $1 FOR UPDATE OF o SKIP LOCKED)").bind(batch).bind(storage_id).execute(&mut *tx).await?.rows_affected();
                 tx.commit().await?;
                 removed += count as usize;
             }

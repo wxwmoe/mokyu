@@ -434,8 +434,8 @@ mod tests {
             );
             let expected = match algorithm {
                 "none" => "6d6f6b79752d7631",
-                "aes-256-gcm" => "9e5fc108be0795bcceb3a9c9b72cd67964b6ed6ddcd46682",
-                _ => "c692b7da947c67663cf8179a3cd513b8faa0c8b031109846",
+                "aes-256-gcm" => "9e5fc108be0795bc4d7780083673095f485cee866149ae4a",
+                _ => "c692b7da947c6766790d4d5f772bc7b664c0eb04afc2c020",
             };
             assert_eq!(&aad(&c).unwrap()[..8], b"MOKYU\x00\x00\x01");
             assert_eq!(hex::encode(&encoded), expected);
@@ -606,6 +606,11 @@ mod tests {
             "next-key".into(),
             Key::new("chacha20-poly1305", [9; 32]).unwrap(),
         );
+        secrets
+            .key_names
+            .write()
+            .unwrap()
+            .insert(Uuid::from_u128(0x101), "next-key".into());
         let compression = crate::content::compression::Pool::new(Default::default(), 4).unwrap();
         std::thread::scope(|scope| {
             for worker in 0..4 {
@@ -622,7 +627,11 @@ mod tests {
                             raw_size: input.len() as i32,
                             stored_size: None,
                             algorithm: key.algorithm.clone(),
-                            block_key_id: Some(Uuid::from_u128(0x100)),
+                            block_key_id: Some(if key_id == "test-key" {
+                                Uuid::from_u128(0x100)
+                            } else {
+                                Uuid::from_u128(0x101)
+                            }),
                             compressed: false,
                             nonce: None,
                             format: 1,
@@ -639,7 +648,12 @@ mod tests {
                             input
                         );
                         let mut wrong = c;
-                        wrong.block_key_id = Some(Uuid::from_u128(0x101));
+                        wrong.block_key_id =
+                            Some(if wrong.block_key_id == Some(Uuid::from_u128(0x100)) {
+                                Uuid::from_u128(0x101)
+                            } else {
+                                Uuid::from_u128(0x100)
+                            });
                         assert!(decode(&wrong, encoded, secrets, 20, compression).is_err());
                         let binding = format!("access-{worker}-{i}");
                         let mut protected = protect(

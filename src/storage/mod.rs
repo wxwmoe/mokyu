@@ -978,10 +978,11 @@ impl Storage {
         }
         self.disk.remove_fragment(id).await
     }
-    pub(crate) async fn reconcile_staging(&self) -> Result<()> {
+    pub(crate) async fn reconcile_staging(&self, storage_id: Option<Uuid>) -> Result<()> {
         let rows: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT s.storage_id,s.object_key FROM staging_objects s WHERE s.created_at < now()-interval '5 minutes' AND NOT EXISTS (SELECT 1 FROM pending_uploads p WHERE p.staging_storage_id=s.storage_id AND p.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.staging_storage_id=s.storage_id AND u.staging_object_key=s.object_key) ORDER BY s.created_at LIMIT 128",
+            "SELECT s.storage_id,s.object_key FROM staging_objects s WHERE ($1::uuid IS NULL OR s.storage_id=$1) AND s.created_at < now()-interval '5 minutes' AND NOT EXISTS (SELECT 1 FROM pending_uploads p WHERE p.staging_storage_id=s.storage_id AND p.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.staging_storage_id=s.storage_id AND u.staging_object_key=s.object_key) ORDER BY s.created_at LIMIT 128",
         )
+        .bind(storage_id)
         .fetch_all(&self.db)
         .await?;
         for (storage_id, key) in rows {
