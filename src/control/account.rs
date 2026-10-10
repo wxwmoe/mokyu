@@ -8,6 +8,7 @@ use axum::{
     Json,
     extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode},
+    response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -182,7 +183,7 @@ pub(super) async fn password(
     Extension(actor): Extension<Identity>,
     headers: HeaderMap,
     Json(input): Json<Password>,
-) -> Result<StatusCode, HttpError> {
+) -> Result<axum::response::Response, HttpError> {
     if !(12..=1024).contains(&input.new_password.len()) {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
@@ -208,6 +209,11 @@ pub(super) async fn password(
     .bind(verified.2 + 1)
     .execute(&mut *tx)
     .await?;
+    let session_id: Uuid = sqlx::query_scalar("SELECT id FROM sessions WHERE token_hash=$1")
+        .bind(current.as_bytes().as_slice())
+        .fetch_one(&mut *tx)
+        .await?;
+    let refresh = super::auth::replace_refresh(&mut tx, session_id).await?;
     super::audit::checkpoint(
         &mut tx,
         "account.password",
@@ -216,7 +222,9 @@ pub(super) async fn password(
     )
     .await?;
     tx.commit().await?;
-    Ok(StatusCode::NO_CONTENT)
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    super::auth::set_refresh_cookie(&mut response, &app, &refresh)?;
+    Ok(response)
 }
 
 #[utoipa::path(post, path="/api/v1/account/reauth", request_body=Reauthenticate, responses((status=204)))]
@@ -225,18 +233,20 @@ pub(super) async fn reauthenticate(
     Extension(actor): Extension<Identity>,
     headers: HeaderMap,
     Json(input): Json<Reauthenticate>,
-) -> Result<StatusCode, HttpError> {
+) -> Result<axum::response::Response, HttpError> {
     let verified = verify(&app, actor.id, input.password).await?;
     let mut tx = app.db.begin().await?;
     lock_verified(&mut tx, &headers, &verified).await?;
+    let current = blake3::hash(token(&headers)?.as_bytes());
     sqlx::query("UPDATE sessions SET reauthenticated_at=now() WHERE token_hash=$1")
-        .bind(
-            blake3::hash(token(&headers)?.as_bytes())
-                .as_bytes()
-                .as_slice(),
-        )
+        .bind(current.as_bytes().as_slice())
         .execute(&mut *tx)
         .await?;
+    let session_id: Uuid = sqlx::query_scalar("SELECT id FROM sessions WHERE token_hash=$1")
+        .bind(current.as_bytes().as_slice())
+        .fetch_one(&mut *tx)
+        .await?;
+    let refresh = super::auth::replace_refresh(&mut tx, session_id).await?;
     super::audit::checkpoint(
         &mut tx,
         "session.reauthenticate",
@@ -245,7 +255,9 @@ pub(super) async fn reauthenticate(
     )
     .await?;
     tx.commit().await?;
-    Ok(StatusCode::NO_CONTENT)
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    super::auth::set_refresh_cookie(&mut response, &app, &refresh)?;
+    Ok(response)
 }
 
 #[derive(Serialize, sqlx::FromRow, ToSchema)]
@@ -270,7 +282,7 @@ pub(super) async fn sessions(
     headers: HeaderMap,
 ) -> Result<Json<SessionList>, HttpError> {
     let id = actor.id;
-    let mut rows = sqlx::query_as("SELECT id,created_at,last_seen_at,expires_at,user_agent,(token_hash=$2) AS current FROM sessions WHERE user_id=$1 AND expires_at>now() ORDER BY created_at DESC,id DESC LIMIT 101")
+    let mut rows = sqlx::query_as("SELECT id,created_at,last_seen_at,expires_at,user_agent,(token_hash=$2) AS current FROM sessions s WHERE user_id=$1 AND (expires_at>now() OR EXISTS(SELECT 1 FROM session_refresh_tokens r WHERE r.session_id=s.id AND r.revoked_at IS NULL AND r.expires_at>now())) ORDER BY created_at DESC,id DESC LIMIT 101")
         .bind(id).bind(blake3::hash(token(&headers)?.as_bytes()).as_bytes().as_slice()).fetch_all(&app.db).await?;
     let more = rows.len() > 100;
     rows.truncate(100);
@@ -285,7 +297,7 @@ pub(super) async fn revoke_session(
     Extension(actor): Extension<Identity>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<StatusCode, HttpError> {
+) -> Result<axum::response::Response, HttpError> {
     let user = actor.id;
     let mut tx = app.db.begin().await?;
     lock_session(&mut tx, &headers, user).await?;
@@ -302,7 +314,12 @@ pub(super) async fn revoke_session(
     )
     .await?;
     tx.commit().await?;
-    Ok(StatusCode::NO_CONTENT)
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if matches!(actor.principal, crate::authorization::Principal::User { session, .. } if session == id)
+    {
+        super::auth::clear_auth_cookies(&mut response)?;
+    }
+    Ok(response)
 }
 #[utoipa::path(delete, path="/api/v1/account/sessions", responses((status=204)))]
 pub(super) async fn revoke_others(

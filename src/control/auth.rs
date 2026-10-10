@@ -12,16 +12,44 @@ use crate::{
 use anyhow::Result;
 use axum::{
     Json,
-    extract::{Extension, MatchedPath, Path, State},
+    extract::{Extension, MatchedPath, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
 };
-use base64::Engine;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
+
+const REFRESH_LIFETIME_DAYS: i64 = 30;
+
+fn derived_token(app: &App, purpose: &str, secret: &str) -> String {
+    let mut hash = blake3::Hasher::new_keyed(&app.secrets.credential_key.material);
+    hash.update(purpose.as_bytes());
+    hash.update(b"\0");
+    hash.update(secret.as_bytes());
+    hash.finalize().to_hex().to_string()
+}
+
+fn refresh_after(expires: DateTime<Utc>, recent: DateTime<Utc>) -> u64 {
+    let now = Utc::now();
+    ((expires - now).num_seconds() * 3 / 4)
+        .min((recent + chrono::Duration::minutes(3) - now).num_seconds())
+        .clamp(0, 180) as u64
+}
+
+fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').map(str::trim).find_map(|value| {
+                let (key, value) = value.split_once('=')?;
+                (key == name).then_some(value)
+            })
+        })
+}
 
 fn csrf_token(token: &str) -> String {
     let mut hash = blake3::Hasher::new();
@@ -36,16 +64,105 @@ pub(crate) fn origin(app: &App, headers: &HeaderMap) -> Result<(), HttpError> {
     Ok(())
 }
 pub(crate) fn token(headers: &HeaderMap) -> Result<&str, HttpError> {
-    headers
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            s.split(';')
-                .map(str::trim)
-                .find_map(|s| s.strip_prefix("mokyu_session="))
-        })
+    cookie(headers, "mokyu_session")
         .filter(|s| s.len() == 64)
         .ok_or_else(unauthorized)
+}
+fn refresh_token(headers: &HeaderMap) -> Result<&str, HttpError> {
+    cookie(headers, "mokyu_refresh")
+        .filter(|s| s.len() == 64)
+        .ok_or_else(unauthorized)
+}
+
+fn secure_cookie(app: &App) -> &'static str {
+    if app.config.web.secure_cookie {
+        "; Secure"
+    } else {
+        ""
+    }
+}
+
+fn append_cookie(response: &mut Response, value: String) -> Result<(), HttpError> {
+    response
+        .headers_mut()
+        .append("set-cookie", HeaderValue::from_str(&value)?);
+    Ok(())
+}
+
+fn set_session_cookie(
+    response: &mut Response,
+    app: &App,
+    token: &str,
+    seconds: u64,
+) -> Result<(), HttpError> {
+    append_cookie(
+        response,
+        format!(
+            "mokyu_session={token}; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age={seconds}{}",
+            secure_cookie(app)
+        ),
+    )
+}
+
+pub(crate) fn set_refresh_cookie(
+    response: &mut Response,
+    app: &App,
+    token: &str,
+) -> Result<(), HttpError> {
+    append_cookie(
+        response,
+        format!(
+            "mokyu_refresh={token}; Path=/api/v1/auth/refresh; HttpOnly; SameSite=Strict; Max-Age={}{}",
+            REFRESH_LIFETIME_DAYS * 86400,
+            secure_cookie(app)
+        ),
+    )
+}
+
+pub(crate) fn clear_auth_cookies(response: &mut Response) -> Result<(), HttpError> {
+    append_cookie(
+        response,
+        "mokyu_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0".into(),
+    )?;
+    append_cookie(
+        response,
+        "mokyu_session=; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age=0".into(),
+    )?;
+    append_cookie(
+        response,
+        "mokyu_refresh=; Path=/api/v1/auth/refresh; HttpOnly; SameSite=Strict; Max-Age=0".into(),
+    )
+}
+
+async fn create_refresh(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: Uuid,
+    family_id: Uuid,
+    token: &str,
+) -> Result<Uuid, HttpError> {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO session_refresh_tokens(id,session_id,family_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+$5*interval '1 day')")
+        .bind(id)
+        .bind(session_id)
+        .bind(family_id)
+        .bind(blake3::hash(token.as_bytes()).as_bytes().as_slice())
+        .bind(REFRESH_LIFETIME_DAYS as f64)
+        .execute(&mut **tx)
+        .await?;
+    Ok(id)
+}
+
+pub(crate) async fn replace_refresh(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: Uuid,
+) -> Result<String, HttpError> {
+    sqlx::query("UPDATE session_refresh_tokens SET revoked_at=now() WHERE session_id=$1 AND revoked_at IS NULL")
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await?;
+    let token = crate::cli::random_secret()?;
+    create_refresh(tx, session_id, Uuid::new_v4(), &token).await?;
+    Ok(token)
 }
 #[derive(Clone)]
 pub(crate) struct Identity {
@@ -154,6 +271,7 @@ pub(super) async fn access_gate(
         || matches!(
             path.as_str(),
             "/api/v1/auth/login"
+                | "/api/v1/auth/refresh"
                 | "/api/v1/info"
                 | "/api/v1/openapi.json"
                 | "/api/v1/auth/bootstrap"
@@ -315,11 +433,14 @@ async fn authenticate(app: &App, headers: &HeaderMap, csrf: bool) -> Result<Iden
         let supplied = headers
             .get("x-csrf-token")
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(unauthorized)?;
+            .ok_or_else(|| crate::http::problem(StatusCode::FORBIDDEN, "CsrfTokenMismatch"))?;
         let hash = blake3::hash(supplied.as_bytes());
         use subtle::ConstantTimeEq;
         if !bool::from(expected.as_slice().ct_eq(hash.as_bytes())) {
-            return Err(unauthorized());
+            return Err(crate::http::problem(
+                StatusCode::FORBIDDEN,
+                "CsrfTokenMismatch",
+            ));
         }
     }
     Ok(Identity {
@@ -377,7 +498,8 @@ pub(super) async fn login(
     };
     #[cfg(feature = "fault-injection")]
     crate::faults::point("login-verified").await;
-    let token = crate::cli::random_secret()?;
+    let refresh = crate::cli::random_secret()?;
+    let token = derived_token(&app, "mokyu-session-v1", &refresh);
     let csrf = csrf_token(&token);
     let seconds = config::seconds(&app.config.web.session_lifetime)?;
     let mut tx = app.db.begin().await?;
@@ -395,21 +517,22 @@ pub(super) async fn login(
     }
     #[cfg(feature = "fault-injection")]
     crate::faults::point("login-before-session").await;
-    sqlx::query("INSERT INTO sessions(token_hash,user_id,csrf_hash,expires_at,auth_revision,user_agent) VALUES($1,$2,$3,now()+$4*interval '1 second',$5,$6)").bind(blake3::hash(token.as_bytes()).as_bytes().as_slice()).bind(user).bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice()).bind(seconds as f64).bind(revision).bind(headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("").chars().filter(|c| !c.is_control()).take(128).collect::<String>()).execute(&mut *tx).await?;
+    let session_id: Uuid = sqlx::query_scalar("INSERT INTO sessions(token_hash,user_id,csrf_hash,expires_at,auth_revision,user_agent) VALUES($1,$2,$3,now()+$4*interval '1 second',$5,$6) RETURNING id")
+        .bind(blake3::hash(token.as_bytes()).as_bytes().as_slice())
+        .bind(user)
+        .bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice())
+        .bind(seconds as f64)
+        .bind(revision)
+        .bind(headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("").chars().filter(|c| !c.is_control()).take(128).collect::<String>())
+        .fetch_one(&mut *tx)
+        .await?;
+    create_refresh(&mut tx, session_id, Uuid::new_v4(), &refresh).await?;
     audit::security(&mut tx, user, "session.login", true, &context.id).await?;
     tx.commit().await?;
     let mut response = Json(LoginReply { csrf_token: csrf }).into_response();
-    let secure = if app.config.web.secure_cookie {
-        "; Secure"
-    } else {
-        ""
-    };
-    response.headers_mut().insert(
-        "set-cookie",
-        HeaderValue::from_str(&format!(
-            "mokyu_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={seconds}{secure}"
-        ))?,
-    );
+    clear_auth_cookies(&mut response)?;
+    set_session_cookie(&mut response, &app, &token, seconds)?;
+    set_refresh_cookie(&mut response, &app, &refresh)?;
     response
         .headers_mut()
         .insert("cache-control", HeaderValue::from_static("no-store"));
@@ -435,11 +558,130 @@ pub(super) async fn logout(
     audit::checkpoint(&mut tx, "session.logout", &id.to_string(), json!({})).await?;
     tx.commit().await?;
     let mut r = StatusCode::NO_CONTENT.into_response();
-    r.headers_mut().insert(
-        "set-cookie",
-        HeaderValue::from_static("mokyu_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"),
-    );
+    clear_auth_cookies(&mut r)?;
     Ok(r)
+}
+
+#[derive(sqlx::FromRow)]
+struct RefreshToken {
+    id: Uuid,
+    session_id: Uuid,
+    family_id: Uuid,
+    expires_at: DateTime<Utc>,
+    revoked_at: Option<DateTime<Utc>>,
+    replaced_by: Option<Uuid>,
+}
+
+#[utoipa::path(post, path = "/api/v1/auth/refresh", responses((status = 200, body = SessionView), (status = 403, body = contract::ErrorBody)))]
+pub(super) async fn refresh(
+    State(app): State<Arc<App>>,
+    Extension(context): Extension<crate::status::stats::RequestContext>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    origin(&app, &headers)?;
+    let supplied = refresh_token(&headers)?;
+    let hash = blake3::hash(supplied.as_bytes());
+    let mut tx = app.db.begin().await?;
+    let user: Uuid = sqlx::query_scalar("SELECT s.user_id FROM session_refresh_tokens r JOIN sessions s ON s.id=r.session_id WHERE r.token_hash=$1")
+        .bind(hash.as_bytes().as_slice()).fetch_optional(&mut *tx).await?.ok_or_else(unauthorized)?;
+    // Match password reset and session revocation lock order.
+    let revision: i64 = sqlx::query_scalar(
+        "SELECT auth_revision FROM web_users WHERE id=$1 AND enabled FOR UPDATE",
+    )
+    .bind(user)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(unauthorized)?;
+    let mut credential: RefreshToken = sqlx::query_as("SELECT id,session_id,family_id,expires_at,revoked_at,replaced_by FROM session_refresh_tokens WHERE token_hash=$1 FOR UPDATE")
+        .bind(hash.as_bytes().as_slice()).fetch_optional(&mut *tx).await?.ok_or_else(unauthorized)?;
+    let now = Utc::now();
+    let mut secret = supplied.to_owned();
+    let mut issue_refresh = false;
+    if let Some(revoked) = credential.revoked_at {
+        let successor: Option<RefreshToken> = sqlx::query_as("SELECT id,session_id,family_id,expires_at,revoked_at,replaced_by FROM session_refresh_tokens WHERE id=$1 AND revoked_at IS NULL AND expires_at>now() FOR UPDATE")
+            .bind(credential.replaced_by).fetch_optional(&mut *tx).await?;
+        if let Some(next) = successor.filter(|_| revoked + chrono::Duration::seconds(30) > now) {
+            // Concurrent rotation responses must return identical cookies without storing secrets.
+            secret = derived_token(&app, "mokyu-refresh-v1", supplied);
+            credential = next;
+            issue_refresh = true;
+        } else {
+            let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM session_refresh_tokens WHERE session_id=$1 AND family_id=$2 AND revoked_at IS NULL)")
+                .bind(credential.session_id).bind(credential.family_id).fetch_one(&mut *tx).await?;
+            if active {
+                sqlx::query("DELETE FROM sessions WHERE id=$1")
+                    .bind(credential.session_id)
+                    .execute(&mut *tx)
+                    .await?;
+                audit::security(&mut tx, user, "session.refresh_reuse", false, &context.id).await?;
+                tx.commit().await?;
+            }
+            return Err(unauthorized());
+        }
+    }
+    if credential.expires_at <= now {
+        return Err(unauthorized());
+    }
+    let expires: DateTime<Utc> = sqlx::query_scalar("SELECT expires_at FROM sessions WHERE id=$1 AND user_id=$2 AND auth_revision=$3 FOR UPDATE")
+        .bind(credential.session_id).bind(user).bind(revision).fetch_optional(&mut *tx).await?.ok_or_else(unauthorized)?;
+    if credential.expires_at <= now + chrono::Duration::days(7) {
+        secret = derived_token(&app, "mokyu-refresh-v1", &secret);
+        sqlx::query("UPDATE session_refresh_tokens SET revoked_at=now() WHERE id=$1")
+            .bind(credential.id)
+            .execute(&mut *tx)
+            .await?;
+        let new_id = create_refresh(
+            &mut tx,
+            credential.session_id,
+            credential.family_id,
+            &secret,
+        )
+        .await?;
+        sqlx::query("UPDATE session_refresh_tokens SET replaced_by=$2 WHERE id=$1")
+            .bind(credential.id)
+            .bind(new_id)
+            .execute(&mut *tx)
+            .await?;
+        credential.id = new_id;
+        issue_refresh = true;
+    }
+    let access = derived_token(&app, "mokyu-session-v1", &secret);
+    let csrf = csrf_token(&access);
+    let seconds = config::seconds(&app.config.web.session_lifetime)?;
+    let issue_access = issue_refresh
+        || token(&headers).ok() != Some(access.as_str())
+        || expires <= now + chrono::Duration::seconds((seconds / 4).max(1) as i64);
+    let expires = if issue_access {
+        now + chrono::Duration::seconds(seconds as i64)
+    } else {
+        expires
+    };
+    sqlx::query("UPDATE sessions SET token_hash=$2,csrf_hash=$3,expires_at=$4,last_seen_at=now(),reauthenticated_at=now() WHERE id=$1")
+        .bind(credential.session_id).bind(blake3::hash(access.as_bytes()).as_bytes().as_slice())
+        .bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice()).bind(expires).execute(&mut *tx).await?;
+    sqlx::query("UPDATE session_refresh_tokens SET last_used_at=now() WHERE id=$1")
+        .bind(credential.id)
+        .execute(&mut *tx)
+        .await?;
+    audit::security(&mut tx, user, "session.refresh", true, &context.id).await?;
+    tx.commit().await?;
+    let mut response = Json(SessionView {
+        account: account::profile(&app, user).await?,
+        csrf_token: csrf,
+        session_id: credential.session_id,
+        refresh_after: refresh_after(expires, now),
+    })
+    .into_response();
+    if issue_access {
+        set_session_cookie(&mut response, &app, &access, seconds)?;
+    }
+    if issue_refresh {
+        set_refresh_cookie(&mut response, &app, &secret)?;
+    }
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 #[utoipa::path(get, path = "/api/v1/auth/session", responses((status = 200, body = SessionView), (status = 403, body = contract::ErrorBody)))]
 pub(super) async fn session(
@@ -448,8 +690,20 @@ pub(super) async fn session(
     headers: HeaderMap,
 ) -> Result<Json<SessionView>, HttpError> {
     let id = actor.id;
+    let (session_id, expires, recent): (Uuid, DateTime<Utc>, DateTime<Utc>) =
+        sqlx::query_as("SELECT id,expires_at,reauthenticated_at FROM sessions WHERE token_hash=$1")
+            .bind(
+                blake3::hash(token(&headers)?.as_bytes())
+                    .as_bytes()
+                    .as_slice(),
+            )
+            .fetch_optional(&app.db)
+            .await?
+            .ok_or_else(unauthorized)?;
     Ok(Json(SessionView {
         account: account::profile(&app, id).await?,
         csrf_token: csrf_token(token(&headers)?),
+        session_id,
+        refresh_after: refresh_after(expires, recent),
     }))
 }

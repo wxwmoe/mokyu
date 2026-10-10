@@ -89,7 +89,7 @@ impl App {
         let start = Instant::now();
         let duration = Duration::from_secs(config::seconds(&c.max_duration)?);
         let batch = c.batch_size as i64;
-        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"integrity_issues":0,"packs":0,"chunk_encodings":0,"audit_events":0,"media_operations":0,"maintenance_previews":0});
+        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"refresh_tokens":0,"integrity_issues":0,"packs":0,"chunk_encodings":0,"audit_events":0,"media_operations":0,"maintenance_previews":0});
         let mut batches = 0;
         let queries = [
             (
@@ -140,7 +140,12 @@ impl App {
             (
                 "sessions",
                 0.0,
-                "DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions WHERE expires_at<now()-$1*interval '1 second' ORDER BY expires_at,token_hash LIMIT $2 FOR UPDATE SKIP LOCKED)",
+                "DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions s WHERE expires_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM session_refresh_tokens r WHERE r.session_id=s.id AND r.revoked_at IS NULL AND r.expires_at>now()) ORDER BY expires_at,token_hash LIMIT $2 FOR UPDATE SKIP LOCKED)",
+            ),
+            (
+                "refresh_tokens",
+                config::seconds(&c.task_retention)? as f64,
+                "DELETE FROM session_refresh_tokens WHERE id IN (SELECT id FROM session_refresh_tokens WHERE revoked_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM session_refresh_tokens live WHERE live.session_id=session_refresh_tokens.session_id AND live.family_id=session_refresh_tokens.family_id AND live.revoked_at IS NULL AND live.expires_at>now()) ORDER BY expires_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)",
             ),
         ];
         // Only SQL is canceled at the deadline: an unfinished transaction rolls back.

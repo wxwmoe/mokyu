@@ -25,6 +25,8 @@ pub(super) struct SessionView {
     #[serde(flatten)]
     pub account: super::account::Profile,
     pub csrf_token: String,
+    pub session_id: Uuid,
+    pub refresh_after: u64,
 }
 
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
@@ -98,6 +100,7 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::tasks::cache_flush))
         .routes(routes!(super::tasks::integrity_report))
         .routes(routes!(super::auth::login))
+        .routes(routes!(super::auth::refresh))
         .routes(routes!(super::auth::logout))
         .routes(routes!(super::auth::session))
         .routes(routes!(super::maintenance::status))
@@ -307,6 +310,7 @@ mod tests {
             ("/api/v1/info", "get"),
             ("/api/v1/openapi.json", "get"),
             ("/api/v1/auth/login", "post"),
+            ("/api/v1/auth/refresh", "post"),
             ("/api/v1/auth/logout", "post"),
             ("/api/v1/auth/session", "get"),
             ("/api/v1/buckets", "get"),
