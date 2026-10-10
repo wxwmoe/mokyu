@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { TooltipProvider, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from 'reka-ui'
 import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ChevronDown, Settings2, Users, FolderHeart, KeyRound, BookHeart, UploadCloud, HouseHeart, Package, Flower2, ListChecks, HeartPulse, HardDrive } from 'lucide-vue-next'
-import { session, signOut, savePreferences, refreshSession, queries } from '../api/client'
+import { session, signOut, savePreferences, refreshSession, resetSession, startAuthManager } from '../api/client'
 import { appearance, setTheme } from './theme'
 import { report, notices } from './feedback'
 import { startupError } from './router'
@@ -38,12 +38,15 @@ watch([current, locale], () => { document.title = `${t(current.value.key)} · Mo
 async function synchronize(event: StorageEvent) {
   if (!['mokyu.identity-change', 'mokyu.preferences-change'].includes(event.key || '')) return
   const identity = event.key === 'mokyu.identity-change'
-  if (identity) { session.value = null; queries.clear(); notices.value = [] }
+  if (identity) { resetSession(); notices.value = [] }
   try { await refreshSession(); if (identity) await router.replace(session.value ? '/overview' : '/login') }
   catch (e) { report(e); if (identity) await router.replace('/login') }
 }
 window.addEventListener('storage', synchronize)
-onBeforeUnmount(() => window.removeEventListener('storage', synchronize))
+let stopAuthManager: (() => void) | undefined
+onMounted(() => { stopAuthManager = startAuthManager() })
+watch(session, (current, previous) => { if (!current && previous) void router.replace('/login') })
+onBeforeUnmount(() => { window.removeEventListener('storage', synchronize); stopAuthManager?.() })
 </script>
 
 <template><TooltipProvider :delay-duration="350">

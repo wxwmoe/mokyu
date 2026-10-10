@@ -23,13 +23,16 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers)
-  if (init.method && !['GET', 'HEAD'].includes(init.method) && session.value) {
-    headers.set('X-CSRF-Token', session.value.csrf_token)
-  }
+const refreshPath = '/api/v1/auth/refresh'
+let refreshFlight: Promise<boolean> | undefined
+let deadline = 0, retryAt = 0, generation = 0
+let recoveryNeeded = false
+const channel = typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel('mokyu.auth')
+export function csrfToken() { return session.value?.csrf_token }
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   let reply: Response
-  try { reply = await fetch(path, { credentials: 'same-origin', ...init, headers }) }
+  try { reply = await fetch(path, { credentials: 'same-origin', ...init }) }
   catch (error) { if (error instanceof DOMException && error.name === 'AbortError') throw error; throw new ApiError(0, 'Network') }
   if (!reply.ok) {
     const error = await reply.json().catch(() => ({}))
@@ -38,20 +41,92 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return reply.status === 204 ? undefined as T : reply.json()
 }
 
+async function applySession(current: Session, expected: number) {
+  if (generation !== expected) return
+  if (session.value && session.value.session_id !== current.session_id) queries.clear()
+  session.value = current
+  deadline = Date.now() + Math.max(0, current.refresh_after) * 1000
+  await applyPreferences(current)
+}
+export function resetSession() { generation++; session.value = null; queries.clear(); recoveryNeeded = false; deadline = 0 }
+const denied = (error: unknown) => error instanceof ApiError && [401, 403].includes(error.status)
+
+export async function refreshAuth(): Promise<boolean> {
+  if (!refreshFlight) {
+    const expected = generation
+    refreshFlight = (async () => {
+      try {
+        const current = await request<Session>(refreshPath, { method: 'POST', cache: 'no-store' })
+        await applySession(current, expected)
+        if (generation !== expected) return false
+        recoveryNeeded = false; retryAt = 0
+        channel?.postMessage('refreshed')
+        return true
+      } catch (error) {
+        if (!denied(error)) { retryAt = Date.now() + 30_000; throw error }
+        // A valid access session can still recover with a password.
+        try { await applySession(await request<Session>('/api/v1/auth/session', { cache: 'no-store' }), expected); recoveryNeeded = true }
+        catch (currentError) {
+          if (!denied(currentError)) throw currentError
+          if (expected === generation) resetSession()
+        }
+        return false
+      }
+    })().finally(() => { refreshFlight = undefined })
+  }
+  return refreshFlight
+}
+
+export async function ensureAuth() {
+  if (refreshFlight) await refreshFlight
+  else if (session.value && !recoveryNeeded && Date.now() >= Math.max(deadline, retryAt)) await refreshAuth()
+}
+
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const managed = !path.startsWith('/api/v1/auth/') && path !== '/api/v1/account/reauth'
+  if (managed) await ensureAuth()
+  const send = () => {
+    const headers = new Headers(init.headers)
+    if (!['GET', 'HEAD'].includes((init.method || 'GET').toUpperCase()) && path !== refreshPath) {
+      const csrf = csrfToken()
+      if (csrf) headers.set('X-CSRF-Token', csrf)
+    }
+    return request<T>(path, { ...init, headers })
+  }
+  try { return await send() }
+  catch (error) {
+    // This code is emitted only by the pre-handler gate, so no mutation ran.
+    if (!(error instanceof ApiError) || error.code !== 'CsrfTokenMismatch' || !await refreshAuth()) throw error
+    return send()
+  }
+}
+
 export function write<T>(path: string, body: unknown, method = 'POST'): Promise<T> {
   return api(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 }
 
 export async function refreshSession() {
-  try { const current = await api<Session>('/api/v1/auth/session'); if (session.value?.id !== current.id) queries.clear(); session.value = current; await applyPreferences(current) }
-  catch (error) {
-    if (!(error instanceof ApiError) || ![401, 403].includes(error.status)) throw error
-    session.value = null
-    queries.clear()
-  }
+  const expected = generation
+  try { await applySession(await request<Session>('/api/v1/auth/session', { cache: 'no-store' }), expected) }
+  catch (error) { if (!denied(error)) throw error; await refreshAuth() }
   return session.value
 }
 
+export function startAuthManager() {
+  const tick = () => { void ensureAuth().catch(() => {}) }
+  const online = () => { retryAt = 0; tick() }
+  const refreshed = () => { if (session.value) void refreshSession().catch(() => {}) }
+  const timer = window.setInterval(tick, 60_000)
+  channel?.addEventListener('message', refreshed)
+  window.addEventListener('focus', tick)
+  window.addEventListener('online', online)
+  document.addEventListener('visibilitychange', tick)
+  return () => {
+    window.clearInterval(timer); channel?.removeEventListener('message', refreshed)
+    window.removeEventListener('focus', tick); window.removeEventListener('online', online)
+    document.removeEventListener('visibilitychange', tick)
+  }
+}
 let preferenceQueue: Promise<unknown> = Promise.resolve()
 export function savePreferences(changes: Partial<Preferences>) {
   const owner = session.value?.id
@@ -70,10 +145,14 @@ export function savePreferences(changes: Partial<Preferences>) {
 }
 
 export async function signOut() {
-  await api('/api/v1/auth/logout', { method: 'POST' })
-  session.value = null
-  queries.clear()
-  identityChanged()
+  try {
+    await api('/api/v1/auth/logout', { method: 'POST' })
+  } catch (error) {
+    if (!denied(error)) throw error
+  } finally {
+    resetSession()
+    identityChanged()
+  }
 }
 
 export function identityChanged() { saveLocal('mokyu.identity-change', uuid()) }

@@ -1,5 +1,5 @@
 import { markRaw, reactive, watch } from 'vue'
-import { api, ApiError, queries, session, uuid } from '../api/client'
+import { api, ApiError, csrfToken, ensureAuth, refreshAuth, queries, session, uuid } from '../api/client'
 import type { components } from '../api/schema'
 
 export type Transfer = components['schemas']['Transfer']
@@ -42,7 +42,15 @@ function json<T>(job: UploadJob, path: string, body: unknown): Promise<T> {
   valid(job)
   return api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: job.controller.signal })
 }
-function send(job: UploadJob, part: number, blob: Blob, digest: string): Promise<Part> {
+async function send(job: UploadJob, part: number, blob: Blob, digest: string): Promise<Part> {
+  await ensureAuth()
+  try { return await sendPart(job, part, blob, digest) }
+  catch (error) {
+    if (!(error instanceof ApiError) || error.code !== 'CsrfTokenMismatch' || !await refreshAuth()) throw error
+    return sendPart(job, part, blob, digest)
+  }
+}
+function sendPart(job: UploadJob, part: number, blob: Blob, digest: string): Promise<Part> {
   valid(job)
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest(), started = performance.now()
@@ -50,7 +58,9 @@ function send(job: UploadJob, part: number, blob: Blob, digest: string): Promise
     const abort = () => xhr.abort()
     xhr.open('PUT', `/api/v1/uploads/${job.transfer!.id}/parts/${part}`)
     xhr.timeout = 300_000
-    xhr.setRequestHeader('X-CSRF-Token', session.value!.csrf_token)
+    const csrf = csrfToken()
+    if (!csrf) { reject(new ApiError(401, 'Unauthorized')); return }
+    xhr.setRequestHeader('X-CSRF-Token', csrf)
     xhr.setRequestHeader('X-Content-SHA256', digest)
     xhr.setRequestHeader('Content-Type', 'application/octet-stream')
     xhr.upload.onprogress = event => {
