@@ -338,7 +338,8 @@ pub(crate) async fn profile(
     Extension(actor): Extension<Identity>,
     Path(name): Path<String>,
 ) -> Result<Json<StorageProfile>, HttpError> {
-    actor.recent(&app).await?;
+    let tx = super::users::admin_transaction(&app, &actor.principal).await?;
+    tx.commit().await?;
     let storage_id: Uuid = sqlx::query_scalar("SELECT id FROM storages WHERE name=$1")
         .bind(&name)
         .fetch_optional(&app.db)

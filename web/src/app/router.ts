@@ -13,6 +13,7 @@ export const router = createRouter({
     { path: '/tasks', name: 'tasks', meta: { admin: true }, component: () => import('../features/Tasks.vue') },
     { path: '/service', name: 'service', meta: { admin: true }, component: () => import('../features/Service.vue') },
     { path: '/storages', name: 'storages', meta: { admin: true }, component: () => import('../features/Storages.vue') },
+    { path: '/storages/:name', name: 'storage-details', meta: { admin: true }, component: () => import('../features/StorageDetail.vue') },
     { path: '/media', name: 'media', component: () => import('../features/Media.vue') },
     { path: '/buckets/:bucket?', name: 'buckets', component: () => import('../features/Buckets.vue') },
     { path: '/credentials', name: 'credentials', meta: { admin: true }, component: () => import('../features/AccessKeys.vue') },

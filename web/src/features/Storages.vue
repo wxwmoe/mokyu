@@ -3,7 +3,8 @@ import ErrorNotice from '../components/ErrorNotice.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { Cloud, Database, HardDrive, Pencil, Plus, RefreshCw, ShieldCheck, WandSparkles } from 'lucide-vue-next'
+import { useRoute, useRouter } from 'vue-router'
+import { ArrowUpRight, Cloud, Database, HardDrive, Pencil, Plus, RefreshCw, ShieldCheck } from 'lucide-vue-next'
 import { api, queries, write } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
@@ -18,10 +19,10 @@ type StorageProfile = components['schemas']['StorageProfile']
 type ProfileKey = Exclude<keyof StorageProfile, 'storage_id' | 'revision'>
 type ProfileField = { key: ProfileKey, kind: 'text' | 'number' | 'boolean' }
 type ManagedKey = components['schemas']['ManagedKeyView']
+const route = useRoute(), router = useRouter()
 const storages = useQuery({ queryKey: ['storages'], queryFn: ({ signal }) => api<Storage[]>('/api/v1/storages', { signal }) })
 const keys = useQuery({ queryKey: ['managed-keys'], queryFn: ({ signal }) => api<ManagedKey[]>('/api/v1/keys', { signal }) })
 const open = ref(false), editing = ref<Storage | null>(null), busy = ref(false), checking = ref('')
-const rewriteOpen = ref(false), rewriteStorage = ref<Storage | null>(null), rewritePreview = ref<Record<string, any> | null>(null), rewritePhrase = ref(''), rewriteBusy = ref(false), rewriteError = ref('')
 const profileDraft = ref<Record<ProfileKey, string | number | boolean | null> | null>(null)
 const draft = reactive({ name: '', type: 's3', path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '', block_key_id: '', enabled: true, initialize: true })
 const types = computed(() => ['local', 's3'].map(value => ({ value, label: t('storeType_' + value) })))
@@ -88,6 +89,13 @@ async function edit(row?: Storage) {
   }
 }
 watch(() => draft.type, value => { if (profileDraft.value) profileDraft.value = profilePreset(value) })
+watch([() => route.query.edit, () => storages.data.value], async ([name, rows]) => {
+  const row = rows?.find(item => item.name === String(name || ''))
+  if (row && !open.value) await edit(row)
+}, { immediate: true })
+watch(open, value => {
+  if (!value && route.query.edit) void router.replace({ query: { ...route.query, edit: undefined } })
+})
 function input() {
   const limits = { block_key_id: draft.block_key_id || null }
   if (draft.type === 'local') return { type: 'local', path: draft.path.trim() || '/data/storage', ...limits }
@@ -121,22 +129,6 @@ async function save() {
     notify(t(editing.value ? 'storeSaved' : 'storeCreated'))
   } catch (error) { report(error) } finally { busy.value = false }
 }
-async function rewrite(row: Storage) {
-  rewriteStorage.value = row; rewritePreview.value = null; rewritePhrase.value = ''; rewriteError.value = ''; rewriteOpen.value = true; rewriteBusy.value = true
-  try { rewritePreview.value = await write<Record<string, any>>(`/api/v1/storages/${encodeURIComponent(row.name)}/rewrite`, { action: 'preview', target_key: row.block_key_id }) }
-  catch (error) { rewriteError.value = String(error) } finally { rewriteBusy.value = false }
-}
-async function startRewrite() {
-  if (!rewriteStorage.value || !rewritePreview.value) return
-  rewriteBusy.value = true; rewriteError.value = ''
-  try { await secure(() => write(`/api/v1/storages/${encodeURIComponent(rewriteStorage.value!.name)}/rewrite`, { action: 'start', target_key: rewriteStorage.value!.block_key_id, confirmation: rewritePhrase.value })); rewriteOpen.value = false; notify(t('storeRewriteStarted')) }
-  catch (error) { rewriteError.value = String(error) } finally { rewriteBusy.value = false }
-}
-async function check(row: Storage) {
-  checking.value = row.name
-  try { await secure(() => api<Storage>('/api/v1/storages/' + encodeURIComponent(row.name) + '/check', { method: 'POST' })); notify(t('storeChecked')) }
-  catch (error) { report(error) } finally { checking.value = '' }
-}
 async function toggle(row: Storage) {
   checking.value = row.name
   try { await secure(() => write<Storage>('/api/v1/storages/' + encodeURIComponent(row.name), { enabled: !row.enabled }, 'PUT')); await storages.refetch(); await queries.invalidateQueries({ queryKey: ['bucket-projects'] }); notify(t('storeSaved')) }
@@ -144,7 +136,7 @@ async function toggle(row: Storage) {
 }
 </script>
 <template>
-  <div class="page-heading"><div><p class="eyebrow">{{ t('storesEyebrow') }}</p><h1>{{ t('stores') }}</h1><p>{{ t('storesHint') }}</p></div><div class="heading-actions"><button class="primary" @click="edit()"><Plus :size="17" />{{ t('createStore') }}</button><button class="icon-button" :aria-label="t('refresh')" @click="storages.refetch()"><RefreshCw :size="17" /></button></div></div>
+  <div class="page-heading"><div><p class="eyebrow">{{ t('storesEyebrow') }}</p><h1>{{ t('storages') }}</h1><p>{{ t('storesHint') }}</p></div><div class="heading-actions"><button class="primary" @click="edit()"><Plus :size="17" />{{ t('createStore') }}</button><button class="icon-button" :aria-label="t('refresh')" @click="storages.refetch()"><RefreshCw :size="17" /></button></div></div>
   <ErrorNotice v-if="storages.error.value" :error="storages.error.value" />
   <div v-if="storages.isPending.value" class="skeleton-row" />
   <div v-else-if="storages.data.value?.length" class="store-grid">
@@ -153,7 +145,7 @@ async function toggle(row: Storage) {
       <div class="store-type"><Database :size="16" />{{ t('storeType_' + row.type) }}</div>
       <dl class="facts"><template v-if="row.type === 'local'"><dt>{{ t('storePath') }}</dt><dd><code>{{ row.path }}</code></dd></template><template v-else><dt>{{ t('storeEndpoint') }}</dt><dd><code>{{ row.endpoint }}</code></dd><dt>{{ t('storeBucket') }}</dt><dd>{{ row.bucket }}</dd><dt>{{ t('storeRegion') }}</dt><dd>{{ row.region }}</dd><dt>{{ t('storePrefix') }}</dt><dd>{{ row.prefix || '—' }}</dd></template><dt>{{ t('storeCurrentKey') }}</dt><dd><code>{{ row.block_key_id || t('storeNoEncryption') }}</code></dd><dt>{{ t('storeReadConcurrency') }}</dt><dd>{{ row.read_concurrency || '—' }}</dd><dt>{{ t('storeUploadConcurrency') }}</dt><dd>{{ row.upload_concurrency || '—' }}</dd><dt>{{ t('storeControlConcurrency') }}</dt><dd>{{ row.control_concurrency || '—' }}</dd><dt>{{ t('updatedAt') }}</dt><dd>{{ date(row.updated_at) }}</dd></dl>
       <p class="field-help"><ShieldCheck :size="14" />{{ t('storeSecretsHint') }}</p>
-      <div class="actions"><button @click="edit(row)"><Pencil :size="15" />{{ t('editStore') }}</button><button :disabled="checking === row.name" @click="check(row)"><ShieldCheck :size="15" />{{ t('checkStore') }}</button><button :disabled="row.type === 'local' || checking === row.name" :title="row.type === 'local' ? 'Pack rewrite is available for S3 storage only' : undefined" @click="rewrite(row)"><WandSparkles :size="15" />{{ t('storeRewrite') }}</button><button :disabled="checking === row.name" @click="toggle(row)">{{ t(row.enabled ? 'disableStore' : 'enableStore') }}</button></div>
+      <div class="actions"><RouterLink class="button" :to="'/storages/' + encodeURIComponent(row.name)"><ArrowUpRight :size="15" />{{ t('storeDetails') }}</RouterLink><button @click="edit(row)"><Pencil :size="15" />{{ t('editStore') }}</button><button :disabled="checking === row.name" @click="toggle(row)">{{ t(row.enabled ? 'disableStore' : 'enableStore') }}</button></div>
     </article>
   </div>
   <EmptyState v-else :title="t('noStores')" :description="t('noStoresHint')"><button class="primary" @click="edit()"><Plus :size="17" />{{ t('createStore') }}</button></EmptyState>
@@ -197,5 +189,4 @@ async function toggle(row: Storage) {
       <div class="form-footer"><button type="button" :disabled="busy" @click="open = false">{{ t('cancel') }}</button><button class="primary" :disabled="busy">{{ t('save') }}</button></div>
     </form>
   </UiDialog>
-  <UiDialog v-model:open="rewriteOpen" :title="t('storeRewrite')" :description="t('storeRewriteHint')" :busy="rewriteBusy"><p v-if="rewriteError" class="error">{{ rewriteError }}</p><pre v-if="rewritePreview" class="object-path">{{ JSON.stringify(rewritePreview.preview || rewritePreview, null, 2) }}</pre><form v-if="rewritePreview?.confirmation" @submit.prevent="startRewrite"><label>{{ t('typeConfirmation', { value: rewritePreview.confirmation }) }}<input v-model="rewritePhrase" autocomplete="off" spellcheck="false" :disabled="rewriteBusy"></label><div class="form-footer"><button type="button" :disabled="rewriteBusy" @click="rewriteOpen = false">{{ t('cancel') }}</button><button class="primary" :disabled="rewriteBusy || rewritePhrase !== rewritePreview.confirmation">{{ t('startTask') }}</button></div></form></UiDialog>
 </template>
