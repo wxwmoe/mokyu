@@ -43,6 +43,10 @@ const profileGroups = [
   { title: 'storeGroupPacking', fields: profileFields.slice(20, 38) },
   { title: 'storeGroupWorker', fields: profileFields.slice(38) },
 ]
+const profileGroupHints: Record<string, string> = {
+  storeGroupLifecycle: 'storeGroupLifecycleHint', storeGroupCache: 'storeGroupCacheHint',
+  storeGroupPacking: 'storeGroupPackingHint', storeGroupWorker: 'storeGroupWorkerHint',
+}
 const profileLabel = (key: string) => key.replaceAll('_', ' ')
 const hasBlockKeys = computed(() => (keys.data.value || []).some(row => row.purpose === 'block' && !row.revoked_at))
 
@@ -144,13 +148,14 @@ async function toggle(row: Storage) {
       <div class="section-heading"><h2><HardDrive v-if="row.type === 'local'" :size="19" /><Cloud v-else :size="19" />{{ row.name }}</h2><span class="badge" :class="{ muted: !row.enabled }">{{ t(row.enabled ? 'storeEnabled' : 'storeDisabled') }}</span></div>
       <div class="store-type"><Database :size="16" />{{ t('storeType_' + row.type) }}</div>
       <dl class="facts"><template v-if="row.type === 'local'"><dt>{{ t('storePath') }}</dt><dd><code>{{ row.path }}</code></dd></template><template v-else><dt>{{ t('storeEndpoint') }}</dt><dd><code>{{ row.endpoint }}</code></dd><dt>{{ t('storeBucket') }}</dt><dd>{{ row.bucket }}</dd><dt>{{ t('storeRegion') }}</dt><dd>{{ row.region }}</dd><dt>{{ t('storePrefix') }}</dt><dd>{{ row.prefix || '—' }}</dd></template><dt>{{ t('storeCurrentKey') }}</dt><dd><code>{{ row.block_key_id || t('storeNoEncryption') }}</code></dd><dt>{{ t('storeReadConcurrency') }}</dt><dd>{{ row.read_concurrency || '—' }}</dd><dt>{{ t('storeUploadConcurrency') }}</dt><dd>{{ row.upload_concurrency || '—' }}</dd><dt>{{ t('storeControlConcurrency') }}</dt><dd>{{ row.control_concurrency || '—' }}</dd><dt>{{ t('updatedAt') }}</dt><dd>{{ date(row.updated_at) }}</dd></dl>
-      <p class="field-help"><ShieldCheck :size="14" />{{ t('storeSecretsHint') }}</p>
+      <p class="store-secret-note"><ShieldCheck :size="15" /><span>{{ t('storeSecretsHint') }}</span></p>
       <div class="actions"><RouterLink class="button" :to="'/storages/' + encodeURIComponent(row.name)"><ArrowUpRight :size="15" />{{ t('storeDetails') }}</RouterLink><button @click="edit(row)"><Pencil :size="15" />{{ t('editStore') }}</button><button :disabled="checking === row.name" @click="toggle(row)">{{ t(row.enabled ? 'disableStore' : 'enableStore') }}</button></div>
     </article>
   </div>
   <EmptyState v-else :title="t('noStores')" :description="t('noStoresHint')"><button class="primary" @click="edit()"><Plus :size="17" />{{ t('createStore') }}</button></EmptyState>
   <UiDialog v-model:open="open" :title="t(editing ? 'editStore' : 'createStore')" :description="t('storeEditorHint')" :busy="busy" wide>
     <form @submit.prevent="save">
+      <p class="store-draft-note"><Pencil :size="15" />{{ t('storeDraftHint') }}</p>
       <div class="store-form-grid">
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeConnection') }}</h3><p class="field-help">{{ t('storeConnectionHint') }}</p></div></div>
         <label v-if="!editing">{{ t('storeName') }}<input v-model="draft.name" required maxlength="128" autocomplete="off" :disabled="busy"></label>
@@ -171,7 +176,7 @@ async function toggle(row: Storage) {
         <template v-if="profileDraft">
           <div class="store-form-wide section-heading"><div><h3>{{ t('storeProfile') }}</h3><p class="field-help">{{ t('storeProfileHint') }}</p></div></div>
           <details v-for="group in profileGroups" :key="group.title" class="store-form-wide profile-group" open>
-            <summary class="profile-group-title"><strong>{{ t(group.title) }}</strong><span>{{ group.fields.length }}</span></summary>
+            <summary class="profile-group-title"><span><strong>{{ t(group.title) }}</strong><small>{{ t(profileGroupHints[group.title]!) }}</small></span><span>{{ group.fields.length }}</span></summary>
             <div class="profile-fields">
               <label v-for="field in group.fields" :key="field.key" :class="field.kind === 'boolean' ? 'profile-toggle' : ''">
                 <span>{{ profileLabel(field.key) }}</span>
@@ -182,7 +187,7 @@ async function toggle(row: Storage) {
           </details>
         </template>
       </div>
-      <p class="field-help"><ShieldCheck :size="14" />{{ t('managedKeysHint') }} <RouterLink to="/service">{{ t('administratorTools') }}</RouterLink></p>
+      <p class="store-secret-note"><ShieldCheck :size="15" /><span>{{ t('managedKeysHint') }} <RouterLink to="/service">{{ t('administratorTools') }}</RouterLink></span></p>
       <UiCheckbox v-if="!editing" v-model="draft.initialize" :label="t('initializeStore')" :disabled="busy" />
       <UiCheckbox v-if="editing" v-model="draft.enabled" :label="t('storeEnabled')" :disabled="busy" />
       <p class="field-help">{{ t(draft.type === 'local' ? 'localStoreHint' : 's3StoreHint') }}</p>
