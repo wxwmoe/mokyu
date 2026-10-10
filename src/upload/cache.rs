@@ -379,8 +379,8 @@ impl App {
     pub async fn release_pending(&self, ids: &[i64], existing_pack: bool) -> Result<()> {
         let _coord = self.coord.lock().await;
         let mut tx = self.db.begin().await?;
-        let keys: Vec<(i64, Uuid)> = sqlx::query_as(
-            "SELECT id,storage_id FROM chunks WHERE id=ANY($1) ORDER BY id FOR UPDATE",
+        let keys: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT c.id,u.staging_object_key FROM chunks c LEFT JOIN pending_uploads u ON u.chunk_id=c.id WHERE c.id=ANY($1) ORDER BY c.id FOR UPDATE OF c",
         )
         .bind(ids)
         .fetch_all(&mut *tx)
@@ -392,7 +392,7 @@ impl App {
         .bind(ids)
         .fetch_all(&mut *tx)
         .await?;
-        for (id, key) in keys {
+        for (id, object_key) in keys {
             let ready:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=$1 AND state='ready') OR EXISTS(SELECT 1 FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=$1 AND p.state='ready' AND ($2 OR c.pack_id IS DISTINCT FROM (SELECT source_pack_id FROM pending_uploads WHERE chunk_id=$1))) OR NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=$1)").bind(id).bind(existing_pack).fetch_one(&mut *tx).await?;
             if ready {
                 sqlx::query("INSERT INTO pack_maintenance(stream_id,reason) SELECT DISTINCT e.stream_id,'pack' FROM extents e JOIN streams s ON s.id=e.stream_id JOIN chunks c ON c.id=e.chunk_id WHERE e.chunk_id=$1 AND s.state='ready' AND c.pack_id IS NULL ON CONFLICT(stream_id) DO UPDATE SET cursor=0,generation=pack_maintenance.generation+1,updated_at=now()")
@@ -401,7 +401,12 @@ impl App {
                     .bind(id)
                     .execute(&mut *tx)
                     .await?;
-                released.push(key);
+                if let Some(key) = object_key
+                    .as_deref()
+                    .and_then(crate::storage::parse_upload_cache_name)
+                {
+                    released.push(key);
+                }
             }
         }
         tx.commit().await?;
@@ -443,11 +448,7 @@ impl App {
             .fetch_all(&mut *tx)
             .await?
             .into_iter()
-            .filter_map(|name| {
-                name.split('.')
-                    .next()
-                    .and_then(|id| Uuid::parse_str(id).ok())
-            })
+            .filter_map(|name| crate::storage::parse_upload_cache_name(&name))
             .collect();
             let owned: HashSet<String> = sqlx::query_scalar(
                 "SELECT u.staging_object_key FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE u.staging_object_key=ANY($1) AND ($2::uuid IS NULL OR c.storage_id=$2)",

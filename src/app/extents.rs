@@ -22,6 +22,7 @@ impl App {
         destination: Uuid,
         source: &StoredStream,
     ) -> Result<()> {
+        self.renew_write_lease(destination).await?;
         let source_target: Uuid = sqlx::query_scalar::<_, Option<Uuid>>(
             "SELECT b.storage_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
         )
@@ -39,6 +40,7 @@ impl App {
         if source_target != destination_target {
             let mut offset = 0;
             while offset < source.size {
+                self.renew_write_lease(destination).await?;
                 let rows: Vec<Extent> = sqlx::query_as(
                     "SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2 ORDER BY offset_bytes LIMIT 500",
                 )
@@ -59,6 +61,7 @@ impl App {
         }
         let mut offset = 0;
         while offset < source.size {
+            self.renew_write_lease(destination).await?;
             let rows: Vec<Extent> = sqlx::query_as("SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2 ORDER BY offset_bytes LIMIT 500")
                 .bind(source.id).bind(offset).fetch_all(&self.db).await?;
             ensure!(!rows.is_empty(), "source mapping is incomplete");
@@ -177,13 +180,16 @@ impl App {
         let app = self.clone();
         let body = async_stream::try_stream! {
             let _pin=pin;let _permits=permits;let read_context=Arc::new(crate::storage::ReadContext::user(range));
+            _pin.renew_read_lease(&app.db).await?;
             let mut cursor:Option<i64>=sqlx::query_scalar("SELECT offset_bytes FROM extents WHERE stream_id=$1 AND offset_bytes<=$2 ORDER BY offset_bytes DESC LIMIT 1").bind(stream.id).bind(start).fetch_optional(&app.db).await?;
             let mut position=start;
             while position<end {
+                _pin.renew_read_lease(&app.db).await?;
                 let rows=app.read_extents(stream.id,cursor.context("object mapping is incomplete")?,end).await?;
                 (!rows.is_empty()).then_some(()).context("object mapping is incomplete")?;
                 let mut loaded=futures_util::stream::iter(rows.into_iter().map(|row| {let app=app.clone();let context=read_context.clone();async move{let data=app.storage.get_with(&row.chunk,Some(&context)).await?;let data=row.extent.slice(data)?;Ok::<_,anyhow::Error>((row.extent,data))}})).buffered(2);
                 while let Some(result)=loaded.next().await {
+                    _pin.renew_read_lease(&app.db).await?;
                     let (row,data)=result?;
                     (row.offset_bytes<=position && row.offset_bytes+row.length as i64>position).then_some(()).context("object mapping has a gap")?;
                     let skip=(position-row.offset_bytes) as usize;let count=((end-position) as usize).min(data.len()-skip);

@@ -16,7 +16,7 @@ use self::profile::StorageProfile;
 pub(crate) use self::{
     cache::*,
     local::*,
-    location::{chunk_name, parse_cache_name, parse_chunk_name},
+    location::{chunk_name, parse_cache_name, parse_chunk_name, parse_upload_cache_name},
     permits::*,
     target::*,
 };
@@ -772,10 +772,7 @@ impl Storage {
                     continue;
                 }
                 let compressed = object_key.ends_with(".zst");
-                let key = object_key
-                    .strip_suffix(".zst")
-                    .or_else(|| object_key.strip_suffix(".raw"))
-                    .and_then(|v| Uuid::parse_str(v).ok());
+                let key = parse_upload_cache_name(&object_key);
                 let Some(key) = key else {
                     continue;
                 };

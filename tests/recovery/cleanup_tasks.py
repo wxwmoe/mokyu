@@ -113,10 +113,13 @@ def exists(fragment, key):
         return False
 
 
-def stream(state):
+def stream(state, lease=False):
     ident = uuid.uuid4()
     db.execute("INSERT INTO streams(id,bucket_id,object_key,stream_type,state,touched_at) "
                "VALUES(%s,%s,%s,'part',%s,now()-interval '100 days')", (ident, bucket_id, ident.hex, state))
+    if lease:
+        db.execute("INSERT INTO stream_leases(id,stream_id,lease_type,expires_at) "
+                   "VALUES(%s,%s,'write',now()+interval '1 hour')", (uuid.uuid4(), ident))
     return ident
 
 
@@ -149,7 +152,12 @@ def expired_task():
 assert not scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='cleanup' AND state IN ('queued','running','paused'))")
 cleanup_paused = scalar("SELECT paused FROM maintenance_controls WHERE kind='cleanup'")
 try:
-    retired, writing, live = stream('retired'), stream('writing'), stream('ready')
+    retired, writing, live = stream('retired'), stream('writing', True), stream('ready')
+    stale_writing = stream('writing')
+    leased_retired = stream('retired')
+    read_lease = uuid.uuid4()
+    db.execute("INSERT INTO stream_leases(id,stream_id,lease_type,expires_at) "
+               "VALUES(%s,%s,'read',now()+interval '1 hour')", (read_lease, leased_retired))
     owned = chunk(retired, 'preparing')
     detached, shared = chunk(None, 'ready'), chunk(None, 'ready')
     for sid, offset, cid in [(retired, 0, detached), (retired, 64, shared), (live, 0, shared)]:
@@ -187,13 +195,17 @@ try:
     for keep in (active, referenced):
         assert scalar('SELECT EXISTS(SELECT 1 FROM fragments WHERE id=%s)', (keep[0],)) and exists(*keep)
     assert scalar('SELECT state FROM streams WHERE id=%s', (writing,)) == 'writing'
+    assert not scalar('SELECT EXISTS(SELECT 1 FROM streams WHERE id=%s)', (stale_writing,))
+    assert scalar('SELECT state FROM streams WHERE id=%s', (leased_retired,)) == 'retired'
     print('PASS cleanup task tree, history deletion, chunk reference timestamps and ' + mode + ' fragment reclamation/protection', flush=True)
 
     # A second pass finishes the now-empty stream and is safe to repeat.
+    db.execute('DELETE FROM stream_leases WHERE id=%s', (read_lease,))
     history_task = expired_task()
     parent = cli('maintenance', 'run', 'cleanup')['task_id']
     check_children(parent, history_task)
     assert not scalar('SELECT EXISTS(SELECT 1 FROM streams WHERE id=%s)', (retired,))
+    assert not scalar('SELECT EXISTS(SELECT 1 FROM streams WHERE id=%s)', (leased_retired,))
     for keep in (active, referenced):
         assert scalar('SELECT EXISTS(SELECT 1 FROM fragments WHERE id=%s)', (keep[0],)) and exists(*keep)
     print('PASS periodic history child, eventual stream removal and repeat cleanup', flush=True)

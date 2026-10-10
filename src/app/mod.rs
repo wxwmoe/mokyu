@@ -99,6 +99,40 @@ pub struct Active {
     id: Uuid,
     registry: Arc<Mutex<HashMap<Uuid, usize>>>,
     wake: Arc<tokio::sync::Notify>,
+    read_lease: Option<ReadLease>,
+}
+struct ReadLease {
+    id: Uuid,
+    db: PgPool,
+    ttl_seconds: i64,
+}
+impl ReadLease {
+    async fn renew(&self, db: &PgPool) -> Result<()> {
+        let changed = sqlx::query(
+            "UPDATE stream_leases SET expires_at=now()+$2*interval '1 second' WHERE id=$1 AND lease_type='read' AND expires_at>now()",
+        )
+        .bind(self.id)
+        .bind(self.ttl_seconds)
+        .execute(db)
+        .await?
+        .rows_affected();
+        ensure!(changed == 1, "read lease expired");
+        Ok(())
+    }
+}
+impl Drop for ReadLease {
+    fn drop(&mut self) {
+        let id = self.id;
+        let db = self.db.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = sqlx::query("DELETE FROM stream_leases WHERE id=$1 AND lease_type='read'")
+                    .bind(id)
+                    .execute(&db)
+                    .await;
+            });
+        }
+    }
 }
 impl Drop for Active {
     fn drop(&mut self) {
@@ -110,6 +144,14 @@ impl Drop for Active {
                 self.wake.notify_one();
             }
         }
+    }
+}
+impl Active {
+    pub(crate) async fn renew_read_lease(&self, db: &PgPool) -> Result<()> {
+        if let Some(lease) = &self.read_lease {
+            lease.renew(db).await?;
+        }
+        Ok(())
     }
 }
 pub struct App {
@@ -280,11 +322,15 @@ impl App {
         Ok((app, owner))
     }
     pub fn pin(&self, id: Uuid) -> Active {
+        self.pin_with_lease(id, None)
+    }
+    fn pin_with_lease(&self, id: Uuid, read_lease: Option<ReadLease>) -> Active {
         *self.active.lock().unwrap().entry(id).or_default() += 1;
         Active {
             id,
             registry: self.active.clone(),
             wake: self.wake_gc.clone(),
+            read_lease,
         }
     }
     pub fn is_active(&self, id: Uuid) -> bool {

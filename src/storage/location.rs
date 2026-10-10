@@ -27,3 +27,10 @@ pub(crate) fn parse_cache_name(name: &str) -> Option<(Uuid, bool)> {
     };
     Some((parse_chunk_name(name)?, compressed))
 }
+
+pub(crate) fn parse_upload_cache_name(name: &str) -> Option<Uuid> {
+    let id = name
+        .strip_suffix(".raw")
+        .or_else(|| name.strip_suffix(".zst"))?;
+    Uuid::parse_str(id).ok()
+}

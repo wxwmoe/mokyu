@@ -290,6 +290,9 @@ impl App {
         let Ok(_running) = self.local_cleanup.try_lock() else {
             return Ok(0);
         };
+        sqlx::query("DELETE FROM stream_leases WHERE expires_at<=now()")
+            .execute(&self.db)
+            .await?;
         self.reconcile_upload_pins(storage_id).await?;
         self.storage.reconcile_staging(storage_id).await?;
         let deadline = Instant::now()
@@ -316,7 +319,7 @@ impl App {
             }
         }
         let active: Vec<Uuid> = self.active.lock().unwrap().keys().copied().collect();
-        let candidates:Vec<Uuid>=sqlx::query_scalar("SELECT s.id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE ($3::uuid IS NULL OR b.storage_id=$3) AND (s.state IN ('retired','abandoned') OR ($5 AND s.state='writing')) AND ($4::double precision IS NULL OR s.touched_at<now()-$4*interval '1 second') AND NOT (s.id=ANY($1)) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND t.lease_expires_at>now()) ORDER BY s.touched_at,s.id LIMIT $2").bind(&active).bind(batch).bind(storage_id).bind(retention_seconds.map(|value| value as f64)).bind(storage_id.is_none()).fetch_all(&self.db).await?;
+        let candidates:Vec<Uuid>=sqlx::query_scalar("SELECT s.id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE ($3::uuid IS NULL OR b.storage_id=$3) AND ((s.state IN ('retired','abandoned') AND ($4::double precision IS NULL OR s.touched_at<now()-$4*interval '1 second')) OR (s.state='writing' AND NOT EXISTS(SELECT 1 FROM stream_leases l WHERE l.stream_id=s.id AND l.lease_type='write' AND l.expires_at>now()))) AND NOT (s.id=ANY($1)) AND NOT EXISTS(SELECT 1 FROM stream_leases l WHERE l.stream_id=s.id AND l.expires_at>now()) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND t.lease_expires_at>now()) ORDER BY s.touched_at,s.id LIMIT $2").bind(&active).bind(batch).bind(storage_id).bind(retention_seconds.map(|value| value as f64)).fetch_all(&self.db).await?;
         for id in candidates {
             if Instant::now() >= deadline {
                 break;
@@ -331,9 +334,8 @@ impl App {
             sqlx::raw_sql("SET LOCAL lock_timeout='100ms'; SET LOCAL statement_timeout='1s'")
                 .execute(&mut *tx)
                 .await?;
-            let claimed = sqlx::query("UPDATE streams s SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL WHERE id=$1 AND (s.state IN ('retired','abandoned') OR ($2 AND s.state='writing')) AND ($3::double precision IS NULL OR s.touched_at<now()-$3*interval '1 second') AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM buckets b WHERE b.id=s.bucket_id AND b.storage_id=$4)) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND t.lease_expires_at>now())")
+            let claimed = sqlx::query("UPDATE streams s SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL WHERE id=$1 AND ((s.state IN ('retired','abandoned') AND ($2::double precision IS NULL OR s.touched_at<now()-$2*interval '1 second')) OR (s.state='writing' AND NOT EXISTS(SELECT 1 FROM stream_leases l WHERE l.stream_id=s.id AND l.lease_type='write' AND l.expires_at>now()))) AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM buckets b WHERE b.id=s.bucket_id AND b.storage_id=$3)) AND NOT EXISTS(SELECT 1 FROM stream_leases l WHERE l.stream_id=s.id AND l.expires_at>now()) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND t.lease_expires_at>now())")
                 .bind(id)
-                .bind(storage_id.is_none())
                 .bind(retention_seconds.map(|value| value as f64))
                 .bind(storage_id)
                 .execute(&mut *tx)
@@ -460,7 +462,7 @@ impl App {
             return Ok(false);
         }
         let mut tx = self.db.begin().await?;
-        let row: Option<(Option<Uuid>,)> = sqlx::query_as("SELECT owner_stream FROM chunks WHERE id=$1 AND storage_id=$2 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) FOR UPDATE")
+        let row: Option<(Option<Uuid>,)> = sqlx::query_as("SELECT owner_stream FROM chunks WHERE id=$1 AND storage_id=$2 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM stream_leases l JOIN extents e ON e.stream_id=l.stream_id WHERE e.chunk_id=chunks.id AND l.expires_at>now()) FOR UPDATE")
             .bind(id).bind(storage_id).bind(grace).fetch_optional(&mut *tx).await?;
         let Some((owner,)) = row else {
             return Ok(false);
@@ -517,7 +519,12 @@ impl App {
             .await?;
         let mut count = 0;
         for (table, id_column) in [("chunk_encodings", "encoding_id"), ("packs", "id")] {
-            let rows:Vec<(i64,Uuid,bool)>=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {id_column},location_id,stored_at IS NULL FROM {table} WHERE state IN ('retired','deleting') AND unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second') AND storage_id=$4 ORDER BY unreferenced_at,{id_column} LIMIT $2")))
+            let lease_guard = if table == "packs" {
+                "NOT EXISTS(SELECT 1 FROM stream_leases l JOIN extents e ON e.stream_id=l.stream_id JOIN pack_members m ON m.chunk_id=e.chunk_id WHERE m.pack_id=r.id AND l.expires_at>now())"
+            } else {
+                "NOT EXISTS(SELECT 1 FROM stream_leases l JOIN extents e ON e.stream_id=l.stream_id JOIN chunk_encodings ce ON ce.chunk_id=e.chunk_id WHERE ce.encoding_id=r.encoding_id AND l.expires_at>now())"
+            };
+            let rows:Vec<(i64,Uuid,bool)>=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT r.{id_column},r.location_id,r.stored_at IS NULL FROM {table} r WHERE r.state IN ('retired','deleting') AND r.unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR r.stored_at IS NULL OR r.stored_at<=now()-$3*interval '1 second') AND r.storage_id=$4 AND {lease_guard} ORDER BY r.unreferenced_at,r.{id_column} LIMIT $2")))
                 .bind(grace).bind(batch.max(1) as i64).bind(minimum).bind(storage_id).fetch_all(&self.db).await?;
             for (id, location_id, unknown_age) in rows {
                 let path = if table == "packs" {

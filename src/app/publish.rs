@@ -16,6 +16,7 @@ impl App {
         etag: &str,
         checksums: Value,
     ) -> Result<()> {
+        self.renew_write_lease(id).await?;
         let changed=sqlx::query("UPDATE streams SET size=$2,etag=$3,checksums=$4,touched_at=now() WHERE id=$1 AND state='writing'").bind(id).bind(size).bind(etag).bind(checksums).execute(&self.db).await?.rows_affected();
         if changed != 1 {
             return Err(s3_error!(OperationAborted).into());
@@ -37,6 +38,7 @@ impl App {
         if_none: Option<&s3s::dto::ETagCondition>,
         completion: Option<(Uuid, String, Value)>,
     ) -> Result<()> {
+        self.renew_write_lease(id).await?;
         self.writable()?;
         let _coord = self.coord.lock().await;
         self.writable()?;

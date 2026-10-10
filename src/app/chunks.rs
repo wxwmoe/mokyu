@@ -90,6 +90,7 @@ impl App {
         should_compress: bool,
     ) -> Result<Chunk> {
         ensure!(!raw.is_empty() && raw.len() <= MAX, "invalid chunk length");
+        self.renew_write_lease(stream).await?;
         let hash = *blake3::hash(&raw).as_bytes();
         let storage_id: Uuid = sqlx::query_scalar::<_, Option<Uuid>>(
             "SELECT b.storage_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=$1",
