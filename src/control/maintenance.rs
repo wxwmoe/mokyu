@@ -38,8 +38,18 @@ pub(super) struct Job {
     blocked: Option<String>,
 }
 fn job(mut value: Value) -> Result<Job> {
-    value["task_type"] = value["kind"].clone();
+    let kind = value["kind"]
+        .as_str()
+        .or_else(|| value["task_type"].as_str())
+        .unwrap_or("unknown")
+        .to_owned();
+    value["task_type"] = json!(kind);
     value["status"] = value["state"].clone();
+    let created_by = value["created_by_label"]
+        .as_str()
+        .or_else(|| value["source"].as_str())
+        .unwrap_or("system");
+    value["created_by"] = json!(created_by);
     value["processed"] = json!(
         value["processed"]
             .as_i64()
@@ -55,7 +65,7 @@ fn job(mut value: Value) -> Result<Job> {
     value["policy"] = value["detail"]["kind"]
         .as_str()
         .map(|s| json!(s))
-        .unwrap_or_else(|| value["kind"].clone());
+        .unwrap_or_else(|| json!(kind));
     Ok(serde_json::from_value(value)?)
 }
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -78,8 +88,43 @@ pub(super) struct MaintenanceStatus {
     pack_creation_enabled: bool,
     preparing_packs: String,
     active_operations: usize,
-    backend_prefix: String,
+    backend_prefixes: Vec<BackendPrefix>,
     min_storage_duration: String,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+struct BackendPrefix {
+    id: Uuid,
+    prefix: String,
+}
+#[cfg(test)]
+mod tests {
+    use super::job;
+    use serde_json::json;
+
+    #[test]
+    fn job_normalizes_current_task_fields() {
+        let job = job(json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "task_type": "cleanup",
+            "state": "completed",
+            "created_by_label": "Scheduler",
+            "source": "system",
+            "processed": 0,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "started_at": null,
+            "bucket_id": null,
+            "bucket_name": null,
+            "error": null,
+            "detail": {"role": "child"},
+            "blocked": null,
+        }))
+        .unwrap();
+        assert_eq!(job.kind, "cleanup");
+        assert_eq!(job.policy, "cleanup");
+        assert_eq!(job.created_by, "Scheduler");
+        assert_eq!(job.processed, "0");
+    }
 }
 async fn guard<'a>(
     app: &'a App,
@@ -448,6 +493,7 @@ pub(super) struct JobQuery {
     state: Option<String>,
     kind: Option<String>,
     bucket: Option<Uuid>,
+    storage: Option<Uuid>,
     actor: Option<String>,
     token: Option<String>,
     limit: Option<i64>,
@@ -483,7 +529,7 @@ pub(super) async fn jobs(
     {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    let filter = serde_json::to_string(&json!([q.state, q.kind, q.bucket, q.actor]))?;
+    let filter = serde_json::to_string(&json!([q.state, q.kind, q.bucket, q.storage, q.actor]))?;
     let cursor = q
         .token
         .as_ref()
@@ -508,6 +554,13 @@ pub(super) async fn jobs(
     }
     if let Some(value) = q.bucket {
         sql.push(" AND t.bucket_id=").push_bind(value);
+    }
+    if let Some(value) = q.storage {
+        sql.push(" AND (b.storage_id=")
+            .push_bind(value)
+            .push(" OR t.detail->>'storage_id'=")
+            .push_bind(value.to_string())
+            .push(')');
     }
     if let Some(value) = q.actor {
         sql.push(" AND position(lower(")

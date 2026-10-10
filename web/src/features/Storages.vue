@@ -47,7 +47,7 @@ const profileGroupHints: Record<string, string> = {
   storeGroupLifecycle: 'storeGroupLifecycleHint', storeGroupCache: 'storeGroupCacheHint',
   storeGroupPacking: 'storeGroupPackingHint', storeGroupWorker: 'storeGroupWorkerHint',
 }
-const profileLabel = (key: string) => key.replaceAll('_', ' ')
+const profileLabel = (key: string) => t('profile_' + key)
 const hasBlockKeys = computed(() => (keys.data.value || []).some(row => row.purpose === 'block' && !row.revoked_at))
 
 function profilePreset(type: string): Record<ProfileKey, string | number | boolean | null> {
@@ -175,7 +175,7 @@ async function toggle(row: Storage) {
       <p v-if="!hasBlockKeys" class="store-form-wide field-help">{{ t('storeNoKeyHint') }} <a href="/service?tab=tools&create=block" target="_blank" rel="noreferrer">{{ t('createKey') }}</a></p>
         <template v-if="profileDraft">
           <div class="store-form-wide section-heading"><div><h3>{{ t('storeProfile') }}</h3><p class="field-help">{{ t('storeProfileHint') }}</p></div></div>
-          <details v-for="group in profileGroups" :key="group.title" class="store-form-wide profile-group" open>
+          <details v-for="(group, index) in profileGroups" :key="group.title" class="store-form-wide profile-group" :open="index === 0">
             <summary class="profile-group-title"><span><strong>{{ t(group.title) }}</strong><small>{{ t(profileGroupHints[group.title]!) }}</small></span><span>{{ group.fields.length }}</span></summary>
             <div class="profile-fields">
               <label v-for="field in group.fields" :key="field.key" :class="field.kind === 'boolean' ? 'profile-toggle' : ''">

@@ -1627,6 +1627,11 @@ export interface components {
             product: string;
             version: string;
         };
+        BackendPrefix: {
+            /** Format: uuid */
+            id: string;
+            prefix: string;
+        };
         Batch: {
             action: components["schemas"]["Kind"];
             /** Format: uuid */
@@ -1971,7 +1976,7 @@ export interface components {
         };
         MaintenanceStatus: {
             active_operations: number;
-            backend_prefix: string;
+            backend_prefixes: components["schemas"]["BackendPrefix"][];
             concurrency: number;
             controls: components["schemas"]["Policy"][];
             maintenance: boolean;
@@ -5234,6 +5239,7 @@ export interface operations {
                 state?: string | null;
                 kind?: string | null;
                 bucket?: string | null;
+                storage?: string | null;
                 actor?: string | null;
                 token?: string | null;
                 limit?: number | null;
