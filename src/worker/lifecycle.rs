@@ -636,6 +636,8 @@ pub async fn run(app: Arc<App>) -> Result<()> {
     local.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {_=app.wake_gc.notified()=>{},_=local.tick()=>{}}
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("local-cleanup").await;
         if let Err(e) = app.cleanup().await {
             app.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(error=%e,"local cleanup failed; retaining recoverable state");
