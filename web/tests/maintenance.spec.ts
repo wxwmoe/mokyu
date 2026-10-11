@@ -56,6 +56,13 @@ test('maintenance policies, task history, service configuration and database key
     await expect(row).toBeVisible()
     await expect(row.locator('code')).toHaveText(/^[a-f0-9]{64}$/)
     await expect(page.getByRole('textbox', { name: en.secretValue })).toHaveCount(0)
+    await row.getByRole('button', { name: en.revokeKey, exact: true }).click()
+    const revoke = page.getByRole('dialog', { name: en.revokeKey, exact: true })
+    await revoke.getByRole('button', { name: en.revokeKey, exact: true }).click()
+    const revokeAuth = page.getByRole('dialog').filter({ has: page.getByRole('textbox', { name: en.currentPassword, exact: true }) })
+    if (await revokeAuth.isVisible()) { await revokeAuth.getByRole('textbox', { name: en.currentPassword, exact: true }).fill(password); await revokeAuth.getByRole('button', { name: en.continue, exact: true }).click() }
+    await expect(row.getByText(en.keyRevoked, { exact: true })).toBeVisible()
+    await expect(row.getByRole('button', { name: en.revokeKey, exact: true })).toHaveCount(0)
     await page.goto('/maintenance'); await page.setViewportSize({ width: 390, height: 844 })
     await expect(page.locator('.policy-card')).toHaveCount(7)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)

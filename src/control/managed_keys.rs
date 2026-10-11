@@ -33,6 +33,9 @@ pub(crate) struct ManagedKeyInput {
     pub algorithm: Option<String>,
 }
 
+const KEY_LIST_QUERY: &str = "SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,EXISTS(SELECT 1 FROM storages s WHERE s.block_key_id=k.id) OR EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state<>'deleted') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),k.fingerprint,k.created_at,k.revoked_at FROM managed_keys k ORDER BY k.name";
+const KEY_USAGE_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM storages WHERE block_key_id=$1) OR EXISTS(SELECT 1 FROM chunk_encodings WHERE block_key_id=$1 AND state<>'deleted') OR EXISTS(SELECT 1 FROM packs WHERE block_key_id=$1 AND state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=$1) OR EXISTS(SELECT 1 FROM tasks WHERE detail->>'target_key_id'=$1::text AND state IN ('queued','running','paused','failed')) FROM managed_keys WHERE id=$1";
+
 fn validate_name(name: &str) -> Result<()> {
     anyhow::ensure!(
         (1..=128).contains(&name.trim().len())
@@ -87,7 +90,7 @@ pub(crate) async fn list_rows(db: &sqlx::PgPool) -> Result<Vec<ManagedKeyView>> 
         DateTime<Utc>,
         Option<DateTime<Utc>>,
     )> = sqlx::query_as(
-        "SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,EXISTS(SELECT 1 FROM storages s WHERE s.block_key_id=k.id),k.fingerprint,k.created_at,k.revoked_at FROM managed_keys k ORDER BY k.name",
+        KEY_LIST_QUERY,
     )
     .fetch_all(db)
     .await?;
@@ -169,14 +172,14 @@ pub(crate) async fn create_record(
 
 pub(crate) async fn revoke_record(app: &App, principal: &Principal, id: Uuid) -> Result<()> {
     let mut tx = users::admin_transaction(app, principal).await?;
-    let name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM managed_keys WHERE id=$1 FOR UPDATE")
+    let exists: Option<bool> =
+        sqlx::query_scalar("SELECT true FROM managed_keys WHERE id=$1 FOR UPDATE")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await?;
-    let name = name.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
-    let used: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE block_key_id=$1) OR EXISTS(SELECT 1 FROM chunk_encodings WHERE block_key_id=$2 AND state<>'deleted') OR EXISTS(SELECT 1 FROM packs WHERE block_key_id=$2 AND state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=$2) OR EXISTS(SELECT 1 FROM tasks WHERE detail->>'target_key'=$2 AND state IN ('queued','running','paused','failed'))")
-        .bind(id).bind(id).fetch_one(&mut *tx).await?;
+    exists.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+    let used: bool = sqlx::query_scalar(KEY_USAGE_QUERY)
+        .bind(id).fetch_one(&mut *tx).await?;
     if used {
         return Err(s3s::s3_error!(
             InvalidRequest,
