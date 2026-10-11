@@ -223,7 +223,7 @@ pub(super) async fn password(
     .await?;
     tx.commit().await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
-    super::auth::set_refresh_cookie(&mut response, &app, &refresh)?;
+    super::auth::set_refresh_header(&mut response, &refresh)?;
     Ok(response)
 }
 
@@ -256,7 +256,7 @@ pub(super) async fn reauthenticate(
     .await?;
     tx.commit().await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
-    super::auth::set_refresh_cookie(&mut response, &app, &refresh)?;
+    super::auth::set_refresh_header(&mut response, &refresh)?;
     Ok(response)
 }
 

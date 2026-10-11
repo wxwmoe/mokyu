@@ -27,7 +27,7 @@
 | 方法与路径 | 用途 |
 | --- | --- |
 | `POST /api/v1/auth/login`、`POST /api/v1/auth/logout` | 登录、撤销当前会话 |
-| `POST /api/v1/auth/refresh` | 使用有效的 refresh Cookie 续期当前会话并轮换必要的凭据 |
+| `POST /api/v1/auth/refresh` | 使用请求体中的 refresh token 续期当前会话并轮换必要的凭据 |
 | `GET /api/v1/auth/session`、`GET /api/v1/account` | 身份、个人资料及能力 |
 | `PUT /api/v1/account` | 保存显示名、语言、主题及头像偏好 |
 | `POST /api/v1/account/password` | 原密码验证后改密，保留当前会话、撤销其余会话及已有个人 Token |
@@ -38,7 +38,7 @@
 
 `locale` 为 en/zh-CN/ja/null，`theme` 为 auto/light/dark/null。null 使用浏览器偏好。显示名最多 240 UTF-8 字节，头像邮箱最多 320 字节；头像默认关闭，启用时用规范化邮箱的 SHA-256 构造 Gravatar URL。
 
-密码为 12～1024 UTF-8 字节，哈希与验证共用两个并行名额。密码验证和会话创建同步检查用户版本，不能用重置前的验证结果创建新会话。`last_seen_at` 最多五分钟更新一次。`POST /api/v1/auth/refresh` 使用仅限 `/api/v1/auth/refresh` 的 HttpOnly refresh Cookie，在同源 Origin 下续期当前会话；服务端只保存 refresh token 的哈希，并在轮换时撤销旧值。刷新失败不会恢复被撤销、禁用或已过期的身份。
+密码为 12～1024 UTF-8 字节，哈希与验证共用两个并行名额。密码验证和会话创建同步检查用户版本，不能用重置前的验证结果创建新会话。`last_seen_at` 最多五分钟更新一次。登录响应和 refresh 响应返回一次性 refresh token；浏览器只在认证管理器调用 refresh 时从本地存储读取并放入 `{refresh_token}`，普通请求不会携带它。服务端只保存 refresh token 的哈希，并在轮换时撤销旧值。刷新失败不会恢复被撤销、禁用或已过期的身份。
 
 首次安装仅在没有用户时开放。使用 `mokyu cli setup token` 生成一次性 token；数据库只保存哈希和一小时有效期，`POST /api/v1/auth/setup` 接收 `{token,username,password}`，成功后立即失效。CLI 创建首个管理员也会关闭初始化入口。
 
@@ -230,7 +230,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | --- | --- |
 | `GET /api/v1/runtime-settings` | 列出 PostgreSQL 中共享的 runtime settings 分组和 `restart_required` 状态 |
 | `GET /api/v1/runtime-settings/{section}` | 读取一个 runtime settings 分组 |
-| `PUT /api/v1/runtime-settings/{section}` | 管理员按 revision 替换一个分组；值按当前 Rust schema 校验 |
+| `PUT /api/v1/runtime-settings/{section}` | 管理员按 revision 替换一个分组；Web 设置也使用 `section=web`，值按当前 Rust schema 校验 |
 | `POST /api/v1/runtime-settings/{section}/reset` | 恢复一个分组的当前代码默认值 |
 
 runtime settings 首次从空数据库启动时由当前配置生成，之后由数据库统一保存。保存后响应只标记需要重启的字段；监听地址、数据库连接、部署密钥和资源预算不属于此 API，重启前请求继续使用旧值。

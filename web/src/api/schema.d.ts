@@ -1961,6 +1961,7 @@ export interface components {
         };
         LoginReply: {
             csrf_token: string;
+            refresh_token: string;
         };
         MaintenancePreview: {
             confirmation: string;
@@ -2263,6 +2264,9 @@ export interface components {
         RecoverInput: {
             confirm?: boolean;
         };
+        RefreshInput: {
+            refresh_token: string;
+        };
         ReleaseInput: {
             confirm?: boolean;
         };
@@ -2364,6 +2368,7 @@ export interface components {
             csrf_token: string;
             /** Format: int64 */
             refresh_after: number;
+            refresh_token?: string | null;
             /** Format: uuid */
             session_id: string;
         };
@@ -3121,7 +3126,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RefreshInput"];
+            };
+        };
         responses: {
             200: {
                 headers: {

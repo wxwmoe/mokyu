@@ -18,6 +18,7 @@ pub(super) struct ApiInfo {
 #[derive(Serialize, ToSchema)]
 pub(super) struct LoginReply {
     pub csrf_token: String,
+    pub refresh_token: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -27,6 +28,8 @@ pub(super) struct SessionView {
     pub csrf_token: String,
     pub session_id: Uuid,
     pub refresh_after: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
 }
 
 #[derive(Serialize, ToSchema, sqlx::FromRow)]

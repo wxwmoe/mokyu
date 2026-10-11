@@ -68,12 +68,6 @@ pub(crate) fn token(headers: &HeaderMap) -> Result<&str, HttpError> {
         .filter(|s| s.len() == 64)
         .ok_or_else(unauthorized)
 }
-fn refresh_token(headers: &HeaderMap) -> Result<&str, HttpError> {
-    cookie(headers, "mokyu_refresh")
-        .filter(|s| s.len() == 64)
-        .ok_or_else(unauthorized)
-}
-
 fn secure_cookie(app: &App) -> &'static str {
     if app.config.web.secure_cookie {
         "; Secure"
@@ -104,19 +98,11 @@ fn set_session_cookie(
     )
 }
 
-pub(crate) fn set_refresh_cookie(
-    response: &mut Response,
-    app: &App,
-    token: &str,
-) -> Result<(), HttpError> {
-    append_cookie(
-        response,
-        format!(
-            "mokyu_refresh={token}; Path=/api/v1/auth/refresh; HttpOnly; SameSite=Strict; Max-Age={}{}",
-            REFRESH_LIFETIME_DAYS * 86400,
-            secure_cookie(app)
-        ),
-    )
+pub(crate) fn set_refresh_header(response: &mut Response, token: &str) -> Result<(), HttpError> {
+    response
+        .headers_mut()
+        .insert("x-mokyu-refresh-token", HeaderValue::from_str(token)?);
+    Ok(())
 }
 
 pub(crate) fn clear_auth_cookies(response: &mut Response) -> Result<(), HttpError> {
@@ -132,6 +118,12 @@ pub(crate) fn clear_auth_cookies(response: &mut Response) -> Result<(), HttpErro
         response,
         "mokyu_refresh=; Path=/api/v1/auth/refresh; HttpOnly; SameSite=Strict; Max-Age=0".into(),
     )
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RefreshInput {
+    refresh_token: String,
 }
 
 async fn create_refresh(
@@ -529,10 +521,13 @@ pub(super) async fn login(
     create_refresh(&mut tx, session_id, Uuid::new_v4(), &refresh).await?;
     audit::security(&mut tx, user, "session.login", true, &context.id).await?;
     tx.commit().await?;
-    let mut response = Json(LoginReply { csrf_token: csrf }).into_response();
+    let mut response = Json(LoginReply {
+        csrf_token: csrf,
+        refresh_token: refresh.clone(),
+    })
+    .into_response();
     clear_auth_cookies(&mut response)?;
     set_session_cookie(&mut response, &app, &token, seconds)?;
-    set_refresh_cookie(&mut response, &app, &refresh)?;
     response
         .headers_mut()
         .insert("cache-control", HeaderValue::from_static("no-store"));
@@ -572,14 +567,18 @@ struct RefreshToken {
     replaced_by: Option<Uuid>,
 }
 
-#[utoipa::path(post, path = "/api/v1/auth/refresh", responses((status = 200, body = SessionView), (status = 403, body = contract::ErrorBody)))]
+#[utoipa::path(post, path = "/api/v1/auth/refresh", request_body = RefreshInput, responses((status = 200, body = SessionView), (status = 403, body = contract::ErrorBody)))]
 pub(super) async fn refresh(
     State(app): State<Arc<App>>,
     Extension(context): Extension<crate::status::stats::RequestContext>,
     headers: HeaderMap,
+    Json(input): Json<RefreshInput>,
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
-    let supplied = refresh_token(&headers)?;
+    let supplied = input.refresh_token.as_str();
+    if supplied.len() != 64 || !supplied.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(unauthorized());
+    }
     let hash = blake3::hash(supplied.as_bytes());
     let mut tx = app.db.begin().await?;
     let user: Uuid = sqlx::query_scalar("SELECT s.user_id FROM session_refresh_tokens r JOIN sessions s ON s.id=r.session_id WHERE r.token_hash=$1")
@@ -601,7 +600,7 @@ pub(super) async fn refresh(
         let successor: Option<RefreshToken> = sqlx::query_as("SELECT id,session_id,family_id,expires_at,revoked_at,replaced_by FROM session_refresh_tokens WHERE id=$1 AND revoked_at IS NULL AND expires_at>now() FOR UPDATE")
             .bind(credential.replaced_by).fetch_optional(&mut *tx).await?;
         if let Some(next) = successor.filter(|_| revoked + chrono::Duration::seconds(30) > now) {
-            // Concurrent rotation responses must return identical cookies without storing secrets.
+            // Concurrent rotation responses must return identical credentials without storing secrets.
             secret = derived_token(&app, "mokyu-refresh-v1", supplied);
             credential = next;
             issue_refresh = true;
@@ -670,13 +669,11 @@ pub(super) async fn refresh(
         csrf_token: csrf,
         session_id: credential.session_id,
         refresh_after: refresh_after(expires, now),
+        refresh_token: Some(secret.clone()),
     })
     .into_response();
     if issue_access {
         set_session_cookie(&mut response, &app, &access, seconds)?;
-    }
-    if issue_refresh {
-        set_refresh_cookie(&mut response, &app, &secret)?;
     }
     response
         .headers_mut()
@@ -705,5 +702,6 @@ pub(super) async fn session(
         csrf_token: csrf_token(token(&headers)?),
         session_id,
         refresh_after: refresh_after(expires, recent),
+        refresh_token: None,
     }))
 }

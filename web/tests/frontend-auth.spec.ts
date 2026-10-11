@@ -11,15 +11,20 @@ test('refreshes a session and restores the storage page after reopening', async 
     data: { username: 'tester', password: password() },
   })
   expect(login.status()).toBe(200)
+  const loginBody = await login.json()
+  expect(loginBody.refresh_token).toMatch(/^[0-9a-f]{64}$/)
   const cookies = login.headersArray().filter(header => header.name.toLowerCase() === 'set-cookie').map(header => header.value)
   expect(cookies.some(cookie => cookie.startsWith('mokyu_session=') && cookie.includes('Path=/api/v1;'))).toBe(true)
-  expect(cookies.some(cookie => cookie.startsWith('mokyu_refresh=') && cookie.includes('Path=/api/v1/auth/refresh;'))).toBe(true)
+  expect(cookies.some(cookie => cookie.startsWith('mokyu_refresh=') && !cookie.includes('Max-Age=0'))).toBe(false)
 
-  const refresh = await request.post('/api/v1/auth/refresh', { headers: { Origin: origin } })
+  const refresh = await request.post('/api/v1/auth/refresh', { headers: { Origin: origin }, data: { refresh_token: loginBody.refresh_token } })
   expect(refresh.status()).toBe(200)
-  expect((await refresh.json()).session_id).toMatch(/^[0-9a-f-]{36}$/)
+  const refreshBody = await refresh.json()
+  expect(refreshBody.session_id).toMatch(/^[0-9a-f-]{36}$/)
+  expect(refreshBody.refresh_token).toMatch(/^[0-9a-f]{64}$/)
 
   const context = await browser.newContext({ storageState: await request.storageState() })
+  await context.addInitScript(token => localStorage.setItem('mokyu.auth.refresh', token), refreshBody.refresh_token)
   const page = await context.newPage()
   try {
     await page.goto('/storages')
