@@ -3,6 +3,7 @@ import { ApiError } from '../api/client'
 import { t } from './i18n'
 export interface Notice { id: number; title: string; description?: string; requestId?: string; tone: 'success' | 'error' | 'info' }
 export const notices = ref<Notice[]>([])
+export const manualCopy = ref('')
 let id = 0
 export function notify(title: string, description?: string, tone: Notice['tone'] = 'success') {
   notices.value = [...notices.value.slice(-2), { id: ++id, title, description, tone }]
@@ -22,6 +23,14 @@ export function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 export async function copy(value: string, title = t('copied')) {
-  try { await navigator.clipboard.writeText(value); notify(title) }
-  catch { notify(t('copyValue'), value, 'info') }
+  try { await navigator.clipboard.writeText(value); notify(title); return }
+  catch { /* HTTP previews need the user-initiated legacy clipboard path. */ }
+  const input = document.createElement('textarea'), previous = document.activeElement
+  input.value = value; input.setAttribute('readonly', ''); input.style.position = 'fixed'; input.style.opacity = '0'
+  document.body.append(input); input.select()
+  let copied = false
+  try { copied = document.execCommand('copy') } catch { /* use the selectable fallback */ }
+  finally { input.remove(); if (previous instanceof HTMLElement) previous.focus() }
+  if (copied) notify(title)
+  else manualCopy.value = value
 }

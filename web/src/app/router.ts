@@ -12,6 +12,7 @@ export const router = createRouter({
     { path: '/maintenance', name: 'maintenance', meta: { admin: true }, component: () => import('../features/Maintenance.vue') },
     { path: '/tasks', name: 'tasks', meta: { admin: true }, component: () => import('../features/Tasks.vue') },
     { path: '/service', name: 'service', meta: { admin: true }, component: () => import('../features/Service.vue') },
+    { path: '/runtime-config', name: 'runtime-config', meta: { admin: true }, component: () => import('../features/RuntimeConfig.vue') },
     { path: '/storages', name: 'storages', meta: { admin: true }, component: () => import('../features/Storages.vue') },
     { path: '/storages/:name', name: 'storage-details', meta: { admin: true }, component: () => import('../features/StorageDetail.vue') },
     { path: '/media', name: 'media', component: () => import('../features/Media.vue') },
@@ -32,6 +33,7 @@ export const router = createRouter({
 let initialized = false
 export const startupError = ref('')
 router.beforeEach(async to => {
+  if (to.name === 'service' && to.query.tab === 'config') return { name: 'runtime-config' }
   if (!initialized) {
     try { await refreshSession() }
     catch { startupError.value = 'unreachable' }

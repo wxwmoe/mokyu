@@ -5,7 +5,7 @@ import { TooltipProvider, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSepar
 import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ChevronDown, Settings2, Users, FolderHeart, KeyRound, BookHeart, UploadCloud, HouseHeart, Package, Flower2, ListChecks, HeartPulse, HardDrive } from 'lucide-vue-next'
 import { session, signOut, savePreferences, refreshSession, resetSession, startAuthManager } from '../api/client'
 import { appearance, setTheme } from './theme'
-import { report, notices } from './feedback'
+import { report, notices, manualCopy } from './feedback'
 import { startupError } from './router'
 import Notices from '../components/Notices.vue'
 import SecurityPrompt from '../components/SecurityPrompt.vue'
@@ -27,6 +27,7 @@ const destinations = [
   { key: 'storages', icon: HardDrive, group: 'administration', admin: true },
   { key: 'tasks', icon: ListChecks, group: 'administration', admin: true },
   { key: 'audit', icon: BookHeart, group: 'administration' },
+  { key: 'runtime-config', label: 'runtimeConfig', icon: Settings2, group: 'administration', admin: true },
   { key: 'service', icon: HeartPulse, group: 'administration', admin: true },
 ]
 const groups = computed(() => ['workspace', 'administration'].map(name => ({ name, entries: destinations.filter(item => (session.value?.role === 'admin' ? item.group === name : name === 'workspace' && !item.admin) && (!item.projects || session.value?.project_management)) })).filter(group => group.entries.length))
@@ -34,11 +35,11 @@ const current = computed(() => destinations.find(item => item.key === route.name
 async function logout() { try { await signOut(); await router.replace('/login') } catch (error) { report(error) } }
 function reload() { location.reload() }
 async function toggleTheme() { try { const value = appearance.value === 'dark' ? 'light' : 'dark'; if (session.value) await savePreferences({ theme: value }); else setTheme(value) } catch (error) { report(error) } }
-watch([current, locale], () => { document.title = `${t(current.value.key)} · Mokyu` }, { immediate: true })
+watch([current, locale], () => { document.title = `${t(current.value.label || current.value.key)} · Mokyu` }, { immediate: true })
 async function synchronize(event: StorageEvent) {
   if (!['mokyu.identity-change', 'mokyu.preferences-change'].includes(event.key || '')) return
   const identity = event.key === 'mokyu.identity-change'
-  if (identity) { resetSession(); notices.value = [] }
+  if (identity) { resetSession(false); notices.value = [] }
   try { await refreshSession(); if (identity) await router.replace(session.value ? '/overview' : '/login') }
   catch (e) { report(e); if (identity) await router.replace('/login') }
 }
@@ -55,7 +56,7 @@ onBeforeUnmount(() => { window.removeEventListener('storage', synchronize); stop
   <div v-if="session" class="app-shell">
     <aside class="sidebar">
       <RouterLink class="brand" to="/"><img src="/assets/mokyu-icon.svg" alt="" width="48" height="48"><span>Mokyu<small>{{ t('brandNote') }}</small></span></RouterLink>
-      <div class="sidebar-links"><template v-for="group in groups" :key="group.name"><p class="nav-label">{{ t(group.name) }}</p><nav :aria-label="t(group.name)"><RouterLink v-for="entry in group.entries" :key="entry.key" :to="'/' + entry.key"><component :is="entry.icon" :size="19" /><span>{{ t(entry.key) }}</span><i class="nav-dot" /></RouterLink></nav></template></div>
+      <div class="sidebar-links"><template v-for="group in groups" :key="group.name"><p class="nav-label">{{ t(group.name) }}</p><nav :aria-label="t(group.name)"><RouterLink v-for="entry in group.entries" :key="entry.key" :to="'/' + entry.key"><component :is="entry.icon" :size="19" /><span>{{ t(entry.label || entry.key) }}</span><i class="nav-dot" /></RouterLink></nav></template></div>
       <div class="sidebar-bottom"><div class="mochi-note"><Sparkles class="note-sparkle" :size="18" /><img src="/assets/mokyu-mochi.svg" alt="" width="124" height="116"><p>{{ t('moreLove') }}</p><span>{{ t('gently') }}</span></div></div>
     </aside>
     <div class="workspace">
@@ -72,5 +73,6 @@ onBeforeUnmount(() => { window.removeEventListener('storage', synchronize); stop
   <main v-else id="main" tabindex="-1"><RouterView v-if="route.name === 'login'" /></main>
   <UiDialog v-model:open="navigation" :title="t('yourWorkspace')"><nav class="mobile-menu"><template v-for="group in groups" :key="group.name"><p class="nav-label">{{ t(group.name) }}</p><RouterLink v-for="entry in group.entries" :key="entry.key" :to="'/' + entry.key" @click="navigation = false"><component :is="entry.icon" :size="20" />{{ t(entry.key) }}</RouterLink></template><RouterLink to="/tokens" @click="navigation = false"><KeyRound :size="20" />{{ t('tokens') }}</RouterLink></nav></UiDialog>
   <Notices />
+  <UiDialog :open="!!manualCopy" :title="t('copy')" :description="t('copyValue')" @update:open="!$event && (manualCopy = '')"><textarea class="manual-copy" :value="manualCopy" :aria-label="t('copy')" readonly rows="6" @focus="($event.target as HTMLTextAreaElement).select()" /><template #footer><button @click="manualCopy = ''">{{ t('done') }}</button></template></UiDialog>
   <SecurityPrompt />
 </TooltipProvider></template>
