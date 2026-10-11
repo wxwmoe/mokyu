@@ -25,6 +25,11 @@ test('three languages, themes, responsive pages, searchable choices and visible 
         await page.goto('/' + route); await expect(page.locator('main h1')).toBeVisible()
         await expect(page.locator('html')).toHaveAttribute('lang', locale)
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+        if (route === 'runtime-config') {
+          await page.locator('.config-source-badge').first().waitFor()
+          await page.locator('.advanced-config > summary').click()
+          expect(await page.locator('.config-source-badge').evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth))).toBe(true)
+        }
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${locale}/${theme}/${width}/${route}`).toBe(true)
         await expect(page.locator('select')).toHaveCount(0)
         if ((route === 'overview' || route === 'maintenance') && width !== 640) {

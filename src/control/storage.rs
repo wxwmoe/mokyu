@@ -2,7 +2,7 @@ use super::Identity;
 use crate::{
     app::App,
     content::codec,
-    http::HttpError,
+    http::{HttpError, problem},
     storage::{
         model::{Record as BackendRecord, identity_marker as storage_identity_marker},
         profile::StorageProfile,
@@ -405,14 +405,13 @@ const PROFILE_COLUMNS: &[&str] = &[
 
 fn validate_profile(profile: &StorageProfile, storage_type: &str) -> anyhow::Result<()> {
     use crate::config::{bytes, cache_bytes, seconds};
-    if storage_type == "local" {
-        anyhow::ensure!(
-            !profile.cache_enabled
-                && !profile.upload_cache
-                && !profile.pack_enabled
-                && !profile.pack_range_enabled,
-            "local storage cannot enable cache or packing"
-        );
+    if storage_type == "local"
+        && (profile.cache_enabled
+            || profile.upload_cache
+            || profile.pack_enabled
+            || profile.pack_range_enabled)
+    {
+        return Err(problem(StatusCode::BAD_REQUEST, "LocalStorageFeatures").0);
     }
     anyhow::ensure!(
         matches!(
@@ -530,7 +529,9 @@ async fn save_profile(
         .execute(&mut **tx)
         .await?
         .rows_affected();
-    anyhow::ensure!(affected == 1, "storage profile revision conflict");
+    if affected != 1 {
+        return Err(problem(StatusCode::CONFLICT, "StorageProfileConflict").0);
+    }
     Ok(())
 }
 
@@ -573,7 +574,7 @@ pub(crate) async fn update_profile(
     path = "/api/v1/storages/{name}/profile",
     params(("name" = String, Path)),
     request_body = StorageProfile,
-    responses((status = 200, body = StorageProfile), (status = 409, body = crate::control::contract::ErrorBody))
+    responses((status = 200, body = StorageProfile), (status = 400, body = crate::control::contract::ErrorBody), (status = 409, body = crate::control::contract::ErrorBody))
 )]
 pub(crate) async fn update_profile_route(
     State(app): State<Arc<App>>,
@@ -620,7 +621,7 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
         validate_profile(profile, &record.r#type)?;
     }
     sqlx::query("INSERT INTO storages(id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,identity_marker,block_key_id,access_key_encrypted,secret_key_encrypted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)").bind(record.id).bind(&record.name).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(&record.identity_marker).bind(input.block_key_id).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency,upload_concurrency,control_concurrency,cache_enabled,upload_cache,compression_enabled,pack_enabled) VALUES($1,$2,$3,$4,$5,$5,$5,$5)")
+    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency,upload_concurrency,control_concurrency,cache_enabled,upload_cache,compression_enabled,pack_enabled,pack_range_enabled) VALUES($1,$2,$3,$4,$5,$5,$5,$5,$5)")
         .bind(record.id)
         .bind(input.read_concurrency)
         .bind(input.upload_concurrency)
@@ -649,7 +650,7 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
         .await?)
 }
 
-#[utoipa::path(post, operation_id = "storage_create", path = "/api/v1/storages", request_body = StorageInput, responses((status = 201, body = StorageView)))]
+#[utoipa::path(post, operation_id = "storage_create", path = "/api/v1/storages", request_body = StorageInput, responses((status = 201, body = StorageView), (status = 400, body = crate::control::contract::ErrorBody)))]
 pub(crate) async fn create(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -763,21 +764,23 @@ pub(crate) async fn update_record(
         )?
     };
     record.enabled = input.enabled.unwrap_or(row.enabled);
-    app.storage.verify_store_record(record.clone()).await?;
+    app.storage
+        .verify_store_record(record.clone())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, storage_id=%row.id, "storage verification failed");
+            problem(StatusCode::CONFLICT, "StorageVerificationFailed").0
+        })?;
     let block_key_id = input.block_key_id.unwrap_or(row.block_key_id);
     validate_block_key(&mut tx, block_key_id).await?;
     sqlx::query("UPDATE storages SET type=$2,path=$3,endpoint_url=$4,remote_bucket_name=$5,region=$6,prefix=$7,block_key_id=$8,access_key_encrypted=$9,secret_key_encrypted=$10,enabled=$11,updated_at=now() WHERE id=$1").bind(row.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(block_key_id).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(record.enabled).execute(&mut *tx).await?;
-    let requested = if let Some(mut requested) = input.profile {
+    let mut requested = if let Some(requested) = input.profile {
         anyhow::ensure!(
             requested.storage_id == row.id,
             "storage profile belongs to another storage"
         );
-        anyhow::ensure!(
-            requested.revision == profile.revision,
-            "storage profile revision conflict"
-        );
-        if record.r#type == "local" {
-            requested.pack_enabled = false;
+        if requested.revision != profile.revision {
+            return Err(problem(StatusCode::CONFLICT, "StorageProfileConflict").0);
         }
         requested
     } else {
@@ -785,11 +788,14 @@ pub(crate) async fn update_record(
         requested.read_concurrency = read_concurrency;
         requested.upload_concurrency = upload_concurrency;
         requested.control_concurrency = control_concurrency;
-        if record.r#type == "local" {
-            requested.pack_enabled = false;
-        }
         requested
     };
+    if record.r#type == "local" {
+        requested.cache_enabled = false;
+        requested.upload_cache = false;
+        requested.pack_enabled = false;
+        requested.pack_range_enabled = false;
+    }
     validate_profile(&requested, &record.r#type)?;
     save_profile(&mut tx, &requested).await?;
     sqlx::query("SELECT pg_notify('mokyu_storage_profiles',$1)")
@@ -935,7 +941,7 @@ pub(crate) async fn unpack(
     }
 }
 
-#[utoipa::path(put, operation_id = "storage_update", path = "/api/v1/storages/{name}", params(("name" = String, Path)), request_body = StoragePatch, responses((status = 200, body = StorageView)))]
+#[utoipa::path(put, operation_id = "storage_update", path = "/api/v1/storages/{name}", params(("name" = String, Path)), request_body = StoragePatch, responses((status = 200, body = StorageView), (status = 409, body = crate::control::contract::ErrorBody)))]
 pub(crate) async fn update(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -948,7 +954,7 @@ pub(crate) async fn update(
     Ok(Json(update_record(&app, name, input).await?))
 }
 
-#[utoipa::path(post, operation_id = "storage_check", path = "/api/v1/storages/{name}/check", params(("name" = String, Path)), responses((status = 200, body = StorageView)))]
+#[utoipa::path(post, operation_id = "storage_check", path = "/api/v1/storages/{name}/check", params(("name" = String, Path)), responses((status = 200, body = StorageView), (status = 409, body = crate::control::contract::ErrorBody)))]
 pub(crate) async fn check(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -958,7 +964,13 @@ pub(crate) async fn check(
     let tx = super::users::admin_transaction(&app, &actor.principal).await?;
     tx.commit().await?;
     let row: StorageRow = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,access_key_encrypted,secret_key_encrypted,identity_marker,block_key_id,enabled FROM storages WHERE name=$1").bind(&name).fetch_optional(&app.db).await?.context("storage was not found")?;
-    app.storage.verify_store_record(row_record(&row)).await?;
+    app.storage
+        .verify_store_record(row_record(&row))
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, storage_id=%row.id, "storage verification failed");
+            problem(StatusCode::CONFLICT, "StorageVerificationFailed").0
+        })?;
     Ok(Json(
         sqlx::query_as(VIEW_BY_ID)
             .bind(row.id)
