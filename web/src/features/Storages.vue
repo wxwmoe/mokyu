@@ -10,7 +10,7 @@ import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
 import { notify, report } from '../app/feedback'
 import { secure } from '../app/security'
-import UiCheckbox from '../components/ui/UiCheckbox.vue'
+import UiSwitch from '../components/ui/UiSwitch.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
 
@@ -110,6 +110,9 @@ function profileInput(field: ProfileField, event: Event) {
   const target = event.target as HTMLInputElement
   profileDraft.value[field.key] = field.kind === 'boolean' ? target.checked : field.kind === 'number' ? (target.value ? Number(target.value) : null) : target.value
 }
+function setProfileBoolean(key: ProfileKey, value: boolean) {
+  if (profileDraft.value) profileDraft.value[key] = value
+}
 function profileDisabled(key: string) {
   return draft.type === 'local' && (key.startsWith('cache_') || key.startsWith('pack_'))
 }
@@ -159,7 +162,7 @@ async function toggle(row: Storage) {
       <div class="store-form-grid">
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeConnection') }}</h3><p class="field-help">{{ t('storeConnectionHint') }}</p></div></div>
         <label v-if="!editing">{{ t('storeName') }}<input v-model="draft.name" required maxlength="128" autocomplete="off" :disabled="busy"></label>
-        <label>{{ t('storeType') }}<UiSelect v-model="draft.type" :options="types" :label="t('storeType')" :disabled="busy" /></label>
+        <label class="store-type-field">{{ t('storeType') }}<UiSelect v-model="draft.type" :options="types" :label="t('storeType')" :disabled="busy" /></label>
         <div class="store-form-wide preset-actions"><span class="field-help">{{ t('storePresetHint') }}</span><button type="button" :disabled="busy" @click="applyPreset">{{ t('loadPreset') }}</button></div>
         <label v-if="draft.type === 'local'" class="store-form-wide">{{ t('storePath') }}<input v-model="draft.path" required maxlength="4096" autocomplete="off" :disabled="busy"></label>
         <template v-else>
@@ -172,24 +175,23 @@ async function toggle(row: Storage) {
         </template>
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeChunkPolicy') }}</h3><p class="field-help">{{ t('storeChunkPolicyHint') }}</p></div></div>
         <label class="store-form-wide">{{ t('storeCurrentKey') }}<UiSelect v-model="draft.block_key_id" :options="keyOptions" :label="t('storeCurrentKey')" :disabled="busy" /></label>
-      <p v-if="!hasBlockKeys" class="store-form-wide field-help">{{ t('storeNoKeyHint') }} <a href="/service?tab=tools&create=block" target="_blank" rel="noreferrer">{{ t('createKey') }}</a></p>
+      <p class="store-form-wide field-help">{{ t(hasBlockKeys ? 'storeKeyHint' : 'storeNoKeyHint') }} <a href="/credentials?tab=managed&create=block" target="_blank" rel="noreferrer">{{ t('manageKeys') }}</a></p>
         <template v-if="profileDraft">
           <div class="store-form-wide section-heading"><div><h3>{{ t('storeProfile') }}</h3><p class="field-help">{{ t('storeProfileHint') }}</p></div></div>
           <details v-for="(group, index) in profileGroups" :key="group.title" class="store-form-wide profile-group" :open="index === 0">
             <summary class="profile-group-title"><span><strong>{{ t(group.title) }}</strong><small>{{ t(profileGroupHints[group.title]!) }}</small></span><span>{{ group.fields.length }}</span></summary>
             <div class="profile-fields">
-              <label v-for="field in group.fields" :key="field.key" :class="field.kind === 'boolean' ? 'profile-toggle' : ''">
-                <span>{{ profileLabel(field.key) }}</span>
-                <input v-if="field.kind === 'boolean'" type="checkbox" :checked="Boolean(profileDraft[field.key])" :disabled="busy || profileDisabled(field.key)" @change="profileInput(field, $event)">
-                <input v-else :type="field.kind === 'number' ? 'number' : 'text'" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)">
-              </label>
+              <div v-for="field in group.fields" :key="field.key" :class="field.kind === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
+                <template v-if="field.kind === 'boolean'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="Boolean(profileDraft[field.key])" :aria-label="profileLabel(field.key)" :disabled="busy || profileDisabled(field.key)" @update:model-value="setProfileBoolean(field.key, $event)" /></template>
+                <label v-else><span>{{ profileLabel(field.key) }}</span><input :type="field.kind === 'number' ? 'number' : 'text'" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"></label>
+              </div>
             </div>
           </details>
         </template>
       </div>
-      <p class="store-secret-note"><ShieldCheck :size="15" /><span>{{ t('managedKeysHint') }} <RouterLink to="/service">{{ t('administratorTools') }}</RouterLink></span></p>
-      <UiCheckbox v-if="!editing" v-model="draft.initialize" :label="t('initializeStore')" :disabled="busy" />
-      <UiCheckbox v-if="editing" v-model="draft.enabled" :label="t('storeEnabled')" :disabled="busy" />
+      <p class="store-secret-note"><ShieldCheck :size="15" /><span>{{ t('managedKeysHint') }} <a href="/credentials?tab=managed" target="_blank" rel="noreferrer">{{ t('manageKeys') }}</a></span></p>
+      <UiSwitch v-if="!editing" v-model="draft.initialize" class="store-form-switch" :label="t('initializeStore')" :disabled="busy" />
+      <UiSwitch v-if="editing" v-model="draft.enabled" class="store-form-switch" :label="t('storeEnabled')" :disabled="busy" />
       <p class="field-help">{{ t(draft.type === 'local' ? 'localStoreHint' : 's3StoreHint') }}</p>
       <div class="form-footer"><button type="button" :disabled="busy" @click="open = false">{{ t('cancel') }}</button><button class="primary" :disabled="busy">{{ t('save') }}</button></div>
     </form>

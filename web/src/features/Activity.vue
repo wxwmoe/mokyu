@@ -3,7 +3,7 @@ import ErrorNotice from '../components/ErrorNotice.vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { BookHeart, Download, Filter, KeyRound, Users, FolderHeart, Settings2, LogIn, ChevronRight, Copy } from 'lucide-vue-next'
-import { api, params, session, ApiError } from '../api/client'
+import { api, params, session } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
 import { copy, errorText, report } from '../app/feedback'
@@ -11,6 +11,7 @@ import Avatar from '../components/Avatar.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 import EmptyState from '../components/EmptyState.vue'
+import UiListFooter from '../components/ui/UiListFooter.vue'
 type Event = components['schemas']['Event']
 const actor = ref(''), search = ref(''), action = ref(''), source = ref(''), outcome = ref(''), days = ref('7'), after = ref(''), selected = ref<Event | null>(null)
 const since = ref(new Date(Date.now() - 7 * 86400000).toISOString())
@@ -37,9 +38,8 @@ onBeforeUnmount(() => controller.abort())
 async function download() {
   exporting.value = true
   try {
-    const response = await fetch('/api/v1/audit/export?' + query.value, { credentials: 'same-origin', signal: controller.signal })
-    if (!response.ok) { const error = await response.json(); throw new ApiError(response.status, error.code, error.request_id) }
-    const url = URL.createObjectURL(await response.blob()), link = document.createElement('a')
+    const blob = await api<Blob>('/api/v1/audit/export?' + query.value, { signal: controller.signal }, 'blob')
+    const url = URL.createObjectURL(blob), link = document.createElement('a')
     link.href = url; link.download = 'mokyu-audit.jsonl'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
   } catch (error) { if (!controller.signal.aborted) report(error) } finally { exporting.value = false }
 }
@@ -48,6 +48,6 @@ async function download() {
   <div class="page-heading"><div><p class="eyebrow">{{ t('auditEyebrow') }}</p><h1>{{ t('audit') }}</h1><p>{{ t(session?.role === 'admin' ? 'auditHint' : 'auditMemberHint') }}</p></div><button :disabled="exporting || !page.data.value?.items.length" @click="download"><Download :size="17" />{{ t('auditExport') }}</button></div>
   <section class="surface audit-filters"><div class="section-heading"><h2><Filter :size="17" />{{ t('auditFilter') }}</h2><button class="text-button" @click="reset">{{ t('auditReset') }}</button></div><div class="audit-filter-grid"><label>{{ t('auditPeriod') }}<UiSelect v-model="days" :options="periods" :label="t('auditPeriod')" /></label><label>{{ t('auditAction') }}<UiSelect v-model="action" :options="groups" :label="t('auditAction')" /></label><label>{{ t('auditSource') }}<UiSelect v-model="source" :options="sources" :label="t('auditSource')" /></label><label>{{ t('auditOutcome') }}<UiSelect v-model="outcome" :options="outcomes" :label="t('auditOutcome')" /></label></div><form v-if="session?.role === 'admin'" class="audit-search" @submit.prevent="actor = search"><input v-model="search" type="search" :placeholder="t('auditSearchActor')" :aria-label="t('auditSearchActor')" maxlength="128"><button>{{ t('search') }}</button></form></section>
   <ErrorNotice v-if="page.error.value" :error="page.error.value" />
-  <section class="surface audit-timeline"><div class="section-heading"><h2><BookHeart :size="19" />{{ t('auditRecent') }}</h2><button :disabled="page.isFetching.value" @click="page.refetch()">{{ t('refresh') }}</button></div><button v-for="event in page.data.value?.items" :key="event.id" class="audit-row" @click="selected = event"><span class="audit-icon" :data-group="group(event)"><component :is="icon(event)" :size="20" /></span><span class="audit-description"><strong>{{ title(event) }}</strong><span>{{ summary(event) }}</span><small><span v-if="attempted(event)">{{ t('auditAttempt') }} </span>{{ event.actor_label }} · {{ t('auditSource_' + event.source) }}</small></span><span class="audit-when"><span class="badge" :class="{ 'audit-problem': ['failed', 'partial'].includes(event.outcome) }">{{ t('auditOutcome_' + event.outcome) }}</span><time :datetime="event.created_at">{{ date(event.created_at) }}</time></span><ChevronRight :size="16" /></button><EmptyState v-if="page.data.value && !page.data.value.items.length" :title="t('auditEmpty')" :description="t('auditEmptyHint')" /><div class="list-footer"><button v-if="after" @click="after = ''">{{ t('firstPage') }}</button><button v-if="page.data.value?.next_cursor" @click="after = page.data.value.next_cursor">{{ t('nextPage') }}<ChevronRight :size="15" /></button></div></section>
+  <section class="surface audit-timeline"><div class="section-heading"><h2><BookHeart :size="19" />{{ t('auditRecent') }}</h2><button :disabled="page.isFetching.value" @click="page.refetch()">{{ t('refresh') }}</button></div><button v-for="event in page.data.value?.items" :key="event.id" class="audit-row" @click="selected = event"><span class="audit-icon" :data-group="group(event)"><component :is="icon(event)" :size="20" /></span><span class="audit-description"><strong>{{ title(event) }}</strong><span>{{ summary(event) }}</span><small><span v-if="attempted(event)">{{ t('auditAttempt') }} </span>{{ event.actor_label }} · {{ t('auditSource_' + event.source) }}</small></span><span class="audit-when"><span class="badge" :class="{ 'audit-problem': ['failed', 'partial'].includes(event.outcome) }">{{ t('auditOutcome_' + event.outcome) }}</span><time :datetime="event.created_at">{{ date(event.created_at) }}</time></span><ChevronRight :size="16" /></button><EmptyState v-if="page.data.value && !page.data.value.items.length" :title="t('auditEmpty')" :description="t('auditEmptyHint')" /><UiListFooter :first="!!after" :next="!!page.data.value?.next_cursor" @first="after = ''" @next="after = page.data.value!.next_cursor || ''" /></section>
   <UiDialog v-model:open="open" :title="current ? title(current) : t('audit')" drawer><ErrorNotice v-if="detail.error.value" :error="detail.error.value" /><template v-if="current"><div class="person-hero"><Avatar :name="current.actor_label" large /><div><p class="eyebrow">{{ t(attempted(current) ? 'auditAttempt' : 'auditActor') }}</p><h2>{{ current.actor_label }}</h2><span class="badge">{{ t('auditOutcome_' + current.outcome) }}</span></div></div><dl class="key-facts"><dt>{{ t('auditWhen') }}</dt><dd>{{ date(current.created_at) }}</dd><dt>{{ t('auditSource') }}</dt><dd>{{ t('auditSource_' + current.source) }}</dd><dt>{{ t('auditTarget') }}</dt><dd>{{ summary(current) }}</dd><template v-if="current.status"><dt>HTTP</dt><dd>{{ current.status }}</dd></template></dl><p v-if="current.outcome === 'unknown'" class="info-callout">{{ t('auditUnknownHint') }}</p><div v-if="current.request_id" class="detail-section"><h3>Request ID</h3><button class="text-button request-id" @click="copy(current.request_id)">{{ current.request_id }}<Copy :size="14" /></button></div><details class="detail-section"><summary>{{ t('auditTechnical') }}</summary><pre class="audit-json">{{ JSON.stringify(current.detail, null, 2) }}</pre><p class="field-help">{{ t('auditRecordId') }}: {{ current.id }}</p></details></template></UiDialog>
 </template>

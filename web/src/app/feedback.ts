@@ -22,15 +22,20 @@ export function errorText(error: unknown) {
   }
   return error instanceof Error ? error.message : String(error)
 }
-export async function copy(value: string, title = t('copied')) {
-  try { await navigator.clipboard.writeText(value); notify(title); return }
+export async function copy(value: string, title = t('copied')): Promise<boolean> {
+  try { await navigator.clipboard.writeText(value); notify(title); return true }
   catch { /* HTTP previews need the user-initiated legacy clipboard path. */ }
   const input = document.createElement('textarea'), previous = document.activeElement
-  input.value = value; input.setAttribute('readonly', ''); input.style.position = 'fixed'; input.style.opacity = '0'
-  document.body.append(input); input.select()
+  input.value = value; input.setAttribute('readonly', ''); input.style.position = 'fixed'; input.style.left = '-10000px'; input.style.top = '0'; input.style.width = '1px'; input.style.height = '1px'
+  const owner = previous instanceof HTMLElement ? previous.closest('[role="dialog"]') : null
+  ;(owner || document.body).append(input); input.select()
   let copied = false
-  try { copied = document.execCommand('copy') } catch { /* use the selectable fallback */ }
+  try {
+    input.addEventListener('copy', event => { event.clipboardData?.setData('text/plain', value); event.preventDefault() }, { once: true })
+    input.focus(); input.select(); copied = document.execCommand('copy')
+  } catch { /* use the selectable fallback */ }
   finally { input.remove(); if (previous instanceof HTMLElement) previous.focus() }
-  if (copied) notify(title)
-  else manualCopy.value = value
+  if (copied) { notify(title); return true }
+  manualCopy.value = value
+  return false
 }

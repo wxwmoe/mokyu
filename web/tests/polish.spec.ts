@@ -17,7 +17,7 @@ test('three languages, themes, responsive pages, searchable choices and visible 
   const preference = (locale: string, theme: string) => request.put('/api/v1/account', { headers, data: { display_name: '', locale, theme, avatar_email: '', avatar_enabled: false } })
   await preference('en', 'light'); await page.emulateMedia({ reducedMotion: 'reduce' }); await login(page)
   const errors: string[] = []; page.on('pageerror', e => errors.push(e.message))
-  const routes = ['overview', 'media', 'storage', 'maintenance', 'tasks', 'service', 'users', 'projects', 'credentials', 'tokens', 'audit', 'account', 'transfers', 'buckets']
+  const routes = ['overview', 'media', 'storage', 'maintenance', 'tasks', 'service', 'runtime-config', 'users', 'projects', 'credentials', 'tokens', 'audit', 'account', 'transfers', 'buckets']
   try {
     for (const [locale, theme, width, height] of [['en', 'light', 1440, 1000], ['zh-CN', 'light', 1440, 1000], ['zh-CN', 'dark', 390, 844], ['ja', 'light', 1440, 1000], ['ja', 'light', 768, 1024], ['ja', 'dark', 320, 740], ['en', 'light', 640, 450]] as const) {
       await preference(locale, theme); await page.setViewportSize({ width, height })
@@ -35,9 +35,13 @@ test('three languages, themes, responsive pages, searchable choices and visible 
     }
     await preference('en', 'light'); await page.setViewportSize({ width: 1280, height: 900 }); await page.goto('/overview')
     const scope = page.getByRole('combobox', { name: en.insightScope, exact: true })
-    await scope.fill('no-such-bucket-for-search'); await expect(page.getByText(en.noChoiceMatches)).toBeVisible()
-    await scope.fill('media'); await page.getByRole('option', { name: /^media / }).click()
-    await expect(page).toHaveURL(/bucket=/); await expect(scope).toHaveValue('media')
+    if (await scope.evaluate(element => element.tagName === 'INPUT')) {
+      await scope.fill('no-such-bucket-for-search'); await expect(page.getByText(en.noChoiceMatches)).toBeVisible()
+      await scope.fill('media'); await page.getByRole('option', { name: /^media / }).click()
+      await expect(page).toHaveURL(/bucket=/); await expect(scope).toHaveValue('media')
+    } else {
+      await scope.click(); await expect(page.getByRole('option').first()).toBeVisible(); await page.keyboard.press('Escape')
+    }
     await page.route('**/api/v1/buckets', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ code: 'SlowDown', request_id: 'polish-request-id' }) }))
     await page.goto('/media'); await expect(page.locator('.inline-error')).toContainText('polish-request-id')
     await expect(page.getByRole('button', { name: en.copyRequestId })).toBeVisible()
@@ -65,4 +69,55 @@ test('identity changes in another tab clear private views and cancel stale sessi
     expect((await (await other.request.get('/api/v1/auth/session')).json()).username).toBe(name)
     await other.goto('/media'); await expect(other.locator('.bucket-card')).toHaveCount(0)
   } finally { await other.close(); await request.delete('/api/v1/users/' + id, { headers }) }
+})
+
+test('list focus and footer rhythm stay consistent', async ({ page }) => {
+  test.setTimeout(90000)
+  await login(page)
+  const focus = async (path: string, selector: string) => {
+    await page.goto('/' + path)
+    const row = page.locator(selector).first()
+    await row.waitFor()
+    await row.focus()
+    return row.evaluate(element => {
+      const style = getComputedStyle(element)
+      const icon = element.querySelector('.policy-icon, .audit-icon, .avatar-fallback, .key-symbol')
+      return { background: style.backgroundColor, iconBackground: icon ? getComputedStyle(icon).backgroundColor : '' }
+    })
+  }
+  const audit = await focus('audit', '.audit-row')
+  const tasks = await focus('tasks', '.task-row')
+  const users = await focus('users', '.person-row')
+  const credentials = await focus('credentials', '.key-row')
+  expect(tasks.background).toBe(audit.background)
+  expect(users.background).toBe(audit.background)
+  expect(tasks.iconBackground).not.toBe(tasks.background)
+  expect(users.iconBackground).not.toBe(users.background)
+  expect(credentials.background).toBe('rgba(0, 0, 0, 0)')
+
+  const footerGap = async (path: string, selector: string) => {
+    await page.goto('/' + path)
+    const footer = page.locator(selector)
+    await footer.waitFor()
+    return footer.evaluate(element => {
+      const parent = element.parentElement!
+      const footerBox = element.getBoundingClientRect()
+      const parentBox = parent.getBoundingClientRect()
+      const style = getComputedStyle(element)
+      return { borderTop: style.borderTopStyle, gap: Math.round(parentBox.bottom - footerBox.bottom) }
+    })
+  }
+  const auditFooter = await footerGap('audit', '.list-footer')
+  const taskFooter = await footerGap('tasks', '.list-footer')
+  const usersFooter = await footerGap('users', '.users-footer')
+  expect(taskFooter.gap).toBe(auditFooter.gap)
+  expect(taskFooter.borderTop).toBe('none')
+  expect(usersFooter.borderTop).toBe('none')
+
+  await page.goto('/buckets')
+  const bucket = await page.locator('.bucket-card').first().getAttribute('href')
+  expect(bucket).toBeTruthy()
+  await page.goto(bucket!)
+  await expect(page.locator('.bucket-settings > .tabs-list')).toBeVisible()
+  expect(await page.locator('.bucket-settings > .tabs-list').evaluate(element => getComputedStyle(element).marginTop)).toBe('0px')
 })

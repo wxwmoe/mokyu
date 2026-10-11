@@ -73,7 +73,7 @@ async function mode() {
 </script>
 <template>
   <div class="page-heading"><div><p class="eyebrow">{{ t('projectsEyebrow') }}</p><h1>{{ t('projects') }}</h1><p>{{ t('projectsHint') }}</p></div><button v-if="admin" class="primary" @click="edit()"><Plus :size="17" />{{ t('createProject') }}</button></div>
-  <div v-if="admin" class="info-callout"><FolderHeart :size="22" /><p>{{ t(session?.project_management ? 'projectModeOn' : 'projectModeOff') }}</p><button :disabled="busy" @click="mode">{{ t(session?.project_management ? 'disableProjectMode' : 'enableProjectMode') }}</button></div>
+  <div v-if="admin" class="info-callout project-mode-callout"><FolderHeart :size="22" /><p>{{ t(session?.project_management ? 'projectModeOn' : 'projectModeOff') }}</p><button :disabled="busy" @click="mode">{{ t(session?.project_management ? 'disableProjectMode' : 'enableProjectMode') }}</button></div>
   <ErrorNotice v-if="projects.error.value || buckets.error.value" :error="projects.error.value || buckets.error.value" />
   <div class="project-grid"><button v-for="project in projects.data.value" :key="project.id" class="project-card" @click="router.push({ query: { ...route.query, project: project.id } })"><span class="project-symbol"><FolderHeart :size="27" /></span><span v-if="project.builtin" class="badge">{{ t('defaultProject') }}</span><h2>{{ project.name }}</h2><p>{{ project.description || t('projectReady') }}</p><span class="field-help">{{ t('bucketCount', { count: buckets.data.value?.filter(item => item.project_id === project.id).length || 0 }) }}</span><ArrowUpRight :size="17" class="project-arrow" /></button></div>
   <EmptyState v-if="projects.data.value && !projects.data.value.length" :title="t('fresh')" :description="t('askForBucket')" />

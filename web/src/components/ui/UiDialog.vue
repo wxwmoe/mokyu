@@ -11,9 +11,9 @@ function restoreFocus(event: Event) { event.preventDefault(); if (returnFocus?.i
 </script>
 <template>
   <DialogRoot v-model:open="open"><DialogPortal><DialogOverlay class="dialog-overlay" />
-    <DialogContent class="dialog-panel" :class="{ drawer, wide }" @close-auto-focus="restoreFocus" @escape-key-down="busy && $event.preventDefault()" @pointer-down-outside="busy && $event.preventDefault()">
+    <DialogContent class="dialog-panel" :class="{ drawer, wide, 'dialog-compact': !$slots.default }" @close-auto-focus="restoreFocus" @escape-key-down="busy && $event.preventDefault()" @pointer-down-outside="busy && $event.preventDefault()">
       <header class="dialog-header"><div><DialogTitle class="dialog-title">{{ title }}</DialogTitle><DialogDescription :class="{ 'sr-only': !description }">{{ description || title }}</DialogDescription></div><DialogClose class="icon-button" :aria-label="t('close')" :disabled="busy"><X :size="18" /></DialogClose></header>
-      <div class="dialog-body"><slot /></div>
+      <div v-if="$slots.default" class="dialog-body"><slot /></div>
       <footer v-if="$slots.footer" class="dialog-footer"><slot name="footer" /></footer>
     </DialogContent>
   </DialogPortal></DialogRoot>

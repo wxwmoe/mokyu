@@ -2,10 +2,10 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { TooltipProvider, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from 'reka-ui'
-import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ChevronDown, Settings2, Users, FolderHeart, KeyRound, BookHeart, UploadCloud, HouseHeart, Package, Flower2, ListChecks, HeartPulse, HardDrive } from 'lucide-vue-next'
+import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ChevronDown, Settings2, Users, FolderHeart, KeyRound, BookHeart, UploadCloud, HouseHeart, Package, Flower2, ListChecks, HeartPulse, HardDrive, Copy } from 'lucide-vue-next'
 import { session, signOut, savePreferences, refreshSession, resetSession, startAuthManager } from '../api/client'
 import { appearance, setTheme } from './theme'
-import { report, notices, manualCopy } from './feedback'
+import { report, notices, manualCopy, copy } from './feedback'
 import { startupError } from './router'
 import Notices from '../components/Notices.vue'
 import SecurityPrompt from '../components/SecurityPrompt.vue'
@@ -34,6 +34,7 @@ const groups = computed(() => ['workspace', 'administration'].map(name => ({ nam
 const current = computed(() => destinations.find(item => item.key === route.name) || { key: route.name === 'login' ? 'signIn' : route.name === 'storage-details' ? 'storages' : ['account', 'tokens'].includes(String(route.name)) ? String(route.name) : 'media', icon: route.name === 'account' ? Settings2 : route.name === 'storage-details' ? HardDrive : Images, group: route.name === 'storage-details' ? 'administration' : 'workspace' })
 async function logout() { try { await signOut(); await router.replace('/login') } catch (error) { report(error) } }
 function reload() { location.reload() }
+async function retryManualCopy() { const value = manualCopy.value; if (value && await copy(value)) manualCopy.value = '' }
 async function toggleTheme() { try { const value = appearance.value === 'dark' ? 'light' : 'dark'; if (session.value) await savePreferences({ theme: value }); else setTheme(value) } catch (error) { report(error) } }
 watch([current, locale], () => { document.title = `${t(current.value.label || current.value.key)} · Mokyu` }, { immediate: true })
 async function synchronize(event: StorageEvent) {
@@ -60,7 +61,7 @@ onBeforeUnmount(() => { window.removeEventListener('storage', synchronize); stop
       <div class="sidebar-bottom"><div class="mochi-note"><Sparkles class="note-sparkle" :size="18" /><img src="/assets/mokyu-mochi.svg" alt="" width="124" height="116"><p>{{ t('moreLove') }}</p><span>{{ t('gently') }}</span></div></div>
     </aside>
     <div class="workspace">
-      <header class="topbar"><div class="topbar-location"><button class="icon-button mobile-nav" :aria-label="t('navigation')" @click="navigation = true"><Menu :size="21" /></button><span class="location-icon"><component :is="current.icon" :size="18" /></span><span>{{ t(session.role === 'admin' ? current.group : 'workspace') }} <span class="crumb-slash">/</span> <strong>{{ t(current.key) }}</strong></span></div><div class="topbar-actions">
+      <header class="topbar"><div class="topbar-location"><button class="icon-button mobile-nav" :aria-label="t('navigation')" @click="navigation = true"><Menu :size="21" /></button><span class="location-icon"><component :is="current.icon" :size="18" /></span><span>{{ t(session.role === 'admin' ? current.group : 'workspace') }} <span class="crumb-slash">/</span> <strong>{{ t(current.label || current.key) }}</strong></span></div><div class="topbar-actions">
         <LocaleMenu />
         <UiTip :text="t(appearance === 'dark' ? 'lightSwitch' : 'darkSwitch')"><button class="icon-button" :aria-label="t(appearance === 'dark' ? 'lightSwitch' : 'darkSwitch')" @click="toggleTheme"><Sun v-if="appearance === 'dark'" :size="19" /><Moon v-else :size="19" /></button></UiTip>
         <span class="topbar-divider" />
@@ -71,8 +72,8 @@ onBeforeUnmount(() => { window.removeEventListener('storage', synchronize); stop
     </div>
   </div>
   <main v-else id="main" tabindex="-1"><RouterView v-if="route.name === 'login'" /></main>
-  <UiDialog v-model:open="navigation" :title="t('yourWorkspace')"><nav class="mobile-menu"><template v-for="group in groups" :key="group.name"><p class="nav-label">{{ t(group.name) }}</p><RouterLink v-for="entry in group.entries" :key="entry.key" :to="'/' + entry.key" @click="navigation = false"><component :is="entry.icon" :size="20" />{{ t(entry.key) }}</RouterLink></template><RouterLink to="/tokens" @click="navigation = false"><KeyRound :size="20" />{{ t('tokens') }}</RouterLink></nav></UiDialog>
+  <UiDialog v-model:open="navigation" :title="t('yourWorkspace')"><nav class="mobile-menu"><template v-for="group in groups" :key="group.name"><p class="nav-label">{{ t(group.name) }}</p><RouterLink v-for="entry in group.entries" :key="entry.key" :to="'/' + entry.key" @click="navigation = false"><component :is="entry.icon" :size="20" />{{ t(entry.label || entry.key) }}</RouterLink></template><RouterLink to="/tokens" @click="navigation = false"><KeyRound :size="20" />{{ t('tokens') }}</RouterLink></nav></UiDialog>
   <Notices />
-  <UiDialog :open="!!manualCopy" :title="t('copy')" :description="t('copyValue')" @update:open="!$event && (manualCopy = '')"><textarea class="manual-copy" :value="manualCopy" :aria-label="t('copy')" readonly rows="6" @focus="($event.target as HTMLTextAreaElement).select()" /><template #footer><button @click="manualCopy = ''">{{ t('done') }}</button></template></UiDialog>
+  <UiDialog :open="!!manualCopy" :title="t('copy')" :description="t('copyValue')" @update:open="!$event && (manualCopy = '')"><textarea class="manual-copy" :value="manualCopy" :aria-label="t('copy')" readonly rows="6" @focus="($event.target as HTMLTextAreaElement).select()" /><div class="manual-copy-actions"><button class="primary" @click="retryManualCopy"><Copy :size="16" />{{ t('copyAgain') }}</button><span class="field-help">{{ t('copyFallbackHint') }}</span></div><template #footer><button @click="manualCopy = ''">{{ t('done') }}</button></template></UiDialog>
   <SecurityPrompt />
 </TooltipProvider></template>

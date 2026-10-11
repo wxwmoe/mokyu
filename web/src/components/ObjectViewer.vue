@@ -17,7 +17,8 @@ import ObjectStorage from './ObjectStorage.vue'
 const props = defineProps<{ bucket: Bucket; item: MediaItem | null; previous: boolean; next: boolean }>()
 const emit = defineEmits<{ close: []; step: [delta: number]; action: [kind: MediaAction] }>()
 const opened = computed({ get: () => !!props.item, set: value => { if (!value) emit('close') } })
-const wide = ref(false), original = ref(false), zoom = ref(false), inspector = ref(true), failed = ref(false)
+const wide = ref(false), original = ref(false), zoom = ref(false), inspector = ref(true), failed = ref(false), dragging = ref(false), stage = ref<HTMLElement | null>(null)
+let panStart: { x: number; y: number; left: number; top: number } | undefined
 const canRead = computed(() => props.bucket.actions.includes('object.read'))
 const query = computed(() => params({ key: props.item?.object_key, version: props.item?.id }))
 const detail = useQuery({ queryKey: ['object', () => props.bucket.id, query], enabled: computed(() => !!props.item), queryFn: ({ signal }) => api<components['schemas']['ObjectDetail']>(`/api/v1/buckets/${props.bucket.id}/object?${query.value}`, { signal }), gcTime: 0 })
@@ -33,11 +34,29 @@ const publicLink = computed(() => {
 let returnFocus: HTMLElement | null = null
 watch(() => props.item, (value, previous) => {
   if (value && !previous) returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-  original.value = false; zoom.value = false; failed.value = false
+  original.value = false; zoom.value = false; failed.value = false; endPan()
   if (!value) { wide.value = false; inspector.value = true }
 }, { immediate: true, flush: 'sync' })
+watch(zoom, value => { if (!value) endPan() })
 function focusBack(event: Event) { event.preventDefault(); if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true }) }
 function expand() { wide.value = !wide.value; if (wide.value && preview.value === 'image' && canRead.value) original.value = true }
+function startPan(event: PointerEvent) {
+  if (!zoom.value || preview.value !== 'image' || event.button !== 0 || !stage.value) return
+  panStart = { x: event.clientX, y: event.clientY, left: stage.value.scrollLeft, top: stage.value.scrollTop }
+  dragging.value = true
+  const target = event.currentTarget as HTMLElement
+  target.setPointerCapture?.(event.pointerId)
+  event.preventDefault()
+}
+function movePan(event: PointerEvent) {
+  if (!panStart || !stage.value) return
+  stage.value.scrollLeft = panStart.left - (event.clientX - panStart.x)
+  stage.value.scrollTop = panStart.top - (event.clientY - panStart.y)
+}
+function endPan(event?: PointerEvent) {
+  if (event && event.currentTarget instanceof HTMLElement && event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  panStart = undefined; dragging.value = false
+}
 function permalink() { const url = new URL(location.href); url.searchParams.set('object', props.item!.object_key); url.searchParams.set('version', props.item!.id); copy(url.toString()) }
 function navigate(event: KeyboardEvent) {
   if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || (event.target as HTMLElement).closest('input, textarea, audio, video, [contenteditable], [role="tablist"], [role="menu"]')) return
@@ -50,12 +69,12 @@ function navigate(event: KeyboardEvent) {
     <DialogContent class="object-viewer" :class="{ expanded: wide, 'inspector-hidden': !inspector }" @close-auto-focus="focusBack" @keydown="navigate">
       <header class="object-viewer-bar"><span class="viewer-title"><Image :size="17" /><span>{{ t('quickLook') }}</span><DialogTitle class="sr-only">{{ name }}</DialogTitle></span><DialogDescription class="sr-only">{{ t('objectDetails') }}</DialogDescription><div class="viewer-controls"><button class="icon-button" :aria-label="t('previousObject')" :disabled="!previous" @click="emit('step', -1)"><ChevronLeft :size="17" /></button><button class="icon-button" :aria-label="t('nextObject')" :disabled="!next" @click="emit('step', 1)"><ChevronRight :size="17" /></button><span class="viewer-separator" /><button class="icon-button" :aria-label="t(wide ? 'compactView' : 'expandView')" @click="expand"><Minimize2 v-if="wide" :size="16" /><Maximize2 v-else :size="16" /></button><button v-if="wide" class="icon-button" :aria-label="t(inspector ? 'hideInspector' : 'showInspector')" @click="inspector = !inspector"><PanelRightClose v-if="inspector" :size="16" /><PanelRightOpen v-else :size="16" /></button><DialogClose class="icon-button" :aria-label="t('close')"><X :size="18" /></DialogClose></div></header>
       <div v-if="item" class="object-viewer-body">
-        <section class="object-stage" :class="{ 'stage-text': preview === 'text', 'stage-original': original, 'stage-zoom': zoom }" :aria-label="t('preview')">
+        <section ref="stage" class="object-stage" :class="{ 'stage-text': preview === 'text', 'stage-original': original, 'stage-zoom': zoom }" :aria-label="t('preview')">
           <ErrorNotice v-if="detail.error.value" :error="detail.error.value" />
           <template v-else-if="canRead">
             <div v-if="preview === 'text'" class="text-preview"><pre v-if="text.data.value">{{ text.data.value.text }}</pre><p v-else class="field-help">{{ text.error.value ? errorText(text.error.value) : t('opening') }}</p><span v-if="text.data.value?.truncated" class="text-truncated">{{ t('textTruncated') }}</span></div>
             <template v-else-if="original && !failed && preview !== 'none'">
-              <img v-if="preview === 'image'" class="original-image" :src="mediaUrl(bucket.id, item, 'content', true)" :alt="name" @error="failed = true">
+              <img v-if="preview === 'image'" class="original-image" :class="{ dragging }" :src="mediaUrl(bucket.id, item, 'content', true)" :alt="name" draggable="false" @error="failed = true" @pointerdown="startPan" @pointermove="movePan" @pointerup="endPan" @pointercancel="endPan" @dragstart.prevent>
               <video v-else-if="preview === 'video'" :key="item.id" :src="mediaUrl(bucket.id, item, 'content', true)" controls preload="metadata" @error="failed = true" />
               <audio v-else-if="preview === 'audio'" :key="item.id" :src="mediaUrl(bucket.id, item, 'content', true)" controls preload="metadata" @error="failed = true" />
               <button v-if="wide && preview === 'image'" class="zoom-button" :aria-label="t(zoom ? 'fitImage' : 'actualSize')" @click="zoom = !zoom"><ZoomOut v-if="zoom" :size="17" /><ZoomIn v-else :size="17" />{{ t(zoom ? 'fitImage' : 'actualSize') }}</button>

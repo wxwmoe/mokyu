@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { test, expect } from '@playwright/test'
 import en from '../src/locales/i18n.en.js'
 
-test('maintenance policies, task history, service configuration and database keys', async ({ page, request }) => {
+test('maintenance policies, task history, runtime settings and managed keys', async ({ page, request }) => {
   test.setTimeout(60000)
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
   const login = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
@@ -36,11 +36,12 @@ test('maintenance policies, task history, service configuration and database key
     await page.screenshot({ path: '/results/step16-maintenance.png', fullPage: true })
     await page.goto('/service'); await expect(page.locator('.queue-card')).toHaveCount(3)
     await expect(page.locator('.service-metric')).toHaveCount(3)
-    await page.getByRole('tab', { name: en.runtimeConfig, exact: true }).click()
+    await page.goto('/runtime-config')
     await page.getByRole('textbox', { name: en.searchConfiguration }).fill('instance.deployment_key')
     await expect(page.locator('.config-fields article')).toHaveCount(1)
     await expect(page.locator('.config-fields article').first()).toContainText(en.redactedValue)
-    await page.getByRole('tab', { name: en.administratorTools, exact: true }).click()
+    await page.goto('/service'); await page.getByRole('tab', { name: en.administratorTools, exact: true }).click()
+    await page.getByRole('link', { name: en.openKeyManagement, exact: true }).click()
     await expect(page.getByRole('heading', { name: en.managedKeys, exact: true })).toBeVisible()
     await page.getByRole('button', { name: en.createKey, exact: true }).click()
     const auth = page.getByRole('dialog').filter({ has: page.getByRole('textbox', { name: en.currentPassword, exact: true }) })
