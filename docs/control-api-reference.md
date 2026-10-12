@@ -220,7 +220,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 
 ## 运行状态
 
-`GET /api/v1/system/status` 与 `cli status` 相同；`GET /api/v1/system/status` 提供页面使用的进程、连接池、资源预算、读写名额、存储 read/upload/control 队列和目录索引状态。`GET /api/v1/system/config` 提供脱敏配置、来源和重启要求，不读取秘密文件内容。
+`GET /api/v1/system/status` 与 `cli status` 相同；`GET /api/v1/system/status` 提供页面使用的进程、连接池、资源预算、读写名额、存储 read/upload/control 队列和目录索引状态。`GET /api/v1/system/config` 提供脱敏配置、来源、值模式和重启要求，不读取秘密文件内容；来源由 `origin` 标识，值模式由 `value_mode` 标识。
 
 运行计数本进程累计、重启归零：HTTP started/completed/active/failed/canceled、4xx/5xx、字节及延时；缓存命中/查找、存储请求/字节、GC 成败。失败率为 `(failed+canceled)/completed`，耗时分位数是倍增直方图的近似上界。统计不是账单或逐请求日志；Linux RSS 也不等于含页缓存的容器内存。
 

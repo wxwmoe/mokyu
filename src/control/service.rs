@@ -20,6 +20,9 @@ pub(super) struct ServiceStatus {
     version: &'static str,
     started_at: String,
     maintenance: bool,
+    mode_mismatch: bool,
+    recovery_required: bool,
+    restart_required: bool,
     counters: Vec<RuntimeCounter>,
     backend_queues: Value,
     backend_operations: Value,
@@ -42,6 +45,18 @@ pub(super) async fn status(
     let mut tx = app.db.begin().await?;
     actor.principal.lock_admin(&mut tx).await?;
     let raw = app.status().await?;
+    let loaded_revisions = app
+        .runtime_revisions
+        .read()
+        .map(|revisions| revisions.clone())
+        .unwrap_or_default();
+    let revisions: Vec<(String, i64)> =
+        sqlx::query_as("SELECT section,revision FROM runtime_settings")
+            .fetch_all(&mut *tx)
+            .await?;
+    let restart_required = revisions.into_iter().any(|(section, revision)| {
+        loaded_revisions.get(&section).copied().unwrap_or_default() != revision
+    });
     let mut counters = Vec::new();
     for key in [
         "db_pool_size",
@@ -90,6 +105,9 @@ pub(super) async fn status(
         version: env!("CARGO_PKG_VERSION"),
         started_at: text(&raw["runtime"]["started_at"]),
         maintenance: raw["maintenance"] == true,
+        mode_mismatch: raw["mode_mismatch"] == true,
+        recovery_required: app.recovery_required(),
+        restart_required,
         counters,
         backend_queues: raw["io"]["backend_queues"].clone(),
         backend_operations: raw["io"]["backend"].clone(),
@@ -105,7 +123,8 @@ pub(super) async fn status(
 pub(super) struct ConfigField {
     key: String,
     value: String,
-    source: &'static str,
+    origin: &'static str,
+    value_mode: &'static str,
     restart: bool,
 }
 #[utoipa::path(get,operation_id="service_config",path="/api/v1/system/config",responses((status=200,body=Vec<ConfigField>)))]
@@ -126,11 +145,24 @@ pub(super) async fn config(
         "database".into(),
         json!({"host":d.host,"port":d.port,"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode}),
     );
-    let runtime: Vec<(String, serde_json::Value)> =
-        sqlx::query_as("SELECT section,value FROM runtime_settings ORDER BY section")
+    let loaded_revisions = app
+        .runtime_revisions
+        .read()
+        .map(|revisions| revisions.clone())
+        .unwrap_or_default();
+    let runtime: Vec<(String, serde_json::Value, i64, bool)> = sqlx::query_as(
+        "SELECT section,value,revision,updated_by_user_id IS NULL FROM runtime_settings ORDER BY section",
+    )
             .fetch_all(&mut *tx)
             .await?;
-    for (section, value) in runtime {
+    let mut runtime_restart = std::collections::HashMap::new();
+    let mut runtime_defaults = std::collections::HashMap::new();
+    for (section, value, revision, is_default) in runtime {
+        runtime_restart.insert(
+            section.clone(),
+            loaded_revisions.get(&section).copied().unwrap_or_default() != revision,
+        );
+        runtime_defaults.insert(section.clone(), is_default);
         sections.insert(section, value);
     }
     let runtime_sections: std::collections::HashSet<&str> = sections
@@ -142,18 +174,27 @@ pub(super) async fn config(
     for (section, values) in &sections {
         for (field, value) in values.as_object().unwrap() {
             let key = format!("{section}.{field}");
-            let source = if runtime_sections.contains(section.as_str()) {
-                "database"
+            let (origin, value_mode) = if runtime_sections.contains(section.as_str()) {
+                if runtime_defaults.get(section).copied().unwrap_or(false) {
+                    if c.configured_fields.contains(&key) {
+                        ("config", "set")
+                    } else {
+                        ("database", "default")
+                    }
+                } else {
+                    ("database", "set")
+                }
             } else if c.configured_fields.contains(&key) {
-                "config"
+                ("config", "set")
             } else {
-                "default"
+                ("config", "default")
             };
             fields.push(ConfigField {
                 key,
                 value: text(value),
-                source,
-                restart: true,
+                origin,
+                value_mode,
+                restart: runtime_restart.get(section.as_str()).copied().unwrap_or(true),
             });
         }
     }
@@ -161,14 +202,16 @@ pub(super) async fn config(
         fields.push(ConfigField {
             key: format!("effective.{key}"),
             value: text(value),
-            source: "computed",
+            origin: "config",
+            value_mode: "budget",
             restart: true,
         });
     }
     fields.push(ConfigField {
         key: "pack.creation_enabled".into(),
         value: app.pack_creation_allowed().to_string(),
-        source: "database",
+        origin: "database",
+        value_mode: "set",
         restart: false,
     });
     tx.commit().await?;

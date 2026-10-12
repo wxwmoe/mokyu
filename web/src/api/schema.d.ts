@@ -1751,9 +1751,10 @@ export interface components {
         };
         ConfigField: {
             key: string;
+            origin: string;
             restart: boolean;
-            source: string;
             value: string;
+            value_mode: string;
         };
         ConfirmBucket: {
             confirm_name: string;
@@ -2345,6 +2346,9 @@ export interface components {
             inventory_error?: string | null;
             inventory_stale: boolean;
             maintenance: boolean;
+            mode_mismatch: boolean;
+            recovery_required: boolean;
+            restart_required: boolean;
             started_at: string;
             version: string;
         };
@@ -5003,6 +5007,14 @@ export interface operations {
                     "application/json": components["schemas"]["StorageView"];
                 };
             };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     storage_update: {
@@ -5028,6 +5040,14 @@ export interface operations {
                     "application/json": components["schemas"]["StorageView"];
                 };
             };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     storage_check: {
@@ -5047,6 +5067,14 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StorageView"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };
@@ -5134,6 +5162,14 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StorageProfile"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             409: {

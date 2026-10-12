@@ -3,7 +3,8 @@ import ErrorNotice from '../components/ErrorNotice.vue'
 import { computed } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { Heart, Images, HardDrive, Sparkles, ArrowUpRight, Package, CloudUpload, RefreshCw, Archive, Flower2, Activity, Clock3 } from 'lucide-vue-next'
-import { api, bytes, session, type Bucket } from '../api/client'
+import { api, bytes, queries, session, type Bucket } from '../api/client'
+import type { components } from '../api/schema'
 import { useInsights, taskTone, type Runtime } from '../app/insights'
 import { t, date } from '../app/i18n'
 import { report, errorText, notify } from '../app/feedback'
@@ -23,7 +24,7 @@ const capacity = computed(() => (statistics.data.value?.history || []).map(p => 
 const requests = computed(() => (runtime.data.value?.history || []).map((p, i, all) => { const previous = all[i - 1], seconds = previous ? (new Date(p.at).getTime() - new Date(previous.at).getTime()) / 1000 : 0; return { at: p.at, epoch: p.epoch, value: previous?.epoch === p.epoch && seconds > 0 && Number(p.requests) >= Number(previous.requests) ? (Number(p.requests) - Number(previous.requests)) / seconds : null } }))
 const saving = computed(() => usage.value?.encoded_bytes == null ? null : Number(usage.value.logical_bytes) - Number(usage.value.encoded_bytes))
 const packed = computed(() => usage.value && Number(usage.value.unique_bytes) ? Math.round(Number(usage.value.packed_bytes) / Number(usage.value.unique_bytes) * 100) : 0)
-async function refresh() { const result = await statistics.refetch(); if (admin.value) await runtime.refetch(); if (result.error) report(result.error); else notify(t('refreshed')) }
+async function refresh() { const result = await statistics.refetch(); if (admin.value) await Promise.all([runtime.refetch(), queries.refetchQueries({ queryKey: ['service-status'] })]); if (result.error) report(result.error); else notify(t('refreshed')) }
 </script>
 <template>
   <div class="page-heading overview-heading"><div><p class="eyebrow">{{ t('overviewEyebrow') }}</p><h1>{{ t('welcomeHome', { name: session?.display_name || session?.username || 'Mokyu' }) }} <Heart class="heading-heart" :size="24" /></h1><p>{{ t('overviewHint') }}</p></div><div class="heading-actions"><ScopePicker /><button class="icon-button" :aria-label="t('refresh')" :disabled="statistics.isFetching.value" @click="refresh"><RefreshCw :size="17" /></button></div></div>

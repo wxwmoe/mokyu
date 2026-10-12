@@ -155,7 +155,7 @@ async function toggle(row: Storage) {
       <div class="actions"><RouterLink class="button" :to="'/storages/' + encodeURIComponent(row.name)"><ArrowUpRight :size="15" />{{ t('storeDetails') }}</RouterLink><button @click="edit(row)"><Pencil :size="15" />{{ t('editStore') }}</button><button :disabled="checking === row.name" @click="toggle(row)">{{ t(row.enabled ? 'disableStore' : 'enableStore') }}</button></div>
     </article>
   </div>
-  <EmptyState v-else :title="t('noStores')" :description="t('noStoresHint')"><button class="primary" @click="edit()"><Plus :size="17" />{{ t('createStore') }}</button></EmptyState>
+  <EmptyState v-else :title="t('noStores')" :description="t('noStoresHint')" />
   <UiDialog v-model:open="open" :title="t(editing ? 'editStore' : 'createStore')" :description="t('storeEditorHint')" :busy="busy" wide>
     <form @submit.prevent="save">
       <p class="store-draft-note"><Pencil :size="15" />{{ t('storeDraftHint') }}</p>

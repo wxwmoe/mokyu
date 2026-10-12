@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { TabsRoot, TabsList, TabsTrigger, TabsContent } from 'reka-ui'
-import { HeartPulse, Database, Cpu, Cloud, Copy, RefreshCw, KeyRound, ArrowUpRight } from 'lucide-vue-next'
+import { HeartPulse, Database, Cpu, Cloud, Copy, RefreshCw } from 'lucide-vue-next'
 import ErrorNotice from '../components/ErrorNotice.vue'
 import { api, bytes } from '../api/client'
 import type { components } from '../api/schema'
@@ -19,13 +18,10 @@ function diagnostic() { void copy(JSON.stringify({ service: status.data.value },
 <template>
   <div class="page-heading"><div><p class="eyebrow">{{ t('serviceEyebrow') }}</p><h1>{{ t('service') }}</h1><p>{{ t('serviceHint') }}</p></div><div class="heading-actions"><button @click="diagnostic"><Copy :size="16" />{{ t('copyDiagnostics') }}</button><button class="icon-button" :aria-label="t('refresh')" @click="status.refetch()"><RefreshCw :size="17" /></button></div></div>
   <ErrorNotice v-if="status.error.value" :error="status.error.value" />
-  <TabsRoot default-value="runtime"><TabsList class="tabs-list" :aria-label="t('service')"><TabsTrigger value="runtime" class="tab-trigger">{{ t('liveRuntime') }}</TabsTrigger><TabsTrigger value="tools" class="tab-trigger">{{ t('administratorTools') }}</TabsTrigger></TabsList>
-    <TabsContent value="runtime">
+  <div>
       <div class="service-metrics"><section class="surface service-metric rose"><HeartPulse :size="25" /><span>{{ t('serviceMode') }}</span><strong>{{ status.data.value ? t(status.data.value.maintenance ? 'recoveryMode' : 'serviceOnline') : '—' }}</strong><small v-if="status.data.value">Mokyu {{ status.data.value.version }}</small></section><section class="surface service-metric lilac"><Cpu :size="25" /><span>{{ t('processMemory') }}</span><strong>{{ counter.rss_bytes && counter.rss_bytes !== 'null' ? bytes(Number(counter.rss_bytes)) : '—' }}</strong><small>{{ t('activeStreams', { count: counter.active_streams || '0' }) }}</small></section><section class="surface service-metric mint"><Database :size="25" /><span>{{ t('databasePool') }}</span><strong>{{ counter.db_pool_idle || '—' }} / {{ counter.db_pool_size || '—' }}</strong><small>{{ t('idleConnections') }}</small></section></div>
       <div class="service-queues"><section v-for="[kind, queue] in queues" :key="kind" class="surface queue-card"><div class="section-heading"><h2><Cloud :size="19" />{{ t('queue_' + kind) }}</h2><span class="badge">{{ queue.running }} / {{ queue.limit }}</span></div><p class="field-help">{{ t('queueHint') }}</p><dl class="facts"><dt>{{ t('foregroundQueue') }}</dt><dd>{{ queue.queued.foreground }}</dd><dt>{{ t('uploadQueue') }}</dt><dd>{{ queue.queued.upload }}</dd><dt>{{ t('maintenanceQueue') }}</dt><dd>{{ queue.queued.maintenance }}</dd><dt>{{ t('oldestWait') }}</dt><dd>{{ t('secondsShort', { value: queue.oldest_wait_seconds }) }}</dd></dl></section></div>
       <section class="surface recovery-card"><div class="section-heading"><h2>{{ t('indexReadiness') }}</h2></div><dl class="facts"><dt>{{ t('catalogState') }}</dt><dd>{{ t('catalog_' + (catalog?.phase || 'unknown')) }}</dd><dt>{{ t('catalogScanned') }}</dt><dd>{{ catalog?.scanned || '—' }}</dd><dt>{{ t('inventoryAsOf') }}</dt><dd>{{ status.data.value?.inventory_as_of ? date(status.data.value.inventory_as_of) : t('collectingInsights') }}</dd><dt>{{ t('startedAt') }}</dt><dd>{{ status.data.value?.started_at ? date(status.data.value.started_at) : '—' }}</dd></dl><p v-if="catalog?.last_error || status.data.value?.inventory_error" class="error">{{ catalog?.last_error || status.data.value?.inventory_error }}</p><p v-if="status.data.value?.inventory_stale" class="field-help">{{ t('snapshotStale') }}</p></section>
       <section class="surface recovery-card"><details><summary>{{ t('runtimeCounters') }}</summary><dl class="runtime-counters"><template v-for="row in status.data.value?.counters" :key="row.key"><dt>{{ row.key }}</dt><dd>{{ row.value }}</dd></template></dl></details></section>
-    </TabsContent>
-    <TabsContent value="tools"><section class="surface tools-board"><div class="section-heading"><div><h2><KeyRound :size="19" />{{ t('managedKeys') }}</h2><p class="field-help">{{ t('managedKeysServiceHint') }}</p></div><RouterLink class="button primary" to="/credentials?tab=managed"><ArrowUpRight :size="16" />{{ t('openKeyManagement') }}</RouterLink></div><p class="field-help">{{ t('managedKeysServiceDetail') }}</p></section><section class="surface tools-board"><div class="section-heading"><div><h2><Copy :size="19" />{{ t('diagnostics') }}</h2><p class="field-help">{{ t('diagnosticsHint') }}</p></div><button @click="diagnostic"><Copy :size="16" />{{ t('copyDiagnostics') }}</button></div></section></TabsContent>
-  </TabsRoot>
+  </div>
 </template>

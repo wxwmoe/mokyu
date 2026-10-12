@@ -26,9 +26,21 @@ test('three languages, themes, responsive pages, searchable choices and visible 
         await expect(page.locator('html')).toHaveAttribute('lang', locale)
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
         if (route === 'runtime-config') {
-          await page.locator('.config-source-badge').first().waitFor()
+          await page.locator('.config-origin-badge').first().waitFor()
           await page.locator('.advanced-config > summary').click()
-          expect(await page.locator('.config-source-badge').evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth))).toBe(true)
+          expect(await page.locator('.config-origin-badge, .config-value-mode-badge').evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth))).toBe(true)
+          if (locale === 'en') {
+            const origin = page.locator('.config-fields article').filter({ hasText: 'web.origin' }).first()
+            await expect(origin.locator('.config-copy > strong')).toHaveText(en.runtimeField_origin)
+            await expect(origin.locator('.config-value .config-origin-badge')).toHaveCount(1)
+            await expect(origin.locator('.config-value .config-value-mode-badge')).toHaveCount(1)
+            await expect(origin.locator('.config-value .config-value-chip')).toHaveCount(1)
+            await expect(origin.locator('.config-value small')).toHaveCount(1)
+            await expect(origin.locator('.config-meta small')).toHaveText(en.appliedSetting)
+            await expect(origin.locator('.config-edit-button')).toHaveCount(1)
+            await origin.getByRole('button', { name: en.editConfigField, exact: true }).click()
+            await expect(page.locator('[data-runtime-field="web.origin"] input')).toBeFocused()
+          }
         }
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${locale}/${theme}/${width}/${route}`).toBe(true)
         await expect(page.locator('select')).toHaveCount(0)
@@ -53,6 +65,29 @@ test('three languages, themes, responsive pages, searchable choices and visible 
     await page.unroute('**/api/v1/buckets'); await page.goto('/media'); await expect(page.locator('.bucket-card').first()).toBeVisible()
     expect(errors).toEqual([])
   } finally { await preference('en', 'light') }
+})
+
+test('service state notices appear across workspace routes', async ({ page }) => {
+  await page.route('**/api/v1/system/status', route => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({
+      version: '0.0.4', started_at: '2026-10-12T00:00:00Z', maintenance: false,
+      mode_mismatch: true, recovery_required: false, restart_required: true,
+      counters: [], backend_queues: {}, backend_operations: {}, catalog: {},
+      inventory_as_of: null, inventory_error: null, inventory_stale: false,
+    }),
+  }))
+  await login(page)
+  const routes = ['overview', 'media', 'storage', 'transfers', 'maintenance', 'buckets', 'users', 'credentials', 'storages', 'tasks', 'audit', 'runtime-config', 'service']
+  for (const route of routes) {
+    await page.goto('/' + route)
+    await expect(page.locator('.overview-status-stack')).toContainText(en.modeMismatchBannerTitle)
+    await expect(page.locator('.overview-status-stack')).toContainText(en.restartBannerTitle)
+    await expect(page.locator('.overview-status-banner')).toHaveCount(2)
+  }
+  await page.goto('/overview')
+  const order = await page.locator('.overview-status-stack').evaluate(element => !!(element.compareDocumentPosition(document.querySelector('.overview-heading')!) & Node.DOCUMENT_POSITION_FOLLOWING))
+  expect(order).toBe(true)
 })
 
 test('identity changes in another tab clear private views and cancel stale session state', async ({ page, context, request }) => {

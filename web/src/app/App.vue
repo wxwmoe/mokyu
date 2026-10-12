@@ -14,6 +14,7 @@ import UiTip from '../components/ui/UiTip.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 import LocaleMenu from '../components/LocaleMenu.vue'
 import Avatar from '../components/Avatar.vue'
+import StatusBanner from '../components/StatusBanner.vue'
 import { t, locale } from './i18n'
 const router = useRouter(), route = useRoute(), navigation = ref(false)
 const destinations = [
@@ -67,7 +68,7 @@ onBeforeUnmount(() => { window.removeEventListener('storage', synchronize); stop
         <span class="topbar-divider" />
         <UiMenu :label="t('accountMenu')"><template #trigger><Avatar :name="session.display_name || session.username" :src="session.avatar_url" /><span class="account-name">{{ session.display_name || session.username }}</span><ChevronDown :size="14" /></template><DropdownMenuLabel class="menu-label">{{ t('yourWorkspace') }}</DropdownMenuLabel><DropdownMenuItem class="menu-item" as-child><RouterLink to="/account"><Settings2 :size="17" />{{ t('account') }}</RouterLink></DropdownMenuItem><DropdownMenuItem class="menu-item" as-child><RouterLink to="/tokens"><KeyRound :size="17" />{{ t('tokens') }}</RouterLink></DropdownMenuItem><DropdownMenuSeparator class="menu-separator" /><DropdownMenuItem class="menu-item" @select="logout"><LogOut :size="17" />{{ t('signOut') }}</DropdownMenuItem></UiMenu>
       </div></header>
-      <main id="main" tabindex="-1"><RouterView :key="session.id" /></main>
+      <main id="main" tabindex="-1"><StatusBanner /><RouterView :key="session.id" /></main>
       <footer class="app-footer"><span>Mokyu <span class="footer-dot">·</span> {{ t('tagline') }} <Heart :size="13" class="footer-heart" /></span><span>{{ t('cozy') }}</span></footer>
     </div>
   </div>

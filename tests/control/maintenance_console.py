@@ -64,7 +64,7 @@ try:
     fields = admin.get(url + '/api/v1/system/config').json()
     for secret_field in ['database.password', 'encryption.deployment_key']:
         assert any(f['key'] == secret_field and f['value'] == '[redacted]' for f in fields)
-    assert any(f['source'] == 'computed' for f in fields)
+    assert any(f['origin'] == 'config' and f['value_mode'] == 'budget' for f in fields)
     managed = post('/api/v1/keys', {'name': 'maintenance-' + uuid.uuid4().hex, 'purpose': 'access'}, 201)
     assert managed['purpose'] == 'access' and managed['algorithm'] == 'raw' and not managed['active']
     assert 'secret' not in managed and 'secret_encrypted' not in managed
