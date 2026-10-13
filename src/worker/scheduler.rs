@@ -270,7 +270,7 @@ async fn worker(
                         .bind(id)
                         .fetch_optional(&app.db)
                         .await?;
-                state.as_deref() == Some("completed") || matches!(result, Ok(true))
+                state.as_deref() == Some("completed")
             } else {
                 false
             };
@@ -297,7 +297,9 @@ async fn worker(
                     sqlx::query("UPDATE pack_changes SET next_check_at=now()+$2*interval '1 second' WHERE pack_id IN (SELECT c.pack_id FROM pack_inputs i JOIN chunks c ON c.id=i.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.local_pack.reuse_interval)? as f64).execute(&app.db).await?;
                     sqlx::query("UPDATE pack_maintenance SET next_check_at=now()+$2*interval '1 second' WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=$1)").bind(id).bind(config::seconds(&app.config.local_pack.reuse_interval)? as f64).execute(&app.db).await?;
                 }
-                if matches!(kind.as_str(), "pack" | "unpack" | "rewrite") {
+                if (completed || result.is_err())
+                    && matches!(kind.as_str(), "pack" | "unpack" | "rewrite")
+                {
                     app.finish_pack_work(id).await?;
                 }
             }

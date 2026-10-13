@@ -655,7 +655,7 @@ pub(super) async fn refresh(
     } else {
         expires
     };
-    sqlx::query("UPDATE sessions SET token_hash=$2,csrf_hash=$3,expires_at=$4,last_seen_at=now(),reauthenticated_at=now() WHERE id=$1")
+    sqlx::query("UPDATE sessions SET token_hash=$2,csrf_hash=$3,expires_at=$4,last_seen_at=now() WHERE id=$1")
         .bind(credential.session_id).bind(blake3::hash(access.as_bytes()).as_bytes().as_slice())
         .bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice()).bind(expires).execute(&mut *tx).await?;
     sqlx::query("UPDATE session_refresh_tokens SET last_used_at=now() WHERE id=$1")

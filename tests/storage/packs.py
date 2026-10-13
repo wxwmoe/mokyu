@@ -53,6 +53,24 @@ assert len(pack) == 1 and pack[0][0], pack
 original_pack = pack[0][0]
 assert get('pack-source') == raw
 assert get('pack-source', Range='bytes=500000-600001') == raw[500000:600002]
+
+# A single pack task must drain more than one stream before it reports completion.
+batch_objects = [('pack-batch-a', os.urandom(15 * 1024 * 1024 + 17)),
+                 ('pack-batch-b', os.urandom(15 * 1024 * 1024 + 29))]
+for key, body in batch_objects:
+    s3.put_object(Bucket=bucket, Key=key, Body=body)
+wait(lambda: db.execute(
+    "SELECT count(*)=0 FROM pending_uploads p "
+    "JOIN chunks c ON c.id=p.chunk_id "
+    "JOIN extents e ON e.chunk_id=c.id "
+    "JOIN objects o ON o.stream_id=e.stream_id "
+    "WHERE o.object_key=ANY(%s)",
+    ([key for key, _ in batch_objects],),
+).fetchone()[0])
+task('pack', 'run')
+for key, _ in batch_objects:
+    assert db.execute("SELECT bool_and(c.pack_id IS NOT NULL) FROM objects o JOIN extents e ON e.stream_id=o.stream_id JOIN chunks c ON c.id=e.chunk_id WHERE o.object_key=%s", (key,)).fetchone()[0], key
+
 # Full ordered reuse retains the existing physical pack.
 s3.copy_object(Bucket=bucket,Key='pack-whole-copy',CopySource={'Bucket':bucket,'Key':'pack-source'})
 task('pack','run','--mode','reuse')

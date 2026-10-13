@@ -121,7 +121,7 @@ impl App {
             .await?;
         sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE storage_id=$1 AND hash=$2 AND raw_size=$3 AND state IN ('preparing','uploading')")
             .bind(storage_id).bind(hash.as_slice()).bind(raw.len() as i32).execute(&self.db).await?;
-        let c: Chunk = loop {
+        let c: Chunk = {
             let mut tx = self.db.begin().await?;
             let old: Option<Chunk> = sqlx::query_as("SELECT * FROM chunks WHERE storage_id=$1 AND hash=$2 AND raw_size=$3 AND state='ready' ORDER BY id LIMIT 1")
                 .bind(storage_id).bind(hash.as_slice()).bind(raw.len() as i32).fetch_optional(&mut *tx).await?;
@@ -152,11 +152,12 @@ impl App {
                 .bind(storage_id).bind(hash.as_slice()).bind(raw.len() as i32).bind(&algorithm).bind(key_id).bind(stream).fetch_optional(&mut *tx).await?;
             tx.commit().await?;
             if let Some(c) = inserted {
-                break c;
+                c
+            } else {
+                return Err(
+                    s3_error!(OperationAborted, "chunk allocation is already in progress").into(),
+                );
             }
-            return Err(
-                s3_error!(OperationAborted, "chunk allocation is already in progress").into(),
-            );
         };
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-allocated").await;

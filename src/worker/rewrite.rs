@@ -437,9 +437,9 @@ impl App {
             return Ok(false);
         }
 
-        sqlx::query("UPDATE tasks SET cursor=$2,updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$3 AND lease_expires_at>clock_timestamp()")
+        sqlx::query("UPDATE tasks SET cursor=$2,state='completed',updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$3 AND lease_expires_at>clock_timestamp()")
                 .bind(id).bind(after.to_string()).bind(token).execute(&self.db).await?;
-        return Ok(true);
+        Ok(false)
     }
 
     async fn rewrite_lease(

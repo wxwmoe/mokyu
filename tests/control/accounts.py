@@ -31,6 +31,16 @@ def login(secret=password):
     return session
 
 
+def login_with_refresh(secret=password):
+    session = requests.Session()
+    response = session.post(url + '/api/v1/auth/login', headers={'Origin': url}, json={'username': username, 'password': secret}, timeout=10)
+    assert response.status_code == 200, response.status_code
+    body = response.json()
+    session.headers.update({'Origin': url, 'X-CSRF-Token': body['csrf_token']})
+    session_id = session.get(url + '/api/v1/auth/session').json()['session_id']
+    return session, body['refresh_token'], session_id
+
+
 db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
 user = cli('user', 'create', username, '--stdin', secret=password + '\n')['id']
 try:
@@ -72,6 +82,17 @@ try:
     assert second.get(url + '/api/v1/auth/session').status_code == 403
     assert first.get(url + '/api/v1/auth/session').status_code == 200
     print('PASS nullable preferences, avatar hashing, validation, CSRF, own sessions and password rotation', flush=True)
+
+    refreshed, refresh_token, session_id = login_with_refresh(new)
+    db.execute("UPDATE sessions SET reauthenticated_at=now()-interval '6 minutes' WHERE id=%s", (session_id,))
+    response = refreshed.post(url + '/api/v1/auth/refresh', json={'refresh_token': refresh_token})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    refreshed.headers['X-CSRF-Token'] = body['csrf_token']
+    assert db.execute("SELECT reauthenticated_at<now()-interval '5 minutes' FROM sessions WHERE id=%s", (session_id,)).fetchone()[0]
+    blocked = refreshed.post(url + '/api/v1/api-tokens', json={'label': 'refresh-boundary', 'grants': []})
+    assert blocked.status_code == 403 and blocked.json()['code'] == 'ReauthenticationRequired', blocked.text
+    print('PASS session refresh preserves the high-risk reauthentication boundary', flush=True)
 
     # Password verification occurs outside the row lock. A concurrent reset must win
     # over a verification result obtained before the reset committed.
