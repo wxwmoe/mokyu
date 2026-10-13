@@ -13,6 +13,7 @@ import UiSelect from '../components/ui/UiSelect.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 import FileIcon from '../components/FileIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
+import UiListFooter from '../components/ui/UiListFooter.vue'
 
 const state = ref('active'), bucket = ref('all'), cursor = ref(''), add = ref(false), visible = ref(!document.hidden)
 document.addEventListener('visibilitychange', visibility)
@@ -74,7 +75,7 @@ async function remove() {
       </div>
     </article>
     <EmptyState v-if="!transfers.isPending.value && !transfers.error.value && !rows.length" :title="t('transfersEmpty')" :description="t('transfersEmptyHint')" />
-    <div v-if="transfers.data.value?.next_cursor || cursor" class="table-footer"><button v-if="cursor" @click="cursor = ''">{{ t('transferNewest') }}</button><button v-if="transfers.data.value?.next_cursor" @click="cursor = transfers.data.value.next_cursor">{{ t('nextPage') }}<ChevronRight :size="16" /></button></div>
+    <UiListFooter :first="!!cursor" :next="!!transfers.data.value?.next_cursor" :summary="cursor || transfers.data.value?.next_cursor ? t('transferNewest') : undefined" @first="cursor = ''" @next="cursor = transfers.data.value!.next_cursor || ''" />
   </section>
   <p class="field-help transfer-help">{{ t('resumeHint') }}</p>
   <input ref="picker" type="file" hidden :aria-label="t('reselectFile')" @change="picked">

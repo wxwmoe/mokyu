@@ -76,11 +76,12 @@ async function revokeManagedKey() {
 onMounted(() => { if (managed.value && route.query.create === 'block') openManagedKey() })
 function expires() { return ['never', 'keep'].includes(draft.expiry) ? null : draft.expiry }
 function reveal(value: string, key = '') { acknowledged.value = false; access.value = key; secret.value = value }
-async function saved() { await rows.refetch(); notify(t('saved')) }
+async function saved(message = t(service.value ? 'credentialUpdated' : 'tokenUpdated')) { await rows.refetch(); notify(message) }
 async function save() {
   busy.value = true
   try {
     const grants = draft.system && !service.value ? [] : draft.grants.filter(grant => grant.actions.length)
+    const created = !selected.value
     if (service.value) {
       if (selected.value) {
         const key = id(selected.value)
@@ -94,7 +95,7 @@ async function save() {
       if (selected.value) detail.value = await secure(() => write<Token>(endpoint.value + '/' + id(selected.value!), input, 'PUT'))
       else { const row = await secure(() => write<components['schemas']['TokenSecret']>(endpoint.value, input)); reveal(row.secret) }
     }
-    editOpen.value = false; await saved()
+    editOpen.value = false; await saved(t(created ? (service.value ? 'credentialCreated' : 'tokenCreated') : (service.value ? 'credentialUpdated' : 'tokenUpdated')))
   } catch (error) { report(error) } finally { busy.value = false }
 }
 async function execute() {
@@ -105,7 +106,8 @@ async function execute() {
       const row = await secure(() => write<components['schemas']['CredentialRotation']>(endpoint.value + '/' + id(detail.value!) + '/rotate', { overlap: overlap.value, expires_in: null }))
       reveal(row.secret_key, row.access_key)
     } else await secure(() => api(endpoint.value + '/' + id(detail.value!), { method: 'DELETE' }))
-    detail.value = null; operation.value = ''; await saved()
+    const message = operation.value === 'rotate' ? t('credentialRotated') : t(service.value ? 'credentialRevoked' : 'tokenRevoked')
+    detail.value = null; operation.value = ''; await saved(message)
   } catch (error) { report(error) } finally { busy.value = false }
 }
 async function copySecret() {
@@ -114,7 +116,7 @@ async function copySecret() {
 function unloading(event: BeforeUnloadEvent) { if (secret.value && !acknowledged.value) { event.preventDefault(); event.returnValue = '' } }
 window.addEventListener('beforeunload', unloading)
 onBeforeUnmount(() => { secret.value = ''; window.removeEventListener('beforeunload', unloading) })
-onBeforeRouteLeave(() => { if (secret.value && !acknowledged.value) { notify(t('saveSecretHint')); return false } })
+onBeforeRouteLeave(() => { if (secret.value && !acknowledged.value) { notify(t('saveSecretHint'), undefined, 'info'); return false } })
 </script>
 <template>
   <div class="page-heading"><div><p class="eyebrow">{{ t('accessEyebrow') }}</p><h1>{{ title }}</h1><p>{{ t(managed ? 'managedKeysHint' : service ? 'credentialsHint' : 'tokensHint') }}</p></div><button v-if="managed" class="primary" @click="openManagedKey"><Plus :size="17" />{{ t('createKey') }}</button><button v-else-if="!owner" class="primary" @click="edit()"><Plus :size="17" />{{ t(service ? 'createCredential' : 'createToken') }}</button></div>

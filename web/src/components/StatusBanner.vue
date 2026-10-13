@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
+import { useRoute } from 'vue-router'
 import { ArrowUpRight, TriangleAlert } from 'lucide-vue-next'
 import { api, session } from '../api/client'
 import type { components } from '../api/schema'
@@ -10,6 +11,7 @@ import ErrorNotice from './ErrorNotice.vue'
 type ServiceStatus = components['schemas']['ServiceStatus']
 type StatusNotice = { tone: 'danger' | 'warning'; title: string; description: string; action: string; to: string }
 const admin = computed(() => session.value?.role === 'admin')
+const route = useRoute()
 const status = useQuery({ queryKey: ['service-status'], enabled: admin, queryFn: ({ signal }) => api<ServiceStatus>('/api/v1/system/status', { signal }), refetchInterval: 15_000 })
 const notices = computed<StatusNotice[]>(() => {
   const value = status.data.value
@@ -18,7 +20,7 @@ const notices = computed<StatusNotice[]>(() => {
   if (value.recovery_required) rows.push({ tone: 'danger', title: t('recoveryBannerTitle'), description: t('recoveryBannerHint'), action: t('openServiceStatus'), to: '/service' })
   if (value.mode_mismatch) rows.push({ tone: 'danger', title: t('modeMismatchBannerTitle'), description: t('modeMismatchBannerHint'), action: t('openServiceStatus'), to: '/service' })
   if (value.restart_required) rows.push({ tone: 'warning', title: t('restartBannerTitle'), description: t('restartBannerHint'), action: t('openRuntimeConfig'), to: '/runtime-config' })
-  if (value.maintenance) rows.push({ tone: 'warning', title: t('maintenanceBannerTitle'), description: t('maintenanceBannerHint'), action: t('openServiceStatus'), to: '/service' })
+  if (value.maintenance && route.path !== '/maintenance') rows.push({ tone: 'warning', title: t('maintenanceBannerTitle'), description: t('maintenanceBannerHint'), action: t('openMaintenance'), to: '/maintenance' })
   return rows
 })
 </script>

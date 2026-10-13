@@ -22,6 +22,7 @@ import MediaActionDialog from '../components/MediaActionDialog.vue'
 import type { MediaAction } from '../app/media'
 import type { components } from '../api/schema'
 import CreateBucket from '../components/CreateBucket.vue'
+import UiListFooter from '../components/ui/UiListFooter.vue'
 
 type MediaObject = components['schemas']['MediaItem']
 type ObjectPage = components['schemas']['MediaPage']
@@ -114,7 +115,7 @@ async function refresh() {
       </div>
     </div>
     <EmptyState v-if="objects.data.value && !objects.data.value.items.length && !objects.data.value.prefixes.length" compact :title="t('emptyFolder')" :description="t('folderReady')" />
-    <div v-if="objects.data.value" class="table-footer"><span>{{ t('pageItems', { count: objects.data.value.items.length + objects.data.value.prefixes.length }) }}</span><button v-if="cursor" @click="router.push({ query: { ...route.query, cursor: undefined } })">{{ t('firstPage') }}</button><button v-if="objects.data.value.next_cursor" @click="router.push({ query: { ...route.query, cursor: objects.data.value.next_cursor } })">{{ t('nextPage') }}<ChevronRight :size="16" /></button><Heart v-else :size="14" /></div>
+    <UiListFooter v-if="objects.data.value" :first="!!cursor" :next="!!objects.data.value.next_cursor" :summary="t('pageItems', { count: objects.data.value.items.length + objects.data.value.prefixes.length })" @first="router.push({ query: { ...route.query, cursor: undefined } })" @next="router.push({ query: { ...route.query, cursor: objects.data.value!.next_cursor || undefined } })"><template #after><Heart v-if="!objects.data.value.next_cursor" :size="14" class="list-footer-endmark" /></template></UiListFooter>
   </section>
   <div v-if="picks.length && current" class="selection-bar"><span class="selection-count">{{ picks.length }}</span><strong>{{ t('selectedObjects', { count: picks.length }) }}</strong><MediaActionsMenu :bucket="current" :items="picks" @action="operate($event)" /><button class="icon-button" :aria-label="t('clearSelection')" @click="checked = new Set()"><X :size="17" /></button></div>
   <ObjectViewer v-if="current" :bucket="current" :item="selected" :previous="selectedIndex > 0" :next="selectedIndex >= 0 && selectedIndex < (objects.data.value?.items.length || 0) - 1" @close="close" @step="step" @action="operate($event, selected ? [selected] : [])" />

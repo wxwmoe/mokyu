@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
+import { useRouter } from 'vue-router'
 import { Settings2, Save, Search } from 'lucide-vue-next'
 import { api, queries, write } from '../api/client'
 import type { components } from '../api/schema'
@@ -17,6 +18,7 @@ type ConfigField = components['schemas']['ConfigField']
 type RuntimeField = { key: string; kind: 'text' | 'number' | 'storage'; example?: string; optional?: boolean }
 
 const runtimeSettings = useQuery({ queryKey: ['runtime-settings'], queryFn: ({ signal }) => api<RuntimeSettings[]>('/api/v1/runtime-settings', { signal }) })
+const router = useRouter()
 const controlSettings = computed(() => runtimeSettings.data.value?.find(row => row.section === 'web'))
 const storages = useQuery({ queryKey: ['storages'], queryFn: ({ signal }) => api<components['schemas']['StorageView'][]>('/api/v1/storages', { signal }) })
 const stagingOptions = computed(() => [{ value: '', label: t('notConfigured') }, ...(storages.data.value || []).filter(row => row.type === 's3' && row.enabled).map(row => ({ value: row.id, label: row.name }))])
@@ -44,7 +46,7 @@ watch(controlSettings, row => { if (row && !settingsBusy.value && row.value && t
 
 async function saveControlSettings() {
   settingsBusy.value = true; settingsError.value = ''
-  try { await secure(() => write<RuntimeSettings>('/api/v1/runtime-settings/web', { value: controlDraft.value, revision: controlSettings.value?.revision }, 'PUT')); await queries.invalidateQueries({ queryKey: ['service-status'] }); await runtimeSettings.refetch(); await config.refetch(); notify(t('controlSettingsSaved')) }
+  try { const result = await secure(() => write<RuntimeSettings>('/api/v1/runtime-settings/web', { value: controlDraft.value, revision: controlSettings.value?.revision }, 'PUT')); await queries.invalidateQueries({ queryKey: ['service-status'] }); await runtimeSettings.refetch(); await config.refetch(); notify(t(result.restart_required ? 'settingsSavedRestart' : 'controlSettingsSaved'), result.restart_required ? t('restartPendingHint') : undefined, result.restart_required ? 'info' : 'success') }
   catch (error) { settingsError.value = errorText(error) } finally { settingsBusy.value = false }
 }
 function runtimeFieldTarget(key: string) {
@@ -60,8 +62,9 @@ function focusConfigField(key: string) {
   control?.scrollIntoView({ behavior: 'smooth', block: 'center' }); control?.focus()
 }
 function editRuntime(row: RuntimeSettings, focusKey = '') { runtimeSection.value = row.section; runtimeRevision.value = row.revision; runtimeDraft.value = row.value && typeof row.value === 'object' ? { ...(row.value as Record<string, unknown>) } : {}; runtimeError.value = ''; runtimeOpen.value = true; if (focusKey) void nextTick(() => focusConfigField(`${row.section}.${focusKey}`)) }
-function canEditConfig(row: ConfigField) { return row.origin === 'database' && !!runtimeFieldTarget(row.key) }
+function canEditConfig(row: ConfigField) { return row.origin === 'database' && (row.key === 'pack.creation_enabled' || !!runtimeFieldTarget(row.key)) }
 function editConfigField(row: ConfigField) {
+  if (row.key === 'pack.creation_enabled') { void router.push({ path: '/maintenance', query: { focus: 'pack-creation' } }); return }
   const target = runtimeFieldTarget(row.key)
   if (!target) return
   if (target.section === 'web') { focusConfigField(row.key); return }
@@ -72,7 +75,7 @@ function updateRuntimeField(field: RuntimeField, value: string | number | null) 
 function inputRuntimeField(field: RuntimeField, event: Event) { const value = (event.target as HTMLInputElement).value; updateRuntimeField(field, field.kind === 'number' ? (value === '' ? null : Number(value)) : value) }
 async function saveRuntime() {
   runtimeError.value = ''; settingsBusy.value = true
-  try { await secure(() => write<RuntimeSettings>(`/api/v1/runtime-settings/${encodeURIComponent(runtimeSection.value)}`, { value: runtimeDraft.value, revision: runtimeRevision.value }, 'PUT')); await queries.invalidateQueries({ queryKey: ['service-status'] }); runtimeOpen.value = false; await runtimeSettings.refetch(); await config.refetch(); notify(t('runtimeSettingsSaved')) }
+  try { const result = await secure(() => write<RuntimeSettings>(`/api/v1/runtime-settings/${encodeURIComponent(runtimeSection.value)}`, { value: runtimeDraft.value, revision: runtimeRevision.value }, 'PUT')); await queries.invalidateQueries({ queryKey: ['service-status'] }); runtimeOpen.value = false; await runtimeSettings.refetch(); await config.refetch(); notify(t(result.restart_required ? 'settingsSavedRestart' : 'runtimeSettingsSaved'), result.restart_required ? t('restartPendingHint') : undefined, result.restart_required ? 'info' : 'success') }
   catch (error) { runtimeError.value = errorText(error) } finally { settingsBusy.value = false }
 }
 </script>

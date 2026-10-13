@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { test, expect, type Page } from '@playwright/test'
 import en from '../src/locales/i18n.en.js'
+import ja from '../src/locales/i18n.ja.js'
+import zh from '../src/locales/i18n.zh-CN.js'
 
 const password = () => (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
 async function login(page: Page, name = 'tester', secret = password()) {
@@ -24,6 +26,7 @@ test('three languages, themes, responsive pages, searchable choices and visible 
       for (const route of routes) {
         await page.goto('/' + route); await expect(page.locator('main h1')).toBeVisible()
         await expect(page.locator('html')).toHaveAttribute('lang', locale)
+        await expect(page.locator('meta[http-equiv="content-language"]')).toHaveAttribute('content', locale)
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
         if (route === 'runtime-config') {
           await page.locator('.config-origin-badge').first().waitFor()
@@ -67,6 +70,82 @@ test('three languages, themes, responsive pages, searchable choices and visible 
   } finally { await preference('en', 'light') }
 })
 
+test('pack creation editing lands on the switch without crowding its actions', async ({ page, request }) => {
+  test.setTimeout(90000)
+  const auth = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password: password() } })
+  const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await auth.json()).csrf_token }
+  const { display_name, locale, theme, avatar_email, avatar_enabled } = await (await request.get('/api/v1/account')).json()
+  const preferences = { display_name, locale, theme, avatar_email, avatar_enabled }
+  const statusResponse = await request.get('/api/v1/maintenance', { headers })
+  expect(statusResponse.ok()).toBe(true)
+  const status = await statusResponse.json() as { pack_creation_enabled: boolean; pack_configured: boolean }
+  expect(status.pack_configured).toBe(true)
+  try {
+    expect((await request.put('/api/v1/account', { headers, data: { ...preferences, locale: 'en', theme: 'light' } })).ok()).toBe(true)
+    await login(page)
+    await page.setViewportSize({ width: 1440, height: 1000 })
+    let writes = 0
+    page.on('request', requestEvent => { if (requestEvent.method() === 'POST' && requestEvent.url().endsWith('/api/v1/maintenance/pack-creation')) writes++ })
+    await page.goto('/runtime-config')
+    const field = page.locator('.config-fields article').filter({ hasText: 'pack.creation_enabled' }).first()
+    await expect(field).toBeVisible()
+    await field.getByRole('button', { name: en.editConfigField, exact: true }).click()
+    await expect(page).toHaveURL(/\/maintenance\?focus=pack-creation$/)
+    const toggle = page.locator('[data-maintenance-focus="pack-creation"]')
+    await expect(toggle).toBeFocused()
+    await expect(toggle).toHaveClass(/is-highlighted/)
+    expect(writes).toBe(0)
+    const geometry = await page.locator('.unpack-controls').evaluate(element => {
+      const setting = element.querySelector('.pack-setting')!.getBoundingClientRect()
+      const actions = element.querySelector('.unpack-actions')!.getBoundingClientRect()
+      return { setting, actions }
+    })
+    expect(geometry.setting.width).toBeGreaterThan(0)
+    expect(geometry.actions.width).toBeGreaterThan(0)
+    expect(geometry.setting.right).toBeLessThanOrEqual(geometry.actions.left + 1)
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-checked', String(!status.pack_creation_enabled))
+    await expect(toggle).toBeEnabled()
+    await page.route('**/api/v1/maintenance/pack-creation', route => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ code: 'OperationAborted', request_id: 'pack-toggle-rejected' }) }))
+    await toggle.click()
+    await expect(page.getByRole('button', { name: 'pack-toggle-rejected', exact: true })).toBeVisible()
+    await expect(toggle).toHaveAttribute('aria-checked', String(!status.pack_creation_enabled))
+    await page.unroute('**/api/v1/maintenance/pack-creation')
+    await page.getByRole('link', { name: en.runtimeConfig, exact: true }).click()
+    await expect(field.locator('.config-value-chip')).toHaveText(String(!status.pack_creation_enabled))
+    await field.getByRole('button', { name: en.editConfigField, exact: true }).click()
+    await expect(toggle).toBeFocused()
+    for (const width of [1440, 1024, 768, 640, 480, 390, 320]) {
+      await page.setViewportSize({ width, height: 1000 })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true)
+      const boxes = await page.locator('.unpack-controls > div').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().toJSON()))
+      expect(boxes[0]!.right <= boxes[1]!.left || boxes[0]!.bottom <= boxes[1]!.top, String(width)).toBe(true)
+      await page.locator('.recovery-card').filter({ has: toggle }).screenshot({ path: `/results/pack-controls-${width}.png` })
+    }
+  } finally {
+    const current = await (await request.get('/api/v1/maintenance', { headers })).json() as { pack_creation_enabled: boolean }
+    if (current.pack_creation_enabled !== status.pack_creation_enabled) expect((await request.post('/api/v1/maintenance/pack-creation', { headers, data: { enabled: status.pack_creation_enabled } })).ok()).toBe(true)
+    expect((await request.put('/api/v1/account', { headers, data: preferences })).ok()).toBe(true)
+  }
+})
+
+test('language hints follow the selected locale without discarding form input', async ({ page }) => {
+  await page.goto('/login')
+  let dictionary = en
+  for (const [value, next] of [['ja', ja], ['zh-CN', zh], ['en', en]] as const) {
+    await page.getByRole('textbox', { name: dictionary.username, exact: true }).fill('language-draft')
+    await page.getByRole('button', { name: dictionary.language, exact: true }).click()
+    await page.getByRole('menuitem', { name: en[`language_${value}`], exact: true }).click()
+    await expect(page.locator('html')).toHaveAttribute('lang', value)
+    await expect(page.locator('meta[http-equiv="content-language"]')).toHaveAttribute('content', value)
+    await expect(page.getByRole('textbox', { name: next.username, exact: true })).toHaveValue('language-draft')
+    await page.reload()
+    await expect(page.locator('html')).toHaveAttribute('lang', value)
+    await expect(page.locator('meta[http-equiv="content-language"]')).toHaveAttribute('content', value)
+    dictionary = next
+  }
+})
+
 test('service state notices appear across workspace routes', async ({ page }) => {
   await page.route('**/api/v1/system/status', route => route.fulfill({
     contentType: 'application/json',
@@ -88,6 +167,31 @@ test('service state notices appear across workspace routes', async ({ page }) =>
   await page.goto('/overview')
   const order = await page.locator('.overview-status-stack').evaluate(element => !!(element.compareDocumentPosition(document.querySelector('.overview-heading')!) & Node.DOCUMENT_POSITION_FOLLOWING))
   expect(order).toBe(true)
+})
+
+test('maintenance notice stays off its workspace and opens the maintenance page', async ({ page }) => {
+  await page.route('**/api/v1/system/status', route => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({
+      version: '0.0.4', started_at: '2026-10-12T00:00:00Z', maintenance: true,
+      mode_mismatch: false, recovery_required: false, restart_required: false,
+      counters: [], backend_queues: {}, backend_operations: {}, catalog: {},
+      inventory_as_of: null, inventory_error: null, inventory_stale: false,
+    }),
+  }))
+  await page.route('**/api/v1/maintenance', route => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ maintenance: true, controls: [], concurrency: 0, pack_configured: false, pack_creation_paused: false, pack_creation_enabled: false, preparing_packs: '0', active_operations: 0, backend_prefixes: [], min_storage_duration: '0s' }),
+  }))
+  await login(page)
+  await page.goto('/overview')
+  const banner = page.locator('.overview-status-banner')
+  await expect(banner).toContainText(en.maintenanceBannerTitle)
+  await expect(banner.getByRole('link')).toHaveAttribute('href', '/maintenance')
+  await expect(banner.getByRole('link')).toContainText(en.openMaintenance)
+  await page.goto('/maintenance')
+  await expect(page.locator('.overview-status-banner')).toHaveCount(0)
+  await expect(page.getByText(en.maintenanceActiveHint, { exact: true })).toBeVisible()
 })
 
 test('identity changes in another tab clear private views and cancel stale session state', async ({ page, context, request }) => {
@@ -149,7 +253,7 @@ test('list focus and footer rhythm stay consistent', async ({ page }) => {
   }
   const auditFooter = await footerGap('audit', '.list-footer')
   const taskFooter = await footerGap('tasks', '.list-footer')
-  const usersFooter = await footerGap('users', '.users-footer')
+  const usersFooter = await footerGap('users', '.list-footer')
   expect(taskFooter.gap).toBe(auditFooter.gap)
   expect(taskFooter.borderTop).toBe('none')
   expect(usersFooter.borderTop).toBe('none')

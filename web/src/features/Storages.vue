@@ -133,12 +133,12 @@ async function save() {
     open.value = false
     await queries.invalidateQueries({ queryKey: ['storages'] })
     await queries.invalidateQueries({ queryKey: ['bucket-projects'] })
-    notify(t(editing.value ? 'storeSaved' : 'storeCreated'))
+    notify(t(editing.value ? 'storeUpdated' : 'storeCreated'))
   } catch (error) { report(error) } finally { busy.value = false }
 }
 async function toggle(row: Storage) {
   checking.value = row.name
-  try { await secure(() => write<Storage>('/api/v1/storages/' + encodeURIComponent(row.name), { enabled: !row.enabled }, 'PUT')); await storages.refetch(); await queries.invalidateQueries({ queryKey: ['bucket-projects'] }); notify(t('storeSaved')) }
+  try { const result = await secure(() => write<Storage>('/api/v1/storages/' + encodeURIComponent(row.name), { enabled: !row.enabled }, 'PUT')); await storages.refetch(); await queries.invalidateQueries({ queryKey: ['bucket-projects'] }); notify(t(result.enabled ? 'storeEnabledNotice' : 'storeDisabledNotice')) }
   catch (error) { report(error) } finally { checking.value = '' }
 }
 </script>

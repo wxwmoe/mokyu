@@ -24,10 +24,10 @@ const languageOptions = computed(() => [{ value: 'auto', label: t('followBrowser
 const themeOptions = computed(() => ['auto', 'light', 'dark'].map(value => ({ value, label: t(value) })))
 async function save() {
   saving.value = true
-  try { await savePreferences({ ...draft }); reset(); notify(t('saved')) } catch (error) { report(error) } finally { saving.value = false }
+  try { await savePreferences({ ...draft }); reset(); notify(t('profileSaved')) } catch (error) { report(error) } finally { saving.value = false }
 }
 async function preference(key: 'locale' | 'theme', value: string) {
-  try { await savePreferences({ [key]: key === 'locale' && value === 'auto' ? null : value }); notify(t('saved')) } catch (error) { report(error) }
+  try { await savePreferences({ [key]: key === 'locale' && value === 'auto' ? null : value }); notify(t('preferencesSaved')) } catch (error) { report(error) }
 }
 async function password() {
   if (newPassword.value !== confirmPassword.value) { notify(t('passwordMismatch'), undefined, 'error'); return }

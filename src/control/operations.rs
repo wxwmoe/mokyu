@@ -726,7 +726,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                     "pause or finish destructive sweep before disabling maintenance"
                 );
             }
-            if !enabled {
+            if !enabled && app.storage.enabled() {
                 app.storage.check_identity(&app.db, false).await?;
             }
             let mut tx = app.db.begin().await?;

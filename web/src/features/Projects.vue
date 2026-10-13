@@ -40,15 +40,15 @@ watch(memberRole, () => { grants.value = grants.value.map(grant => ({ ...grant, 
 watch(deleting, () => { confirm.value = '' })
 function edit(project?: Project) { editing.value = project?.id || ''; Object.assign(draft, { name: project?.name || '', description: project?.description || '', allow_bucket_create: project?.allow_bucket_create || false }); editorOpen.value = true }
 function member(row?: Member) { memberRole.value = row?.role || 'reader'; scope.value = row?.scope || 'selected'; grants.value = (row?.grants || []).map(grant => ({ bucket_id: grant.bucket_id, actions: [...grant.actions] })); memberId.value = row?.user_id || String(route.query.user || ''); memberName.value = row?.username || ''; search.value = ''; filter.value = ''; membershipOpen.value = true }
-async function changed() { await queries.invalidateQueries({ queryKey: ['projects'] }); await refreshSession(); notify(t('saved')) }
+async function changed(message = t('projectUpdated')) { await queries.invalidateQueries({ queryKey: ['projects'] }); await refreshSession(); notify(message) }
 async function save() {
   busy.value = true
-  try { await secure(() => write('/api/v1/projects' + (editing.value ? '/' + editing.value : ''), { ...draft }, editing.value ? 'PUT' : 'POST')); editorOpen.value = false; await changed() }
+  try { const message = editing.value ? t('projectUpdated') : t('projectCreated'); await secure(() => write('/api/v1/projects' + (editing.value ? '/' + editing.value : ''), { ...draft }, editing.value ? 'PUT' : 'POST')); editorOpen.value = false; await changed(message) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 async function saveMember() {
   busy.value = true
-  try { await secure(() => write(`/api/v1/projects/${projectId.value}/members/${memberId.value}`, { role: memberRole.value, scope: scope.value, grants: scope.value === 'all' ? [] : grants.value.filter(grant => grant.actions.length) }, 'PUT')); membershipOpen.value = false; await members.refetch(); notify(t('saved')) }
+  try { await secure(() => write(`/api/v1/projects/${projectId.value}/members/${memberId.value}`, { role: memberRole.value, scope: scope.value, grants: scope.value === 'all' ? [] : grants.value.filter(grant => grant.actions.length) }, 'PUT')); membershipOpen.value = false; await members.refetch(); notify(t('projectMembershipUpdated')) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 const removing = ref<Member | null>(null)
@@ -57,17 +57,17 @@ async function removeMember() {
   if (!removing.value) return
   const id = removing.value.user_id
   busy.value = true
-  try { await secure(() => api(`/api/v1/projects/${projectId.value}/members/${id}`, { method: 'DELETE' })); removing.value = null; await members.refetch(); notify(t('saved')) }
+  try { await secure(() => api(`/api/v1/projects/${projectId.value}/members/${id}`, { method: 'DELETE' })); removing.value = null; await members.refetch(); notify(t('projectMembershipRemoved')) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 async function removeProject() {
   busy.value = true
-  try { await secure(() => api('/api/v1/projects/' + projectId.value, { method: 'DELETE' })); deleting.value = false; detailOpen.value = false; await changed() }
+  try { await secure(() => api('/api/v1/projects/' + projectId.value, { method: 'DELETE' })); deleting.value = false; detailOpen.value = false; await changed(t('projectDeleted')) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 async function mode() {
   busy.value = true
-  try { await secure(() => write('/api/v1/projects/settings', { enabled: !session.value?.project_management }, 'PUT')); await changed() }
+  try { await secure(() => write('/api/v1/projects/settings', { enabled: !session.value?.project_management }, 'PUT')); await changed(t('projectModeUpdated')) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 </script>

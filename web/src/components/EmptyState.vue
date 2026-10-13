@@ -35,7 +35,7 @@ defineProps<{ title: string; description?: string; compact?: boolean }>()
   height: 128px;
   margin-bottom: 2px;
   object-fit: contain;
-  filter: drop-shadow(0 8px 12px #ad60821a);
+  filter: drop-shadow(0 8px 12px var(--empty-shadow));
 }
 
 .empty-state.compact img {

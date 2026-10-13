@@ -4,7 +4,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { TabsRoot, TabsList, TabsTrigger, TabsContent } from 'reka-ui'
-import { Settings2, Globe, ShieldCheck, Flower2, Plus, Trash2, Save, RefreshCw, ArrowUpRight } from 'lucide-vue-next'
+import { Settings2, Globe, ShieldCheck, Flower2, HardDrive, Trash2, Save, RefreshCw, ArrowUpRight } from 'lucide-vue-next'
 import { api, write, queries, session, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
@@ -21,6 +21,9 @@ type Rule = components['schemas']['CorsRule']
 const route = useRoute(), router = useRouter(), id = computed(() => String(route.params.bucket || ''))
 const admin = computed(() => session.value?.role === 'admin')
 const buckets = useQuery({ queryKey: ['buckets'], queryFn: ({ signal }) => api<Bucket[]>('/api/v1/buckets', { signal }) })
+const bucketOptions = useQuery({ queryKey: ['bucket-projects'], enabled: computed(() => !id.value), queryFn: ({ signal }) => api<components['schemas']['BucketCreationOptions']>('/api/v1/bucket-projects', { signal }) })
+const hasStorage = computed(() => !!bucketOptions.data.value?.storages.length)
+const needsStorage = computed(() => !!bucketOptions.data.value && admin.value && !hasStorage.value)
 const manageable = computed(() => buckets.data.value?.filter(b => b.actions.includes('bucket.settings')) || [])
 const filter = ref(''), filtered = computed(() => manageable.value.filter(b => b.name.toLowerCase().includes(filter.value.toLowerCase())))
 const settings = useQuery({ queryKey: ['bucket-settings', id], enabled: computed(() => !!id.value), queryFn: ({ signal }) => api<components['schemas']['BucketSettings']>(`/api/v1/buckets/${id.value}/settings`, { signal }) })
@@ -60,9 +63,9 @@ window.addEventListener('beforeunload', beforeUnload)
 onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload); decide?.(false) })
 </script>
 <template>
-  <div class="page-heading"><div><p class="eyebrow">{{ t('littleHomes') }}</p><h1>{{ settings.data.value?.bucket.name || t('buckets') }}</h1><p>{{ t('bucketSettingsHint') }}</p></div><div class="heading-actions"><template v-if="id"><RouterLink class="button" :to="`/media/${id}`"><ArrowUpRight :size="16" />{{ t('browseFiles') }}</RouterLink><button :disabled="saving" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button></template><CreateBucket v-else @created="router.push('/buckets/' + $event.id)" /></div></div>
-  <ErrorNotice v-if="settings.error.value || buckets.error.value" :error="settings.error.value || buckets.error.value" />
-  <template v-if="!id"><label class="search-field"><span class="sr-only">{{ t('findBucket') }}</span><input v-model="filter" :placeholder="t('findBucket')" type="search"></label><div class="bucket-grid"><RouterLink v-for="bucket in filtered" :key="bucket.id" class="bucket-card" :to="'/buckets/' + bucket.id"><img src="/assets/mokyu-pack.svg" alt="" width="64" height="64"><h2>{{ bucket.name }}</h2><span class="badge">{{ t(bucket.uploads_paused ? 'uploadsPaused' : bucket.status) }}</span><Settings2 class="bucket-arrow" :size="19" /></RouterLink></div><EmptyState v-if="!buckets.isPending.value && !filtered.length" :title="t('noBuckets')" :description="t('bucketSettingsEmpty')" /></template>
+  <div class="page-heading"><div><p class="eyebrow">{{ t('littleHomes') }}</p><h1>{{ settings.data.value?.bucket.name || t('buckets') }}</h1><p>{{ t('bucketSettingsHint') }}</p></div><div class="heading-actions"><template v-if="id"><RouterLink class="button" :to="`/media/${id}`"><ArrowUpRight :size="16" />{{ t('browseFiles') }}</RouterLink><button :disabled="saving" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button></template><template v-else-if="needsStorage"><RouterLink class="button primary" to="/storages"><HardDrive :size="17" />{{ t('createStore') }}</RouterLink></template><CreateBucket v-else @created="router.push('/buckets/' + $event.id)" /></div></div>
+  <ErrorNotice v-if="settings.error.value || buckets.error.value || bucketOptions.error.value" :error="settings.error.value || buckets.error.value || bucketOptions.error.value" />
+  <template v-if="!id"><label class="search-field"><span class="sr-only">{{ t('findBucket') }}</span><input v-model="filter" :placeholder="t('findBucket')" type="search"></label><div class="bucket-grid"><RouterLink v-for="bucket in filtered" :key="bucket.id" class="bucket-card" :to="'/buckets/' + bucket.id"><img src="/assets/mokyu-pack.svg" alt="" width="64" height="64"><h2>{{ bucket.name }}</h2><span class="badge">{{ t(bucket.uploads_paused ? 'uploadsPaused' : bucket.status) }}</span><Settings2 class="bucket-arrow" :size="19" /></RouterLink></div><EmptyState v-if="!buckets.isPending.value && !bucketOptions.isPending.value && !bucketOptions.error.value && !filtered.length" :title="t(needsStorage ? 'noStores' : 'noBuckets')" :description="t(needsStorage ? 'noStoresHint' : 'bucketSettingsEmpty')"><RouterLink v-if="needsStorage" class="button primary" to="/storages"><HardDrive :size="16" />{{ t('createStore') }}</RouterLink></EmptyState></template>
   <template v-else-if="draft && settings.data.value"><nav class="breadcrumbs bucket-back"><RouterLink to="/buckets">{{ t('buckets') }}</RouterLink><span>/</span><span>{{ settings.data.value.bucket.name }}</span><span v-if="settings.data.value.bucket.status !== 'active'" class="badge">{{ t(settings.data.value.bucket.status) }}</span></nav>
     <QuotaPanel v-if="settings.data.value.bucket.actions.includes('storage.inspect')" kind="bucket" :id="id" />
     <TabsRoot default-value="connection" class="surface bucket-settings"><TabsList class="tabs-list" :aria-label="t('buckets')"><TabsTrigger class="tab-trigger" value="connection"><Globe :size="16" />{{ t('bucketConnection') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="cors"><ShieldCheck :size="16" />CORS</TabsTrigger><TabsTrigger class="tab-trigger" value="website"><Flower2 :size="16" />{{ t('bucketWebsite') }}</TabsTrigger></TabsList>

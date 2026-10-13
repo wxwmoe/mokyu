@@ -59,9 +59,9 @@ async function toggle() {
   if (!storage.value) return
   checking.value = true
   try {
-    await secure(() => write<Storage>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}`, { enabled: !storage.value!.enabled }, 'PUT'))
+    const result = await secure(() => write<Storage>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}`, { enabled: !storage.value!.enabled }, 'PUT'))
     await queries.invalidateQueries({ queryKey: ['storages'] })
-    notify(t('storeSaved'))
+    notify(t(result.enabled ? 'storeEnabledNotice' : 'storeDisabledNotice'))
   } catch (error) { report(error) } finally { checking.value = false }
 }
 async function check() {
@@ -90,9 +90,9 @@ async function startRewrite() {
   if (!storage.value || !rewritePreview.value) return
   rewriteBusy.value = true; rewriteError.value = ''
   try {
-    await secure(() => write(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}/rewrite`, { action: 'start', target_key: storage.value!.block_key_id, confirmation: rewritePhrase.value }))
+    const result = await secure(() => write<components['schemas']['TaskStarted']>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}/rewrite`, { action: 'start', target_key: storage.value!.block_key_id, confirmation: rewritePhrase.value }))
     rewriteOpen.value = false
-    notify(t('storeRewriteStarted'))
+    notify(t('storeRewriteQueued'), result.task_id ? t('taskQueuedHint', { id: result.task_id }) : undefined, 'info')
   } catch (error) { rewriteError.value = errorText(error) } finally { rewriteBusy.value = false }
 }
 </script>

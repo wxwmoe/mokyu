@@ -61,5 +61,17 @@ async function save() {
   </form></UiDialog>
 </template>
 <style scoped>
-.quota-card{background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:18px 22px;margin:18px 0}.quota-card h3{display:flex;align-items:center;gap:8px;margin:0}.quota-card h3 svg{color:#66978a}.quota-reading{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;margin-top:15px}.quota-reading strong{font-size:24px;font-weight:850}.quota-reading>span{color:var(--muted)}.quota-meter{height:7px;background:var(--line);border-radius:9px;margin-top:12px;overflow:hidden}.quota-meter>span{display:block;height:100%;border-radius:9px;background:linear-gradient(90deg,#97c5b6,#c2d0ab)}.exceeded .quota-meter>span{background:#d997a4}.quota-details{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:var(--small-size,12px);color:var(--muted)}.quota-details>span{display:flex;align-items:center;gap:5px}.quota-input{display:grid;grid-template-columns:minmax(0,1fr) 105px;gap:8px}.quota-card .field-help{margin-bottom:0}
+.quota-card { margin: 18px 0; padding: 18px 22px; background: var(--surface); border: 1px solid var(--line); border-radius: 20px; }
+.quota-card h3 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.quota-card h3 svg { color: var(--quota-accent); }
+.quota-reading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
+.quota-reading strong { font-size: 24px; font-weight: 850; }
+.quota-reading > span { color: var(--muted); }
+.quota-meter { height: 7px; margin-top: 12px; overflow: hidden; background: var(--line); border-radius: 9px; }
+.quota-meter > span { display: block; height: 100%; background: linear-gradient(90deg, var(--quota-meter-start), var(--quota-meter-end)); border-radius: 9px; }
+.exceeded .quota-meter > span { background: var(--quota-alert); }
+.quota-details { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; color: var(--muted); font-size: var(--small-size, 12px); }
+.quota-details > span { display: flex; align-items: center; gap: 5px; }
+.quota-input { display: grid; grid-template-columns: minmax(0, 1fr) 105px; gap: 8px; }
+.quota-card .field-help { margin-bottom: 0; }
 </style>

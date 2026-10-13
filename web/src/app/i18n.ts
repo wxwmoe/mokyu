@@ -22,11 +22,16 @@ export async function setLocale(value: Locale, persist = true) {
   messages.value = dictionary.default
   locale.value = value
   document.documentElement.lang = value
+  let languageMeta = document.head.querySelector<HTMLMetaElement>('meta[http-equiv="content-language"]')
+  if (!languageMeta) { languageMeta = document.createElement('meta'); languageMeta.httpEquiv = 'content-language'; document.head.append(languageMeta) }
+  languageMeta.content = value
   if (persist) saveLocal('mokyu.locale', value)
 }
 export async function initializeLocale() {
   const saved = localValue('mokyu.locale') as Locale
-  try { await setLocale(locales.includes(saved) ? saved : browserLocale(), false) }
+  const initial = locales.includes(saved) ? saved : browserLocale()
+  document.documentElement.lang = initial
+  try { await setLocale(initial, false) }
   catch { await setLocale('en', false) }
 }
 export function t(key: string, values: Record<string, string | number> = {}) {

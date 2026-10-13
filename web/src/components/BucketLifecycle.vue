@@ -45,7 +45,7 @@ async function execute() {
   try {
     const input = { confirm_name: name.value, confirmation: preview.value.confirmation }
     if (operation.value === 'transfer') { await secure(() => write(path.value + '/transfer', { ...input, target_project: target.value })); emit('changed'); notify(t('bucketTransferred')) }
-    else if (operation.value === 'purge') { const task = await secure(() => write<components['schemas']['BucketTask']>(path.value + '/purge', input)); notify(t('bucketPurgeStarted'), task.task_id); emit('removed') }
+    else if (operation.value === 'purge') { const task = await secure(() => write<components['schemas']['BucketTask']>(path.value + '/purge', input)); notify(t('bucketPurgeQueued'), t('taskQueuedHint', { id: task.task_id }), 'info'); emit('removed') }
     else { await secure(() => write(path.value, input, 'DELETE')); notify(t('bucketDeleted')); emit('removed') }
     open.value = false; await queries.invalidateQueries({ queryKey: ['buckets'] }); await queries.invalidateQueries({ queryKey: ['quota'] })
   } catch (failure) { error.value = failure; report(failure) } finally { busy.value = false }

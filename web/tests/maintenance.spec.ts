@@ -18,7 +18,11 @@ test('maintenance policies, task history, runtime settings and managed keys', as
   try {
     await page.goto('/maintenance'); await expect(page.locator('.policy-card')).toHaveCount(7)
     const cleanup = page.locator('.policy-card').filter({ has: page.getByRole('heading', { name: en.task_cleanup, exact: true }) })
-    await cleanup.getByRole('button', { name: before.controls.find((p: any) => p.kind === 'cleanup').paused ? en.resumePolicy : en.pausePolicy, exact: true }).click()
+    const policyPaused = before.controls.find((p: any) => p.kind === 'cleanup').paused
+    await cleanup.getByRole('button', { name: policyPaused ? en.resumePolicy : en.pausePolicy, exact: true }).click()
+    const policyNotice = page.locator('.toast').filter({ hasText: policyPaused ? en.policyResumedNotice : en.policyPausedNotice })
+    await expect(policyNotice).toBeVisible()
+    await expect(policyNotice).not.toBeVisible({ timeout: 4000 })
     await expect(cleanup.getByRole('button', { name: before.controls.find((p: any) => p.kind === 'cleanup').paused ? en.pausePolicy : en.resumePolicy, exact: true })).toBeVisible()
     await request.post('/api/v1/maintenance/cleanup/actions', { headers, data: { action: 'resume' } })
     await page.reload(); await cleanup.getByRole('button', { name: en.runNow, exact: true }).click()

@@ -3,7 +3,7 @@ import ErrorNotice from '../components/ErrorNotice.vue'
 import { computed, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { useRoute, useRouter } from 'vue-router'
-import { Package, Sparkles, HardDrive, Archive, RefreshCw, ArrowUpRight, ChevronRight, Layers3 } from 'lucide-vue-next'
+import { Package, Sparkles, HardDrive, Archive, RefreshCw, ArrowUpRight, Layers3 } from 'lucide-vue-next'
 import { api, bytes, params, session } from '../api/client'
 import type { components } from '../api/schema'
 import { useInsights, type Runtime } from '../app/insights'
@@ -14,6 +14,7 @@ import SpaceStory from '../components/SpaceStory.vue'
 import EmptyState from '../components/EmptyState.vue'
 import PackDetails from '../components/PackDetails.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
+import UiListFooter from '../components/ui/UiListFooter.vue'
 const route = useRoute(), router = useRouter(), admin = computed(() => session.value?.role === 'admin')
 const { scope, query, statistics } = useInsights(), usage = computed(() => statistics.data.value?.usage)
 const runtime = useQuery({ queryKey: ['runtime-insights'], enabled: admin, queryFn: ({ signal }) => api<Runtime>('/api/v1/usage/runtime', { signal }), refetchInterval: 15_000 })
@@ -39,6 +40,6 @@ const now = computed(() => runtime.data.value?.current)
   <section class="surface pack-library"><div class="section-heading"><h2><Package :size="20" />{{ t('packLibrary') }}</h2><UiSelect v-if="admin" v-model="state" :options="states" :label="t('packState')" /></div><div v-if="usage" class="pack-library-intro"><span class="badge"><Layers3 :size="14" />{{ t('chunksInScope', { count: usage.chunks }) }}</span><span class="badge"><Package :size="14" />{{ t('packsInScope', { count: usage.packs }) }}</span><p>{{ t(admin ? 'packLibraryHint' : 'packScopedHint') }}</p></div>
     <ErrorNotice v-if="packs.error.value" :error="packs.error.value" /><div v-if="packs.isPending.value" class="skeleton-row" />
     <div v-else class="pack-grid"><button v-for="pack in packs.data.value?.items" :key="pack.id" class="pack-card" @click="router.push({ query: { ...route.query, pack: pack.id } })"><img src="/assets/mokyu-pack.svg" alt="" width="74" height="74"><span class="badge">{{ t(pack.status) }}</span><strong>{{ t('packNumber', { id: pack.id }) }}</strong><span>{{ pack.stored_size == null ? t('visiblePack') : bytes(Number(pack.stored_size)) }} · {{ t(pack.compressed ? 'zstdPacked' : 'uncompressedPack') }}</span><ArrowUpRight :size="16" class="pack-open" /></button></div>
-    <EmptyState v-if="packs.data.value && !packs.data.value.items.length" compact :title="t('noPacksHere')" :description="t('noPacksHint')" /><div class="table-footer"><button v-if="after" @click="after = ''">{{ t('firstPage') }}</button><button v-if="packs.data.value?.next_cursor" @click="after = packs.data.value.next_cursor">{{ t('nextPage') }}<ChevronRight :size="15" /></button></div>
+    <EmptyState v-if="packs.data.value && !packs.data.value.items.length" compact :title="t('noPacksHere')" :description="t('noPacksHint')" /><UiListFooter :first="!!after" :next="!!packs.data.value?.next_cursor" @first="after = ''" @next="after = packs.data.value!.next_cursor || ''" />
   </section><PackDetails v-model:open="open" :id="String(route.query.pack || '')" :bucket="scope.bucket" :project="scope.project" />
 </template>
