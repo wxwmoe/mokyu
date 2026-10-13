@@ -89,11 +89,7 @@ pub(crate) async fn list_rows(db: &sqlx::PgPool) -> Result<Vec<ManagedKeyView>> 
         Vec<u8>,
         DateTime<Utc>,
         Option<DateTime<Utc>>,
-    )> = sqlx::query_as(
-        KEY_LIST_QUERY,
-    )
-    .fetch_all(db)
-    .await?;
+    )> = sqlx::query_as(KEY_LIST_QUERY).fetch_all(db).await?;
     Ok(rows.into_iter().map(view).collect())
 }
 
@@ -179,7 +175,9 @@ pub(crate) async fn revoke_record(app: &App, principal: &Principal, id: Uuid) ->
             .await?;
     exists.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
     let used: bool = sqlx::query_scalar(KEY_USAGE_QUERY)
-        .bind(id).fetch_one(&mut *tx).await?;
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
     if used {
         return Err(s3s::s3_error!(
             InvalidRequest,

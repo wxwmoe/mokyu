@@ -194,7 +194,10 @@ pub(super) async fn config(
                 value: text(value),
                 origin,
                 value_mode,
-                restart: runtime_restart.get(section.as_str()).copied().unwrap_or(true),
+                restart: runtime_restart
+                    .get(section.as_str())
+                    .copied()
+                    .unwrap_or(true),
             });
         }
     }

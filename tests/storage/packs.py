@@ -81,7 +81,11 @@ wait(lambda: (cli('gc','run'),db.execute("SELECT count(*)=0 FROM streams WHERE o
 # Full verification downloads the physical object once even across inspection batches.
 before=cli('status')['backend_gets']
 checked=task('integrity','check','--mode','full','--bucket',bucket,'--key','pack-source')
-assert checked['detail']['issues']==0,checked
+issues = db.execute(
+    "SELECT detail->>'issues' FROM tasks WHERE parent_task_id=%s AND task_type='integrity' ORDER BY created_at DESC LIMIT 1",
+    (checked['id'],),
+).fetchone()[0]
+assert issues == '0', checked
 assert cli('status')['backend_gets']-before==1
 wait(lambda: db.execute('SELECT sum(downloads)>0 FROM pack_access_windows WHERE pack_id=%s',(original_pack,)).fetchone()[0])
 assert db.execute('SELECT sum(range_reads)>0 FROM chunk_access_stats').fetchone()[0]
@@ -198,7 +202,9 @@ assert db.execute('SELECT state FROM packs WHERE id=%s',(old_pack,)).fetchone()[
 assert get('pack-gc-first')==reclaim[:cut]
 
 # Metadata-only maintenance must never treat indexed pack payloads as sweep orphans.
-configuration=tomllib.loads(Path(os.environ['MOKYU_TEST_CONFIG']).read_text())['backend']
+backend_file = os.environ.get('MOKYU_TEST_BACKEND')
+configuration = (json.loads(Path(backend_file).read_text()) if backend_file else
+                 tomllib.loads(Path(os.environ['MOKYU_TEST_CONFIG']).read_text())['backend'])
 backend=boto3.client('s3',endpoint_url=configuration['endpoint'],region_name=configuration['region'],aws_access_key_id=configuration['access_key'],aws_secret_access_key=configuration['secret_key'])
 orphan=configuration['prefix']+'/packs/aa/'+'a'*32
 backend.put_object(Bucket=configuration['bucket'],Key=orphan,Body=b'orphan')

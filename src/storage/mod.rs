@@ -75,7 +75,7 @@ pub struct Storage {
     max_entries: usize,
     capacity: Option<u64>,
     min_compression_savings_percent: u8,
-    misses: Mutex<HashMap<Uuid, std::sync::Weak<FetchResult>>>,
+    misses: Mutex<HashMap<(i64, Uuid), std::sync::Weak<FetchResult>>>,
     pub backend_gets: std::sync::atomic::AtomicU64,
     pub cache_hits: std::sync::atomic::AtomicU64,
     pub backend_puts: std::sync::atomic::AtomicU64,
@@ -1268,47 +1268,55 @@ impl Storage {
         Ok(())
     }
     async fn cached(&self, c: &Chunk) -> Result<Option<Bytes>> {
-        if c.location_id.is_nil() {
-            return Ok(None);
-        }
-        if !self.local_cache(c.storage_id).enabled {
-            return Ok(None);
-        }
-        let (pin, compressed) = {
-            let mut fifo = self.fifo.lock().await;
-            let Some(e) = fifo.entries.get_mut(&c.location_id) else {
-                return Ok(None);
-            };
-            e.pins.fetch_add(1, Ordering::Relaxed);
-            e.frequency = e.frequency.saturating_add(1).min(3);
-            (CachePin(e.pins.clone()), e.compressed)
-        };
-        let data = read_bounded(self.cache_path(c.location_id, compressed), MAX).await;
-        drop(pin);
-        if let Ok(data) = data {
-            let size = data.len() as u64;
-            let permit = self.cpu.clone().acquire_owned().await?;
-            let chunk = c.clone();
-            let (compression, _, _) = self.compression_for(c.storage_id);
-            let decoded = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                codec::decode_cache(&chunk, Bytes::from(data), compressed, &compression)
-            })
-            .await?;
-            if let Ok(raw) = decoded {
-                self.cache_hits.fetch_add(1, Ordering::Relaxed);
-                self.cache_hit_bytes.fetch_add(size, Ordering::Relaxed);
-                return Ok(Some(raw));
-            }
-        }
-        if let Some((storage_id, key)) = sqlx::query_as::<_, (Uuid, String)>(
-            "SELECT staging_storage_id,staging_object_key FROM pending_uploads WHERE chunk_id=$1 AND staging_storage_id IS NOT NULL AND staging_object_key LIKE '__mokyu/multipart/%'",
+        let staged: Option<(Uuid, String)> = sqlx::query_as(
+            "SELECT staging_storage_id,staging_object_key FROM pending_uploads WHERE chunk_id=$1 AND staging_storage_id IS NOT NULL",
         )
         .bind(c.id)
         .fetch_optional(&self.db)
-        .await?
+        .await?;
+        let cache_id = (!c.location_id.is_nil())
+            .then_some(c.location_id)
+            .or_else(|| {
+                staged
+                    .as_ref()
+                    .and_then(|(_, key)| parse_upload_cache_name(key))
+            });
+        if self.local_cache(c.storage_id).enabled
+            && let Some(cache_id) = cache_id
         {
-            let raw = self.read_staged(storage_id, &key, c.raw_size as usize).await?;
+            let cached = {
+                let mut fifo = self.fifo.lock().await;
+                fifo.entries.get_mut(&cache_id).map(|e| {
+                    e.pins.fetch_add(1, Ordering::Relaxed);
+                    e.frequency = e.frequency.saturating_add(1).min(3);
+                    (CachePin(e.pins.clone()), e.compressed)
+                })
+            };
+            if let Some((pin, compressed)) = cached {
+                let data = read_bounded(self.cache_path(cache_id, compressed), MAX).await;
+                drop(pin);
+                if let Ok(data) = data {
+                    let size = data.len() as u64;
+                    let permit = self.cpu.clone().acquire_owned().await?;
+                    let chunk = c.clone();
+                    let (compression, _, _) = self.compression_for(c.storage_id);
+                    let decoded = tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        codec::decode_cache(&chunk, Bytes::from(data), compressed, &compression)
+                    })
+                    .await?;
+                    if let Ok(raw) = decoded {
+                        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+                        self.cache_hit_bytes.fetch_add(size, Ordering::Relaxed);
+                        return Ok(Some(raw));
+                    }
+                }
+            }
+        }
+        if let Some((storage_id, key)) = staged.filter(|(_, key)| key.starts_with(STAGING_PREFIX)) {
+            let raw = self
+                .read_staged(storage_id, &key, c.raw_size as usize)
+                .await?;
             ensure!(
                 raw.len() == c.raw_size as usize
                     && blake3::hash(&raw).as_bytes() == c.hash.as_slice(),
@@ -1320,7 +1328,8 @@ impl Storage {
             .upload_pins
             .lock()
             .unwrap()
-            .contains_key(&c.location_id);
+            .keys()
+            .any(|id| Some(*id) == cache_id);
         if pending
             && sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'))")
                 .bind(c.id).fetch_one(&self.db).await? {
@@ -1472,11 +1481,12 @@ impl Storage {
         let lock = {
             let mut map = self.misses.lock().unwrap();
             map.retain(|_, v| v.strong_count() > 0);
-            if let Some(lock) = map.get(&c.location_id).and_then(|v| v.upgrade()) {
+            let key = (c.id, c.location_id);
+            if let Some(lock) = map.get(&key).and_then(|v| v.upgrade()) {
                 lock
             } else {
                 let lock = Arc::new(tokio::sync::OnceCell::new());
-                map.insert(c.location_id, Arc::downgrade(&lock));
+                map.insert(key, Arc::downgrade(&lock));
                 lock
             }
         };
