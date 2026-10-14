@@ -65,7 +65,7 @@ def request_id(response, s3_response=False):
 
 
 before = wait(lambda v: v['storage']['snapshot'] is not None)
-assert before['version'] == '0.0.4'
+assert before['version'] == '0.0.5'
 assert before['storage']['snapshot']['objects'] == 0, 'requires a fresh test bucket/database'
 assert before['process_memory']['rss_bytes'] > 0
 assert requests.get(web + '/api/v1/system/status').status_code == 403
