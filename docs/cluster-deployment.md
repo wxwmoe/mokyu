@@ -42,7 +42,7 @@ mokyu data            # S3 和公共读/data
 mokyu cli ...         # 通过本机 control HTTP 入口执行管理命令
 ```
 
-CLI 会向本机 `instance.listen_control` 发送请求，并使用 `node.json` 中保存的节点凭据；首次启动且尚无节点文件时，单容器模式使用部署密钥完成 bootstrap。data/worker 在模式不匹配或需要恢复时只提供 `/status`，不会接收业务流量或调度任务。
+CLI 向本机 `instance.listen_control` 发送请求。单容器使用配置中的部署密钥认证，不注册节点或创建 `node.json`；群集 control 使用 `node.json` 中的节点凭据。data/worker 在模式不匹配或需要恢复时只提供 `/status`，不会接收业务流量或调度任务。
 
 ## 网络和 DNS
 
@@ -99,7 +99,7 @@ docker exec mokyu-control mokyu cli cluster mode single
 
 进入 cluster 前必须已迁移并移除所有 local storage；回到 single 前必须释放所有 enabled 节点。模式切换会递增 `deployment_mode_revision`，节点以此检测配置和数据库代际是否一致。
 
-角色与数据库模式不匹配时，control/single 继续提供管理入口；worker/data 只提供 `/status` 并停止调度或数据面服务。`mokyu cli status --ready` 只有在节点已注册、模式匹配且未处于 `recovery_required` 时才成功。修正数据库模式、节点文件或部署配置后重启进程即可恢复。
+角色与数据库模式不匹配时，control/single 继续提供管理入口；worker/data 只提供 `/status` 并停止调度或数据面服务。`mokyu cli status --ready` 只有在模式匹配且未处于 `recovery_required` 时才成功；群集角色还要求节点已注册。修正数据库模式、节点文件或部署配置后重启进程即可恢复。
 
 ## 存储限制与迁移
 

@@ -129,7 +129,7 @@ impl Config {
         );
         ensure!(
             !c.database.host.is_empty()
-                && c.database.port > 0
+                && c.database.effective_port().is_some_and(|port| port > 0)
                 && !c.database.name.is_empty()
                 && !c.database.user.is_empty(),
             "database host, name, user and port are required"

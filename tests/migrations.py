@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import psycopg
 assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
 command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG']]
 conninfo = Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip()
+data_path = Path(os.environ.get('MOKYU_TEST_DATA', '/data'))
 db = psycopg.connect(conninfo, autocommit=True)
 assert db.execute("SELECT to_regclass('gateway_meta'),to_regclass('mokyu_meta'),to_regclass('_sqlx_migrations')").fetchone() == (None, None, None)
 process = None
@@ -56,11 +58,22 @@ def stop():
     process.communicate(timeout=40)
 
 
+def reset_local_identity():
+    (data_path / 'node.json').unlink(missing_ok=True)
+
+
 def history():
     return db.execute('SELECT version,installed_on,success,checksum,execution_time FROM _sqlx_migrations ORDER BY version').fetchall()
 
 
 try:
+    if db.info.server_version < 180000:
+        start()
+        stopped_with('PostgreSQL 18 or newer is required')
+        assert db.execute("SELECT count(*) FROM pg_tables WHERE schemaname='public'").fetchone() == (0,)
+        print('PASS unsupported PostgreSQL leaves the empty database untouched', flush=True)
+        sys.exit(0)
+
     # A failure midway through the baseline must undo earlier DDL and its history.
     db.execute('CREATE TABLE buckets (sentinel integer)')
     start()
@@ -89,28 +102,84 @@ try:
     assert history() == []
     print('PASS interrupted migration rolls back schema and can be retried', flush=True)
 
-    # A non-empty 0.0.3 schema is deliberately rejected; an empty schema may
-    # continue through the append-only migrations so operators can migrate
-    # files manually.
+    # A non-empty 0.0.4 schema is deliberately rejected; an empty schema may
+    # continue through the append-only 0.0.5 migrations so operators can
+    # migrate logical objects manually.
     with db.transaction():
+        db.execute("SELECT set_config('media_gateway.backend_identity','storage-registry',false)")
         for path in sorted(migrations.glob('*.sql')):
             version = int(path.stem.split('_')[0])
-            if version > 21:
+            if version > 33:
                 continue
             db.execute(path.read_text())
             db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
                        (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
     legacy_history = history()
-    db.execute("INSERT INTO buckets(id,name) VALUES(gen_random_uuid(),'legacy-preserved')")
+    legacy_storage = '00000000-0000-0000-0000-000000000042'
+    db.execute("INSERT INTO storages(id,name,type,path) VALUES(%s,'legacy-local','local','/data/storage')", (legacy_storage,))
+    db.execute("INSERT INTO buckets(id,name,storage_id) VALUES(gen_random_uuid(),'legacy-preserved',%s)", (legacy_storage,))
     legacy_buckets = db.execute('SELECT * FROM buckets').fetchall()
     start()
-    stopped_with('0.0.3 data is not importable')
+    stopped_with('0.0.4 data cannot be upgraded in place')
     assert db.execute("SELECT to_regclass('mokyu_meta')").fetchone()[0] == 'mokyu_meta'
     assert db.execute('SELECT * FROM buckets').fetchall() == legacy_buckets
     assert history() == legacy_history
     db.execute("DROP SCHEMA public CASCADE")
     db.execute("CREATE SCHEMA public")
-    print('PASS non-empty 0.0.3 schema rejects import without changing data or history', flush=True)
+    print('PASS non-empty 0.0.4 schema rejects import without changing data or history', flush=True)
+    with db.transaction():
+        db.execute('DROP SCHEMA public CASCADE')
+        db.execute('CREATE SCHEMA public')
+
+    # An empty 0.0.4 schema is allowed to finish the 0.0.5 baseline.
+    db.execute("CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)")
+    with db.transaction():
+        db.execute("SELECT set_config('media_gateway.backend_identity','storage-registry',false)")
+        for path in sorted(migrations.glob('*.sql')):
+            version = int(path.stem.split('_')[0])
+            if version > 33:
+                continue
+            db.execute(path.read_text())
+            db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
+                       (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
+    start()
+    ready()
+    assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone()[0] == latest
+    stop()
+    print('PASS empty 0.0.4 schema upgrades to the 0.0.5 baseline', flush=True)
+    reset_local_identity()
+    with db.transaction():
+        db.execute('DROP SCHEMA public CASCADE')
+        db.execute('CREATE SCHEMA public')
+
+    # Preserve policy state and task details when applying the naming migration.
+    db.execute("CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)")
+    with db.transaction():
+        db.execute("SELECT set_config('media_gateway.backend_identity','storage-registry',false)")
+        for path in sorted(migrations.glob('*.sql')):
+            version = int(path.stem.split('_')[0])
+            if version > 34:
+                continue
+            db.execute(path.read_text())
+            db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
+                       (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
+        db.execute("UPDATE maintenance_controls SET paused=true WHERE kind='reuse'")
+        db.execute("INSERT INTO tasks(id,task_type,state,detail) VALUES('00000000-0000-0000-0000-000000000035','pack','paused','{\"kind\":\"reuse\",\"sentinel\":42}')")
+        db.execute("CREATE INDEX objects_catalog_kind ON objects(bucket_id,catalog_kind,object_key) WHERE stream_id IS NOT NULL")
+        db.execute("UPDATE catalog_build SET current_index='objects_catalog_kind'")
+    prior_history = history()
+    start()
+    ready()
+    assert history()[:len(prior_history)] == prior_history
+    assert db.execute("SELECT paused FROM maintenance_controls WHERE policy='reuse'").fetchone() == (True,)
+    assert db.execute("SELECT state,detail FROM tasks WHERE id='00000000-0000-0000-0000-000000000035'").fetchone() == ('paused', {'policy': 'reuse', 'sentinel': 42})
+    assert db.execute("SELECT catalog_category('photo.png','application/octet-stream')").fetchone() == ('image',)
+    assert db.execute("SELECT to_regclass('objects_catalog_category'),to_regclass('tasks_policy_recent'),to_regclass('objects_catalog_kind'),to_regclass('tasks_kind_recent')").fetchone() == ('objects_catalog_category', 'tasks_policy_recent', None, None)
+    assert db.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND (column_name='kind' OR column_name='catalog_kind')").fetchone() == (0,)
+    assert db.execute("SELECT current_index FROM catalog_build").fetchone()[0] != 'objects_catalog_kind'
+    stop()
+    print('PASS semantic names preserve policy state, task details, indexes and migration history', flush=True)
+    reset_local_identity()
     with db.transaction():
         db.execute('DROP SCHEMA public CASCADE')
         db.execute('CREATE SCHEMA public')
@@ -119,14 +188,17 @@ try:
     ready()
     assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone()[0] == latest
     assert db.execute("SELECT to_regclass('gateway_meta')").fetchone()[0] is None
-    assert db.execute("SELECT conname FROM pg_constraint WHERE conrelid='mokyu_meta'::regclass AND contype IN ('p','c') ORDER BY conname").fetchall() == [('mokyu_meta_pkey',), ('mokyu_meta_singleton_check',)]
+    constraints = {row[0] for row in db.execute("SELECT conname FROM pg_constraint WHERE conrelid='mokyu_meta'::regclass AND contype IN ('p','c')").fetchall()}
+    assert {'mokyu_meta_pkey', 'mokyu_meta_singleton_check'} <= constraints
     assert db.execute("SELECT count(*) FROM pg_constraint WHERE conrelid='mokyu_meta'::regclass AND starts_with(conname,'gateway_meta_')").fetchone()[0] == 0
     assert db.execute("SELECT to_regclass('mokyu_meta_pkey'),to_regclass('gateway_meta_pkey')").fetchone() == ('mokyu_meta_pkey', None)
     before = history()
     expected = checksums[1]
     assert [row[0] for row in before] == sorted(checksums)
     assert all(row[2] and row[3] == checksums[row[0]] for row in before)
-    cli('bucket', 'create', 'migration-preserved')
+    preserved_storage = '00000000-0000-0000-0000-000000000043'
+    db.execute("INSERT INTO storages(id,name,type,path) VALUES(%s,'migration-local','local','/data/storage')", (preserved_storage,))
+    db.execute("INSERT INTO buckets(id,name,storage_id) VALUES(gen_random_uuid(),'migration-preserved',%s)", (preserved_storage,))
     bucket = db.execute("SELECT id,created_at FROM buckets WHERE name='migration-preserved'").fetchone()
     deployment = db.execute('SELECT deployment_id FROM mokyu_meta').fetchone()
     stop()

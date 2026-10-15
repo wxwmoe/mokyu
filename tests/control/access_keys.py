@@ -18,6 +18,7 @@ url = os.environ['MOKYU_TEST_WEB']
 db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
 command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli']
 prefix = 'keys-' + uuid.uuid4().hex[:10]
+bucket_name = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())['bucket']
 password = 'Access-key-test-' + uuid.uuid4().hex
 users, credentials, tokens = [], [], []
 writer = None
@@ -64,7 +65,7 @@ def denied(call, **kwargs):
 
 
 admin = login('tester', os.environ['MOKYU_TEST_PASSWORD'])
-bucket = next(row for row in admin.get(url + '/api/v1/buckets').json() if row['name'] == 'media')
+bucket = next(row for row in admin.get(url + '/api/v1/buckets').json() if row['name'] == bucket_name)
 grant = {'bucket_id': bucket['id'], 'actions': ['bucket.list', 'object.read', 'storage.inspect']}
 key_input = {'label': prefix, 'project_id': bucket['project_id'], 'grants': [grant]}
 try:
@@ -74,18 +75,18 @@ try:
     original = reply.json()
     credentials.append(original['access_key'])
     client = s3(original)
-    assert [row['Name'] for row in client.list_buckets()['Buckets']] == ['media']
-    denied(client.put_object, Bucket='media', Key=prefix, Body=b'not permitted')
+    assert [row['Name'] for row in client.list_buckets()['Buckets']] == [bucket_name]
+    denied(client.put_object, Bucket=bucket_name, Key=prefix, Body=b'not permitted')
     rows = admin.get(url + '/api/v1/s3-credentials', params={'project': bucket['project_id']}).text
     assert original['secret_key'] not in rows and 'secret_encrypted' not in rows
-    assert db.execute('SELECT last_used_at IS NOT NULL FROM credentials WHERE access_key=%s', (original['access_key'],)).fetchone()[0]
+    assert db.execute('SELECT last_used_at IS NOT NULL FROM s3_credentials WHERE access_key_id=%s', (original['access_key'],)).fetchone()[0]
     rotation = admin.post(url + '/api/v1/s3-credentials/' + original['access_key'] + '/rotate', json={'overlap': '1h'}).json()
     credentials.append(rotation['access_key'])
     assert rotation['access_key'] != original['access_key']
     client.list_buckets()
     replacement = s3(rotation)
     replacement.list_buckets()
-    db.execute("UPDATE credentials SET expires_at=now()-interval '1 second' WHERE access_key=%s", (original['access_key'],))
+    db.execute("UPDATE s3_credentials SET expires_at=now()-interval '1 second' WHERE access_key_id=%s", (original['access_key'],))
     denied(client.list_buckets)
     replacement.list_buckets()
     cli('cred', 'disable', rotation['access_key'])
@@ -131,10 +132,10 @@ try:
 
     # Revocation wins while an admitted mutation is waiting before its final transaction.
     if os.environ.get('MOKYU_TEST_FAULT_DIR'):
-        key = cli('cred', 'create', 'media', '--label', prefix + '-write')
+        key = cli('cred', 'create', bucket_name, '--label', prefix + '-write')
         credentials.append(key['access_key'])
         writer = s3(key)
-        writer.put_object(Bucket='media', Key=prefix, Body=b'private key regression')
+        writer.put_object(Bucket=bucket_name, Key=prefix, Body=b'private key regression')
         version = str(db.execute('SELECT stream_id FROM objects WHERE bucket_id=%s AND object_key=%s', (bucket['id'], prefix)).fetchone()[0])
         mutation, mutating = mint(admin, grants=[{**grant, 'actions': ['object.acl']}])
         gate = Path(os.environ['MOKYU_TEST_FAULT_DIR']) / 'management-before-change'
@@ -142,7 +143,7 @@ try:
         hit.unlink(missing_ok=True)
         gate.write_text('wait')
         with ThreadPoolExecutor(max_workers=1) as pool:
-            pending = pool.submit(mutation.post, url + '/api/v1/media/actions', json={'bucket': bucket['id'], 'action': 'public-read', 'objects': [{'key': prefix, 'version': version}]}, timeout=20)
+            pending = pool.submit(mutation.post, url + '/api/v1/media/actions', json={'bucket': bucket['id'], 'action': 'public-read', 'objects': [{'client_id': str(uuid.uuid4()), 'key': prefix, 'version': version}]}, timeout=20)
             try:
                 deadline = time.monotonic() + 10
                 while not hit.exists():
@@ -154,8 +155,8 @@ try:
             result = pending.result().json()
         assert result['results'][0]['status'] == 403
         assert not db.execute('SELECT public_read FROM streams WHERE id=%s', (version,)).fetchone()[0]
-        denied(client.get_object, Bucket='media', Key=prefix)
-        assert replacement.get_object(Bucket='media', Key=prefix)['Body'].read() == b'private key regression'
+        denied(client.get_object, Bucket=bucket_name, Key=prefix)
+        assert replacement.get_object(Bucket=bucket_name, Key=prefix)['Body'].read() == b'private key regression'
         print('PASS token revoked during an admitted mutation cannot commit; expired S3 key cannot download', flush=True)
 
     user = admin.post(url + '/api/v1/users', json={'username': prefix, 'password': password, 'role': 'member', 'must_change_password': False}).json()
@@ -177,14 +178,14 @@ try:
     assert member_token.get(url + '/api/v1/buckets').status_code == 403
     replacement.list_buckets()
     # The key remains after deleting its recorded creator; tokens are removed with their owner.
-    db.execute('UPDATE credentials SET created_by=%s WHERE access_key=%s', (user['id'], rotation['access_key']))
+    db.execute('UPDATE s3_credentials SET created_by=%s WHERE access_key_id=%s', (user['id'], rotation['access_key']))
     assert admin.delete(url + '/api/v1/users/' + user['id']).status_code == 204
     replacement.list_buckets()
-    assert db.execute('SELECT created_by FROM credentials WHERE access_key=%s', (rotation['access_key'],)).fetchone()[0] is None
+    assert db.execute('SELECT created_by FROM s3_credentials WHERE access_key_id=%s', (rotation['access_key'],)).fetchone()[0] is None
     print('PASS member permission intersection, reset revocation and project-owned key independence', flush=True)
 finally:
     if writer:
-        writer.delete_object(Bucket='media', Key=prefix)
+        writer.delete_object(Bucket=bucket_name, Key=prefix)
     for key in credentials:
         admin.delete(url + '/api/v1/s3-credentials/' + key)
     for token in tokens:

@@ -864,22 +864,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/maintenance/{kind}/actions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["policy"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/maintenance/{operation}/execute": {
         parameters: {
             query?: never;
@@ -890,6 +874,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["execute"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/maintenance/{policy}/actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["policy"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1633,7 +1633,7 @@ export interface components {
             prefix: string;
         };
         Batch: {
-            action: components["schemas"]["Kind"];
+            action: components["schemas"]["MediaAction"];
             /** Format: uuid */
             bucket: string;
             confirm_storage_migration?: boolean;
@@ -1949,8 +1949,6 @@ export interface components {
             items: components["schemas"]["Job"][];
             next_cursor?: string | null;
         };
-        /** @enum {string} */
-        Kind: "delete" | "private" | "public-read" | "copy" | "move" | "metadata";
         Limits: {
             bucket_count_limit?: string | null;
             inflight_bytes_limit?: string | null;
@@ -2006,6 +2004,8 @@ export interface components {
             /** Format: date-time */
             revoked_at?: string | null;
         };
+        /** @enum {string} */
+        MediaAction: "delete" | "private" | "public-read" | "copy" | "move" | "metadata";
         MediaItem: {
             content_type: string;
             /** Format: uuid */
@@ -2191,11 +2191,11 @@ export interface components {
             enabled: boolean;
             /** Format: int64 */
             interval_seconds: number;
-            kind: string;
             latest?: components["schemas"]["Job"] | null;
             /** Format: date-time */
             next_run_at?: string | null;
             paused: boolean;
+            policy: string;
         };
         PolicyAction: {
             action: string;
@@ -3525,7 +3525,7 @@ export interface operations {
                 q?: string;
                 mode?: string;
                 search_in?: string;
-                kind?: string | null;
+                category?: string | null;
                 public?: boolean | null;
                 min_size?: string | null;
                 max_size?: string | null;
@@ -4272,31 +4272,6 @@ export interface operations {
             };
         };
     };
-    policy: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                kind: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PolicyAction"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MaintenanceResult"];
-                };
-            };
-        };
-    };
     execute: {
         parameters: {
             query?: never;
@@ -4318,6 +4293,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskStarted"];
+                };
+            };
+        };
+    };
+    policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                policy: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicyAction"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenanceResult"];
                 };
             };
         };
@@ -5282,7 +5282,7 @@ export interface operations {
         parameters: {
             query?: {
                 state?: string | null;
-                kind?: string | null;
+                policy?: string | null;
                 bucket?: string | null;
                 storage?: string | null;
                 actor?: string | null;

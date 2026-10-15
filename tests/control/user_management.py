@@ -47,9 +47,9 @@ try:
     for values in [{'role': 'owner'}, {'username': ' leading'}, {'password': 'short'}, {'unknown': True}]:
         assert admin.post(url + '/api/v1/users', json={'username': prefix + '-invalid', 'password': password, 'role': 'member', **values}).status_code in (400, 422)
     page = admin.get(url + '/api/v1/users', params={'q': prefix, 'limit': 1}).json()
-    assert len(page['users']) == 1 and page['next'] == user['username']
-    following = admin.get(url + '/api/v1/users', params={'q': prefix, 'limit': 1, 'after': page['next']}).json()
-    assert following['users'][0]['id'] == created[1]['id'] and following['next'] is None
+    assert len(page['items']) == 1 and page['next_cursor'] == user['username']
+    following = admin.get(url + '/api/v1/users', params={'q': prefix, 'limit': 1, 'after': page['next_cursor']}).json()
+    assert following['items'][0]['id'] == created[1]['id'] and following['next_cursor'] is None
     member = login(user['username'], password)
     assert member.get(url + '/api/v1/account').json()['must_change_password']
     denied = member.get(url + '/api/v1/buckets')

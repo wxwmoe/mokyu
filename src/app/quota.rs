@@ -1,19 +1,43 @@
 use crate::app::App;
-use anyhow::{Result, ensure};
+use crate::model::{self, Error};
+use anyhow::Result;
 use uuid::Uuid;
 
 pub(crate) fn database_error(error: &anyhow::Error) -> Option<s3s::S3Error> {
-    let code = error
-        .downcast_ref::<sqlx::Error>()?
-        .as_database_error()?
-        .code()?;
-    match code.as_ref() {
-        "MKQ01" => {
+    match model::error(error)? {
+        Error::QuotaExceeded => {
             let mut error = s3s::S3Error::new(s3s::S3ErrorCode::Custom("QuotaExceeded".into()));
             error.set_status_code(hyper::StatusCode::FORBIDDEN);
             Some(error)
         }
-        "MKQ02" => Some(s3s::s3_error!(OperationAborted)),
+        Error::LocalStorageFeatures => {
+            let mut error =
+                s3s::S3Error::new(s3s::S3ErrorCode::Custom("LocalStorageFeatures".into()));
+            error.set_status_code(hyper::StatusCode::BAD_REQUEST);
+            Some(error)
+        }
+        Error::OperationAborted => Some(s3s::s3_error!(OperationAborted)),
+        reason @ (Error::LastAdministrator
+        | Error::BucketAlreadyExists
+        | Error::BucketNotEmpty
+        | Error::DomainInUse
+        | Error::BucketNotDrained
+        | Error::ObjectAlreadyExists
+        | Error::StorageProfileConflict) => {
+            let code = match reason {
+                Error::LastAdministrator => "LastAdministrator",
+                Error::BucketAlreadyExists => "BucketAlreadyExists",
+                Error::BucketNotEmpty => "BucketNotEmpty",
+                Error::DomainInUse => "DomainInUse",
+                Error::BucketNotDrained => "BucketNotDrained",
+                Error::StorageProfileConflict => "StorageProfileConflict",
+                Error::ObjectAlreadyExists => "ObjectAlreadyExists",
+                _ => unreachable!(),
+            };
+            let mut error = s3s::S3Error::new(s3s::S3ErrorCode::Custom(code.into()));
+            error.set_status_code(hyper::StatusCode::CONFLICT);
+            Some(error)
+        }
         _ => None,
     }
 }
@@ -26,44 +50,44 @@ impl App {
         padding: bool,
         upload: Option<(Uuid, i32)>,
     ) -> Result<i64> {
-        Ok(sqlx::query_scalar("SELECT quota_reserve($1,$2,$3,$4,$5)")
-            .bind(stream)
-            .bind(size)
-            .bind(padding)
-            .bind(upload.map(|u| u.0))
-            .bind(upload.map(|u| u.1))
-            .fetch_one(&self.db)
-            .await?)
+        self.quota.reserve(stream, size, padding, upload).await
     }
 
     pub(crate) async fn complete_quota(&self, upload: Uuid, stream: Uuid, size: i64) -> Result<()> {
-        let mut tx = self.db.begin().await?;
-        let bucket: Uuid = sqlx::query_scalar(
-            "SELECT bucket_id FROM uploads WHERE id=$1 AND state='completing' FOR SHARE",
+        self.quota.complete(upload, stream, size).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn domain_errors_keep_s3_codes_and_statuses() {
+        let quota = database_error(&anyhow::Error::from(Error::QuotaExceeded)).unwrap();
+        assert_eq!(quota.code().as_str(), "QuotaExceeded");
+        assert_eq!(quota.status_code(), Some(hyper::StatusCode::FORBIDDEN));
+        let aborted = database_error(
+            &anyhow::Error::from(Error::OperationAborted).context("reserving quota"),
         )
-        .bind(upload)
-        .fetch_one(&mut *tx)
-        .await?;
-        sqlx::query("SELECT id FROM streams WHERE id=$1 FOR SHARE")
-            .bind(stream)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SELECT quota_lock($1)")
-            .bind(bucket)
-            .execute(&mut *tx)
-            .await?;
-        // Reuse the accepted parts' reservation, including omitted parts until publication succeeds.
-        let changed = sqlx::query(
-            "UPDATE quota_reservations SET result_stream_id=$2 WHERE id=$1 AND logical_bytes>=$3",
-        )
-        .bind(upload)
-        .bind(stream)
-        .bind(size)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        ensure!(changed == 1, "multipart quota reservation is missing");
-        tx.commit().await?;
-        Ok(())
+        .unwrap();
+        assert_eq!(aborted.code().as_str(), "OperationAborted");
+        assert_eq!(aborted.status_code(), Some(hyper::StatusCode::CONFLICT));
+        assert!(database_error(&anyhow::Error::from(Error::QueryCancelled)).is_none());
+        let admin = database_error(&anyhow::Error::from(Error::LastAdministrator)).unwrap();
+        assert_eq!(admin.code().as_str(), "LastAdministrator");
+        assert_eq!(admin.status_code(), Some(hyper::StatusCode::CONFLICT));
+        for (source, code) in [
+            (Error::BucketAlreadyExists, "BucketAlreadyExists"),
+            (Error::BucketNotEmpty, "BucketNotEmpty"),
+            (Error::DomainInUse, "DomainInUse"),
+            (Error::BucketNotDrained, "BucketNotDrained"),
+            (Error::ObjectAlreadyExists, "ObjectAlreadyExists"),
+            (Error::StorageProfileConflict, "StorageProfileConflict"),
+        ] {
+            let error = database_error(&source.into()).unwrap();
+            assert_eq!(error.code().as_str(), code);
+            assert_eq!(error.status_code(), Some(hyper::StatusCode::CONFLICT));
+        }
     }
 }

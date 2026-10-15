@@ -227,12 +227,7 @@ async fn public(
         .and_then(|s| s.to_str().ok())
         .ok_or_else(unauthorized)?
         .to_ascii_lowercase();
-    let bucket: Option<Bucket> = sqlx::query_as(
-        "SELECT b.* FROM buckets b JOIN bucket_domains d ON d.bucket_id=b.id WHERE d.host=$1",
-    )
-    .bind(host)
-    .fetch_optional(&app.db)
-    .await?;
+    let bucket = app.buckets.by_host(&host).await?;
     let bucket = bucket.ok_or_else(unauthorized)?;
     let cors = cors_headers(&bucket, request.headers(), request.method().as_str())?;
     if request.method() == Method::OPTIONS {

@@ -73,13 +73,13 @@ try:
     secret = issued.json()['secret']
     token = issued.json()['token']['id']
     tokens.append(token)
-    own = member.get(url + '/api/v1/audit').json()['events']
+    own = member.get(url + '/api/v1/audit').json()['items']
     assert own and all(row['actor_id'] == user['id'] for row in own)
     assert member.get(url + '/api/v1/audit/' + str(intent[0])).status_code == 404
     assert requests.get(url + '/api/v1/audit', headers={'Authorization': 'Bearer ' + secret}).status_code == 403
     assert secret not in admin.get(url + '/api/v1/audit', params={'actor': prefix}).text
     assert member.post(url + '/api/v1/users', json={'username': 'blocked', 'password': password, 'role': 'admin'}).status_code == 403
-    assert member.get(url + '/api/v1/audit', params={'outcome': 'failed'}).json()['events']
+    assert member.get(url + '/api/v1/audit', params={'outcome': 'failed'}).json()['items']
     with ThreadPoolExecutor(max_workers=2) as pool:
         attempts = [pool.submit(requests.post, url + '/api/v1/auth/login', headers={'Origin': url}, json={'username': prefix, 'password': password + '-incorrect'}) for _ in range(2)]
         assert all(attempt.result().status_code == 403 for attempt in attempts)
@@ -94,18 +94,18 @@ try:
     try:
         rejected = admin.post(url + '/api/v1/s3-credentials', json={'label': prefix, 'project_id': bucket['project_id'], 'grants': []})
         assert rejected.status_code == 500
-        assert db.execute('SELECT count(*) FROM credentials WHERE label=%s', (prefix,)).fetchone()[0] == 0
+        assert db.execute('SELECT count(*) FROM s3_credentials WHERE label=%s', (prefix,)).fetchone()[0] == 0
         assert db.execute('SELECT outcome FROM audit_events WHERE request_id=%s', (rejected.headers['X-Request-ID'],)).fetchone()[0] == 'failed'
     finally:
         db.execute(sql.SQL('DROP TRIGGER IF EXISTS {} ON audit_events').format(sql.Identifier(trigger)))
         db.execute(sql.SQL('DROP FUNCTION IF EXISTS {}()').format(sql.Identifier(trigger)))
     cli('token', 'revoke', token)
-    assert cli('audit', '--action', 'token.revoke')['events'][0]['source'] == 'cli'
+    assert cli('audit', '--action', 'token.revoke')['items'][0]['source'] == 'cli'
     print('PASS audit-write failure rolls back key creation; CLI mutations share the journal', flush=True)
 
     page = admin.get(url + '/api/v1/audit', params={'limit': 2}).json()
-    following = admin.get(url + '/api/v1/audit', params={'limit': 2, 'after': page['next']}).json()
-    assert not {row['id'] for row in page['events']} & {row['id'] for row in following['events']}
+    following = admin.get(url + '/api/v1/audit', params={'limit': 2, 'after': page['next_cursor']}).json()
+    assert not {row['id'] for row in page['items']} & {row['id'] for row in following['items']}
     exported = member.get(url + '/api/v1/audit/export', params={'limit': 2})
     assert exported.status_code == 200 and exported.headers['Content-Type'].startswith('application/x-ndjson')
     assert exported.headers['X-Next-Cursor']
@@ -121,9 +121,9 @@ try:
     assert admin.patch(url + '/api/v1/users/' + user['id'], json={'role': 'member'}).status_code == 200
     demoted = login(prefix, password)
     assert demoted.get(url + '/api/v1/audit/' + str(restricted_history)).status_code == 404
-    assert all(row['id'] != str(restricted_history) for row in demoted.get(url + '/api/v1/audit').json()['events'])
+    assert all(row['id'] != str(restricted_history) for row in demoted.get(url + '/api/v1/audit').json()['items'])
     assert admin.delete(url + '/api/v1/users/' + user['id']).status_code == 204
-    history = admin.get(url + '/api/v1/audit', params={'actor': prefix}).json()['events']
+    history = admin.get(url + '/api/v1/audit', params={'actor': prefix}).json()['items']
     assert history and all(row['actor_label'] == prefix for row in history)
     assert secret not in json.dumps(history) and password not in json.dumps(history)
     old = db.execute("INSERT INTO audit_events(actor_label,source,action,created_at,outcome) VALUES(%s,'cli','retention.probe',now()-interval '91 days','succeeded') RETURNING id", (prefix,)).fetchone()[0]

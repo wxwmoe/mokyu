@@ -7,30 +7,13 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{Postgres, Transaction};
 use std::{
     sync::{Arc, atomic::Ordering::Relaxed},
     time::Duration,
 };
-use utoipa::{IntoParams, ToSchema};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Default, Deserialize, IntoParams)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ScopeQuery {
-    pub bucket: Option<Uuid>,
-    pub project: Option<Uuid>,
-}
-#[derive(Serialize, Deserialize, ToSchema)]
-pub(super) struct PhysicalUsage {
-    indexed_bytes: String,
-    selected_bytes: String,
-    retained_bytes: String,
-    gc_bytes: String,
-    unconfirmed_bytes: String,
-    chunk_objects: String,
-    pack_objects: String,
-}
 #[derive(Serialize, Deserialize, ToSchema)]
 pub(super) struct ObjectChunk {
     id: String,
@@ -56,52 +39,6 @@ pub(super) struct ChunkPage {
     #[serde(rename = "next_cursor")]
     pub next_offset: Option<String>,
 }
-#[derive(Serialize, Deserialize, ToSchema)]
-pub(super) struct StorageUsage {
-    buckets: String,
-    objects: String,
-    logical_bytes: String,
-    unique_bytes: String,
-    attributed_raw_bytes: String,
-    encoded_bytes: Option<String>,
-    encoded_known_bytes: String,
-    local_savings: String,
-    shared_savings: String,
-    encoding_savings: Option<String>,
-    chunks: String,
-    packs: String,
-    packed_bytes: String,
-    pending_bytes: String,
-    physical: Option<PhysicalUsage>,
-}
-#[derive(Serialize, Deserialize, ToSchema)]
-pub(super) struct RuntimePoint {
-    at: DateTime<Utc>,
-    epoch: DateTime<Utc>,
-    requests: String,
-    failed: String,
-    backend_read_bytes: String,
-    backend_write_bytes: String,
-    cache_hits: String,
-    cache_lookups: String,
-    cache_bytes: String,
-    cache_limit: String,
-    upload_bytes: String,
-    upload_limit: String,
-    multipart_bytes: String,
-    thumbnail_bytes: String,
-    rss_bytes: Option<String>,
-}
-#[derive(Serialize, ToSchema)]
-pub(super) struct CapacityPoint {
-    at: DateTime<Utc>,
-    usage: StorageUsage,
-}
-#[derive(Default, sqlx::FromRow)]
-struct SavedStorage {
-    as_of: Option<DateTime<Utc>>,
-    data: Option<sqlx::types::Json<StorageUsage>>,
-}
 #[derive(Serialize, ToSchema)]
 pub(super) struct StorageInsights {
     scope: &'static str,
@@ -112,16 +49,6 @@ pub(super) struct StorageInsights {
     refresh_seconds: u64,
     usage: Option<StorageUsage>,
     history: Vec<CapacityPoint>,
-}
-#[derive(Serialize, sqlx::FromRow, ToSchema)]
-pub(super) struct WorkSummary {
-    id: Uuid,
-    #[serde(rename = "task_type")]
-    kind: String,
-    #[serde(rename = "status")]
-    state: String,
-    processed: String,
-    updated_at: DateTime<Utc>,
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct RuntimeInsights {
@@ -134,65 +61,25 @@ pub(super) struct RuntimeInsights {
     failed_uploads: String,
 }
 
-// Every scope is derived from live permissions; a caller cannot submit a cached scope ID.
-pub(super) async fn scope(
-    tx: &mut Transaction<'_, Postgres>,
-    actor: &Identity,
-    query: &ScopeQuery,
-) -> Result<Vec<Uuid>> {
-    actor.principal.lock_identity(tx).await?;
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT b.id FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=$1 LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=$3 WHERE ($2 OR 'storage.inspect'=ANY(CASE WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END)) AND ($4::uuid IS NULL OR b.id=$4) AND ($5::uuid IS NULL OR b.project_id=$5) ORDER BY b.id")
-        .bind(actor.id).bind(actor.admin).bind(actor.principal.token_id()).bind(query.bucket).bind(query.project).fetch_all(&mut **tx).await?;
-    if query.bucket.is_some() && ids.is_empty() {
-        return Err(s3s::s3_error!(AccessDenied).into());
-    }
-    Ok(ids)
-}
 #[utoipa::path(get,operation_id="usage_summary",path="/api/v1/usage/summary",params(ScopeQuery),responses((status=200,body=StorageInsights)))]
 pub(super) async fn get(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
     Query(query): Query<ScopeQuery>,
 ) -> Result<Json<StorageInsights>, HttpError> {
-    let mut tx = app.db.begin().await?;
-    let ids = scope(&mut tx, &actor, &query).await?;
-    let global = actor.admin && query.bucket.is_none() && query.project.is_none();
-    let key = if global {
-        "global".to_owned()
-    } else {
-        blake3::hash(&serde_json::to_vec(&ids)?)
-            .to_hex()
-            .to_string()
-    };
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM usage_summary WHERE id=$1)")
-        .bind(&key)
-        .fetch_one(&mut *tx)
+    let snapshot = app
+        .metrics
+        .usage(&actor.principal, &query, app.config.metrics.scope_limit)
         .await?;
-    if !exists {
-        sqlx::query("SELECT pg_advisory_xact_lock(734922709851030)")
-            .execute(&mut *tx)
-            .await?;
-        // Bound cached permission combinations, including workloads from short-lived tokens.
-        sqlx::query("DELETE FROM usage_summary WHERE id IN (SELECT id FROM usage_summary WHERE id<>'global' ORDER BY requested_at DESC,id OFFSET $1)")
-            .bind(app.config.metrics.scope_limit as i64-1).execute(&mut *tx).await?;
-        sqlx::query(
-            "INSERT INTO usage_summary(id,bucket_ids) VALUES($1,$2) ON CONFLICT DO NOTHING",
-        )
-        .bind(&key)
-        .bind(&ids)
-        .execute(&mut *tx)
-        .await?;
-    }
-    sqlx::query("UPDATE usage_summary SET requested_at=now() WHERE id=$1 AND requested_at<now()-interval '1 hour'").bind(&key).execute(&mut *tx).await?;
-    let row: Option<SavedStorage> =
-        sqlx::query_as("SELECT as_of,data FROM usage_summary WHERE id=$1")
-            .bind(&key)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let SavedStorage { as_of, data } = row.unwrap_or_default();
-    let points:Vec<(DateTime<Utc>,sqlx::types::Json<StorageUsage>)>=sqlx::query_as("SELECT snapshot_at,data FROM (SELECT snapshot_at,data FROM usage_history WHERE scope_id=$1 ORDER BY snapshot_at DESC LIMIT 2048) p ORDER BY snapshot_at").bind(&key).fetch_all(&mut *tx).await?;
-    tx.commit().await?;
-    if !exists {
+    let crate::model::metrics::UsageSnapshot {
+        global,
+        bucket_count,
+        as_of,
+        usage,
+        history,
+        created,
+    } = snapshot;
+    if created {
         app.statistics.wake.notify_one();
     }
     let interval = config::seconds(&app.config.metrics.refresh_interval)?;
@@ -207,33 +94,16 @@ pub(super) async fn get(
         } else {
             "visible"
         },
-        bucket_count: ids.len(),
+        bucket_count,
         as_of,
         collecting: as_of.is_none() || inventory["collecting"] == true,
         stale: as_of.is_none_or(|at| {
             Utc::now().signed_duration_since(at).num_seconds() > interval.saturating_mul(2) as i64
         }) || !inventory["last_error"].is_null(),
         refresh_seconds: interval,
-        usage: data.map(|v| v.0),
-        history: points
-            .into_iter()
-            .map(|(at, data)| CapacityPoint { at, usage: data.0 })
-            .collect(),
+        usage,
+        history,
     }))
-}
-pub(crate) async fn collect(app: &App, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::query("DELETE FROM usage_summary WHERE id<>'global' AND requested_at<now()-$1*interval '1 second'")
-        .bind(config::seconds(&app.config.metrics.storage_retention)? as f64).execute(&mut **tx).await?;
-    sqlx::raw_sql(include_str!("usage_summary.sql"))
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query("INSERT INTO usage_history(scope_id,snapshot_at,data) SELECT i.id,i.as_of,i.data FROM usage_summary i WHERE i.as_of IS NOT NULL AND NOT EXISTS(SELECT 1 FROM usage_history h WHERE h.scope_id=i.id AND h.snapshot_at>i.as_of-$1*interval '1 second') ON CONFLICT DO NOTHING")
-        .bind(config::seconds(&app.config.metrics.storage_interval)? as f64).execute(&mut **tx).await?;
-    sqlx::query("DELETE FROM usage_history WHERE snapshot_at<now()-$1*interval '1 second'")
-        .bind(config::seconds(&app.config.metrics.storage_retention)? as f64)
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
 }
 async fn runtime_point(app: &App) -> Result<RuntimePoint> {
     let runtime = app.statistics.runtime();
@@ -271,15 +141,17 @@ pub(super) async fn runtime(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<RuntimeInsights>, HttpError> {
-    let mut tx = app.db.begin().await?;
-    actor.principal.lock_admin(&mut tx).await?;
-    let history:Vec<sqlx::types::Json<RuntimePoint>>=sqlx::query_scalar("SELECT data FROM (SELECT sampled_at,data FROM runtime_samples ORDER BY sampled_at DESC LIMIT 2048) h ORDER BY sampled_at").fetch_all(&mut *tx).await?;
-    let work=sqlx::query_as("SELECT id,coalesce(detail->>'kind',task_type) kind,state,processed::text,updated_at FROM tasks WHERE state IN ('queued','running','paused') ORDER BY CASE state WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,updated_at DESC LIMIT 5").fetch_all(&mut *tx).await?;
-    let (pending_entries,pending_bytes,oldest_pending,failed_uploads):(String,String,Option<DateTime<Utc>>,String)=sqlx::query_as("SELECT count(*)::text,coalesce(sum(staged_size),0)::text,min(created_at),count(*) FILTER(WHERE last_error IS NOT NULL)::text FROM pending_uploads").fetch_one(&mut *tx).await?;
-    tx.commit().await?;
+    let crate::model::metrics::RuntimeHistory {
+        history,
+        work,
+        pending_entries,
+        pending_bytes,
+        oldest_pending,
+        failed_uploads,
+    } = app.metrics.runtime(&actor.principal).await?;
     Ok(Json(RuntimeInsights {
         current: runtime_point(&app).await?,
-        history: history.into_iter().map(|v| v.0).collect(),
+        history,
         work,
         pending_entries,
         pending_bytes,
@@ -297,26 +169,23 @@ pub(crate) async fn runtime_loop(app: Arc<App>) -> Result<()> {
         };
         let result: Result<()> = async {
             let point = runtime_point(&app).await?;
-            let mut tx = app.db.begin().await?;
-            sqlx::query("INSERT INTO runtime_samples(sampled_at,data) VALUES($1,$2)")
-                .bind(point.at)
-                .bind(sqlx::types::Json(point))
-                .execute(&mut *tx)
+            app.metrics
+                .sample_runtime(
+                    point,
+                    config::seconds(&app.config.metrics.runtime_retention)? as f64,
+                )
                 .await?;
-            sqlx::query(
-                "DELETE FROM runtime_samples WHERE sampled_at<now()-$1*interval '1 second'",
-            )
-            .bind(config::seconds(&app.config.metrics.runtime_retention)? as f64)
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
             Ok(())
         }
         .await;
         if let Err(error) = result {
             tracing::warn!(%error,"runtime sample failed");
         }
-        leader.commit().await?;
+        leader.finish().await?;
         tokio::time::sleep(interval).await;
     }
 }
+
+pub(super) use crate::model::metrics::{
+    CapacityPoint, RuntimePoint, ScopeQuery, StorageUsage, WorkSummary,
+};

@@ -18,12 +18,12 @@ test('maintenance policies, task history, runtime settings and managed keys', as
   try {
     await page.goto('/maintenance'); await expect(page.locator('.policy-card')).toHaveCount(7)
     const cleanup = page.locator('.policy-card').filter({ has: page.getByRole('heading', { name: en.task_cleanup, exact: true }) })
-    const policyPaused = before.controls.find((p: any) => p.kind === 'cleanup').paused
+    const policyPaused = before.controls.find((p: any) => p.policy === 'cleanup').paused
     await cleanup.getByRole('button', { name: policyPaused ? en.resumePolicy : en.pausePolicy, exact: true }).click()
     const policyNotice = page.locator('.toast').filter({ hasText: policyPaused ? en.policyResumedNotice : en.policyPausedNotice })
     await expect(policyNotice).toBeVisible()
     await expect(policyNotice).not.toBeVisible({ timeout: 4000 })
-    await expect(cleanup.getByRole('button', { name: before.controls.find((p: any) => p.kind === 'cleanup').paused ? en.pausePolicy : en.resumePolicy, exact: true })).toBeVisible()
+    await expect(cleanup.getByRole('button', { name: before.controls.find((p: any) => p.policy === 'cleanup').paused ? en.pausePolicy : en.resumePolicy, exact: true })).toBeVisible()
     await request.post('/api/v1/maintenance/cleanup/actions', { headers, data: { action: 'resume' } })
     await page.reload(); await cleanup.getByRole('button', { name: en.runNow, exact: true }).click()
     await expect(page.getByRole('dialog', { name: en.taskDetails, exact: true })).toBeVisible()
@@ -72,5 +72,5 @@ test('maintenance policies, task history, runtime settings and managed keys', as
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.screenshot({ path: '/results/step16-maintenance-mobile.png', fullPage: true })
     expect(errors).toEqual([])
-  } finally { await request.post('/api/v1/maintenance/cleanup/actions', { headers, data: { action: before.controls.find((p: any) => p.kind === 'cleanup').paused ? 'pause' : 'resume' } }) }
+  } finally { await request.post('/api/v1/maintenance/cleanup/actions', { headers, data: { action: before.controls.find((p: any) => p.policy === 'cleanup').paused ? 'pause' : 'resume' } }) }
 })

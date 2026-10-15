@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, parse_qsl, urlencode, urlsplit, urlunsplit
@@ -120,6 +121,29 @@ def multipart():
     print("PASS multipart late first part, replacement failure, complete retry, abort, protocol limits", flush=True)
 
 
+def literal_prefixes():
+    root = 'prefix-' + uuid.uuid4().hex + '/'
+    keys = [root + suffix for suffix in ('a%/one', 'a%/two', 'a_/one', 'a_/two',
+                                         'a\\/one', 'a\\/two', 'ab/one', 'A%/one')]
+    try:
+        for key in keys:
+            s3.put_object(Bucket=bucket, Key=key, Body=b'prefix')
+        for literal in ('a%', 'a_', 'a\\', 'ab', 'A%'):
+            prefix = root + literal + '/'
+            expected = sorted(key for key in keys if key.startswith(prefix))
+            pages = s3.get_paginator('list_objects_v2').paginate(
+                Bucket=bucket, Prefix=prefix, PaginationConfig={'PageSize': 1})
+            actual = [item['Key'] for page in pages for item in page.get('Contents', [])]
+            assert actual == expected, (prefix, actual, expected)
+        pages = s3.get_paginator('list_objects_v2').paginate(
+            Bucket=bucket, Prefix=root, Delimiter='/', PaginationConfig={'PageSize': 1})
+        actual = [item['Prefix'] for page in pages for item in page.get('CommonPrefixes', [])]
+        assert actual == sorted({key.rsplit('/', 1)[0] + '/' for key in keys}), actual
+    finally:
+        s3.delete_objects(Bucket=bucket, Delete={'Objects': [{'Key': key} for key in keys]})
+    print('PASS literal percent, underscore, backslash and case-sensitive S3 prefixes', flush=True)
+
+
 def http_acl():
     public = os.environ["MOKYU_TEST_PUBLIC"]
     key = "space +/\u4e2d\u6587%2F.jpg"
@@ -157,4 +181,5 @@ def http_acl():
 if __name__ == "__main__":
     ordinary()
     multipart()
+    literal_prefixes()
     http_acl()

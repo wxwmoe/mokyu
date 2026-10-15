@@ -55,6 +55,8 @@ def error(call, **kwargs):
 
 
 admin = login('tester', os.environ['MOKYU_TEST_PASSWORD'])
+fixture_bucket = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())['bucket']
+storage = next(row['storage_id'] for row in admin.get(url + '/api/v1/buckets').json() if row['name'] == fixture_bucket)
 assert admin.post(url + '/api/v1/account/reauth', json={'password': os.environ['MOKYU_TEST_PASSWORD']}).status_code == 204
 try:
     # Empty projects may be removed; the built-in one and non-empty projects may not.
@@ -66,10 +68,10 @@ try:
     for index in range(2):
         project = admin.post(url + '/api/v1/projects', json={'name': prefix + '-' + str(index)}).json()
         projects.append(project['id'])
-        bucket = cli('bucket', 'create', prefix + '-' + str(index))
+        bucket = cli('bucket', 'create', prefix + '-' + str(index), '--storage', storage)
         db.execute('UPDATE buckets SET project_id=%s WHERE id=%s', (project['id'], bucket['id']))
         buckets.append(bucket)
-    assert admin.put(url + '/api/v1/runtime-settings/projects', json={'enabled': False}).status_code == 409
+    assert 'projects' not in {row['section'] for row in admin.get(url + '/api/v1/runtime-settings').json()}
     assert admin.delete(url + '/api/v1/projects/' + projects[0]).status_code == 409
     admin_id = admin.get(url + '/api/v1/account').json()['id']
     db.execute("UPDATE sessions SET reauthenticated_at=now()-interval '10 minutes' WHERE user_id=%s", (admin_id,))
@@ -93,45 +95,50 @@ try:
         users.append(name)
         db.execute("UPDATE web_users SET role='member' WHERE id=%s", (user,))
         db.execute("INSERT INTO project_members(user_id,project_id,role,scope) VALUES(%s,%s,%s,'selected')", (user, projects[0], role))
-        db.execute('INSERT INTO member_grants(user_id,project_id,bucket_id,actions) VALUES(%s,%s,%s,%s)', (user, projects[0], bucket['id'], all_actions))
+        db.execute('INSERT INTO member_bucket_grants(user_id,project_id,bucket_id,actions) VALUES(%s,%s,%s,%s)', (user, projects[0], bucket['id'], all_actions))
         client = login(name, password)
         clients[role] = (client, user)
         visible = client.get(url + '/api/v1/buckets').json()
         assert len(visible) == 1 and visible[0]['id'] == bucket['id']
         assert len(visible[0]['actions']) == {'reader': 3, 'writer': 6, 'maintainer': 7}[role]
         assert len(client.get(url + '/api/v1/projects').json()) == 1
-        for route in ['/api/v1/system/status', '/api/v1/tasks', '/api/v1/packs', '/api/v1/runtime-settings/projects',
-                      '/api/v1/tasks/' + str(uuid.uuid4()) + '/report', '/api/v1/packs/1']:
+        for route in ['/api/v1/system/status', '/api/v1/tasks', '/api/v1/runtime-settings/maintenance',
+                      '/api/v1/tasks/' + str(uuid.uuid4()) + '/report']:
             assert client.get(url + route).status_code == 403, route
+        packs = client.get(url + '/api/v1/storage/packs')
+        assert packs.status_code == 200 and packs.json()['items'] == []
+        assert client.get(url + '/api/v1/storage/packs/1').status_code == 404
         assert client.post(url + '/api/v1/projects', json={'name': 'denied'}).status_code == 403
         for route in [f"/api/v1/buckets/{buckets[1]['id']}/objects", f"/api/v1/buckets/{buckets[1]['id']}/object", f"/api/v1/buckets/{buckets[1]['id']}/object/content", f"/api/v1/buckets/{buckets[1]['id']}/object/chunks"]:
-            response = client.get(url + route, params={'bucket': buckets[1]['id'], 'key': 'private', 'version': str(uuid.uuid4())})
+            response = client.get(url + route, params={} if route.endswith('/objects') else {'key': 'private', 'version': str(uuid.uuid4())})
             assert response.status_code == 403, (route, response.status_code)
-        assert client.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params={ 'key': 'private'}).content == b'private content'
-        detail = client.get(url + f"/api/v1/buckets/{bucket['id']}/object", params={ 'key': 'private'}).json()
-        assert detail['bucket_grants'] == []
-        response = client.get(url + f"/api/v1/buckets/{bucket['id']}/object/chunks", params={ 'key': 'private', 'version': detail['object']['id']})
+        item = client.get(url + f"/api/v1/buckets/{bucket['id']}/objects", params={'q': 'private', 'mode': 'exact'}).json()['items'][0]
+        private_query = {'key': 'private', 'version': item['id']}
+        assert client.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params=private_query).content == b'private content'
+        detail = client.get(url + f"/api/v1/buckets/{bucket['id']}/object", params=private_query).json()
+        assert 'bucket_grants' not in detail
+        response = client.get(url + f"/api/v1/buckets/{bucket['id']}/object/chunks", params={ 'key': 'private', 'version': detail['item']['id']})
         assert response.status_code == 200, response.text
-        assert response.json()['chunks']
-        assert all(chunk.get(key) is None for chunk in response.json()['chunks'] for key in ['reads', 'range_reads', 'block_key_id'])
+        assert response.json()['items']
+        assert all(chunk.get(key) is None for chunk in response.json()['items'] for key in ['reads', 'range_reads', 'block_key_id'])
         for method in ['get', 'put']:
             response = getattr(client, method)(url + '/api/v1/buckets/' + bucket['id'] + '/cors', **({'json': []} if method == 'put' else {}))
             assert response.status_code == (200 if role == 'maintainer' else 403), (role, response.text)
-        response = client.post(url + '/api/v1/media/actions', json={'bucket': bucket['id'], 'action': 'private', 'objects': [{'key': 'private', 'version': detail['object']['id']}]})
+        response = client.post(url + '/api/v1/media/actions', json={'bucket': bucket['id'], 'action': 'private', 'objects': [{'client_id': str(uuid.uuid4()), 'key': 'private', 'version': detail['item']['id']}]})
         assert response.status_code == 200, response.text
         assert response.json()['results'][0]['status'] == (403 if role == 'reader' else 200)
     reader, user = clients['reader']
-    db.execute('DELETE FROM member_grants WHERE user_id=%s', (user,))
+    db.execute('DELETE FROM member_bucket_grants WHERE user_id=%s', (user,))
     assert reader.get(url + '/api/v1/auth/session').status_code == 200
     assert reader.get(url + '/api/v1/buckets').json() == []
-    assert reader.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params={ 'key': 'private'}).status_code == 403
+    assert reader.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params=private_query).status_code == 403
     db.execute("UPDATE project_members SET scope='all' WHERE user_id=%s", (user,))
     assert len(reader.get(url + '/api/v1/buckets').json()) == 1
     assert requests.get(endpoint + '/' + bucket['name'] + '/public').content == b'project content'
     print('PASS project ownership, role ceilings, scoped routes, private objects and live revocation', flush=True)
 
     def grant(actions):
-        db.execute('UPDATE grants SET actions=%s WHERE access_key=%s', (actions, credential['access_key']))
+        db.execute('UPDATE s3_credential_grants SET actions=%s WHERE access_key=%s', (actions, credential['access_key']))
 
     grant(['object.read'])
     assert s3.get_object(Bucket=bucket['name'], Key='private')['Body'].read() == b'private content'
@@ -144,10 +151,10 @@ try:
     error(s3.put_object_acl, Bucket=bucket['name'], Key='write-only', ACL='public-read')
     error(s3.copy_object, Bucket=bucket['name'], Key='copy', CopySource=bucket['name'] + '/private')
     grant(all_actions)
-    db.execute('INSERT INTO grants(access_key,bucket_id,actions) VALUES(%s,%s,%s)', (credential['access_key'], buckets[1]['id'], all_actions))
+    db.execute('INSERT INTO s3_credential_grants(access_key,bucket_id,actions) VALUES(%s,%s,%s)', (credential['access_key'], buckets[1]['id'], all_actions))
     error(s3.put_object, Bucket=buckets[1]['name'], Key='cross-project', Body=b'x')
     assert all(item['Name'] != buckets[1]['name'] for item in s3.list_buckets()['Buckets'])
-    db.execute('DELETE FROM grants WHERE access_key=%s AND bucket_id=%s', (credential['access_key'], buckets[1]['id']))
+    db.execute('DELETE FROM s3_credential_grants WHERE access_key=%s AND bucket_id=%s', (credential['access_key'], buckets[1]['id']))
     print('PASS separate S3 read/write/delete/ACL/list actions and service project boundary', flush=True)
 
     # Pause the HTTP body after admission. Revocation must prevent publication.

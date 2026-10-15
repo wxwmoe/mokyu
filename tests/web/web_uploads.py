@@ -63,6 +63,16 @@ def complete(id, receipts, status=200):
     return reply
 
 
+def content(key):
+    listed = admin.get(url + f"/api/v1/buckets/{bucket['id']}/objects", params={'q': key, 'mode': 'exact'})
+    assert listed.status_code == 200
+    version = listed.json()['items'][0]['id']
+    reply = admin.get(url + f"/api/v1/buckets/{bucket['id']}/object/content",
+                      params={'key': key, 'version': version}, timeout=30)
+    assert reply.status_code == 200
+    return reply.content
+
+
 try:
     first = b'part-one-' * (2 * 1024 * 1024)
     first = first[:16 * 1024 * 1024]
@@ -82,16 +92,15 @@ try:
     assert admin.get(url + '/api/v1/uploads/' + upload['id']).json()['received_bytes'] == str(len(first) + len(tail))
     complete(upload['id'], [head], 400)
     reply = complete(upload['id'], [head, last])
-    assert reply.json()['state'] == 'completed' and reply.json()['remote_state'] == 'stored', reply.json()
-    assert complete(upload['id'], [head, last]).json()['state'] == 'completed'
-    downloaded = admin.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params={ 'key': body['key']}, timeout=30)
-    assert downloaded.content == first + tail
+    assert reply.json()['status'] == 'completed' and reply.json()['remote_state'] == 'stored', reply.json()
+    assert complete(upload['id'], [head, last]).json()['status'] == 'completed'
+    assert content(body['key']) == first + tail
     event = db.execute('SELECT action,outcome FROM audit_events WHERE request_id=%s', (reply.headers['X-Request-ID'],)).fetchone()
     assert event == ('upload.complete', 'succeeded'), event
     print('PASS idempotent creation, out-of-order checksummed parts, complete retry, actual content and transactional audit', flush=True)
 
     empty, _ = start('empty', 0)
-    assert complete(empty['id'], [part(empty['id'], 1, b'')]).json()['state'] == 'completed'
+    assert complete(empty['id'], [part(empty['id'], 1, b'')]).json()['status'] == 'completed'
     conflict = admin.post(url + '/api/v1/buckets/' + bucket['id'] + '/uploads', json={**body, 'client_id': str(uuid.uuid4())})
     assert conflict.status_code == 409 and conflict.json()['code'] == 'ObjectAlreadyExists'
     key = cli('cred', 'create', prefix)
@@ -104,7 +113,7 @@ try:
     s3.put_object(Bucket=prefix, Key='replace', Body=b'abc')
     denied = complete(replacement['id'], [receipt], 412)
     assert denied.json()['code'] == 'PreconditionFailed'
-    assert admin.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params={ 'key': 'replace'}).content == b'abc'
+    assert content('replace') == b'abc'
     assert admin.delete(url + '/api/v1/uploads/' + replacement['id']).status_code == 204
     cli('cred', 'disable', key['access_key'])
     print('PASS empty object, explicit overwrite and generation protection despite identical old ETag', flush=True)
@@ -126,7 +135,7 @@ try:
     member = login(prefix, secret)
     assert member.get(url + '/api/v1/uploads/' + waiting['id']).status_code == 404
     own, _ = start('member', 1, client=member)
-    assert member.get(url + '/api/v1/uploads', params={'bucket': bucket['id']}).json()['uploads'][0]['id'] == own['id']
+    assert member.get(url + '/api/v1/uploads', params={'bucket': bucket['id']}).json()['items'][0]['id'] == own['id']
     assert admin.put(membership, json={'role': 'reader', 'scope': 'selected', 'grants': [{'bucket_id': bucket['id'], 'actions': ['bucket.list', 'object.read']}]}).status_code == 204
     revoked = member.put(url + '/api/v1/uploads/' + own['id'] + '/parts/1', data=b'x', headers={'X-Content-SHA256': base64.b64encode(hashlib.sha256(b'x').digest()).decode()})
     assert revoked.status_code in (403, 404)
@@ -143,12 +152,12 @@ try:
     scoped, _ = start('token', 3, client=bearer)
     receipt = part(scoped['id'], 1, b'pat', client=bearer)
     reply = bearer.post(url + '/api/v1/uploads/' + scoped['id'] + '/complete', json={'parts': [receipt]})
-    assert reply.status_code == 200 and reply.json()['state'] == 'completed', reply.text
-    rows = bearer.get(url + '/api/v1/uploads?state=all').json()['uploads']
+    assert reply.status_code == 200 and reply.json()['status'] == 'completed', reply.text
+    rows = bearer.get(url + '/api/v1/uploads?state=all').json()['items']
     assert rows and all(item['bucket_id'] == bucket['id'] for item in rows)
     assert admin.put(url + '/api/v1/api-tokens/' + token_id, json={'label': prefix, 'grants': []}).status_code == 200
     assert bearer.get(url + '/api/v1/uploads/' + scoped['id']).status_code == 404
-    assert bearer.get(url + '/api/v1/uploads?state=all').json()['uploads'] == []
+    assert bearer.get(url + '/api/v1/uploads?state=all').json()['items'] == []
     print('PASS scoped management token upload and immediate scope removal', flush=True)
 finally:
     for id in created:

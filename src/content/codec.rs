@@ -89,23 +89,17 @@ pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, sqlx::FromRow, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Chunk {
     pub id: i64,
-    #[sqlx(rename = "current_encoding_id")]
     pub encoding_id: i64,
-    #[sqlx(default)]
     pub location_id: Uuid,
     pub storage_id: Option<Uuid>,
     pub hash: Vec<u8>,
     pub raw_size: i32,
-    #[sqlx(rename = "standalone_size")]
     pub stored_size: Option<i32>,
-    #[sqlx(rename = "encryption_algorithm")]
     pub algorithm: String,
-    #[sqlx(rename = "block_key_id")]
     pub block_key_id: Option<Uuid>,
-    #[sqlx(rename = "standalone_compressed")]
     pub compressed: bool,
     pub nonce: Option<Vec<u8>>,
     pub format: i32,
@@ -122,15 +116,18 @@ pub fn cut(input: &[u8]) -> usize {
 pub fn nonce(date: DateTime<Utc>, id: i64) -> Result<[u8; 12]> {
     typed_nonce(date, id, 0)
 }
-pub fn typed_nonce(date: DateTime<Utc>, id: i64, kind: u8) -> Result<[u8; 12]> {
+pub fn typed_nonce(date: DateTime<Utc>, id: i64, type_tag: u8) -> Result<[u8; 12]> {
     ensure!(id > 0, "chunk ID must be positive");
     let day = u32::try_from(date.year())?
         .checked_mul(10_000)
         .and_then(|n| n.checked_add(date.month() * 100 + date.day()))
         .context("invalid nonce date")?;
-    ensure!(kind < 32 && day < (1 << 27), "nonce fields exceed format");
+    ensure!(
+        type_tag < 32 && day < (1 << 27),
+        "nonce fields exceed format"
+    );
     let mut result = [0; 12];
-    result[..4].copy_from_slice(&((u32::from(kind) << 27) | day).to_be_bytes());
+    result[..4].copy_from_slice(&((u32::from(type_tag) << 27) | day).to_be_bytes());
     result[4..].copy_from_slice(&(id as u64).to_be_bytes());
     Ok(result)
 }

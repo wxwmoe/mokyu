@@ -108,18 +108,15 @@ impl Config {
     }
 }
 
-#[derive(Clone, sqlx::FromRow, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Pack {
     pub id: i64,
     pub location_id: Uuid,
     pub storage_id: Option<Uuid>,
-    #[sqlx(rename = "encryption_algorithm")]
     pub algorithm: String,
-    #[sqlx(rename = "block_key_id")]
     pub block_key_id: Option<Uuid>,
     pub raw_size: i64,
     pub stored_size: Option<i64>,
-    #[sqlx(rename = "pack_compressed")]
     pub compressed: bool,
     pub nonce: Option<Vec<u8>>,
     pub digest: Option<Vec<u8>>,

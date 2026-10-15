@@ -169,13 +169,13 @@ def client(bucket):
 marker = arm('purge-before-batch')
 tasks = []
 try:
-    for kind in ('objects', 'uploads', 'empty'):
-        bucket = prefix + '-' + kind
+    for scenario in ('objects', 'uploads', 'empty'):
+        bucket = prefix + '-' + scenario
         bid = cli('bucket', 'create', bucket)['id']
         s3 = client(bucket)
-        if kind == 'objects':
+        if scenario == 'objects':
             s3.put_object(Bucket=bucket, Key='keep', Body=b'keep this object')
-        elif kind == 'uploads':
+        elif scenario == 'uploads':
             upload = s3.create_multipart_upload(Bucket=bucket, Key='pending')['UploadId']
             s3.upload_part(Bucket=bucket, Key='pending', UploadId=upload, PartNumber=1, Body=b'pending')
         task = uuid.uuid4()

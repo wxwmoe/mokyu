@@ -236,7 +236,6 @@ impl App {
         length: Option<i64>,
         algorithm: Option<&str>,
         upload: Option<(Uuid, i32)>,
-        should_compress: bool,
     ) -> Result<(i64, String, Value)> {
         let mut check = Integrity::new(headers, algorithm)?;
         let declared = if let Some(v) = headers.get("x-amz-decoded-content-length") {
@@ -287,9 +286,7 @@ impl App {
                 rest = &rest[take..];
                 if window.len() == MAX {
                     let n = codec::cut(&window);
-                    let chunk = self
-                        .put_chunk(stream, offset, window[..n].to_vec(), should_compress)
-                        .await?;
+                    let chunk = self.put_chunk(stream, offset, window[..n].to_vec()).await?;
                     let taken = self
                         .consume_seed(stream, offset, &chunk, &mut seed, n)
                         .await?;
@@ -299,16 +296,7 @@ impl App {
             }
             if touch.elapsed() >= Duration::from_secs(5) {
                 if let Some((upload, _)) = upload {
-                    let changed = sqlx::query(
-                        "UPDATE uploads SET touched_at=now() WHERE id=$1 AND state='active'",
-                    )
-                    .bind(upload)
-                    .execute(&self.db)
-                    .await?
-                    .rows_affected();
-                    if changed != 1 {
-                        return Err(s3_error!(NoSuchUpload).into());
-                    }
+                    self.multipart.touch(upload).await?;
                 }
                 touch = Instant::now();
             }
@@ -326,8 +314,7 @@ impl App {
         } else {
             while !window.is_empty() {
                 let n = codec::cut(&window);
-                self.put_chunk(stream, offset, window[..n].to_vec(), should_compress)
-                    .await?;
+                self.put_chunk(stream, offset, window[..n].to_vec()).await?;
                 window.drain(..n);
                 offset += n as i64;
             }

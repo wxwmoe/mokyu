@@ -211,7 +211,7 @@ backend.put_object(Bucket=configuration['bucket'],Key=orphan,Body=b'orphan')
 time.sleep(1.2)
 swept=task('storage','sweep','--age','1s')
 assert swept['detail']['candidates']==1,swept
-assert orphan in swept['detail']['samples']
+assert orphan.removeprefix(configuration['prefix'].rstrip('/') + '/') in swept['detail']['samples']
 
 web=os.environ['MOKYU_TEST_WEB'];session=requests.Session()
 login=session.post(web+'/api/v1/auth/login',headers={'Origin':web},json={'username':'tester','password':os.environ['MOKYU_TEST_PASSWORD']});login.raise_for_status()

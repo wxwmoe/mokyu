@@ -42,18 +42,14 @@ pub(super) async fn status(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<ServiceStatus>, HttpError> {
-    let mut tx = app.db.begin().await?;
-    actor.principal.lock_admin(&mut tx).await?;
+    let access = app.authorization.admin(&actor.principal).await?;
     let raw = app.status().await?;
     let loaded_revisions = app
         .runtime_revisions
         .read()
         .map(|revisions| revisions.clone())
         .unwrap_or_default();
-    let revisions: Vec<(String, i64)> =
-        sqlx::query_as("SELECT section,revision FROM runtime_settings")
-            .fetch_all(&mut *tx)
-            .await?;
+    let revisions = app.runtime_settings.revisions().await?;
     let restart_required = revisions.into_iter().any(|(section, revision)| {
         loaded_revisions.get(&section).copied().unwrap_or_default() != revision
     });
@@ -100,7 +96,7 @@ pub(super) async fn status(
         key: "rss_bytes".into(),
         value: text(&raw["process_memory"]["rss_bytes"]),
     });
-    tx.commit().await?;
+    access.finish().await?;
     Ok(Json(ServiceStatus {
         version: env!("CARGO_PKG_VERSION"),
         started_at: text(&raw["runtime"]["started_at"]),
@@ -132,8 +128,7 @@ pub(super) async fn config(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<ConfigField>>, HttpError> {
-    let mut tx = app.db.begin().await?;
-    actor.principal.lock_admin(&mut tx).await?;
+    let access = app.authorization.admin(&actor.principal).await?;
     let c = &app.config;
     let d = &c.database;
     // Only current file sections and database-backed runtime sections are serialized. Secret-bearing fields use an allowlist.
@@ -141,20 +136,14 @@ pub(super) async fn config(
     let mut instance = serde_json::to_value(&c.instance)?;
     instance["deployment_key"] = json!("[redacted]");
     sections.insert("instance".into(), instance);
-    sections.insert(
-        "database".into(),
-        json!({"host":d.host,"port":d.port,"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode}),
-    );
+    let database = json!({"type":d.backend.as_str(),"host":d.host,"port":d.effective_port(),"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode});
+    sections.insert("database".into(), database);
     let loaded_revisions = app
         .runtime_revisions
         .read()
         .map(|revisions| revisions.clone())
         .unwrap_or_default();
-    let runtime: Vec<(String, serde_json::Value, i64, bool)> = sqlx::query_as(
-        "SELECT section,value,revision,updated_by_user_id IS NULL FROM runtime_settings ORDER BY section",
-    )
-            .fetch_all(&mut *tx)
-            .await?;
+    let runtime = app.runtime_settings.inspect().await?;
     let mut runtime_restart = std::collections::HashMap::new();
     let mut runtime_defaults = std::collections::HashMap::new();
     for (section, value, revision, is_default) in runtime {
@@ -217,6 +206,6 @@ pub(super) async fn config(
         value_mode: "set",
         restart: false,
     });
-    tx.commit().await?;
+    access.finish().await?;
     Ok(Json(fields))
 }

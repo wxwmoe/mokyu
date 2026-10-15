@@ -38,6 +38,13 @@ for path, method in [('/api/v1/info', 'get'), ('/api/v1/auth/login', 'post'), ('
                      ('/api/v1/maintenance', 'get'), ('/api/v1/system/config', 'get')]:
     assert method in schema['paths'][path]
 
+assert 'MediaAction' in schema['components']['schemas']
+assert 'policy' in schema['components']['schemas']['Policy']['properties']
+assert 'post' in schema['paths']['/api/v1/maintenance/{policy}/actions']
+for path, name in [('/api/v1/buckets/{bucket}/objects', 'category'), ('/api/v1/tasks', 'policy')]:
+    parameters = {item['name'] for item in schema['paths'][path]['get']['parameters']}
+    assert name in parameters and 'kind' not in parameters
+
 
 def error(reply, status, code):
     assert reply.status_code == status, reply.text
@@ -73,7 +80,7 @@ buckets = session.get(url + '/api/v1/buckets')
 buckets.raise_for_status()
 assert isinstance(buckets.json(), list)
 for bucket in buckets.json():
-    assert set(bucket) == {'id', 'name', 'status', 'cors', 'website_enabled',
+    assert set(bucket) == {'id', 'name', 'storage_id', 'status', 'cors', 'website_enabled',
                            'index_document', 'error_document', 'created_at', 'project_id', 'actions',
                            'revision', 'uploads_paused', 'public_base_url'}
 

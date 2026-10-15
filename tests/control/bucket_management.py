@@ -40,7 +40,9 @@ other = admin.post(url + '/api/v1/projects', json={'name': name + '-other'}).jso
 
 
 def create(suffix, client=admin, project_id=project, status=201):
-    result = client.post(url + '/api/v1/buckets', json={'name': name + suffix, 'project_id': project_id})
+    fixture_bucket = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())['bucket']
+    storage = next(row['storage_id'] for row in admin.get(url + '/api/v1/buckets').json() if row['name'] == fixture_bucket)
+    result = client.post(url + '/api/v1/buckets', json={'name': name + suffix, 'project_id': project_id, 'storage_id': storage})
     assert result.status_code == status, (result.status_code, result.text)
     if status != 201:
         return result.json()
@@ -94,7 +96,7 @@ try:
     assert admin.post(url + '/api/v1/buckets', json={'name': 'Bad/Name'}).status_code == 400
     owner, maintainer = member('-maintainer', 'maintainer')
     _, reader = member('-reader', 'reader', 'all')
-    assert reader.get(url + '/api/v1/bucket-projects').json() == []
+    assert reader.get(url + '/api/v1/bucket-projects').json()['projects'] == []
     create('-denied', reader, status=403)
     bucket = create('-a', maintainer)
     assert bucket['actions'] == ['bucket.list', 'object.read', 'object.write', 'object.delete', 'object.acl', 'bucket.settings', 'storage.inspect']

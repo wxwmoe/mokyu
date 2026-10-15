@@ -15,35 +15,15 @@ use std::sync::{Arc, Weak};
 use tracing::Instrument;
 use uuid::Uuid;
 
-#[derive(sqlx::FromRow)]
-pub struct Upload {
-    pub id: Uuid,
-    pub bucket_id: Uuid,
-    pub object_key: String,
-    pub state: String,
-    pub metadata: Value,
-    pub public_read: bool,
-    pub checksum_algorithm: Option<String>,
-    pub checksum_type: Option<String>,
-    pub manifest_hash: Option<String>,
-    pub result: Option<Value>,
-    pub created_at: DateTime<Utc>,
-}
+pub use crate::model::multipart::Upload;
+pub(crate) use crate::model::multipart::WebUpload;
+use crate::model::multipart::{MultipartCreate, PartStitch, SeedConsumption};
+
 pub struct Seed {
     pub upload: Uuid,
     pub spans: Vec<(Uuid, i64, usize)>,
     pub bytes: Vec<u8>,
     pub pins: Vec<Active>,
-}
-pub(crate) struct WebUpload {
-    pub user: Uuid,
-    pub client_id: Uuid,
-    pub request_hash: Vec<u8>,
-    pub file_name: String,
-    pub size: i64,
-    pub part_size: i64,
-    pub modified_at: Option<i64>,
-    pub overwrite: bool,
 }
 impl Seed {
     pub fn empty(upload: Uuid) -> Self {
@@ -68,7 +48,9 @@ impl App {
             let user = principal.user_id().ok_or_else(|| s3_error!(AccessDenied))?;
             Ok((
                 format!("web:{user}"),
-                principal.require(&self.db, bucket, action).await?,
+                principal
+                    .require(self.authorization.as_ref(), bucket, action)
+                    .await?,
             ))
         } else {
             let access = access.ok_or_else(|| s3_error!(AccessDenied))?;
@@ -97,7 +79,7 @@ impl App {
         access: &str,
     ) -> Result<Upload> {
         let id = Uuid::parse_str(id).map_err(|_| s3_error!(NoSuchUpload))?;
-        sqlx::query_as("SELECT * FROM uploads WHERE id=$1 AND bucket_id=$2 AND object_key=$3 AND access_key=$4 AND state<>'aborted'").bind(id).bind(bucket).bind(key).bind(access).fetch_optional(&self.db).await?.ok_or_else(||s3_error!(NoSuchUpload).into())
+        self.multipart.upload(id, bucket, key, access).await
     }
     pub async fn create_multipart(
         &self,
@@ -127,7 +109,7 @@ impl App {
             return Err(s3_error!(InvalidArgument).into());
         }
         let algorithm = i.checksum_algorithm.as_ref().map(|a| a.as_str().to_owned());
-        let kind = if algorithm.is_some() {
+        let checksum_type = if algorithm.is_some() {
             Some(
                 i.checksum_type
                     .as_ref()
@@ -144,10 +126,10 @@ impl App {
         };
         if let Some(a) = &algorithm {
             Integrity::new(&hyper::HeaderMap::new(), Some(a))?;
-            if !matches!(kind.as_deref(), Some("FULL_OBJECT" | "COMPOSITE"))
-                || (kind.as_deref() == Some("FULL_OBJECT")
+            if !matches!(checksum_type.as_deref(), Some("FULL_OBJECT" | "COMPOSITE"))
+                || (checksum_type.as_deref() == Some("FULL_OBJECT")
                     && !matches!(a.as_str(), "CRC32" | "CRC32C" | "CRC64NVME"))
-                || (a == "CRC64NVME" && kind.as_deref() != Some("FULL_OBJECT"))
+                || (a == "CRC64NVME" && checksum_type.as_deref() != Some("FULL_OBJECT"))
             {
                 return Err(s3_error!(InvalidRequest, "invalid multipart checksum type").into());
             }
@@ -157,94 +139,35 @@ impl App {
         }
         let _coord = self.coord.lock().await;
         self.writable()?;
-        let mut tx = self.db.begin().await?;
-        authority.lock(&mut tx).await?;
-        let (state, paused): (String, bool) =
-            sqlx::query_as("SELECT state,uploads_paused FROM buckets WHERE id=$1 FOR SHARE")
-                .bind(bucket.id)
-                .fetch_one(&mut *tx)
-                .await?;
-        if state != "active" {
-            return Err(s3_error!(OperationAborted).into());
-        }
-        let expected: Option<Uuid> = if let Some(web) = &web {
-            let existing: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
-                "SELECT upload_id,request_hash FROM web_uploads WHERE user_id=$1 AND client_id=$2",
-            )
-            .bind(web.user)
-            .bind(web.client_id)
-            .fetch_optional(&mut *tx)
+        let (id, existing) = self
+            .multipart
+            .create(MultipartCreate {
+                authority: &authority,
+                bucket: bucket.id,
+                key: &i.key,
+                access: &key,
+                metadata: serde_json::to_value(metadata!(i))?,
+                public: canned(i.acl.as_ref())?,
+                algorithm,
+                checksum_type: checksum_type.clone(),
+                web,
+                max_active: self.config.uploads.max_active_uploads,
+            })
             .await?;
-            if let Some((id, hash)) = existing {
-                if hash != web.request_hash {
-                    return Err(
-                        s3_error!(InvalidRequest, "upload identity was already used").into(),
-                    );
-                }
-                return Ok(S3Response::new(CreateMultipartUploadOutput {
-                    bucket: Some(i.bucket),
-                    key: Some(i.key),
-                    upload_id: Some(id.to_string()),
-                    ..Default::default()
-                }));
-            }
-            let expected: Option<Uuid> = sqlx::query_scalar(
-                "SELECT stream_id FROM objects WHERE bucket_id=$1 AND object_key=$2",
-            )
-            .bind(bucket.id)
-            .bind(&i.key)
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten();
-            if expected.is_some() && !web.overwrite {
-                return Err(crate::http::problem(
-                    hyper::StatusCode::CONFLICT,
-                    "ObjectAlreadyExists",
-                )
-                .0);
-            }
-            expected
-        } else {
-            None
-        };
-        if paused {
-            return Err(s3_error!(OperationAborted).into());
+        if existing {
+            return Ok(S3Response::new(CreateMultipartUploadOutput {
+                bucket: Some(i.bucket),
+                key: Some(i.key),
+                upload_id: Some(id.to_string()),
+                ..Default::default()
+            }));
         }
-        if let Some(limit) = self.config.uploads.max_active_uploads {
-            sqlx::query(
-                "SELECT pg_advisory_xact_lock(hashtextextended('mokyu:uploads:max-active', 0))",
-            )
-            .execute(&mut *tx)
-            .await?;
-            let count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM uploads WHERE state IN ('active','completing')",
-            )
-            .fetch_one(&mut *tx)
-            .await?;
-            if count >= limit {
-                return Err(s3_error!(SlowDown).into());
-            }
-        }
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO uploads(id,bucket_id,object_key,access_key,metadata,public_read,checksum_algorithm,checksum_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(id).bind(bucket.id).bind(&i.key).bind(key).bind(serde_json::to_value(metadata!(i))?).bind(canned(i.acl.as_ref())?).bind(&algorithm).bind(&kind).execute(&mut *tx).await?;
-        if let Some(web) = web {
-            sqlx::query("INSERT INTO web_uploads(upload_id,user_id,client_id,request_hash,file_name,expected_size,part_size,modified_at,expected_stream_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
-                .bind(id).bind(web.user).bind(web.client_id).bind(web.request_hash).bind(web.file_name).bind(web.size).bind(web.part_size).bind(web.modified_at).bind(expected).execute(&mut *tx).await?;
-            crate::control::audit::checkpoint(
-                &mut tx,
-                "upload.create",
-                &id.to_string(),
-                json!({"bucket_id":bucket.id,"key":i.key,"size":web.size}),
-            )
-            .await?;
-        }
-        tx.commit().await?;
         Ok(S3Response::new(CreateMultipartUploadOutput {
             bucket: Some(i.bucket),
             key: Some(i.key),
             upload_id: Some(id.to_string()),
             checksum_algorithm: i.checksum_algorithm,
-            checksum_type: kind.map(ChecksumType::from),
+            checksum_type: checksum_type.map(ChecksumType::from),
             ..Default::default()
         }))
     }
@@ -297,18 +220,9 @@ impl App {
         {
             let lock = self.operation_lock(u.id);
             let _guard = lock.lock().await;
-            let mut tx = self.db.begin().await?;
-            authority.lock(&mut tx).await?;
-            let state: String =
-                sqlx::query_scalar("SELECT state FROM uploads WHERE id=$1 FOR UPDATE")
-                    .bind(u.id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            if state != "active" {
-                return Err(s3_error!(NoSuchUpload).into());
-            }
-            sqlx::query("INSERT INTO parts(upload_id,part_number,write_token) VALUES($1,$2,$3) ON CONFLICT(upload_id,part_number) DO UPDATE SET write_token=excluded.write_token").bind(u.id).bind(i.part_number).bind(id).execute(&mut *tx).await?;
-            tx.commit().await?;
+            self.multipart
+                .begin_part(&authority, u.id, i.part_number, id)
+                .await?;
         }
         let body = req
             .input
@@ -327,9 +241,6 @@ impl App {
                     .as_deref()
                     .or(i.checksum_algorithm.as_ref().map(|a| a.as_str())),
                 Some((u.id, i.part_number)),
-                self.config
-                    .local_compression
-                    .should_try(u.metadata["content_type"].as_str(), &u.object_key),
             )
             .await?;
         {
@@ -337,56 +248,9 @@ impl App {
             let _guard = lock.lock().await;
             let _coord = self.coord.lock().await;
             self.writable()?;
-            let mut tx = self.db.begin().await?;
-            authority.lock(&mut tx).await?;
-            let bucket_state: String =
-                sqlx::query_scalar("SELECT state FROM buckets WHERE id=$1 FOR SHARE")
-                    .bind(b.id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            if bucket_state != "active" {
-                return Err(s3_error!(OperationAborted).into());
-            }
-            let state: String =
-                sqlx::query_scalar("SELECT state FROM uploads WHERE id=$1 FOR UPDATE")
-                    .bind(u.id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            if state != "active" {
-                return Err(s3_error!(NoSuchUpload).into());
-            }
-            let (old,epoch):(Option<Uuid>,Uuid)=sqlx::query_as("SELECT stream_id,write_token FROM parts WHERE upload_id=$1 AND part_number=$2 FOR UPDATE").bind(u.id).bind(i.part_number).fetch_one(&mut *tx).await?;
-            if epoch != id {
-                return Err(s3_error!(OperationAborted, "part was superseded").into());
-            }
-            sqlx::query("UPDATE parts SET stream_id=$3 WHERE upload_id=$1 AND part_number=$2")
-                .bind(u.id)
-                .bind(i.part_number)
-                .bind(id)
-                .execute(&mut *tx)
+            self.multipart
+                .commit_part(&authority, b.id, u.id, i.part_number, id)
                 .await?;
-            sqlx::query("UPDATE streams SET state='ready' WHERE id=$1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            if let Some(old) = old {
-                sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id=$1")
-                    .bind(old)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            sqlx::query("UPDATE uploads SET touched_at=now() WHERE id=$1")
-                .bind(u.id)
-                .execute(&mut *tx)
-                .await?;
-            crate::control::audit::checkpoint(
-                &mut tx,
-                "upload.part",
-                &u.id.to_string(),
-                json!({"bucket_id":b.id,"part":i.part_number}),
-            )
-            .await?;
-            tx.commit().await?;
         }
         self.seal_uploads(id, false).await?;
         // A late predecessor can now transfer its tail using an already durable successor.
@@ -406,22 +270,14 @@ impl App {
         let _guard = lock.lock().await;
         let mut seed = Seed::empty(upload);
         let mut number = number - 1;
-        let active: bool = sqlx::query_scalar("SELECT state='active' FROM uploads WHERE id=$1")
-            .bind(upload)
-            .fetch_one(&self.db)
-            .await?;
+        let active: bool = self.multipart.active(upload).await?;
         if !active {
             return Err(s3_error!(NoSuchUpload).into());
         }
         while number > 0 && seed.bytes.len() < MAX - 1 {
-            let s:Option<StoredStream>=sqlx::query_as("SELECT s.* FROM parts p JOIN streams s ON p.stream_id=s.id WHERE p.upload_id=$1 AND p.part_number=$2 AND s.state='ready'").bind(upload).bind(number).fetch_optional(&self.db).await?;
+            let s: Option<StoredStream> = self.multipart.part(upload, number).await?;
             let Some(s) = s else { break };
-            let tail: Option<Extent> = sqlx::query_as(
-                "SELECT * FROM extents WHERE stream_id=$1 ORDER BY offset_bytes DESC LIMIT 1",
-            )
-            .bind(s.id)
-            .fetch_optional(&self.db)
-            .await?;
+            let tail: Option<Extent> = self.multipart.tail(s.id).await?;
             let Some(tail) = tail
                 .filter(|e| e.fragment_id.is_some() && e.offset_bytes + e.length as i64 == s.size)
             else {
@@ -459,76 +315,34 @@ impl App {
         let lock = self.operation_lock(seed.upload);
         let _guard = lock.lock().await;
         let _coord = self.coord.lock().await;
-        let mut tx = self.db.begin().await?;
-        let active: bool =
-            sqlx::query_scalar("SELECT state='active' FROM uploads WHERE id=$1 FOR SHARE")
-                .bind(seed.upload)
-                .fetch_one(&mut *tx)
-                .await?;
-        let mut remaining = prefix;
-        let mut chunk_offset = 0;
-        while remaining > 0 {
-            let span = seed.spans.first_mut().context("missing prefix span")?;
-            let n = remaining.min(span.2);
-            if active {
-                replace_range(&mut tx, span.0, span.1, n, c.id, chunk_offset).await?;
-            }
-            span.1 += n as i64;
-            span.2 -= n;
-            remaining -= n;
-            chunk_offset += n;
-            if span.2 == 0 {
-                seed.spans.remove(0);
-            }
-        }
-        if prefix == consumed {
-            sqlx::query("DELETE FROM extents WHERE stream_id=$1 AND offset_bytes=$2")
-                .bind(stream)
-                .bind(offset)
-                .execute(&mut *tx)
-                .await?;
-            crate::worker::lifecycle::mark_unreferenced(&mut tx, &[c.id]).await?;
-        } else {
-            sqlx::query("UPDATE extents SET source_offset=$3,length=$4 WHERE stream_id=$1 AND offset_bytes=$2").bind(stream).bind(offset).bind(prefix as i32).bind((consumed-prefix) as i32).execute(&mut *tx).await?;
-        }
-        sqlx::query("UPDATE streams SET size=$2 WHERE id=$1")
-            .bind(stream)
-            .bind(offset + (consumed - prefix) as i64)
-            .execute(&mut *tx)
+        self.multipart
+            .consume_seed(SeedConsumption {
+                upload: seed.upload,
+                stream,
+                offset,
+                chunk: c.id,
+                prefix,
+                consumed,
+                spans: &mut seed.spans,
+            })
             .await?;
-        tx.commit().await?;
         self.wake_gc.notify_one();
         Ok(consumed - prefix)
     }
     pub async fn stitch_pair(&self, upload: Uuid, number: i32) -> Result<()> {
         let lock = self.operation_lock(upload);
         let _guard = lock.lock().await;
-        let metadata: Option<Value> =
-            sqlx::query_scalar("SELECT metadata FROM uploads WHERE id=$1 AND state='active'")
-                .bind(upload)
-                .fetch_optional(&self.db)
-                .await?;
-        let Some(metadata) = metadata else {
+        let Some((metadata, rows)) = self.multipart.pair(upload, number).await? else {
             return Ok(());
         };
-        let rows:Vec<StoredStream>=sqlx::query_as("SELECT s.* FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number IN ($2,$2+1) AND s.state='ready' ORDER BY p.part_number").bind(upload).bind(number).fetch_all(&self.db).await?;
         if rows.len() != 2 {
             return Ok(());
         }
         let left = &rows[0];
         let right = &rows[1];
-        let should_compress = self
-            .config
-            .local_compression
-            .should_try(metadata["content_type"].as_str(), &left.object_key);
         let _lpin = self.pin(left.id);
         let _rpin = self.pin(right.id);
-        let tail: Option<Extent> = sqlx::query_as(
-            "SELECT * FROM extents WHERE stream_id=$1 ORDER BY offset_bytes DESC LIMIT 1",
-        )
-        .bind(left.id)
-        .fetch_optional(&self.db)
-        .await?;
+        let tail: Option<Extent> = self.multipart.tail(left.id).await?;
         let Some(tail) = tail.filter(|e| e.fragment_id.is_some()) else {
             return Ok(());
         };
@@ -557,7 +371,7 @@ impl App {
             window.extend_from_slice(&data[used..]);
             let mut pos = 0;
             while window.len() < MAX {
-                let rows = self.extents(right.id, pos, right.size).await?;
+                let rows = self.chunks.extents(right.id, pos, right.size).await?;
                 ensure!(!rows.is_empty(), "part mapping incomplete");
                 for row in rows {
                     ensure!(row.offset_bytes == pos, "part mapping has gap");
@@ -572,31 +386,24 @@ impl App {
             }
             let n = codec::cut(&window);
             let chunk = self
-                .put_chunk(work, used as i64, window[..n].to_vec(), should_compress)
+                .put_chunk(work, used as i64, window[..n].to_vec())
                 .await?;
             let l = (data.len() - used).min(n);
             let r = n - l;
             let _coord = self.coord.lock().await;
-            let mut tx = self.db.begin().await?;
-            replace_range(
-                &mut tx,
-                left.id,
-                tail.offset_bytes + used as i64,
-                l,
-                chunk.id,
-                0,
-            )
-            .await?;
-            if r > 0 {
-                replace_range(&mut tx, right.id, 0, r, chunk.id, l).await?;
-            }
-            tx.commit().await?;
+            self.multipart
+                .stitch(PartStitch {
+                    left: left.id,
+                    offset: tail.offset_bytes + used as i64,
+                    left_length: l,
+                    right: right.id,
+                    right_length: r,
+                    chunk: chunk.id,
+                })
+                .await?;
             used += l;
         }
-        sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id=$1")
-            .bind(work)
-            .execute(&self.db)
-            .await?;
+        self.multipart.retire_work(work).await?;
         self.wake_gc.notify_one();
         Ok(())
     }
@@ -696,7 +503,14 @@ impl App {
         let mut total = 0i64;
         let mut etag_hash = Md5::new();
         for (idx, part) in manifest.iter().enumerate() {
-            let s:StoredStream=sqlx::query_as("SELECT s.* FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number=$2 AND s.state='ready'").bind(u.id).bind(part.part_number).fetch_optional(&self.db).await?.ok_or_else(||s3_error!(InvalidPart))?;
+            let s: StoredStream = self
+                .multipart
+                .part(
+                    u.id,
+                    part.part_number.ok_or_else(|| s3_error!(InvalidPart))?,
+                )
+                .await?
+                .ok_or_else(|| s3_error!(InvalidPart))?;
             if !part
                 .e_tag
                 .as_ref()
@@ -731,13 +545,9 @@ impl App {
         }
         let etag = format!("{}-{}", hex::encode(etag_hash.finalize()), parts.len());
         let _coord = self.coord.lock().await;
-        let mut tx = self.db.begin().await?;
-        authority.lock(&mut tx).await?;
-        let changed=sqlx::query("UPDATE uploads SET state='completing',manifest_hash=$2,touched_at=now() WHERE id=$1 AND state='active'").bind(u.id).bind(&hash).execute(&mut *tx).await?.rows_affected();
-        if changed != 1 {
-            return Err(s3_error!(OperationAborted).into());
-        }
-        tx.commit().await?;
+        self.multipart
+            .begin_complete(&authority, u.id, &hash)
+            .await?;
         drop(_coord);
         let app = self.clone();
         let upin = self.pin(u.id);
@@ -748,20 +558,29 @@ impl App {
         let input = req.input;
         let headers = req.headers;
         let audit = crate::control::audit::current();
-        let work = tokio::spawn(async move {
-            let _guard = guard;
-            let _pins = pins;
-            let _upin = upin;
-            let _permits = permits;
-            #[cfg(feature = "fault-injection")]
-            crate::faults::point("multipart-completing").await;
-            let assembly = app.assemble(&authority, &u, &parts, &input, &headers, total, &etag, &hash);
-            let result = if let Some(id)=audit { crate::control::audit::scope(id,assembly).await } else { assembly.await };
-            if result.is_err() {
-                let _=sqlx::query("UPDATE uploads SET state='active',touched_at=now() WHERE id=$1 AND state='completing'").bind(u.id).execute(&app.db).await;
+        let work = tokio::spawn(
+            async move {
+                let _guard = guard;
+                let _pins = pins;
+                let _upin = upin;
+                let _permits = permits;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("multipart-completing").await;
+                let assembly = app.assemble(
+                    &authority, &u, &parts, &input, &headers, total, &etag, &hash,
+                );
+                let result = if let Some(id) = audit {
+                    crate::control::audit::scope(id, assembly).await
+                } else {
+                    assembly.await
+                };
+                if result.is_err() {
+                    let _ = app.multipart.retry_complete(u.id).await;
+                }
+                result.map_err(crate::app::internal)
             }
-            result.map_err(crate::app::internal)
-        }.in_current_span());
+            .in_current_span(),
+        );
         let future = Box::pin(async move {
             let result = work
                 .await
@@ -809,10 +628,6 @@ impl App {
             )
             .await?;
         self.complete_quota(u.id, id, total).await?;
-        let should_compress = self
-            .config
-            .local_compression
-            .should_try(u.metadata["content_type"].as_str(), &u.object_key);
         let mut window = Vec::with_capacity(MAX);
         let mut offset = 0;
         let mut full = Integrity::new(&hyper::HeaderMap::new(), u.checksum_algorithm.as_deref())?;
@@ -821,7 +636,7 @@ impl App {
             let mut part_hash = Md5::new();
             let mut pos = 0;
             while pos < part.size {
-                let rows = self.extents(part.id, pos, part.size).await?;
+                let rows = self.chunks.extents(part.id, pos, part.size).await?;
                 ensure!(!rows.is_empty(), "part mapping incomplete");
                 for row in rows {
                     ensure!(row.offset_bytes == pos, "part mapping has gap");
@@ -835,8 +650,7 @@ impl App {
                         rest = &rest[n..];
                         if window.len() == MAX {
                             let n = codec::cut(&window);
-                            self.put_chunk(id, offset, window[..n].to_vec(), should_compress)
-                                .await?;
+                            self.put_chunk(id, offset, window[..n].to_vec()).await?;
                             offset += n as i64;
                             window.drain(..n);
                         }
@@ -851,8 +665,7 @@ impl App {
         }
         while !window.is_empty() {
             let n = codec::cut(&window);
-            self.put_chunk(id, offset, window[..n].to_vec(), should_compress)
-                .await?;
+            self.put_chunk(id, offset, window[..n].to_vec()).await?;
             offset += n as i64;
             window.drain(..n);
         }
@@ -933,31 +746,7 @@ impl App {
         _coord: &tokio::sync::MutexGuard<'_, ()>,
         authority: &Permit,
     ) -> Result<()> {
-        let mut tx = self.db.begin().await?;
-        authority.lock(&mut tx).await?;
-        let changed=sqlx::query("UPDATE uploads SET state='aborted',touched_at=now() WHERE id=$1 AND state IN ('active','completing')").bind(id).execute(&mut *tx).await?.rows_affected();
-        if changed == 0 {
-            return Err(s3_error!(NoSuchUpload).into());
-        }
-        sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id IN (SELECT stream_id FROM parts WHERE upload_id=$1)").bind(id).execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM parts WHERE upload_id=$1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        if authority.principal.user_id().is_some() && crate::control::audit::active() {
-            let bucket: Uuid = sqlx::query_scalar("SELECT bucket_id FROM uploads WHERE id=$1")
-                .bind(id)
-                .fetch_one(&mut *tx)
-                .await?;
-            crate::control::audit::checkpoint(
-                &mut tx,
-                "upload.abort",
-                &id.to_string(),
-                json!({"bucket_id":bucket}),
-            )
-            .await?;
-        }
-        tx.commit().await?;
+        self.multipart.abort(authority, id).await?;
         self.wake_gc.notify_one();
         Ok(())
     }
@@ -983,7 +772,8 @@ impl App {
         if !(0..=1000).contains(&limit) || !(0..=10000).contains(&marker) {
             return Err(s3_error!(InvalidArgument).into());
         }
-        let rows:Vec<(i32,i64,String,DateTime<Utc>,Value)>=sqlx::query_as("SELECT p.part_number,s.size,s.etag,s.touched_at,s.checksums FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number>$2 ORDER BY p.part_number LIMIT $3").bind(u.id).bind(marker).bind(limit as i64+1).fetch_all(&self.db).await?;
+        let rows: Vec<(i32, i64, String, DateTime<Utc>, Value)> =
+            self.multipart.parts(u.id, marker, limit as i64 + 1).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("list-parts-read").await;
         let truncated = rows.len() > limit as usize;
@@ -1065,7 +855,10 @@ impl App {
         };
         if limit > 0 {
             'pages: loop {
-                let rows:Vec<Upload>=sqlx::query_as("SELECT * FROM uploads WHERE bucket_id=$1 AND access_key=$2 AND state IN ('active','completing') AND starts_with(object_key,$3) AND (object_key>$4 OR (object_key=$4 AND ($5 OR id>$6))) ORDER BY object_key,id LIMIT 64").bind(b.id).bind(access).bind(prefix).bind(&cursor).bind(inclusive).bind(cursor_id).fetch_all(&self.db).await?;
+                let rows: Vec<Upload> = self
+                    .multipart
+                    .uploads(b.id, access, prefix, &cursor, inclusive, cursor_id)
+                    .await?;
                 if rows.is_empty() {
                     break;
                 }
@@ -1144,70 +937,6 @@ impl App {
     }
 }
 
-async fn replace_range(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    stream: Uuid,
-    offset: i64,
-    length: usize,
-    chunk: i64,
-    source: usize,
-) -> Result<()> {
-    if length == 0 {
-        return Ok(());
-    }
-    let end = offset + length as i64;
-    let rows:Vec<Extent>=sqlx::query_as("SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=GREATEST(0,$2-4194304) AND offset_bytes<$3 AND offset_bytes+length>$2 ORDER BY offset_bytes FOR UPDATE").bind(stream).bind(offset).bind(end).fetch_all(&mut **tx).await?;
-    let mut covered = offset;
-    let mut previous = Vec::new();
-    for row in rows {
-        if let Some(id) = row.chunk_id {
-            previous.push(id);
-        }
-        ensure!(row.offset_bytes <= covered, "extent replacement gap");
-        let row_end = row.offset_bytes + row.length as i64;
-        covered = covered.max(row_end.min(end));
-        sqlx::query("DELETE FROM extents WHERE stream_id=$1 AND offset_bytes=$2")
-            .bind(stream)
-            .bind(row.offset_bytes)
-            .execute(&mut **tx)
-            .await?;
-        if row.offset_bytes < offset {
-            insert_extent(
-                tx,
-                &row,
-                row.offset_bytes,
-                (offset - row.offset_bytes) as i32,
-                row.source_offset,
-            )
-            .await?;
-        }
-        if row_end > end {
-            insert_extent(
-                tx,
-                &row,
-                end,
-                (row_end - end) as i32,
-                row.source_offset + (end - row.offset_bytes) as i32,
-            )
-            .await?;
-        }
-    }
-    ensure!(covered == end, "extent replacement incomplete");
-    sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id,source_offset) VALUES($1,$2,$3,$4,$5)").bind(stream).bind(offset).bind(length as i32).bind(chunk).bind(source as i32).execute(&mut **tx).await?;
-    // Retained slices and references from other streams still protect the old chunk.
-    crate::worker::lifecycle::mark_unreferenced(tx, &previous).await?;
-    Ok(())
-}
-async fn insert_extent(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    e: &Extent,
-    offset: i64,
-    length: i32,
-    source: i32,
-) -> Result<()> {
-    sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id,fragment_id,source_offset) VALUES($1,$2,$3,$4,$5,$6)").bind(e.stream_id).bind(offset).bind(length).bind(e.chunk_id).bind(e.fragment_id).bind(source).execute(&mut **tx).await?;
-    Ok(())
-}
 fn part_sums(p: &CompletedPart) -> Value {
     let mut map = serde_json::Map::new();
     for (n, v) in [

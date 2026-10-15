@@ -1,7 +1,5 @@
 use super::{
-    audit,
     auth::Identity,
-    buckets,
     contract::{self, BucketView},
     insights,
 };
@@ -11,9 +9,8 @@ use axum::{
     Json,
     extract::{Extension, Path, Query, State},
 };
-use s3s::s3_error;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -22,19 +19,13 @@ pub(super) async fn buckets(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<BucketView>>, HttpError> {
-    let rows: Vec<BucketView> = sqlx::query_as("SELECT b.*,b.settings_revision::text AS revision,CASE WHEN $2 THEN ARRAY['bucket.list','object.read','object.write','object.delete','object.acl','bucket.settings','storage.inspect'] WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END AS actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=$1 LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=$3 WHERE $2 OR 'bucket.list'=ANY(CASE WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END) ORDER BY b.name LIMIT 1000")
-        .bind(actor.id).bind(actor.admin).bind(actor.principal.token_id())
-        .fetch_all(&app.db)
+    let rows = app
+        .buckets
+        .visible(actor.id, actor.admin, actor.principal.token_id())
         .await?;
     Ok(Json(rows))
 }
-#[derive(Deserialize, Serialize, sqlx::FromRow, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Website {
-    pub(crate) website_enabled: bool,
-    pub(crate) index_document: String,
-    pub(crate) error_document: String,
-}
+pub(crate) use crate::model::bucket::Website;
 #[utoipa::path(
     get,
     operation_id = "bucket_cors",
@@ -49,13 +40,9 @@ pub(super) async fn cors(
 ) -> Result<Json<Value>, HttpError> {
     actor
         .principal
-        .require(&app.db, bucket, Action::Settings)
+        .require(app.authorization.as_ref(), bucket, Action::Settings)
         .await?;
-    let rules = sqlx::query_scalar("SELECT cors FROM buckets WHERE id=$1")
-        .bind(bucket)
-        .fetch_optional(&app.db)
-        .await?
-        .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    let rules = app.buckets.cors(bucket).await?;
     Ok(Json(rules))
 }
 #[utoipa::path(
@@ -102,15 +89,9 @@ pub(super) async fn website(
 ) -> Result<Json<Website>, HttpError> {
     actor
         .principal
-        .require(&app.db, bucket, Action::Settings)
+        .require(app.authorization.as_ref(), bucket, Action::Settings)
         .await?;
-    let row = sqlx::query_as(
-        "SELECT website_enabled,index_document,error_document FROM buckets WHERE id=$1",
-    )
-    .bind(bucket)
-    .fetch_optional(&app.db)
-    .await?
-    .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    let row = app.buckets.website(bucket).await?;
     Ok(Json(row))
 }
 #[utoipa::path(put, path = "/api/v1/buckets/{bucket}/website", params(("bucket" = Uuid, Path)), request_body = Website, responses((status = 200, body = Website), (status = 400, body = contract::ErrorBody)))]
@@ -122,14 +103,11 @@ pub(super) async fn save_website(
 ) -> Result<Json<Website>, HttpError> {
     app.writable()?;
     input.validate()?;
-    let mut tx = app.db.begin().await?;
-    buckets::lock_settings(&mut tx, &actor.principal, bucket).await?;
-    let row = sqlx::query_as("UPDATE buckets SET website_enabled=$2,index_document=$3,error_document=$4 WHERE id=$1 AND state='active' RETURNING website_enabled,index_document,error_document")
-        .bind(bucket).bind(input.website_enabled).bind(&input.index_document).bind(&input.error_document)
-        .fetch_optional(&mut *tx).await?.ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
-    audit::checkpoint(&mut tx,"bucket.website",&bucket.to_string(),json!({"bucket_id":bucket,"website_enabled":input.website_enabled,"index_document":input.index_document,"error_document":input.error_document})).await?;
-    tx.commit().await?;
-    Ok(Json(row))
+    Ok(Json(
+        app.buckets
+            .set_website(&actor.principal, bucket, input)
+            .await?,
+    ))
 }
 #[derive(Deserialize, utoipa::IntoParams)]
 pub(crate) struct ChunkQuery {
@@ -147,7 +125,7 @@ pub(super) async fn object_chunks(
 ) -> Result<Json<insights::ChunkPage>, HttpError> {
     actor
         .principal
-        .require(&app.db, bucket, Action::Inspect)
+        .require(app.authorization.as_ref(), bucket, Action::Inspect)
         .await?;
     let limit = q.limit.unwrap_or(100);
     if !(1..=200).contains(&limit) || q.after.is_some_and(|a| a < 0) {
@@ -157,8 +135,10 @@ pub(super) async fn object_chunks(
     if object.id != q.version {
         return Err(s3s::s3_error!(PreconditionFailed).into());
     }
-    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',c.id::text,'offset_bytes',e.offset_bytes::text,'length',e.length,'source_offset',e.source_offset,'raw_size',c.raw_size,'stored_size',l.standalone_size,'independent_size_hint',c.standalone_size,'payload_size',c.standalone_size-CASE WHEN c.encryption_algorithm='none' THEN 0 ELSE 16 END,'compression',CASE WHEN c.standalone_compressed THEN 'zstd' ELSE 'none' END,'algorithm',c.encryption_algorithm,'block_key_id',c.block_key_id,'pack_id',c.pack_id::text,'source',CASE WHEN l.encoding_id IS NOT NULL THEN 'chunk' WHEN c.pack_id IS NOT NULL THEN 'pack' ELSE 'pending' END,'reads',COALESCE(a.reads,0)::text,'range_reads',COALESCE(a.range_reads,0)::text) FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN chunk_access_stats a ON a.chunk_id=c.id WHERE e.stream_id=$1 AND e.offset_bytes>$2 ORDER BY e.offset_bytes LIMIT $3")
-        .bind(object.id).bind(q.after.unwrap_or(-1)).bind(limit + 1).fetch_all(&app.db).await?;
+    let mut rows = app
+        .objects
+        .chunks(object.id, q.after.unwrap_or(-1), limit + 1)
+        .await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     if !actor.admin {

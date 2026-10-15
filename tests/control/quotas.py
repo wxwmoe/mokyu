@@ -32,7 +32,8 @@ assert reply.status_code == 200
 admin.headers.update({'Origin': url, 'X-CSRF-Token': reply.json()['csrf_token']})
 assert admin.post(url + '/api/v1/account/reauth', json={'password': os.environ['MOKYU_TEST_PASSWORD']}).status_code == 204
 project = admin.post(url + '/api/v1/projects', json={'name': prefix}).json()['id']
-bucket = cli('bucket', 'create', prefix)
+storage = cli('storage', 'show', os.environ['MOKYU_TEST_STORAGE'])['id']
+bucket = cli('bucket', 'create', prefix, '--storage', storage)
 db.execute('UPDATE buckets SET project_id=%s WHERE id=%s', (project, bucket['id']))
 credential = cli('cred', 'create', prefix)
 s3 = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
@@ -43,9 +44,9 @@ uploads, connections = [], []
 user = None
 
 
-def limits(size=None, inflight=None, buckets=None, kind='project'):
-    target = project if kind == 'project' else bucket['id']
-    reply = admin.put(url + '/api/v1/quotas/' + kind + '/' + target, json={
+def limits(size=None, inflight=None, buckets=None, scope='project'):
+    target = project if scope == 'project' else bucket['id']
+    reply = admin.put(url + '/api/v1/quotas/' + scope + '/' + target, json={
         'logical_bytes_limit': None if size is None else str(size),
         'inflight_bytes_limit': None if inflight is None else str(inflight),
         'bucket_count_limit': None if buckets is None else str(buckets)})
@@ -64,6 +65,18 @@ def wait_counts(expected):
         time.sleep(.05)
     # Both scopes are updated by the same transaction.
     assert db.execute("SELECT used_bytes,reserved_bytes,inflight_bytes FROM quota_scopes WHERE scope='bucket' AND scope_id=%s", (bucket['id'],)).fetchone() == expected
+
+
+def writer(key, exclude=None):
+    streams = [row[0] for row in db.execute("SELECT id FROM streams WHERE bucket_id=%s AND object_key=%s AND state='writing'", (bucket['id'], key)) if row[0] != exclude]
+    assert len(streams) == 1, streams
+    return streams[0]
+
+
+def expire_writer(stream):
+    # Advance only the canceled writer's durable lease; active writers must remain protected.
+    assert db.execute("UPDATE stream_leases SET expires_at=now()-interval '1 second' WHERE stream_id=%s AND lease_type='write'", (stream,)).rowcount == 1
+    cli('gc', 'run')
 
 
 def put(key, data):
@@ -120,9 +133,9 @@ try:
     limits(0)
     denied(s3.put_object, Bucket=prefix, Key='zero', Body=b'x')
     put('empty', b''); wait_counts((0, 0, 0))
-    limits(10); limits(4, kind='bucket')
+    limits(10); limits(4, scope='bucket')
     denied(s3.put_object, Bucket=prefix, Key='tight', Body=b'12345')
-    limits(kind='bucket')
+    limits(scope='bucket')
     print('PASS exact logical accounting, copy, overwrite credit, lower limits, zero and bucket cap', flush=True)
 
     with ThreadPoolExecutor(max_workers=2) as workers:
@@ -145,6 +158,7 @@ try:
     target = s3.generate_presigned_url('put_object', Params={'Bucket': prefix, 'Key': 'unknown-over'}, HttpMethod='PUT', ExpiresIn=60)
     reply = requests.put(target, data=iter([b'12', b'345']), timeout=15)
     assert reply.status_code == 403 and 'QuotaExceeded' in reply.text, reply.text
+    expire_writer(writer('unknown-over'))
     s3.delete_object(Bucket=prefix, Key='unknown'); wait_counts((0, 0, 0))
     print('PASS parallel admission and bounded unknown-length reservations', flush=True)
 
@@ -181,11 +195,14 @@ try:
     limits(10, 20)
     put('held', b'0123456789')
     first = hold('held', 10); wait_counts((10, 0, 10))
+    first_stream = writer('held')
     second = hold('held', 10); wait_counts((10, 0, 20))
-    first.close(); wait_counts((10, 0, 10))
+    second_stream = writer('held', first_stream)
+    first.close(); expire_writer(first_stream); wait_counts((10, 0, 10))
+    assert db.execute("SELECT expires_at>now() FROM stream_leases WHERE stream_id=%s AND lease_type='write'", (second_stream,)).fetchone()[0]
     limits(10, 15)
     denied(s3.put_object, Bucket=prefix, Key='held', Body=b'0123456789')
-    second.close(); wait_counts((10, 0, 0))
+    second.close(); expire_writer(second_stream); wait_counts((10, 0, 0))
     assert s3.get_object(Bucket=prefix, Key='held')['Body'].read() == b'0123456789'
     s3.delete_object(Bucket=prefix, Key='held'); wait_counts((0, 0, 0))
     print('PASS superseded writers retain in-flight budget until cancellation cleanup', flush=True)
@@ -210,12 +227,13 @@ try:
     s3.delete_object(Bucket=prefix, Key='parts'); wait_counts((0, 0, 0))
     a = mpu('cancel')
     pending = hold('cancel', 7, a); wait_counts((0, 7, 7))
+    pending_stream = writer('cancel')
     abort('cancel', a); wait_counts((0, 0, 7))
-    pending.close(); wait_counts((0, 0, 0))
+    pending.close(); expire_writer(pending_stream); wait_counts((0, 0, 0))
     print('PASS part replacement, partial manifest, completion retry, exclusive credit and abort', flush=True)
 
     limits(None, None, 1)
-    extra = cli('bucket', 'create', prefix + '-extra')
+    extra = cli('bucket', 'create', prefix + '-extra', '--storage', storage)
     try:
         try:
             db.execute('UPDATE buckets SET project_id=%s WHERE id=%s', (project, extra['id']))
@@ -249,11 +267,18 @@ try:
     cli('gc', 'run')
     wait_counts((5, 0, 0))
     assert db.execute('SELECT state FROM uploads WHERE id=%s', (expired,)).fetchone()[0] == 'aborted'
-    task = uuid.uuid4()
-    with db.transaction():
-        db.execute("UPDATE buckets SET state='purging' WHERE id=%s", (bucket['id'],))
-        db.execute("INSERT INTO tasks(id,task_type,bucket_id,state) VALUES(%s,'purge',%s,'paused')", (task, bucket['id']))
-    cli('task', 'resume', str(task))
+    # Every writer above has ended; advance remaining rejected writes before testing full purge.
+    db.execute("UPDATE stream_leases SET expires_at=now()-interval '1 second' WHERE lease_type='write' AND stream_id IN (SELECT id FROM streams WHERE bucket_id=%s)", (bucket['id'],))
+    deadline = time.monotonic() + 20
+    while db.execute("SELECT count(*) FROM streams WHERE bucket_id=%s AND state='writing'", (bucket['id'],)).fetchone()[0]:
+        assert time.monotonic() < deadline, 'ended writers were not reclaimed'
+        cli('gc', 'run')
+        time.sleep(.1)
+    preview = admin.post(url + f"/api/v1/buckets/{bucket['id']}/purge/preview")
+    assert preview.status_code == 200, preview.text
+    purge = admin.post(url + f"/api/v1/buckets/{bucket['id']}/purge", json={'confirm_name': prefix, 'confirmation': preview.json()['confirmation']})
+    assert purge.status_code == 200, purge.text
+    task = purge.json()['task_id']
     deadline = time.monotonic() + 45
     while db.execute('SELECT state FROM tasks WHERE id=%s', (task,)).fetchone()[0] != 'completed':
         assert time.monotonic() < deadline, 'purge did not complete'

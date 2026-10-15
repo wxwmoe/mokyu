@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -25,11 +26,12 @@ points = ('upload-cache-written', 'upload-cache-durable', 'upload-cache-before-c
 
 
 def cli(*args):
-    return json.loads(subprocess.check_output(command + ['cli', *args], stderr=subprocess.DEVNULL, text=True))
+    return json.loads(subprocess.check_output(command + ['cli', *args], stderr=subprocess.DEVNULL, text=True, timeout=20))
 
 
 def wait(predicate):
-    for _ in range(600):
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(.1)
@@ -52,10 +54,13 @@ def kill():
 
 def start():
     global process, pid
+    db.execute("UPDATE mokyu_meta SET maintenance=true")
     process = subprocess.Popen(command,
                                stdout=open(Path(os.environ['MOKYU_TEST_RESULTS']) / 'upload-crashes.log', 'a'),
                                stderr=subprocess.STDOUT)
     pid = process.pid
+    if pid_file := os.environ.get('MOKYU_TEST_GATEWAY_PID_FILE'):
+        Path(pid_file).write_text(str(pid))
     def ready():
         assert process.poll() is None, 'replacement process exited; inspect upload-crashes.log'
         try:
@@ -111,23 +116,29 @@ try:
     s3.put_object(Bucket=bucket, Key='rotated-pending', Body=raw)
     ids = [r[0] for r in db.execute('SELECT chunk_id FROM pending_uploads').fetchall()]
     assert len(ids) > 1
-    rotated = cli('key', 'create', 'rotated', 'block', '-a', 'aes-256-gcm')
-    cli('storage', 'key', 'set', 'test-media', '--key', 'rotated')
+    identity = db.execute('SELECT id,hash,raw_size FROM chunks WHERE id=ANY(%s) ORDER BY id', (ids,)).fetchall()
+    rotated_name = 'rotated-' + uuid.uuid4().hex[:10]
+    rotated = cli('key', 'create', rotated_name, 'block', '-a', 'aes-256-gcm')
+    old_keys = db.execute('SELECT DISTINCT block_key_id FROM chunks WHERE id=ANY(%s)', (ids,)).fetchall()
+    assert len(old_keys) == 1 and old_keys[0][0] is not None
+    rotated_id = uuid.UUID(rotated['id'])
+    cli('storage', 'key', 'set', os.environ['MOKYU_TEST_STORAGE'], rotated_name)
     kill()
     (faults / 'upload-before-work').unlink()
     start()
     assert s3.get_object(Bucket=bucket, Key='rotated-pending')['Body'].read() == raw
     done(cli('cache', 'flush')['task_id'])
-    assert db.execute('SELECT DISTINCT c.block_key_id,l.block_key_id FROM chunks c JOIN chunk_encodings l ON l.chunk_id=c.id WHERE c.id=ANY(%s) AND l.state=\'ready\'', (ids,)).fetchall() == [('test', 'rotated')]
+    assert db.execute('SELECT DISTINCT c.block_key_id,l.block_key_id FROM chunks c JOIN chunk_encodings l ON l.chunk_id=c.id WHERE c.id=ANY(%s) AND l.state=\'ready\'', (ids,)).fetchall() == [(rotated_id, rotated_id)]
+    assert db.execute('SELECT id,hash,raw_size FROM chunks WHERE id=ANY(%s) ORDER BY id', (ids,)).fetchall() == identity
     cli('maintenance', 'disable')
     db.execute("UPDATE chunks SET repack_after=now()-interval '1 hour'")
     db.execute('UPDATE pack_maintenance SET next_check_at=now()')
     done(cli('pack', 'run')['task_id'])
     packed = db.execute("SELECT DISTINCT p.id,p.block_key_id FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=ANY(%s)", (ids,)).fetchall()
-    assert packed and all(p[1] == 'rotated' for p in packed), packed
+    assert packed and all(p[1] == rotated_id for p in packed), packed
     for pack_id, _ in packed:
         done(cli('pack', 'unpack', str(pack_id), '--execute')['task_id'])
-    assert db.execute('SELECT DISTINCT l.block_key_id FROM chunk_encodings l WHERE l.chunk_id=ANY(%s) AND l.state=\'ready\'', (ids,)).fetchall() == [('rotated',)]
+    assert db.execute('SELECT DISTINCT l.block_key_id FROM chunk_encodings l WHERE l.chunk_id=ANY(%s) AND l.state=\'ready\'', (ids,)).fetchall() == [(rotated_id,)]
     assert s3.get_object(Bucket=bucket, Key='rotated-pending')['Body'].read() == raw
     print('PASS key rotation across pending upload, packing and unpacking', flush=True)
 finally:

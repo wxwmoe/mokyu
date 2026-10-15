@@ -13,10 +13,10 @@ export function useInsights() {
   return { scope, query, statistics }
 }
 export const metric = (value: string | null | undefined) => value == null ? null : Number(value)
-export function taskTone(kind: string) {
-  if (['gc', 'cleanup', 'purge', 'sweep', 'reclaim', 'pack_reclaim'].includes(kind)) return 'mint'
-  if (['integrity', 'range', 'pack_range'].includes(kind)) return 'sky'
-  if (['pack', 'reuse', 'pack_reuse'].includes(kind)) return 'rose'
-  if (['upload', 'cache_flush'].includes(kind)) return 'cream'
+export function taskTone(taskType: string) {
+  if (['gc', 'cleanup', 'purge', 'sweep', 'reclaim', 'pack_reclaim'].includes(taskType)) return 'mint'
+  if (['integrity', 'range', 'pack_range'].includes(taskType)) return 'sky'
+  if (['pack', 'reuse', 'pack_reuse'].includes(taskType)) return 'rose'
+  if (['upload', 'cache_flush'].includes(taskType)) return 'cream'
   return 'lilac'
 }

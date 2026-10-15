@@ -11,8 +11,8 @@ import { notify, report, errorText } from '../app/feedback'
 import UiDialog from './ui/UiDialog.vue'
 import UiSelect from './ui/UiSelect.vue'
 type Quota = components['schemas']['Quota']
-const props = defineProps<{ kind: 'project' | 'bucket'; id: string }>()
-const path = computed(() => `/api/v1/quotas/${props.kind}/${props.id}`)
+const props = defineProps<{ scope: 'project' | 'bucket'; id: string }>()
+const path = computed(() => `/api/v1/quotas/${props.scope}/${props.id}`)
 const quota = useQuery({ queryKey: ['quota', path], queryFn: ({ signal }) => api<Quota>(path.value, { signal }), refetchInterval: 30000 })
 const row = computed(() => quota.data.value)
 const used = computed(() => row.value?.used_bytes == null ? null : Number(row.value.used_bytes))
@@ -35,7 +35,7 @@ function edit() {
 }
 async function save() {
   let limits
-  try { limits = { logical_bytes_limit: parseBytes(draft.bytes, draft.byteUnit), inflight_bytes_limit: props.kind === 'project' ? parseBytes(draft.inflight, draft.inflightUnit) : null, bucket_count_limit: props.kind === 'project' ? parseBytes(draft.buckets) : null } }
+  try { limits = { logical_bytes_limit: parseBytes(draft.bytes, draft.byteUnit), inflight_bytes_limit: props.scope === 'project' ? parseBytes(draft.inflight, draft.inflightUnit) : null, bucket_count_limit: props.scope === 'project' ? parseBytes(draft.buckets) : null } }
   catch { invalid.value = true; return }
   busy.value = true
   try { await secure(() => write(path.value, limits, 'PUT')); open.value = false; await quota.refetch(); notify(t('quotaSaved')) }
@@ -49,13 +49,13 @@ async function save() {
     <template v-if="row"><div v-if="used != null" class="quota-reading"><strong>{{ bytes(used) }}</strong><span>/ {{ limit == null ? t('quotaUnlimited') : bytes(limit) }}</span><span v-if="over" class="badge">{{ t('quotaExceeded') }}</span></div>
       <p v-else class="field-help">{{ t('quotaScoped') }}</p>
       <div v-if="used != null && limit != null" class="quota-meter" role="progressbar" :aria-label="t('quotaTitle')" :aria-valuenow="Math.round(percent)" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: percent + '%' }" /></div>
-      <div v-if="used != null" class="quota-details"><span v-if="reserved"><Clock3 :size="13" />{{ t('quotaReserved', { value: bytes(reserved) }) }}</span><span v-if="Number(row.inflight_bytes)">{{ t('quotaInFlight', { value: bytes(Number(row.inflight_bytes)) }) }}</span><span v-if="kind === 'project' && row.bucket_count_limit != null">{{ t('quotaBuckets', { used: row.bucket_count || '0', limit: row.bucket_count_limit }) }}</span></div>
+      <div v-if="used != null" class="quota-details"><span v-if="reserved"><Clock3 :size="13" />{{ t('quotaReserved', { value: bytes(reserved) }) }}</span><span v-if="Number(row.inflight_bytes)">{{ t('quotaInFlight', { value: bytes(Number(row.inflight_bytes)) }) }}</span><span v-if="scope === 'project' && row.bucket_count_limit != null">{{ t('quotaBuckets', { used: row.bucket_count || '0', limit: row.bucket_count_limit }) }}</span></div>
       <p class="field-help">{{ t(over ? 'quotaOverHint' : 'quotaHint') }}</p>
     </template>
   </section>
   <UiDialog v-model:open="open" :title="t('quotaEdit')" :description="t('quotaEditHint')" :busy="busy"><form @submit.prevent="save">
     <label>{{ t('quotaLogicalLimit') }}<span class="quota-input"><input v-model="draft.bytes" inputmode="decimal" :placeholder="t('quotaUnlimited')" :disabled="busy"><UiSelect v-model="draft.byteUnit" :options="units" :label="t('quotaUnit')" :disabled="busy" /></span></label>
-    <template v-if="kind === 'project'"><label>{{ t('quotaInflightLimit') }}<span class="quota-input"><input v-model="draft.inflight" inputmode="decimal" :placeholder="t('quotaUnlimited')" :disabled="busy"><UiSelect v-model="draft.inflightUnit" :options="units" :label="t('quotaUnit')" :disabled="busy" /></span></label><p class="field-help">{{ t('quotaInflightHint') }}</p><label>{{ t('quotaBucketLimit') }}<input v-model="draft.buckets" inputmode="numeric" :placeholder="t('quotaUnlimited')" :disabled="busy"></label></template>
+    <template v-if="scope === 'project'"><label>{{ t('quotaInflightLimit') }}<span class="quota-input"><input v-model="draft.inflight" inputmode="decimal" :placeholder="t('quotaUnlimited')" :disabled="busy"><UiSelect v-model="draft.inflightUnit" :options="units" :label="t('quotaUnit')" :disabled="busy" /></span></label><p class="field-help">{{ t('quotaInflightHint') }}</p><label>{{ t('quotaBucketLimit') }}<input v-model="draft.buckets" inputmode="numeric" :placeholder="t('quotaUnlimited')" :disabled="busy"></label></template>
     <div class="info-callout"><Gauge :size="20" /><p>{{ t('quotaZeroHint') }}</p></div><p v-if="invalid" class="error" role="alert">{{ t('quotaInvalid') }}</p>
     <div class="form-footer"><button type="button" :disabled="busy" @click="open = false">{{ t('cancel') }}</button><button class="primary" :disabled="busy">{{ t('save') }}</button></div>
   </form></UiDialog>

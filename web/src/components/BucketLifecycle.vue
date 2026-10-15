@@ -28,7 +28,7 @@ async function refresh() {
   try { preview.value = operation.value === 'transfer' ? await write<Transfer>(path.value + '/transfer/preview', { target_project: target.value }) : await api<components['schemas']['BucketPreview']>(path.value + '/purge/preview', { method: 'POST' }) }
   catch (failure) { error.value = failure } finally { busy.value = false }
 }
-function begin(kind: typeof operation.value) { operation.value = kind; name.value = ''; preview.value = undefined; error.value = undefined; target.value = choices.value[0]?.value || ''; open.value = true; if (kind !== 'transfer' || target.value) refresh() }
+function begin(action: typeof operation.value) { operation.value = action; name.value = ''; preview.value = undefined; error.value = undefined; target.value = choices.value[0]?.value || ''; open.value = true; if (action !== 'transfer' || target.value) refresh() }
 async function pause() {
   busy.value = true
   try {

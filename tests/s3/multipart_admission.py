@@ -1,8 +1,9 @@
 """Multipart completion quotas in an isolated fault-injection build.
 
 Uses integration.py's environment plus MOKYU_TEST_BINARY, MOKYU_TEST_CONFIG,
-MOKYU_TEST_DATABASE_FILE and MOKYU_TEST_FAULT_DIR. Configure upload_concurrency=4,
-read_concurrency=6 and enough inflight_bytes for at least 10 data slots.
+MOKYU_TEST_DATABASE_FILE and MOKYU_TEST_FAULT_DIR. The derived data budget must
+leave read capacity after every upload slot is occupied. The test bucket must use
+a cache-enabled S3 storage with a short upload flush timeout.
 """
 import http.client
 import json
@@ -50,11 +51,11 @@ def slots(snapshot):
 
 def assert_slots(used):
     actual = slots(status())
-    assert actual == (4 - used, 6, data_slots - used), actual
+    assert actual == (upload_slots - used, read_slots, data_slots - used), actual
 
 
 def released():
-    wait(lambda: slots(status()) == (4, 6, data_slots))
+    wait(lambda: slots(status()) == (upload_slots, read_slots, data_slots))
 
 
 def arm():
@@ -88,31 +89,39 @@ def slowed(fn, **args):
 
 
 initial = status()
-assert initial['resources']['upload_concurrency'] == 4
-assert initial['resources']['read_concurrency'] == 6
+upload_slots = initial['resources']['upload_concurrency']
+read_slots = initial['resources']['read_concurrency']
+assert upload_slots > 0 and read_slots > 0
 data_slots = initial['resources']['data_slots']
-assert data_slots >= 10, 'separate class limits from the shared memory budget'
+assert data_slots > upload_slots, 'separate upload limits from the shared memory budget'
 released()
 warm_key, warm = prefix + 'warm', os.urandom(32768)
 s3.put_object(Bucket=bucket, Key=warm_key, Body=warm, ACL='public-read')
-assert read(warm_key)[0] == warm
-uploads = [prepare(str(n)) for n in range(5)]
+# Wait for publication to settle before asserting cache hits across a held completion.
+wait(lambda: not db.execute("SELECT EXISTS(SELECT 1 FROM pending_uploads p JOIN extents e ON e.chunk_id=p.chunk_id JOIN objects o ON o.stream_id=e.stream_id JOIN buckets b ON b.id=o.bucket_id WHERE b.name=%s AND o.object_key=%s)", (bucket, warm_key)).fetchone()[0])
+def warmed():
+    before = status()
+    assert read(warm_key)[0] == warm
+    after = status()
+    return after['cache_hits'] > before['cache_hits'] and after['backend_gets'] == before['backend_gets']
+wait(warmed)
+uploads = [prepare(str(n)) for n in range(upload_slots + 1)]
 
-# All four workers remain paused after the HTTP handler transfers their permits.
+# All upload workers remain paused after the HTTP handler transfers their permits.
 arm()
-with ThreadPoolExecutor(max_workers=4) as pool:
-    pending = [pool.submit(s3.complete_multipart_upload, **args) for args, _ in uploads[:4]]
+with ThreadPoolExecutor(max_workers=upload_slots) as pool:
+    pending = [pool.submit(s3.complete_multipart_upload, **args) for args, _ in uploads[:upload_slots]]
     try:
         wait(lambda: marker.with_suffix('.hit').exists()
-             and all(state(args) == 'completing' for args, _ in uploads[:4]))
+             and all(state(args) == 'completing' for args, _ in uploads[:upload_slots]))
         assert all(not future.done() for future in pending)
-        assert_slots(4)
-        fifth, _ = uploads[4]
-        slowed(s3.complete_multipart_upload, **fifth)
+        assert_slots(upload_slots)
+        excess, _ = uploads[upload_slots]
+        slowed(s3.complete_multipart_upload, **excess)
         slowed(s3.put_object, Bucket=bucket, Key=prefix + 'blocked', Body=b'blocked')
-        slowed(s3.upload_part, Bucket=bucket, Key=fifth['Key'], UploadId=fifth['UploadId'],
+        slowed(s3.upload_part, Bucket=bucket, Key=excess['Key'], UploadId=excess['UploadId'],
                PartNumber=2, Body=b'blocked')
-        assert state(fifth) == 'active'
+        assert state(excess) == 'active'
         before = status()['backend_gets']
         assert read(warm_key)[0] == warm
         body, response = read(warm_key, Range='bytes=7-1030')
@@ -121,18 +130,18 @@ with ThreadPoolExecutor(max_workers=4) as pool:
             response = requests.get(os.environ['MOKYU_TEST_PUBLIC'] + '/' + warm_key,
                 headers={'Host': os.environ.get('MOKYU_TEST_PUBLIC_HOST', 'media.test'), **headers}, timeout=10)
             assert response.status_code == code and response.content == expected
-        wait(lambda: slots(status()) == (0, 6, data_slots - 4))
-        assert status()['backend_gets'] == before, 'warm GET/Range should stay in cache'
+        wait(lambda: slots(status()) == (0, read_slots, data_slots - upload_slots))
+        assert status()['backend_gets'] == before, ('warm GET/Range should stay in cache', before, status()['backend_gets'])
     finally:
         marker.unlink(missing_ok=True)
     for future in pending:
         assert future.result(timeout=20)['ResponseMetadata']['HTTPStatusCode'] == 200
 released()
-s3.complete_multipart_upload(**uploads[4][0])
+s3.complete_multipart_upload(**uploads[upload_slots][0])
 released()
 for args, data in uploads:
     assert read(args['Key'])[0] == data
-print('PASS four completions fill upload quota; excess Complete/PUT/part return 503; cached S3/public GET and Range remain available', flush=True)
+print('PASS completions fill upload quota; excess Complete/PUT/part return 503; cached S3/public GET and Range remain available', flush=True)
 
 # A checksum mismatch is detected inside the background worker, after admission.
 args, data = prepare('bad-checksum', checksum=True)

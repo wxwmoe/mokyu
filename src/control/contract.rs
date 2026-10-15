@@ -1,8 +1,6 @@
-use crate::app::{App, Bucket};
+use crate::app::App;
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
 use serde::Serialize;
-use serde_json::Value;
 use std::sync::Arc;
 use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -32,49 +30,7 @@ pub(super) struct SessionView {
     pub refresh_token: Option<String>,
 }
 
-#[derive(Serialize, ToSchema, sqlx::FromRow)]
-pub(super) struct BucketView {
-    id: Uuid,
-    project_id: Uuid,
-    storage_id: Option<Uuid>,
-    #[schema(value_type = Vec<crate::authorization::Action>)]
-    pub(super) actions: Vec<String>,
-    name: String,
-    #[serde(rename = "status")]
-    state: String,
-    revision: String,
-    uploads_paused: bool,
-    public_base_url: String,
-    cors: Value,
-    website_enabled: bool,
-    index_document: String,
-    error_document: String,
-    created_at: DateTime<Utc>,
-}
-
-impl From<Bucket> for BucketView {
-    fn from(bucket: Bucket) -> Self {
-        Self {
-            id: bucket.id,
-            project_id: bucket.project_id,
-            storage_id: bucket.storage_id,
-            actions: crate::authorization::Action::ALL
-                .iter()
-                .map(|a| a.name().into())
-                .collect(),
-            name: bucket.name,
-            state: bucket.state,
-            revision: bucket.settings_revision.to_string(),
-            uploads_paused: bucket.uploads_paused,
-            public_base_url: bucket.public_base_url,
-            cors: bucket.cors,
-            website_enabled: bucket.website_enabled,
-            index_document: bucket.index_document,
-            error_document: bucket.error_document,
-            created_at: bucket.created_at,
-        }
-    }
-}
+pub(crate) use crate::model::bucket::BucketView;
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ErrorBody {

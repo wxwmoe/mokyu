@@ -40,7 +40,11 @@ const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 pub struct Storage {
     pub access: Arc<crate::status::access::Access>,
     maintenance: Arc<std::sync::atomic::AtomicBool>,
-    pub db: sqlx::PgPool,
+    physical: Arc<dyn crate::model::PhysicalStore>,
+    permit_store: Arc<dyn crate::model::StoragePermitStore>,
+    profile_store: Arc<dyn crate::model::StorageProfileStore>,
+    managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
+    record_store: Arc<dyn crate::model::StorageRecordStore>,
     pub source_gate: tokio::sync::RwLock<()>,
     physical_pins: Mutex<HashMap<Uuid, std::sync::Weak<AtomicUsize>>>,
     pack_misses: Mutex<HashMap<i64, std::sync::Weak<PackFetch>>>,
@@ -87,25 +91,11 @@ pub struct Storage {
     operations: [Arc<crate::status::stats::Counters>; 4],
 }
 
-pub(crate) type StoreRow = (
-    Uuid,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    String,
-    Option<Vec<u8>>,
-    Option<Vec<u8>>,
-    serde_json::Value,
-    i64,
-);
-
 async fn build_store(
     options: StoreOptions,
     secrets: &Secrets,
-    db: &sqlx::PgPool,
-    row: StoreRow,
+    permit_store: &Arc<dyn crate::model::StoragePermitStore>,
+    row: crate::model::StorageRecord,
     profile: &StorageProfile,
     base_compression: &crate::content::compression::Config,
     cpu_jobs: usize,
@@ -114,7 +104,7 @@ async fn build_store(
     aging: Duration,
     permit_holder: Uuid,
 ) -> Result<Arc<StoreBackend>> {
-    let (
+    let crate::model::StorageRecord {
         id,
         store_type,
         path,
@@ -126,7 +116,7 @@ async fn build_store(
         secret,
         identity_marker,
         revision,
-    ) = row;
+    } = row;
     let is_local = store_type == "local";
     let record = StoreRecord {
         id,
@@ -156,7 +146,7 @@ async fn build_store(
         identity_ready: false.into(),
         identity_check: tokio::sync::Mutex::new(()),
         reads: StoreGate::new(
-            db,
+            permit_store,
             id,
             "read",
             profile.read_concurrency.map_or(defaults.0, |n| n as usize),
@@ -165,7 +155,7 @@ async fn build_store(
             permit_holder,
         ),
         writes: StoreGate::new(
-            db,
+            permit_store,
             id,
             "upload",
             profile
@@ -176,7 +166,7 @@ async fn build_store(
             permit_holder,
         ),
         controls: StoreGate::new(
-            db,
+            permit_store,
             id,
             "control",
             profile
@@ -187,7 +177,7 @@ async fn build_store(
             permit_holder,
         ),
         pack: StoreGate::new(
-            db,
+            permit_store,
             id,
             "pack",
             profile.pack_concurrency.max(1) as usize,
@@ -196,7 +186,7 @@ async fn build_store(
             permit_holder,
         ),
         integrity: StoreGate::new(
-            db,
+            permit_store,
             id,
             "integrity",
             profile.integrity_concurrency.max(1) as usize,
@@ -205,7 +195,7 @@ async fn build_store(
             permit_holder,
         ),
         maintenance: StoreGate::new(
-            db,
+            permit_store,
             id,
             "maintenance",
             profile
@@ -217,7 +207,7 @@ async fn build_store(
             permit_holder,
         ),
         migration: StoreGate::new(
-            db,
+            permit_store,
             id,
             "migration",
             profile
@@ -247,7 +237,7 @@ async fn build_store(
             .as_deref()
             .map(config::cache_bytes)
             .transpose()?,
-        pack_enabled: profile.pack_enabled,
+        pack_config: Arc::new(profile.pack_config()),
     }))
 }
 
@@ -256,7 +246,11 @@ impl Storage {
         c: &Config,
         secrets: Arc<Secrets>,
         budget: &Budget,
-        db: sqlx::PgPool,
+        physical: Arc<dyn crate::model::PhysicalStore>,
+        permit_store: Arc<dyn crate::model::StoragePermitStore>,
+        profile_store: Arc<dyn crate::model::StorageProfileStore>,
+        managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
+        record_store: Arc<dyn crate::model::StorageRecordStore>,
         maintenance: Arc<std::sync::atomic::AtomicBool>,
         cluster_mode: bool,
         use_target: bool,
@@ -264,12 +258,8 @@ impl Storage {
         let pack_units = budget.pack_memory_units;
         let mut compression = c.local_compression.clone();
         compression.context_idle_timeout = c.instance.compression_idle_timeout.clone();
-        let rows: Vec<StoreRow> = if use_target {
-            sqlx::query_as(
-                "SELECT s.id,s.type,s.path,s.endpoint_url,s.remote_bucket_name,s.region,s.prefix,s.access_key_encrypted,s.secret_key_encrypted,s.identity_marker,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.enabled ORDER BY s.created_at,s.id",
-            )
-            .fetch_all(&db)
-            .await?
+        let rows: Vec<crate::model::StorageRecord> = if use_target {
+            record_store.enabled().await?
         } else {
             Vec::new()
         };
@@ -312,12 +302,13 @@ impl Storage {
             budget.storage_upload_slots,
             budget.storage_control_slots,
         );
-        let storage_id = rows.first().map(|row| row.0);
+        let storage_id = rows.first().map(|row| row.id);
         let permit_holder = Uuid::new_v4();
         let mut targets = HashMap::with_capacity(rows.len());
         for row in rows {
-            let id = row.0;
-            let profile = StorageProfile::load(&db, id)
+            let id = row.id;
+            let profile = profile_store
+                .load(id)
                 .await
                 .with_context(|| format!("storage profile is missing for {id}"))?;
             targets.insert(
@@ -325,7 +316,7 @@ impl Storage {
                 build_store(
                     StoreOptions::from_profile(&profile)?,
                     &secrets,
-                    &db,
+                    &permit_store,
                     row,
                     &profile,
                     &compression,
@@ -343,7 +334,11 @@ impl Storage {
             access: Arc::new(crate::status::access::Access::new(
                 budget.cache_entries.clamp(128, 8192),
             )),
-            db,
+            physical,
+            permit_store,
+            profile_store,
+            managed_keys,
+            record_store,
             source_gate: tokio::sync::RwLock::new(()),
             physical_pins: Mutex::new(HashMap::new()),
             pack_misses: Mutex::new(HashMap::new()),
@@ -464,12 +459,8 @@ impl Storage {
                 self.min_compression_savings_percent,
             ))
     }
-    pub(crate) fn pack_enabled(&self, storage_id: Uuid) -> bool {
-        self.targets
-            .read()
-            .unwrap()
-            .get(&storage_id)
-            .is_none_or(|target| target.pack_enabled)
+    pub(crate) fn pack_config(&self, storage: Uuid) -> Result<Arc<crate::content::pack::Config>> {
+        Ok(self.store_backend(storage)?.pack_config.clone())
     }
     pub(crate) async fn pack_permit(
         &self,
@@ -491,21 +482,18 @@ impl Storage {
         }
     }
     pub async fn refresh_store(&self, storage_id: Uuid) -> Result<()> {
-        let row: Option<StoreRow> = sqlx::query_as(
-            "SELECT s.id,s.type,s.path,s.endpoint_url,s.remote_bucket_name,s.region,s.prefix,s.access_key_encrypted,s.secret_key_encrypted,s.identity_marker,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=$1 AND s.enabled",
-        )
-        .bind(storage_id)
-        .fetch_optional(&self.db)
-        .await?;
+        let row = self.record_store.enabled_by_id(storage_id).await?;
         let backend = if let Some(row) = row {
-            let profile = StorageProfile::load(&self.db, storage_id)
+            let profile = self
+                .profile_store
+                .load(storage_id)
                 .await
                 .with_context(|| format!("storage profile is missing for {storage_id}"))?;
             Some(
                 build_store(
                     StoreOptions::from_profile(&profile)?,
                     &self.secrets,
-                    &self.db,
+                    &self.permit_store,
                     row,
                     &profile,
                     &self.base_compression,
@@ -529,11 +517,8 @@ impl Storage {
         Ok(())
     }
     pub async fn refresh_storages(&self) -> Result<()> {
-        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
-            "SELECT s.id,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.enabled ORDER BY s.created_at,s.id",
-        )
-                .fetch_all(&self.db)
-                .await?;
+        let rows = self.record_store.enabled().await?;
+        let revisions: HashMap<Uuid, i64> = rows.iter().map(|row| (row.id, row.revision)).collect();
         let known: HashMap<Uuid, i64> = self
             .targets
             .read()
@@ -541,20 +526,14 @@ impl Storage {
             .iter()
             .map(|(id, target)| (*id, target.revision))
             .collect();
-        for (id, revision) in rows {
-            if known.get(&id) != Some(&revision) {
-                self.refresh_store(id).await?;
+        for (id, revision) in &revisions {
+            if known.get(id) != Some(revision) {
+                self.refresh_store(*id).await?;
             }
         }
-        for id in known.keys().copied().collect::<Vec<_>>() {
-            let exists: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE id=$1 AND enabled)")
-                    .bind(id)
-                    .fetch_one(&self.db)
-                    .await?;
-            if !exists {
-                self.refresh_store(id).await?;
-            }
+        let mut targets = self.targets.write().unwrap();
+        for id in known.keys().filter(|id| !revisions.contains_key(id)) {
+            targets.remove(id);
         }
         Ok(())
     }
@@ -590,7 +569,7 @@ impl Storage {
         Ok(Path::from(format!("packs/{}", chunk_name(id))))
     }
     fn parse_path(path: &str) -> Option<Uuid> {
-        parse_chunk_name(path.strip_prefix("chunks/")?)
+        parse_chunk_name(path).or_else(|| parse_chunk_name(path.strip_prefix("chunks/")?))
     }
     fn parse_physical_path(path: &str) -> Option<Uuid> {
         Self::parse_path(path).or_else(|| parse_chunk_name(path.strip_prefix("packs/")?))
@@ -613,12 +592,19 @@ impl Storage {
             )
             .await?;
         let offset = Path::parse(cursor.unwrap_or(""))?;
-        Ok(target
-            .backend
-            .list_with_offset(None, &offset)
-            .take(limit)
-            .try_collect()
-            .await?)
+        let mut rows = target.backend.list_with_offset(None, &offset);
+        if !target.is_local {
+            return Ok(rows.take(limit).try_collect().await?);
+        }
+        // Local listings are unordered; keep the first bounded page after the cursor.
+        let mut page = std::collections::BTreeMap::new();
+        while let Some(row) = rows.try_next().await? {
+            page.insert(row.location.clone(), row);
+            if page.len() > limit {
+                page.pop_last();
+            }
+        }
+        Ok(page.into_values().collect())
     }
     async fn ensure_storage_verified(&self, storage_id: Uuid) -> Result<()> {
         let target = self.store_backend(storage_id)?;
@@ -627,32 +613,23 @@ impl Storage {
         }
         let _check = target.identity_check.lock().await;
         if !target.identity_ready.load(Ordering::Acquire) {
-            self.check_storage_inner(
-                storage_id,
-                &target,
-                &self.db,
-                self.maintenance.load(Ordering::Acquire),
-                true,
-                true,
-            )
-            .await?;
+            self.check_storage_inner(&target).await?;
         }
         Ok(())
     }
-    pub async fn check_identity(&self, _db: &sqlx::PgPool, maintenance: bool) -> Result<()> {
+    pub async fn check_identity(&self) -> Result<()> {
         let ids = self.storage_ids();
         ensure!(!ids.is_empty(), "no store is configured");
         for id in ids {
-            self.check_storage(id, maintenance).await?;
+            self.check_storage(id).await?;
         }
         Ok(())
     }
-    pub async fn check_storage(&self, storage_id: Uuid, maintenance: bool) -> Result<()> {
+    pub async fn check_storage(&self, storage_id: Uuid) -> Result<()> {
         let target = self.store_backend(storage_id)?;
         let _check = target.identity_check.lock().await;
         target.identity_ready.store(false, Ordering::Release);
-        self.check_storage_inner(storage_id, &target, &self.db, maintenance, true, true)
-            .await?;
+        self.check_storage_inner(&target).await?;
         Ok(())
     }
     pub(crate) async fn initialize_store(&self, record: StoreRecord) -> Result<()> {
@@ -673,15 +650,11 @@ impl Storage {
             )
             .await?;
         }
-        let profile_exists: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_profiles WHERE storage_id=$1)")
-                .bind(record.id)
-                .fetch_one(&self.db)
-                .await?;
+        let profile_exists: bool = self.profile_store.exists(record.id).await?;
         let options = if let Some(profile) = profile {
             StoreOptions::from_profile(profile)?
         } else if profile_exists {
-            StoreOptions::from_profile(&StorageProfile::load(&self.db, record.id).await?)?
+            StoreOptions::from_profile(&self.profile_store.load(record.id).await?)?
         } else {
             StoreOptions::new(&self.base_storage)?
         };
@@ -695,7 +668,9 @@ impl Storage {
         target.initialize().await
     }
     pub(crate) async fn verify_store_record(&self, record: StoreRecord) -> Result<()> {
-        let profile = StorageProfile::load(&self.db, record.id)
+        let profile = self
+            .profile_store
+            .load(record.id)
             .await
             .with_context(|| format!("storage profile is missing for {}", record.id))?;
         let target = VerifiedStore::build(
@@ -711,15 +686,7 @@ impl Storage {
             .await?;
         target.verify().await
     }
-    async fn check_storage_inner(
-        &self,
-        _storage_id: Uuid,
-        target: &StoreBackend,
-        _db: &sqlx::PgPool,
-        _maintenance: bool,
-        _allow_initialize: bool,
-        _persist: bool,
-    ) -> Result<()> {
+    async fn check_storage_inner(&self, target: &StoreBackend) -> Result<()> {
         let _permit = target.reads.acquire().await?;
         let result = target
             .backend
@@ -758,8 +725,8 @@ impl Storage {
     async fn restore_upload_pins(&self) -> Result<()> {
         let mut after = 0i64;
         loop {
-            let rows: Vec<(i64,Option<Uuid>,Option<String>,i64)> = sqlx::query_as("SELECT u.chunk_id,u.staging_storage_id,u.staging_object_key,u.staged_size FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE u.chunk_id>$1 ORDER BY u.chunk_id LIMIT 512")
-                .bind(after).fetch_all(&self.db).await?;
+            let rows: Vec<(i64, Option<Uuid>, Option<String>, i64)> =
+                self.physical.upload_pins(after).await?;
             if rows.is_empty() {
                 break;
             }
@@ -834,50 +801,17 @@ impl Storage {
         Ok(id)
     }
     async fn claim_staging(&self, storage_id: Uuid, key: &str, bytes: u64) -> Result<()> {
-        let limit = self.staging_bytes_limit.unwrap_or(DEFAULT_STAGING_LIMIT);
-        let mut tx = self.db.begin().await?;
-        let lock_key = format!("mokyu:staging:{storage_id}");
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-            .bind(lock_key)
-            .execute(&mut *tx)
-            .await?;
-        let existing: Option<i64> = sqlx::query_scalar(
-            "SELECT bytes FROM staging_objects WHERE storage_id=$1 AND object_key=$2 FOR UPDATE",
-        )
-        .bind(storage_id)
-        .bind(key)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some(existing) = existing {
-            ensure!(existing == bytes as i64, "staging object size changed");
-            tx.commit().await?;
-            return Ok(());
-        }
-        let used: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(sum(bytes),0) FROM staging_objects WHERE storage_id=$1",
-        )
-        .bind(storage_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        ensure!(
-            used >= 0 && (used as u64).saturating_add(bytes) <= limit,
-            "shared staging quota exhausted"
-        );
-        sqlx::query("INSERT INTO staging_objects(storage_id,object_key,bytes) VALUES($1,$2,$3)")
-            .bind(storage_id)
-            .bind(key)
-            .bind(i64::try_from(bytes)?)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(())
+        self.physical
+            .claim_staging(
+                storage_id,
+                key,
+                bytes,
+                self.staging_bytes_limit.unwrap_or(DEFAULT_STAGING_LIMIT),
+            )
+            .await
     }
     async fn release_staging(&self, storage_id: Uuid, key: &str) -> Result<()> {
-        sqlx::query("DELETE FROM staging_objects WHERE storage_id=$1 AND object_key=$2")
-            .bind(storage_id)
-            .bind(key)
-            .execute(&self.db)
-            .await?;
+        self.physical.release_staging(storage_id, key).await?;
         Ok(())
     }
     async fn put_staged(&self, storage_id: Uuid, key: &str, data: Bytes) -> Result<()> {
@@ -976,12 +910,7 @@ impl Storage {
         self.disk.remove_fragment(id).await
     }
     pub(crate) async fn reconcile_staging(&self, storage_id: Option<Uuid>) -> Result<()> {
-        let rows: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT s.storage_id,s.object_key FROM staging_objects s WHERE ($1::uuid IS NULL OR s.storage_id=$1) AND s.created_at < now()-interval '5 minutes' AND NOT EXISTS (SELECT 1 FROM pending_uploads p WHERE p.staging_storage_id=s.storage_id AND p.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.staging_storage_id=s.storage_id AND u.staging_object_key=s.object_key) ORDER BY s.created_at LIMIT 128",
-        )
-        .bind(storage_id)
-        .fetch_all(&self.db)
-        .await?;
+        let rows: Vec<(Uuid, String)> = self.physical.stale_staging(storage_id).await?;
         for (storage_id, key) in rows {
             if let Err(error) = self.delete_staged(storage_id, &key).await {
                 tracing::warn!(%storage_id, %key, error=%error, "orphan staging object cleanup failed");
@@ -1268,22 +1197,16 @@ impl Storage {
         Ok(())
     }
     async fn cached(&self, c: &Chunk) -> Result<Option<Bytes>> {
-        let staged: Option<(Uuid, String)> = sqlx::query_as(
-            "SELECT staging_storage_id,staging_object_key FROM pending_uploads WHERE chunk_id=$1 AND staging_storage_id IS NOT NULL",
-        )
-        .bind(c.id)
-        .fetch_optional(&self.db)
-        .await?;
+        let staged: Option<(Uuid, String)> = self.physical.pending_source(c.id).await?;
         let cache_id = (!c.location_id.is_nil())
             .then_some(c.location_id)
             .or_else(|| {
                 staged
                     .as_ref()
                     .and_then(|(_, key)| parse_upload_cache_name(key))
-            });
-        if self.local_cache(c.storage_id).enabled
-            && let Some(cache_id) = cache_id
-        {
+            })
+            .unwrap_or_else(|| cache::cache_id(c));
+        if self.local_cache(c.storage_id).enabled {
             let cached = {
                 let mut fifo = self.fifo.lock().await;
                 fifo.entries.get_mut(&cache_id).map(|e| {
@@ -1329,14 +1252,12 @@ impl Storage {
             .lock()
             .unwrap()
             .keys()
-            .any(|id| Some(*id) == cache_id);
-        if pending
-            && sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'))")
-                .bind(c.id).fetch_one(&self.db).await? {
+            .any(|id| *id == cache_id);
+        if pending && self.physical.pending_only(c.id).await? {
             return Err(anyhow::anyhow!("pending upload cache is missing or corrupt for chunk {}; preserve data/chunks and restore its durable source", c.id).context(codec::IntegrityError::PendingUnavailable));
         }
-        if let Err(e) = self.invalidate(c.location_id).await {
-            tracing::warn!(location_id=%c.location_id,error=%e,"cache invalidation failed; falling back to backend");
+        if let Err(e) = self.invalidate(cache_id).await {
+            tracing::warn!(%cache_id,error=%e,"cache invalidation failed; falling back to backend");
         }
         Ok(None)
     }
@@ -1368,7 +1289,7 @@ impl Storage {
             return Ok(());
         };
         let storage = self.clone();
-        let id = c.location_id;
+        let id = cache::cache_id(c);
         let (_, _, threshold) = self.compression_for(c.storage_id);
         let compressed = codec::cache_compressed(c, threshold);
         tokio::spawn(async move {
@@ -1558,8 +1479,7 @@ impl Storage {
         }
     }
     pub async fn register_location(&self, c: &Chunk) -> Result<()> {
-        sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,location_id,storage_id,standalone_size,standalone_compressed,nonce,state,created_at,unreferenced_at,encryption_algorithm,block_key_id) VALUES($1,$2,$3,$4,$5,$6,$7,'uploading',$8,now(),$9,$10)")
-            .bind(c.encoding_id).bind(c.id).bind(c.location_id).bind(c.storage_id).bind(c.stored_size).bind(c.compressed).bind(&c.nonce).bind(c.created_at).bind(&c.algorithm).bind(c.block_key_id).execute(&self.db).await?;
+        self.physical.register_encoding(c).await?;
         Ok(())
     }
     fn physical_pin(&self, id: Uuid) -> CachePin {
@@ -1586,16 +1506,16 @@ impl Storage {
     }
     async fn source(&self, id: i64) -> Result<Source> {
         let _gate = self.source_gate.read().await;
-        let physical:Option<Chunk>=sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size AS standalone_size,l.encryption_algorithm AS encryption_algorithm,l.block_key_id,l.standalone_compressed AS standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready'")
-            .bind(id).fetch_optional(&self.db).await?;
-        if let Some(c) = physical {
-            let pin = self.physical_pin(c.location_id);
-            return Ok(Source::Chunk(c, pin));
+        match self.physical.source(id).await? {
+            crate::model::PhysicalSource::Chunk(chunk) => {
+                let pin = self.physical_pin(chunk.location_id);
+                Ok(Source::Chunk(chunk, pin))
+            }
+            crate::model::PhysicalSource::Pack(pack) => {
+                let pin = self.physical_pin(pack.location_id);
+                Ok(Source::Pack(pack, pin))
+            }
         }
-        let p:crate::content::pack::Pack=sqlx::query_as("SELECT p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=$1 AND c.state='ready' AND p.state='ready'")
-            .bind(id).fetch_optional(&self.db).await?.context(codec::IntegrityError::Metadata)?;
-        let pin = self.physical_pin(p.location_id);
-        Ok(Source::Pack(p, pin))
     }
     pub async fn pack_memory(&self, size: usize) -> Result<tokio::sync::OwnedSemaphorePermit> {
         let workspace = self.compression.workspace_bytes()?;
@@ -1693,13 +1613,13 @@ impl Storage {
         if self.secrets.key(&name).is_some() {
             return Ok(());
         }
-        crate::database::load_runtime_key(&self.db, &self.secrets, &name).await
+        self.managed_keys.ensure_loaded(&self.secrets, &name).await
     }
     pub(crate) async fn ensure_key_loaded_name(&self, name: &str) -> Result<()> {
         if name.is_empty() || self.secrets.key(name).is_some() {
             return Ok(());
         }
-        crate::database::load_runtime_key(&self.db, &self.secrets, name).await
+        self.managed_keys.ensure_loaded(&self.secrets, name).await
     }
 
     pub(crate) async fn load_pack(
@@ -1806,11 +1726,7 @@ impl Storage {
     }
     async fn fill_pack(self: &Arc<Self>, loaded: &LoadedPack) -> Result<()> {
         let ids: Vec<i64> = loaded.data.members.iter().map(|m| m.id).collect();
-        let chunks: Vec<Chunk> =
-            sqlx::query_as("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.location_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE c.id=ANY($1) AND c.state='ready'")
-                .bind(ids)
-                .fetch_all(&self.db)
-                .await?;
+        let chunks: Vec<Chunk> = self.physical.ready_chunks(&ids).await?;
         for c in chunks {
             self.fill_raw(&c, loaded.data.chunk(&c)?).await?;
         }
@@ -1822,7 +1738,7 @@ impl Storage {
         }
         let (data, compressed) = self.cache_payload(c, raw).await?;
         let policy = self.local_cache(c.storage_id);
-        self.fill_owned(c.location_id, &data, compressed, policy)
+        self.fill_owned(cache::cache_id(c), &data, compressed, policy)
             .await
     }
     pub async fn cache_payload(&self, c: &Chunk, raw: Bytes) -> Result<(Bytes, bool)> {
@@ -1872,7 +1788,7 @@ impl Storage {
         mode: crate::worker::integrity::Mode,
         physical_detail: &mut serde_json::Value,
     ) -> Result<u64> {
-        let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'))").bind(c.id).fetch_one(&self.db).await?;
+        let pending: bool = self.physical.pending_only(c.id).await?;
         if pending {
             *physical_detail = serde_json::json!({"source":"pending","storage_id":c.storage_id});
             ensure!(
@@ -1908,25 +1824,12 @@ impl Storage {
                 p.validate(&self.secrets)?;
                 let capacity = p.payload_size().context(codec::IntegrityError::Metadata)?;
                 ensure!(
-                    sqlx::query_scalar::<_, bool>(
-                        "SELECT EXISTS(SELECT 1 FROM pack_members WHERE pack_id=$1 AND chunk_id=$2)"
-                    )
-                    .bind(p.id)
-                    .bind(c.id)
-                    .fetch_one(&self.db)
-                    .await?,
+                    self.physical.pack_contains(p.id, c.id).await?,
                     codec::IntegrityError::Metadata
                 );
                 // Persistent task results avoid downloading one physical pack per logical chunk.
                 let _inspection = self.inspection.lock().await;
-                if let Some((code,)) = sqlx::query_as::<_, (Option<String>,)>(
-                    "SELECT error_code FROM integrity_packs WHERE task_id=$1 AND pack_id=$2",
-                )
-                .bind(task)
-                .bind(p.id)
-                .fetch_optional(&self.db)
-                .await?
-                {
+                if let Some(code) = self.physical.inspection(task, p.id).await? {
                     if let Some(code) = code {
                         return Err(codec::IntegrityError::from_code(&code)
                             .context("invalid inspection result")?
@@ -1934,33 +1837,70 @@ impl Storage {
                     }
                     return Ok(0);
                 }
-                let result:Result<u64>=async {
-                    let members:Vec<(Chunk,i64)>=sqlx::query_as::<_,InspectionMember>("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.location_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,m.offset_bytes FROM pack_members m JOIN chunks c ON c.id=m.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE m.pack_id=$1 ORDER BY m.ordinal LIMIT 4097")
-                        .bind(p.id).fetch_all(&self.db).await?.into_iter().map(|m|(m.chunk,m.offset_bytes)).collect();
-                    let mut offset=0i64;
-                    ensure!(members.len()==p.member_count as usize,codec::IntegrityError::Metadata);
-                    for (c,start) in &members {ensure!(*start==offset && c.raw_size>0,codec::IntegrityError::Metadata);offset+=i64::from(c.raw_size);}
-                    ensure!(offset==p.raw_size,codec::IntegrityError::Metadata);
-                    if matches!(mode,crate::worker::integrity::Mode::Metadata) {return Ok(0);}
-                    if matches!(mode,crate::worker::integrity::Mode::Head) {
-                        let storage_id = p.storage_id.context(codec::IntegrityError::Metadata)?;
-                        let meta=self.head_path_for(storage_id, &self.pack_path_for(storage_id, p.location_id)?).await?;
-                        ensure!(Some(meta.size as i64)==p.stored_size,codec::IntegrityError::Length);return Ok(0);
+                let result: Result<u64> = async {
+                    let members: Vec<(Chunk, i64)> = self.physical.inspection_members(p.id).await?;
+                    let mut offset = 0i64;
+                    ensure!(
+                        members.len() == p.member_count as usize,
+                        codec::IntegrityError::Metadata
+                    );
+                    for (c, start) in &members {
+                        ensure!(
+                            *start == offset && c.raw_size > 0,
+                            codec::IntegrityError::Metadata
+                        );
+                        offset += i64::from(c.raw_size);
                     }
-                    let _memory=self.pack_memory(capacity).await?;
+                    ensure!(offset == p.raw_size, codec::IntegrityError::Metadata);
+                    if matches!(mode, crate::worker::integrity::Mode::Metadata) {
+                        return Ok(0);
+                    }
+                    if matches!(mode, crate::worker::integrity::Mode::Head) {
+                        let storage_id = p.storage_id.context(codec::IntegrityError::Metadata)?;
+                        let meta = self
+                            .head_path_for(
+                                storage_id,
+                                &self.pack_path_for(storage_id, p.location_id)?,
+                            )
+                            .await?;
+                        ensure!(
+                            Some(meta.size as i64) == p.stored_size,
+                            codec::IntegrityError::Length
+                        );
+                        return Ok(0);
+                    }
+                    let _memory = self.pack_memory(capacity).await?;
                     let storage_id = p.storage_id.context(codec::IntegrityError::Metadata)?;
-                    let data=self.read_path_for(storage_id, &self.pack_path_for(storage_id, p.location_id)?,capacity+16).await?;
-                    let size=data.len() as u64;
-                    let permit=self.cpu.clone().acquire_owned().await?;let pool=self.compression.clone();let secrets=self.secrets.clone();let pack=p.clone();
-                    tokio::task::spawn_blocking(move||{
-                        let _permit=permit;let decoded=crate::content::pack::decode(&pack,data,&secrets,&pool)?;
-                        for ((c,offset),member) in members.iter().zip(&decoded.members) {
-                            ensure!(member.id==c.id && member.hash.as_slice()==c.hash && member.len==c.raw_size as usize && member.start==12+44*members.len()+*offset as usize,codec::IntegrityError::Metadata);
+                    let data = self
+                        .read_path_for(
+                            storage_id,
+                            &self.pack_path_for(storage_id, p.location_id)?,
+                            capacity + 16,
+                        )
+                        .await?;
+                    let size = data.len() as u64;
+                    let permit = self.cpu.clone().acquire_owned().await?;
+                    let pool = self.compression.clone();
+                    let secrets = self.secrets.clone();
+                    let pack = p.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        let decoded = crate::content::pack::decode(&pack, data, &secrets, &pool)?;
+                        for ((c, offset), member) in members.iter().zip(&decoded.members) {
+                            ensure!(
+                                member.id == c.id
+                                    && member.hash.as_slice() == c.hash
+                                    && member.len == c.raw_size as usize
+                                    && member.start == 12 + 44 * members.len() + *offset as usize,
+                                codec::IntegrityError::Metadata
+                            );
                         }
-                        Ok::<_,anyhow::Error>(())
-                    }).await??;
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await??;
                     Ok(size)
-                }.await;
+                }
+                .await;
                 let code = result.as_ref().err().and_then(|e| {
                     e.downcast_ref::<codec::IntegrityError>()
                         .map(|e| e.code())
@@ -1973,7 +1913,7 @@ impl Storage {
                         })
                 });
                 if result.is_ok() || code.is_some() {
-                    sqlx::query("INSERT INTO integrity_packs(task_id,pack_id,error_code) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(task).bind(p.id).bind(code).execute(&self.db).await?;
+                    self.physical.record_inspection(task, p.id, code).await?;
                 }
                 result
             }

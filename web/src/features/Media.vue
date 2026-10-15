@@ -36,7 +36,7 @@ const buckets = useQuery({ queryKey: ['buckets'], queryFn: ({ signal }) => api<B
 const current = computed(() => buckets.data.value?.find(item => item.id === bucket.value))
 const query = computed(() => {
   const values: Record<string, string | undefined> = { prefix: prefix.value, after: cursor.value || undefined, limit: pageSize.value }
-  for (const key of ['q', 'mode', 'search_in', 'kind', 'public', 'min_size', 'max_size', 'recursive', 'sort', 'order']) if (route.query[key]) values[key] = String(route.query[key])
+  for (const key of ['q', 'mode', 'search_in', 'category', 'public', 'min_size', 'max_size', 'recursive', 'sort', 'order']) if (route.query[key]) values[key] = String(route.query[key])
   for (const [key, apiKey] of [['from', 'since'], ['to', 'until']] as const) {
     const value = String(route.query[key] || '')
     if (/^\d{4}-\d{2}-\d{2}$/.test(value)) { const time = new Date(value + (key === 'from' ? 'T00:00:00' : 'T23:59:59.999')); if (Number.isFinite(time.getTime())) values[apiKey] = time.toISOString() }
@@ -60,7 +60,7 @@ function pick(item: MediaObject, value: boolean) {
   for (const entry of range) { if (value) next.add(entry.id); else next.delete(entry.id) }
   checked.value = next; anchor = index; selectionShift.value = false
 }
-function operate(kind: MediaAction, items = picks.value) { action.value = kind; actionItems.value = [...items]; selected.value = null; actionOpen.value = true }
+function operate(operation: MediaAction, items = picks.value) { action.value = operation; actionItems.value = [...items]; selected.value = null; actionOpen.value = true }
 function changed() { checked.value = new Set(); objects.refetch() }
 const uploading = ref(false)
 const layout = ref(localValue('mokyu.mediaLayout') === 'gallery' ? 'gallery' : 'list')
@@ -89,7 +89,7 @@ async function refresh() {
 <template>
   <div class="page-heading"><div><p class="eyebrow">{{ t('collection') }}</p><h1>{{ current?.name || t('media') }}</h1><p>{{ t('everything') }}</p></div><div class="heading-actions"><CreateBucket v-if="!bucket" @created="router.push('/media/' + $event.id)" /><RouterLink v-if="current?.actions.includes('bucket.settings')" class="button" :to="'/buckets/' + bucket">{{ t('buckets') }}</RouterLink><button :disabled="buckets.isFetching.value || (bucket !== '' && objects.isFetching.value)" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button><button v-if="current?.status === 'active' && current.actions.includes('object.write')" :disabled="current?.uploads_paused || current?.status !== 'active'" class="primary" @click="uploading = true"><UploadCloud :size="16" />{{ t('uploadTitle') }}</button></div></div>
   <ErrorNotice v-if="buckets.error.value || objects.error.value" :error="buckets.error.value || objects.error.value" />
-  <QuotaPanel v-if="current?.actions.includes('storage.inspect')" kind="bucket" :id="current.id" />
+  <QuotaPanel v-if="current?.actions.includes('storage.inspect')" scope="bucket" :id="current.id" />
   <div v-if="!bucket" class="bucket-grid">
     <RouterLink v-for="item in buckets.data.value" :key="item.id" class="bucket-card" :to="`/media/${item.id}`"><img src="/assets/mokyu-pack.svg" alt="" width="64" height="64"><h2>{{ item.name }}</h2><span>{{ t(item.status) }}</span><ArrowUpRight class="bucket-arrow" :size="19" /></RouterLink>
     <EmptyState v-if="!buckets.isPending.value && !buckets.error.value && !buckets.data.value?.length" :title="t('fresh')" :description="t(session?.role === 'admin' ? 'firstBucket' : 'askForBucket')" />

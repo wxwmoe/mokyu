@@ -30,7 +30,8 @@ def login(username, password):
 
 
 admin = login('tester', os.environ['MOKYU_TEST_PASSWORD'])
-bucket = cli('bucket', 'create', name)
+storage = cli('storage', 'show', os.environ['MOKYU_TEST_STORAGE'])['id']
+bucket = cli('bucket', 'create', name, '--storage', storage)
 credential = cli('cred', 'create', name)
 s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                   aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
@@ -51,7 +52,7 @@ def page(client=admin, **query):
 
 
 def keys(result):
-    return [row['object_key'] for row in result['objects']]
+    return [row['object_key'] for row in result['items']]
 
 
 try:
@@ -70,25 +71,32 @@ try:
     assert keys(page(q='\u53ef\u7231\u732b')) == ['folder/' + '\u53ef\u7231\u732b' + '.png']
     assert keys(page(q='odd/../a +%_#.txt', mode='exact')) == ['odd/../a +%_#.txt']
     assert keys(page(prefix='odd/../', recursive='true')) == ['odd/../a +%_#.txt']
-    assert len(keys(page(kind='image'))) == 3
+    assert len(keys(page(category='image'))) == 3
     assert set(keys(page(min_size='22', max_size='22'))) == {'folder/HELLO.txt', 'folder/sub/hello.webm'}
     assert keys(page(max_size='0')) == ['zero']
     print('PASS literal wildcards, Unicode trigrams, short-prefix fallback, raw paths and metadata filters', flush=True)
+
+    with db.transaction():
+        db.execute('LOCK TABLE objects IN ACCESS EXCLUSIVE MODE')
+        timed_out = admin.get(path, params={'q': 'hello'}, timeout=10)
+        assert timed_out.status_code == 422 and timed_out.json()['code'] == 'SearchTooBroad', timed_out.text
+    assert keys(page(q='hello'))
+    print('PASS bounded search timeout retains its public error and recovers after the lock is released', flush=True)
 
     for sort in ['name', 'size', 'modified']:
         for order in ['asc', 'desc']:
             found, cursor = [], None
             while True:
                 result = page(recursive='true', sort=sort, order=order, limit=2, **({'after': cursor} if cursor else {}))
-                found += result['objects']
-                cursor = result['next']
+                found += result['items']
+                cursor = result['next_cursor']
                 if not cursor:
                     break
             assert len(found) == len(objects) and len(set(row['id'] for row in found)) == len(objects)
             values = [(int(row['size']), row['object_key']) if sort == 'size' else (row['modified_at'], row['object_key']) if sort == 'modified' else row['object_key'] for row in found]
             assert values == sorted(values, reverse=order == 'desc'), values
     first = page(recursive='true', limit=2)
-    assert admin.get(path, params={'recursive': 'true', 'after': first['next'], 'limit': 2, 'kind': 'image'}).status_code == 400
+    assert admin.get(path, params={'recursive': 'true', 'after': first['next_cursor'], 'limit': 2, 'category': 'image'}).status_code == 400
     for query in [{'sort': 'injected'}, {'q': '\0'}, {'min_size': '-1'}, {'limit': 0}, {'max_size': '1', 'min_size': '2'}, {'unused': 'x'}]:
         assert admin.get(path, params=query).status_code in (400, 422), query
     before = admin.get(url + '/api/v1/quotas/bucket/' + bucket['id']).json()
@@ -96,7 +104,7 @@ try:
     assert keys(page(public='true')) == ['a.txt']
     s3.put_object(Bucket=name, Key='a.txt', Body=b'updated', ContentType='video/mp4')
     assert keys(page(public='true')) == []
-    assert 'a.txt' in keys(page(kind='video'))
+    assert 'a.txt' in keys(page(category='video'))
     s3.delete_object(Bucket=name, Key='b.zip')
     assert keys(page(q='b.zip', mode='exact')) == []
     after = admin.get(url + '/api/v1/quotas/bucket/' + bucket['id']).json()
@@ -117,7 +125,7 @@ try:
     foreign = next(b['id'] for b in admin.get(url + '/api/v1/buckets').json() if b['id'] != bucket['id'])
     assert member.get(url + '/api/v1/buckets/' + foreign + '/objects', params={'q': 'hello'}).status_code in (403, 404)
     assert admin.delete(membership).status_code == 204
-    assert member.get(path, params={'recursive': 'true', 'after': first['next'], 'limit': 2}).status_code in (403, 404)
+    assert member.get(path, params={'recursive': 'true', 'after': first['next_cursor'], 'limit': 2}).status_code in (403, 404)
     print('PASS scoped list-only search, hidden instance progress and revocation with an old cursor', flush=True)
 finally:
     if user:

@@ -184,7 +184,7 @@ pub(super) struct ObjectDetail {
     thumbnail: bool,
     touched_at: DateTime<Utc>,
 }
-fn kind(metadata: &Metadata) -> &'static str {
+fn preview_type(metadata: &Metadata) -> &'static str {
     if metadata
         .content_encoding
         .as_deref()
@@ -223,7 +223,10 @@ async fn current(
     if q.key.is_empty() || q.key.len() > 1024 || q.key.contains('\0') {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    actor.principal.require(&app.db, bucket, action).await?;
+    actor
+        .principal
+        .require(app.authorization.as_ref(), bucket, action)
+        .await?;
     let (stream, pin) = app.current(bucket, &q.key).await?;
     if stream.id != q.version {
         return Err(s3s::s3_error!(PreconditionFailed).into());
@@ -239,7 +242,7 @@ pub(super) async fn detail(
 ) -> Result<Json<ObjectDetail>, HttpError> {
     let (stream, _pin) = current(&app, &actor, bucket, &q, Action::List).await?;
     let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
-    let preview = kind(&metadata);
+    let preview = preview_type(&metadata);
     let thumbnail = preview == "image"
         && !metadata
             .content_type
@@ -275,7 +278,7 @@ pub(super) async fn content(
 ) -> Result<Response, HttpError> {
     actor
         .principal
-        .require(&app.db, bucket, Action::Read)
+        .require(app.authorization.as_ref(), bucket, Action::Read)
         .await?;
     crate::http::respond(
         app,
@@ -301,7 +304,7 @@ pub(super) async fn text(
 ) -> Result<Json<TextPreview>, HttpError> {
     let (stream, pin) = current(&app, &actor, bucket, &q, Action::Read).await?;
     let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
-    if kind(&metadata) != "text" {
+    if preview_type(&metadata) != "text" {
         return Err(problem(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "PreviewUnavailable",
@@ -331,7 +334,7 @@ pub(super) async fn thumbnail(
         data
     } else {
         let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
-        if kind(&metadata) != "image" {
+        if preview_type(&metadata) != "image" {
             return Err(problem(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "PreviewUnavailable",

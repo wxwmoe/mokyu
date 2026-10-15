@@ -10,31 +10,13 @@ use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Serialize, sqlx::FromRow, ToSchema)]
-pub(crate) struct Project {
-    id: Uuid,
-    name: String,
-    description: String,
-    builtin: bool,
-    allow_bucket_create: bool,
-    created_at: DateTime<Utc>,
-}
-#[derive(Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProjectInput {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub allow_bucket_create: bool,
-}
+pub(crate) use crate::model::administration::{Project, ProjectInput};
+
 impl ProjectInput {
     fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty()
@@ -47,12 +29,10 @@ impl ProjectInput {
         Ok(())
     }
 }
-pub(crate) async fn list_all(db: &PgPool) -> Result<Vec<Project>> {
-    Ok(
-        sqlx::query_as("SELECT * FROM projects ORDER BY builtin DESC,name LIMIT 1000")
-            .fetch_all(db)
-            .await?,
-    )
+pub(crate) async fn list_all(
+    store: &dyn crate::model::AdministrationStore,
+) -> Result<Vec<Project>> {
+    store.projects().await
 }
 pub(crate) async fn save(
     app: &App,
@@ -61,88 +41,18 @@ pub(crate) async fn save(
     input: ProjectInput,
 ) -> Result<Project> {
     input.validate()?;
-    let mut tx = super::users::admin_transaction(app, principal).await?;
-    sqlx::query("SELECT singleton FROM mokyu_meta FOR UPDATE")
-        .execute(&mut *tx)
-        .await?;
-    let duplicate: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM projects WHERE name=$1 AND ($2::uuid IS NULL OR id<>$2))",
-    )
-    .bind(input.name.trim())
-    .bind(id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if duplicate {
-        return Err(s3s::s3_error!(OperationAborted).into());
-    }
-    let row: Project = if let Some(id) = id {
-        sqlx::query_as("UPDATE projects SET name=$2,description=$3,allow_bucket_create=$4 WHERE id=$1 RETURNING *")
-            .bind(id).bind(input.name.trim()).bind(input.description).bind(input.allow_bucket_create).fetch_optional(&mut *tx).await?.ok_or_else(|| s3s::s3_error!(NoSuchKey))?
-    } else {
-        sqlx::query("UPDATE mokyu_meta SET project_management=true")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query_as("INSERT INTO projects(id,name,description,allow_bucket_create) VALUES($1,$2,$3,$4) RETURNING *")
-            .bind(Uuid::new_v4()).bind(input.name.trim()).bind(input.description).bind(input.allow_bucket_create).fetch_one(&mut *tx).await?
-    };
-    super::audit::checkpoint(&mut tx,if id.is_some(){"project.update"}else{"project.create"},&row.id.to_string(),serde_json::json!({"project_id":row.id,"name":row.name,"allow_bucket_create":row.allow_bucket_create})).await?;
-    tx.commit().await?;
-    Ok(row)
+    app.administration.save_project(principal, id, input).await
 }
 pub(crate) async fn remove(app: &App, principal: &Principal, id: Uuid) -> Result<()> {
     if id == DEFAULT_PROJECT {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
-    let mut tx = super::users::admin_transaction(app, principal).await?;
-    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM projects WHERE id=$1 FOR UPDATE")
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if exists.is_none() {
-        return Err(s3s::s3_error!(NoSuchKey).into());
-    }
-    let dependent: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE project_id=$1) OR EXISTS(SELECT 1 FROM s3_credentials WHERE project_id=$1) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=$1)").bind(id).fetch_one(&mut *tx).await?;
-    if dependent {
-        return Err(s3s::s3_error!(OperationAborted).into());
-    }
-    sqlx::query("DELETE FROM projects WHERE id=$1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    super::audit::checkpoint(
-        &mut tx,
-        "project.delete",
-        &id.to_string(),
-        serde_json::json!({"project_id":id}),
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    app.administration.delete_project(principal, id).await
 }
 pub(crate) async fn mode(app: &App, principal: &Principal, enabled: bool) -> Result<()> {
-    let mut tx = super::users::admin_transaction(app, principal).await?;
-    sqlx::query("SELECT singleton FROM mokyu_meta FOR UPDATE")
-        .execute(&mut *tx)
-        .await?;
-    if !enabled {
-        let dependent: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE NOT builtin) OR EXISTS(SELECT 1 FROM web_users WHERE role='member') OR EXISTS(SELECT 1 FROM project_members)").fetch_one(&mut *tx).await?;
-        if dependent {
-            return Err(s3s::s3_error!(OperationAborted).into());
-        }
-    }
-    sqlx::query("UPDATE mokyu_meta SET project_management=$1")
-        .bind(enabled)
-        .execute(&mut *tx)
-        .await?;
-    super::audit::checkpoint(
-        &mut tx,
-        "project.mode",
-        "",
-        serde_json::json!({"enabled":enabled}),
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    app.administration
+        .set_project_mode(principal, enabled)
+        .await
 }
 
 #[utoipa::path(get, path="/api/v1/projects", responses((status=200, body=Vec<Project>)))]
@@ -150,8 +60,11 @@ pub(super) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<Project>>, HttpError> {
-    let rows = sqlx::query_as("SELECT p.* FROM projects p WHERE $2 OR CASE WHEN $3::uuid IS NOT NULL THEN EXISTS(SELECT 1 FROM token_bucket_access t JOIN buckets b ON b.id=t.bucket_id WHERE t.token_id=$3 AND b.project_id=p.id AND 'bucket.list'=ANY(t.actions)) ELSE EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=p.id AND m.user_id=$1) END ORDER BY p.builtin DESC,p.name LIMIT 1000").bind(actor.id).bind(actor.admin).bind(actor.principal.token_id()).fetch_all(&app.db).await?;
-    Ok(Json(rows))
+    Ok(Json(
+        app.administration
+            .visible_projects(actor.id, actor.admin, actor.principal.token_id())
+            .await?,
+    ))
 }
 #[utoipa::path(post, path="/api/v1/projects", request_body=ProjectInput, responses((status=201, body=Project)))]
 pub(super) async fn create(
@@ -193,9 +106,7 @@ pub(crate) struct ProjectMode {
 #[utoipa::path(get, path="/api/v1/projects/settings", responses((status=200, body=ProjectMode)))]
 pub(super) async fn get_mode(State(app): State<Arc<App>>) -> Result<Json<ProjectMode>, HttpError> {
     Ok(Json(ProjectMode {
-        enabled: sqlx::query_scalar("SELECT project_management FROM mokyu_meta")
-            .fetch_one(&app.db)
-            .await?,
+        enabled: app.administration.project_mode().await?,
     }))
 }
 #[utoipa::path(put, path="/api/v1/projects/settings", request_body=ProjectMode, responses((status=200, body=ProjectMode)))]

@@ -14,34 +14,15 @@ use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Serialize, sqlx::FromRow, ToSchema)]
-pub(crate) struct StorageView {
-    id: Uuid,
-    name: String,
-    #[serde(rename = "type")]
-    storage_type: String,
-    path: Option<String>,
-    endpoint: Option<String>,
-    bucket: Option<String>,
-    region: Option<String>,
-    prefix: String,
-    block_key_id: Option<Uuid>,
-    profile_revision: i64,
-    read_concurrency: Option<i32>,
-    upload_concurrency: Option<i32>,
-    control_concurrency: Option<i32>,
-    enabled: bool,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
+pub(crate) use crate::model::storage::StorageView;
+use crate::model::storage::{StorageEdit, StorageRow};
+use crate::storage::profile::validate as validate_profile;
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StorageInput {
@@ -110,23 +91,6 @@ pub(crate) struct StorageUnpackInput {
     confirmation: Option<String>,
 }
 
-#[derive(Clone, sqlx::FromRow)]
-struct StorageRow {
-    id: Uuid,
-    name: String,
-    r#type: String,
-    path: Option<String>,
-    endpoint_url: Option<String>,
-    remote_bucket_name: Option<String>,
-    region: Option<String>,
-    prefix: String,
-    access_key_encrypted: Option<Vec<u8>>,
-    secret_key_encrypted: Option<Vec<u8>>,
-    identity_marker: serde_json::Value,
-    block_key_id: Option<Uuid>,
-    enabled: bool,
-}
-
 fn validate_name(value: &str) -> anyhow::Result<String> {
     let value = value.trim();
     anyhow::ensure!(
@@ -170,23 +134,6 @@ fn validate_concurrency(value: Option<i32>, field: &'static str) -> anyhow::Resu
     Ok(())
 }
 
-async fn validate_block_key(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    key_id: Option<Uuid>,
-) -> anyhow::Result<()> {
-    let Some(key_id) = key_id else {
-        return Ok(());
-    };
-    let valid: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM managed_keys WHERE id=$1 AND purpose='block' AND revoked_at IS NULL)",
-    )
-    .bind(key_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    anyhow::ensure!(valid, "active block key was not found");
-    Ok(())
-}
-
 fn required(value: Option<String>, field: &'static str) -> anyhow::Result<String> {
     let value = value.context(field)?;
     anyhow::ensure!(!value.trim().is_empty(), "{field} must not be empty");
@@ -203,9 +150,6 @@ fn endpoint(value: String) -> anyhow::Result<String> {
     );
     Ok(value)
 }
-
-const VIEW_ORDERED: &str = "SELECT s.id,s.name,s.type AS storage_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id ORDER BY s.name";
-const VIEW_BY_ID: &str = "SELECT s.id,s.name,s.type AS storage_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=$1";
 
 fn row_record(row: &StorageRow) -> BackendRecord {
     BackendRecord {
@@ -228,7 +172,7 @@ fn build_record(
     app: &App,
     id: Uuid,
     name: String,
-    kind: String,
+    storage_type: String,
     path: Option<String>,
     endpoint_value: Option<String>,
     bucket: Option<String>,
@@ -238,51 +182,52 @@ fn build_record(
     secret_key: Option<String>,
     identity_marker: serde_json::Value,
 ) -> anyhow::Result<BackendRecord> {
-    let (path, endpoint_url, remote_bucket_name, region, access, secret) = if kind == "local" {
-        anyhow::ensure!(
-            endpoint_value.is_none()
-                && bucket.is_none()
-                && region.is_none()
-                && access_key.is_none()
-                && secret_key.is_none(),
-            "local storages cannot include S3 settings"
-        );
-        (
-            Some(required(
-                path.or_else(|| Some("/data/storage".into())),
-                "storage path",
-            )?),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-    } else {
-        anyhow::ensure!(path.is_none(), "S3 storages cannot include a local path");
-        let access_key = required(access_key, "S3 access key")?;
-        let secret_key = required(secret_key, "S3 secret key")?;
-        (
-            None,
-            Some(endpoint(required(endpoint_value, "S3 endpoint")?)?),
-            Some(required(bucket, "S3 bucket")?),
-            Some(required(region, "S3 region")?),
-            Some(codec::protect(
-                access_key.as_bytes(),
-                &app.secrets.credential_key,
-                format!("storage-{id}-access").as_bytes(),
-            )?),
-            Some(codec::protect(
-                secret_key.as_bytes(),
-                &app.secrets.credential_key,
-                format!("storage-{id}-secret").as_bytes(),
-            )?),
-        )
-    };
+    let (path, endpoint_url, remote_bucket_name, region, access, secret) =
+        if storage_type == "local" {
+            anyhow::ensure!(
+                endpoint_value.is_none()
+                    && bucket.is_none()
+                    && region.is_none()
+                    && access_key.is_none()
+                    && secret_key.is_none(),
+                "local storages cannot include S3 settings"
+            );
+            (
+                Some(required(
+                    path.or_else(|| Some("/data/storage".into())),
+                    "storage path",
+                )?),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        } else {
+            anyhow::ensure!(path.is_none(), "S3 storages cannot include a local path");
+            let access_key = required(access_key, "S3 access key")?;
+            let secret_key = required(secret_key, "S3 secret key")?;
+            (
+                None,
+                Some(endpoint(required(endpoint_value, "S3 endpoint")?)?),
+                Some(required(bucket, "S3 bucket")?),
+                Some(required(region, "S3 region")?),
+                Some(codec::protect(
+                    access_key.as_bytes(),
+                    &app.secrets.credential_key,
+                    format!("storage-{id}-access").as_bytes(),
+                )?),
+                Some(codec::protect(
+                    secret_key.as_bytes(),
+                    &app.secrets.credential_key,
+                    format!("storage-{id}-secret").as_bytes(),
+                )?),
+            )
+        };
     Ok(BackendRecord {
         id,
         name,
-        r#type: kind,
+        r#type: storage_type,
         path,
         endpoint_url,
         remote_bucket_name,
@@ -295,35 +240,17 @@ fn build_record(
     })
 }
 
-async fn lock_mode(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> anyhow::Result<(Uuid, String)> {
-    Ok(sqlx::query_as(
-        "SELECT deployment_id,deployment_mode FROM mokyu_meta WHERE singleton FOR UPDATE",
-    )
-    .fetch_one(&mut **tx)
-    .await?)
-}
-
-async fn load_row(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    name: &str,
-) -> anyhow::Result<StorageRow> {
-    Ok(sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,access_key_encrypted,secret_key_encrypted,identity_marker,block_key_id,enabled FROM storages WHERE name=$1 FOR UPDATE").bind(name).fetch_optional(&mut **tx).await?.context("storage was not found")?)
-}
-
-async fn list_rows(db: &sqlx::PgPool) -> anyhow::Result<Vec<StorageView>> {
-    Ok(sqlx::query_as(VIEW_ORDERED).fetch_all(db).await?)
-}
-
 #[utoipa::path(get, operation_id = "storages", path = "/api/v1/storages", responses((status = 200, body = Vec<StorageView>)))]
 pub(crate) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<StorageView>>, HttpError> {
-    let tx = super::users::admin_transaction(&app, &actor.principal).await?;
-    tx.commit().await?;
-    Ok(Json(list_rows(&app.db).await?))
+    app.authorization
+        .admin(&actor.principal)
+        .await?
+        .finish()
+        .await?;
+    Ok(Json(app.storage_records.list().await?))
 }
 
 #[utoipa::path(
@@ -338,201 +265,17 @@ pub(crate) async fn profile(
     Extension(actor): Extension<Identity>,
     Path(name): Path<String>,
 ) -> Result<Json<StorageProfile>, HttpError> {
-    let tx = super::users::admin_transaction(&app, &actor.principal).await?;
-    tx.commit().await?;
-    let storage_id: Uuid = sqlx::query_scalar("SELECT id FROM storages WHERE name=$1")
-        .bind(&name)
-        .fetch_optional(&app.db)
+    app.authorization
+        .admin(&actor.principal)
+        .await?
+        .finish()
+        .await?;
+    let storage_id: Uuid = app
+        .storage_records
+        .id(&name, None)
         .await?
         .context("storage was not found")?;
-    Ok(Json(StorageProfile::load(&app.db, storage_id).await?))
-}
-
-const PROFILE_COLUMNS: &[&str] = &[
-    "connect_timeout",
-    "request_timeout",
-    "max_retries",
-    "retry_timeout",
-    "priority_aging",
-    "min_storage_duration",
-    "unreferenced_grace",
-    "deleted_chunk_retention",
-    "upload_retention",
-    "cache_enabled",
-    "cache_soft_limit",
-    "cache_entries",
-    "upload_cache",
-    "upload_cache_size",
-    "compression_enabled",
-    "compression_strategy",
-    "compression_level",
-    "compression_sample_level",
-    "compression_min_savings_percent",
-    "compression_min_savings_bytes",
-    "pack_enabled",
-    "pack_max_size",
-    "pack_upload_flush_timeout",
-    "pack_interval",
-    "pack_reuse_interval",
-    "pack_reclaim_interval",
-    "pack_repack_interval",
-    "pack_repack_cooldown",
-    "pack_reclaim_min_savings_bytes",
-    "pack_range_enabled",
-    "pack_range_interval",
-    "pack_range_window",
-    "pack_range_min_downloads",
-    "pack_range_min_savings_percent",
-    "pack_range_min_savings_bytes",
-    "pack_range_repack_after",
-    "pack_range_repack_window",
-    "pack_range_repack_retry_interval",
-    "pack_concurrency",
-    "integrity_concurrency",
-    "integrity_rps",
-    "integrity_bandwidth",
-    "integrity_batch_timeout",
-    "read_concurrency",
-    "upload_concurrency",
-    "control_concurrency",
-    "pack_byte_budget",
-    "integrity_byte_budget",
-    "maintenance_concurrency",
-    "maintenance_byte_budget",
-    "migration_concurrency",
-    "migration_byte_budget",
-];
-
-fn validate_profile(profile: &StorageProfile, storage_type: &str) -> anyhow::Result<()> {
-    use crate::config::{bytes, cache_bytes, seconds};
-    if storage_type == "local"
-        && (profile.cache_enabled
-            || profile.upload_cache
-            || profile.pack_enabled
-            || profile.pack_range_enabled)
-    {
-        return Err(problem(StatusCode::BAD_REQUEST, "LocalStorageFeatures").0);
-    }
-    anyhow::ensure!(
-        matches!(
-            profile.compression_strategy.as_str(),
-            "never" | "always" | "sample"
-        ),
-        "compression strategy must be never, always, or sample"
-    );
-    profile
-        .compression_config(&crate::content::compression::Config::default())
-        .validate()?;
-    for duration in [
-        &profile.connect_timeout,
-        &profile.request_timeout,
-        &profile.retry_timeout,
-        &profile.priority_aging,
-        &profile.unreferenced_grace,
-        &profile.deleted_chunk_retention,
-        &profile.upload_retention,
-        &profile.pack_upload_flush_timeout,
-        &profile.pack_interval,
-        &profile.pack_reuse_interval,
-        &profile.pack_reclaim_interval,
-        &profile.pack_repack_interval,
-        &profile.pack_repack_cooldown,
-        &profile.pack_range_interval,
-        &profile.pack_range_window,
-        &profile.pack_range_repack_after,
-        &profile.pack_range_repack_window,
-        &profile.pack_range_repack_retry_interval,
-        &profile.integrity_batch_timeout,
-    ] {
-        seconds(duration)?;
-    }
-    if profile.min_storage_duration != "0s" {
-        seconds(&profile.min_storage_duration)?;
-    }
-    for size in [
-        &profile.pack_max_size,
-        &profile.pack_reclaim_min_savings_bytes,
-        &profile.pack_range_min_savings_bytes,
-    ] {
-        bytes(size)?;
-    }
-    for size in [&profile.cache_soft_limit, &profile.upload_cache_size]
-        .into_iter()
-        .flatten()
-    {
-        cache_bytes(size)?;
-    }
-    for size in [
-        &profile.integrity_bandwidth,
-        &profile.pack_byte_budget,
-        &profile.integrity_byte_budget,
-        &profile.maintenance_byte_budget,
-        &profile.migration_byte_budget,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        bytes(size)?;
-    }
-    anyhow::ensure!(
-        (0..=100).contains(&profile.max_retries),
-        "retries must be 0..100"
-    );
-    anyhow::ensure!(
-        (0..=100).contains(&profile.compression_min_savings_percent)
-            && profile.compression_min_savings_bytes >= 0,
-        "compression savings must be nonnegative and at most 100 percent"
-    );
-    for limit in [
-        profile.read_concurrency,
-        profile.upload_concurrency,
-        profile.control_concurrency,
-        profile.maintenance_concurrency,
-        profile.migration_concurrency,
-        Some(profile.pack_concurrency),
-        Some(profile.integrity_concurrency),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        anyhow::ensure!(limit > 0, "concurrency must be positive");
-    }
-    anyhow::ensure!(
-        profile.integrity_rps.is_none_or(|v| v > 0) && profile.cache_entries.is_none_or(|v| v > 0),
-        "rate and entry limits must be positive"
-    );
-    anyhow::ensure!(
-        profile.pack_range_min_downloads > 0
-            && (1..=100).contains(&profile.pack_range_min_savings_percent),
-        "invalid pack range thresholds"
-    );
-    Ok(())
-}
-
-async fn save_profile(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    profile: &StorageProfile,
-) -> anyhow::Result<()> {
-    let columns = PROFILE_COLUMNS.join(",");
-    let requested = PROFILE_COLUMNS
-        .iter()
-        .map(|column| format!("requested.{column}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let statement = format!(
-        "UPDATE storage_profiles AS current SET ({columns})=(SELECT {requested} FROM jsonb_populate_record(current,$2::jsonb) AS requested),revision=revision+1,updated_at=now() WHERE current.storage_id=$1 AND current.revision=$3"
-    );
-    let affected = sqlx::query(sqlx::AssertSqlSafe(statement))
-        .bind(profile.storage_id)
-        .bind(serde_json::to_value(profile)?)
-        .bind(profile.revision)
-        .execute(&mut **tx)
-        .await?
-        .rows_affected();
-    if affected != 1 {
-        return Err(problem(StatusCode::CONFLICT, "StorageProfileConflict").0);
-    }
-    Ok(())
+    Ok(Json(app.storage_profiles.load(storage_id).await?))
 }
 
 pub(crate) async fn update_profile(
@@ -540,33 +283,9 @@ pub(crate) async fn update_profile(
     name: String,
     profile: StorageProfile,
 ) -> anyhow::Result<StorageProfile> {
-    let mut tx = app.db.begin().await?;
-    let (storage_id, storage_type): (Uuid, String) =
-        sqlx::query_as("SELECT id,type FROM storages WHERE name=$1 FOR UPDATE")
-            .bind(&name)
-            .fetch_optional(&mut *tx)
-            .await?
-            .context("storage was not found")?;
-    anyhow::ensure!(
-        profile.storage_id == storage_id,
-        "storage profile belongs to another storage"
-    );
-    validate_profile(&profile, &storage_type)?;
-    save_profile(&mut tx, &profile).await?;
-    super::audit::checkpoint(
-        &mut tx,
-        "storage.profile.update",
-        &name,
-        serde_json::json!({"revision": profile.revision + 1}),
-    )
-    .await?;
-    sqlx::query("SELECT pg_notify('mokyu_storage_profiles',$1)")
-        .bind(storage_id.to_string())
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    app.storage.refresh_store(storage_id).await?;
-    Ok(StorageProfile::load(&app.db, storage_id).await?)
+    let id = app.storage_profiles.update(name, profile).await?;
+    app.storage.refresh_store(id).await?;
+    app.storage_profiles.load(id).await
 }
 #[utoipa::path(
     put,
@@ -583,14 +302,20 @@ pub(crate) async fn update_profile_route(
     Json(profile): Json<StorageProfile>,
 ) -> Result<Json<StorageProfile>, HttpError> {
     actor.recent(&app).await?;
-    let tx = super::users::admin_transaction(&app, &actor.principal).await?;
-    tx.commit().await?;
+    app.authorization
+        .admin(&actor.principal)
+        .await?
+        .finish()
+        .await?;
     Ok(Json(update_profile(&app, name, profile).await?))
 }
 
 pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Result<StorageView> {
-    let mut tx = app.db.begin().await?;
-    let (deployment_id, mode) = lock_mode(&mut tx).await?;
+    let crate::model::storage::StorageCreation {
+        deployment: deployment_id,
+        mode,
+        mut writer,
+    } = app.storage_records.creation().await?;
     let name = validate_name(&input.name)?;
     validate_storage_type(&input.storage_type)?;
     validate_concurrency(input.read_concurrency, "read")?;
@@ -601,7 +326,6 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
         !(mode == "cluster" && input.storage_type == "local"),
         "local storages are unavailable in cluster mode"
     );
-    validate_block_key(&mut tx, input.block_key_id).await?;
     let id = Uuid::new_v4();
     let record = build_record(
         app,
@@ -620,34 +344,23 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
     if let Some(profile) = &input.profile {
         validate_profile(profile, &record.r#type)?;
     }
-    sqlx::query("INSERT INTO storages(id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,identity_marker,block_key_id,access_key_encrypted,secret_key_encrypted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)").bind(record.id).bind(&record.name).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(&record.identity_marker).bind(input.block_key_id).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency,upload_concurrency,control_concurrency,cache_enabled,upload_cache,compression_enabled,pack_enabled,pack_range_enabled) VALUES($1,$2,$3,$4,$5,$5,$5,$5,$5)")
-        .bind(record.id)
-        .bind(input.read_concurrency)
-        .bind(input.upload_concurrency)
-        .bind(input.control_concurrency)
-        .bind(record.r#type == "s3")
-        .execute(&mut *tx)
-        .await?;
     let profile_for_init = input.profile.clone();
-    if let Some(mut profile) = input.profile {
-        profile.storage_id = record.id;
-        profile.revision = 1;
-        save_profile(&mut tx, &profile).await?;
-    }
+    writer
+        .prepare(
+            &record,
+            input.block_key_id,
+            input.read_concurrency,
+            input.upload_concurrency,
+            input.control_concurrency,
+            input.profile,
+        )
+        .await?;
     app.storage
         .initialize_store_with_profile(record.clone(), profile_for_init.as_ref())
         .await?;
-    sqlx::query("SELECT pg_notify('mokyu_storage_profiles',$1)")
-        .bind(record.id.to_string())
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+    writer.finish().await?;
     app.storage.refresh_store(record.id).await?;
-    Ok(sqlx::query_as(VIEW_BY_ID)
-        .bind(record.id)
-        .fetch_one(&app.db)
-        .await?)
+    app.storage_records.view(record.id).await
 }
 
 #[utoipa::path(post, operation_id = "storage_create", path = "/api/v1/storages", request_body = StorageInput, responses((status = 201, body = StorageView), (status = 400, body = crate::control::contract::ErrorBody)))]
@@ -657,8 +370,11 @@ pub(crate) async fn create(
     Json(input): Json<StorageInput>,
 ) -> Result<(StatusCode, Json<StorageView>), HttpError> {
     actor.recent(&app).await?;
-    let tx = super::users::admin_transaction(&app, &actor.principal).await?;
-    tx.commit().await?;
+    app.authorization
+        .admin(&actor.principal)
+        .await?
+        .finish()
+        .await?;
     Ok((StatusCode::CREATED, Json(create_record(&app, input).await?)))
 }
 
@@ -667,26 +383,23 @@ pub(crate) async fn update_record(
     name: String,
     input: StoragePatch,
 ) -> anyhow::Result<StorageView> {
-    let mut tx = app.db.begin().await?;
-    let (_deployment_id, mode) = lock_mode(&mut tx).await?;
-    let row = load_row(&mut tx, &name).await?;
-    let profile: StorageProfile = sqlx::query_as(
-        "SELECT storage_id,revision,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=$1 FOR UPDATE",
-    )
-    .bind(row.id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let StorageEdit {
+        row,
+        profile,
+        mode,
+        update,
+    } = app.storage_records.edit(&name).await?;
     anyhow::ensure!(
         row.identity_marker != serde_json::json!({}),
         "storage identity marker is empty; initialize and check it before changing the connection"
     );
-    let kind = input
+    let storage_type = input
         .storage_type
         .clone()
         .unwrap_or_else(|| row.r#type.clone());
-    validate_storage_type(&kind)?;
+    validate_storage_type(&storage_type)?;
     anyhow::ensure!(
-        !(mode == "cluster" && kind == "local"),
+        !(mode == "cluster" && storage_type == "local"),
         "local storages are unavailable in cluster mode"
     );
     let prefix = normalize_prefix(input.prefix.clone().unwrap_or_else(|| row.prefix.clone()))?;
@@ -700,7 +413,7 @@ pub(crate) async fn update_record(
     validate_concurrency(read_concurrency, "read")?;
     validate_concurrency(upload_concurrency, "upload")?;
     validate_concurrency(control_concurrency, "control")?;
-    let mut record = if kind == "local" {
+    let mut record = if storage_type == "local" {
         anyhow::ensure!(
             input.endpoint.is_none()
                 && input.bucket.is_none()
@@ -713,7 +426,7 @@ pub(crate) async fn update_record(
             app,
             row.id,
             row.name.clone(),
-            kind,
+            storage_type,
             input.path.or(row.path),
             None,
             None,
@@ -752,7 +465,7 @@ pub(crate) async fn update_record(
             app,
             row.id,
             row.name.clone(),
-            kind,
+            storage_type,
             None,
             input.endpoint.or(row.endpoint_url),
             input.bucket.or(row.remote_bucket_name),
@@ -772,15 +485,13 @@ pub(crate) async fn update_record(
             problem(StatusCode::CONFLICT, "StorageVerificationFailed").0
         })?;
     let block_key_id = input.block_key_id.unwrap_or(row.block_key_id);
-    validate_block_key(&mut tx, block_key_id).await?;
-    sqlx::query("UPDATE storages SET type=$2,path=$3,endpoint_url=$4,remote_bucket_name=$5,region=$6,prefix=$7,block_key_id=$8,access_key_encrypted=$9,secret_key_encrypted=$10,enabled=$11,updated_at=now() WHERE id=$1").bind(row.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(block_key_id).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(record.enabled).execute(&mut *tx).await?;
     let mut requested = if let Some(requested) = input.profile {
         anyhow::ensure!(
             requested.storage_id == row.id,
             "storage profile belongs to another storage"
         );
         if requested.revision != profile.revision {
-            return Err(problem(StatusCode::CONFLICT, "StorageProfileConflict").0);
+            return Err(crate::model::Error::StorageProfileConflict.into());
         }
         requested
     } else {
@@ -797,17 +508,9 @@ pub(crate) async fn update_record(
         requested.pack_range_enabled = false;
     }
     validate_profile(&requested, &record.r#type)?;
-    save_profile(&mut tx, &requested).await?;
-    sqlx::query("SELECT pg_notify('mokyu_storage_profiles',$1)")
-        .bind(row.id.to_string())
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+    update.finish(&record, block_key_id, &requested).await?;
     app.storage.refresh_store(row.id).await?;
-    Ok(sqlx::query_as(VIEW_BY_ID)
-        .bind(row.id)
-        .fetch_one(&app.db)
-        .await?)
+    app.storage_records.view(row.id).await
 }
 
 pub(crate) async fn set_current_key(
@@ -815,50 +518,12 @@ pub(crate) async fn set_current_key(
     name: String,
     key: Option<String>,
 ) -> anyhow::Result<StorageView> {
-    let mut tx = app.db.begin().await?;
-    let row = load_row(&mut tx, &name).await?;
-    let key_id = if let Some(key) = key {
-        let parsed = key.parse::<Uuid>().ok();
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM managed_keys WHERE ((($1::uuid IS NOT NULL AND id=$1) OR name=$2) AND purpose='block' AND revoked_at IS NULL)",
-        )
-        .bind(parsed)
-        .bind(key.trim())
-        .fetch_optional(&mut *tx)
-        .await?
-        .context("active block key was not found")
-        .map(Some)?
-    } else {
-        None
-    };
-    sqlx::query("UPDATE storages SET block_key_id=$2,updated_at=now() WHERE id=$1")
-        .bind(row.id)
-        .bind(key_id)
-        .execute(&mut *tx)
+    let id = app
+        .storage_records
+        .current_key(&name, key.as_deref())
         .await?;
-    sqlx::query(
-        "UPDATE storage_profiles SET revision=revision+1,updated_at=now() WHERE storage_id=$1",
-    )
-    .bind(row.id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("SELECT pg_notify('mokyu_storage_profiles',$1)")
-        .bind(row.id.to_string())
-        .execute(&mut *tx)
-        .await?;
-    super::audit::checkpoint(
-        &mut tx,
-        "storage.current_key.update",
-        &name,
-        serde_json::json!({"block_key_id":key_id}),
-    )
-    .await?;
-    tx.commit().await?;
-    app.storage.refresh_store(row.id).await?;
-    Ok(sqlx::query_as(VIEW_BY_ID)
-        .bind(row.id)
-        .fetch_one(&app.db)
-        .await?)
+    app.storage.refresh_store(id).await?;
+    app.storage_records.view(id).await
 }
 
 #[utoipa::path(
@@ -894,23 +559,19 @@ pub(crate) async fn unpack(
     Json(input): Json<StorageUnpackInput>,
 ) -> Result<Json<Value>, HttpError> {
     actor.recent(&app).await?;
-    let storage_id: Uuid = sqlx::query_scalar("SELECT id FROM storages WHERE name=$1")
-        .bind(&name)
-        .fetch_optional(&app.db)
+    let storage_id: Uuid = app
+        .storage_records
+        .id(&name, None)
         .await?
         .context("storage was not found")?;
-    let belongs: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM packs WHERE id=$1 AND storage_id=$2 AND state='ready')",
-    )
-    .bind(input.pack_id)
-    .bind(storage_id)
-    .fetch_one(&app.db)
-    .await?;
+    let belongs = app.packing.in_storage(input.pack_id, storage_id).await?;
     if !belongs {
         return Err(anyhow::anyhow!("pack was not found in storage").into());
     }
     match input.action.as_str() {
-        "preview" => Ok(Json(app.unpack_start(Some(input.pack_id), false, false).await?)),
+        "preview" => Ok(Json(
+            app.unpack_start(Some(input.pack_id), false, false).await?,
+        )),
         "start" => {
             let confirmation = input
                 .confirmation
@@ -929,13 +590,10 @@ pub(crate) async fn unpack(
             ))
         }
         "status" => Ok(Json(
-            sqlx::query_scalar::<_, Value>(
-                "SELECT to_jsonb(t) FROM tasks t WHERE task_type='unpack' AND detail->>'pack_id'=$1 ORDER BY created_at DESC LIMIT 1",
-            )
-            .bind(input.pack_id.to_string())
-            .fetch_optional(&app.db)
-            .await?
-            .unwrap_or_else(|| serde_json::json!({"status":"missing"})),
+            app.task_control
+                .unpack_status(input.pack_id)
+                .await?
+                .unwrap_or_else(|| serde_json::json!({"status":"missing"})),
         )),
         _ => Err(s3s::s3_error!(InvalidArgument).into()),
     }
@@ -949,8 +607,11 @@ pub(crate) async fn update(
     Json(input): Json<StoragePatch>,
 ) -> Result<Json<StorageView>, HttpError> {
     actor.recent(&app).await?;
-    let tx = super::users::admin_transaction(&app, &actor.principal).await?;
-    tx.commit().await?;
+    app.authorization
+        .admin(&actor.principal)
+        .await?
+        .finish()
+        .await?;
     Ok(Json(update_record(&app, name, input).await?))
 }
 
@@ -961,9 +622,16 @@ pub(crate) async fn check(
     Path(name): Path<String>,
 ) -> Result<Json<StorageView>, HttpError> {
     actor.recent(&app).await?;
-    let tx = super::users::admin_transaction(&app, &actor.principal).await?;
-    tx.commit().await?;
-    let row: StorageRow = sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,access_key_encrypted,secret_key_encrypted,identity_marker,block_key_id,enabled FROM storages WHERE name=$1").bind(&name).fetch_optional(&app.db).await?.context("storage was not found")?;
+    app.authorization
+        .admin(&actor.principal)
+        .await?
+        .finish()
+        .await?;
+    let row = app
+        .storage_records
+        .record(&name)
+        .await?
+        .context("storage was not found")?;
     app.storage
         .verify_store_record(row_record(&row))
         .await
@@ -971,12 +639,7 @@ pub(crate) async fn check(
             tracing::warn!(%error, storage_id=%row.id, "storage verification failed");
             problem(StatusCode::CONFLICT, "StorageVerificationFailed").0
         })?;
-    Ok(Json(
-        sqlx::query_as(VIEW_BY_ID)
-            .bind(row.id)
-            .fetch_one(&app.db)
-            .await?,
-    ))
+    Ok(Json(app.storage_records.view(row.id).await?))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -1002,38 +665,36 @@ pub(crate) async fn rewrite(
     Json(input): Json<RewriteRequest>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     actor.recent(&app).await?;
-    let storage_id: Uuid = sqlx::query_scalar("SELECT id FROM storages WHERE name=$1")
-        .bind(&name)
-        .fetch_optional(&app.db)
+    let storage_id: Uuid = app
+        .storage_records
+        .id(&name, None)
         .await?
         .context("storage was not found")?;
     let value = match input.action.as_str() {
-        "preview" => app
-            .rewrite_start(storage_id, input.target_key.as_deref(), false, None)
-            .await?,
-        "start" => app
-            .rewrite_start(
+        "preview" => {
+            app.rewrite_start(storage_id, input.target_key.as_deref(), false, None)
+                .await?
+        }
+        "start" => {
+            app.rewrite_start(
                 storage_id,
                 input.target_key.as_deref(),
                 true,
                 input.confirmation.as_deref(),
             )
-            .await?,
-        "status" => sqlx::query_scalar::<_, serde_json::Value>(
-            "SELECT to_jsonb(t) FROM tasks t WHERE task_type='rewrite' AND detail->>'role'='parent' AND detail->>'storage_id'=$1 ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(storage_id.to_string())
-        .fetch_optional(&app.db)
-        .await?
-        .context("rewrite task not found")?,
-        "pause" | "resume" | "retry" => {
-            let task: Uuid = sqlx::query_scalar(
-                "SELECT id FROM tasks WHERE task_type='rewrite' AND detail->>'role'='parent' AND detail->>'storage_id'=$1 ORDER BY created_at DESC LIMIT 1",
-            )
-            .bind(storage_id.to_string())
-            .fetch_optional(&app.db)
             .await?
-            .context("rewrite task not found")?;
+        }
+        "status" => app
+            .task_control
+            .rewrite_status(storage_id)
+            .await?
+            .context("rewrite task not found")?,
+        "pause" | "resume" | "retry" => {
+            let task: Uuid = app
+                .task_control
+                .rewrite_task(storage_id)
+                .await?
+                .context("rewrite task not found")?;
             app.task_change(task, input.action != "pause").await?
         }
         _ => return Err(s3s::s3_error!(InvalidArgument).into()),

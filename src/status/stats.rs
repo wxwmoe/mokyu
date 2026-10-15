@@ -1,3 +1,4 @@
+use crate::model::task::Execution;
 use crate::{app::App, config};
 use anyhow::Result;
 use bytes::Buf;
@@ -375,255 +376,38 @@ impl Statistics {
     }
 }
 
-async fn collect(app: &App) -> Result<Value> {
-    let mut tx = app.db.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *tx)
-        .await?;
-    // One worker, bounded working memory and wait time; large sorts may spill to PostgreSQL disk.
-    sqlx::raw_sql("SET LOCAL work_mem='16MB'; SET LOCAL max_parallel_workers_per_gather=0; SET LOCAL lock_timeout='1s'")
-        .execute(&mut *tx).await?;
-    let timeout = config::seconds(&app.config.metrics.query_timeout)? * 1000;
-    sqlx::query("SELECT set_config('statement_timeout',$1,true)")
-        .bind(timeout.to_string())
-        .execute(&mut *tx)
-        .await?;
-    let as_of: DateTime<Utc> = sqlx::query_scalar("SELECT transaction_timestamp()")
-        .fetch_one(&mut *tx)
-        .await?;
-    let buckets: Vec<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('id',b.id,'name',b.name,'objects',count(o.stream_id),'logical_bytes',COALESCE(sum(s.size),0))
-         FROM buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.stream_id IS NOT NULL
-         LEFT JOIN streams s ON s.id=o.stream_id
-         GROUP BY GROUPING SETS ((b.id,b.name),()) ORDER BY b.id NULLS FIRST LIMIT 1002")
-        .fetch_all(&mut *tx).await?;
-    let chunks: Value = sqlx::query_scalar(
-        "SELECT jsonb_build_object(
-            'states',COALESCE(jsonb_object_agg(state,n),'{}'),
-            'stored_bytes',COALESCE(sum(bytes) FILTER(WHERE state IN ('ready','deleting')),0),
-            'unconfirmed_bytes',COALESCE(sum(bytes) FILTER(WHERE state IN ('uploading','failed')),0))
-         FROM (SELECT state,count(*) n,COALESCE(sum(standalone_size),0) bytes FROM chunks GROUP BY state) c")
-        .fetch_one(&mut *tx).await?;
-    let physical:Value=sqlx::query_scalar("SELECT COALESCE(jsonb_agg(to_jsonb(p)),'[]') FROM (SELECT kind,state,count(*) objects,COALESCE(sum(stored_size),0) stored_bytes FROM (SELECT 'chunk' kind,state,standalone_size AS stored_size FROM chunk_encodings UNION ALL SELECT 'pack',state,stored_size FROM packs) sources GROUP BY kind,state ORDER BY kind,state) p").fetch_one(&mut *tx).await?;
-    let mut chunks = chunks;
-    chunks["stored_bytes"] = json!(
-        physical
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|p| matches!(p["state"].as_str(), Some("ready" | "retired" | "deleting")))
-            .map(|p| p["stored_bytes"].as_i64().unwrap_or(0))
-            .sum::<i64>()
-    );
-    chunks["unconfirmed_bytes"] = json!(
-        physical
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|p| matches!(p["state"].as_str(), Some("preparing" | "uploading")))
-            .map(|p| p["stored_bytes"].as_i64().unwrap_or(0))
-            .sum::<i64>()
-    );
-    let live: Value = sqlx::query_scalar(
-        "WITH refs AS (
-            SELECT e.chunk_id,sum(e.length) bytes FROM objects o JOIN extents e ON e.stream_id=o.stream_id
-            WHERE e.chunk_id IS NOT NULL GROUP BY e.chunk_id),
-         physical AS (
-            SELECT l.standalone_size bytes,l.standalone_size-CASE WHEN l.encryption_algorithm='none' THEN 0 ELSE 16 END payload
-            FROM refs r JOIN chunks c ON c.id=r.chunk_id JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready'
-            UNION ALL SELECT p.stored_size,p.stored_size-CASE WHEN p.encryption_algorithm='none' THEN 0 ELSE 16 END
-            FROM packs p WHERE state='ready' AND EXISTS(SELECT 1 FROM refs r JOIN chunks c ON c.id=r.chunk_id WHERE c.pack_id=p.id))
-         SELECT jsonb_build_object('chunks',count(*),'reference_bytes',COALESCE(sum(r.bytes),0),
-            'raw_bytes',COALESCE(sum(c.raw_size),0),'pending_raw_bytes',COALESCE(sum(c.raw_size) FILTER(WHERE c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND state='ready')),0),'stored_bytes',(SELECT COALESCE(sum(bytes),0) FROM physical),
-            'payload_bytes',(SELECT COALESCE(sum(payload),0) FROM physical))
-         FROM refs r JOIN chunks c ON c.id=r.chunk_id")
-        .fetch_one(&mut *tx).await?;
-    let grace = config::seconds(&app.config.maintenance.unreferenced_grace)? as f64;
-    let mut unreferenced: Value = sqlx::query_scalar(
-        "SELECT jsonb_build_object('chunks',count(*),'stored_bytes',COALESCE(sum(standalone_size),0),
-            'eligible_chunks',count(*) FILTER(WHERE unreferenced_at<now()-$1*interval '1 second' AND owner_stream IS NULL),
-            'eligible_bytes',COALESCE(sum(standalone_size) FILTER(WHERE unreferenced_at<now()-$1*interval '1 second' AND owner_stream IS NULL),0))
-         FROM chunks c WHERE state IN ('ready','failed','deleting') AND unreferenced_at IS NOT NULL
-            AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)")
-        .bind(grace).fetch_one(&mut *tx).await?;
-    let reclaimable:Value=sqlx::query_scalar("SELECT jsonb_build_object('bytes',COALESCE(sum(bytes),0),'eligible',COALESCE(sum(bytes) FILTER(WHERE since<now()-$1*interval '1 second'),0)) FROM (SELECT l.standalone_size bytes,COALESCE(l.unreferenced_at,c.unreferenced_at) since FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('retired','deleting') OR (l.state='ready' AND c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) UNION ALL SELECT stored_size,unreferenced_at FROM packs WHERE state IN ('retired','deleting')) p").bind(grace).fetch_one(&mut *tx).await?;
-    unreferenced["stored_bytes"] = reclaimable["bytes"].clone();
-    unreferenced["eligible_bytes"] = reclaimable["eligible"].clone();
-    let tasks: Value = sqlx::query_scalar(
-        "SELECT COALESCE(jsonb_object_agg(state,n),'{}') FROM (SELECT state,count(*) n FROM tasks GROUP BY state) t")
-        .fetch_one(&mut *tx).await?;
-    let uploads: Value = sqlx::query_scalar(
-        "SELECT COALESCE(jsonb_object_agg(state,n),'{}') FROM (SELECT state,count(*) n FROM uploads WHERE state IN ('active','completing') GROUP BY state) u")
-        .fetch_one(&mut *tx).await?;
-    let cleanup: Value = sqlx::query_scalar(
-        "SELECT jsonb_object_agg(kind,jsonb_build_object('eligible',n,'oldest_at',oldest)) FROM (
-            SELECT 'chunks' kind,count(*) n,min(deleted_at) oldest FROM chunks c
-                WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second'
-                AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)
-            UNION ALL SELECT 'uploads',count(*),min(touched_at) FROM uploads u
-                WHERE state IN ('completed','aborted') AND touched_at<now()-$2*interval '1 second'
-                AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id)
-            UNION ALL SELECT 'tasks',count(*),min(updated_at) FROM tasks
-                WHERE state='completed' AND updated_at<now()-$3*interval '1 second'
-            UNION ALL SELECT 'integrity_issues',count(*),min(t.updated_at) FROM integrity_issues i JOIN tasks t ON t.id=i.task_id
-                WHERE t.state='completed' AND t.updated_at<now()-$3*interval '1 second'
-            UNION ALL SELECT 'sessions',count(*),min(expires_at) FROM sessions WHERE expires_at<now()
-            UNION ALL SELECT 'packs',count(*),min(deleted_at) FROM packs WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second'
-            UNION ALL SELECT 'chunk_encodings',count(*),min(deleted_at) FROM chunk_encodings WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second'
-        ) backlog")
-        .bind(config::seconds(&app.config.maintenance.deleted_chunk_retention)? as f64)
-        .bind(config::seconds(&app.config.maintenance.upload_retention)? as f64)
-        .bind(config::seconds(&app.config.maintenance.task_retention)? as f64)
-        .fetch_one(&mut *tx).await?;
-    let database: Vec<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('table',relname,'total_bytes',pg_total_relation_size(relid),
-            'index_bytes',pg_indexes_size(relid),'live_rows_estimate',n_live_tup,
-            'dead_rows_estimate',n_dead_tup,'last_autovacuum',last_autovacuum,'last_autoanalyze',last_autoanalyze)
-         FROM pg_stat_user_tables WHERE schemaname='public'
-            AND relname IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions','session_refresh_tokens','integrity_issues','chunk_encodings','packs','pack_members','pack_maintenance','pack_changes','pack_inputs','chunk_access_stats','chunk_access_windows','pack_access_windows','pack_member_access_windows','integrity_packs','pending_uploads','cache_pins')
-         ORDER BY relname")
-        .fetch_all(&mut *tx).await?;
-    crate::control::insights::collect(app, &mut tx).await?;
-    tx.commit().await?;
-    Ok(
-        json!({"as_of":as_of,"collected_at":Utc::now(),"objects":buckets[0]["objects"],
-        "logical_bytes":buckets[0]["logical_bytes"],"buckets":buckets.iter().skip(1).take(1000).collect::<Vec<_>>(),
-        "buckets_truncated":buckets.len()>1001,"chunks":chunks,"live":live,"physical":physical,
-        "unreferenced":unreferenced,"tasks":tasks,"uploads":uploads,"cleanup":cleanup,"database":database}),
-    )
-}
-
-async fn collect_storage(app: &App, storage_id: Uuid) -> Result<Value> {
-    let mut tx = app.db.begin().await?;
-    sqlx::raw_sql("SET LOCAL work_mem='8MB'; SET LOCAL max_parallel_workers_per_gather=0; SET LOCAL statement_timeout='5s'")
-        .execute(&mut *tx)
-        .await?;
-    let as_of: DateTime<Utc> = sqlx::query_scalar("SELECT transaction_timestamp()")
-        .fetch_one(&mut *tx)
-        .await?;
-    let buckets: (i64, i64, i64) = sqlx::query_as(
-        "SELECT count(DISTINCT b.id),count(o.stream_id),coalesce(sum(s.size),0)::bigint FROM buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.stream_id IS NOT NULL LEFT JOIN streams s ON s.id=o.stream_id WHERE b.storage_id=$1",
-    )
-    .bind(storage_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    let chunks: (i64, i64) = sqlx::query_as(
-        "SELECT count(*),coalesce(sum(standalone_size),0)::bigint FROM chunks WHERE storage_id=$1 AND state IN ('ready','deleting')",
-    )
-    .bind(storage_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    let physical: (i64, i64) = sqlx::query_as(
-        "SELECT count(*),coalesce(sum(bytes),0)::bigint FROM (SELECT standalone_size::bigint bytes FROM chunk_encodings WHERE storage_id=$1 AND state IN ('ready','retired','deleting') UNION ALL SELECT stored_size::bigint FROM packs WHERE storage_id=$1 AND state IN ('ready','retired','deleting')) p",
-    )
-    .bind(storage_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(
-        json!({"storage_id":storage_id,"as_of":as_of,"buckets":buckets.0,"objects":buckets.1,"logical_bytes":buckets.2,"chunks":chunks.0,"stored_bytes":chunks.1,"physical":{"objects":physical.0,"stored_bytes":physical.1}}),
-    )
-}
-
 impl App {
     pub(crate) async fn usage_start(&self) -> Result<Value> {
         let _coord = self.coord.lock().await;
-        let mut tx = self.db.begin().await?;
-        if let Some(id) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM tasks WHERE task_type='usage' AND state IN ('queued','running','paused') ORDER BY created_at LIMIT 1",
-        )
-        .fetch_optional(&mut *tx)
-        .await?
-        {
-            tx.commit().await?;
-            return Ok(json!({"task_id":id,"existing":true}));
-        }
-        let storages: Vec<(Uuid, String, i64)> = sqlx::query_as(
-            "SELECT s.id,s.type,sp.revision FROM storages s JOIN storage_profiles sp ON sp.storage_id=s.id WHERE s.enabled ORDER BY s.created_at,s.id",
-        )
-        .fetch_all(&mut *tx)
-        .await?;
-        let id = crate::worker::insert(
-            &mut *tx,
-            "usage",
-            None,
-            json!({"role":"parent","children":storages.len()}),
-        )
-        .await?;
-        for (storage_id, storage_type, revision) in &storages {
-            let child = crate::worker::insert_child(
-                &mut *tx,
-                "usage",
-                None,
-                json!({"role":"child","storage_id":storage_id,"profile_revision":revision}),
-            )
+        let result = self
+            .metrics
+            .start_usage(self.node.get().map(|state| state.node_id))
             .await?;
-            let (scope, node) = if storage_type == "local" {
-                ("node", self.node.get().map(|state| state.node_id))
-            } else {
-                ("cluster", None)
-            };
-            sqlx::query("UPDATE tasks SET parent_task_id=$2,batch_total=1,execution_scope=$3,target_node_id=$4 WHERE id=$1")
-                .bind(child)
-                .bind(id)
-                .bind(scope)
-                .bind(node)
-                .execute(&mut *tx)
-                .await?;
+        if result["existing"] != true {
+            self.wake_tasks.notify_one();
         }
-        sqlx::query("UPDATE tasks SET batch_total=$2 WHERE id=$1")
-            .bind(id)
-            .bind(storages.len() as i64)
-            .execute(&mut *tx)
-            .await?;
-        if storages.is_empty() {
-            sqlx::query("UPDATE tasks SET state='completed',updated_at=now() WHERE id=$1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
-        self.wake_tasks.notify_one();
-        Ok(json!({"task_id":id}))
+        Ok(result)
     }
 
-    pub(crate) async fn usage_batch(&self, id: Uuid, detail: Value) -> Result<bool> {
-        {
-            let mut saved = self.statistics.inventory.lock().unwrap();
-            saved["collecting"] = json!(true);
-            saved["last_attempt_at"] = json!(Utc::now());
-        }
+    pub(crate) async fn usage_batch(&self, id: Execution, detail: Value) -> Result<bool> {
         let storage_id = detail["storage_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("usage task is missing storage scope"))?
             .parse::<Uuid>()?;
         let timeout = Duration::from_secs(config::seconds(&self.config.metrics.query_timeout)?);
-        let result = tokio::time::timeout(timeout, collect_storage(self, storage_id)).await;
+        let snapshot = tokio::time::timeout(timeout, self.metrics.storage_inventory(storage_id))
+            .await
+            .map_err(|_| anyhow::anyhow!("storage statistics refresh timed out"))??;
+        if !self.metrics.complete_usage(id).await? {
+            return Ok(false);
+        }
         {
             let mut saved = self.statistics.inventory.lock().unwrap();
-            saved["collecting"] = json!(false);
-            match result {
-                Ok(Ok(snapshot)) => {
-                    if !saved["storages"].is_object() {
-                        saved["storages"] = json!({});
-                    }
-                    saved["snapshot"] = snapshot.clone();
-                    saved["storages"][storage_id.to_string()] = snapshot;
-                    saved["last_error"] = Value::Null;
-                }
-                error => {
-                    tracing::warn!(
-                        ?error,
-                        "storage statistics refresh failed; keeping previous snapshot"
-                    );
-                    saved["last_error"] = json!("refresh_failed");
-                }
+            if !saved["storages"].is_object() {
+                saved["storages"] = json!({});
             }
+            saved["storages"][storage_id.to_string()] = snapshot;
         }
-        sqlx::query("UPDATE tasks SET state='completed',processed=processed+1,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1 AND state='running'")
-            .bind(id)
-            .execute(&self.db)
-            .await?;
         Ok(true)
     }
 }
@@ -636,6 +420,35 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             tokio::time::sleep(interval).await;
             continue;
         };
+        {
+            let mut saved = app.statistics.inventory.lock().unwrap();
+            saved["collecting"] = json!(true);
+            saved["last_attempt_at"] = json!(Utc::now());
+        }
+        let timeout = Duration::from_secs(config::seconds(&app.config.metrics.query_timeout)?);
+        let result = tokio::time::timeout(
+            timeout,
+            app.metrics
+                .inventory(&app.config.metrics, &app.config.maintenance),
+        )
+        .await;
+        {
+            let mut saved = app.statistics.inventory.lock().unwrap();
+            saved["collecting"] = json!(false);
+            match result {
+                Ok(Ok(snapshot)) => {
+                    saved["snapshot"] = snapshot;
+                    saved["last_error"] = Value::Null;
+                }
+                error => {
+                    tracing::warn!(
+                        ?error,
+                        "statistics refresh failed; keeping previous snapshot"
+                    );
+                    saved["last_error"] = json!("refresh_failed");
+                }
+            }
+        }
         if let Err(error) = app.usage_start().await {
             tracing::warn!(%error, "usage task scheduling failed");
         }
@@ -643,7 +456,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             _ = tokio::time::sleep(interval) => (),
             _ = app.statistics.wake.notified() => tokio::time::sleep(Duration::from_secs(5)).await,
         }
-        leader.commit().await?;
+        leader.finish().await?;
     }
 }
 

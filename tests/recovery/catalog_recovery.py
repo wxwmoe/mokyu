@@ -17,7 +17,8 @@ url = os.environ['MOKYU_TEST_WEB']
 db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
 command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli']
 name = 'catalog-restart-' + uuid.uuid4().hex[:10]
-bucket = json.loads(subprocess.check_output(command + ['bucket', 'create', name], text=True))
+storage = json.loads(subprocess.check_output(command + ['storage', 'show', os.environ['MOKYU_TEST_STORAGE']], text=True))['id']
+bucket = json.loads(subprocess.check_output(command + ['bucket', 'create', name, '--storage', storage], text=True))
 client = requests.Session()
 reply = client.post(url + '/api/v1/auth/login', headers={'Origin': url}, json={'username': 'tester', 'password': os.environ['MOKYU_TEST_PASSWORD']})
 client.headers.update({'Origin': url, 'X-CSRF-Token': reply.json()['csrf_token']})
@@ -38,7 +39,7 @@ try:
             db.execute("INSERT INTO streams(id,bucket_id,object_key,stream_type,state,size,etag) VALUES(%s,%s,%s,'object','ready',0,'d41d8cd98f00b204e9800998ecf8427e')", (stream, bucket['id'], key))
             db.execute('INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES(%s,%s,%s,%s)', (bucket['id'], key, stream, stream))
     ledger = db.execute("SELECT used_bytes,reserved_bytes,inflight_bytes,object_count FROM quota_scopes WHERE scope='bucket' AND scope_id=%s", (bucket['id'],)).fetchone()
-    db.execute('UPDATE objects SET catalog_size=NULL,catalog_modified=NULL,catalog_type=NULL,catalog_kind=NULL,catalog_public=NULL WHERE bucket_id=%s', (bucket['id'],))
+    db.execute('UPDATE objects SET catalog_size=NULL,catalog_modified=NULL,catalog_type=NULL,catalog_category=NULL,catalog_public=NULL WHERE bucket_id=%s', (bucket['id'],))
     db.execute('DROP INDEX CONCURRENTLY objects_catalog_search')
     try:
         db.execute('CREATE UNIQUE INDEX CONCURRENTLY objects_catalog_search ON objects(catalog_public)')
@@ -59,7 +60,7 @@ try:
     path = url + '/api/v1/buckets/' + bucket['id'] + '/objects'
     assert client.get(path).status_code == 200
     reply = client.get(path, params={'q': 'empty-a', 'mode': 'exact'})
-    assert reply.status_code == 200 and reply.json()['objects'][0]['size'] == '0', reply.text
+    assert reply.status_code == 200 and reply.json()['items'][0]['size'] == '0', reply.text
     reply = client.get(path, params={'q': 'empty'})
     assert reply.status_code == 503 and reply.json()['code'] == 'CatalogBuilding', reply.text
     assert db.execute("SELECT used_bytes,reserved_bytes,inflight_bytes,object_count FROM quota_scopes WHERE scope='bucket' AND scope_id=%s", (bucket['id'],)).fetchone() == ledger
@@ -71,7 +72,7 @@ try:
     assert final >= checkpoint[1]
     assert db.execute('SELECT count(*) FROM objects WHERE stream_id IS NOT NULL AND catalog_size IS NULL').fetchone() == (0,)
     reply = client.get(path, params={'q': 'empty'})
-    assert reply.status_code == 200 and len(reply.json()['objects']) == 2, reply.text
+    assert reply.status_code == 200 and len(reply.json()['items']) == 2, reply.text
     assert db.execute("SELECT used_bytes,reserved_bytes,inflight_bytes,object_count FROM quota_scopes WHERE scope='bucket' AND scope_id=%s", (bucket['id'],)).fetchone() == ledger
     print('PASS invalid concurrent index recovery, checkpoint restart, fallback browsing and quota-neutral backfill', flush=True)
 finally:

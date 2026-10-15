@@ -23,12 +23,12 @@ for algorithm in ['CRC32', 'SHA1', 'SHA256']:
           **{field: encoded(algorithm, data)})
     assert read('checksum')[0] == data
 
-for algorithm, kind in [('CRC32', 'FULL_OBJECT'), ('SHA256', 'COMPOSITE')]:
+for algorithm, checksum_type in [('CRC32', 'FULL_OBJECT'), ('SHA256', 'COMPOSITE')]:
     field = 'Checksum' + algorithm
     key = 'checksum-multipart'
     chunks = [os.urandom(5 * 1024 * 1024), os.urandom(271_000)]
     upload = s3.create_multipart_upload(Bucket=bucket, Key=key,
-                                        ChecksumAlgorithm=algorithm, ChecksumType=kind)['UploadId']
+                                        ChecksumAlgorithm=algorithm, ChecksumType=checksum_type)['UploadId']
     manifest = []
     for n, data in enumerate(chunks, 1):
         out = s3.upload_part(Bucket=bucket, Key=key, UploadId=upload, PartNumber=n,
@@ -36,14 +36,14 @@ for algorithm, kind in [('CRC32', 'FULL_OBJECT'), ('SHA256', 'COMPOSITE')]:
         assert out[field] == encoded(algorithm, data)
         manifest.append({'PartNumber': n, 'ETag': out['ETag'], field: out[field]})
     joined = b''.join(chunks)
-    expected = (encoded(algorithm, joined) if kind == 'FULL_OBJECT' else
+    expected = (encoded(algorithm, joined) if checksum_type == 'FULL_OBJECT' else
                 encoded(algorithm, b''.join(base64.b64decode(p[field]) for p in manifest)) + '-2')
     out = s3.complete_multipart_upload(Bucket=bucket, Key=key, UploadId=upload,
-                                       MultipartUpload={'Parts': manifest}, ChecksumType=kind,
+                                       MultipartUpload={'Parts': manifest}, ChecksumType=checksum_type,
                                        **{field: expected})
     assert out[field] == expected, out
     raw, out = read(key, ChecksumMode='ENABLED')
-    assert raw == joined and out[field] == expected and out['ChecksumType'] == kind
+    assert raw == joined and out[field] == expected and out['ChecksumType'] == checksum_type
 
 names = ['listing/a/1', 'listing/a/2', 'listing/b/1', 'listing/z', 'listing/z']
 uploads = [(key, s3.create_multipart_upload(Bucket=bucket, Key=key)['UploadId']) for key in names]

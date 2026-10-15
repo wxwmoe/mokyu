@@ -2,7 +2,7 @@ import type { components } from '../api/schema'
 import { params } from '../api/client'
 
 export type MediaItem = components['schemas']['MediaItem']
-export type MediaAction = components['schemas']['Kind']
+export type MediaAction = components['schemas']['MediaAction']
 export function mediaUrl(bucket: string, item: MediaItem, action = 'content', preview = false) {
   return `/api/v1/buckets/${bucket}/object/${action}?` + params({ key: item.object_key, version: item.id, ...(action === 'content' ? { preview: String(preview) } : {}) })
 }

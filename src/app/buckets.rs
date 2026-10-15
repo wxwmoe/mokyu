@@ -1,7 +1,7 @@
 use crate::authorization::{Action, Permit, Principal};
 use anyhow::Result;
 use s3s::s3_error;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 
@@ -16,25 +16,7 @@ impl App {
     ) -> Result<Value> {
         self.writable()?;
         crate::http::validate_cors(&rules).map_err(|e| s3_error!(InvalidArgument, "{e}"))?;
-        let mut tx = self.db.begin().await?;
-        crate::control::buckets::lock_settings(&mut tx, principal, bucket).await?;
-        let result = sqlx::query_scalar(
-            "UPDATE buckets SET cors=$2 WHERE id=$1 AND state='active' RETURNING cors",
-        )
-        .bind(bucket)
-        .bind(rules)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| s3_error!(NoSuchBucket))?;
-        crate::control::audit::checkpoint(
-            &mut tx,
-            "bucket.cors",
-            &bucket.to_string(),
-            json!({"bucket_id":bucket,"cors":result}),
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(result)
+        self.buckets.set_cors(principal, bucket, rules).await
     }
     pub async fn admit(
         &self,
@@ -56,9 +38,9 @@ impl App {
         if write {
             self.writable()?;
         }
-        let bucket: Bucket = sqlx::query_as("SELECT * FROM buckets WHERE name=$1")
-            .bind(name)
-            .fetch_optional(&self.db)
+        let bucket = self
+            .buckets
+            .by_name(name, false)
             .await?
             .ok_or_else(|| s3_error!(NoSuchBucket))?;
         if write && bucket.state != "active" {
@@ -73,9 +55,9 @@ impl App {
         action: Action,
     ) -> Result<Permit> {
         let key = key.ok_or_else(|| s3_error!(AccessDenied))?;
-        Principal::service(&self.db, key)
+        Principal::service(self.authorization.as_ref(), key)
             .await?
-            .require(&self.db, bucket, action)
+            .require(self.authorization.as_ref(), bucket, action)
             .await
     }
 }

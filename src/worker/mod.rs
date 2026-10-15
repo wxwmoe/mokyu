@@ -9,4 +9,4 @@ pub(crate) mod rewrite;
 pub(crate) mod scheduler;
 pub(crate) mod task;
 
-pub(crate) use task::{REQUEST_ID, insert, insert_child};
+pub(crate) use crate::model::REQUEST_ID;

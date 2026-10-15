@@ -2,7 +2,6 @@
 import fcntl
 import json
 import os
-import pty
 import signal
 import subprocess
 import time
@@ -12,6 +11,7 @@ from pathlib import Path
 
 import boto3
 import psycopg
+import requests
 from tests.integration import s3, bucket, read
 
 assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
@@ -19,10 +19,14 @@ db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), a
 config = Path(os.environ['MOKYU_TEST_CONFIG'])
 original = config.read_text()
 command = [os.environ['MOKYU_TEST_BINARY'], '--config', str(config), 'cli']
-settings = tomllib.loads(original)['backend']
+backend_file = os.environ.get('MOKYU_TEST_BACKEND')
+settings = json.loads(Path(backend_file).read_text()) if backend_file else tomllib.loads(original)['backend']
+storage_name = os.environ['MOKYU_TEST_STORAGE']
+storage_id = db.execute('SELECT id FROM storages WHERE name=%s', (storage_name,)).fetchone()[0]
 backend = boto3.client('s3', endpoint_url=settings['endpoint'], region_name=settings['region'],
                       aws_access_key_id=settings['access_key'], aws_secret_access_key=settings['secret_key'])
-pid = int(os.environ['MOKYU_TEST_GATEWAY_PID'])
+pid_file = Path(os.environ['MOKYU_TEST_PID_FILE'])
+pid = int(pid_file.read_text())
 backend_pid = int(os.environ['MOKYU_TEST_BACKEND_PID'])
 process = None
 
@@ -55,22 +59,32 @@ def task(*args):
     return done(cli(*args)['task_id'])
 
 
-def execute_sweep(preview, expected_error=None):
-    master, slave = pty.openpty()
-    child = subprocess.Popen(command + ['storage', 'sweep', '--execute', '--preview', preview,
-                                         '--age', '1s'], stdin=slave,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    os.close(slave)
-    try:
-        os.write(master, (settings['prefix'] + '/\nDELETE\n').encode())
-        out, err = child.communicate(timeout=30)
-        if expected_error:
-            assert child.returncode and expected_error in err, err
-            return
-        assert child.returncode == 0, err
-        return done(json.loads(out)['task_id'])
-    finally:
-        os.close(master)
+url = os.environ['MOKYU_TEST_WEB']
+admin = requests.Session()
+reply = admin.post(url + '/api/v1/auth/login', headers={'Origin': url},
+                   json={'username': 'tester', 'password': os.environ['MOKYU_TEST_PASSWORD']}, timeout=15)
+assert reply.status_code == 200
+admin.headers.update({'Origin': url, 'X-CSRF-Token': reply.json()['csrf_token']})
+assert admin.post(url + '/api/v1/account/reauth', json={'password': os.environ['MOKYU_TEST_PASSWORD']}).status_code == 204
+
+
+def post(path, data, status=200):
+    reply = admin.post(url + '/api/v1/maintenance/' + path, json=data, timeout=30)
+    assert reply.status_code == status, (path, reply.status_code, reply.text)
+    return reply.json()
+
+
+def sweep():
+    return done(post('sweep', {'older_than': '1s', 'storage_id': str(storage_id)})['task_id'])
+
+
+def approval(scan):
+    return post('sweep/preview', {'task_id': scan['id']})
+
+
+def execute_sweep(preview, status=200):
+    result = post('sweep/execute', {'preview_id': preview['id'], 'confirmation': preview['confirmation']}, status)
+    return done(result['task_id']) if status == 200 else result
 
 
 def stop():
@@ -87,15 +101,23 @@ def stop():
     wait(unlocked)
 
 
-def start(minimum):
+def restart(minimum, clear_age=False):
     global process, pid
-    text = original.replace('allow_http=true', 'allow_http=true\nmin_storage_duration="' + minimum
-                            + '"\nrequest_timeout="1s"\nretry_timeout="1s"\nmax_retries=0')
-    config.write_text(text)
-    process = subprocess.Popen(command[:-1],
-                               stdout=open(Path(os.environ['MOKYU_TEST_RESULTS']) / 'storage-retention.log', 'a'),
-                               stderr=subprocess.STDOUT)
+    profile = cli('storage', 'profile', 'show', storage_name)
+    profile.update(min_storage_duration=minimum, request_timeout='1s', retry_timeout='1s', max_retries=0)
+    profile_file = Path(os.environ['MOKYU_TEST_RESULTS']) / 'retention-profile.json'
+    profile_file.write_text(json.dumps(profile))
+    cli('storage', 'profile', 'set', storage_name, str(profile_file))
+    cli('maintenance', 'enable')
+    stop()
+    if clear_age:
+        with db.transaction():
+            db.execute('UPDATE chunk_encodings SET stored_at=NULL WHERE storage_id=%s', (storage_id,))
+            db.execute('UPDATE packs SET stored_at=NULL WHERE storage_id=%s', (storage_id,))
+    with open(Path(os.environ['MOKYU_TEST_RESULTS']) / 'storage-retention.log', 'a') as log:
+        process = subprocess.Popen(command[:-1], stdout=log, stderr=log, start_new_session=True)
     pid = process.pid
+    pid_file.write_text(str(pid))
     def ready():
         assert process.poll() is None, 'gateway exited; inspect storage-retention.log'
         try:
@@ -103,42 +125,41 @@ def start(minimum):
         except subprocess.CalledProcessError:
             return False
     wait(ready)
+    assert cli('storage', 'profile', 'show', storage_name)['min_storage_duration'] == minimum
 
 
-def physical_key(kind, storage):
-    return settings['prefix'] + '/' + kind + '/' + storage.hex[:2] + '/' + storage.hex
+def physical_key(source_type, storage):
+    prefix = 'packs/' if source_type == 'packs' else ''
+    return settings['prefix'].rstrip('/') + '/' + prefix + storage.hex[:2] + '/' + storage.hex
 
 
 try:
-    assert cli('gc', 'status')['min_storage_duration'] == '0s'
-    raw = os.urandom(7 * 1024 * 1024 + 17)
+    assert cli('storage', 'profile', 'show', storage_name)['min_storage_duration'] == '0s'
+    raw = os.urandom(15 * 1024 * 1024 + 17)
     s3.put_object(Bucket=bucket, Key='retained', Body=raw)
-    locations = db.execute('SELECT encoding_id,location_id,nonce,stored_at FROM chunk_encodings ORDER BY id').fetchall()
+    locations = db.execute('SELECT encoding_id,location_id,nonce,stored_at FROM chunk_encodings ORDER BY encoding_id').fetchall()
     assert all(row[3] is not None for row in locations)
     puts = cli('status')['backend_puts']
     s3.put_object(Bucket=bucket, Key='retained-copy', Body=raw)
     assert cli('status')['backend_puts'] == puts
-    assert locations == db.execute('SELECT encoding_id,location_id,nonce,stored_at FROM chunk_encodings ORDER BY id').fetchall()
+    assert locations == db.execute('SELECT encoding_id,location_id,nonce,stored_at FROM chunk_encodings ORDER BY encoding_id').fetchall()
     s3.delete_object(Bucket=bucket, Key='retained-copy')
     wait(lambda: (cli('gc', 'run'), scalar("SELECT count(*)=0 FROM streams WHERE object_key='retained-copy'"))[1])
     task('pack', 'run')
-    pack = db.execute("SELECT id,storage_id,nonce,stored_at FROM packs WHERE state='ready'").fetchone()
+    pack = db.execute("SELECT id,location_id,nonce,stored_at FROM packs WHERE state='ready'").fetchone()
     assert pack and pack[3] is not None and read('retained')[0] == raw
 
     # Missing storage timestamps require conservative remote age checks.
-    stop()
-    with db.transaction():
-        db.execute('UPDATE chunk_encodings SET stored_at=NULL')
-        db.execute('UPDATE packs SET stored_at=NULL')
-    start('30d')
-    assert db.execute('SELECT encoding_id,location_id,nonce FROM chunk_encodings ORDER BY id').fetchall() == [r[:3] for r in locations]
-    assert db.execute('SELECT id,storage_id,nonce,stored_at FROM packs').fetchone() == (*pack[:3], None)
+    restart('30d', clear_age=True)
+    assert db.execute('SELECT encoding_id,location_id,nonce FROM chunk_encodings ORDER BY encoding_id').fetchall() == [r[:3] for r in locations]
+    assert db.execute('SELECT id,location_id,nonce,stored_at FROM packs').fetchone() == (*pack[:3], None)
     assert scalar('SELECT bool_and(stored_at IS NULL) FROM chunk_encodings')
     assert read('retained')[0] == raw
     cli('maintenance', 'disable')
 
     # New unpack output gets a confirmed timestamp; legacy sources use remote HEAD.
-    task('pack', 'unpack', str(pack[0]), '--execute')
+    unpack = post('unpack/preview', {'pack_id': str(pack[0])})
+    done(post('unpack/execute', {'preview_id': unpack['id'], 'confirmation': unpack['confirmation']})['task_id'])
     assert scalar("SELECT bool_and(stored_at IS NOT NULL) FROM chunk_encodings WHERE state='ready'")
     for table in ('chunk_encodings', 'packs'):
         db.execute(f"UPDATE {table} SET created_at=now()-interval '100 days',unreferenced_at=now()-interval '3 days' WHERE state='retired'")
@@ -152,7 +173,7 @@ try:
 
     # A failed HEAD is not absence; a missing abandoned physical source is safe to clear.
     location, storage = locations[0][:2]
-    db.execute('UPDATE chunk_encodings SET stored_at=NULL WHERE id=%s', (location,))
+    db.execute('UPDATE chunk_encodings SET stored_at=NULL WHERE encoding_id=%s', (location,))
     before = cli('status')
     os.kill(backend_pid, signal.SIGSTOP)
     try:
@@ -163,18 +184,19 @@ try:
         assert cli('status')['runtime']['gc_failures'] > before['runtime']['gc_failures']
     finally:
         os.kill(backend_pid, signal.SIGCONT)
+    backend.head_object(Bucket=settings['bucket'], Key=physical_key('chunks', storage))
     backend.delete_object(Bucket=settings['bucket'], Key=physical_key('chunks', storage))
     cli('gc', 'run')
     assert scalar('SELECT state FROM chunk_encodings WHERE encoding_id=%s', (location,)) == 'deleted'
 
     # Both clocks must expire, independently for packs and independent chunks.
-    for table, ident in [('packs', pack[0]), ('chunk_encodings', locations[1][0])]:
-        db.execute(f"UPDATE {table} SET stored_at=now()-interval '31 days',unreferenced_at=now() WHERE id=%s", (ident,))
+    for table, id_column, ident in [('packs', 'id', pack[0]), ('chunk_encodings', 'encoding_id', locations[1][0])]:
+        db.execute(f"UPDATE {table} SET stored_at=now()-interval '31 days',unreferenced_at=now() WHERE {id_column}=%s", (ident,))
         cli('gc', 'run')
-        assert scalar(f'SELECT state FROM {table} WHERE id=%s', (ident,)) == 'retired'
-        db.execute(f"UPDATE {table} SET unreferenced_at=now()-interval '3 days' WHERE id=%s", (ident,))
+        assert scalar(f'SELECT state FROM {table} WHERE {id_column}=%s', (ident,)) == 'retired'
+        db.execute(f"UPDATE {table} SET unreferenced_at=now()-interval '3 days' WHERE {id_column}=%s", (ident,))
         cli('gc', 'run')
-        assert scalar(f'SELECT state FROM {table} WHERE id=%s', (ident,)) == 'deleted'
+        assert scalar(f'SELECT state FROM {table} WHERE {id_column}=%s', (ident,)) == 'deleted'
 
     # Last-reference removal must not let logical GC delete a young physical block.
     s3.put_object(Bucket=bucket, Key='young', Body=os.urandom(1024))
@@ -192,28 +214,28 @@ try:
     backend.put_object(Bucket=settings['bucket'], Key=orphan, Body=b'unindexed')
     time.sleep(1.2)
     cli('maintenance', 'enable')
-    preview = task('storage', 'sweep', '--age', '1s')
+    preview = sweep()
     assert preview['detail']['candidates'] == 0
     assert preview['detail']['min_storage_duration_seconds'] == 30 * 86400
-    assert execute_sweep(preview['id'])['detail']['candidates'] == 0
-    stop()
-    start('0s')
-    execute_sweep(preview['id'], expected_error='preview again')
-    preview = task('storage', 'sweep', '--age', '1s')
+    approved = approval(preview)
+    assert approved['impact']['minimum_storage_seconds'] == 30 * 86400
+    assert execute_sweep(approved)['detail']['candidates'] == 0
+    stale = approval(preview)
+    restart('0s')
+    execute_sweep(stale, status=412)
+    preview = sweep()
     assert preview['detail']['candidates'] == 1
     # Persist an approved task before restart under a longer minimum.
     resumed = uuid.uuid4()
     detail = {**preview['detail'], 'dry_run': False, 'candidates': 0, 'bytes': 0, 'samples': []}
     db.execute("INSERT INTO tasks(id,task_type,state,detail) VALUES(%s,'sweep','paused',%s::jsonb)", (resumed, json.dumps(detail)))
-    stop()
-    start('30d')
+    restart('30d')
     cli('task', 'resume', str(resumed))
     assert done(str(resumed))['detail']['candidates'] == 0
     backend.head_object(Bucket=settings['bucket'], Key=orphan)
-    stop()
-    start('0s')
-    preview = task('storage', 'sweep', '--age', '1s')
-    assert execute_sweep(preview['id'])['detail']['candidates'] == 1
+    restart('0s')
+    preview = sweep()
+    assert execute_sweep(approval(preview))['detail']['candidates'] == 1
     cli('maintenance', 'disable')
     cli('gc', 'run')
     assert scalar('SELECT state FROM chunk_encodings WHERE chunk_id=%s', (chunk,)) == 'deleted'
@@ -224,5 +246,4 @@ finally:
     if process and process.poll() is None:
         process.terminate()
         process.wait(timeout=40)
-    config.write_text(original)
     db.close()

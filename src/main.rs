@@ -5,10 +5,10 @@ mod cluster;
 mod config;
 mod content;
 mod control;
-mod database;
 #[cfg(feature = "fault-injection")]
 mod faults;
 mod http;
+mod model;
 mod runtime;
 mod status;
 mod storage;

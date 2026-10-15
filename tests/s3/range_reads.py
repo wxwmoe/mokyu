@@ -2,6 +2,7 @@
 import fcntl
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -23,11 +24,12 @@ process = None
 
 
 def cli(*args):
-    return json.loads(subprocess.check_output(command + ['cli', *args], stderr=subprocess.DEVNULL, text=True))
+    return json.loads(subprocess.check_output(command + ['cli', *args], stderr=subprocess.DEVNULL, text=True, timeout=20))
 
 
 def wait(predicate, message='Range test timed out'):
-    for _ in range(600):
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(.1)
@@ -39,7 +41,13 @@ def task(*args):
     wait(lambda: cli('task', 'show', job)['state'] in ('completed', 'failed'))
     state = cli('task', 'show', job)
     assert state['state'] == 'completed', state
-    return state
+    return child_result(state)
+
+
+def child_result(state):
+    children = db.execute('SELECT processed,detail FROM tasks WHERE parent_task_id=%s', (state['id'],)).fetchall()
+    assert len(children) == 1, children
+    return {**state, 'processed': children[0][0], 'detail': children[0][1]}
 
 
 def get(span=None):
@@ -72,6 +80,8 @@ def restart(text, maintenance=False):
     config.write_text(text)
     process = subprocess.Popen(command, stdout=open(Path(os.environ['MOKYU_TEST_RESULTS']) / 'range-restarts.log', 'a'), stderr=subprocess.STDOUT)
     pid = process.pid
+    if pid_file := os.environ.get('MOKYU_TEST_GATEWAY_PID_FILE'):
+        Path(pid_file).write_text(str(pid))
     def ready():
         assert process.poll() is None, 'Range restart exited'
         try:
@@ -96,13 +106,23 @@ try:
     expected = raw[start:start + 65536]
     ids = [r[1] for r in members]
     old_bytes = db.execute('SELECT stored_size FROM packs WHERE id=%s', (pack,)).fetchone()[0]
+    assert get() == raw
+    # Direct uploads need a read to populate the cache; wait for asynchronous fills.
+    def warm():
+        previous = cli('status')['backend_gets']
+        assert get() == raw
+        return cli('status')['backend_gets'] == previous
+    wait(warm)
+    time.sleep(1.3)
+    warm_counts = count(pack)
+    assert warm_counts[1] == 0
     before = cli('status')['backend_gets']
     for _ in range(10):
         assert get(span) == expected
     s3.head_object(Bucket=bucket, Key='ranges')
     assert cli('status')['backend_gets'] == before
     time.sleep(1.3)
-    assert count(pack) == (0, 0)
+    assert count(pack) == warm_counts
     assert task('pack', 'run', '--mode', 'range')['processed'] == 0
     for full_span in (None, f'bytes=0-{len(raw) - 1}'):
         evict()
@@ -167,6 +187,7 @@ try:
     wait(lambda: cli('task', 'show', job)['state'] in ('completed', 'failed'))
     result = cli('task', 'show', job)
     assert result['state'] == 'completed', result
+    result = child_result(result)
     print('PASS Range publication crash, maintenance pause and resumed layout switch', flush=True)
     assert result['processed'] == len(members), result
     report = result['detail']['last_range']
@@ -228,7 +249,8 @@ try:
     del compressible
     print('PASS highly compressed pack stays intact when encoded-byte savings cannot pay rewrite costs', flush=True)
 
-    restart(original.replace('max_size="128MiB"', 'max_size="0B"') + '\n[pack]\nenabled=false\nrange_optimization=true\n')
+    cli('maintenance', 'pack-creation', 'stop')
+    restart(re.sub(r'cache_size\s*=\s*"128MiB"', 'cache_size = "0B"', original))
     pack = packed[0][0]
     initial_packs = db.execute('SELECT count(*) FROM packs').fetchone()[0]
     for _ in range(8):
@@ -244,11 +266,14 @@ try:
 
     # The shared maintenance UI is verified in web/tests/maintenance.spec.ts.
 
-    restart(original + '\n[pack]\nrange_optimization=false\n')
-    assert not cli('pack', 'status')['range_optimization']
+    restart(original)
+    cli('maintenance', 'pause', 'range')
     assert subprocess.run(command + ['cli', 'pack', 'run', '--mode', 'range'], capture_output=True).returncode != 0
-    print('PASS disabled Range optimization rejects manual scheduling', flush=True)
+    cli('maintenance', 'resume', 'range')
+    cli('maintenance', 'pack-creation', 'resume')
+    print('PASS paused Range policy rejects manual scheduling', flush=True)
 finally:
+    config.write_text(original)
     (faults / 'pack-download').unlink(missing_ok=True)
     (faults / 'pack-before-publish').unlink(missing_ok=True)
     if process and process.poll() is None:

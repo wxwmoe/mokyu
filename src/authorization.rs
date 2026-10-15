@@ -1,7 +1,6 @@
 use anyhow::Result;
 use s3s::s3_error;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -64,6 +63,7 @@ impl Action {
 pub enum Principal {
     System,
     Bootstrap,
+    Local,
     Node {
         id: Uuid,
         role: String,
@@ -99,186 +99,26 @@ impl Principal {
             None
         }
     }
-    pub async fn lock_identity(&self, tx: &mut Transaction<'_, Postgres>) -> Result<bool> {
-        self.validate(tx, true).await
+    pub async fn service(
+        store: &dyn crate::model::AuthorizationStore,
+        access_key: &str,
+    ) -> Result<Self> {
+        store.service(access_key).await
     }
-    pub async fn lock_admin(&self, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-        if self.validate(tx, true).await? {
-            Ok(())
-        } else {
-            Err(s3_error!(AccessDenied).into())
-        }
-    }
-    pub async fn service(db: &PgPool, access_key: &str) -> Result<Self> {
-        let revision = sqlx::query_scalar(
-            "SELECT authorization_revision FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>now())",
-        )
-        .bind(access_key)
-        .fetch_optional(db)
-        .await?
-        .ok_or_else(|| s3_error!(AccessDenied))?;
-        Ok(Self::Service {
-            access_key: access_key.into(),
-            revision,
-        })
-    }
-    async fn validate(&self, connection: &mut PgConnection, lock: bool) -> Result<bool> {
-        match self {
-            Self::System | Self::Bootstrap => Ok(true),
-            Self::Node { id, role } => {
-                let query = if lock {
-                    "SELECT role FROM nodes WHERE id=$1 AND enabled FOR SHARE"
-                } else {
-                    "SELECT role FROM nodes WHERE id=$1 AND enabled"
-                };
-                let current: Option<String> = sqlx::query_scalar(query)
-                    .bind(id)
-                    .fetch_optional(&mut *connection)
-                    .await?;
-                Ok(current.as_deref() == Some(role.as_str()) && role == "control")
-            }
-            Self::User {
-                id,
-                session,
-                revision,
-            } => {
-                let query = if lock {
-                    "SELECT u.role,u.authorization_revision FROM web_users u JOIN sessions s ON s.user_id=u.id WHERE u.id=$1 AND s.id=$2 AND u.enabled AND NOT u.must_change_password AND s.expires_at>now() AND s.auth_revision=u.auth_revision FOR SHARE OF u"
-                } else {
-                    "SELECT u.role,u.authorization_revision FROM web_users u JOIN sessions s ON s.user_id=u.id WHERE u.id=$1 AND s.id=$2 AND u.enabled AND NOT u.must_change_password AND s.expires_at>now() AND s.auth_revision=u.auth_revision"
-                };
-                let row: Option<(String, i64)> = sqlx::query_as(query)
-                    .bind(id)
-                    .bind(session)
-                    .fetch_optional(connection)
-                    .await?;
-                match row {
-                    Some((role, current)) if current == *revision => Ok(role == "admin"),
-                    _ => Err(s3_error!(AccessDenied).into()),
-                }
-            }
-            Self::Service {
-                access_key,
-                revision,
-            } => {
-                let query = if lock {
-                    "SELECT authorization_revision FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>now()) FOR SHARE"
-                } else {
-                    "SELECT authorization_revision FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>now())"
-                };
-                let current: Option<i64> = sqlx::query_scalar(query)
-                    .bind(access_key)
-                    .fetch_optional(connection)
-                    .await?;
-                if current == Some(*revision) {
-                    Ok(false)
-                } else {
-                    Err(s3_error!(AccessDenied).into())
-                }
-            }
-            Self::Token {
-                id,
-                user,
-                revision,
-                user_revision,
-            } => {
-                let user_query = if lock {
-                    "SELECT role,authorization_revision,auth_revision FROM web_users WHERE id=$1 AND enabled AND NOT must_change_password FOR SHARE"
-                } else {
-                    "SELECT role,authorization_revision,auth_revision FROM web_users WHERE id=$1 AND enabled AND NOT must_change_password"
-                };
-                let current: Option<(String, i64, i64)> = sqlx::query_as(user_query)
-                    .bind(user)
-                    .fetch_optional(&mut *connection)
-                    .await?;
-                let (role, current, auth) = current.ok_or_else(|| s3_error!(AccessDenied))?;
-                if current != *user_revision {
-                    return Err(s3_error!(AccessDenied).into());
-                }
-                let token_query = if lock {
-                    "SELECT system,authorization_revision FROM api_tokens WHERE id=$1 AND user_id=$2 AND auth_revision=$3 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now()) FOR SHARE"
-                } else {
-                    "SELECT system,authorization_revision FROM api_tokens WHERE id=$1 AND user_id=$2 AND auth_revision=$3 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())"
-                };
-                let token: Option<(bool, i64)> = sqlx::query_as(token_query)
-                    .bind(id)
-                    .bind(user)
-                    .bind(auth)
-                    .fetch_optional(connection)
-                    .await?;
-                match token {
-                    Some((system, current)) if current == *revision => {
-                        Ok(system && role == "admin")
-                    }
-                    _ => Err(s3_error!(AccessDenied).into()),
-                }
-            }
-        }
-    }
-    async fn bucket_actions(
+    pub async fn actions(
         &self,
-        connection: &mut PgConnection,
+        store: &dyn crate::model::AuthorizationStore,
         bucket: Uuid,
-        admin: bool,
     ) -> Result<Vec<Action>> {
-        if admin {
-            return Ok(Action::ALL.to_vec());
-        }
-        let actions = match self {
-            Self::Token { id, .. } => {
-                let row: Option<Vec<String>> = sqlx::query_scalar(
-                    "SELECT actions FROM token_bucket_access WHERE token_id=$1 AND bucket_id=$2",
-                )
-                .bind(id)
-                .bind(bucket)
-                .fetch_optional(connection)
-                .await?;
-                Action::ALL
-                    .into_iter()
-                    .filter(|a| {
-                        row.as_ref()
-                            .is_some_and(|row| row.iter().any(|s| s == a.name()))
-                    })
-                    .collect()
-            }
-            Self::User { id, .. } => {
-                let row: Option<Vec<String>> = sqlx::query_scalar(
-                    "SELECT actions FROM user_bucket_access WHERE bucket_id=$1 AND user_id=$2",
-                )
-                .bind(bucket)
-                .bind(id)
-                .fetch_optional(connection)
-                .await?;
-                Action::ALL
-                    .into_iter()
-                    .filter(|a| {
-                        row.as_ref()
-                            .is_some_and(|row| row.iter().any(|s| s == a.name()))
-                    })
-                    .collect()
-            }
-            Self::Service { access_key, .. } => {
-                let row: Option<Vec<String>> = sqlx::query_scalar("SELECT g.actions FROM s3_credential_grants g JOIN buckets b ON b.id=g.bucket_id JOIN s3_credentials c ON c.access_key_id=g.access_key AND c.project_id=b.project_id WHERE g.access_key=$1 AND g.bucket_id=$2")
-                    .bind(access_key).bind(bucket).fetch_optional(connection).await?;
-                Action::ALL
-                    .into_iter()
-                    .filter(|a| {
-                        row.as_ref()
-                            .is_some_and(|row| row.iter().any(|s| s == a.name()))
-                    })
-                    .collect()
-            }
-            Self::System | Self::Bootstrap | Self::Node { .. } => Action::ALL.to_vec(),
-        };
-        Ok(actions)
+        store.actions(self, bucket).await
     }
-    pub async fn actions(&self, db: &PgPool, bucket: Uuid) -> Result<Vec<Action>> {
-        let mut connection = db.acquire().await?;
-        let admin = self.validate(&mut connection, false).await?;
-        self.bucket_actions(&mut connection, bucket, admin).await
-    }
-    pub async fn require(&self, db: &PgPool, bucket: Uuid, action: Action) -> Result<Permit> {
-        if !self.actions(db, bucket).await?.contains(&action) {
+    pub async fn require(
+        &self,
+        store: &dyn crate::model::AuthorizationStore,
+        bucket: Uuid,
+        action: Action,
+    ) -> Result<Permit> {
+        if !self.actions(store, bucket).await?.contains(&action) {
             return Err(s3_error!(AccessDenied).into());
         }
         Ok(Permit {
@@ -309,24 +149,6 @@ impl Permit {
     }
     pub fn add(&mut self, bucket: Uuid, action: Action) {
         self.resources.entry(bucket).or_default().push(action);
-    }
-    pub async fn lock(&self, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-        let admin = self.principal.validate(tx, true).await?;
-        for (bucket, required) in &self.resources {
-            let exists: Option<Uuid> =
-                sqlx::query_scalar("SELECT id FROM buckets WHERE id=$1 FOR SHARE")
-                    .bind(bucket)
-                    .fetch_optional(&mut **tx)
-                    .await?;
-            if exists.is_none() {
-                return Err(s3_error!(AccessDenied).into());
-            }
-            let available = self.principal.bucket_actions(tx, *bucket, admin).await?;
-            if required.iter().any(|a| !available.contains(a)) {
-                return Err(s3_error!(AccessDenied).into());
-            }
-        }
-        Ok(())
     }
 }
 

@@ -1,10 +1,13 @@
 use super::{Identity, media::ObjectMetadata};
+use crate::model::object::{
+    MediaAction, ObjectTransfer, Outcome, RECEIPT, Receipt, StorageMigration,
+};
 use crate::{
     app::App,
     authorization::{Action, Permit},
     http::{HttpError, problem},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result};
 use axum::{
     Json,
     extract::{Extension, State},
@@ -13,21 +16,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
 use std::{collections::HashSet, sync::Arc};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub(super) enum Kind {
-    Delete,
-    Private,
-    PublicRead,
-    Copy,
-    Move,
-    Metadata,
-}
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Item {
@@ -41,20 +33,13 @@ pub(super) struct Item {
 #[serde(deny_unknown_fields)]
 pub(super) struct Batch {
     bucket: Uuid,
-    action: Kind,
+    action: MediaAction,
     target_bucket: Option<Uuid>,
     #[serde(default)]
     confirm_storage_migration: bool,
     public_read: Option<bool>,
     metadata: Option<ObjectMetadata>,
     objects: Vec<Item>,
-}
-#[derive(Clone, Serialize, Deserialize, ToSchema)]
-pub(super) struct Outcome {
-    status: u16,
-    code: Option<String>,
-    output_version: Option<Uuid>,
-    task_id: Option<Uuid>,
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct ItemResult {
@@ -67,69 +52,6 @@ pub(super) struct ItemResult {
 #[derive(Serialize, ToSchema)]
 pub(super) struct BatchResult {
     results: Vec<ItemResult>,
-}
-struct Receipt {
-    id: Uuid,
-    bucket: Uuid,
-    key: String,
-    action: Kind,
-    count: usize,
-}
-tokio::task_local! { static RECEIPT:Receipt; }
-
-pub(crate) async fn complete(
-    tx: &mut Transaction<'_, Postgres>,
-    version: Option<Uuid>,
-) -> Result<()> {
-    record(
-        tx,
-        Outcome {
-            status: 200,
-            code: None,
-            output_version: version,
-            task_id: None,
-        },
-    )
-    .await
-}
-
-pub(crate) async fn queued(tx: &mut Transaction<'_, Postgres>, task_id: Uuid) -> Result<()> {
-    record(
-        tx,
-        Outcome {
-            status: 202,
-            code: None,
-            output_version: None,
-            task_id: Some(task_id),
-        },
-    )
-    .await
-}
-
-async fn record(tx: &mut Transaction<'_, Postgres>, result: Outcome) -> Result<()> {
-    if let Ok((id, bucket, key, action, count)) =
-        RECEIPT.try_with(|r| (r.id, r.bucket, r.key.clone(), r.action, r.count))
-    {
-        let changed =
-            sqlx::query("UPDATE media_operations SET result=$2 WHERE id=$1 AND result IS NULL")
-                .bind(id)
-                .bind(sqlx::types::Json(&result))
-                .execute(&mut **tx)
-                .await?
-                .rows_affected();
-        ensure!(changed == 1, "media operation receipt is missing");
-        super::audit::checkpoint(
-            tx,
-            "object.change",
-            &key,
-            json!({"bucket_id":bucket,"operation":action,"version":result.output_version,"task_id":result.task_id,"operation_id":id}),
-        )
-        .await?;
-        if count > 1 {
-            super::audit::partial(tx).await?;
-        }
-    }
-    Ok(())
 }
 fn invalid() -> anyhow::Error {
     s3s::s3_error!(InvalidArgument).into()
@@ -174,22 +96,22 @@ fn authority(actor: &Identity, input: &Batch) -> Permit {
         actor.principal.clone(),
         input.bucket,
         match input.action {
-            Kind::Delete => Action::Delete,
-            Kind::Private | Kind::PublicRead => Action::Acl,
+            MediaAction::Delete => Action::Delete,
+            MediaAction::Private | MediaAction::PublicRead => Action::Acl,
             _ => Action::Read,
         },
     );
     match input.action {
-        Kind::Copy | Kind::Move => {
+        MediaAction::Copy | MediaAction::Move => {
             permit.add(input.target_bucket.unwrap(), Action::Write);
             if input.public_read == Some(true) {
                 permit.add(input.target_bucket.unwrap(), Action::Acl);
             }
-            if input.action == Kind::Move {
+            if input.action == MediaAction::Move {
                 permit.add(input.bucket, Action::Delete);
             }
         }
-        Kind::Metadata => permit.add(input.bucket, Action::Write),
+        MediaAction::Metadata => permit.add(input.bucket, Action::Write),
         _ => (),
     }
     permit
@@ -197,7 +119,10 @@ fn authority(actor: &Identity, input: &Batch) -> Permit {
 async fn check(permit: &Permit, app: &App) -> Result<()> {
     for (bucket, actions) in &permit.resources {
         for action in actions {
-            permit.principal.require(&app.db, *bucket, *action).await?;
+            permit
+                .principal
+                .require(app.authorization.as_ref(), *bucket, *action)
+                .await?;
         }
     }
     Ok(())
@@ -210,12 +135,12 @@ pub(super) async fn batch(
     Extension(context): Extension<crate::status::stats::RequestContext>,
     Json(input): Json<Batch>,
 ) -> Result<Json<BatchResult>, HttpError> {
-    let copy = matches!(input.action, Kind::Copy | Kind::Move);
+    let copy = matches!(input.action, MediaAction::Copy | MediaAction::Move);
     if input.objects.is_empty()
         || input.objects.len() > 1000
         || copy != input.target_bucket.is_some()
-        || (input.action == Kind::Metadata) != input.metadata.is_some()
-        || input.public_read.is_some() && input.action != Kind::Copy
+        || (input.action == MediaAction::Metadata) != input.metadata.is_some()
+        || input.public_read.is_some() && input.action != MediaAction::Copy
     {
         return Err(invalid().into());
     }
@@ -259,12 +184,7 @@ pub(super) async fn batch(
             replayed,
         });
     }
-    let mut tx = app.db.begin().await?;
-    super::audit::checkpoint(&mut tx,"object.batch",&input.bucket.to_string(),json!({"bucket_id":input.bucket,"target_bucket_id":input.target_bucket,"operation":input.action,"count":results.len(),"failed":results.iter().filter(|r|r.outcome.status!=200).count(),"sample":results.iter().take(20).collect::<Vec<_>>()})).await?;
-    if context.failed.load(std::sync::atomic::Ordering::Relaxed) {
-        super::audit::partial(&mut tx).await?;
-    }
-    tx.commit().await?;
+    app.objects.audit_batch(input.bucket, json!({"bucket_id":input.bucket,"target_bucket_id":input.target_bucket,"operation":input.action,"count":results.len(),"failed":results.iter().filter(|r|r.outcome.status!=200).count(),"sample":results.iter().take(20).collect::<Vec<_>>()}), context.failed.load(std::sync::atomic::Ordering::Relaxed)).await?;
     Ok(Json(BatchResult { results }))
 }
 fn failure(error: anyhow::Error) -> Outcome {
@@ -296,27 +216,19 @@ async fn apply(
         &input.metadata,
         item,
     ))?);
-    let receipt = Uuid::new_v4();
-    let mut tx = app.db.begin().await?;
-    actor.principal.lock_identity(&mut tx).await?;
-    sqlx::query("INSERT INTO media_operations(id,user_id,token_id,client_id,request_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id,token_id,client_id) DO NOTHING")
-        .bind(receipt).bind(actor.id).bind(actor.principal.token_id()).bind(item.client_id).bind(hash.as_bytes().as_slice()).execute(&mut *tx).await?;
-    let (id,expected):(Uuid,Vec<u8>)=sqlx::query_as("SELECT id,request_hash FROM media_operations WHERE user_id=$1 AND token_id IS NOT DISTINCT FROM $2 AND client_id=$3")
-        .bind(actor.id).bind(actor.principal.token_id()).bind(item.client_id).fetch_one(&mut *tx).await?;
-    tx.commit().await?;
+    let (id, expected) = app
+        .objects
+        .begin_operation(&actor.principal, actor.id, item.client_id, hash.as_bytes())
+        .await?;
     if expected != hash.as_bytes() {
         return Err(problem(StatusCode::CONFLICT, "IdempotencyConflict").0);
     }
     let lock = app.operation_lock(id);
     let _guard = lock.lock().await;
-    let previous: Option<Value> =
-        sqlx::query_scalar("SELECT result FROM media_operations WHERE id=$1")
-            .bind(id)
-            .fetch_one(&app.db)
-            .await?;
+    let previous = app.objects.operation(id).await?;
     if let Some(previous) = previous {
         check(permit, app).await?;
-        return Ok((serde_json::from_value(previous)?, true));
+        return Ok((previous, true));
     }
     let result = RECEIPT
         .scope(
@@ -329,96 +241,45 @@ async fn apply(
             },
             async {
                 match input.action {
-                    Kind::Delete | Kind::Private | Kind::PublicRead => {
+                    MediaAction::Delete | MediaAction::Private | MediaAction::PublicRead => {
                         app.change_object(
                             &actor.principal,
                             input.bucket,
                             &item.key,
                             Some(item.version),
                             match input.action {
-                                Kind::Delete => None,
-                                Kind::Private => Some(false),
+                                MediaAction::Delete => None,
+                                MediaAction::Private => Some(false),
                                 _ => Some(true),
                             },
                         )
                         .await
                     }
-                    Kind::Move => move_object(app, input, item, permit).await,
-                    Kind::Copy | Kind::Metadata => copy_object(app, input, item, permit).await,
+                    MediaAction::Move => move_object(app, input, item, permit).await,
+                    MediaAction::Copy | MediaAction::Metadata => {
+                        copy_object(app, input, item, permit).await
+                    }
                 }
             },
         )
         .await;
     if let Err(error) = result {
         let outcome = failure(error);
-        sqlx::query("UPDATE media_operations SET result=$2 WHERE id=$1 AND result IS NULL")
-            .bind(id)
-            .bind(sqlx::types::Json(&outcome))
-            .execute(&app.db)
-            .await?;
+        app.objects.fail_operation(id, &outcome).await?;
     }
     #[cfg(feature = "fault-injection")]
     crate::faults::point("media-after-operation").await;
-    let result: Value = sqlx::query_scalar("SELECT result FROM media_operations WHERE id=$1")
-        .bind(id)
-        .fetch_one(&app.db)
-        .await?;
-    Ok((serde_json::from_value(result)?, false))
-}
-async fn scope(tx: &mut Transaction<'_, Postgres>, permit: &Permit) -> Result<()> {
-    permit.lock(tx).await?;
-    let buckets: Vec<Uuid> = permit.resources.keys().copied().collect();
-    let blocked: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM buckets WHERE id=ANY($1) AND state<>'active')",
-    )
-    .bind(&buckets)
-    .fetch_one(&mut **tx)
-    .await?;
-    if blocked {
-        return Err(s3s::s3_error!(OperationAborted).into());
-    }
-    sqlx::query("SELECT scope_id FROM quota_scopes WHERE scope='project' AND scope_id IN (SELECT project_id FROM buckets WHERE id=ANY($1)) ORDER BY scope_id FOR UPDATE").bind(&buckets).execute(&mut **tx).await?;
-    sqlx::query(
-        "SELECT scope_id FROM quota_scopes WHERE scope='bucket' AND scope_id=ANY($1) ORDER BY scope_id",
-    )
-    .bind(&buckets)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-pub(crate) async fn selected(
-    tx: &mut Transaction<'_, Postgres>,
-    bucket: Uuid,
-    key: &str,
-    expected: Option<Uuid>,
-) -> Result<Option<Uuid>> {
-    let actual: Option<Uuid> = sqlx::query_scalar(
-        "SELECT stream_id FROM objects WHERE bucket_id=$1 AND object_key=$2 FOR UPDATE",
-    )
-    .bind(bucket)
-    .bind(key)
-    .fetch_optional(&mut **tx)
-    .await?
-    .flatten();
-    if actual != expected {
-        return Err(s3s::s3_error!(PreconditionFailed).into());
-    }
-    Ok(actual)
+    let result = app
+        .objects
+        .operation(id)
+        .await?
+        .context("media operation receipt is missing")?;
+    Ok((result, false))
 }
 async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit) -> Result<()> {
     let target = input.target_bucket.unwrap();
-    let source_target: Option<Uuid> =
-        sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=$1")
-            .bind(input.bucket)
-            .fetch_optional(&app.db)
-            .await?
-            .flatten();
-    let target_target: Option<Uuid> =
-        sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=$1")
-            .bind(target)
-            .fetch_optional(&app.db)
-            .await?
-            .flatten();
+    let source_target = app.objects.storage(input.bucket).await?;
+    let target_target = app.objects.storage(target).await?;
     if source_target.is_none() || target_target.is_none() {
         return Err(s3s::s3_error!(NoSuchBucket).into());
     }
@@ -430,44 +291,19 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
     crate::faults::point("media-before-publish").await;
     let _coord = app.coord.lock().await;
     app.writable()?;
-    let mut tx = app.db.begin().await?;
-    scope(&mut tx, permit).await?;
-    selected(&mut tx, input.bucket, &item.key, Some(item.version)).await?;
-    let key = item.target_key.as_deref().unwrap();
-    let old = selected(&mut tx, target, key, item.target_version).await?;
-    let public: bool = sqlx::query_scalar("SELECT public_read FROM streams WHERE id=$1")
-        .bind(item.version)
-        .fetch_one(&mut *tx)
+    app.objects
+        .move_object(
+            permit,
+            ObjectTransfer {
+                source_bucket: input.bucket,
+                source_key: &item.key,
+                source_version: item.version,
+                target_bucket: target,
+                target_key: item.target_key.as_deref().unwrap(),
+                target_version: item.target_version,
+            },
+        )
         .await?;
-    if public {
-        Permit::for_action(permit.principal.clone(), target, Action::Acl)
-            .lock(&mut tx)
-            .await?;
-    }
-    sqlx::query(
-        "UPDATE objects SET stream_id=NULL,write_token=$3 WHERE bucket_id=$1 AND object_key=$2",
-    )
-    .bind(input.bucket)
-    .bind(&item.key)
-    .bind(Uuid::new_v4())
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("UPDATE streams SET bucket_id=$2,object_key=$3 WHERE id=$1")
-        .bind(item.version)
-        .bind(target)
-        .bind(key)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,$2,$3,$3) ON CONFLICT(bucket_id,object_key) DO UPDATE SET stream_id=excluded.stream_id,write_token=excluded.write_token")
-        .bind(target).bind(key).bind(item.version).execute(&mut *tx).await?;
-    if let Some(old) = old {
-        sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id=$1")
-            .bind(old)
-            .execute(&mut *tx)
-            .await?;
-    }
-    complete(&mut tx, Some(item.version)).await?;
-    tx.commit().await?;
     app.wake_gc.notify_one();
     Ok(())
 }
@@ -477,7 +313,7 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
     if source.id != item.version {
         return Err(s3s::s3_error!(PreconditionFailed).into());
     }
-    let replace = input.action == Kind::Metadata;
+    let replace = input.action == MediaAction::Metadata;
     let (target, key, expected, public, meta) = if replace {
         (
             input.bucket,
@@ -491,7 +327,7 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
             input.target_bucket.unwrap(),
             item.target_key.as_deref().unwrap(),
             item.target_version,
-            if input.action == Kind::Move {
+            if input.action == MediaAction::Move {
                 source.public_read
             } else {
                 input.public_read.unwrap_or(false)
@@ -499,49 +335,41 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
             source.metadata.clone(),
         )
     };
-    let source_target: Uuid =
-        sqlx::query_scalar::<_, Option<Uuid>>("SELECT storage_id FROM buckets WHERE id=$1")
-            .bind(input.bucket)
-            .fetch_one(&app.db)
-            .await?
-            .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
-    let target_target: Uuid =
-        sqlx::query_scalar::<_, Option<Uuid>>("SELECT storage_id FROM buckets WHERE id=$1")
-            .bind(target)
-            .fetch_one(&app.db)
-            .await?
-            .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    let source_target = app
+        .objects
+        .storage(input.bucket)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    let target_target = app
+        .objects
+        .storage(target)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
     if source_target != target_target {
         if !input.confirm_storage_migration {
             return Err(problem(StatusCode::CONFLICT, "StorageMigrationConfirmationRequired").0);
         }
         let _coord = app.coord.lock().await;
-        let mut tx = app.db.begin().await?;
-        let mut authority = permit.clone();
-        if public {
-            authority.add(target, Action::Acl);
-        }
-        scope(&mut tx, &authority).await?;
-        selected(&mut tx, input.bucket, &item.key, Some(item.version)).await?;
-        selected(&mut tx, target, key, expected).await?;
-        let task = crate::worker::insert(
-            &mut tx,
-            "storage_migration",
-            Some(target),
-            json!({
-                "source_bucket": input.bucket,
-                "source_key": item.key,
-                "source_version": item.version,
-                "target_bucket": target,
-                "target_key": key,
-                "target_version": expected,
-                "action": if input.action == Kind::Move { "move" } else { "copy" },
-                "public_read": public,
-            }),
-        )
-        .await?;
-        queued(&mut tx, task).await?;
-        tx.commit().await?;
+        app.objects
+            .queue_migration(
+                permit,
+                &StorageMigration {
+                    source_bucket: input.bucket,
+                    source_key: item.key.clone(),
+                    source_version: item.version,
+                    target_bucket: target,
+                    target_key: key.to_owned(),
+                    target_version: expected,
+                    action: if input.action == MediaAction::Move {
+                        "move"
+                    } else {
+                        "copy"
+                    }
+                    .to_owned(),
+                    public_read: public,
+                },
+            )
+            .await?;
         app.wake_tasks.notify_one();
         return Ok(());
     }
@@ -550,35 +378,35 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
             permit, target, key, "object", meta, public, false, None, None,
         )
         .await?;
-    let result=async {
-        app.copy_extents(id,&source).await?;
-        app.finish_stream(id,source.size,&source.etag,source.checksums.clone()).await?;
-        #[cfg(feature="fault-injection")]
+    let result = async {
+        app.copy_extents(id, &source).await?;
+        app.finish_stream(id, source.size, &source.etag, source.checksums.clone())
+            .await?;
+        #[cfg(feature = "fault-injection")]
         crate::faults::point("media-before-publish").await;
-        let _coord=app.coord.lock().await;app.writable()?;
-        let mut tx=app.db.begin().await?;
-        let mut authority=permit.clone();if public {authority.add(target,Action::Acl);}
-        scope(&mut tx,&authority).await?;
-        selected(&mut tx,input.bucket,&item.key,Some(item.version)).await?;
-        let old=selected(&mut tx,target,key,expected).await?;
-        if replace {
-            let current:bool=sqlx::query_scalar("SELECT public_read FROM streams WHERE id=$1").bind(source.id).fetch_one(&mut *tx).await?;
-            if current!=source.public_read {return Err(s3s::s3_error!(PreconditionFailed).into());}
-        }
-        sqlx::query("UPDATE streams SET state='ready',touched_at=now() WHERE id=$1 AND state='writing'").bind(id).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,$2,$3,$3) ON CONFLICT(bucket_id,object_key) DO UPDATE SET stream_id=excluded.stream_id,write_token=excluded.write_token")
-            .bind(target).bind(key).bind(id).execute(&mut *tx).await?;
-        if let Some(old)=old {sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id=$1").bind(old).execute(&mut *tx).await?;}
-        complete(&mut tx,Some(id)).await?;tx.commit().await?;
-        Ok::<_,anyhow::Error>(())
-    }.await;
+        let _coord = app.coord.lock().await;
+        app.writable()?;
+        app.objects
+            .publish_copy(
+                permit,
+                ObjectTransfer {
+                    source_bucket: input.bucket,
+                    source_key: &item.key,
+                    source_version: item.version,
+                    target_bucket: target,
+                    target_key: key,
+                    target_version: expected,
+                },
+                id,
+                public,
+                replace.then_some(source.public_read),
+            )
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
     if result.is_err() {
-        let _ = sqlx::query(
-            "UPDATE streams SET state='abandoned',touched_at=now() WHERE id=$1 AND state='writing'",
-        )
-        .bind(id)
-        .execute(&app.db)
-        .await;
+        let _ = app.objects.abandon_copy(id).await;
     }
     app.wake_gc.notify_one();
     result

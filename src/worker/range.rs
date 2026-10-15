@@ -1,10 +1,11 @@
+use crate::model::task::Execution;
 use crate::{
     app::App,
     config,
     storage::ReadContext,
     worker::packing::{Mapping, Output},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -45,48 +46,63 @@ impl Benefit {
 }
 
 impl App {
-    pub(crate) async fn range_batch(&self, task: Uuid, detail: &Value) -> Result<bool> {
-        ensure!(
-            self.config.local_pack.range_optimization,
-            "Range optimization is disabled"
-        );
+    pub(crate) async fn range_batch(&self, task: Execution, detail: &Value) -> Result<bool> {
+        let storage: Uuid = detail["storage_id"]
+            .as_str()
+            .context("missing Range storage")?
+            .parse()?;
+        let settings = self.storage.pack_config(storage)?;
+        if !settings.range_optimization {
+            self.packing.complete_range_task(task).await?;
+            return Ok(false);
+        }
         let cutoff = detail["upper_time"]
             .as_str()
             .context("missing Range snapshot")?
             .parse::<chrono::DateTime<chrono::Utc>>()?;
         // Check only packs with new pressure evidence, at most once per sweep. Larger downloads go first.
-        let id:Option<i64>=sqlx::query_scalar("SELECT p.id FROM packs p JOIN pack_access_windows w ON w.pack_id=p.id WHERE p.state='ready' AND p.created_at<=$1 AND (p.range_checked_at IS NULL OR p.range_checked_at<$1) AND w.window_start>=date_trunc('hour',now()-$2*interval '1 second') GROUP BY p.id HAVING sum(w.partial_downloads)>=$3 AND max(w.updated_at)>COALESCE(p.range_checked_at,'-infinity'::timestamptz) ORDER BY sum(w.partial_bytes) DESC,p.id LIMIT 1")
-            .bind(cutoff).bind(config::seconds(&self.config.local_pack.range_window)? as f64).bind(i64::from(self.config.local_pack.range_min_downloads)).fetch_optional(&self.db).await?;
+        let id: Option<i64> = self
+            .packing
+            .next_range_pack(
+                storage,
+                cutoff,
+                config::seconds(&settings.range_window)? as f64,
+                i64::from(settings.range_min_downloads),
+            )
+            .await?;
         let Some(id) = id else {
-            sqlx::query("UPDATE tasks SET state='completed',updated_at=now() WHERE id=$1 AND state='running'").bind(task).execute(&self.db).await?;
+            self.packing.complete_range_task(task).await?;
             return Ok(false);
         };
-        let (processed, decision) = self.optimize_range_pack(task, id).await?;
-        let mut tx = self.db.begin().await?;
-        sqlx::query("UPDATE packs SET range_checked_at=now() WHERE id=$1")
-            .bind(id)
-            .execute(&mut *tx)
+        let (processed, decision) = self.optimize_range_pack(task, id, &settings).await?;
+        self.packing
+            .record_range(task, id, processed, decision)
             .await?;
-        sqlx::query("UPDATE tasks SET cursor=$2,processed=processed+$3,detail=detail||jsonb_build_object('last_range',$4::jsonb,'evaluated',COALESCE((detail->>'evaluated')::bigint,0)+1),updated_at=now() WHERE id=$1 AND state='running'").bind(task).bind(id.to_string()).bind(processed as i64).bind(decision).execute(&mut *tx).await?;
-        tx.commit().await?;
         Ok(true)
     }
-    async fn optimize_range_pack(&self, task: Uuid, id: i64) -> Result<(usize, Value)> {
+    async fn optimize_range_pack(
+        &self,
+        task: Execution,
+        id: i64,
+        settings: &crate::content::pack::Config,
+    ) -> Result<(usize, Value)> {
         let mut report = json!({"pack_id":id.to_string(),"applied":false});
-        let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack_id=$1) OR EXISTS(SELECT 1 FROM chunks c JOIN extents e ON e.chunk_id=c.id JOIN streams s ON s.id=e.stream_id WHERE c.pack_id=$1 AND s.state='writing')").bind(id).fetch_one(&self.db).await?;
+        let blocked: bool = self.packing.range_pack_blocked(id).await?;
         if blocked {
             report["reason"] = json!("active_upload");
             return Ok((0, report));
         }
-        let window = config::seconds(&self.config.local_pack.range_window)? as f64;
-        let (partial,observed,full):(i64,i64,i64)=sqlx::query_as("SELECT COALESCE(sum(partial_downloads),0)::bigint,COALESCE(sum(partial_bytes),0)::bigint,COALESCE(sum(downloads-partial_downloads),0)::bigint FROM pack_access_windows WHERE pack_id=$1 AND window_start>=date_trunc('hour',now()-$2*interval '1 second')").bind(id).bind(window).fetch_one(&self.db).await?;
-        let hits:HashMap<i64,i64>=sqlx::query_as::<_,(i64,i64)>("SELECT chunk_id,sum(downloads)::bigint FROM pack_member_access_windows WHERE pack_id=$1 AND window_start>=date_trunc('hour',now()-$2*interval '1 second') GROUP BY chunk_id").bind(id).bind(window).fetch_all(&self.db).await?.into_iter().collect();
-        let (old, raw, count): (i64, i64, i32) =
-            sqlx::query_as("SELECT stored_size,raw_size,member_count FROM packs WHERE id=$1")
-                .bind(id)
-                .fetch_one(&self.db)
-                .await?;
-        let rows:Vec<Mapping>=sqlx::query_as("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.location_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,m.offset_bytes,c.pack_id FROM pack_members m JOIN chunks c ON c.id=m.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE m.pack_id=$1 AND c.pack_id=$1 AND c.state='ready' AND EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) ORDER BY m.ordinal LIMIT 4096").bind(id).fetch_all(&self.db).await?;
+        let window = config::seconds(&settings.range_window)? as f64;
+        let (partial, observed, full): (i64, i64, i64) =
+            self.packing.pack_range_totals(id, window).await?;
+        let hits: HashMap<i64, i64> = self
+            .packing
+            .pack_member_hits(id, window)
+            .await?
+            .into_iter()
+            .collect();
+        let (old, raw, count): (i64, i64, i32) = self.packing.pack_dimensions(id).await?;
+        let rows: Vec<Mapping> = self.packing.range_pack_layout(id).await?;
         if rows.len() != count as usize
             || rows
                 .iter()
@@ -94,7 +110,7 @@ impl App {
                 .sum::<i64>()
                 != raw
             || hits.values().sum::<i64>() < partial
-            || partial < i64::from(self.config.local_pack.range_min_downloads)
+            || partial < i64::from(settings.range_min_downloads)
             || observed == 0
         {
             report["reason"] = json!("incomplete_evidence_or_layout");
@@ -104,6 +120,7 @@ impl App {
         for row in &rows {
             let join = if let Some(last) = groups.last().and_then(|g| g.last()) {
                 self.pack_creation_allowed()
+                    && settings.enabled
                     && hits.contains_key(&last.chunk.id) == hits.contains_key(&row.chunk.id)
                     && last.offset_bytes + i64::from(last.chunk.raw_size) == row.offset_bytes
                     && groups
@@ -113,14 +130,15 @@ impl App {
                         .map(|r| r.chunk.raw_size as u64)
                         .sum::<u64>()
                         + row.chunk.raw_size as u64
-                        <= config::bytes(&self.config.local_pack.max_size)?
-                    && Self::same_references(
-                        last.chunk.id,
-                        row.chunk.id,
-                        row.offset_bytes - last.offset_bytes,
-                    )
-                    .fetch_one(&self.db)
-                    .await?
+                        <= config::bytes(&settings.max_size)?
+                    && self
+                        .packing
+                        .same_references(
+                            last.chunk.id,
+                            row.chunk.id,
+                            row.offset_bytes - last.offset_bytes,
+                        )
+                        .await?
             } else {
                 false
             };
@@ -178,7 +196,7 @@ impl App {
         );
         report["partial_downloads"] = json!(partial);
         report["benefit"] = serde_json::to_value(&predicted)?;
-        if !predicted.worthwhile(&self.config.local_pack)? {
+        if !predicted.worthwhile(settings)? {
             report["reason"] = json!("insufficient_net_savings");
             return Ok((0, report));
         }
@@ -205,7 +223,7 @@ impl App {
                 .collect(),
         );
         report["benefit"] = serde_json::to_value(&actual)?;
-        if !actual.worthwhile(&self.config.local_pack)? {
+        if !actual.worthwhile(settings)? {
             report["reason"] = json!("encoded_layout_not_beneficial");
             return Ok((0, report));
         }
@@ -214,10 +232,22 @@ impl App {
         report["reason"] = json!("repeated_partial_downloads");
         Ok((rows.len(), report))
     }
-    pub(crate) async fn defer_range_repack(&self, stream: Uuid, from: i64) -> Result<()> {
+    pub(crate) async fn defer_range_repack(
+        &self,
+        stream: Uuid,
+        from: i64,
+        settings: &crate::content::pack::Config,
+    ) -> Result<()> {
         // Keep the reason on logical chunks, independent of old packs and task-history retention.
-        sqlx::query("UPDATE chunks c SET repack_after=now()+$4*interval '1 second' FROM mokyu_meta g WHERE c.range_split_at IS NOT NULL AND c.repack_after<=now() AND c.id IN (SELECT chunk_id FROM extents WHERE stream_id=$1 AND offset_bytes>=$5 ORDER BY offset_bytes LIMIT 1026) AND (g.access_coverage_since IS NULL OR g.access_coverage_since>date_trunc('hour',now()-$2*interval '1 second') OR g.access_flushed_at IS NULL OR g.access_flushed_at<now()-$3*interval '1 second' OR EXISTS(SELECT 1 FROM chunk_access_windows w WHERE w.chunk_id=c.id AND w.range_reads>0 AND w.window_start>=date_trunc('hour',now()-$2*interval '1 second')))")
-            .bind(stream).bind(config::seconds(&self.config.local_pack.range_repack_window)? as f64).bind((2*config::seconds(&self.config.metrics.access_flush_interval)?) as f64).bind(config::seconds(&self.config.local_pack.range_repack_retry_interval)? as f64).bind(from).execute(&self.db).await?;
+        self.packing
+            .defer_range_repack(
+                stream,
+                config::seconds(&settings.range_repack_window)? as f64,
+                (2 * config::seconds(&self.config.metrics.access_flush_interval)?) as f64,
+                config::seconds(&settings.range_repack_retry_interval)? as f64,
+                from,
+            )
+            .await?;
         Ok(())
     }
 }

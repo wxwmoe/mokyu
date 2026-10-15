@@ -54,6 +54,7 @@ pub(crate) fn run() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("TLS provider initialization failed"))?;
     let (config, secrets, budget) = config::Config::load(&args.config)?;
+    config.database.backend.validate_role(role.title())?;
     tracing::info!(version=env!("CARGO_PKG_VERSION"),resources=%serde_json::to_string(&budget)?,"starting Mokyu");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(budget.available_cpus)
@@ -74,11 +75,7 @@ pub(crate) fn run() -> Result<()> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                let alive = tokio::time::timeout(
-                    Duration::from_secs(3),
-                    sqlx::query("SELECT 1").execute(&mut owner),
-                )
-                .await;
+                let alive = tokio::time::timeout(Duration::from_secs(3), owner.check()).await;
                 if !matches!(alive, Ok(Ok(_))) {
                     tracing::error!("database ownership connection lost; terminating");
                     std::process::exit(1);

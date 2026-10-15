@@ -75,10 +75,10 @@ fn collect(root: &Path, files: &mut Vec<PathBuf>) {
         if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
-        let kind = entry.file_type().unwrap();
-        if kind.is_dir() {
+        let file_type = entry.file_type().unwrap();
+        if file_type.is_dir() {
             collect(&entry.path(), files);
-        } else if kind.is_file() {
+        } else if file_type.is_file() {
             files.push(entry.path());
         }
     }

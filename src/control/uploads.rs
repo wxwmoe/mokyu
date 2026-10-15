@@ -1,4 +1,5 @@
 use super::Identity;
+pub(crate) use crate::model::multipart::{ReceivedPart, Transfer, TransferFilter as Filter};
 use crate::{
     app::App,
     authorization::{Action, Permit},
@@ -20,7 +21,6 @@ use base64::{
 use chrono::{DateTime, Utc};
 use s3s::{S3Request, dto::*};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Postgres, QueryBuilder};
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -40,31 +40,7 @@ pub(super) struct UploadInput {
     #[serde(default)]
     overwrite: bool,
 }
-#[derive(Serialize, FromRow, ToSchema)]
-pub(super) struct Transfer {
-    id: Uuid,
-    bucket_id: Uuid,
-    bucket_name: String,
-    object_key: String,
-    #[serde(rename = "status")]
-    state: String,
-    source: String,
-    user_id: Option<Uuid>,
-    owner: String,
-    file_name: Option<String>,
-    expected_size: Option<String>,
-    part_size: Option<String>,
-    modified_at: Option<i64>,
-    received_bytes: String,
-    parts: i64,
-    remote_state: String,
-    created_at: DateTime<Utc>,
-    touched_at: DateTime<Utc>,
-    #[sqlx(default)]
-    expires_at: Option<DateTime<Utc>>,
-    #[sqlx(default)]
-    can_resume: bool,
-}
+
 #[derive(Serialize, ToSchema)]
 pub(super) struct TransferPage {
     #[serde(rename = "items")]
@@ -72,15 +48,7 @@ pub(super) struct TransferPage {
     #[serde(rename = "next_cursor")]
     next: Option<String>,
 }
-#[derive(Default, Deserialize, Serialize, IntoParams)]
-pub(super) struct Filter {
-    bucket: Option<Uuid>,
-    state: Option<String>,
-    source: Option<String>,
-    own: Option<bool>,
-    after: Option<String>,
-    limit: Option<i64>,
-}
+
 #[derive(Deserialize, Serialize)]
 struct Cursor {
     created: DateTime<Utc>,
@@ -90,8 +58,6 @@ struct Cursor {
     source: Option<String>,
     own: Option<bool>,
 }
-
-const VIEW: &str = "SELECT u.id,u.bucket_id,b.name bucket_name,u.object_key,u.state,CASE WHEN w.upload_id IS NULL THEN 's3' ELSE 'web' END source,w.user_id,COALESCE(NULLIF(a.display_name,''),NULLIF(a.username,''),c.label,'S3 application') owner,w.file_name,w.expected_size::text,w.part_size::text,w.modified_at,CASE WHEN u.state='completed' THEN COALESCE(s.size,w.expected_size,0) ELSE COALESCE((SELECT sum(quota_size) FROM parts WHERE upload_id=u.id),0) END::text received_bytes,(SELECT count(*) FROM parts WHERE upload_id=u.id) parts,CASE WHEN u.state<>'completed' THEN 'pending' WHEN u.durable_at IS NOT NULL THEN 'stored' WHEN u.output_stream IS NULL THEN 'unavailable' WHEN EXISTS(SELECT 1 FROM extents e JOIN chunks ch ON ch.id=e.chunk_id WHERE e.stream_id=u.output_stream AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=ch.id AND l.state='ready') AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=ch.pack_id AND p.state='ready')) THEN 'pending' ELSE 'stored' END remote_state,u.created_at,u.touched_at FROM uploads u JOIN buckets b ON b.id=u.bucket_id LEFT JOIN web_uploads w ON w.upload_id=u.id LEFT JOIN web_users a ON a.id=w.user_id LEFT JOIN s3_credentials c ON c.access_key_id=u.access_key LEFT JOIN streams s ON s.id=u.output_stream WHERE ";
 
 async fn page(app: &App, actor: &Identity, q: Filter, id: Option<Uuid>) -> Result<TransferPage> {
     let limit = q.limit.unwrap_or(50);
@@ -116,72 +82,17 @@ async fn page(app: &App, actor: &Identity, q: Filter, id: Option<Uuid>) -> Resul
     }) {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    let mut tx = app.db.begin().await?;
-    let admin = actor.principal.lock_identity(&mut tx).await?;
-    let mut sql = QueryBuilder::<Postgres>::new(VIEW);
-    if admin {
-        sql.push("true");
-    } else {
-        if let Some(token) = actor.principal.token_id() {
-            sql.push("EXISTS(SELECT 1 FROM token_bucket_access g WHERE g.token_id=")
-                .push_bind(token);
-        } else {
-            sql.push("EXISTS(SELECT 1 FROM user_bucket_access g WHERE g.user_id=")
-                .push_bind(actor.id);
-        }
-        sql.push(" AND g.bucket_id=u.bucket_id AND 'object.write'=ANY(g.actions) AND (w.user_id=")
-            .push_bind(actor.id)
-            .push(" OR 'bucket.settings'=ANY(g.actions)))");
-    }
-    if let Some(id) = id {
-        sql.push(" AND u.id=").push_bind(id);
-    } else {
-        match q.state.as_deref() {
-            Some("all") => {}
-            Some(state) => {
-                sql.push(" AND u.state=").push_bind(state);
-            }
-            None => {
-                sql.push(" AND u.state IN ('active','completing')");
-            }
-        }
-    }
-    if let Some(bucket) = q.bucket {
-        sql.push(" AND u.bucket_id=").push_bind(bucket);
-    }
-    if let Some(source) = &q.source {
-        sql.push(if source == "web" {
-            " AND w.upload_id IS NOT NULL"
-        } else {
-            " AND w.upload_id IS NULL"
-        });
-    }
-    if q.own == Some(true) {
-        sql.push(" AND w.user_id=").push_bind(actor.id);
-    }
-    if let Some(cursor) = cursor {
-        sql.push(" AND (u.created_at,u.id)<(")
-            .push_bind(cursor.created)
-            .push(",")
-            .push_bind(cursor.id)
-            .push(")");
-    }
-    sql.push(" ORDER BY u.created_at DESC,u.id DESC LIMIT ")
-        .push_bind(limit + 1);
-    let mut rows: Vec<Transfer> = sql.build_query_as().fetch_all(&mut *tx).await?;
-    let more = rows.len() > limit as usize;
-    rows.truncate(limit as usize);
-    let ready: Vec<Uuid> = rows
-        .iter()
-        .filter(|r| r.remote_state == "stored")
-        .map(|r| r.id)
-        .collect();
-    if !ready.is_empty() {
-        sqlx::query("UPDATE uploads SET durable_at=now() WHERE id=ANY($1) AND durable_at IS NULL")
-            .bind(ready)
-            .execute(&mut *tx)
-            .await?;
-    }
+    let (mut rows, more) = app
+        .multipart
+        .transfers(
+            &actor.principal,
+            actor.id,
+            &q,
+            cursor.map(|c| (c.created, c.id)),
+            id,
+            limit,
+        )
+        .await?;
     let idle = config::seconds(&app.config.uploads.idle_timeout)?;
     for row in &mut rows {
         row.expires_at = matches!(row.state.as_str(), "active" | "completing")
@@ -201,7 +112,6 @@ async fn page(app: &App, actor: &Identity, q: Filter, id: Option<Uuid>) -> Resul
     } else {
         None
     };
-    tx.commit().await?;
     Ok(TransferPage {
         uploads: rows,
         next,
@@ -221,7 +131,7 @@ async fn owned(app: &App, actor: &Identity, id: Uuid) -> Result<Transfer> {
     }
     actor
         .principal
-        .require(&app.db, row.bucket_id, Action::Write)
+        .require(app.authorization.as_ref(), row.bucket_id, Action::Write)
         .await?;
     Ok(row)
 }
@@ -262,12 +172,9 @@ pub(super) async fn create(
     }
     actor
         .principal
-        .require(&app.db, bucket, Action::Write)
+        .require(app.authorization.as_ref(), bucket, Action::Write)
         .await?;
-    let name: String = sqlx::query_scalar("SELECT name FROM buckets WHERE id=$1")
-        .bind(bucket)
-        .fetch_one(&app.db)
-        .await?;
+    let name: String = app.multipart.bucket_name(bucket).await?;
     let part_size = (((size + 9999) / 10000 + 1048575) / 1048576).max(16) * 1048576;
     let spec = WebUpload {
         user: actor.id,
@@ -337,13 +244,7 @@ pub(super) struct PartReceipt {
     etag: String,
     sha256: String,
 }
-#[derive(Serialize, ToSchema, FromRow)]
-pub(super) struct ReceivedPart {
-    number: i32,
-    size: String,
-    etag: String,
-    sha256: Option<String>,
-}
+
 #[derive(Serialize, ToSchema)]
 pub(super) struct PartsPage {
     parts: Vec<ReceivedPart>,
@@ -365,7 +266,7 @@ pub(super) async fn parts(
     if !(0..=10000).contains(&after) {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    let mut parts:Vec<ReceivedPart>=sqlx::query_as("SELECT p.part_number number,s.size::text,s.etag,s.checksums->>'sha256' sha256 FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number>$2 ORDER BY p.part_number LIMIT 1001").bind(id).bind(after).fetch_all(&app.db).await?;
+    let mut parts: Vec<ReceivedPart> = app.multipart.web_parts(id, after).await?;
     let more = parts.len() > 1000;
     parts.truncate(1000);
     let next = more.then(|| parts.last().unwrap().number);

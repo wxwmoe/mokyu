@@ -23,11 +23,13 @@ nonce 为 12 字节：前 4 字节编码来源类型和 UTC 日期，后 8 字�
 
 ```text
 <storage.prefix>/meta.json
-<storage.prefix>/chunks/<UUID 前两位>/<32 位小写 UUID>
+<storage.prefix>/<UUID 前两位>/<32 位小写 UUID>
 <storage.prefix>/packs/<UUID 前两位>/<32 位小写 UUID>
 ```
 
 `meta.json` 包含 `format_version`、`deployment_id`、`storage_id`、chunk/pack layout、创建时间和版本诊断字段。创建 storage 时只允许在目标命名空间为空的情况下用条件写入初始化；编辑已有 storage 时必须读取并匹配完整 meta，缺失或不匹配会拒绝保存。修改 prefix 不会自动搬迁载荷。
+
+独立区块直接使用 UUID 分片路径。sweep 同时识别此前文档中的 `chunks/<分片>/<UUID>` 路径；任何仍被物理索引记录的 UUID 都受到保护。
 
 群集上传暂存使用所选 staging storage 的保留前缀：
 

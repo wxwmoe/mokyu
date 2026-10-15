@@ -24,13 +24,15 @@ def cli(*args):
 
 
 bucket = 'integrity-' + uuid.uuid4().hex[:10]
-cli('bucket', 'create', bucket)
+storage_id = cli('storage', 'show', os.environ['MOKYU_TEST_STORAGE'])['id']
+cli('bucket', 'create', bucket, '--storage', storage_id)
 credential = cli('cred', 'create', bucket)
 client_config = Config(s3={'addressing_style': 'path'}, retries={'max_attempts': 0},
     request_checksum_calculation='when_required', response_checksum_validation='when_required')
 s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
     aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'], config=client_config)
-backend_config = configuration['backend']
+backend_file = os.environ.get('MOKYU_TEST_BACKEND')
+backend_config = json.loads(Path(backend_file).read_text()) if backend_file else configuration['backend']
 def secret(name):
     return backend_config.get(name) or (Path(os.environ['MOKYU_TEST_CONFIG']).parent / backend_config[name + '_file']).read_text().strip()
 backend = boto3.client('s3', endpoint_url=backend_config['endpoint'], region_name=backend_config['region'],
@@ -52,8 +54,13 @@ def get(path, **params):
 def wait(task):
     for _ in range(300):
         value = get('/api/v1/tasks/' + task)
-        if value['state'] in ('completed', 'failed'):
-            assert value['state'] == 'completed', value
+        if value['status'] in ('completed', 'failed'):
+            assert value['status'] == 'completed', value
+            if value['detail'].get('role') == 'parent':
+                children = db.execute('SELECT id FROM tasks WHERE parent_task_id=%s', (task,)).fetchall()
+                assert len(children) == 1, children
+                value = get('/api/v1/tasks/' + str(children[0][0]))
+                assert value['status'] == 'completed', value
             return value
         time.sleep(.05)
     raise AssertionError('integrity task timed out')
@@ -63,7 +70,7 @@ def check(mode='metadata', key=None):
     r = session.post(url + '/api/v1/integrity', headers=headers, json={'mode': mode, 'bucket': bucket, 'key': key})
     assert r.status_code == 200, r.text
     value = wait(r.json()['task_id'])
-    issues = get('/api/v1/tasks/' + value['id'] + '/issues')['issues']
+    issues = get('/api/v1/tasks/' + value['id'] + '/issues')['items']
     return value, issues
 
 
@@ -77,24 +84,28 @@ def codes(mode, expected, key='a'):
 data = os.urandom(128 * 1024)
 for key, body in [('a', data), ('b', data), ('empty', b'')]:
     s3.put_object(Bucket=bucket, Key=key, Body=body)
+assert s3.get_object(Bucket=bucket, Key='a')['Body'].read() == data
 cache = Path(os.environ['MOKYU_TEST_DATA']) / 'chunks'
 cache_before = {str(p): p.read_bytes() for p in cache.rglob('*') if p.is_file()}
-gets = get('/api/v1/system/status')['backend_gets']
+def backend_gets():
+    return int(next(row['value'] for row in get('/api/v1/system/status')['counters'] if row['key'] == 'backend_gets'))
+
+gets = backend_gets()
 task, issues = check()
 assert not issues and task['detail']['objects_checked'] == 3 and task['detail']['chunks_checked'] == 1, task
-assert get('/api/v1/system/status')['backend_gets'] == gets
+assert backend_gets() == gets
 task, _ = check('head')
-assert get('/api/v1/system/status')['backend_gets'] == gets
+assert backend_gets() == gets
 task, _ = check('full')
-assert task['detail']['chunks_checked'] == 1 and get('/api/v1/system/status')['backend_gets'] == gets + 1
+assert task['detail']['chunks_checked'] == 1 and backend_gets() == gets + 1
 assert {str(p): p.read_bytes() for p in cache.rglob('*') if p.is_file()} == cache_before
 assert wait(cli('integrity', 'check', '--bucket', bucket, '--mode', 'metadata')['task_id'])['detail']['issues'] == 0
 print('PASS all modes, empty objects, shared chunks checked once, CLI, zero cache changes', flush=True)
 
-row = db.execute("SELECT c.id,c.storage_id,c.standalone_size,c.encryption_algorithm,c.block_key_id,c.nonce,c.standalone_compressed,s.id FROM chunks c JOIN extents e ON e.chunk_id=c.id JOIN streams s ON s.id=e.stream_id JOIN objects o ON o.stream_id=s.id WHERE o.bucket_id=%s AND o.object_key='a'", (bucket_id,)).fetchone()
+row = db.execute("SELECT c.id,l.location_id,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.nonce,l.standalone_compressed,s.id FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id JOIN extents e ON e.chunk_id=c.id JOIN streams s ON s.id=e.stream_id JOIN objects o ON o.stream_id=s.id WHERE o.bucket_id=%s AND o.object_key='a'", (bucket_id,)).fetchone()
 chunk, storage, stored, algorithm, key_id, nonce, compressed, stream = row
 storage = storage.hex
-path = '/'.join(filter(None, [backend_config.get('prefix', '').rstrip('/'), 'chunks', storage[:2], storage]))
+path = '/'.join(filter(None, [backend_config.get('prefix', '').rstrip('/'), storage[:2], storage]))
 remote = {'Bucket': backend_config['bucket'], 'Key': path}
 encoded = backend.get_object(**remote)['Body'].read()
 try:
@@ -103,8 +114,8 @@ try:
     codes('metadata', [])
     _, issues = codes('head', ['remote_missing'])
     task, _ = codes('full', ['remote_missing'])
-    related = get(f"/api/v1/tasks/{task['id']}/issues/{get('/api/v1/tasks/' + task['id'] + '/issues')['issues'][0]['id']}/objects")
-    assert {o['key'] for o in related['objects']} == {'a', 'b'}
+    related = get(f"/api/v1/tasks/{task['id']}/issues/{get('/api/v1/tasks/' + task['id'] + '/issues')['items'][0]['id']}/objects")
+    assert {o['key'] for o in related['items']} == {'a', 'b'}
     backend.put_object(**remote, Body=bytes([encoded[0] ^ 1]) + encoded[1:])
     codes('head', [])
     codes('full', ['authentication_failed'])
@@ -112,8 +123,11 @@ try:
     codes('head', ['length_mismatch'])
     codes('full', ['length_mismatch'])
     backend.put_object(**remote, Body=encoded)
-    db.execute('UPDATE chunks SET block_key_id=%s WHERE id=%s', (uuid.uuid4(), chunk))
-    db.execute('UPDATE chunk_encodings SET block_key_id=%s WHERE chunk_id=%s', (uuid.uuid4(), chunk))
+    # Simulate corrupt key references only inside this isolated fixture transaction.
+    with db.transaction():
+        db.execute("SET LOCAL session_replication_role='replica'")
+        db.execute('UPDATE chunks SET block_key_id=%s WHERE id=%s', (uuid.uuid4(), chunk))
+        db.execute('UPDATE chunk_encodings SET block_key_id=%s WHERE chunk_id=%s', (uuid.uuid4(), chunk))
     codes('metadata', ['missing_key'])
     db.execute("UPDATE chunks SET encryption_algorithm='none',block_key_id=NULL,nonce=NULL,standalone_compressed=false,standalone_size=raw_size WHERE id=%s", (chunk,))
     db.execute("UPDATE chunk_encodings SET encryption_algorithm='none',block_key_id=NULL,nonce=NULL,standalone_compressed=false,standalone_size=%s WHERE chunk_id=%s", (len(data), chunk))
@@ -145,11 +159,11 @@ try:
     all_issues, after = [], 0
     while True:
         page = get(path_api + '/issues', after=after)
-        assert len(page['issues']) <= 100
-        all_issues.extend(page['issues'])
-        if page['next_after'] is None: break
-        assert isinstance(page['next_after'], str)
-        after = page['next_after']
+        assert len(page['items']) <= 100
+        all_issues.extend(page['items'])
+        if page['next_cursor'] is None: break
+        assert isinstance(page['next_cursor'], str)
+        after = page['next_cursor']
     assert len(all_issues) == 210 and len({i['id'] for i in all_issues}) == 210
     assert all(isinstance(i['id'], str) for i in all_issues)
     assert len(cli('integrity', 'issues', task['id'], '--limit', '1')['issues']) == 1
@@ -169,6 +183,21 @@ finally:
         cur.executemany('INSERT INTO extents(stream_id,offset_bytes,length,chunk_id,source_offset) VALUES(%s,%s,%s,%s,%s)', [(stream, *r) for r in saved])
 codes('metadata', [])
 print('PASS paged mappings/findings, exact-key scope, JSONL export, string IDs and access control', flush=True)
+
+profile = cli('storage', 'profile', 'show', os.environ['MOKYU_TEST_STORAGE'])
+profile_path = Path(os.environ['MOKYU_TEST_DATA']) / 'integrity-profile.json'
+try:
+    limited = {**profile, 'integrity_rps': 2, 'integrity_bandwidth': '64KiB', 'integrity_byte_budget': '64KiB'}
+    profile_path.write_text(json.dumps(limited))
+    cli('storage', 'profile', 'set', os.environ['MOKYU_TEST_STORAGE'], str(profile_path))
+    checked, issues = check('full', 'a')
+    assert checked['detail']['chunks_checked'] == 1 and not issues
+finally:
+    profile['revision'] = cli('storage', 'profile', 'show', os.environ['MOKYU_TEST_STORAGE'])['revision']
+    profile_path.write_text(json.dumps(profile))
+    cli('storage', 'profile', 'set', os.environ['MOKYU_TEST_STORAGE'], str(profile_path))
+    profile_path.unlink()
+print('PASS rate and byte budgets allow a chunk larger than one second of bandwidth', flush=True)
 
 for body, status in [({'mode': 'invalid'}, 422), ({'unknown': 1}, 422), ({'key': 'a'}, 400),
                      ({'bucket': bucket, 'key': ''}, 400), ({'bucket': bucket, 'key': 'x' * 1025}, 400),

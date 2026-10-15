@@ -19,11 +19,12 @@ process = None
 
 
 def cli(*args):
-    return json.loads(subprocess.check_output(command + ['cli', *args], stderr=subprocess.DEVNULL, text=True))
+    return json.loads(subprocess.check_output(command + ['cli', *args], stderr=subprocess.DEVNULL, text=True, timeout=20))
 
 
 def wait(predicate):
-    for _ in range(600):
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(.1)
@@ -52,7 +53,7 @@ try:
         if process:
             process.wait(timeout=10)
         # A killed process may remain a zombie until the outer runner reaps it.
-        wait(lambda: not Path(f'/proc/{pid}/stat').exists() or Path(f'/proc/{pid}/stat').read_text().split()[2] == 'Z')
+        wait(lambda: not Path(f'/proc/{pid}/stat').exists() or Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z')
         def released():
             with (Path(os.environ['MOKYU_TEST_DATA'])/'gateway.lock').open('rb') as lock:
                 try:
@@ -62,9 +63,12 @@ try:
                     return False
         wait(released)
         marker.unlink()
+        db.execute("UPDATE mokyu_meta SET maintenance=true")
         log = open(Path(os.environ['MOKYU_TEST_RESULTS']) / 'pack-recovery.log', 'a')
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
         pid = process.pid
+        if pid_file := os.environ.get('MOKYU_TEST_GATEWAY_PID_FILE'):
+            Path(pid_file).write_text(str(pid))
         wait(ready)
         assert db.execute("SELECT state FROM tasks WHERE id=%s", (job,)).fetchone()[0] == 'paused'
         assert db.execute('SELECT count(*) FROM pack_inputs').fetchone()[0] == 0

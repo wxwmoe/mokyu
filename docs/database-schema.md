@@ -15,7 +15,7 @@ PostgreSQL 保存对象目录、权限、存储映射、任务和运行状态；
 | `web_users`、`sessions`、`api_tokens` | 用户、会话和个人 API token 字段 | Web 认证、CSRF、授权修订和会话撤销 |
 | `nodes` | `id`、`name`、`role`、`credential_encrypted`、`enabled`、`status`、`recovery_required`、`lease_expires_at`、`load_score` | control/worker/data 节点注册、凭据、状态和低频负载；节点直接连接 PostgreSQL |
 
-节点凭据只写入本节点 `node.json`。释放节点时会清除其凭据、回收任务 lease 并允许同名节点重新注册；部署密钥丢失或改变不能作为普通升级处理。
+单容器不创建 `nodes` 记录或 `node.json`。群集节点凭据只写入本节点 `node.json`。释放节点时会清除其凭据、回收任务 lease 并允许同名节点重新注册；部署密钥丢失或改变不能作为普通升级处理。
 
 ## storage、桶与对象
 
@@ -26,7 +26,7 @@ PostgreSQL 保存对象目录、权限、存储映射、任务和运行状态；
 | `storage_permits` | `token`、`storage_id`、`direction`、`holder_id`、`acquired_at`、`expires_at` | 短租约，按 storage 和方向限制群集总并发 |
 | `buckets` | `id`、`name`、`project_id`、`storage_id`、设置和状态字段 | `storage_id` 创建时绑定且不可修改；同一 storage 内去重，跨 storage 不去重 |
 | `bucket_domains` | `host`、`bucket_id` | 公共 Host 到桶的唯一映射 |
-| `objects`、`streams`、`extents`、`fragments` | `object_key`、`stream_type`、`write_token`、范围映射、片段状态 | 对象目录和版本发布；完整 ready stream 才能发布 |
+| `objects`、`streams`、`extents`、`fragments` | `object_key`、`stream_type`、`write_token`、`catalog_category`、范围映射、片段状态 | 对象目录和版本发布；完整 ready stream 才能发布；catalog_category 是文件分类，catalog_type 是 MIME type |
 
 storage 连接和 profile 修改只改变后续写入及新请求的策略。存量载荷的加密、压缩或区块包转换必须显式启动 `storage rewrite` 或 `storage unpack` 任务。
 
@@ -57,14 +57,16 @@ storage 连接和 profile 修改只改变后续写入及新请求的策略。存
 
 | 表 | 关键字段 | 用途 |
 | --- | --- | --- |
-| `tasks` | `task_type`、`parent_task_id`、`execution_scope`、`target_node_id`、`batch_cursor`、`batch_total`、`batch_completed`、状态和 lease 字段 | 父任务拆分为可恢复的批次子任务；不依赖本机目录的任务由所有 worker 平等领取 |
-| `maintenance_controls`、`maintenance_previews` | 策略暂停状态、预览参数、确认指纹和 task 回执 | GC、pack、rewrite、迁移、清查和破坏性操作的安全控制 |
+| `tasks` | `task_type`、`detail.policy`、`parent_task_id`、`execution_scope`、`target_node_id`、`batch_cursor`、`batch_total`、`batch_completed`、状态和 lease 字段 | pack 任务在 detail.policy 中区分维护策略；父任务拆分为可恢复的批次子任务；不依赖本机目录的任务由所有 worker 平等领取 |
+| `maintenance_controls`、`maintenance_previews` | `policy`、策略暂停状态、预览参数、确认指纹和 task 回执 | GC、pack、rewrite、迁移、清查和破坏性操作的安全控制 |
 | `integrity_issues`、`integrity_packs` | 巡检对象、位置、错误和共享 pack 记录 | 完整性任务只报告问题，不自动修复 |
 | `audit_events`、`media_operations` | actor、来源、请求、结果和幂等回执 | 管理操作审计与媒体操作幂等 |
 | `usage_summary`、`usage_history`、`runtime_samples` | 范围摘要、历史采样和进程指标 | Web/CLI 统计展示，不参与权限或配额准入 |
 
 任务在节点关闭、模式切换或 lease 过期时回到可恢复状态。涉及某个 Data 本机目录的任务固定 `target_node_id`；共享 S3、数据库和 storage profile 的任务可由任意 worker 承担。
 
+任务发布、游标更新和收尾校验本次领取的 lease token。重新领取后，旧执行不能提交结果或清理新执行的输入与临时来源。失败处理和临时来源回收在同一事务内完成；准备中的 pack、encoding 按 `owner_task` 建立部分索引。
+
 ## 迁移和历史
 
-迁移 `0001`–`0041` 保持追加顺序；`0037` 完成 storage/location、quota、task、credential 和 runtime 字段的最终词汇，`0038`–`0040` 完成物理 fingerprint、共享 staging 和 rewrite 压缩策略，`0041` 删除部署级的历史 storage identity/initialization 字段。新安装执行完整链；发布文档负责说明旧版本迁移边界。
+新安装执行完整迁移链，已发布迁移不可改写。兼容条件和操作步骤见[部署与恢复](deployment-and-recovery.md#升级与数据库迁移)。当前结构以迁移执行后的结果为准，历史文件中的旧名称不代表当前字段。

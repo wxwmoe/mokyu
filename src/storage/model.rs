@@ -16,7 +16,7 @@ use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
-#[derive(Clone, sqlx::FromRow)]
+#[derive(Clone)]
 pub(crate) struct Record {
     pub id: Uuid,
     pub name: String,

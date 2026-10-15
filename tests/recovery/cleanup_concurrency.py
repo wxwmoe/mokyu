@@ -67,9 +67,10 @@ raw = os.urandom(200000)
 put('warm', raw)
 put('pinned', raw)
 sid = stream('pinned')
-storage = scalar('SELECT c.storage_id FROM chunks c JOIN extents e ON e.chunk_id=c.id WHERE e.stream_id=%s', (sid,))
+location = scalar('SELECT l.location_id FROM chunks c JOIN extents e ON e.chunk_id=c.id '
+                  'JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE e.stream_id=%s', (sid,))
 for extension in ('raw', 'zst'):
-    (data / 'chunks' / storage.hex[:2] / (storage.hex + '.' + extension)).unlink(missing_ok=True)
+    (data / 'chunks' / location.hex[:2] / (location.hex + '.' + extension)).unlink(missing_ok=True)
 marker = arm('cache-reserved')
 try:
     with ThreadPoolExecutor(max_workers=1) as pool:

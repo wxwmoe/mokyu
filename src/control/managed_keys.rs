@@ -1,4 +1,4 @@
-use super::{Identity, users};
+use super::Identity;
 use crate::{app::App, authorization::Principal, content::codec, http::HttpError};
 use anyhow::Result;
 use axum::{
@@ -6,23 +6,13 @@ use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Serialize, ToSchema)]
-pub(crate) struct ManagedKeyView {
-    pub id: Uuid,
-    pub name: String,
-    pub purpose: String,
-    pub algorithm: String,
-    pub in_use: bool,
-    pub fingerprint: String,
-    pub created_at: DateTime<Utc>,
-    pub revoked_at: Option<DateTime<Utc>>,
-}
+use crate::model::key::ManagedKeyCreate;
+pub(crate) use crate::model::key::ManagedKeyView;
 
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -32,9 +22,6 @@ pub(crate) struct ManagedKeyInput {
     #[serde(default)]
     pub algorithm: Option<String>,
 }
-
-const KEY_LIST_QUERY: &str = "SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,EXISTS(SELECT 1 FROM storages s WHERE s.block_key_id=k.id) OR EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state<>'deleted') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),k.fingerprint,k.created_at,k.revoked_at FROM managed_keys k ORDER BY k.name";
-const KEY_USAGE_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM storages WHERE block_key_id=$1) OR EXISTS(SELECT 1 FROM chunk_encodings WHERE block_key_id=$1 AND state<>'deleted') OR EXISTS(SELECT 1 FROM packs WHERE block_key_id=$1 AND state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=$1) OR EXISTS(SELECT 1 FROM tasks WHERE detail->>'target_key_id'=$1::text AND state IN ('queued','running','paused','failed')) FROM managed_keys WHERE id=$1";
 
 fn validate_name(name: &str) -> Result<()> {
     anyhow::ensure!(
@@ -55,42 +42,11 @@ fn validate_purpose(purpose: &str) -> Result<()> {
     Ok(())
 }
 
-fn view(
-    (id, name, purpose, algorithm, active, fingerprint, created_at, revoked_at): (
-        Uuid,
-        String,
-        String,
-        String,
-        bool,
-        Vec<u8>,
-        DateTime<Utc>,
-        Option<DateTime<Utc>>,
-    ),
-) -> ManagedKeyView {
-    ManagedKeyView {
-        id,
-        name,
-        purpose,
-        algorithm,
-        in_use: active,
-        fingerprint: hex::encode(fingerprint),
-        created_at,
-        revoked_at,
-    }
-}
-
-pub(crate) async fn list_rows(db: &sqlx::PgPool) -> Result<Vec<ManagedKeyView>> {
-    let rows: Vec<(
-        Uuid,
-        String,
-        String,
-        String,
-        bool,
-        Vec<u8>,
-        DateTime<Utc>,
-        Option<DateTime<Utc>>,
-    )> = sqlx::query_as(KEY_LIST_QUERY).fetch_all(db).await?;
-    Ok(rows.into_iter().map(view).collect())
+pub(crate) async fn list_rows(
+    store: &dyn crate::model::ManagedKeyStore,
+    principal: &Principal,
+) -> Result<Vec<ManagedKeyView>> {
+    store.list(principal).await
 }
 
 pub(crate) async fn create_record(
@@ -129,36 +85,20 @@ pub(crate) async fn create_record(
     let runtime_key = (input.purpose == "block")
         .then(|| codec::Key::new(algorithm, secret))
         .transpose()?;
-    let mut tx = users::admin_transaction(app, principal).await?;
-    let row: (
-        Uuid,
-        String,
-        String,
-        String,
-        bool,
-        Vec<u8>,
-        DateTime<Utc>,
-        Option<DateTime<Utc>>,
-    ) = sqlx::query_as(
-        "INSERT INTO managed_keys(id,name,purpose,key_algorithm,secret_encrypted,fingerprint) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,purpose,key_algorithm AS algorithm,false,fingerprint,created_at,revoked_at",
-    )
-    .bind(id)
-    .bind(input.name.trim())
-    .bind(&input.purpose)
-    .bind(algorithm)
-    .bind(protected)
-    .bind(fingerprint.as_bytes().as_slice())
-    .fetch_one(&mut *tx)
-    .await?;
-    let result = view(row);
-    super::audit::checkpoint(
-        &mut tx,
-        "managed_key.create",
-        &id.to_string(),
-        serde_json::json!({"name":result.name,"purpose":result.purpose,"algorithm":result.algorithm,"fingerprint":result.fingerprint}),
-    )
-    .await?;
-    tx.commit().await?;
+    let result = app
+        .managed_keys
+        .create(
+            principal,
+            ManagedKeyCreate {
+                id,
+                name: input.name,
+                purpose: input.purpose,
+                algorithm: algorithm.to_owned(),
+                protected,
+                fingerprint: *fingerprint.as_bytes(),
+            },
+        )
+        .await?;
     if let Some(key) = runtime_key {
         app.secrets
             .publish_key_with_id(Some(id), result.name.clone(), key)?;
@@ -167,43 +107,7 @@ pub(crate) async fn create_record(
 }
 
 pub(crate) async fn revoke_record(app: &App, principal: &Principal, id: Uuid) -> Result<()> {
-    let mut tx = users::admin_transaction(app, principal).await?;
-    let exists: Option<bool> =
-        sqlx::query_scalar("SELECT true FROM managed_keys WHERE id=$1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    exists.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
-    let used: bool = sqlx::query_scalar(KEY_USAGE_QUERY)
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-    if used {
-        return Err(s3s::s3_error!(
-            InvalidRequest,
-            "key is still used by a storage, physical encoding, pending upload or task"
-        )
-        .into());
-    }
-    let changed = sqlx::query(
-        "UPDATE managed_keys SET revoked_at=coalesce(revoked_at,now()),secret_encrypted=NULL WHERE id=$1",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if changed == 0 {
-        return Err(s3s::s3_error!(NoSuchKey).into());
-    }
-    super::audit::checkpoint(
-        &mut tx,
-        "managed_key.revoke",
-        &id.to_string(),
-        serde_json::json!({}),
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    app.managed_keys.revoke(principal, id).await
 }
 
 #[utoipa::path(get, operation_id = "managed_keys", path = "/api/v1/keys", responses((status = 200, body = Vec<ManagedKeyView>)))]
@@ -211,9 +115,7 @@ pub(crate) async fn list(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<ManagedKeyView>>, HttpError> {
-    let tx = users::admin_transaction(&app, &actor.principal).await?;
-    tx.commit().await?;
-    let rows = list_rows(&app.db).await?;
+    let rows = list_rows(app.managed_keys.as_ref(), &actor.principal).await?;
     Ok(Json(rows))
 }
 

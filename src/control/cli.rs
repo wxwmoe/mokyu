@@ -5,7 +5,6 @@ use crate::{
     http::{HttpError, unauthorized},
 };
 use axum::{Json, extract::State, http::HeaderMap};
-use base64::Engine;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -22,6 +21,34 @@ pub(super) async fn cli(
     headers: HeaderMap,
     Json(command): Json<crate::cli::Command>,
 ) -> Result<Json<Value>, HttpError> {
+    let principal = if app.role == "single" {
+        deployment_identity(&app, &headers)?;
+        if app.mode_mismatch().await? {
+            Principal::Bootstrap
+        } else {
+            Principal::Local
+        }
+    } else {
+        cluster_identity(&app, &headers).await?
+    };
+    if matches!(&principal, Principal::Bootstrap) && !command.allows_bootstrap() {
+        return Err(
+            anyhow::anyhow!("node recovery is required before this command can run").into(),
+        );
+    }
+    let result = operations::execute_as(&app, &principal, command).await?;
+    Ok(Json(json!({"ok": true, "result": result})))
+}
+
+fn deployment_identity(app: &App, headers: &HeaderMap) -> Result<(), HttpError> {
+    let key = headers
+        .get("x-mokyu-deployment-key")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(unauthorized)?;
+    crate::cluster::verify_deployment_key(app, key).map_err(|_| unauthorized())
+}
+
+async fn cluster_identity(app: &App, headers: &HeaderMap) -> Result<Principal, HttpError> {
     let node_id = headers
         .get("x-mokyu-node-id")
         .and_then(|v| v.to_str().ok())
@@ -31,16 +58,11 @@ pub(super) async fn cli(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let row: Option<(String, Vec<u8>)> = if let Some(node_id) = node_id {
-        sqlx::query_as(
-            "SELECT role,credential_encrypted FROM nodes WHERE id=$1 AND role='control' AND enabled AND credential_encrypted IS NOT NULL",
-        )
-        .bind(node_id)
-        .fetch_optional(&app.db)
-        .await?
+        app.cluster()?.credential(node_id).await?
     } else {
         None
     };
-    let principal = if let Some((role, encrypted)) = row {
+    Ok(if let Some((role, encrypted)) = row {
         let expected = crate::content::codec::unprotect(
             &encrypted,
             &app.secrets.credential_key,
@@ -60,31 +82,7 @@ pub(super) async fn cli(
             role,
         }
     } else {
-        let key = headers
-            .get("x-mokyu-deployment-key")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(unauthorized)?;
-        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(key.as_bytes())
-            .map_err(|_| unauthorized())?;
-        if raw.len() != 48 {
-            return Err(anyhow::anyhow!("invalid deployment key").into());
-        }
-        if aws_lc_rs::constant_time::verify_slices_are_equal(
-            blake3::hash(&raw).as_bytes(),
-            &app.secrets.credential_key.material,
-        )
-        .is_err()
-        {
-            return Err(anyhow::anyhow!("invalid deployment key").into());
-        }
+        deployment_identity(app, headers)?;
         Principal::Bootstrap
-    };
-    if matches!(&principal, Principal::Bootstrap) && !command.allows_bootstrap() {
-        return Err(
-            anyhow::anyhow!("node recovery is required before this command can run").into(),
-        );
-    }
-    let result = operations::execute_as(&app, &principal, command).await?;
-    Ok(Json(json!({"ok": true, "result": result})))
+    })
 }

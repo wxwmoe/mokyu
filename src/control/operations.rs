@@ -56,9 +56,15 @@ pub async fn execute_as(app: &Arc<App>, principal: &Principal, command: Command)
     if !super::audit::active()
         && let Some(action) = command.audit_action()
     {
-        let id = super::audit::begin(&app.db, principal, action, None).await?;
+        let id = super::audit::begin(app.audit.as_ref(), principal, action, None).await?;
         let result = super::audit::scope(id, execute_inner(app, principal, command)).await;
-        super::audit::finish(&app.db, id, if result.is_ok() { 200 } else { 400 }, false).await;
+        super::audit::finish(
+            app.audit.as_ref(),
+            id,
+            if result.is_ok() { 200 } else { 400 },
+            false,
+        )
+        .await;
         return result;
     }
     execute_inner(app, principal, command).await
@@ -71,7 +77,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             require_change,
             ..
         } => {
-            let local_control = matches!(principal, Principal::Bootstrap)
+            let local_control = matches!(principal, Principal::Bootstrap | Principal::Local)
                 || matches!(principal, Principal::Node { role, .. } if role == "control");
             ensure!(local_control, "init requires a local control identity");
             let id = super::account::initialize_admin(
@@ -129,7 +135,9 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
         Command::Project(project) => {
             use super::projects::{self, ProjectInput};
             match project {
-                Projects::List => Ok(serde_json::to_value(projects::list_all(&app.db).await?)?),
+                Projects::List => Ok(serde_json::to_value(
+                    projects::list_all(app.administration.as_ref()).await?,
+                )?),
                 Projects::Create { name } => Ok(serde_json::to_value(
                     projects::save(
                         app,
@@ -174,7 +182,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
         Command::Status { ready } => {
             let status = app.status().await?;
             if ready {
-                sqlx::query("SELECT 1").execute(&app.db).await?;
+                app.runtime.health().await?;
                 ensure!(!app.mode_mismatch().await?, "service is in mode_mismatch");
                 ensure!(!app.recovery_required(), "node recovery is required");
                 ensure!(
@@ -185,125 +193,12 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             Ok(status)
         }
         Command::Cluster(command) => match command {
-            Cluster::Status => {
-                let mode: String =
-                    sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE singleton")
-                        .fetch_one(&app.db)
-                        .await?;
-                let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM nodes WHERE enabled")
-                    .fetch_one(&app.db)
-                    .await?;
-                let local_storages: i64 =
-                    sqlx::query_scalar("SELECT count(*) FROM storages WHERE type='local'")
-                        .fetch_one(&app.db)
-                        .await?;
-                Ok(json!({"mode": mode, "enabled_nodes": nodes, "local_storages": local_storages}))
-            }
+            Cluster::Status => Ok(serde_json::to_value(app.cluster()?.status().await?)?),
             Cluster::Mode { mode } => {
-                let mut tx = app.db.begin().await?;
-                let current: String = sqlx::query_scalar(
-                    "SELECT deployment_mode FROM mokyu_meta WHERE singleton FOR UPDATE",
-                )
-                .fetch_one(&mut *tx)
-                .await?;
-                if current == mode {
-                    tx.rollback().await?;
-                    return Ok(json!({"mode": mode}));
-                }
-                if mode == "cluster" {
-                    let local: bool = sqlx::query_scalar(
-                        "SELECT EXISTS(SELECT 1 FROM storages WHERE type='local')",
-                    )
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    ensure!(
-                        !local,
-                        "local storages exist; migrate them to S3 and update their storage before enabling cluster mode"
-                    );
-                    let staging: Option<uuid::Uuid> = sqlx::query_scalar(
-                        "SELECT NULLIF(value->>'staging_storage_id','')::uuid FROM runtime_settings WHERE section='uploads'",
-                    )
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    let valid_staging: bool = sqlx::query_scalar(
-                        "SELECT EXISTS(SELECT 1 FROM storages WHERE id=$1 AND enabled AND type='s3')",
-                    )
-                    .bind(staging)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    ensure!(
-                        valid_staging,
-                        "cluster mode requires an enabled S3 uploads.staging_storage_id"
-                    );
-                } else {
-                    let local_node = match principal {
-                        Principal::Node { id, role } if role == "control" => Some(*id),
-                        _ => None,
-                    };
-                    let other_nodes: bool = sqlx::query_scalar(
-                        "SELECT EXISTS(SELECT 1 FROM nodes WHERE enabled AND ($1::uuid IS NULL OR id<>$1))",
-                    )
-                    .bind(local_node)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    ensure!(
-                        !other_nodes,
-                        "disable all registered cluster nodes before returning to single mode"
-                    );
-                    let pending: bool = sqlx::query_scalar(
-                        "SELECT EXISTS(SELECT 1 FROM pending_uploads) OR EXISTS(SELECT 1 FROM fragments WHERE staging_storage_id IS NOT NULL)",
-                    )
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    ensure!(
-                        !pending,
-                        "complete or cancel active uploads before returning to single mode"
-                    );
-                }
-                if mode == "single"
-                    && let Principal::Node { id, role } = principal
-                    && role == "control"
-                {
-                    sqlx::query("UPDATE nodes SET enabled=false,credential_encrypted=NULL,last_seen_at=NULL,status='released',recovery_required=false,updated_at=now() WHERE id=$1")
-                        .bind(id)
-                        .execute(&mut *tx)
-                        .await?;
-                    sqlx::query("UPDATE tasks SET state=CASE WHEN execution_scope='node' THEN 'paused' ELSE 'queued' END,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE lease_node_id=$1 AND state='running'")
-                        .bind(id)
-                        .execute(&mut *tx)
-                        .await?;
-                    sqlx::query("DELETE FROM storage_permits WHERE holder_id=$1")
-                        .bind(id)
-                        .execute(&mut *tx)
-                        .await?;
-                }
-                sqlx::query("UPDATE mokyu_meta SET deployment_mode=$1,deployment_mode_revision=deployment_mode_revision+1 WHERE singleton")
-                    .bind(&mode)
-                    .execute(&mut *tx)
-                    .await?;
-                tx.commit().await?;
-                Ok(json!({"mode": mode}))
+                app.cluster()?.set_mode(principal, &mode).await?;
+                Ok(json!({"mode":mode}))
             }
-            Cluster::Nodes => {
-                let rows: Vec<(
-                    uuid::Uuid,
-                    String,
-                    String,
-                    bool,
-                    Option<chrono::DateTime<chrono::Utc>>,
-                    chrono::DateTime<chrono::Utc>,
-                )> = sqlx::query_as(
-                    "SELECT id,name,role,enabled,last_seen_at,created_at FROM nodes ORDER BY name",
-                )
-                .fetch_all(&app.db)
-                .await?;
-                Ok(json!(rows
-                    .into_iter()
-                    .map(|(id, name, kind, enabled, last_seen_at, created_at)| {
-                        json!({"id":id,"name":name,"role":kind,"enabled":enabled,"last_seen_at":last_seen_at,"created_at":created_at})
-                    })
-                    .collect::<Vec<_>>()))
-            }
+            Cluster::Nodes => Ok(serde_json::to_value(app.cluster()?.nodes().await?)?),
             Cluster::Release { name, confirm } => {
                 if matches!(principal, Principal::Bootstrap) {
                     let local_name = if app.role == "single" {
@@ -317,14 +212,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                     );
                 }
                 ensure!(confirm, "cluster release requires --confirm");
-                let id: uuid::Uuid = sqlx::query_scalar("UPDATE nodes SET enabled=false,credential_encrypted=NULL,last_seen_at=NULL,status='released',recovery_required=false,updated_at=now() WHERE name=$1 AND enabled RETURNING id")
-                    .bind(&name).fetch_optional(&app.db).await?.ok_or_else(|| anyhow::anyhow!("node not found or already released"))?;
-                sqlx::query("UPDATE tasks SET state=CASE WHEN execution_scope='node' THEN 'paused' ELSE 'queued' END,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE lease_node_id=$1 AND state='running'")
-                    .bind(id).execute(&app.db).await?;
-                sqlx::query("DELETE FROM storage_permits WHERE holder_id=$1")
-                    .bind(id)
-                    .execute(&app.db)
-                    .await?;
+                app.cluster()?.release(&name).await?;
                 Ok(json!({"released": name}))
             }
         },
@@ -332,68 +220,35 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             Ok(json!({"token": super::account::setup_token(app).await?}))
         }
         Command::Storages(command) => {
-            type Row = (
-                uuid::Uuid,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                String,
-                Option<uuid::Uuid>,
-                i64,
-                Option<i32>,
-                Option<i32>,
-                Option<i32>,
-                bool,
-                chrono::DateTime<chrono::Utc>,
-            );
-            let public = |row: Row| {
-                json!({
-                    "id": row.0,
-                    "name": row.1,
-                    "type": row.2,
-                    "path": row.3,
-                    "endpoint": row.4,
-                    "bucket": row.5,
-                    "region": row.6,
-                    "prefix": row.7,
-                    "block_key_id": row.8,
-                    "profile_revision": row.9,
-                    "read_concurrency": row.10,
-                    "upload_concurrency": row.11,
-                    "control_concurrency": row.12,
-                    "enabled": row.13,
-                    "updated_at": row.14,
-                })
+            let public = |row: super::storage::StorageView| -> Result<Value> {
+                let mut value = serde_json::to_value(row)?;
+                value.as_object_mut().unwrap().remove("created_at");
+                Ok(value)
             };
             match command {
                 Storages::List => {
-                    let rows: Vec<Row> = sqlx::query_as("SELECT s.id,s.name,s.type,s.path,s.endpoint_url,s.remote_bucket_name,s.region,s.prefix,s.block_key_id,p.revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id ORDER BY s.name")
-                        .fetch_all(&app.db)
-                        .await?;
-                    Ok(json!(rows.into_iter().map(public).collect::<Vec<_>>()))
+                    let rows = app.storage_records.list().await?;
+                    Ok(json!(
+                        rows.into_iter().map(public).collect::<Result<Vec<_>>>()?
+                    ))
                 }
                 Storages::Check { name } => {
-                    let row: Row = sqlx::query_as("SELECT s.id,s.name,s.type,s.path,s.endpoint_url,s.remote_bucket_name,s.region,s.prefix,s.block_key_id,p.revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.name=$1")
-                        .bind(&name)
-                        .fetch_optional(&app.db)
+                    let row = app
+                        .storage_records
+                        .named(&name)
                         .await?
                         .context("storage not found")?;
-                    app.storage.refresh_store(row.0).await?;
-                    ensure!(row.13, "storage is disabled");
-                    app.storage.check_storage(row.0, false).await?;
-                    Ok(public(row))
+                    app.storage.refresh_store(row.id).await?;
+                    ensure!(row.enabled, "storage is disabled");
+                    app.storage.check_storage(row.id).await?;
+                    public(row)
                 }
-                Storages::Show { name } => {
-                    let row: Row = sqlx::query_as("SELECT s.id,s.name,s.type,s.path,s.endpoint_url,s.remote_bucket_name,s.region,s.prefix,s.block_key_id,p.revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.name=$1")
-                        .bind(&name)
-                        .fetch_optional(&app.db)
+                Storages::Show { name } => public(
+                    app.storage_records
+                        .named(&name)
                         .await?
-                        .context("storage not found")?;
-                    Ok(public(row))
-                }
+                        .context("storage not found")?,
+                ),
                 Storages::Key { command } => match command {
                     StorageKey::Set { storage, key } => Ok(serde_json::to_value(
                         super::storage::set_current_key(app, storage, Some(key)).await?,
@@ -404,15 +259,13 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 },
                 Storages::Profile { command } => match command {
                     StorageProfiles::Show { name } => {
-                        let storage_id: uuid::Uuid =
-                            sqlx::query_scalar("SELECT id FROM storages WHERE name=$1")
-                                .bind(&name)
-                                .fetch_optional(&app.db)
-                                .await?
-                                .context("storage not found")?;
+                        let storage_id: uuid::Uuid = app
+                            .storage_records
+                            .id(&name, None)
+                            .await?
+                            .context("storage not found")?;
                         Ok(serde_json::to_value(
-                            crate::storage::profile::StorageProfile::load(&app.db, storage_id)
-                                .await?,
+                            app.storage_profiles.load(storage_id).await?,
                         )?)
                     }
                     StorageProfiles::Set { name, document, .. } => {
@@ -426,36 +279,41 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                     }
                 },
                 Storages::Rewrite { storage, command } => {
-                    let storage_id: uuid::Uuid =
-                        sqlx::query_scalar("SELECT id FROM storages WHERE name=$1 OR id=$2::uuid")
-                            .bind(&storage)
-                            .bind(storage.parse::<uuid::Uuid>().ok())
-                            .fetch_optional(&app.db)
-                            .await?
-                            .context("storage not found")?;
+                    let storage_id: uuid::Uuid = app
+                        .storage_records
+                        .id(&storage, storage.parse().ok())
+                        .await?
+                        .context("storage not found")?;
                     match command {
                         RewriteCommand::Preview { target_key } => {
-                            app.rewrite_start(storage_id, target_key.as_deref(), false, None).await
+                            app.rewrite_start(storage_id, target_key.as_deref(), false, None)
+                                .await
                         }
-                        RewriteCommand::Start { target_key, confirm } => {
-                            app.rewrite_start(storage_id, target_key.as_deref(), true, Some(&confirm)).await
-                        }
-                        RewriteCommand::Status => Ok(sqlx::query_scalar::<_, serde_json::Value>(
-                            "SELECT to_jsonb(t) FROM tasks t WHERE task_type='rewrite' AND detail->>'role'='parent' AND detail->>'storage_id'=$1 ORDER BY created_at DESC LIMIT 1",
-                        )
-                        .bind(storage_id.to_string())
-                        .fetch_optional(&app.db)
-                        .await?
-                        .context("rewrite task not found")?),
-                        RewriteCommand::Pause | RewriteCommand::Resume | RewriteCommand::Retry => {
-                            let task: uuid::Uuid = sqlx::query_scalar(
-                                "SELECT id FROM tasks WHERE task_type='rewrite' AND detail->>'role'='parent' AND detail->>'storage_id'=$1 ORDER BY created_at DESC LIMIT 1",
+                        RewriteCommand::Start {
+                            target_key,
+                            confirm,
+                        } => {
+                            app.rewrite_start(
+                                storage_id,
+                                target_key.as_deref(),
+                                true,
+                                Some(&confirm),
                             )
-                            .bind(storage_id.to_string())
-                            .fetch_optional(&app.db)
+                            .await
+                        }
+                        RewriteCommand::Status => Ok(app
+                            .task_control
+                            .rewrite_status(storage_id)
                             .await?
-                            .context("rewrite task not found")?;
-                            let resume = matches!(command, RewriteCommand::Resume | RewriteCommand::Retry);
+                            .context("rewrite task not found")?),
+                        RewriteCommand::Pause | RewriteCommand::Resume | RewriteCommand::Retry => {
+                            let task: uuid::Uuid = app
+                                .task_control
+                                .rewrite_task(storage_id)
+                                .await?
+                                .context("rewrite task not found")?;
+                            let resume =
+                                matches!(command, RewriteCommand::Resume | RewriteCommand::Retry);
                             app.task_change(task, resume).await
                         }
                     }
@@ -477,15 +335,12 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                     control_concurrency,
                 } => {
                     let block_key_id = if let Some(key) = key {
-                        sqlx::query_scalar::<_, uuid::Uuid>(
-                            "SELECT id FROM managed_keys WHERE purpose='block' AND revoked_at IS NULL AND (name=$1 OR id=$2)",
-                        )
-                        .bind(&key)
-                        .bind(key.parse::<uuid::Uuid>().ok())
-                        .fetch_optional(&app.db)
-                        .await?
-                        .map(Some)
-                        .context("active block key not found")?
+                        app.managed_keys
+                            .resolve_block(&key)
+                            .await?
+                            .map(|key| key.id)
+                            .map(Some)
+                            .context("active block key not found")?
                     } else {
                         None
                     };
@@ -533,14 +388,11 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 } => {
                     let block_key_id = if let Some(key) = key {
                         Some(
-                            sqlx::query_scalar::<_, uuid::Uuid>(
-                                "SELECT id FROM managed_keys WHERE purpose='block' AND revoked_at IS NULL AND (name=$1 OR id=$2)",
-                            )
-                            .bind(&key)
-                            .bind(key.parse::<uuid::Uuid>().ok())
-                            .fetch_optional(&app.db)
-                            .await?
-                            .context("active block key not found")?,
+                            app.managed_keys
+                                .resolve_block(&key)
+                                .await?
+                                .map(|key| key.id)
+                                .context("active block key not found")?,
                         )
                     } else {
                         None
@@ -645,7 +497,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
         },
         Command::Keys(command) => match command {
             Keys::List => Ok(serde_json::to_value(
-                super::managed_keys::list_rows(&app.db).await?,
+                super::managed_keys::list_rows(app.managed_keys.as_ref(), principal).await?,
             )?),
             Keys::Create {
                 name,
@@ -720,50 +572,26 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             let enabled = matches!(mode, Maintenance::Enable);
             let _coord = app.coord.lock().await;
             if !enabled {
-                let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='sweep' AND detail->>'dry_run'='false' AND state IN ('queued','running'))").fetch_one(&app.db).await?;
+                let pending = app.maintenance_store.destructive_sweep().await?;
                 ensure!(
                     !pending,
                     "pause or finish destructive sweep before disabling maintenance"
                 );
             }
             if !enabled && app.storage.enabled() {
-                app.storage.check_identity(&app.db, false).await?;
+                app.storage.check_identity().await?;
             }
-            let mut tx = app.db.begin().await?;
-            sqlx::query("UPDATE mokyu_meta SET maintenance=$1")
-                .bind(enabled)
-                .execute(&mut *tx)
-                .await?;
-            if enabled {
-                sqlx::query("UPDATE tasks SET state='paused',updated_at=now() WHERE task_type IN ('purge','pack','unpack') AND state IN ('queued','running')")
-                      .execute(&mut *tx).await?;
-            }
-            super::audit::checkpoint(
-                &mut tx,
-                "maintenance.mode",
-                "deployment",
-                json!({"enabled":enabled}),
-            )
-            .await?;
-            tx.commit().await?;
+            app.maintenance_store.mode(enabled).await?;
             app.maintenance
                 .store(enabled, std::sync::atomic::Ordering::Release);
             Ok(json!({"maintenance":enabled,"active_operations":app.active.lock().unwrap().len()}))
         }
         Command::Task(Tasks::List) => {
-            let tasks: Vec<Value> = sqlx::query_scalar(
-                "SELECT to_jsonb(t) FROM tasks t ORDER BY created_at DESC LIMIT 100",
-            )
-            .fetch_all(&app.db)
-            .await?;
+            let tasks = app.task_control.all().await?;
             Ok(json!(tasks))
         }
         Command::Task(Tasks::Show { id }) => {
-            sqlx::query_scalar("SELECT to_jsonb(t) FROM tasks t WHERE id=$1")
-                .bind(id)
-                .fetch_optional(&app.db)
-                .await?
-                .context("task not found")
+            app.task_control.raw(id).await?.context("task not found")
         }
         Command::Task(Tasks::Pause { id }) => app.task_change(id, false).await,
         Command::Task(Tasks::Resume { id }) => app.task_change(id, true).await,
@@ -791,9 +619,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             .await
         }
         Command::Bucket(Buckets::List) => {
-            let buckets: Vec<Bucket> = sqlx::query_as("SELECT * FROM buckets ORDER BY name")
-                .fetch_all(&app.db)
-                .await?;
+            let buckets: Vec<Bucket> = app.buckets.all().await?;
             Ok(serde_json::to_value(buckets)?)
         }
         Command::Bucket(Buckets::Create {
@@ -827,10 +653,16 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             use super::keys::{self, CredentialInput, RotateCredential};
             match command {
                 Credentials::List { after } => Ok(serde_json::to_value(
-                    keys::list_credentials(&app.db, None, &after.unwrap_or_default(), 100).await?,
+                    keys::list_credentials(
+                        app.credentials.as_ref(),
+                        None,
+                        &after.unwrap_or_default(),
+                        100,
+                    )
+                    .await?,
                 )?),
                 Credentials::Show { access_key } => Ok(serde_json::to_value(
-                    keys::get_credential(&mut *app.db.acquire().await?, &access_key).await?,
+                    keys::get_credential(app.credentials.as_ref(), &access_key).await?,
                 )?),
                 Credentials::Create {
                     bucket,
@@ -939,23 +771,25 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             use crate::cli::Tokens;
             match command {
                 Tokens::List { username, after } => {
-                    let user = sqlx::query_scalar("SELECT id FROM web_users WHERE username=$1")
-                        .bind(username)
-                        .fetch_optional(&app.db)
+                    let user = app
+                        .administration
+                        .find_user(&username)
                         .await?
-                        .context("user not found")?;
+                        .context("user not found")?
+                        .id;
                     Ok(serde_json::to_value(
-                        tokens::list_tokens(&app.db, user, after, 100).await?,
+                        tokens::list_tokens(app.credentials.as_ref(), user, after, 100).await?,
                     )?)
                 }
                 Tokens::Create {
                     username, document, ..
                 } => {
-                    let user = sqlx::query_scalar("SELECT id FROM web_users WHERE username=$1")
-                        .bind(username)
-                        .fetch_optional(&app.db)
+                    let user = app
+                        .administration
+                        .find_user(&username)
                         .await?
-                        .context("user not found")?;
+                        .context("user not found")?
+                        .id;
                     Ok(serde_json::to_value(
                         tokens::create_token(
                             app,
@@ -967,9 +801,9 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                     )?)
                 }
                 Tokens::Update { id, document, .. } => {
-                    let user = sqlx::query_scalar("SELECT user_id FROM api_tokens WHERE id=$1")
-                        .bind(id)
-                        .fetch_optional(&app.db)
+                    let user = app
+                        .credentials
+                        .token_user(id)
                         .await?
                         .context("token not found")?;
                     Ok(serde_json::to_value(
@@ -990,7 +824,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             }
         }
         Command::Domain(Domains::List) => {
-            let rows:Vec<(String,String)>=sqlx::query_as("SELECT d.host,b.name FROM bucket_domains d JOIN buckets b ON b.id=d.bucket_id ORDER BY d.host").fetch_all(&app.db).await?;
+            let rows = app.buckets.domain_names().await?;
             Ok(json!(
                 rows.into_iter()
                     .map(|(host, bucket)| json!({"host":host,"bucket":bucket}))
@@ -1011,10 +845,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             let local = principal;
             match user {
                 Users::List => {
-                    let rows: Vec<users::User> =
-                        sqlx::query_as("SELECT * FROM web_users ORDER BY username LIMIT 1000")
-                            .fetch_all(&app.db)
-                            .await?;
+                    let rows = app.administration.all_users().await?;
                     Ok(serde_json::to_value(rows)?)
                 }
                 Users::Create {

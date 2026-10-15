@@ -57,7 +57,9 @@ try:
         job = cli('integrity', 'check', '--mode', mode, '--bucket', bucket, '--key', 'pending')['task_id']
         wait(lambda: cli('task', 'show', job)['state'] in ('completed', 'failed'), 'pending inspection did not finish')
         inspection = cli('task', 'show', job)
-        assert inspection['state'] == 'completed' and inspection['detail']['issues'] == 0, inspection
+        children = db.execute('SELECT state,detail FROM tasks WHERE parent_task_id=%s', (job,)).fetchall()
+        assert inspection['state'] == 'completed' and children, inspection
+        assert all(state == 'completed' and detail['issues'] == 0 for state, detail in children), children
     assert cli('status')['backend_gets'] == 0
     s3.copy_object(Bucket=bucket, Key='copy', CopySource={'Bucket': bucket, 'Key': 'pending'})
     assert scalar('SELECT count(*) FROM cache_pins') == 2 * pending()

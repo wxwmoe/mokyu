@@ -1,4 +1,4 @@
-use super::{auth::Identity, contract, insights, maintenance};
+use super::{auth::Identity, contract, maintenance};
 use crate::{app::App, http::HttpError};
 use anyhow::Result;
 use axum::{
@@ -9,7 +9,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
-use s3s::s3_error;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -21,12 +20,11 @@ pub(super) async fn start_integrity(
     Extension(actor): Extension<Identity>,
     Json(input): Json<crate::worker::integrity::Request>,
 ) -> Result<Json<maintenance::TaskStarted>, HttpError> {
-    let mut guard = app.db.begin().await?;
-    actor.principal.lock_admin(&mut guard).await?;
+    let guard = app.authorization.admin(&actor.principal).await?;
     let user_id = actor.id;
     let result = app.integrity_start(input).await;
     tracing::info!(%user_id,success=result.is_ok(),task_id=?result.as_ref().ok().and_then(|r|r.get("task_id")),"management integrity check");
-    guard.commit().await?;
+    guard.finish().await?;
     Ok(Json(serde_json::from_value(result?)?))
 }
 #[utoipa::path(
@@ -45,8 +43,7 @@ pub(super) async fn packs(
     if !(1..=200).contains(&limit) || q.after.is_some_and(|id| id < 0) {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(p)||jsonb_build_object('id',p.id::text) FROM packs p WHERE id>$1 ORDER BY id LIMIT $2")
-        .bind(q.after.unwrap_or(0)).bind(limit+1).fetch_all(&app.db).await?;
+    let rows = app.packing.page(q.after.unwrap_or(0), limit + 1).await?;
     let next = if rows.len() > limit as usize {
         rows[limit as usize - 1]["id"].clone()
     } else {
@@ -68,14 +65,7 @@ pub(super) async fn pack_detail(
     Extension(_actor): Extension<Identity>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, HttpError> {
-    let pack: Value = sqlx::query_scalar(
-        "SELECT to_jsonb(p)||jsonb_build_object('id',p.id::text) FROM packs p WHERE id=$1",
-    )
-    .bind(id)
-    .fetch_optional(&app.db)
-    .await?
-    .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
-    let members:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('ordinal',m.ordinal,'chunk_id',m.chunk_id::text,'offset',m.offset_bytes,'raw_size',c.raw_size,'current',c.pack_id=m.pack_id) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 ORDER BY ordinal LIMIT 4096").bind(id).fetch_all(&app.db).await?;
+    let (pack, members) = app.packing.detail(id).await?;
     Ok(Json(json!({"pack":pack,"members":members})))
 }
 #[utoipa::path(
@@ -114,9 +104,9 @@ struct IntegrityIssue {
 }
 #[derive(Deserialize, Serialize, utoipa::ToSchema)]
 pub(crate) struct IssuePage {
-    #[serde(rename = "items")]
+    #[serde(rename = "items", alias = "issues")]
     issues: Vec<IntegrityIssue>,
-    #[serde(rename = "next_cursor")]
+    #[serde(rename = "next_cursor", alias = "next_after")]
     next_after: Option<String>,
     groups: std::collections::BTreeMap<String, String>,
 }
@@ -150,9 +140,9 @@ struct IssueObject {
 }
 #[derive(Deserialize, Serialize, utoipa::ToSchema)]
 pub(crate) struct IssueObjects {
-    #[serde(rename = "items")]
+    #[serde(rename = "items", alias = "objects")]
     objects: Vec<IssueObject>,
-    #[serde(rename = "next_cursor")]
+    #[serde(rename = "next_cursor", alias = "next")]
     next: Option<(Uuid, String)>,
 }
 #[utoipa::path(get,path="/api/v1/tasks/{id}/issues/{issue}/objects",params(("id"=Uuid,Path),("issue"=i64,Path),IssueObjectsQuery),responses((status=200,body=IssueObjects)))]
@@ -183,12 +173,11 @@ pub(super) async fn integrity_report(
     Extension(_actor): Extension<Identity>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, HttpError> {
-    let task: Value =
-        sqlx::query_scalar("SELECT to_jsonb(t) FROM tasks t WHERE id=$1 AND task_type='integrity'")
-            .bind(id)
-            .fetch_optional(&app.db)
-            .await?
-            .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+    let task = app
+        .integrity_store
+        .report_task(id)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
     if task["state"] != "completed" {
         return Err(s3s::s3_error!(
             OperationAborted,
@@ -197,17 +186,13 @@ pub(super) async fn integrity_report(
         .into());
     }
     // Fix the boundary so report size stays finite; pages do not retain a database connection.
-    let upper: i64 =
-        sqlx::query_scalar("SELECT COALESCE(max(id),0) FROM integrity_issues WHERE task_id=$1")
-            .bind(id)
-            .fetch_one(&app.db)
-            .await?;
+    let upper = app.integrity_store.report_upper(id).await?;
     let body = async_stream::try_stream! {
         yield bytes::Bytes::from(format!("{}\n",json!({"type":"task","task":task})));
         let mut after = 0;
         let mut count = 0u64;
         loop {
-            let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(i)||jsonb_build_object('id',i.id::text,'chunk_id',i.chunk_id::text) FROM integrity_issues i WHERE task_id=$1 AND id>$2 AND id<=$3 ORDER BY id LIMIT 100").bind(id).bind(after).bind(upper).fetch_all(&app.db).await.map_err(std::io::Error::other)?;
+            let rows = app.integrity_store.report_page(id,after,upper).await.map_err(std::io::Error::other)?;
             if rows.is_empty() { break; }
             for row in rows {
                 after = row["id"].as_str().and_then(|v|v.parse().ok()).ok_or_else(||std::io::Error::other("invalid report ID"))?;
@@ -231,4 +216,41 @@ pub(super) async fn integrity_report(
         HeaderValue::from_str(&format!("attachment; filename=\"integrity-{id}.jsonl\""))?,
     );
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integrity_pages_keep_public_names() {
+        let issues: IssuePage = serde_json::from_value(json!({
+            "issues": [], "next_after": null, "groups": {}
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(issues).unwrap(),
+            json!({
+                "items": [], "next_cursor": null, "groups": {}
+            })
+        );
+        let objects: IssueObjects = serde_json::from_value(json!({
+            "objects": [], "next": null
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(objects).unwrap(),
+            json!({
+                "items": [], "next_cursor": null
+            })
+        );
+        let schema = serde_json::to_value(crate::control::schema()).unwrap();
+        for name in ["IssuePage", "IssueObjects"] {
+            let properties = &schema["components"]["schemas"][name]["properties"];
+            assert!(properties.get("items").is_some());
+            assert!(properties.get("next_cursor").is_some());
+            assert!(properties.get("issues").is_none());
+            assert!(properties.get("objects").is_none());
+        }
+    }
 }

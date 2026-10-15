@@ -55,8 +55,8 @@ def restart(phase):
 
 
 def upload(index, width, height):
-    def chunk(kind, data):
-        return struct.pack('!I', len(data)) + kind + data + struct.pack('!I', zlib.crc32(kind + data))
+    def chunk(chunk_type, data):
+        return struct.pack('!I', len(data)) + chunk_type + data + struct.pack('!I', zlib.crc32(chunk_type + data))
     png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!IIBBBBB', width, height, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(b''.join(b'\0' + os.urandom(width * 3) for _ in range(height)))) + chunk(b'IEND', b'')
     key = prefix + str(index) + '.png'
     keys.append(key)

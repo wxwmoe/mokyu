@@ -38,7 +38,7 @@ test('search, type chips, sorted results, styled date picker and URL restoration
     await page.reload()
     await expect(page.getByRole('searchbox', { name: en.mediaSearch, exact: true })).toHaveValue('heart')
     await page.getByRole('button', { name: en.clearFilters, exact: true }).click()
-    await page.getByRole('button', { name: en.kind_image, exact: true }).click()
+    await page.getByRole('button', { name: en.category_image, exact: true }).click()
     await expect(page.locator('tbody tr')).toHaveCount(2)
     await page.getByRole('combobox', { name: en.mediaSort, exact: true }).click()
     await page.getByRole('option', { name: en.sortLargest, exact: true }).click()
@@ -64,6 +64,9 @@ test('search, type chips, sorted results, styled date picker and URL restoration
     expect(errors).toEqual([])
   } finally {
     const result = await (await request.get(`/api/v1/buckets/${bucket.id}/objects?` + new URLSearchParams({ prefix, recursive: 'true' }))).json()
-    if (result.items?.length) await request.post('/api/v1/media/actions', { headers, data: { bucket: bucket.id, action: 'delete', objects: result.items.map((o: any) => ({ key: o.object_key, version: o.id })) } })
+    if (result.items?.length) {
+      const cleanup = await request.post('/api/v1/media/actions', { headers, data: { bucket: bucket.id, action: 'delete', objects: result.items.map((o: any) => ({ client_id: randomUUID(), key: o.object_key, version: o.id })) } })
+      expect(cleanup.ok()).toBe(true)
+    }
   }
 })

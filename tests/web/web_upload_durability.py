@@ -18,8 +18,20 @@ reply = client.post(url + '/api/v1/auth/login', headers={'Origin': url}, json={'
 assert reply.status_code == 200
 client.headers.update({'Origin': url, 'X-CSRF-Token': reply.json()['csrf_token']})
 command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli']
-bucket = json.loads(subprocess.check_output(command + ['bucket', 'create', 'durability-' + uuid.uuid4().hex[:10]], text=True))
+bucket = json.loads(subprocess.check_output(command + ['bucket', 'create', 'durability-' + uuid.uuid4().hex[:10], '--storage', os.environ['MOKYU_TEST_STORAGE_ID']], text=True))
 marker = Path(os.environ['MOKYU_TEST_FAULT_DIR']) / 'upload-before-work'
+
+
+def object_row(key):
+    reply = client.get(url + '/api/v1/buckets/' + bucket['id'] + '/objects', params={'q': key, 'mode': 'exact'}, timeout=10)
+    assert reply.status_code == 200, reply.text
+    return reply.json()['items'][0]
+
+
+def content(key):
+    reply = client.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params={'key': key, 'version': object_row(key)['id']}, timeout=30)
+    assert reply.status_code == 200, reply.status_code
+    return reply.content
 data = os.urandom(6 * 1024 * 1024 + 31)
 try:
     marker.touch()
@@ -30,18 +42,17 @@ try:
     assert reply.status_code == 200, reply.text
     reply = client.post(path + '/complete', json={'parts': [reply.json()]}, timeout=60)
     assert reply.status_code == 200, reply.text
-    assert (reply.json()['state'], reply.json()['remote_state']) == ('completed', 'pending'), reply.json()
-    assert client.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params={ 'key': 'pending'}).content == data
-    source = client.get(url + '/api/v1/buckets/' + bucket['id'] + '/objects', params={'q': 'pending', 'mode': 'exact'}).json()['objects'][0]
-    for action, key, target in [('copy', 'pending', 'copy'), ('move', 'pending', 'moved')]:
+    assert (reply.json()['status'], reply.json()['remote_state']) == ('completed', 'pending'), reply.json()
+    assert content('pending') == data
+    for action, key, target in [('copy', 'pending', 'copy'), ('move', 'copy', 'moved')]:
         result = client.post(url + '/api/v1/media/actions', json={'bucket': bucket['id'], 'action': action, 'target_bucket': bucket['id'],
-            'objects': [{'client_id': str(uuid.uuid4()), 'key': key, 'version': source['id'], 'target_key': target}]}).json()['results'][0]
+            'objects': [{'client_id': str(uuid.uuid4()), 'key': key, 'version': object_row(key)['id'], 'target_key': target}]}).json()['results'][0]
         assert result['status'] == 200, result
-        assert client.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params={ 'key': target}).content == data
+        assert content(target) == data
     result = client.post(url + '/api/v1/media/actions', json={'bucket': bucket['id'], 'action': 'delete',
-        'objects': [{'client_id': str(uuid.uuid4()), 'key': 'moved', 'version': source['id']}]}).json()['results'][0]
+        'objects': [{'client_id': str(uuid.uuid4()), 'key': 'moved', 'version': object_row('moved')['id']}]}).json()['results'][0]
     assert result['status'] == 200
-    assert client.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params={ 'key': 'copy'}).content == data
+    assert content('pending') == data
     marker.unlink()
     for _ in range(200):
         row = client.get(path).json()
@@ -50,7 +61,7 @@ try:
         time.sleep(.1)
     else:
         raise AssertionError(row)
-    assert client.get(url + f"/api/v1/buckets/{bucket['id']}/object/content", params={ 'key': 'copy'}).content == data
+    assert content('pending') == data
     print('PASS pending upload copy/move/delete retain shared local data and become stored only after backend flush', flush=True)
 finally:
     marker.unlink(missing_ok=True)

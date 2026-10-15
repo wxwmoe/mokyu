@@ -125,7 +125,7 @@ secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployme
 | --- | --- |
 | prefix / recursive | 路径前缀 / 是否展开子目录 |
 | q / mode / search_in | 搜索词；contains/prefix/exact；name/path |
-| kind / public | image/video/audio/document/archive/other；true/false |
+| category / public | image/video/audio/document/archive/other；true/false |
 | min_size / max_size | 原始字节范围，含边界 |
 | since / until | RFC3339 更新时间范围，含边界 |
 | sort / order | name/size/modified；asc/desc |
@@ -253,8 +253,8 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 
 | 方法与路径 | 用途 |
 | --- | --- |
-| `GET /api/v1/maintenance` | 七类策略、周期、当前/最近任务、下次检查、打包开关和排空状态 |
-| `POST /api/v1/maintenance/{kind}/actions` | pause/resume/run；kind 为 pack/reuse/reclaim/repack/range/gc/cleanup |
+| `GET /api/v1/maintenance` | controls 中每项以 policy 标识策略，附带周期、当前/最近任务、下次检查、打包开关和排空状态 |
+| `POST /api/v1/maintenance/{policy}/actions` | pause/resume/run；policy 为 pack/reuse/reclaim/repack/range/gc/cleanup |
 | `POST /api/v1/maintenance/mode` | `{enabled}`；启用或退出维护模式 |
 | `POST /api/v1/maintenance/pack-creation` | `{enabled}`；允许或停止新包生成 |
 | `POST /api/v1/maintenance/flush` | 将已有上传缓存写入存储 |
@@ -272,7 +272,7 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 
 ## 后台任务
 
-`GET /api/v1/tasks` 支持 state/task_type/bucket/storage/actor/token、分页游标和 limit（默认 50，最多 200），返回 items/next_cursor；storage 会筛选直接关联该后端存储或其存储桶的任务。`GET /api/v1/tasks/{id}` 返回状态、来源、发起者、处理计数、阻止原因及 detail。`POST /api/v1/tasks/{id}/actions` 提交 pause/resume。
+`GET /api/v1/tasks` 支持 state/policy/bucket/storage/actor/token、分页游标和 limit（默认 50，最多 200），返回 items/next_cursor；policy 匹配 pack 任务的维护策略（如 reuse、range），其他任务匹配 task_type；storage 会筛选直接关联该后端存储或其存储桶的任务。`GET /api/v1/tasks/{id}` 返回 task_type、policy、状态、来源、发起者、处理计数、阻止原因及 detail。`POST /api/v1/tasks/{id}/actions` 提交 pause/resume。
 
 状态为 queued/running/paused/completed/failed。暂停不回滚已提交批次；重启将 running 重排，paused 保持暂停。维护前提和策略可能阻止继续。任务创建成功只表示排队，不代表完成。`storage_migration` 的 detail 保存源/目标桶、对象版本、目标键和 copy/move 动作；可用同一任务接口查看、暂停和恢复。
 

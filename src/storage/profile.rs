@@ -1,11 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// Typed, revisioned policy shared by every node that serves a storage.
-#[derive(Clone, Debug, Deserialize, Serialize, sqlx::FromRow, ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StorageProfile {
     pub storage_id: Uuid,
@@ -65,6 +64,40 @@ pub(crate) struct StorageProfile {
 }
 
 impl StorageProfile {
+    pub(crate) fn pack_config(&self) -> crate::content::pack::Config {
+        use crate::content::pack::{CompressionStrategy, Config};
+        Config {
+            enabled: self.pack_enabled,
+            max_size: self.pack_max_size.clone(),
+            upload_cache_timeout: self.pack_upload_flush_timeout.clone(),
+            compression_strategy: Some(if !self.compression_enabled {
+                CompressionStrategy::Never
+            } else {
+                match self.compression_strategy.as_str() {
+                    "never" => CompressionStrategy::Never,
+                    "sample" => CompressionStrategy::Sample,
+                    _ => CompressionStrategy::Always,
+                }
+            }),
+            interval: self.pack_interval.clone(),
+            reuse_interval: self.pack_reuse_interval.clone(),
+            reclaim_interval: self.pack_reclaim_interval.clone(),
+            repack_interval: self.pack_repack_interval.clone(),
+            repack_cooldown: self.pack_repack_cooldown.clone(),
+            reclaim_min_savings_bytes: self.pack_reclaim_min_savings_bytes.clone(),
+            range_optimization: self.pack_range_enabled,
+            range_interval: self.pack_range_interval.clone(),
+            range_window: self.pack_range_window.clone(),
+            range_min_downloads: self.pack_range_min_downloads as u32,
+            range_min_savings_percent: self.pack_range_min_savings_percent as u8,
+            range_min_savings_bytes: self.pack_range_min_savings_bytes.clone(),
+            range_repack_after: self.pack_range_repack_after.clone(),
+            range_repack_window: self.pack_range_repack_window.clone(),
+            range_repack_retry_interval: self.pack_range_repack_retry_interval.clone(),
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn min_storage_seconds(&self) -> Result<u64> {
         if self.min_storage_duration == "0s" {
             Ok(0)
@@ -91,11 +124,110 @@ impl StorageProfile {
         config.min_savings_bytes = self.compression_min_savings_bytes as u64;
         config
     }
+}
 
-    pub(crate) async fn load(pool: &PgPool, storage_id: Uuid) -> Result<Self> {
-        Ok(sqlx::query_as("SELECT storage_id,revision,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=$1")
-            .bind(storage_id)
-            .fetch_one(pool)
-            .await?)
+pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::Result<()> {
+    use crate::config::{bytes, cache_bytes, seconds};
+    if storage_type == "local"
+        && (profile.cache_enabled
+            || profile.upload_cache
+            || profile.pack_enabled
+            || profile.pack_range_enabled)
+    {
+        return Err(crate::model::Error::LocalStorageFeatures.into());
     }
+    anyhow::ensure!(
+        matches!(
+            profile.compression_strategy.as_str(),
+            "never" | "always" | "sample"
+        ),
+        "compression strategy must be never, always, or sample"
+    );
+    profile
+        .compression_config(&crate::content::compression::Config::default())
+        .validate()?;
+    for duration in [
+        &profile.connect_timeout,
+        &profile.request_timeout,
+        &profile.retry_timeout,
+        &profile.priority_aging,
+        &profile.unreferenced_grace,
+        &profile.deleted_chunk_retention,
+        &profile.upload_retention,
+        &profile.pack_upload_flush_timeout,
+        &profile.pack_interval,
+        &profile.pack_reuse_interval,
+        &profile.pack_reclaim_interval,
+        &profile.pack_repack_interval,
+        &profile.pack_repack_cooldown,
+        &profile.pack_range_interval,
+        &profile.pack_range_window,
+        &profile.pack_range_repack_after,
+        &profile.pack_range_repack_window,
+        &profile.pack_range_repack_retry_interval,
+        &profile.integrity_batch_timeout,
+    ] {
+        seconds(duration)?;
+    }
+    if profile.min_storage_duration != "0s" {
+        seconds(&profile.min_storage_duration)?;
+    }
+    for size in [
+        &profile.pack_max_size,
+        &profile.pack_reclaim_min_savings_bytes,
+        &profile.pack_range_min_savings_bytes,
+    ] {
+        bytes(size)?;
+    }
+    for size in [&profile.cache_soft_limit, &profile.upload_cache_size]
+        .into_iter()
+        .flatten()
+    {
+        cache_bytes(size)?;
+    }
+    for size in [
+        &profile.integrity_bandwidth,
+        &profile.pack_byte_budget,
+        &profile.integrity_byte_budget,
+        &profile.maintenance_byte_budget,
+        &profile.migration_byte_budget,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        bytes(size)?;
+    }
+    anyhow::ensure!(
+        (0..=100).contains(&profile.max_retries),
+        "retries must be 0..100"
+    );
+    anyhow::ensure!(
+        (0..=100).contains(&profile.compression_min_savings_percent)
+            && profile.compression_min_savings_bytes >= 0,
+        "compression savings must be nonnegative and at most 100 percent"
+    );
+    for limit in [
+        profile.read_concurrency,
+        profile.upload_concurrency,
+        profile.control_concurrency,
+        profile.maintenance_concurrency,
+        profile.migration_concurrency,
+        Some(profile.pack_concurrency),
+        Some(profile.integrity_concurrency),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        anyhow::ensure!(limit > 0, "concurrency must be positive");
+    }
+    anyhow::ensure!(
+        profile.integrity_rps.is_none_or(|v| v > 0) && profile.cache_entries.is_none_or(|v| v > 0),
+        "rate and entry limits must be positive"
+    );
+    anyhow::ensure!(
+        profile.pack_range_min_downloads > 0
+            && (1..=100).contains(&profile.pack_range_min_savings_percent),
+        "invalid pack range thresholds"
+    );
+    Ok(())
 }

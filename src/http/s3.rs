@@ -80,10 +80,7 @@ pub async fn s3_http(
             && domain.as_ref() != Some(&host)
             && s3s::path::check_bucket_name(&host)
         {
-            bucket = sqlx::query_as("SELECT * FROM buckets WHERE name=$1")
-                .bind(&host)
-                .fetch_optional(&app.db)
-                .await?;
+            bucket = app.buckets.by_name(&host, false).await?;
             if let Some(b) = &bucket {
                 public_alias = true;
                 if b.state != "active" {
@@ -116,10 +113,7 @@ pub async fn s3_http(
                         .unwrap_or(""),
                 )?
             };
-            bucket = sqlx::query_as("SELECT * FROM buckets WHERE name=$1 AND state='active'")
-                .bind(name)
-                .fetch_optional(&app.db)
-                .await?;
+            bucket = app.buckets.by_name(&name, true).await?;
         }
         if let Some(bucket) = bucket {
             cors = cors_headers(&bucket, request.headers(), request.method().as_str())?;

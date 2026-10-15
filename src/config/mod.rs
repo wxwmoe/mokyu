@@ -7,8 +7,8 @@ pub(crate) mod runtime;
 pub use file::FileConfig;
 pub use limits::{Budget, bytes, cache_bytes, seconds};
 pub use runtime::{
-    BackendDefaults, Database, Instance, LocalCache, Maintenance, MetricsSettings, RequestSettings,
-    RuntimeSettings, Secrets, UploadSettings, WebSettings,
+    BackendDefaults, Database, DatabaseType, Instance, LocalCache, Maintenance, MetricsSettings,
+    RequestSettings, RuntimeSettings, Secrets, UploadSettings, WebSettings,
 };
 
 #[derive(Clone, Deserialize)]
@@ -123,5 +123,22 @@ mod tests {
         ] {
             assert!(bytes(s).is_err());
         }
+    }
+
+    #[test]
+    fn database_type_defaults_to_postgres_and_resolves_ports() {
+        let file: FileConfig = toml::from_str(
+            r#"
+                [database]
+                host = "postgres"
+                name = "mokyu"
+                user = "mokyu"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(file.database.backend, DatabaseType::Postgres);
+        assert_eq!(file.database.effective_port(), Some(5432));
+
+        assert!(DatabaseType::Postgres.validate_role("data").is_ok());
     }
 }

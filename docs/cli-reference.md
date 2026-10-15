@@ -145,7 +145,7 @@ docker exec -i mokyu mokyu cli user create admin --stdin < /secure/password-file
 | `gc resume` | 解除暂停；需要立即执行时再调用 `gc run` |
 | `cleanup status` | 返回历史保留策略、运行状态和上轮结果 |
 | `cleanup run` | 立即执行一轮历史清理，遵守保留期、引用和资源预算；已有清理运行时返回当前状态 |
-| `maintenance enable` | 持久禁止新写入和远端 GC，暂停清桶、打包和拆包任务，返回 active_operations；须等待已接纳操作排空 |
+| `maintenance enable` | 持久禁止新写入和远端 GC，暂停清桶、打包、拆包、存储迁移和重写任务，返回 active_operations；须等待已接纳操作排空 |
 | `maintenance disable` | 恢复写入；须先暂停或完成破坏性 sweep |
 
 `maintenance status` 返回七类定时策略、当前/最近任务、周期、下一次检查和新包生成状态。`maintenance pause TASK` / `resume TASK` 持久暂停或恢复对应策略，`maintenance run TASK` 发起单次任务；TASK 为 pack/reuse/reclaim/repack/range/gc/cleanup。暂停策略不丢失进度，当前批次可完成。
@@ -174,7 +174,7 @@ runtime settings 由所有角色共享。保存成功后响应会标记需要重
 | `cluster nodes` | 列出节点 id、名称、角色、启用状态和最近 heartbeat |
 | `cluster release NAME --confirm` | 禁用节点并将其持有的任务重新排队 |
 
-control、worker 和 data 首次启动时直接向 PostgreSQL 注册，凭据保存到 `instance.data_path/node.json`。节点文件丢失时进入 `recovery_required`，管理员先释放旧节点，再重启角色完成注册。控制节点不使用远程 URL 或主备转发；DNS 和角色安排见[群集部署](cluster-deployment.md)。
+单容器 CLI 使用部署密钥认证，不依赖 `node.json`。control、worker 和 data 首次启动时直接向 PostgreSQL 注册，凭据保存到 `instance.data_path/node.json`。节点文件丢失时进入 `recovery_required`，管理员先释放旧节点，再重启角色完成注册。控制节点不使用远程 URL 或主备转发；DNS 和角色安排见[群集部署](cluster-deployment.md)。
 
 群集模式下，data/worker 容器的本地 CLI 只支持 `status`；其他管理命令在单容器模式或 control 容器执行。
 
@@ -185,9 +185,9 @@ control、worker 和 data 首次启动时直接向 PostgreSQL 注册，凭据保
 | `task list` | 最近 100 个任务 |
 | `task show UUID` | 完整任务状态、游标、计数、detail/error |
 | `task pause UUID` | 暂停 queued/running 任务，允许当前批次结束 |
-| `task resume UUID` | 从持久进度继续 paused/failed 任务，清除旧错误 |
+| `task resume UUID` | 从持久进度继续 paused/failed 任务，清除旧错误并刷新 storage profile 版本；保留游标和操作目标 |
 
-重启后此前运行的任务自动继续，paused 保持暂停。维护模式下 purge/pack/unpack/upload/storage_migration 会持久暂停，退出维护后需显式 `task resume`。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge/pack/unpack/upload/storage_migration 需要退出维护模式，只读 sweep、巡检和显式 cache flush 可在维护模式下运行。
+重启后此前运行的任务自动继续，paused 保持暂停。维护模式下 purge/pack/unpack/upload/storage_migration/rewrite 会持久暂停，退出维护后需显式 `task resume`。completed 任务不能继续；继续破坏性 sweep 需要维护模式，purge/pack/unpack/upload/storage_migration/rewrite 需要退出维护模式，只读 sweep、巡检和显式 cache flush 可在维护模式下运行。
 
 ### 区块包维护
 

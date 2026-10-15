@@ -111,22 +111,63 @@ impl Default for MetricsSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseType {
+    #[default]
+    Postgres,
+}
+
+impl DatabaseType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+        }
+    }
+
+    pub fn default_port(self) -> Option<u16> {
+        match self {
+            Self::Postgres => Some(5432),
+        }
+    }
+
+    pub fn validate_role(self, role: &str) -> Result<()> {
+        ensure!(
+            role == "single" || self == Self::Postgres,
+            "database backend '{}' does not support cluster mode",
+            self.as_str()
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Database {
+    #[serde(rename = "type", default)]
+    pub backend: DatabaseType,
+    #[serde(default)]
     pub host: String,
-    #[serde(default = "postgres_port")]
-    pub port: u16,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub user: String,
     pub password: Option<String>,
     pub password_file: Option<PathBuf>,
     #[serde(default = "postgres_ssl_mode")]
     pub ssl_mode: String,
 }
-fn postgres_port() -> u16 {
-    5432
+
+impl Database {
+    pub fn effective_port(&self) -> Option<u16> {
+        self.backend
+            .default_port()
+            .map(|port| self.port.unwrap_or(port))
+    }
 }
+
 fn postgres_ssl_mode() -> String {
     "prefer".into()
 }

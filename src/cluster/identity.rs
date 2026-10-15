@@ -66,31 +66,14 @@ pub(super) async fn write_state(path: &Path, state: &NodeState) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn local_node_id(app: &App) -> Result<Option<Uuid>> {
-    Ok(app.node.get().map(|state| state.node_id))
-}
-
 pub(crate) async fn try_leader(
     app: &App,
     key: i64,
-) -> Result<Option<sqlx::Transaction<'static, sqlx::Postgres>>> {
-    let mut transaction = app.db.begin().await?;
-    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(key)
-        .fetch_one(&mut *transaction)
-        .await?;
-    if locked {
-        Ok(Some(transaction))
-    } else {
-        transaction.rollback().await?;
-        Ok(None)
-    }
+) -> Result<Option<Box<dyn crate::model::cluster::Leader>>> {
+    app.cluster()?.leader(key).await
 }
 
-pub(super) fn role_name(app: &App, role: &str) -> Result<String> {
-    if role == "single" {
-        return Ok("single".into());
-    }
+pub(super) fn role_name(app: &App) -> Result<String> {
     app.config
         .instance
         .name

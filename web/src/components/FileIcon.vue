@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { File, Image, Film, Music2, FileText, Folder, FileArchive, Code2 } from 'lucide-vue-next'
 const props = defineProps<{ name: string; folder?: boolean; large?: boolean }>()
-const kind = computed(() => {
+const appearance = computed(() => {
   if (props.folder) return { icon: Folder, tone: 'cream' }
   const ext = props.name.split('.').pop()?.toLowerCase() || ''
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'heic'].includes(ext)) return { icon: Image, tone: 'rose' }
@@ -14,4 +14,4 @@ const kind = computed(() => {
   return { icon: File, tone: 'muted' }
 })
 </script>
-<template><span class="file-icon" :class="[kind.tone, { large }]" aria-hidden="true"><component :is="kind.icon" :size="large ? 42 : 20" :stroke-width="1.7" /></span></template>
+<template><span class="file-icon" :class="[appearance.tone, { large }]" aria-hidden="true"><component :is="appearance.icon" :size="large ? 42 : 20" :stroke-width="1.7" /></span></template>

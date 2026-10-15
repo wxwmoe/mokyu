@@ -29,7 +29,7 @@ const outcomes = computed(() => ['', 'succeeded', 'failed', 'partial', 'unknown'
 const periods = computed(() => ['1', '7', '30', ''].map(value => ({ value, label: value ? t('auditDays', { count: value }) : t('auditAllTime') })))
 function title(event: Event) { const key = 'auditAction_' + event.action; return t(key) === key ? event.action : t(key) }
 function group(event: Event) { return event.action.split('.')[0] || 'account' }
-function icon(event: Event) { const kind = group(event); return ['credential', 'token'].includes(kind) ? KeyRound : kind === 'user' ? Users : ['project', 'bucket', 'object'].includes(kind) ? FolderHeart : kind === 'session' ? LogIn : Settings2 }
+function icon(event: Event) { const category = group(event); return ['credential', 'token'].includes(category) ? KeyRound : category === 'user' ? Users : ['project', 'bucket', 'object'].includes(category) ? FolderHeart : category === 'session' ? LogIn : Settings2 }
 function summary(event: Event) { const detail = event.detail as Record<string, unknown>; return String(detail.label || detail.name || detail.username || event.target || t('auditInstance')) }
 function attempted(event: Event) { return (event.detail as Record<string, unknown>).identity_verified === false }
 function reset() { actor.value = ''; search.value = ''; action.value = ''; source.value = ''; outcome.value = ''; days.value = '7'; after.value = '' }

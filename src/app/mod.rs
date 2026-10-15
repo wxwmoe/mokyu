@@ -11,7 +11,6 @@ use futures_util::StreamExt;
 use s3s::{dto::StreamingBlob, s3_error};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgListener};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, RwLock, Weak},
@@ -27,7 +26,7 @@ pub(crate) mod publish;
 pub(crate) mod quota;
 pub(crate) mod streams;
 
-#[derive(Clone, sqlx::FromRow, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Bucket {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -43,12 +42,11 @@ pub struct Bucket {
     pub error_document: String,
     pub created_at: DateTime<Utc>,
 }
-#[derive(Clone, sqlx::FromRow, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct StoredStream {
     pub id: Uuid,
     pub bucket_id: Uuid,
     pub object_key: String,
-    #[sqlx(rename = "stream_type")]
     pub stream_type: String,
     pub state: String,
     pub size: i64,
@@ -59,7 +57,7 @@ pub struct StoredStream {
     pub created_at: DateTime<Utc>,
     pub touched_at: DateTime<Utc>,
 }
-#[derive(Clone, sqlx::FromRow, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Extent {
     pub stream_id: Uuid,
     pub offset_bytes: i64,
@@ -77,13 +75,6 @@ impl Extent {
         ensure!(end <= data.len(), "extent exceeds source");
         Ok(data.slice(start..end))
     }
-}
-#[derive(sqlx::FromRow)]
-struct ReadExtent {
-    #[sqlx(flatten)]
-    extent: Extent,
-    #[sqlx(flatten)]
-    chunk: Chunk,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Metadata {
@@ -103,33 +94,21 @@ pub struct Active {
 }
 struct ReadLease {
     id: Uuid,
-    db: PgPool,
+    store: Arc<dyn crate::model::StreamLeaseStore>,
     ttl_seconds: i64,
 }
 impl ReadLease {
-    async fn renew(&self, db: &PgPool) -> Result<()> {
-        let changed = sqlx::query(
-            "UPDATE stream_leases SET expires_at=now()+$2*interval '1 second' WHERE id=$1 AND lease_type='read' AND expires_at>now()",
-        )
-        .bind(self.id)
-        .bind(self.ttl_seconds)
-        .execute(db)
-        .await?
-        .rows_affected();
-        ensure!(changed == 1, "read lease expired");
-        Ok(())
+    async fn renew(&self) -> Result<()> {
+        self.store.renew_read(self.id, self.ttl_seconds).await
     }
 }
 impl Drop for ReadLease {
     fn drop(&mut self) {
         let id = self.id;
-        let db = self.db.clone();
+        let store = self.store.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                let _ = sqlx::query("DELETE FROM stream_leases WHERE id=$1 AND lease_type='read'")
-                    .bind(id)
-                    .execute(&db)
-                    .await;
+                let _ = store.release_read(id).await;
             });
         }
     }
@@ -147,22 +126,48 @@ impl Drop for Active {
     }
 }
 impl Active {
-    pub(crate) async fn renew_read_lease(&self, db: &PgPool) -> Result<()> {
+    pub(crate) async fn renew_read_lease(&self) -> Result<()> {
         if let Some(lease) = &self.read_lease {
-            lease.renew(db).await?;
+            lease.renew().await?;
         }
         Ok(())
     }
 }
 pub struct App {
+    cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
+    pub(crate) metrics: Arc<dyn crate::model::metrics::MetricsStore>,
+    pub(crate) integrity_store: Arc<dyn crate::model::integrity::IntegrityStore>,
+    pub(crate) maintenance_store: Arc<dyn crate::model::maintenance::MaintenanceStore>,
+    pub(crate) physical: Arc<dyn crate::model::PhysicalStore>,
+    pub(crate) packing: Arc<dyn crate::model::PackingStore>,
     pub role: String,
     pub recovery_required: std::sync::atomic::AtomicBool,
     pub config: Config,
     pub runtime_defaults: HashMap<String, Value>,
     pub runtime_revisions: RwLock<HashMap<String, i64>>,
+    pub runtime_settings: Arc<dyn crate::model::RuntimeSettingsStore>,
+    pub managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
+    pub storage_records: Arc<dyn crate::model::StorageRecordStore>,
+    pub chunks: Arc<dyn crate::model::ChunkStore>,
     pub budget: Budget,
     pub secrets: Arc<Secrets>,
-    pub db: PgPool,
+    pub runtime: Arc<dyn crate::model::runtime::RuntimeStore>,
+    pub quota: Arc<dyn crate::model::QuotaStore>,
+    pub objects: Arc<dyn crate::model::ObjectStore>,
+    pub publish: Arc<dyn crate::model::PublishStore>,
+    pub task_control: Arc<dyn crate::model::TaskControlStore>,
+    pub authorization: Arc<dyn crate::model::AuthorizationStore>,
+    pub audit: Arc<dyn crate::model::AuditStore>,
+    pub administration: Arc<dyn crate::model::AdministrationStore>,
+    pub upload_cache: Arc<dyn crate::model::UploadCacheStore>,
+    pub multipart: Arc<dyn crate::model::MultipartStore>,
+    pub buckets: Arc<dyn crate::model::BucketStore>,
+    pub credentials: Arc<dyn crate::model::CredentialStore>,
+    pub accounts: Arc<dyn crate::model::AccountStore>,
+    pub task_leases: Arc<dyn crate::model::TaskLeaseStore>,
+    pub storage_profiles: Arc<dyn crate::model::StorageProfileStore>,
+    pub stream_store: Arc<dyn crate::model::StreamStore>,
+    pub stream_leases: Arc<dyn crate::model::StreamLeaseStore>,
     pub node: std::sync::OnceLock<crate::cluster::NodeState>,
     pub storage: Arc<Storage>,
     pub thumbnails: Arc<crate::control::media::Thumbnails>,
@@ -192,7 +197,7 @@ impl App {
         start_maintenance: bool,
         use_storage: bool,
         role: &str,
-    ) -> Result<(Arc<Self>, sqlx::PgConnection)> {
+    ) -> Result<(Arc<Self>, Box<dyn crate::model::runtime::Owner>)> {
         tokio::fs::create_dir_all(&config.instance.data_path).await?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
@@ -202,34 +207,31 @@ impl App {
             .open(config.instance.data_path.join("gateway.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("another gateway owns this data directory")?;
-        let (db, owner) = crate::database::connect(&config, &mut secrets, &budget, role).await?;
-        let runtime_defaults = crate::database::runtime_defaults(&config)
+        let (stores, owner) = crate::model::connect(&config, &mut secrets, &budget, role).await?;
+        let defaults = crate::model::runtime_defaults(&config);
+        stores.runtime_settings.ensure(&defaults).await?;
+        let runtime_defaults = defaults
             .into_iter()
             .map(|(section, value)| (section.to_owned(), value))
             .collect();
-        crate::database::ensure_runtime_settings(&db, &config).await?;
-        let runtime_revisions = crate::database::load_runtime_settings(&db, &mut config).await?;
+        let runtime_revisions =
+            crate::model::load_runtime_settings(stores.runtime_settings.as_ref(), &mut config)
+                .await?;
         let budget = config.budget()?;
-        if start_maintenance {
-            sqlx::query("UPDATE mokyu_meta SET maintenance=true")
-                .execute(&db)
-                .await?;
-        }
-        let maintenance: bool = sqlx::query_scalar("SELECT maintenance FROM mokyu_meta")
-            .fetch_one(&db)
-            .await?;
-        let maintenance = Arc::new(std::sync::atomic::AtomicBool::new(maintenance));
-        let pack_creation_paused: bool =
-            sqlx::query_scalar("SELECT pack_creation_paused FROM mokyu_meta")
-                .fetch_one(&db)
-                .await?;
+        let state = stores.runtime.initialize(start_maintenance).await?;
+        let maintenance = Arc::new(std::sync::atomic::AtomicBool::new(state.maintenance));
+        let pack_creation_paused = state.pack_creation_paused;
         let secrets = Arc::new(secrets);
         let storage = Arc::new(
             Storage::new(
                 &config,
                 secrets.clone(),
                 &budget,
-                db.clone(),
+                stores.physical.clone(),
+                stores.storage_permits.clone(),
+                stores.storage_profiles.clone(),
+                stores.managed_keys.clone(),
+                stores.storage_records.clone(),
                 maintenance.clone(),
                 role != "single",
                 use_storage,
@@ -237,14 +239,8 @@ impl App {
             .await?,
         );
         if storage.enabled() {
-            if let Err(error) = storage
-                .check_identity(&db, maintenance.load(std::sync::atomic::Ordering::Acquire))
-                .await
-            {
-                let pending: bool =
-                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads)")
-                        .fetch_one(&db)
-                        .await?;
+            if let Err(error) = storage.check_identity().await {
+                let pending = stores.runtime.pending_uploads().await?;
                 if !pending || error.downcast_ref::<object_store::Error>().is_none() {
                     return Err(error);
                 }
@@ -256,6 +252,7 @@ impl App {
         let thumbnails =
             Arc::new(crate::control::media::Thumbnails::new(&config, storage.disk.clone()).await?);
         let app = Arc::new(Self {
+            cluster: stores.cluster,
             role: role.to_owned(),
             recovery_required: std::sync::atomic::AtomicBool::new(false),
             uploads: Arc::new(Semaphore::new(budget.upload_concurrency)),
@@ -264,9 +261,34 @@ impl App {
             config,
             runtime_defaults,
             runtime_revisions: RwLock::new(runtime_revisions),
+            runtime_settings: stores.runtime_settings,
+            metrics: stores.metrics,
+            managed_keys: stores.managed_keys,
+            storage_records: stores.storage_records,
+            chunks: stores.chunks,
             budget,
             secrets,
-            db,
+            runtime: stores.runtime,
+            quota: stores.quota,
+            objects: stores.objects,
+            publish: stores.publish,
+            task_control: stores.task_control,
+            authorization: stores.authorization,
+            audit: stores.audit,
+            accounts: stores.accounts,
+            physical: stores.physical,
+            packing: stores.packing,
+            maintenance_store: stores.maintenance,
+            integrity_store: stores.integrity,
+            upload_cache: stores.upload_cache,
+            multipart: stores.multipart,
+            buckets: stores.buckets,
+            credentials: stores.credentials,
+            administration: stores.administration,
+            task_leases: stores.task_leases,
+            storage_profiles: stores.storage_profiles,
+            stream_store: stores.streams,
+            stream_leases: stores.stream_leases,
             node: std::sync::OnceLock::new(),
             storage,
             thumbnails,
@@ -287,27 +309,16 @@ impl App {
         });
         let profile_app = app.clone();
         tokio::spawn(async move {
-            let mut listener = match PgListener::connect_with(&profile_app.db).await {
+            let mut listener = match profile_app.storage_profiles.changes().await {
                 Ok(listener) => listener,
                 Err(error) => {
                     tracing::warn!(%error, "storage profile listener unavailable");
                     return;
                 }
             };
-            if let Err(error) = listener.listen("mokyu_storage_profiles").await {
-                tracing::warn!(%error, "storage profile subscription failed");
-                return;
-            }
             loop {
-                match listener.recv().await {
-                    Ok(notification) => {
-                        let Ok(storage_id) = notification.payload().parse::<Uuid>() else {
-                            tracing::warn!(
-                                payload = notification.payload(),
-                                "invalid storage profile notification"
-                            );
-                            continue;
-                        };
+                match listener.next().await {
+                    Ok(storage_id) => {
                         if let Err(error) = profile_app.storage.refresh_store(storage_id).await {
                             tracing::warn!(%error, %storage_id, "storage profile refresh failed");
                         }
@@ -345,19 +356,21 @@ impl App {
 }
 
 impl App {
+    pub(crate) fn cluster(&self) -> Result<&dyn crate::model::cluster::ClusterStore> {
+        self.cluster
+            .as_deref()
+            .context("cluster operations require PostgreSQL")
+    }
     pub async fn status(&self) -> Result<Value> {
-        let (paused, maintenance, mode, mode_revision): (bool, bool, String, i64) = sqlx::query_as(
-            "SELECT gc_paused,maintenance,deployment_mode,deployment_mode_revision FROM mokyu_meta",
-        )
-        .fetch_one(&self.db)
-        .await?;
+        let state = self.runtime.state().await?;
+        let (pool_size, pool_idle) = self.runtime.pool();
         let expected = if self.role == "single" {
             "single"
         } else {
             "cluster"
         };
-        let mismatch = mode != expected;
-        let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"role":self.role,"deployment_mode":mode,"deployment_mode_revision":mode_revision,"mode_mismatch":mismatch,"node_registered":self.node.get().is_some(),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":paused,"maintenance":maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":self.db.size(),"db_pool_idle":self.db.num_idle(),"data_slots_available":self.slots.available_permits(),"active_streams":self.active.lock().unwrap().len()});
+        let mismatch = state.mode != expected;
+        let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"role":self.role,"deployment_mode":state.mode,"deployment_mode_revision":state.mode_revision,"mode_mismatch":mismatch,"node_registered":self.node.get().is_some(),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":state.gc_paused,"maintenance":state.maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":pool_size,"db_pool_idle":pool_idle,"data_slots_available":self.slots.available_permits(),"active_streams":self.active.lock().unwrap().len()});
         status["runtime"] = self.statistics.runtime();
         status["cleanup"] = self.cleanup_status();
         status["catalog"] = serde_json::to_value(crate::control::catalog::progress(self).await?)?;
@@ -374,10 +387,7 @@ impl App {
     }
 
     pub async fn mode_mismatch(&self) -> Result<bool> {
-        let mode: String =
-            sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE singleton")
-                .fetch_one(&self.db)
-                .await?;
+        let mode = self.runtime.mode().await?;
         Ok(mode
             != if self.role == "single" {
                 "single"
@@ -390,21 +400,6 @@ impl App {
         self.recovery_required
             .load(std::sync::atomic::Ordering::Acquire)
     }
-}
-pub(super) fn check_write_conditions(
-    current: Option<&str>,
-    if_match: Option<&s3s::dto::ETagCondition>,
-    if_none: Option<&s3s::dto::ETagCondition>,
-) -> Result<()> {
-    use s3s::dto::{ETag, ETagCondition};
-    let matches = |c: &ETagCondition| match c {
-        ETagCondition::Any => current.is_some(),
-        ETagCondition::ETag(e) => current.is_some_and(|v| ETag::Strong(v.into()).strong_cmp(e)),
-    };
-    if if_match.is_some_and(|c| !matches(c)) || if_none.is_some_and(matches) {
-        return Err(s3_error!(PreconditionFailed).into());
-    }
-    Ok(())
 }
 pub fn internal(error: anyhow::Error) -> s3s::S3Error {
     if let Some(error) = crate::app::quota::database_error(&error) {

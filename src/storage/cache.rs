@@ -8,6 +8,20 @@ use std::{
 };
 use uuid::Uuid;
 
+pub(super) fn cache_id(chunk: &Chunk) -> Uuid {
+    if !chunk.location_id.is_nil() {
+        return chunk.location_id;
+    }
+    // Packed chunks retain a cache identity after their standalone encoding is retired.
+    let mut identity = [0; 24];
+    identity[..16].copy_from_slice(chunk.storage_id.unwrap_or_default().as_bytes());
+    identity[16..].copy_from_slice(&chunk.id.to_be_bytes());
+    let hash = blake3::derive_key("mokyu logical chunk cache", &identity);
+    let mut id = [0; 16];
+    id.copy_from_slice(&hash[..16]);
+    Uuid::from_bytes(id)
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Queue {
     Small,
@@ -115,12 +129,6 @@ impl ReadContext {
 pub(crate) enum Source {
     Chunk(Chunk, CachePin),
     Pack(crate::content::pack::Pack, CachePin),
-}
-#[derive(sqlx::FromRow)]
-pub(crate) struct InspectionMember {
-    #[sqlx(flatten)]
-    pub(crate) chunk: Chunk,
-    pub(crate) offset_bytes: i64,
 }
 #[derive(Default)]
 pub(crate) struct Fifo {

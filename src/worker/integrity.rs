@@ -1,3 +1,4 @@
+use crate::model::task::Execution;
 use crate::{
     app::{Active, App, StoredStream},
     config,
@@ -80,43 +81,7 @@ pub struct Request {
     pub key: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
-struct Detail {
-    #[serde(default)]
-    storage_id: Option<Uuid>,
-    mode: Mode,
-    phase: String,
-    bucket_id: Option<Uuid>,
-    bucket: Option<String>,
-    key: Option<String>,
-    upper_chunk_id: String,
-    upper_object: Option<(Uuid, String)>,
-    objects_checked: u64,
-    chunks_checked: u64,
-    bytes_checked: u64,
-    issues: u64,
-    skipped: u64,
-    finished_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-#[derive(Default, Deserialize, Serialize)]
-struct Cursor {
-    bucket: Option<Uuid>,
-    key: Option<String>,
-    stream: Option<Uuid>,
-    after_extent: i64,
-    position: i64,
-    chunk: i64,
-}
-struct Finding {
-    subject: String,
-    code: String,
-    chunk_id: Option<i64>,
-    location_id: Option<Uuid>,
-    stream_id: Option<Uuid>,
-    bucket_id: Option<Uuid>,
-    key: Option<String>,
-    detail: Value,
-}
+use crate::model::integrity::{Cursor, Detail, Finding};
 impl Finding {
     fn object(s: &StoredStream, code: &str, offset: i64, detail: Value) -> Self {
         Self {
@@ -166,41 +131,7 @@ impl App {
         if rates.is_empty() {
             return Ok(true);
         }
-        let mut tx = self.db.begin().await?;
-        for (metric, rate, amount) in rates {
-            // A single integrity request/chunk may be larger than one second's
-            // configured rate.  Grow the burst capacity for that request so a
-            // byte budget can make progress instead of waiting forever.
-            let capacity = rate.max(amount).max(1.0);
-            sqlx::query("INSERT INTO storage_rate_state(storage_id,metric,tokens,replenished_at,updated_at) VALUES($1,$2,$3::text::numeric,now(),now()) ON CONFLICT(storage_id,metric) DO NOTHING")
-                .bind(storage_id)
-                .bind(metric)
-                .bind(format!("{capacity:.6}"))
-                .execute(&mut *tx)
-                .await?;
-            let (tokens, replenished): (f64, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
-                "SELECT tokens::double precision,replenished_at FROM storage_rate_state WHERE storage_id=$1 AND metric=$2 FOR UPDATE",
-            )
-            .bind(storage_id)
-            .bind(metric)
-            .fetch_one(&mut *tx)
-            .await?;
-            let elapsed =
-                (chrono::Utc::now() - replenished).num_milliseconds().max(0) as f64 / 1000.0;
-            let available = (tokens + elapsed * rate).min(capacity);
-            if available < amount {
-                return Ok(false);
-            }
-            let remaining = available - amount;
-            sqlx::query("UPDATE storage_rate_state SET tokens=$3::text::numeric,replenished_at=now(),updated_at=now() WHERE storage_id=$1 AND metric=$2")
-                .bind(storage_id)
-                .bind(metric)
-                .bind(format!("{remaining:.6}"))
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
-        Ok(true)
+        self.integrity_store.acquire_rate(storage_id, &rates).await
     }
 
     pub async fn integrity_start(&self, input: Request) -> Result<Value> {
@@ -224,115 +155,17 @@ impl App {
             self.current(b.id, key).await?;
         }
         let _coord = self.coord.lock().await;
-        // Limit queued work as well as running work; repeated clicks must not grow an unbounded queue.
-        let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND state IN ('queued','running'))").fetch_one(&self.db).await?;
-        if busy {
-            return Err(
-                s3s::s3_error!(OperationAborted, "an integrity check is already active").into(),
-            );
-        }
-        let storage_rows: Vec<(Uuid, String)> =
-            if let Some(storage_id) = bucket.as_ref().and_then(|value| value.storage_id) {
-                sqlx::query_as("SELECT id,type FROM storages WHERE id=$1 AND enabled")
-                    .bind(storage_id)
-                    .fetch_all(&self.db)
-                    .await?
-            } else if bucket.is_some() {
-                Vec::new()
-            } else {
-                sqlx::query_as("SELECT id,type FROM storages WHERE enabled ORDER BY created_at,id")
-                    .fetch_all(&self.db)
-                    .await?
-            };
-        let storage_rows = if storage_rows.is_empty() {
-            vec![(Uuid::nil(), "shared".to_owned())]
-        } else {
-            storage_rows
-        };
-        let child_count = storage_rows.len();
-        let mut tx = self.db.begin().await?;
-        let parent_detail = json!({
-            "role": "parent",
-            "mode": input.mode,
-            "bucket": input.bucket.clone(),
-            "key": input.key.clone(),
-            "children": storage_rows.len(),
-        });
-        let parent = crate::worker::insert(
-            &mut *tx,
-            "integrity",
-            bucket.as_ref().map(|value| value.id),
-            parent_detail,
-        )
-        .await?;
-        for (storage_id, storage_type) in storage_rows {
-            let storage_id = (storage_id != Uuid::nil()).then_some(storage_id);
-            let upper: i64 = if let Some(storage_id) = storage_id {
-                sqlx::query_scalar("SELECT COALESCE(max(id),0) FROM chunks WHERE storage_id=$1")
-                    .bind(storage_id)
-                    .fetch_one(&mut *tx)
-                    .await?
-            } else {
-                sqlx::query_scalar("SELECT COALESCE(max(id),0) FROM chunks")
-                    .fetch_one(&mut *tx)
-                    .await?
-            };
-            let mut detail = Detail {
-                storage_id,
-                mode: input.mode,
-                phase: "metadata".into(),
-                bucket_id: bucket.as_ref().map(|value| value.id),
-                bucket: input.bucket.clone(),
-                key: input.key.clone(),
-                upper_chunk_id: upper.to_string(),
-                upper_object: None,
-                objects_checked: 0,
-                chunks_checked: 0,
-                bytes_checked: 0,
-                issues: 0,
-                skipped: 0,
-                finished_at: None,
-            };
-            let mut query = sqlx::QueryBuilder::new(
-                "SELECT o.bucket_id,o.object_key FROM objects o WHERE o.stream_id IS NOT NULL",
-            );
-            scope(&mut query, &detail);
-            query.push(" ORDER BY o.bucket_id DESC,o.object_key DESC LIMIT 1");
-            detail.upper_object = query.build_query_as().fetch_optional(&mut *tx).await?;
-            let child = crate::worker::insert_child(
-                &mut *tx,
-                "integrity",
-                detail.bucket_id,
-                serde_json::to_value(detail)?,
-            )
+        let (parent, child_count) = self
+            .integrity_store
+            .start(input, bucket, self.node.get().map(|node| node.node_id))
             .await?;
-            let (execution_scope, target_node_id) = if storage_type == "local" {
-                ("node", self.node.get().map(|state| state.node_id))
-            } else {
-                ("cluster", None)
-            };
-            sqlx::query("UPDATE tasks SET parent_task_id=$2,batch_total=$3,execution_scope=$4,target_node_id=$5 WHERE id=$1")
-                .bind(child)
-                .bind(parent)
-                .bind(1_i64)
-                .bind(execution_scope)
-                .bind(target_node_id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        sqlx::query("UPDATE tasks SET batch_total=$2 WHERE id=$1")
-            .bind(parent)
-            .bind(child_count as i64)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
         self.wake_tasks.notify_waiters();
         Ok(json!({"task_id":parent,"children":child_count}))
     }
 
     pub async fn integrity_batch(
         self: &Arc<Self>,
-        id: Uuid,
+        id: Execution,
         saved: Option<&str>,
         detail: Value,
     ) -> Result<bool> {
@@ -343,7 +176,7 @@ impl App {
             .unwrap_or_default();
         let mut issues = Vec::new();
         let profile = if let Some(storage_id) = d.storage_id {
-            Some(crate::storage::profile::StorageProfile::load(&self.db, storage_id).await?)
+            Some(self.storage_profiles.load(storage_id).await?)
         } else {
             None
         };
@@ -367,19 +200,18 @@ impl App {
             if d.mode != Mode::Metadata && Instant::now() < *self.integrity_pacing.lock().unwrap() {
                 return Ok(false);
             }
-            let mut query = sqlx::QueryBuilder::new(
-                "SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.location_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE c.state='ready' AND c.id>",
-            );
-            query.push_bind(cursor.chunk).push(" AND c.id<=").push_bind(d.upper_chunk_id.parse::<i64>()?).push(" AND EXISTS(SELECT 1 FROM extents e JOIN objects o ON o.stream_id=e.stream_id WHERE e.chunk_id=c.id");
-            scope(&mut query, &d);
-            query
-                .push(") ORDER BY c.id LIMIT ")
-                .push_bind(if d.mode == Mode::Metadata {
-                    64
-                } else {
-                    count as i64
-                });
-            let mut rows: Vec<Chunk> = query.build_query_as().fetch_all(&self.db).await?;
+            let mut rows = self
+                .integrity_store
+                .chunks(
+                    &d,
+                    cursor.chunk,
+                    if d.mode == Mode::Metadata {
+                        64
+                    } else {
+                        count as i64
+                    },
+                )
+                .await?;
             if let Some(limit) = profile
                 .as_ref()
                 .and_then(|p| p.integrity_byte_budget.as_deref())
@@ -420,11 +252,12 @@ impl App {
                 }
                 let started = Instant::now();
                 let requests = rows.len();
-                let results: Vec<_> =
-                    futures_util::stream::iter(rows.iter().map(|c| self.inspect_chunk(id, c, &d)))
-                        .buffered(count)
-                        .try_collect()
-                        .await?;
+                let results: Vec<_> = futures_util::stream::iter(
+                    rows.iter().map(|c| self.inspect_chunk(id.id, c, &d)),
+                )
+                .buffered(count)
+                .try_collect()
+                .await?;
                 let mut bytes = 0;
                 for (c, result) in rows.iter().zip(results) {
                     cursor.chunk = c.id;
@@ -470,18 +303,9 @@ impl App {
         }
         #[cfg(feature = "fault-injection")]
         crate::faults::point("integrity-before-commit").await;
-        let mut tx = self.db.begin().await?;
-        for i in issues {
-            let inserted = sqlx::query("INSERT INTO integrity_issues(task_id,subject,code,chunk_id,location_id,stream_id,bucket_id,object_key,detail) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(task_id,subject,code) DO NOTHING")
-                .bind(id).bind(i.subject).bind(&i.code).bind(i.chunk_id).bind(i.location_id).bind(i.stream_id).bind(i.bucket_id).bind(i.key).bind(i.detail).execute(&mut *tx).await?.rows_affected();
-            d.issues += inserted;
-            if inserted > 0 {
-                tracing::warn!(task_id=%id,chunk_id=?i.chunk_id,stream_id=?i.stream_id,code=%i.code,"integrity finding");
-            }
-        }
-        sqlx::query("UPDATE tasks SET cursor=$2,detail=$3,processed=$4,updated_at=now(),state=CASE WHEN $5 AND state='running' THEN 'completed' ELSE state END WHERE id=$1")
-            .bind(id).bind(serde_json::to_string(&cursor)?).bind(serde_json::to_value(&d)?).bind((d.objects_checked+d.chunks_checked) as i64).bind(d.phase=="done").execute(&mut *tx).await?;
-        tx.commit().await?;
+        self.integrity_store
+            .checkpoint(id, serde_json::to_string(&cursor)?, d, issues)
+            .await?;
         Ok(true)
     }
 
@@ -496,30 +320,8 @@ impl App {
             return Ok(());
         }
         let coord = self.coord.lock().await;
-        let mut query = sqlx::QueryBuilder::new(
-            "SELECT s.*,o.bucket_id AS visible_bucket,o.object_key AS visible_key FROM objects o JOIN streams s ON s.id=o.stream_id WHERE true",
-        );
-        scope(&mut query, d);
-        if let Some(stream) = cursor.stream {
-            query.push(" AND o.stream_id=").push_bind(stream);
-        } else if let (Some(bucket), Some(key)) = (cursor.bucket, &cursor.key) {
-            query
-                .push(" AND (o.bucket_id,o.object_key)>(")
-                .push_bind(bucket)
-                .push(",")
-                .push_bind(key)
-                .push(")");
-        }
-        query.push(" ORDER BY o.bucket_id,o.object_key LIMIT 1");
-        #[derive(sqlx::FromRow)]
-        struct Object {
-            #[sqlx(flatten)]
-            stream: StoredStream,
-            visible_bucket: Uuid,
-            visible_key: String,
-        }
-        let row: Option<Object> = query.build_query_as().fetch_optional(&self.db).await?;
-        let Some(row) = row else {
+        let row = self.integrity_store.mapping(d, cursor).await?;
+        let Some((mut s, visible_bucket, visible_key)) = row else {
             if cursor.stream.take().is_some() {
                 d.skipped += 1;
             } else {
@@ -527,11 +329,9 @@ impl App {
             }
             return Ok(());
         };
-        let mut s = row.stream;
-        let identity_mismatch =
-            s.bucket_id != row.visible_bucket || s.object_key != row.visible_key;
-        s.bucket_id = row.visible_bucket;
-        s.object_key = row.visible_key;
+        let identity_mismatch = s.bucket_id != visible_bucket || s.object_key != visible_key;
+        s.bucket_id = visible_bucket;
+        s.object_key = visible_key;
         let pin = self.pin(s.id);
         if cursor.stream.is_none() {
             cursor.bucket = Some(s.bucket_id);
@@ -552,18 +352,10 @@ impl App {
                 json!({"state":s.state,"stream_type":s.stream_type}),
             ));
         }
-        #[derive(sqlx::FromRow)]
-        struct Range {
-            offset_bytes: i64,
-            length: i32,
-            source_offset: i32,
-            fragment_id: Option<Uuid>,
-            chunk_id: Option<i64>,
-            state: Option<String>,
-            raw_size: Option<i32>,
-        }
-        let rows: Vec<Range> = sqlx::query_as("SELECT e.*,c.state,c.raw_size FROM extents e LEFT JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=$1 AND e.offset_bytes>$2 ORDER BY e.offset_bytes LIMIT 65")
-            .bind(s.id).bind(cursor.after_extent).fetch_all(&self.db).await?;
+        let rows = self
+            .integrity_store
+            .ranges(s.id, cursor.after_extent)
+            .await?;
         let more = rows.len() > 64;
         for r in rows.iter().take(64) {
             if r.offset_bytes != cursor.position {
@@ -607,14 +399,10 @@ impl App {
             }
             cursor.stream = None;
         }
-        let current: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM objects WHERE bucket_id=$1 AND object_key=$2 AND stream_id=$3)",
-        )
-        .bind(s.bucket_id)
-        .bind(&s.object_key)
-        .bind(s.id)
-        .fetch_one(&self.db)
-        .await?;
+        let current: bool = self
+            .integrity_store
+            .current(s.bucket_id, &s.object_key, s.id)
+            .await?;
         if current {
             issues.extend(found);
             if !more {
@@ -630,13 +418,7 @@ impl App {
 
     async fn chunk_pin(&self, c: &Chunk, d: &Detail) -> Result<Option<Active>> {
         let _coord = self.coord.lock().await;
-        let mut query = sqlx::QueryBuilder::new(
-            "SELECT o.stream_id FROM extents e JOIN objects o ON o.stream_id=e.stream_id JOIN chunks c ON c.id=e.chunk_id WHERE c.state='ready' AND c.id=",
-        );
-        query.push_bind(c.id);
-        scope(&mut query, d);
-        query.push(" LIMIT 1");
-        let id: Option<Uuid> = query.build_query_scalar().fetch_optional(&self.db).await?;
+        let id = self.integrity_store.chunk_stream(c.id, d).await?;
         Ok(id.map(|id| self.pin(id)))
     }
     async fn inspect_chunk(
@@ -724,20 +506,18 @@ impl App {
         if after < 0 || !(1..=200).contains(&limit) {
             return Err(s3s::s3_error!(InvalidArgument).into());
         }
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND task_type='integrity')",
-        )
-        .bind(id)
-        .fetch_one(&self.db)
-        .await?;
+        let exists: bool = self.integrity_store.exists(id).await?;
         if !exists {
             return Err(s3s::s3_error!(NoSuchKey).into());
         }
-        let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(i)||jsonb_build_object('id',i.id::text,'chunk_id',i.chunk_id::text) FROM integrity_issues i WHERE task_id=$1 AND id>$2 AND ($4::text IS NULL OR code=$4) ORDER BY id LIMIT $3").bind(id).bind(after).bind(limit+1).bind(code).fetch_all(&self.db).await?;
+        let mut rows: Vec<Value> = self
+            .integrity_store
+            .findings(id, after, limit + 1, code)
+            .await?;
         let more = rows.len() > limit as usize;
         rows.truncate(limit as usize);
         let next = more.then(|| rows.last().unwrap()["id"].clone());
-        let groups:Vec<(String,String)>=sqlx::query_as("SELECT code,count(*)::text FROM integrity_issues WHERE task_id=$1 GROUP BY code ORDER BY code").bind(id).fetch_all(&self.db).await?;
+        let groups: Vec<(String, String)> = self.integrity_store.groups(id).await?;
         Ok(
             json!({"issues":rows,"next_after":next,"groups":groups.into_iter().collect::<std::collections::BTreeMap<_,_>>()}),
         )
@@ -749,37 +529,7 @@ impl App {
         issue: i64,
         after: Option<(Uuid, String)>,
     ) -> Result<Value> {
-        let row: Option<(Option<i64>, Option<Uuid>)> = sqlx::query_as(
-            "SELECT chunk_id,stream_id FROM integrity_issues WHERE task_id=$1 AND id=$2",
-        )
-        .bind(id)
-        .bind(issue)
-        .fetch_optional(&self.db)
-        .await?;
-        let (chunk, stream) = row.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
-        let mut query = sqlx::QueryBuilder::new(
-            "SELECT jsonb_build_object('bucket_id',o.bucket_id,'bucket',b.name,'key',o.object_key,'version',o.stream_id) FROM objects o JOIN buckets b ON b.id=o.bucket_id WHERE ",
-        );
-        if let Some(chunk) = chunk {
-            query
-                .push(
-                    "EXISTS(SELECT 1 FROM extents e WHERE e.stream_id=o.stream_id AND e.chunk_id=",
-                )
-                .push_bind(chunk)
-                .push(")");
-        } else {
-            query.push("o.stream_id=").push_bind(stream);
-        }
-        if let Some((bucket, key)) = after {
-            query
-                .push(" AND (o.bucket_id,o.object_key)>(")
-                .push_bind(bucket)
-                .push(",")
-                .push_bind(key)
-                .push(")");
-        }
-        query.push(" ORDER BY o.bucket_id,o.object_key LIMIT 101");
-        let mut rows: Vec<Value> = query.build_query_scalar().fetch_all(&self.db).await?;
+        let mut rows = self.integrity_store.objects(id, issue, after).await?;
         let more = rows.len() > 100;
         rows.truncate(100);
         let next = more.then(|| {
@@ -789,30 +539,5 @@ impl App {
             ])
         });
         Ok(json!({"objects":rows,"next":next}))
-    }
-}
-
-fn scope(query: &mut sqlx::QueryBuilder<sqlx::Postgres>, d: &Detail) {
-    if let Some(storage_id) = d.storage_id {
-        query
-            .push(
-                " AND EXISTS (SELECT 1 FROM buckets sb WHERE sb.id=o.bucket_id AND sb.storage_id=",
-            )
-            .push_bind(storage_id)
-            .push(")");
-    }
-    if let Some(bucket) = d.bucket_id {
-        query.push(" AND o.bucket_id=").push_bind(bucket);
-    }
-    if let Some(key) = &d.key {
-        query.push(" AND o.object_key=").push_bind(key);
-    }
-    if let Some((bucket, key)) = &d.upper_object {
-        query
-            .push(" AND (o.bucket_id,o.object_key)<=(")
-            .push_bind(*bucket)
-            .push(",")
-            .push_bind(key)
-            .push(")");
     }
 }

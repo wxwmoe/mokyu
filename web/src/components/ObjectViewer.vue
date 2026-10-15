@@ -15,7 +15,7 @@ import MediaActionsMenu from './MediaActionsMenu.vue'
 import ObjectStorage from './ObjectStorage.vue'
 
 const props = defineProps<{ bucket: Bucket; item: MediaItem | null; previous: boolean; next: boolean }>()
-const emit = defineEmits<{ close: []; step: [delta: number]; action: [kind: MediaAction] }>()
+const emit = defineEmits<{ close: []; step: [delta: number]; action: [action: MediaAction] }>()
 const opened = computed({ get: () => !!props.item, set: value => { if (!value) emit('close') } })
 const wide = ref(false), original = ref(false), zoom = ref(false), inspector = ref(true), failed = ref(false), dragging = ref(false), stage = ref<HTMLElement | null>(null)
 let panStart: { x: number; y: number; left: number; top: number } | undefined

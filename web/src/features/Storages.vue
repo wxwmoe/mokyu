@@ -17,7 +17,7 @@ import UiSelect from '../components/ui/UiSelect.vue'
 type Storage = components['schemas']['StorageView']
 type StorageProfile = components['schemas']['StorageProfile']
 type ProfileKey = Exclude<keyof StorageProfile, 'storage_id' | 'revision'>
-type ProfileField = { key: ProfileKey, kind: 'text' | 'number' | 'boolean' }
+type ProfileField = { key: ProfileKey, valueType: 'text' | 'number' | 'boolean' }
 type ManagedKey = components['schemas']['ManagedKeyView']
 const route = useRoute(), router = useRouter()
 const storages = useQuery({ queryKey: ['storages'], queryFn: ({ signal }) => api<Storage[]>('/api/v1/storages', { signal }) })
@@ -28,14 +28,14 @@ const draft = reactive({ name: '', type: 's3', path: '/data/storage', endpoint: 
 const types = computed(() => ['local', 's3'].map(value => ({ value, label: t('storeType_' + value) })))
 const keyOptions = computed(() => [{ value: '', label: t('storeNoEncryption') }, ...(keys.data.value || []).filter(row => row.purpose === 'block' && !row.revoked_at).map(row => ({ value: row.id, label: `${row.name} · ${row.algorithm}` }))])
 const profileFields: ProfileField[] = [
-  { key: 'connect_timeout', kind: 'text' }, { key: 'request_timeout', kind: 'text' }, { key: 'max_retries', kind: 'number' }, { key: 'retry_timeout', kind: 'text' }, { key: 'priority_aging', kind: 'text' },
-  { key: 'min_storage_duration', kind: 'text' }, { key: 'unreferenced_grace', kind: 'text' }, { key: 'deleted_chunk_retention', kind: 'text' }, { key: 'upload_retention', kind: 'text' },
-  { key: 'cache_enabled', kind: 'boolean' }, { key: 'cache_soft_limit', kind: 'text' }, { key: 'cache_entries', kind: 'number' }, { key: 'upload_cache', kind: 'boolean' }, { key: 'upload_cache_size', kind: 'text' },
-  { key: 'compression_enabled', kind: 'boolean' }, { key: 'compression_strategy', kind: 'text' }, { key: 'compression_level', kind: 'number' }, { key: 'compression_sample_level', kind: 'number' }, { key: 'compression_min_savings_percent', kind: 'number' }, { key: 'compression_min_savings_bytes', kind: 'number' },
-  { key: 'pack_enabled', kind: 'boolean' }, { key: 'pack_max_size', kind: 'text' }, { key: 'pack_upload_flush_timeout', kind: 'text' }, { key: 'pack_interval', kind: 'text' }, { key: 'pack_reuse_interval', kind: 'text' }, { key: 'pack_reclaim_interval', kind: 'text' }, { key: 'pack_repack_interval', kind: 'text' }, { key: 'pack_repack_cooldown', kind: 'text' }, { key: 'pack_reclaim_min_savings_bytes', kind: 'text' },
-  { key: 'pack_range_enabled', kind: 'boolean' }, { key: 'pack_range_interval', kind: 'text' }, { key: 'pack_range_window', kind: 'text' }, { key: 'pack_range_min_downloads', kind: 'number' }, { key: 'pack_range_min_savings_percent', kind: 'number' }, { key: 'pack_range_min_savings_bytes', kind: 'text' }, { key: 'pack_range_repack_after', kind: 'text' }, { key: 'pack_range_repack_window', kind: 'text' }, { key: 'pack_range_repack_retry_interval', kind: 'text' },
-  { key: 'pack_concurrency', kind: 'number' }, { key: 'integrity_concurrency', kind: 'number' }, { key: 'integrity_rps', kind: 'number' }, { key: 'integrity_bandwidth', kind: 'text' }, { key: 'integrity_batch_timeout', kind: 'text' },
-  { key: 'read_concurrency', kind: 'number' }, { key: 'upload_concurrency', kind: 'number' }, { key: 'control_concurrency', kind: 'number' }, { key: 'pack_byte_budget', kind: 'text' }, { key: 'integrity_byte_budget', kind: 'text' }, { key: 'maintenance_concurrency', kind: 'number' }, { key: 'maintenance_byte_budget', kind: 'text' }, { key: 'migration_concurrency', kind: 'number' }, { key: 'migration_byte_budget', kind: 'text' },
+  { key: 'connect_timeout', valueType: 'text' }, { key: 'request_timeout', valueType: 'text' }, { key: 'max_retries', valueType: 'number' }, { key: 'retry_timeout', valueType: 'text' }, { key: 'priority_aging', valueType: 'text' },
+  { key: 'min_storage_duration', valueType: 'text' }, { key: 'unreferenced_grace', valueType: 'text' }, { key: 'deleted_chunk_retention', valueType: 'text' }, { key: 'upload_retention', valueType: 'text' },
+  { key: 'cache_enabled', valueType: 'boolean' }, { key: 'cache_soft_limit', valueType: 'text' }, { key: 'cache_entries', valueType: 'number' }, { key: 'upload_cache', valueType: 'boolean' }, { key: 'upload_cache_size', valueType: 'text' },
+  { key: 'compression_enabled', valueType: 'boolean' }, { key: 'compression_strategy', valueType: 'text' }, { key: 'compression_level', valueType: 'number' }, { key: 'compression_sample_level', valueType: 'number' }, { key: 'compression_min_savings_percent', valueType: 'number' }, { key: 'compression_min_savings_bytes', valueType: 'number' },
+  { key: 'pack_enabled', valueType: 'boolean' }, { key: 'pack_max_size', valueType: 'text' }, { key: 'pack_upload_flush_timeout', valueType: 'text' }, { key: 'pack_interval', valueType: 'text' }, { key: 'pack_reuse_interval', valueType: 'text' }, { key: 'pack_reclaim_interval', valueType: 'text' }, { key: 'pack_repack_interval', valueType: 'text' }, { key: 'pack_repack_cooldown', valueType: 'text' }, { key: 'pack_reclaim_min_savings_bytes', valueType: 'text' },
+  { key: 'pack_range_enabled', valueType: 'boolean' }, { key: 'pack_range_interval', valueType: 'text' }, { key: 'pack_range_window', valueType: 'text' }, { key: 'pack_range_min_downloads', valueType: 'number' }, { key: 'pack_range_min_savings_percent', valueType: 'number' }, { key: 'pack_range_min_savings_bytes', valueType: 'text' }, { key: 'pack_range_repack_after', valueType: 'text' }, { key: 'pack_range_repack_window', valueType: 'text' }, { key: 'pack_range_repack_retry_interval', valueType: 'text' },
+  { key: 'pack_concurrency', valueType: 'number' }, { key: 'integrity_concurrency', valueType: 'number' }, { key: 'integrity_rps', valueType: 'number' }, { key: 'integrity_bandwidth', valueType: 'text' }, { key: 'integrity_batch_timeout', valueType: 'text' },
+  { key: 'read_concurrency', valueType: 'number' }, { key: 'upload_concurrency', valueType: 'number' }, { key: 'control_concurrency', valueType: 'number' }, { key: 'pack_byte_budget', valueType: 'text' }, { key: 'integrity_byte_budget', valueType: 'text' }, { key: 'maintenance_concurrency', valueType: 'number' }, { key: 'maintenance_byte_budget', valueType: 'text' }, { key: 'migration_concurrency', valueType: 'number' }, { key: 'migration_byte_budget', valueType: 'text' },
 ]
 const profileGroups = [
   { title: 'storeGroupLifecycle', fields: profileFields.slice(0, 9) },
@@ -108,7 +108,7 @@ function input() {
 function profileInput(field: ProfileField, event: Event) {
   if (!profileDraft.value) return
   const target = event.target as HTMLInputElement
-  profileDraft.value[field.key] = field.kind === 'boolean' ? target.checked : field.kind === 'number' ? (target.value ? Number(target.value) : null) : target.value
+  profileDraft.value[field.key] = field.valueType === 'boolean' ? target.checked : field.valueType === 'number' ? (target.value ? Number(target.value) : null) : target.value
 }
 function setProfileBoolean(key: ProfileKey, value: boolean) {
   if (profileDraft.value) profileDraft.value[key] = value
@@ -181,9 +181,9 @@ async function toggle(row: Storage) {
           <details v-for="(group, index) in profileGroups" :key="group.title" class="store-form-wide profile-group" :open="index === 0">
             <summary class="profile-group-title"><span><strong>{{ t(group.title) }}</strong><small>{{ t(profileGroupHints[group.title]!) }}</small></span><span>{{ group.fields.length }}</span></summary>
             <div class="profile-fields">
-              <div v-for="field in group.fields" :key="field.key" :class="field.kind === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
-                <template v-if="field.kind === 'boolean'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="Boolean(profileDraft[field.key])" :aria-label="profileLabel(field.key)" :label="profileDisabled(field.key) ? t('storeOptionUnused') : t(Boolean(profileDraft[field.key]) ? 'enabled' : 'disabled')" :disabled="busy || profileDisabled(field.key)" @update:model-value="setProfileBoolean(field.key, $event)" /></template>
-                <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><input :type="field.kind === 'number' ? 'number' : 'text'" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"></label>
+              <div v-for="field in group.fields" :key="field.key" :class="field.valueType === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
+                <template v-if="field.valueType === 'boolean'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="Boolean(profileDraft[field.key])" :aria-label="profileLabel(field.key)" :label="profileDisabled(field.key) ? t('storeOptionUnused') : t(Boolean(profileDraft[field.key]) ? 'enabled' : 'disabled')" :disabled="busy || profileDisabled(field.key)" @update:model-value="setProfileBoolean(field.key, $event)" /></template>
+                <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><input :type="field.valueType === 'number' ? 'number' : 'text'" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"></label>
               </div>
             </div>
           </details>

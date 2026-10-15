@@ -18,19 +18,10 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
-const REFRESH_LIFETIME_DAYS: i64 = 30;
-
-fn derived_token(app: &App, purpose: &str, secret: &str) -> String {
-    let mut hash = blake3::Hasher::new_keyed(&app.secrets.credential_key.material);
-    hash.update(purpose.as_bytes());
-    hash.update(b"\0");
-    hash.update(secret.as_bytes());
-    hash.finalize().to_hex().to_string()
-}
+use crate::model::account::{AuthSession, SessionLogin, SessionRefresh, csrf_token, derived_token};
 
 fn refresh_after(expires: DateTime<Utc>, recent: DateTime<Utc>) -> u64 {
     let now = Utc::now();
@@ -51,12 +42,6 @@ fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         })
 }
 
-fn csrf_token(token: &str) -> String {
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"mokyu-web-csrf-v1\0");
-    hash.update(token.as_bytes());
-    hash.finalize().to_hex().to_string()
-}
 pub(crate) fn origin(app: &App, headers: &HeaderMap) -> Result<(), HttpError> {
     if headers.get("origin").and_then(|v| v.to_str().ok()) != Some(&app.config.web.origin) {
         return Err(unauthorized());
@@ -126,36 +111,6 @@ pub(crate) struct RefreshInput {
     refresh_token: String,
 }
 
-async fn create_refresh(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    session_id: Uuid,
-    family_id: Uuid,
-    token: &str,
-) -> Result<Uuid, HttpError> {
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO session_refresh_tokens(id,session_id,family_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+$5*interval '1 day')")
-        .bind(id)
-        .bind(session_id)
-        .bind(family_id)
-        .bind(blake3::hash(token.as_bytes()).as_bytes().as_slice())
-        .bind(REFRESH_LIFETIME_DAYS as f64)
-        .execute(&mut **tx)
-        .await?;
-    Ok(id)
-}
-
-pub(crate) async fn replace_refresh(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    session_id: Uuid,
-) -> Result<String, HttpError> {
-    sqlx::query("UPDATE session_refresh_tokens SET revoked_at=now() WHERE session_id=$1 AND revoked_at IS NULL")
-        .bind(session_id)
-        .execute(&mut **tx)
-        .await?;
-    let token = crate::cli::random_secret()?;
-    create_refresh(tx, session_id, Uuid::new_v4(), &token).await?;
-    Ok(token)
-}
 #[derive(Clone)]
 pub(crate) struct Identity {
     pub(super) id: Uuid,
@@ -166,14 +121,14 @@ pub(crate) struct Identity {
 impl Identity {
     pub(crate) async fn recent(&self, app: &App) -> Result<(), HttpError> {
         if self.principal.token_id().is_some() && self.admin
-            || matches!(self.principal, Principal::Node { .. })
+            || matches!(self.principal, Principal::Local | Principal::Node { .. })
         {
             return Ok(());
         }
         let Principal::User { session, .. } = self.principal else {
             return Err(unauthorized());
         };
-        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=$1 AND user_id=$2 AND reauthenticated_at>now()-interval '5 minutes')").bind(session).bind(self.id).fetch_one(&app.db).await?;
+        let valid = app.accounts.recent(session, self.id).await?;
         if !valid {
             return Err(crate::http::problem(
                 StatusCode::FORBIDDEN,
@@ -311,7 +266,7 @@ pub(super) async fn access_gate(
                     .get::<crate::status::stats::RequestContext>()
                     .map(|c| c.id.as_str());
                 match audit::begin(
-                    &app.db,
+                    app.audit.as_ref(),
                     &identity.principal,
                     &format!("{} {}", request.method(), path),
                     request_id,
@@ -332,7 +287,7 @@ pub(super) async fn access_gate(
             if let Some(id) = event {
                 let response = audit::scope(id, next.run(request)).await;
                 audit::finish(
-                    &app.db,
+                    app.audit.as_ref(),
                     id,
                     response.status().as_u16(),
                     context.is_some_and(|c| c.failed.load(std::sync::atomic::Ordering::Relaxed)),
@@ -346,7 +301,7 @@ pub(super) async fn access_gate(
         Ok(identity) => {
             if write
                 && let Ok(id) = audit::begin(
-                    &app.db,
+                    app.audit.as_ref(),
                     &identity.principal,
                     &format!("{} {}", request.method(), path),
                     request
@@ -356,22 +311,12 @@ pub(super) async fn access_gate(
                 )
                 .await
             {
-                audit::finish(&app.db, id, 403, false).await;
+                audit::finish(app.audit.as_ref(), id, 403, false).await;
             }
             unauthorized().into_response()
         }
         Err(error) => error.into_response(),
     }
-}
-#[derive(sqlx::FromRow)]
-struct AuthSession {
-    user_id: Uuid,
-    session_id: Uuid,
-    role: String,
-    must_change_password: bool,
-    authorization_revision: i64,
-    csrf_hash: Vec<u8>,
-    last_seen_at: DateTime<Utc>,
 }
 async fn authenticate(app: &App, headers: &HeaderMap, csrf: bool) -> Result<Identity, HttpError> {
     if headers.contains_key("authorization") {
@@ -389,10 +334,11 @@ async fn authenticate(app: &App, headers: &HeaderMap, csrf: bool) -> Result<Iden
             })
             .ok_or_else(unauthorized)?;
         let hash = blake3::hash(secret.as_bytes());
-        let row: Option<(Uuid,Uuid,String,bool,i64,i64)>=sqlx::query_as("SELECT t.id,t.user_id,u.role,t.system,t.authorization_revision,u.authorization_revision FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.token_hash=$1 AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AND t.auth_revision=u.auth_revision AND u.enabled AND NOT u.must_change_password")
-            .bind(hash.as_bytes().as_slice()).fetch_optional(&app.db).await?;
-        let (id, user, role, system, revision, user_revision) = row.ok_or_else(unauthorized)?;
-        sqlx::query("UPDATE api_tokens SET last_used_at=now() WHERE id=$1 AND (last_used_at IS NULL OR last_used_at<now()-interval '5 minutes')").bind(id).execute(&app.db).await?;
+        let (id, user, role, system, revision, user_revision) = app
+            .accounts
+            .authenticate_token(hash.as_bytes())
+            .await?
+            .ok_or_else(unauthorized)?;
         return Ok(Identity {
             id: user,
             admin: role == "admin" && system,
@@ -407,7 +353,7 @@ async fn authenticate(app: &App, headers: &HeaderMap, csrf: bool) -> Result<Iden
     }
     let token = token(headers)?;
     let hash = blake3::hash(token.as_bytes());
-    let row: Option<AuthSession> = sqlx::query_as("SELECT u.id AS user_id,s.id AS session_id,u.role,u.must_change_password,u.authorization_revision,s.csrf_hash,s.last_seen_at FROM sessions s JOIN web_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.enabled AND s.auth_revision=u.auth_revision").bind(hash.as_bytes().as_slice()).fetch_optional(&app.db).await?;
+    let row = app.accounts.authenticate_session(hash.as_bytes()).await?;
     let AuthSession {
         user_id: id,
         session_id: session,
@@ -415,11 +361,8 @@ async fn authenticate(app: &App, headers: &HeaderMap, csrf: bool) -> Result<Iden
         must_change_password,
         authorization_revision: revision,
         csrf_hash: expected,
-        last_seen_at: last_seen,
+        last_seen_at: _,
     } = row.ok_or_else(unauthorized)?;
-    if (Utc::now() - last_seen).num_seconds() >= 300 {
-        sqlx::query("UPDATE sessions SET last_seen_at=now() WHERE token_hash=$1 AND last_seen_at<now()-interval '5 minutes'").bind(hash.as_bytes().as_slice()).execute(&app.db).await?;
-    }
     if csrf {
         origin(app, headers)?;
         let supplied = headers
@@ -464,12 +407,7 @@ pub(super) async fn login(
     if input.username.len() > 64 || input.password.len() > 1024 {
         return Err(unauthorized());
     }
-    let row: Option<(Uuid, String, i64)> = sqlx::query_as(
-        "SELECT id,password_hash,auth_revision FROM web_users WHERE username=$1 AND enabled",
-    )
-    .bind(input.username)
-    .fetch_optional(&app.db)
-    .await?;
+    let row = app.accounts.login_user(&input.username).await?;
     let attempted = row.as_ref().map(|row| row.0);
     let started = tokio::time::Instant::now();
     let verified = if let Some((id, hash, revision)) = row {
@@ -482,45 +420,39 @@ pub(super) async fn login(
     tokio::time::sleep_until(started + Duration::from_millis(300)).await;
     let Some((user, verified_hash, revision)) = verified else {
         if let Some(user) = attempted {
-            let mut tx = app.db.begin().await?;
-            audit::security(&mut tx, user, "session.login", false, &context.id).await?;
-            tx.commit().await?;
+            app.accounts.failed_login(user, &context.id).await?;
         }
         return Err(unauthorized());
     };
     #[cfg(feature = "fault-injection")]
     crate::faults::point("login-verified").await;
     let refresh = crate::cli::random_secret()?;
-    let token = derived_token(&app, "mokyu-session-v1", &refresh);
+    let token = derived_token(
+        &app.secrets.credential_key.material,
+        "mokyu-session-v1",
+        &refresh,
+    );
     let csrf = csrf_token(&token);
     let seconds = config::seconds(&app.config.web.session_lifetime)?;
-    let mut tx = app.db.begin().await?;
-    // Password reset and disable update this same row before revoking sessions.
-    let current: Option<(String, bool, i64)> = sqlx::query_as(
-        "SELECT password_hash,enabled,auth_revision FROM web_users WHERE id=$1 FOR UPDATE",
-    )
-    .bind(user)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if !current.is_some_and(|(hash, enabled, current_revision)| {
-        enabled && hash == verified_hash && current_revision == revision
-    }) {
-        return Err(unauthorized());
-    }
-    #[cfg(feature = "fault-injection")]
-    crate::faults::point("login-before-session").await;
-    let session_id: Uuid = sqlx::query_scalar("INSERT INTO sessions(token_hash,user_id,csrf_hash,expires_at,auth_revision,user_agent) VALUES($1,$2,$3,now()+$4*interval '1 second',$5,$6) RETURNING id")
-        .bind(blake3::hash(token.as_bytes()).as_bytes().as_slice())
-        .bind(user)
-        .bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice())
-        .bind(seconds as f64)
-        .bind(revision)
-        .bind(headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("").chars().filter(|c| !c.is_control()).take(128).collect::<String>())
-        .fetch_one(&mut *tx)
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(128)
+        .collect::<String>();
+    app.accounts
+        .login(SessionLogin {
+            verified: &(user, verified_hash, revision),
+            access_hash: blake3::hash(token.as_bytes()).as_bytes(),
+            csrf_hash: blake3::hash(csrf.as_bytes()).as_bytes(),
+            refresh_hash: blake3::hash(refresh.as_bytes()).as_bytes(),
+            seconds,
+            user_agent: &user_agent,
+            request_id: &context.id,
+        })
         .await?;
-    create_refresh(&mut tx, session_id, Uuid::new_v4(), &refresh).await?;
-    audit::security(&mut tx, user, "session.login", true, &context.id).await?;
-    tx.commit().await?;
     let mut response = Json(LoginReply {
         csrf_token: csrf,
         refresh_token: refresh.clone(),
@@ -539,32 +471,15 @@ pub(super) async fn logout(
     Extension(actor): Extension<Identity>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let id = actor.id;
-    let mut tx = app.db.begin().await?;
-    account::lock_session(&mut tx, &headers, id).await?;
-    sqlx::query("DELETE FROM sessions WHERE token_hash=$1")
-        .bind(
-            blake3::hash(token(&headers)?.as_bytes())
-                .as_bytes()
-                .as_slice(),
+    app.accounts
+        .logout(
+            actor.id,
+            blake3::hash(token(&headers)?.as_bytes()).as_bytes(),
         )
-        .execute(&mut *tx)
         .await?;
-    audit::checkpoint(&mut tx, "session.logout", &id.to_string(), json!({})).await?;
-    tx.commit().await?;
     let mut r = StatusCode::NO_CONTENT.into_response();
     clear_auth_cookies(&mut r)?;
     Ok(r)
-}
-
-#[derive(sqlx::FromRow)]
-struct RefreshToken {
-    id: Uuid,
-    session_id: Uuid,
-    family_id: Uuid,
-    expires_at: DateTime<Utc>,
-    revoked_at: Option<DateTime<Utc>>,
-    replaced_by: Option<Uuid>,
 }
 
 #[utoipa::path(post, path = "/api/v1/auth/refresh", request_body = RefreshInput, responses((status = 200, body = SessionView), (status = 403, body = contract::ErrorBody)))]
@@ -579,101 +494,27 @@ pub(super) async fn refresh(
     if supplied.len() != 64 || !supplied.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(unauthorized());
     }
-    let hash = blake3::hash(supplied.as_bytes());
-    let mut tx = app.db.begin().await?;
-    let user: Uuid = sqlx::query_scalar("SELECT s.user_id FROM session_refresh_tokens r JOIN sessions s ON s.id=r.session_id WHERE r.token_hash=$1")
-        .bind(hash.as_bytes().as_slice()).fetch_optional(&mut *tx).await?.ok_or_else(unauthorized)?;
-    // Match password reset and session revocation lock order.
-    let revision: i64 = sqlx::query_scalar(
-        "SELECT auth_revision FROM web_users WHERE id=$1 AND enabled FOR UPDATE",
-    )
-    .bind(user)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(unauthorized)?;
-    let mut credential: RefreshToken = sqlx::query_as("SELECT id,session_id,family_id,expires_at,revoked_at,replaced_by FROM session_refresh_tokens WHERE token_hash=$1 FOR UPDATE")
-        .bind(hash.as_bytes().as_slice()).fetch_optional(&mut *tx).await?.ok_or_else(unauthorized)?;
-    let now = Utc::now();
-    let mut secret = supplied.to_owned();
-    let mut issue_refresh = false;
-    if let Some(revoked) = credential.revoked_at {
-        let successor: Option<RefreshToken> = sqlx::query_as("SELECT id,session_id,family_id,expires_at,revoked_at,replaced_by FROM session_refresh_tokens WHERE id=$1 AND revoked_at IS NULL AND expires_at>now() FOR UPDATE")
-            .bind(credential.replaced_by).fetch_optional(&mut *tx).await?;
-        if let Some(next) = successor.filter(|_| revoked + chrono::Duration::seconds(30) > now) {
-            // Concurrent rotation responses must return identical credentials without storing secrets.
-            secret = derived_token(&app, "mokyu-refresh-v1", supplied);
-            credential = next;
-            issue_refresh = true;
-        } else {
-            let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM session_refresh_tokens WHERE session_id=$1 AND family_id=$2 AND revoked_at IS NULL)")
-                .bind(credential.session_id).bind(credential.family_id).fetch_one(&mut *tx).await?;
-            if active {
-                sqlx::query("DELETE FROM sessions WHERE id=$1")
-                    .bind(credential.session_id)
-                    .execute(&mut *tx)
-                    .await?;
-                audit::security(&mut tx, user, "session.refresh_reuse", false, &context.id).await?;
-                tx.commit().await?;
-            }
-            return Err(unauthorized());
-        }
-    }
-    if credential.expires_at <= now {
-        return Err(unauthorized());
-    }
-    let expires: DateTime<Utc> = sqlx::query_scalar("SELECT expires_at FROM sessions WHERE id=$1 AND user_id=$2 AND auth_revision=$3 FOR UPDATE")
-        .bind(credential.session_id).bind(user).bind(revision).fetch_optional(&mut *tx).await?.ok_or_else(unauthorized)?;
-    if credential.expires_at <= now + chrono::Duration::days(7) {
-        secret = derived_token(&app, "mokyu-refresh-v1", &secret);
-        sqlx::query("UPDATE session_refresh_tokens SET revoked_at=now() WHERE id=$1")
-            .bind(credential.id)
-            .execute(&mut *tx)
-            .await?;
-        let new_id = create_refresh(
-            &mut tx,
-            credential.session_id,
-            credential.family_id,
-            &secret,
-        )
-        .await?;
-        sqlx::query("UPDATE session_refresh_tokens SET replaced_by=$2 WHERE id=$1")
-            .bind(credential.id)
-            .bind(new_id)
-            .execute(&mut *tx)
-            .await?;
-        credential.id = new_id;
-        issue_refresh = true;
-    }
-    let access = derived_token(&app, "mokyu-session-v1", &secret);
-    let csrf = csrf_token(&access);
     let seconds = config::seconds(&app.config.web.session_lifetime)?;
-    let issue_access = issue_refresh
-        || token(&headers).ok() != Some(access.as_str())
-        || expires <= now + chrono::Duration::seconds((seconds / 4).max(1) as i64);
-    let expires = if issue_access {
-        now + chrono::Duration::seconds(seconds as i64)
-    } else {
-        expires
-    };
-    sqlx::query("UPDATE sessions SET token_hash=$2,csrf_hash=$3,expires_at=$4,last_seen_at=now() WHERE id=$1")
-        .bind(credential.session_id).bind(blake3::hash(access.as_bytes()).as_bytes().as_slice())
-        .bind(blake3::hash(csrf.as_bytes()).as_bytes().as_slice()).bind(expires).execute(&mut *tx).await?;
-    sqlx::query("UPDATE session_refresh_tokens SET last_used_at=now() WHERE id=$1")
-        .bind(credential.id)
-        .execute(&mut *tx)
+    let refreshed = app
+        .accounts
+        .refresh(SessionRefresh {
+            supplied,
+            access: token(&headers).ok(),
+            key: &app.secrets.credential_key.material,
+            seconds,
+            request_id: &context.id,
+        })
         .await?;
-    audit::security(&mut tx, user, "session.refresh", true, &context.id).await?;
-    tx.commit().await?;
     let mut response = Json(SessionView {
-        account: account::profile(&app, user).await?,
-        csrf_token: csrf,
-        session_id: credential.session_id,
-        refresh_after: refresh_after(expires, now),
-        refresh_token: Some(secret.clone()),
+        account: account::profile(&app, refreshed.user).await?,
+        csrf_token: refreshed.csrf,
+        session_id: refreshed.session,
+        refresh_after: refresh_after(refreshed.expires, refreshed.refreshed_at),
+        refresh_token: Some(refreshed.refresh),
     })
     .into_response();
-    if issue_access {
-        set_session_cookie(&mut response, &app, &access, seconds)?;
+    if refreshed.issue_access {
+        set_session_cookie(&mut response, &app, &refreshed.access, seconds)?;
     }
     response
         .headers_mut()
@@ -687,16 +528,11 @@ pub(super) async fn session(
     headers: HeaderMap,
 ) -> Result<Json<SessionView>, HttpError> {
     let id = actor.id;
-    let (session_id, expires, recent): (Uuid, DateTime<Utc>, DateTime<Utc>) =
-        sqlx::query_as("SELECT id,expires_at,reauthenticated_at FROM sessions WHERE token_hash=$1")
-            .bind(
-                blake3::hash(token(&headers)?.as_bytes())
-                    .as_bytes()
-                    .as_slice(),
-            )
-            .fetch_optional(&app.db)
-            .await?
-            .ok_or_else(unauthorized)?;
+    let (session_id, expires, recent) = app
+        .accounts
+        .session(blake3::hash(token(&headers)?.as_bytes()).as_bytes())
+        .await?
+        .ok_or_else(unauthorized)?;
     Ok(Json(SessionView {
         account: account::profile(&app, id).await?,
         csrf_token: csrf_token(token(&headers)?),

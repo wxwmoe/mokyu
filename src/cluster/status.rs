@@ -1,4 +1,3 @@
-use super::registration::validate_node;
 use crate::app::App;
 use anyhow::Result;
 use std::{sync::Arc, time::Duration};
@@ -9,13 +8,9 @@ pub async fn control_loop(app: Arc<App>) -> Result<()> {
     };
     loop {
         let result: Result<()> = async {
-            let mut tx = app.db.begin().await?;
-            validate_node(&app, &mut *tx, state, "control").await?;
-            sqlx::query("UPDATE nodes SET last_seen_at=now(),updated_at=now() WHERE id=$1")
-                .bind(state.node_id)
-                .execute(&mut *tx)
+            app.cluster()?
+                .heartbeat(state, "control", &app.secrets.credential_key)
                 .await?;
-            tx.commit().await?;
             Ok(())
         }
         .await;
@@ -32,13 +27,9 @@ pub async fn node_loop(app: Arc<App>, role: &'static str) -> Result<()> {
     };
     loop {
         let result: Result<()> = async {
-            let mut tx = app.db.begin().await?;
-            validate_node(&app, &mut *tx, state, role).await?;
-            sqlx::query("UPDATE nodes SET last_seen_at=now(),updated_at=now() WHERE id=$1")
-                .bind(state.node_id)
-                .execute(&mut *tx)
+            app.cluster()?
+                .heartbeat(state, role, &app.secrets.credential_key)
                 .await?;
-            tx.commit().await?;
             app.storage.refresh_storages().await?;
             Ok(())
         }

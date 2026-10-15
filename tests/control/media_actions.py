@@ -20,6 +20,7 @@ command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_C
 name = 'actions-' + uuid.uuid4().hex[:10]
 fault = Path(os.environ['MOKYU_TEST_FAULT_DIR']) / 'media-before-publish'
 after = fault.with_name('media-after-operation')
+migration = fault.with_name('migration-before-publish')
 user = None
 
 
@@ -38,7 +39,8 @@ def login(username, password):
 admin = login('tester', os.environ['MOKYU_TEST_PASSWORD'])
 assert admin.post(url + '/api/v1/account/reauth', json={'password': os.environ['MOKYU_TEST_PASSWORD']}).status_code == 204
 project = admin.post(url + '/api/v1/projects', json={'name': name}).json()['id']
-buckets = [cli('bucket', 'create', name + suffix) for suffix in ['-a', '-b']]
+storage = cli('storage', 'show', os.environ['MOKYU_TEST_STORAGE'])['id']
+buckets = [cli('bucket', 'create', name + suffix, '--storage', storage) for suffix in ['-a', '-b']]
 for bucket in buckets:
     db.execute('UPDATE buckets SET project_id=%s WHERE id=%s', (project, bucket['id']))
 a, b = [bucket['id'] for bucket in buckets]
@@ -50,7 +52,7 @@ s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_n
 
 def put(key, body=b'some little chunks', **kwargs):
     s3.put_object(Bucket=buckets[0]['name'], Key=key, Body=body, ContentType='text/plain', **kwargs)
-    item = admin.get(url + f'/api/v1/buckets/{a}/objects', params={'q': key, 'mode': 'exact'}).json()['objects'][0]
+    item = admin.get(url + f'/api/v1/buckets/{a}/objects', params={'q': key, 'mode': 'exact'}).json()['items'][0]
     return {'client_id': str(uuid.uuid4()), 'key': key, 'version': item['id']}
 
 
@@ -77,7 +79,7 @@ def used():
 
 def content(bucket, key, version=None):
     if version is None:
-        version = admin.get(url + f'/api/v1/buckets/{bucket}/objects', params={'q': key, 'mode': 'exact'}).json()['objects'][0]['id']
+        version = admin.get(url + f'/api/v1/buckets/{bucket}/objects', params={'q': key, 'mode': 'exact'}).json()['items'][0]['id']
     reply = admin.get(url + f'/api/v1/buckets/{bucket}/object/content', params={'key': key, 'version': version})
     assert reply.status_code == 200, reply.text
     return reply.content
@@ -94,6 +96,19 @@ def hit(path):
     while not path.with_suffix('.hit').exists():
         assert time.monotonic() < end, 'action did not reach publication boundary'
         time.sleep(.02)
+
+
+def wait(check):
+    deadline = time.monotonic() + 60
+    while not check():
+        assert time.monotonic() < deadline, 'migration did not settle'
+        time.sleep(.05)
+
+
+def completed(task):
+    status = cli('task', 'show', task)['state']
+    assert status not in ('failed', 'paused'), status
+    return status == 'completed'
 
 
 try:
@@ -121,7 +136,7 @@ try:
     s3.copy_object(Bucket=buckets[0]['name'], Key='slice-s3', CopySource={'Bucket': buckets[0]['name'], 'Key': 'slice.bin'})
     assert content(a, 'slice-s3') == fragment
     for bucket_id, key in [(a, 'slice.bin'), (a, 'slice-s3'), (b, 'slice-copy')]:
-        item = admin.get(url + f'/api/v1/buckets/{bucket_id}/objects', params={'q': key, 'mode': 'exact'}).json()['objects'][0]
+        item = admin.get(url + f'/api/v1/buckets/{bucket_id}/objects', params={'q': key, 'mode': 'exact'}).json()['items'][0]
         one('delete', {'client_id': str(uuid.uuid4()), 'key': key, 'version': item['id']}, bucket=bucket_id)
     print('PASS zero-data copy, exact content, logical quota, durable replay and overwrite guards', flush=True)
 
@@ -144,7 +159,7 @@ try:
     assert invalid.status_code == 400
     limits(None)
     other = admin.post(url + '/api/v1/projects', json={'name': name + '-other'}).json()['id']
-    destination = cli('bucket', 'create', name + '-other')
+    destination = cli('bucket', 'create', name + '-other', '--storage', storage)
     buckets.append(destination)
     db.execute('UPDATE buckets SET project_id=%s WHERE id=%s', (other, destination['id']))
     assert admin.put(url + '/api/v1/quotas/project/' + other, json={'logical_bytes_limit': '0', 'inflight_bytes_limit': None, 'bucket_count_limit': None}).status_code == 200
@@ -207,6 +222,54 @@ try:
     one('copy', {**scoped, 'target_key': 'private-copy'}, 403, client=member, target_bucket=b)
     print('PASS private-by-default copies, explicit public permission, publication and replay revocation', flush=True)
 
+    cli('key', 'create', name, 'block', '-a', 'aes-256-gcm')
+    target_storage = cli('storage', 'create', name, 'local', '--init', '--key', name,
+                         '--path', str(Path(os.environ['MOKYU_TEST_DATA']) / name))
+    target = cli('bucket', 'create', name + '-migration', '--storage', target_storage['id'])
+    buckets.append(target)
+    db.execute('UPDATE buckets SET project_id=%s WHERE id=%s', (project, target['id']))
+    migration_body = os.urandom(512 * 1024 + 7)
+    original = put('migration-source', migration_body, ACL='public-read')
+    copied = {**original, 'target_key': 'migration-copy'}
+    denied = one('copy', copied, 409, target_bucket=target['id'])
+    assert denied['code'] == 'StorageMigrationConfirmationRequired'
+    copied['client_id'] = str(uuid.uuid4())
+    queued = one('copy', copied, 202, target_bucket=target['id'], confirm_storage_migration=True)
+    wait(lambda: completed(queued['task_id']))
+    assert content(target['id'], copied['target_key']) == migration_body
+    assert content(a, original['key']) == migration_body
+    assert one('copy', copied, 202, target_bucket=target['id'], confirm_storage_migration=True)['replayed']
+    targets = db.execute('''SELECT DISTINCT c.storage_id FROM objects o JOIN extents e ON e.stream_id=o.stream_id
+        JOIN chunks c ON c.id=e.chunk_id WHERE o.bucket_id=%s AND o.object_key=%s''',
+        (target['id'], copied['target_key'])).fetchall()
+    assert targets == [(uuid.UUID(target_storage['id']),)], targets
+    moved = {**original, 'client_id': str(uuid.uuid4()), 'target_key': 'migration-move'}
+    queued = one('move', moved, 202, target_bucket=target['id'], confirm_storage_migration=True)
+    wait(lambda: completed(queued['task_id']))
+    assert content(target['id'], moved['target_key']) == migration_body
+    assert admin.get(url + f'/api/v1/buckets/{a}/object', params={'key': original['key'], 'version': original['version']}).status_code == 404
+    target_item = admin.get(url + f"/api/v1/buckets/{target['id']}/objects", params={'q': moved['target_key'], 'mode': 'exact'}).json()['items'][0]
+    assert target_item['public_read']
+    print('PASS confirmed cross-storage copy/move, independent chunks, source retirement, ACL and receipt replay', flush=True)
+
+    pending = {**put('migration-paused', migration_body), 'target_key': 'migration-resumed'}
+    arm(migration)
+    queued = one('copy', pending, 202, target_bucket=target['id'], confirm_storage_migration=True)
+    task = queued['task_id']
+    hit(migration)
+    stream = db.execute("SELECT id FROM streams WHERE owner_task_id=%s AND state='writing'", (task,)).fetchone()[0]
+    cli('task', 'pause', task)
+    migration.unlink()
+    wait(lambda: db.execute('SELECT state FROM streams WHERE id=%s', (stream,)).fetchone()[0] == 'abandoned')
+    assert cli('task', 'show', task)['state'] == 'paused'
+    assert not db.execute('SELECT EXISTS(SELECT 1 FROM objects WHERE bucket_id=%s AND object_key=%s AND stream_id IS NOT NULL)', (target['id'], pending['target_key'])).fetchone()[0]
+    assert content(a, pending['key']) == migration_body
+    cli('task', 'resume', task)
+    wait(lambda: completed(task))
+    assert content(target['id'], pending['target_key']) == migration_body
+    assert cli('task', 'show', task)['processed'] == 1
+    print('PASS lost migration ownership rejects publication and resume publishes exactly once', flush=True)
+
     # Independently reconcile trigger ledgers after every successful and failed mutation.
     for bucket in buckets:
         expected = db.execute('SELECT coalesce(sum(s.size),0),count(*) FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=%s', (bucket['id'],)).fetchone()
@@ -214,7 +277,7 @@ try:
         assert expected == actual, (expected, actual)
     print('PASS independent final quota reconciliation', flush=True)
 finally:
-    for path in [fault, after]:
+    for path in [fault, after, migration]:
         path.unlink(missing_ok=True)
         path.with_suffix('.hit').unlink(missing_ok=True)
     limits(None)

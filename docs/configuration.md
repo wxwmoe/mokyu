@@ -8,14 +8,17 @@
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
+| `database.type` | `postgres` | 数据库类型：`postgres` |
 | `database.host` | 必填 | PostgreSQL 主机或容器服务名 |
 | `database.port` | `5432` | PostgreSQL 端口 |
-| `database.name` | 必填 | 数据库名 |
-| `database.user` | 必填 | 数据库用户名 |
+| `database.name` | 必填 | PostgreSQL 数据库名 |
+| `database.user` | 必填 | PostgreSQL 用户名 |
 | `database.password` / `database.password_file` | 二选一 | 直接密码或密码文件 |
-| `database.ssl_mode` | `prefer` | PostgreSQL SSL 模式 |
+| `database.ssl_mode` | `prefer` | PostgreSQL 连接 SSL 模式 |
 
-每个 control、worker、data 都从自己的 `[database]` 连接 PostgreSQL。Mokyu 不负责 PostgreSQL 故障转移；需要高可用时使用 PostgreSQL 自己的主备或集群地址。
+最低支持 PostgreSQL 18，低于该版本时启动会在执行迁移前拒绝。新部署建议使用仍在维护的稳定版或 LTS 的最新补丁。
+
+单容器和群集模式都使用 PostgreSQL。每个 control、worker、data 都从自己的 `[database]` 连接数据库。Mokyu 不负责 PostgreSQL 故障转移；需要高可用时使用 PostgreSQL 自己的主备或集群地址。
 
 ## instance
 
@@ -28,7 +31,7 @@
 | `instance.listen_control` | `0.0.0.0:9002` | 管理 HTTP 监听；CLI 默认访问本机地址 |
 | `instance.listen_web` | `0.0.0.0:9001` | 公共读 Web 监听 |
 | `instance.listen_s3` | `0.0.0.0:9000` | S3 监听 |
-| `instance.data_path` | `/data` | 本节点持久目录，保存 node.json、multipart、缓存和锁 |
+| `instance.data_path` | `/data` | 本节点持久目录，保存 multipart、缓存和锁，群集角色另保存 node.json |
 | `instance.min_free_space` | `1GiB` | 本地文件写入后必须保留的空间 |
 | `instance.multipart_limit` | 自动 | 单容器本地 multipart 暂存上限；群集使用共享 staging storage |
 | `instance.cache_size` | 自动 | 本地区块缓存字节上限 |
@@ -95,4 +98,4 @@ mokyu data            # data
 mokyu cli status      # 本机 control HTTP
 ```
 
-`mokyu cli` 优先使用本机 `node.json` 凭据；未指定 control URL 时访问 `127.0.0.1:instance.listen_control`。worker/data 只提供 status。入口与数据库模式不匹配时仍监听管理/状态端口，data 返回 503、worker 和调度暂停；`cluster mode single|cluster` 可在该状态下修正数据库模式，成功后重启入口。
+`mokyu cli` 访问 `127.0.0.1:instance.listen_control`。单容器使用部署密钥认证，群集 control 使用本机 `node.json` 凭据。worker/data 只提供 status。入口与数据库模式不匹配时仍监听管理/状态端口，data 返回 503、worker 和调度暂停；`cluster mode single|cluster` 可在该状态下修正数据库模式，成功后重启入口。

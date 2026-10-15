@@ -68,7 +68,7 @@ def check_children(parent, history_task):
     for storage, row in scoped.items():
         assert row[2] == ('node' if storages[storage] == 'local' else 'cluster'), row
         if storages[storage] == 'local':
-            assert row[3] is not None, row
+            assert (row[3] is not None) == (mode == 'cluster'), row
     assert db.execute('SELECT batch_total,batch_completed FROM tasks WHERE id=%s', (parent,)).fetchone() == (len(children), len(children))
     return scoped
 
@@ -150,7 +150,7 @@ def expired_task():
 
 
 assert not scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='cleanup' AND state IN ('queued','running','paused'))")
-cleanup_paused = scalar("SELECT paused FROM maintenance_controls WHERE kind='cleanup'")
+cleanup_paused = scalar("SELECT paused FROM maintenance_controls WHERE policy='cleanup'")
 try:
     retired, writing, live = stream('retired'), stream('writing', True), stream('ready')
     stale_writing = stream('writing')

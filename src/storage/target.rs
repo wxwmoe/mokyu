@@ -25,7 +25,7 @@ pub(crate) struct StoreBackend {
     pub(crate) cache_entries: usize,
     pub(crate) upload_cache: bool,
     pub(crate) upload_cache_size: Option<u64>,
-    pub(crate) pack_enabled: bool,
+    pub(crate) pack_config: Arc<crate::content::pack::Config>,
 }
 
 #[derive(Clone, Copy)]
