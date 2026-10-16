@@ -1,6 +1,6 @@
 # 配置参考
 
-主配置是 [`config.example.toml`](../config.example.toml)，默认路径 `/config/config.toml`。文件只保存启动前必须可用的 `[database]` 和 `[instance]`；Web、请求、上传、统计、维护和 storage 策略通过 Web 专项表单或 `mokyu cli` 写入 PostgreSQL。
+主配置是 [`config.example.toml`](../config.example.toml)，默认路径 `/config/config.toml`。文件只保存启动前必须可用的 `[database]` 和 `[instance]`；Web、请求、上传、统计、维护和 storage 策略通过 Web 专项表单或 `mokyu cli` 写入数据库。
 
 未知字段、错误类型、超范围数值和无法满足本机内存预算的配置会拒绝启动。保存需要重启的字段时只显示 `restart_required`，新值不会阻塞请求，也不会在当前进程中假装已经生效。
 
@@ -8,17 +8,24 @@
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `database.type` | `postgres` | 数据库类型：`postgres` |
-| `database.host` | 必填 | PostgreSQL 主机或容器服务名 |
-| `database.port` | `5432` | PostgreSQL 端口 |
-| `database.name` | 必填 | PostgreSQL 数据库名 |
-| `database.user` | 必填 | PostgreSQL 用户名 |
-| `database.password` / `database.password_file` | 二选一 | 直接密码或密码文件 |
-| `database.ssl_mode` | `prefer` | PostgreSQL 连接 SSL 模式 |
+| `database.type` | `postgres` | 数据库类型：`postgres` 或 `mysql` |
+| `database.host` | 服务端数据库必填 | PostgreSQL/MySQL 主机或容器服务名 |
+| `database.port` | PostgreSQL `5432`、MySQL `3306` | 服务端数据库端口 |
+| `database.name` | 服务端数据库必填 | PostgreSQL/MySQL 数据库名 |
+| `database.user` | 服务端数据库必填 | PostgreSQL/MySQL 用户名 |
+| `database.password` / `database.password_file` | 服务端数据库二选一 | 直接密码或密码文件 |
+| `database.ssl_mode` | `prefer` | PostgreSQL/MySQL 的连接 SSL 模式；MySQL 支持 `disable`、`prefer`、`require`、`verify-ca`、`verify-full` |
 
-最低支持 PostgreSQL 18，低于该版本时启动会在执行迁移前拒绝。新部署建议使用仍在维护的稳定版或 LTS 的最新补丁。
+| 数据库 | 单容器 | 群集 |
+| --- | --- | --- |
+| PostgreSQL | 支持 | 支持 |
+| MySQL / MariaDB | 支持 | 不支持 |
 
-单容器和群集模式都使用 PostgreSQL。每个 control、worker、data 都从自己的 `[database]` 连接数据库。Mokyu 不负责 PostgreSQL 故障转移；需要高可用时使用 PostgreSQL 自己的主备或集群地址。
+最低支持 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3。MariaDB 使用 `type = "mysql"` 和相同连接字段，由程序自动识别。MySQL/MariaDB 使用 InnoDB，要求 `innodb_flush_log_at_trx_commit=1`。低于最低版本时，启动会在执行迁移前拒绝。
+
+最低兼容版本不代表推荐部署版本。新部署建议选择仍在维护的稳定版或 LTS，并安装该系列最新补丁。
+
+群集模式下，每个 control、worker、data 都从自己的 `[database]` 连接 PostgreSQL。Mokyu 不负责 PostgreSQL 故障转移；需要高可用时使用 PostgreSQL 自己的主备或集群地址。
 
 ## instance
 
@@ -39,7 +46,7 @@
 | `instance.upload_cache_size` | 自动 | 本地待上传暂存上限 |
 | `instance.thumbnail_cache_size` | `256MiB` | 缩略图缓存上限 |
 | `instance.request_connections` | 自动 | 本节点 HTTP/S3 请求连接池上限 |
-| `instance.database_connections` | 自动 | 本节点 PostgreSQL 连接池上限 |
+| `instance.database_connections` | 自动 | 本节点数据库连接池上限 |
 | `instance.cpu_jobs` | 自动 | 本节点压缩、哈希和加解密等阻塞计算预算 |
 | `instance.stream_memory_budget` | 自动 | 数据流临时内存预算，不是 RSS 硬限制 |
 | `instance.storage_read_slots` | 自动 | 本节点所有 storage 共享的读槽位 |
@@ -49,7 +56,7 @@
 
 省略 `request_connections` 和三个 `storage_*_slots` 时，服务按 CPU、内存、文件描述符和连接池自动计算保守但偏宽的本机预算。它们只限制本机；storage profile 则限制每个 storage 的总并发，单容器使用进程内队列，群集通过 PostgreSQL 共享许可。profile 热更新保留正在执行和排队的操作；降低上限后等待现有操作排空，提高上限则放行等待者。显式修改 instance 预算需要重启。
 
-PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；multipart 尾块和异步上传使用保留前缀 `__mokyu/multipart/`。单容器模式可使用 `/data/storage` 的 local storage。
+共享 staging 设置只对 PostgreSQL 提供；MySQL 不接受这两个设置。PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；multipart 尾块和异步上传使用保留前缀 `__mokyu/multipart/`。单容器模式可使用 `/data/storage` 的 local storage。
 
 ## runtime 设置
 

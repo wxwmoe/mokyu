@@ -156,7 +156,7 @@ docker exec -i mokyu mokyu cli user create admin --stdin < /secure/password-file
 
 | 命令 | 作用与返回 |
 | --- | --- |
-| `settings get SECTION` | 显示 PostgreSQL 中一个 runtime settings 分组；不返回秘密 |
+| `settings get SECTION` | 显示数据库中一个 runtime settings 分组；不返回秘密 |
 | `settings set SECTION FILE [--rev REVISION]` | 用 JSON 文件完整替换一个分组；省略 `--rev` 时由服务端在当前 revision 上保存，FILE 为 `-` 时从 stdin 读取 |
 | `settings reset SECTION` | 将分组恢复为当前代码默认值 |
 | `settings web show` | 显示 Web 设置兼容视图 |

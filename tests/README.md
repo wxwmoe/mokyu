@@ -13,7 +13,7 @@ cargo clippy --locked --all-targets --features fault-injection
 cargo build --locked
 ```
 
-数据库契约默认 ignored。设置 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`，再提供 `MOKYU_TEST_DATABASE_URL_FILE`（保存 PostgreSQL DSN 的文件）。配置文件包含测试数据库连接、固定部署密钥和独立 data 目录；各测试头部注明额外环境变量。例如：
+数据库契约默认 ignored。设置 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`，再提供 `MOKYU_TEST_DATABASE_URL_FILE`（保存 PostgreSQL DSN 的文件）或 `MOKYU_TEST_MYSQL_CONFIG`（MySQL/MariaDB 配置）。配置文件包含测试数据库连接、固定部署密钥和独立 data 目录；各测试头部注明额外环境变量。例如：
 
 ```sh
 MOKYU_TEST_DATABASE_URL_FILE=/config/pg-task-claim.url \
@@ -22,7 +22,7 @@ MOKYU_TEST_DATABASE_URL_FILE=/config/pg-task-claim.url \
 
 每个原生契约覆盖对应接口、事务和故障恢复；原生 SQL 仅用于构造或检查本后端状态。不要用同一配置批量并发执行所有 ignored 测试，也不要把过滤后执行零个测试视为通过。曾经执行并写入数据的契约，应更换空库后重跑。
 
-数据库改动需在 PostgreSQL 18 的最低版本和当前维护版本验证。`migrations.py` 在 PostgreSQL 17 空库验证低版本拒绝且不写入表，在支持版本验证完整迁移与恢复。
+数据库改动需在 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3 的最低版本和当前维护版本验证。MariaDB 复用全部 MySQL 契约和 `MOKYU_TEST_MYSQL_CONFIG`；`mysql_dialect_and_lock_scope_contract` 额外检查 JSON 类型、大小写/尾空格比较和任务领取的锁范围。`migrations.py` 在 PostgreSQL 17 空库验证低版本拒绝且不写入表，在支持版本验证完整迁移与恢复。
 
 ## 公共接口与恢复
 

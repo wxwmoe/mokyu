@@ -1,5 +1,5 @@
 [database]
-type = "postgres"
+type = "postgres" # postgres | mysql
 host = "postgres"
 port = 5432
 name = "mokyu"

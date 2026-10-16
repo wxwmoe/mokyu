@@ -50,6 +50,7 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<Error> {
         .downcast_ref::<Error>()
         .copied()
         .or_else(|| postgres::error(source))
+        .or_else(|| backend::mysql::error(source))
 }
 pub(crate) use key::{ManagedKeyRecord, ManagedKeyStore};
 pub(crate) use physical::{PhysicalSource, PhysicalStore};
@@ -101,6 +102,9 @@ pub(crate) async fn connect(
     match config.database.backend {
         crate::config::DatabaseType::Postgres => {
             postgres::connect(config, secrets, budget, role).await
+        }
+        crate::config::DatabaseType::Mysql => {
+            backend::mysql::connect(config, secrets, budget, role).await
         }
     }
 }

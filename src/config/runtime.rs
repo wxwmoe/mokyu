@@ -116,18 +116,21 @@ impl Default for MetricsSettings {
 pub enum DatabaseType {
     #[default]
     Postgres,
+    Mysql,
 }
 
 impl DatabaseType {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Postgres => "postgres",
+            Self::Mysql => "mysql",
         }
     }
 
     pub fn default_port(self) -> Option<u16> {
         match self {
             Self::Postgres => Some(5432),
+            Self::Mysql => Some(3306),
         }
     }
 
