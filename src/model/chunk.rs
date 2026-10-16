@@ -12,14 +12,6 @@ pub(crate) struct ChunkCreate {
     pub(crate) key: Option<Uuid>,
 }
 
-#[must_use = "keep the claim alive until chunk writing finishes"]
-pub(crate) struct ChunkClaim {
-    pub(crate) chunk: Chunk,
-    pub(crate) reused: bool,
-    // The backend owns the lock; dropping it also releases a cancelled write.
-    pub(crate) guard: Box<dyn Send>,
-}
-
 pub(crate) struct ReadExtent {
     pub(crate) extent: Extent,
     pub(crate) chunk: Chunk,
@@ -41,7 +33,8 @@ pub(crate) trait ChunkStore: Send + Sync {
     async fn extents(&self, stream: Uuid, from: i64, until: i64) -> Result<Vec<Extent>>;
     async fn read_extents(&self, stream: Uuid, from: i64, until: i64) -> Result<Vec<ReadExtent>>;
     async fn read_start(&self, stream: Uuid, position: i64) -> Result<Option<i64>>;
-    async fn allocate(&self, input: ChunkCreate) -> Result<ChunkClaim>;
+    /// The caller serializes this storage/hash until its write or staging finishes.
+    async fn allocate(&self, input: ChunkCreate) -> Result<(Chunk, bool)>;
     async fn can_stage_reuse(&self, id: i64) -> Result<bool>;
     async fn mark_uploading(&self, chunk: &Chunk) -> Result<()>;
     async fn reference(

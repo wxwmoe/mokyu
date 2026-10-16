@@ -47,9 +47,9 @@
 | `instance.storage_control_slots` | 自动 | 本节点所有 storage 共享的控制槽位 |
 | `instance.compression_idle_timeout` | `30s` | 本节点压缩上下文空闲回收时间 |
 
-省略 `request_connections` 和三个 `storage_*_slots` 时，服务按 CPU、内存、文件描述符和连接池自动计算保守但偏宽的本机预算。它们只限制本机；storage profile 的 permit 是所有节点合计的 storage 级预算。显式修改 instance 预算需要重启，保存和请求处理不受阻塞。
+省略 `request_connections` 和三个 `storage_*_slots` 时，服务按 CPU、内存、文件描述符和连接池自动计算保守但偏宽的本机预算。它们只限制本机；storage profile 则限制每个 storage 的总并发，单容器使用进程内队列，群集通过 PostgreSQL 共享许可。profile 热更新保留正在执行和排队的操作；降低上限后等待现有操作排空，提高上限则放行等待者。显式修改 instance 预算需要重启。
 
-群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；multipart 尾块和异步上传使用保留前缀 `__mokyu/multipart/`。单容器模式可使用 `/data/storage` 的 local storage。
+PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；multipart 尾块和异步上传使用保留前缀 `__mokyu/multipart/`。单容器模式可使用 `/data/storage` 的 local storage。
 
 ## runtime 设置
 
@@ -78,13 +78,13 @@ profile 是类型化字段，不是任意 JSON。字段包括：
 - `pack_concurrency`、`integrity_concurrency`、`integrity_rps`、`integrity_bandwidth`、`integrity_batch_timeout`；
 - storage 级 read/upload/control、pack、integrity、maintenance、migration 并发和字节预算。
 
-这些并发、速率和字节预算在 Web storage 页面及 `storage profile` CLI 中调整，Web 明确标记为“群集共享”。single 模式也使用同一套 storage permit；profile 保存后下一批任务使用新值，不要求重启。
+这些并发、速率和字节预算在 Web storage 页面及 `storage profile` CLI 中调整，保存后下一批任务使用新值，不要求重启。单容器使用进程内并发队列和巡检速率账户，群集通过 PostgreSQL 共享这些额度。巡检同时检查 RPS 与字节预算，任一不足时均不扣减；大于一秒带宽预算的单批仍可前进。修改 profile 保留已消耗额度；单容器重启或重新启用 storage 后允许一次有界突发。
 
 ## 加密、压缩与存量维护
 
 block key 在数据库生成，创建后算法和材料不可更改。支持 AES-256-GCM、ChaCha20-Poly1305 和无加密，默认 AES-256-GCM；storage 只绑定已有 block key，未找到匹配算法的 key 时表单提供“在新标签页创建 key”的入口，不会在保存 storage 时隐式生成。
 
-切换 storage 当前 key、压缩规则或区块包策略只影响新写入。`storage rewrite` 是显式、可预览、可确认、可暂停、可重试的低优先级任务，按 encoding/pack fingerprint 重写需要转换的存量来源；保存表单、local/S3 切换和“载入预设”都不会自动启动 rewrite。旧 key 在所有物理来源和任务释放后才可删除。
+切换 storage 当前 key、压缩规则或区块包策略只影响新写入。`storage rewrite` 是显式、可预览、可确认、可暂停、可重试的低优先级任务，按 encoding/pack fingerprint 重写需要转换的存量来源；保存表单、local/S3 切换和“载入预设”都不会自动启动 rewrite。旧 key 在所有物理来源和任务释放后才可删除。单容器 rewrite 只创建一个任务，保存扫描上界和游标，按区块 ID 顺序推进；群集保留分片子任务。
 
 ## 模式与 CLI
 

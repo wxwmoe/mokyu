@@ -27,8 +27,8 @@ use crate::model::multipart::{
 };
 use crate::model::settings::{ControlSettingsPatch, RuntimeSettingsRow};
 use crate::model::{
-    ChunkClaim, ChunkCreate, ObjectChange, PublishStore, QuotaStore, StoragePermitStore,
-    StreamCreate, StreamStore, StreamTail, check_write_conditions,
+    ChunkCreate, ObjectChange, PublishStore, QuotaStore, StreamCreate, StreamStore, StreamTail,
+    check_write_conditions,
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
@@ -421,12 +421,19 @@ pub(super) async fn setup_account(
     Ok(())
 }
 
-pub(super) async fn allocate_chunk(pool: &PgPool, input: ChunkCreate) -> Result<ChunkClaim> {
-    // The claim spans encoding and storage I/O, not just allocation.
+pub(super) async fn claim_chunk(
+    pool: &PgPool,
+    storage: Uuid,
+    hash: &[u8; 32],
+) -> Result<Box<dyn Send>> {
     let mut claim = pool.begin().await?;
-    queries::claim_chunk_hash(input.storage, &input.hash)
+    queries::claim_chunk_hash(storage, hash)
         .execute(&mut *claim)
         .await?;
+    Ok(Box::new(claim))
+}
+
+pub(super) async fn allocate_chunk(pool: &PgPool, input: ChunkCreate) -> Result<(Chunk, bool)> {
     queries::fail_chunk_allocations(&input)
         .execute(pool)
         .await?;
@@ -447,11 +454,7 @@ pub(super) async fn allocate_chunk(pool: &PgPool, input: ChunkCreate) -> Result<
     let chunk = chunk.ok_or_else(|| {
         s3s::s3_error!(OperationAborted, "chunk allocation is already in progress")
     })?;
-    Ok(ChunkClaim {
-        chunk,
-        reused,
-        guard: Box::new(claim),
-    })
+    Ok((chunk, reused))
 }
 
 pub(super) async fn reference_chunk(
@@ -706,23 +709,25 @@ pub(super) async fn recover_stale(pool: &PgPool) -> Result<u64> {
 pub(super) async fn claim_task(
     pool: &PgPool,
     input: crate::model::TaskClaim<'_>,
+    node: Option<(
+        &crate::cluster::NodeState,
+        &str,
+        &crate::content::codec::Key,
+    )>,
 ) -> Result<Option<uuid::Uuid>> {
     let mut tx = pool.begin().await?;
-    if input.role != "single" {
-        let node = input
-            .node
-            .context("cluster task claim requires a registered node")?;
-        validate_node(&mut tx, node, input.role, input.credential_key).await?;
+    if let Some((state, role, key)) = node {
+        validate_node(&mut tx, state, role, key).await?;
     }
     let id = queries::claim_task(
         input.class,
         input.active,
-        input.node.map(|n| n.node_id),
+        node.map(|(state, _, _)| state.node_id),
         input.token,
     )
     .fetch_optional(&mut *tx)
     .await?;
-    // The new lease owns cleanup before any fresh physical outputs are allocated.
+    // The new execution owns cleanup before any fresh physical outputs are allocated.
     if input.class != 0
         && let Some(id) = id
     {
@@ -802,27 +807,6 @@ pub(super) async fn renew_storage_permit(pool: &PgPool, token: uuid::Uuid) -> Re
 pub(super) async fn release_storage_permit(pool: &PgPool, token: uuid::Uuid) -> Result<()> {
     queries::release_storage_permit(token).execute(pool).await?;
     Ok(())
-}
-
-#[async_trait::async_trait]
-impl StoragePermitStore for Backend {
-    async fn acquire(
-        &self,
-        storage_id: uuid::Uuid,
-        direction: &str,
-        limit: i32,
-        holder: uuid::Uuid,
-    ) -> Result<Option<uuid::Uuid>> {
-        try_acquire_storage_permit(&self.pool, storage_id, direction, limit, holder).await
-    }
-
-    async fn renew(&self, token: uuid::Uuid) -> Result<bool> {
-        renew_storage_permit(&self.pool, token).await
-    }
-
-    async fn release(&self, token: uuid::Uuid) -> Result<()> {
-        release_storage_permit(&self.pool, token).await
-    }
 }
 
 pub(crate) async fn insert_task(
@@ -958,68 +942,15 @@ pub(super) async fn change_object(pool: &PgPool, input: ObjectChange) -> Result<
 
 #[async_trait::async_trait]
 impl StreamStore for Backend {
-    async fn current(
-        &self,
-        bucket: Uuid,
-        key: &str,
-        lease_seconds: i64,
-    ) -> Result<(crate::app::StoredStream, Uuid)> {
-        let mut tx = self.pool.begin().await?;
-        let stream: crate::app::StoredStream = queries::current_stream(bucket, key)
-            .fetch_optional(&mut *tx)
+    async fn current(&self, bucket: Uuid, key: &str) -> Result<crate::app::StoredStream> {
+        queries::current_stream(bucket, key, false)
+            .fetch_optional(&self.pool)
             .await?
-            .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
-        let lease = create_read_lease(&mut tx, stream.id, lease_seconds).await?;
-        tx.commit().await?;
-        Ok((stream, lease))
+            .ok_or_else(|| s3s::s3_error!(NoSuchKey).into())
     }
 
-    async fn create(&self, mut input: StreamCreate) -> Result<Uuid> {
-        let id = Uuid::new_v4();
-        let mut tx = self.pool.begin().await?;
-        if let Some((task, token)) = input.owner.as_ref() {
-            let owned: Option<Uuid> = queries::lock_owned_task(task, token)
-                .fetch_optional(&mut *tx)
-                .await?;
-            anyhow::ensure!(owned.is_some(), "storage migration lease lost");
-        }
-        input
-            .authority
-            .add(input.bucket, crate::authorization::Action::Write);
-        if input.public {
-            input
-                .authority
-                .add(input.bucket, crate::authorization::Action::Acl);
-        }
-        input.authority.lock(&mut tx).await?;
-        let (state, paused): (String, bool) = queries::lock_bucket_uploads(input.bucket)
-            .fetch_one(&mut *tx)
-            .await?;
-        if state != "active" {
-            return Err(s3s::s3_error!(OperationAborted).into());
-        }
-        if paused && input.stream_type == "object" {
-            let finishing: bool =
-                queries::completing_upload(input.completion, input.bucket, &input.key)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            if !finishing {
-                return Err(s3s::s3_error!(
-                    OperationAborted,
-                    "new uploads are paused for this bucket"
-                )
-                .into());
-            }
-        }
-        queries::insert_stream(id, &input).execute(&mut *tx).await?;
-        create_write_lease(&mut tx, id, input.lease_seconds).await?;
-        if input.claim_object {
-            queries::claim_object(input.bucket, &input.key, id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
-        Ok(id)
+    async fn create(&self, input: StreamCreate) -> Result<Uuid> {
+        create_stream(&self.pool, input, None).await
     }
 
     async fn append_tail(&self, tail: StreamTail) -> Result<()> {
@@ -1052,6 +983,74 @@ impl StreamStore for Backend {
     async fn finish(&self, stream: Uuid, size: i64, etag: &str, checksums: Value) -> Result<bool> {
         finish_stream(&self.pool, stream, size, etag, checksums).await
     }
+}
+
+pub(super) async fn current_stream(
+    pool: &PgPool,
+    bucket: Uuid,
+    key: &str,
+    lease_seconds: i64,
+) -> Result<(crate::app::StoredStream, Uuid)> {
+    let mut tx = pool.begin().await?;
+    let stream: crate::app::StoredStream = queries::current_stream(bucket, key, true)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+    let lease = create_read_lease(&mut tx, stream.id, lease_seconds).await?;
+    tx.commit().await?;
+    Ok((stream, lease))
+}
+
+pub(super) async fn create_stream(
+    pool: &PgPool,
+    mut input: StreamCreate,
+    ttl_seconds: Option<i64>,
+) -> Result<Uuid> {
+    let id = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    if let Some((task, token)) = input.owner.as_ref() {
+        let owned: Option<Uuid> = queries::lock_owned_task(task, token)
+            .fetch_optional(&mut *tx)
+            .await?;
+        anyhow::ensure!(owned.is_some(), "storage migration lease lost");
+    }
+    input
+        .authority
+        .add(input.bucket, crate::authorization::Action::Write);
+    if input.public {
+        input
+            .authority
+            .add(input.bucket, crate::authorization::Action::Acl);
+    }
+    input.authority.lock(&mut tx).await?;
+    let (state, paused): (String, bool) = queries::lock_bucket_uploads(input.bucket)
+        .fetch_one(&mut *tx)
+        .await?;
+    if state != "active" {
+        return Err(s3s::s3_error!(OperationAborted).into());
+    }
+    if paused && input.stream_type == "object" {
+        let finishing: bool =
+            queries::completing_upload(input.completion, input.bucket, &input.key)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !finishing {
+            return Err(
+                s3s::s3_error!(OperationAborted, "new uploads are paused for this bucket").into(),
+            );
+        }
+    }
+    queries::insert_stream(id, &input).execute(&mut *tx).await?;
+    if let Some(ttl) = ttl_seconds {
+        create_write_lease(&mut tx, id, ttl).await?;
+    }
+    if input.claim_object {
+        queries::claim_object(input.bucket, &input.key, id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(id)
 }
 
 pub(super) async fn create_read_lease(
@@ -3133,6 +3132,7 @@ pub(super) async fn pin_pack_inputs(
 
 pub(super) async fn start_pack(
     pool: &PgPool,
+    single: bool,
     policy: &str,
     automatic: bool,
     reuse_seconds: f64,
@@ -3158,12 +3158,17 @@ pub(super) async fn start_pack(
         return Ok(json!({"task_id":id,"retry_pending":true}));
     }
     let detail = json!({"policy":policy,"upper_time":chrono::Utc::now(),"automatic":automatic});
-    let mut parent_detail = detail.clone();
-    parent_detail["role"] = json!("parent");
-    let id = enqueue_task(&mut tx, "pack", None, parent_detail, false).await?;
     let storages: Vec<(Uuid, String, i64)> = queries::pack_storages(Some(policy))
         .fetch_all(&mut *tx)
         .await?;
+    if single {
+        let id = enqueue_storage_task(&mut tx, "pack", detail, &storages).await?;
+        tx.commit().await?;
+        return Ok(json!({"task_id":id}));
+    }
+    let mut parent_detail = detail.clone();
+    parent_detail["role"] = json!("parent");
+    let id = enqueue_task(&mut tx, "pack", None, parent_detail, false).await?;
     for (storage_id, storage_type, revision) in &storages {
         let mut child_detail = detail.clone();
         child_detail["role"] = json!("child");
@@ -3188,26 +3193,37 @@ pub(super) async fn start_pack(
 }
 pub(super) async fn start_unpack(
     pool: &PgPool,
+    single: bool,
     pack: Option<i64>,
     all: bool,
     node: Option<Uuid>,
 ) -> Result<Value> {
+    let mut tx = pool.begin().await?;
+    queries::lock_pack_policy(format!("mokyu:unpack:{all}:{pack:?}"))
+        .execute(&mut *tx)
+        .await?;
     if let Some(id) = queries::active_unpack_task(all.to_string(), pack.map(|v| v.to_string()))
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?
     {
+        tx.commit().await?;
         return Ok(json!({"task_id":id,"existing":true}));
     }
-    let mut tx = pool.begin().await?;
-    let detail = json!({"pack_id":pack,"all":all});
-    let mut parent_detail = detail.clone();
-    parent_detail["role"] = json!("parent");
-    let id = enqueue_task(&mut tx, "unpack", None, parent_detail, false).await?;
+    let mut detail = json!({"pack_id":pack,"all":all});
     let storages: Vec<(Uuid, String, i64)> = if let Some(pack_id) = pack {
         queries::unpack_storage(pack_id).fetch_all(&mut *tx).await?
     } else {
         queries::pack_storages(None).fetch_all(&mut *tx).await?
     };
+    if single {
+        detail["upper_time"] = json!(chrono::Utc::now());
+        let id = enqueue_storage_task(&mut tx, "unpack", detail, &storages).await?;
+        tx.commit().await?;
+        return Ok(json!({"task_id":id}));
+    }
+    let mut parent_detail = detail.clone();
+    parent_detail["role"] = json!("parent");
+    let id = enqueue_task(&mut tx, "unpack", None, parent_detail, false).await?;
     for (storage_id, storage_type, revision) in &storages {
         let mut child_detail = detail.clone();
         child_detail["role"] = json!("child");
@@ -3230,6 +3246,77 @@ pub(super) async fn start_unpack(
 
     Ok(json!({"task_id":id}))
 }
+async fn enqueue_storage_task(
+    tx: &mut Transaction<'_, Postgres>,
+    task_type: &str,
+    mut detail: Value,
+    storages: &[(Uuid, String, i64)],
+) -> Result<Uuid> {
+    detail["execution_mode"] = json!("single");
+    detail["storages"] = json!(
+        storages
+            .iter()
+            .map(|(id, _, revision)| { json!({"storage_id":id,"profile_revision":revision}) })
+            .collect::<Vec<_>>()
+    );
+    detail["storage_index"] = json!(0);
+    let history = detail["phase"] == "history";
+    if !history && let Some((id, _, revision)) = storages.first() {
+        detail["storage_id"] = json!(id);
+        detail["profile_revision"] = json!(revision);
+    }
+    let id = enqueue_task(tx, task_type, None, detail, false).await?;
+    if storages.is_empty() && !history {
+        queries::complete_task(id).execute(&mut **tx).await?;
+    }
+    Ok(id)
+}
+
+fn advance_storage_scope(detail: &mut Value) -> Result<bool> {
+    let index = if detail["phase"] == "history" {
+        detail["phase"] = json!("storage");
+        0
+    } else {
+        detail["storage_index"]
+            .as_u64()
+            .context("missing task storage index")?
+            + 1
+    };
+    let next = detail["storages"]
+        .as_array()
+        .context("missing task storages")?
+        .get(index as usize)
+        .cloned();
+    detail["storage_index"] = json!(index);
+    if let Some(next) = &next {
+        detail["storage_id"] = next["storage_id"].clone();
+        detail["profile_revision"] = next["profile_revision"].clone();
+    }
+    Ok(next.is_none())
+}
+
+pub(super) async fn advance_pack_storage(
+    pool: &PgPool,
+    task: Execution,
+    processed: i64,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let mut detail = queries::lock_task_detail(task)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("task execution expired")?;
+    let done = advance_storage_scope(&mut detail)?;
+    queries::advance_storage_task(task.id, detail, processed, done)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    #[cfg(feature = "fault-injection")]
+    if !done {
+        crate::faults::point("pack-storage-advanced").await;
+    }
+    Ok(())
+}
+
 pub(super) async fn insert_pack_members(pool: &PgPool, pack: i64, rows: &[Mapping]) -> Result<()> {
     let mut tx = pool.begin().await?;
     let mut offset = 0i64;
@@ -3428,6 +3515,7 @@ pub(super) async fn start_rewrite(
     pool: &PgPool,
     input: &RewriteTask,
     node: Option<Uuid>,
+    single: bool,
 ) -> Result<(Uuid, bool)> {
     let mut tx = pool.begin().await?;
     queries::lock_rewrite_storage(input.storage_id)
@@ -3444,6 +3532,17 @@ pub(super) async fn start_rewrite(
     let upper = queries::rewrite_upper(input.storage_id)
         .fetch_one(&mut *tx)
         .await?;
+    if single {
+        let detail = json!({"execution_mode":"single","storage_id":input.storage_id,"upper_chunk_id":upper,"profile_revision":input.profile_revision,"target_key_id":input.target_key_id,"target_key":input.target_key,"target_algorithm":input.target_algorithm});
+        let id = enqueue_task(&mut tx, "rewrite", None, detail, false).await?;
+        if input.shards == 0 {
+            queries::complete_empty_rewrite(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        return Ok((id, false));
+    }
     let local = queries::rewrite_is_local(input.storage_id)
         .fetch_one(&mut *tx)
         .await?;
@@ -3707,10 +3806,12 @@ pub(super) async fn claim_stale_stream(
     id: Uuid,
     storage: Option<Uuid>,
     retention: Option<f64>,
+    single: bool,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     queries::cleanup_limits(&mut tx).await?;
-    if queries::claim_stale_stream(id, retention, storage)
+    if queries::claim_stale_stream(id, retention, storage, single)
+        .build()
         .execute(&mut *tx)
         .await?
         .rows_affected()
@@ -3860,12 +3961,17 @@ pub(super) async fn acquire_integrity_rate(
 }
 pub(super) async fn start_integrity(
     pool: &PgPool,
+    single: bool,
     input: IntegrityRequest,
     bucket: Option<Bucket>,
     node: Option<Uuid>,
 ) -> Result<(Uuid, usize)> {
+    let mut tx = pool.begin().await?;
+    queries::lock_pack_policy("mokyu:integrity".to_owned())
+        .execute(&mut *tx)
+        .await?;
     // Limit queued work as well as running work; repeated clicks must not grow an unbounded queue.
-    let busy: bool = queries::integrity_busy().fetch_one(pool).await?;
+    let busy: bool = queries::integrity_busy().fetch_one(&mut *tx).await?;
     if busy {
         return Err(
             s3s::s3_error!(OperationAborted, "an integrity check is already active").into(),
@@ -3874,39 +3980,19 @@ pub(super) async fn start_integrity(
     let storage_rows: Vec<(Uuid, String)> =
         if let Some(storage_id) = bucket.as_ref().and_then(|value| value.storage_id) {
             queries::integrity_storage(storage_id)
-                .fetch_all(pool)
+                .fetch_all(&mut *tx)
                 .await?
         } else if bucket.is_some() {
             Vec::new()
         } else {
-            queries::integrity_storages().fetch_all(pool).await?
+            queries::integrity_storages().fetch_all(&mut *tx).await?
         };
     let storage_rows = if storage_rows.is_empty() {
         vec![(Uuid::nil(), "shared".to_owned())]
     } else {
         storage_rows
     };
-    let child_count = storage_rows.len();
-    let mut tx = pool.begin().await?;
-    let parent_detail = json!({
-        "role": "parent",
-        "mode": input.mode,
-        "bucket": input.bucket.clone(),
-        "key": input.key.clone(),
-        "children": storage_rows.len(),
-    });
-    let parent = crate::model::REQUEST_ID
-        .try_with(|id| *id)
-        .unwrap_or_else(|_| Uuid::new_v4());
-    insert_task(
-        &mut *tx,
-        parent,
-        "integrity",
-        bucket.as_ref().map(|value| value.id),
-        parent_detail,
-        crate::model::audit::current(),
-    )
-    .await?;
+    let mut details = Vec::with_capacity(storage_rows.len());
     for (storage_id, storage_type) in storage_rows {
         let storage_id = (storage_id != Uuid::nil()).then_some(storage_id);
         let upper: i64 = if let Some(storage_id) = storage_id {
@@ -3933,8 +4019,55 @@ pub(super) async fn start_integrity(
             issues: 0,
             skipped: 0,
             finished_at: None,
+            storages: Vec::new(),
+            storage_index: 0,
         };
         detail.upper_object = queries::integrity_upper_object(&mut tx, &detail).await?;
+        details.push((storage_type, detail));
+    }
+    if single {
+        let storages = details
+            .iter()
+            .map(|(_, detail)| crate::model::integrity::StorageSnapshot {
+                storage_id: detail.storage_id,
+                upper_chunk_id: detail.upper_chunk_id.clone(),
+                upper_object: detail.upper_object.clone(),
+            })
+            .collect();
+        let mut detail = details.remove(0).1;
+        detail.storages = storages;
+        let id = enqueue_task(
+            &mut tx,
+            "integrity",
+            detail.bucket_id,
+            serde_json::to_value(detail)?,
+            false,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok((id, 0));
+    }
+    let child_count = details.len();
+    let parent_detail = json!({
+        "role": "parent",
+        "mode": input.mode,
+        "bucket": input.bucket.clone(),
+        "key": input.key.clone(),
+        "children": details.len(),
+    });
+    let parent = crate::model::REQUEST_ID
+        .try_with(|id| *id)
+        .unwrap_or_else(|_| Uuid::new_v4());
+    insert_task(
+        &mut *tx,
+        parent,
+        "integrity",
+        bucket.as_ref().map(|value| value.id),
+        parent_detail,
+        crate::model::audit::current(),
+    )
+    .await?;
+    for (storage_type, detail) in details {
         let child = Uuid::new_v4();
         insert_task(
             &mut *tx,
@@ -3963,7 +4096,7 @@ pub(super) async fn start_integrity(
 pub(super) async fn checkpoint_integrity(
     pool: &PgPool,
     id: Execution,
-    cursor: String,
+    mut cursor: String,
     mut d: Detail,
     issues: Vec<Finding>,
 ) -> Result<()> {
@@ -3979,6 +4112,19 @@ pub(super) async fn checkpoint_integrity(
             tracing::warn!(task_id=%id.id,chunk_id=?i.chunk_id,stream_id=?i.stream_id,code=%i.code,"integrity finding");
         }
     }
+    let mut advanced = false;
+    if d.phase == "done" && !d.storages.is_empty() {
+        d.storage_index += 1;
+        if let Some(next) = d.storages.get(d.storage_index) {
+            d.storage_id = next.storage_id;
+            d.upper_chunk_id = next.upper_chunk_id.clone();
+            d.upper_object = next.upper_object.clone();
+            d.phase = "metadata".into();
+            d.finished_at = None;
+            cursor = serde_json::to_string(&crate::model::integrity::Cursor::default())?;
+            advanced = true;
+        }
+    }
     queries::integrity_checkpoint(
         id.id,
         cursor,
@@ -3989,6 +4135,10 @@ pub(super) async fn checkpoint_integrity(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    if advanced {
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("integrity-storage-advanced").await;
+    }
     Ok(())
 }
 
@@ -4043,6 +4193,7 @@ pub(super) async fn change_maintenance_policy(
 }
 pub(super) async fn start_lifecycle_policy(
     pool: &PgPool,
+    single: bool,
     policy: &str,
     node: Option<Uuid>,
 ) -> Result<(Uuid, bool)> {
@@ -4059,6 +4210,15 @@ pub(super) async fn start_lifecycle_policy(
     }
     let storages: Vec<(Uuid, String, i64)> =
         queries::lifecycle_storages().fetch_all(&mut *tx).await?;
+    if single {
+        let detail = json!({"phase":if policy == "cleanup" {"history"} else {"storage"}});
+        let id = enqueue_storage_task(&mut tx, policy, detail, &storages).await?;
+        queries::scheduled_maintenance(policy)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok((id, false));
+    }
     let children = storages.len() + usize::from(policy == "cleanup");
     let id = enqueue_task(
         &mut tx,
@@ -4111,6 +4271,46 @@ pub(super) async fn start_lifecycle_policy(
     tx.commit().await?;
 
     Ok((id, false))
+}
+
+pub(super) async fn finish_single_lifecycle(
+    pool: &PgPool,
+    task: Execution,
+    count: i64,
+    again: bool,
+    report: Value,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let mut detail = queries::lock_task_detail(task)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("task execution expired")?;
+    if let Some(storage) = detail["storage_id"].as_str().map(str::to_owned) {
+        let saved = &mut detail["report"]["storages"][storage];
+        for (key, value) in report.as_object().context("invalid maintenance report")? {
+            if let Some(count) = value.as_i64() {
+                saved[key] = json!(
+                    saved[key]
+                        .as_i64()
+                        .unwrap_or(0)
+                        .checked_add(count)
+                        .context("maintenance report overflow")?
+                );
+            }
+        }
+    } else {
+        detail["report"]["history"] = report;
+    }
+    let done = !again && advance_storage_scope(&mut detail)?;
+    queries::advance_storage_task(task.id, detail, count, done)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    if !again && !done {
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("lifecycle-storage-advanced").await;
+    }
+    Ok(())
 }
 
 use crate::model::object::{ObjectTransfer, Outcome, RECEIPT, StorageMigration};
@@ -4427,45 +4627,18 @@ pub(super) async fn complete_storage_migration(
     Ok(())
 }
 
-pub(super) async fn backfill_catalog(pool: &PgPool) -> Result<bool> {
-    let mut tx = pool.begin().await?;
-    queries::catalog_build_settings().execute(&mut *tx).await?;
-    let cursor: (Option<Uuid>, Option<String>) =
-        queries::catalog_build_cursor().fetch_one(&mut *tx).await?;
-    let rows: Vec<(Uuid, String)> = queries::catalog_scan(&cursor)
-        .build_query_as()
-        .fetch_all(&mut *tx)
-        .await?;
-    if let Some((bucket, key)) = rows.last() {
-        queries::catalog_backfill(&cursor, bucket, key)
-            .build()
-            .execute(&mut *tx)
-            .await?;
-        queries::advance_catalog(bucket, key, rows.len() as i64)
-            .execute(&mut *tx)
-            .await?;
-    } else {
-        queries::finish_catalog().execute(&mut *tx).await?;
-    }
-    tx.commit().await?;
-    #[cfg(feature = "fault-injection")]
-    crate::faults::point("catalog-after-batch").await;
-    Ok(false)
-}
-
 pub(super) async fn browse_catalog(
     pool: &PgPool,
     authority: &Permit,
     bucket: Uuid,
     filter: &mut crate::model::object::CatalogFilter,
     cursor: Option<crate::model::object::CatalogCursor>,
-    ready: bool,
     sizes: (Option<i64>, Option<i64>),
 ) -> Result<Vec<crate::model::object::MediaItem>> {
     let mut tx = pool.begin().await?;
     queries::catalog_search_settings().execute(&mut *tx).await?;
     authority.lock(&mut tx).await?;
-    let rows = queries::browse_catalog(&mut tx, bucket, filter, cursor, ready, sizes).await?;
+    let rows = queries::browse_catalog(&mut tx, bucket, filter, cursor, sizes).await?;
     tx.commit().await?;
     Ok(rows)
 }
@@ -5316,6 +5489,24 @@ pub(super) async fn set_deployment_mode(
         tx.rollback().await?;
         return Ok(());
     }
+    let (maintenance, tasks, uploads, sources) =
+        queries::mode_transition_state().fetch_one(&mut *tx).await?;
+    ensure!(
+        maintenance,
+        "enable maintenance before changing deployment mode"
+    );
+    ensure!(
+        !tasks,
+        "finish queued, running and paused tasks before changing deployment mode"
+    );
+    ensure!(
+        !uploads,
+        "finish or abort uploads and wait for reads to drain before changing deployment mode"
+    );
+    ensure!(
+        !sources,
+        "flush pending uploads and referenced fragments before changing deployment mode"
+    );
     if mode == "cluster" {
         let local: bool = queries::cluster_local_storages()
             .fetch_one(&mut *tx)
@@ -5344,13 +5535,6 @@ pub(super) async fn set_deployment_mode(
             !other_nodes,
             "disable all registered cluster nodes before returning to single mode"
         );
-        let pending: bool = queries::cluster_pending_sources()
-            .fetch_one(&mut *tx)
-            .await?;
-        ensure!(
-            !pending,
-            "complete or cancel active uploads before returning to single mode"
-        );
     }
     if mode == "single"
         && let Principal::Node { id, role } = principal
@@ -5360,6 +5544,9 @@ pub(super) async fn set_deployment_mode(
         queries::release_node_tasks(id).execute(&mut *tx).await?;
         queries::release_node_permits(id).execute(&mut *tx).await?;
     }
+    queries::preserve_failed_task_mode(&current)
+        .execute(&mut *tx)
+        .await?;
     queries::update_deployment_mode(&mode)
         .execute(&mut *tx)
         .await?;

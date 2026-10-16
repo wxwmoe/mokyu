@@ -27,6 +27,17 @@ pub(crate) struct Detail {
     pub(crate) issues: u64,
     pub(crate) skipped: u64,
     pub(crate) finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) storages: Vec<StorageSnapshot>,
+    #[serde(default)]
+    pub(crate) storage_index: usize,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct StorageSnapshot {
+    pub(crate) storage_id: Option<Uuid>,
+    pub(crate) upper_chunk_id: String,
+    pub(crate) upper_object: Option<(Uuid, String)>,
 }
 #[derive(Default, Deserialize, Serialize)]
 pub(crate) struct Cursor {
@@ -60,7 +71,6 @@ pub(crate) struct MappingRange {
 
 #[async_trait]
 pub(crate) trait IntegrityStore: Send + Sync {
-    async fn acquire_rate(&self, storage: Uuid, rates: &[(&str, f64, f64)]) -> Result<bool>;
     async fn start(
         &self,
         input: Request,

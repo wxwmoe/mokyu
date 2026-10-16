@@ -26,7 +26,6 @@ pub(super) struct ServiceStatus {
     counters: Vec<RuntimeCounter>,
     backend_queues: Value,
     backend_operations: Value,
-    catalog: Value,
     inventory_as_of: Option<String>,
     inventory_error: Option<String>,
     inventory_stale: bool,
@@ -107,7 +106,6 @@ pub(super) async fn status(
         counters,
         backend_queues: raw["io"]["backend_queues"].clone(),
         backend_operations: raw["io"]["backend"].clone(),
-        catalog: raw["catalog"].clone(),
         inventory_as_of: raw["storage"]["snapshot"]["as_of"]
             .as_str()
             .map(str::to_owned),

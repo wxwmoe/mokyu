@@ -9,16 +9,27 @@ use super::{Active, App, StoredStream};
 impl App {
     pub async fn current(&self, bucket: Uuid, key: &str) -> Result<(StoredStream, Active)> {
         let _guard = self.coord.lock().await;
-        let ttl = self.read_lease_seconds()?;
-        let (stream, lease_id) = self.stream_store.current(bucket, key, ttl).await?;
-        let pin = self.pin_with_lease(
-            stream.id,
-            Some(super::ReadLease {
-                id: lease_id,
-                store: self.stream_leases.clone(),
-                ttl_seconds: ttl,
-            }),
-        );
+        self.ensure_mode()?;
+        let (stream, pin) = if self.role == "single" {
+            let stream = self.stream_store.current(bucket, key).await?;
+            let pin = self.pin(stream.id);
+            (stream, pin)
+        } else {
+            let ttl = self.read_lease_seconds()?;
+            let (stream, lease_id) = self.cluster()?.current_stream(bucket, key, ttl).await?;
+            let pin = self.pin_with_lease(
+                stream.id,
+                Some(super::ReadLease {
+                    id: lease_id,
+                    store: self.cluster.as_ref().unwrap().clone(),
+                    ttl_seconds: ttl,
+                }),
+            );
+            (stream, pin)
+        };
+        drop(_guard);
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("read-pinned").await;
         Ok((stream, pin))
     }
     #[allow(clippy::too_many_arguments)]
@@ -40,21 +51,24 @@ impl App {
         }
         let _guard = self.coord.lock().await;
         self.writable()?;
-        let id = self
-            .stream_store
-            .create(crate::model::StreamCreate {
-                authority: authority.clone(),
-                bucket,
-                key: key.into(),
-                stream_type: stream_type.into(),
-                metadata,
-                public,
-                claim_object,
-                completion,
-                owner,
-                lease_seconds: self.write_lease_seconds()?,
-            })
-            .await?;
+        let input = crate::model::StreamCreate {
+            authority: authority.clone(),
+            bucket,
+            key: key.into(),
+            stream_type: stream_type.into(),
+            metadata,
+            public,
+            claim_object,
+            completion,
+            owner,
+        };
+        let id = if self.role == "single" {
+            self.stream_store.create(input).await?
+        } else {
+            self.cluster()?
+                .create_stream(input, self.write_lease_seconds()?)
+                .await?
+        };
         Ok((id, self.pin(id)))
     }
     pub(crate) fn write_lease_seconds(&self) -> Result<i64> {
@@ -68,9 +82,12 @@ impl App {
             .saturating_mul(2) as i64)
     }
     pub(crate) async fn renew_write_lease(&self, stream: Uuid) -> Result<()> {
-        self.stream_leases
-            .renew_write(stream, self.write_lease_seconds()?)
-            .await
+        if self.role != "single" {
+            self.cluster()?
+                .renew_write(stream, self.write_lease_seconds()?)
+                .await?;
+        }
+        Ok(())
     }
     pub async fn tail(&self, stream: Uuid, offset: i64, data: &[u8]) -> Result<()> {
         if data.is_empty() {

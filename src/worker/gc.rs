@@ -40,6 +40,7 @@ impl App {
         storage_id: Option<Uuid>,
     ) -> Result<Value> {
         let _coord = self.coord.lock().await;
+        self.ensure_mode()?;
         let age = config::seconds(older_than)?;
         ensure!(age <= i64::MAX as u64 / 1000, "age too large");
         let storage_id = self.storage.select_store(storage_id)?;

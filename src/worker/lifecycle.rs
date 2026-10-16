@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 #[derive(Default)]
 pub struct Cleanup {
-    running: tokio::sync::Mutex<()>,
+    pub(crate) running: tokio::sync::Mutex<()>,
     last_run: Mutex<Value>,
 }
 
@@ -73,6 +73,7 @@ impl App {
     }
 
     pub async fn cleanup_history(&self) -> Result<Value> {
+        self.ensure_mode()?;
         anyhow::ensure!(
             !self.maintenance_paused("cleanup").await?,
             "history cleanup is paused"
@@ -232,7 +233,9 @@ impl App {
         let Ok(_running) = self.local_cleanup.try_lock() else {
             return Ok(0);
         };
-        self.maintenance_store.expire_stream_leases().await?;
+        if self.role != "single" {
+            self.cluster()?.expire_stream_leases().await?;
+        }
         self.reconcile_upload_pins(storage_id).await?;
         self.storage.reconcile_staging(storage_id).await?;
         let deadline = Instant::now()

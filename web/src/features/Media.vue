@@ -45,9 +45,6 @@ const query = computed(() => {
 })
 const objects = useQuery({ queryKey: ['objects', bucket, query], enabled: computed(() => !!bucket.value),
   queryFn: ({ signal }) => api<ObjectPage>(`/api/v1/buckets/${bucket.value}/objects?${query.value}`, { signal }) })
-const catalog = useQuery({ queryKey: ['catalog', bucket], enabled: computed(() => !!bucket.value), queryFn: ({ signal }) => api<components['schemas']['CatalogStatus']>(`/api/v1/buckets/${bucket.value}/catalog`, { signal }), refetchInterval: query => query.state.data?.phase === 'ready' ? false : 5000 })
-const ready = computed(() => catalog.data.value?.phase === 'ready' || objects.data.value?.index_ready === true)
-watch(ready, value => { if (value) objects.refetch() })
 const selected = ref<MediaObject | null>(null)
 const checked = ref(new Set<string>()), selectionShift = ref(false)
 let anchor = -1
@@ -98,8 +95,7 @@ async function refresh() {
     <div class="media-toolbar"><nav class="breadcrumbs" :aria-label="t('folderPath')"><RouterLink to="/media"><Home :size="15" />{{ t('media') }}</RouterLink><ChevronRight :size="13" /><button @click="folder('')">{{ current?.name }}</button><span v-if="prefix" class="path-text">/ {{ prefix }}</span></nav>
       <div class="media-view-options"><div class="view-switch" :aria-label="t('mediaLayout')"><button :aria-label="t('listView')" :aria-pressed="layout === 'list'" @click="layout = 'list'"><List :size="17" /></button><button :aria-label="t('galleryView')" :aria-pressed="layout === 'gallery'" @click="layout = 'gallery'"><LayoutGrid :size="17" /></button></div><UiSelect v-model="pageSize" :label="t('pageSize')" :options="sizes" /></div>
     </div>
-    <MediaFilters :ready="ready" /><div v-if="objects.data.value?.items.length" class="selection-heading"><UiCheckbox v-model="all" :label="t('selectPage')" /><span>{{ t('selectionHint') }}</span></div>
-    <p v-if="!ready && catalog.data.value" class="info-callout">{{ t('catalogBuilding') }}</p>
+    <MediaFilters /><div v-if="objects.data.value?.items.length" class="selection-heading"><UiCheckbox v-model="all" :label="t('selectPage')" /><span>{{ t('selectionHint') }}</span></div>
     <p v-if="objects.data.value?.search_mode === 'prefix' && route.query.q && (!route.query.mode || route.query.mode === 'contains')" class="field-help catalog-note">{{ t('shortSearchHint') }}</p>
     <p v-else-if="objects.data.value?.layout === 'flat'" class="field-help catalog-note">{{ t('flatResults') }}</p>
     <div v-if="objects.isPending.value" role="status"><span class="sr-only">{{ t('opening') }}</span><div v-for="i in 4" :key="i" class="skeleton-row" /></div>

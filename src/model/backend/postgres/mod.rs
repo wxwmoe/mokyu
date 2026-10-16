@@ -14,18 +14,24 @@ mod task_tests;
 mod execution_tests;
 
 use crate::model::Error;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use std::sync::Arc;
 
 pub(crate) use connection::connect;
 
 pub(crate) struct Backend {
     pool: PgPool,
+    owner: tokio::sync::Mutex<PgConnection>,
+    single: bool,
 }
 
 impl Backend {
-    pub(crate) fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub(crate) fn new(pool: PgPool, owner: PgConnection, single: bool) -> Self {
+        Self {
+            pool,
+            owner: tokio::sync::Mutex::new(owner),
+            single,
+        }
     }
 }
 
@@ -83,8 +89,7 @@ mod lifecycle_tests;
 #[path = "../../../../tests/recovery/rewrite.rs"]
 mod rewrite_tests;
 
-fn stores(pool: PgPool) -> crate::model::Stores {
-    let backend = Arc::new(Backend::new(pool));
+fn stores(backend: Arc<Backend>) -> crate::model::Stores {
     crate::model::Stores {
         runtime: backend.clone(),
         cluster: Some(backend.clone()),
@@ -106,9 +111,7 @@ fn stores(pool: PgPool) -> crate::model::Stores {
         quota: backend.clone(),
         streams: backend.clone(),
         task_control: backend.clone(),
-        task_leases: backend.clone(),
-        stream_leases: backend.clone(),
-        storage_permits: backend.clone(),
+        task_execution: backend.clone(),
         storage_profiles: backend.clone(),
         runtime_settings: backend.clone(),
         managed_keys: backend.clone(),

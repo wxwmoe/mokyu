@@ -1,5 +1,5 @@
 use super::{Backend, migration};
-use crate::model::{PackingStore, packing::RewriteTask, task::Execution};
+use crate::model::{ChunkStore, PackingStore, packing::RewriteTask, task::Execution};
 use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -20,7 +20,7 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
             .is_none()
     );
     migration::run(&pool, &mut *pool.acquire().await?, false).await?;
-    let backend = Backend::new(pool.clone());
+    let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let storage = Uuid::new_v4();
     let task = Uuid::new_v4();
     let token = Uuid::new_v4();
@@ -55,6 +55,17 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
         }
         packs.push(id);
     }
+    assert_eq!(backend.rewrite_counts(storage, "none", None).await?, (0, 0));
+    sqlx::query("UPDATE storage_profiles SET compression_enabled=TRUE WHERE storage_id=$1")
+        .bind(storage)
+        .execute(&pool)
+        .await?;
+    assert_eq!(backend.rewrite_counts(storage, "none", None).await?, (1, 4));
+    sqlx::query("UPDATE storage_profiles SET compression_enabled=FALSE WHERE storage_id=$1")
+        .bind(storage)
+        .execute(&pool)
+        .await?;
+    assert_eq!(backend.rewrite_counts(storage, "none", None).await?, (0, 0));
     sqlx::query("UPDATE storage_profiles SET compression_level=CASE WHEN compression_level=5 THEN 6 ELSE 5 END WHERE storage_id=$1")
         .bind(storage).execute(&pool).await?;
     let mut job = RewriteTask {
@@ -76,6 +87,13 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
         vec![chunks[4], chunks[0]]
     );
     assert_eq!(current, vec![chunks[0], chunks[4]]);
+
+    sqlx::query("UPDATE chunks SET pack_id=NULL WHERE id=$1")
+        .bind(chunks[4])
+        .execute(&pool)
+        .await?;
+    let (_, _, current) = backend.rewrite_pack_inputs(packs[0]).await?;
+    assert_eq!(current, vec![chunks[0]]);
 
     job.shards = 2;
     job.shard = chunks[0] % 2;
@@ -123,5 +141,106 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
             .collect::<Vec<_>>(),
         vec![chunks[4], chunks[0]]
     );
+    assert_eq!(
+        backend.rewrite_pack_inputs(new.id).await?.2,
+        vec![chunks[0]]
+    );
+    let detached: Option<i64> = sqlx::query_scalar("SELECT pack_id FROM chunks WHERE id=$1")
+        .bind(chunks[4])
+        .fetch_one(&pool)
+        .await?;
+    assert!(detached.is_none());
+    job.shards = 2;
+    let (parent, existing) = backend.start_rewrite(&job, None).await?;
+    assert!(!existing);
+    let children: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks WHERE parent_task_id=$1")
+        .bind(parent)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(children, 2);
+    assert_eq!(backend.start_rewrite(&job, None).await?, (parent, true));
+    sqlx::query("UPDATE tasks SET state='completed' WHERE id=$1 OR parent_task_id=$1")
+        .bind(parent)
+        .execute(&pool)
+        .await?;
+
+    let single = Backend::new(pool.clone(), pool.acquire().await?.detach(), true);
+    job.shards = 1;
+    let (id, existing) = single.start_rewrite(&job, None).await?;
+    assert!(!existing);
+    assert_eq!(single.start_rewrite(&job, None).await?, (id, true));
+    let detail: serde_json::Value = sqlx::query_scalar("SELECT detail FROM tasks WHERE id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(detail["execution_mode"], "single");
+    assert!(detail.get("role").is_none() && detail.get("shards").is_none());
+    assert_eq!(detail["upper_chunk_id"], chunks[4]);
+    let children: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks WHERE parent_task_id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(children, 0);
+    sqlx::query("UPDATE tasks SET state='completed' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    job.shards = 0;
+    let (empty, _) = single.start_rewrite(&job, None).await?;
+    let state: String = sqlx::query_scalar("SELECT state FROM tasks WHERE id=$1")
+        .bind(empty)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(state, "completed");
+    let execution = Execution {
+        id: Uuid::new_v4(),
+        token: Uuid::new_v4(),
+    };
+    sqlx::query(
+        "INSERT INTO tasks(id,task_type,state,lease_token) VALUES($1,'rewrite','running',$2)",
+    )
+    .bind(execution.id)
+    .bind(execution.token)
+    .execute(&pool)
+    .await?;
+    let mut physical = backend.ready_chunk(chunks[2]).await?.unwrap();
+    let original_encoding = physical.encoding_id;
+    physical.location_id = Uuid::new_v4();
+    let first = backend.prepare_encoding(&physical, execution).await?;
+    assert!(first > original_encoding);
+    physical.location_id = Uuid::new_v4();
+    let second = backend.prepare_encoding(&physical, execution).await?;
+    assert!(second > first);
+    physical.location_id = Uuid::new_v4();
+    assert!(
+        backend
+            .prepare_encoding(
+                &physical,
+                Execution {
+                    id: execution.id,
+                    token: Uuid::new_v4()
+                }
+            )
+            .await
+            .is_err()
+    );
+    sqlx::query(
+        "UPDATE tasks SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+    )
+    .bind(execution.id)
+    .execute(&pool)
+    .await?;
+    assert!(
+        backend
+            .prepare_encoding(&physical, execution)
+            .await
+            .is_err()
+    );
+    let prepared: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM chunk_encodings WHERE owner_task=$1")
+            .bind(execution.id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(prepared, 2);
     Ok(())
 }

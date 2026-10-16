@@ -44,7 +44,10 @@ def task(policy='pack'):
     wait(lambda: cli('task', 'show', job)['state'] in ('completed', 'failed', 'paused'))
     state = cli('task', 'show', job)
     assert state['state'] == 'completed', state
-    return db.execute('SELECT detail FROM tasks WHERE parent_task_id=%s', (job,)).fetchall()
+    assert db.execute('SELECT count(*) FROM tasks WHERE parent_task_id=%s', (job,)).fetchone()[0] == 0
+    assert state['detail']['storage_index'] == len(state['detail']['storages'])
+    assert 'role' not in state['detail'] and 'children' not in state['detail']
+    return state['detail']
 
 
 def profile(index, **changes):
@@ -92,12 +95,12 @@ assert s3.get_object(Bucket=bucket, Key='profile-source', Range='bytes=4000000-5
 print('PASS upload-cache packs obey the 4MiB storage limit and preserve full/Range reads', flush=True)
 
 other.put_object(Bucket=second['bucket'], Key='other-source', Body=raw)
-children = task()
-assert {row[0]['storage_id'] for row in children} == {str(ids[0])}, children
+detail = task()
+assert {row['storage_id'] for row in detail['storages']} == {str(ids[0])}, detail
 assert db.execute("SELECT count(*) FROM packs WHERE storage_id=%s AND state='ready'", (ids[1],)).fetchone()[0] == 0
 profile(1, pack_enabled=True)
-children = task()
-assert {row[0]['storage_id'] for row in children} == {str(value) for value in ids}, children
+detail = task()
+assert {row['storage_id'] for row in detail['storages']} == {str(value) for value in ids}, detail
 other_pack = db.execute("SELECT id FROM packs WHERE storage_id=%s AND state='ready'", (ids[1],)).fetchone()[0]
 other_chunk = db.execute('SELECT chunk_id FROM pack_members WHERE pack_id=%s ORDER BY ordinal LIMIT 1', (other_pack,)).fetchone()[0]
 evidence(other_pack, other_chunk, 100)
@@ -107,15 +110,15 @@ pack = db.execute("SELECT p.id FROM packs p JOIN pack_members m ON m.pack_id=p.i
 chunk = db.execute('SELECT m.chunk_id FROM pack_members m JOIN chunks c ON c.id=m.chunk_id '
                    'WHERE m.pack_id=%s ORDER BY c.raw_size LIMIT 1', (pack,)).fetchone()[0]
 evidence(pack, chunk, 6, old=True)
-children = task('range')
-assert {row[0]['storage_id'] for row in children} == {str(ids[0])}, children
+detail = task('range')
+assert {row['storage_id'] for row in detail['storages']} == {str(ids[0])}, detail
 assert db.execute('SELECT range_checked_at IS NULL FROM packs WHERE id=%s', (other_pack,)).fetchone()[0]
 assert db.execute('SELECT range_checked_at IS NULL FROM packs WHERE id=%s', (pack,)).fetchone()[0]
 print('PASS disabled storage policies, refreshed profiles, Range storage isolation and 2h evidence window', flush=True)
 
 evidence(pack, chunk, 6)
-children = task('range')
-decision = children[0][0]['last_range']
+detail = task('range')
+decision = detail['last_range']
 assert decision['pack_id'] == str(pack) and decision['applied'], decision
 assert db.execute('SELECT range_checked_at IS NULL FROM packs WHERE id=%s', (other_pack,)).fetchone()[0]
 cooldown = db.execute('SELECT extract(epoch FROM repack_after-range_split_at) FROM chunks WHERE id=%s', (chunk,)).fetchone()[0]

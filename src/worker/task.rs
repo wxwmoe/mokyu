@@ -12,7 +12,7 @@ pub(crate) async fn fence(app: &App, id: Uuid, token: Uuid) -> Result<bool> {
     } else {
         "cluster"
     };
-    app.task_leases.fence(expected, id, token).await
+    app.task_execution.fence(expected, id, token).await
 }
 
 impl App {
@@ -21,7 +21,19 @@ impl App {
         let task = self.task_control.load(id).await?;
         let parent_task = task.as_ref().is_some_and(|(parent, _, _)| *parent);
         if resume {
+            self.ensure_mode()?;
             let (_, task_type, detail) = task.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+            let mode = if self.role == "single" {
+                "single"
+            } else {
+                "cluster"
+            };
+            anyhow::ensure!(
+                detail["execution_mode"]
+                    .as_str()
+                    .is_none_or(|saved| saved == mode),
+                "cannot resume a task from a different deployment mode"
+            );
             let policy = if task_type == "pack" {
                 detail["policy"].as_str().unwrap_or("")
             } else {

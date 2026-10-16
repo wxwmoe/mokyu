@@ -11,6 +11,7 @@ pub async fn control_loop(app: Arc<App>) -> Result<()> {
             app.cluster()?
                 .heartbeat(state, "control", &app.secrets.credential_key)
                 .await?;
+            app.storage.refresh_storages().await?;
             Ok(())
         }
         .await;

@@ -28,6 +28,23 @@ pub(crate) struct StoreBackend {
     pub(crate) pack_config: Arc<crate::content::pack::Config>,
 }
 
+impl StoreBackend {
+    pub(crate) fn reuse_gates(&mut self, registry: &mut super::permits::GateRegistry) {
+        registry.retain(|_, gate| gate.strong_count() > 0);
+        for gate in [
+            &mut self.reads,
+            &mut self.writes,
+            &mut self.controls,
+            &mut self.pack,
+            &mut self.integrity,
+            &mut self.maintenance,
+            &mut self.migration,
+        ] {
+            *gate = gate.reuse(registry);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct CachePolicy {
     pub(crate) enabled: bool,

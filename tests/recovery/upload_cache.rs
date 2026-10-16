@@ -1,5 +1,5 @@
 use super::{Backend, migration};
-use crate::model::{TaskFinish, TaskLeaseStore, UploadCacheStore, task::Execution};
+use crate::model::{TaskExecutionStore, TaskFinish, UploadCacheStore, task::Execution};
 use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -20,7 +20,7 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
             .is_none()
     );
     migration::run(&pool, &mut *pool.acquire().await?, false).await?;
-    let backend = Backend::new(pool.clone());
+    let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let storage = Uuid::new_v4();
     let bucket = Uuid::new_v4();
     let stream = Uuid::new_v4();
@@ -116,7 +116,7 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
         .execute(&pool)
         .await?;
     sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,owner_task,next_retry_at) VALUES($1,$2,0,1,$3,now())").bind(ids[0]).bind(stream).bind(task).execute(&pool).await?;
-    TaskLeaseStore::finish(
+    TaskExecutionStore::finish(
         &backend,
         TaskFinish {
             execution,

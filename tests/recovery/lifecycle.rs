@@ -20,7 +20,7 @@ async fn postgres_fragment_deletion_holds_lock() -> Result<()> {
             .is_none()
     );
     migration::run(&pool, &mut *pool.acquire().await?, false).await?;
-    let backend = Backend::new(pool.clone());
+    let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let storage = Uuid::new_v4();
     let bucket = Uuid::new_v4();
     let stream = Uuid::new_v4();

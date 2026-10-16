@@ -90,20 +90,26 @@ docker exec mokyu-control mokyu cli cluster release <node-name> --confirm
 
 ## 模式切换和恢复
 
-使用 control CLI 切换数据库部署模式：
+使用当前 single 或最后一个 control 的 CLI 切换数据库部署模式，也可由管理员通过管理 API 操作：
 
 ```sh
 docker exec mokyu-control mokyu cli cluster mode cluster
 docker exec mokyu-control mokyu cli cluster mode single
 ```
 
-进入 cluster 前必须已迁移并移除所有 local storage；回到 single 前必须释放所有 enabled 节点。模式切换会递增 `deployment_mode_revision`，节点以此检测配置和数据库代际是否一致。
+1. 暂停定时维护策略，完成 queued/running/paused 任务；完成或中止上传，并执行 `cache flush` 排空已确认的暂存数据。
+2. 进入 cluster 前迁移并移除所有 local storage，配置启用的 S3 `uploads.staging_storage_id`。回到 single 前释放其他 enabled 节点；当前 control 会在成功切换时释放自己。
+3. 停止其他所有进程，包括已经 release 但尚未退出的节点；只保留执行切换的 single/control。进入维护模式并等待活动读写、GC、清理与读取租约排空。仍被引用的 multipart 暂存或待上传数据会阻止切换。
+4. 执行模式切换。服务在数据库独占运行权下更新 `deployment_mode_revision`，保留独占直到当前进程退出；旧进程停止接受数据操作和新任务，不能直接恢复服务。
+5. 停止当前进程，再按新模式启动对应角色。核对 `status --ready` 后退出维护模式，恢复需要的定时策略。
 
-角色与数据库模式不匹配时，control/single 继续提供管理入口；worker/data 只提供 `/status` 并停止调度或数据面服务。`mokyu cli status --ready` 只有在模式匹配且未处于 `recovery_required` 时才成功；群集角色还要求节点已注册。修正数据库模式、节点文件或部署配置后重启进程即可恢复。
+同一模式的重复设置不重复切换。失败任务历史保留，但不能在另一模式恢复旧任务形态；不会自动转换任务树。切换请求中断或提交结果无法确认时，当前进程保持受限，应核对数据库模式后重启。
+
+角色与数据库模式不匹配时，control/single 继续提供管理入口；worker/data 只提供 `/status` 并停止调度或数据面服务。`mokyu cli status --ready` 只有在模式匹配、没有待重启的切换且未处于 `recovery_required` 时才成功；群集角色还要求节点已注册。启动时读取的模式在当前运行权期间固定，请求无需反复查询数据库；修正数据库模式、节点文件或部署配置后须重启进程。
 
 ## 存储限制与迁移
 
-群集模式禁用 local 存储。单容器模式切换到群集模式时，Mokyu 只检查是否仍存在 local 存储，不会替部署管理员上传文件：
+群集模式禁用 local 存储。单容器模式切换到群集模式时，Mokyu 会检查存储和运行状态，不会替部署管理员上传文件：
 
 1. 手动把 local 目录中的规范 S3 文件结构迁移到目标 S3 前缀或供应商。
 2. 在 Web 或 CLI 修改 storage 的连接信息。保存时核对远端 `meta.json`；文件缺失或内容不匹配时拒绝保存。

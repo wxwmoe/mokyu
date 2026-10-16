@@ -53,7 +53,11 @@ try:
     cleanup = post('/api/v1/maintenance/cleanup/actions', {'action': 'run'})['task_id']
     done = wait(cleanup)
     assert done['created_by'] == 'tester' and done['source'] == 'web', done
-    assert db.execute('SELECT bool_and(started_at IS NOT NULL) FROM tasks WHERE parent_task_id=%s', (cleanup,)).fetchone()[0]
+    if done['detail'].get('execution_mode') == 'single':
+        assert done['started_at'] and 'role' not in done['detail']
+        assert db.execute('SELECT count(*) FROM tasks WHERE parent_task_id=%s', (cleanup,)).fetchone()[0] == 0
+    else:
+        assert db.execute('SELECT bool_and(started_at IS NOT NULL) FROM tasks WHERE parent_task_id=%s', (cleanup,)).fetchone()[0]
     assert isinstance(done['processed'], str)
     post('/api/v1/maintenance/cleanup/actions', {'action': 'pause'})
     name, password = key[:28], uuid.uuid4().hex
@@ -150,12 +154,16 @@ try:
     task = post('/api/v1/maintenance/sweep/execute', {'preview_id': sweep['id'], 'confirmation': sweep['confirmation']})['task_id']
     wait(task)
     post('/api/v1/maintenance/mode', {'enabled': False}, 204)
+    wait(post('/api/v1/integrity', {'mode': 'metadata', 'bucket': bucket, 'key': key})['task_id'])
     check = post('/api/v1/integrity', {'mode': 'metadata', 'bucket': bucket, 'key': key})['task_id']
     result = wait(check)
-    children = db.execute('SELECT id FROM tasks WHERE parent_task_id=%s', (check,)).fetchall()
-    assert len(children) == 1, children
-    check = str(children[0][0])
-    result = wait(check)
+    if result['detail'].get('role') == 'parent':
+        children = db.execute('SELECT id FROM tasks WHERE parent_task_id=%s', (check,)).fetchall()
+        assert len(children) == 1, children
+        check = str(children[0][0])
+        result = wait(check)
+    else:
+        assert db.execute('SELECT count(*) FROM tasks WHERE parent_task_id=%s', (check,)).fetchone()[0] == 0
     assert result['detail']['issues'] == 0, result
     issues = admin.get(url + f'/api/v1/tasks/{check}/issues').json()
     assert not issues['items'] and 'groups' in issues

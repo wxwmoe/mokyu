@@ -12,8 +12,28 @@ pub(super) struct Args {
         default_value = "/config/config.toml"
     )]
     pub(super) config: PathBuf,
+    /// Start in maintenance mode before recovering uploads and tasks.
+    #[arg(long)]
+    pub(super) maintenance: bool,
     #[command(subcommand)]
     pub(super) command: Option<Command>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_startup() {
+        let single = Args::try_parse_from(["mokyu", "--maintenance"]).unwrap();
+        assert!(single.maintenance && single.command.is_none());
+        let control = Args::try_parse_from(["mokyu", "control", "--maintenance"]).unwrap();
+        assert!(matches!(
+            control.command,
+            Some(Command::Control { maintenance: true })
+        ));
+        assert!(!Args::try_parse_from(["mokyu"]).unwrap().maintenance);
+    }
 }
 #[derive(Subcommand)]
 pub(super) enum Command {

@@ -66,13 +66,6 @@ pub(super) async fn write_state(path: &Path, state: &NodeState) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn try_leader(
-    app: &App,
-    key: i64,
-) -> Result<Option<Box<dyn crate::model::cluster::Leader>>> {
-    app.cluster()?.leader(key).await
-}
-
 pub(super) fn role_name(app: &App) -> Result<String> {
     app.config
         .instance

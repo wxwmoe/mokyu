@@ -42,7 +42,7 @@ pub(crate) fn run() -> Result<()> {
         _ => Role::Single,
     };
     set_process_title(role.title());
-    let start_maintenance = role.maintenance(args.command.as_ref());
+    let start_maintenance = args.maintenance || role.maintenance(args.command.as_ref());
     if let Some(Command::Cli { command }) = args.command {
         set_process_title("cli");
         return tokio::runtime::Builder::new_current_thread()

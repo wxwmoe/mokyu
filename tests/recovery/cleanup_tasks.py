@@ -51,25 +51,38 @@ def task_done(task):
     return state == 'completed'
 
 
-def check_children(parent, history_task):
-    wait(lambda: task_done(parent), 'cleanup parent did not complete')
+def check_tasks(task, history_task):
+    wait(lambda: task_done(task), 'cleanup task did not complete')
     children = db.execute('SELECT state,detail,execution_scope,target_node_id,started_at FROM tasks '
-                          'WHERE parent_task_id=%s', (parent,)).fetchall()
-    assert len(children) == len(storages) + 1, children
-    assert all(row[0] == 'completed' and row[4] is not None for row in children), children
-    history = [row for row in children if row[1].get('phase') == 'history']
-    assert len(history) == 1 and 'storage_id' not in history[0][1], children
-    assert history[0][2] == 'cluster'
-    report = history[0][1]['report']['last_run']
+                          'WHERE parent_task_id=%s', (task,)).fetchall()
+    if mode == 'single':
+        state = cli('task', 'show', task)
+        detail = state['detail']
+        assert not children and 'role' not in detail and 'children' not in detail, state
+        assert state['started_at'] and detail['storage_index'] == len(storages)
+        report = detail['report']['history']['last_run']
+        scoped = {uuid.UUID(key): value for key, value in detail['report']['storages'].items()}
+        assert state['processed'] == sum(report['deleted'].values()) + sum(value['deleted'] for value in scoped.values())
+    else:
+        assert len(children) == len(storages) + 1, children
+        assert all(row[0] == 'completed' and row[4] is not None for row in children), children
+        history = [row for row in children if row[1].get('phase') == 'history']
+        assert len(history) == 1 and 'storage_id' not in history[0][1], children
+        assert history[0][2] == 'cluster'
+        report = history[0][1]['report']['last_run']
+        scoped = {}
+        for row in children:
+            if 'storage_id' not in row[1]:
+                continue
+            storage = uuid.UUID(row[1]['storage_id'])
+            assert row[2] == ('node' if storages[storage] == 'local' else 'cluster'), row
+            if storages[storage] == 'local':
+                assert row[3] is not None, row
+            scoped[storage] = row[1]['report']
+        assert db.execute('SELECT batch_total,batch_completed FROM tasks WHERE id=%s', (task,)).fetchone() == (len(children), len(children))
+    assert scoped.keys() == storages.keys(), scoped
     assert report['last_error'] is None and report['deleted']['tasks'] >= 1, report
     assert not scalar('SELECT EXISTS(SELECT 1 FROM tasks WHERE id=%s)', (history_task,))
-    scoped = {uuid.UUID(row[1]['storage_id']): row for row in children if 'storage_id' in row[1]}
-    assert scoped.keys() == storages.keys(), children
-    for storage, row in scoped.items():
-        assert row[2] == ('node' if storages[storage] == 'local' else 'cluster'), row
-        if storages[storage] == 'local':
-            assert (row[3] is not None) == (mode == 'cluster'), row
-    assert db.execute('SELECT batch_total,batch_completed FROM tasks WHERE id=%s', (parent,)).fetchone() == (len(children), len(children))
     return scoped
 
 
@@ -151,7 +164,25 @@ def expired_task():
 
 assert not scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='cleanup' AND state IN ('queued','running','paused'))")
 cleanup_paused = scalar("SELECT paused FROM maintenance_controls WHERE policy='cleanup'")
+gc_paused = scalar('SELECT gc_paused FROM mokyu_meta')
+transition = Path(os.environ['MOKYU_TEST_FAULT_DIR']) / 'lifecycle-storage-advanced' if mode == 'single' else None
+original_profile = None
+profile_name = scalar('SELECT name FROM storages WHERE id=%s', (storage_id,))
+
+
+def set_profile(name, profile):
+    path = Path(os.environ['MOKYU_TEST_DATA']) / 'cleanup-task-profile.json'
+    path.write_text(json.dumps(profile))
+    try:
+        cli('storage', 'profile', 'set', name, str(path))
+    finally:
+        path.unlink(missing_ok=True)
+
+
 try:
+    if mode == 'single':
+        original_profile = cli('storage', 'profile', 'show', profile_name)
+        set_profile(profile_name, {**original_profile, 'maintenance_concurrency': 1})
     retired, writing, live = stream('retired'), stream('writing', True), stream('ready')
     stale_writing = stream('writing')
     leased_retired = stream('retired')
@@ -177,9 +208,21 @@ try:
                        "VALUES(%s,%s,6,now()-%s*interval '1 minute')", (staging_id, key, age))
     if cleanup_paused:
         cli('maintenance', 'resume', 'cleanup')
+    if transition:
+        transition.with_suffix('.hit').unlink(missing_ok=True)
+        transition.touch()
     parent = cli('maintenance', 'run', 'cleanup')['task_id']
-    scoped = check_children(parent, history_task)
-    assert scoped[storage_id][1]['report']['deleted'] > 0, scoped
+    if transition:
+        wait(transition.with_suffix('.hit').exists, 'history checkpoint did not advance to storage')
+        state = cli('task', 'show', parent)
+        assert state['detail']['phase'] == 'storage' and state['detail']['storage_index'] == 0
+        assert state['detail']['report']['history']['last_run']['deleted']['tasks'] >= 1
+        cli('task', 'pause', parent)
+        transition.unlink()
+        assert cli('task', 'show', parent)['state'] == 'paused'
+        cli('task', 'resume', parent)
+    scoped = check_tasks(parent, history_task)
+    assert scoped[storage_id]['deleted'] > 0, scoped
     assert scalar('SELECT count(*) FROM extents WHERE stream_id=%s', (retired,)) == 0
     assert db.execute('SELECT owner_stream,state,unreferenced_at IS NOT NULL FROM chunks WHERE id=%s', (owned,)).fetchone() == (None, 'failed', True)
     assert scalar('SELECT unreferenced_at IS NOT NULL FROM chunks WHERE id=%s', (detached,))
@@ -192,26 +235,61 @@ try:
         assert not scalar('SELECT EXISTS(SELECT 1 FROM staging_objects WHERE storage_id=%s AND object_key=%s)', (staging_id, orphan))
         assert exists(None, recent)
         assert scalar('SELECT EXISTS(SELECT 1 FROM staging_objects WHERE storage_id=%s AND object_key=%s)', (staging_id, recent))
-    for keep in (active, referenced):
+    protected = (active, referenced) if mode == 'cluster' else (referenced,)
+    for keep in protected:
         assert scalar('SELECT EXISTS(SELECT 1 FROM fragments WHERE id=%s)', (keep[0],)) and exists(*keep)
-    assert scalar('SELECT state FROM streams WHERE id=%s', (writing,)) == 'writing'
+    if mode == 'cluster':
+        assert scalar('SELECT state FROM streams WHERE id=%s', (writing,)) == 'writing'
+        assert scalar('SELECT state FROM streams WHERE id=%s', (leased_retired,)) == 'retired'
+    else:
+        assert not exists(*active), 'a synthetic lease protected an inactive single-process writer'
+        assert not scalar('SELECT EXISTS(SELECT 1 FROM streams WHERE id=%s)', (leased_retired,))
     assert not scalar('SELECT EXISTS(SELECT 1 FROM streams WHERE id=%s)', (stale_writing,))
-    assert scalar('SELECT state FROM streams WHERE id=%s', (leased_retired,)) == 'retired'
-    print('PASS cleanup task tree, history deletion, chunk reference timestamps and ' + mode + ' fragment reclamation/protection', flush=True)
+    print('PASS cleanup task scopes, history deletion, chunk reference timestamps and ' + mode + ' fragment reclamation/protection', flush=True)
 
     # A second pass finishes the now-empty stream and is safe to repeat.
     db.execute('DELETE FROM stream_leases WHERE id=%s', (read_lease,))
     history_task = expired_task()
     parent = cli('maintenance', 'run', 'cleanup')['task_id']
-    check_children(parent, history_task)
+    check_tasks(parent, history_task)
     assert not scalar('SELECT EXISTS(SELECT 1 FROM streams WHERE id=%s)', (retired,))
     assert not scalar('SELECT EXISTS(SELECT 1 FROM streams WHERE id=%s)', (leased_retired,))
-    for keep in (active, referenced):
+    for keep in protected:
         assert scalar('SELECT EXISTS(SELECT 1 FROM fragments WHERE id=%s)', (keep[0],)) and exists(*keep)
-    print('PASS periodic history child, eventual stream removal and repeat cleanup', flush=True)
+    print('PASS periodic history phase, eventual stream removal and repeat cleanup', flush=True)
+    if mode == 'single':
+        if gc_paused:
+            cli('maintenance', 'resume', 'gc')
+        if len(storages) > 1:
+            transition.with_suffix('.hit').unlink(missing_ok=True)
+            transition.touch()
+        task = cli('maintenance', 'run', 'gc')['task_id']
+        if len(storages) > 1:
+            wait(transition.with_suffix('.hit').exists, 'GC did not advance storage')
+            state = cli('task', 'show', task)
+            assert state['detail']['storage_index'] == 1 and state['detail']['report']['storages']
+            cli('task', 'pause', task)
+            name = scalar('SELECT name FROM storages WHERE id=%s', (state['detail']['storage_id'],))
+            set_profile(name, cli('storage', 'profile', 'show', name))
+            transition.unlink()
+            cli('task', 'resume', task)
+        wait(lambda: task_done(task), 'single GC did not complete')
+        state = cli('task', 'show', task)
+        reports = state['detail']['report']['storages']
+        assert state['detail']['storage_index'] == len(storages)
+        assert {uuid.UUID(key) for key in reports} == storages.keys()
+        assert state['processed'] == sum(report['chunks_reclaimed'] for report in reports.values())
+        assert not scalar('SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_task_id=%s)', (task,))
+        print('PASS single GC storage transition, profile resume and accumulated reports without children', flush=True)
 finally:
     if cleanup_paused:
         cli('maintenance', 'pause', 'cleanup')
     if mode == 'single':
+        if original_profile:
+            current = cli('storage', 'profile', 'show', profile_name)
+            set_profile(profile_name, {**original_profile, 'revision': current['revision']})
+        if gc_paused:
+            cli('maintenance', 'pause', 'gc')
         marker.unlink(missing_ok=True)
+        transition.unlink(missing_ok=True)
     db.close()

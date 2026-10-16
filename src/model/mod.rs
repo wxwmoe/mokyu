@@ -16,7 +16,6 @@ pub(crate) mod metrics;
 pub(crate) mod multipart;
 pub(crate) mod object;
 pub(crate) mod packing;
-mod permit;
 mod physical;
 mod profile;
 mod publish;
@@ -38,7 +37,7 @@ pub(crate) use authorization::{AdminGuard, AuthorizationStore};
 pub(crate) use bucket::BucketStore;
 pub(crate) use cache::UploadCacheStore;
 pub(crate) use chunk::Mapping;
-pub(crate) use chunk::{ChunkClaim, ChunkCreate, ChunkStore, FragmentSource, ReadExtent};
+pub(crate) use chunk::{ChunkCreate, ChunkStore, FragmentSource, ReadExtent};
 pub(crate) use credential::CredentialStore;
 pub(crate) use error::Error;
 pub(crate) use multipart::MultipartStore;
@@ -53,7 +52,6 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<Error> {
         .or_else(|| postgres::error(source))
 }
 pub(crate) use key::{ManagedKeyRecord, ManagedKeyStore};
-pub(crate) use permit::StoragePermitStore;
 pub(crate) use physical::{PhysicalSource, PhysicalStore};
 pub(crate) use profile::StorageProfileStore;
 pub(crate) use quota::QuotaStore;
@@ -61,8 +59,8 @@ pub(crate) use settings::{
     RuntimeSettingsStore, apply_runtime_section, load_runtime_settings, runtime_defaults,
 };
 pub(crate) use storage::{StorageRecord, StorageRecordStore};
-pub(crate) use stream::{StreamCreate, StreamLeaseStore, StreamStore, StreamTail};
-pub(crate) use task::{TaskClaim, TaskControlStore, TaskFinish, TaskLeaseStore, TaskRecord};
+pub(crate) use stream::{StreamCreate, StreamStore, StreamTail};
+pub(crate) use task::{TaskClaim, TaskControlStore, TaskExecutionStore, TaskFinish, TaskRecord};
 
 pub(crate) struct Stores {
     pub(crate) runtime: Arc<dyn runtime::RuntimeStore>,
@@ -85,9 +83,7 @@ pub(crate) struct Stores {
     pub(crate) quota: Arc<dyn QuotaStore>,
     pub(crate) streams: Arc<dyn StreamStore>,
     pub(crate) task_control: Arc<dyn TaskControlStore>,
-    pub(crate) task_leases: Arc<dyn TaskLeaseStore>,
-    pub(crate) stream_leases: Arc<dyn StreamLeaseStore>,
-    pub(crate) storage_permits: Arc<dyn StoragePermitStore>,
+    pub(crate) task_execution: Arc<dyn TaskExecutionStore>,
     pub(crate) storage_profiles: Arc<dyn StorageProfileStore>,
     pub(crate) runtime_settings: Arc<dyn RuntimeSettingsStore>,
     pub(crate) managed_keys: Arc<dyn ManagedKeyStore>,

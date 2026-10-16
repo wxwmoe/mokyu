@@ -304,22 +304,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/buckets/{bucket}/catalog": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["catalog_status"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/buckets/{bucket}/cors": {
         parameters: {
             query?: never;
@@ -1727,14 +1711,6 @@ export interface components {
             at: string;
             usage: components["schemas"]["StorageUsage"];
         };
-        CatalogStatus: {
-            current_index?: string | null;
-            last_error?: string | null;
-            phase: string;
-            scanned?: string | null;
-            /** Format: date-time */
-            updated_at: string;
-        };
         ChunkPage: {
             items: components["schemas"]["ObjectChunk"][];
             next_cursor?: string | null;
@@ -2017,7 +1993,6 @@ export interface components {
             size: string;
         };
         MediaPage: {
-            index_ready: boolean;
             items: components["schemas"]["MediaItem"][];
             layout: string;
             next_cursor?: string | null;
@@ -2340,7 +2315,6 @@ export interface components {
         ServiceStatus: {
             backend_operations: unknown;
             backend_queues: unknown;
-            catalog: unknown;
             counters: components["schemas"]["RuntimeCounter"][];
             inventory_as_of?: string | null;
             inventory_error?: string | null;
@@ -3294,27 +3268,6 @@ export interface operations {
             };
         };
     };
-    catalog_status: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                bucket: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CatalogStatus"];
-                };
-            };
-        };
-    };
     bucket_cors: {
         parameters: {
             query?: never;
@@ -3840,6 +3793,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     cluster_mode: {
@@ -3863,6 +3824,14 @@ export interface operations {
                     "application/json": components["schemas"]["ClusterStatus"];
                 };
             };
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     cluster_nodes: {
@@ -3880,6 +3849,14 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NodeView"][];
+                };
+            };
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };
@@ -3904,6 +3881,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
             };
         };
     };
@@ -3936,6 +3921,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     cluster_status: {
@@ -3953,6 +3946,14 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ClusterStatus"];
+                };
+            };
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };

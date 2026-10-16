@@ -46,6 +46,7 @@ pub(crate) trait UploadCacheStore: Send + Sync {
     async fn status(&self) -> Result<(Value, Vec<Value>)>;
     async fn flush(&self) -> Result<(Uuid, bool)>;
     async fn enqueue(&self, maximum: u64) -> Result<bool>;
+    async fn next_attempt(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>>;
     async fn pause(&self, task: Execution) -> Result<()>;
     async fn batch(
         &self,

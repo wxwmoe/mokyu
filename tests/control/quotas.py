@@ -18,6 +18,7 @@ from botocore.exceptions import ClientError
 assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
 url, endpoint = os.environ['MOKYU_TEST_WEB'], os.environ['MOKYU_TEST_ENDPOINT']
 db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
+single = db.execute('SELECT deployment_mode FROM mokyu_meta WHERE singleton').fetchone()[0] == 'single'
 command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli']
 prefix = 'quota-' + uuid.uuid4().hex[:10]
 
@@ -74,8 +75,9 @@ def writer(key, exclude=None):
 
 
 def expire_writer(stream):
-    # Advance only the canceled writer's durable lease; active writers must remain protected.
-    assert db.execute("UPDATE stream_leases SET expires_at=now()-interval '1 second' WHERE stream_id=%s AND lease_type='write'", (stream,)).rowcount == 1
+    if not single:
+        # Advance only the canceled writer's durable lease; active writers remain protected.
+        assert db.execute("UPDATE stream_leases SET expires_at=now()-interval '1 second' WHERE stream_id=%s AND lease_type='write'", (stream,)).rowcount == 1
     cli('gc', 'run')
 
 
@@ -199,7 +201,8 @@ try:
     second = hold('held', 10); wait_counts((10, 0, 20))
     second_stream = writer('held', first_stream)
     first.close(); expire_writer(first_stream); wait_counts((10, 0, 10))
-    assert db.execute("SELECT expires_at>now() FROM stream_leases WHERE stream_id=%s AND lease_type='write'", (second_stream,)).fetchone()[0]
+    assert db.execute('SELECT state FROM streams WHERE id=%s', (second_stream,)).fetchone()[0] == 'writing'
+    assert db.execute("SELECT EXISTS(SELECT 1 FROM stream_leases WHERE stream_id=%s AND lease_type='write' AND expires_at>now())", (second_stream,)).fetchone()[0] is not single
     limits(10, 15)
     denied(s3.put_object, Bucket=prefix, Key='held', Body=b'0123456789')
     second.close(); expire_writer(second_stream); wait_counts((10, 0, 0))
@@ -268,7 +271,8 @@ try:
     wait_counts((5, 0, 0))
     assert db.execute('SELECT state FROM uploads WHERE id=%s', (expired,)).fetchone()[0] == 'aborted'
     # Every writer above has ended; advance remaining rejected writes before testing full purge.
-    db.execute("UPDATE stream_leases SET expires_at=now()-interval '1 second' WHERE lease_type='write' AND stream_id IN (SELECT id FROM streams WHERE bucket_id=%s)", (bucket['id'],))
+    if not single:
+        db.execute("UPDATE stream_leases SET expires_at=now()-interval '1 second' WHERE lease_type='write' AND stream_id IN (SELECT id FROM streams WHERE bucket_id=%s)", (bucket['id'],))
     deadline = time.monotonic() + 20
     while db.execute("SELECT count(*) FROM streams WHERE bucket_id=%s AND state='writing'", (bucket['id'],)).fetchone()[0]:
         assert time.monotonic() < deadline, 'ended writers were not reclaimed'

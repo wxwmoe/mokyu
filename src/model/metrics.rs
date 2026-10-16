@@ -1,4 +1,3 @@
-use crate::model::task::Execution;
 use crate::{
     authorization::Principal,
     config::{Maintenance, MetricsSettings},
@@ -133,8 +132,6 @@ pub(crate) trait MetricsStore: Send + Sync {
         maintenance: &Maintenance,
     ) -> Result<Value>;
     async fn storage_inventory(&self, storage: Uuid) -> Result<Value>;
-    async fn start_usage(&self, node: Option<Uuid>) -> Result<Value>;
-    async fn complete_usage(&self, task: Execution) -> Result<bool>;
     async fn usage(
         &self,
         principal: &Principal,

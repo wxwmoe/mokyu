@@ -84,11 +84,15 @@ point = marker('rewrite-chunk-stored')
 try:
     job = cli('storage', 'rewrite', storage, 'start', '--confirm', preview['confirmation'])['task_id']
     wait(point.with_suffix('.hit').exists)
+    assert db.execute('SELECT count(*) FROM tasks WHERE parent_task_id=%s', (job,)).fetchone()[0] == 0
+    detail = cli('task', 'show', job)['detail']
+    assert detail['execution_mode'] == 'single' and 'role' not in detail and 'shards' not in detail
+    assert cli('storage', 'rewrite', storage, 'status')['id'] == job
     assert s3.get_object(Bucket=bucket, Key='rewrite-source')['Body'].read() == raw
     cli('task', 'pause', job)
 finally:
     point.unlink(missing_ok=True)
-wait(lambda: db.execute('SELECT count(*)=0 FROM pack_inputs p JOIN tasks t ON t.id=p.task_id WHERE t.parent_task_id=%s', (job,)).fetchone()[0])
+wait(lambda: db.execute('SELECT count(*)=0 FROM pack_inputs p JOIN tasks t ON t.id=p.task_id WHERE t.id=%s OR t.parent_task_id=%s', (job, job)).fetchone()[0])
 assert identities() == before
 assert cli('task', 'show', job)['state'] == 'paused'
 cli('task', 'resume', job)
@@ -113,6 +117,10 @@ point = marker('rewrite-pack-stored')
 try:
     job = cli('storage', 'rewrite', storage, 'start', '--key', target, '--confirm', preview['confirmation'])['task_id']
     wait(point.with_suffix('.hit').exists)
+    assert db.execute('SELECT count(*) FROM tasks WHERE parent_task_id=%s', (job,)).fetchone()[0] == 0
+    detail = cli('task', 'show', job)['detail']
+    assert detail['execution_mode'] == 'single' and 'role' not in detail and 'shards' not in detail
+    assert cli('storage', 'rewrite', storage, 'status')['id'] == job
     assert s3.get_object(Bucket=bucket, Key='rewrite-packed-source')['Body'].read() == packed_raw
     cli('maintenance', 'enable')
     os.kill(int(pid_file.read_text()), signal.SIGKILL)

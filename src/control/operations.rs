@@ -53,6 +53,9 @@ pub async fn password_hash(password: String) -> Result<String> {
     .await?
 }
 pub async fn execute_as(app: &Arc<App>, principal: &Principal, command: Command) -> Result<Value> {
+    if matches!(&command, Command::Cluster(_)) {
+        app.cluster()?;
+    }
     if !super::audit::active()
         && let Some(action) = command.audit_action()
     {
@@ -195,7 +198,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
         Command::Cluster(command) => match command {
             Cluster::Status => Ok(serde_json::to_value(app.cluster()?.status().await?)?),
             Cluster::Mode { mode } => {
-                app.cluster()?.set_mode(principal, &mode).await?;
+                app.change_mode(principal, &mode).await?;
                 Ok(json!({"mode":mode}))
             }
             Cluster::Nodes => Ok(serde_json::to_value(app.cluster()?.nodes().await?)?),
@@ -572,6 +575,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             let enabled = matches!(mode, Maintenance::Enable);
             let _coord = app.coord.lock().await;
             if !enabled {
+                app.ensure_mode()?;
                 let pending = app.maintenance_store.destructive_sweep().await?;
                 ensure!(
                     !pending,

@@ -133,11 +133,15 @@ impl DatabaseType {
 
     pub fn validate_role(self, role: &str) -> Result<()> {
         ensure!(
-            role == "single" || self == Self::Postgres,
+            role == "single" || self.supports_cluster(),
             "database backend '{}' does not support cluster mode",
             self.as_str()
         );
         Ok(())
+    }
+
+    pub fn supports_cluster(self) -> bool {
+        self == Self::Postgres
     }
 }
 

@@ -164,7 +164,6 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/projects"
                 | "/api/v1/quotas/{scope_type}/{scope_id}"
                 | "/api/v1/buckets/{bucket}/objects"
-                | "/api/v1/buckets/{bucket}/catalog"
                 | "/api/v1/buckets/{bucket}/object"
                 | "/api/v1/buckets/{bucket}/object/content"
                 | "/api/v1/buckets/{bucket}/object/thumbnail"

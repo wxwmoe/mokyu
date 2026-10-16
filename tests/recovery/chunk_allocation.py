@@ -1,19 +1,24 @@
-"""Chunk claim lifetime and retry, with synchronous storage and a 10s upload idle timeout."""
+"""Local/cross-node chunk exclusion, cancellation and retry with synchronous storage."""
 import os
+import json
+import subprocess
 import time
+import tomllib
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import psycopg
+import boto3
 from botocore.exceptions import ClientError
-from tests.integration import s3, bucket, read, error
+from tests.integration import s3, bucket, read, error, config as client_config
 
 assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
 dsn = Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip()
 faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
 prefix = 'chunk-claim-' + uuid.uuid4().hex + '-'
 db = psycopg.connect(dsn, autocommit=True)
+single = db.execute('SELECT deployment_mode FROM mokyu_meta WHERE singleton').fetchone()[0] == 'single'
 keys = []
 
 
@@ -58,7 +63,7 @@ try:
                 wait(lambda: marker.with_suffix('.hit').exists() or upload.done(), point + ' not reached')
                 assert not upload.done(), point + ' did not block'
                 row = claimed(first)
-                assert not available(row), point + ' released its database claim early'
+                assert available(row) is single, point + ' used the wrong coordination mode'
                 duplicate = pool.submit(s3.put_object, Bucket=bucket, Key=second, Body=raw)
                 time.sleep(.15)
                 assert not duplicate.done(), 'concurrent reuse bypassed the in-flight writer'
@@ -74,7 +79,71 @@ try:
         assert refs == [(row[0],), (row[0],)], refs
         assert db.execute("SELECT count(*) FROM chunks WHERE storage_id=%s AND hash=%s AND state='ready'",
                           (row[1], row[2])).fetchone() == (1,)
-        print('PASS ' + point + ' retains its claim through storage and concurrent deduplication', flush=True)
+        print('PASS ' + point + ' retains exclusive allocation and uses database claims only in cluster mode', flush=True)
+
+    if single:
+        config = tomllib.loads(Path(os.environ['MOKYU_TEST_CONFIG']).read_text())
+        assert config['instance']['database_connections'] == 2, 'fixture requires a two-connection pool'
+        marker = faults / 'chunk-allocated'
+        marker.with_suffix('.hit').unlink(missing_ok=True)
+        marker.touch()
+        batch = [prefix + 'bounded-pool-' + str(n) for n in range(2)]
+        keys.extend(batch)
+        payloads = [os.urandom(32768) for _ in batch]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            uploads = [pool.submit(s3.put_object, Bucket=bucket, Key=key, Body=raw)
+                       for key, raw in zip(batch, payloads)]
+            try:
+                wait(lambda: db.execute("SELECT count(*) FROM chunks c JOIN streams s ON s.id=c.owner_stream "
+                                        "JOIN buckets b ON b.id=s.bucket_id WHERE b.name=%s AND s.object_key=ANY(%s) "
+                                        "AND c.state='preparing'", (bucket, batch)).fetchone()[0] == 2,
+                     'independent allocations exhausted the two-connection fixture pool')
+                assert not any(upload.done() for upload in uploads)
+                error('404', s3.head_object, Bucket=bucket, Key=prefix + 'not-found')
+            finally:
+                marker.unlink(missing_ok=True)
+            for upload in uploads:
+                upload.result(timeout=20)
+        for key, raw in zip(batch, payloads):
+            assert read(key)[0] == raw
+        print('PASS two suspended allocations leave the two-connection database pool available', flush=True)
+
+        def cli(*args):
+            return json.loads(subprocess.check_output(
+                [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli', *args],
+                text=True, timeout=30))
+        name = 'claim-' + uuid.uuid4().hex[:12]
+        storage = cli('storage', 'create', name, 'local', '--init', '--key', 'blocks',
+                      '--path', str(Path(os.environ['MOKYU_TEST_DATA']) / name))
+        cli('bucket', 'create', name, '--storage', storage['id'])
+        credential = cli('cred', 'create', name)
+        other = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
+                             aws_access_key_id=credential['access_key'], aws_secret_access_key=credential['secret_key'],
+                             config=client_config)
+        key, raw = prefix + 'storage-scope', os.urandom(32768)
+        keys.append(key)
+        marker.touch()
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                uploads = [pool.submit(client.put_object, Bucket=target, Key=key, Body=raw)
+                           for client, target in ((s3, bucket), (other, name))]
+                try:
+                    wait(lambda: db.execute("SELECT count(DISTINCT c.storage_id) FROM chunks c "
+                                            "JOIN streams s ON s.id=c.owner_stream WHERE s.object_key=%s "
+                                            "AND c.state='preparing'", (key,)).fetchone()[0] == 2,
+                         'same content in different stores was serialized or reused across stores')
+                finally:
+                    marker.unlink(missing_ok=True)
+                for upload in uploads:
+                    upload.result(timeout=20)
+            assert read(key)[0] == other.get_object(Bucket=name, Key=key)['Body'].read() == raw
+            copies = db.execute('SELECT c.id,c.storage_id FROM chunks c JOIN extents e ON e.chunk_id=c.id '
+                                'JOIN objects o ON o.stream_id=e.stream_id WHERE o.object_key=%s', (key,)).fetchall()
+            assert len(copies) == 2 and copies[0][0] != copies[1][0] and copies[0][1] != copies[1][1]
+            print('PASS concurrent identical content in different stores keeps independent allocations', flush=True)
+        finally:
+            marker.unlink(missing_ok=True)
+            other.delete_object(Bucket=name, Key=key)
 
     marker = faults / 'chunk-allocated'
     marker.with_suffix('.hit').unlink(missing_ok=True)
@@ -86,7 +155,7 @@ try:
         try:
             wait(marker.with_suffix('.hit').exists, 'timeout allocation checkpoint not reached')
             row = claimed(key)
-            assert not available(row)
+            assert available(row) is single
             try:
                 upload.result(timeout=20)
             except ClientError as exc:

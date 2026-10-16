@@ -19,12 +19,12 @@ struct Waiting {
     priority: Option<Arc<AtomicUsize>>,
 }
 struct State {
+    limit: usize,
+    aging: Duration,
     active: usize,
     queues: [VecDeque<Waiting>; 3],
 }
 pub struct Gate {
-    limit: usize,
-    aging: Duration,
     state: Mutex<State>,
 }
 pub struct Permit {
@@ -34,9 +34,9 @@ impl Gate {
     pub fn new(limit: usize, aging: Duration) -> Arc<Self> {
         assert!(limit > 0);
         Arc::new(Self {
-            limit,
-            aging,
             state: Mutex::new(State {
+                limit,
+                aging,
                 active: 0,
                 queues: std::array::from_fn(|_| VecDeque::new()),
             }),
@@ -61,12 +61,12 @@ impl Gate {
             }
             state.queues[i] = kept;
         }
-        while state.active < self.limit {
+        while state.active < state.limit {
             let aged = (0..3)
                 .filter(|&i| {
                     state.queues[i]
                         .front()
-                        .is_some_and(|w| w.since.elapsed() >= self.aging)
+                        .is_some_and(|w| w.since.elapsed() >= state.aging)
                 })
                 .min_by_key(|&i| state.queues[i].front().unwrap().since);
             let Some(i) = aged.or_else(|| (0..3).find(|&i| !state.queues[i].is_empty())) else {
@@ -87,6 +87,17 @@ impl Gate {
     }
     pub fn refresh(self: &Arc<Self>) {
         self.dispatch(&mut self.state.lock().unwrap());
+    }
+    pub(crate) fn settings(&self) -> (usize, Duration) {
+        let state = self.state.lock().unwrap();
+        (state.limit, state.aging)
+    }
+    pub(crate) fn configure(self: &Arc<Self>, limit: usize, aging: Duration) {
+        assert!(limit > 0);
+        let mut state = self.state.lock().unwrap();
+        state.limit = limit;
+        state.aging = aging;
+        self.dispatch(&mut state);
     }
     pub async fn acquire_shared(
         self: &Arc<Self>,
@@ -113,7 +124,7 @@ impl Gate {
     }
     pub fn snapshot(&self) -> serde_json::Value {
         let state = self.state.lock().unwrap();
-        serde_json::json!({"limit":self.limit,"running":state.active,
+        serde_json::json!({"limit":state.limit,"running":state.active,
             "queued":{"foreground":state.queues[FOREGROUND].iter().filter(|w|!w.send.is_closed()).count(),"upload":state.queues[UPLOAD].iter().filter(|w|!w.send.is_closed()).count(),"maintenance":state.queues[MAINTENANCE].iter().filter(|w|!w.send.is_closed()).count()},
             "oldest_wait_seconds":state.queues.iter().flat_map(|q|q.iter()).filter(|w|!w.send.is_closed()).map(|w|w.since.elapsed().as_secs()).max().unwrap_or(0)})
     }

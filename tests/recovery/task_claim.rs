@@ -2,19 +2,16 @@ use super::{Backend, migration};
 use crate::{
     cluster::NodeState,
     content::codec,
-    model::{TaskClaim, TaskFinish, TaskLeaseStore, task::Execution},
+    model::{TaskClaim, TaskExecutionStore, TaskFinish, cluster::ClusterStore, task::Execution},
 };
 use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-fn claimant<'a>(node: &'a NodeState, key: &'a codec::Key, token: Uuid) -> TaskClaim<'a> {
+fn claimant(token: Uuid) -> TaskClaim<'static> {
     TaskClaim {
         class: 0,
         active: &[],
-        node: Some(node),
-        role: "worker",
-        credential_key: key,
         token,
     }
 }
@@ -38,8 +35,8 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         let mut owner = pool.acquire().await?;
         migration::run(&pool, &mut owner, false).await?;
     }
-    let first = Backend::new(pool.clone());
-    let second = Backend::new(pool.clone());
+    let first = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
+    let second = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let key = codec::Key::new("aes-256-gcm", [7; 32])?;
     let nodes = [
         NodeState {
@@ -73,8 +70,8 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         .await?;
     let tokens = [Uuid::new_v4(), Uuid::new_v4()];
     let (a, b) = tokio::join!(
-        first.claim(claimant(&nodes[0], &key, tokens[0])),
-        second.claim(claimant(&nodes[1], &key, tokens[1]))
+        first.claim_task(claimant(tokens[0]), &nodes[0], "worker", &key),
+        second.claim_task(claimant(tokens[1]), &nodes[1], "worker", &key)
     );
     let results = [a?, b?];
     assert_eq!(results.iter().filter(|id| id.is_some()).count(), 1);
@@ -82,8 +79,8 @@ async fn postgres_task_claim_recovery() -> Result<()> {
     assert_eq!(results[winner], Some(task));
     let record = first.load(task).await?;
     assert_eq!(record.state, "running");
-    assert_eq!(record.lease_token, Some(tokens[winner]));
-    assert!(!first.renew(task, tokens[1 - winner]).await?);
+    assert_eq!(record.execution_token, Some(tokens[winner]));
+    assert!(!first.renew_task(task, tokens[1 - winner]).await?);
 
     let bucket = Uuid::new_v4();
     let stream = Uuid::new_v4();
@@ -101,8 +98,8 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         .bind(task)
         .execute(&pool)
         .await?;
-    assert_eq!(second.recover().await?, 1);
-    assert_eq!(second.recover().await?, 0);
+    assert_eq!(second.recover_tasks().await?, 1);
+    assert_eq!(second.recover_tasks().await?, 0);
     assert_eq!(first.load(task).await?.state, "queued");
     let abandoned: (String, Option<Uuid>, Option<Uuid>) =
         sqlx::query_as("SELECT state,owner_task_id,owner_lease_token FROM streams WHERE id=$1")
@@ -111,10 +108,13 @@ async fn postgres_task_claim_recovery() -> Result<()> {
             .await?;
     assert_eq!(abandoned, ("abandoned".into(), None, None));
 
-    let mut input = claimant(&nodes[0], &key, Uuid::new_v4());
+    let mut input = claimant(Uuid::new_v4());
     let active = [task];
     input.active = &active;
-    assert_eq!(first.claim(input).await?, None);
+    assert_eq!(
+        first.claim_task(input, &nodes[0], "worker", &key).await?,
+        None
+    );
     sqlx::query("UPDATE tasks SET execution_scope='node',target_node_id=$2 WHERE id=$1")
         .bind(task)
         .bind(nodes[0].node_id)
@@ -122,7 +122,7 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         .await?;
     assert_eq!(
         second
-            .claim(claimant(&nodes[1], &key, Uuid::new_v4()))
+            .claim_task(claimant(Uuid::new_v4()), &nodes[1], "worker", &key)
             .await?,
         None
     );
@@ -132,7 +132,7 @@ async fn postgres_task_claim_recovery() -> Result<()> {
     };
     assert!(
         first
-            .claim(claimant(&invalid, &key, Uuid::new_v4()))
+            .claim_task(claimant(Uuid::new_v4()), &invalid, "worker", &key)
             .await
             .is_err()
     );
@@ -143,7 +143,7 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         .await?;
     assert!(
         first
-            .claim(claimant(&nodes[0], &key, Uuid::new_v4()))
+            .claim_task(claimant(Uuid::new_v4()), &nodes[0], "worker", &key)
             .await
             .is_err()
     );
@@ -154,11 +154,13 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         .await?;
     let token = Uuid::new_v4();
     assert_eq!(
-        first.claim(claimant(&nodes[0], &key, token)).await?,
+        first
+            .claim_task(claimant(token), &nodes[0], "worker", &key)
+            .await?,
         Some(task)
     );
-    assert!(first.renew(task, token).await?);
-    assert!(!first.renew(task, tokens[winner]).await?);
+    assert!(first.renew_task(task, token).await?);
+    assert!(!first.renew_task(task, tokens[winner]).await?);
     let parent = Uuid::new_v4();
     sqlx::query("INSERT INTO tasks(id,task_type,state) VALUES($1,'integrity','queued')")
         .bind(parent)
@@ -196,5 +198,89 @@ async fn postgres_task_claim_recovery() -> Result<()> {
     first.finish(failure(resumed)).await?;
     assert_eq!(first.load(task).await?.state, "failed");
     assert_eq!(first.load(parent).await?.state, "failed");
+
+    {
+        use crate::model::TaskControlStore;
+        let local = Backend::new(pool.clone(), pool.acquire().await?.detach(), true);
+        let local_other = Backend::new(pool.clone(), pool.acquire().await?.detach(), true);
+        let task = Uuid::new_v4();
+        sqlx::query("INSERT INTO tasks(id,task_type,state) VALUES($1,'integrity','queued')")
+            .bind(task)
+            .execute(&pool)
+            .await?;
+        let tokens = [Uuid::new_v4(), Uuid::new_v4()];
+        let (a, b) = tokio::join!(
+            local.claim(claimant(tokens[0])),
+            local_other.claim(claimant(tokens[1]))
+        );
+        let claims = [a?, b?];
+        assert_eq!(claims.iter().filter(|id| id.is_some()).count(), 1);
+        let winner = claims.iter().position(|id| id.is_some()).unwrap();
+        let old = Execution {
+            id: task,
+            token: tokens[winner],
+        };
+        assert!(local.confirm(task, old.token).await?);
+        assert!(!local.confirm(task, tokens[1 - winner]).await?);
+        assert!(!local.renew_task(task, old.token).await?);
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT lease_node_id IS NULL AND lease_expires_at IS NULL FROM tasks WHERE id=$1"
+            )
+            .bind(task)
+            .fetch_one(&pool)
+            .await?
+        );
+        // Local executions survive time passing; only process recovery or controls revoke them.
+        sqlx::query("UPDATE tasks SET started_at=now()-interval '1 day',updated_at=now()-interval '1 day' WHERE id=$1")
+        .bind(task).execute(&pool).await?;
+        assert_eq!(first.recover_tasks().await?, 0);
+        assert_eq!(local.claim(claimant(Uuid::new_v4())).await?, None);
+        assert!(local.confirm(task, old.token).await?);
+        assert!(sqlx::query_scalar::<_, bool>("SELECT updated_at<now()-interval '1 hour' AND lease_expires_at IS NULL FROM tasks WHERE id=$1")
+        .bind(task).fetch_one(&pool).await?);
+        local.pause(old).await?;
+        assert!(local.change_state(task, false, true).await?);
+        let current = Execution {
+            id: task,
+            token: Uuid::new_v4(),
+        };
+        assert_eq!(local.claim(claimant(current.token)).await?, Some(task));
+        assert!(!local.confirm(task, old.token).await?);
+        local
+            .progress(old, "stale", 100, serde_json::json!({}))
+            .await?;
+        local.complete(old).await?;
+        local
+            .finish(TaskFinish {
+                execution: old,
+                reuse_seconds: 60,
+                error: Some("stale".into()),
+            })
+            .await?;
+        assert!(local.running(current).await?);
+        local
+            .progress(current, "current", 2, serde_json::json!({}))
+            .await?;
+        local.complete(current).await?;
+        local
+            .finish(TaskFinish {
+                execution: current,
+                reuse_seconds: 60,
+                error: None,
+            })
+            .await?;
+        let record = TaskExecutionStore::load(&local, task).await?;
+        assert_eq!(record.state, "completed");
+        assert_eq!(record.cursor.as_deref(), Some("current"));
+        assert_eq!(record.execution_token, None);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT processed FROM tasks WHERE id=$1")
+                .bind(task)
+                .fetch_one(&pool)
+                .await?,
+            2
+        );
+    }
     Ok(())
 }

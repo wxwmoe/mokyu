@@ -42,13 +42,14 @@ pub async fn initialize(app: &App, role: &str) -> Result<()> {
 }
 
 pub async fn recover(app: &App) -> Result<()> {
+    let cluster = app.cluster()?;
     ensure!(
         app.role == "control",
         "only a local control node can recover"
     );
     let name = role_name(app)?;
     let role = "control";
-    app.cluster()?.recover(&name, role).await?;
+    cluster.recover(&name, role).await?;
     let path = node_state_path(app);
     let _ = tokio::fs::remove_file(path).await;
     app.recovery_required

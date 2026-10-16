@@ -30,7 +30,8 @@ reply = admin.post(url + '/api/v1/auth/login', headers={'Origin': url}, json={'u
 admin.headers.update({'Origin': url, 'X-CSRF-Token': reply.json()['csrf_token']})
 prefix = 'quota-restart-' + uuid.uuid4().hex[:10]
 project = admin.post(url + '/api/v1/projects', json={'name': prefix}).json()['id']
-bucket = cli('bucket', 'create', prefix)
+storage = ['--storage', cli('storage', 'show', os.environ['MOKYU_TEST_STORAGE'])['id']] if 'MOKYU_TEST_STORAGE' in os.environ else []
+bucket = cli('bucket', 'create', prefix, *storage)
 db.execute('UPDATE buckets SET project_id=%s WHERE id=%s', (project, bucket['id']))
 credential = cli('cred', 'create', prefix)
 s3 = boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',

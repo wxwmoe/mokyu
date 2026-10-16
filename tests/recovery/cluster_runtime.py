@@ -5,6 +5,7 @@ import os
 import time
 import tomllib
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import boto3
@@ -23,7 +24,7 @@ deployment_key = tomllib.loads(Path(fixture['config']).read_text())['instance'][
 credentials = json.loads(Path(fixture['credentials']).read_text())
 s3 = boto3.client('s3', endpoint_url=fixture['data'], region_name='us-east-1',
                   aws_access_key_id=credentials['access_key'], aws_secret_access_key=credentials['secret_key'],
-                  config=Config(s3={'addressing_style': 'path'}, request_checksum_calculation='when_required'))
+                  config=Config(signature_version='s3v4', s3={'addressing_style': 'path'}, request_checksum_calculation='when_required'))
 
 
 def wait(predicate, timeout=60):
@@ -152,6 +153,17 @@ elif phase == 'runtime':
     status = rpc({'Status': {'ready': True}})
     assert status['deployment_mode'] == 'cluster' and not status['mode_mismatch']
     assert 0 <= status['db_pool_idle'] <= status['db_pool_size']
+    def listeners():
+        return db.execute("SELECT pid FROM pg_stat_activity WHERE datname=current_database() "
+                          "AND rtrim(query, ';') IN ('LISTEN \"mokyu_storage_profiles\"', 'LISTEN \"mokyu_tasks\"')").fetchall()
+    wait(lambda: len(listeners()) == 5)
+    previous = listeners()
+    for (pid,) in previous:
+        db.execute('SELECT pg_terminate_backend(%s)', (pid,))
+    wait(lambda: len(listeners()) == 5 and not set(previous).intersection(listeners()), 30)
+    observer = psycopg.connect(Path(fixture['dsn']).read_text(), autocommit=True)
+    observer.execute('LISTEN mokyu_storage_profiles')
+    observer.execute('LISTEN mokyu_tasks')
     seen = dict(db.execute('SELECT id,last_seen_at FROM nodes WHERE enabled').fetchall())
     wait(lambda: all(stamp > seen[id] for id, stamp in db.execute('SELECT id,last_seen_at FROM nodes WHERE enabled').fetchall()), 25)
     name = db.execute('SELECT name FROM storages WHERE id=%s', (fixture['storage'],)).fetchone()[0]
@@ -185,12 +197,15 @@ elif phase == 'runtime':
                           'JOIN packs p ON p.id=c.pack_id WHERE b.name=%s AND o.object_key=%s',
                           (fixture['bucket'], key)).fetchone()[0]
         assert s3.get_object(Bucket=fixture['bucket'], Key=key)['Body'].read() == payload['raw']
+        channels = {notice.channel for notice in observer.notifies(timeout=.5)}
+        assert channels == {'mokyu_storage_profiles', 'mokyu_tasks'}, channels
     finally:
+        observer.close()
         current = admin.get(profile_url, timeout=15).json()
         reply = admin.put(profile_url, json={**original, 'revision': current['revision']}, timeout=20)
         assert reply.status_code == 200
         s3.delete_object(Bucket=fixture['bucket'], Key=key)
-    print('PASS runtime status, live heartbeats and cross-node profile changes preserve compressed chunk/pack bytes', flush=True)
+    print('PASS listener reconnection, runtime status, heartbeats and cross-node profiles preserve compressed chunk/pack bytes', flush=True)
 elif phase == 'execution':
     admin = login()
     directories = {role: Path('/data/cluster') / role / 'faults' for role in ('data', 'worker')}
@@ -261,6 +276,191 @@ elif phase == 'execution':
         assert admin.put(profile_url, json={**original, 'revision': current['revision']}, timeout=20).status_code == 200
         s3.delete_object(Bucket=fixture['bucket'], Key=key)
     print('PASS actual data/worker handoff rejects stale publication and cleanup; resumed pack retains full and Range bytes', flush=True)
+elif phase == 'usage':
+    admin = login()
+    def latest():
+        row = db.execute("SELECT id FROM tasks WHERE task_type='usage' AND parent_task_id IS NULL ORDER BY created_at DESC LIMIT 1").fetchone()
+        return str(row[0]) if row else None
+    task = wait(latest)
+    complete(admin, task)
+    storages = {str(row[0]) for row in db.execute('SELECT id FROM storages WHERE enabled')}
+    children = db.execute('SELECT state,detail,processed FROM tasks WHERE parent_task_id=%s', (task,)).fetchall()
+    assert {detail['storage_id'] for _, detail, _ in children} == storages
+    assert all(state == 'completed' and count == 1 for state, _, count in children)
+    assert db.execute('SELECT batch_total,batch_completed FROM tasks WHERE id=%s', (task,)).fetchone() == (len(children), len(children))
+    inventory = rpc({'Status': {'ready': False}})['storage']
+    assert inventory['snapshot'] and inventory['last_error'] is None
+    assert 'storage_id' not in inventory['snapshot']
+    assert db.execute('SELECT count(*) FROM usage_history').fetchone()[0] > 0
+    print('PASS cluster usage children, snapshot publication, aggregate progress and persisted history', flush=True)
+elif phase == 'lifecycle':
+    admin = login()
+    original = dict(db.execute("SELECT policy,paused FROM maintenance_controls WHERE policy IN ('gc','cleanup')"))
+    storages = {str(row[0]) for row in db.execute('SELECT id FROM storages WHERE enabled')}
+    expired = uuid.uuid4()
+    db.execute("INSERT INTO tasks(id,task_type,state,updated_at) VALUES(%s,'sweep','completed',now()-interval '100 years')", (expired,))
+    try:
+        for policy in ('cleanup', 'gc'):
+            endpoint = url + '/api/v1/maintenance/' + policy + '/actions'
+            assert admin.post(endpoint, json={'action': 'resume'}, timeout=15).status_code == 200
+            reply = admin.post(endpoint, json={'action': 'run'}, timeout=20)
+            reply.raise_for_status()
+            task = reply.json()['task_id']
+            complete(admin, task)
+            children = db.execute('SELECT state,detail,started_at FROM tasks WHERE parent_task_id=%s', (task,)).fetchall()
+            assert len(children) == len(storages) + (policy == 'cleanup'), children
+            assert all(state == 'completed' and detail['role'] == 'child' and started for state, detail, started in children)
+            assert {detail['storage_id'] for _, detail, _ in children if 'storage_id' in detail} == storages
+            assert db.execute('SELECT batch_total,batch_completed FROM tasks WHERE id=%s', (task,)).fetchone() == (len(children), len(children))
+            if policy == 'cleanup':
+                history = [detail for _, detail, _ in children if detail.get('phase') == 'history']
+                assert len(history) == 1 and history[0]['report']['last_run']['deleted']['tasks'] >= 1
+                assert not db.execute('SELECT EXISTS(SELECT 1 FROM tasks WHERE id=%s)', (expired,)).fetchone()[0]
+        checkpoint = json.loads(saved.read_text())
+        assert hashlib.sha256(s3.get_object(Bucket=fixture['bucket'], Key='cluster-source')['Body'].read()).hexdigest() == checkpoint['digest']
+    finally:
+        for policy, paused in original.items():
+            assert admin.post(url + '/api/v1/maintenance/' + policy + '/actions',
+                              json={'action': 'pause' if paused else 'resume'}, timeout=15).status_code == 200
+    print('PASS cluster cleanup/history and GC children, aggregated progress, policy controls and retained data', flush=True)
+elif phase == 'rate':
+    admin = login()
+    name = db.execute('SELECT name FROM storages WHERE id=%s', (fixture['storage'],)).fetchone()[0]
+    endpoint = url + '/api/v1/storages/' + name + '/profile'
+    original = admin.get(endpoint, timeout=15).json()
+    db.execute('CREATE EXTENSION IF NOT EXISTS pg_stat_statements')
+
+    def rate_calls():
+        return db.execute("SELECT coalesce(sum(calls),0) FROM pg_stat_statements "
+                          "WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) "
+                          "AND query LIKE '%%storage_rate_state%%' AND query NOT LIKE '%%pg_stat_statements%%'").fetchone()[0]
+
+    before = rate_calls()
+    try:
+        reply = admin.put(endpoint, json={**original, 'integrity_rps': 16, 'integrity_bandwidth': '64MiB'}, timeout=15)
+        assert reply.status_code == 200
+        reply = admin.post(url + '/api/v1/integrity', json={'mode': 'full', 'bucket': fixture['bucket'], 'key': 'cluster-source'}, timeout=15)
+        assert reply.status_code == 200
+        task = reply.json()['task_id']
+        complete(admin, task)
+        checked, issues = db.execute("SELECT coalesce(sum((detail->>'chunks_checked')::bigint),0), "
+                                     "coalesce(sum((detail->>'issues')::bigint),0) FROM tasks WHERE parent_task_id=%s", (task,)).fetchone()
+        assert checked > 0 and issues == 0, (checked, issues)
+        assert rate_calls() > before
+        assert db.execute('SELECT count(*) FROM storage_rate_state WHERE storage_id=%s', (fixture['storage'],)).fetchone()[0] == 2
+    finally:
+        current = admin.get(endpoint, timeout=15).json()
+        reply = admin.put(endpoint, json={**original, 'revision': current['revision']}, timeout=15)
+        assert reply.status_code == 200
+    print('PASS cluster full integrity checks retain shared request and byte rate accounting', flush=True)
+elif phase == 'permits':
+    admin = login()
+    name = db.execute('SELECT name FROM storages WHERE id=%s', (fixture['storage'],)).fetchone()[0]
+    endpoint = url + '/api/v1/storages/' + name + '/profile'
+    reply = admin.get(endpoint, timeout=15)
+    assert reply.status_code == 200
+    original = reply.json()
+    marker = Path('/data/cluster/data/faults/pack-download')
+    try:
+        reply = admin.put(endpoint, json={**original, 'read_concurrency': 1, 'cache_enabled': False}, timeout=15)
+        assert reply.status_code == 200
+        job = rpc({'Pack': {'Run': {'mode': 'pack'}}})
+        complete(admin, job['task_id'])
+        assert db.execute("SELECT EXISTS(SELECT 1 FROM objects o JOIN extents e ON e.stream_id=o.stream_id "
+                          "JOIN chunks c ON c.id=e.chunk_id WHERE o.object_key='cluster-source' AND c.pack_id IS NOT NULL)").fetchone()[0]
+        marker.with_suffix('.hit').unlink(missing_ok=True)
+        marker.touch()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            read = pool.submit(lambda: s3.get_object(Bucket=fixture['bucket'], Key='cluster-source')['Body'].read())
+            try:
+                wait(lambda: marker.with_suffix('.hit').exists() or read.done())
+                assert not read.done(), 'pack read did not reach its shared permit barrier'
+                assert db.execute("SELECT count(*) FROM storage_permits WHERE storage_id=%s "
+                                  "AND direction='read' AND expires_at>now()", (fixture['storage'],)).fetchone()[0] == 1
+            finally:
+                marker.unlink(missing_ok=True)
+            assert hashlib.sha256(read.result(timeout=30)).hexdigest() == json.loads(saved.read_text())['digest']
+        wait(lambda: db.execute("SELECT count(*) FROM storage_permits WHERE storage_id=%s AND direction='read'",
+                                (fixture['storage'],)).fetchone()[0] == 0)
+    finally:
+        marker.unlink(missing_ok=True)
+        current = admin.get(endpoint, timeout=15).json()
+        reply = admin.put(endpoint, json={**original, 'revision': current['revision']}, timeout=15)
+        assert reply.status_code == 200
+    print('PASS cluster packed reads acquire/release the shared storage read permit and preserve bytes', flush=True)
+elif phase == 'streams':
+    from tests.recovery.stream_lifetime import run
+    run(s3, fixture['bucket'], db, Path('/data/cluster/data/faults'), lambda: rpc({'Gc': 'Run'}), False)
+    print('PASS cluster data readers and writers are protected from control-node GC by database leases', flush=True)
+elif phase == 'claims':
+    marker = Path('/data/cluster/data/faults/upload-cache-committed')
+    keys = ['claim-' + uuid.uuid4().hex for _ in range(2)]
+    raw = os.urandom(32768)
+    try:
+        marker.with_suffix('.hit').unlink(missing_ok=True)
+        marker.touch()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            upload = pool.submit(s3.put_object, Bucket=fixture['bucket'], Key=keys[0], Body=raw)
+            try:
+                wait(lambda: marker.with_suffix('.hit').exists() or upload.done())
+                assert not upload.done(), 'cluster write did not reach the persistence barrier'
+                row = db.execute('SELECT c.id,c.storage_id,c.hash FROM chunks c JOIN extents e ON e.chunk_id=c.id JOIN streams s ON s.id=e.stream_id '
+                                 'WHERE s.object_key=%s', (keys[0],)).fetchone()
+                assert row
+                with psycopg.connect(Path(fixture['dsn']).read_text()) as probe:
+                    assert not probe.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s::uuid::text || ':' || encode(%s::bytea,'hex'),734922709851001))",
+                                             (row[1], row[2])).fetchone()[0]
+                duplicate = pool.submit(s3.put_object, Bucket=fixture['bucket'], Key=keys[1], Body=raw)
+                time.sleep(.2)
+                assert not duplicate.done()
+            finally:
+                marker.unlink(missing_ok=True)
+            upload.result(timeout=30)
+            duplicate.result(timeout=30)
+        for key in keys:
+            assert s3.get_object(Bucket=fixture['bucket'], Key=key)['Body'].read() == raw
+        ids = db.execute('SELECT e.chunk_id FROM objects o JOIN extents e ON e.stream_id=o.stream_id '
+                         'WHERE o.object_key=ANY(%s)', (keys,)).fetchall()
+        assert ids == [(row[0],), (row[0],)]
+    finally:
+        marker.unlink(missing_ok=True)
+        for key in keys:
+            s3.delete_object(Bucket=fixture['bucket'], Key=key)
+    print('PASS cluster hash guard excludes another database session until persistence and preserves concurrent deduplication', flush=True)
+elif phase == 'rewrite':
+    admin = login()
+    name = db.execute('SELECT name FROM storages WHERE id=%s', (fixture['storage'],)).fetchone()[0]
+    endpoint = url + '/api/v1/storages/' + name + '/rewrite'
+    key = 'rewrite-cluster-' + uuid.uuid4().hex
+    raw = os.urandom(9 * 1024 * 1024 + 23)
+    s3.put_object(Bucket=fixture['bucket'], Key=key, Body=raw)
+    try:
+        wait(lambda: not db.execute('SELECT EXISTS(SELECT 1 FROM pending_uploads p JOIN extents e ON e.chunk_id=p.chunk_id '
+                                    'JOIN objects o ON o.stream_id=e.stream_id JOIN buckets b ON b.id=o.bucket_id '
+                                    'WHERE b.name=%s AND o.object_key=%s)', (fixture['bucket'], key)).fetchone()[0])
+        reply = admin.post(endpoint, json={'action': 'preview'}, timeout=20)
+        assert reply.status_code == 200
+        preview = reply.json()
+        assert preview['preview']['loose_chunks'] + preview['preview']['packed_chunks'] > 0
+        reply = admin.post(endpoint, json={'action': 'start', 'confirmation': preview['confirmation']}, timeout=20)
+        assert reply.status_code == 200
+        job = reply.json()
+        assert job['children'] > 1
+        parent = job['task_id']
+        assert db.execute('SELECT count(*) FROM tasks WHERE parent_task_id=%s', (parent,)).fetchone()[0] == job['children']
+        complete(admin, parent)
+        assert db.execute("SELECT bool_and(state='completed' AND detail->>'role'='child') FROM tasks WHERE parent_task_id=%s",
+                          (parent,)).fetchone()[0]
+        reply = admin.post(endpoint, json={'action': 'status'}, timeout=20)
+        assert reply.status_code == 200 and reply.json()['id'] == parent
+        assert s3.get_object(Bucket=fixture['bucket'], Key=key)['Body'].read() == raw
+        assert s3.get_object(Bucket=fixture['bucket'], Key=key, Range='bytes=999-9999')['Body'].read() == raw[999:10000]
+        reply = admin.post(endpoint, json={'action': 'preview'}, timeout=20)
+        assert reply.status_code == 200
+        assert reply.json()['preview']['loose_chunks'] == reply.json()['preview']['packed_chunks'] == 0
+    finally:
+        s3.delete_object(Bucket=fixture['bucket'], Key=key)
+    print('PASS cluster rewrite retains shards, task lookup and full/Range bytes', flush=True)
 elif phase == 'final':
     checkpoint = json.loads(saved.read_text())
     assert rpc({'Status': {'ready': True}})['node_registered']

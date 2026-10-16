@@ -1,7 +1,7 @@
 use crate::{
     config,
     content::codec::{Chunk, MAX},
-    model::{ChunkClaim, ChunkCreate, ManagedKeyRecord},
+    model::{ChunkCreate, ManagedKeyRecord},
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -76,11 +76,12 @@ impl App {
         };
         let _guard = mutex.lock().await;
         let (algorithm, key_id) = self.store_encoding(storage_id).await?;
-        let ChunkClaim {
-            chunk: c,
-            reused,
-            guard: _claim,
-        } = self
+        let _claim = if self.role == "single" {
+            None
+        } else {
+            Some(self.cluster()?.claim_chunk(storage_id, &hash).await?)
+        };
+        let (c, reused) = self
             .chunks
             .allocate(ChunkCreate {
                 storage: storage_id,

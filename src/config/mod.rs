@@ -141,4 +141,49 @@ mod tests {
 
         assert!(DatabaseType::Postgres.validate_role("data").is_ok());
     }
+
+    #[test]
+    fn compatible_backends_exclude_cluster_settings() {
+        let file: FileConfig =
+            toml::from_str("[database]\nhost='database'\nname='mokyu'\nuser='mokyu'").unwrap();
+        let mut config = file.into_config();
+        for backend in [DatabaseType::Postgres] {
+            config.database.backend = backend;
+            let defaults = crate::model::runtime_defaults(&config);
+            let uploads = &defaults
+                .iter()
+                .find(|(section, _)| *section == "uploads")
+                .unwrap()
+                .1;
+            assert_eq!(
+                uploads.get("staging_storage_id").is_some(),
+                backend.supports_cluster()
+            );
+            assert_eq!(
+                uploads.get("staging_bytes_limit").is_some(),
+                backend.supports_cluster()
+            );
+            let mut restored = config.clone();
+            for (section, value) in defaults {
+                crate::model::apply_runtime_section(&mut restored, section, value).unwrap();
+            }
+            for key in ["staging_storage_id", "staging_bytes_limit"] {
+                let result = crate::model::apply_runtime_section(
+                    &mut restored,
+                    "uploads",
+                    serde_json::json!({key: null}),
+                );
+                assert_eq!(result.is_ok(), backend.supports_cluster());
+            }
+            restored.uploads.staging_bytes_limit = Some("1GiB".into());
+            assert_eq!(restored.validate().is_ok(), backend.supports_cluster());
+            for role in ["control", "worker", "data"] {
+                assert_eq!(
+                    backend.validate_role(role).is_ok(),
+                    backend.supports_cluster()
+                );
+            }
+            assert!(backend.validate_role("single").is_ok());
+        }
+    }
 }

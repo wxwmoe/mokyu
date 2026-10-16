@@ -1,22 +1,43 @@
-use super::{migration, queries};
+use super::{Backend, migration, queries, transactions};
 use crate::config::{Budget, Config, Secrets};
 use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 
-struct RuntimeOwner(PgConnection);
+struct RuntimeOwner(std::sync::Arc<Backend>);
 
 #[async_trait::async_trait]
 impl crate::model::runtime::Owner for RuntimeOwner {
     async fn check(&mut self) -> Result<()> {
-        queries::health().execute(&mut self.0).await?;
+        queries::health()
+            .execute(&mut *self.0.owner.lock().await)
+            .await?;
         Ok(())
     }
+}
+
+pub(super) async fn set_mode(
+    backend: &Backend,
+    principal: &crate::authorization::Principal,
+    mode: &str,
+) -> Result<()> {
+    let mut owner = backend.owner.lock().await;
+    let exclusive = queries::claim_runtime(true).fetch_one(&mut *owner).await?;
+    ensure!(
+        exclusive,
+        "stop every other runtime before changing deployment mode"
+    );
+    let result = transactions::set_deployment_mode(&backend.pool, principal, mode).await;
+    if result.is_err() {
+        queries::release_runtime().fetch_one(&mut *owner).await?;
+    }
+    // Keep exclusive ownership until restart, including the control process.
+    result
 }
 
 struct ProfileListener(sqlx::postgres::PgListener);
 
 #[async_trait::async_trait]
-impl crate::model::profile::ProfileChanges for ProfileListener {
+impl crate::model::cluster::ProfileChanges for ProfileListener {
     async fn next(&mut self) -> Result<uuid::Uuid> {
         loop {
             let notification = self.0.recv().await?;
@@ -33,7 +54,7 @@ impl crate::model::profile::ProfileChanges for ProfileListener {
 
 pub(super) async fn profile_changes(
     pool: &PgPool,
-) -> Result<Box<dyn crate::model::profile::ProfileChanges>> {
+) -> Result<Box<dyn crate::model::cluster::ProfileChanges>> {
     let mut listener = sqlx::postgres::PgListener::connect_with(pool).await?;
     listener
         .listen("mokyu_storage_profiles")
@@ -48,6 +69,7 @@ pub(super) async fn listen_tasks(
 ) -> Result<()> {
     let mut listener = sqlx::postgres::PgListener::connect_with(pool).await?;
     listener.listen("mokyu_tasks").await?;
+    wake.notify_waiters();
     loop {
         listener.recv().await?;
         wake.notify_waiters();
@@ -149,5 +171,9 @@ pub async fn connect(
             .all(|id| secrets.key_for_id(Some(*id)).is_some()),
         "database is missing a historical chunk key"
     );
-    Ok((super::stores(pool), Box::new(RuntimeOwner(owner))))
+    let backend = std::sync::Arc::new(Backend::new(pool, owner, role == "single"));
+    Ok((
+        super::stores(backend.clone()),
+        Box::new(RuntimeOwner(backend)),
+    ))
 }

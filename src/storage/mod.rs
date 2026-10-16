@@ -8,6 +8,7 @@ pub(crate) mod location;
 pub(crate) mod model;
 pub(crate) mod permits;
 pub(crate) mod profile;
+mod rate;
 pub(crate) mod resource_gate;
 pub(crate) mod target;
 
@@ -41,7 +42,7 @@ pub struct Storage {
     pub access: Arc<crate::status::access::Access>,
     maintenance: Arc<std::sync::atomic::AtomicBool>,
     physical: Arc<dyn crate::model::PhysicalStore>,
-    permit_store: Arc<dyn crate::model::StoragePermitStore>,
+    cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
     profile_store: Arc<dyn crate::model::StorageProfileStore>,
     managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
     record_store: Arc<dyn crate::model::StorageRecordStore>,
@@ -55,7 +56,9 @@ pub struct Storage {
     inspection: tokio::sync::Mutex<()>,
     targets: RwLock<HashMap<Uuid, Arc<StoreBackend>>>,
     store_defaults: (usize, usize, usize),
-    store_aging: Duration,
+    store_gates: Mutex<GateRegistry>,
+    integrity_rates: Mutex<HashMap<Uuid, rate::IntegrityRate>>,
+    refresh: tokio::sync::Mutex<()>,
     permit_holder: Uuid,
     pub storage_id: Option<Uuid>,
     pub disk: Arc<Disk>,
@@ -94,16 +97,15 @@ pub struct Storage {
 async fn build_store(
     options: StoreOptions,
     secrets: &Secrets,
-    permit_store: &Arc<dyn crate::model::StoragePermitStore>,
+    cluster: &Option<Arc<dyn crate::model::cluster::ClusterStore>>,
     row: crate::model::StorageRecord,
     profile: &StorageProfile,
     base_compression: &crate::content::compression::Config,
     cpu_jobs: usize,
     default_cache_entries: usize,
     defaults: (usize, usize, usize),
-    aging: Duration,
     permit_holder: Uuid,
-) -> Result<Arc<StoreBackend>> {
+) -> Result<StoreBackend> {
     let crate::model::StorageRecord {
         id,
         store_type,
@@ -137,7 +139,8 @@ async fn build_store(
         profile.compression_config(base_compression),
         cpu_jobs,
     )?);
-    Ok(Arc::new(StoreBackend {
+    let aging = Duration::from_secs(config::seconds(&profile.priority_aging)?);
+    Ok(StoreBackend {
         backend: target.backend,
         is_local,
         prefix: prefix.trim_matches('/').into(),
@@ -146,7 +149,7 @@ async fn build_store(
         identity_ready: false.into(),
         identity_check: tokio::sync::Mutex::new(()),
         reads: StoreGate::new(
-            permit_store,
+            cluster,
             id,
             "read",
             profile.read_concurrency.map_or(defaults.0, |n| n as usize),
@@ -155,7 +158,7 @@ async fn build_store(
             permit_holder,
         ),
         writes: StoreGate::new(
-            permit_store,
+            cluster,
             id,
             "upload",
             profile
@@ -166,7 +169,7 @@ async fn build_store(
             permit_holder,
         ),
         controls: StoreGate::new(
-            permit_store,
+            cluster,
             id,
             "control",
             profile
@@ -177,7 +180,7 @@ async fn build_store(
             permit_holder,
         ),
         pack: StoreGate::new(
-            permit_store,
+            cluster,
             id,
             "pack",
             profile.pack_concurrency.max(1) as usize,
@@ -186,7 +189,7 @@ async fn build_store(
             permit_holder,
         ),
         integrity: StoreGate::new(
-            permit_store,
+            cluster,
             id,
             "integrity",
             profile.integrity_concurrency.max(1) as usize,
@@ -195,7 +198,7 @@ async fn build_store(
             permit_holder,
         ),
         maintenance: StoreGate::new(
-            permit_store,
+            cluster,
             id,
             "maintenance",
             profile
@@ -207,7 +210,7 @@ async fn build_store(
             permit_holder,
         ),
         migration: StoreGate::new(
-            permit_store,
+            cluster,
             id,
             "migration",
             profile
@@ -238,7 +241,7 @@ async fn build_store(
             .map(config::cache_bytes)
             .transpose()?,
         pack_config: Arc::new(profile.pack_config()),
-    }))
+    })
 }
 
 impl Storage {
@@ -247,7 +250,7 @@ impl Storage {
         secrets: Arc<Secrets>,
         budget: &Budget,
         physical: Arc<dyn crate::model::PhysicalStore>,
-        permit_store: Arc<dyn crate::model::StoragePermitStore>,
+        cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
         profile_store: Arc<dyn crate::model::StorageProfileStore>,
         managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
         record_store: Arc<dyn crate::model::StorageRecordStore>,
@@ -255,6 +258,7 @@ impl Storage {
         cluster_mode: bool,
         use_target: bool,
     ) -> Result<Self> {
+        let cluster = if cluster_mode { cluster } else { None };
         let pack_units = budget.pack_memory_units;
         let mut compression = c.local_compression.clone();
         compression.context_idle_timeout = c.instance.compression_idle_timeout.clone();
@@ -305,29 +309,28 @@ impl Storage {
         let storage_id = rows.first().map(|row| row.id);
         let permit_holder = Uuid::new_v4();
         let mut targets = HashMap::with_capacity(rows.len());
+        let mut store_gates = GateRegistry::new();
         for row in rows {
             let id = row.id;
             let profile = profile_store
                 .load(id)
                 .await
                 .with_context(|| format!("storage profile is missing for {id}"))?;
-            targets.insert(
-                id,
-                build_store(
-                    StoreOptions::from_profile(&profile)?,
-                    &secrets,
-                    &permit_store,
-                    row,
-                    &profile,
-                    &compression,
-                    budget.cpu_jobs,
-                    c.instance.cache_entries.unwrap_or(budget.cache_entries),
-                    defaults,
-                    aging,
-                    permit_holder,
-                )
-                .await?,
-            );
+            let mut backend = build_store(
+                StoreOptions::from_profile(&profile)?,
+                &secrets,
+                &cluster,
+                row,
+                &profile,
+                &compression,
+                budget.cpu_jobs,
+                c.instance.cache_entries.unwrap_or(budget.cache_entries),
+                defaults,
+                permit_holder,
+            )
+            .await?;
+            backend.reuse_gates(&mut store_gates);
+            targets.insert(id, Arc::new(backend));
         }
         let s = Self {
             maintenance,
@@ -335,7 +338,7 @@ impl Storage {
                 budget.cache_entries.clamp(128, 8192),
             )),
             physical,
-            permit_store,
+            cluster,
             profile_store,
             managed_keys,
             record_store,
@@ -349,7 +352,9 @@ impl Storage {
             inspection: tokio::sync::Mutex::new(()),
             targets: RwLock::new(targets),
             store_defaults: defaults,
-            store_aging: aging,
+            store_gates: Mutex::new(store_gates),
+            integrity_rates: Mutex::new(HashMap::new()),
+            refresh: tokio::sync::Mutex::new(()),
             permit_holder,
             storage_id,
             disk,
@@ -462,6 +467,33 @@ impl Storage {
     pub(crate) fn pack_config(&self, storage: Uuid) -> Result<Arc<crate::content::pack::Config>> {
         Ok(self.store_backend(storage)?.pack_config.clone())
     }
+    pub(crate) fn acquire_integrity_rate(
+        &self,
+        storage: Uuid,
+        request_rate: Option<f64>,
+        byte_rate: Option<f64>,
+        requests: f64,
+        bytes: f64,
+    ) -> Result<bool> {
+        let targets = self.targets.read().unwrap();
+        ensure!(
+            targets.contains_key(&storage),
+            "integrity storage is not enabled"
+        );
+        Ok(self
+            .integrity_rates
+            .lock()
+            .unwrap()
+            .entry(storage)
+            .or_default()
+            .acquire(
+                request_rate,
+                byte_rate,
+                requests,
+                bytes,
+                std::time::Instant::now(),
+            ))
+    }
     pub(crate) async fn pack_permit(
         &self,
         storage_id: Uuid,
@@ -482,6 +514,7 @@ impl Storage {
         }
     }
     pub async fn refresh_store(&self, storage_id: Uuid) -> Result<()> {
+        let _refresh = self.refresh.lock().await;
         let row = self.record_store.enabled_by_id(storage_id).await?;
         let backend = if let Some(row) = row {
             let profile = self
@@ -493,14 +526,13 @@ impl Storage {
                 build_store(
                     StoreOptions::from_profile(&profile)?,
                     &self.secrets,
-                    &self.permit_store,
+                    &self.cluster,
                     row,
                     &profile,
                     &self.base_compression,
                     self.cpu_jobs,
                     self.max_entries,
                     self.store_defaults,
-                    self.store_aging,
                     self.permit_holder,
                 )
                 .await?,
@@ -509,10 +541,12 @@ impl Storage {
             None
         };
         let mut targets = self.targets.write().unwrap();
-        if let Some(backend) = backend {
-            targets.insert(storage_id, backend);
+        if let Some(mut backend) = backend {
+            backend.reuse_gates(&mut self.store_gates.lock().unwrap());
+            targets.insert(storage_id, Arc::new(backend));
         } else {
             targets.remove(&storage_id);
+            self.integrity_rates.lock().unwrap().remove(&storage_id);
         }
         Ok(())
     }
@@ -531,9 +565,8 @@ impl Storage {
                 self.refresh_store(*id).await?;
             }
         }
-        let mut targets = self.targets.write().unwrap();
         for id in known.keys().filter(|id| !revisions.contains_key(id)) {
-            targets.remove(id);
+            self.refresh_store(*id).await?;
         }
         Ok(())
     }
@@ -801,7 +834,9 @@ impl Storage {
         Ok(id)
     }
     async fn claim_staging(&self, storage_id: Uuid, key: &str, bytes: u64) -> Result<()> {
-        self.physical
+        self.cluster
+            .as_ref()
+            .context("shared staging requires cluster mode")?
             .claim_staging(
                 storage_id,
                 key,
@@ -811,7 +846,11 @@ impl Storage {
             .await
     }
     async fn release_staging(&self, storage_id: Uuid, key: &str) -> Result<()> {
-        self.physical.release_staging(storage_id, key).await?;
+        self.cluster
+            .as_ref()
+            .context("shared staging requires cluster mode")?
+            .release_staging(storage_id, key)
+            .await?;
         Ok(())
     }
     async fn put_staged(&self, storage_id: Uuid, key: &str, data: Bytes) -> Result<()> {
@@ -910,7 +949,10 @@ impl Storage {
         self.disk.remove_fragment(id).await
     }
     pub(crate) async fn reconcile_staging(&self, storage_id: Option<Uuid>) -> Result<()> {
-        let rows: Vec<(Uuid, String)> = self.physical.stale_staging(storage_id).await?;
+        let Some(cluster) = &self.cluster else {
+            return Ok(());
+        };
+        let rows: Vec<(Uuid, String)> = cluster.stale_staging(storage_id).await?;
         for (storage_id, key) in rows {
             if let Err(error) = self.delete_staged(storage_id, &key).await {
                 tracing::warn!(%storage_id, %key, error=%error, "orphan staging object cleanup failed");
@@ -938,13 +980,14 @@ impl Storage {
         compressed: bool,
     ) -> Result<Option<UploadPin>> {
         let policy = self.local_cache(c.storage_id);
+        let id = cache::cache_id(c);
         if !self.cluster_mode && (!policy.enabled || !policy.upload_cache) {
             return Ok(None);
         }
         if self.cluster_mode {
             let storage_id = self.shared_staging_id()?;
             let raw = self.decode_staged_cache(c, data, compressed).await?;
-            let key = format!("{STAGING_PREFIX}pending/{}", c.location_id.simple());
+            let key = format!("{STAGING_PREFIX}pending/{}", id.simple());
             self.put_staged(storage_id, &key, raw.clone()).await?;
             return Ok(Some(UploadPin {
                 _pin: None,
@@ -958,7 +1001,6 @@ impl Storage {
         }
         let permit = self.fills.clone().acquire_owned().await?;
         let storage = self.clone();
-        let id = c.location_id;
         tokio::spawn(async move {
             let _permit = permit;
             storage
@@ -1178,6 +1220,8 @@ impl Storage {
         let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
         let size = encoded.len();
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("storage-put-permitted").await;
         let result = target
             .backend
             .put(
@@ -1573,6 +1617,8 @@ impl Storage {
         let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
         let size = data.len() as u64;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("storage-put-permitted").await;
         let result = target.backend.put(path, Bytes::from(data).into()).await;
         operation.finish(result.is_err());
         result?;
@@ -1669,8 +1715,7 @@ impl Storage {
                     let memory = self.pack_memory(p.payload_size()?).await?;
                     let read_permit = target
                         .reads
-                        .local
-                        .acquire_shared(Some(lock.priority.clone()))
+                        .acquire_with_priority(Some(lock.priority.clone()))
                         .await?;
                     #[cfg(feature = "fault-injection")]
                     crate::faults::point("pack-download").await;

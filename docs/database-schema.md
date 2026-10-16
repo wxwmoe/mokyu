@@ -4,6 +4,8 @@ PostgreSQL 保存对象目录、权限、存储映射、任务和运行状态；
 
 全新安装按编号执行全部迁移，已发布迁移不可修改。单容器模式和群集模式使用同一套表；群集中的 control、worker、data 共享数据库，但每个节点保留独立 `instance.data_path` 和 `node.json`。
 
+`stream_leases` 只用于群集的跨节点读取与写入保护。单容器通过进程内活动引用协调读写和 GC，不创建或续期 stream lease；请求取消释放引用，重启后按持久状态恢复未完成写入。`storage_permits` 也只供群集协调 storage 并发；单容器使用按 storage 和方向共享的进程内队列。
+
 ## 部署、运行设置与身份
 
 | 表 | 关键字段 | 用途 |
@@ -13,7 +15,7 @@ PostgreSQL 保存对象目录、权限、存储映射、任务和运行状态；
 | `managed_keys` | `id`、`name`、`purpose`、`key_algorithm`、`secret_encrypted`、`fingerprint`、`created_at`、`revoked_at` | 数据库生成的 access/signing/block key；密文由 deployment key 保护，block 支持 AES-256-GCM、ChaCha20-Poly1305 和无加密 |
 | `setup_tokens` | `token_hash`、`created_at`、`expires_at` | Web 首次管理员设置的一次性 token；CLI 初始化不依赖它 |
 | `web_users`、`sessions`、`api_tokens` | 用户、会话和个人 API token 字段 | Web 认证、CSRF、授权修订和会话撤销 |
-| `nodes` | `id`、`name`、`role`、`credential_encrypted`、`enabled`、`status`、`recovery_required`、`lease_expires_at`、`load_score` | control/worker/data 节点注册、凭据、状态和低频负载；节点直接连接 PostgreSQL |
+| `nodes` | `id`、`name`、`role`、`credential_encrypted`、`enabled`、`status`、`recovery_required`、`lease_expires_at` | control/worker/data 节点注册、凭据和状态；节点直接连接 PostgreSQL |
 
 单容器不创建 `nodes` 记录或 `node.json`。群集节点凭据只写入本节点 `node.json`。释放节点时会清除其凭据、回收任务 lease 并允许同名节点重新注册；部署密钥丢失或改变不能作为普通升级处理。
 
@@ -57,15 +59,24 @@ storage 连接和 profile 修改只改变后续写入及新请求的策略。存
 
 | 表 | 关键字段 | 用途 |
 | --- | --- | --- |
-| `tasks` | `task_type`、`detail.policy`、`parent_task_id`、`execution_scope`、`target_node_id`、`batch_cursor`、`batch_total`、`batch_completed`、状态和 lease 字段 | pack 任务在 detail.policy 中区分维护策略；父任务拆分为可恢复的批次子任务；不依赖本机目录的任务由所有 worker 平等领取 |
+| `tasks` | `task_type`、`detail.policy`、`cursor`、`parent_task_id`、`execution_scope`、`target_node_id`、`batch_total`、`batch_completed`、状态和执行令牌/lease 字段 | pack 任务在 detail.policy 中区分维护策略；single 在同一任务中按存储推进，群集拆分存储子任务；不依赖本机目录的群集任务由所有 worker 平等领取 |
 | `maintenance_controls`、`maintenance_previews` | `policy`、策略暂停状态、预览参数、确认指纹和 task 回执 | GC、pack、rewrite、迁移、清查和破坏性操作的安全控制 |
 | `integrity_issues`、`integrity_packs` | 巡检对象、位置、错误和共享 pack 记录 | 完整性任务只报告问题，不自动修复 |
+| `storage_rate_state` | `storage_id`、`metric`、`tokens`、`replenished_at` | 群集巡检的共享 RPS 与字节预算；单容器使用内存状态 |
 | `audit_events`、`media_operations` | actor、来源、请求、结果和幂等回执 | 管理操作审计与媒体操作幂等 |
 | `usage_summary`、`usage_history`、`runtime_samples` | 范围摘要、历史采样和进程指标 | Web/CLI 统计展示，不参与权限或配额准入 |
 
-任务在节点关闭、模式切换或 lease 过期时回到可恢复状态。涉及某个 Data 本机目录的任务固定 `target_node_id`；共享 S3、数据库和 storage profile 的任务可由任意 worker 承担。
+single 任务不设置节点或过期 lease，重启后按持久状态恢复。群集任务在节点关闭或 lease 过期时回到可恢复状态。模式切换要求非终态任务已排空；保留的失败任务在 `detail.execution_mode` 记录原模式，不能在另一模式恢复。涉及某个 Data 本机目录的任务固定 `target_node_id`；共享 S3、数据库和 storage profile 的任务可由任意 worker 承担。
 
 任务发布、游标更新和收尾校验本次领取的 lease token。重新领取后，旧执行不能提交结果或清理新执行的输入与临时来源。失败处理和临时来源回收在同一事务内完成；准备中的 pack、encoding 按 `owner_task` 建立部分索引。
+
+single 的 pack/repack/reuse/reclaim/Range/unpack 将存储列表、profile revision、当前存储和快照上界保存在任务 detail 中。存储切换与游标清空在同一事务提交，processed 累计实际处理数量。暂停、失败和重启沿用原任务；profile 版本改变时暂停，显式恢复采用当前存储的新版本。
+
+single 的 integrity 同样只创建一个任务，按各存储的对象和 chunk 上界执行 metadata/head/full 检查。问题、累计检查数、阶段和游标在同一事务保存，跨存储与重启后继续累计；任务的 issues 接口与 JSONL 报告覆盖整次巡检。群集保留按存储分派的子任务。
+
+single 的 GC 和 cleanup 在一个任务中逐存储处理有界批次，cleanup 先执行 history 阶段。detail.report 保留 history 报告和按存储累计的清理计数，processed 保留总进度；存储切换与报告保存由同一执行代次保护。群集继续使用独立 history 和 storage 子任务。
+
+single 的用量采样不创建 usage 任务：在一次刷新超时预算内依次读取部署与各存储统计，成功后一起更新本机快照，失败保留旧值并标记刷新错误。查询新权限范围仍唤醒采样，历史统计继续持久化；usage 子任务仅用于群集。
 
 ## 迁移和历史
 

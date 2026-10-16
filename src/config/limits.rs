@@ -138,6 +138,12 @@ impl Config {
             .ssl_mode
             .parse::<sqlx::postgres::PgSslMode>()
             .map_err(|_| anyhow::anyhow!("invalid database.ssl_mode"))?;
+        ensure!(
+            c.database.backend.supports_cluster()
+                || (c.uploads.staging_storage_id.is_none()
+                    && c.uploads.staging_bytes_limit.is_none()),
+            "shared staging requires PostgreSQL"
+        );
         c.backend_defaults.min_storage_seconds()?;
         for value in [
             &c.uploads.idle_timeout,

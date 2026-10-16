@@ -49,13 +49,13 @@ def inspect(key, mode, expected=()):
         assert state['state'] not in ('failed', 'paused'), state
         return state if state['state'] == 'completed' else None
     wait(finished)
-    children = db.execute('SELECT id,detail FROM tasks WHERE parent_task_id=%s', (job,)).fetchall()
-    assert len(children) == 1, children
-    child, detail = children[0]
-    codes = db.execute('SELECT code FROM integrity_issues WHERE task_id=%s', (child,)).fetchall()
+    records = db.execute("SELECT id,detail FROM tasks WHERE (id=%s OR parent_task_id=%s) AND detail ? 'issues'", (job, job)).fetchall()
+    assert len(records) == 1, records
+    task, detail = records[0]
+    codes = db.execute('SELECT code FROM integrity_issues WHERE task_id=%s', (task,)).fetchall()
     assert {row[0] for row in codes} == set(expected), (mode, detail, codes)
     assert detail['issues'] == len(codes)
-    return child
+    return task
 
 
 def profile(value):
@@ -69,6 +69,7 @@ def profile(value):
 original = cli('storage', 'profile', 'show', name)
 content = {prefix + 'chunk': os.urandom(32768), prefix + 'pack': os.urandom(6 * 1024 * 1024 + 17)}
 try:
+    profile({'upload_cache': True, 'pack_enabled': True})
     cli('storage', 'check', name)
     cli('maintenance', 'pack-creation', 'stop')
     s3.put_object(Bucket=bucket, Key=prefix + 'chunk', Body=content[prefix + 'chunk'])
@@ -117,6 +118,7 @@ try:
         assert read(prefix + suffix)[0] == content[prefix + suffix]
     print('PASS missing, truncated and corrupted physical objects are classified without changing logical data', flush=True)
 finally:
-    profile({'cache_enabled': original['cache_enabled'], 'upload_cache': original['upload_cache']})
+    profile({'cache_enabled': original['cache_enabled'], 'upload_cache': original['upload_cache'],
+             'pack_enabled': original['pack_enabled']})
     cli('maintenance', 'pack-creation', 'resume')
     db.close()

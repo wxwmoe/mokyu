@@ -71,9 +71,17 @@ impl App {
         let size = pin.size as i64;
         let timeout = config::seconds(&self.config.local_pack.upload_cache_timeout)?;
         let local = !pin.remote;
+        let local_id = if local {
+            Some(
+                crate::storage::parse_upload_cache_name(&key)
+                    .context("invalid upload cache key")?,
+            )
+        } else {
+            None
+        };
         // Protect before starting the transaction; cancellation may retain an extra pin until reconciliation.
-        if local {
-            self.storage.hold_upload(c.location_id, pin);
+        if let Some(id) = local_id {
+            self.storage.hold_upload(id, pin);
         }
         if !self
             .upload_cache
@@ -89,12 +97,15 @@ impl App {
             })
             .await?
         {
-            if local {
-                self.storage.release_upload(c.location_id);
+            if let Some(id) = local_id {
+                self.storage.release_upload(id);
             }
             return Ok(false);
         }
         drop(_coord);
+        if self.role == "single" {
+            self.wake_tasks.notify_one();
+        }
         self.seal_uploads(stream, false).await?;
         Ok(true)
     }
@@ -121,6 +132,7 @@ impl App {
     }
     pub async fn cache_flush_start(&self) -> Result<Value> {
         let _coord = self.coord.lock().await;
+        self.ensure_mode()?;
         let (id, existing) = self.upload_cache.flush().await?;
         if existing {
             return Ok(json!({"task_id":id,"existing":true}));
@@ -133,6 +145,9 @@ impl App {
             return Ok(false);
         }
         let _coord = self.coord.lock().await;
+        if self.ensure_mode().is_err() || self.maintenance.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         self.upload_cache
             .enqueue(config::bytes(&self.config.local_pack.max_size)?)
             .await

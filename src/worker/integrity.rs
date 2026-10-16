@@ -117,21 +117,46 @@ impl App {
         requests: usize,
         bytes: i64,
     ) -> Result<bool> {
-        let mut rates = Vec::new();
-        if let Some(rate) = profile.integrity_rps {
-            rates.push(("integrity_rps", rate as f64, requests as f64));
-        }
-        if let Some(rate) = profile.integrity_bandwidth.as_deref() {
-            rates.push((
-                "integrity_bandwidth",
-                config::bytes(rate)? as f64,
+        let request_rate = profile.integrity_rps.map(|rate| rate as f64);
+        let byte_rate = profile
+            .integrity_bandwidth
+            .as_deref()
+            .map(config::bytes)
+            .transpose()?
+            .map(|rate| rate as f64);
+        if self.role == "single" {
+            return self.storage.acquire_integrity_rate(
+                storage_id,
+                request_rate.or(self
+                    .config
+                    .local_integrity
+                    .requests_per_second
+                    .map(f64::from)),
+                byte_rate.or(self
+                    .config
+                    .local_integrity
+                    .bandwidth
+                    .as_deref()
+                    .map(config::bytes)
+                    .transpose()?
+                    .map(|rate| rate as f64)),
+                requests as f64,
                 bytes.max(0) as f64,
-            ));
+            );
+        }
+        let mut rates = Vec::new();
+        if let Some(rate) = request_rate {
+            rates.push(("integrity_rps", rate, requests as f64));
+        }
+        if let Some(rate) = byte_rate {
+            rates.push(("integrity_bandwidth", rate, bytes.max(0) as f64));
         }
         if rates.is_empty() {
             return Ok(true);
         }
-        self.integrity_store.acquire_rate(storage_id, &rates).await
+        self.cluster()?
+            .acquire_integrity_rate(storage_id, &rates)
+            .await
     }
 
     pub async fn integrity_start(&self, input: Request) -> Result<Value> {
@@ -155,12 +180,17 @@ impl App {
             self.current(b.id, key).await?;
         }
         let _coord = self.coord.lock().await;
-        let (parent, child_count) = self
+        self.ensure_mode()?;
+        let (task, child_count) = self
             .integrity_store
             .start(input, bucket, self.node.get().map(|node| node.node_id))
             .await?;
         self.wake_tasks.notify_waiters();
-        Ok(json!({"task_id":parent,"children":child_count}))
+        let mut result = json!({"task_id":task});
+        if self.role != "single" {
+            result["children"] = json!(child_count);
+        }
+        Ok(result)
     }
 
     pub async fn integrity_batch(
@@ -197,7 +227,11 @@ impl App {
                 .min(self.budget.read_concurrency)
                 .min(self.budget.data_slots.saturating_sub(1).max(1))
                 .min(64);
-            if d.mode != Mode::Metadata && Instant::now() < *self.integrity_pacing.lock().unwrap() {
+            // Single mode already admits each storage against its own token balance.
+            if self.role != "single"
+                && d.mode != Mode::Metadata
+                && Instant::now() < *self.integrity_pacing.lock().unwrap()
+            {
                 return Ok(false);
             }
             let mut rows = self
@@ -247,6 +281,8 @@ impl App {
                         )
                         .await?
                     {
+                        #[cfg(feature = "fault-injection")]
+                        crate::faults::point("integrity-rate-waiting").await;
                         return Ok(false);
                     }
                 }
@@ -273,7 +309,7 @@ impl App {
                     }
                 }
                 d.bytes_checked += bytes;
-                if d.mode != Mode::Metadata {
+                if self.role != "single" && d.mode != Mode::Metadata {
                     let request_delay = profile
                         .as_ref()
                         .and_then(|p| p.integrity_rps)

@@ -379,8 +379,9 @@ impl Statistics {
 impl App {
     pub(crate) async fn usage_start(&self) -> Result<Value> {
         let _coord = self.coord.lock().await;
+        self.ensure_mode()?;
         let result = self
-            .metrics
+            .cluster()?
             .start_usage(self.node.get().map(|state| state.node_id))
             .await?;
         if result["existing"] != true {
@@ -398,7 +399,7 @@ impl App {
         let snapshot = tokio::time::timeout(timeout, self.metrics.storage_inventory(storage_id))
             .await
             .map_err(|_| anyhow::anyhow!("storage statistics refresh timed out"))??;
-        if !self.metrics.complete_usage(id).await? {
+        if !self.cluster()?.complete_usage(id).await? {
             return Ok(false);
         }
         {
@@ -416,7 +417,11 @@ pub async fn run(app: Arc<App>) -> Result<()> {
     const LEADER_KEY: i64 = 734922709851031;
     let interval = Duration::from_secs(config::seconds(&app.config.metrics.refresh_interval)?);
     loop {
-        let Some(leader) = crate::cluster::try_leader(&app, LEADER_KEY).await? else {
+        let leader = if app.role == "single" {
+            None
+        } else if let Some(leader) = app.cluster()?.leader(LEADER_KEY).await? {
+            Some(leader)
+        } else {
             tokio::time::sleep(interval).await;
             continue;
         };
@@ -426,18 +431,36 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             saved["last_attempt_at"] = json!(Utc::now());
         }
         let timeout = Duration::from_secs(config::seconds(&app.config.metrics.query_timeout)?);
-        let result = tokio::time::timeout(
-            timeout,
-            app.metrics
-                .inventory(&app.config.metrics, &app.config.maintenance),
-        )
+        let result = tokio::time::timeout(timeout, async {
+            let snapshot = app
+                .metrics
+                .inventory(&app.config.metrics, &app.config.maintenance)
+                .await?;
+            let storages = if app.role == "single"
+                && !app.maintenance.load(std::sync::atomic::Ordering::Acquire)
+            {
+                let mut snapshots = json!({});
+                for storage in app.maintenance_store.storages().await? {
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("inventory-storage").await;
+                    snapshots[storage.to_string()] = app.metrics.storage_inventory(storage).await?;
+                }
+                Some(snapshots)
+            } else {
+                None
+            };
+            Ok::<_, anyhow::Error>((snapshot, storages))
+        })
         .await;
         {
             let mut saved = app.statistics.inventory.lock().unwrap();
             saved["collecting"] = json!(false);
             match result {
-                Ok(Ok(snapshot)) => {
+                Ok(Ok((snapshot, storages))) => {
                     saved["snapshot"] = snapshot;
+                    if let Some(storages) = storages {
+                        saved["storages"] = storages;
+                    }
                     saved["last_error"] = Value::Null;
                 }
                 error => {
@@ -449,14 +472,19 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 }
             }
         }
-        if let Err(error) = app.usage_start().await {
+        if app.role != "single"
+            && !app.maintenance.load(std::sync::atomic::Ordering::Acquire)
+            && let Err(error) = app.usage_start().await
+        {
             tracing::warn!(%error, "usage task scheduling failed");
         }
         tokio::select! {
             _ = tokio::time::sleep(interval) => (),
             _ = app.statistics.wake.notified() => tokio::time::sleep(Duration::from_secs(5)).await,
         }
-        leader.finish().await?;
+        if let Some(leader) = leader {
+            leader.finish().await?;
+        }
     }
 }
 

@@ -94,7 +94,7 @@ pub struct Active {
 }
 struct ReadLease {
     id: Uuid,
-    store: Arc<dyn crate::model::StreamLeaseStore>,
+    store: Arc<dyn crate::model::cluster::ClusterStore>,
     ttl_seconds: i64,
 }
 impl ReadLease {
@@ -164,10 +164,9 @@ pub struct App {
     pub buckets: Arc<dyn crate::model::BucketStore>,
     pub credentials: Arc<dyn crate::model::CredentialStore>,
     pub accounts: Arc<dyn crate::model::AccountStore>,
-    pub task_leases: Arc<dyn crate::model::TaskLeaseStore>,
+    pub task_execution: Arc<dyn crate::model::TaskExecutionStore>,
     pub storage_profiles: Arc<dyn crate::model::StorageProfileStore>,
     pub stream_store: Arc<dyn crate::model::StreamStore>,
-    pub stream_leases: Arc<dyn crate::model::StreamLeaseStore>,
     pub node: std::sync::OnceLock<crate::cluster::NodeState>,
     pub storage: Arc<Storage>,
     pub thumbnails: Arc<crate::control::media::Thumbnails>,
@@ -183,6 +182,8 @@ pub struct App {
     pub maintenance: Arc<std::sync::atomic::AtomicBool>,
     pub pack_creation_paused: std::sync::atomic::AtomicBool,
     pub gc_running: std::sync::atomic::AtomicBool,
+    started_mode: String,
+    restart_required: std::sync::atomic::AtomicBool,
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: Arc<tokio::sync::Notify>,
     hashes: Mutex<HashMap<(Uuid, [u8; 32]), Weak<tokio::sync::Mutex<()>>>>,
@@ -228,7 +229,7 @@ impl App {
                 secrets.clone(),
                 &budget,
                 stores.physical.clone(),
-                stores.storage_permits.clone(),
+                stores.cluster.clone(),
                 stores.storage_profiles.clone(),
                 stores.managed_keys.clone(),
                 stores.storage_records.clone(),
@@ -285,10 +286,9 @@ impl App {
             buckets: stores.buckets,
             credentials: stores.credentials,
             administration: stores.administration,
-            task_leases: stores.task_leases,
+            task_execution: stores.task_execution,
             storage_profiles: stores.storage_profiles,
             stream_store: stores.streams,
-            stream_leases: stores.stream_leases,
             node: std::sync::OnceLock::new(),
             storage,
             thumbnails,
@@ -301,35 +301,38 @@ impl App {
             maintenance,
             pack_creation_paused: pack_creation_paused.into(),
             gc_running: false.into(),
+            started_mode: state.mode,
+            restart_required: false.into(),
             wake_gc: Arc::new(tokio::sync::Notify::new()),
             wake_tasks: Arc::new(tokio::sync::Notify::new()),
             hashes: Mutex::new(HashMap::new()),
             operation_locks: Mutex::new(HashMap::new()),
             _file_lock: lock,
         });
-        let profile_app = app.clone();
-        tokio::spawn(async move {
-            let mut listener = match profile_app.storage_profiles.changes().await {
-                Ok(listener) => listener,
-                Err(error) => {
-                    tracing::warn!(%error, "storage profile listener unavailable");
-                    return;
-                }
-            };
-            loop {
-                match listener.next().await {
-                    Ok(storage_id) => {
-                        if let Err(error) = profile_app.storage.refresh_store(storage_id).await {
-                            tracing::warn!(%error, %storage_id, "storage profile refresh failed");
+        if app.role != "single" {
+            let cluster = app
+                .cluster
+                .clone()
+                .context("cluster backend is unavailable")?;
+            let profile_app = app.clone();
+            tokio::spawn(async move {
+                loop {
+                    let result: Result<()> = async {
+                        let mut listener = cluster.profile_changes().await?;
+                        profile_app.storage.refresh_storages().await?;
+                        loop {
+                            let storage_id = listener.next().await?;
+                            profile_app.storage.refresh_store(storage_id).await?;
                         }
                     }
-                    Err(error) => {
-                        tracing::warn!(%error, "storage profile listener stopped");
-                        break;
+                    .await;
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "storage profile listener will retry");
                     }
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 }
-            }
-        });
+            });
+        }
         Ok((app, owner))
     }
     pub fn pin(&self, id: Uuid) -> Active {
@@ -348,8 +351,28 @@ impl App {
         self.active.lock().unwrap().contains_key(&id)
     }
     pub fn writable(&self) -> Result<()> {
+        self.ensure_mode()?;
         if self.maintenance.load(std::sync::atomic::Ordering::Acquire) {
             return Err(s3_error!(ServiceUnavailable, "gateway is in maintenance mode").into());
+        }
+        Ok(())
+    }
+    pub(crate) fn ensure_mode(&self) -> Result<()> {
+        let expected = if self.role == "single" {
+            "single"
+        } else {
+            "cluster"
+        };
+        if self.started_mode != expected
+            || self
+                .restart_required
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(s3_error!(
+                ServiceUnavailable,
+                "restart in the configured deployment mode"
+            )
+            .into());
         }
         Ok(())
     }
@@ -357,9 +380,58 @@ impl App {
 
 impl App {
     pub(crate) fn cluster(&self) -> Result<&dyn crate::model::cluster::ClusterStore> {
-        self.cluster
-            .as_deref()
-            .context("cluster operations require PostgreSQL")
+        self.cluster.as_deref().ok_or_else(|| {
+            s3_error!(NotImplemented, "cluster operations require PostgreSQL").into()
+        })
+    }
+    pub(crate) async fn change_mode(&self, principal: &Principal, mode: &str) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        ensure!(
+            matches!(mode, "single" | "cluster"),
+            "mode must be single or cluster"
+        );
+        let _coord = self.coord.lock().await;
+        let cluster = self.cluster()?;
+        let current = cluster.mode().await?;
+        if current == mode {
+            return Ok(());
+        }
+        ensure!(
+            !self.restart_required.load(Ordering::Acquire),
+            "restart before changing deployment mode again"
+        );
+        ensure!(
+            self.maintenance.load(Ordering::Acquire),
+            "enable maintenance before changing deployment mode"
+        );
+        ensure!(
+            self.active.lock().unwrap().is_empty(),
+            "wait for active reads and writes to drain"
+        );
+        ensure!(
+            !self.gc_running.load(Ordering::Acquire),
+            "wait for the current GC batch"
+        );
+        let _cleanup = self
+            .cleanup_state
+            .running
+            .try_lock()
+            .context("wait for history cleanup")?;
+        let _local = self
+            .local_cleanup
+            .try_lock()
+            .context("wait for local cleanup")?;
+        // Cancellation or an uncertain commit must leave this process restricted.
+        self.restart_required.store(true, Ordering::Release);
+        let result = cluster.set_mode(principal, mode).await;
+        #[cfg(feature = "fault-injection")]
+        if result.is_ok() {
+            crate::faults::point("mode-committed").await;
+        }
+        if result.is_err() && matches!(cluster.mode().await, Ok(observed) if observed == current) {
+            self.restart_required.store(false, Ordering::Release);
+        }
+        result
     }
     pub async fn status(&self) -> Result<Value> {
         let state = self.runtime.state().await?;
@@ -369,11 +441,13 @@ impl App {
         } else {
             "cluster"
         };
-        let mismatch = state.mode != expected;
+        let mismatch = state.mode != expected
+            || self
+                .restart_required
+                .load(std::sync::atomic::Ordering::Acquire);
         let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"role":self.role,"deployment_mode":state.mode,"deployment_mode_revision":state.mode_revision,"mode_mismatch":mismatch,"node_registered":self.node.get().is_some(),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":state.gc_paused,"maintenance":state.maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":pool_size,"db_pool_idle":pool_idle,"data_slots_available":self.slots.available_permits(),"active_streams":self.active.lock().unwrap().len()});
         status["runtime"] = self.statistics.runtime();
         status["cleanup"] = self.cleanup_status();
-        status["catalog"] = serde_json::to_value(crate::control::catalog::progress(self).await?)?;
         status["storage"] = self.statistics.inventory(crate::config::seconds(
             &self.config.metrics.refresh_interval,
         )?);
@@ -387,13 +461,7 @@ impl App {
     }
 
     pub async fn mode_mismatch(&self) -> Result<bool> {
-        let mode = self.runtime.mode().await?;
-        Ok(mode
-            != if self.role == "single" {
-                "single"
-            } else {
-                "cluster"
-            })
+        Ok(self.ensure_mode().is_err())
     }
 
     pub fn recovery_required(&self) -> bool {

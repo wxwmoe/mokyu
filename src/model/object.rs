@@ -67,17 +67,12 @@ pub(crate) struct StorageMigration {
 
 #[async_trait]
 pub(crate) trait ObjectStore: Send + Sync {
-    async fn catalog_ready(&self) -> Result<bool>;
-    async fn catalog_status(&self) -> Result<CatalogStatus>;
-    async fn build_catalog(&self) -> Result<bool>;
-    async fn fail_catalog(&self) -> Result<()>;
     async fn browse(
         &self,
         authority: &Permit,
         bucket: Uuid,
         filter: &mut CatalogFilter,
         cursor: Option<CatalogCursor>,
-        ready: bool,
         sizes: (Option<i64>, Option<i64>),
     ) -> Result<Vec<MediaItem>>;
     async fn chunks(&self, stream: Uuid, after: i64, limit: i64) -> Result<Vec<Value>>;
@@ -112,15 +107,6 @@ pub(crate) trait ObjectStore: Send + Sync {
     ) -> Result<()>;
     async fn abandon_copy(&self, stream: Uuid) -> Result<()>;
     async fn abandon_migration(&self, stream: Uuid) -> Result<()>;
-}
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct CatalogStatus {
-    pub(crate) phase: String,
-    pub(crate) scanned: Option<String>,
-    pub(crate) current_index: Option<String>,
-    pub(crate) last_error: Option<String>,
-    pub(crate) updated_at: DateTime<Utc>,
 }
 
 #[derive(Serialize, Deserialize, IntoParams)]

@@ -47,6 +47,9 @@ def ready():
             raise AssertionError(process.stderr.read())
         try:
             cli('status')
+            assert db.execute("SELECT to_regclass('catalog_build')").fetchone() == (None,)
+            assert db.execute("SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE c.relname IN ('objects_catalog_size','objects_catalog_modified','objects_catalog_category','objects_catalog_search') AND i.indisvalid").fetchone() == (4,)
+            assert db.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='tasks' AND column_name='batch_cursor') OR (table_name='nodes' AND column_name IN ('credential_version','load_score','load_sampled_at')))").fetchone() == (0,)
             return
         except subprocess.CalledProcessError:
             time.sleep(.25)
@@ -142,6 +145,29 @@ try:
             db.execute(path.read_text())
             db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
                        (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
+    db.execute("""CREATE FUNCTION _test_catalog_migration() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.version=37 THEN PERFORM pg_advisory_xact_lock(734922709859937); END IF;
+        RETURN NEW; END $$""")
+    db.execute('CREATE TRIGGER _test_catalog_migration BEFORE INSERT ON _sqlx_migrations FOR EACH ROW EXECUTE FUNCTION _test_catalog_migration()')
+    with psycopg.connect(conninfo) as blocker:
+        blocker.execute('SELECT pg_advisory_xact_lock(734922709859937)')
+        start()
+        for _ in range(100):
+            waiting = db.execute("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query ILIKE '%INSERT INTO _sqlx_migrations%'").fetchone()
+            if waiting:
+                break
+            assert process.poll() is None, process.stderr.read()
+            time.sleep(.1)
+        else:
+            raise AssertionError('catalog migration did not reach its history commit')
+        assert db.execute('SELECT pg_terminate_backend(%s)', waiting).fetchone()[0]
+        stopped_with('apply database migrations')
+    assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone() == (36,)
+    assert db.execute("SELECT to_regclass('catalog_build'),to_regclass('objects_catalog_search')").fetchone() == ('catalog_build', None)
+    assert history()[-1][0] == 36
+    db.execute('DROP TRIGGER _test_catalog_migration ON _sqlx_migrations')
+    db.execute('DROP FUNCTION _test_catalog_migration()')
+    print('PASS interrupted catalog baseline rolls back its indexes, removed state and migration history', flush=True)
     start()
     ready()
     assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone()[0] == latest
@@ -176,7 +202,7 @@ try:
     assert db.execute("SELECT catalog_category('photo.png','application/octet-stream')").fetchone() == ('image',)
     assert db.execute("SELECT to_regclass('objects_catalog_category'),to_regclass('tasks_policy_recent'),to_regclass('objects_catalog_kind'),to_regclass('tasks_kind_recent')").fetchone() == ('objects_catalog_category', 'tasks_policy_recent', None, None)
     assert db.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND (column_name='kind' OR column_name='catalog_kind')").fetchone() == (0,)
-    assert db.execute("SELECT current_index FROM catalog_build").fetchone()[0] != 'objects_catalog_kind'
+    assert db.execute("SELECT to_regclass('catalog_build')").fetchone() == (None,)
     stop()
     print('PASS semantic names preserve policy state, task details, indexes and migration history', flush=True)
     reset_local_identity()

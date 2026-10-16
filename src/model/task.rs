@@ -9,7 +9,7 @@ pub(crate) struct Execution {
 }
 
 /// Persistent task control operations shared by single-container and cluster
-/// schedulers. The backend owns state transitions and wake-up notifications.
+/// schedulers. Callers wake local workers after committed state transitions.
 #[async_trait]
 pub(crate) trait TaskControlStore: Send + Sync {
     async fn unpack_status(&self, pack: i64) -> Result<Option<Value>>;
@@ -48,15 +48,11 @@ pub(crate) trait TaskControlStore: Send + Sync {
 
     async fn load(&self, id: Uuid) -> Result<Option<(bool, String, serde_json::Value)>>;
     async fn change_state(&self, id: Uuid, parent: bool, resume: bool) -> Result<bool>;
-    async fn listen(&self, wake: std::sync::Arc<tokio::sync::Notify>) -> Result<()>;
 }
 
 pub(crate) struct TaskClaim<'a> {
     pub(crate) class: i32,
     pub(crate) active: &'a [Uuid],
-    pub(crate) node: Option<&'a crate::cluster::NodeState>,
-    pub(crate) role: &'a str,
-    pub(crate) credential_key: &'a crate::content::codec::Key,
     pub(crate) token: Uuid,
 }
 
@@ -66,7 +62,7 @@ pub(crate) struct TaskRecord {
     pub(crate) bucket_id: Option<Uuid>,
     pub(crate) cursor: Option<String>,
     pub(crate) detail: serde_json::Value,
-    pub(crate) lease_token: Option<Uuid>,
+    pub(crate) execution_token: Option<Uuid>,
 }
 
 pub(crate) struct TaskFinish {
@@ -75,14 +71,12 @@ pub(crate) struct TaskFinish {
     pub(crate) error: Option<String>,
 }
 
-/// Persistent task claims, leases and recovery shared by both deployment modes.
+/// Persistent task claims and execution ownership shared by both deployment modes.
 #[async_trait]
-pub(crate) trait TaskLeaseStore: Send + Sync {
+pub(crate) trait TaskExecutionStore: Send + Sync {
     async fn claim(&self, input: TaskClaim<'_>) -> Result<Option<Uuid>>;
-    async fn recover(&self) -> Result<u64>;
     async fn load(&self, id: Uuid) -> Result<TaskRecord>;
     async fn fence(&self, expected_mode: &str, id: Uuid, token: Uuid) -> Result<bool>;
-    async fn renew(&self, id: Uuid, token: Uuid) -> Result<bool>;
     async fn confirm(&self, id: Uuid, token: Uuid) -> Result<bool>;
     async fn finish(&self, input: TaskFinish) -> Result<()>;
 }

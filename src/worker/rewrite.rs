@@ -56,6 +56,8 @@ impl App {
         }
         let shards = if loose + packed == 0 {
             0
+        } else if self.role == "single" {
+            1
         } else {
             (loose + packed).clamp(1, 8)
         };
@@ -69,6 +71,8 @@ impl App {
             target_key: target_name.to_owned(),
             target_algorithm: target_algorithm.to_owned(),
         };
+        let _coord = self.coord.lock().await;
+        self.writable()?;
         let (id, existing) = self
             .packing
             .start_rewrite(&job, self.node.get().map(|n| n.node_id))
@@ -77,7 +81,11 @@ impl App {
             return Ok(json!({"task_id":id,"existing":true}));
         }
         self.wake_tasks.notify_one();
-        Ok(json!({"task_id":id,"preview":preview,"children":shards}))
+        let mut result = json!({"task_id":id,"preview":preview});
+        if self.role != "single" {
+            result["children"] = json!(shards);
+        }
+        Ok(result)
     }
 
     pub(super) async fn rewrite_batch(

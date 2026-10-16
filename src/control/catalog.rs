@@ -1,6 +1,6 @@
 use super::Identity;
 pub(super) use crate::model::object::MediaItem;
-use crate::model::object::{CatalogCursor as Cursor, CatalogFilter as Filter, CatalogStatus};
+use crate::model::object::{CatalogCursor as Cursor, CatalogFilter as Filter};
 use crate::{
     app::{App, StoredStream},
     authorization::Action,
@@ -15,58 +15,9 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use serde::Serialize;
-use std::{
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
-};
+use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
-
-pub(crate) async fn run(app: Arc<App>) -> Result<()> {
-    const LEADER_KEY: i64 = 734922709851033;
-    loop {
-        let Some(leader) = crate::cluster::try_leader(&app, LEADER_KEY).await? else {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
-        };
-        if app.maintenance.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
-        }
-        let result = app.objects.build_catalog().await;
-        leader.finish().await?;
-        match result {
-            Ok(true) => return std::future::pending().await,
-            Ok(false) => tokio::time::sleep(Duration::from_millis(100)).await,
-            Err(error) => {
-                tracing::warn!(%error,"media catalog build will retry");
-                let _ = app.objects.fail_catalog().await;
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
-        }
-    }
-}
-pub(crate) async fn progress(app: &App) -> Result<CatalogStatus> {
-    app.objects.catalog_status().await
-}
-#[utoipa::path(get,operation_id="catalog_status",path="/api/v1/buckets/{bucket}/catalog",params(("bucket"=Uuid,Path)),responses((status=200,body=CatalogStatus)))]
-pub(super) async fn status(
-    State(app): State<Arc<App>>,
-    Extension(actor): Extension<Identity>,
-    Path(bucket): Path<Uuid>,
-) -> Result<Json<CatalogStatus>, HttpError> {
-    actor
-        .principal
-        .require(app.authorization.as_ref(), bucket, Action::List)
-        .await?;
-    let mut row = progress(&app).await?;
-    if !actor.admin {
-        row.scanned = None;
-        row.current_index = None;
-        row.last_error = None;
-    }
-    Ok(Json(row))
-}
 
 impl From<StoredStream> for MediaItem {
     fn from(s: StoredStream) -> Self {
@@ -92,7 +43,6 @@ pub(super) struct MediaPage {
     next: Option<String>,
     layout: &'static str,
     search_mode: String,
-    index_ready: bool,
 }
 fn invalid() -> anyhow::Error {
     s3s::s3_error!(InvalidArgument).into()
@@ -151,7 +101,6 @@ pub(super) async fn list(
         .principal
         .require(app.authorization.as_ref(), bucket, Action::List)
         .await?;
-    let ready = app.objects.catalog_ready().await?;
     let folders = !q.recursive
         && q.q.is_empty()
         && q.category.is_none()
@@ -192,7 +141,6 @@ pub(super) async fn list(
             next,
             layout: "folders",
             search_mode: q.mode,
-            index_ready: ready,
         }));
     }
     if cursor.as_ref().is_some_and(|c| c.folder.is_some()) {
@@ -200,12 +148,9 @@ pub(super) async fn list(
     }
     let mut rows = app
         .objects
-        .browse(&authority, bucket, &mut q, cursor, ready, (min, max))
+        .browse(&authority, bucket, &mut q, cursor, (min, max))
         .await
         .map_err(|error| match crate::model::error(&error) {
-            Some(crate::model::Error::CatalogBuilding) => {
-                crate::http::problem(StatusCode::SERVICE_UNAVAILABLE, "CatalogBuilding").0
-            }
             Some(crate::model::Error::QueryCancelled) => {
                 crate::http::problem(StatusCode::UNPROCESSABLE_ENTITY, "SearchTooBroad").0
             }
@@ -231,6 +176,5 @@ pub(super) async fn list(
         next,
         layout: "flat",
         search_mode: q.mode,
-        index_ready: ready,
     }))
 }

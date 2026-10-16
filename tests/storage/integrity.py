@@ -61,6 +61,9 @@ def wait(task):
                 assert len(children) == 1, children
                 value = get('/api/v1/tasks/' + str(children[0][0]))
                 assert value['status'] == 'completed', value
+            else:
+                assert db.execute('SELECT count(*) FROM tasks WHERE parent_task_id=%s', (task,)).fetchone()[0] == 0
+                assert value['detail']['storage_index'] == len(value['detail']['storages'])
             return value
         time.sleep(.05)
     raise AssertionError('integrity task timed out')
@@ -186,18 +189,39 @@ print('PASS paged mappings/findings, exact-key scope, JSONL export, string IDs a
 
 profile = cli('storage', 'profile', 'show', os.environ['MOKYU_TEST_STORAGE'])
 profile_path = Path(os.environ['MOKYU_TEST_DATA']) / 'integrity-profile.json'
+single = db.execute('SELECT deployment_mode FROM mokyu_meta WHERE singleton').fetchone()[0] == 'single'
+db.execute('CREATE EXTENSION IF NOT EXISTS pg_stat_statements')
+
+
+def rate_calls():
+    return db.execute("SELECT coalesce(sum(calls),0) FROM pg_stat_statements "
+                      "WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) "
+                      "AND query LIKE '%%storage_rate_state%%' AND query NOT LIKE '%%pg_stat_statements%%'").fetchone()[0]
+
+
+before = rate_calls()
 try:
     limited = {**profile, 'integrity_rps': 2, 'integrity_bandwidth': '64KiB', 'integrity_byte_budget': '64KiB'}
     profile_path.write_text(json.dumps(limited))
     cli('storage', 'profile', 'set', os.environ['MOKYU_TEST_STORAGE'], str(profile_path))
     checked, issues = check('full', 'a')
     assert checked['detail']['chunks_checked'] == 1 and not issues
+    limited['revision'] = cli('storage', 'profile', 'show', os.environ['MOKYU_TEST_STORAGE'])['revision']
+    profile_path.write_text(json.dumps(limited))
+    cli('storage', 'profile', 'set', os.environ['MOKYU_TEST_STORAGE'], str(profile_path))
+    checked, issues = check('full', 'a')
+    assert checked['detail']['chunks_checked'] == 1 and not issues
+    if single:
+        assert rate_calls() == before, 'single integrity checks used database rate state'
+        assert not db.execute('SELECT EXISTS(SELECT 1 FROM storage_rate_state WHERE storage_id=%s)', (storage_id,)).fetchone()[0]
 finally:
     profile['revision'] = cli('storage', 'profile', 'show', os.environ['MOKYU_TEST_STORAGE'])['revision']
     profile_path.write_text(json.dumps(profile))
     cli('storage', 'profile', 'set', os.environ['MOKYU_TEST_STORAGE'], str(profile_path))
     profile_path.unlink()
 print('PASS rate and byte budgets allow a chunk larger than one second of bandwidth', flush=True)
+if single:
+    print('PASS profile reload preserves single integrity rate state without database queries', flush=True)
 
 for body, status in [({'mode': 'invalid'}, 422), ({'unknown': 1}, 422), ({'key': 'a'}, 400),
                      ({'bucket': bucket, 'key': ''}, 400), ({'bucket': bucket, 'key': 'x' * 1025}, 400),

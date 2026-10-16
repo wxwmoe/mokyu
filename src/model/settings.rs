@@ -68,7 +68,7 @@ where
 }
 
 pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
-    vec![
+    let mut values = vec![
         (
             "web",
             json!({
@@ -123,7 +123,17 @@ pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
                 "audit_retention": configured.maintenance.audit_retention.clone(),
             }),
         ),
-    ]
+    ];
+    if !configured.database.backend.supports_cluster() {
+        let uploads = values
+            .iter_mut()
+            .find(|(section, _)| *section == "uploads")
+            .unwrap();
+        let uploads = uploads.1.as_object_mut().unwrap();
+        uploads.remove("staging_storage_id");
+        uploads.remove("staging_bytes_limit");
+    }
+    values
 }
 
 pub(crate) fn apply_runtime_section(
@@ -131,6 +141,12 @@ pub(crate) fn apply_runtime_section(
     section: &str,
     value: Value,
 ) -> Result<()> {
+    if section == "uploads"
+        && !config.database.backend.supports_cluster()
+        && (value.get("staging_storage_id").is_some() || value.get("staging_bytes_limit").is_some())
+    {
+        return Err(s3s::s3_error!(InvalidArgument, "shared staging requires PostgreSQL").into());
+    }
     match section {
         "web" => config.web = overlay(&config.web, &value)?,
         "requests" => config.requests = overlay(&config.requests, &value)?,

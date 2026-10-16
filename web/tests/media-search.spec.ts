@@ -14,6 +14,7 @@ test('search, type chips, sorted results, styled date picker and URL restoration
   const files: [string, number, string][] = [['heart.png', 8, 'image/png'], ['star.png', 12, 'image/png'], ['memory.txt', 15, 'text/plain'], ['video.mp4', 70, 'video/mp4'], ['folder/note.txt', 4, 'text/plain']]
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
+  page.on('request', request => { if (new URL(request.url()).pathname.endsWith('/catalog')) errors.push('obsolete catalog progress request') })
   page.on('console', message => { if (message.type() === 'error' && /Content Security Policy|Refused to/i.test(message.text())) errors.push(message.text()) })
   try {
     for (const [name, size, mime] of files) {

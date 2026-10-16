@@ -100,6 +100,7 @@ impl App {
             return self.pack_start(policy).await;
         }
         let _coord = self.coord.lock().await;
+        self.ensure_mode()?;
         if policy != "cleanup" {
             self.writable()?;
         }
@@ -219,7 +220,11 @@ impl App {
 pub async fn run(app: Arc<App>) -> Result<()> {
     const LEADER_KEY: i64 = 734922709851034;
     loop {
-        let Some(leader) = crate::cluster::try_leader(&app, LEADER_KEY).await? else {
+        let leader = if app.role == "single" {
+            None
+        } else if let Some(leader) = app.cluster()?.leader(LEADER_KEY).await? {
+            Some(leader)
+        } else {
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         };
@@ -250,7 +255,9 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 }
             }
         }
-        leader.finish().await?;
+        if let Some(leader) = leader {
+            leader.finish().await?;
+        }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }

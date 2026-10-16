@@ -154,7 +154,6 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::uploads::create))
         .routes(routes!(super::uploads::list))
         .routes(routes!(super::catalog::list))
-        .routes(routes!(super::catalog::status))
         .routes(routes!(super::media::detail))
         .routes(routes!(super::media::content))
         .routes(routes!(super::media::thumbnail))

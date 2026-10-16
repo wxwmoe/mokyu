@@ -2,6 +2,8 @@
 
 默认部署运行一个单容器模式实例，同时提供管理、S3 和公共读，独占一个数据库、data 目录和存储范围。需要拆分职责或多节点入口时，使用[群集部署](cluster-deployment.md)；群集的 control、worker、data 容器仍共享同一数据库和部署密钥，但各自使用独立 data 目录。以下单容器部署命令在源码根目录执行。
 
+单容器使用进程内任务调度、活动读写保护和存储并发限制，不创建群集节点或子任务，也不维护分布式租约或共享 staging。任务、配额、上传确认和恢复状态仍持久化在数据库中。
+
 ## 构建镜像
 
 ```sh
@@ -84,7 +86,7 @@ docker exec mokyu mokyu cli task list
 
 保持 PostgreSQL autovacuum/ANALYZE 启用。普通 DELETE/VACUUM 释放的空间通常供数据库复用，不会立即缩小磁盘文件；项目不自动执行 `VACUUM FULL`。
 
-媒体目录需要 PostgreSQL 的 `pg_trgm` 扩展；数据库用户须能创建该扩展，或由数据库管理员提前安装。首次启动或升级后，服务会逐个并发创建目录索引，再分批回填摘要，重启可继续。构建期间仍可浏览目录、按路径前缀或完整路径查找；包含搜索、筛选和其他排序在就绪后开放。`cli status` 的 `catalog` 字段显示进度。为索引和构建临时文件预留数据库磁盘空间，长路径和大量对象会增加占用。
+PostgreSQL 媒体目录使用 `pg_trgm` 扩展；数据库用户须能创建该扩展，或由数据库管理员提前安装。目录索引在迁移事务中建立，服务启动后即可搜索、筛选和排序。为索引预留数据库磁盘空间，长路径和大量对象会增加占用。
 
 需要验证数据时，手动运行[完整性巡检](cli-reference.md#完整性巡检)。存储中未索引区块仅在管理需要时使用[清查命令](cli-reference.md#存储清查)。
 
@@ -126,9 +128,9 @@ docker exec mokyu mokyu cli gc mark-unreferenced
 
 1. 停止所有会写同一数据库或存储范围的网关，保留现场，核对备份所属部署。
 2. 恢复数据库、配置和全部历史密钥；一并恢复该恢复点依赖的 multipart、chunks 待上传快照。只有确认恢复点不存在待上传数据时，chunks 才可以为空。
-3. 保持恢复数据库对应的 `instance.deployment_key` 不变。启动 control 或单容器入口后，立即执行 `mokyu cli maintenance enable`，确认管理端口可用且数据面已停止写入。
-4. **生成新的实际区块写密钥**：用 `cli key create NAME block` 创建，再对每个存储执行 `cli storage key set STORAGE NAME`，保留历史读密钥。需要把存量编码全部切换时，再显式运行 `storage rewrite`。数据库 ID 可能回滚；只改名称或日期不能防止 nonce 重用。完成这一步前不要运行会重新编码区块的维护任务或恢复写入。
-5. 确认 `cli status` 的 `maintenance=true`，核对storage 身份、历史密钥、旧对象和 Range 读取；可运行巡检。清桶任务会保持暂停，须在核验并退出维护后显式恢复。缺失 multipart 尾部的未完成上传需重传，已发布对象不依赖该目录。
+3. 保持恢复数据库对应的 `instance.deployment_key` 不变。单容器使用 `mokyu --maintenance` 启动（Compose 临时设置 `command: ["--maintenance"]`）；群集先只启动 `mokyu control --maintenance`。启动过程先持久化维护状态，再恢复上传和任务，确认 `cli status` 的 `maintenance=true`。不要先正常启动再开启维护。
+4. **生成新的实际区块写密钥**：用 `cli key create NAME block` 创建，再对每个存储执行 `cli storage key set STORAGE NAME`，保留历史读密钥。需要把存量编码全部切换时，再显式运行 `storage rewrite`。数据库 ID 可能回滚；只改名称或日期不能防止 nonce 重用。完成这一步前不要执行缓存 flush、运行会重新编码区块的维护任务或恢复写入。
+5. 确认 `cli status` 的 `maintenance=true`，核对 storage 身份、历史密钥、旧对象和 Range 读取；可运行巡检。清桶任务会保持暂停，须在核验并退出维护后显式恢复。缺失 multipart 尾部的未完成上传需重传，已发布对象不依赖该目录。
 6. 如需清理恢复点之后遗留的未知区块，保持维护并排空活跃操作，先[预览存储清查](cli-reference.md#存储清查)，核对后再确认执行；并非每次恢复都需清查。
 7. 移除 Compose 的临时启动参数，再用 `cli maintenance disable` 恢复写入；验证新上传和旧对象读取。存储切换 current key 后仍应保留历史 key。
 

@@ -43,7 +43,7 @@ async fn admin(actor: &Identity, app: &App) -> Result<(), HttpError> {
     Ok(())
 }
 
-#[utoipa::path(get, operation_id = "cluster_status", path = "/api/v1/cluster/status", responses((status = 200, body = ClusterStatus)))]
+#[utoipa::path(get, operation_id = "cluster_status", path = "/api/v1/cluster/status", responses((status = 200, body = ClusterStatus), (status = 501, body = crate::control::contract::ErrorBody)))]
 pub(crate) async fn status(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -52,23 +52,18 @@ pub(crate) async fn status(
     Ok(Json(app.cluster()?.status().await?))
 }
 
-#[utoipa::path(post, operation_id = "cluster_mode", path = "/api/v1/cluster/mode", request_body = ModeInput, responses((status = 200, body = ClusterStatus)))]
+#[utoipa::path(post, operation_id = "cluster_mode", path = "/api/v1/cluster/mode", request_body = ModeInput, responses((status = 200, body = ClusterStatus), (status = 501, body = crate::control::contract::ErrorBody)))]
 pub(crate) async fn mode(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
     Json(input): Json<ModeInput>,
 ) -> Result<Json<ClusterStatus>, HttpError> {
     admin(&actor, &app).await?;
-    if !matches!(input.mode.as_str(), "single" | "cluster") {
-        return Err(anyhow::anyhow!("mode must be single or cluster").into());
-    }
-    app.cluster()?
-        .set_mode(&actor.principal, &input.mode)
-        .await?;
+    app.change_mode(&actor.principal, &input.mode).await?;
     status(State(app), Extension(actor)).await
 }
 
-#[utoipa::path(get, operation_id = "cluster_nodes", path = "/api/v1/cluster/nodes", responses((status = 200, body = Vec<NodeView>)))]
+#[utoipa::path(get, operation_id = "cluster_nodes", path = "/api/v1/cluster/nodes", responses((status = 200, body = Vec<NodeView>), (status = 501, body = crate::control::contract::ErrorBody)))]
 pub(crate) async fn nodes(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -77,7 +72,7 @@ pub(crate) async fn nodes(
     Ok(Json(app.cluster()?.nodes().await?))
 }
 
-#[utoipa::path(post, operation_id = "cluster_release", path = "/api/v1/cluster/nodes/{name}/release", params(("name" = String, Path)), request_body = ReleaseInput, responses((status = 200)))]
+#[utoipa::path(post, operation_id = "cluster_release", path = "/api/v1/cluster/nodes/{name}/release", params(("name" = String, Path)), request_body = ReleaseInput, responses((status = 200), (status = 501, body = crate::control::contract::ErrorBody)))]
 pub(crate) async fn release(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
@@ -97,7 +92,7 @@ pub(crate) async fn release(
     operation_id = "cluster_recover",
     path = "/api/v1/cluster/recover",
     request_body = RecoverInput,
-    responses((status = 200, body = ClusterStatus), (status = 403, body = crate::control::contract::ErrorBody))
+    responses((status = 200, body = ClusterStatus), (status = 403, body = crate::control::contract::ErrorBody), (status = 501, body = crate::control::contract::ErrorBody))
 )]
 pub(crate) async fn recover(
     State(app): State<Arc<App>>,

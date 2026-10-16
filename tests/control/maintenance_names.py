@@ -49,7 +49,11 @@ try:
     else:
         raise AssertionError('reuse task did not complete')
     children = db.execute('SELECT state,detail FROM tasks WHERE parent_task_id=%s', (task_id,)).fetchall()
-    assert children and all(state == 'completed' and detail['policy'] == 'reuse' for state, detail in children)
+    if result['detail'].get('execution_mode') == 'single':
+        assert not children and 'role' not in result['detail']
+        assert result['detail']['storage_index'] == len(result['detail']['storages'])
+    else:
+        assert children and all(state == 'completed' and detail['policy'] == 'reuse' for state, detail in children)
     found = admin.get(url + '/api/v1/tasks', params={'policy': 'reuse'}).json()['items']
     assert any(item['id'] == task_id for item in found)
     assert all(item['policy'] == 'reuse' for item in found)

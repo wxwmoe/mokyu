@@ -1,5 +1,5 @@
 use super::{Backend, migration};
-use crate::model::PhysicalStore;
+use crate::model::cluster::ClusterStore;
 use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -22,8 +22,8 @@ async fn postgres_staging_claim_is_atomic() -> Result<()> {
     migration::run(&pool, &mut *pool.acquire().await?, false).await?;
     let storage = Uuid::new_v4();
     sqlx::query("INSERT INTO storages(id,name,type,path) VALUES($1,'staging-contract','local','/data/staging-contract')").bind(storage).execute(&pool).await?;
-    let first = Backend::new(pool.clone());
-    let second = Backend::new(pool.clone());
+    let first = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
+    let second = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let (a, b) = tokio::join!(
         first.claim_staging(storage, "same", 8, 8),
         second.claim_staging(storage, "same", 8, 8)

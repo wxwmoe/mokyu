@@ -350,6 +350,7 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
             return Err(problem(StatusCode::CONFLICT, "StorageMigrationConfirmationRequired").0);
         }
         let _coord = app.coord.lock().await;
+        app.writable()?;
         app.objects
             .queue_migration(
                 permit,

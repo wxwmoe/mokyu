@@ -13,7 +13,6 @@ pub(crate) struct RuntimeState {
 pub(crate) trait RuntimeStore: Send + Sync {
     async fn initialize(&self, maintenance: bool) -> Result<RuntimeState>;
     async fn state(&self) -> Result<RuntimeState>;
-    async fn mode(&self) -> Result<String>;
     async fn pending_uploads(&self) -> Result<bool>;
     async fn health(&self) -> Result<()>;
     fn pool(&self) -> (u32, usize);

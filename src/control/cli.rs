@@ -14,7 +14,7 @@ use uuid::Uuid;
     operation_id = "cli",
     path = "/api/v1/cli",
     request_body = Value,
-    responses((status = 200, body = Value), (status = 400, body = contract::ErrorBody))
+    responses((status = 200, body = Value), (status = 400, body = contract::ErrorBody), (status = 501, body = contract::ErrorBody))
 )]
 pub(super) async fn cli(
     State(app): State<Arc<App>>,

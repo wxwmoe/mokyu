@@ -1,7 +1,7 @@
 use super::{Backend, migration};
 use crate::model::{
-    Mapping, PackingStore, PhysicalStore, TaskControlStore, TaskFinish, TaskLeaseStore,
-    UploadCacheStore, metrics::MetricsStore, packing::PackOutput, task::Execution,
+    Mapping, PackingStore, PhysicalStore, TaskControlStore, TaskExecutionStore, TaskFinish,
+    UploadCacheStore, cluster::ClusterStore, packing::PackOutput, task::Execution,
 };
 use anyhow::Result;
 use serde_json::json;
@@ -24,7 +24,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
             .is_none()
     );
     migration::run(&pool, &mut *pool.acquire().await?, false).await?;
-    let backend = Backend::new(pool.clone());
+    let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let storage = Uuid::new_v4();
     let old = Execution {
         id: Uuid::new_v4(),
@@ -116,7 +116,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
     );
     assert!(UploadCacheStore::finish(&backend, old).await.is_err());
     for error in [None, Some("late upload error".into())] {
-        TaskLeaseStore::finish(
+        TaskExecutionStore::finish(
             &backend,
             TaskFinish {
                 execution: old,
@@ -167,7 +167,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
         matches!(backend.source(chunk).await?, crate::model::PhysicalSource::Pack(pack) if pack.id == prepared.id)
     );
     assert!(backend.complete_usage(current).await?);
-    TaskLeaseStore::finish(
+    TaskExecutionStore::finish(
         &backend,
         TaskFinish {
             execution: old,
@@ -177,7 +177,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
     )
     .await?;
     assert_eq!(
-        TaskLeaseStore::load(&backend, parent).await?.state,
+        TaskExecutionStore::load(&backend, parent).await?.state,
         "running"
     );
     assert_eq!(
@@ -188,7 +188,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
         "uploading"
     );
     assert!(backend.change_state(parent, true, false).await?);
-    TaskLeaseStore::finish(
+    TaskExecutionStore::finish(
         &backend,
         TaskFinish {
             execution: current,
@@ -198,12 +198,12 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
     )
     .await?;
     assert_eq!(
-        TaskLeaseStore::load(&backend, parent).await?.state,
+        TaskExecutionStore::load(&backend, parent).await?.state,
         "paused"
     );
     assert!(backend.change_state(parent, true, true).await?);
     assert_eq!(
-        TaskLeaseStore::load(&backend, parent).await?.state,
+        TaskExecutionStore::load(&backend, parent).await?.state,
         "completed"
     );
     assert_eq!(
@@ -221,7 +221,9 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
         0
     );
     assert_eq!(
-        TaskLeaseStore::load(&backend, old.id).await?.lease_token,
+        TaskExecutionStore::load(&backend, old.id)
+            .await?
+            .execution_token,
         None
     );
     assert!(
@@ -240,7 +242,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
     }
     assert!(backend.change_state(family[0], true, true).await?);
     for (index, id) in family.iter().enumerate() {
-        let task = TaskLeaseStore::load(&backend, *id).await?;
+        let task = TaskExecutionStore::load(&backend, *id).await?;
         assert_eq!(
             task.detail["profile_revision"],
             if index == 2 { 1 } else { 2 }

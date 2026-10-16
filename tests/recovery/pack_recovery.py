@@ -39,8 +39,13 @@ def ready():
         return False
 
 
+points = ['pack-prepared', 'pack-stored', 'pack-before-publish']
+if db.execute("SELECT deployment_mode='single' FROM mokyu_meta").fetchone()[0] and db.execute(
+    'SELECT count(*)>1 FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.enabled AND p.pack_enabled'
+).fetchone()[0]:
+    points.append('pack-storage-advanced')
 try:
-    for index, point in enumerate(('pack-prepared', 'pack-stored', 'pack-before-publish')):
+    for index, point in enumerate(points):
         raw = os.urandom(6 * 1024 * 1024 + index)
         key = f'recovery-{index}'
         s3.put_object(Bucket=bucket, Key=key, Body=raw)
@@ -49,6 +54,10 @@ try:
         marker.touch()
         job = cli('pack', 'run')['task_id']
         wait(marker.with_suffix('.hit').exists)
+        if point == 'pack-storage-advanced':
+            detail, cursor, processed = db.execute('SELECT detail,cursor,processed FROM tasks WHERE id=%s', (job,)).fetchone()
+            assert detail['storage_index'] == 1 and cursor is None and processed > 0
+            assert db.execute('SELECT count(*) FROM tasks WHERE parent_task_id=%s', (job,)).fetchone()[0] == 0
         os.kill(pid, signal.SIGKILL)
         if process:
             process.wait(timeout=10)
@@ -85,7 +94,7 @@ try:
         assert db.execute("SELECT count(*) FROM packs WHERE state='retired' AND unreferenced_at IS NULL").fetchone()[0] == 0
         print('PASS crash recovery and maintenance pause:', point, flush=True)
 finally:
-    for point in ('pack-prepared', 'pack-stored', 'pack-before-publish'):
+    for point in points:
         (faults / point).unlink(missing_ok=True)
     if process:
         process.terminate()

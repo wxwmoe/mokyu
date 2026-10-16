@@ -82,8 +82,8 @@ wait(lambda: (cli('gc','run'),db.execute("SELECT count(*)=0 FROM streams WHERE o
 before=cli('status')['backend_gets']
 checked=task('integrity','check','--mode','full','--bucket',bucket,'--key','pack-source')
 issues = db.execute(
-    "SELECT detail->>'issues' FROM tasks WHERE parent_task_id=%s AND task_type='integrity' ORDER BY created_at DESC LIMIT 1",
-    (checked['id'],),
+    "SELECT detail->>'issues' FROM tasks WHERE (id=%s OR parent_task_id=%s) AND task_type='integrity' AND detail ? 'issues' ORDER BY created_at DESC LIMIT 1",
+    (checked['id'], checked['id']),
 ).fetchone()[0]
 assert issues == '0', checked
 assert cli('status')['backend_gets']-before==1

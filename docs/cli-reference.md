@@ -170,7 +170,7 @@ runtime settings 由所有角色共享。保存成功后响应会标记需要重
 | --- | --- |
 | `setup token` | 生成一次性 Web 首次管理员 setup token；只输出本次明文，保存哈希和一小时有效期 |
 | `cluster status` | 返回 deployment mode、enabled 节点数和 local storage 数 |
-| `cluster mode single/cluster` | 切换数据库部署模式；进入 cluster（群集模式）前必须已迁移并移除所有 local storage，回到 single（单容器模式）前必须禁用所有节点 |
+| `cluster mode single/cluster` | 在维护模式且工作已排空时切换数据库部署模式，随后必须重启；准备步骤见[模式切换](cluster-deployment.md#模式切换和恢复) |
 | `cluster nodes` | 列出节点 id、名称、角色、启用状态和最近 heartbeat |
 | `cluster release NAME --confirm` | 禁用节点并将其持有的任务重新排队 |
 

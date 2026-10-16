@@ -73,7 +73,6 @@ pub(crate) trait MaintenanceStore: Send + Sync {
     async fn fragment_exists(&self, id: Uuid) -> Result<bool>;
     async fn recovery_fragments(&self, after: Uuid) -> Result<Vec<RecoveryFragment>>;
     async fn fragment_uploads(&self, id: Uuid) -> Result<Vec<Uuid>>;
-    async fn expire_stream_leases(&self) -> Result<()>;
     async fn expired_uploads(
         &self,
         idle: f64,

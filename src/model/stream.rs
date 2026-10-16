@@ -14,7 +14,6 @@ pub(crate) struct StreamCreate {
     pub(crate) claim_object: bool,
     pub(crate) completion: Option<Uuid>,
     pub(crate) owner: Option<(Uuid, Uuid)>,
-    pub(crate) lease_seconds: i64,
 }
 
 pub(crate) struct StreamTail {
@@ -29,21 +28,8 @@ pub(crate) struct StreamTail {
 
 #[async_trait]
 pub(crate) trait StreamStore: Send + Sync {
-    async fn current(
-        &self,
-        bucket: Uuid,
-        key: &str,
-        lease_seconds: i64,
-    ) -> Result<(StoredStream, Uuid)>;
+    async fn current(&self, bucket: Uuid, key: &str) -> Result<StoredStream>;
     async fn create(&self, input: StreamCreate) -> Result<Uuid>;
     async fn append_tail(&self, tail: StreamTail) -> Result<()>;
     async fn finish(&self, stream: Uuid, size: i64, etag: &str, checksums: Value) -> Result<bool>;
-}
-
-/// Persistent stream lease operations shared by object readers and writers.
-#[async_trait]
-pub(crate) trait StreamLeaseStore: Send + Sync {
-    async fn renew_read(&self, id: Uuid, ttl_seconds: i64) -> Result<()>;
-    async fn release_read(&self, id: Uuid) -> Result<()>;
-    async fn renew_write(&self, stream: Uuid, ttl_seconds: i64) -> Result<()>;
 }

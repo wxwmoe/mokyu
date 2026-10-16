@@ -119,7 +119,7 @@ secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployme
 
 ## 媒体目录与检索
 
-`GET /api/v1/buckets/{bucket}/objects` 需 bucket.list，返回 items/prefixes/next_cursor/layout/search_mode/index_ready；对象版本为 id UUID。
+`GET /api/v1/buckets/{bucket}/objects` 需 bucket.list，返回 items/prefixes/next_cursor/layout/search_mode；对象版本为 id UUID。
 
 | 参数 | 取值 |
 | --- | --- |
@@ -133,7 +133,7 @@ secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployme
 
 前缀和完整路径区分大小写，q 接在 prefix 后；包含搜索不区分大小写，通配符按普通字符处理。无法提取连续三个文字/数字时改为路径前缀，响应明确 search_mode。无筛选的名称升序使用虚拟目录，其余为平面文件列表，不推算文件夹大小。
 
-`GET /api/v1/buckets/{bucket}/catalog` 返回 indexes/backfill/ready。索引未就绪可浏览目录、按完整路径或前缀查找；其余查询返回 503 CatalogBuilding。查询预算 2 秒。目录摘要与对象变更同事务更新，旧对象后台分批回填，重启可继续。
+图库索引在数据库迁移中建立，服务启动后即可使用搜索、筛选和排序。查询预算 2 秒，目录摘要与对象变更同事务更新。
 
 ### 预览与下载
 
@@ -228,7 +228,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 
 | 方法与路径 | 用途 |
 | --- | --- |
-| `GET /api/v1/runtime-settings` | 列出 PostgreSQL 中共享的 runtime settings 分组和 `restart_required` 状态 |
+| `GET /api/v1/runtime-settings` | 列出数据库中的 runtime settings 分组和 `restart_required` 状态 |
 | `GET /api/v1/runtime-settings/{section}` | 读取一个 runtime settings 分组 |
 | `PUT /api/v1/runtime-settings/{section}` | 管理员按 revision 替换一个分组；Web 设置也使用 `section=web`，值按当前 Rust schema 校验 |
 | `POST /api/v1/runtime-settings/{section}/reset` | 恢复一个分组的当前代码默认值 |
@@ -240,10 +240,12 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 | 方法与路径 | 用途 |
 | --- | --- |
 | `GET /api/v1/cluster/status` | 读取 deployment mode、enabled 节点数和 local storage 数 |
-| `POST /api/v1/cluster/mode` | 切换 single/cluster deployment mode，并递增 mode revision |
+| `POST /api/v1/cluster/mode` | 在维护模式、工作已排空且独占运行权时切换 single/cluster，递增 mode revision；当前进程保持受限，必须重启 |
 | `GET /api/v1/cluster/nodes` | 列出节点名称、角色、启用状态和最近 heartbeat |
 | `POST /api/v1/cluster/nodes/{name}/release` | 释放节点、撤销凭据并重新排队其任务 |
-| `POST /api/v1/cluster/recover` | 使用 deployment key 确认恢复模式并释放待恢复节点；仅 control/single 可调用 |
+| `POST /api/v1/cluster/recover` | 使用 deployment key 确认恢复模式并释放待恢复节点；仅 control 可调用 |
+
+群集接口仅 PostgreSQL 可用；其他后端返回 `501 NotImplemented`，CLI 同样拒绝。`uploads.staging_storage_id` 和 `staging_bytes_limit` 仅 PostgreSQL 返回和接受，单容器的 PostgreSQL 可预先设置供模式切换使用。
 
 节点丢失 `node.json` 时先释放旧节点，再重启对应角色完成本机注册。节点凭据不会出现在 URL、列表或普通 API 响应中。
 
@@ -273,6 +275,8 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 ## 后台任务
 
 `GET /api/v1/tasks` 支持 state/policy/bucket/storage/actor/token、分页游标和 limit（默认 50，最多 200），返回 items/next_cursor；policy 匹配 pack 任务的维护策略（如 reuse、range），其他任务匹配 task_type；storage 会筛选直接关联该后端存储或其存储桶的任务。`GET /api/v1/tasks/{id}` 返回 task_type、policy、状态、来源、发起者、处理计数、阻止原因及 detail。`POST /api/v1/tasks/{id}/actions` 提交 pause/resume。
+
+单容器任务的 CLI 结果和巡检报告不含群集父子任务、节点与过期租约字段；执行令牌不作为公开任务字段返回。
 
 状态为 queued/running/paused/completed/failed。暂停不回滚已提交批次；重启将 running 重排，paused 保持暂停。维护前提和策略可能阻止继续。任务创建成功只表示排队，不代表完成。`storage_migration` 的 detail 保存源/目标桶、对象版本、目标键和 copy/move 动作；可用同一任务接口查看、暂停和恢复。
 
