@@ -8,24 +8,30 @@
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `database.type` | `postgres` | 数据库类型：`postgres` 或 `mysql` |
-| `database.host` | 服务端数据库必填 | PostgreSQL/MySQL 主机或容器服务名 |
-| `database.port` | PostgreSQL `5432`、MySQL `3306` | 服务端数据库端口 |
-| `database.name` | 服务端数据库必填 | PostgreSQL/MySQL 数据库名 |
-| `database.user` | 服务端数据库必填 | PostgreSQL/MySQL 用户名 |
-| `database.password` / `database.password_file` | 服务端数据库二选一 | 直接密码或密码文件 |
-| `database.ssl_mode` | `prefer` | PostgreSQL/MySQL 的连接 SSL 模式；MySQL 支持 `disable`、`prefer`、`require`、`verify-ca`、`verify-full` |
+| `database.type` | `postgres` | 数据库类型：`postgres`、`mysql` 或 `sqlite` |
+| `database.host` | 服务端数据库必填 | PostgreSQL/MySQL 主机或容器服务名；SQLite 不使用 |
+| `database.port` | PostgreSQL `5432`、MySQL `3306` | 服务端数据库端口；SQLite 不使用 |
+| `database.name` | 服务端数据库必填 | PostgreSQL/MySQL 数据库名；SQLite 不使用 |
+| `database.user` | 服务端数据库必填 | PostgreSQL/MySQL 用户名；SQLite 不使用 |
+| `database.password` / `database.password_file` | 服务端数据库二选一 | 直接密码或密码文件；SQLite 不使用 |
+| `database.ssl_mode` | `prefer` | PostgreSQL/MySQL 的连接 SSL 模式；MySQL 支持 `disable`、`prefer`、`require`、`verify-ca`、`verify-full`，SQLite 不使用 |
+| `database.path` | `instance.data_path/mokyu.db` | SQLite 数据库文件；其他类型不使用 |
 
 | 数据库 | 单容器 | 群集 |
 | --- | --- | --- |
 | PostgreSQL | 支持 | 支持 |
 | MySQL / MariaDB | 支持 | 不支持 |
+| SQLite | 支持 | 不支持 |
 
-最低支持 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3。MariaDB 使用 `type = "mysql"` 和相同连接字段，由程序自动识别。MySQL/MariaDB 使用 InnoDB，要求 `innodb_flush_log_at_trx_commit=1`。低于最低版本时，启动会在执行迁移前拒绝。
+最低支持 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3。MariaDB 使用 `type = "mysql"` 和相同连接字段，由程序自动识别。MySQL/MariaDB 使用 InnoDB，要求 `innodb_flush_log_at_trx_commit=1`。低于最低版本时，启动会在执行迁移前拒绝。SQLite 随程序编译，无需单独安装数据库服务。
 
 最低兼容版本不代表推荐部署版本。新部署建议选择仍在维护的稳定版或 LTS，并安装该系列最新补丁。
 
 群集模式下，每个 control、worker、data 都从自己的 `[database]` 连接 PostgreSQL。Mokyu 不负责 PostgreSQL 故障转移；需要高可用时使用 PostgreSQL 自己的主备或集群地址。
+
+SQLite 使用 WAL、外键和 FULL 同步，数据库及其 `-wal`、`-shm` 文件必须位于可写的本地持久文件系统，不支持网络共享盘。默认文件是 `/data/mokyu.db`；新建数据库和锁文件权限为 `0600`，新建父目录为 `0700`。一个数据库文件只允许一个 Mokyu 实例，符号链接按实际路径识别，数据库硬链接被拒绝。文件被替换或运行锁丢失时进程退出。
+
+SQLite 将 `instance.database_connections` 中的一个连接用于串行写入，其余用于只读查询；设置为 `1` 时读写共用一个连接。更高的连接数不增加同时写入的事务数。
 
 ## instance
 
@@ -56,7 +62,7 @@
 
 省略 `request_connections` 和三个 `storage_*_slots` 时，服务按 CPU、内存、文件描述符和连接池自动计算保守但偏宽的本机预算。它们只限制本机；storage profile 则限制每个 storage 的总并发，单容器使用进程内队列，群集通过 PostgreSQL 共享许可。profile 热更新保留正在执行和排队的操作；降低上限后等待现有操作排空，提高上限则放行等待者。显式修改 instance 预算需要重启。
 
-共享 staging 设置只对 PostgreSQL 提供；MySQL 不接受这两个设置。PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；multipart 尾块和异步上传使用保留前缀 `__mokyu/multipart/`。单容器模式可使用 `/data/storage` 的 local storage。
+共享 staging 设置只对 PostgreSQL 提供；MySQL、SQLite 不接受这两个设置。PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；multipart 尾块和异步上传使用保留前缀 `__mokyu/multipart/`。单容器模式可使用 `/data/storage` 的 local storage。
 
 ## runtime 设置
 

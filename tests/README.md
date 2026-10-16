@@ -1,6 +1,6 @@
 # 验证
 
-构建和测试在隔离 Docker 环境中执行。每组数据库契约使用独立空库；测试账户、S3 桶、data 目录和故障注入目录也必须专用，不能指向已有部署。
+构建和测试在隔离 Docker 环境中执行。每组数据库契约使用独立空库或全新 SQLite 文件；测试账户、S3 桶、data 目录和故障注入目录也必须专用，不能指向已有部署。
 
 ## Rust 检查
 
@@ -13,11 +13,11 @@ cargo clippy --locked --all-targets --features fault-injection
 cargo build --locked
 ```
 
-数据库契约默认 ignored。设置 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`，再提供 `MOKYU_TEST_DATABASE_URL_FILE`（保存 PostgreSQL DSN 的文件）或 `MOKYU_TEST_MYSQL_CONFIG`（MySQL/MariaDB 配置）。配置文件包含测试数据库连接、固定部署密钥和独立 data 目录；各测试头部注明额外环境变量。例如：
+数据库契约默认 ignored。设置 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`，再按后端提供 `MOKYU_TEST_DATABASE_URL_FILE`（PostgreSQL，保存 DSN 的文件）、`MOKYU_TEST_MYSQL_CONFIG` 或 `MOKYU_TEST_SQLITE_CONFIG`。配置文件包含测试数据库连接、固定部署密钥和独立 data 目录；各测试头部注明额外环境变量。例如：
 
 ```sh
-MOKYU_TEST_DATABASE_URL_FILE=/config/pg-task-claim.url \
-  cargo test --locked --no-default-features postgres_task_claim_recovery -- --ignored --nocapture
+MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
+  cargo test --locked --no-default-features sqlite_account -- --ignored --nocapture
 ```
 
 每个原生契约覆盖对应接口、事务和故障恢复；原生 SQL 仅用于构造或检查本后端状态。不要用同一配置批量并发执行所有 ignored 测试，也不要把过滤后执行零个测试视为通过。曾经执行并写入数据的契约，应更换空库后重跑。
@@ -33,7 +33,7 @@ MOKYU_TEST_DATABASE_URL_FILE=/config/pg-task-claim.url \
 - `integration.py`：S3 普通上传、条件请求、校验、Range 和分片协议。
 - `control/database_capabilities.py`：管理 API/CLI、配置字段和群集能力边界。
 - `storage/single_lifecycle.py`：提前本地确认、持久上传、pack、rewrite、unpack、巡检、容量和清理。
-- `recovery/single_restart.py`：后端无关的 API 契约，覆盖 8 个崩溃点、待上传数据的密钥轮换及 local/S3 加密数据重启读取。
+- `recovery/single_restart.py`：三个后端共用的 API 契约，覆盖 8 个崩溃点、待上传数据的密钥轮换及 local/S3 加密数据重启读取。
 - `recovery/cluster_runtime.py`、`cluster_staging.py`：PostgreSQL 多角色、节点和共享暂存验证。
 
 各文件头部及 `MOKYU_TEST_*` 读取处定义所需环境变量。凭据使用文件传入；不能将测试密码或 S3 secret 放入日志。恢复测试会强杀并重启配置指定的网关进程，只能在专用测试容器运行。故障注入构建不用于部署。

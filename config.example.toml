@@ -1,5 +1,5 @@
 [database]
-type = "postgres" # postgres | mysql
+type = "postgres" # postgres | mysql | sqlite
 host = "postgres"
 port = 5432
 name = "mokyu"
@@ -8,6 +8,9 @@ password = "YOUR_POSTGRES_PASSWORD"
 # Use password_file instead of password for Docker secrets.
 #password_file = "secrets/postgres-password"
 ssl_mode = "prefer"
+# SQLite: keep only type = "sqlite" and optional path in this section.
+# Defaults to instance.data_path/mokyu.db when path is omitted.
+#path = "/data/mokyu.db"
 
 [instance]
 # Generate once with `mokyu tool keygen`; use the same key for every role.

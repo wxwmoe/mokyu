@@ -117,6 +117,7 @@ pub enum DatabaseType {
     #[default]
     Postgres,
     Mysql,
+    Sqlite,
 }
 
 impl DatabaseType {
@@ -124,6 +125,7 @@ impl DatabaseType {
         match self {
             Self::Postgres => "postgres",
             Self::Mysql => "mysql",
+            Self::Sqlite => "sqlite",
         }
     }
 
@@ -131,6 +133,7 @@ impl DatabaseType {
         match self {
             Self::Postgres => Some(5432),
             Self::Mysql => Some(3306),
+            Self::Sqlite => None,
         }
     }
 
@@ -165,6 +168,8 @@ pub struct Database {
     pub password_file: Option<PathBuf>,
     #[serde(default = "postgres_ssl_mode")]
     pub ssl_mode: String,
+    #[serde(default)]
+    pub path: Option<PathBuf>,
 }
 
 impl Database {
@@ -172,6 +177,14 @@ impl Database {
         self.backend
             .default_port()
             .map(|port| self.port.unwrap_or(port))
+    }
+
+    pub fn sqlite_path(&self, data_path: &std::path::Path) -> Option<PathBuf> {
+        (self.backend == DatabaseType::Sqlite).then(|| {
+            self.path
+                .clone()
+                .unwrap_or_else(|| data_path.join("mokyu.db"))
+        })
     }
 }
 

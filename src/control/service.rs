@@ -134,7 +134,11 @@ pub(super) async fn config(
     let mut instance = serde_json::to_value(&c.instance)?;
     instance["deployment_key"] = json!("[redacted]");
     sections.insert("instance".into(), instance);
-    let database = json!({"type":d.backend.as_str(),"host":d.host,"port":d.effective_port(),"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode});
+    let database = if d.backend == crate::config::DatabaseType::Sqlite {
+        json!({"type":d.backend.as_str(),"path":d.sqlite_path(&c.instance.data_path)})
+    } else {
+        json!({"type":d.backend.as_str(),"host":d.host,"port":d.effective_port(),"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode})
+    };
     sections.insert("database".into(), database);
     let loaded_revisions = app
         .runtime_revisions

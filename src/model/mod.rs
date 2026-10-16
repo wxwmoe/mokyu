@@ -51,6 +51,7 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<Error> {
         .copied()
         .or_else(|| postgres::error(source))
         .or_else(|| backend::mysql::error(source))
+        .or_else(|| backend::sqlite::error(source))
 }
 pub(crate) use key::{ManagedKeyRecord, ManagedKeyStore};
 pub(crate) use physical::{PhysicalSource, PhysicalStore};
@@ -105,6 +106,9 @@ pub(crate) async fn connect(
         }
         crate::config::DatabaseType::Mysql => {
             backend::mysql::connect(config, secrets, budget, role).await
+        }
+        crate::config::DatabaseType::Sqlite => {
+            backend::sqlite::connect(config, secrets, budget, role).await
         }
     }
 }

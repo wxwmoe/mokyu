@@ -127,18 +127,30 @@ impl Config {
                 && c.instance.listen_web != c.instance.listen_control,
             "listeners must be distinct"
         );
-        ensure!(
-            !c.database.host.is_empty()
-                && c.database.effective_port().is_some_and(|port| port > 0)
-                && !c.database.name.is_empty()
-                && !c.database.user.is_empty(),
-            "database host, name, user and port are required"
-        );
-        if c.database.backend == super::DatabaseType::Postgres {
-            c.database
-                .ssl_mode
-                .parse::<sqlx::postgres::PgSslMode>()
-                .map_err(|_| anyhow::anyhow!("invalid database.ssl_mode"))?;
+        match c.database.backend {
+            super::DatabaseType::Postgres | super::DatabaseType::Mysql => {
+                ensure!(
+                    !c.database.host.is_empty()
+                        && c.database.effective_port().is_some_and(|port| port > 0)
+                        && !c.database.name.is_empty()
+                        && !c.database.user.is_empty(),
+                    "database host, name, user and port are required"
+                );
+                if c.database.backend == super::DatabaseType::Postgres {
+                    c.database
+                        .ssl_mode
+                        .parse::<sqlx::postgres::PgSslMode>()
+                        .map_err(|_| anyhow::anyhow!("invalid database.ssl_mode"))?;
+                }
+            }
+            super::DatabaseType::Sqlite => {
+                ensure!(
+                    c.database
+                        .sqlite_path(&c.instance.data_path)
+                        .is_some_and(|path| !path.as_os_str().is_empty()),
+                    "database.path must not be empty"
+                );
+            }
         }
         ensure!(
             c.database.backend.supports_cluster()
