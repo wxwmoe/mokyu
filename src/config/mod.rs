@@ -142,7 +142,13 @@ mod tests {
         let mut config = file.into_config();
         config.database.backend = DatabaseType::Mysql;
         assert_eq!(config.database.effective_port(), Some(3306));
+        config.database.backend = DatabaseType::Sqlite;
+        assert_eq!(
+            config.database.sqlite_path(Path::new("/data")).unwrap(),
+            Path::new("/data/mokyu.db")
+        );
         assert!(DatabaseType::Mysql.validate_role("control").is_err());
+        assert!(DatabaseType::Sqlite.validate_role("worker").is_err());
         assert!(DatabaseType::Postgres.validate_role("data").is_ok());
     }
 
@@ -151,7 +157,11 @@ mod tests {
         let file: FileConfig =
             toml::from_str("[database]\nhost='database'\nname='mokyu'\nuser='mokyu'").unwrap();
         let mut config = file.into_config();
-        for backend in [DatabaseType::Postgres, DatabaseType::Mysql] {
+        for backend in [
+            DatabaseType::Postgres,
+            DatabaseType::Mysql,
+            DatabaseType::Sqlite,
+        ] {
             config.database.backend = backend;
             let defaults = crate::model::runtime_defaults(&config);
             let uploads = &defaults

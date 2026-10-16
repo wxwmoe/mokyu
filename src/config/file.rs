@@ -1,5 +1,6 @@
 use super::{
-    BackendDefaults, Budget, Config, Database, Instance, LocalCache, RuntimeSettings, Secrets,
+    BackendDefaults, Budget, Config, Database, DatabaseType, Instance, LocalCache, RuntimeSettings,
+    Secrets,
 };
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
@@ -98,13 +99,18 @@ impl Config {
             .map(deployment_key)
             .transpose()?
             .context("instance.deployment_key is required")?;
-        let secrets = Secrets {
-            database_password: secret_value(
+        let database_password = if c.database.backend == DatabaseType::Sqlite {
+            String::new()
+        } else {
+            secret_value(
                 c.database.password.as_deref(),
                 c.database.password_file.as_deref(),
                 base,
                 "database.password",
-            )?,
+            )?
+        };
+        let secrets = Secrets {
+            database_password,
             credential_key: crate::content::codec::Key::new("aes-256-gcm", credential_material)?,
             keys: BTreeMap::new(),
             runtime_keys: Arc::new(RwLock::new(BTreeMap::new())),
