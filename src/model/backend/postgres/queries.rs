@@ -845,8 +845,11 @@ pub(super) fn create_write_lease(id: Uuid, stream: Uuid, ttl: i64) -> Statement<
         .bind(ttl)
 }
 
-pub(super) fn server_version() -> Scalar<'static, i32> {
-    sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
+pub(super) fn server_version() -> sqlx::query::QueryAs<'static, Postgres, (i32, String), PgArguments>
+{
+    sqlx::query_as(
+        "SELECT current_setting('server_version_num')::integer, current_setting('server_version')",
+    )
 }
 
 pub(super) fn synchronous_commit() -> Statement<'static> {
@@ -7219,6 +7222,9 @@ use crate::model::runtime::{RuntimeState, RuntimeStore};
 
 #[async_trait::async_trait]
 impl RuntimeStore for Backend {
+    fn database_info(&self) -> Option<&crate::model::runtime::DatabaseInfo> {
+        self.database_info.as_ref()
+    }
     fn read_replica(&self) -> Option<Value> {
         self.replica.as_ref().map(connection::Replica::snapshot)
     }

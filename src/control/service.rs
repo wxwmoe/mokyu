@@ -17,6 +17,8 @@ pub(super) struct RuntimeCounter {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct ServiceStatus {
+    deployment_mode: String,
+    current_node: Option<NodeContext>,
     version: &'static str,
     started_at: String,
     maintenance: bool,
@@ -29,6 +31,12 @@ pub(super) struct ServiceStatus {
     inventory_as_of: Option<String>,
     inventory_error: Option<String>,
     inventory_stale: bool,
+}
+#[derive(Serialize, ToSchema)]
+pub(super) struct NodeContext {
+    id: Option<uuid::Uuid>,
+    name: Option<String>,
+    role: String,
 }
 fn text(value: &Value) -> String {
     value
@@ -97,6 +105,12 @@ pub(super) async fn status(
     });
     access.finish().await?;
     Ok(Json(ServiceStatus {
+        deployment_mode: text(&raw["deployment_mode"]),
+        current_node: (raw["deployment_mode"] == "cluster").then(|| NodeContext {
+            id: app.node.get().map(|node| node.node_id),
+            name: app.config.instance.name.clone(),
+            role: app.role.to_owned(),
+        }),
         version: env!("CARGO_PKG_VERSION"),
         started_at: text(&raw["runtime"]["started_at"]),
         maintenance: raw["maintenance"] == true,
@@ -120,6 +134,8 @@ pub(super) struct ConfigField {
     origin: &'static str,
     value_mode: &'static str,
     restart: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value_state: Option<&'static str>,
 }
 #[utoipa::path(get,operation_id="service_config",path="/api/v1/system/config",responses((status=200,body=Vec<ConfigField>)))]
 pub(super) async fn config(
@@ -140,6 +156,10 @@ pub(super) async fn config(
         json!({"type":d.backend.as_str(),"host":d.host,"port":d.effective_port(),"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode})
     };
     sections.insert("database".into(), database);
+    if let Some(replica) = &c.replica_database {
+        let d = replica.resolve(d)?;
+        sections.insert("replica_database".into(), json!({"host":d.host,"port":d.effective_port(),"name":d.name,"user":d.user,"password":"[redacted]","password_file":"[redacted]","ssl_mode":d.ssl_mode}));
+    }
     let loaded_revisions = app
         .runtime_revisions
         .read()
@@ -158,7 +178,7 @@ pub(super) async fn config(
     }
     let runtime_sections: std::collections::HashSet<&str> = sections
         .keys()
-        .filter(|key| !matches!(key.as_str(), "instance" | "database"))
+        .filter(|key| !matches!(key.as_str(), "instance" | "database" | "replica_database"))
         .map(String::as_str)
         .collect();
     let mut fields = Vec::new();
@@ -177,10 +197,15 @@ pub(super) async fn config(
                 }
             } else if c.configured_fields.contains(&key) {
                 ("config", "set")
+            } else if section == "replica_database"
+                && matches!(field.as_str(), "port" | "name" | "user" | "ssl_mode")
+            {
+                ("config", "inherited")
             } else {
                 ("config", "default")
             };
             fields.push(ConfigField {
+                value_state: None,
                 key,
                 value: text(value),
                 origin,
@@ -194,6 +219,7 @@ pub(super) async fn config(
     }
     for (key, value) in serde_json::to_value(&app.budget)?.as_object().unwrap() {
         fields.push(ConfigField {
+            value_state: None,
             key: format!("effective.{key}"),
             value: text(value),
             origin: "config",
@@ -202,12 +228,106 @@ pub(super) async fn config(
         });
     }
     fields.push(ConfigField {
+        value_state: None,
         key: "pack.creation_enabled".into(),
         value: app.pack_creation_allowed().to_string(),
         origin: "database",
         value_mode: "set",
         restart: false,
     });
+    fields.extend(environment(&app));
     access.finish().await?;
     Ok(Json(fields))
+}
+
+fn observed(key: &str, value: Value, missing: &'static str) -> ConfigField {
+    ConfigField {
+        key: key.into(),
+        value_state: value.is_null().then_some(missing),
+        value: if value.is_null() {
+            String::new()
+        } else {
+            text(&value)
+        },
+        origin: "environment",
+        value_mode: "read",
+        restart: false,
+    }
+}
+
+fn environment(app: &App) -> Vec<ConfigField> {
+    let mut fields = Vec::new();
+    let info = serde_json::to_value(app.runtime.database_info()).unwrap_or(Value::Null);
+    for key in ["program", "version", "schema_version"] {
+        fields.push(observed(
+            &format!("database.{key}"),
+            info[key].clone(),
+            "unavailable",
+        ));
+    }
+    let e = &app.budget.environment;
+    for (key, value) in [
+        ("version", json!(env!("CARGO_PKG_VERSION"))),
+        ("os", json!(std::env::consts::OS)),
+        ("arch", json!(std::env::consts::ARCH)),
+        ("available_cpus", json!(e.available_cpus)),
+        (
+            "memory_available_at_start",
+            json!(e.memory_available_at_start),
+        ),
+    ] {
+        fields.push(observed(&format!("runtime.{key}"), value, "unavailable"));
+    }
+    fields.push(observed(
+        "runtime.cpu_quota",
+        json!(e.cpu_quota),
+        if e.cpu_quota_read {
+            "unlimited"
+        } else {
+            "unavailable"
+        },
+    ));
+    fields.push(observed(
+        "runtime.memory_limit",
+        json!(e.memory_limit),
+        if e.memory_limit_read {
+            "unlimited"
+        } else {
+            "unavailable"
+        },
+    ));
+    if app.config.replica_database.is_some() {
+        let replica = app.runtime.read_replica();
+        let missing = if replica.is_some() {
+            "not_read"
+        } else {
+            "not_applicable"
+        };
+        let replica = replica.unwrap_or(Value::Null);
+        for key in ["program", "version", "schema_version", "observed_at"] {
+            fields.push(observed(
+                &format!("replica_database.{key}"),
+                replica["database"][key].clone(),
+                missing,
+            ));
+        }
+    }
+    fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observations_distinguish_zero_and_missing() {
+        let zero = observed("runtime.cpu_quota", json!(0), "unavailable");
+        assert_eq!(zero.value, "0");
+        assert_eq!(zero.value_state, None);
+        let missing = observed("runtime.cpu_quota", Value::Null, "unlimited");
+        assert_eq!(missing.value, "");
+        assert_eq!(missing.value_state, Some("unlimited"));
+        assert_eq!(missing.origin, "environment");
+        assert!(!missing.restart);
+    }
 }

@@ -24,6 +24,8 @@
 
 ## 会话
 
+`GET /api/v1/system/status` 保留本机状态语义，另返回权威 `deployment_mode`。仅群集包含 `current_node`（可空的注册 id、配置名称及角色）；单容器为 null。`GET /api/v1/system/config` 的环境行使用 `origin=environment`、`value_mode=read`，只读且不要求重启；缺失值以 `value_state=unavailable/not_read/not_applicable/unlimited` 区分，`value` 为空。数值零不属于缺失值。从库继承的非秘密配置使用 `value_mode=inherited`；环境观察不触发实时数据库探测。
+
 | 方法与路径 | 用途 |
 | --- | --- |
 | `POST /api/v1/auth/login`、`POST /api/v1/auth/logout` | 登录、撤销当前会话 |

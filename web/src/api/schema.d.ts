@@ -1731,6 +1731,7 @@ export interface components {
             restart: boolean;
             value: string;
             value_mode: string;
+            value_state?: string | null;
         };
         ConfirmBucket: {
             confirm_name: string;
@@ -2019,6 +2020,12 @@ export interface components {
         ModeInput: {
             /** @example cluster */
             mode: string;
+        };
+        NodeContext: {
+            /** Format: uuid */
+            id?: string | null;
+            name?: string | null;
+            role: string;
         };
         NodeView: {
             /** Format: date-time */
@@ -2316,6 +2323,8 @@ export interface components {
             backend_operations: unknown;
             backend_queues: unknown;
             counters: components["schemas"]["RuntimeCounter"][];
+            current_node?: components["schemas"]["NodeContext"] | null;
+            deployment_mode: string;
             inventory_as_of?: string | null;
             inventory_error?: string | null;
             inventory_stale: boolean;

@@ -197,6 +197,15 @@ pub(super) async fn open(
         .execute(&mut owner)
         .await?;
     migration::run(&mut owner).await?;
+    let database_info = crate::model::runtime::DatabaseInfo {
+        program: match server {
+            Server::MySql => "MySQL",
+            Server::MariaDb => "MariaDB",
+        },
+        version,
+        schema_version: i64::from(queries::schema_version().fetch_one(&mut owner).await?),
+        observed_at: chrono::Utc::now(),
+    };
     transactions::identify(
         &mut owner,
         blake3::hash(&secrets.credential_key.material).as_bytes(),
@@ -224,6 +233,7 @@ pub(super) async fn open(
         .await
         .map_err(|_| anyhow::anyhow!("cannot open MySQL pool"))?;
     Ok(Backend {
+        database_info,
         pool,
         owner: tokio::sync::Mutex::new(owner),
         upload_admission: tokio::sync::Mutex::new(()),

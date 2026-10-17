@@ -20,6 +20,7 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
 }
 
 pub(crate) struct Backend {
+    database_info: crate::model::runtime::DatabaseInfo,
     pool: MySqlPool,
     owner: tokio::sync::Mutex<MySqlConnection>,
     upload_admission: tokio::sync::Mutex<()>,

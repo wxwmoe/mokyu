@@ -5178,6 +5178,9 @@ use crate::model::{ManagedKeyRecord, ManagedKeyStore};
 
 #[async_trait::async_trait]
 impl RuntimeStore for Backend {
+    fn database_info(&self) -> Option<&crate::model::runtime::DatabaseInfo> {
+        Some(&self.database_info)
+    }
     async fn initialize(&self, maintenance: bool) -> Result<RuntimeState> {
         if maintenance {
             sqlx::query("UPDATE mokyu_meta SET maintenance=TRUE WHERE id=1")

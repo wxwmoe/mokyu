@@ -4,6 +4,8 @@ use std::{fs, path::PathBuf};
 
 #[derive(Clone, serde::Serialize)]
 pub struct Budget {
+    #[serde(skip)]
+    pub environment: Environment,
     pub available_cpus: usize,
     pub memory_bytes: u64,
     pub cpu_jobs: usize,
@@ -21,6 +23,16 @@ pub struct Budget {
     pub cache_entries: usize,
     pub pack_memory_units: u32,
     pub response_cache_bytes: u64,
+}
+
+#[derive(Clone, Default)]
+pub struct Environment {
+    pub available_cpus: Option<usize>,
+    pub cpu_quota: Option<f64>,
+    pub cpu_quota_read: bool,
+    pub memory_limit: Option<u64>,
+    pub memory_limit_read: bool,
+    pub memory_available_at_start: Option<u64>,
 }
 
 pub const SLOT_BYTES: u64 = 32 * 1024 * 1024;
@@ -257,9 +269,11 @@ impl Config {
     }
 
     pub fn budget(&self) -> Result<Budget> {
-        let mut cpus = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1);
+        let mut environment = Environment {
+            available_cpus: std::thread::available_parallelism().ok().map(usize::from),
+            ..Environment::default()
+        };
+        let mut cpus = environment.available_cpus.unwrap_or(1);
         // Rust's estimate may floor a fractional cgroup quota before we inspect it.
         // Read the actual affinity first, then apply the quota with rounding below.
         if let Ok(status) = fs::read_to_string("/proc/self/status")
@@ -275,14 +289,17 @@ impl Config {
             && count > 0
         {
             cpus = count;
+            environment.available_cpus = Some(count);
         }
         let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
-        let mut memory = meminfo
+        environment.memory_available_at_start = meminfo
             .lines()
             .find(|s| s.starts_with("MemAvailable:"))
             .and_then(|s| s.split_whitespace().nth(1))
             .and_then(|s| s.parse::<u64>().ok())
-            .map(|n| n.saturating_mul(1024))
+            .map(|n| n.saturating_mul(1024));
+        let mut memory = environment
+            .memory_available_at_start
             .unwrap_or(512 * 1024 * 1024);
         let mut paths = vec![PathBuf::from("/sys/fs/cgroup")];
         if let Ok(cgroup) = fs::read_to_string("/proc/self/cgroup")
@@ -297,10 +314,15 @@ impl Config {
             }
         }
         for p in paths {
-            if let Ok(v) = fs::read_to_string(p.join("memory.max"))
-                && let Ok(n) = v.trim().parse::<u64>()
-            {
-                memory = memory.min(n);
+            if let Ok(v) = fs::read_to_string(p.join("memory.max")) {
+                if let Ok(n) = v.trim().parse::<u64>() {
+                    memory = memory.min(n);
+                    environment.memory_limit =
+                        Some(environment.memory_limit.map_or(n, |old| old.min(n)));
+                    environment.memory_limit_read = true;
+                } else if v.trim() == "max" {
+                    environment.memory_limit_read = true;
+                }
             }
             if let Ok(v) = fs::read_to_string(p.join("cpu.max")) {
                 let f: Vec<_> = v.split_whitespace().collect();
@@ -309,8 +331,18 @@ impl Config {
                     && t > 0
                 {
                     cpus = cpus.min(q.div_ceil(t).max(1) as usize);
+                    let quota = q as f64 / t as f64;
+                    environment.cpu_quota =
+                        Some(environment.cpu_quota.map_or(quota, |old| old.min(quota)));
+                    environment.cpu_quota_read = true;
+                } else if f.len() == 2 && f[0] == "max" && f[1].parse::<u64>().is_ok_and(|t| t > 0)
+                {
+                    environment.cpu_quota_read = true;
                 }
             }
+        }
+        if environment.available_cpus.is_some() {
+            environment.available_cpus = Some(cpus);
         }
         let inflight = self
             .instance
@@ -437,6 +469,7 @@ impl Config {
             "explicit resource budgets exceed effective memory"
         );
         Ok(Budget {
+            environment,
             available_cpus: cpus,
             memory_bytes: memory,
             cpu_jobs,

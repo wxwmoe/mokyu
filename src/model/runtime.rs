@@ -1,6 +1,14 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct DatabaseInfo {
+    pub program: &'static str,
+    pub version: String,
+    pub schema_version: i64,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub(crate) struct RuntimeState {
     pub(crate) gc_paused: bool,
     pub(crate) maintenance: bool,
@@ -11,6 +19,7 @@ pub(crate) struct RuntimeState {
 
 #[async_trait]
 pub(crate) trait RuntimeStore: Send + Sync {
+    fn database_info(&self) -> Option<&DatabaseInfo>;
     async fn initialize(&self, maintenance: bool) -> Result<RuntimeState>;
     async fn state(&self) -> Result<RuntimeState>;
     async fn pending_uploads(&self) -> Result<bool>;

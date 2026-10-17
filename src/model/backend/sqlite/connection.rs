@@ -214,7 +214,7 @@ pub(super) async fn open(
     let mut connection = SqliteConnection::connect_with(&options)
         .await
         .context("cannot open SQLite database")?;
-    let initialized: Result<()> = async {
+    let initialized: Result<crate::model::runtime::DatabaseInfo> = async {
         let version = queries::version().fetch_one(&mut connection).await?;
         let numbers: Vec<u64> = version
             .split('.')
@@ -233,11 +233,17 @@ pub(super) async fn open(
             &mut connection,
             blake3::hash(&secrets.credential_key.material).as_bytes(),
         )
-        .await
+        .await?;
+        Ok(crate::model::runtime::DatabaseInfo {
+            program: "SQLite",
+            version,
+            schema_version: queries::schema_version().fetch_one(&mut connection).await?,
+            observed_at: chrono::Utc::now(),
+        })
     }
     .await;
     connection.close().await?;
-    initialized?;
+    let database_info = initialized?;
     let pools = || {
         SqlitePoolOptions::new()
             .min_connections(0)
@@ -260,6 +266,7 @@ pub(super) async fn open(
             .await?
     };
     let backend = Backend {
+        database_info,
         authorization: Default::default(),
         previews: Default::default(),
         shared_pool: budget.database_connections == 1,

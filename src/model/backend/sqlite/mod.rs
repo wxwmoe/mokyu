@@ -9,6 +9,7 @@ use std::{fs::File, path::PathBuf};
 pub(crate) use connection::connect;
 
 pub(crate) struct Backend {
+    database_info: crate::model::runtime::DatabaseInfo,
     authorization: std::sync::Arc<tokio::sync::RwLock<()>>,
     previews: std::sync::Arc<tokio::sync::Mutex<()>>,
     read: SqlitePool,

@@ -686,6 +686,9 @@ body { background: radial-gradient(ellipse at 85% 0%, color-mix(in srgb, var(--r
 .bucket-settings { padding-top: 12px; }
 .bucket-settings > .tabs-list { margin-top: 0; padding: 0 24px 4px; }
 .config-origin-badge, .config-value-mode-badge { width: auto; min-width: 0; padding-inline: .65rem; justify-self: start; justify-content: center; text-align: center; white-space: nowrap; }
+.config-origin-badge[data-origin='environment'] { background: var(--sky-soft); color: var(--sky); }
+.config-value-mode-badge[data-mode='read'] { background: var(--gray-soft); color: var(--gray); }
+.config-value-mode-badge[data-mode='inherited'] { background: var(--sky-soft); color: var(--sky); }
 .config-origin-badge[data-origin='config'] { background: var(--rose-soft); color: var(--rose); }
 .config-origin-badge[data-origin='database'] { background: var(--lilac-soft); color: var(--lilac); }
 .config-value-mode-badge[data-mode='set'] { background: var(--cream-soft); color: var(--cream); }

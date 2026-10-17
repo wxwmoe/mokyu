@@ -99,7 +99,7 @@ runtime 设置保存在 `runtime_settings`，只有以下五组。Web 使用固�
 | `metrics` | storage/runtime/access 采样间隔、保留期和查询超时 | 部署共享 |
 | `maintenance` | GC、清理、任务保留、审计保留和批量大小 | 部署共享 |
 
-runtime section 使用 revision 乐观并发。冲突返回当前 revision；重置恢复当前版本默认值。设置改变后各节点在请求边界、任务领取边界和低频刷新时重新加载。
+runtime section 使用 revision 乐观并发。冲突返回当前 revision；重置恢复当前版本默认值。runtime 设置在启动时加载；保存后按各进程实际加载的修订提示重启，不进行热更新。
 
 ## storage profile
 
@@ -135,3 +135,9 @@ mokyu cli status      # 本机 control HTTP
 ```
 
 `mokyu cli` 访问 `127.0.0.1:instance.listen_control`。单容器使用部署密钥认证，群集 control 使用本机 `node.json` 凭据。worker/data 只提供 status。入口与数据库模式不匹配时仍监听管理/状态端口，data 返回 503、worker 和调度暂停；`cluster mode single|cluster` 可在该状态下修正数据库模式，成功后重启入口。
+
+## 运行环境信息
+
+运行配置沿用现有字段列表，以“运行环境 / 读取值”展示数据库程序、连接初始化时的版本和结构版本，以及程序版本、平台、CPU 和内存识别结果。环境行只读；`effective.*` 仍是高级详情中的最终预算。MySQL 配置连接 MariaDB 时，程序名称显示 MariaDB。
+
+CPU 配额保留小数；启动时可用内存不代表当前剩余内存，也不等于容器上限。未限制、无法读取、尚未读取和不适用分别展示，零值仍是有效数值。从库版本只在按需连接成功后保存，浏览页面不会触发从库连接；读取时间不代表实时健康状态。密码、密码文件和部署密钥不回显，从库继承的非秘密配置标注为继承值。

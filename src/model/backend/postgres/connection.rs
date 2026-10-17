@@ -36,6 +36,7 @@ pub(super) struct Replica {
     slots: tokio::sync::Semaphore,
     limit: u32,
     counters: ReplicaCounters,
+    database_info: std::sync::Arc<Mutex<Option<crate::model::runtime::DatabaseInfo>>>,
 }
 
 impl Replica {
@@ -45,6 +46,8 @@ impl Replica {
         identity: queries::ReplicaIdentity,
     ) -> Self {
         let expected = identity.clone();
+        let database_info = std::sync::Arc::new(Mutex::new(None));
+        let observed = database_info.clone();
         let pool = PgPoolOptions::new()
             .min_connections(0)
             .max_connections(limit)
@@ -53,15 +56,23 @@ impl Replica {
             .idle_timeout(Duration::from_secs(60))
             .after_connect(move |connection, _| {
                 let expected = expected.clone();
+                let observed = observed.clone();
                 Box::pin(async move {
                     if !queries::check_replica(&expected)
-                        .fetch_one(connection)
+                        .fetch_one(&mut *connection)
                         .await?
                     {
                         return Err(sqlx::Error::Protocol(
                             "replica identity, version or role mismatch".into(),
                         ));
                     }
+                    let (_, version) = queries::server_version().fetch_one(connection).await?;
+                    *observed.lock().unwrap() = Some(crate::model::runtime::DatabaseInfo {
+                        program: "PostgreSQL",
+                        version,
+                        schema_version: i64::from(expected.schema_version),
+                        observed_at: chrono::Utc::now(),
+                    });
                     Ok(())
                 })
             })
@@ -85,12 +96,13 @@ impl Replica {
             probe: tokio::sync::Semaphore::new(1),
             slots: tokio::sync::Semaphore::new(limit as usize),
             counters: ReplicaCounters::default(),
+            database_info,
         }
     }
 
     pub(super) fn snapshot(&self) -> serde_json::Value {
         let health = self.health.lock().unwrap();
-        serde_json::json!({"state":health.state,"retry_after_ms":health.next.saturating_duration_since(Instant::now()).as_millis(),"pool_size":self.pool.size(),"pool_idle":self.pool.num_idle(),"connections":self.limit,"attempts":self.counters.attempts.load(Relaxed),"pages":self.counters.pages.load(Relaxed),"lagging":self.counters.lagging.load(Relaxed),"errors":self.counters.errors.load(Relaxed),"connect_errors":self.counters.connect_errors.load(Relaxed),"query_errors":self.counters.query_errors.load(Relaxed),"busy":self.counters.busy.load(Relaxed),"fallbacks":self.counters.fallbacks.load(Relaxed)})
+        serde_json::json!({"database":*self.database_info.lock().unwrap(),"state":health.state,"retry_after_ms":health.next.saturating_duration_since(Instant::now()).as_millis(),"pool_size":self.pool.size(),"pool_idle":self.pool.num_idle(),"connections":self.limit,"attempts":self.counters.attempts.load(Relaxed),"pages":self.counters.pages.load(Relaxed),"lagging":self.counters.lagging.load(Relaxed),"errors":self.counters.errors.load(Relaxed),"connect_errors":self.counters.connect_errors.load(Relaxed),"query_errors":self.counters.query_errors.load(Relaxed),"busy":self.counters.busy.load(Relaxed),"fallbacks":self.counters.fallbacks.load(Relaxed)})
     }
 
     pub(super) async fn read(
@@ -279,8 +291,9 @@ pub async fn connect(
     let mut owner = PgConnection::connect_with(&options)
         .await
         .map_err(|_| anyhow::anyhow!("cannot connect to PostgreSQL"))?;
+    let (version_number, version) = queries::server_version().fetch_one(&mut owner).await?;
     ensure!(
-        queries::server_version().fetch_one(&mut owner).await? >= 180_000,
+        version_number >= 180_000,
         "PostgreSQL 18 or newer is required"
     );
     let pool = PgPoolOptions::new()
@@ -312,6 +325,12 @@ pub async fn connect(
         "another runtime owns this database in an incompatible mode"
     );
     migration::run(&mut owner).await?;
+    let database_info = crate::model::runtime::DatabaseInfo {
+        program: "PostgreSQL",
+        version,
+        schema_version: i64::from(queries::schema_version().fetch_one(&mut owner).await?),
+        observed_at: chrono::Utc::now(),
+    };
     crate::model::key::load(secrets, queries::managed_keys().fetch_all(&pool).await?)?;
     let deployment_fingerprint = blake3::hash(&secrets.credential_key.material);
     let saved: Option<Vec<u8>> = queries::deployment_fingerprint().fetch_one(&pool).await?;
@@ -354,6 +373,7 @@ pub async fn connect(
         "database is missing a historical chunk key"
     );
     let mut backend = Backend::new(pool, owner, role == "single");
+    backend.database_info = Some(database_info);
     if role == "data"
         && let Some(replica) = &c.replica_database
     {
