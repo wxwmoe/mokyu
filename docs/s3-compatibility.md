@@ -80,6 +80,8 @@ GetObject、公共读和管理下载支持单段 `bytes=a-b`、`bytes=a-`、`byt
 
 支持 If-Match、If-None-Match、If-Modified-Since、If-Unmodified-Since；GET／公共读支持 If-Range。日期按秒比较，条件请求可返回 304/412。S3 HeadObject 的 Range 仍返回 200，Content-Length 为区间长度；公共 HEAD 可返回 206。对象保存的 Content-Type、Cache-Control 等元数据随响应返回。
 
+HEAD 和 304 只读取当前对象元数据，不读取区块、不占正文读取名额，也不创建群集读取租约。条件请求需要正文时，服务重新固定当前版本并检查权限和条件，再发送响应；完整读取从起点直接分页，非零 Range 才查询所在区块的起点。
+
 后续区块损坏可能使响应中止，已发出的前部区块仍经过校验；客户端须核对 Content-Length 和响应完整性。
 
 ## 公共网站

@@ -66,12 +66,12 @@ try:
                    (bucket_id, source, stream, stream))
     before = mapping_calls()
     assert read(source)[0] == payload
-    assert mapping_calls() - before == math.ceil(count / 64) + 1
+    assert mapping_calls() - before == math.ceil(count / 64)
     for start, end in [(0, 1), (len(payload) - 37, len(payload)),
                        (63 * len(segment) + 5, 65 * len(segment) + 13)]:
         before = mapping_calls()
         assert read(source, Range=f'bytes={start}-{end - 1}')[0] == payload[start:end]
-        assert mapping_calls() - before == 2
+        assert mapping_calls() - before == (1 if start == 0 else 2)
     assert read(source, Range='bytes=-71')[0] == payload[-71:]
     assert read(source)[0] == payload
     print('PASS 513 sliced extents, bounded metadata queries and full/Range reads', flush=True)

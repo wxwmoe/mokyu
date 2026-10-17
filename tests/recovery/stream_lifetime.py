@@ -48,6 +48,7 @@ def run(s3, bucket, db, faults, gc, single):
     before = lease_calls() if single else None
     try:
         for operation in ('get', 'head', 'copy'):
+            marker = faults / ('read-metadata' if operation == 'head' else 'read-pinned')
             key, target = prefix + '-' + operation, prefix + '-' + operation + '-copy'
             keys.extend((key, target))
             raw = os.urandom(32768)
@@ -70,12 +71,15 @@ def run(s3, bucket, db, faults, gc, single):
                     assert not pending.done(), 'read missed its pin barrier'
                     leased = scalar("SELECT EXISTS(SELECT 1 FROM stream_leases WHERE stream_id=%s "
                                     "AND lease_type='read' AND expires_at>now())", (stream,))
-                    assert leased is not single, 'read used the wrong coordination mode'
+                    assert leased == (not single and operation != 'head'), 'read used the wrong coordination mode'
                     if operation != 'copy':
                         s3.put_object(Bucket=bucket, Key=key, Body=b'new version')
                     s3.delete_object(Bucket=bucket, Key=key)
                     gc()
-                    assert retained(stream), 'GC reclaimed an active reader'
+                    if operation != 'head':
+                        assert retained(stream), 'GC reclaimed an active reader'
+                    else:
+                        wait(lambda: reclaimed(stream))
                 finally:
                     marker.unlink(missing_ok=True)
                 result = pending.result(timeout=30)
@@ -87,7 +91,7 @@ def run(s3, bucket, db, faults, gc, single):
                 assert s3.get_object(Bucket=bucket, Key=target)['Body'].read() == raw
             wait(lambda: reclaimed(stream))
             changes = 'delete and GC' if operation == 'copy' else 'overwrite, delete and GC'
-            print('PASS ' + operation + ' retains its original stream through ' + changes, flush=True)
+            print('PASS ' + operation + ' preserves its response through ' + changes, flush=True)
 
         key = prefix + '-writer'
         keys.append(key)

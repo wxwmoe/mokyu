@@ -130,8 +130,10 @@ impl App {
         let app = self.clone();
         let body = async_stream::try_stream! {
             let _pin=pin;let _permits=permits;let read_context=Arc::new(crate::storage::ReadContext::user(range));
+            #[cfg(feature="fault-injection")]
+            crate::faults::point("read-body").await;
             _pin.renew_read_lease().await?;
-            let mut cursor=app.chunks.read_start(stream.id,start).await?;
+            let mut cursor=if start==0 {Some(0)} else {app.chunks.read_start(stream.id,start).await?};
             let mut position=start;
             while position<end {
                 _pin.renew_read_lease().await?;

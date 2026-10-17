@@ -37,6 +37,8 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 - `storage/single_lifecycle.py`：提前本地确认、持久上传、pack、rewrite、unpack、巡检、容量和清理。
 - `recovery/single_restart.py`：三个后端共用的 API 契约，覆盖 8 个崩溃点、待上传数据的密钥轮换及 local/S3 加密数据重启读取。
 - `recovery/cluster_runtime.py`、`cluster_staging.py`：PostgreSQL 多角色、节点和共享暂存验证。
+- `s3/read_path.py`：分页 SQL、后台缓存故障和读名额耗尽时的 HEAD/304；可用 `MOKYU_TEST_PUBLIC_WEB`、`MOKYU_TEST_PUBLIC_HOST` 同时验证公共 Web。
+- `recovery/read_leases.py`：两个 data 节点、按时间续约、元数据轻读和过期租约拒绝；要求读取空闲超时为 `30s`，测试进程独立于受限应用容器，至少预留 1 GiB 内存。
 
 各文件头部及 `MOKYU_TEST_*` 读取处定义所需环境变量。凭据使用文件传入；不能将测试密码或 S3 secret 放入日志。恢复测试会强杀并重启配置指定的网关进程，只能在专用测试容器运行。故障注入构建不用于部署。
 

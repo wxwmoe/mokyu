@@ -89,14 +89,14 @@ extents = db.execute('SELECT offset_bytes,length FROM extents WHERE stream_id=%s
 assert len(extents) > 64, len(extents)
 before = mapping_calls()
 assert read('large') == payload
-assert mapping_calls() - before == math.ceil(len(extents) / 64) + 1
-print('PASS one metadata query per 64 mappings plus initial Range seek', flush=True)
+assert mapping_calls() - before == math.ceil(len(extents) / 64)
+print('PASS one metadata query per 64 mappings without a full-read seek', flush=True)
 
 for start, end in [(0, 1), (len(payload) - 37, len(payload)),
                    (extents[63][0] + 7, extents[65][0] + 13)]:
     before = mapping_calls()
     assert read('large', {'Range': f'bytes={start}-{end - 1}'}) == payload[start:end]
-    assert mapping_calls() - before == 2
+    assert mapping_calls() - before == (1 if start == 0 else 2)
 assert read('large', {'Range': 'bytes=-71'}) == payload[-71:]
 assert read('large') == payload
 del payload
@@ -197,5 +197,59 @@ cache = Path(os.environ['MOKYU_TEST_DATA']) / 'chunks'
 assert not list(cache.glob('*/*.tmp'))
 assert status()['local_bytes'][1] == sum(p.stat().st_size for p in cache.glob('*/*') if p.is_file())
 print('PASS nonblocking cache fills/cleanup, coalesced jobs, warm reads and exact disk accounting', flush=True)
+
+# Metadata-only responses must still work when every body slot is occupied.
+etag = s3.head_object(Bucket=bucket, Key=prefix + 'warm')['ETag']
+urls = [(f'{endpoint}/{bucket}/{prefix}warm', {})]
+if public := os.environ.get('MOKYU_TEST_PUBLIC_WEB'):
+    urls.append((public + '/' + prefix + 'warm', {'Host': os.environ['MOKYU_TEST_PUBLIC_HOST']}))
+marker = faults / 'read-body'
+marker.with_suffix('.hit').unlink(missing_ok=True)
+marker.touch()
+slots = status()['read_slots_available']
+with ThreadPoolExecutor(max_workers=slots) as pool:
+    pending = [pool.submit(read, 'warm') for _ in range(slots)]
+    try:
+        deadline = time.monotonic() + 10
+        while status()['read_slots_available']:
+            assert time.monotonic() < deadline, 'read slots were not occupied'
+            time.sleep(.02)
+        before, backend = mapping_calls(), status()['backend_gets']
+        for url, extra in urls:
+            response = requests.head(url, headers=extra, timeout=3)
+            assert response.status_code == 200 and not response.content
+            assert int(response.headers['Content-Length']) == len(raw)
+            response = requests.get(url, headers={**extra, 'If-None-Match': etag}, timeout=3)
+            assert response.status_code == 304 and not response.content
+        assert mapping_calls() == before
+        assert status()['backend_gets'] == backend
+    finally:
+        marker.unlink(missing_ok=True)
+    assert all(result.result(timeout=15) == raw for result in pending)
+marker.with_suffix('.hit').unlink(missing_ok=True)
+print('PASS HEAD/304 under saturated read slots without extent or backend reads', flush=True)
+
+for url, extra in urls:
+    for change in ('acl', 'overwrite'):
+        marker = faults / 'read-metadata'
+        marker.with_suffix('.hit').unlink(missing_ok=True)
+        marker.touch()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(requests.get, url, headers={**extra, 'If-Match': etag}, timeout=15)
+            try:
+                deadline = time.monotonic() + 10
+                while not marker.with_suffix('.hit').exists():
+                    assert time.monotonic() < deadline, 'conditional read missed metadata barrier'
+                    time.sleep(.02)
+                if change == 'acl':
+                    s3.put_object_acl(Bucket=bucket, Key=prefix + 'warm', ACL='private')
+                else:
+                    put('warm', raw[::-1])
+            finally:
+                marker.unlink(missing_ok=True)
+            assert pending.result(timeout=15).status_code == (403 if change == 'acl' else 412)
+        put('warm', raw)
+marker.with_suffix('.hit').unlink(missing_ok=True)
+print('PASS conditional body reads recheck ACL and version after metadata lookup', flush=True)
 
 db.close()

@@ -7,6 +7,13 @@ use uuid::Uuid;
 use super::{Active, App, StoredStream};
 
 impl App {
+    pub async fn metadata(&self, bucket: Uuid, key: &str) -> Result<StoredStream> {
+        self.ensure_mode()?;
+        let stream = self.stream_store.current(bucket, key).await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("read-metadata").await;
+        Ok(stream)
+    }
     pub async fn current(&self, bucket: Uuid, key: &str) -> Result<(StoredStream, Active)> {
         let _guard = self.coord.lock().await;
         self.ensure_mode()?;
@@ -16,6 +23,7 @@ impl App {
             (stream, pin)
         } else {
             let ttl = self.read_lease_seconds()?;
+            let started = tokio::time::Instant::now();
             let (stream, lease_id) = self.cluster()?.current_stream(bucket, key, ttl).await?;
             let pin = self.pin_with_lease(
                 stream.id,
@@ -23,6 +31,7 @@ impl App {
                     id: lease_id,
                     store: self.cluster.as_ref().unwrap().clone(),
                     ttl_seconds: ttl,
+                    renewed_at: tokio::sync::Mutex::new(started),
                 }),
             );
             (stream, pin)

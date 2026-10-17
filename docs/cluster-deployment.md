@@ -122,3 +122,5 @@ docker exec mokyu-control mokyu cli cluster mode single
 PostgreSQL 数据库、WAL、部署密钥、每个容器的 data 目录（尤其是 `node.json`）和存储区块仍按[部署与恢复](deployment-and-recovery.md)的要求备份。
 
 群集部署只改变进程职责，不改变 S3 兼容接口、存储格式或 PostgreSQL 的恢复责任。S3 服务、DNS 健康检查、TLS 终止和 PostgreSQL 主备切换由部署环境提供和维护。
+
+正文读取在同一事务中固定对象版本和创建读取租约。续约间隔为租约 TTL 的三分之一，TTL 为读取空闲超时与 30 秒中较大值的两倍；续约失败或租约已经过期时停止取源。续约次数随读取时间增长，不随区块数量增长。HEAD/304 不获取来源租约；单容器继续使用本机 pin，不写群集租约。

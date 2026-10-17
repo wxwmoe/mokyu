@@ -96,10 +96,19 @@ struct ReadLease {
     id: Uuid,
     store: Arc<dyn crate::model::cluster::ClusterStore>,
     ttl_seconds: i64,
+    renewed_at: tokio::sync::Mutex<tokio::time::Instant>,
 }
 impl ReadLease {
     async fn renew(&self) -> Result<()> {
-        self.store.renew_read(self.id, self.ttl_seconds).await
+        let mut renewed_at = self.renewed_at.lock().await;
+        let started = tokio::time::Instant::now();
+        if started.duration_since(*renewed_at).as_secs() < (self.ttl_seconds / 3) as u64 {
+            return Ok(());
+        }
+        self.store.renew_read(self.id, self.ttl_seconds).await?;
+        // Count database latency against the next renewal interval.
+        *renewed_at = started;
+        Ok(())
     }
 }
 impl Drop for ReadLease {

@@ -117,6 +117,7 @@ pub async fn s3_http(
         }
         if let Some(bucket) = bucket {
             cors = cors_headers(&bucket, request.headers(), request.method().as_str())?;
+            request.extensions_mut().insert(bucket);
         }
         if request.method() == Method::OPTIONS {
             let mut response = hyper::Response::new(s3s::Body::empty());
@@ -277,14 +278,6 @@ pub(crate) async fn respond(
     method: Method,
     options: ReadOptions,
 ) -> Result<Response, HttpError> {
-    let permits = app.admit(false).await?;
-    let (s, pin) = app.current(bucket, key).await?;
-    if options.public && !s.public_read {
-        return Err(unauthorized());
-    }
-    if options.version.is_some_and(|id| id != s.id) {
-        return Err(s3s::s3_error!(PreconditionFailed).into());
-    }
     let etag = |name: &str| {
         headers
             .get(name)
@@ -297,28 +290,55 @@ pub(crate) async fn respond(
             .and_then(|s| s.to_str().ok())
             .and_then(|s| Timestamp::parse(TimestampFormat::HttpDate, s).ok())
     };
-    let condition = gateway::conditions(
-        &s,
-        etag("if-match")?.as_ref(),
-        etag("if-none-match")?.as_ref(),
-        date("if-modified-since").as_ref(),
-        date("if-unmodified-since").as_ref(),
-        true,
-    );
-    if let Err(e) = condition {
-        if e.downcast_ref::<s3s::S3Error>()
-            .is_some_and(|e| e.code() == &s3s::S3ErrorCode::NotModified)
-        {
-            return Ok(Response::builder()
-                .status(StatusCode::NOT_MODIFIED)
-                .header("etag", format!("\"{}\"", s.etag))
-                .header(
-                    "last-modified",
-                    gateway::http_date(gateway::stamp(s.touched_at))?,
-                )
-                .body(Body::empty())?);
+    let im = etag("if-match")?;
+    let inm = etag("if-none-match")?;
+    let ims = date("if-modified-since");
+    let iums = date("if-unmodified-since");
+    let light =
+        method == Method::HEAD || im.is_some() || inm.is_some() || ims.is_some() || iums.is_some();
+    let (mut s, mut pin) = if light {
+        (app.metadata(bucket, key).await?, None)
+    } else {
+        let (s, pin) = app.current(bucket, key).await?;
+        (s, Some(pin))
+    };
+    loop {
+        if options.public && !s.public_read {
+            return Err(unauthorized());
         }
-        return Err(e.into());
+        if options.version.is_some_and(|id| id != s.id) {
+            return Err(s3s::s3_error!(PreconditionFailed).into());
+        }
+        let condition = gateway::conditions(
+            &s,
+            im.as_ref(),
+            inm.as_ref(),
+            ims.as_ref(),
+            iums.as_ref(),
+            true,
+        );
+        if let Err(e) = condition {
+            if e.downcast_ref::<s3s::S3Error>()
+                .is_some_and(|e| e.code() == &s3s::S3ErrorCode::NotModified)
+            {
+                return Ok(Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .header("etag", format!("\"{}\"", s.etag))
+                    .header(
+                        "last-modified",
+                        gateway::http_date(gateway::stamp(s.touched_at))?,
+                    )
+                    .body(Body::empty())?);
+            }
+            return Err(e.into());
+        }
+        if method == Method::HEAD || pin.is_some() {
+            break;
+        }
+        // Recheck permissions and conditions on the atomically protected version.
+        let current = app.current(bucket, key).await?;
+        s = current.0;
+        pin = Some(current.1);
     }
     let requested = headers
         .get("range")
@@ -426,9 +446,10 @@ pub(crate) async fn respond(
     let body = if method == Method::HEAD {
         Body::empty()
     } else {
+        let permits = app.admit(false).await?;
         Body::new(s3s::Body::from(app.body(
             s,
-            pin,
+            pin.expect("body read is protected"),
             span.start as i64,
             span.end as i64,
             permits,

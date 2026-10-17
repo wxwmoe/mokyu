@@ -18,6 +18,21 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Gateway(pub Arc<App>);
+impl Gateway {
+    async fn read_bucket(
+        &self,
+        name: &str,
+        extensions: &axum::http::Extensions,
+    ) -> Result<crate::app::Bucket> {
+        if let Some(bucket) = extensions
+            .get::<crate::app::Bucket>()
+            .filter(|b| b.name == name)
+        {
+            return Ok(bucket.clone());
+        }
+        self.0.bucket(name, false).await
+    }
+}
 pub fn stamp(t: DateTime<Utc>) -> Timestamp {
     Timestamp::from(std::time::SystemTime::from(
         DateTime::from_timestamp(t.timestamp(), 0).unwrap(),
@@ -465,26 +480,42 @@ impl S3 for Gateway {
             if i.version_id.is_some() {
                 return Err(s3_error!(NotImplemented, "versioning is unsupported").into());
             }
-            let permits = self.0.admit(false).await?;
-            let b = self.0.bucket(&i.bucket, false).await?;
-            let (s, pin) = self.0.current(b.id, &i.key).await?;
-            if req.credentials.is_some() || !s.public_read {
-                self.0
-                    .authorize(
-                        req.credentials.as_ref().map(|c| c.access_key.as_str()),
-                        b.id,
-                        Action::Read,
-                    )
-                    .await?;
+            let b = self.read_bucket(&i.bucket, &req.extensions).await?;
+            let light = i.if_match.is_some()
+                || i.if_none_match.is_some()
+                || i.if_modified_since.is_some()
+                || i.if_unmodified_since.is_some();
+            let (mut s, mut pin) = if light {
+                (self.0.metadata(b.id, &i.key).await?, None)
+            } else {
+                let (s, pin) = self.0.current(b.id, &i.key).await?;
+                (s, Some(pin))
+            };
+            loop {
+                if req.credentials.is_some() || !s.public_read {
+                    self.0
+                        .authorize(
+                            req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                            b.id,
+                            Action::Read,
+                        )
+                        .await?;
+                }
+                conditions(
+                    &s,
+                    i.if_match.as_ref(),
+                    i.if_none_match.as_ref(),
+                    i.if_modified_since.as_ref(),
+                    i.if_unmodified_since.as_ref(),
+                    true,
+                )?;
+                if pin.is_some() {
+                    break;
+                }
+                let current = self.0.current(b.id, &i.key).await?;
+                s = current.0;
+                pin = Some(current.1);
             }
-            conditions(
-                &s,
-                i.if_match.as_ref(),
-                i.if_none_match.as_ref(),
-                i.if_modified_since.as_ref(),
-                i.if_unmodified_since.as_ref(),
-                true,
-            )?;
             let requested = if if_range_matches(&s, &req.headers) {
                 i.range
             } else {
@@ -515,9 +546,10 @@ impl S3 for Gateway {
                 checksums!(out, &s.checksums);
                 out.checksum_type = checksum(&s.checksums, "type").map(ChecksumType::from);
             }
+            let permits = self.0.admit(false).await?;
             out.body = Some(self.0.body(
                 s,
-                pin,
+                pin.expect("body read is protected"),
                 range.start as i64,
                 range.end as i64,
                 permits,
@@ -538,8 +570,8 @@ impl S3 for Gateway {
             if i.version_id.is_some() {
                 return Err(s3_error!(NotImplemented, "versioning is unsupported").into());
             }
-            let b = self.0.bucket(&i.bucket, false).await?;
-            let (s, _pin) = self.0.current(b.id, &i.key).await?;
+            let b = self.read_bucket(&i.bucket, &req.extensions).await?;
+            let s = self.0.metadata(b.id, &i.key).await?;
             if req.credentials.is_some() || !s.public_read {
                 self.0
                     .authorize(
@@ -759,7 +791,7 @@ impl S3 for Gateway {
     ) -> S3Result<S3Response<GetObjectAclOutput>> {
         async {
             let i = req.input;
-            let b = self.0.bucket(&i.bucket, false).await?;
+            let b = self.read_bucket(&i.bucket, &req.extensions).await?;
             self.0
                 .authorize(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
@@ -767,7 +799,7 @@ impl S3 for Gateway {
                     Action::Read,
                 )
                 .await?;
-            let (s, _pin) = self.0.current(b.id, &i.key).await?;
+            let s = self.0.metadata(b.id, &i.key).await?;
             let mut grants = vec![Grant {
                 grantee: Some(Grantee {
                     type_: Type::from_static("CanonicalUser"),
