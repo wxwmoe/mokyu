@@ -20,6 +20,7 @@ async fn run(app: &App, role: &str, refresh: bool) -> Result<()> {
     };
     loop {
         let result: Result<()> = async {
+            app.refresh_maintenance().await?;
             app.cluster()?
                 .heartbeat(state, role, &app.secrets.credential_key)
                 .await?;

@@ -217,8 +217,15 @@ async fn run_status(app: Arc<app::App>) -> Result<()> {
 }
 
 async fn drain(app: Arc<app::App>) -> Result<()> {
-    app.maintenance
-        .store(true, std::sync::atomic::Ordering::Release);
+    {
+        let _coord = app.coord.lock().await;
+        app.draining
+            .store(true, std::sync::atomic::Ordering::Release);
+        app.maintenance
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("runtime-draining").await;
     let drain = async {
         while !app.active.lock().unwrap().is_empty() {
             tokio::time::sleep(Duration::from_millis(100)).await;

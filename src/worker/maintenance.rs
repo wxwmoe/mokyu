@@ -9,6 +9,18 @@ use std::{
 use uuid::Uuid;
 
 impl App {
+    pub(crate) async fn refresh_maintenance(&self) -> Result<()> {
+        let _coord = self.coord.lock().await;
+        if self.draining.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let state = self.runtime.state().await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("maintenance-refresh").await;
+        self.maintenance.store(state.maintenance, Ordering::Release);
+        Ok(())
+    }
+
     pub(crate) fn pack_creation_allowed(&self) -> bool {
         self.config.local_pack.enabled && !self.pack_creation_paused.load(Ordering::Acquire)
     }

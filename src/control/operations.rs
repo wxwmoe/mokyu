@@ -601,6 +601,9 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
         Command::Maintenance(mode @ (Maintenance::Enable | Maintenance::Disable)) => {
             let enabled = matches!(mode, Maintenance::Enable);
             let _coord = app.coord.lock().await;
+            if app.draining.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(s3s::s3_error!(ServiceUnavailable, "gateway is draining").into());
+            }
             if !enabled {
                 app.ensure_mode()?;
                 let pending = app.maintenance_store.destructive_sweep().await?;
