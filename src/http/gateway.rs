@@ -495,7 +495,7 @@ impl S3 for Gateway {
                 }
                 let read = super::object::read(
                     &self.0,
-                    b.id,
+                    &b,
                     &i.key,
                     &req.headers,
                     false,
@@ -622,7 +622,7 @@ impl S3 for Gateway {
             if req.credentials.is_none() {
                 let read = super::object::read(
                     &self.0,
-                    b.id,
+                    &b,
                     &i.key,
                     &req.headers,
                     true,

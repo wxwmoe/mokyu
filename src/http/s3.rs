@@ -265,21 +265,21 @@ pub fn decode_path(path: &str) -> Result<String> {
 }
 
 pub(crate) struct ReadOptions {
-    pub public: bool,
+    pub public: Option<Bucket>,
     pub preview: Option<bool>,
     pub version: Option<uuid::Uuid>,
 }
 impl ReadOptions {
-    pub(super) fn public() -> Self {
+    pub(super) fn public(bucket: &Bucket) -> Self {
         Self {
-            public: true,
+            public: Some(bucket.clone()),
             preview: None,
             version: None,
         }
     }
     pub fn managed(preview: bool, version: Option<uuid::Uuid>) -> Self {
         Self {
-            public: false,
+            public: None,
             preview: Some(preview),
             version,
         }
@@ -293,10 +293,10 @@ pub(crate) async fn respond(
     method: Method,
     options: ReadOptions,
 ) -> Result<Response, HttpError> {
-    if options.public {
+    if let Some(public_bucket) = &options.public {
         let read = super::object::read(
             &app,
-            bucket,
+            public_bucket,
             key,
             &headers,
             method == Method::HEAD,

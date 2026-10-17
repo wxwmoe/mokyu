@@ -3,7 +3,7 @@ use super::{
     gateway,
 };
 use crate::{
-    app::{App, Metadata, StoredStream, responses},
+    app::{App, Bucket, Metadata, StoredStream, responses},
     model::CompressionObservation,
 };
 use anyhow::Result;
@@ -14,7 +14,6 @@ use std::{
     io,
     sync::{Arc, Mutex},
 };
-use uuid::Uuid;
 
 const POLICY: i32 = 1;
 
@@ -163,13 +162,17 @@ fn observation(
 
 pub(crate) async fn read(
     app: &Arc<App>,
-    bucket: Uuid,
+    bucket_info: &Bucket,
     key: &str,
     request: &HeaderMap,
     head: bool,
     overrides: &HeaderMap,
     checksum: bool,
 ) -> Result<Read> {
+    let bucket = bucket_info.id;
+    if bucket_info.state != "active" {
+        return Err(s3s::s3_error!(AccessDenied).into());
+    }
     let accept = AcceptEncoding::new(request);
     let light = head
         || [
@@ -180,7 +183,41 @@ pub(crate) async fn read(
         ]
         .iter()
         .any(|name| request.contains_key(name));
-    let (mut stream, mut pin) = if light {
+    let candidate =
+        if !light && !checksum && cacheable(request) && app.response_cache.candidate(bucket, key) {
+            app.ensure_mode()?;
+            app.stream_store.cached(bucket, key).await?
+        } else {
+            None
+        };
+    let candidate = if let Some(candidate) = candidate {
+        if !candidate.bucket_active {
+            return Err(s3s::s3_error!(AccessDenied).into());
+        }
+        if candidate.bucket_revision != bucket_info.settings_revision {
+            return Err(s3s::s3_error!(
+                ServiceUnavailable,
+                "bucket settings changed; retry the request"
+            )
+            .into());
+        }
+        let mut mapping = responses::Mapping::new(candidate.stream.size);
+        for row in &candidate.extents {
+            mapping.record_cached(row);
+        }
+        mapping
+            .signature()
+            .map(|mapping| (candidate.stream, mapping))
+    } else {
+        None
+    };
+    let mut cached_mapping = None;
+    let (mut stream, mut pin) = if let Some((stream, mapping)) = candidate {
+        cached_mapping = Some(mapping);
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("read-cache-snapshot").await;
+        (stream, None)
+    } else if light {
         (app.metadata(bucket, key).await?, None)
     } else {
         let (stream, pin) = app.current(bucket, key).await?;
@@ -217,7 +254,7 @@ pub(crate) async fn read(
         };
         let original_tag = format!("\"{}\"", stream.etag);
         let not_modified = conditions(&stream, request, &encoding.etag(&original_tag))?;
-        if !head && !not_modified && pin.is_none() {
+        if !head && !not_modified && pin.is_none() && cached_mapping.is_none() {
             // Permissions and representation selection must refer to the protected current version.
             let current = app.current(bucket, key).await?;
             stream = current.0;
@@ -291,7 +328,12 @@ pub(crate) async fn read(
             };
             if let Some(entry) = cached {
                 let mut valid = entry.raw_size == stream.size && entry.etag == stream.etag;
-                if valid && !head {
+                if valid
+                    && !head
+                    && let Some(mapping) = cached_mapping
+                {
+                    valid = mapping == entry.mapping;
+                } else if valid && !head {
                     let rows = match app.chunks.read_extents(stream.id, 0, stream.size).await {
                         Ok(rows) => rows,
                         Err(error) => {
@@ -314,6 +356,9 @@ pub(crate) async fn read(
                     headers.insert(header::CONTENT_LENGTH, bytes.len().to_string().parse()?);
                     if !head {
                         app.response_cache.hit();
+                        if cached_mapping.is_some() {
+                            app.response_cache.validated();
+                        }
                         if let Some(observe) = observation(app, &stream, encoding) {
                             observe(stream.size as u64, entry.bytes.len() as u64);
                         }
@@ -335,6 +380,14 @@ pub(crate) async fn read(
                 app.response_cache.remove(cache_key, &entry);
             }
         }
+        if !head && pin.is_none() {
+            // A cache miss must acquire source protection and recheck the current representation.
+            let current = app.current(bucket, key).await?;
+            stream = current.0;
+            pin = Some(current.1);
+            cached_mapping = None;
+            continue;
+        }
         let memory = (encoding != Encoding::Identity && !head)
             .then(|| app.storage.http_work())
             .flatten();
@@ -352,7 +405,7 @@ pub(crate) async fn read(
             let permits = app.admit(false).await?;
             let size = stream.size as u64;
             let builder = if use_cache && range.is_none() {
-                app.response_cache.begin(cache_key, &stream)
+                app.response_cache.begin(cache_key, &stream, key)
             } else {
                 None
             };

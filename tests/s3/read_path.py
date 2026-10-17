@@ -42,6 +42,10 @@ def read(key, headers=None, timeout=30):
 
 
 def status():
+    if url := os.environ.get('MOKYU_TEST_STATUS_URL'):
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
     return json.loads(subprocess.check_output([os.environ['MOKYU_TEST_BINARY'], '--config',
         os.environ['MOKYU_TEST_CONFIG'], 'cli', 'status'], text=True))
 

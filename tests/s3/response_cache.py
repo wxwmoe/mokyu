@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 import brotli
@@ -58,6 +59,7 @@ for name, original in [('text', text), ('noise', noise)]:
         after = status()
         assert data == encoded and int(response.headers['content-length']) == len(encoded)
         assert after['response_cache']['hits'] == before['response_cache']['hits'] + 1, (encoding, before['response_cache'], after['response_cache'])
+        assert after['response_cache']['validated_hits'] == before['response_cache']['validated_hits'] + 1
         assert after['backend_gets'] == before['backend_gets'] and after['cache_hits'] == before['cache_hits']
         head, data = read(name, encoding, method='HEAD')
         assert not data and int(head.headers['content-length']) == len(encoded)
@@ -76,7 +78,7 @@ assert response.headers['content-encoding'] == 'zstd'
 before = status()['response_cache']['hits']
 assert client.get_object(Bucket=bucket, Key=prefix + 'text')['Body'].read() == text
 assert status()['response_cache']['hits'] == before
-if os.environ.get('MOKYU_TEST_PUBLIC_WEB') and not os.environ.get('MOKYU_TEST_STATUS_URL'):
+if os.environ.get('MOKYU_TEST_PUBLIC_WEB'):
     alias = prefix.rstrip('/').replace('/', '-') + '.test'
     cli('domain', 'set', alias, bucket)
     target = os.environ['MOKYU_TEST_PUBLIC_WEB'] + '/' + prefix + 'text'
@@ -111,6 +113,19 @@ assert read('noise')[0].status_code == 404
 if os.environ.get('MOKYU_TEST_DATABASE_FILE'):
     import psycopg
     with psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True) as db:
+        db.execute('CREATE EXTENSION IF NOT EXISTS pg_stat_statements')
+        def lease_writes():
+            return sum(count for query, count in db.execute('SELECT query,calls FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())') if query.startswith(('INSERT INTO stream_leases', 'DELETE FROM stream_leases WHERE id=')))
+        put('hot', text)
+        for encoding in ['identity', 'zstd', 'br', 'gzip']:
+            warm('hot', text, encoding)
+        time.sleep(.2)
+        before = lease_writes()
+        for encoding in ['identity', 'zstd', 'br', 'gzip']:
+            assert read('hot', encoding)[0].status_code == 200
+        assert read('hot', Range='bytes=3-99')[1] == text[3:100]
+        time.sleep(.2)
+        assert lease_writes() == before, 'a validated hot response wrote a source lease'
         put('unavailable', text)
         warm('unavailable', text, 'zstd')
         chunk = db.execute('SELECT e.chunk_id FROM extents e JOIN objects o ON o.stream_id=e.stream_id JOIN buckets b ON b.id=o.bucket_id WHERE b.name=%s AND o.object_key=%s LIMIT 1', (bucket, prefix + 'unavailable')).fetchone()[0]
@@ -143,6 +158,31 @@ if os.environ.get('MOKYU_TEST_DATABASE_FILE'):
         before = status()['response_cache']['hits']
         warm('fragmented', text)
         assert status()['response_cache']['hits'] == before
+        if fault_dir := os.environ.get('MOKYU_TEST_FAULT_DIR'):
+            put('snapshot', text)
+            warm('snapshot', text, 'gzip')
+            stream = db.execute('SELECT o.stream_id FROM objects o JOIN buckets b ON b.id=o.bucket_id WHERE b.name=%s AND o.object_key=%s', (bucket, prefix + 'snapshot')).fetchone()[0]
+            fault = Path(fault_dir) / 'read-cache-snapshot'
+            fault.with_suffix('.hit').unlink(missing_ok=True)
+            fault.touch()
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(read, 'snapshot', 'gzip')
+                try:
+                    for _ in range(500):
+                        if fault.with_suffix('.hit').exists():
+                            break
+                        time.sleep(.02)
+                    assert fault.with_suffix('.hit').exists()
+                    assert db.execute('SELECT count(*) FROM stream_leases WHERE stream_id=%s', (stream,)).fetchone()[0] == 0
+                    client.delete_object(Bucket=bucket, Key=prefix + 'snapshot')
+                    db.execute('DELETE FROM streams WHERE id=%s', (stream,))
+                finally:
+                    fault.unlink(missing_ok=True)
+                    fault.with_suffix('.hit').unlink(missing_ok=True)
+                response, data = pending.result(timeout=15)
+                assert response.status_code == 200 and gzip.decompress(data) == text
+            assert read('snapshot')[0].status_code == 404
+            print('PASS validated memory body survives deletion without a source lease; later reads see deletion')
 
 if nodes := os.environ.get('MOKYU_TEST_DATA_ENDPOINTS'):
     nodes = json.loads(nodes)

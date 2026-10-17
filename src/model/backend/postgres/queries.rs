@@ -656,6 +656,27 @@ pub(super) fn current_stream<'q>(
     }).bind(bucket).bind(key)
 }
 
+pub(super) async fn cached_stream(
+    pool: &PgPool,
+    bucket: Uuid,
+    key: &str,
+) -> Result<Option<crate::model::CachedStream>> {
+    use sqlx::{FromRow, Row};
+    let rows = sqlx::query("SELECT s.*,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN extents e ON e.stream_id=s.id LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=$1 AND o.object_key=$2 AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key).fetch_all(pool).await?;
+    let Some(first) = rows.first() else {
+        return Ok(None);
+    };
+    Ok(Some(crate::model::CachedStream {
+        stream: crate::app::StoredStream::from_row(first)?,
+        bucket_revision: first.try_get("bucket_revision")?,
+        bucket_active: first.try_get("bucket_active")?,
+        extents: rows
+            .iter()
+            .map(crate::model::CachedExtent::from_row)
+            .collect::<Result<_, _>>()?,
+    }))
+}
+
 pub(super) fn lock_owned_task<'q>(id: &'q Uuid, token: &'q Uuid) -> Scalar<'q, Uuid> {
     sqlx::query_scalar("SELECT id FROM tasks WHERE id=$1 AND state='running' AND lease_token=$2 AND ((lease_node_id IS NULL AND lease_expires_at IS NULL) OR lease_expires_at>clock_timestamp()) FOR SHARE")
         .bind(id)

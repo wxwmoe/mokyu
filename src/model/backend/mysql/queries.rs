@@ -4728,6 +4728,23 @@ pub(super) fn resize_writing_stream(id: Uuid, size: i64) -> Statement<'static> {
 
 #[async_trait::async_trait]
 impl StreamStore for Backend {
+    async fn cached(&self, bucket: Uuid, key: &str) -> Result<Option<crate::model::CachedStream>> {
+        use sqlx::FromRow;
+        let rows = sqlx::query("SELECT s.*,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN extents e ON e.stream_id=s.id LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=? AND o.object_key=? AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key.as_bytes()).fetch_all(&self.pool).await?;
+        let Some(first) = rows.first() else {
+            return Ok(None);
+        };
+        Ok(Some(crate::model::CachedStream {
+            stream: StoredStream::from_row(first)?,
+            bucket_revision: first.try_get("bucket_revision")?,
+            bucket_active: first.try_get("bucket_active")?,
+            extents: rows
+                .iter()
+                .map(crate::model::CachedExtent::from_row)
+                .collect::<Result<_, _>>()?,
+        }))
+    }
+
     async fn current(&self, bucket: Uuid, key: &str) -> Result<StoredStream> {
         sqlx::query_as("SELECT s.* FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=? AND o.object_key=? AND s.state='ready'").bind(bucket).bind(key.as_bytes()).fetch_optional(&self.pool).await?.ok_or_else(|| s3s::s3_error!(NoSuchKey).into())
     }

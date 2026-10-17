@@ -30,6 +30,24 @@ pub(crate) struct StreamTail {
     pub(crate) staging_key: Option<String>,
 }
 
+#[derive(sqlx::FromRow)]
+pub(crate) struct CachedExtent {
+    pub cache_offset: Option<i64>,
+    pub cache_length: Option<i32>,
+    pub cache_source: Option<i32>,
+    pub cache_chunk: Option<i64>,
+    pub cache_ready: Option<i64>,
+    pub cache_size: Option<i32>,
+    pub cache_hash: Option<Vec<u8>>,
+}
+
+pub(crate) struct CachedStream {
+    pub stream: StoredStream,
+    pub bucket_revision: i64,
+    pub bucket_active: bool,
+    pub extents: Vec<CachedExtent>,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct CompressionObservation {
     pub stream: Uuid,
@@ -51,6 +69,7 @@ impl CompressionObservation {
 #[async_trait]
 pub(crate) trait StreamStore: Send + Sync {
     async fn current(&self, bucket: Uuid, key: &str) -> Result<StoredStream>;
+    async fn cached(&self, bucket: Uuid, key: &str) -> Result<Option<CachedStream>>;
     async fn create(&self, input: StreamCreate) -> Result<Uuid>;
     async fn append_tail(&self, tail: StreamTail) -> Result<()>;
     async fn finish(&self, stream: Uuid, size: i64, etag: &str, checksums: Value) -> Result<bool>;

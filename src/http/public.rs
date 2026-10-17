@@ -262,7 +262,7 @@ async fn public(
         &key,
         request.headers().clone(),
         request.method().clone(),
-        ReadOptions::public(),
+        ReadOptions::public(&bucket),
     )
     .await;
     let result = match result {
@@ -303,7 +303,7 @@ async fn website_response(
         } else {
             Method::HEAD
         },
-        ReadOptions::public(),
+        ReadOptions::public(bucket),
     )
     .await;
     match result {
@@ -338,7 +338,7 @@ async fn website_response(
             &bucket.error_document,
             error_headers,
             request.method.clone(),
-            ReadOptions::public(),
+            ReadOptions::public(bucket),
         )
         .await
         {

@@ -61,7 +61,9 @@ pub(crate) use settings::{
     RuntimeSettingsStore, apply_runtime_section, load_runtime_settings, runtime_defaults,
 };
 pub(crate) use storage::{StorageRecord, StorageRecordStore};
-pub(crate) use stream::{CompressionObservation, StreamCreate, StreamStore, StreamTail};
+pub(crate) use stream::{
+    CachedExtent, CachedStream, CompressionObservation, StreamCreate, StreamStore, StreamTail,
+};
 pub(crate) use task::{TaskClaim, TaskControlStore, TaskExecutionStore, TaskFinish, TaskRecord};
 
 pub(crate) struct Stores {
