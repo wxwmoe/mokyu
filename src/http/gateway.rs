@@ -45,6 +45,17 @@ pub fn invalid_range(size: i64) -> s3s::S3Error {
     e.set_headers(h);
     e
 }
+pub fn checked_range(range: Range, size: i64) -> S3Result<std::ops::Range<u64>> {
+    if size <= 0 {
+        return Err(invalid_range(size));
+    }
+    let span = range.check(size as u64).map_err(|_| invalid_range(size))?;
+    if span.is_empty() {
+        return Err(invalid_range(size));
+    }
+    Ok(span)
+}
+
 pub fn if_range_matches(s: &StoredStream, headers: &hyper::HeaderMap) -> bool {
     let Some(value) = headers.get("if-range") else {
         return true;
@@ -570,7 +581,7 @@ impl S3 for Gateway {
                 None
             };
             let range = match requested {
-                Some(r) => r.check(s.size as u64).map_err(|_| invalid_range(s.size))?,
+                Some(r) => checked_range(r, s.size)?,
                 None => 0..s.size as u64,
             };
             let m: Metadata = serde_json::from_value(s.metadata.clone())?;
@@ -669,7 +680,7 @@ impl S3 for Gateway {
                 true,
             )?;
             let range = match i.range {
-                Some(r) => r.check(s.size as u64).map_err(|_| invalid_range(s.size))?,
+                Some(r) => checked_range(r, s.size)?,
                 None => 0..s.size as u64,
             };
             let m: Metadata = serde_json::from_value(s.metadata)?;
@@ -1034,5 +1045,34 @@ impl S3 for Gateway {
         }
         .await
         .map_err(internal)
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    #[test]
+    fn requested_ranges_always_contain_bytes() {
+        for value in ["bytes=-1", "bytes=-99", "bytes=0-", "bytes=0-0"] {
+            let error = checked_range(Range::parse(value).unwrap(), 0).unwrap_err();
+            assert_eq!(error.code(), &s3s::S3ErrorCode::InvalidRange);
+        }
+        for (value, size, expected) in [
+            ("bytes=-1", 1, 0..1),
+            ("bytes=-99", 3, 0..3),
+            ("bytes=0-0", 3, 0..1),
+            ("bytes=1-", 3, 1..3),
+        ] {
+            assert_eq!(
+                checked_range(Range::parse(value).unwrap(), size).unwrap(),
+                expected
+            );
+        }
+        for value in ["bytes=-0", "bytes=3-", "bytes=9-10"] {
+            if let Ok(range) = Range::parse(value) {
+                assert!(checked_range(range, 3).is_err());
+            }
+        }
     }
 }

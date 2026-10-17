@@ -384,10 +384,7 @@ pub(crate) async fn respond(
         None
     };
     let range = requested
-        .map(|r| {
-            r.check(s.size as u64)
-                .map_err(|_| HttpError(gateway::invalid_range(s.size).into()))
-        })
+        .map(|r| gateway::checked_range(r, s.size).map_err(|e| HttpError(e.into())))
         .transpose()?;
     let span = range.clone().unwrap_or(0..s.size as u64);
     let metadata: Metadata = serde_json::from_value(s.metadata.clone())?;

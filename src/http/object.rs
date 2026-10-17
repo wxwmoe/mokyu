@@ -282,12 +282,11 @@ pub(crate) async fn read(
             });
         }
         let range = if range_requested && encoding == Encoding::Identity {
-            Some(
+            Some(gateway::checked_range(
                 Range::parse(request[header::RANGE].to_str().unwrap_or(""))
-                    .map_err(|_| gateway::invalid_range(stream.size))?
-                    .check(stream.size as u64)
                     .map_err(|_| gateway::invalid_range(stream.size))?,
-            )
+                stream.size,
+            )?)
         } else {
             None
         };
