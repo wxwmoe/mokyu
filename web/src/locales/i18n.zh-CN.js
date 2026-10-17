@@ -658,4 +658,6 @@ export default {
   quotaEditHint: '所有上传都遵守这些额度，包括管理员和 S3 请求。', quotaLogicalLimit: '逻辑存储上限', quotaInflightLimit: '在途上传预算', quotaBucketLimit: '存储桶数量上限', quotaUnit: '容量单位',
   quotaInflightHint: '包含未完成的分片和并发覆盖，即使覆盖可以扣抵旧文件空间，也会计入这个预算。', quotaZeroHint: '留空表示不限，0 表示没有额外空间，调低额度不会删除文件', quotaInvalid: '请输入非负容量，最多三位小数，存储桶数量需要是整数',
   error_QuotaExceeded: '这次上传会超过空间额度或在途预算，请释放空间，或请管理员调整额度。',
+  configField_instance_response_cache_size: '公共响应缓存', configHelp_instance_response_cache_size: '用于完整公共响应的内存，默认禁用；启用会减少 pack 内存额度',
+  configField_effective_response_cache_bytes: '有效响应缓存容量', configHelp_effective_response_cache_bytes: '为公共正文预留的内存，包含构建中和已淘汰但仍在发送的数据',
 }

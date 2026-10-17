@@ -483,10 +483,10 @@ pub(crate) async fn respond(
         Body::new(s3s::Body::from(app.body(
             s,
             pin.expect("body read is protected"),
-            span.start as i64,
-            span.end as i64,
+            span.start as i64..span.end as i64,
             permits,
             range.is_some(),
+            None,
         )))
     };
     Ok(response.body(body)?)

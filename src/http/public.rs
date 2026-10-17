@@ -330,11 +330,13 @@ async fn website_response(
     }
     if !bucket.error_document.is_empty() {
         // The missing resource's Range/If-* headers do not apply to the error document.
+        let mut error_headers = HeaderMap::new();
+        error_headers.insert("cache-control", HeaderValue::from_static("no-store"));
         match respond(
             app,
             bucket.id,
             &bucket.error_document,
-            HeaderMap::new(),
+            error_headers,
             request.method.clone(),
             ReadOptions::public(),
         )

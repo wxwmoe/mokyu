@@ -15,10 +15,10 @@ services:
     volumes:
       - ./config:/config:ro
       - ./data:/data
-    # Optional deployment limits; omission does not impose a project-wide cap.
+    # Example limits; adjust with the budgets in config/config.toml.
     # cpus: 4
-    # mem_limit: 1g
-    # memswap_limit: 1g
+    mem_limit: 1g
+    memswap_limit: 1g
     stop_grace_period: 45s
   postgres:
     image: postgres:18-bookworm

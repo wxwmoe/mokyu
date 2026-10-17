@@ -122,12 +122,13 @@ impl App {
         self: &Arc<Self>,
         stream: StoredStream,
         pin: Active,
-        start: i64,
-        end: i64,
+        span: std::ops::Range<i64>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
         range: bool,
+        capture: Option<Arc<Mutex<super::responses::Mapping>>>,
     ) -> StreamingBlob {
         let app = self.clone();
+        let (start, end) = (span.start, span.end);
         let body = async_stream::try_stream! {
             let _pin=pin;let _permits=permits;let read_context=Arc::new(crate::storage::ReadContext::user(range));
             #[cfg(feature="fault-injection")]
@@ -139,6 +140,7 @@ impl App {
                 _pin.renew_read_lease().await?;
                 let rows=app.chunks.read_extents(stream.id,cursor.context("object mapping is incomplete")?,end).await?;
                 (!rows.is_empty()).then_some(()).context("object mapping is incomplete")?;
+                if let Some(capture)=&capture { let mut mapping=capture.lock().unwrap(); for row in &rows { mapping.record(row); } }
                 let mut loaded=futures_util::stream::iter(rows.into_iter().map(|row| {let app=app.clone();let context=read_context.clone();async move{let data=app.storage.get_with(&row.chunk,Some(&context)).await?;let data=row.extent.slice(data)?;Ok::<_,anyhow::Error>((row.extent,data))}})).buffered(2);
                 while let Some(result)=loaded.next().await {
                     _pin.renew_read_lease().await?;
@@ -146,6 +148,7 @@ impl App {
                     (row.offset_bytes<=position && row.offset_bytes+row.length as i64>position).then_some(()).context("object mapping has a gap")?;
                     let skip=(position-row.offset_bytes) as usize;let count=((end-position) as usize).min(data.len()-skip);
                     position+=count as i64;cursor=Some(row.offset_bytes+row.length as i64);
+                    if position==end && let Some(capture)=&capture { capture.lock().unwrap().finish_source(); }
                     if let Some(id)=row.chunk_id {app.storage.access.chunk(id,range,count,false);}
                     yield data.slice(skip..skip+count);
                     if position==end {break;}

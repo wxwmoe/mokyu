@@ -25,6 +25,7 @@ pub(crate) mod extents;
 pub(crate) mod listing;
 pub(crate) mod publish;
 pub(crate) mod quota;
+pub(crate) mod responses;
 pub(crate) mod streams;
 
 #[derive(Clone, Serialize)]
@@ -184,6 +185,7 @@ pub struct App {
     pub thumbnails: Arc<crate::control::media::Thumbnails>,
     pub statistics: crate::status::stats::Statistics,
     pub compression_observations: Arc<compression::Observations>,
+    pub response_cache: Arc<responses::Cache>,
     pub cleanup_state: crate::worker::lifecycle::Cleanup,
     pub integrity_pacing: std::sync::Mutex<std::time::Instant>,
     pub local_cleanup: tokio::sync::Mutex<()>,
@@ -231,7 +233,13 @@ impl App {
         let runtime_revisions =
             crate::model::load_runtime_settings(stores.runtime_settings.as_ref(), &mut config)
                 .await?;
-        let budget = config.budget()?;
+        let mut budget = config.budget()?;
+        if !matches!(role, "single" | "data") {
+            budget.pack_memory_units = budget
+                .pack_memory_units
+                .saturating_add((budget.response_cache_bytes / 2 / (1024 * 1024)) as u32);
+            budget.response_cache_bytes = 0;
+        }
         let state = stores.runtime.initialize(start_maintenance).await?;
         let maintenance = Arc::new(std::sync::atomic::AtomicBool::new(state.maintenance));
         let pack_creation_paused = state.pack_creation_paused;
@@ -266,6 +274,7 @@ impl App {
         let thumbnails =
             Arc::new(crate::control::media::Thumbnails::new(&config, storage.disk.clone()).await?);
         let (compression_observations, compression_receiver) = compression::Observations::new();
+        let response_cache = responses::Cache::new(budget.response_cache_bytes);
         let app = Arc::new(Self {
             cluster: stores.cluster,
             role: role.to_owned(),
@@ -308,6 +317,7 @@ impl App {
             thumbnails,
             statistics: crate::status::stats::Statistics::default(),
             compression_observations,
+            response_cache,
             cleanup_state: crate::worker::lifecycle::Cleanup::default(),
             integrity_pacing: std::sync::Mutex::new(std::time::Instant::now()),
             local_cleanup: tokio::sync::Mutex::new(()),
@@ -465,6 +475,7 @@ impl App {
         status["runtime"] = self.statistics.runtime();
         status["cache_jobs_active"] = json!(self.storage.cache_jobs_active());
         status["http_compression"] = self.compression_observations.snapshot();
+        status["response_cache"] = self.response_cache.snapshot();
         status["cleanup"] = self.cleanup_status();
         status["storage"] = self.statistics.inventory(crate::config::seconds(
             &self.config.metrics.refresh_interval,

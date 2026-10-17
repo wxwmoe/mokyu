@@ -24,6 +24,8 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 数据库改动需在 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3 的最低版本和当前维护版本验证。MariaDB 复用全部 MySQL 契约和 `MOKYU_TEST_MYSQL_CONFIG`；`mysql_dialect_and_lock_scope_contract` 额外检查 JSON 类型、大小写/尾空格比较和任务领取的锁范围。`migrations.py` 在 PostgreSQL 17 空库验证低版本拒绝且不写入表，在支持版本验证完整迁移与恢复。
 
+MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由其他客户端登录预热认证缓存。关闭 TLS 时，`caching_sha2_password` 的首次认证依赖 SQLx 的 `mysql-rsa` 功能。
+
 `cleanup_reacquires_returning_connection`、`cleanup_yields_to_busy_writer_and_recovers`、`cleanup_propagates_pool_errors`、`cleanup_cancels_busy_database_transaction` 属于普通 Rust 测试，使用独立 SQLite 临时库和单写连接覆盖清理连续领取、忙写者下有界退让和取消后恢复、外部写事务占用时取消 BEGIN、真实连接池错误。
 
 ## 公共接口与恢复
@@ -41,6 +43,7 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 - `recovery/read_leases.py`：两个 data 节点、按时间续约、元数据轻读和过期租约拒绝；要求读取空闲超时为 `30s`，测试进程独立于受限应用容器，至少预留 1 GiB 内存。
 - `web/web_assets.py`：内嵌资源与公开 schema 的三种 HTTP 编码、协商、ETag、HEAD、敏感响应排除；另需 Python `brotli`、`zstandard`，直连与反向代理均应执行。
 - `s3/http_compression.py`：公共 Web/匿名 S3 的线上编码字节、签名排除、HEAD/304/Range、预估与学习；使用同样的解码依赖，可选 PostgreSQL DSN 检查 JSON。原生 `postgres_compression_contract`、`mysql_content_contract`、`sqlite_content_contract` 覆盖并发算法合并、策略切换和重复观测；迁移恢复契约同时检查新增字段。
+- `s3/response_cache.py`：启用完整正文缓存后，验证跨入口/编码复用、真实长度、权限变更、覆盖删除和坏映射拒绝。`s3/response_cache_pressure.py` 在 `4MiB` 额度与故障注入下额外验证取消、迟到构建、淘汰后慢响应持有内存及正常上传仍可前进。
 
 各文件头部及 `MOKYU_TEST_*` 读取处定义所需环境变量。凭据使用文件传入；不能将测试密码或 S3 secret 放入日志。恢复测试会强杀并重启配置指定的网关进程，只能在专用测试容器运行。故障注入构建不用于部署。
 

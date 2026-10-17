@@ -19,6 +19,7 @@ pub struct Budget {
     pub database_connections: u32,
     pub cache_entries: usize,
     pub pack_memory_units: u32,
+    pub response_cache_bytes: u64,
 }
 
 pub const SLOT_BYTES: u64 = 32 * 1024 * 1024;
@@ -220,6 +221,9 @@ impl Config {
         if let Some(v) = &c.instance.upload_cache_size {
             cache_bytes(v)?;
         }
+        if let Some(v) = &c.instance.response_cache_size {
+            cache_bytes(v)?;
+        }
         ensure!(
             c.local_cache.min_compression_savings_percent <= 100,
             "cache.min_compression_savings_percent must be 0..100"
@@ -332,12 +336,37 @@ impl Config {
             self.local_compression.sample_level
         );
         let slots = (inflight / slot_bytes) as usize;
-        let pack_memory_units = (memory
+        let remaining = memory
             .saturating_sub(slots as u64 * slot_bytes)
-            .saturating_sub(memory / 4)
-            / 2
-            / (1024 * 1024))
-            .min(u32::MAX as u64) as u32;
+            .saturating_sub(memory / 4);
+        let pack_required = if self.local_pack.enabled {
+            let maximum = bytes(&self.local_pack.max_size)?;
+            let payload = maximum + 12 + 44 * (maximum / crate::content::codec::MIN as u64 + 1);
+            (payload * 4 + compression_budget.workspace_bytes()?).div_ceil(1024 * 1024)
+                * 1024
+                * 1024
+        } else {
+            0
+        };
+        let cache_maximum = remaining
+            .saturating_sub(pack_required.saturating_mul(2))
+            .min(memory / 4)
+            .min(u64::from(u32::MAX) * 4096);
+        let response_cache_bytes = match self.instance.response_cache_size.as_deref() {
+            Some(value) => {
+                let size = cache_bytes(value)?;
+                ensure!(
+                    size <= cache_maximum && (size == 0 || size >= 4 * 1024 * 1024),
+                    "response_cache_size must be 0B or at least 4MiB and fit alongside stream and pack budgets"
+                );
+                size
+            }
+            // Existing packs can be larger than the current creation policy; keep their read budget by default.
+            None => 0,
+        } / 65536
+            * 65536;
+        let pack_memory_units =
+            ((remaining - response_cache_bytes) / 2 / (1024 * 1024)).min(u32::MAX as u64) as u32;
         if self.local_pack.enabled {
             let maximum = bytes(&self.local_pack.max_size)?;
             let payload = maximum + 12 + 44 * (maximum / crate::content::codec::MIN as u64 + 1);
@@ -414,6 +443,7 @@ impl Config {
             database_connections: db,
             cache_entries: entries,
             pack_memory_units,
+            response_cache_bytes,
         })
     }
 }

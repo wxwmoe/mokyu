@@ -153,6 +153,29 @@ mod tests {
     }
 
     #[test]
+    fn response_cache_shares_the_existing_memory_budget() {
+        let file: FileConfig = toml::from_str("[database]\ntype='sqlite'\n").unwrap();
+        let mut config = file.into_config();
+        assert_eq!(config.budget().unwrap().response_cache_bytes, 0);
+        config.instance.response_cache_size = Some("4MiB".into());
+        let cached = config.budget().unwrap();
+        assert_eq!(cached.response_cache_bytes, 4 * 1024 * 1024);
+        assert!(
+            cached.data_slots as u64 * cached.slot_bytes
+                + cached.memory_bytes / 4
+                + u64::from(cached.pack_memory_units) * 2 * 1024 * 1024
+                + cached.response_cache_bytes
+                <= cached.memory_bytes
+        );
+        config.instance.response_cache_size = Some("0B".into());
+        let disabled = config.budget().unwrap();
+        assert_eq!(disabled.response_cache_bytes, 0);
+        assert!(disabled.pack_memory_units > cached.pack_memory_units);
+        config.instance.response_cache_size = Some("1MiB".into());
+        assert!(config.budget().is_err());
+    }
+
+    #[test]
     fn compatible_backends_exclude_cluster_settings() {
         let file: FileConfig =
             toml::from_str("[database]\nhost='database'\nname='mokyu'\nuser='mokyu'").unwrap();

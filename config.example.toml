@@ -31,14 +31,17 @@ min_free_space = "1GiB"
 #multipart_limit = "2GB"
 #cache_size = "10GiB"
 #cache_entries = 65536
+response_cache_size = "64MiB" # Public response memory; omitted or 0B disables it.
 #upload_cache_size = "2GiB"
 thumbnail_cache_size = "256MiB"
 
 # Connection pools and resource budgets
+# Sized for the 1GiB Compose example with the default 32MiB S3 packs.
+# Pack read/work memory uses the remaining budget automatically.
 #request_connections = 128
 #database_connections = 12
 #cpu_jobs = 2
-#stream_memory_budget = "128MiB"
+stream_memory_budget = "256MiB"
 #storage_read_slots = 16
 #storage_upload_slots = 4
 #storage_control_slots = 2

@@ -49,6 +49,7 @@ SQLite 将 `instance.database_connections` 中的一个连接用于串行写入�
 | `instance.multipart_limit` | 自动 | 单容器本地 multipart 暂存上限；群集使用共享 staging storage |
 | `instance.cache_size` | 自动 | 本地区块缓存字节上限 |
 | `instance.cache_entries` | 自动 | 本地缓存索引条目上限 |
+| `instance.response_cache_size` | `0B` | 完整公共响应的内存额度；示例显式设为 `64MiB`，省略或 `0B` 关闭；启用至少 `4MiB`，需要重启 |
 | `instance.upload_cache_size` | 自动 | 本地待上传暂存上限 |
 | `instance.thumbnail_cache_size` | `256MiB` | 缩略图缓存上限 |
 | `instance.request_connections` | 自动 | 本节点 HTTP/S3 请求连接池上限 |
@@ -61,6 +62,10 @@ SQLite 将 `instance.database_connections` 中的一个连接用于串行写入�
 | `instance.compression_idle_timeout` | `30s` | 本节点压缩上下文空闲回收时间 |
 
 省略 `request_connections` 和三个 `storage_*_slots` 时，服务按 CPU、内存、文件描述符和连接池自动计算保守但偏宽的本机预算。它们只限制本机；storage profile 则限制每个 storage 的总并发，单容器使用进程内队列，群集通过 PostgreSQL 共享许可。profile 热更新保留正在执行和排队的操作；降低上限后等待现有操作排空，提高上限则放行等待者。显式修改 instance 预算需要重启。
+
+公共响应缓存显式启用后，从原有 pack 内存与工作区预算中划出，不额外增加总预算；control/worker 不启用正文缓存。额度不能超过进程内存的四分之一，并保留流式读写及默认 pack 所需空间。启用或增大前需确认剩余 pack 额度可容纳现有最大 pack 及各 storage profile；历史 pack 可能大于当前创建策略，因此默认不自动缩减它们的读取预算。每个正文的原始与编码长度均不超过总额度的 1/16 或 8 MiB，构建峰值最多占总额度的四分之一；索引、历史与构建元数据预留 1 MiB。淘汰后仍被发送响应引用的正文继续占额度，额度不足时不等待缓存空间，退回正常读取。
+
+示例配置配合 Compose 的 Mokyu 容器 `1GiB` 内存限制，显式设置 `stream_memory_budget = "256MiB"` 和 `response_cache_size = "64MiB"`；PostgreSQL 容器内存另计。省略响应缓存字段的配置仍关闭正文缓存。默认压缩参数下，流式预算可提供 5 个数据槽位，实际预留约 `216MiB`，runtime/OS 预留 `256MiB`，pack 读取与工作区各自动分得约 `244MiB`。S3 storage 的默认 `pack_max_size = "32MiB"` 每个 pack 需约 `140MiB` 额度；local storage 不创建 pack。pack 大小在 storage profile 中配置，节点 pack 内存无需单独填写；更改容器限制、压缩参数或 pack 大小时应一起核对这些预算。
 
 共享 staging 设置只对 PostgreSQL 提供；MySQL、SQLite 不接受这两个设置。PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；multipart 尾块和异步上传使用保留前缀 `__mokyu/multipart/`。单容器模式可使用 `/data/storage` 的 local storage。
 

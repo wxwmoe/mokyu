@@ -598,10 +598,10 @@ impl S3 for Gateway {
             out.body = Some(self.0.body(
                 s,
                 pin.expect("body read is protected"),
-                range.start as i64,
-                range.end as i64,
+                range.start as i64..range.end as i64,
                 permits,
                 requested.is_some(),
+                None,
             ));
             Ok(S3Response::new(out))
         }

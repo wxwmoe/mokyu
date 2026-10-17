@@ -35,7 +35,8 @@ def put(key, data):
 
 
 def read(key, headers=None, timeout=30):
-    response = requests.get(f'{endpoint}/{bucket}/{prefix}{key}', headers=headers, timeout=timeout)
+    # This suite exercises the physical cache; complete response reuse has its own contract.
+    response = requests.get(f'{endpoint}/{bucket}/{prefix}{key}', headers={'Cache-Control': 'no-store', **(headers or {})}, timeout=timeout)
     response.raise_for_status()
     return response.content
 

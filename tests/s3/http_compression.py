@@ -50,14 +50,16 @@ for source in sources:
         assert response.status_code == 200 and response.headers.get('content-encoding') == encoding, (source, encoding, response.status_code, dict(response.headers), data[:120])
         assert decoders[encoding](data) == original
         assert len(data) < len(original) and response.headers['etag'] == 'W/' + tag
+        encoded_length = len(data)
         assert 'accept-ranges' not in response.headers
         assert 'accept-encoding' in response.headers['vary'].lower()
         if 'content-length' in response.headers:
             assert int(response.headers['content-length']) == len(data)
         head, data = wire(source, encoding=encoding, method='HEAD')
         assert head.status_code == 200 and not data and head.headers.get('content-encoding') == encoding, (encoding, dict(head.headers))
-        # Learned lengths do not replace an actually held representation.
-        assert 'content-length' not in head.headers, dict(head.headers)
+        # Only an actually held representation can supply the compressed HEAD length.
+        if 'content-length' in head.headers:
+            assert int(head.headers['content-length']) == encoded_length
         cached, data = wire(source, encoding=encoding, **{'If-None-Match': tag})
         assert cached.status_code == 304 and not data and cached.headers['etag'] == 'W/' + tag, (source, encoding, cached.status_code, dict(cached.headers), len(data))
         assert 'content-encoding' not in cached.headers and 'content-length' not in cached.headers

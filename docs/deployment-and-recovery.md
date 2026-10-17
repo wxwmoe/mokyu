@@ -10,13 +10,15 @@
 ./build.sh
 ```
 
-默认构建 Debian slim 镜像，标签为 `wxwmoe/mokyu:latest` 及项目版本号。可用 `./build.sh --alpine` 构建 Alpine 镜像，标签为 `:alpine` 及带 `-alpine` 后缀的版本号；`--no-cache` 禁用构建缓存。
+默认构建 Debian slim 镜像 `wxwmoe/mokyu`，并生成对应项目版本标签。可用 `./build.sh --alpine` 构建 Alpine 镜像，标签为 `:alpine` 及带 `-alpine` 后缀的版本号；`--no-cache` 禁用构建缓存。
 
 构建会安装并编译 Vue 静态资源，再嵌入 Rust 二进制；运行不需要 Node.js。`--api-only` 省略内嵌前端，标签为 `:api` / 版本号加 `-api`；与 `--alpine` 组合使用 `:alpine-api` / 版本号加 `-alpine-api`。仓库不包含构建后的镜像。
 
 可压缩的内嵌资源同时保存 gzip、Brotli 和 Zstandard 构建产物，按 `Accept-Encoding` 的 q 值选择，同权重时依次优先 zstd、br、gzip、identity。未提供或为空时返回原始表示；原始 ETag 为强标签，压缩变体使用同值弱标签，并发送 `Vary: Accept-Encoding`。公开 OpenAPI JSON 使用有界流式压缩，其余管理 API 保持原有响应与缓存策略。
 
 公共 Web 和匿名 S3 对象也可流式协商这三种编码，签名请求保持原始表示；收益、ETag、Range 和条件请求规则见 [S3 兼容性](s3-compatibility.md#公共响应压缩)。编码与普通磁盘缓存填充共用现有工作内存预算，额度不足时优先保证原始读写。压缩收益通过有界内存队列回写，重启或停机可丢弃待学习统计；`cli status` 的 `http_compression` 展示 pending/written/dropped/failed 计数。
+
+示例配置通过 `instance.response_cache_size = "64MiB"` 启用热门完整正文的进程内缓存；省略该项或设为 `0B` 时关闭，配套内存和 pack 预算见[配置参考](configuration.md)。Web 与匿名 S3 按不可变内容及编码共享正文，每次仍检查当前权限与来源映射；命中后不再读取区块或编码。候选只在完整读取并校验后发布，取消、超限或内存不足时放弃填充。重启会清空缓存，无需备份；`cli status` 的 `response_cache` 区分存活字节、构建额度和淘汰后仍被响应持有的字节。
 
 独立前端使用 [web](../web/README.md) 的 `dist/`，将 `/api/v1/` 同源反代至管理端口，只有前端页面使用 SPA fallback。管理 Origin 必须是浏览器实际访问的地址；管理 API 不应缓存，也不使用桶的 CORS 规则。首次设置、头像与安全头要求与内嵌部署相同。
 
@@ -32,8 +34,8 @@
    mkdir -p config/secrets data
    chmod 700 config config/secrets data
    cp config.example.toml config/config.toml
-   docker run --rm wxwmoe/mokyu:latest tool keygen > config/secrets/postgres-password
-   docker run --rm wxwmoe/mokyu:latest tool keygen > config/secrets/deployment-key
+   docker run --rm wxwmoe/mokyu tool keygen > config/secrets/postgres-password
+   docker run --rm wxwmoe/mokyu tool keygen > config/secrets/deployment-key
    ```
 
 2. 编辑 `config/config.toml`：
