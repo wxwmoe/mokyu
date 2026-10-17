@@ -1,4 +1,4 @@
-"""Adaptive cache checks using the state_checks environment and default 20% threshold.
+"""Adaptive cache checks using the state_checks environment and default 2% profile threshold.
 
 Requires an isolated deployment with enough cache space for three small chunks.
 Run gateway and test as the same unprivileged UID so directory permissions apply.
@@ -8,6 +8,7 @@ import json
 import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import boto3
@@ -35,11 +36,15 @@ def status():
 def read(key, expected, **kwargs):
     with s3.get_object(Bucket=bucket, Key=key, **kwargs)['Body'] as body:
         assert body.read() == expected
+    deadline = time.monotonic() + 15
+    while status()['cache_jobs_active']:
+        assert time.monotonic() < deadline, 'cache work did not finish'
+        time.sleep(.02)
 
 
 for name, raw, extension in [
     ('random', os.urandom(200 * 1024), '.raw'),
-    ('weak', os.urandom(180 * 1024) + bytes(20 * 1024), '.raw'),
+    ('weak', os.urandom(180 * 1024) + bytes(20 * 1024), '.zst'),
     ('strong', b'compressible-cache\n' * 11000, '.zst'),
 ]:
     key = prefix + name

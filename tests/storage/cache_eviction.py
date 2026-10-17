@@ -1,6 +1,6 @@
 """Cache eviction failures using the adaptive_cache.py environment.
 
-Requires an isolated gateway with cache.max_entries=1 and at least 1 MiB of
+Requires an isolated gateway with instance.cache_entries=1 and at least 1 MiB of
 cache space. Run gateway and test as the same unprivileged UID. Temporarily
 removes write access from the shard directories of its own cached objects.
 """
@@ -8,6 +8,7 @@ import json
 import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import boto3
@@ -35,10 +36,14 @@ def status():
 def read(key, expected):
     with s3.get_object(Bucket=bucket, Key=key)['Body'] as body:
         assert body.read() == expected
+    deadline = time.monotonic() + 15
+    while status()['cache_jobs_active']:
+        assert time.monotonic() < deadline, 'cache work did not finish'
+        time.sleep(.02)
 
 
 def cache_path(key, extension):
-    rows = db.execute('''SELECT c.storage_id FROM objects o
+    rows = db.execute('''SELECT l.location_id FROM objects o
         JOIN buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=o.stream_id
         JOIN chunks c ON c.id=e.chunk_id JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE b.name=%s AND o.object_key=%s''', (bucket, key)).fetchall()
     assert len(rows) == 1

@@ -79,6 +79,7 @@ pub struct Storage {
     cache_writes: tokio::sync::Mutex<()>,
     upload_pins: Mutex<HashMap<Uuid, UploadPin>>,
     fills: Arc<Semaphore>,
+    cache_fills: Arc<Mutex<HashSet<Uuid>>>,
     max_entries: usize,
     capacity: Option<u64>,
     min_compression_savings_percent: u8,
@@ -383,6 +384,7 @@ impl Storage {
             cache_writes: tokio::sync::Mutex::new(()),
             upload_pins: Mutex::new(HashMap::new()),
             fills: Arc::new(Semaphore::new(budget.cpu_jobs)),
+            cache_fills: Arc::new(Mutex::new(HashSet::new())),
             max_entries: c.instance.cache_entries.unwrap_or(budget.cache_entries),
             capacity: c
                 .instance
@@ -1033,13 +1035,19 @@ impl Storage {
             return Ok(None);
         };
         if let Some(e) = fifo.entries.get(&id) {
-            match tokio::fs::remove_file(self.cache_path(id, e.compressed)).await {
+            let removal = CacheRemoval::new(&e.pins);
+            let path = self.cache_path(id, e.compressed);
+            drop(fifo);
+            let result = tokio::fs::remove_file(path).await;
+            fifo = self.fifo.lock().await;
+            match result {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
             let e = fifo.forget(id).unwrap();
             self.disk.release(Area::Cache, e.size);
+            drop(removal);
         }
         let ticket = loop {
             if fifo.entries.len() < policy.max_entries
@@ -1052,7 +1060,14 @@ impl Storage {
                 return Ok(None);
             };
             let entry = &fifo.entries[&victim];
-            match tokio::fs::remove_file(self.cache_path(victim, entry.compressed)).await {
+            let removal = CacheRemoval::new(&entry.pins);
+            let path = self.cache_path(victim, entry.compressed);
+            drop(fifo);
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("cache-delete").await;
+            let result = tokio::fs::remove_file(path).await;
+            fifo = self.fifo.lock().await;
+            match result {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
@@ -1063,6 +1078,7 @@ impl Storage {
             if let Some(e) = fifo.evict(victim, policy.max_entries) {
                 self.disk.release(Area::Cache, e.size);
             }
+            drop(removal);
         };
         drop(fifo);
         let path = self.cache_path(id, compressed);
@@ -1240,44 +1256,72 @@ impl Storage {
         }
         Ok(())
     }
-    async fn cached(&self, c: &Chunk) -> Result<Option<Bytes>> {
-        let staged: Option<(Uuid, String)> = self.physical.pending_source(c.id).await?;
-        let cache_id = (!c.location_id.is_nil())
-            .then_some(c.location_id)
-            .or_else(|| {
-                staged
-                    .as_ref()
-                    .and_then(|(_, key)| parse_upload_cache_name(key))
-            })
-            .unwrap_or_else(|| cache::cache_id(c));
-        if self.local_cache(c.storage_id).enabled {
-            let cached = {
-                let mut fifo = self.fifo.lock().await;
-                fifo.entries.get_mut(&cache_id).map(|e| {
-                    e.pins.fetch_add(1, Ordering::Relaxed);
-                    e.frequency = e.frequency.saturating_add(1).min(3);
-                    (CachePin(e.pins.clone()), e.compressed)
-                })
-            };
-            if let Some((pin, compressed)) = cached {
-                let data = read_bounded(self.cache_path(cache_id, compressed), MAX).await;
-                drop(pin);
-                if let Ok(data) = data {
-                    let size = data.len() as u64;
-                    let permit = self.cpu.clone().acquire_owned().await?;
-                    let chunk = c.clone();
-                    let (compression, _, _) = self.compression_for(c.storage_id);
-                    let decoded = tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        codec::decode_cache(&chunk, Bytes::from(data), compressed, &compression)
-                    })
-                    .await?;
-                    if let Ok(raw) = decoded {
-                        self.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        self.cache_hit_bytes.fetch_add(size, Ordering::Relaxed);
-                        return Ok(Some(raw));
-                    }
+    async fn cached_file(&self, c: &Chunk, id: Uuid) -> Result<Option<Bytes>> {
+        if !self.local_cache(c.storage_id).enabled {
+            return Ok(None);
+        }
+        let cached = {
+            let mut fifo = self.fifo.lock().await;
+            fifo.entries.get_mut(&id).and_then(|e| {
+                if !e.valid || e.pins.load(Ordering::Relaxed) == usize::MAX {
+                    return None;
                 }
+                e.pins.fetch_add(1, Ordering::Relaxed);
+                e.frequency = e.frequency.saturating_add(1).min(3);
+                Some((CachePin(e.pins.clone()), e.compressed))
+            })
+        };
+        if let Some((pin, compressed)) = cached {
+            let file = read_bounded(self.cache_path(id, compressed), MAX).await;
+            let missing = file.as_ref().err().is_some_and(|e| {
+                e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            });
+            if let Ok(data) = file {
+                let size = data.len() as u64;
+                let permit = self.cpu.clone().acquire_owned().await?;
+                let chunk = c.clone();
+                let (compression, _, _) = self.compression_for(c.storage_id);
+                let decoded = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    codec::decode_cache(&chunk, Bytes::from(data), compressed, &compression)
+                })
+                .await?;
+                if let Ok(raw) = decoded {
+                    self.cache_hits.fetch_add(1, Ordering::Relaxed);
+                    self.cache_hit_bytes.fetch_add(size, Ordering::Relaxed);
+                    return Ok(Some(raw));
+                }
+            }
+            let mut fifo = self.fifo.lock().await;
+            if let Some(entry) = fifo.entries.get_mut(&id)
+                && Arc::ptr_eq(&entry.pins, &pin.0)
+            {
+                entry.valid = false;
+                // A missing unshared file needs no cleanup job or publication lock.
+                if missing && entry.pins.load(Ordering::Relaxed) == 1 {
+                    let entry = fifo.forget(id).unwrap();
+                    self.disk.release(Area::Cache, entry.size);
+                }
+            }
+        }
+        Ok(None)
+    }
+    async fn cached(&self, c: &Chunk) -> Result<Option<Bytes>> {
+        let mut cache_id = cache::cache_id(c);
+        if let Some(raw) = self.cached_file(c, cache_id).await? {
+            return Ok(Some(raw));
+        }
+        let staged: Option<(Uuid, String)> = self.physical.pending_source(c.id).await?;
+        if c.location_id.is_nil()
+            && let Some(id) = staged
+                .as_ref()
+                .and_then(|(_, key)| parse_upload_cache_name(key))
+            && id != cache_id
+        {
+            cache_id = id;
+            if let Some(raw) = self.cached_file(c, id).await? {
+                return Ok(Some(raw));
             }
         }
         if let Some((storage_id, key)) = staged.filter(|(_, key)| key.starts_with(STAGING_PREFIX)) {
@@ -1300,21 +1344,30 @@ impl Storage {
         if pending && self.physical.pending_only(c.id).await? {
             return Err(anyhow::anyhow!("pending upload cache is missing or corrupt for chunk {}; preserve data/chunks and restore its durable source", c.id).context(codec::IntegrityError::PendingUnavailable));
         }
-        if let Err(e) = self.invalidate(cache_id).await {
-            tracing::warn!(%cache_id,error=%e,"cache invalidation failed; falling back to backend");
-        }
         Ok(None)
     }
     pub(crate) async fn invalidate(&self, id: Uuid) -> Result<()> {
+        self.invalidate_entry(id, None).await
+    }
+    async fn invalidate_entry(&self, id: Uuid, expected: Option<&Arc<AtomicUsize>>) -> Result<()> {
         let _write = self.cache_writes.lock().await;
         let mut fifo = self.fifo.lock().await;
         let Some(entry) = fifo.entries.get(&id) else {
             return Ok(());
         };
-        if entry.pins.load(Ordering::Relaxed) > 0 {
+        if entry.pins.load(Ordering::Relaxed) > 0
+            || expected.is_some_and(|pins| !Arc::ptr_eq(pins, &entry.pins))
+        {
             return Ok(());
         }
-        match tokio::fs::remove_file(self.cache_path(id, entry.compressed)).await {
+        let removal = CacheRemoval::new(&entry.pins);
+        let path = self.cache_path(id, entry.compressed);
+        drop(fifo);
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("cache-delete").await;
+        let result = tokio::fs::remove_file(path).await;
+        fifo = self.fifo.lock().await;
+        match result {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
@@ -1322,7 +1375,60 @@ impl Storage {
         if let Some(e) = fifo.forget(id) {
             self.disk.release(Area::Cache, e.size);
         }
+        drop(removal);
         Ok(())
+    }
+    pub fn cache_jobs_active(&self) -> usize {
+        self.cpu_jobs - self.fills.available_permits()
+    }
+    fn cache_work(&self, id: Uuid, units: u32) -> Option<CacheWork> {
+        let slot = self.fills.clone().try_acquire_owned().ok()?;
+        let memory = self.pack_work.clone().try_acquire_many_owned(units).ok()?;
+        if !self.cache_fills.lock().unwrap().insert(id) {
+            return None;
+        }
+        Some(CacheWork {
+            id,
+            pending: self.cache_fills.clone(),
+            _slot: slot,
+            _memory: memory,
+        })
+    }
+    fn fill_read(self: &Arc<Self>, c: &Chunk, data: Bytes, compressed: Option<bool>) {
+        let policy = self.local_cache(c.storage_id);
+        if !policy.enabled {
+            return;
+        }
+        let (pool, _, _) = self.compression_for(c.storage_id);
+        let Ok(workspace) = pool.workspace_bytes() else {
+            return;
+        };
+        // Detached fills retain their buffers after the request returns its data slot.
+        let units =
+            (data.len().max(c.raw_size as usize) as u64 * 4 + workspace).div_ceil(1024 * 1024);
+        let Ok(units) = u32::try_from(units) else {
+            return;
+        };
+        let Some(work) = self.cache_work(cache::cache_id(c), units) else {
+            return;
+        };
+        let storage = self.clone();
+        let chunk = c.clone();
+        tokio::spawn(
+            resource_gate::PRIORITY.scope(resource_gate::MAINTENANCE, async move {
+                let _work = work;
+                let result = if let Some(compressed) = compressed {
+                    storage
+                        .fill_owned(cache::cache_id(&chunk), &data, compressed, policy)
+                        .await
+                } else {
+                    storage.fill_raw(&chunk, data).await
+                };
+                if let Err(e) = result {
+                    tracing::warn!(error=%e,"cache fill failed; serving verified backend data");
+                }
+            }),
+        );
     }
     async fn fill(self: &Arc<Self>, c: &Chunk, data: Bytes) -> Result<()> {
         let policy = self.local_cache(c.storage_id);
@@ -1353,6 +1459,17 @@ impl Storage {
         if policy.capacity.is_some_and(|capacity| size > capacity) {
             return Ok(());
         }
+        let invalid = self
+            .fifo
+            .lock()
+            .await
+            .entries
+            .get(&id)
+            .filter(|e| !e.valid)
+            .map(|e| e.pins.clone());
+        if let Some(expected) = invalid {
+            self.invalidate_entry(id, Some(&expected)).await?;
+        }
         // Serialize publication/invalidation while cache hits only need the FIFO index lock.
         let _write = self.cache_writes.lock().await;
         let mut fifo = self.fifo.lock().await;
@@ -1371,7 +1488,14 @@ impl Storage {
                     return Ok(());
                 };
                 let entry = &fifo.entries[&victim];
-                match tokio::fs::remove_file(self.cache_path(victim, entry.compressed)).await {
+                let removal = CacheRemoval::new(&entry.pins);
+                let path = self.cache_path(victim, entry.compressed);
+                drop(fifo);
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("cache-delete").await;
+                let result = tokio::fs::remove_file(path).await;
+                fifo = self.fifo.lock().await;
+                match result {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => {
@@ -1382,6 +1506,7 @@ impl Storage {
                 if let Some(e) = fifo.evict(victim, policy.max_entries) {
                     self.disk.release(Area::Cache, e.size);
                 }
+                drop(removal);
             }
         };
         drop(fifo);
@@ -1427,12 +1552,6 @@ impl Storage {
         context: Option<&ReadContext>,
     ) -> Result<Bytes> {
         self.cache_lookups.fetch_add(1, Ordering::Relaxed);
-        if let Some(raw) = self.cached(c).await? {
-            if let Some(context) = context {
-                context.touch(c).await;
-            }
-            return Ok(raw);
-        }
         if let Some(context) = context {
             let current = context.pack.lock().await;
             if let Some(loaded) = current
@@ -1442,6 +1561,12 @@ impl Storage {
                 loaded.touch(c, context.observe, context.range);
                 return loaded.data.chunk(c);
             }
+        }
+        if let Some(raw) = self.cached(c).await? {
+            if let Some(context) = context {
+                context.touch(c).await;
+            }
+            return Ok(raw);
         }
         let lock = {
             let mut map = self.misses.lock().unwrap();
@@ -1489,15 +1614,11 @@ impl Storage {
                 self.ensure_key_loaded(physical.block_key_id).await?;
                 let encoded = self.read_backend(&physical).await?;
                 let (raw, cache) = self.decode(&physical, encoded).await?;
-                let fill = if physical.compressed == c.compressed
-                    && physical.stored_size == c.stored_size
-                {
-                    self.fill(c, cache).await
+                if physical.compressed == c.compressed && physical.stored_size == c.stored_size {
+                    let (_, _, threshold) = self.compression_for(c.storage_id);
+                    self.fill_read(c, cache, Some(codec::cache_compressed(c, threshold)));
                 } else {
-                    self.fill_raw(c, raw.clone()).await
-                };
-                if let Err(e) = fill {
-                    tracing::warn!(error=%e,"cache fill failed; serving verified backend data");
+                    self.fill_read(c, raw.clone(), None);
                 }
                 Ok((raw, None))
             }

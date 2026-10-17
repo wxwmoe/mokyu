@@ -47,20 +47,32 @@ def status():
 
 def mapping_calls():
     prefixes = ('SELECT * FROM chunks WHERE id=', 'SELECT * FROM extents WHERE stream_id=',
-                'SELECT e.*,c.* FROM (SELECT * FROM extents', 'SELECT offset_bytes FROM extents')
+                'SELECT e.*,c.id,', 'SELECT offset_bytes FROM extents')
     return sum(calls for query, calls in db.execute('''SELECT query,calls FROM pg_stat_statements
         WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())''')
                if query.startswith(prefixes))
 
 
-def evict(key):
-    rows = db.execute('''SELECT c.storage_id FROM objects o JOIN buckets b ON b.id=o.bucket_id
+def cache_paths(key):
+    rows = db.execute('''SELECT l.location_id FROM objects o JOIN buckets b ON b.id=o.bucket_id
         JOIN extents e ON e.stream_id=o.stream_id JOIN chunks c ON c.id=e.chunk_id
+        JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id
         WHERE b.name=%s AND o.object_key=%s''', (bucket, prefix + key)).fetchall()
-    for (storage_id,) in rows:
-        name = storage_id.hex
-        for path in (Path(os.environ['MOKYU_TEST_DATA']) / 'chunks' / name[:2]).glob(name + '.*'):
-            path.unlink()
+    return [path for (location,) in rows
+            for path in (Path(os.environ['MOKYU_TEST_DATA']) / 'chunks' / location.hex[:2]).glob(location.hex + '.*')]
+
+
+def cache_idle():
+    deadline = time.monotonic() + 15
+    while status()['cache_jobs_active']:
+        assert time.monotonic() < deadline, 'cache work did not finish'
+        time.sleep(.02)
+
+
+def evict(key):
+    cache_idle()
+    for path in cache_paths(key):
+        path.unlink()
 
 
 payload = os.urandom(128 * 1024 * 1024)
@@ -130,6 +142,7 @@ faults.mkdir(parents=True, exist_ok=True)
 put('warm', raw)
 assert read('warm') == raw
 for boundary in ['cache-reserved', 'cache-written', 'cache-published']:
+    cache_idle()
     cold = os.urandom(65536)
     put(boundary, cold)
     evict(boundary)
@@ -144,17 +157,45 @@ for boundary in ['cache-reserved', 'cache-written', 'cache-published']:
             while not reached.exists():
                 assert time.monotonic() < deadline, f'{boundary} not reached'
                 time.sleep(.02)
-            assert not pending.done()
+            assert pending.result(timeout=3) == cold, 'verified read waited for cache publication'
             assert read('warm', timeout=3) == raw
             assert marker.exists(), 'warm hit must finish while the write remains paused'
         finally:
             marker.unlink(missing_ok=True)
         assert pending.result(timeout=15) == cold
     assert read(boundary) == cold
+    cache_idle()
     reached.unlink(missing_ok=True)
+
+put('corrupt', raw[::-1])
+cache_idle()
+path, = cache_paths('corrupt')
+changed = bytearray(path.read_bytes())
+changed[len(changed) // 2] ^= 1
+path.write_bytes(changed)
+marker = faults / 'cache-delete'
+reached = marker.with_suffix('.hit')
+reached.unlink(missing_ok=True)
+marker.touch()
+try:
+    assert read('corrupt', timeout=3) == raw[::-1]
+    deadline = time.monotonic() + 10
+    while not reached.exists():
+        assert time.monotonic() < deadline, 'cache cleanup did not reach barrier'
+        time.sleep(.02)
+    for _ in range(3):
+        assert read('warm', timeout=3) == raw
+        assert read('corrupt', timeout=3) == raw[::-1]
+    assert status()['cache_jobs_active'] == 1, 'duplicate cleanup jobs were not coalesced'
+finally:
+    marker.unlink(missing_ok=True)
+cache_idle()
+assert read('corrupt') == raw[::-1]
+cache_idle()
+reached.unlink(missing_ok=True)
 cache = Path(os.environ['MOKYU_TEST_DATA']) / 'chunks'
 assert not list(cache.glob('*/*.tmp'))
 assert status()['local_bytes'][1] == sum(p.stat().st_size for p in cache.glob('*/*') if p.is_file())
-print('PASS warm reads during every cache write boundary and exact disk accounting', flush=True)
+print('PASS nonblocking cache fills/cleanup, coalesced jobs, warm reads and exact disk accounting', flush=True)
 
 db.close()

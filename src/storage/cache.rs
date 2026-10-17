@@ -33,11 +33,37 @@ pub(crate) struct Entry {
     pub(crate) frequency: u8,
     pub(crate) pins: Arc<AtomicUsize>,
     pub(crate) queue: Queue,
+    pub(crate) valid: bool,
 }
 pub(crate) struct CachePin(pub(crate) Arc<AtomicUsize>);
 impl Drop for CachePin {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+pub(crate) struct CacheRemoval(Arc<AtomicUsize>);
+impl CacheRemoval {
+    pub(crate) fn new(pins: &Arc<AtomicUsize>) -> Self {
+        // Reserve deletion while unrelated cache hits continue through the FIFO.
+        debug_assert_eq!(pins.load(Ordering::Relaxed), 0);
+        pins.store(usize::MAX, Ordering::Relaxed);
+        Self(pins.clone())
+    }
+}
+impl Drop for CacheRemoval {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
+}
+pub(crate) struct CacheWork {
+    pub(crate) id: Uuid,
+    pub(crate) pending: Arc<Mutex<HashSet<Uuid>>>,
+    pub(crate) _slot: tokio::sync::OwnedSemaphorePermit,
+    pub(crate) _memory: tokio::sync::OwnedSemaphorePermit,
+}
+impl Drop for CacheWork {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.id);
     }
 }
 pub(crate) struct UploadCharge {
@@ -163,6 +189,7 @@ impl Fifo {
                 frequency: 0,
                 pins: Arc::new(AtomicUsize::new(0)),
                 queue,
+                valid: true,
             },
         );
     }
