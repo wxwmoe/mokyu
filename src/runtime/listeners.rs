@@ -34,6 +34,8 @@ pub(super) async fn serve_s3(
     let controls = Arc::new(Semaphore::new(app.budget.data_slots));
     loop {
         let (socket, _) = listener.accept().await?;
+        // Compressed frames must not wait for delayed ACKs between small writes.
+        socket.set_nodelay(true)?;
         let permit = match connections.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => continue,
@@ -82,6 +84,7 @@ pub(super) async fn serve_router(
 ) -> Result<()> {
     loop {
         let (socket, _) = listener.accept().await?;
+        socket.set_nodelay(true)?;
         let permit = match connections.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => continue,
