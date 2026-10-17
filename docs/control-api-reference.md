@@ -226,6 +226,8 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 
 运行计数本进程累计、重启归零：HTTP started/completed/active/failed/canceled、4xx/5xx、字节及延时；缓存命中/查找、存储请求/字节、GC 成败。失败率为 `(failed+canceled)/completed`，耗时分位数是倍增直方图的近似上界。统计不是账单或逐请求日志；Linux RSS 也不等于含页缓存的容器内存。
 
+存储诊断区分后端 permission/timeout/missing/other、内容 length/authentication/decompression/hash/metadata/missing_key，以及索引缓存丢失、无效、回退和 pending_unavailable。共享来源读取按实际物理尝试计数，各 HTTP 请求分别计失败；后端传输成功后的内容校验失败不会计入后端传输失败。队列 `waiting` 记录获取许可的耗时、完成和取消；外层超时导致的取消也计入 canceled。普通读取只更新内存诊断，不写诊断数据库。服务状态 counters 使用 `storage.*` 键，群集节点状态在 `io.diagnostics` 中提供同一计数；缺报节点不能当成零。
+
 ## 控制设置
 
 | 方法与路径 | 用途 |

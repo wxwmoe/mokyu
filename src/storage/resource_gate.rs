@@ -26,6 +26,7 @@ struct State {
 }
 pub struct Gate {
     state: Mutex<State>,
+    waiting: Arc<crate::status::stats::Counters>,
 }
 pub struct Permit {
     gate: Option<Arc<Gate>>,
@@ -34,6 +35,7 @@ impl Gate {
     pub fn new(limit: usize, aging: Duration) -> Arc<Self> {
         assert!(limit > 0);
         Arc::new(Self {
+            waiting: Arc::default(),
             state: Mutex::new(State {
                 limit,
                 aging,
@@ -103,6 +105,7 @@ impl Gate {
         self: &Arc<Self>,
         shared: Option<Arc<AtomicUsize>>,
     ) -> anyhow::Result<Permit> {
+        let mut waiting = self.waiting.begin();
         let (send, receive) = oneshot::channel();
         {
             let mut state = self.state.lock().unwrap();
@@ -120,11 +123,13 @@ impl Gate {
             });
             self.dispatch(&mut state);
         }
-        Ok(receive.await?)
+        let permit = receive.await?;
+        waiting.finish(false);
+        Ok(permit)
     }
     pub fn snapshot(&self) -> serde_json::Value {
         let state = self.state.lock().unwrap();
-        serde_json::json!({"limit":state.limit,"running":state.active,
+        serde_json::json!({"limit":state.limit,"running":state.active,"waiting":self.waiting.snapshot(),
             "queued":{"foreground":state.queues[FOREGROUND].iter().filter(|w|!w.send.is_closed()).count(),"upload":state.queues[UPLOAD].iter().filter(|w|!w.send.is_closed()).count(),"maintenance":state.queues[MAINTENANCE].iter().filter(|w|!w.send.is_closed()).count()},
             "oldest_wait_seconds":state.queues.iter().flat_map(|q|q.iter()).filter(|w|!w.send.is_closed()).map(|w|w.since.elapsed().as_secs()).max().unwrap_or(0)})
     }
@@ -156,6 +161,7 @@ mod tests {
         let first = foreground.await.unwrap();
         assert!(futures_util::poll!(&mut background).is_pending());
         drop(cancelled);
+        assert_eq!(gate.snapshot()["waiting"]["canceled"], 1);
         drop(first);
         assert!(background.await.is_ok());
         let gate = Gate::new(1, Duration::ZERO);
@@ -167,6 +173,7 @@ mod tests {
         );
         drop(held);
         assert!(gate.acquire().await.is_ok());
+        assert_eq!(gate.snapshot()["waiting"]["canceled"], 1);
     }
     #[tokio::test]
     async fn promotes_shared_downloads_and_ages_old_waiters() {

@@ -103,6 +103,21 @@ pub(super) async fn status(
         key: "rss_bytes".into(),
         value: text(&raw["process_memory"]["rss_bytes"]),
     });
+    for (group, values) in raw["io"]["diagnostics"].as_object().into_iter().flatten() {
+        if let Some(values) = values.as_object() {
+            for (key, value) in values {
+                counters.push(RuntimeCounter {
+                    key: format!("storage.{group}.{key}"),
+                    value: text(value),
+                });
+            }
+        } else {
+            counters.push(RuntimeCounter {
+                key: format!("storage.{group}"),
+                value: text(values),
+            });
+        }
+    }
     access.finish().await?;
     Ok(Json(ServiceStatus {
         deployment_mode: text(&raw["deployment_mode"]),

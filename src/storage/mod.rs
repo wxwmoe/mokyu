@@ -3,6 +3,7 @@ use crate::{
     content::codec::{self, Chunk, MAX},
 };
 pub(crate) mod cache;
+mod diagnostics;
 pub(crate) mod local;
 pub(crate) mod location;
 pub(crate) mod model;
@@ -15,6 +16,10 @@ pub(crate) mod target;
 #[cfg(all(test, feature = "fault-injection"))]
 #[path = "../../tests/recovery/pack_memory.rs"]
 mod memory_tests;
+
+#[cfg(all(test, feature = "fault-injection"))]
+#[path = "../../tests/storage/diagnostics.rs"]
+mod diagnostic_tests;
 
 use self::model::{Record as StoreRecord, Store as VerifiedStore};
 use self::profile::StorageProfile;
@@ -97,6 +102,7 @@ pub struct Storage {
     pub cache_hit_bytes: std::sync::atomic::AtomicU64,
     cache_lookups: std::sync::atomic::AtomicU64,
     operations: [Arc<crate::status::stats::Counters>; 4],
+    diagnostics: Arc<diagnostics::Diagnostics>,
 }
 
 async fn build_store(
@@ -407,6 +413,7 @@ impl Storage {
             cache_hit_bytes: 0.into(),
             cache_lookups: 0.into(),
             operations: std::array::from_fn(|_| Arc::default()),
+            diagnostics: Arc::default(),
         };
         s.restore_upload_pins().await?;
         s.scan().await?;
@@ -414,7 +421,30 @@ impl Storage {
     }
     pub fn statistics(&self) -> serde_json::Value {
         let lookups = self.cache_lookups.load(Ordering::Relaxed);
-        serde_json::json!({"backend":{"get":self.operations[0].snapshot(),"put":self.operations[1].snapshot(),"delete":self.operations[2].snapshot(),"head":self.operations[3].snapshot()},
+        let mut diagnostics = self.diagnostics.snapshot();
+        let gates = self.store_gates.lock().unwrap();
+        for direction in [
+            "read",
+            "upload",
+            "control",
+            "pack",
+            "integrity",
+            "maintenance",
+            "migration",
+        ] {
+            let canceled: u64 = gates
+                .iter()
+                .filter(|((_, name), _)| *name == direction)
+                .filter_map(|(_, gate)| gate.upgrade())
+                .map(|gate| {
+                    gate.local.snapshot()["waiting"]["canceled"]
+                        .as_u64()
+                        .unwrap_or(0)
+                })
+                .sum();
+            diagnostics["waiting_canceled"][direction] = serde_json::json!(canceled);
+        }
+        serde_json::json!({"backend":{"get":self.operations[0].snapshot(),"put":self.operations[1].snapshot(),"delete":self.operations[2].snapshot(),"head":self.operations[3].snapshot()},"diagnostics":diagnostics,
             "cache_lookups":lookups,"cache_hit_rate":crate::status::stats::ratio(self.cache_hits.load(Ordering::Relaxed),lookups).map(|v| v.min(1.0)),
             "cpu_slots_available":self.cpu.available_permits(),"backend_queues":{"read":self.reads.snapshot(),"upload":self.writes.snapshot(),"control":self.controls.snapshot()},
             "cache_limit_bytes":self.capacity,"multipart_limit_bytes":self.disk.limits[0]})
@@ -864,7 +894,11 @@ impl Storage {
         self.claim_staging(storage_id, key, data.len() as u64)
             .await?;
         let target = self.store_backend(storage_id)?;
-        let result = target.backend.put(&Path::from(key), data.into()).await;
+        let result = target
+            .backend
+            .put(&Path::from(key), data.into())
+            .await
+            .inspect_err(|e| self.diagnostics.backend(e));
         if let Err(error) = result {
             let _ = self.release_staging(storage_id, key).await;
             return Err(error.into());
@@ -876,25 +910,8 @@ impl Storage {
             key.starts_with(STAGING_PREFIX),
             "invalid staging object key"
         );
-        self.ensure_storage_verified(storage_id).await?;
-        let target = self.store_backend(storage_id)?;
-        let _permit = target.reads.acquire().await?;
-        let result = target.backend.get(&Path::from(key)).await?;
-        ensure!(
-            result.meta.size <= bound as u64,
-            "staging object exceeds bound"
-        );
-        let mut data = Vec::with_capacity(result.meta.size as usize);
-        let mut stream = result.into_stream();
-        while let Some(bytes) = stream.next().await {
-            let bytes = bytes?;
-            ensure!(
-                data.len() + bytes.len() <= bound,
-                "staging object exceeds bound"
-            );
-            data.extend_from_slice(&bytes);
-        }
-        Ok(data)
+        self.read_path_for(storage_id, &Path::from(key), bound)
+            .await
     }
     pub(crate) async fn delete_staged(&self, storage_id: Uuid, key: &str) -> Result<()> {
         if !key.starts_with(STAGING_PREFIX) {
@@ -903,7 +920,12 @@ impl Storage {
         let target = self.store_backend(storage_id)?;
         self.ensure_storage_verified(storage_id).await?;
         let _permit = target.controls.acquire().await?;
-        match target.backend.delete(&Path::from(key)).await {
+        match target
+            .backend
+            .delete(&Path::from(key))
+            .await
+            .inspect_err(|e| self.diagnostics.backend(e))
+        {
             Ok(()) => {}
             Err(object_store::Error::NotFound { .. }) => {}
             Err(error) => return Err(error.into()),
@@ -1229,9 +1251,11 @@ impl Storage {
         let c = c.clone();
         let secrets = self.secrets.clone();
         let (compression, _, threshold) = self.compression_for(c.storage_id);
+        let diagnostics = self.diagnostics.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             codec::decode(&c, encoded, &secrets, threshold, &compression)
+                .inspect_err(|e| diagnostics.content(e))
         })
         .await?
     }
@@ -1255,7 +1279,8 @@ impl Storage {
                 &self.path_for(storage_id, c.location_id)?,
                 Bytes::from(encoded).into(),
             )
-            .await;
+            .await
+            .inspect_err(|e| self.diagnostics.backend(e));
         operation.finish(result.is_err());
         result?;
         drop(permit);
@@ -1304,6 +1329,18 @@ impl Storage {
                     return Ok(Some(raw));
                 }
             }
+            if missing {
+                self.diagnostics
+                    .cache_missing
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.diagnostics
+                    .cache_invalid
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            self.diagnostics
+                .cache_fallback
+                .fetch_add(1, Ordering::Relaxed);
             let mut fifo = self.fifo.lock().await;
             if let Some(entry) = fifo.entries.get_mut(&id)
                 && Arc::ptr_eq(&entry.pins, &pin.0)
@@ -1354,11 +1391,18 @@ impl Storage {
                 }
                 Err(error) => return Err(error),
             };
-            ensure!(
-                raw.len() == c.raw_size as usize
-                    && blake3::hash(&raw).as_bytes() == c.hash.as_slice(),
-                "staged chunk integrity mismatch"
-            );
+            let validation: Result<()> = (|| {
+                ensure!(
+                    raw.len() == c.raw_size as usize,
+                    codec::IntegrityError::Length
+                );
+                ensure!(
+                    blake3::hash(&raw).as_bytes() == c.hash.as_slice(),
+                    codec::IntegrityError::Hash
+                );
+                Ok(())
+            })();
+            validation.inspect_err(|e| self.diagnostics.content(e))?;
             return Ok(Some(Bytes::from(raw)));
         }
         let pending = self
@@ -1368,6 +1412,9 @@ impl Storage {
             .keys()
             .any(|id| *id == cache_id);
         if pending && self.physical.pending_only(c.id).await? {
+            self.diagnostics
+                .pending_unavailable
+                .fetch_add(1, Ordering::Relaxed);
             return Err(anyhow::anyhow!("pending upload cache is missing or corrupt for chunk {}; preserve data/chunks and restore its durable source", c.id).context(codec::IntegrityError::PendingUnavailable));
         }
         Ok(None)
@@ -1775,7 +1822,11 @@ impl Storage {
         let size = data.len() as u64;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("storage-put-permitted").await;
-        let result = target.backend.put(path, Bytes::from(data).into()).await;
+        let result = target
+            .backend
+            .put(path, Bytes::from(data).into())
+            .await
+            .inspect_err(|e| self.diagnostics.backend(e));
         operation.finish(result.is_err());
         result?;
         self.operations[1].bytes(size);
@@ -1789,7 +1840,11 @@ impl Storage {
         self.background_writable()?;
         let mut operation = self.operations[2].begin();
         self.backend_deletes.fetch_add(1, Ordering::Relaxed);
-        let result = target.backend.delete(path).await;
+        let result = target
+            .backend
+            .delete(path)
+            .await
+            .inspect_err(|e| self.diagnostics.backend(e));
         operation.finish(result.is_err());
         result?;
         Ok(())
@@ -1887,11 +1942,13 @@ impl Storage {
                     let secrets = self.secrets.clone();
                     let (pool, _, _) = self.compression_for(p.storage_id);
                     let pack = p.clone();
+                    let diagnostics = self.diagnostics.clone();
                     let (data, memory) = tokio::task::spawn_blocking(move || {
                         let _permit = permit;
                         #[cfg(feature = "fault-injection")]
                         crate::faults::blocking("pack-decode");
-                        let data = crate::content::pack::decode(&pack, encoded, &secrets, &pool)?;
+                        let data = crate::content::pack::decode(&pack, encoded, &secrets, &pool)
+                            .inspect_err(|e| diagnostics.content(e))?;
                         Ok::<_, anyhow::Error>((data, memory))
                     })
                     .await??;
@@ -1981,7 +2038,11 @@ impl Storage {
         let target = self.store_backend(storage_id)?;
         let _permit = target.controls.acquire().await?;
         let mut operation = self.operations[3].begin();
-        let result = target.backend.head(path).await;
+        let result = target
+            .backend
+            .head(path)
+            .await
+            .inspect_err(|e| self.diagnostics.backend(e));
         operation.finish(result.is_err());
         Ok(result?)
     }
@@ -2004,7 +2065,8 @@ impl Storage {
         match self.source(c.id).await? {
             Source::Chunk(physical, _pin) => {
                 *physical_detail = serde_json::json!({"source":"chunk","encoding_id":physical.encoding_id.to_string(),"location_id":physical.location_id});
-                codec::validate_metadata(&physical, &self.secrets)?;
+                codec::validate_metadata(&physical, &self.secrets)
+                    .inspect_err(|e| self.diagnostics.content(e))?;
                 match mode {
                     crate::worker::integrity::Mode::Metadata => Ok(0),
                     crate::worker::integrity::Mode::Head => {
@@ -2025,7 +2087,8 @@ impl Storage {
             }
             Source::Pack(p, _pin) => {
                 *physical_detail = serde_json::json!({"source":"pack","pack_id":p.id.to_string(),"location_id":p.location_id});
-                p.validate(&self.secrets)?;
+                p.validate(&self.secrets)
+                    .inspect_err(|e| self.diagnostics.content(e))?;
                 let capacity = p.payload_size().context(codec::IntegrityError::Metadata)?;
                 ensure!(
                     self.physical.pack_contains(p.id, c.id).await?,
@@ -2087,22 +2150,28 @@ impl Storage {
                     let pool = self.compression.clone();
                     let secrets = self.secrets.clone();
                     let pack = p.clone();
+                    let diagnostics = self.diagnostics.clone();
                     tokio::task::spawn_blocking(move || {
                         let _permit = permit;
                         let _memory = memory;
                         #[cfg(feature = "fault-injection")]
                         crate::faults::blocking("pack-inspect");
-                        let decoded = crate::content::pack::decode(&pack, data, &secrets, &pool)?;
-                        for ((c, offset), member) in members.iter().zip(&decoded.members) {
-                            ensure!(
-                                member.id == c.id
-                                    && member.hash.as_slice() == c.hash
-                                    && member.len == c.raw_size as usize
-                                    && member.start == 12 + 44 * members.len() + *offset as usize,
-                                codec::IntegrityError::Metadata
-                            );
-                        }
-                        Ok::<_, anyhow::Error>(())
+                        let result = (|| {
+                            let decoded =
+                                crate::content::pack::decode(&pack, data, &secrets, &pool)?;
+                            for ((c, offset), member) in members.iter().zip(&decoded.members) {
+                                ensure!(
+                                    member.id == c.id
+                                        && member.hash.as_slice() == c.hash
+                                        && member.len == c.raw_size as usize
+                                        && member.start
+                                            == 12 + 44 * members.len() + *offset as usize,
+                                    codec::IntegrityError::Metadata
+                                );
+                            }
+                            Ok::<_, anyhow::Error>(())
+                        })();
+                        result.inspect_err(|e| diagnostics.content(e))
                     })
                     .await??;
                     Ok(size)
@@ -2158,6 +2227,8 @@ impl Storage {
         self.backend_gets
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let result: Result<Vec<u8>> = async {
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("storage-read-permitted").await;
             let result = target.backend.get(path).await?;
             ensure!(
                 result.meta.size <= bound as u64,
@@ -2176,7 +2247,18 @@ impl Storage {
             Ok(data)
         }
         .await;
-        operation.finish(result.is_err());
+        let content_error = result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.downcast_ref::<codec::IntegrityError>().is_some());
+        if let Err(error) = &result {
+            if content_error {
+                self.diagnostics.content(error);
+            } else if let Some(error) = error.downcast_ref::<object_store::Error>() {
+                self.diagnostics.backend(error);
+            }
+        }
+        operation.finish(result.is_err() && !content_error);
         let data = result?;
         self.operations[0].bytes(data.len() as u64);
         self.backend_read_bytes

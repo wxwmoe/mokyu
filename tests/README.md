@@ -34,6 +34,8 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 
 ## 公共接口与恢复
 
+`storage_diagnostics_count_shared_failures_and_cache_fallback` 是带 `fault-injection` 的 Rust ignored 测试，使用全新 `MOKYU_TEST_SQLITE_CONFIG`、独立 `MOKYU_TEST_FAULT_DIR` 和 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`。覆盖 16 个共享读取者、来源缺失、错误正文、超长正文，以及无法清理的损坏缓存和缓存文件丢失；检查传输、内容与缓存计数互不混淆。
+
 启动带 `fault-injection` 的隔离服务，配置专用 local/S3 存储、桶、区块密钥及管理员后，执行对应 Python 模块。依赖 `boto3`、`requests`；PostgreSQL 专用测试另需 `psycopg`。
 
 生命周期测试会等待容量统计收敛；测试服务的 `metrics.refresh_interval` 应设为短周期（如 `2s`），保存设置后重启再运行。
