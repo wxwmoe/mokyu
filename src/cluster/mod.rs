@@ -1,5 +1,6 @@
 pub(crate) mod identity;
 pub(crate) mod registration;
+pub(crate) mod report;
 pub(crate) mod status;
 
 pub(crate) use identity::{NodeState, credential_binding, verify_deployment_key};

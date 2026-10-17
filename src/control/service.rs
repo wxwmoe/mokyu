@@ -127,27 +127,67 @@ pub(super) async fn status(
         inventory_stale: raw["storage"]["stale"] == true,
     }))
 }
-#[derive(Serialize, ToSchema)]
-pub(super) struct ConfigField {
-    key: String,
-    value: String,
-    origin: &'static str,
-    value_mode: &'static str,
-    restart: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    value_state: Option<&'static str>,
-}
+pub(crate) use crate::model::runtime::ConfigField;
 #[utoipa::path(get,operation_id="service_config",path="/api/v1/system/config",responses((status=200,body=Vec<ConfigField>)))]
 pub(super) async fn config(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<ConfigField>>, HttpError> {
     let access = app.authorization.admin(&actor.principal).await?;
+    let fields = config_fields(&app, app.runtime_settings.inspect().await?)?;
+    access.finish().await?;
+    Ok(Json(fields))
+}
+
+pub(crate) fn loaded_config(app: &App) -> Result<Vec<ConfigField>> {
+    let revisions = app.runtime_revisions.read().unwrap();
+    let values = crate::model::runtime_defaults(&app.config)
+        .into_iter()
+        .map(|(section, value)| {
+            (
+                section.to_owned(),
+                value,
+                revisions.get(section).copied().unwrap_or_default(),
+                false,
+            )
+        })
+        .collect();
+    drop(revisions);
+    config_fields(app, values)
+}
+
+fn config_fields(app: &App, runtime: Vec<(String, Value, i64, bool)>) -> Result<Vec<ConfigField>> {
     let c = &app.config;
     let d = &c.database;
     // Only current file sections and database-backed runtime sections are serialized. Secret-bearing fields use an allowlist.
     let mut sections = serde_json::Map::new();
     let mut instance = serde_json::to_value(&c.instance)?;
+    instance.as_object_mut().unwrap().retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "name"
+                | "listen_control"
+                | "listen_web"
+                | "listen_s3"
+                | "data_path"
+                | "min_free_space"
+                | "multipart_limit"
+                | "cache_size"
+                | "cache_entries"
+                | "response_cache_size"
+                | "upload_cache_size"
+                | "thumbnail_cache_size"
+                | "request_connections"
+                | "database_connections"
+                | "database_read_connections"
+                | "cpu_jobs"
+                | "stream_memory_budget"
+                | "storage_read_slots"
+                | "storage_upload_slots"
+                | "storage_control_slots"
+                | "compression_idle_timeout"
+        )
+    });
     instance["deployment_key"] = json!("[redacted]");
     sections.insert("instance".into(), instance);
     let database = if d.backend == crate::config::DatabaseType::Sqlite {
@@ -165,7 +205,6 @@ pub(super) async fn config(
         .read()
         .map(|revisions| revisions.clone())
         .unwrap_or_default();
-    let runtime = app.runtime_settings.inspect().await?;
     let mut runtime_restart = std::collections::HashMap::new();
     let mut runtime_defaults = std::collections::HashMap::new();
     for (section, value, revision, is_default) in runtime {
@@ -208,8 +247,8 @@ pub(super) async fn config(
                 value_state: None,
                 key,
                 value: text(value),
-                origin,
-                value_mode,
+                origin: origin.into(),
+                value_mode: value_mode.into(),
                 restart: runtime_restart
                     .get(section.as_str())
                     .copied()
@@ -222,8 +261,8 @@ pub(super) async fn config(
             value_state: None,
             key: format!("effective.{key}"),
             value: text(value),
-            origin: "config",
-            value_mode: "budget",
+            origin: "config".into(),
+            value_mode: "budget".into(),
             restart: true,
         });
     }
@@ -231,26 +270,25 @@ pub(super) async fn config(
         value_state: None,
         key: "pack.creation_enabled".into(),
         value: app.pack_creation_allowed().to_string(),
-        origin: "database",
-        value_mode: "set",
+        origin: "database".into(),
+        value_mode: "set".into(),
         restart: false,
     });
-    fields.extend(environment(&app));
-    access.finish().await?;
-    Ok(Json(fields))
+    fields.extend(environment(app));
+    Ok(fields)
 }
 
 fn observed(key: &str, value: Value, missing: &'static str) -> ConfigField {
     ConfigField {
         key: key.into(),
-        value_state: value.is_null().then_some(missing),
+        value_state: value.is_null().then(|| missing.to_owned()),
         value: if value.is_null() {
             String::new()
         } else {
             text(&value)
         },
-        origin: "environment",
-        value_mode: "read",
+        origin: "environment".into(),
+        value_mode: "read".into(),
         restart: false,
     }
 }
@@ -326,7 +364,7 @@ mod tests {
         assert_eq!(zero.value_state, None);
         let missing = observed("runtime.cpu_quota", Value::Null, "unlimited");
         assert_eq!(missing.value, "");
-        assert_eq!(missing.value_state, Some("unlimited"));
+        assert_eq!(missing.value_state.as_deref(), Some("unlimited"));
         assert_eq!(missing.origin, "environment");
         assert!(!missing.restart);
     }

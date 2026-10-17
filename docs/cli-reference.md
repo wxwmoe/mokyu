@@ -270,3 +270,5 @@ docker exec mokyu mokyu cli task resume TASK_UUID
 | `mokyu cli maintenance enable` | 通过管理 API 进入维护状态；恢复数据库时先停止写入，再用该命令确认维护状态 |
 
 全部在线管理能力在 Web 有对应入口，见[管理指南](management.md)；部署密钥生成、配置文件安装、数据库备份恢复及停止状态的救援仍在部署环境执行。
+
+`cluster nodes` 返回 `{items,next_cursor}`，默认 50 项，可用 `--limit`（1–200）、`--after`、`--role`、`--contact`、`--work`、`--configuration`、`--section` 筛选并续页。游标只用于同一组筛选。`cluster status` 增加节点联系、工作和配置生效汇总；`status` 仍表示本进程状态。

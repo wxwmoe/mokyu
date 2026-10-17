@@ -34,6 +34,20 @@ pub async fn initialize(app: &App, role: &str) -> Result<()> {
     app.cluster()?
         .heartbeat(&state, role, &app.secrets.credential_key)
         .await?;
+    let boot = uuid::Uuid::new_v4();
+    app.cluster()?
+        .begin_report(
+            &state,
+            role,
+            &app.secrets.credential_key,
+            boot,
+            serde_json::from_value(app.statistics.runtime()["started_at"].clone())?,
+        )
+        .await?;
+    ensure!(
+        app.node_boot.set(boot).is_ok(),
+        "node boot was already initialized"
+    );
     ensure!(
         app.node.set(state).is_ok(),
         "node identity was already initialized"

@@ -592,6 +592,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/cluster/nodes/{id}/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["cluster_node_config"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/cluster/nodes/{id}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["cluster_node_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/cluster/nodes/{name}/release": {
         parameters: {
             query?: never;
@@ -618,6 +650,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["cluster_recover"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/cluster/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["cluster_settings"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1715,6 +1763,16 @@ export interface components {
             items: components["schemas"]["ObjectChunk"][];
             next_cursor?: string | null;
         };
+        ClusterOverview: components["schemas"]["ClusterStatus"] & {
+            nodes: components["schemas"]["NodeCount"][];
+            /** Format: date-time */
+            observed_at: string;
+            settings: components["schemas"]["SettingCount"][];
+        };
+        ClusterSettings: {
+            nodes: components["schemas"]["NodePage"];
+            sections: components["schemas"]["SettingCount"][];
+        };
         ClusterStatus: {
             /** Format: int64 */
             enabled_nodes: number;
@@ -2021,13 +2079,41 @@ export interface components {
             /** @example cluster */
             mode: string;
         };
+        NodeConfig: {
+            fields: components["schemas"]["ConfigField"][];
+            node: components["schemas"]["NodeView"];
+            revisions: unknown;
+        };
         NodeContext: {
             /** Format: uuid */
             id?: string | null;
             name?: string | null;
             role: string;
         };
+        NodeCount: {
+            configuration: string;
+            contact: string;
+            count: string;
+            role: string;
+            work: string;
+        };
+        NodePage: {
+            items: components["schemas"]["NodeView"][];
+            next_cursor?: string | null;
+        };
+        NodeStatus: {
+            /** Format: uuid */
+            boot_id?: string | null;
+            more_tasks: boolean;
+            node: components["schemas"]["NodeView"];
+            /** Format: date-time */
+            started_at?: string | null;
+            status?: unknown;
+            tasks: components["schemas"]["WorkSummary"][];
+        };
         NodeView: {
+            configuration: string;
+            contact: string;
             /** Format: date-time */
             created_at: string;
             enabled: boolean;
@@ -2036,7 +2122,14 @@ export interface components {
             /** Format: date-time */
             last_seen_at?: string | null;
             name: string;
+            /** Format: date-time */
+            received_at?: string | null;
+            report_fresh: boolean;
             role: string;
+            /** Format: date-time */
+            sampled_at?: string | null;
+            settings: unknown;
+            work: string;
         };
         ObjectChunk: {
             algorithm: string;
@@ -2358,6 +2451,11 @@ export interface components {
             refresh_token?: string | null;
             /** Format: uuid */
             session_id: string;
+        };
+        SettingCount: {
+            count: string;
+            section: string;
+            state: string;
         };
         SettingsInput: {
             cors: components["schemas"]["CorsRule"][];
@@ -3830,7 +3928,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ClusterStatus"];
+                    "application/json": components["schemas"]["ClusterOverview"];
                 };
             };
             501: {
@@ -3845,7 +3943,15 @@ export interface operations {
     };
     cluster_nodes: {
         parameters: {
-            query?: never;
+            query?: {
+                role?: string | null;
+                contact?: string | null;
+                work?: string | null;
+                configuration?: string | null;
+                section?: string | null;
+                after?: string | null;
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3857,7 +3963,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["NodeView"][];
+                    "application/json": components["schemas"]["NodePage"];
                 };
             };
             501: {
@@ -3866,6 +3972,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    cluster_node_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeConfig"];
+                };
+            };
+        };
+    };
+    cluster_node_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeStatus"];
                 };
             };
         };
@@ -3940,6 +4088,33 @@ export interface operations {
             };
         };
     };
+    cluster_settings: {
+        parameters: {
+            query?: {
+                role?: string | null;
+                contact?: string | null;
+                work?: string | null;
+                configuration?: string | null;
+                section?: string | null;
+                after?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterSettings"];
+                };
+            };
+        };
+    };
     cluster_status: {
         parameters: {
             query?: never;
@@ -3954,7 +4129,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ClusterStatus"];
+                    "application/json": components["schemas"]["ClusterOverview"];
                 };
             };
             501: {

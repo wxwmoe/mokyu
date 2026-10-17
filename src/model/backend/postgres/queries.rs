@@ -6912,6 +6912,55 @@ pub(super) fn bump_storage_profile(id: Uuid) -> Statement<'static> {
 const VIEW_BY_NAME: &str = "SELECT s.id,s.name,s.type AS storage_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.name=$1";
 
 use crate::model::cluster::{ClusterStatus, ClusterStore, Leader, NodeView};
+use crate::model::node::{
+    CONTACT_SECONDS, NodeCount, NodeFilter, NodePage, NodeReport, SavedReport, SettingCount,
+};
+
+const NODE_OBSERVATIONS: &str = r#"
+WITH reports AS (
+    SELECT n.id,n.name,n.role,n.enabled,n.last_seen_at,n.created_at,r.metadata,r.status,r.sampled_at,r.received_at,
+        CASE WHEN NOT n.enabled THEN 'released' WHEN n.last_seen_at IS NULL THEN 'not_reported'
+            WHEN n.last_seen_at < now()-$2*interval '1 second' THEN 'unresponsive' ELSE 'online' END AS contact,
+        COALESCE(n.enabled AND n.last_seen_at >= now()-$2*interval '1 second'
+            AND r.sampled_at IS NOT NULL AND r.received_at >= now()-$2*interval '1 second',false) AS report_fresh
+    FROM nodes n LEFT JOIN node_reports r ON r.node_id=n.id
+), observed AS (
+    SELECT r.id,r.name,r.role,r.enabled,r.last_seen_at,r.created_at,r.sampled_at,r.received_at,r.contact,r.report_fresh,
+        CASE WHEN NOT r.enabled THEN 'unknown'
+            WHEN r.status->>'work'='starting' AND r.received_at>=now()-$2*interval '1 second' THEN 'starting'
+            WHEN r.report_fresh AND r.metadata->>'format'='1' AND r.status->>'work' IN ('normal','maintenance','restricted','recovery') THEN r.status->>'work'
+            ELSE 'unknown' END AS work,
+        COALESCE(s.settings,'{}'::jsonb) AS settings
+    FROM reports r LEFT JOIN LATERAL (
+        SELECT jsonb_object_agg(section,CASE
+            WHEN desired->'value'='{}'::jsonb THEN 'not_applicable'
+            WHEN NOT r.report_fresh OR r.metadata->>'format' IS DISTINCT FROM '1' THEN 'unknown'
+            WHEN NOT COALESCE((r.metadata->'loaded'->section) ?& ARRAY(SELECT jsonb_object_keys(desired->'value')),false) THEN 'unknown'
+            WHEN NOT ((r.metadata->'loaded'->section) @> (desired->'value')) THEN 'restart_required'
+            WHEN r.metadata->'revisions'->section=desired->'revision' THEN 'applied'
+            ELSE 'equivalent' END) AS settings
+        FROM jsonb_each($1::jsonb->r.role) AS setting(section,desired)
+    ) s ON true
+), states AS (
+    SELECT *,CASE WHEN settings='{}'::jsonb OR EXISTS(SELECT 1 FROM jsonb_each_text(settings) v WHERE v.value='unknown') THEN 'unknown'
+        WHEN EXISTS(SELECT 1 FROM jsonb_each_text(settings) v WHERE v.value='restart_required') THEN 'restart_required'
+        WHEN EXISTS(SELECT 1 FROM jsonb_each_text(settings) v WHERE v.value='equivalent') THEN 'equivalent'
+        ELSE 'applied' END AS configuration FROM observed
+)
+"#;
+
+pub(super) fn begin_node_report(
+    id: Uuid,
+    boot: Uuid,
+    started: DateTime<Utc>,
+) -> Statement<'static> {
+    sqlx::query("INSERT INTO node_reports(node_id,boot_id,started_at,status) VALUES($1,$2,$3,'{\"work\":\"starting\"}') ON CONFLICT(node_id) DO UPDATE SET boot_id=$2,sequence=0,started_at=$3,sampled_at=NULL,received_at=now(),metadata='{}',status=EXCLUDED.status")
+        .bind(id).bind(boot).bind(started)
+}
+pub(super) fn save_node_report(id: Uuid, report: &NodeReport) -> Statement<'_> {
+    sqlx::query("UPDATE node_reports SET sequence=$3,sampled_at=$4,received_at=now(),metadata=COALESCE($5,metadata),status=$6 WHERE node_id=$1 AND boot_id=$2 AND sequence<$3")
+        .bind(id).bind(report.boot_id).bind(report.sequence).bind(report.sampled_at).bind(&report.metadata).bind(&report.status)
+}
 
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
     fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
@@ -6922,6 +6971,13 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
             enabled: row.try_get("enabled")?,
             last_seen_at: row.try_get("last_seen_at")?,
             created_at: row.try_get("created_at")?,
+            contact: row.try_get("contact")?,
+            work: row.try_get("work")?,
+            configuration: row.try_get("configuration")?,
+            settings: row.try_get("settings")?,
+            sampled_at: row.try_get("sampled_at")?,
+            received_at: row.try_get("received_at")?,
+            report_fresh: row.try_get("report_fresh")?,
         })
     }
 }
@@ -7061,12 +7117,94 @@ impl ClusterStore for Backend {
                 .await?,
         })
     }
-    async fn nodes(&self) -> Result<Vec<NodeView>> {
-        Ok(sqlx::query_as(
-            "SELECT id,name,role,enabled,last_seen_at,created_at FROM nodes ORDER BY name",
-        )
-        .fetch_all(&self.pool)
+    async fn nodes(&self, filter: &NodeFilter, desired: &Value) -> Result<NodePage> {
+        let cursor = filter.cursor()?;
+        let mut items: Vec<NodeView> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT * FROM states WHERE ($3::text IS NULL OR role=$3) AND ($4::text IS NULL OR contact=$4) AND ($5::text IS NULL OR work=$5) AND ($6::text IS NULL OR CASE WHEN $7::text IS NULL THEN configuration ELSE settings->>$7 END=$6) AND ($8::uuid IS NULL OR id>$8) ORDER BY id LIMIT $9")))
+            .bind(desired).bind(CONTACT_SECONDS).bind(&filter.role).bind(&filter.contact).bind(&filter.work)
+            .bind(&filter.configuration).bind(&filter.section).bind(cursor).bind(filter.limit+1)
+            .fetch_all(&self.pool).await?;
+        let more = items.len() > filter.limit as usize;
+        items.truncate(filter.limit as usize);
+        let next_cursor = if more {
+            items.last().map(|node| filter.next(node.id)).transpose()?
+        } else {
+            None
+        };
+        Ok(NodePage { items, next_cursor })
+    }
+    async fn node(&self, id: Uuid, desired: &Value) -> Result<Option<NodeView>> {
+        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "{NODE_OBSERVATIONS} SELECT * FROM states WHERE id=$3"
+        )))
+        .bind(desired)
+        .bind(CONTACT_SECONDS)
+        .bind(id)
+        .fetch_optional(&self.pool)
         .await?)
+    }
+    async fn node_counts(&self, desired: &Value) -> Result<Vec<NodeCount>> {
+        let rows: Vec<(String,String,String,String,String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT role,contact,work,configuration,count(*)::text FROM states GROUP BY role,contact,work,configuration ORDER BY role,contact,work,configuration")))
+            .bind(desired).bind(CONTACT_SECONDS).fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(role, contact, work, configuration, count)| NodeCount {
+                role,
+                contact,
+                work,
+                configuration,
+                count,
+            })
+            .collect())
+    }
+    async fn setting_counts(&self, desired: &Value) -> Result<Vec<SettingCount>> {
+        let rows: Vec<(String,String,String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT s.key,s.value,count(*)::text FROM states CROSS JOIN LATERAL jsonb_each_text(settings) s WHERE enabled GROUP BY s.key,s.value ORDER BY s.key,s.value")))
+            .bind(desired).bind(CONTACT_SECONDS).fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(section, state, count)| SettingCount {
+                section,
+                state,
+                count,
+            })
+            .collect())
+    }
+    async fn node_report(&self, id: Uuid) -> Result<Option<SavedReport>> {
+        let row: Option<(Uuid, DateTime<Utc>, Value, Value)> = sqlx::query_as(
+            "SELECT boot_id,started_at,metadata,status FROM node_reports WHERE node_id=$1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(
+            row.map(|(boot_id, started_at, metadata, status)| SavedReport {
+                boot_id,
+                started_at,
+                metadata,
+                status,
+            }),
+        )
+    }
+    async fn node_tasks(&self, id: Uuid) -> Result<Vec<crate::model::metrics::WorkSummary>> {
+        Ok(sqlx::query_as("SELECT id,task_type,state,processed::text,updated_at FROM tasks WHERE lease_node_id=$1 AND state='running' ORDER BY updated_at DESC,id LIMIT 21").bind(id).fetch_all(&self.pool).await?)
+    }
+    async fn begin_report(
+        &self,
+        state: &crate::cluster::NodeState,
+        role: &str,
+        key: &crate::content::codec::Key,
+        boot: Uuid,
+        started: DateTime<Utc>,
+    ) -> Result<()> {
+        transactions::begin_report(&self.pool, state, role, key, boot, started).await
+    }
+    async fn report(
+        &self,
+        state: &crate::cluster::NodeState,
+        role: &str,
+        key: &crate::content::codec::Key,
+        report: &NodeReport,
+    ) -> Result<bool> {
+        transactions::report_node(&self.pool, state, role, key, report).await
     }
     async fn credential(&self, id: Uuid) -> Result<Option<(String, Vec<u8>)>> {
         Ok(sqlx::query_as("SELECT role,credential_encrypted FROM nodes WHERE id=$1 AND role='control' AND enabled AND credential_encrypted IS NOT NULL").bind(id).fetch_optional(&self.pool).await?)

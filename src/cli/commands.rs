@@ -367,7 +367,22 @@ pub enum Cluster {
         #[arg(value_parser = ["single", "cluster"])]
         mode: String,
     },
-    Nodes,
+    Nodes {
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        contact: Option<String>,
+        #[arg(long)]
+        work: Option<String>,
+        #[arg(long)]
+        configuration: Option<String>,
+        #[arg(long)]
+        section: Option<String>,
+    },
     Release {
         name: String,
         #[arg(long)]
@@ -492,7 +507,7 @@ impl Command {
             | Self::Settings(Settings::Control(ControlSettings::Show) | Settings::Get { .. })
             | Self::Keys(Keys::List)
             | Self::Setup(Setup::Token)
-            | Self::Cluster(Cluster::Status | Cluster::Nodes) => None,
+            | Self::Cluster(Cluster::Status | Cluster::Nodes { .. }) => None,
             Self::Bucket(_) => Some("bucket.change"),
             Self::Credential(_) => Some("credential.change"),
             Self::Token(_) => Some("token.change"),

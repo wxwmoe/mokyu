@@ -34,3 +34,14 @@ pub(crate) trait RuntimeStore: Send + Sync {
 pub(crate) trait Owner: Send {
     async fn check(&mut self) -> Result<()>;
 }
+
+#[derive(Clone, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ConfigField {
+    pub(crate) key: String,
+    pub(crate) value: String,
+    pub(crate) origin: String,
+    pub(crate) value_mode: String,
+    pub(crate) restart: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) value_state: Option<String>,
+}

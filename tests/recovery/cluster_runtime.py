@@ -71,11 +71,12 @@ if phase == 'live':
     admin = login()
     status = rpc({'Status': {'ready': True}})
     assert status['role'] == 'control' and status['node_registered'] and not status['mode_mismatch']
-    nodes = rpc({'Cluster': 'Nodes'})
+    nodes = rpc({'Cluster': {'Nodes': {'limit': 50}}})['items']
     assert {row['role'] for row in nodes if row['enabled']} == {'control', 'data', 'worker'}
-    assert admin.get(url + '/api/v1/cluster/nodes').json() == nodes
+    assert {row['id'] for row in admin.get(url + '/api/v1/cluster/nodes').json()['items']} == {row['id'] for row in nodes}
     cluster = admin.get(url + '/api/v1/cluster/status').json()
-    assert cluster == rpc({'Cluster': 'Status'}) == {'mode': 'cluster', 'enabled_nodes': 3, 'local_storages': 0}
+    assert {key: cluster[key] for key in ('mode', 'enabled_nodes', 'local_storages')} == {'mode': 'cluster', 'enabled_nodes': 3, 'local_storages': 0}
+    assert rpc({'Cluster': 'Status'})['enabled_nodes'] == 3
     assert admin.post(url + '/api/v1/cluster/mode', json={'mode': 'single'}).status_code >= 400
     assert rpc({'Cluster': 'Status'})['mode'] == 'cluster'
     seen = dict(db.execute('SELECT id,last_seen_at FROM nodes WHERE enabled').fetchall())

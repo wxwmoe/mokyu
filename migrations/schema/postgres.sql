@@ -1,4 +1,4 @@
--- Current postgres schema, matching migration 0040.
+-- Current postgres schema, matching migration 0041.
 -- The initializer records schema_version and migration checksums after this script succeeds.
 
 SET LOCAL check_function_bodies = false;
@@ -2159,3 +2159,15 @@ INSERT INTO public.runtime_settings(section,value) VALUES
     ('maintenance','{"interval":"30m","batch_size":1000,"max_duration":"5s","task_retention":"30d","audit_retention":"90d"}');
 INSERT INTO maintenance_controls(policy) VALUES('gc'),('pack'),('reuse'),('reclaim'),('repack'),('range'),('cleanup');
 INSERT INTO usage_summary(id) VALUES('global');
+
+CREATE TABLE node_reports (
+    node_id uuid PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+    boot_id uuid NOT NULL,
+    sequence bigint NOT NULL DEFAULT 0 CHECK (sequence >= 0),
+    started_at timestamptz NOT NULL,
+    sampled_at timestamptz,
+    received_at timestamptz NOT NULL DEFAULT now(),
+    metadata jsonb NOT NULL DEFAULT '{}' CHECK (octet_length(metadata::text) <= 65536),
+    status jsonb NOT NULL DEFAULT '{}' CHECK (octet_length(status::text) <= 32768)
+);
+CREATE INDEX tasks_node_running ON tasks (lease_node_id, updated_at DESC, id) WHERE state='running';

@@ -302,3 +302,17 @@ metadata 检查对象映射与区块身份，head 增加存储存在性和长度
 `GET/PUT /api/v1/buckets/{bucket}/cors`、`POST /api/v1/cli`、`GET /api/v1/packs`、`GET /api/v1/packs/{id}`、`POST /api/v1/cache/flush` 和 `GET /api/v1/tasks/{id}/report` 已纳入同一 OpenAPI 合约；它们使用现有 control service 和统一权限边界。
 
 页面为 Vue 静态资源，运行无需 Node.js。带内容哈希的资源可长期缓存，入口 HTML 和品牌素材需重新验证，私有 API 不缓存。三语按需加载、明暗主题与账户同步规则见[管理指南](management.md)。
+
+### 节点报告与配置生效
+
+群集只读查询要求管理员，但不要求最近五分钟重新验证密码；mode/release/recover 的危险操作规则保持不变。
+
+| 方法与路径 | 返回内容 |
+| --- | --- |
+| `GET /api/v1/cluster/status` | 保留 mode/enabled_nodes/local_storages，增加按角色、联系、工作和配置状态统计的 nodes、分组生效汇总 settings 和 observed_at |
+| `GET /api/v1/cluster/nodes` | `{items,next_cursor}`；支持 role/contact/work/configuration/section/after/limit，默认 50、最多 200，游标绑定筛选条件 |
+| `GET /api/v1/cluster/nodes/{id}/status` | 节点身份和新鲜度、启动编号、资源与工作快照、最多 20 项当前任务及 more_tasks |
+| `GET /api/v1/cluster/nodes/{id}/config` | 节点实际加载的脱敏 fields、加载 revisions 和当前配置比较结果 |
+| `GET /api/v1/cluster/settings` | sections 的生效计数和可分页 nodes；筛选方式与节点列表一致 |
+
+节点查询用稳定 id；原释放接口仍以名称定位。`configuration` 为 applied/equivalent/restart_required/unknown；分组 settings 还可能为 not_applicable。equivalent 表示当前适用值相同但修订不同。`report_fresh=false` 的快照仍可查看，不能据此认定当前运行状态。`sampled_at` 是采集时刻，`received_at` 由数据库记录；任务清单查询当前数据库，不属于历史快照。

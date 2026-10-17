@@ -5596,6 +5596,42 @@ pub(super) async fn heartbeat(
     Ok(())
 }
 
+pub(super) async fn begin_report(
+    pool: &PgPool,
+    state: &crate::cluster::NodeState,
+    role: &str,
+    key: &crate::content::codec::Key,
+    boot: Uuid,
+    started: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    validate_node(&mut tx, state, role, key).await?;
+    queries::begin_node_report(state.node_id, boot, started)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn report_node(
+    pool: &PgPool,
+    state: &crate::cluster::NodeState,
+    role: &str,
+    key: &crate::content::codec::Key,
+    report: &crate::model::node::NodeReport,
+) -> Result<bool> {
+    report.validate()?;
+    let mut tx = pool.begin().await?;
+    validate_node(&mut tx, state, role, key).await?;
+    let written = queries::save_node_report(state.node_id, report)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        == 1;
+    tx.commit().await?;
+    Ok(written)
+}
+
 pub(super) async fn recover_node(pool: &PgPool, name: &str, role: &str) -> Result<()> {
     let mut tx = pool.begin().await?;
     let registered: Option<(Uuid, String)> = queries::recover_node_lock(&name)

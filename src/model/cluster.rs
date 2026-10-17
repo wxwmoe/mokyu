@@ -60,7 +60,35 @@ pub(crate) trait ClusterStore: Send + Sync {
     async fn listen_tasks(&self, wake: std::sync::Arc<tokio::sync::Notify>) -> Result<()>;
     async fn mode(&self) -> Result<String>;
     async fn status(&self) -> Result<ClusterStatus>;
-    async fn nodes(&self) -> Result<Vec<NodeView>>;
+    async fn nodes(
+        &self,
+        filter: &super::node::NodeFilter,
+        desired: &serde_json::Value,
+    ) -> Result<super::node::NodePage>;
+    async fn node(&self, id: Uuid, desired: &serde_json::Value) -> Result<Option<NodeView>>;
+    async fn node_counts(&self, desired: &serde_json::Value)
+    -> Result<Vec<super::node::NodeCount>>;
+    async fn setting_counts(
+        &self,
+        desired: &serde_json::Value,
+    ) -> Result<Vec<super::node::SettingCount>>;
+    async fn node_report(&self, id: Uuid) -> Result<Option<super::node::SavedReport>>;
+    async fn node_tasks(&self, id: Uuid) -> Result<Vec<super::metrics::WorkSummary>>;
+    async fn begin_report(
+        &self,
+        state: &NodeState,
+        role: &str,
+        key: &Key,
+        boot: Uuid,
+        started: DateTime<Utc>,
+    ) -> Result<()>;
+    async fn report(
+        &self,
+        state: &NodeState,
+        role: &str,
+        key: &Key,
+        report: &super::node::NodeReport,
+    ) -> Result<bool>;
     async fn set_mode(&self, principal: &Principal, mode: &str) -> Result<()>;
     async fn release(&self, name: &str) -> Result<()>;
     async fn recover(&self, name: &str, role: &str) -> Result<()>;
@@ -98,4 +126,11 @@ pub(crate) struct NodeView {
     pub(crate) enabled: bool,
     pub(crate) last_seen_at: Option<DateTime<Utc>>,
     pub(crate) created_at: DateTime<Utc>,
+    pub(crate) contact: String,
+    pub(crate) work: String,
+    pub(crate) configuration: String,
+    pub(crate) settings: serde_json::Value,
+    pub(crate) sampled_at: Option<DateTime<Utc>>,
+    pub(crate) received_at: Option<DateTime<Utc>>,
+    pub(crate) report_fresh: bool,
 }

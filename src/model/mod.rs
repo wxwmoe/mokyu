@@ -14,6 +14,7 @@ pub(crate) mod key;
 pub(crate) mod maintenance;
 pub(crate) mod metrics;
 pub(crate) mod multipart;
+pub(crate) mod node;
 pub(crate) mod object;
 pub(crate) mod packing;
 mod physical;

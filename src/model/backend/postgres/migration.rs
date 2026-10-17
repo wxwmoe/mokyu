@@ -7,7 +7,7 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator.locking = false;
     migrator
 };
-const SCHEMA_VERSION: i64 = 40;
+const SCHEMA_VERSION: i64 = 41;
 const LEGACY_SCHEMA_VERSION: i32 = 33;
 
 pub(super) async fn run(owner: &mut PgConnection) -> Result<()> {

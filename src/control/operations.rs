@@ -196,12 +196,37 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             Ok(status)
         }
         Command::Cluster(command) => match command {
-            Cluster::Status => Ok(serde_json::to_value(app.cluster()?.status().await?)?),
+            Cluster::Status => Ok(serde_json::to_value(
+                crate::control::cluster::overview(app).await?,
+            )?),
             Cluster::Mode { mode } => {
                 app.change_mode(principal, &mode).await?;
                 Ok(json!({"mode":mode}))
             }
-            Cluster::Nodes => Ok(serde_json::to_value(app.cluster()?.nodes().await?)?),
+            Cluster::Nodes {
+                limit,
+                after,
+                role,
+                contact,
+                work,
+                configuration,
+                section,
+            } => {
+                let filter = crate::model::node::NodeFilter {
+                    limit,
+                    after,
+                    role,
+                    contact,
+                    work,
+                    configuration,
+                    section,
+                };
+                filter.cursor()?;
+                let desired = crate::model::node::desired(app).await?;
+                Ok(serde_json::to_value(
+                    app.cluster()?.nodes(&filter, &desired).await?,
+                )?)
+            }
             Cluster::Release { name, confirm } => {
                 if matches!(principal, Principal::Bootstrap) {
                     let local_name = if app.role == "single" {

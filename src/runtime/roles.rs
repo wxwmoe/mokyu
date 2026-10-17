@@ -89,6 +89,7 @@ async fn run_control(app: Arc<app::App>) -> Result<()> {
         .context("control listener")?;
     let connections = Arc::new(Semaphore::new(app.budget.request_connections));
     tokio::select! {
+        result = cluster::report::run(app.clone(), false) => result?,
         result = cluster::control_loop(app.clone()) => result?,
         result = serve_router(control_listener, control::router(app.clone()), connections) => result?,
         result = maintenance::run(app.clone()) => result?,
@@ -106,6 +107,7 @@ async fn run_worker(app: Arc<app::App>) -> Result<()> {
         .await
         .context("status listener")?;
     tokio::select! {
+        result = cluster::report::run(app.clone(), false) => result?,
         result = cluster::node_loop(app.clone(), "worker") => result?,
         result = serve_router(status_listener, http::status_router(app.clone()), Arc::new(Semaphore::new(4))) => result?,
         result = worker::scheduler::run(app.clone()) => result?,
@@ -132,6 +134,7 @@ async fn run_data(app: Arc<app::App>) -> Result<()> {
     let connections = Arc::new(Semaphore::new(app.budget.request_connections));
     let s3 = build_s3(app.clone())?;
     tokio::select! {
+        result = cluster::report::run(app.clone(), false) => result?,
         result = cluster::node_loop(app.clone(), "data") => result?,
         result = worker::scheduler::run(app.clone()) => result?,
         result = control::insights::runtime_loop(app.clone()) => result?,
@@ -151,6 +154,8 @@ async fn run_control_restricted(app: Arc<app::App>) -> Result<()> {
         .context("control listener")?;
     let connections = Arc::new(Semaphore::new(app.budget.request_connections));
     tokio::select! {
+        result = cluster::report::run(app.clone(), true) => result?,
+        result = cluster::status::restricted_loop(app.clone()) => result?,
         result = serve_router(control_listener, control::router(app.clone()), connections) => result?,
         _ = shutdown_signal() => tracing::info!(role="control", "stopping restricted listener"),
     }
@@ -191,6 +196,8 @@ async fn run_data_restricted(app: Arc<app::App>) -> Result<()> {
     let connections = Arc::new(Semaphore::new(app.budget.request_connections));
     let s3 = build_s3(app.clone())?;
     tokio::select! {
+        result = cluster::report::run(app.clone(), true) => result?,
+        result = cluster::status::restricted_loop(app.clone()) => result?,
         result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
         result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
         result = serve_router(control_listener, http::status_router(app.clone()), connections) => result?,
@@ -203,12 +210,11 @@ async fn run_status(app: Arc<app::App>) -> Result<()> {
     let listener = TcpListener::bind(&app.config.instance.listen_control)
         .await
         .context("status listener")?;
-    serve_router(
-        listener,
-        http::status_router(app),
-        Arc::new(Semaphore::new(4)),
-    )
-    .await
+    tokio::select! {
+        result = cluster::report::run(app.clone(), true) => result,
+        result = cluster::status::restricted_loop(app.clone()) => result,
+        result = serve_router(listener, http::status_router(app.clone()), Arc::new(Semaphore::new(4))) => result,
+    }
 }
 
 async fn drain(app: Arc<app::App>) -> Result<()> {

@@ -89,3 +89,5 @@ single 的用量采样不创建 usage 任务：在一次刷新超时预算内依
 ## 迁移和历史
 
 新安装执行完整迁移链，已发布迁移不可改写。兼容条件和操作步骤见[部署与恢复](deployment-and-recovery.md#升级与数据库迁移)。当前结构以迁移执行后的结果为准，历史文件中的旧名称不代表当前字段。
+
+PostgreSQL 群集的 `node_reports` 按 node_id 保存一份最新报告，boot_id 与 sequence 防止旧进程和乱序覆盖。metadata 保存脱敏加载配置与修订，status 保存有限的运行快照；两者分别限制为 64 KiB 和 32 KiB。只由有效注册身份更新，不使用公共读取从库。单容器不写节点报告，MySQL/SQLite 不创建对应表。正在执行的节点任务通过 tasks_node_running 部分索引查询。
