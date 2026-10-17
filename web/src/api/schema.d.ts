@@ -2081,6 +2081,8 @@ export interface components {
         };
         NodeConfig: {
             fields: components["schemas"]["ConfigField"][];
+            /** Format: date-time */
+            loaded_at?: string | null;
             node: components["schemas"]["NodeView"];
             revisions: unknown;
         };
@@ -2369,13 +2371,14 @@ export interface components {
             value: string;
         };
         RuntimeInsights: {
-            current: components["schemas"]["RuntimePoint"];
+            current?: components["schemas"]["RuntimePoint"] | null;
             failed_uploads: string;
             history: components["schemas"]["RuntimePoint"][];
             /** Format: date-time */
             oldest_pending?: string | null;
             pending_bytes: string;
             pending_entries: string;
+            scope: string;
             work: components["schemas"]["WorkSummary"][];
         };
         RuntimePoint: {
@@ -3944,6 +3947,7 @@ export interface operations {
     cluster_nodes: {
         parameters: {
             query?: {
+                name?: string | null;
                 role?: string | null;
                 contact?: string | null;
                 work?: string | null;
@@ -4091,6 +4095,7 @@ export interface operations {
     cluster_settings: {
         parameters: {
             query?: {
+                name?: string | null;
                 role?: string | null;
                 contact?: string | null;
                 work?: string | null;

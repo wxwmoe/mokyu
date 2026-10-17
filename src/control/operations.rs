@@ -204,6 +204,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 Ok(json!({"mode":mode}))
             }
             Cluster::Nodes {
+                name,
                 limit,
                 after,
                 role,
@@ -213,6 +214,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 section,
             } => {
                 let filter = crate::model::node::NodeFilter {
+                    name,
                     limit,
                     after,
                     role,

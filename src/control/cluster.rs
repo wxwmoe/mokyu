@@ -157,11 +157,9 @@ pub(crate) async fn node_config(
         .node(id, &desired)
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
-    let metadata = cluster
-        .node_report(id)
-        .await?
-        .map(|r| r.metadata)
-        .unwrap_or(Value::Null);
+    let report = cluster.node_report(id).await?;
+    let loaded_at = report.as_ref().map(|r| r.started_at);
+    let metadata = report.map(|r| r.metadata).unwrap_or(Value::Null);
     let fields = if metadata["format"] == crate::model::node::REPORT_FORMAT {
         serde_json::from_value(metadata["fields"].clone())?
     } else {
@@ -169,6 +167,7 @@ pub(crate) async fn node_config(
     };
     Ok(Json(NodeConfig {
         node,
+        loaded_at,
         fields,
         revisions: metadata.get("revisions").cloned().unwrap_or(json!({})),
     }))

@@ -52,7 +52,8 @@ pub(super) struct StorageInsights {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct RuntimeInsights {
-    current: RuntimePoint,
+    scope: &'static str,
+    current: Option<RuntimePoint>,
     history: Vec<RuntimePoint>,
     work: Vec<WorkSummary>,
     pending_entries: String,
@@ -150,8 +151,21 @@ pub(super) async fn runtime(
         failed_uploads,
     } = app.metrics.runtime(&actor.principal).await?;
     Ok(Json(RuntimeInsights {
-        current: runtime_point(&app).await?,
-        history,
+        scope: if app.role == "single" {
+            "single"
+        } else {
+            "cluster"
+        },
+        current: if app.role == "single" {
+            Some(runtime_point(&app).await?)
+        } else {
+            None
+        },
+        history: if app.role == "single" {
+            history
+        } else {
+            Vec::new()
+        },
         work,
         pending_entries,
         pending_bytes,
@@ -160,17 +174,12 @@ pub(super) async fn runtime(
     }))
 }
 pub(crate) async fn runtime_loop(app: Arc<App>) -> Result<()> {
-    const LEADER_KEY: i64 = 734922709851032;
+    // Unattributed local samples cannot represent cluster history.
+    if app.role != "single" {
+        return std::future::pending().await;
+    }
     let interval = Duration::from_secs(config::seconds(&app.config.metrics.runtime_interval)?);
     loop {
-        let leader = if app.role == "single" {
-            None
-        } else if let Some(leader) = app.cluster()?.leader(LEADER_KEY).await? {
-            Some(leader)
-        } else {
-            tokio::time::sleep(interval).await;
-            continue;
-        };
         let result: Result<()> = async {
             let point = runtime_point(&app).await?;
             app.metrics
@@ -184,9 +193,6 @@ pub(crate) async fn runtime_loop(app: Arc<App>) -> Result<()> {
         .await;
         if let Err(error) = result {
             tracing::warn!(%error,"runtime sample failed");
-        }
-        if let Some(leader) = leader {
-            leader.finish().await?;
         }
         tokio::time::sleep(interval).await;
     }

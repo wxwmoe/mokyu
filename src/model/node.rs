@@ -12,6 +12,7 @@ pub(crate) const CONTACT_SECONDS: i64 = 30;
 #[derive(Clone, Deserialize, Serialize, IntoParams)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct NodeFilter {
+    pub name: Option<String>,
     pub role: Option<String>,
     pub contact: Option<String>,
     pub work: Option<String>,
@@ -23,6 +24,7 @@ pub(crate) struct NodeFilter {
 impl Default for NodeFilter {
     fn default() -> Self {
         Self {
+            name: None,
             role: None,
             contact: None,
             work: None,
@@ -35,6 +37,10 @@ impl Default for NodeFilter {
 }
 impl NodeFilter {
     pub fn cursor(&self) -> Result<Option<Uuid>> {
+        ensure!(
+            self.name.as_ref().is_none_or(|s| s.len() <= 128),
+            "node name filter is too long"
+        );
         ensure!((1..=200).contains(&self.limit), "node limit must be 1..200");
         for (value, allowed) in [
             (&self.role, &["control", "data", "worker"][..]),
@@ -165,6 +171,7 @@ pub(crate) struct NodeStatus {
 #[derive(Serialize, ToSchema)]
 pub(crate) struct NodeConfig {
     pub node: super::cluster::NodeView,
+    pub loaded_at: Option<DateTime<Utc>>,
     pub fields: Vec<super::runtime::ConfigField>,
     pub revisions: Value,
 }

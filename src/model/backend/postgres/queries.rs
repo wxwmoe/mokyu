@@ -7119,9 +7119,9 @@ impl ClusterStore for Backend {
     }
     async fn nodes(&self, filter: &NodeFilter, desired: &Value) -> Result<NodePage> {
         let cursor = filter.cursor()?;
-        let mut items: Vec<NodeView> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT * FROM states WHERE ($3::text IS NULL OR role=$3) AND ($4::text IS NULL OR contact=$4) AND ($5::text IS NULL OR work=$5) AND ($6::text IS NULL OR CASE WHEN $7::text IS NULL THEN configuration ELSE settings->>$7 END=$6) AND ($8::uuid IS NULL OR id>$8) ORDER BY id LIMIT $9")))
+        let mut items: Vec<NodeView> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT * FROM states WHERE ($3::text IS NULL OR role=$3) AND (($4::text IS NULL AND enabled) OR contact=$4) AND ($5::text IS NULL OR work=$5) AND ($6::text IS NULL OR CASE WHEN $7::text IS NULL THEN configuration ELSE settings->>$7 END=$6) AND ($8::uuid IS NULL OR id>$8) AND ($10::text IS NULL OR strpos(lower(name),lower($10))>0) ORDER BY id LIMIT $9")))
             .bind(desired).bind(CONTACT_SECONDS).bind(&filter.role).bind(&filter.contact).bind(&filter.work)
-            .bind(&filter.configuration).bind(&filter.section).bind(cursor).bind(filter.limit+1)
+            .bind(&filter.configuration).bind(&filter.section).bind(cursor).bind(filter.limit+1).bind(&filter.name)
             .fetch_all(&self.pool).await?;
         let more = items.len() > filter.limit as usize;
         items.truncate(filter.limit as usize);

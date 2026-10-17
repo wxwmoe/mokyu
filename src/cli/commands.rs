@@ -368,6 +368,8 @@ pub enum Cluster {
         mode: String,
     },
     Nodes {
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long, default_value_t = 50)]
         limit: i64,
         #[arg(long)]

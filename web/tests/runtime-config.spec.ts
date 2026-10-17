@@ -19,6 +19,8 @@ test('single runtime observations preserve the configuration and service layout'
       expect((await request.put('/api/v1/account', { headers, data: { display_name: '', locale, theme, avatar_email: '', avatar_enabled: false } })).ok()).toBe(true)
       await page.goto('/runtime-config?node=invalid&view=node')
       await expect(page.locator('.config-board')).toHaveCount(3)
+      await expect(page).toHaveURL(/\/runtime-config$/)
+      await expect(page.locator('.cluster-scopes, .node-picker, .cluster-board')).toHaveCount(0)
       await expect(page.locator('.runtime-section-list article')).toHaveCount(4)
       await expect(page.locator('.config-origin-badge[data-origin="environment"]')).toHaveCount(10)
       const version = page.locator('.config-fields article').filter({ has: page.locator('code', { hasText: /^database\.version$/ }) })
