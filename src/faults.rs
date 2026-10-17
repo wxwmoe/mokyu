@@ -18,6 +18,9 @@ pub async fn point(name: &str) {
 }
 pub fn blocking(name: &str) {
     if let Some(path) = armed(name) {
+        if std::fs::read(&path).is_ok_and(|value| value == b"panic") {
+            panic!("injected blocking failure: {name}");
+        }
         while path.exists() {
             std::thread::sleep(Duration::from_millis(20));
         }

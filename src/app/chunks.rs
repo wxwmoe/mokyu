@@ -112,7 +112,7 @@ impl App {
         crate::faults::point("chunk-allocated").await;
         let mut c = c;
         c.location_id = Uuid::new_v4();
-        let (c, encoded, cache) = self.storage.encode(c, raw, true).await?;
+        let (c, encoded, cache) = self.storage.encode(c, raw, true, None).await?;
         self.chunks.mark_uploading(&c).await?;
         if self
             .stage_chunk(

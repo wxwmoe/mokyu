@@ -54,6 +54,8 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 
 各文件头部及 `MOKYU_TEST_*` 读取处定义所需环境变量。凭据使用文件传入；不能将测试密码或 S3 secret 放入日志。恢复测试会强杀并重启配置指定的网关进程，只能在专用测试容器运行。故障注入构建不用于部署。
 
+`recovery/pack_memory.rs` 使用全新 `MOKYU_TEST_SQLITE_CONFIG`、独立 `MOKYU_TEST_FAULT_DIR` 和状态修改授权，运行 `cargo test --locked --no-default-features --features fault-injection pack_memory_follows_blocking_work_and_last_reader -- --ignored --nocapture`。它阻塞真实 pack 解码、完整巡检、编码和拆包编码，验证取消、超时、错误、panic、成功以及最后使用者释放后的内存/CPU 额度回收；测试数据库不能与运行中的服务共用。
+
 `recovery/local_durability.py` 在每种单容器数据库验证 local 文件与目录的 fsync 失败：初始化不登记存储、覆盖失败保留原对象、rewrite 保留旧编码，恢复后可重试。在 Linux 构建容器编译 `cc -shared -fPIC -Wall -Wextra -Werror tests/recovery/fsync.c -ldl -o /test/fsync.so`，仅为被测服务设置 `LD_PRELOAD=/test/fsync.so`。服务和测试共享 `MOKYU_TEST_FSYNC_ROOT`（专用后端根目录，不带末尾斜线）、`MOKYU_TEST_FSYNC_FAULT` 和 `MOKYU_TEST_FSYNC_TRACE`；故障文件、trace 和数据库必须位于后端根目录以外。此检查注入真实 fsync 返回错误，不模拟断电。local 禁止上传缓存，S3 唯一暂存与 flush 由 `storage/single_lifecycle.py` 覆盖。
 
 浏览器验证在包含 Playwright 浏览器的容器中执行 `web` 的 `npm run test:ui`。必须指定隔离服务地址 `MOKYU_TEST_WEB`、状态修改授权及测试账户密码文件；`frontend-auth.spec.ts` 覆盖真实会话刷新和重新打开页面。

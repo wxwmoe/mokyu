@@ -12,6 +12,10 @@ mod rate;
 pub(crate) mod resource_gate;
 pub(crate) mod target;
 
+#[cfg(all(test, feature = "fault-injection"))]
+#[path = "../../tests/recovery/pack_memory.rs"]
+mod memory_tests;
+
 use self::model::{Record as StoreRecord, Store as VerifiedStore};
 use self::profile::StorageProfile;
 pub(crate) use self::{
@@ -1196,12 +1200,19 @@ impl Storage {
         c: Chunk,
         raw: Vec<u8>,
         should_compress: bool,
+        memory: Option<&Arc<tokio::sync::OwnedSemaphorePermit>>,
     ) -> Result<(Chunk, Vec<u8>, Bytes)> {
+        let memory = memory.cloned();
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
         let (compression, compression_enabled, threshold) = self.compression_for(c.storage_id);
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let _memory = memory;
+            #[cfg(feature = "fault-injection")]
+            if _memory.is_some() {
+                crate::faults::blocking("pack-chunk-encode");
+            }
             codec::encode(
                 c,
                 raw,
@@ -1710,17 +1721,18 @@ impl Storage {
             .acquire_many_owned(units as u32)
             .await?)
     }
-    pub async fn pack_work(&self, size: usize) -> Result<tokio::sync::OwnedSemaphorePermit> {
+    pub async fn pack_work(&self, size: usize) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>> {
         let units = (size as u64 * 4 + self.compression.workspace_bytes()?).div_ceil(1024 * 1024);
         ensure!(
             units <= u64::from(self.pack_memory_units),
             "pack rewrite exceeds available memory budget"
         );
-        Ok(self
-            .pack_work
-            .clone()
-            .acquire_many_owned(units as u32)
-            .await?)
+        Ok(Arc::new(
+            self.pack_work
+                .clone()
+                .acquire_many_owned(units as u32)
+                .await?,
+        ))
     }
     pub(crate) fn http_work(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.pack_work.clone().try_acquire_many_owned(32).ok()
@@ -1731,12 +1743,17 @@ impl Storage {
         members: Vec<(Chunk, Bytes)>,
         strategy: crate::content::compression::Strategy,
         should_try: bool,
+        memory: &Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<(crate::content::pack::Pack, Vec<u8>)> {
+        let memory = memory.clone();
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
         let (pool, compression_enabled, _) = self.compression_for(p.storage_id);
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let _memory = memory;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::blocking("pack-encode");
             crate::content::pack::encode(
                 p,
                 &members,
@@ -1870,9 +1887,12 @@ impl Storage {
                     let secrets = self.secrets.clone();
                     let (pool, _, _) = self.compression_for(p.storage_id);
                     let pack = p.clone();
-                    let data = tokio::task::spawn_blocking(move || {
+                    let (data, memory) = tokio::task::spawn_blocking(move || {
                         let _permit = permit;
-                        crate::content::pack::decode(&pack, encoded, &secrets, &pool)
+                        #[cfg(feature = "fault-injection")]
+                        crate::faults::blocking("pack-decode");
+                        let data = crate::content::pack::decode(&pack, encoded, &secrets, &pool)?;
+                        Ok::<_, anyhow::Error>((data, memory))
                     })
                     .await??;
                     let loaded = Arc::new(LoadedPack {
@@ -2053,7 +2073,7 @@ impl Storage {
                         );
                         return Ok(0);
                     }
-                    let _memory = self.pack_memory(capacity).await?;
+                    let memory = self.pack_memory(capacity).await?;
                     let storage_id = p.storage_id.context(codec::IntegrityError::Metadata)?;
                     let data = self
                         .read_path_for(
@@ -2069,6 +2089,9 @@ impl Storage {
                     let pack = p.clone();
                     tokio::task::spawn_blocking(move || {
                         let _permit = permit;
+                        let _memory = memory;
+                        #[cfg(feature = "fault-injection")]
+                        crate::faults::blocking("pack-inspect");
                         let decoded = crate::content::pack::decode(&pack, data, &secrets, &pool)?;
                         for ((c, offset), member) in members.iter().zip(&decoded.members) {
                             ensure!(

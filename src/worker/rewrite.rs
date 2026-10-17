@@ -149,7 +149,7 @@ impl App {
             physical.encoding_id = self.packing.prepare_encoding(&physical, execution).await?;
             let (physical, encoded, _) = self
                 .storage
-                .encode(physical, raw.to_vec(), source.compressed)
+                .encode(physical, raw.to_vec(), source.compressed, None)
                 .await?;
             self.storage
                 .put_path_for(
@@ -182,7 +182,7 @@ impl App {
                 })
                 .collect();
             self.pin_pack_inputs(execution, &mappings).await?;
-            let _work = self.storage.pack_work(old.payload_size()?).await?;
+            let work = self.storage.pack_work(old.payload_size()?).await?;
             let loaded = self.storage.load_pack(old.clone()).await?;
             let mut encoded_members = Vec::with_capacity(members.len());
             for mut member in members {
@@ -212,6 +212,7 @@ impl App {
                     strategy,
                     profile.compression_enabled
                         && strategy != crate::content::compression::Strategy::Never,
+                    &work,
                 )
                 .await?;
             self.storage

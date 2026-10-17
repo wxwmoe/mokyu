@@ -121,7 +121,13 @@ impl App {
         Ok(result)
     }
 
-    async fn independent_output(&self, task: Execution, c: &Chunk, raw: Bytes) -> Result<Output> {
+    async fn independent_output(
+        &self,
+        task: Execution,
+        c: &Chunk,
+        raw: Bytes,
+        memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<Output> {
         if let Some((id, size)) = self.packing.ready_encoding(c.id).await? {
             let mut physical = c.clone();
             physical.encoding_id = id;
@@ -141,7 +147,7 @@ impl App {
         physical.encoding_id = self.packing.prepare_encoding(&physical, task).await?;
         let (physical, encoded, _) = self
             .storage
-            .encode(physical, raw.to_vec(), c.compressed)
+            .encode(physical, raw.to_vec(), c.compressed, Some(memory))
             .await?;
         self.packing.encoding_metadata(&physical).await?;
         let storage_id = physical.storage_id.context("chunk has no store")?;
@@ -168,7 +174,7 @@ impl App {
         allow_pack: bool,
     ) -> Result<Vec<Output>> {
         let raw_size: usize = rows.iter().map(|r| r.chunk.raw_size as usize).sum();
-        let _memory = self
+        let memory = self
             .storage
             .pack_work(raw_size + 12 + rows.len() * 44)
             .await?;
@@ -180,7 +186,7 @@ impl App {
         if rows.len() == 1 || !allow_pack || !self.pack_creation_allowed() {
             let mut outputs = Vec::new();
             for (c, raw) in data {
-                outputs.push(self.independent_output(task, &c, raw).await?);
+                outputs.push(self.independent_output(task, &c, raw, &memory).await?);
             }
             return Ok(outputs);
         }
@@ -207,7 +213,7 @@ impl App {
             start = end;
             if rows.len() > 1
                 && let Some(output) = self
-                    .try_pack_output(task, rows, data, content_type, key)
+                    .try_pack_output(task, rows, data, content_type, key, &memory)
                     .await?
             {
                 outputs.push(output);
@@ -218,14 +224,17 @@ impl App {
             for (rows, data) in [(&rows[..mid], &data[..mid]), (&rows[mid..], &data[mid..])] {
                 if rows.len() > 1
                     && let Some(output) = self
-                        .try_pack_output(task, rows, data, content_type, key)
+                        .try_pack_output(task, rows, data, content_type, key, &memory)
                         .await?
                 {
                     outputs.push(output);
                     continue;
                 }
                 for (c, raw) in data {
-                    outputs.push(self.independent_output(task, c, raw.clone()).await?);
+                    outputs.push(
+                        self.independent_output(task, c, raw.clone(), &memory)
+                            .await?,
+                    );
                 }
             }
         }
@@ -238,6 +247,7 @@ impl App {
         data: &[(Chunk, Bytes)],
         content_type: Option<&str>,
         key: &str,
+        memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<Option<Output>> {
         let coord = self.coord.lock().await;
         if !self.pack_creation_allowed() {
@@ -283,7 +293,7 @@ impl App {
         };
         let (p, encoded) = self
             .storage
-            .encode_pack(p, data.to_vec(), strategy, should_try)
+            .encode_pack(p, data.to_vec(), strategy, should_try, memory)
             .await?;
         let old: i64 = rows
             .iter()
