@@ -24,6 +24,12 @@ fn main() {
     files.sort();
     let mut source = String::from("pub(super) static ASSETS: &[Asset] = &[\n");
     for file in files {
+        if matches!(
+            file.extension().and_then(|s| s.to_str()),
+            Some("gz" | "br" | "zst")
+        ) {
+            continue;
+        }
         let path = format!(
             "/{}",
             file.strip_prefix(&root)
@@ -59,7 +65,15 @@ fn main() {
                 file.extension().and_then(|s| s.to_str()),
                 Some("js" | "css" | "woff" | "woff2")
             );
-        source.push_str(&format!("Asset {{ path: {path:?}, mime: {mime:?}, etag: {etag:?}, immutable: {immutable}, data: include_bytes!({:?}) }},\n", file));
+        let variants = ["zst", "br", "gz"].map(|extension| {
+            let variant = PathBuf::from(format!("{}.{}", file.display(), extension));
+            if variant.is_file() {
+                format!("Some(include_bytes!({variant:?}))")
+            } else {
+                "None".to_owned()
+            }
+        });
+        source.push_str(&format!("Asset {{ path: {path:?}, mime: {mime:?}, etag: {etag:?}, immutable: {immutable}, data: include_bytes!({file:?}), variants: [{}] }},\n", variants.join(",")));
     }
     source.push_str("];");
     fs::write(

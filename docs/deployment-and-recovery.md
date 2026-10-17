@@ -14,6 +14,8 @@
 
 构建会安装并编译 Vue 静态资源，再嵌入 Rust 二进制；运行不需要 Node.js。`--api-only` 省略内嵌前端，标签为 `:api` / 版本号加 `-api`；与 `--alpine` 组合使用 `:alpine-api` / 版本号加 `-alpine-api`。仓库不包含构建后的镜像。
 
+可压缩的内嵌资源同时保存 gzip、Brotli 和 Zstandard 构建产物，按 `Accept-Encoding` 的 q 值选择，同权重时依次优先 zstd、br、gzip、identity。未提供或为空时返回原始表示；原始 ETag 为强标签，压缩变体使用同值弱标签，并发送 `Vary: Accept-Encoding`。公开 OpenAPI JSON 使用有界流式压缩，其余管理 API 保持原有响应与缓存策略。
+
 独立前端使用 [web](../web/README.md) 的 `dist/`，将 `/api/v1/` 同源反代至管理端口，只有前端页面使用 SPA fallback。管理 Origin 必须是浏览器实际访问的地址；管理 API 不应缓存，也不使用桶的 CORS 规则。首次设置、头像与安全头要求与内嵌部署相同。
 
 下文使用默认镜像。[Compose 示例](../compose.yaml) 使用随源码维护的版本标签；选择 Alpine 时需相应调整服务的 `image`。
@@ -95,6 +97,8 @@ docker exec mokyu mokyu cli domain set media.example.com media
 上述在线操作也可在管理页面完成。默认无需启用项目管理；多个应用团队需要分权时，再创建项目与普通成员，并设置桶范围、应用密钥和逻辑额度，见[管理指南](management.md)。
 
 S3 客户端使用网关 endpoint、逻辑桶和生成的凭据，签名 region 与 runtime `requests.s3_region` 一致。寻址、ACL 和上传限制见[S3 兼容性](s3-compatibility.md)。反代配置见[Nginx 示例](../nginx.example.conf)，需替换域名、证书和上游。
+
+示例禁用 nginx gzip，并将 `Accept-Encoding` 传给 Mokyu；`Content-Encoding`、`Vary`、`ETag` 和 `Cache-Control` 随响应透传。额外安装的 Brotli、Zstandard 或 gunzip 过滤器也应在这些入口关闭，避免二次转换。TLS、HTTP/2 和 HTTP/3 仍由反向代理终止。
 
 ## 日常维护
 

@@ -1707,6 +1707,9 @@ impl Storage {
             .acquire_many_owned(units as u32)
             .await?)
     }
+    pub(crate) fn http_work(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.pack_work.clone().try_acquire_many_owned(32).ok()
+    }
     pub async fn encode_pack(
         &self,
         p: crate::content::pack::Pack,

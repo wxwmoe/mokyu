@@ -226,7 +226,7 @@ pub async fn s3_http(
             .to_http_response()
             .expect("static S3 error");
     }
-    response.headers_mut().extend(cors);
+    super::compression::merge(response.headers_mut(), cors);
     response
 }
 pub fn decode_path(path: &str) -> Result<String> {

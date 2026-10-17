@@ -12,6 +12,7 @@ pub(super) struct Asset {
     etag: &'static str,
     immutable: bool,
     data: &'static [u8],
+    variants: [Option<&'static [u8]>; 3],
 }
 #[cfg(feature = "web-ui")]
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
@@ -24,6 +25,7 @@ pub(super) async fn serve(request: Request) -> Response {
     }
     #[cfg(feature = "web-ui")]
     {
+        use crate::http::compression::{self, AcceptEncoding, Encoding};
         use axum::http::{Method, header};
         if request.method() != Method::GET && request.method() != Method::HEAD {
             return (
@@ -54,23 +56,47 @@ pub(super) async fn serve(request: Request) -> Response {
         let Some(asset) = asset else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        let unchanged = request
-            .headers()
-            .get(header::IF_NONE_MATCH)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| {
-                v.split(',').any(|tag| {
-                    tag.trim().trim_start_matches("W/") == asset.etag || tag.trim() == "*"
-                })
-            });
-        let mut response = if unchanged {
+        let accept = AcceptEncoding::new(request.headers());
+        let identity = accept.identity() && request.headers().contains_key(header::IF_MATCH);
+        let transform = !compression::no_transform(request.headers()) && !identity;
+        let variant = |encoding| match encoding {
+            Encoding::Zstd => asset.variants[0],
+            Encoding::Brotli => asset.variants[1],
+            Encoding::Gzip => asset.variants[2],
+            Encoding::Identity => Some(asset.data),
+        };
+        let Some(encoding) = accept.select(|encoding| {
+            (encoding == Encoding::Identity || transform) && variant(encoding).is_some()
+        }) else {
+            let mut response = StatusCode::NOT_ACCEPTABLE.into_response();
+            compression::vary(response.headers_mut(), "Accept-Encoding");
+            return response;
+        };
+        let data = variant(encoding).unwrap();
+        let etag = encoding.etag(asset.etag);
+        let failed = request.headers().contains_key(header::IF_MATCH)
+            && !compression::matches(request.headers(), header::IF_MATCH, &etag, false);
+        let unchanged = compression::matches(request.headers(), header::IF_NONE_MATCH, &etag, true);
+        let mut response = if failed {
+            StatusCode::PRECONDITION_FAILED.into_response()
+        } else if unchanged {
             StatusCode::NOT_MODIFIED.into_response()
         } else {
-            asset.data.into_response()
+            data.into_response()
         };
         let headers = response.headers_mut();
         headers.insert(header::CONTENT_TYPE, asset.mime.parse().unwrap());
         headers.insert(header::ETAG, asset.etag.parse().unwrap());
+        compression::encoded_headers(headers, encoding);
+        if failed || unchanged {
+            headers.remove(header::CONTENT_ENCODING);
+        }
+        if !failed && !unchanged {
+            headers.insert(
+                header::CONTENT_LENGTH,
+                data.len().to_string().parse().unwrap(),
+            );
+        }
         headers.insert(
             header::CACHE_CONTROL,
             if asset.immutable {

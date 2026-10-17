@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "check": "vue-tsc --noEmit && node scripts/check-locales.mjs",
-    "build": "npm run check && vite build && node scripts/licenses.mjs",
+    "build": "npm run check && vite build && node scripts/licenses.mjs && node scripts/compress.mjs",
     "test:ui": "playwright test",
     "preview": "vite preview --host 0.0.0.0",
     "api:types": "node scripts/update-api.mjs"

@@ -16,3 +16,5 @@ npm run build
 - 静态托管 `dist/`，将 `/api/v1/` 同源反代到 Mokyu，`control.origin` 设为浏览器访问地址
 - 应用页面使用 SPA fallback；未知 API 和资源返回 404，私有 API 不缓存
 - 后端镜像可在仓库根目录用 `./build.sh --api-only` 构建，也可加 `--alpine`
+
+构建同时生成有收益的 `.gz`、`.br`、`.zst` 变体。内嵌服务自动协商；独立静态托管需由服务器选择变体并正确设置 `Content-Encoding` 和 `Vary: Accept-Encoding`，未配置时原始资源仍可用。

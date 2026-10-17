@@ -8,3 +8,4 @@ pub(crate) use public::{
     CorsRule, cors_headers, observe, public_router, status_router, validate_cors,
 };
 pub(crate) use s3::{ReadOptions, decode_path, respond, s3_http};
+pub(crate) mod compression;

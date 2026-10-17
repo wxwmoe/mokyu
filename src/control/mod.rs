@@ -67,6 +67,10 @@ pub fn router(app: Arc<App>) -> Router {
             auth::access_gate,
         ))
         .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            crate::http::compression::json,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
             web_policy,
             system::web_headers,
         ))

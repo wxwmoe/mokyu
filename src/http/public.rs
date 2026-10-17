@@ -272,7 +272,7 @@ async fn public(
         other => other,
     };
     let mut response = result.unwrap_or_else(IntoResponse::into_response);
-    response.headers_mut().extend(cors);
+    super::compression::merge(response.headers_mut(), cors);
     Ok(response)
 }
 async fn website_response(
