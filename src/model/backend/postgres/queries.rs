@@ -769,6 +769,20 @@ pub(super) fn fsync() -> Scalar<'static, String> {
     sqlx::query_scalar("SHOW fsync")
 }
 
+pub(super) const SCHEMA: &str = include_str!("../../../../migrations/schema/postgres.sql");
+
+pub(super) fn schema_empty() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname NOT IN ('public','information_schema')) AND NOT EXISTS(SELECT 1 FROM pg_depend d JOIN pg_namespace n ON d.refclassid='pg_namespace'::regclass AND d.refobjid=n.oid WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_extension WHERE extname<>'plpgsql') AND NOT EXISTS(SELECT 1 FROM pg_event_trigger)",
+    )
+}
+
+pub(super) fn initialize_meta(version: i32) -> Statement<'static> {
+    sqlx::query("INSERT INTO mokyu_meta(schema_version,deployment_id) VALUES($1,gen_random_uuid())")
+        .bind(version)
+}
+
+#[cfg(test)]
 pub(super) fn metadata_table() -> Scalar<'static, Option<String>> {
     sqlx::query_scalar("SELECT to_regclass('public.mokyu_meta')::text")
 }
@@ -789,6 +803,7 @@ pub(super) fn release_runtime() -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT pg_advisory_unlock(734922709851001)")
 }
 
+#[cfg(test)]
 pub(super) fn migration_identity<'q>(value: &'q str) -> Statement<'q> {
     sqlx::query("SELECT set_config('media_gateway.backend_identity',$1,false)").bind(value)
 }

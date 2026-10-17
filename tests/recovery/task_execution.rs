@@ -23,7 +23,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
             .await?
             .is_none()
     );
-    migration::run(&pool, &mut *pool.acquire().await?, false).await?;
+    migration::run(&mut *pool.acquire().await?).await?;
     let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let storage = Uuid::new_v4();
     let old = Execution {

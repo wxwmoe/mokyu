@@ -93,6 +93,10 @@ mod lifecycle_tests;
 #[path = "../../../../tests/recovery/rewrite.rs"]
 mod rewrite_tests;
 
+#[cfg(test)]
+#[path = "../../../../tests/recovery/postgres_bootstrap.rs"]
+mod bootstrap_tests;
+
 fn stores(backend: Arc<Backend>) -> crate::model::Stores {
     crate::model::Stores {
         runtime: backend.clone(),

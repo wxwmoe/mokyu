@@ -26,7 +26,7 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
         .transpose()?
         .unwrap_or(latest);
     anyhow::ensure!(
-        (1..=latest).contains(&interrupt_version),
+        (2..=latest).contains(&interrupt_version),
         "invalid migration interruption point"
     );
     let admin_path = std::env::var("MOKYU_TEST_MYSQL_ADMIN_CONFIG")?;
@@ -48,6 +48,10 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
     }
     assert!(queries::tables().fetch_all(&mut admin).await?.is_empty());
     admin.ensure_migrations_table("_sqlx_migrations").await?;
+    let migrations = sqlx::migrate!("./migrations/mysql");
+    for migration in migrations.iter().take((interrupt_version - 1) as usize) {
+        admin.apply("_sqlx_migrations", migration).await?;
+    }
     let _: i64 = sqlx::query_scalar("SELECT GET_LOCK('mokyu-test-migration-history',0)")
         .fetch_one(&mut admin)
         .await?;

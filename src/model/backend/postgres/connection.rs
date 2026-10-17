@@ -121,7 +121,6 @@ pub async fn connect(
         .map_err(|_| anyhow::anyhow!("cannot open PostgreSQL pool"))?;
     let fsync: String = queries::fsync().fetch_one(&pool).await?;
     ensure!(fsync == "on", "PostgreSQL fsync must be enabled");
-    let exists: Option<String> = queries::metadata_table().fetch_one(&pool).await?;
     let locked = queries::claim_runtime(role == "single")
         .fetch_one(&mut owner)
         .await?;
@@ -129,7 +128,7 @@ pub async fn connect(
         locked,
         "another runtime owns this database in an incompatible mode"
     );
-    migration::run(&pool, &mut owner, exists.is_some()).await?;
+    migration::run(&mut owner).await?;
     crate::model::key::load(secrets, queries::managed_keys().fetch_all(&pool).await?)?;
     let deployment_fingerprint = blake3::hash(&secrets.credential_key.material);
     let saved: Option<Vec<u8>> = queries::deployment_fingerprint().fetch_one(&pool).await?;

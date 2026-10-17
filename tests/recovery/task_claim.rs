@@ -33,7 +33,7 @@ async fn postgres_task_claim_recovery() -> Result<()> {
     );
     {
         let mut owner = pool.acquire().await?;
-        migration::run(&pool, &mut owner, false).await?;
+        migration::run(&mut owner).await?;
     }
     let first = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let second = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);

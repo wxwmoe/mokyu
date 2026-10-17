@@ -19,7 +19,7 @@ async fn postgres_staging_claim_is_atomic() -> Result<()> {
             .await?
             .is_none()
     );
-    migration::run(&pool, &mut *pool.acquire().await?, false).await?;
+    migration::run(&mut *pool.acquire().await?).await?;
     let storage = Uuid::new_v4();
     sqlx::query("INSERT INTO storages(id,name,type,path) VALUES($1,'staging-contract','local','/data/staging-contract')").bind(storage).execute(&pool).await?;
     let first = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);

@@ -156,3 +156,7 @@ mod startup_tests;
 #[cfg(test)]
 #[path = "../../../../tests/recovery/mysql_compatibility.rs"]
 mod compatibility_tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/recovery/mysql_bootstrap.rs"]
+mod bootstrap_tests;

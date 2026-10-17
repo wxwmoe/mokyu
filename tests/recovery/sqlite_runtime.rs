@@ -84,6 +84,11 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
     sqlx::raw_sql("DROP TRIGGER test_migration")
         .execute(&mut admin)
         .await?;
+    // A valid old schema exercises incremental upgrade rollback, not bootstrap recovery.
+    let migrations = sqlx::migrate!("./migrations/sqlite");
+    for migration in migrations.iter().take(5) {
+        admin.apply("_sqlx_migrations", migration).await?;
+    }
     sqlx::raw_sql("CREATE TRIGGER test_migration BEFORE INSERT ON _sqlx_migrations WHEN NEW.version=6 BEGIN SELECT RAISE(ABORT,'isolated late interruption'); END").execute(&mut admin).await?;
     assert!(
         connection::open(&config, &secrets, &budget, "single")

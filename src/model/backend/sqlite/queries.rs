@@ -10,6 +10,17 @@ type Scalar<'q, T> = QueryScalar<'q, Sqlite, T, SqliteArguments>;
 type Rows<'q, T> = sqlx::query::QueryAs<'q, Sqlite, T, SqliteArguments>;
 
 pub(super) const BEGIN_WRITE: &str = "BEGIN IMMEDIATE";
+pub(super) const SCHEMA: &str = include_str!("../../../../migrations/schema/sqlite.sql");
+
+pub(super) fn schema_empty() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*')",
+    )
+}
+
+pub(super) fn initialize_meta(version: i64) -> Statement<'static> {
+    sqlx::query("INSERT INTO mokyu_meta(id,schema_version) VALUES(1,?)").bind(version)
+}
 
 pub(super) fn version() -> Scalar<'static, String> {
     sqlx::query_scalar("SELECT sqlite_version()")
@@ -17,6 +28,7 @@ pub(super) fn version() -> Scalar<'static, String> {
 pub(super) fn journal_mode() -> Scalar<'static, String> {
     sqlx::query_scalar("PRAGMA journal_mode")
 }
+#[cfg(test)]
 pub(super) fn tables() -> Scalar<'static, String> {
     sqlx::query_scalar(
         "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",

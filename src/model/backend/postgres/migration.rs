@@ -1,45 +1,93 @@
 use super::queries;
 use anyhow::{Context, Result, ensure};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, migrate::Migrate};
 
-static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+static MIGRATIONS: sqlx::migrate::Migrator = {
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.locking = false;
+    migrator
+};
+const SCHEMA_VERSION: i64 = 40;
 const LEGACY_SCHEMA_VERSION: i32 = 33;
 
-pub(super) async fn run(pool: &PgPool, owner: &mut PgConnection, existing: bool) -> Result<()> {
-    let latest = MIGRATIONS
-        .iter()
-        .last()
-        .context("no embedded database migrations")?
-        .version;
-    if existing {
-        let version: i32 = queries::schema_version().fetch_one(pool).await?;
-        ensure!(
-            i64::from(version) <= latest,
-            "database schema is newer than this binary; downgrade is unsupported"
-        );
-        ensure!(version >= 1, "unsupported database schema version");
-        ensure!(
-            version >= LEGACY_SCHEMA_VERSION,
-            "0.0.5 requires a fresh database or an empty 0.0.4 schema at migration version 33; migrate logical objects through S3"
-        );
-    }
-    // Migrate before listeners or background work start. The migrator serializes
-    // concurrent cluster upgrades; cluster roles do not hold a runtime session lock.
+pub(super) async fn run(owner: &mut PgConnection) -> Result<()> {
     sqlx::raw_sql(queries::MIGRATION_SETUP)
         .execute(&mut *owner)
         .await?;
-    // The immutable baseline reads this historical migration parameter.
-    queries::migration_identity("storage-registry")
-        .execute(&mut *owner)
-        .await?;
+    // Inspect and initialize under the same lock as incremental cluster upgrades.
+    owner.lock().await?;
+    let result = run_locked(owner).await;
+    let unlock = owner.unlock().await;
+    result?;
+    unlock?;
+    Ok(())
+}
+
+async fn run_locked(owner: &mut PgConnection) -> Result<()> {
+    ensure!(
+        MIGRATIONS.iter().last().map(|m| m.version) == Some(SCHEMA_VERSION),
+        "PostgreSQL schema snapshot is out of date"
+    );
+    if queries::schema_empty().fetch_one(&mut *owner).await? {
+        return initialize(owner, queries::SCHEMA).await;
+    }
+    let version = queries::schema_version().fetch_one(&mut *owner).await
+        .context("nonempty database requires valid mokyu_meta.schema_version; initialization is incomplete or the database is unsupported")?;
+    ensure!(
+        i64::from(version) <= SCHEMA_VERSION,
+        "database schema is newer than this binary; downgrade is unsupported"
+    );
+    ensure!(
+        version >= LEGACY_SCHEMA_VERSION,
+        "unsupported database schema version; migrate logical objects through S3"
+    );
+    ensure!(
+        owner.dirty_version("_sqlx_migrations").await?.is_none(),
+        "PostgreSQL migration history contains a failed transaction"
+    );
+    let applied = owner.list_applied_migrations("_sqlx_migrations").await?;
+    ensure!(
+        applied.last().map(|m| m.version) == Some(i64::from(version)),
+        "schema version does not match the migration history"
+    );
+    for (index, applied) in applied.iter().enumerate() {
+        let migration = MIGRATIONS
+            .iter()
+            .nth(index)
+            .context("applied PostgreSQL migration is missing from this binary")?;
+        ensure!(
+            applied.version == migration.version,
+            "PostgreSQL migration history has a missing or unknown version"
+        );
+        ensure!(
+            applied.checksum == migration.checksum,
+            "PostgreSQL migration checksum changed"
+        );
+    }
     MIGRATIONS
         .run(&mut *owner)
         .await
         .context("apply database migrations")?;
-    let version: i32 = queries::schema_version().fetch_one(pool).await?;
     ensure!(
-        i64::from(version) == latest,
+        i64::from(queries::schema_version().fetch_one(&mut *owner).await?) == SCHEMA_VERSION,
         "schema version does not match the migration history"
     );
+    Ok(())
+}
+
+pub(super) async fn initialize(owner: &mut PgConnection, schema: &str) -> Result<()> {
+    let mut tx = owner.begin().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(schema))
+        .execute(&mut *tx)
+        .await
+        .context("initialize PostgreSQL schema")?;
+    tx.ensure_migrations_table("_sqlx_migrations").await?;
+    for migration in MIGRATIONS.iter() {
+        tx.skip("_sqlx_migrations", migration).await?;
+    }
+    queries::initialize_meta(SCHEMA_VERSION as i32)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }

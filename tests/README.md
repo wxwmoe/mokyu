@@ -22,7 +22,11 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 每个原生契约覆盖对应接口、事务和故障恢复；原生 SQL 仅用于构造或检查本后端状态。不要用同一配置批量并发执行所有 ignored 测试，也不要把过滤后执行零个测试视为通过。曾经执行并写入数据的契约，应更换空库后重跑。
 
-数据库改动需在 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3 的最低版本和当前维护版本验证。MariaDB 复用全部 MySQL 契约和 `MOKYU_TEST_MYSQL_CONFIG`；`mysql_dialect_and_lock_scope_contract` 额外检查 JSON 类型、大小写/尾空格比较和任务领取的锁范围。`migrations.py` 在 PostgreSQL 17 空库验证低版本拒绝且不写入表，在支持版本验证完整迁移与恢复。
+数据库改动需在 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3 的最低版本和当前维护版本验证。MariaDB 复用全部 MySQL 契约和 `MOKYU_TEST_MYSQL_CONFIG`；`mysql_dialect_and_lock_scope_contract` 额外检查 JSON 类型、大小写/尾空格比较和任务领取的锁范围。`migrations.py` 在 PostgreSQL 17 空库验证低版本拒绝且不写入表，在支持版本验证新装、旧版本升级与恢复。
+
+`postgres_schema_bootstrap_contract`、`mysql_schema_bootstrap_contract` 对照当前快照与完整编号迁移的结构、初值和校验和，并检查升级、重启、未知版本、历史损坏、新装失败与真实连接中断。PostgreSQL 同时验证并发初始化。两者除上述连接配置外，测试用户还需有创建数据库的权限；会在同一隔离服务器创建 `mokyu_bootstrap_*` 测试库，验证后随专用测试实例一并清理。`sqlite_schema_bootstrap_contract` 使用捆绑 SQLite 内存库，属于普通 Rust 测试；磁盘/WAL/进程恢复由 `sqlite_runtime_and_migration_recovery` 覆盖。
+
+增加编号迁移时同步更新对应 `migrations/schema/*.sql` 与迁移入口的快照版本。快照包含最终结构和必需初值，版本行及 `_sqlx_migrations` 由初始化器最后登记。保留原迁移内容与校验和；结构对照包含列、默认值、约束、索引、视图，以及 PostgreSQL 函数、触发器和序列。
 
 MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由其他客户端登录预热认证缓存。关闭 TLS 时，`caching_sha2_password` 的首次认证依赖 SQLx 的 `mysql-rsa` 功能。
 

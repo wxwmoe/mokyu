@@ -28,6 +28,18 @@ type Statement<'q> = Query<'q, MySql, MySqlArguments>;
 type Scalar<'q, T> = QueryScalar<'q, MySql, T, MySqlArguments>;
 type Rows<'q, T> = sqlx::query::QueryAs<'q, MySql, T, MySqlArguments>;
 
+pub(super) const SCHEMA: &str = include_str!("../../../../migrations/schema/mysql.sql");
+
+pub(super) fn schema_empty() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()) AND NOT EXISTS(SELECT 1 FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE()) AND NOT EXISTS(SELECT 1 FROM information_schema.EVENTS WHERE EVENT_SCHEMA=DATABASE())",
+    )
+}
+
+pub(super) fn initialize_meta(version: i32) -> Statement<'static> {
+    sqlx::query("INSERT INTO mokyu_meta(id,schema_version,deployment_id) VALUES(1,?,UNHEX(REPLACE(UUID(),'-','')))").bind(version)
+}
+
 use crate::model::metrics::StorageUsage;
 
 pub(super) async fn inventory_buckets(
@@ -6043,6 +6055,7 @@ pub(super) fn owns_runtime() -> Scalar<'static, bool> {
     )
 }
 
+#[cfg(test)]
 pub(super) fn tables() -> Scalar<'static, String> {
     sqlx::query_scalar(
         "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME",

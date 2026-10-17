@@ -1,36 +1,29 @@
 use super::queries;
 use anyhow::{Context, Result, ensure};
-use sqlx::{SqliteConnection, migrate::Migrate};
+use sqlx::{Connection, SqliteConnection, migrate::Migrate};
 
 static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
+const SCHEMA_VERSION: i64 = 18;
 
 pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
-    let latest = MIGRATIONS
-        .iter()
-        .last()
-        .context("no embedded SQLite migrations")?
-        .version;
-    let tables = queries::tables().fetch_all(&mut *connection).await?;
     ensure!(
-        tables.is_empty() || tables.iter().any(|name| name == "_sqlx_migrations"),
-        "SQLite initialization requires an empty database"
+        MIGRATIONS.iter().last().map(|m| m.version) == Some(SCHEMA_VERSION),
+        "SQLite schema snapshot is out of date"
     );
-    if tables.iter().any(|name| name == "mokyu_meta") {
-        ensure!(
-            queries::schema_version()
-                .fetch_optional(&mut *connection)
-                .await?
-                .is_none_or(|version| version <= latest),
-            "database schema is newer than this binary; downgrade is unsupported"
-        );
+    if queries::schema_empty().fetch_one(&mut *connection).await? {
+        return initialize(connection, queries::SCHEMA).await;
     }
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
+    let version = queries::schema_version().fetch_one(&mut *connection).await
+        .context("nonempty database requires valid mokyu_meta.schema_version; initialization is incomplete or the database is unsupported")?;
+    ensure!(
+        version <= SCHEMA_VERSION,
+        "database schema is newer than this binary; downgrade is unsupported"
+    );
+    ensure!(version >= 1, "unsupported database schema version");
     let applied = queries::migrations().fetch_all(&mut *connection).await?;
     ensure!(
-        !applied.is_empty() || tables.iter().all(|name| name == "_sqlx_migrations"),
-        "SQLite migration history is missing"
+        applied.last().map(|m| m.0) == Some(version),
+        "schema version does not match the SQLite migration history"
     );
     for (index, (version, success, checksum)) in applied.iter().enumerate() {
         let migration = MIGRATIONS
@@ -58,8 +51,25 @@ pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
         queries::schema_version()
             .fetch_one(&mut *connection)
             .await?
-            == latest,
+            == SCHEMA_VERSION,
         "schema version does not match the SQLite migration history"
     );
+    Ok(())
+}
+
+pub(super) async fn initialize(connection: &mut SqliteConnection, schema: &str) -> Result<()> {
+    let mut tx = connection.begin_with(queries::BEGIN_WRITE).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(schema))
+        .execute(&mut *tx)
+        .await
+        .context("initialize SQLite schema")?;
+    tx.ensure_migrations_table("_sqlx_migrations").await?;
+    for migration in MIGRATIONS.iter() {
+        tx.skip("_sqlx_migrations", migration).await?;
+    }
+    queries::initialize_meta(SCHEMA_VERSION)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }

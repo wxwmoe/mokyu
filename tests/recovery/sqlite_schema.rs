@@ -35,7 +35,7 @@ async fn sqlite_data_schema_contract() -> Result<()> {
     let other = super::storage_tests::fixture_named(&backend, "other").await?;
     assert_eq!(
         queries::schema_version().fetch_one(&backend.read).await?,
-        17
+        18
     );
     let first = chunk(db, storage).await?;
     assert!(chunk(db, storage).await.is_err());

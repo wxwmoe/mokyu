@@ -183,3 +183,7 @@ mod startup_tests;
 #[cfg(test)]
 #[path = "../../../../tests/recovery/sqlite_files.rs"]
 mod file_tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/recovery/sqlite_bootstrap.rs"]
+mod bootstrap_tests;

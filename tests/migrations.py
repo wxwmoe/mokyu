@@ -77,37 +77,19 @@ try:
         print('PASS unsupported PostgreSQL leaves the empty database untouched', flush=True)
         sys.exit(0)
 
-    # A failure midway through the baseline must undo earlier DDL and its history.
+    # A nonempty database without metadata must remain untouched.
     db.execute('CREATE TABLE buckets (sentinel integer)')
     start()
-    stopped_with('apply database migrations')
+    stopped_with('nonempty database requires valid mokyu_meta.schema_version')
     assert db.execute("SELECT to_regclass('gateway_meta'),to_regclass('key_fingerprints')").fetchone() == (None, None)
-    assert history() == []
+    assert db.execute("SELECT to_regclass('_sqlx_migrations')").fetchone() == (None,)
     db.execute('DROP TABLE buckets')
-    print('PASS failed baseline rolls back DDL and migration record', flush=True)
-
-    # Block the history INSERT after the schema SQL, then disconnect its owner.
-    with psycopg.connect(conninfo) as blocker:
-        blocker.execute('LOCK TABLE _sqlx_migrations IN SHARE MODE')
-        start()
-        for _ in range(100):
-            waiting = db.execute("""SELECT pid FROM pg_stat_activity WHERE datname=current_database()
-                AND wait_event_type='Lock' AND query ILIKE '%INSERT INTO _sqlx_migrations%'""").fetchone()
-            if waiting:
-                break
-            assert process.poll() is None, process.stderr.read()
-            time.sleep(.1)
-        else:
-            raise AssertionError('migration did not reach history insertion')
-        assert db.execute('SELECT pg_terminate_backend(%s)', waiting).fetchone()[0]
-        stopped_with('apply database migrations')
-    assert db.execute("SELECT to_regclass('gateway_meta')").fetchone()[0] is None
-    assert history() == []
-    print('PASS interrupted migration rolls back schema and can be retried', flush=True)
+    print('PASS unknown database refuses initialization without writing schema or history', flush=True)
 
     # A non-empty 0.0.4 schema is deliberately rejected; an empty schema may
     # continue through the append-only 0.0.5 migrations so operators can
     # migrate logical objects manually.
+    db.execute("CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)")
     with db.transaction():
         db.execute("SELECT set_config('media_gateway.backend_identity','storage-registry',false)")
         for path in sorted(migrations.glob('*.sql')):
@@ -238,11 +220,11 @@ try:
 
     db.execute("UPDATE _sqlx_migrations SET checksum=decode(repeat('00',48),'hex') WHERE version=1")
     start()
-    stopped_with('previously applied but has been modified')
+    stopped_with('PostgreSQL migration checksum changed')
     db.execute('UPDATE _sqlx_migrations SET checksum=%s WHERE version=1', (expected,))
     db.execute("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(999,'future',true,%s,0)", (expected,))
     start()
-    stopped_with('applied but is missing')
+    stopped_with('schema version does not match the migration history')
     db.execute('DELETE FROM _sqlx_migrations WHERE version=999')
     db.execute('UPDATE mokyu_meta SET schema_version=999')
     start()

@@ -1,38 +1,36 @@
 use super::queries;
 use anyhow::{Context, Result, ensure};
-use sqlx::{MySqlConnection, migrate::Migrate};
+use sqlx::{Connection, MySqlConnection, migrate::Migrate};
 
 static MIGRATIONS: sqlx::migrate::Migrator = {
     let mut migrator = sqlx::migrate!("./migrations/mysql");
     migrator.locking = false;
     migrator
 };
+const SCHEMA_VERSION: i64 = 17;
 
 pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
-    let latest = MIGRATIONS
-        .iter()
-        .last()
-        .context("no embedded MySQL migrations")?
-        .version;
-    let tables = queries::tables().fetch_all(&mut *owner).await?;
     ensure!(
-        tables.is_empty() || tables.iter().any(|name| name == "_sqlx_migrations"),
-        "MySQL initialization requires an empty database"
+        MIGRATIONS.iter().last().map(|m| m.version) == Some(SCHEMA_VERSION),
+        "MySQL schema snapshot is out of date"
     );
-    if tables.iter().any(|name| name == "mokyu_meta") {
-        let version = queries::schema_version()
-            .fetch_optional(&mut *owner)
-            .await?;
-        ensure!(
-            version.is_none_or(|v| i64::from(v) <= latest),
-            "database schema is newer than this binary; downgrade is unsupported"
-        );
+    if queries::schema_empty().fetch_one(&mut *owner).await? {
+        return initialize(owner, queries::SCHEMA).await;
     }
-    owner.ensure_migrations_table("_sqlx_migrations").await?;
-    let applied = queries::migrations().fetch_all(&mut *owner).await?;
+    let version = i64::from(queries::schema_version().fetch_one(&mut *owner).await
+        .context("nonempty database requires valid mokyu_meta.schema_version; initialization is incomplete or the database is unsupported")?);
     ensure!(
-        !applied.is_empty() || tables.iter().all(|name| name == "_sqlx_migrations"),
-        "MySQL migration history is missing"
+        version <= SCHEMA_VERSION,
+        "database schema is newer than this binary; downgrade is unsupported"
+    );
+    ensure!(version >= 1, "unsupported database schema version");
+    let applied = queries::migrations().fetch_all(&mut *owner).await?;
+    let last = applied
+        .last()
+        .context("MySQL migration history is missing")?;
+    ensure!(
+        version == last.0 || (!last.1 && version + 1 == last.0),
+        "schema version does not match the MySQL migration history"
     );
     for (index, (version, success, checksum)) in applied.iter().enumerate() {
         let migration = MIGRATIONS
@@ -53,10 +51,12 @@ pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
                 matches!(*version, 1..=17) && index + 1 == applied.len(),
                 "MySQL migration requires manual recovery"
             );
-            queries::forget_failed_migration(*version)
-                .execute(&mut *owner)
-                .await?;
         }
+    }
+    if !last.1 {
+        queries::forget_failed_migration(last.0)
+            .execute(&mut *owner)
+            .await?;
     }
     // The dedicated connection already owns the database for this single runtime.
     MIGRATIONS
@@ -64,8 +64,26 @@ pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
         .await
         .context("apply MySQL migrations")?;
     ensure!(
-        i64::from(queries::schema_version().fetch_one(&mut *owner).await?) == latest,
+        i64::from(queries::schema_version().fetch_one(&mut *owner).await?) == SCHEMA_VERSION,
         "schema version does not match the MySQL migration history"
     );
+    Ok(())
+}
+
+pub(super) async fn initialize(owner: &mut MySqlConnection, schema: &str) -> Result<()> {
+    // DDL commits implicitly; an interrupted bootstrap stays unversioned and fails closed.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(schema))
+        .execute(&mut *owner)
+        .await
+        .context("initialize MySQL schema")?;
+    owner.ensure_migrations_table("_sqlx_migrations").await?;
+    let mut tx = owner.begin().await?;
+    for migration in MIGRATIONS.iter() {
+        tx.skip("_sqlx_migrations", migration).await?;
+    }
+    queries::initialize_meta(SCHEMA_VERSION as i32)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }

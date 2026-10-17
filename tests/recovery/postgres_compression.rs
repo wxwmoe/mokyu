@@ -14,7 +14,7 @@ async fn postgres_compression_contract() -> Result<()> {
     let url = std::fs::read_to_string(std::env::var("MOKYU_TEST_DATABASE_URL_FILE")?)?;
     let pool = PgPool::connect(url.trim()).await?;
     assert!(queries::metadata_table().fetch_one(&pool).await?.is_none());
-    migration::run(&pool, &mut *pool.acquire().await?, false).await?;
+    migration::run(&mut *pool.acquire().await?).await?;
     let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), true);
     let bucket = Uuid::new_v4();
     let stream = Uuid::new_v4();
