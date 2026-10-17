@@ -29,6 +29,7 @@ impl App {
                 stream.id,
                 Some(super::ReadLease {
                     id: lease_id,
+                    replica: false,
                     store: self.cluster.as_ref().unwrap().clone(),
                     ttl_seconds: ttl,
                     renewed_at: tokio::sync::Mutex::new(started),

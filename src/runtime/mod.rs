@@ -54,7 +54,7 @@ pub(crate) fn run() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("TLS provider initialization failed"))?;
     let (config, secrets, budget) = config::Config::load(&args.config)?;
-    config.database.backend.validate_role(role.title())?;
+    config.validate_role(role.title())?;
     tracing::info!(version=env!("CARGO_PKG_VERSION"),resources=%serde_json::to_string(&budget)?,"starting Mokyu");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(budget.available_cpus)

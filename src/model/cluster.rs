@@ -43,6 +43,13 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &str,
         ttl_seconds: i64,
     ) -> Result<(crate::app::StoredStream, Uuid)>;
+    async fn read_page(
+        &self,
+        stream: Uuid,
+        lease: Uuid,
+        from: i64,
+        until: i64,
+    ) -> Result<Vec<super::ReadExtent>>;
     async fn create_stream(&self, input: super::StreamCreate, ttl_seconds: i64) -> Result<Uuid>;
     async fn renew_read(&self, id: Uuid, ttl_seconds: i64) -> Result<()>;
     async fn release_read(&self, id: Uuid) -> Result<()>;

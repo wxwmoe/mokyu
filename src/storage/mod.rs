@@ -1325,9 +1325,24 @@ impl Storage {
             }
         }
         if let Some((storage_id, key)) = staged.filter(|(_, key)| key.starts_with(STAGING_PREFIX)) {
-            let raw = self
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("read-pending-source").await;
+            let raw = match self
                 .read_staged(storage_id, &key, c.raw_size as usize)
-                .await?;
+                .await
+            {
+                Ok(raw) => raw,
+                // Publication may remove staging after lookup; fetch reselects a protected source.
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<object_store::Error>(),
+                        Some(object_store::Error::NotFound { .. })
+                    ) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
             ensure!(
                 raw.len() == c.raw_size as usize
                     && blake3::hash(&raw).as_bytes() == c.hash.as_slice(),

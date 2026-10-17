@@ -98,6 +98,7 @@ pub struct Active {
 }
 struct ReadLease {
     id: Uuid,
+    replica: bool,
     store: Arc<dyn crate::model::cluster::ClusterStore>,
     ttl_seconds: i64,
     renewed_at: tokio::sync::Mutex<tokio::time::Instant>,
@@ -139,6 +140,11 @@ impl Drop for Active {
     }
 }
 impl Active {
+    pub(crate) fn allow_replica(&mut self) {
+        if let Some(lease) = &mut self.read_lease {
+            lease.replica = true;
+        }
+    }
     pub(crate) async fn renew_read_lease(&self) -> Result<()> {
         if let Some(lease) = &self.read_lease {
             lease.renew().await?;
@@ -234,6 +240,9 @@ impl App {
             crate::model::load_runtime_settings(stores.runtime_settings.as_ref(), &mut config)
                 .await?;
         let mut budget = config.budget()?;
+        if role != "data" {
+            budget.database_read_connections = 0;
+        }
         if !matches!(role, "single" | "data") {
             budget.pack_memory_units = budget
                 .pack_memory_units
@@ -476,6 +485,7 @@ impl App {
         status["cache_jobs_active"] = json!(self.storage.cache_jobs_active());
         status["http_compression"] = self.compression_observations.snapshot();
         status["response_cache"] = self.response_cache.snapshot();
+        status["read_replica"] = self.runtime.read_replica().unwrap_or_else(|| json!({"state":if self.config.replica_database.is_some() {"not_applicable"} else {"disabled"}}));
         status["cleanup"] = self.cleanup_status();
         status["storage"] = self.statistics.inventory(crate::config::seconds(
             &self.config.metrics.refresh_interval,

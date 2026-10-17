@@ -12,6 +12,15 @@ ssl_mode = "prefer"
 # Defaults to instance.data_path/mokyu.db when path is omitted.
 #path = "/data/mokyu.db"
 
+# Optional PostgreSQL standby for cluster data nodes. No type or path field.
+# Omit this section to use only the primary. Control/worker do not open this pool.
+#[replica_database]
+#host = "postgres-replica"
+# port, name, user and ssl_mode inherit database; name must match.
+# Set password/password_file when specifying a separate user.
+#user = "mokyu_reader"
+#password_file = "secrets/replica-password"
+
 [instance]
 # Generate once with `mokyu tool keygen`; use the same key for every role.
 deployment_key = "REPLACE_WITH_MOKYU_TOOL_KEYGEN_OUTPUT"
@@ -40,6 +49,7 @@ thumbnail_cache_size = "256MiB"
 # Pack read/work memory uses the remaining budget automatically.
 #request_connections = 128
 #database_connections = 12
+#database_read_connections = 3 # Optional standby pool; requires replica_database.
 #cpu_jobs = 2
 stream_memory_budget = "256MiB"
 #storage_read_slots = 16

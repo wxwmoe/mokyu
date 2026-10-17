@@ -27,6 +27,7 @@ pub(crate) struct Backend {
     pool: PgPool,
     owner: tokio::sync::Mutex<PgConnection>,
     single: bool,
+    replica: Option<connection::Replica>,
 }
 
 impl Backend {
@@ -35,6 +36,7 @@ impl Backend {
             pool,
             owner: tokio::sync::Mutex::new(owner),
             single,
+            replica: None,
         }
     }
 }

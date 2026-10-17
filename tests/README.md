@@ -43,8 +43,10 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `storage/single_lifecycle.py`：提前本地确认、持久上传、pack、rewrite、unpack、巡检、容量和清理。
 - `recovery/single_restart.py`：三个后端共用的 API 契约，覆盖 8 个崩溃点、待上传数据的密钥轮换及 local/S3 加密数据重启读取。
 - `recovery/cluster_runtime.py`、`cluster_staging.py`：PostgreSQL 多角色、节点和共享暂存验证。
+- `recovery/staged_reads.py`：两个 data 上验证共享暂存查找与后台发布/删除并发，公共及签名读重新选择已发布来源；唯一暂存丢失仍拒绝。另需 `MOKYU_TEST_UPLOAD_FAULT_DIRS`（所有执行上传的 data/worker 故障目录 JSON 数组）和首个 data 的 `MOKYU_TEST_FAULT_DIR`。
 - `s3/read_path.py`：分页 SQL、后台缓存故障和读名额耗尽时的 HEAD/304；可用 `MOKYU_TEST_PUBLIC_WEB`、`MOKYU_TEST_PUBLIC_HOST` 同时验证公共 Web。
 - `recovery/read_leases.py`：两个 data 节点、按时间续约、元数据轻读和过期租约拒绝；要求读取空闲超时为 `30s`，测试进程独立于受限应用容器，至少预留 1 GiB 内存。
+- `recovery/read_replicas.py`：真实 PostgreSQL 热备及独立只读账户，覆盖公共分页分流、签名排除、暂停回放、权限/部署身份错误、DDL 回放阻塞、连接与超时预算、过期主库租约和流中删除。需要 `MOKYU_TEST_REPLICA_DATABASE_FILE`（隔离从库的管理 DSN）、`MOKYU_TEST_REPLICA_USER`、data 的 `MOKYU_TEST_STATUS_URL` 和故障注入目录；读空闲超时为 `30s`，读并发至少 4，从库池为 2。测试会暂停回放并修改权限，仅用于独立测试主从。
 - `web/web_assets.py`：内嵌资源与公开 schema 的三种 HTTP 编码、协商、ETag、HEAD、敏感响应排除；另需 Python `brotli`、`zstandard`，直连与反向代理均应执行。
 - `s3/http_compression.py`：公共 Web/匿名 S3 的线上编码字节、签名排除、HEAD/304/Range、预估与学习；使用同样的解码依赖，可选 PostgreSQL DSN 检查 JSON。原生 `postgres_compression_contract`、`mysql_content_contract`、`sqlite_content_contract` 覆盖并发算法合并、策略切换和重复观测；迁移恢复契约同时检查新增字段。
 - `s3/response_cache.py`：启用完整正文缓存后，验证跨入口/编码复用、真实长度、权限变更、覆盖删除和坏映射拒绝；PostgreSQL 配合 `pg_stat_statements` 验证稳定热命中不写来源租约，故障注入验证快照后删除不破坏已校验内存正文。群集测试通过 `MOKYU_TEST_STATUS_URL` 读取对应 data 的状态；`s3/read_path.py` 也支持此字段。`s3/response_cache_pressure.py` 在 `4MiB` 额度与故障注入下额外验证取消、迟到构建、淘汰后慢响应持有内存及正常上传仍可前进。

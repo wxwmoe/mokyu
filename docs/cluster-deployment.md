@@ -117,6 +117,22 @@ docker exec mokyu-control mokyu cli cluster mode single
 
 桶绑定的 `storage_id` 永久不变；同一 storage 的桶共享去重，不跨 storage 去重。跨 storage 的对象迁移由 Mokyu 异步任务负责复制、权限、校验和发布一致性；部署管理员负责目标容量、凭据、网络和供应商策略。
 
+## 可选 PostgreSQL 从库
+
+先为公共入口启用合适的响应缓存，再按元数据分页负载考虑从库。data 可以通过 `[replica_database]` 指定一个 PostgreSQL 物理热备入口，连接字段及凭据继承规则见[配置参考](configuration.md#replica_database)。无需启用同步复制；不配置时全部读取继续走主库。
+
+分流仅覆盖 Web 公共读和匿名 S3 公共读的后续正文页。路由、ACL、当前对象、完整响应缓存校验、首个页面、Range 起点、物理来源及其保护仍在主库；签名/预签名 S3、管理请求、后台任务、写入、迁移和通知不使用从库。每页最多 64 条映射；小对象和完整正文缓存命中通常没有从库查询。
+
+每个来源读取在主库创建独立 UUID 读租约。后续页在从库同一 SQL 快照中确认该租约标记可见，再读取对应不可变 stream 的映射；看不到标记立即回主库，不等待 WAL 追平。从库中残留的旧租约不能用于新请求，也不能续活主库已过期的租约。主库续约、运行权及来源保护仍然决定请求能否继续。
+
+从库连接检查 PostgreSQL 版本、hot standby 状态、部署 ID、部署密钥指纹和 schema 版本，页面查询再次检查身份及恢复状态。账户只需 SELECT 权限；从库不会执行初始化、迁移、锁定业务记录、心跳或租约写入。连接按需建立，失败时健康主库仍可用。
+
+池忙直接回主库；新连接获取最多等待 200ms，页面查询最多 100ms，超时连接关闭。未追平后短暂退避 250ms，故障按 1–30 秒退避，并限制恢复探测。每页至多回主库一次，沿用原 stream 和尚未发送的起点；不重播已发字节、不拼接不同对象版本。主库也无法提供数据时中止响应流。
+
+`instance.database_connections` 保留主库预算，`instance.database_read_connections` 独立限制从库池；还需计入 owner、通知连接以及 PostgreSQL 从库自己的 CPU/内存。不要仅因配置了从库就缩减主库可靠写和故障回退容量。`status.read_replica` 返回 `disabled`、`not_applicable`、`idle`、`available`、`lagging` 或 `backoff`，并提供池大小、尝试、成功页、未追平、错误、忙碌、回退次数和下次尝试时间；可用状态只反映最近结果，每页仍需检查本次租约。
+
+PostgreSQL 故障切换和旧主库隔离由部署环境负责。主库运行权连接丢失时 Mokyu 退出，切换后重启并为新请求创建新租约；旧时间线的从库无法提供这些标记，因此回退新主库。被提升的从库因不再处于 recovery 状态停止接受分流。此功能不把从库变成可脱离主库运行的数据面。
+
 ## 备份、升级和故障边界
 
 PostgreSQL 数据库、WAL、部署密钥、每个容器的 data 目录（尤其是 `node.json`）和存储区块仍按[部署与恢复](deployment-and-recovery.md)的要求备份。

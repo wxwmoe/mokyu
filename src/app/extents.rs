@@ -137,8 +137,16 @@ impl App {
             let mut cursor=if start==0 {Some(0)} else {app.chunks.read_start(stream.id,start).await?};
             let mut position=start;
             while position<end {
+                app.ensure_mode()?;
+                #[cfg(feature="fault-injection")]
+                if position != start && _pin.read_lease.as_ref().is_some_and(|lease| lease.replica) {
+                    crate::faults::point("read-replica-page").await;
+                }
                 _pin.renew_read_lease().await?;
-                let rows=app.chunks.read_extents(stream.id,cursor.context("object mapping is incomplete")?,end).await?;
+                let from=cursor.context("object mapping is incomplete")?;
+                let rows=if position != start && let Some(lease)=_pin.read_lease.as_ref().filter(|lease|lease.replica) {
+                    lease.store.read_page(stream.id,lease.id,from,end).await?
+                } else {app.chunks.read_extents(stream.id,from,end).await?};
                 (!rows.is_empty()).then_some(()).context("object mapping is incomplete")?;
                 if let Some(capture)=&capture { let mut mapping=capture.lock().unwrap(); for row in &rows { mapping.record(row); } }
                 let mut loaded=futures_util::stream::iter(rows.into_iter().map(|row| {let app=app.clone();let context=read_context.clone();async move{let data=app.storage.get_with(&row.chunk,Some(&context)).await?;let data=row.extent.slice(data)?;Ok::<_,anyhow::Error>((row.extent,data))}})).buffered(2);

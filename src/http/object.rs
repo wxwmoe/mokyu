@@ -411,9 +411,11 @@ pub(crate) async fn read(
             };
             let capture = builder.as_ref().map(|builder| builder.capture.clone());
             let observation = observation(app, &stream, encoding);
+            let mut pin = pin.take().expect("body read is protected");
+            pin.allow_replica();
             let body = app.body(
                 stream,
-                pin.take().expect("body read is protected"),
+                pin,
                 span.start as i64..span.end as i64,
                 permits,
                 range.is_some(),

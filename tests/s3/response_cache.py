@@ -61,6 +61,7 @@ for name, original in [('text', text), ('noise', noise)]:
         assert after['response_cache']['hits'] == before['response_cache']['hits'] + 1, (encoding, before['response_cache'], after['response_cache'])
         assert after['response_cache']['validated_hits'] == before['response_cache']['validated_hits'] + 1
         assert after['backend_gets'] == before['backend_gets'] and after['cache_hits'] == before['cache_hits']
+        assert after.get('read_replica', {}).get('attempts', 0) == before.get('read_replica', {}).get('attempts', 0)
         head, data = read(name, encoding, method='HEAD')
         assert not data and int(head.headers['content-length']) == len(encoded)
         for _ in range(100):
@@ -148,6 +149,7 @@ if os.environ.get('MOKYU_TEST_DATABASE_FILE'):
         finally:
             db.execute('UPDATE extents SET source_offset=%s WHERE stream_id=%s AND offset_bytes=%s', (row[2], row[0], row[1]))
         put('fragmented', text)
+        warm('fragmented', text)
         stream, chunk = db.execute('SELECT e.stream_id,e.chunk_id FROM extents e JOIN objects o ON o.stream_id=e.stream_id JOIN buckets b ON b.id=o.bucket_id WHERE b.name=%s AND o.object_key=%s LIMIT 1', (bucket, prefix + 'fragmented')).fetchone()
         with db.transaction():
             db.execute('DELETE FROM extents WHERE stream_id=%s', (stream,))

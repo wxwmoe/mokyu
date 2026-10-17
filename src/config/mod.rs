@@ -8,7 +8,7 @@ pub use file::FileConfig;
 pub use limits::{Budget, bytes, cache_bytes, seconds};
 pub use runtime::{
     BackendDefaults, Database, DatabaseType, Instance, LocalCache, Maintenance, MetricsSettings,
-    RequestSettings, RuntimeSettings, Secrets, UploadSettings, WebSettings,
+    ReplicaDatabase, RequestSettings, RuntimeSettings, Secrets, UploadSettings, WebSettings,
 };
 
 #[derive(Clone, Deserialize)]
@@ -16,6 +16,7 @@ pub struct Config {
     #[serde(skip)]
     pub configured_fields: std::collections::BTreeSet<String>,
     pub database: Database,
+    pub replica_database: Option<ReplicaDatabase>,
     #[serde(skip)]
     pub instance: Instance,
     #[serde(skip)]
@@ -36,6 +37,17 @@ impl std::ops::Deref for Config {
     type Target = RuntimeSettings;
     fn deref(&self) -> &Self::Target {
         &self.runtime
+    }
+}
+
+impl Config {
+    pub fn validate_role(&self, role: &str) -> anyhow::Result<()> {
+        self.database.backend.validate_role(role)?;
+        anyhow::ensure!(
+            self.replica_database.is_none() || role != "single",
+            "replica_database requires cluster mode"
+        );
+        Ok(())
     }
 }
 
@@ -150,6 +162,109 @@ mod tests {
         assert!(DatabaseType::Mysql.validate_role("control").is_err());
         assert!(DatabaseType::Sqlite.validate_role("worker").is_err());
         assert!(DatabaseType::Postgres.validate_role("data").is_ok());
+    }
+
+    #[test]
+    fn replica_configuration_preserves_primary_credentials_and_role_boundaries() {
+        let primary = "[database]\nhost='primary'\nport=5433\nname='mokyu'\nuser='writer'\npassword='primary-secret'\nssl_mode='verify-full'\n";
+        let load = |extra: &str| -> Config {
+            toml::from_str::<FileConfig>(&format!("{primary}{extra}"))
+                .unwrap()
+                .into_config()
+        };
+        assert_eq!(load("").budget().unwrap().database_read_connections, 0);
+        let config = load("[replica_database]\nhost='replica'\n");
+        config.validate().unwrap();
+        let resolved = config
+            .replica_database
+            .as_ref()
+            .unwrap()
+            .resolve(&config.database)
+            .unwrap();
+        assert_eq!(resolved.host, "replica");
+        assert_eq!(resolved.effective_port(), Some(5433));
+        assert_eq!(resolved.name, "mokyu");
+        assert_eq!(resolved.user, "writer");
+        assert_eq!(resolved.password.as_deref(), Some("primary-secret"));
+        assert_eq!(resolved.ssl_mode, "verify-full");
+        assert!(config.validate_role("single").is_err());
+        for role in ["data", "control", "worker"] {
+            config.validate_role(role).unwrap();
+        }
+        for extra in [
+            "host=''",
+            "host='replica'\nname='different'",
+            "host='replica'\nuser='reader'",
+            "host='replica'\nport=0",
+            "host='replica'\npassword='x'\npassword_file='file'",
+            "host='replica'\nssl_mode='invalid'",
+        ] {
+            assert!(
+                load(&format!("[replica_database]\n{extra}\n"))
+                    .validate()
+                    .is_err()
+            );
+        }
+        for extra in [
+            "type='postgres'",
+            "path='/data/mokyu.db'",
+            "unknown='value'",
+        ] {
+            assert!(
+                toml::from_str::<FileConfig>(&format!(
+                    "{primary}[replica_database]\nhost='replica'\n{extra}\n"
+                ))
+                .is_err()
+            );
+        }
+        let mut config =
+            load("[replica_database]\nhost='replica'\nuser='reader'\npassword='replica-secret'\n");
+        let resolved = config
+            .replica_database
+            .as_ref()
+            .unwrap()
+            .resolve(&config.database)
+            .unwrap();
+        assert_eq!(resolved.password.as_deref(), Some("replica-secret"));
+        config.instance.database_connections = Some(12);
+        assert_eq!(config.budget().unwrap().database_read_connections, 3);
+        config.instance.database_read_connections = Some(2);
+        assert_eq!(config.budget().unwrap().database_read_connections, 2);
+        config.instance.database_read_connections = Some(0);
+        assert!(config.validate().is_err());
+        config.instance.database_read_connections = None;
+        config.database.backend = DatabaseType::Mysql;
+        assert!(config.validate().is_err());
+        config.database.backend = DatabaseType::Sqlite;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn replica_password_files_resolve_relative_to_the_config() {
+        let base =
+            std::env::temp_dir().join(format!("mokyu-replica-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&base).unwrap();
+        fs::write(base.join("primary"), "primary-secret\n").unwrap();
+        fs::write(base.join("replica"), "replica-secret\n").unwrap();
+        let text = format!(
+            "[database]\nhost='primary'\nname='mokyu'\nuser='writer'\npassword_file='primary'\n[instance]\ndeployment_key='{}'\n",
+            "A".repeat(64)
+        );
+        let path = base.join("config.toml");
+        fs::write(&path, format!("{text}[replica_database]\nhost='replica'\n")).unwrap();
+        let (_, secrets, _) = Config::load(&path).unwrap();
+        assert_eq!(secrets.replica_password.as_deref(), Some("primary-secret"));
+        fs::write(
+            &path,
+            format!(
+                "{text}[replica_database]\nhost='replica'\nuser='reader'\npassword_file='replica'\n"
+            ),
+        )
+        .unwrap();
+        let (_, secrets, _) = Config::load(&path).unwrap();
+        assert_eq!(secrets.database_password, "primary-secret");
+        assert_eq!(secrets.replica_password.as_deref(), Some("replica-secret"));
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

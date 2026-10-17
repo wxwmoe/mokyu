@@ -372,6 +372,7 @@ mod tests {
             let key_id = if algorithm == "none" { "" } else { "test" };
             let secrets = Secrets {
                 database_password: String::new(),
+                replica_password: None,
                 credential_key: codec::Key::new("aes-256-gcm", [4; 32]).unwrap(),
                 keys: if key_id.is_empty() {
                     Default::default()

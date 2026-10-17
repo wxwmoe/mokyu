@@ -16,6 +16,9 @@ pub(crate) trait RuntimeStore: Send + Sync {
     async fn pending_uploads(&self) -> Result<bool>;
     async fn health(&self) -> Result<()>;
     fn pool(&self) -> (u32, usize);
+    fn read_replica(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 #[async_trait]

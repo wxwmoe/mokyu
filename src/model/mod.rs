@@ -101,7 +101,7 @@ pub(crate) async fn connect(
     budget: &crate::config::Budget,
     role: &str,
 ) -> anyhow::Result<(Stores, Box<dyn runtime::Owner>)> {
-    config.database.backend.validate_role(role)?;
+    config.validate_role(role)?;
     match config.database.backend {
         crate::config::DatabaseType::Postgres => {
             postgres::connect(config, secrets, budget, role).await

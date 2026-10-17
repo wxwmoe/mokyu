@@ -91,6 +91,77 @@ fn read_extents(stream: Uuid, from: i64, until: i64) -> Rows<'static, ReadExtent
         .bind(until)
 }
 
+#[derive(Clone, sqlx::FromRow)]
+pub(super) struct ReplicaIdentity {
+    pub deployment_id: Uuid,
+    pub schema_version: i32,
+    pub deployment_key_fingerprint: Vec<u8>,
+    pub deployment_mode: String,
+}
+
+pub(super) fn replica_identity() -> Rows<'static, ReplicaIdentity> {
+    sqlx::query_as(
+        "SELECT deployment_id,schema_version,deployment_key_fingerprint,deployment_mode FROM mokyu_meta WHERE singleton",
+    )
+}
+
+pub(super) fn check_replica(identity: &ReplicaIdentity) -> Scalar<'_, bool> {
+    sqlx::query_scalar("SELECT pg_is_in_recovery() AND current_setting('server_version_num')::int>=180000 AND EXISTS(SELECT 1 FROM mokyu_meta WHERE singleton AND deployment_id=$1 AND schema_version=$2 AND deployment_key_fingerprint=$3 AND deployment_mode='cluster')")
+        .bind(identity.deployment_id).bind(identity.schema_version).bind(&identity.deployment_key_fingerprint)
+}
+
+pub(super) async fn replica_page(
+    connection: &mut sqlx::PgConnection,
+    identity: &ReplicaIdentity,
+    stream: Uuid,
+    lease: Uuid,
+    from: i64,
+    until: i64,
+) -> Result<Option<Vec<ReadExtent>>> {
+    use sqlx::{FromRow, Row};
+    // The lease marker and the page share one snapshot; an older lease cannot authorize this request.
+    let rows = sqlx::query("WITH checked AS MATERIALIZED (SELECT pg_is_in_recovery() AND EXISTS(SELECT 1 FROM mokyu_meta WHERE singleton AND deployment_id=$5 AND schema_version=$6 AND deployment_key_fingerprint=$7 AND deployment_mode='cluster') AS valid,EXISTS(SELECT 1 FROM stream_leases WHERE id=$4 AND stream_id=$1 AND lease_type='read') AS visible) SELECT checked.valid,checked.visible,e.*,c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.location_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM checked LEFT JOIN LATERAL (SELECT * FROM extents WHERE checked.valid AND checked.visible AND stream_id=$1 AND offset_bytes>=$2 AND offset_bytes<$3 ORDER BY offset_bytes LIMIT 64) e ON TRUE LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' ORDER BY e.offset_bytes")
+        .bind(stream).bind(from).bind(until).bind(lease)
+        .bind(identity.deployment_id).bind(identity.schema_version).bind(&identity.deployment_key_fingerprint)
+        .fetch_all(connection).await?;
+    let first = rows.first().context("replica validation returned no row")?;
+    ensure!(
+        first.try_get::<bool, _>("valid")?,
+        "replica identity or role changed"
+    );
+    if !first.try_get::<bool, _>("visible")? {
+        return Ok(None);
+    }
+    let mut page = Vec::with_capacity(rows.len());
+    let mut position = from;
+    for row in &rows {
+        let row = ReadExtent::from_row(row)?;
+        let extent = &row.extent;
+        ensure!(
+            extent.stream_id == stream
+                && extent.offset_bytes == position
+                && extent.length > 0
+                && extent.fragment_id.is_none()
+                && extent.chunk_id == Some(row.chunk.id)
+                && extent.source_offset >= 0
+                && i64::from(extent.source_offset) + i64::from(extent.length)
+                    <= i64::from(row.chunk.raw_size)
+                && row.chunk.hash.len() == 32
+                && row.chunk.state == "ready",
+            "invalid replica mapping"
+        );
+        position = position
+            .checked_add(i64::from(extent.length))
+            .context("replica mapping overflow")?;
+        page.push(row);
+    }
+    ensure!(
+        page.len() == 64 || position >= until,
+        "replica mapping is incomplete"
+    );
+    Ok(Some(page))
+}
+
 fn read_start(stream: Uuid, position: i64) -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT offset_bytes FROM extents WHERE stream_id=$1 AND offset_bytes<=$2 ORDER BY offset_bytes DESC LIMIT 1")
         .bind(stream)
@@ -662,7 +733,7 @@ pub(super) async fn cached_stream(
     key: &str,
 ) -> Result<Option<crate::model::CachedStream>> {
     use sqlx::{FromRow, Row};
-    let rows = sqlx::query("SELECT s.*,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN extents e ON e.stream_id=s.id LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=$1 AND o.object_key=$2 AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key).fetch_all(pool).await?;
+    let rows = sqlx::query("SELECT s.*,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN LATERAL (SELECT * FROM extents WHERE stream_id=s.id ORDER BY offset_bytes LIMIT 65) e ON TRUE LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=$1 AND o.object_key=$2 AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key).fetch_all(pool).await?;
     let Some(first) = rows.first() else {
         return Ok(None);
     };
@@ -6854,6 +6925,22 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn read_page(
+        &self,
+        stream: Uuid,
+        lease: Uuid,
+        from: i64,
+        until: i64,
+    ) -> Result<Vec<ReadExtent>> {
+        if let Some(replica) = &self.replica
+            && let Some(page) = replica.read(stream, lease, from, until).await
+        {
+            return Ok(page);
+        }
+        Ok(read_extents(stream, from, until)
+            .fetch_all(&self.pool)
+            .await?)
+    }
     async fn release_staging(&self, storage: Uuid, key: &str) -> Result<()> {
         sqlx::query("DELETE FROM staging_objects WHERE storage_id=$1 AND object_key=$2")
             .bind(storage)
@@ -7132,6 +7219,9 @@ use crate::model::runtime::{RuntimeState, RuntimeStore};
 
 #[async_trait::async_trait]
 impl RuntimeStore for Backend {
+    fn read_replica(&self) -> Option<Value> {
+        self.replica.as_ref().map(connection::Replica::snapshot)
+    }
     async fn initialize(&self, maintenance: bool) -> Result<RuntimeState> {
         if maintenance {
             set_maintenance_mode(true).execute(&self.pool).await?;

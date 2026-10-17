@@ -2,6 +2,189 @@ use super::{Backend, migration, queries, transactions};
 use crate::config::{Budget, Config, Secrets};
 use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use std::{
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering::Relaxed},
+    },
+    time::{Duration, Instant},
+};
+
+#[derive(Default)]
+struct ReplicaCounters {
+    attempts: AtomicU64,
+    pages: AtomicU64,
+    lagging: AtomicU64,
+    errors: AtomicU64,
+    connect_errors: AtomicU64,
+    query_errors: AtomicU64,
+    busy: AtomicU64,
+    fallbacks: AtomicU64,
+}
+
+struct ReplicaHealth {
+    next: Instant,
+    failures: u32,
+    state: &'static str,
+}
+
+pub(super) struct Replica {
+    pool: PgPool,
+    identity: queries::ReplicaIdentity,
+    health: Mutex<ReplicaHealth>,
+    probe: tokio::sync::Semaphore,
+    slots: tokio::sync::Semaphore,
+    limit: u32,
+    counters: ReplicaCounters,
+}
+
+impl Replica {
+    fn new(
+        options: sqlx::postgres::PgConnectOptions,
+        limit: u32,
+        identity: queries::ReplicaIdentity,
+    ) -> Self {
+        let expected = identity.clone();
+        let pool = PgPoolOptions::new()
+            .min_connections(0)
+            .max_connections(limit)
+            .acquire_timeout(Duration::from_millis(200))
+            .test_before_acquire(false)
+            .idle_timeout(Duration::from_secs(60))
+            .after_connect(move |connection, _| {
+                let expected = expected.clone();
+                Box::pin(async move {
+                    if !queries::check_replica(&expected)
+                        .fetch_one(connection)
+                        .await?
+                    {
+                        return Err(sqlx::Error::Protocol(
+                            "replica identity, version or role mismatch".into(),
+                        ));
+                    }
+                    Ok(())
+                })
+            })
+            .connect_lazy_with(
+                options
+                    .options([
+                        ("default_transaction_read_only", "on"),
+                        ("statement_timeout", "100ms"),
+                    ])
+                    .application_name("mokyu-replica"),
+            );
+        Self {
+            pool,
+            identity,
+            limit,
+            health: Mutex::new(ReplicaHealth {
+                next: Instant::now(),
+                failures: 0,
+                state: "idle",
+            }),
+            probe: tokio::sync::Semaphore::new(1),
+            slots: tokio::sync::Semaphore::new(limit as usize),
+            counters: ReplicaCounters::default(),
+        }
+    }
+
+    pub(super) fn snapshot(&self) -> serde_json::Value {
+        let health = self.health.lock().unwrap();
+        serde_json::json!({"state":health.state,"retry_after_ms":health.next.saturating_duration_since(Instant::now()).as_millis(),"pool_size":self.pool.size(),"pool_idle":self.pool.num_idle(),"connections":self.limit,"attempts":self.counters.attempts.load(Relaxed),"pages":self.counters.pages.load(Relaxed),"lagging":self.counters.lagging.load(Relaxed),"errors":self.counters.errors.load(Relaxed),"connect_errors":self.counters.connect_errors.load(Relaxed),"query_errors":self.counters.query_errors.load(Relaxed),"busy":self.counters.busy.load(Relaxed),"fallbacks":self.counters.fallbacks.load(Relaxed)})
+    }
+
+    pub(super) async fn read(
+        &self,
+        stream: uuid::Uuid,
+        lease: uuid::Uuid,
+        from: i64,
+        until: i64,
+    ) -> Option<Vec<crate::model::ReadExtent>> {
+        let result = self.try_read(stream, lease, from, until).await;
+        if result.is_none() {
+            self.counters.fallbacks.fetch_add(1, Relaxed);
+        }
+        result
+    }
+
+    async fn try_read(
+        &self,
+        stream: uuid::Uuid,
+        lease: uuid::Uuid,
+        from: i64,
+        until: i64,
+    ) -> Option<Vec<crate::model::ReadExtent>> {
+        let probe = {
+            let health = self.health.lock().unwrap();
+            if Instant::now() < health.next {
+                return None;
+            }
+            if health.failures > 0 {
+                Some(self.probe.try_acquire().ok()?)
+            } else {
+                None
+            }
+        };
+        let Ok(_slot) = self.slots.try_acquire() else {
+            self.counters.busy.fetch_add(1, Relaxed);
+            return None;
+        };
+        if self.pool.num_idle() == 0 && self.pool.size() >= self.limit {
+            self.counters.busy.fetch_add(1, Relaxed);
+            return None;
+        }
+        self.counters.attempts.fetch_add(1, Relaxed);
+        let mut connected = false;
+        let result = async {
+            let mut connection =
+                tokio::time::timeout(Duration::from_millis(200), self.pool.acquire()).await??;
+            connected = true;
+            let result = tokio::time::timeout(Duration::from_millis(100), async {
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("read-replica-query").await;
+                queries::replica_page(&mut connection, &self.identity, stream, lease, from, until)
+                    .await
+            })
+            .await;
+            if !matches!(result, Ok(Ok(_))) {
+                connection.close_on_drop();
+            }
+            result?
+        }
+        .await;
+        match result {
+            Ok(Some(page)) => {
+                self.counters.pages.fetch_add(1, Relaxed);
+                let mut health = self.health.lock().unwrap();
+                if probe.is_some() || health.failures == 0 {
+                    health.failures = 0;
+                    health.state = "available";
+                }
+                Some(page)
+            }
+            result => {
+                let mut health = self.health.lock().unwrap();
+                health.failures = (health.failures + 1).min(6);
+                let delay = if result.is_ok() {
+                    self.counters.lagging.fetch_add(1, Relaxed);
+                    health.state = "lagging";
+                    Duration::from_millis(250)
+                } else {
+                    self.counters.errors.fetch_add(1, Relaxed);
+                    if connected {
+                        self.counters.query_errors.fetch_add(1, Relaxed);
+                    } else {
+                        self.counters.connect_errors.fetch_add(1, Relaxed);
+                    }
+                    health.state = "backoff";
+                    Duration::from_secs((1u64 << (health.failures - 1)).min(30))
+                };
+                health.next = Instant::now() + delay;
+                None
+            }
+        }
+    }
+}
 
 struct RuntimeOwner(std::sync::Arc<Backend>);
 
@@ -170,7 +353,33 @@ pub async fn connect(
             .all(|id| secrets.key_for_id(Some(*id)).is_some()),
         "database is missing a historical chunk key"
     );
-    let backend = std::sync::Arc::new(Backend::new(pool, owner, role == "single"));
+    let mut backend = Backend::new(pool, owner, role == "single");
+    if role == "data"
+        && let Some(replica) = &c.replica_database
+    {
+        let identity = queries::replica_identity().fetch_one(&backend.pool).await?;
+        if identity.deployment_mode == "cluster" {
+            let replica = replica.resolve(&c.database)?;
+            let options = sqlx::postgres::PgConnectOptions::new()
+                .host(&replica.host)
+                .port(replica.effective_port().unwrap())
+                .database(&replica.name)
+                .username(&replica.user)
+                .password(
+                    secrets
+                        .replica_password
+                        .as_deref()
+                        .context("missing replica database password")?,
+                )
+                .ssl_mode(replica.ssl_mode.parse()?);
+            backend.replica = Some(Replica::new(
+                options,
+                budget.database_read_connections,
+                identity,
+            ));
+        }
+    }
+    let backend = std::sync::Arc::new(backend);
     Ok((
         super::stores(backend.clone()),
         Box::new(RuntimeOwner(backend)),

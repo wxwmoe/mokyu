@@ -4730,7 +4730,7 @@ pub(super) fn resize_writing_stream(id: Uuid, size: i64) -> Statement<'static> {
 impl StreamStore for Backend {
     async fn cached(&self, bucket: Uuid, key: &str) -> Result<Option<crate::model::CachedStream>> {
         use sqlx::FromRow;
-        let rows = sqlx::query("SELECT s.*,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN extents e ON e.stream_id=s.id LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=? AND o.object_key=? AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key.as_bytes()).fetch_all(&self.pool).await?;
+        let rows = sqlx::query("SELECT s.*,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN (SELECT * FROM extents WHERE stream_id=(SELECT stream_id FROM objects WHERE bucket_id=? AND object_key=?) ORDER BY offset_bytes LIMIT 65) e ON e.stream_id=s.id LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=? AND o.object_key=? AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key.as_bytes()).bind(bucket).bind(key.as_bytes()).fetch_all(&self.pool).await?;
         let Some(first) = rows.first() else {
             return Ok(None);
         };

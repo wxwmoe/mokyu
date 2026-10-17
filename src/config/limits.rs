@@ -17,6 +17,7 @@ pub struct Budget {
     pub storage_control_slots: usize,
     pub request_connections: usize,
     pub database_connections: u32,
+    pub database_read_connections: u32,
     pub cache_entries: usize,
     pub pack_memory_units: u32,
     pub response_cache_bytes: u64,
@@ -93,6 +94,7 @@ impl Config {
         for value in [
             c.instance.request_connections,
             c.instance.database_connections.map(|v| v as usize),
+            c.instance.database_read_connections.map(|v| v as usize),
             c.instance.storage_read_slots,
             c.instance.storage_upload_slots,
             c.instance.storage_control_slots,
@@ -127,6 +129,13 @@ impl Config {
                 && c.instance.listen_s3 != c.instance.listen_control
                 && c.instance.listen_web != c.instance.listen_control,
             "listeners must be distinct"
+        );
+        if let Some(replica) = &c.replica_database {
+            replica.resolve(&c.database)?;
+        }
+        ensure!(
+            c.replica_database.is_some() || c.instance.database_read_connections.is_none(),
+            "database_read_connections requires replica_database"
         );
         match c.database.backend {
             super::DatabaseType::Postgres | super::DatabaseType::Mysql => {
@@ -441,6 +450,13 @@ impl Config {
             storage_control_slots,
             request_connections: connections,
             database_connections: db,
+            database_read_connections: if self.replica_database.is_some() {
+                self.instance
+                    .database_read_connections
+                    .unwrap_or((db / 4).clamp(1, 4))
+            } else {
+                0
+            },
             cache_entries: entries,
             pack_memory_units,
             response_cache_bytes,

@@ -16,6 +16,7 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
     pub database: Database,
+    pub replica_database: Option<super::ReplicaDatabase>,
     #[serde(default)]
     pub instance: Instance,
 }
@@ -25,6 +26,7 @@ impl FileConfig {
         Config {
             configured_fields: Default::default(),
             database: self.database,
+            replica_database: self.replica_database,
             instance: self.instance.clone(),
             backend_defaults: BackendDefaults::default(),
             local_cache: LocalCache::default(),
@@ -109,8 +111,22 @@ impl Config {
                 "database.password",
             )?
         };
+        let replica_password = c
+            .replica_database
+            .as_ref()
+            .map(|replica| {
+                let resolved = replica.resolve(&c.database)?;
+                secret_value(
+                    resolved.password.as_deref(),
+                    resolved.password_file.as_deref(),
+                    base,
+                    "replica_database.password",
+                )
+            })
+            .transpose()?;
         let secrets = Secrets {
             database_password,
+            replica_password,
             credential_key: crate::content::codec::Key::new("aes-256-gcm", credential_material)?,
             keys: BTreeMap::new(),
             runtime_keys: Arc::new(RwLock::new(BTreeMap::new())),

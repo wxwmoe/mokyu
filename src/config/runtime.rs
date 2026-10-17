@@ -26,6 +26,7 @@ pub struct Instance {
     pub thumbnail_cache_size: String,
     pub request_connections: Option<usize>,
     pub database_connections: Option<u32>,
+    pub database_read_connections: Option<u32>,
     pub cpu_jobs: Option<usize>,
     pub stream_memory_budget: Option<String>,
     pub storage_read_slots: Option<usize>,
@@ -52,6 +53,7 @@ impl Default for Instance {
             thumbnail_cache_size: "256MiB".into(),
             request_connections: None,
             database_connections: None,
+            database_read_connections: None,
             cpu_jobs: None,
             stream_memory_budget: None,
             storage_read_slots: None,
@@ -192,6 +194,77 @@ impl Database {
 
 fn postgres_ssl_mode() -> String {
     "prefer".into()
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplicaDatabase {
+    pub host: String,
+    pub port: Option<u16>,
+    pub name: Option<String>,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub password_file: Option<PathBuf>,
+    pub ssl_mode: Option<String>,
+}
+
+impl ReplicaDatabase {
+    pub fn resolve(&self, primary: &Database) -> Result<Database> {
+        ensure!(
+            primary.backend == DatabaseType::Postgres,
+            "replica_database requires PostgreSQL"
+        );
+        ensure!(
+            !self.host.trim().is_empty(),
+            "replica_database.host is required"
+        );
+        ensure!(
+            self.name.as_ref().is_none_or(|name| name == &primary.name),
+            "replica_database.name must match database.name"
+        );
+        ensure!(
+            self.user
+                .as_ref()
+                .is_none_or(|user| !user.trim().is_empty()),
+            "replica_database.user must not be empty"
+        );
+        ensure!(
+            self.port != Some(0),
+            "replica_database.port must be positive"
+        );
+        let supplied = self.password.is_some() || self.password_file.is_some();
+        ensure!(
+            self.password.is_none() || self.password_file.is_none(),
+            "configure only one replica database password source"
+        );
+        ensure!(
+            self.user.is_none() || supplied,
+            "replica_database.user requires password or password_file"
+        );
+        let ssl_mode = self.ssl_mode.as_ref().unwrap_or(&primary.ssl_mode).clone();
+        ssl_mode
+            .parse::<sqlx::postgres::PgSslMode>()
+            .map_err(|_| anyhow::anyhow!("invalid replica_database.ssl_mode"))?;
+        Ok(Database {
+            backend: DatabaseType::Postgres,
+            host: self.host.clone(),
+            port: self.port.or(primary.effective_port()),
+            name: primary.name.clone(),
+            user: self.user.as_ref().unwrap_or(&primary.user).clone(),
+            password: if supplied {
+                self.password.clone()
+            } else {
+                primary.password.clone()
+            },
+            password_file: if supplied {
+                self.password_file.clone()
+            } else {
+                primary.password_file.clone()
+            },
+            ssl_mode,
+            path: None,
+        })
+    }
 }
 #[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -395,6 +468,7 @@ impl Default for Maintenance {
 
 pub struct Secrets {
     pub database_password: String,
+    pub replica_password: Option<String>,
     pub credential_key: crate::content::codec::Key,
     pub keys: BTreeMap<String, crate::content::codec::Key>,
     pub runtime_keys: Arc<RwLock<BTreeMap<String, crate::content::codec::Key>>>,

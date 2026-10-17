@@ -386,6 +386,7 @@ mod tests {
     fn secrets_for(algorithm: &str) -> Secrets {
         Secrets {
             database_password: String::new(),
+            replica_password: None,
             credential_key: Key::new("aes-256-gcm", [8; 32]).unwrap(),
             keys: if algorithm == "none" {
                 BTreeMap::new()
