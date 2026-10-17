@@ -39,6 +39,9 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 生命周期测试会等待容量统计收敛；测试服务的 `metrics.refresh_interval` 应设为短周期（如 `2s`），保存设置后重启再运行。
 
 - `integration.py`：S3 普通上传、条件请求、校验、Range 和分片协议。
+- `s3/publication.py`：保留 boto3 默认 checksum 行为，验证文件流、transfer-manager multipart、同 key 普通 PUT/If-None-Match 竞争，以及正文、ETag、长度、类型和 writer 元数据属于同一代。默认 20 轮 × 8 写者；`MOKYU_TEST_ENDPOINTS` 可指定多 data 地址 JSON 数组，否则使用单个 `MOKYU_TEST_ENDPOINT`。记录预算拒绝 SlowDown，不把它算作成功。
+- `s3/connections.py`：Expect 未发送正文、部分正文、完整正文遭拒后的 HTTP/1.1 连接边界；前两种关闭，完整正文可复用，且后续响应正文完整。仅直连隔离 HTTP 端口运行，每种 20 轮。
+- `recovery/truncated_stream.py`：PostgreSQL 专用数据库构造 513 个有 source offset 的 extent，删除最后完整 extent 后，已读过和绕过缓存的完整/尾部 Range 均不得静默成功；恢复后字节正确。使用 `MOKYU_TEST_DATABASE_FILE` 和与发布测试相同的 endpoint 设置。
 - `s3/empty_ranges.py`：签名/匿名 S3、公共 Web 与面板下载的空对象、单字节、suffix/open/closed Range、HEAD 和条件请求。空对象无 Range 正常返回，合法但不可满足的 Range 返回 416 和 `Content-Range: bytes */0`；使用默认 SDK 校验配置，另验证空对象复制。面板验证读取 `MOKYU_TEST_PASSWORD_FILE`，公共 Web 使用 `MOKYU_TEST_PUBLIC_WEB`/`MOKYU_TEST_PUBLIC_HOST`。
 - `control/database_capabilities.py`：管理 API/CLI、配置字段和群集能力边界。
 - `storage/single_lifecycle.py`：提前本地确认、持久上传、pack、rewrite、unpack、巡检、容量和清理。
@@ -62,3 +65,43 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 浏览器验证在包含 Playwright 浏览器的容器中执行 `web` 的 `npm run test:ui`。必须指定隔离服务地址 `MOKYU_TEST_WEB`、状态修改授权及测试账户密码文件；`frontend-auth.spec.ts` 覆盖真实会话刷新和重新打开页面。
 
 `http-compression.spec.ts` 使用实际 Chromium 缓存验证三种编码与 identity 切换、强弱 ETag 和 304 后的完整正文；设置 `MOKYU_TEST_HTTP_OBJECT` 可同时验证具有压缩收益的公开文本对象 URL。HTTPS 测试需信任专用测试证书，跳过证书错误可能导致浏览器禁用缓存，不能将全为 200 的结果当作重验证通过。
+
+## 公共读基准
+
+`python -m tests.benchmarks.public_reads /config/benchmark.json /results/reads.json` 在独立客户端 Docker 中运行，要求状态修改授权。服务必须来自已记录 revision 的 `cargo build --release --locked` 构建，不能使用 debug 或故障注入构建作性能结论。上传固定种子的公开样本后保存原始字节；基准本身只读对象，逐请求检查 HTTP 状态、线上编码、Content-Length 和解码后的完整正文。
+
+先在 Linux cgroup v2 测试容器运行 `python -m tests.benchmarks.public_reads_test`，验证四种编码的实际字节计数、正文/HTTP 错误计数、全失败时的空百分位和预热失败退出。这个自检使用本机 HTTP fixture，不是 Mokyu 性能数据。
+
+fixture 示例：
+
+```json
+{
+  "label": "cache-on-round-1",
+  "revision": "tested-git-revision",
+  "build": "release",
+  "database_version": "PostgreSQL 18",
+  "cache_state": "warm; response cache enabled; chunk cache enabled",
+  "seed": 719,
+  "requests": 1000,
+  "concurrency": 4,
+  "warmup": 4,
+  "database_file": "/config/postgres-dsn",
+  "resources": {
+    "client": {"cgroup": "/sys/fs/cgroup"},
+    "data": {"cgroup": "/metrics/data", "status_url": "http://data:9002/status"},
+    "database": {"cgroup": "/metrics/database"}
+  },
+  "cases": [{
+    "name": "text-1MiB-zstd",
+    "urls": ["http://data:9000/test-bucket/text"],
+    "expected_file": "/fixtures/text.bin",
+    "encoding": "zstd"
+  }]
+}
+```
+
+将本轮各容器自己的 cgroup v2 目录分别只读挂入客户端；资源列表应包含客户端、所有参与的 data/control/worker、数据库与共享后端。程序记录实际 CPU/内存上限、CPU 使用与限流增量、采样的 `memory.current` 峰值，节点状态包含前后 RSS、完整正文缓存、从库和后端请求/字节计数。`memory.current` 包含页缓存，不能当作进程 RSS；状态中的 peak RSS 是进程生命周期峰值。PostgreSQL 可选 `database_file` 需要预先启用 `pg_stat_statements`，记录主库分页、快照和租约 SQL 增量；其他数据库省略该项，输出 null，不能解释成零查询。
+
+`cases` 可配置多个对象与入口；`encoding` 支持 identity/gzip/br/zstd，后两者另需 Python `brotli`/`zstandard`。Range 场景通过 `headers.Range`、`status: 206` 和对应切片的 expected_file 表达。`successful_wire_body_bytes` 统计实际读取的编码正文，不含 HTTP 头和帧开销，不以解码长度回填。延迟从请求开始到正文读完，包含连接等待；TTFB 到第一个正文字节。RPS 包含客户端解码校验开销，必须检查客户端 CPU 是否饱和。
+
+预热失败不会启动并发屏障；请求或校验失败写入结果并非零退出，没有成功样本时百分位为 null。先运行少量请求验证入口，再做交错 off/on/on/off；冷测试必须明确记录外部清理或重启步骤并设 warmup=0，不能把重复同对象的全程称为冷读。固定总预算与新增总预算的比较分别报告，禁止把消除 SQL、缓存命中或小样本吞吐直接作为生产收益。
