@@ -76,6 +76,19 @@ test('cluster views keep node identity and read-only configuration across locale
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
       await page.setViewportSize({ width: 1440, height: 1040 })
       await page.screenshot({ path: `${process.env.MOKYU_TEST_RESULTS}/config-${locale}-${theme}.png`, fullPage: true })
+      for (const path of ['/overview', '/storage']) {
+        const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/v1/usage/runtime')
+        await page.goto(path)
+        const runtime = (await (await response).json()).cluster
+        await expect(page.locator('.runtime-coverage strong')).toBeVisible()
+        const partial = runtime.stale || runtime.current.reported_nodes < runtime.current.expected_nodes || runtime.current.rate_nodes < runtime.current.expected_nodes
+        if (partial) await expect(page.locator('.runtime-coverage')).toHaveClass(/is-partial/)
+        else await expect(page.locator('.runtime-coverage')).not.toHaveClass(/is-partial/)
+        await page.screenshot({ path: `${process.env.MOKYU_TEST_RESULTS}${path}-${locale}-${theme}.png`, fullPage: true })
+        await page.setViewportSize({ width: 320, height: 844 })
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+        await page.setViewportSize({ width: 1440, height: 1040 })
+      }
     }
   }
   expect(errors).toEqual([])

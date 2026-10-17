@@ -772,4 +772,6 @@ export default {
   clusterCacheCopies: "各节点缓存副本",
   clusterCacheCopiesHint: "仅汇总已报告节点的本地副本，不代表部署唯一数据量；上传和区块缓存区域可能重叠。",
   clusterSampleWindow: "最近有效采样窗口",
+  configField_database_type: "数据库类型",
+  configHelp_database_type: "连接使用的驱动类型，实际服务程序见“数据库程序”",
 }

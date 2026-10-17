@@ -18,6 +18,14 @@ def get(path):
     return reply.json()
 
 nodes = get('/api/v1/cluster/nodes')['items']
+until=time.monotonic()+210
+while True:
+    initial=(get('/api/v1/usage/runtime').get('cluster') or {}).get('current')
+    if initial and initial['rate_nodes']==len(nodes):
+        baseline=initial['at']
+        break
+    assert time.monotonic()<until,'cluster runtime baselines did not converge'
+    time.sleep(2)
 for host,count in [('data1',12),('data2',24)]:
     for _ in range(count):
         requests.get('http://mokyu-runtime-console-'+host+':9001/runtime-observation-missing',timeout=10)
@@ -25,7 +33,7 @@ until=time.monotonic()+210
 while True:
     runtime=get('/api/v1/usage/runtime')
     current=(runtime.get('cluster') or {}).get('current')
-    if current and current['rate_nodes']==len(nodes) and current['rates']['requests']>0:
+    if current and current['at']>baseline and current['rate_nodes']==len(nodes) and current['rates']['requests']>0:
         break
     assert time.monotonic()<until,'cluster runtime did not converge'
     time.sleep(2)

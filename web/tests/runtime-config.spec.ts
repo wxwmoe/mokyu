@@ -35,6 +35,11 @@ test('single runtime observations preserve the configuration and service layout'
       await page.goto('/service')
       await expect(page.locator('.config-board')).toHaveCount(0)
       await expect(page.getByRole('combobox')).toHaveCount(0)
+      for (const path of ['/overview', '/storage']) {
+        await page.goto(path)
+        await expect(page.locator('.page-heading h1')).toBeVisible()
+        await expect(page.locator('.runtime-coverage, .cluster-scopes, .node-picker')).toHaveCount(0)
+      }
     }
   }
   expect(clusterRequests).toEqual([])

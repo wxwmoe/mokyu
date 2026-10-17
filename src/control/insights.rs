@@ -160,13 +160,7 @@ pub(super) async fn runtime(
     } else {
         let mut history = app.cluster()?.cluster_runtime(&query).await?;
         let current = history.pop();
-        let stale = current.as_ref().is_none_or(|p| {
-            Utc::now().signed_duration_since(p.at).num_seconds()
-                > config::seconds(&app.config.metrics.runtime_interval)
-                    .unwrap_or(60)
-                    .saturating_mul(2)
-                    .saturating_add(30) as i64
-        });
+        let stale = current.as_ref().is_none_or(|p| p.stale_at(Utc::now()));
         Some(crate::model::metrics::ClusterRuntime {
             current,
             history,

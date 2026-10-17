@@ -33,6 +33,10 @@ for path, method in [('/api/v1/info', 'get'), ('/api/v1/auth/login', 'post'), ('
                      ('/api/v1/domains', 'get'), ('/api/v1/domains', 'post'),
                      ('/api/v1/domains/{host}', 'delete'),
                      ('/api/v1/cluster/recover', 'post'),
+                     ('/api/v1/cluster/status', 'get'), ('/api/v1/cluster/nodes', 'get'),
+                     ('/api/v1/cluster/nodes/{id}/config', 'get'), ('/api/v1/cluster/nodes/{id}/status', 'get'),
+                     ('/api/v1/cluster/nodes/{id}/runtime', 'get'), ('/api/v1/cluster/settings', 'get'),
+                     ('/api/v1/usage/runtime', 'get'),
                      ('/api/v1/buckets/{bucket}/uploads', 'post'),
                      ('/api/v1/media/actions', 'post'), ('/api/v1/usage/summary', 'get'),
                      ('/api/v1/maintenance', 'get'), ('/api/v1/system/config', 'get')]:

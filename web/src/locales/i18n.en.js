@@ -772,4 +772,6 @@ export default {
   clusterCacheCopies: "Cache copies across nodes",
   clusterCacheCopiesHint: "Sum of reported node-local copies, not unique deployment data. Upload and chunk cache areas can overlap.",
   clusterSampleWindow: "Latest sampling window",
+  configField_database_type: "Database type",
+  configHelp_database_type: "Driver used for this connection. Database program identifies the actual server.",
 }

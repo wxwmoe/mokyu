@@ -1796,6 +1796,8 @@ export interface components {
             /** Format: int64 */
             expected_nodes: number;
             gauges?: components["schemas"]["RuntimeGauges"] | null;
+            /** Format: int64 */
+            interval_seconds?: number;
             rate_nodes: number;
             rates?: components["schemas"]["RuntimeRates"] | null;
             reported_nodes: number;

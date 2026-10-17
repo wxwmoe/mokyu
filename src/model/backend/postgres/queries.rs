@@ -8054,7 +8054,7 @@ pub(super) fn runtime_node_window(
     ),
 > {
     // The cap bounds coordinator memory; omitted nodes remain in expected coverage.
-    sqlx::query_as("WITH members AS (SELECT id FROM nodes WHERE enabled AND last_seen_at>=now()-interval '30 seconds' ORDER BY id LIMIT 4096), samples AS (SELECT n.id,s.received_at,s.data,s.sequence FROM members n JOIN node_reports r ON r.node_id=n.id CROSS JOIN LATERAL (SELECT received_at,data,sequence FROM node_runtime_samples s WHERE s.node_id=n.id AND s.boot_id=r.boot_id AND s.received_at>=now()-$1*interval '1 second' ORDER BY received_at DESC,sequence DESC LIMIT 2) s) SELECT s.id,s.received_at,s.data,e.expected FROM (SELECT count(*) AS expected FROM nodes WHERE enabled) e LEFT JOIN samples s ON true ORDER BY s.id,s.received_at DESC,s.sequence DESC").bind(seconds)
+    sqlx::query_as("WITH members AS (SELECT id FROM nodes WHERE enabled AND last_seen_at>=now()-$2*interval '1 second' ORDER BY id LIMIT 4096), samples AS (SELECT n.id,s.received_at,s.data,s.sequence FROM members n JOIN node_reports r ON r.node_id=n.id CROSS JOIN LATERAL (SELECT received_at,data,sequence FROM node_runtime_samples s WHERE s.node_id=n.id AND s.boot_id=r.boot_id AND s.received_at>=now()-$1*interval '1 second' ORDER BY received_at DESC,sequence DESC LIMIT 2) s) SELECT s.id,s.received_at,s.data,e.expected FROM (SELECT count(*) AS expected FROM nodes WHERE enabled) e LEFT JOIN samples s ON true ORDER BY s.id,s.received_at DESC,s.sequence DESC").bind(seconds).bind(CONTACT_SECONDS)
 }
 pub(super) fn node_runtime_history(
     id: Uuid,

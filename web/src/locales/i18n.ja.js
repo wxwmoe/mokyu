@@ -772,4 +772,6 @@ export default {
   clusterCacheCopies: "ノードごとのキャッシュコピー",
   clusterCacheCopiesHint: "報告済みノードのローカルコピーの合計です。デプロイの一意なデータ量ではありません。アップロードとブロックキャッシュは重複する場合があります。",
   clusterSampleWindow: "直近の取得期間",
+  configField_database_type: "データベースの種類",
+  configHelp_database_type: "接続に使用するドライバーで、実際のサーバーは「データベースプログラム」に表示",
 }

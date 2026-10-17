@@ -331,12 +331,23 @@ pub(crate) struct RuntimeRates {
 pub(crate) struct ClusterRuntimePoint {
     pub scope: String,
     pub at: DateTime<Utc>,
+    #[serde(default = "runtime_interval")]
+    pub interval_seconds: u64,
     pub window_start: DateTime<Utc>,
     pub expected_nodes: i64,
     pub reported_nodes: usize,
     pub rate_nodes: usize,
     pub gauges: Option<RuntimeGauges>,
     pub rates: Option<RuntimeRates>,
+}
+fn runtime_interval() -> u64 {
+    60
+}
+impl ClusterRuntimePoint {
+    pub fn stale_at(&self, now: DateTime<Utc>) -> bool {
+        now.signed_duration_since(self.at).num_seconds()
+            > self.interval_seconds.saturating_mul(2).saturating_add(30) as i64
+    }
 }
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ClusterRuntime {
@@ -359,6 +370,7 @@ pub(crate) fn aggregate_runtime(
     let mut out = ClusterRuntimePoint {
         scope: "cluster".into(),
         at,
+        interval_seconds: interval,
         window_start: at,
         expected_nodes: expected,
         reported_nodes: 0,
@@ -501,6 +513,10 @@ mod runtime_tests {
     }
     #[test]
     fn cluster_runtime_weights_deltas_and_preserves_missing_coverage() -> Result<()> {
+        let at = Utc::now();
+        let point = aggregate_runtime(at, 1, 300, &[])?;
+        assert!(!point.stale_at(at + chrono::Duration::seconds(400)));
+        assert!(point.stale_at(at + chrono::Duration::seconds(631)));
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
         let boot = Uuid::new_v4();
