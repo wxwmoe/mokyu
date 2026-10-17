@@ -114,7 +114,7 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
     );
     assert_eq!(
         queries::schema_version().fetch_one(&backend.read).await?,
-        17
+        18
     );
     assert_eq!(
         queries::journal_mode().fetch_one(&backend.read).await?,
@@ -395,7 +395,7 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
             .await
             .is_err()
     );
-    sqlx::query("UPDATE mokyu_meta SET schema_version=17")
+    sqlx::query("UPDATE mokyu_meta SET schema_version=(SELECT MAX(version) FROM _sqlx_migrations)")
         .execute(&mut admin)
         .await?;
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version=1")

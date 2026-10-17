@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 pub(crate) mod buckets;
 pub(crate) mod chunks;
+pub(crate) mod compression;
 pub(crate) mod extents;
 pub(crate) mod listing;
 pub(crate) mod publish;
@@ -54,6 +55,8 @@ pub struct StoredStream {
     pub metadata: Value,
     pub public_read: bool,
     pub checksums: Value,
+    #[serde(skip)]
+    pub http_compression: Value,
     pub created_at: DateTime<Utc>,
     pub touched_at: DateTime<Utc>,
 }
@@ -180,6 +183,7 @@ pub struct App {
     pub storage: Arc<Storage>,
     pub thumbnails: Arc<crate::control::media::Thumbnails>,
     pub statistics: crate::status::stats::Statistics,
+    pub compression_observations: Arc<compression::Observations>,
     pub cleanup_state: crate::worker::lifecycle::Cleanup,
     pub integrity_pacing: std::sync::Mutex<std::time::Instant>,
     pub local_cleanup: tokio::sync::Mutex<()>,
@@ -261,6 +265,7 @@ impl App {
         }
         let thumbnails =
             Arc::new(crate::control::media::Thumbnails::new(&config, storage.disk.clone()).await?);
+        let (compression_observations, compression_receiver) = compression::Observations::new();
         let app = Arc::new(Self {
             cluster: stores.cluster,
             role: role.to_owned(),
@@ -302,6 +307,7 @@ impl App {
             storage,
             thumbnails,
             statistics: crate::status::stats::Statistics::default(),
+            compression_observations,
             cleanup_state: crate::worker::lifecycle::Cleanup::default(),
             integrity_pacing: std::sync::Mutex::new(std::time::Instant::now()),
             local_cleanup: tokio::sync::Mutex::new(()),
@@ -318,6 +324,7 @@ impl App {
             operation_locks: Mutex::new(HashMap::new()),
             _file_lock: lock,
         });
+        compression::Observations::start(Arc::downgrade(&app), compression_receiver);
         if app.role != "single" {
             let cluster = app
                 .cluster
@@ -457,6 +464,7 @@ impl App {
         let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"role":self.role,"deployment_mode":state.mode,"deployment_mode_revision":state.mode_revision,"mode_mismatch":mismatch,"node_registered":self.node.get().is_some(),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":state.gc_paused,"maintenance":state.maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":pool_size,"db_pool_idle":pool_idle,"data_slots_available":self.slots.available_permits(),"active_streams":self.active.lock().unwrap().len()});
         status["runtime"] = self.statistics.runtime();
         status["cache_jobs_active"] = json!(self.storage.cache_jobs_active());
+        status["http_compression"] = self.compression_observations.snapshot();
         status["cleanup"] = self.cleanup_status();
         status["storage"] = self.statistics.inventory(crate::config::seconds(
             &self.config.metrics.refresh_interval,

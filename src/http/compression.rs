@@ -344,6 +344,7 @@ impl AsRef<[u8]> for Output {
 }
 
 pub(crate) type ByteStream = Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>>;
+pub(crate) type Complete = Box<dyn FnOnce(u64, u64) + Send>;
 
 pub(crate) fn encode(
     mut source: ByteStream,
@@ -351,6 +352,7 @@ pub(crate) fn encode(
     expected: Option<u64>,
     cpu: Arc<Semaphore>,
     memory: OwnedSemaphorePermit,
+    complete: Option<Complete>,
 ) -> ByteStream {
     Box::pin(async_stream::try_stream! {
         let memory = Arc::new(memory);
@@ -361,6 +363,7 @@ pub(crate) fn encode(
             Encoder::new(encoding).map(|codec| (codec, held))
         }).await.map_err(io::Error::other)??;
         let mut raw_size = 0u64;
+        let mut encoded_size = 0u64;
         while let Some(data) = source.next().await {
             let data = data?;
             raw_size = raw_size.checked_add(data.len() as u64).ok_or_else(|| io::Error::other("response size overflow"))?;
@@ -376,16 +379,21 @@ pub(crate) fn encode(
                     Ok::<_, io::Error>((encoder, output))
                 }).await.map_err(io::Error::other)??;
                 encoder = next;
+                encoded_size = encoded_size.checked_add(output.len() as u64).ok_or_else(|| io::Error::other("encoded size overflow"))?;
                 if !output.is_empty() { yield Bytes::from_owner(Output { bytes: output, _memory: memory.clone() }); }
             }
         }
         if expected.is_some_and(|length| raw_size != length) { Err(io::Error::other("response ended before expected size"))?; }
+        #[cfg(feature="fault-injection")]
+        crate::faults::point("http-compression-finish").await;
         let permit = cpu.acquire_owned().await.map_err(io::Error::other)?;
         let held = memory.clone();
         let output = tokio::task::spawn_blocking(move || {
             let (_permit, _memory) = (permit, held);
             encoder.0.step(&[], true)
         }).await.map_err(io::Error::other)??;
+        encoded_size = encoded_size.checked_add(output.len() as u64).ok_or_else(|| io::Error::other("encoded size overflow"))?;
+        if let Some(complete) = complete { complete(raw_size, encoded_size); }
         if !output.is_empty() { yield Bytes::from_owner(Output { bytes: output, _memory: memory }); }
     })
 }
@@ -446,6 +454,7 @@ pub(crate) async fn json(
             length,
             app.storage.cpu.clone(),
             memory.unwrap(),
+            None,
         ));
     }
     response
@@ -543,12 +552,17 @@ mod tests {
                     yield bytes;
                 }
             };
+            let observed = Arc::new(std::sync::Mutex::new(None));
+            let completed = observed.clone();
             let mut stream = encode(
                 Box::pin(source),
                 encoding,
                 Some(original.len() as u64),
                 cpu.clone(),
                 memory.clone().acquire_owned().await.unwrap(),
+                Some(Box::new(move |raw, encoded| {
+                    *completed.lock().unwrap() = Some((raw, encoded));
+                })),
             );
             let encoded = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 let mut bytes = Vec::new();
@@ -559,6 +573,10 @@ mod tests {
             })
             .await
             .expect("single CPU permit must make progress");
+            assert_eq!(
+                *observed.lock().unwrap(),
+                Some((original.len() as u64, encoded.len() as u64))
+            );
             let decoded = match encoding {
                 Encoding::Zstd => zstd::decode_all(encoded.as_slice()).unwrap(),
                 Encoding::Brotli => {
@@ -595,6 +613,9 @@ mod tests {
                 Some(100),
                 cpu,
                 memory.clone().acquire_owned().await.unwrap(),
+                Some(Box::new(|_, _| {
+                    panic!("incomplete response must not be learned")
+                })),
             );
             let mut failed = false;
             while let Some(part) = stream.next().await {
@@ -620,6 +641,9 @@ mod tests {
             None,
             cpu.clone(),
             memory.clone().acquire_owned().await.unwrap(),
+            Some(Box::new(|_, _| {
+                panic!("canceled response must not be learned")
+            })),
         );
         let output = stream.next().await.unwrap().unwrap();
         drop(stream);

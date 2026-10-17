@@ -9,7 +9,7 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | HeadBucket / GetBucketLocation | 核对桶授权，区域为 runtime `requests.s3_region` |
 | ListBuckets | 仅列已授权桶，支持 prefix/region 过滤和分页；max-buckets 默认 1000，范围 1～10000 |
 | PutObject | 流式 CDC、校验、元数据、ACL 和条件发布；失败保留旧对象 |
-| GetObject / HeadObject | 原始字节、ETag、长度、时间、元数据及请求的已有 checksum；单段 Range 和条件请求 |
+| GetObject / HeadObject | 原始字节、ETag、长度、时间、元数据及请求的已有 checksum；匿名公共读可协商压缩；单段 Range 和条件请求 |
 | DeleteObject / DeleteObjects | 逻辑删除，批量最多 1000 项，逐项错误／Quiet；共享块由 GC 回收 |
 | ListObjectsV2 | prefix/delimiter/start-after/continuation-token/encoding-type=url；max-keys 为 0～1000，C 排序，游标绑定桶和前缀 |
 | CreateMultipartUpload | 保存初始元数据、ACL 和校验模式，无需预知总大小 |
@@ -78,11 +78,21 @@ ACL 变更对新请求生效，已接纳的读取可以完成；CDN 已缓存内
 
 GetObject、公共读和管理下载支持单段 `bytes=a-b`、`bytes=a-`、`bytes=-n`，不支持多段 multipart/byteranges。只读取覆盖范围的区块，每块完整认证，大范围仍流式返回；无效范围返回 416 和 `Content-Range: bytes */<size>`。
 
-支持 If-Match、If-None-Match、If-Modified-Since、If-Unmodified-Since；GET／公共读支持 If-Range。日期按秒比较，条件请求可返回 304/412。S3 HeadObject 的 Range 仍返回 200，Content-Length 为区间长度；公共 HEAD 可返回 206。对象保存的 Content-Type、Cache-Control 等元数据随响应返回。
+支持 If-Match、If-None-Match、If-Modified-Since、If-Unmodified-Since；修改日期按秒比较，条件请求可返回 304/412。GET／公共读的 If-Range 只接受匹配的强 ETag；弱标签、日期或不匹配的标签返回完整表示。对象可能在同一秒内多次覆盖，因此 Last-Modified 不能用作强范围验证器。S3 HeadObject 的 Range 仍返回 200，Content-Length 为区间长度；公共 HEAD 可返回 206。对象保存的 Content-Type、Cache-Control 等元数据随响应返回。
 
 HEAD 和 304 只读取当前对象元数据，不读取区块、不占正文读取名额，也不创建群集读取租约。条件请求需要正文时，服务重新固定当前版本并检查权限和条件，再发送响应；完整读取从起点直接分页，非零 Range 才查询所在区块的起点。
 
 后续区块损坏可能使响应中止，已发出的前部区块仍经过校验；客户端须核对 Content-Length 和响应完整性。
+
+## 公共响应压缩
+
+公共 Web 与通过匿名认证的 S3 GetObject/HeadObject 按 Accept-Encoding 的 q 值协商，同权重时优先 zstd、br、gzip、identity；未发送或空值返回原始表示。签名与预签名请求、checksum mode、已有 Content-Encoding 和请求或对象的 no-transform 均不追加编码。无可接受表示返回 406；禁止 identity 且编码工作内存不足时返回 503。
+
+原始表示使用强 ETag，压缩表示使用同值弱 ETag。所有可协商响应发送 Vary: Accept-Encoding；S3 另包含 Authorization 和 X-Amz-Checksum-Mode。强 If-Match 和有效 Range 优先原始表示；206 不压缩，identity 被明确禁止时忽略 Range 并返回完整压缩表示。条件判断针对最终选择的表示，If-None-Match 使用弱比较。
+
+压缩 HEAD 不启动编码器，没有实际压缩正文时省略 Content-Length；304 保留 ETag、Vary 和缓存策略，省略 Content-Encoding 和长度，避免在重验证时错误标记浏览器已有正文。S3 response-* 覆盖仍生效，并参与压缩排除判断。
+
+对象发布时根据完整独立区块的存储大小预估收益；部分引用、pack 成员或未知大小按原始长度计入，不在 GET/HEAD 扫描全部映射。小于 1 KiB 的对象不追加压缩；初次尝试要求预计节省至少 128 字节且达到 2%。无摘要的历史对象仅对不超过 8 MiB 的文本类内容保守尝试。完整编码后异步保存各算法的收益，不更新文件 ETag、修改时间或目录版本；失败、取消与仅元数据请求不学习。
 
 ## 公共网站
 

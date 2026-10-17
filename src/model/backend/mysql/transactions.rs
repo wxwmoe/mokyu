@@ -4373,6 +4373,22 @@ pub(super) async fn publish(
     Ok(true)
 }
 
+pub(super) async fn learn_compression(
+    pool: &sqlx::MySqlPool,
+    observation: crate::model::CompressionObservation,
+) -> anyhow::Result<bool> {
+    let mut tx = pool.begin().await?;
+    if !queries::compression_writable().fetch_one(&mut *tx).await? {
+        return Ok(false);
+    }
+    let changed = queries::learn_compression(observation)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(changed == 1)
+}
+
 pub(super) async fn create_stream(
     pool: &sqlx::MySqlPool,
     mut input: StreamCreate,

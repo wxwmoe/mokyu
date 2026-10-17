@@ -273,6 +273,7 @@ async fn public(
     };
     let mut response = result.unwrap_or_else(IntoResponse::into_response);
     super::compression::merge(response.headers_mut(), cors);
+    super::compression::vary(response.headers_mut(), "Accept-Encoding");
     Ok(response)
 }
 async fn website_response(

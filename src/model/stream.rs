@@ -4,6 +4,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "../../tests/recovery/http_compression.rs"]
+pub(crate) mod compression_tests;
+
 pub(crate) struct StreamCreate {
     pub(crate) authority: Permit,
     pub(crate) bucket: Uuid,
@@ -26,10 +30,33 @@ pub(crate) struct StreamTail {
     pub(crate) staging_key: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CompressionObservation {
+    pub stream: Uuid,
+    pub version: i32,
+    pub encoding: &'static str,
+    pub size: i64,
+}
+
+impl CompressionObservation {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.version > 0 && self.size >= 0 && matches!(self.encoding, "zstd" | "br" | "gzip"),
+            "invalid HTTP compression observation"
+        );
+        Ok(())
+    }
+}
+
 #[async_trait]
 pub(crate) trait StreamStore: Send + Sync {
     async fn current(&self, bucket: Uuid, key: &str) -> Result<StoredStream>;
     async fn create(&self, input: StreamCreate) -> Result<Uuid>;
     async fn append_tail(&self, tail: StreamTail) -> Result<()>;
     async fn finish(&self, stream: Uuid, size: i64, etag: &str, checksums: Value) -> Result<bool>;
+    async fn learn_compression(
+        &self,
+        observation: CompressionObservation,
+        node: Option<Uuid>,
+    ) -> Result<bool>;
 }

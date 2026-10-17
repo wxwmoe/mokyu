@@ -40,9 +40,10 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 - `s3/read_path.py`：分页 SQL、后台缓存故障和读名额耗尽时的 HEAD/304；可用 `MOKYU_TEST_PUBLIC_WEB`、`MOKYU_TEST_PUBLIC_HOST` 同时验证公共 Web。
 - `recovery/read_leases.py`：两个 data 节点、按时间续约、元数据轻读和过期租约拒绝；要求读取空闲超时为 `30s`，测试进程独立于受限应用容器，至少预留 1 GiB 内存。
 - `web/web_assets.py`：内嵌资源与公开 schema 的三种 HTTP 编码、协商、ETag、HEAD、敏感响应排除；另需 Python `brotli`、`zstandard`，直连与反向代理均应执行。
+- `s3/http_compression.py`：公共 Web/匿名 S3 的线上编码字节、签名排除、HEAD/304/Range、预估与学习；使用同样的解码依赖，可选 PostgreSQL DSN 检查 JSON。原生 `postgres_compression_contract`、`mysql_content_contract`、`sqlite_content_contract` 覆盖并发算法合并、策略切换和重复观测；迁移恢复契约同时检查新增字段。
 
 各文件头部及 `MOKYU_TEST_*` 读取处定义所需环境变量。凭据使用文件传入；不能将测试密码或 S3 secret 放入日志。恢复测试会强杀并重启配置指定的网关进程，只能在专用测试容器运行。故障注入构建不用于部署。
 
 浏览器验证在包含 Playwright 浏览器的容器中执行 `web` 的 `npm run test:ui`。必须指定隔离服务地址 `MOKYU_TEST_WEB`、状态修改授权及测试账户密码文件；`frontend-auth.spec.ts` 覆盖真实会话刷新和重新打开页面。
 
-`http-compression.spec.ts` 使用实际 Chromium 缓存验证三种编码与 identity 切换、强弱 ETag 和 304 后的完整正文；HTTPS 测试需信任专用测试证书，跳过证书错误可能导致浏览器禁用缓存，不能将全为 200 的结果当作重验证通过。
+`http-compression.spec.ts` 使用实际 Chromium 缓存验证三种编码与 identity 切换、强弱 ETag 和 304 后的完整正文；设置 `MOKYU_TEST_HTTP_OBJECT` 可同时验证具有压缩收益的公开文本对象 URL。HTTPS 测试需信任专用测试证书，跳过证书错误可能导致浏览器禁用缓存，不能将全为 200 的结果当作重验证通过。

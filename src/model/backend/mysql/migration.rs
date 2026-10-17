@@ -50,7 +50,7 @@ pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
         if !success {
             // Only explicitly idempotent migrations may resume after MySQL's implicit DDL commits.
             ensure!(
-                matches!(*version, 1..=16) && index + 1 == applied.len(),
+                matches!(*version, 1..=17) && index + 1 == applied.len(),
                 "MySQL migration requires manual recovery"
             );
             queries::forget_failed_migration(*version)

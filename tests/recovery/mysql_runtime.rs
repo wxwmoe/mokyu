@@ -19,7 +19,7 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
     );
     let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
     let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
-    let latest = 16;
+    let latest = 17;
     let interrupt_version: i64 = std::env::var("MOKYU_TEST_MYSQL_INTERRUPT_MIGRATION")
         .ok()
         .map(|value| value.parse())

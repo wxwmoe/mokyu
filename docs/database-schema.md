@@ -36,6 +36,10 @@
 
 storage 连接和 profile 修改只改变后续写入及新请求的策略。存量载荷的加密、压缩或区块包转换必须显式启动 `storage rewrite` 或 `storage unpack` 任务。
 
+`streams.http_compression` 是内部响应压缩摘要：PostgreSQL 使用 JSONB，MySQL/MariaDB 使用 JSON，SQLite 使用带 json_valid 检查的 TEXT，默认 `{}`，不通过对象 API 暴露。`estimated_size` 在最终发布时按 extent 引用累计，重复引用重复计数；完整独立区块采用已知存储长度，其余采用原始长度。`version` 是压缩策略修订；`zstd`、`br`、`gzip` 缺失表示未知，0 表示完整尝试收益不足，正数是实际编码长度。
+
+各算法观测通过后端原子更新合并，同策略保留未知键，切换策略只保留有效预估并清除全部旧算法结果；旧节点不能覆盖新策略。观测只写 ready stream，遵守维护、运行模式与所有者边界，不改变对象时间、ETag 或目录 revision。内存队列有界且允许丢弃，数据库中没有额外观测任务或租约；读取不等待回写。
+
 ## 逻辑区块和物理来源
 
 | 表 | 关键字段 | 说明 |

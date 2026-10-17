@@ -2111,6 +2111,21 @@ impl StreamStore for Backend {
     async fn finish(&self, stream: Uuid, size: i64, etag: &str, checksums: Value) -> Result<bool> {
         Ok(sqlx::query("UPDATE streams SET size=?,etag=?,checksums=?,touched_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state='writing'").bind(size).bind(etag).bind(checksums).bind(stream).execute(&self.write).await?.rows_affected()==1)
     }
+
+    async fn learn_compression(
+        &self,
+        observation: crate::model::CompressionObservation,
+        node: Option<Uuid>,
+    ) -> Result<bool> {
+        observation.validate()?;
+        anyhow::ensure!(node.is_none(), "SQLite only supports single mode");
+        self.check_owner()?;
+        Ok(learn_compression(observation)
+            .execute(&self.write)
+            .await?
+            .rows_affected()
+            == 1)
+    }
 }
 
 // Include the exact partial-index predicate so SQLite can use the dedup index.
@@ -2430,6 +2445,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for StoredStream {
             metadata: row.try_get("metadata")?,
             public_read: row.try_get("public_read")?,
             checksums: row.try_get("checksums")?,
+            http_compression: row.try_get("http_compression")?,
             created_at: date(row, "created_at")?,
             touched_at: date(row, "touched_at")?,
         })
@@ -2870,8 +2886,15 @@ pub(super) fn publish_object(stream: &StoredStream) -> Statement<'_> {
 }
 
 pub(super) fn publish_stream(id: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE streams SET state='ready',touched_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=?")
+    sqlx::query("UPDATE streams AS s SET state='ready',touched_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),http_compression=CASE WHEN stream_type='object' THEN (SELECT CASE WHEN COALESCE(sum(e.length),0)=s.size THEN json_object('estimated_size',COALESCE(sum(CASE WHEN e.source_offset=0 AND e.length=c.raw_size AND c.pack_id IS NULL AND COALESCE(l.standalone_size,c.standalone_size) IS NOT NULL THEN COALESCE(l.standalone_size,c.standalone_size) ELSE e.length END),0)) ELSE '{}' END FROM extents e LEFT JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE e.stream_id=s.id) ELSE '{}' END WHERE id=?")
         .bind(id)
+}
+
+pub(super) fn learn_compression(
+    observation: crate::model::CompressionObservation,
+) -> Statement<'static> {
+    sqlx::query("UPDATE streams SET http_compression=json_set(CASE WHEN COALESCE(json_extract(http_compression,'$.version'),0)<? THEN CASE WHEN json_type(http_compression,'$.estimated_size')='integer' AND json_extract(http_compression,'$.estimated_size')>=0 THEN json_object('version',?,'estimated_size',json_extract(http_compression,'$.estimated_size')) ELSE json_object('version',?) END ELSE http_compression END,?,?) WHERE id=? AND state='ready' AND COALESCE(json_extract(http_compression,'$.version'),0)<=? AND (COALESCE(json_extract(http_compression,'$.version'),0)<? OR json_type(http_compression,?) IS NULL) AND EXISTS(SELECT 1 FROM mokyu_meta WHERE id=1 AND NOT maintenance)")
+        .bind(observation.version).bind(observation.version).bind(observation.version).bind(format!("$.{}",observation.encoding)).bind(observation.size).bind(observation.stream).bind(observation.version).bind(observation.version).bind(format!("$.{}",observation.encoding))
 }
 
 pub(super) fn retire_stream(id: Uuid) -> Statement<'static> {

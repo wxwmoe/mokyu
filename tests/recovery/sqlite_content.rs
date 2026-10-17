@@ -175,10 +175,7 @@ async fn sqlite_content_contract() -> Result<()> {
     );
 
     // Publication remains a separate transaction; this fixture exposes its stored stream.
-    sqlx::query("UPDATE streams SET state='ready' WHERE id=?")
-        .bind(first)
-        .execute(db)
-        .await?;
+    super::queries::publish_stream(first).execute(db).await?;
     sqlx::query("UPDATE objects SET stream_id=? WHERE bucket_id=? AND object_key=?")
         .bind(first)
         .bind(bucket)
@@ -186,6 +183,12 @@ async fn sqlite_content_contract() -> Result<()> {
         .execute(db)
         .await?;
     assert_eq!(backend.current(bucket, &key).await?.object_key, key);
+    assert_eq!(
+        backend.current(bucket, &key).await?.http_compression,
+        json!({"estimated_size":64})
+    );
+    sqlx::query("UPDATE streams SET http_compression=json_object('version',1,'estimated_size',64,'future',5) WHERE id=?").bind(first).execute(db).await?;
+    crate::model::stream::compression_tests::check(&backend, bucket, &key).await?;
     assert!(backend.current(bucket, key.trim_end()).await.is_err());
     assert!(
         backend
@@ -336,6 +339,24 @@ async fn sqlite_content_contract() -> Result<()> {
         .execute(db)
         .await?;
     assert!(backend.can_stage_reuse(physical.id).await?);
+    super::queries::publish_stream(first).execute(db).await?;
+    assert_eq!(
+        backend.current(bucket, &key).await?.http_compression,
+        json!({"estimated_size":64})
+    );
+    sqlx::query("UPDATE streams SET size=4104 WHERE id=?")
+        .bind(sliced)
+        .execute(db)
+        .await?;
+    super::queries::publish_stream(sliced).execute(db).await?;
+    let estimated: String = sqlx::query_scalar("SELECT http_compression FROM streams WHERE id=?")
+        .bind(sliced)
+        .fetch_one(db)
+        .await?;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&estimated)?,
+        json!({"estimated_size":4104})
+    );
     backend.check_owner()?;
     backend.read.close().await;
     backend.write.close().await;

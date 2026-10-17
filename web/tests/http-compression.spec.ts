@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test'
 
-test('static variants survive browser revalidation and coding changes', async ({ page, context, baseURL }) => {
+for (const subject of ['static', 'object']) {
+test(`${subject} variants survive browser revalidation and coding changes`, async ({ page, context, baseURL }) => {
+  test.skip(subject === 'object' && !process.env.MOKYU_TEST_HTTP_OBJECT, 'requires a public text object URL')
   const network = await context.newCDPSession(page)
   await network.send('Network.enable')
   const responses: { url: string, status: number, encoding: string, etag: string }[] = []
@@ -11,10 +13,16 @@ test('static variants survive browser revalidation and coding changes', async ({
     responses.push({ url: requests.get(event.requestId) || '', status: event.statusCode,
       encoding: headers['content-encoding'] || 'identity', etag: headers.etag || '' })
   })
-  await page.goto('/')
-  const path = await page.locator('script[src^="/assets/"]').first().getAttribute('src')
-  expect(path).toBeTruthy()
-  const target = new URL(path!, baseURL).href + '?compression-test'
+  let target: string
+  if (subject === 'object') {
+    target = process.env.MOKYU_TEST_HTTP_OBJECT! + '?compression-test'
+    await page.goto(target)
+  } else {
+    await page.goto('/')
+    const path = await page.locator('script[src^="/assets/"]').first().getAttribute('src')
+    expect(path).toBeTruthy()
+    target = new URL(path!, baseURL).href + '?compression-test'
+  }
   let original = ''
   for (const encoding of ['zstd', 'br', 'gzip', 'identity', 'zstd', 'identity']) {
     await network.send('Network.setExtraHTTPHeaders', { headers: { 'Accept-Encoding': encoding } })
@@ -38,3 +46,4 @@ test('static variants survive browser revalidation and coding changes', async ({
   expect(observed.some(response => response.status === 304 && !response.etag.startsWith('W/'))).toBeTruthy()
   expect(observed.some(response => response.status === 200 && response.encoding === 'identity')).toBeTruthy()
 })
+}

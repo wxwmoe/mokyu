@@ -16,6 +16,8 @@
 
 可压缩的内嵌资源同时保存 gzip、Brotli 和 Zstandard 构建产物，按 `Accept-Encoding` 的 q 值选择，同权重时依次优先 zstd、br、gzip、identity。未提供或为空时返回原始表示；原始 ETag 为强标签，压缩变体使用同值弱标签，并发送 `Vary: Accept-Encoding`。公开 OpenAPI JSON 使用有界流式压缩，其余管理 API 保持原有响应与缓存策略。
 
+公共 Web 和匿名 S3 对象也可流式协商这三种编码，签名请求保持原始表示；收益、ETag、Range 和条件请求规则见 [S3 兼容性](s3-compatibility.md#公共响应压缩)。编码与普通磁盘缓存填充共用现有工作内存预算，额度不足时优先保证原始读写。压缩收益通过有界内存队列回写，重启或停机可丢弃待学习统计；`cli status` 的 `http_compression` 展示 pending/written/dropped/failed 计数。
+
 独立前端使用 [web](../web/README.md) 的 `dist/`，将 `/api/v1/` 同源反代至管理端口，只有前端页面使用 SPA fallback。管理 Origin 必须是浏览器实际访问的地址；管理 API 不应缓存，也不使用桶的 CORS 规则。首次设置、头像与安全头要求与内嵌部署相同。
 
 下文使用默认镜像。[Compose 示例](../compose.yaml) 使用随源码维护的版本标签；选择 Alpine 时需相应调整服务的 `image`。

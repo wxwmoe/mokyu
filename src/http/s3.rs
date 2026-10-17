@@ -1,4 +1,4 @@
-use super::errors::{HttpError, unauthorized};
+use super::errors::HttpError;
 use super::public::cors_headers;
 use crate::{
     app::{App, Bucket, Metadata},
@@ -22,6 +22,8 @@ pub async fn s3_http(
     request: hyper::Request<hyper::body::Incoming>,
     controls: Arc<tokio::sync::Semaphore>,
 ) -> s3s::HttpResponse {
+    let head = request.method() == Method::HEAD;
+    let read = head || request.method() == Method::GET;
     let aws_chunked = request
         .headers()
         .get("x-amz-content-sha256")
@@ -227,6 +229,19 @@ pub async fn s3_http(
             .expect("static S3 error");
     }
     super::compression::merge(response.headers_mut(), cors);
+    if read {
+        super::compression::vary(
+            response.headers_mut(),
+            "Accept-Encoding, Authorization, X-Amz-Checksum-Mode",
+        );
+    }
+    if head
+        && response.headers().contains_key("content-encoding")
+        && !response.headers().contains_key("content-length")
+    {
+        *response.body_mut() =
+            s3s::Body::from(super::object::blob(Box::pin(futures_util::stream::empty())));
+    }
     response
 }
 pub fn decode_path(path: &str) -> Result<String> {
@@ -278,6 +293,27 @@ pub(crate) async fn respond(
     method: Method,
     options: ReadOptions,
 ) -> Result<Response, HttpError> {
+    if options.public {
+        let read = super::object::read(
+            &app,
+            bucket,
+            key,
+            &headers,
+            method == Method::HEAD,
+            &HeaderMap::new(),
+            false,
+        )
+        .await?;
+        let mut response = Response::new(match read.body {
+            Some(body) => Body::new(s3s::Body::from(body)),
+            None => {
+                Body::from_stream(futures_util::stream::empty::<std::io::Result<bytes::Bytes>>())
+            }
+        });
+        *response.status_mut() = read.status;
+        *response.headers_mut() = read.headers;
+        return Ok(response);
+    }
     let etag = |name: &str| {
         headers
             .get(name)
@@ -303,9 +339,6 @@ pub(crate) async fn respond(
         (s, Some(pin))
     };
     loop {
-        if options.public && !s.public_read {
-            return Err(unauthorized());
-        }
         if options.version.is_some_and(|id| id != s.id) {
             return Err(s3s::s3_error!(PreconditionFailed).into());
         }

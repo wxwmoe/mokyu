@@ -6,6 +6,10 @@ mod queries;
 mod transactions;
 
 #[cfg(test)]
+#[path = "../../../../tests/recovery/postgres_compression.rs"]
+mod compression_tests;
+
+#[cfg(test)]
 #[path = "../../../../tests/recovery/task_claim.rs"]
 mod task_tests;
 

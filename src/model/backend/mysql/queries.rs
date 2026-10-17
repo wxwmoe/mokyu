@@ -4595,8 +4595,19 @@ pub(super) fn publish_object(stream: &StoredStream) -> Statement<'_> {
     sqlx::query("UPDATE objects SET stream_id=?,catalog_size=?,catalog_modified=?,catalog_type=?,catalog_category=?,catalog_public=? WHERE bucket_id=? AND object_key=?").bind(stream.id).bind(stream.size).bind(stream.created_at).bind(mime).bind(catalog_category(&stream.object_key,mime)).bind(stream.public_read).bind(stream.bucket_id).bind(stream.object_key.as_bytes())
 }
 pub(super) fn publish_stream(id: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE streams SET state='ready',touched_at=CURRENT_TIMESTAMP(6) WHERE id=?")
+    sqlx::query("UPDATE streams s SET state='ready',touched_at=CURRENT_TIMESTAMP(6),http_compression=CASE WHEN stream_type='object' THEN (SELECT CASE WHEN COALESCE(sum(e.length),0)=s.size THEN JSON_OBJECT('estimated_size',CAST(COALESCE(sum(CASE WHEN e.source_offset=0 AND e.length=c.raw_size AND c.pack_id IS NULL AND COALESCE(l.standalone_size,c.standalone_size) IS NOT NULL THEN COALESCE(l.standalone_size,c.standalone_size) ELSE e.length END),0) AS SIGNED)) ELSE JSON_OBJECT() END FROM extents e LEFT JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE e.stream_id=s.id) ELSE JSON_OBJECT() END WHERE id=?")
         .bind(id)
+}
+
+pub(super) fn compression_writable() -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT NOT maintenance FROM mokyu_meta WHERE id=1 LOCK IN SHARE MODE")
+}
+
+pub(super) fn learn_compression(
+    observation: crate::model::CompressionObservation,
+) -> Statement<'static> {
+    sqlx::query("UPDATE streams SET http_compression=JSON_SET(CASE WHEN COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(http_compression,'$.version')) AS SIGNED),0)<? THEN CASE WHEN CAST(JSON_TYPE(JSON_EXTRACT(http_compression,'$.estimated_size')) AS BINARY)='INTEGER' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(http_compression,'$.estimated_size')) AS SIGNED)>=0 THEN JSON_OBJECT('version',?,'estimated_size',CAST(JSON_UNQUOTE(JSON_EXTRACT(http_compression,'$.estimated_size')) AS SIGNED)) ELSE JSON_OBJECT('version',?) END ELSE http_compression END,?,?) WHERE id=? AND state='ready' AND COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(http_compression,'$.version')) AS SIGNED),0)<=? AND (COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(http_compression,'$.version')) AS SIGNED),0)<? OR NOT JSON_CONTAINS_PATH(http_compression,'one',?))")
+        .bind(observation.version).bind(observation.version).bind(observation.version).bind(format!("$.{}",observation.encoding)).bind(observation.size).bind(observation.stream).bind(observation.version).bind(observation.version).bind(format!("$.{}",observation.encoding))
 }
 pub(super) fn retire_stream(id: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE streams SET state='retired',touched_at=CURRENT_TIMESTAMP(6) WHERE id=?")
@@ -4716,6 +4727,17 @@ impl StreamStore for Backend {
     }
     async fn finish(&self, stream: Uuid, size: i64, etag: &str, checksums: Value) -> Result<bool> {
         Ok(sqlx::query("UPDATE streams SET size=?,etag=?,checksums=?,touched_at=CURRENT_TIMESTAMP(6) WHERE id=? AND state='writing'").bind(size).bind(etag).bind(checksums).bind(stream).execute(&self.pool).await?.rows_affected()==1)
+    }
+
+    async fn learn_compression(
+        &self,
+        observation: crate::model::CompressionObservation,
+        node: Option<Uuid>,
+    ) -> Result<bool> {
+        observation.validate()?;
+        anyhow::ensure!(node.is_none(), "MySQL only supports single mode");
+        self.check_owner().await?;
+        transactions::learn_compression(&self.pool, observation).await
     }
 }
 
@@ -5033,6 +5055,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for StoredStream {
             metadata: row.try_get("metadata")?,
             public_read: row.try_get("public_read")?,
             checksums: row.try_get("checksums")?,
+            http_compression: row.try_get("http_compression")?,
             created_at: row.try_get("created_at")?,
             touched_at: row.try_get("touched_at")?,
         })

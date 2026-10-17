@@ -9,3 +9,4 @@ pub(crate) use public::{
 };
 pub(crate) use s3::{ReadOptions, decode_path, respond, s3_http};
 pub(crate) mod compression;
+pub(crate) mod object;

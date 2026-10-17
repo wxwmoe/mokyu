@@ -983,6 +983,19 @@ impl StreamStore for Backend {
     async fn finish(&self, stream: Uuid, size: i64, etag: &str, checksums: Value) -> Result<bool> {
         finish_stream(&self.pool, stream, size, etag, checksums).await
     }
+
+    async fn learn_compression(
+        &self,
+        observation: crate::model::CompressionObservation,
+        node: Option<Uuid>,
+    ) -> Result<bool> {
+        observation.validate()?;
+        Ok(queries::learn_compression(observation, node)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            == 1)
+    }
 }
 
 pub(super) async fn current_stream(

@@ -160,10 +160,7 @@ async fn mysql_content_contract() -> Result<()> {
     );
 
     // Publication remains a separate transaction; this fixture exposes its stored stream.
-    sqlx::query("UPDATE streams SET state='ready' WHERE id=?")
-        .bind(first)
-        .execute(db)
-        .await?;
+    super::queries::publish_stream(first).execute(db).await?;
     sqlx::query("UPDATE objects SET stream_id=? WHERE bucket_id=? AND object_key=?")
         .bind(first)
         .bind(bucket)
@@ -171,6 +168,12 @@ async fn mysql_content_contract() -> Result<()> {
         .execute(db)
         .await?;
     assert_eq!(backend.current(bucket, &key).await?.object_key, key);
+    assert_eq!(
+        backend.current(bucket, &key).await?.http_compression,
+        json!({"estimated_size":64})
+    );
+    sqlx::query("UPDATE streams SET http_compression=JSON_OBJECT('version',1,'estimated_size',64,'future',5) WHERE id=?").bind(first).execute(db).await?;
+    crate::model::stream::compression_tests::check(&backend, bucket, &key).await?;
     assert!(backend.current(bucket, key.trim_end()).await.is_err());
     assert!(
         backend
@@ -321,6 +324,23 @@ async fn mysql_content_contract() -> Result<()> {
         .execute(db)
         .await?;
     assert!(backend.can_stage_reuse(physical.id).await?);
+    // Packed members are charged once per extent at raw size, never as the whole pack.
+    super::queries::publish_stream(first).execute(db).await?;
+    assert_eq!(
+        backend.current(bucket, &key).await?.http_compression,
+        json!({"estimated_size":64})
+    );
+    sqlx::query("UPDATE streams SET size=4104 WHERE id=?")
+        .bind(sliced)
+        .execute(db)
+        .await?;
+    super::queries::publish_stream(sliced).execute(db).await?;
+    let estimated: serde_json::Value =
+        sqlx::query_scalar("SELECT http_compression FROM streams WHERE id=?")
+            .bind(sliced)
+            .fetch_one(db)
+            .await?;
+    assert_eq!(estimated, json!({"estimated_size":4104}));
     backend.check_owner().await?;
     backend.pool.close().await;
     Ok(())

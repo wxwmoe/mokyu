@@ -52,11 +52,8 @@ pub fn if_range_matches(s: &StoredStream, headers: &hyper::HeaderMap) -> bool {
     if let Ok(tag) = ETag::parse_http_header(value.as_bytes()) {
         return tag.strong_cmp(&ETag::Strong(s.etag.clone()));
     }
-    value
-        .to_str()
-        .ok()
-        .and_then(|s| Timestamp::parse(TimestampFormat::HttpDate, s).ok())
-        .is_some_and(|t| stamp(s.touched_at) <= t)
+    // A key can be replaced twice within one second; its Last-Modified is not a strong validator.
+    false
 }
 pub fn http_date(t: Timestamp) -> Result<String> {
     let mut text = Vec::new();
@@ -481,6 +478,57 @@ impl S3 for Gateway {
                 return Err(s3_error!(NotImplemented, "versioning is unsupported").into());
             }
             let b = self.read_bucket(&i.bucket, &req.extensions).await?;
+            if req.credentials.is_none() {
+                let mut overrides = hyper::HeaderMap::new();
+                for (name, value) in [
+                    ("content-type", i.response_content_type),
+                    ("content-disposition", i.response_content_disposition),
+                    ("content-encoding", i.response_content_encoding),
+                    ("content-language", i.response_content_language),
+                    ("cache-control", i.response_cache_control),
+                    ("expires", i.response_expires.map(http_date).transpose()?),
+                ] {
+                    if let Some(value) = value {
+                        overrides
+                            .insert(hyper::header::HeaderName::from_static(name), value.parse()?);
+                    }
+                }
+                let read = super::object::read(
+                    &self.0,
+                    b.id,
+                    &i.key,
+                    &req.headers,
+                    false,
+                    &overrides,
+                    i.checksum_mode.is_some(),
+                )
+                .await?;
+                if read.status == hyper::StatusCode::NOT_MODIFIED {
+                    let mut error = s3_error!(NotModified);
+                    error.set_headers(read.headers);
+                    return Err(error.into());
+                }
+                let mut out = GetObjectOutput {
+                    body: read.body,
+                    metadata: read.metadata.user,
+                    content_range: read
+                        .headers
+                        .get("content-range")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned),
+                    ..Default::default()
+                };
+                if i.checksum_mode.is_some()
+                    && !read.partial
+                    && read.status != hyper::StatusCode::NOT_MODIFIED
+                {
+                    checksums!(out, &read.checksums);
+                    out.checksum_type = checksum(&read.checksums, "type").map(ChecksumType::from);
+                }
+                let mut response = S3Response::new(out);
+                response.headers = read.headers;
+                return Ok(response);
+            }
             let light = i.if_match.is_some()
                 || i.if_none_match.is_some()
                 || i.if_modified_since.is_some()
@@ -571,6 +619,37 @@ impl S3 for Gateway {
                 return Err(s3_error!(NotImplemented, "versioning is unsupported").into());
             }
             let b = self.read_bucket(&i.bucket, &req.extensions).await?;
+            if req.credentials.is_none() {
+                let read = super::object::read(
+                    &self.0,
+                    b.id,
+                    &i.key,
+                    &req.headers,
+                    true,
+                    &hyper::HeaderMap::new(),
+                    i.checksum_mode.is_some(),
+                )
+                .await?;
+                if read.status == hyper::StatusCode::NOT_MODIFIED {
+                    let mut error = s3_error!(NotModified);
+                    error.set_headers(read.headers);
+                    return Err(error.into());
+                }
+                let mut out = HeadObjectOutput {
+                    metadata: read.metadata.user,
+                    ..Default::default()
+                };
+                if i.checksum_mode.is_some()
+                    && !read.partial
+                    && read.status != hyper::StatusCode::NOT_MODIFIED
+                {
+                    checksums!(out, &read.checksums);
+                    out.checksum_type = checksum(&read.checksums, "type").map(ChecksumType::from);
+                }
+                let mut response = S3Response::new(out);
+                response.headers = read.headers;
+                return Ok(response);
+            }
             let s = self.0.metadata(b.id, &i.key).await?;
             if req.credentials.is_some() || !s.public_read {
                 self.0

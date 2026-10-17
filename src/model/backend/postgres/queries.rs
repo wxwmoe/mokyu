@@ -542,7 +542,15 @@ pub(super) fn publish_object<'q>(bucket: Uuid, key: &'q str, stream: Uuid) -> St
 }
 
 pub(super) fn publish_stream(id: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE streams SET state='ready',touched_at=now() WHERE id=$1").bind(id)
+    sqlx::query("UPDATE streams s SET state='ready',touched_at=now(),http_compression=CASE WHEN stream_type='object' THEN (SELECT CASE WHEN COALESCE(sum(e.length),0)=s.size THEN jsonb_build_object('estimated_size',COALESCE(sum(CASE WHEN e.source_offset=0 AND e.length=c.raw_size AND c.pack_id IS NULL AND COALESCE(l.standalone_size,c.standalone_size) IS NOT NULL THEN COALESCE(l.standalone_size,c.standalone_size) ELSE e.length END),0)) ELSE '{}'::jsonb END FROM extents e LEFT JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE e.stream_id=s.id) ELSE '{}'::jsonb END WHERE id=$1").bind(id)
+}
+
+pub(super) fn learn_compression(
+    observation: crate::model::CompressionObservation,
+    node: Option<Uuid>,
+) -> Statement<'static> {
+    sqlx::query("WITH allowed AS MATERIALIZED (SELECT 1 FROM mokyu_meta WHERE singleton AND NOT maintenance AND deployment_mode=CASE WHEN $5::uuid IS NULL THEN 'single' ELSE 'cluster' END FOR SHARE), active_node AS MATERIALIZED (SELECT 1 FROM nodes WHERE id=$5 AND enabled AND role='data' FOR SHARE) UPDATE streams SET http_compression=jsonb_set(CASE WHEN COALESCE((http_compression->>'version')::bigint,0)<$2 THEN jsonb_strip_nulls(jsonb_build_object('version',$2::bigint,'estimated_size',CASE WHEN jsonb_typeof(http_compression->'estimated_size')='number' AND (http_compression->>'estimated_size') ~ '^[0-9]+$' THEN CASE WHEN (http_compression->>'estimated_size')::numeric<=9223372036854775807 THEN http_compression->'estimated_size' END END)) ELSE http_compression END,ARRAY[$3::text],to_jsonb($4::bigint)) WHERE id=$1 AND state='ready' AND COALESCE((http_compression->>'version')::bigint,0)<=$2 AND (COALESCE((http_compression->>'version')::bigint,0)<$2 OR NOT http_compression ? $3) AND EXISTS(SELECT 1 FROM allowed) AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM active_node))")
+        .bind(observation.stream).bind(i64::from(observation.version)).bind(observation.encoding).bind(observation.size).bind(node)
 }
 
 pub(super) fn retire_stream(id: Uuid) -> Statement<'static> {
@@ -7170,6 +7178,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::app::StoredStream {
             metadata: row.try_get("metadata")?,
             public_read: row.try_get("public_read")?,
             checksums: row.try_get("checksums")?,
+            http_compression: row.try_get("http_compression")?,
             created_at: row.try_get("created_at")?,
             touched_at: row.try_get("touched_at")?,
         })
