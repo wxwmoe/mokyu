@@ -13,6 +13,10 @@ export function useInsights() {
   return { scope, query, statistics }
 }
 export const metric = (value: string | null | undefined) => value == null ? null : Number(value)
+export function requestHistory(runtime: Runtime | undefined) {
+  if (runtime?.scope === 'cluster') return [...(runtime.cluster?.history || []), ...(runtime.cluster?.current ? [runtime.cluster.current] : [])].map(p => ({ at: p.at, epoch: `${p.rate_nodes}/${p.expected_nodes}`, value: p.rates?.requests ?? null }))
+  return (runtime?.history || []).map((p, i, all) => { const previous = all[i - 1], seconds = previous ? (new Date(p.at).getTime() - new Date(previous.at).getTime()) / 1000 : 0; return { at: p.at, epoch: p.epoch, value: previous?.epoch === p.epoch && seconds > 0 && Number(p.requests) >= Number(previous.requests) ? (Number(p.requests) - Number(previous.requests)) / seconds : null } })
+}
 export function taskTone(taskType: string) {
   if (['gc', 'cleanup', 'purge', 'sweep', 'reclaim', 'pack_reclaim'].includes(taskType)) return 'mint'
   if (['integrity', 'range', 'pack_range'].includes(taskType)) return 'sky'

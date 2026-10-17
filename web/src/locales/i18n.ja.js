@@ -767,4 +767,9 @@ export default {
   clusterAvailable: "{count} 台が正常稼働を報告",
   clusterSearchNodes: "ノード名を検索",
   clusterLoadedAt: "設定の読み込み日時：{time}",
+  clusterCoverage: "対象 {expected} 台中 {reported} 台から取得",
+  clusterRateCoverage: "速率の対象は {count} 台です。基準値の欠落はゼロではありません。",
+  clusterCacheCopies: "ノードごとのキャッシュコピー",
+  clusterCacheCopiesHint: "報告済みノードのローカルコピーの合計です。デプロイの一意なデータ量ではありません。アップロードとブロックキャッシュは重複する場合があります。",
+  clusterSampleWindow: "直近の取得期間",
 }

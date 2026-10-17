@@ -4948,6 +4948,9 @@ async fn collect_usage(
 
 pub(super) async fn read_runtime(pool: &PgPool, principal: &Principal) -> Result<RuntimeHistory> {
     let mut tx = pool.begin().await?;
+    queries::runtime_diagnostic_limits()
+        .execute(&mut *tx)
+        .await?;
     principal.lock_admin(&mut tx).await?;
     let history: Vec<sqlx::types::Json<RuntimePoint>> =
         queries::runtime_history().fetch_all(&mut *tx).await?;
@@ -5795,5 +5798,86 @@ pub(super) async fn finish_task(pool: &PgPool, input: crate::model::TaskFinish) 
         }
     }
     tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn sample_node_runtime(
+    pool: &PgPool,
+    state: &crate::cluster::NodeState,
+    role: &str,
+    key: &crate::content::codec::Key,
+    sample: &crate::model::metrics::NodeSample,
+) -> Result<bool> {
+    sample.validate()?;
+    let mut tx = pool.begin().await?;
+    queries::runtime_diagnostic_limits()
+        .execute(&mut *tx)
+        .await?;
+    validate_node(&mut tx, state, role, key).await?;
+    let changed = queries::node_runtime_sample(state.node_id, sample)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        == 1;
+    tx.commit().await?;
+    Ok(changed)
+}
+pub(super) async fn aggregate_runtime(pool: &PgPool, interval: u64, retention: u64) -> Result<()> {
+    use crate::model::metrics::{NodeRuntimePoint, aggregate_runtime};
+    let mut tx = pool.begin().await?;
+    queries::runtime_diagnostic_limits()
+        .execute(&mut *tx)
+        .await?;
+    if !queries::runtime_aggregate_lock()
+        .fetch_one(&mut *tx)
+        .await?
+    {
+        return Ok(());
+    }
+    let (at, expected, due) = queries::runtime_aggregate_due(interval as f64)
+        .fetch_one(&mut *tx)
+        .await?;
+    if due {
+        let rows =
+            queries::runtime_node_window(interval.saturating_mul(3).saturating_add(30) as f64)
+                .fetch_all(&mut *tx)
+                .await?;
+        let expected = rows.first().map(|row| row.3).unwrap_or(expected);
+        let samples = rows
+            .into_iter()
+            .filter_map(|(id, at, sample, _)| {
+                Some(NodeRuntimePoint {
+                    node_id: id?,
+                    received_at: at?,
+                    sample: sample?.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let point = aggregate_runtime(at, expected, interval, &samples)?;
+        queries::cluster_runtime_sample(&point)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    if due {
+        // Commit each bounded cleanup batch so a deadline cannot undo useful progress.
+        for _ in 0..8 {
+            let mut tx = pool.begin().await?;
+            queries::runtime_diagnostic_limits()
+                .execute(&mut *tx)
+                .await?;
+            let removed = queries::node_runtime_expire(retention as f64)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            queries::cluster_runtime_expire(retention as f64)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            if removed < 1000 {
+                break;
+            }
+        }
+    }
     Ok(())
 }

@@ -105,6 +105,10 @@ mod bootstrap_tests;
 #[path = "../../../../tests/recovery/node_reports.rs"]
 mod node_report_tests;
 
+#[cfg(test)]
+#[path = "../../../../tests/recovery/node_runtime.rs"]
+mod node_runtime_tests;
+
 fn stores(backend: Arc<Backend>) -> crate::model::Stores {
     crate::model::Stores {
         runtime: backend.clone(),

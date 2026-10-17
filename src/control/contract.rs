@@ -97,6 +97,7 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::cluster::settings))
         .routes(routes!(super::cluster::node_status))
         .routes(routes!(super::cluster::node_config))
+        .routes(routes!(super::cluster::node_runtime))
         .routes(routes!(super::cluster::release))
         .routes(routes!(super::cluster::recover))
         .routes(routes!(super::tasks::start_integrity))

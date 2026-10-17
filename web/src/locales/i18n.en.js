@@ -767,4 +767,9 @@ export default {
   clusterAvailable: "{count} reporting normal work",
   clusterSearchNodes: "Search node names",
   clusterLoadedAt: "Configuration loaded at {time}",
+  clusterCoverage: "Samples from {reported} / {expected} expected nodes",
+  clusterRateCoverage: "Rates cover {count} nodes; missing baselines are not zero.",
+  clusterCacheCopies: "Cache copies across nodes",
+  clusterCacheCopiesHint: "Sum of reported node-local copies, not unique deployment data. Upload and chunk cache areas can overlap.",
+  clusterSampleWindow: "Latest sampling window",
 }

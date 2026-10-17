@@ -53,6 +53,7 @@ pub(super) struct StorageInsights {
 #[derive(Serialize, ToSchema)]
 pub(super) struct RuntimeInsights {
     scope: &'static str,
+    cluster: Option<crate::model::metrics::ClusterRuntime>,
     current: Option<RuntimePoint>,
     history: Vec<RuntimePoint>,
     work: Vec<WorkSummary>,
@@ -137,20 +138,45 @@ async fn runtime_point(app: &App) -> Result<RuntimePoint> {
         rss_bytes: memory["rss_bytes"].as_u64().map(|v| v.to_string()),
     })
 }
-#[utoipa::path(get,operation_id="runtime_insights",path="/api/v1/usage/runtime",responses((status=200,body=RuntimeInsights)))]
+#[utoipa::path(get,operation_id="runtime_insights",path="/api/v1/usage/runtime",params(crate::model::metrics::RuntimeQuery),responses((status=200,body=RuntimeInsights)))]
 pub(super) async fn runtime(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
+    Query(query): Query<crate::model::metrics::RuntimeQuery>,
 ) -> Result<Json<RuntimeInsights>, HttpError> {
+    query
+        .validate()
+        .map_err(|_| s3s::s3_error!(InvalidArgument))?;
     let crate::model::metrics::RuntimeHistory {
-        history,
+        mut history,
         work,
         pending_entries,
         pending_bytes,
         oldest_pending,
         failed_uploads,
     } = app.metrics.runtime(&actor.principal).await?;
+    let cluster = if app.role == "single" {
+        None
+    } else {
+        let mut history = app.cluster()?.cluster_runtime(&query).await?;
+        let current = history.pop();
+        let stale = current.as_ref().is_none_or(|p| {
+            Utc::now().signed_duration_since(p.at).num_seconds()
+                > config::seconds(&app.config.metrics.runtime_interval)
+                    .unwrap_or(60)
+                    .saturating_mul(2)
+                    .saturating_add(30) as i64
+        });
+        Some(crate::model::metrics::ClusterRuntime {
+            current,
+            history,
+            stale,
+        })
+    };
+    history.retain(|p| p.at >= Utc::now() - chrono::Duration::hours(i64::from(query.hours)));
+    history.drain(..history.len().saturating_sub(query.limit as usize));
     Ok(Json(RuntimeInsights {
+        cluster,
         scope: if app.role == "single" {
             "single"
         } else {

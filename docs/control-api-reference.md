@@ -316,3 +316,9 @@ metadata 检查对象映射与区块身份，head 增加存储存在性和长度
 | `GET /api/v1/cluster/settings` | sections 的生效计数和可分页 nodes；筛选方式与节点列表一致 |
 
 节点查询用稳定 id；原释放接口仍以名称定位。`configuration` 为 applied/equivalent/restart_required/unknown；分组 settings 还可能为 not_applicable。equivalent 表示当前适用值相同但修订不同。`report_fresh=false` 的快照仍可查看，不能据此认定当前运行状态。`sampled_at` 是采集时刻，`received_at` 由数据库记录；任务清单查询当前数据库，不属于历史快照。
+
+### 运行历史
+
+`GET /api/v1/usage/runtime` 返回明确的 `scope`。single 的 `current/history` 延续进程指标；cluster 的本机字段为 null/空数组，`cluster.current/history` 返回后台汇总、窗口开始时间、预期/报告/有效差分节点数、gauges 和 rates，`stale` 标示汇总过期。`cluster.current` 为最新点，history 为其之前的点；两者合计受 limit 限制。缺少节点或差分基线时不外推为整个群集。
+
+`GET /api/v1/cluster/nodes/{id}/runtime` 返回节点 history，包含 node_id、boot_id、sequence、数据库 received_at、单调 uptime_seconds、采样间隔和进程指标。两个接口都支持 `hours`（默认 24，1–168）和 `limit`（默认 2048，1–2048），只返回范围内最近的有限采样，按时间升序排列。群集查询使用主库、限制执行时间，只允许管理员读取，不要求近期密码重验。

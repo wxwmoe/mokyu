@@ -74,6 +74,23 @@ pub(crate) trait ClusterStore: Send + Sync {
     ) -> Result<Vec<super::node::SettingCount>>;
     async fn node_report(&self, id: Uuid) -> Result<Option<super::node::SavedReport>>;
     async fn node_tasks(&self, id: Uuid) -> Result<Vec<super::metrics::WorkSummary>>;
+    async fn sample_node_runtime(
+        &self,
+        state: &NodeState,
+        role: &str,
+        key: &Key,
+        sample: &super::metrics::NodeSample,
+    ) -> Result<bool>;
+    async fn aggregate_runtime(&self, interval: u64, retention: u64) -> Result<()>;
+    async fn cluster_runtime(
+        &self,
+        query: &super::metrics::RuntimeQuery,
+    ) -> Result<Vec<super::metrics::ClusterRuntimePoint>>;
+    async fn node_runtime(
+        &self,
+        id: Uuid,
+        query: &super::metrics::RuntimeQuery,
+    ) -> Result<Vec<super::metrics::NodeRuntimePoint>>;
     async fn begin_report(
         &self,
         state: &NodeState,

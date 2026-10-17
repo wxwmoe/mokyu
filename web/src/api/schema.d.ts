@@ -608,6 +608,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/cluster/nodes/{id}/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["cluster_node_runtime"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/cluster/nodes/{id}/status": {
         parameters: {
             query?: never;
@@ -1769,6 +1785,24 @@ export interface components {
             observed_at: string;
             settings: components["schemas"]["SettingCount"][];
         };
+        ClusterRuntime: {
+            current?: components["schemas"]["ClusterRuntimePoint"] | null;
+            history: components["schemas"]["ClusterRuntimePoint"][];
+            stale: boolean;
+        };
+        ClusterRuntimePoint: {
+            /** Format: date-time */
+            at: string;
+            /** Format: int64 */
+            expected_nodes: number;
+            gauges?: components["schemas"]["RuntimeGauges"] | null;
+            rate_nodes: number;
+            rates?: components["schemas"]["RuntimeRates"] | null;
+            reported_nodes: number;
+            scope: string;
+            /** Format: date-time */
+            window_start: string;
+        };
         ClusterSettings: {
             nodes: components["schemas"]["NodePage"];
             sections: components["schemas"]["SettingCount"][];
@@ -2103,6 +2137,34 @@ export interface components {
             items: components["schemas"]["NodeView"][];
             next_cursor?: string | null;
         };
+        NodeRuntime: {
+            history: components["schemas"]["NodeRuntimePoint"][];
+        };
+        NodeRuntimePoint: components["schemas"]["NodeSample"] & {
+            /** Format: uuid */
+            node_id: string;
+            /** Format: date-time */
+            received_at: string;
+        };
+        NodeSample: {
+            /** Format: uuid */
+            boot_id: string;
+            /** Format: int64 */
+            db_pool_idle: number;
+            /** Format: int64 */
+            db_pool_size: number;
+            /** Format: int64 */
+            interval_seconds: number;
+            point: components["schemas"]["RuntimePoint"];
+            /** Format: int64 */
+            queue_running: number;
+            /** Format: int64 */
+            queue_waiting: number;
+            /** Format: int64 */
+            sequence: number;
+            /** Format: int64 */
+            uptime_seconds: number;
+        };
         NodeStatus: {
             /** Format: uuid */
             boot_id?: string | null;
@@ -2370,7 +2432,21 @@ export interface components {
             key: string;
             value: string;
         };
+        RuntimeGauges: {
+            cache_bytes: string;
+            cache_limit: string;
+            db_pool_idle: string;
+            db_pool_size: string;
+            multipart_bytes: string;
+            queue_running: string;
+            queue_waiting: string;
+            rss_bytes?: string | null;
+            thumbnail_bytes: string;
+            upload_bytes: string;
+            upload_limit: string;
+        };
         RuntimeInsights: {
+            cluster?: components["schemas"]["ClusterRuntime"] | null;
             current?: components["schemas"]["RuntimePoint"] | null;
             failed_uploads: string;
             history: components["schemas"]["RuntimePoint"][];
@@ -2399,6 +2475,18 @@ export interface components {
             thumbnail_bytes: string;
             upload_bytes: string;
             upload_limit: string;
+        };
+        RuntimeRates: {
+            /** Format: double */
+            backend_read_bytes: number;
+            /** Format: double */
+            backend_write_bytes: number;
+            /** Format: double */
+            cache_hit_ratio?: number | null;
+            /** Format: double */
+            failed: number;
+            /** Format: double */
+            requests: number;
         };
         RuntimeSettingsPatch: {
             /** Format: int64 */
@@ -3997,6 +4085,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NodeConfig"];
+                };
+            };
+        };
+    };
+    cluster_node_runtime: {
+        parameters: {
+            query?: {
+                hours?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeRuntime"];
                 };
             };
         };
@@ -5760,7 +5872,10 @@ export interface operations {
     };
     runtime_insights: {
         parameters: {
-            query?: never;
+            query?: {
+                hours?: number;
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;

@@ -173,6 +173,30 @@ pub(crate) async fn node_config(
     }))
 }
 
+#[utoipa::path(get, operation_id="cluster_node_runtime", path="/api/v1/cluster/nodes/{id}/runtime", params(("id"=Uuid,Path),crate::model::metrics::RuntimeQuery), responses((status=200,body=crate::model::metrics::NodeRuntime)))]
+pub(crate) async fn node_runtime(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<crate::model::metrics::RuntimeQuery>,
+) -> Result<Json<crate::model::metrics::NodeRuntime>, HttpError> {
+    read_admin(&actor, &app).await?;
+    query
+        .validate()
+        .map_err(|_| s3s::s3_error!(InvalidArgument))?;
+    let cluster = app.cluster()?;
+    if cluster
+        .node(id, &crate::model::node::desired(&app).await?)
+        .await?
+        .is_none()
+    {
+        return Err(s3s::s3_error!(NoSuchKey).into());
+    }
+    Ok(Json(crate::model::metrics::NodeRuntime {
+        history: cluster.node_runtime(id, &query).await?,
+    }))
+}
+
 #[utoipa::path(post, operation_id = "cluster_release", path = "/api/v1/cluster/nodes/{name}/release", params(("name" = String, Path)), request_body = ReleaseInput, responses((status = 200), (status = 501, body = crate::control::contract::ErrorBody)))]
 pub(crate) async fn release(
     State(app): State<Arc<App>>,

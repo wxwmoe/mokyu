@@ -55,6 +55,10 @@ pub(crate) async fn run(app: Arc<App>, restricted: bool) -> Result<()> {
     };
     let mut sequence = 0i64;
     let mut sent_metadata = Value::Null;
+    let sample_interval = Duration::from_secs(crate::config::seconds(
+        &app.config.metrics.runtime_interval,
+    )?);
+    let mut sampled = None::<std::time::Instant>;
     loop {
         let result = tokio::time::timeout(Duration::from_secs(2), async {
             let (metadata, status) = collect(&app, restricted).await?;
@@ -73,6 +77,19 @@ pub(crate) async fn run(app: Arc<App>, restricted: bool) -> Result<()> {
                 .await?
             {
                 sent_metadata = metadata;
+                if sampled.is_none_or(|at| at.elapsed() >= sample_interval) {
+                    let sample = crate::model::metrics::NodeSample::from_report(
+                        &report,
+                        sample_interval.as_secs(),
+                    )?;
+                    if app
+                        .cluster()?
+                        .sample_node_runtime(state, &app.role, &app.secrets.credential_key, &sample)
+                        .await?
+                    {
+                        sampled = Some(std::time::Instant::now());
+                    }
+                }
             }
             Ok::<_, anyhow::Error>(())
         })
@@ -83,5 +100,23 @@ pub(crate) async fn run(app: Arc<App>, restricted: bool) -> Result<()> {
             Err(_) => tracing::warn!("node report timed out"),
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+}
+
+pub(crate) async fn aggregate(app: Arc<App>) -> Result<()> {
+    let interval = crate::config::seconds(&app.config.metrics.runtime_interval)?;
+    let retention = crate::config::seconds(&app.config.metrics.runtime_retention)?;
+    loop {
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            app.cluster()?.aggregate_runtime(interval, retention),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "cluster runtime aggregation failed"),
+            Err(_) => tracing::warn!("cluster runtime aggregation timed out"),
+        }
+        tokio::time::sleep(Duration::from_secs(interval)).await;
     }
 }

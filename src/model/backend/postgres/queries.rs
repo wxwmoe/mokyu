@@ -1,7 +1,7 @@
 //! PostgreSQL statements, row decoding, and nontransactional operations.
 use crate::model::task::{Execution, TaskFinish};
 
-use super::{Backend, connection, transactions};
+use super::{Backend, connection, normalize_error, transactions};
 use crate::app::{Bucket, Extent};
 use crate::authorization::{Action, Permit, Principal};
 use crate::content::codec::Chunk;
@@ -6315,7 +6315,7 @@ pub(super) fn usage_history_expire(retention: f64) -> Statement<'static> {
 
 pub(super) fn runtime_history() -> Scalar<'static, sqlx::types::Json<RuntimePoint>> {
     sqlx::query_scalar(
-        "SELECT data FROM (SELECT sampled_at,data FROM runtime_samples ORDER BY sampled_at DESC LIMIT 2048) h ORDER BY sampled_at",
+        "SELECT data FROM (SELECT sampled_at,data FROM runtime_samples WHERE data->>'scope' IS NULL AND (SELECT deployment_mode FROM mokyu_meta)='single' ORDER BY sampled_at DESC LIMIT 2048) h ORDER BY sampled_at",
     )
 }
 
@@ -7184,6 +7184,60 @@ impl ClusterStore for Backend {
             }),
         )
     }
+    async fn sample_node_runtime(
+        &self,
+        state: &crate::cluster::NodeState,
+        role: &str,
+        key: &crate::content::codec::Key,
+        sample: &crate::model::metrics::NodeSample,
+    ) -> Result<bool> {
+        transactions::sample_node_runtime(&self.pool, state, role, key, sample)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn aggregate_runtime(&self, interval: u64, retention: u64) -> Result<()> {
+        transactions::aggregate_runtime(&self.pool, interval, retention)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn cluster_runtime(
+        &self,
+        query: &crate::model::metrics::RuntimeQuery,
+    ) -> Result<Vec<crate::model::metrics::ClusterRuntimePoint>> {
+        query.validate()?;
+        let mut tx = self.pool.begin().await?;
+        runtime_diagnostic_limits().execute(&mut *tx).await?;
+        let rows = cluster_runtime_history(query)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| normalize_error(e.into()))?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+    async fn node_runtime(
+        &self,
+        id: Uuid,
+        query: &crate::model::metrics::RuntimeQuery,
+    ) -> Result<Vec<crate::model::metrics::NodeRuntimePoint>> {
+        query.validate()?;
+        let mut tx = self.pool.begin().await?;
+        runtime_diagnostic_limits().execute(&mut *tx).await?;
+        let rows = node_runtime_history(id, query)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| normalize_error(e.into()))?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(node_id, received_at, sample)| crate::model::metrics::NodeRuntimePoint {
+                    node_id,
+                    received_at,
+                    sample: sample.0,
+                },
+            )
+            .collect())
+    }
     async fn node_tasks(&self, id: Uuid) -> Result<Vec<crate::model::metrics::WorkSummary>> {
         Ok(sqlx::query_as("SELECT id,task_type,state,processed::text,updated_at FROM tasks WHERE lease_node_id=$1 AND state='running' ORDER BY updated_at DESC,id LIMIT 21").bind(id).fetch_all(&self.pool).await?)
     }
@@ -7963,4 +8017,66 @@ pub(super) fn lock_task_family(id: Uuid) -> Scalar<'static, Uuid> {
         "SELECT id FROM tasks WHERE id=$1 OR parent_task_id=$1 ORDER BY (id=$1),id FOR UPDATE",
     )
     .bind(id)
+}
+
+pub(super) fn runtime_diagnostic_limits() -> sqlx::RawSql {
+    sqlx::raw_sql(
+        "SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='100ms'; SET LOCAL work_mem='4MB'",
+    )
+}
+pub(super) fn runtime_aggregate_lock() -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(734922709851032)")
+}
+pub(super) fn runtime_aggregate_due(interval: f64) -> Rows<'static, (DateTime<Utc>, i64, bool)> {
+    sqlx::query_as("SELECT now(),(SELECT count(*) FROM nodes WHERE enabled),NOT EXISTS(SELECT 1 FROM runtime_samples WHERE data->>'scope'='cluster' AND sampled_at>now()-$1*interval '1 second')").bind(interval)
+}
+pub(super) fn node_runtime_sample<'a>(
+    id: Uuid,
+    sample: &'a crate::model::metrics::NodeSample,
+) -> Statement<'a> {
+    sqlx::query("INSERT INTO node_runtime_samples(node_id,boot_id,sequence,uptime_seconds,data) SELECT $1,$2,$3,$4,$5 FROM node_reports r WHERE r.node_id=$1 AND r.boot_id=$2 AND r.sequence>=$3 AND NOT EXISTS(SELECT 1 FROM node_runtime_samples s WHERE s.node_id=$1 AND s.boot_id=$2 AND (s.sequence>=$3 OR s.uptime_seconds>=$4)) ON CONFLICT DO NOTHING")
+        .bind(id).bind(sample.boot_id).bind(sample.sequence).bind(sample.uptime_seconds as i64).bind(sqlx::types::Json(sample))
+}
+type NodeRuntimeRow = (
+    Uuid,
+    DateTime<Utc>,
+    sqlx::types::Json<crate::model::metrics::NodeSample>,
+);
+pub(super) fn runtime_node_window(
+    seconds: f64,
+) -> Rows<
+    'static,
+    (
+        Option<Uuid>,
+        Option<DateTime<Utc>>,
+        Option<sqlx::types::Json<crate::model::metrics::NodeSample>>,
+        i64,
+    ),
+> {
+    // The cap bounds coordinator memory; omitted nodes remain in expected coverage.
+    sqlx::query_as("WITH members AS (SELECT id FROM nodes WHERE enabled AND last_seen_at>=now()-interval '30 seconds' ORDER BY id LIMIT 4096), samples AS (SELECT n.id,s.received_at,s.data,s.sequence FROM members n JOIN node_reports r ON r.node_id=n.id CROSS JOIN LATERAL (SELECT received_at,data,sequence FROM node_runtime_samples s WHERE s.node_id=n.id AND s.boot_id=r.boot_id AND s.received_at>=now()-$1*interval '1 second' ORDER BY received_at DESC,sequence DESC LIMIT 2) s) SELECT s.id,s.received_at,s.data,e.expected FROM (SELECT count(*) AS expected FROM nodes WHERE enabled) e LEFT JOIN samples s ON true ORDER BY s.id,s.received_at DESC,s.sequence DESC").bind(seconds)
+}
+pub(super) fn node_runtime_history(
+    id: Uuid,
+    query: &crate::model::metrics::RuntimeQuery,
+) -> Rows<'static, NodeRuntimeRow> {
+    sqlx::query_as("SELECT node_id,received_at,data FROM (SELECT node_id,received_at,sequence,data FROM node_runtime_samples WHERE node_id=$1 AND received_at>=now()-$2*interval '1 hour' ORDER BY received_at DESC,sequence DESC LIMIT $3) s ORDER BY received_at,sequence").bind(id).bind(f64::from(query.hours)).bind(query.limit)
+}
+pub(super) fn cluster_runtime_history(
+    query: &crate::model::metrics::RuntimeQuery,
+) -> Scalar<'static, sqlx::types::Json<crate::model::metrics::ClusterRuntimePoint>> {
+    sqlx::query_scalar("SELECT data FROM (SELECT sampled_at,data FROM runtime_samples WHERE data->>'scope'='cluster' AND sampled_at>=now()-$1*interval '1 hour' ORDER BY sampled_at DESC LIMIT $2) s ORDER BY sampled_at").bind(f64::from(query.hours)).bind(query.limit)
+}
+pub(super) fn cluster_runtime_sample(
+    point: &crate::model::metrics::ClusterRuntimePoint,
+) -> Statement<'_> {
+    sqlx::query("INSERT INTO runtime_samples(sampled_at,data) VALUES($1,$2) ON CONFLICT DO NOTHING")
+        .bind(point.at)
+        .bind(sqlx::types::Json(point))
+}
+pub(super) fn node_runtime_expire(retention: f64) -> Statement<'static> {
+    sqlx::query("DELETE FROM node_runtime_samples WHERE (node_id,boot_id,sequence) IN (SELECT node_id,boot_id,sequence FROM node_runtime_samples WHERE received_at<now()-$1*interval '1 second' ORDER BY received_at LIMIT 1000)").bind(retention)
+}
+pub(super) fn cluster_runtime_expire(retention: f64) -> Statement<'static> {
+    sqlx::query("DELETE FROM runtime_samples WHERE sampled_at IN (SELECT sampled_at FROM runtime_samples WHERE data->>'scope'='cluster' AND sampled_at<now()-$1*interval '1 second' ORDER BY sampled_at LIMIT 1000)").bind(retention)
 }

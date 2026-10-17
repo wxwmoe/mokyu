@@ -767,4 +767,9 @@ export default {
   clusterAvailable: "{count} 个报告工作正常",
   clusterSearchNodes: "搜索节点名称",
   clusterLoadedAt: "配置加载于 {time}",
+  clusterCoverage: "已采集 {reported} / {expected} 个预期节点",
+  clusterRateCoverage: "速率覆盖 {count} 个节点，缺少基线不视为零。",
+  clusterCacheCopies: "各节点缓存副本",
+  clusterCacheCopiesHint: "仅汇总已报告节点的本地副本，不代表部署唯一数据量；上传和区块缓存区域可能重叠。",
+  clusterSampleWindow: "最近有效采样窗口",
 }
