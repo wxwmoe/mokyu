@@ -102,11 +102,14 @@ impl Store {
             "unsupported storage identity marker"
         );
         let backend: Arc<dyn ObjectStore> = match row.r#type.as_str() {
-            "local" => Arc::new(LocalFileSystem::new_with_prefix(
-                row.path
-                    .as_deref()
-                    .context("local storage path is missing")?,
-            )?),
+            "local" => Arc::new(
+                LocalFileSystem::new_with_prefix(
+                    row.path
+                        .as_deref()
+                        .context("local storage path is missing")?,
+                )?
+                .with_fsync(true),
+            ),
             "s3" => {
                 let access = codec::unprotect(
                     row.access_key_encrypted
