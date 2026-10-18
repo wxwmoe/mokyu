@@ -152,6 +152,8 @@ fixture 沿用公共读基准的 `label`、`revision`、`build`、`database_vers
 | `concurrency` | 并发写者，默认 4，上限 32 |
 | `max_operations` | 每场景请求上限，默认 100000，上限 1000000；提前触顶的结果不能声称达到指定持续时间 |
 | `slots_per_worker` | 每个写者覆盖的有限目标 key 数，默认 4，上限 64 |
+| `unique_keys` | 默认 false；true 时每次用新 key，必须设置 `max_total_bytes`，且 max_operations × size 不超过它 |
+| `drain_seconds` | 默认 0；设置 1–600 时要求 PostgreSQL，预热后及计时后等待 pending_uploads/pack_inputs 清空，超时失败 |
 | `size` | 普通场景原始正文大小，默认 32768，上限 16MiB |
 | `cases` | `new`、`dedup`、`copy`、`multipart`、`many`、`mixed` 的数组 |
 | `many_source` | `many` 所需的既有对象 key 与 expected_file，完整正文上限 64MiB；须另记录真实 extent 数及是否使用合成布局 |
@@ -159,4 +161,6 @@ fixture 沿用公共读基准的 `label`、`revision`、`build`、`database_vers
 
 `new` 改变固定种子正文的尾部以产生新内容；`dedup` 和 `copy` 复用同一热门来源；`many` 复制预先准备的多 extent 对象；`multipart` 只计 Complete 调用延迟，完整周期还包括初始化、上传单片和读回。每次成功写入均完整 GET 并核对字节和长度，吞吐包含校验耗时，写延迟不含读回。请求或采样错误使脚本失败，空样本百分位为 null。
 
-CPU/cgroup 内存、各节点状态、后端字节/操作与 PostgreSQL SQL 次数和执行时间均记录前后差值；每 100ms 采样活动连接的等待类别。这是采样计数，不能当作精确锁等待秒数。连接池等待未插桩，输出 null。`mixed` 记录实际尝试修复的数量和延迟，需结合恢复审计确认确实命中恢复，不能把普通去重计作修复收益。有限 key 不限制历史物理版本数量，运行前仍须为总字节、保留期及测试清理安排预算。
+CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值。PostgreSQL 以 userid/dbid/queryid/toplevel 区分语句，保存完整 SQL、执行/计划时间、行数、buffer 和 WAL；统计重置会报错。记录 track/track_planning/fsync/synchronous_commit 设置，track=all 的内外层耗时不能相加。每 100ms 按 application_name 采样等待类别、事件和阻塞关系，每秒采样上传积压；这些计数不能当作精确等待秒数，application_name 也不参与 SQL 统计分组。连接池等待未插桩，输出 null。
+
+启用 drain 后分别保留请求窗口和含排空的 SQL/CPU/后端成本、待处理队列与 ready 编码数；不能把延后落盘当成提速。`mixed` 分别记录健康与恢复请求延迟，需结合恢复审计确认命中恢复。各比较版本须从等价历史/队列状态开始，统一预热、统计刷新和 ANALYZE 相位；至少三组交错配对，详细 tracing 只作独立归因。有限 key 不限制历史物理版本数量，运行前仍须安排总字节、保留期及清理预算。
