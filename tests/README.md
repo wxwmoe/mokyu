@@ -113,7 +113,7 @@ fixture 示例：
 
 `source_quarantine_contract` 使用全新 `MOKYU_TEST_CONFIG` 和 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`，四种数据库共用。验证引用/发布拒绝、执行 token、授权、隔离代次、维护输入 ABA 与独立后台审计；pack publication 契约另验证健康替代来源。
 
-`postgres_source_validation_allows_references` 使用指向全新隔离库的 `MOKYU_TEST_DATABASE_URL_FILE`，验证来源资格锁期间仍能建立普通引用，但物理隔离与映射变更必须等待；同时验证重复引用不再更新已清空的存活时间。
+`postgres_source_validation_allows_references` 使用指向全新隔离库的 `MOKYU_TEST_DATABASE_URL_FILE`，验证来源资格锁期间仍能建立普通引用，但物理隔离与映射变更必须等待；同时验证重复引用不再更新已清空的存活时间。来源检查还覆盖两种作用域的三阶段锁等待后的新状态、不可用结果后事务及锁仍然有效、空/fragment来源、4097区块和generic/custom计划。
 
 `python -m tests.storage.source_quarantine` 在独立故障注入服务验证引用前/发布前隔离、Copy/UploadPartCopy/Complete 拒绝、原对象保留、暖正文缓存/Range/304、CSRF、幂等、暂停复检及恢复。要求 `MOKYU_TEST_BINARY`、`MOKYU_TEST_CONFIG`、`MOKYU_TEST_ENDPOINT`、`MOKYU_TEST_WEB`、`MOKYU_TEST_FAULT_DIR`、`MOKYU_TEST_PASSWORD_FILE`，初始管理员用户名为 tester，启用响应缓存。local 使用专用 `MOKYU_TEST_FSYNC_ROOT`；模拟 S3 使用 `MOKYU_TEST_BACKEND` JSON 文件，字段为 endpoint、bucket、region、access_key、secret_key、prefix。测试自行创建独立 storage、桶及凭据，不使用真实桶。
 

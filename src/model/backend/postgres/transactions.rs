@@ -5954,7 +5954,7 @@ pub(super) async fn aggregate_runtime(pool: &PgPool, interval: u64, retention: u
     Ok(())
 }
 
-async fn require_sources(
+pub(super) async fn require_sources(
     db: &mut sqlx::PgConnection,
     stream: Option<Uuid>,
     chunks: &[i64],
