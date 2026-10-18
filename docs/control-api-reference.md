@@ -324,3 +324,16 @@ metadata 检查对象映射与区块身份，head 增加存储存在性和长度
 `GET /api/v1/usage/runtime` 返回明确的 `scope`。single 的 `current/history` 延续进程指标；cluster 的本机字段为 null/空数组，`cluster.current/history` 返回后台汇总、窗口开始时间、预期/报告/有效差分节点数、gauges 和 rates，`stale` 标示汇总过期。`cluster.current` 为最新点，history 为其之前的点；两者合计受 limit 限制。缺少节点或差分基线时不外推为整个群集。
 
 `GET /api/v1/cluster/nodes/{id}/runtime` 返回节点 history，包含 node_id、boot_id、sequence、数据库 received_at、单调 uptime_seconds、采样间隔和进程指标。两个接口都支持 `hours`（默认 24，1–168）和 `limit`（默认 2048，1–2048），只返回范围内最近的有限采样，按时间升序排列。群集查询使用主库、限制执行时间，只允许管理员读取，不要求近期密码重验。
+
+## 来源隔离与复检
+
+仅管理员可操作。`source` 为 `chunk`（独立编码）或 `pack`，`id` 是该 encoding/pack 的正十进制字符串，不是对象或逻辑 chunk ID。
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /api/v1/maintenance/quarantines` | 必须提供 `storage_id`、`source`；`after` 默认 0、`limit` 默认 50，范围 1～200；返回 `{items,next}`，next 为下一页游标或 null |
+| `POST /api/v1/maintenance/quarantine/preview` | `{storage_id,source,id}`；完整核查精确物理来源及命名空间，返回带确认词的维护预览 |
+| `POST /api/v1/maintenance/recheck/preview` | 相同范围，目标须已隔离；预览不解除隔离 |
+| `POST /api/v1/maintenance/{quarantine,recheck}/execute` | `{preview_id,confirmation}`；要求近期密码验证和对应会话 CSRF，返回 `{task_id}`；重复执行同一预览返回同一任务 |
+
+预览绑定位置、profile、身份和隔离代次；过期或已变化返回冲突。任务复核当前授权和执行 token，事务内提交隔离状态、代次、结果和审计。复检须完整回源校验；接受或 HEAD 成功均不代表恢复完成。任务详情不返回内部授权依据或维护输入快照。隔离列表的 retired/deleting/deleted 项只供查看，不能复检为 ready。

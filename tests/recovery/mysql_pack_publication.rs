@@ -171,7 +171,7 @@ async fn mysql_pack_publication_contract() -> Result<()> {
         "preparing"
     );
     assert!(matches!(
-        backend.source(rows[0].chunk.id).await?,
+        backend.source(rows[0].chunk.id, false).await?,
         PhysicalSource::Chunk(_)
     ));
     let before_fingerprint: Vec<u8> =
@@ -183,7 +183,7 @@ async fn mysql_pack_publication_contract() -> Result<()> {
     transactions::commit_pack_outputs(db, task, &rows[..2], &outputs, false, &settings, 60.)
         .await?;
     assert!(
-        matches!(backend.source(rows[0].chunk.id).await?,PhysicalSource::Pack(p) if p.id==pack.id)
+        matches!(backend.source(rows[0].chunk.id, false).await?,PhysicalSource::Pack(p) if p.id==pack.id)
     );
     assert_eq!(
         queries::pack_layout_bytes(&[rows[0].chunk.id, rows[1].chunk.id])
@@ -206,8 +206,59 @@ async fn mysql_pack_publication_contract() -> Result<()> {
     for row in &mut rows {
         row.pack_id = Some(pack.id);
     }
-    transactions::pin_pack_inputs(db, task, &rows).await?;
     sqlx::query("UPDATE chunk_encodings SET state='ready',standalone_compressed=TRUE,standalone_size=16 WHERE encoding_id=?").bind(rows[0].chunk.encoding_id).execute(db).await?;
+    transactions::pin_pack_inputs(db, task, &rows).await?;
+    // Quarantine follows the physical source, so a second healthy representation remains usable.
+    use crate::model::source::{SourceOperation, SourceScope, SourceType, SourceUpdate};
+    for (source, id) in [
+        (SourceType::Pack, pack.id),
+        (SourceType::Chunk, rows[0].chunk.encoding_id),
+    ] {
+        let scope = SourceScope {
+            storage_id: storage,
+            source,
+            id: id.to_string(),
+        };
+        let snapshot = backend.source_snapshot(&scope).await?;
+        let operation = SourceOperation {
+            principal: Principal::Local,
+            mode: "single".into(),
+            snapshot,
+            code: Some("hash_mismatch".into()),
+            node: None,
+        };
+        let quarantine = execution(&backend, "quarantine").await?;
+        backend
+            .source_update(SourceUpdate {
+                execution: quarantine,
+                operation: &operation,
+                apply: true,
+            })
+            .await?;
+        let chosen = backend.source(rows[0].chunk.id, false).await?;
+        assert!(matches!(
+            (&chosen, source),
+            (PhysicalSource::Chunk(_), SourceType::Pack)
+                | (PhysicalSource::Pack(_), SourceType::Chunk)
+        ));
+        if source == SourceType::Pack {
+            assert!(backend.source(rows[1].chunk.id, false).await.is_err());
+        }
+        let operation = SourceOperation {
+            snapshot: backend.source_snapshot(&scope).await?,
+            code: None,
+            ..operation
+        };
+        let recheck = execution(&backend, "recheck").await?;
+        backend
+            .source_update(SourceUpdate {
+                execution: recheck,
+                operation: &operation,
+                apply: true,
+            })
+            .await?;
+    }
+    transactions::pin_pack_inputs(db, task, &rows).await?;
     let existing = rows[0].chunk.clone();
     let mut physical = rows[1].chunk.clone();
     physical.location_id = Uuid::new_v4();
@@ -233,12 +284,12 @@ async fn mysql_pack_publication_contract() -> Result<()> {
         queries::pack_record(pack.id).fetch_one(db).await?.state,
         "retired"
     );
-    let PhysicalSource::Chunk(current) = backend.source(rows[0].chunk.id).await? else {
+    let PhysicalSource::Chunk(current) = backend.source(rows[0].chunk.id, false).await? else {
         panic!("missing reused encoding")
     };
     assert!(current.compressed);
     assert_eq!(current.stored_size, Some(16));
-    let PhysicalSource::Chunk(current) = backend.source(rows[1].chunk.id).await? else {
+    let PhysicalSource::Chunk(current) = backend.source(rows[1].chunk.id, false).await? else {
         panic!("missing prepared encoding")
     };
     assert_eq!(current.encoding_id, physical.encoding_id);
@@ -322,11 +373,11 @@ async fn mysql_pack_publication_contract() -> Result<()> {
         "retired"
     );
     assert!(matches!(
-        backend.source(rows[0].chunk.id).await?,
+        backend.source(rows[0].chunk.id, false).await?,
         PhysicalSource::Chunk(_)
     ));
     assert!(matches!(
-        backend.source(rows[1].chunk.id).await?,
+        backend.source(rows[1].chunk.id, false).await?,
         PhysicalSource::Chunk(_)
     ));
     assert_eq!(

@@ -304,7 +304,14 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<()> {
             Duration::from_secs(timeout),
             crate::storage::resource_gate::PRIORITY.scope(
                 crate::storage::resource_gate::MAINTENANCE,
-                app.integrity_batch(execution, cursor.as_deref(), detail),
+                async {
+                    if detail.get("source_operation").is_some() {
+                        app.source_batch(execution, detail).await
+                    } else {
+                        app.integrity_batch(execution, cursor.as_deref(), detail)
+                            .await
+                    }
+                },
             ),
         )
         .await

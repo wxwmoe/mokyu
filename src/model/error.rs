@@ -13,6 +13,7 @@ pub(crate) enum Error {
     DomainInUse,
     BucketNotDrained,
     ObjectAlreadyExists,
+    SourceUnavailable,
 }
 
 impl fmt::Display for Error {
@@ -29,6 +30,7 @@ impl fmt::Display for Error {
             Self::DomainInUse => "domain is already assigned to another bucket",
             Self::BucketNotDrained => "bucket must be paused and drained before transfer",
             Self::ObjectAlreadyExists => "object already exists",
+            Self::SourceUnavailable => "no eligible durable source is available",
         })
     }
 }
@@ -54,6 +56,7 @@ mod tests {
             Error::DomainInUse,
             Error::BucketNotDrained,
             Error::ObjectAlreadyExists,
+            Error::SourceUnavailable,
         ] {
             let source = std::io::Error::other("original database failure");
             let error = anyhow::Error::from(source)

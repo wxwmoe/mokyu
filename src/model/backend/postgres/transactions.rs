@@ -434,10 +434,11 @@ pub(super) async fn claim_chunk(
 }
 
 pub(super) async fn allocate_chunk(pool: &PgPool, input: ChunkCreate) -> Result<(Chunk, bool)> {
-    queries::fail_chunk_allocations(&input)
-        .execute(pool)
-        .await?;
     let mut tx = pool.begin().await?;
+    require_writing_stream(&mut tx, input.stream).await?;
+    queries::fail_chunk_allocations(&input)
+        .execute(&mut *tx)
+        .await?;
     let old = queries::reusable_chunk(&input)
         .fetch_optional(&mut *tx)
         .await?;
@@ -450,10 +451,13 @@ pub(super) async fn allocate_chunk(pool: &PgPool, input: ChunkCreate) -> Result<
                 .await?
         }
     };
-    tx.commit().await?;
     let chunk = chunk.ok_or_else(|| {
         s3s::s3_error!(OperationAborted, "chunk allocation is already in progress")
     })?;
+    if reused {
+        require_sources(&mut tx, None, &[chunk.id]).await?;
+    }
+    tx.commit().await?;
     Ok((chunk, reused))
 }
 
@@ -465,10 +469,12 @@ pub(super) async fn reference_chunk(
     raw_size: i32,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    require_writing_stream(&mut tx, stream).await?;
     let state: String = queries::lock_chunk(chunk_id).fetch_one(&mut *tx).await?;
     if state != "ready" {
         return Err(s3s::s3_error!(OperationAborted, "chunk is being reclaimed").into());
     }
+    require_sources(&mut tx, None, &[chunk_id]).await?;
     queries::insert_chunk_extent(stream, offset, raw_size, chunk_id)
         .execute(&mut *tx)
         .await?;
@@ -493,6 +499,15 @@ pub(super) async fn complete_chunk_write(
     chunk: &Chunk,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    require_writing_stream(&mut tx, stream).await?;
+    ensure!(
+        queries::allocated_source(stream, chunk)
+            .build_query_scalar::<i64>()
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some(),
+        crate::model::Error::OperationAborted
+    );
     let changed = queries::complete_chunk(chunk.id)
         .execute(&mut *tx)
         .await?
@@ -522,10 +537,12 @@ pub(super) async fn copy_chunk_references(
     chunks: &[i64],
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    require_writing_stream(&mut tx, destination).await?;
     let locked: Vec<i64> = queries::lock_ready_chunks(chunks)
         .fetch_all(&mut *tx)
         .await?;
     ensure!(locked.len() == chunks.len(), "copy source is not ready");
+    require_sources(&mut tx, None, chunks).await?;
     queries::copy_extents(destination, source, offset, end)
         .execute(&mut *tx)
         .await?;
@@ -672,6 +689,7 @@ impl PublishStore for Backend {
             end == size && contiguous,
             "cannot publish a mapping with gaps or overlaps"
         );
+        require_sources(&mut tx, Some(id), &[]).await?;
         if !apply_publish(&mut tx, id, bucket, &object_key, old, completion.as_ref()).await? {
             return Ok(false);
         }
@@ -2535,6 +2553,8 @@ pub(super) async fn commit_upload_part(
     if epoch != stream {
         return Err(s3s::s3_error!(OperationAborted, "part was superseded").into());
     }
+    require_writing_stream(&mut tx, stream).await?;
+    require_sources(&mut tx, Some(stream), &[]).await?;
     queries::publish_upload_part(upload, number, stream)
         .execute(&mut *tx)
         .await?;
@@ -2561,6 +2581,11 @@ pub(super) async fn consume_upload_seed(pool: &PgPool, input: SeedConsumption<'_
     let active = queries::lock_upload_active(input.upload)
         .fetch_one(&mut *tx)
         .await?;
+    let mut streams: Vec<_> = input.spans.iter().map(|span| span.0).collect();
+    streams.push(input.stream);
+    streams.sort_unstable();
+    streams.dedup();
+    lock_splice_sources(&mut tx, &streams, input.chunk).await?;
     let mut remaining = input.prefix;
     let mut chunk_offset = 0;
     while remaining > 0 {
@@ -2604,6 +2629,7 @@ pub(super) async fn consume_upload_seed(pool: &PgPool, input: SeedConsumption<'_
 
 pub(super) async fn stitch_upload_parts(pool: &PgPool, input: PartStitch) -> Result<()> {
     let mut tx = pool.begin().await?;
+    lock_splice_sources(&mut tx, &[input.left, input.right], input.chunk).await?;
     replace_upload_range(
         &mut tx,
         input.left,
@@ -2790,6 +2816,7 @@ use crate::model::cache::{CacheBatch, CacheRelease, CacheStage};
 
 pub(super) async fn cache_stage(pool: &PgPool, input: CacheStage<'_>) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    require_writing_stream(&mut tx, input.stream).await?;
     let (state, source) = queries::lock_cache_source(input.chunk.id)
         .fetch_one(&mut *tx)
         .await?;
@@ -2799,6 +2826,9 @@ pub(super) async fn cache_stage(pool: &PgPool, input: CacheStage<'_>) -> Result<
     );
     if !input.new && source.is_none() {
         return Ok(false);
+    }
+    if !input.new {
+        require_sources(&mut tx, None, &[input.chunk.id]).await?;
     }
     queries::insert_pending_upload(&input, source)
         .execute(&mut *tx)
@@ -2966,6 +2996,7 @@ pub(super) async fn cache_batch(
         let ids = queries::pending_pack_uploads(pack, task.id)
             .fetch_all(&mut *tx)
             .await?;
+        record_source_inputs(&mut tx, task.id, &ids).await?;
         queries::claim_pending_uploads(&ids, task.id)
             .execute(&mut *tx)
             .await?;
@@ -3001,6 +3032,7 @@ pub(super) async fn cache_batch(
         return Ok(CacheBatch::Finished);
     }
     let ids: Vec<i64> = rows.iter().map(|r| r.chunk.id).collect();
+    record_source_inputs(&mut tx, task.id, &ids).await?;
     queries::claim_pending_uploads(&ids, task.id)
         .execute(&mut *tx)
         .await?;
@@ -3140,6 +3172,7 @@ pub(super) async fn pin_pack_inputs(
     lock_execution(&mut tx, task).await?;
     let ready: Vec<i64> = queries::pack_ready_inputs(&ids).fetch_all(&mut *tx).await?;
     ensure!(ready == ids, "pack inputs changed; retry maintenance");
+    record_source_inputs(&mut tx, task.id, &ids).await?;
     queries::insert_pack_inputs(task.id, &ids)
         .execute(&mut *tx)
         .await?;
@@ -3368,6 +3401,7 @@ pub(super) async fn commit_pack_outputs(
                 .any(|(id, p)| *id == r.chunk.id && *p == r.pack_id)),
         "pack layout changed; retry maintenance"
     );
+    check_source_inputs(&mut tx, task.id, &ids).await?;
     let before: i64 = queries::pack_layout_bytes(&ids).fetch_one(&mut *tx).await?;
     let added: i64 = queries::pack_added_bytes(task.id)
         .fetch_one(&mut *tx)
@@ -3613,6 +3647,7 @@ pub(super) async fn commit_rewrite_chunk(
         .fetch_optional(&mut *tx)
         .await?;
     ensure!(current == Some(None), "chunk source changed during rewrite");
+    check_source_inputs(&mut tx, task, &[source.id]).await?;
     let changed = queries::retire_rewrite_encoding(source.encoding_id)
         .execute(&mut *tx)
         .await?
@@ -3647,6 +3682,7 @@ pub(super) async fn commit_rewrite_pack(
         .fetch_all(&mut *tx)
         .await?;
     ensure!(locked == current, "pack membership changed during rewrite");
+    check_source_inputs(&mut tx, task, current).await?;
     let updated = queries::publish_rewrite_pack(new)
         .execute(&mut *tx)
         .await?
@@ -4529,6 +4565,8 @@ pub(super) async fn publish_copy(
             return Err(s3s::s3_error!(PreconditionFailed).into());
         }
     }
+    require_writing_stream(&mut tx, id).await?;
+    require_sources(&mut tx, Some(id), &[]).await?;
     queries::publish_copy_stream(id).execute(&mut *tx).await?;
     queries::upsert_object(target, key, id)
         .execute(&mut *tx)
@@ -4612,6 +4650,8 @@ pub(super) async fn complete_storage_migration(
         source_current == Some(job.source_version),
         "source object changed during storage migration"
     );
+    require_writing_stream(&mut tx, destination).await?;
+    require_sources(&mut tx, Some(destination), &[]).await?;
     let published = queries::publish_migration_stream(destination, id, lease_token)
         .execute(&mut *tx)
         .await?;
@@ -5879,5 +5919,185 @@ pub(super) async fn aggregate_runtime(pool: &PgPool, interval: u64, retention: u
             }
         }
     }
+    Ok(())
+}
+
+async fn require_sources(
+    db: &mut sqlx::PgConnection,
+    stream: Option<Uuid>,
+    chunks: &[i64],
+) -> Result<()> {
+    use futures_util::TryStreamExt;
+    // Lock all logical rows before any physical row; shared validation locks block quarantine.
+    for phase in 0..3 {
+        let mut query = queries::source_locks(stream, chunks, phase);
+        let mut rows = query.build_query_scalar::<i64>().fetch(&mut *db);
+        while rows.try_next().await?.is_some() {}
+    }
+    ensure!(
+        !queries::unavailable_sources(stream, chunks)
+            .build_query_scalar::<bool>()
+            .fetch_one(&mut *db)
+            .await?,
+        crate::model::Error::SourceUnavailable
+    );
+    Ok(())
+}
+
+async fn require_writing_stream(db: &mut PgConnection, stream: Uuid) -> Result<()> {
+    ensure!(
+        queries::source_writing_stream(stream)
+            .fetch_optional(db)
+            .await?
+            .is_some(),
+        crate::model::Error::OperationAborted
+    );
+    Ok(())
+}
+
+pub(super) async fn read_source_snapshot(
+    pool: &sqlx::PgPool,
+    scope: &crate::model::source::SourceScope,
+) -> Result<crate::model::source::SourceSnapshot> {
+    let mut tx = pool.begin().await?;
+    let snapshot = queries::source_snapshot(&mut tx, scope, false).await?;
+    tx.commit().await?;
+    Ok(snapshot)
+}
+
+pub(super) async fn source_update(
+    pool: &sqlx::PgPool,
+    update: crate::model::source::SourceUpdate<'_>,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let operation = update.operation;
+    operation.principal.lock_admin(&mut tx).await?;
+    ensure!(
+        queries::source_mode(&operation.mode)
+            .fetch_one(&mut *tx)
+            .await?,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        queries::source_executor(update.execution.id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or(operation.mode == "single"),
+        crate::model::Error::OperationAborted
+    );
+    lock_execution(&mut tx, update.execution).await?;
+    let snapshot = queries::source_snapshot(&mut tx, &operation.snapshot.scope, true).await?;
+    ensure!(
+        snapshot.state == "ready" && snapshot.fingerprint()? == operation.snapshot.fingerprint()?,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        snapshot.quarantine_code.is_none() == operation.code.is_some(),
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        operation
+            .code
+            .as_deref()
+            .is_none_or(crate::model::source::quarantine_code),
+        s3s::s3_error!(InvalidArgument)
+    );
+    if update.apply {
+        ensure!(
+            queries::change_source(&snapshot, operation.code.as_deref())?
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
+        let action = if operation.code.is_some() {
+            "source.quarantine"
+        } else {
+            "source.recheck"
+        };
+        let detail = serde_json::json!({"source":snapshot.summary()?,"revision":(snapshot.revision+1).to_string(),"code":operation.code,"requested_by":operation.principal.user_id(),"token_id":operation.principal.token_id(),"task_id":update.execution.id});
+        queries::source_result(update.execution.id, serde_json::json!({"result":detail}))
+            .execute(&mut *tx)
+            .await?;
+        queries::complete_task(update.execution.id)
+            .execute(&mut *tx)
+            .await?;
+        checkpoint_event(&mut tx, action, &snapshot.location().to_string(), detail).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn require_inputs(db: &mut sqlx::PgConnection, chunks: &[i64]) -> Result<()> {
+    require_sources(db, None, chunks).await?;
+    ensure!(
+        !queries::quarantined_inputs(chunks)
+            .build_query_scalar::<bool>()
+            .fetch_one(db)
+            .await?,
+        crate::model::Error::SourceUnavailable
+    );
+    Ok(())
+}
+
+async fn lock_splice_sources(
+    db: &mut sqlx::PgConnection,
+    streams: &[Uuid],
+    chunk: i64,
+) -> Result<()> {
+    use futures_util::TryStreamExt;
+    for physical in [false, true] {
+        let mut query = queries::splice_locks(streams, chunk, physical);
+        let mut rows = query.build().fetch(&mut *db);
+        while rows.try_next().await?.is_some() {}
+    }
+    require_sources(db, None, &[chunk]).await
+}
+async fn source_input_stamp(db: &mut sqlx::PgConnection, chunks: &[i64]) -> Result<Value> {
+    let rows: Vec<(i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+        queries::source_input_versions(chunks)
+            .build_query_as()
+            .fetch_all(db)
+            .await?;
+    Ok(Value::Object(
+        rows.into_iter()
+            .map(|(id, encoding, revision, pack, pack_revision)| {
+                (
+                    id.to_string(),
+                    json!([encoding, revision, pack, pack_revision]),
+                )
+            })
+            .collect(),
+    ))
+}
+async fn record_source_inputs(
+    db: &mut sqlx::PgConnection,
+    task: Uuid,
+    chunks: &[i64],
+) -> Result<()> {
+    require_inputs(db, chunks).await?;
+    let stamp = source_input_stamp(db, chunks).await?;
+    queries::save_source_inputs(task, &stamp)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+async fn check_source_inputs(
+    db: &mut sqlx::PgConnection,
+    task: Uuid,
+    chunks: &[i64],
+) -> Result<()> {
+    require_inputs(db, chunks).await?;
+    let stamp = source_input_stamp(db, chunks).await?;
+    let saved = queries::saved_source_inputs(task).fetch_one(db).await?;
+    ensure!(
+        stamp
+            .as_object()
+            .unwrap()
+            .iter()
+            .all(|(id, value)| saved.get(id) == Some(value)),
+        crate::model::Error::OperationAborted
+    );
     Ok(())
 }

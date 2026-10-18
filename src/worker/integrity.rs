@@ -110,7 +110,7 @@ impl Finding {
 }
 
 impl App {
-    async fn acquire_profile_rate(
+    pub(crate) async fn acquire_profile_rate(
         &self,
         storage_id: Uuid,
         profile: &crate::storage::profile::StorageProfile,
@@ -519,6 +519,7 @@ impl App {
                 finding.location_id = physical_detail["location_id"]
                     .as_str()
                     .and_then(|s| Uuid::parse_str(s).ok());
+                physical_detail["storage_id"] = json!(c.storage_id);
                 finding.detail = physical_detail;
                 Some(finding)
             }

@@ -93,3 +93,9 @@ single 的用量采样不创建 usage 任务：在一次刷新超时预算内依
 PostgreSQL 群集的 `node_reports` 按 node_id 保存一份最新报告，boot_id 与 sequence 防止旧进程和乱序覆盖。metadata 保存脱敏加载配置与修订，status 保存有限的运行快照；两者分别限制为 64 KiB 和 32 KiB。只由有效注册身份更新，不使用公共读取从库。单容器不写节点报告，MySQL/SQLite 不创建对应表。正在执行的节点任务通过 tasks_node_running 部分索引查询。
 
 群集历史保存在 `node_runtime_samples`，按 node_id、boot_id、sequence 去重，记录数据库接收时间、进程单调运行时间及最多 16 KiB 的指标。各节点独立采样；control 仅协调汇总与清理。带 `scope=cluster` 的汇总进入 `runtime_samples`，保留当时的预期、报告和有效差分节点数；旧无归属记录不混入群集曲线。按节点/时间与群集 scope 建立索引，过期历史按每批 1000 项清理。
+
+### 来源隔离字段
+
+`chunk_encodings` 和 `packs` 的 `quarantined_at`、`quarantine_code` 与 `quarantine_revision` 独立于原生命周期状态。隔离时间和代码同时为空或同时有值；隔离/完整复检成功均递增代次。物理来源退休后保留隔离证据，逻辑 chunk 和 extents 不变。
+
+引用与最终发布按固定顺序锁逻辑区块、独立编码、pack，当前写库重新判断合格来源。pack/rewrite/cache 批次在任务内部保存有界的来源 ID/隔离代次快照，发布时逐输入比较；仅重查当前“未隔离”不足以防止中间隔离又解除的竞争。群集完整复检通过有效执行任务保护目标物理位置，单容器使用既有本机 pin。

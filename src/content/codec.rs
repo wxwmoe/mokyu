@@ -89,7 +89,7 @@ pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, serde::Deserialize, Serialize)]
 pub struct Chunk {
     pub id: i64,
     pub encoding_id: i64,

@@ -4,6 +4,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod maintenance;
 pub(crate) mod migration;
 pub(crate) mod packing;
+pub(crate) mod quarantine;
 pub(crate) mod range;
 pub(crate) mod rewrite;
 pub(crate) mod scheduler;

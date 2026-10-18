@@ -864,6 +864,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/maintenance/quarantine/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["quarantine_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/maintenance/quarantines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["quarantines"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/maintenance/recheck/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["recheck_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/maintenance/sweep": {
         parameters: {
             query?: never;
@@ -2380,6 +2428,14 @@ export interface components {
         ProjectMode: {
             enabled: boolean;
         };
+        QuarantinedSource: components["schemas"]["SourceScope"] & {
+            code: string;
+            /** Format: uuid */
+            location_id: string;
+            quarantined_at: string;
+            revision: string;
+            state: string;
+        };
         Quota: {
             bucket_count?: string | null;
             bucket_count_limit?: string | null;
@@ -2565,6 +2621,18 @@ export interface components {
             token: string;
             username: string;
         };
+        SourcePage: {
+            items: components["schemas"]["QuarantinedSource"][];
+            next?: string | null;
+        };
+        SourceScope: {
+            id: string;
+            source: components["schemas"]["SourceType"];
+            /** Format: uuid */
+            storage_id: string;
+        };
+        /** @enum {string} */
+        SourceType: "chunk" | "pack";
         StorageInput: {
             access_key?: string | null;
             /** Format: uuid */
@@ -4504,6 +4572,76 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    quarantine_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceScope"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenancePreview"];
+                };
+            };
+        };
+    };
+    quarantines: {
+        parameters: {
+            query: {
+                storage_id: string;
+                source: components["schemas"]["SourceType"];
+                after?: number;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourcePage"];
+                };
+            };
+        };
+    };
+    recheck_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceScope"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenancePreview"];
+                };
             };
         };
     };

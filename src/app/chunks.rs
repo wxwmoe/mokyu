@@ -93,6 +93,8 @@ impl App {
             })
             .await?;
         if reused {
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("source-before-reference").await;
             if self.config.local_cache.upload_cache && self.chunks.can_stage_reuse(c.id).await? {
                 let (data, compressed) = self
                     .storage

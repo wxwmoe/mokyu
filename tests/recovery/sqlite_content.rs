@@ -155,7 +155,7 @@ async fn sqlite_content_contract() -> Result<()> {
         (ready.encoding_id, ready.location_id, ready.stored_size),
         (physical.encoding_id, physical.location_id, Some(32))
     );
-    let source = backend.source(physical.id).await?;
+    let source = backend.source(physical.id, false).await?;
     assert!(matches!(source,PhysicalSource::Chunk(c) if c.location_id==physical.location_id));
     let (reused, existing) = backend.allocate(chunk(storage, first, 1)).await?;
     assert!(existing);
@@ -324,7 +324,9 @@ async fn sqlite_content_contract() -> Result<()> {
     assert!(backend.indexed(pack_location).await?);
     assert!(backend.pack_contains(pack, physical.id).await?);
     assert!(!backend.pending_only(physical.id).await?);
-    assert!(matches!(backend.source(physical.id).await?,PhysicalSource::Pack(p) if p.id==pack));
+    assert!(
+        matches!(backend.source(physical.id, false).await?,PhysicalSource::Pack(p) if p.id==pack)
+    );
     assert_eq!(backend.inspection_members(pack).await?[0].1, 0);
     assert!(backend.inspection(task, pack).await?.is_none());
     backend.record_inspection(task, pack, None).await?;

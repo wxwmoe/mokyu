@@ -37,6 +37,10 @@ pub(super) struct Job {
     blocked: Option<String>,
 }
 fn job(mut value: Value) -> Result<Job> {
+    if let Some(detail) = value["detail"].as_object_mut() {
+        detail.remove("source_operation");
+        detail.remove("source_inputs");
+    }
     let task_type = value["task_type"].as_str().unwrap_or("unknown").to_owned();
     value["task_type"] = json!(task_type);
     value["status"] = value["state"].clone();
@@ -111,7 +115,7 @@ mod tests {
             "bucket_id": null,
             "bucket_name": null,
             "error": null,
-            "detail": {"role": "child"},
+            "detail": {"role": "child", "source_operation": {"principal":"private"}, "source_inputs": {"1":[1,0,null,null]}},
             "blocked": null,
         }))
         .unwrap();
@@ -119,6 +123,7 @@ mod tests {
         assert_eq!(job.policy, "cleanup");
         assert_eq!(job.created_by, "Scheduler");
         assert_eq!(job.processed, "0");
+        assert_eq!(job.detail, json!({"role":"child"}));
     }
 }
 async fn guard(app: &App, actor: &Identity) -> Result<Box<dyn crate::model::AdminGuard>> {
@@ -253,6 +258,63 @@ impl PackScope {
     }
 }
 pub(super) use crate::model::maintenance::MaintenancePreview;
+use crate::model::source::{SourceOperation, SourcePage, SourceQuery, SourceScope};
+
+#[utoipa::path(get,path="/api/v1/maintenance/quarantines",params(SourceQuery),responses((status=200,body=SourcePage)))]
+pub(super) async fn quarantines(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Query(query): Query<SourceQuery>,
+) -> Result<Json<SourcePage>, HttpError> {
+    Ok(Json(app.source_list(&actor.principal, query).await?))
+}
+
+async fn source_preview(
+    app: &App,
+    actor: &Identity,
+    scope: SourceScope,
+    recheck: bool,
+) -> Result<MaintenancePreview> {
+    let operation = app.source_prepare(&actor.principal, scope, recheck).await?;
+    let action = if recheck { "recheck" } else { "quarantine" };
+    let impact = operation.snapshot.summary()?;
+    let confirmation = format!(
+        "{} {}",
+        action.to_ascii_uppercase(),
+        operation.snapshot.scope.id
+    );
+    let access = guard(app, actor).await?;
+    let preview = app
+        .maintenance_store
+        .preview(
+            &actor.principal,
+            action,
+            serde_json::to_value(operation)?,
+            impact,
+            confirmation,
+        )
+        .await?;
+    access.finish().await?;
+    Ok(preview)
+}
+
+#[utoipa::path(post,path="/api/v1/maintenance/quarantine/preview",request_body=SourceScope,responses((status=200,body=MaintenancePreview)))]
+pub(super) async fn quarantine_preview(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Json(scope): Json<SourceScope>,
+) -> Result<Json<MaintenancePreview>, HttpError> {
+    Ok(Json(source_preview(&app, &actor, scope, false).await?))
+}
+
+#[utoipa::path(post,path="/api/v1/maintenance/recheck/preview",request_body=SourceScope,responses((status=200,body=MaintenancePreview)))]
+pub(super) async fn recheck_preview(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Json(scope): Json<SourceScope>,
+) -> Result<Json<MaintenancePreview>, HttpError> {
+    Ok(Json(source_preview(&app, &actor, scope, true).await?))
+}
 async fn unpack_impact(app: &App, input: &PackScope) -> Result<Value> {
     let id = input.id()?;
     app.unpack_start(id, input.all, false).await
@@ -385,7 +447,15 @@ pub(super) async fn execute(
         completion.finish(task_id, false).await?;
         return Ok(Json(TaskStarted { task_id }));
     }
-    let result = if operation == "unpack" {
+    let result = if matches!(operation.as_str(), "quarantine" | "recheck") {
+        let bound: SourceOperation = serde_json::from_value(parameters["input"].clone())?;
+        if bound.code.is_some() != (operation == "quarantine") {
+            return Err(s3s::s3_error!(InvalidArgument).into());
+        }
+        crate::worker::REQUEST_ID
+            .scope(input.preview_id, app.source_start(bound))
+            .await?
+    } else if operation == "unpack" {
         let scope: PackScope = serde_json::from_value(parameters["input"].clone())?;
         let impact = unpack_impact(&app, &scope).await?;
         if fingerprint

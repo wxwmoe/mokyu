@@ -114,7 +114,7 @@ CREATE TABLE chunk_encodings (
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     unreferenced_at INTEGER,
     deleted_at INTEGER,
-    stored_at INTEGER,
+    stored_at INTEGER, quarantined_at INTEGER, quarantine_code TEXT CONSTRAINT encodings_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)), quarantine_revision INTEGER NOT NULL DEFAULT 0 CONSTRAINT encodings_quarantine_revision CHECK (quarantine_revision >= 0),
     CONSTRAINT encodings_chunk FOREIGN KEY (storage_id,chunk_id) REFERENCES chunks(storage_id,id) ON DELETE CASCADE,
     CONSTRAINT encodings_owner FOREIGN KEY (owner_task) REFERENCES tasks(id) ON DELETE SET NULL,
     CONSTRAINT encodings_key FOREIGN KEY (block_key_id) REFERENCES managed_keys(id),
@@ -232,7 +232,7 @@ CREATE TABLE maintenance_previews (
     CONSTRAINT maintenance_previews_actor FOREIGN KEY (actor_id) REFERENCES web_users(id) ON DELETE CASCADE,
     CONSTRAINT maintenance_previews_token FOREIGN KEY (token_id) REFERENCES api_tokens(id) ON DELETE CASCADE,
     CONSTRAINT maintenance_previews_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL,
-    CONSTRAINT maintenance_previews_action CHECK (action IN ('unpack','sweep'))
+    CONSTRAINT maintenance_previews_action CHECK (action IN ('unpack','sweep','quarantine','recheck'))
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE managed_keys (
@@ -383,7 +383,7 @@ CREATE TABLE packs (
     unreferenced_at INTEGER,
     deleted_at INTEGER,
     range_checked_at INTEGER,
-    stored_at INTEGER,
+    stored_at INTEGER, quarantined_at INTEGER, quarantine_code TEXT CONSTRAINT packs_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)), quarantine_revision INTEGER NOT NULL DEFAULT 0 CONSTRAINT packs_quarantine_revision CHECK (quarantine_revision >= 0),
     CONSTRAINT packs_storage FOREIGN KEY (storage_id) REFERENCES storages(id),
     CONSTRAINT packs_key FOREIGN KEY (block_key_id) REFERENCES managed_keys(id),
     CONSTRAINT packs_owner FOREIGN KEY (owner_task) REFERENCES tasks(id) ON DELETE SET NULL,
@@ -1002,3 +1002,7 @@ INSERT INTO quota_scopes(scope,scope_id) VALUES('project',X'00000000000000000000
 INSERT INTO access_state(id,coverage_since,flushed_at) VALUES(1,CAST(unixepoch('subsec')*1000000 AS INTEGER),CAST(unixepoch('subsec')*1000000 AS INTEGER));
 INSERT INTO maintenance_controls(policy) VALUES('gc'),('pack'),('reuse'),('reclaim'),('repack'),('range'),('cleanup');
 INSERT INTO usage_summary(id) VALUES('global');
+
+CREATE INDEX encodings_quarantined ON chunk_encodings (storage_id,encoding_id) WHERE quarantined_at IS NOT NULL;
+
+CREATE INDEX packs_quarantined ON packs (storage_id,id) WHERE quarantined_at IS NOT NULL;

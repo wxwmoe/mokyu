@@ -640,6 +640,11 @@ CREATE TABLE public.chunk_encodings (
     storage_id uuid CONSTRAINT chunk_locations_storage_target_id_not_null NOT NULL,
     block_key_id uuid,
     encoding_fingerprint bytea NOT NULL,
+    quarantined_at timestamp with time zone,
+    quarantine_code text,
+    quarantine_revision bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT encodings_quarantine CHECK (((quarantined_at IS NULL) = (quarantine_code IS NULL))),
+    CONSTRAINT encodings_quarantine_revision CHECK ((quarantine_revision >= 0)),
     CONSTRAINT chunk_encodings_block_key_check CHECK ((((encryption_algorithm = 'none'::text) AND (block_key_id IS NULL)) OR ((encryption_algorithm <> 'none'::text) AND (block_key_id IS NOT NULL)))),
     CONSTRAINT chunk_encodings_fingerprint_size CHECK ((octet_length(encoding_fingerprint) = 32)),
     CONSTRAINT chunk_locations_algorithm_check CHECK ((encryption_algorithm = ANY (ARRAY['none'::text, 'aes-256-gcm'::text, 'chacha20-poly1305'::text]))),
@@ -778,7 +783,7 @@ CREATE TABLE public.maintenance_previews (
     fingerprint text NOT NULL,
     expires_at timestamp with time zone DEFAULT (now() + '00:10:00'::interval) NOT NULL,
     task_id uuid,
-    CONSTRAINT maintenance_previews_action_check CHECK ((action = ANY (ARRAY['unpack'::text, 'sweep'::text])))
+    CONSTRAINT maintenance_previews_action_check CHECK ((action = ANY (ARRAY['unpack'::text, 'sweep'::text, 'quarantine'::text, 'recheck'::text])))
 );
 
 CREATE TABLE public.managed_keys (
@@ -935,6 +940,11 @@ CREATE TABLE public.packs (
     storage_id uuid CONSTRAINT packs_storage_target_id_not_null NOT NULL,
     block_key_id uuid,
     pack_fingerprint bytea NOT NULL,
+    quarantined_at timestamp with time zone,
+    quarantine_code text,
+    quarantine_revision bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT packs_quarantine CHECK (((quarantined_at IS NULL) = (quarantine_code IS NULL))),
+    CONSTRAINT packs_quarantine_revision CHECK ((quarantine_revision >= 0)),
     CONSTRAINT packs_algorithm_check CHECK ((encryption_algorithm = ANY (ARRAY['none'::text, 'aes-256-gcm'::text, 'chacha20-poly1305'::text]))),
     CONSTRAINT packs_block_key_check CHECK ((((encryption_algorithm = 'none'::text) AND (block_key_id IS NULL)) OR ((encryption_algorithm <> 'none'::text) AND (block_key_id IS NOT NULL)))),
     CONSTRAINT packs_digest_check CHECK (((digest IS NULL) OR (octet_length(digest) = 32))),
@@ -2184,3 +2194,7 @@ CREATE TABLE node_runtime_samples (
 CREATE INDEX node_runtime_time ON node_runtime_samples (node_id, received_at DESC);
 CREATE INDEX node_runtime_expire ON node_runtime_samples (received_at);
 CREATE INDEX runtime_cluster_time ON runtime_samples (sampled_at DESC) WHERE data->>'scope'='cluster';
+
+CREATE INDEX encodings_quarantined ON public.chunk_encodings USING btree (storage_id, encoding_id) WHERE (quarantined_at IS NOT NULL);
+
+CREATE INDEX packs_quarantined ON public.packs USING btree (storage_id, id) WHERE (quarantined_at IS NOT NULL);

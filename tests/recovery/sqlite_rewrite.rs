@@ -244,10 +244,10 @@ async fn sqlite_rewrite_contract() -> Result<()> {
         "retired"
     );
     assert!(
-        matches!(backend.source(rows[0].chunk.id).await?,PhysicalSource::Pack(p) if p.id==replacement.id)
+        matches!(backend.source(rows[0].chunk.id, false).await?,PhysicalSource::Pack(p) if p.id==replacement.id)
     );
     assert!(matches!(
-        backend.source(rows[2].chunk.id).await?,
+        backend.source(rows[2].chunk.id, false).await?,
         PhysicalSource::Chunk(_)
     ));
     assert_eq!(
@@ -342,7 +342,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
                 .is_err()
         );
         assert!(
-            matches!(backend.source(source.id).await?,PhysicalSource::Chunk(c) if c.encoding_id==physical.encoding_id && c.compressed)
+            matches!(backend.source(source.id, false).await?,PhysicalSource::Chunk(c) if c.encoding_id==physical.encoding_id && c.compressed)
         );
         changed.push(source.id);
         after = source.id;

@@ -566,7 +566,7 @@ pub(super) async fn create_maintenance_preview(
     confirmation: String,
 ) -> Result<MaintenancePreview> {
     ensure!(
-        matches!(action, "unpack" | "sweep"),
+        matches!(action, "unpack" | "sweep" | "quarantine" | "recheck"),
         "invalid maintenance preview action"
     );
     let actor = principal.user_id().ok_or_else(denied)?;
@@ -970,6 +970,7 @@ pub(super) async fn commit_rewrite_chunk(
         current == Some((None, source.encoding_id)),
         "chunk source changed during rewrite"
     );
+    check_source_inputs(&mut tx, task.id, &[source.id]).await?;
     let owners: Vec<Uuid> = queries::pack_input_owners(&[source.id])
         .build_query_scalar()
         .fetch_all(&mut *tx)
@@ -1046,6 +1047,7 @@ pub(super) async fn commit_rewrite_pack(
         .fetch_all(&mut *tx)
         .await?;
     ensure!(locked == current, "pack membership changed during rewrite");
+    check_source_inputs(&mut tx, task.id, current).await?;
     let owners: Vec<Uuid> = queries::pack_input_owners(current)
         .build_query_scalar()
         .fetch_all(&mut *tx)
@@ -1344,6 +1346,7 @@ pub(super) async fn pin_pack_inputs(
         owners.iter().all(|id| *id == task.id),
         "pack input is already owned"
     );
+    record_source_inputs(&mut tx, task.id, &ids).await?;
     queries::insert_pack_inputs(task.id, &ids)
         .build()
         .execute(&mut *tx)
@@ -1492,6 +1495,7 @@ pub(super) async fn commit_pack_outputs(
         owners.len() == ids.len() && owners.iter().all(|id| *id == task.id),
         "pack inputs are not owned by this task"
     );
+    check_source_inputs(&mut tx, task.id, &ids).await?;
     let before: i64 = queries::pack_layout_bytes(&ids)
         .build_query_scalar()
         .fetch_one(&mut *tx)
@@ -1758,6 +1762,9 @@ pub(super) async fn cache_stage(pool: &MySqlPool, input: CacheStage<'_>) -> Resu
     if !input.new && source.is_none() {
         return Ok(false);
     }
+    if !input.new {
+        require_sources(&mut tx, None, &[input.chunk.id]).await?;
+    }
     queries::insert_pending_upload(&input, source, timeout)
         .execute(&mut *tx)
         .await?;
@@ -1948,6 +1955,7 @@ pub(super) async fn cache_batch(
         let ids = queries::pending_pack_uploads(pack, task.id)
             .fetch_all(&mut *tx)
             .await?;
+        record_source_inputs(&mut tx, task.id, &ids).await?;
         queries::claim_pending_uploads(&ids, task.id)
             .build()
             .execute(&mut *tx)
@@ -1986,6 +1994,7 @@ pub(super) async fn cache_batch(
         return Ok(CacheBatch::Finished);
     }
     let ids: Vec<_> = rows.iter().map(|r| r.chunk.id).collect();
+    record_source_inputs(&mut tx, task.id, &ids).await?;
     queries::claim_pending_uploads(&ids, task.id)
         .build()
         .execute(&mut *tx)
@@ -2459,6 +2468,7 @@ pub(super) async fn publish_copy(
         );
     }
     let stream = validate_copy(&mut tx, id, input.target_bucket, input.target_key, public).await?;
+    require_sources(&mut tx, Some(id), &[]).await?;
     queries::publish_stream(id).execute(&mut *tx).await?;
     queries::ready_stream_queues(&mut tx, id).await?;
     replace_object_reference(&mut tx, &stream, old).await?;
@@ -2555,6 +2565,7 @@ pub(super) async fn complete_storage_migration(
         job.public_read,
     )
     .await?;
+    require_sources(&mut tx, Some(id), &[]).await?;
     ensure!(
         queries::publish_migration_stream(id, task)
             .execute(&mut *tx)
@@ -3462,6 +3473,7 @@ pub(super) async fn commit_upload_part(
         end == info.size && contiguous,
         "part mapping has gaps or overlaps"
     );
+    require_sources(&mut tx, Some(stream), &[]).await?;
     let mut accounts = lock_quota(&mut tx, bucket).await?;
     let mut row = queries::quota_reservation(upload)
         .fetch_one(&mut *tx)
@@ -3678,6 +3690,7 @@ async fn replace_upload_range(
 
 pub(super) async fn stitch_upload_parts(pool: &sqlx::MySqlPool, input: PartStitch) -> Result<()> {
     let mut tx = pool.begin().await?;
+    lock_splice_sources(&mut tx, &[input.left, input.right], input.chunk).await?;
     replace_upload_range(
         &mut tx,
         input.left,
@@ -3709,6 +3722,11 @@ pub(super) async fn consume_upload_seed(
     let active = queries::lock_upload_active(input.upload)
         .fetch_one(&mut *tx)
         .await?;
+    let mut streams: Vec<_> = input.spans.iter().map(|span| span.0).collect();
+    streams.push(input.stream);
+    streams.sort_unstable();
+    streams.dedup();
+    lock_splice_sources(&mut tx, &streams, input.chunk).await?;
     let mut remaining = input.prefix;
     let mut chunk_offset = 0;
     while remaining > 0 {
@@ -4330,6 +4348,7 @@ pub(super) async fn publish(
         end == stream.size && contiguous,
         "cannot publish a mapping with gaps or overlaps"
     );
+    require_sources(&mut tx, Some(id), &[]).await?;
     let mut accounts = lock_quota(&mut tx, stream.bucket_id).await?;
     replace_object_quota(
         &mut tx,
@@ -4508,6 +4527,9 @@ pub(super) async fn allocate_chunk(
         queries::refresh_encoding_fingerprint(&mut tx, encoding).await?;
         (queries::allocated_chunk(&mut tx, chunk).await?, false)
     };
+    if reused {
+        require_sources(&mut tx, None, &[chunk.id]).await?;
+    }
     tx.commit().await?;
     Ok((chunk, reused))
 }
@@ -4525,6 +4547,7 @@ pub(super) async fn reference_chunk(
         queries::lock_chunk(chunk).fetch_one(&mut *tx).await? == "ready",
         crate::model::Error::OperationAborted
     );
+    require_sources(&mut tx, None, &[chunk]).await?;
     queries::insert_chunk_extent(stream, offset, size, chunk)
         .execute(&mut *tx)
         .await?;
@@ -4548,6 +4571,14 @@ pub(super) async fn complete_chunk_write(
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     writing_stream(&mut tx, stream).await?;
+    ensure!(
+        queries::allocated_source(stream, chunk)
+            .build_query_scalar::<i64>()
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some(),
+        crate::model::Error::OperationAborted
+    );
     ensure!(
         queries::complete_chunk(chunk)
             .execute(&mut *tx)
@@ -4586,6 +4617,7 @@ pub(super) async fn copy_chunk_references(
     writing_stream(&mut tx, destination).await?;
     let locked = queries::lock_ready_chunks(&mut tx, chunks).await?;
     ensure!(locked.len() == chunks.len(), "copy source is not ready");
+    require_sources(&mut tx, None, chunks).await?;
     queries::copy_extents(destination, source, offset, end)
         .execute(&mut *tx)
         .await?;
@@ -6229,4 +6261,170 @@ pub(super) async fn storage_current_key(
     .await?;
     tx.commit().await?;
     Ok(row.id)
+}
+
+async fn require_sources(
+    db: &mut sqlx::MySqlConnection,
+    stream: Option<Uuid>,
+    chunks: &[i64],
+) -> Result<()> {
+    use futures_util::TryStreamExt;
+    // Lock all logical rows before any physical row; shared validation locks block quarantine.
+    for phase in 0..3 {
+        let mut query = queries::source_locks(stream, chunks, phase);
+        let mut rows = query.build_query_scalar::<i64>().fetch(&mut *db);
+        while rows.try_next().await?.is_some() {}
+    }
+    ensure!(
+        !queries::unavailable_sources(stream, chunks)
+            .build_query_scalar::<bool>()
+            .fetch_one(&mut *db)
+            .await?,
+        crate::model::Error::SourceUnavailable
+    );
+    Ok(())
+}
+
+pub(super) async fn read_source_snapshot(
+    pool: &sqlx::MySqlPool,
+    scope: &crate::model::source::SourceScope,
+) -> Result<crate::model::source::SourceSnapshot> {
+    let mut tx = pool.begin().await?;
+    let snapshot = queries::source_snapshot(&mut tx, scope, false).await?;
+    tx.commit().await?;
+    Ok(snapshot)
+}
+
+pub(super) async fn source_update(
+    pool: &sqlx::MySqlPool,
+    update: crate::model::source::SourceUpdate<'_>,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let operation = update.operation;
+    ensure!(
+        queries::validate_identity(&operation.principal, &mut tx, true).await?,
+        s3s::s3_error!(AccessDenied)
+    );
+    ensure!(
+        queries::source_mode(&operation.mode)
+            .fetch_one(&mut *tx)
+            .await?,
+        crate::model::Error::OperationAborted
+    );
+    lock_execution(&mut tx, update.execution).await?;
+    let snapshot = queries::source_snapshot(&mut tx, &operation.snapshot.scope, true).await?;
+    ensure!(
+        snapshot.state == "ready" && snapshot.fingerprint()? == operation.snapshot.fingerprint()?,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        snapshot.quarantine_code.is_none() == operation.code.is_some(),
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        operation
+            .code
+            .as_deref()
+            .is_none_or(crate::model::source::quarantine_code),
+        s3s::s3_error!(InvalidArgument)
+    );
+    if update.apply {
+        ensure!(
+            queries::change_source(&snapshot, operation.code.as_deref())?
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
+        let action = if operation.code.is_some() {
+            "source.quarantine"
+        } else {
+            "source.recheck"
+        };
+        let detail = serde_json::json!({"source":snapshot.summary()?,"revision":(snapshot.revision+1).to_string(),"code":operation.code,"requested_by":operation.principal.user_id(),"token_id":operation.principal.token_id(),"task_id":update.execution.id});
+        queries::source_result(update.execution.id, serde_json::json!({"result":detail}))
+            .execute(&mut *tx)
+            .await?;
+        queries::complete_task(update.execution.id)
+            .execute(&mut *tx)
+            .await?;
+        checkpoint_event(&mut tx, action, &snapshot.location().to_string(), detail).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn require_inputs(db: &mut sqlx::MySqlConnection, chunks: &[i64]) -> Result<()> {
+    require_sources(db, None, chunks).await?;
+    ensure!(
+        !queries::quarantined_inputs(chunks)
+            .build_query_scalar::<bool>()
+            .fetch_one(db)
+            .await?,
+        crate::model::Error::SourceUnavailable
+    );
+    Ok(())
+}
+
+async fn lock_splice_sources(
+    db: &mut sqlx::MySqlConnection,
+    streams: &[Uuid],
+    chunk: i64,
+) -> Result<()> {
+    use futures_util::TryStreamExt;
+    for physical in [false, true] {
+        let mut query = queries::splice_locks(streams, chunk, physical);
+        let mut rows = query.build().fetch(&mut *db);
+        while rows.try_next().await?.is_some() {}
+    }
+    require_sources(db, None, &[chunk]).await
+}
+
+async fn source_input_stamp(db: &mut sqlx::MySqlConnection, chunks: &[i64]) -> Result<Value> {
+    let rows: Vec<(i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+        queries::source_input_versions(chunks)
+            .build_query_as()
+            .fetch_all(db)
+            .await?;
+    Ok(Value::Object(
+        rows.into_iter()
+            .map(|(id, encoding, revision, pack, pack_revision)| {
+                (
+                    id.to_string(),
+                    json!([encoding, revision, pack, pack_revision]),
+                )
+            })
+            .collect(),
+    ))
+}
+async fn record_source_inputs(
+    db: &mut sqlx::MySqlConnection,
+    task: Uuid,
+    chunks: &[i64],
+) -> Result<()> {
+    require_inputs(db, chunks).await?;
+    let stamp = source_input_stamp(db, chunks).await?;
+    queries::save_source_inputs(task, &stamp)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+async fn check_source_inputs(
+    db: &mut sqlx::MySqlConnection,
+    task: Uuid,
+    chunks: &[i64],
+) -> Result<()> {
+    require_inputs(db, chunks).await?;
+    let stamp = source_input_stamp(db, chunks).await?;
+    let saved = queries::saved_source_inputs(task).fetch_one(db).await?;
+    ensure!(
+        stamp
+            .as_object()
+            .unwrap()
+            .iter()
+            .all(|(id, value)| saved.get(id) == Some(value)),
+        crate::model::Error::OperationAborted
+    );
+    Ok(())
 }

@@ -564,6 +564,63 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
         Command::Integrity(Integrity::Issues { id, after, limit }) => {
             app.integrity_issues(id, after, limit).await
         }
+        Command::Integrity(Integrity::Quarantines {
+            storage,
+            source,
+            after,
+            limit,
+        }) => Ok(serde_json::to_value(
+            app.source_list(
+                principal,
+                crate::model::source::SourceQuery {
+                    storage_id: storage,
+                    source,
+                    after,
+                    limit: Some(limit),
+                },
+            )
+            .await?,
+        )?),
+        Command::Integrity(
+            command @ (Integrity::Quarantine { .. } | Integrity::Recheck { .. }),
+        ) => {
+            let recheck = matches!(&command, Integrity::Recheck { .. });
+            let (storage_id, source, id, confirm) = match command {
+                Integrity::Quarantine {
+                    storage,
+                    source,
+                    id,
+                    confirm,
+                }
+                | Integrity::Recheck {
+                    storage,
+                    source,
+                    id,
+                    confirm,
+                } => (storage, source, id, confirm),
+                _ => unreachable!(),
+            };
+            let operation = app
+                .source_prepare(
+                    principal,
+                    crate::model::source::SourceScope {
+                        storage_id,
+                        source,
+                        id,
+                    },
+                    recheck,
+                )
+                .await?;
+            let fingerprint = operation.snapshot.fingerprint()?;
+            if let Some(confirm) = confirm {
+                ensure!(confirm == fingerprint, s3s::s3_error!(PreconditionFailed));
+                app.source_start(operation).await
+            } else {
+                Ok(
+                    json!({"impact":operation.snapshot.summary()?,"confirm":fingerprint,"effect":if recheck { "full verification before clearing quarantine" } else { "reject new references to this source" }}),
+                )
+            }
+        }
         Command::Cleanup(Cleanup::Status) => Ok(app.cleanup_status()),
         Command::Cleanup(Cleanup::Run) => app.cleanup_history().await,
         Command::Gc(Gc::Status) => app.gc_status().await,
@@ -621,11 +678,22 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             Ok(json!({"maintenance":enabled,"active_operations":app.active.lock().unwrap().len()}))
         }
         Command::Task(Tasks::List) => {
-            let tasks = app.task_control.all().await?;
+            let mut tasks = app.task_control.all().await?;
+            for task in &mut tasks {
+                if let Some(detail) = task["detail"].as_object_mut() {
+                    detail.remove("source_operation");
+                    detail.remove("source_inputs");
+                }
+            }
             Ok(json!(tasks))
         }
         Command::Task(Tasks::Show { id }) => {
-            app.task_control.raw(id).await?.context("task not found")
+            let mut task = app.task_control.raw(id).await?.context("task not found")?;
+            if let Some(detail) = task["detail"].as_object_mut() {
+                detail.remove("source_operation");
+                detail.remove("source_inputs");
+            }
+            Ok(task)
         }
         Command::Task(Tasks::Pause { id }) => app.task_change(id, false).await,
         Command::Task(Tasks::Resume { id }) => app.task_change(id, true).await,

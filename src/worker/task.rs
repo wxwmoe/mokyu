@@ -65,6 +65,8 @@ impl App {
                 "purge" | "pack" | "unpack" | "upload" | "gc" | "storage_migration" | "rewrite"
             ) {
                 self.writable()?;
+            } else if detail.get("source_operation").is_some() {
+                self.source_writable()?;
             } else if task_type == "integrity" {
                 let busy: bool = self.task_control.other_integrity(id).await?;
                 if busy {

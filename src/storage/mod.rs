@@ -1682,7 +1682,7 @@ impl Storage {
             }
             return Ok((raw, None));
         }
-        match self.source(c.id).await? {
+        match self.source(c.id, false).await? {
             Source::Chunk(physical, _pin) => {
                 self.ensure_key_loaded(physical.block_key_id).await?;
                 let encoded = self.read_backend(&physical).await?;
@@ -1742,9 +1742,9 @@ impl Storage {
             .and_then(std::sync::Weak::upgrade)
             .is_some_and(|p| p.load(Ordering::Relaxed) > 0)
     }
-    async fn source(&self, id: i64) -> Result<Source> {
+    async fn source(&self, id: i64, inspection: bool) -> Result<Source> {
         let _gate = self.source_gate.read().await;
-        match self.physical.source(id).await? {
+        match self.physical.source(id, inspection).await? {
             crate::model::PhysicalSource::Chunk(chunk) => {
                 let pin = self.physical_pin(chunk.location_id);
                 Ok(Source::Chunk(chunk, pin))
@@ -2062,8 +2062,71 @@ impl Storage {
             );
             return Ok(0);
         }
-        match self.source(c.id).await? {
+        self.inspect_source(
+            Some(task),
+            self.source(c.id, true).await?,
+            c,
+            mode,
+            physical_detail,
+        )
+        .await
+    }
+    pub(crate) async fn verify_source_namespace(
+        &self,
+        snapshot: &crate::model::source::SourceSnapshot,
+    ) -> Result<bool> {
+        let target = self.store_backend(snapshot.scope.storage_id)?;
+        ensure!(
+            target.revision == snapshot.storage_revision
+                && target.identity_marker == snapshot.identity_marker,
+            crate::model::Error::OperationAborted
+        );
+        self.check_storage_inner(&target).await?;
+        target.identity_ready.store(true, Ordering::Release);
+        Ok(target.is_local)
+    }
+    pub(crate) async fn inspect_exact(
+        &self,
+        snapshot: &crate::model::source::SourceSnapshot,
+    ) -> Result<u64> {
+        let (source, chunk) = {
+            let _gate = self.source_gate.read().await;
+            let pin = self.physical_pin(snapshot.location());
+            match &snapshot.physical {
+                crate::model::PhysicalSource::Chunk(chunk) => {
+                    (Source::Chunk(chunk.clone(), pin), chunk.clone())
+                }
+                crate::model::PhysicalSource::Pack(pack) => {
+                    let members = self.physical.inspection_members(pack.id).await?;
+                    let chunk = members
+                        .first()
+                        .context(codec::IntegrityError::Metadata)?
+                        .0
+                        .clone();
+                    (Source::Pack(pack.clone(), pin), chunk)
+                }
+            }
+        };
+        self.inspect_source(
+            None,
+            source,
+            &chunk,
+            crate::worker::integrity::Mode::Full,
+            &mut serde_json::Value::Null,
+        )
+        .await
+    }
+    async fn inspect_source(
+        &self,
+        task: Option<Uuid>,
+        source: Source,
+        c: &Chunk,
+        mode: crate::worker::integrity::Mode,
+        physical_detail: &mut serde_json::Value,
+    ) -> Result<u64> {
+        match source {
             Source::Chunk(physical, _pin) => {
+                self.ensure_key_loaded(physical.block_key_id).await?;
                 *physical_detail = serde_json::json!({"source":"chunk","encoding_id":physical.encoding_id.to_string(),"location_id":physical.location_id});
                 codec::validate_metadata(&physical, &self.secrets)
                     .inspect_err(|e| self.diagnostics.content(e))?;
@@ -2086,6 +2149,7 @@ impl Storage {
                 }
             }
             Source::Pack(p, _pin) => {
+                self.ensure_key_loaded(p.block_key_id).await?;
                 *physical_detail = serde_json::json!({"source":"pack","pack_id":p.id.to_string(),"location_id":p.location_id});
                 p.validate(&self.secrets)
                     .inspect_err(|e| self.diagnostics.content(e))?;
@@ -2096,7 +2160,9 @@ impl Storage {
                 );
                 // Persistent task results avoid downloading one physical pack per logical chunk.
                 let _inspection = self.inspection.lock().await;
-                if let Some(code) = self.physical.inspection(task, p.id).await? {
+                if let Some(task) = task
+                    && let Some(code) = self.physical.inspection(task, p.id).await?
+                {
                     if let Some(code) = code {
                         return Err(codec::IntegrityError::from_code(&code)
                             .context("invalid inspection result")?
@@ -2188,7 +2254,9 @@ impl Storage {
                             .then_some("remote_missing")
                         })
                 });
-                if result.is_ok() || code.is_some() {
+                if let Some(task) = task
+                    && (result.is_ok() || code.is_some())
+                {
                     self.physical.record_inspection(task, p.id, code).await?;
                 }
                 result

@@ -272,3 +272,13 @@ docker exec mokyu mokyu cli task resume TASK_UUID
 全部在线管理能力在 Web 有对应入口，见[管理指南](management.md)；部署密钥生成、配置文件安装、数据库备份恢复及停止状态的救援仍在部署环境执行。
 
 `cluster nodes` 返回 `{items,next_cursor}`，默认 50 项，可用 `--limit`（1–200）、`--after`、`--name`、`--role`、`--contact`、`--work`、`--configuration`、`--section` 筛选并续页。游标只用于同一组筛选。`cluster status` 增加节点联系、工作和配置生效汇总；`status` 仍表示本进程状态。
+
+## 来源隔离与复检
+
+| 命令 | 说明 |
+| --- | --- |
+| `integrity quarantines --storage UUID --source chunk\|pack [--after ID] [--limit N]` | 按存储和类型分页，默认 50，最多 200 |
+| `integrity quarantine --storage UUID --source chunk\|pack ID [--confirm FINGERPRINT]` | 无 confirm 时完整核查并预览；指定返回的 fingerprint 后再次核查并提交隔离任务 |
+| `integrity recheck --storage UUID --source chunk\|pack ID [--confirm FINGERPRINT]` | 预览已隔离来源；确认后异步完整回源复检，成功才解除 |
+
+ID 是独立 encoding ID 或 pack ID。CLI 与面板使用同一授权、来源代次和任务边界；无强制解除选项。隔离/复检允许维护模式，排空时拒绝。任务入队不代表成功，使用 `task show UUID` 核对状态与结果；普通巡检不会自动隔离，故障计数也不会触发改库。

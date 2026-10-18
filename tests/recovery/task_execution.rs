@@ -164,7 +164,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
         .commit_pack_outputs(current, &rows, &output, false, &Default::default(), 60.0)
         .await?;
     assert!(
-        matches!(backend.source(chunk).await?, crate::model::PhysicalSource::Pack(pack) if pack.id == prepared.id)
+        matches!(backend.source(chunk, false).await?, crate::model::PhysicalSource::Pack(pack) if pack.id == prepared.id)
     );
     assert!(backend.complete_usage(current).await?);
     TaskExecutionStore::finish(
@@ -227,7 +227,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
         None
     );
     assert!(
-        matches!(backend.source(chunk).await?, crate::model::PhysicalSource::Pack(pack) if pack.id == prepared.id)
+        matches!(backend.source(chunk, false).await?, crate::model::PhysicalSource::Pack(pack) if pack.id == prepared.id)
     );
     sqlx::query("INSERT INTO storage_profiles(storage_id,revision) VALUES($1,2)")
         .bind(storage)

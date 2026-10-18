@@ -91,6 +91,34 @@ pub enum Packs {
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Integrity {
+    Quarantines {
+        #[arg(long)]
+        storage: Uuid,
+        #[arg(long, value_enum)]
+        source: crate::model::source::SourceType,
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    Quarantine {
+        #[arg(long)]
+        storage: Uuid,
+        #[arg(long, value_enum)]
+        source: crate::model::source::SourceType,
+        id: String,
+        #[arg(long)]
+        confirm: Option<String>,
+    },
+    Recheck {
+        #[arg(long)]
+        storage: Uuid,
+        #[arg(long, value_enum)]
+        source: crate::model::source::SourceType,
+        id: String,
+        #[arg(long)]
+        confirm: Option<String>,
+    },
     Check {
         #[arg(long, value_enum, default_value = "metadata")]
         mode: crate::worker::integrity::Mode,
@@ -499,7 +527,7 @@ impl Command {
             | Self::Cleanup(Cleanup::Status)
             | Self::Maintenance(Maintenance::Status)
             | Self::Task(Tasks::List | Tasks::Show { .. })
-            | Self::Integrity(Integrity::Issues { .. })
+            | Self::Integrity(Integrity::Issues { .. } | Integrity::Quarantines { .. })
             | Self::Pack(Packs::Status)
             | Self::Cache(Cache::Status)
             | Self::Storages(Storages::List | Storages::Show { .. })
@@ -525,6 +553,8 @@ impl Command {
             Self::Settings(_) => Some("runtime.settings"),
             Self::Keys(_) => Some("managed_key.change"),
             Self::Cluster(_) => Some("cluster.change"),
+            Self::Integrity(Integrity::Quarantine { .. }) => Some("source.quarantine"),
+            Self::Integrity(Integrity::Recheck { .. }) => Some("source.recheck"),
             Self::Integrity(_) => Some("integrity.check"),
             Self::Pack(_) => Some("pack.change"),
             Self::Cache(_) => Some("cache.flush"),

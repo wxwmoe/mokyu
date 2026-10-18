@@ -327,6 +327,9 @@ CREATE TABLE `packs` (
   `deleted_at` datetime(6) DEFAULT NULL,
   `range_checked_at` datetime(6) DEFAULT NULL,
   `stored_at` datetime(6) DEFAULT NULL,
+  quarantined_at datetime(6) DEFAULT NULL,
+  quarantine_code varchar(32) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  quarantine_revision bigint NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`),
   UNIQUE KEY `location_id` (`location_id`),
   UNIQUE KEY `packs_storage_id` (`storage_id`,`id`),
@@ -341,7 +344,10 @@ CREATE TABLE `packs` (
   CONSTRAINT `packs_state` CHECK ((`state` in ('preparing','ready','retired','deleting','deleted'))),
   CONSTRAINT `packs_key` FOREIGN KEY (`block_key_id`) REFERENCES `managed_keys` (`id`),
   CONSTRAINT `packs_owner` FOREIGN KEY (`owner_task`) REFERENCES `tasks` (`id`) ON DELETE SET NULL,
-  CONSTRAINT `packs_storage` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`)
+  CONSTRAINT `packs_storage` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
+  CONSTRAINT packs_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)),
+  CONSTRAINT packs_quarantine_revision CHECK (quarantine_revision >= 0),
+  KEY packs_quarantined (storage_id,quarantined_at,id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `integrity_packs` (
@@ -508,6 +514,9 @@ CREATE TABLE `chunk_encodings` (
   `deleted_at` datetime(6) DEFAULT NULL,
   `stored_at` datetime(6) DEFAULT NULL,
   `ready_chunk` bigint GENERATED ALWAYS AS (if((`state` = 'ready'),`chunk_id`,NULL)) VIRTUAL,
+  quarantined_at datetime(6) DEFAULT NULL,
+  quarantine_code varchar(32) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  quarantine_revision bigint NOT NULL DEFAULT 0,
   PRIMARY KEY (`encoding_id`),
   UNIQUE KEY `location_id` (`location_id`),
   UNIQUE KEY `encodings_ready` (`ready_chunk`),
@@ -523,7 +532,10 @@ CREATE TABLE `chunk_encodings` (
   CONSTRAINT `encodings_state` CHECK ((`state` in ('uploading','ready','retired','deleting','deleted'))),
   CONSTRAINT `encodings_chunk` FOREIGN KEY (`storage_id`, `chunk_id`) REFERENCES `chunks` (`storage_id`, `id`) ON DELETE CASCADE,
   CONSTRAINT `encodings_key` FOREIGN KEY (`block_key_id`) REFERENCES `managed_keys` (`id`),
-  CONSTRAINT `encodings_owner` FOREIGN KEY (`owner_task`) REFERENCES `tasks` (`id`) ON DELETE SET NULL
+  CONSTRAINT `encodings_owner` FOREIGN KEY (`owner_task`) REFERENCES `tasks` (`id`) ON DELETE SET NULL,
+  CONSTRAINT encodings_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)),
+  CONSTRAINT encodings_quarantine_revision CHECK (quarantine_revision >= 0),
+  KEY encodings_quarantined (storage_id,quarantined_at,encoding_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `fragments` (
@@ -805,7 +817,7 @@ CREATE TABLE `maintenance_previews` (
   `id` binary(16) NOT NULL,
   `actor_id` binary(16) NOT NULL,
   `token_id` binary(16) DEFAULT NULL,
-  `action` varchar(6) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `action` varchar(10) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `parameters` json NOT NULL,
   `fingerprint` char(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `expires_at` datetime(6) NOT NULL DEFAULT ((CURRENT_TIMESTAMP(6) + INTERVAL 10 MINUTE)),
@@ -815,7 +827,7 @@ CREATE TABLE `maintenance_previews` (
   KEY `maintenance_previews_task` (`task_id`),
   KEY `maintenance_previews_owner` (`actor_id`,`token_id`,`action`,`task_id`),
   KEY `maintenance_previews_expiry` (`expires_at`),
-  CONSTRAINT `maintenance_previews_action` CHECK ((`action` in ('unpack','sweep'))),
+  CONSTRAINT `maintenance_previews_action` CHECK ((`action` in ('unpack','sweep','quarantine','recheck'))),
   CONSTRAINT `maintenance_previews_actor` FOREIGN KEY (`actor_id`) REFERENCES `web_users` (`id`) ON DELETE CASCADE,
   CONSTRAINT `maintenance_previews_task` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE SET NULL,
   CONSTRAINT `maintenance_previews_token` FOREIGN KEY (`token_id`) REFERENCES `api_tokens` (`id`) ON DELETE CASCADE

@@ -23,6 +23,7 @@ mod publish;
 pub(crate) mod quota;
 pub(crate) mod runtime;
 pub(crate) mod settings;
+pub(crate) mod source;
 pub(crate) mod storage;
 mod stream;
 pub(crate) mod task;

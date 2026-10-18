@@ -108,7 +108,7 @@ impl Config {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Pack {
     pub id: i64,
     pub location_id: Uuid,

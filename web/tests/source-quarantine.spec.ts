@@ -1,0 +1,43 @@
+import { readFileSync } from 'node:fs'
+import { test, expect } from '@playwright/test'
+import en from '../src/locales/i18n.en.js'
+
+test('lists exact quarantines and confirms a full recheck', async ({ page, request }, info) => {
+  test.setTimeout(60000)
+  const fixture = JSON.parse(readFileSync(process.env.MOKYU_TEST_QUARANTINE_FIXTURE!, 'utf8'))
+  const password = readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8').trim()
+  const origin = process.env.MOKYU_TEST_WEB!
+  const login = await request.post('/api/v1/auth/login', { headers: { Origin: origin }, data: { username: 'tester', password } })
+  expect(login.status()).toBe(200)
+  const headers = { Origin: origin, 'X-CSRF-Token': (await login.json()).csrf_token }
+  expect((await request.put('/api/v1/account', { headers, data: { display_name:'',locale:'en',theme:'light',avatar_email:'',avatar_enabled:false } })).ok()).toBe(true)
+  const errors: string[] = []; page.on('pageerror', e => errors.push(e.message))
+  await page.goto('/login')
+  await page.getByRole('textbox', { name:en.username,exact:true }).fill('tester')
+  await page.getByRole('textbox', { name:en.password,exact:true }).fill(password)
+  await page.getByRole('button', { name:en.signIn,exact:true }).click()
+  await expect(page).toHaveURL(/\/overview$/)
+  await page.goto('/maintenance')
+  const card = page.locator('.source-quarantines')
+  await expect(card.getByRole('heading',{name:en.quarantinedSources,exact:true})).toBeVisible()
+  await card.getByRole('combobox',{name:en.taskStorage,exact:true}).click()
+  await page.getByRole('option',{name:fixture.name,exact:true}).click()
+  await expect(card.locator('article')).toHaveCount(1)
+  await expect(card.locator('article')).toContainText('#' + fixture.id)
+  await page.setViewportSize({width:390,height:844})
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await card.screenshot({path:info.outputPath('quarantine-mobile.png')})
+  await page.setViewportSize({width:1440,height:1040})
+  await card.getByRole('button',{name:en.recheckSource,exact:true}).click()
+  const dialog=page.getByRole('dialog',{name:en.sourceConfirm_recheck,exact:true})
+  await expect(dialog.getByRole('button',{name:en.startTask,exact:true})).toBeDisabled()
+  await dialog.getByRole('textbox').fill('RECHECK ' + fixture.id)
+  await expect(dialog.getByRole('button',{name:en.startTask,exact:true})).toBeEnabled()
+  await dialog.screenshot({path:info.outputPath('quarantine-confirm.png')})
+  await dialog.getByRole('button',{name:en.startTask,exact:true}).click()
+  await expect(page).toHaveURL(/\/tasks\?task=/)
+  await expect(page.locator('.task-hero')).toContainText(en.task_recheck)
+  await page.keyboard.press('Escape')
+  await expect.poll(async () => (await (await request.get('/api/v1/maintenance/quarantines?storage_id='+fixture.storage+'&source=chunk')).json()).items.length).toBe(0)
+  expect(errors).toEqual([])
+})

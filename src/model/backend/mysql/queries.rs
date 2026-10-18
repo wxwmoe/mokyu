@@ -1165,7 +1165,7 @@ pub(super) fn lock_integrity_start() -> Statement<'static> {
 }
 pub(super) fn integrity_busy() -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND state IN ('queued','running'))",
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND JSON_EXTRACT(detail,'$.source_operation') IS NULL AND state IN ('queued','running'))",
     )
 }
 pub(super) fn integrity_storages(storage: Option<Uuid>) -> Scalar<'static, Uuid> {
@@ -1725,7 +1725,7 @@ impl PackingStore for Backend {
         cooldown: f64,
     ) -> Result<Vec<PackCandidate>> {
         let mut query = sqlx::QueryBuilder::<MySql>::new("SELECT ");
-        query.push(CHUNK_COLUMNS).push(",e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND e.source_offset=0 AND e.length=c.raw_size AND (SELECT COUNT(*) FROM extents WHERE chunk_id=c.id)=1 AND COALESCE(c.repack_after<=CURRENT_TIMESTAMP(6),TRUE) AND (c.split_at IS NULL OR c.reference_changed_at<=TIMESTAMPADD(MICROSECOND,-").push_bind(cooldown * 1_000_000.).push(",CURRENT_TIMESTAMP(6)))) AS eligible,CAST(IF(c.pack_id IS NULL,1,(SELECT COUNT(*) FROM chunks WHERE pack_id=c.pack_id AND state='ready')) AS SIGNED) AS unit_count FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=").push_bind(stream).push(" AND e.offset_bytes>=").push_bind(offset).push(" AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026");
+        query.push(CHUNK_COLUMNS).push(",e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings q WHERE q.chunk_id=c.id AND q.state='ready' AND q.quarantined_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM packs q WHERE q.id=c.pack_id AND q.quarantined_at IS NOT NULL) AND e.source_offset=0 AND e.length=c.raw_size AND (SELECT COUNT(*) FROM extents WHERE chunk_id=c.id)=1 AND COALESCE(c.repack_after<=CURRENT_TIMESTAMP(6),TRUE) AND (c.split_at IS NULL OR c.reference_changed_at<=TIMESTAMPADD(MICROSECOND,-").push_bind(cooldown * 1_000_000.).push(",CURRENT_TIMESTAMP(6)))) AS eligible,CAST(IF(c.pack_id IS NULL,1,(SELECT COUNT(*) FROM chunks WHERE pack_id=c.pack_id AND state='ready')) AS SIGNED) AS unit_count FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=").push_bind(stream).push(" AND e.offset_bytes>=").push_bind(offset).push(" AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026");
         Ok(query
             .build_query_as::<PackCandidateRow>()
             .fetch_all(&self.pool)
@@ -3016,7 +3016,7 @@ impl TaskControlStore for Backend {
             .transpose()
     }
     async fn other_integrity(&self, id: Uuid) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND state IN ('queued','running') AND id<>?)").bind(id).fetch_one(&self.pool).await?)
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND JSON_EXTRACT(detail,'$.source_operation') IS NULL AND state IN ('queued','running') AND id<>?)").bind(id).fetch_one(&self.pool).await?)
     }
     async fn enqueue(&self, task_type: &str, bucket: Option<Uuid>, detail: Value) -> Result<Uuid> {
         transactions::enqueue_task(&mut *self.pool.acquire().await?, task_type, bucket, detail)
@@ -4993,6 +4993,32 @@ pub(super) fn register_encoding(chunk: &Chunk) -> Statement<'_> {
 
 #[async_trait::async_trait]
 impl PhysicalStore for Backend {
+    async fn source_snapshot(
+        &self,
+        scope: &crate::model::source::SourceScope,
+    ) -> Result<crate::model::source::SourceSnapshot> {
+        transactions::read_source_snapshot(&self.pool, scope).await
+    }
+    async fn quarantines(
+        &self,
+        storage: Uuid,
+        packed: bool,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::model::source::QuarantinedSource>> {
+        quarantines(
+            &mut *self.pool.acquire().await?,
+            storage,
+            packed,
+            after,
+            limit,
+        )
+        .await
+    }
+    async fn source_update(&self, update: crate::model::source::SourceUpdate<'_>) -> Result<()> {
+        transactions::source_update(&self.pool, update).await
+    }
+
     async fn has_chunks(&self) -> Result<bool> {
         Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunks)")
             .fetch_one(&self.pool)
@@ -5013,16 +5039,19 @@ impl PhysicalStore for Backend {
     async fn register_encoding(&self, chunk: &Chunk) -> Result<()> {
         transactions::register_encoding(&self.pool, chunk).await
     }
-    async fn source(&self, id: i64) -> Result<PhysicalSource> {
+    async fn source(&self, id: i64, inspection: bool) -> Result<PhysicalSource> {
         let mut query = chunk_query(true);
         query
             .push(" WHERE c.id=")
             .push_bind(id)
             .push(" AND c.state='ready' AND l.encoding_id IS NOT NULL");
+        if !inspection {
+            query.push(" AND l.quarantined_at IS NULL");
+        }
         if let Some(chunk) = query.build_query_as().fetch_optional(&self.pool).await? {
             return Ok(PhysicalSource::Chunk(chunk));
         }
-        let pack=sqlx::query_as("SELECT p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=? AND c.state='ready' AND p.state='ready'").bind(id).fetch_optional(&self.pool).await?.context(crate::content::codec::IntegrityError::Metadata)?;
+        let pack=sqlx::query_as("SELECT p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=? AND c.state='ready' AND p.state='ready' AND (? OR p.quarantined_at IS NULL)").bind(id).bind(inspection).fetch_optional(&self.pool).await?.context(crate::model::Error::SourceUnavailable)?;
         Ok(PhysicalSource::Pack(pack))
     }
     async fn ready_chunks(&self, ids: &[i64]) -> Result<Vec<Chunk>> {
@@ -7259,4 +7288,234 @@ pub(super) fn save_storage_profile(profile: &StorageProfile) -> Statement<'_> {
         .bind(profile.migration_concurrency)
         .bind(&profile.migration_byte_budget)
         .bind(profile.storage_id).bind(profile.revision)
+}
+
+fn source_scope(query: &mut sqlx::QueryBuilder<MySql>, stream: Option<Uuid>, chunks: &[i64]) {
+    query.push("c.id IN (");
+    if let Some(stream) = stream {
+        query
+            .push("SELECT chunk_id FROM extents WHERE stream_id=")
+            .push_bind(stream);
+    } else if chunks.is_empty() {
+        query.push("NULL");
+    } else {
+        let mut values = query.separated(",");
+        for id in chunks {
+            values.push_bind(*id);
+        }
+    }
+    query.push(")");
+}
+
+pub(super) fn source_locks(
+    stream: Option<Uuid>,
+    chunks: &[i64],
+    phase: u8,
+) -> sqlx::QueryBuilder<MySql> {
+    let mut query = sqlx::QueryBuilder::new(match phase {
+        0 => "SELECT c.id FROM chunks c WHERE ",
+        1 => {
+            "SELECT l.encoding_id FROM chunk_encodings l WHERE l.state='ready' AND l.chunk_id IN (SELECT c.id FROM chunks c WHERE "
+        }
+        2 => {
+            "SELECT p.id FROM packs p WHERE p.state='ready' AND p.id IN (SELECT c.pack_id FROM chunks c WHERE "
+        }
+        _ => unreachable!(),
+    });
+    source_scope(&mut query, stream, chunks);
+    query.push(match phase {
+        0 => " ORDER BY c.id LOCK IN SHARE MODE",
+        1 => ") ORDER BY l.encoding_id LOCK IN SHARE MODE",
+        _ => ") ORDER BY p.id LOCK IN SHARE MODE",
+    });
+    query
+}
+
+pub(super) fn unavailable_sources(
+    stream: Option<Uuid>,
+    chunks: &[i64],
+) -> sqlx::QueryBuilder<MySql> {
+    let mut query = sqlx::QueryBuilder::new("SELECT EXISTS(SELECT 1 FROM chunks c WHERE ");
+    source_scope(&mut query, stream, chunks);
+    query.push(" AND (c.state<>'ready' OR (NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=c.id AND l.state='ready' AND l.quarantined_at IS NULL) AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=c.pack_id AND p.state='ready' AND p.quarantined_at IS NULL) AND NOT (EXISTS(SELECT 1 FROM pending_uploads u WHERE u.chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=c.id AND l.quarantined_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=c.pack_id AND p.quarantined_at IS NOT NULL)))))");
+    query
+}
+
+pub(super) async fn source_snapshot(
+    db: &mut sqlx::MySqlConnection,
+    scope: &crate::model::source::SourceScope,
+    lock: bool,
+) -> Result<crate::model::source::SourceSnapshot> {
+    use crate::model::source::{SourceSnapshot, manifest_digest};
+    let id = scope.number()?;
+    let suffix = if lock { " LOCK IN SHARE MODE" } else { "" };
+    let (storage_revision, marker): (i64, sqlx::types::Json<Value>) = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT p.revision,s.identity_marker FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=? AND s.enabled{suffix}")))
+        .bind(scope.storage_id).fetch_one(&mut *db).await?;
+    let suffix = if lock { " FOR UPDATE" } else { "" };
+    let (table, column) = if scope.packed() {
+        ("packs", "id")
+    } else {
+        ("chunk_encodings", "encoding_id")
+    };
+    let (state, revision, quarantine_code): (String, i64, Option<String>) = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT state,quarantine_revision,quarantine_code FROM {table} WHERE {column}=? AND storage_id=?{suffix}")))
+        .bind(id).bind(scope.storage_id).fetch_optional(&mut *db).await?.context(crate::model::Error::OperationAborted)?;
+    let physical = if scope.packed() {
+        PhysicalSource::Pack(
+            sqlx::query_as("SELECT * FROM packs WHERE id=? AND storage_id=?")
+                .bind(id)
+                .bind(scope.storage_id)
+                .fetch_one(&mut *db)
+                .await?,
+        )
+    } else {
+        PhysicalSource::Chunk(sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.encoding_id=? AND l.storage_id=?").bind(id).bind(scope.storage_id).fetch_one(&mut *db).await?)
+    };
+    let manifest_digest = if let PhysicalSource::Pack(pack) = &physical {
+        let members: Vec<(i64, i64, i32, Vec<u8>)> = sqlx::query_as("SELECT m.chunk_id,m.offset_bytes,c.raw_size,c.hash FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=? ORDER BY m.ordinal LIMIT 4097").bind(id).fetch_all(&mut *db).await?;
+        Some(manifest_digest(pack, &members)?)
+    } else {
+        None
+    };
+    Ok(SourceSnapshot {
+        scope: scope.clone(),
+        physical,
+        state,
+        revision,
+        quarantine_code,
+        storage_revision,
+        identity_marker: marker.0,
+        manifest_digest,
+    })
+}
+
+pub(super) async fn quarantines(
+    db: &mut sqlx::MySqlConnection,
+    storage: Uuid,
+    packed: bool,
+    after: i64,
+    limit: i64,
+) -> Result<Vec<crate::model::source::QuarantinedSource>> {
+    use crate::model::source::{QuarantinedSource, SourceScope, SourceType};
+    let (table, id) = if packed {
+        ("packs", "id")
+    } else {
+        ("chunk_encodings", "encoding_id")
+    };
+    let rows: Vec<(i64, Uuid, String, String, String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {id},location_id,state,DATE_FORMAT(quarantined_at,'%Y-%m-%dT%H:%i:%s.%fZ'),quarantine_code,quarantine_revision FROM {table} WHERE storage_id=? AND quarantined_at IS NOT NULL AND {id}>? ORDER BY {id} LIMIT ?")))
+        .bind(storage).bind(after).bind(limit).fetch_all(db).await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, location_id, state, quarantined_at, code, revision)| QuarantinedSource {
+                scope: SourceScope {
+                    storage_id: storage,
+                    source: if packed {
+                        SourceType::Pack
+                    } else {
+                        SourceType::Chunk
+                    },
+                    id: id.to_string(),
+                },
+                location_id,
+                state,
+                quarantined_at,
+                code,
+                revision: revision.to_string(),
+            },
+        )
+        .collect())
+}
+
+pub(super) fn change_source<'a>(
+    snapshot: &crate::model::source::SourceSnapshot,
+    code: Option<&'a str>,
+) -> Result<Statement<'a>> {
+    let (table, id) = if snapshot.scope.packed() {
+        ("packs", "id")
+    } else {
+        ("chunk_encodings", "encoding_id")
+    };
+    Ok(sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET quarantined_at=CASE WHEN ? IS NULL THEN NULL ELSE UTC_TIMESTAMP(6) END,quarantine_code=?,quarantine_revision=quarantine_revision+1 WHERE {id}=? AND storage_id=? AND quarantine_revision=? AND state='ready'")))
+        .bind(code).bind(code).bind(snapshot.scope.number()?).bind(snapshot.scope.storage_id).bind(snapshot.revision))
+}
+
+pub(super) fn source_mode(mode: &str) -> Scalar<'_, bool> {
+    sqlx::query_scalar("SELECT ?='single'").bind(mode)
+}
+
+pub(super) fn source_result(task: Uuid, result: Value) -> Statement<'static> {
+    sqlx::query(
+        "UPDATE tasks SET detail=JSON_MERGE_PATCH(detail,?),processed=processed+1 WHERE id=?",
+    )
+    .bind(result)
+    .bind(task)
+}
+
+pub(super) fn quarantined_inputs(chunks: &[i64]) -> sqlx::QueryBuilder<MySql> {
+    let mut query = sqlx::QueryBuilder::new("SELECT EXISTS(SELECT 1 FROM chunks c WHERE ");
+    source_scope(&mut query, None, chunks);
+    query.push(" AND (EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=c.id AND l.state='ready' AND l.quarantined_at IS NOT NULL) OR EXISTS(SELECT 1 FROM packs p WHERE p.id=c.pack_id AND p.state='ready' AND p.quarantined_at IS NOT NULL)))");
+    query
+}
+
+pub(super) fn splice_locks(
+    streams: &[Uuid],
+    chunk: i64,
+    physical: bool,
+) -> sqlx::QueryBuilder<MySql> {
+    let mut query = sqlx::QueryBuilder::new(if physical {
+        "SELECT c.id FROM chunks c WHERE c.id="
+    } else {
+        "SELECT id FROM streams WHERE id IN ("
+    });
+    if physical {
+        query
+            .push_bind(chunk)
+            .push(" OR c.id IN (SELECT chunk_id FROM extents WHERE stream_id IN (");
+    }
+    let mut values = query.separated(",");
+    for stream in streams {
+        values.push_bind(*stream);
+    }
+    query.push(if physical {
+        ")) ORDER BY c.id FOR UPDATE"
+    } else {
+        ") ORDER BY id FOR UPDATE"
+    });
+    query
+}
+
+pub(super) fn allocated_source(stream: Uuid, chunk: &Chunk) -> sqlx::QueryBuilder<MySql> {
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT l.encoding_id FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.chunk_id=c.id WHERE c.state='uploading' AND l.state='uploading' AND l.quarantined_at IS NULL AND l.owner_task IS NULL AND c.id=",
+    );
+    query
+        .push_bind(chunk.id)
+        .push(" AND c.owner_stream=")
+        .push_bind(stream)
+        .push(" AND l.encoding_id=")
+        .push_bind(chunk.encoding_id)
+        .push(" AND l.location_id=")
+        .push_bind(chunk.location_id)
+        .push(" FOR UPDATE");
+    query
+}
+pub(super) fn source_input_versions(chunks: &[i64]) -> sqlx::QueryBuilder<MySql> {
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT c.id,l.encoding_id,l.quarantine_revision,p.id,p.quarantine_revision FROM chunks c LEFT JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready' WHERE ",
+    );
+    source_scope(&mut query, None, chunks);
+    query.push(" ORDER BY c.id,l.encoding_id,p.id");
+    query
+}
+pub(super) fn save_source_inputs(task: Uuid, stamp: &Value) -> Statement<'_> {
+    sqlx::query(
+        "UPDATE tasks SET detail=JSON_SET(detail,'$.source_inputs',JSON_EXTRACT(?,'$')) WHERE id=?",
+    )
+    .bind(stamp)
+    .bind(task)
+}
+pub(super) fn saved_source_inputs(task: Uuid) -> Scalar<'static, Value> {
+    sqlx::query_scalar("SELECT JSON_EXTRACT(detail,'$.source_inputs') FROM tasks WHERE id=?")
+        .bind(task)
 }

@@ -37,6 +37,8 @@ impl App {
     ) -> Result<()> {
         self.renew_write_lease(id).await?;
         self.writable()?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("source-before-publish").await;
         let _coord = self.coord.lock().await;
         self.writable()?;
         if !self
