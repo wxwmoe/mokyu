@@ -141,6 +141,16 @@ Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专�
 
 ## 来源写入基准
 
+### 独立操作计时
+
+`python -m tests.benchmarks.object_io /config/io.json /results/io.json` 分别计量 `put`、`get`、`head` 或 `multipart`，要求 release 构建与 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`。先运行 `python -m tests.benchmarks.object_io_test`。普通写入只计收到 ACK 的耗时，每个成功对象使用唯一 key，全部完整读回校验在计时及资源采样窗口之外；GET 计完整正文校验并另记首字节，Multipart 同时记录 Create、UploadPart、Complete 和完整生命周期。写入 ACK 不代表异步后台已排空，应另外记录排空时间与资源。
+
+fixture 使用 `revision`、`build`、`database_version`、`cache_state`、`seed`、`credentials_file`、`prefix` 和可选 `resources`/PostgreSQL `database_file`，另设单个 `endpoint`、`operation`、`size`、`seconds`、`concurrency`、`max_operations`、`max_total_bytes`。正文大小 0–64MiB，并发 1–64，持续 1–600 秒，请求最多一百万；包括预热对象的 `(max_operations + 1) × size` 必须在字节预算内。每轮使用独占前缀，脚本不会删除数据；触及请求上限时按实际时间报告。
+
+报告保存各操作百分位、实际请求窗口吞吐、读回校验数量/错误、CPU、cgroup 内存（含匿名页/文件页/脏页）、逐设备 I/O 字节/次数及节点状态。逐设备计数不叠加，以免重复计算分区和底层设备。PostgreSQL SQL 差值是整个测量窗口的数据库总成本，包含后台工作，不是逐请求前台 SQL 计数；没有采集时为 null，不能解读成零。公共 Web/匿名 S3 的编码读取继续使用公共读基准；所有比较记录应用/页缓存状态，统一资源与确认策略，并发超出服务准入额度的 SlowDown 必须计为错误，不能只报告成功请求。
+
+### 写入与立即读回
+
 `python -m tests.benchmarks.source_writes /config/writes.json /results/writes.json` 使用独立 release 服务和可丢弃桶，要求 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`、boto3，以及启用 SQL 采样时的 psycopg。先运行 `python -m tests.benchmarks.source_writes_test`，确保错误正文不能计作成功。
 
 fixture 沿用公共读基准的 `label`、`revision`、`build`、`database_version`、`cache_state`、`seed`、`resources` 和可选 `database_file`，增加：
