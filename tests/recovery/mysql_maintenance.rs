@@ -315,7 +315,9 @@ async fn mysql_maintenance_contract() -> Result<()> {
                 .claim_physical(false, chunk.encoding_id, 0., 0.)
                 .await?
         );
-        backend.delete_physical(false, chunk.encoding_id).await?;
+        backend
+            .delete_physical(false, chunk.encoding_id, 0.)
+            .await?;
     }
     assert_eq!(history(&backend, "chunks", 10).await?, 0);
     backend
@@ -329,7 +331,7 @@ async fn mysql_maintenance_contract() -> Result<()> {
             .any(|r| r.0 == pack && !r.2)
     );
     assert!(backend.claim_physical(true, pack, 0., 86400.).await?);
-    backend.delete_physical(true, pack).await?;
+    backend.delete_physical(true, pack, 0.).await?;
     assert_eq!(history(&backend, "packs", 1).await?, 1);
     assert_eq!(history(&backend, "chunks", 1).await?, 1);
     assert_eq!(history(&backend, "chunks", 10).await?, 1);

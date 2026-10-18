@@ -7,7 +7,7 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator.locking = false;
     migrator
 };
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
     ensure!(
@@ -48,7 +48,7 @@ pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
         if !success {
             // Only explicitly idempotent migrations may resume after MySQL's implicit DDL commits.
             ensure!(
-                matches!(*version, 1..=18) && index + 1 == applied.len(),
+                matches!(*version, 1..=19) && index + 1 == applied.len(),
                 "MySQL migration requires manual recovery"
             );
         }

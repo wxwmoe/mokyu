@@ -424,6 +424,13 @@ impl App {
         min_storage_seconds: u64,
     ) -> Result<usize> {
         let minimum = min_storage_seconds as f64;
+        let retention = config::seconds(
+            &self
+                .storage_profiles
+                .load(storage_id)
+                .await?
+                .deleted_chunk_retention,
+        )? as f64;
         self.maintenance_store.retire_packs(storage_id).await?;
         let mut count = 0;
         for packed in [false, true] {
@@ -475,7 +482,9 @@ impl App {
                 }
                 match self.storage.delete_path_for(storage_id, &path).await {
                     Ok(()) => {
-                        self.maintenance_store.delete_physical(packed, id).await?;
+                        self.maintenance_store
+                            .delete_physical(packed, id, retention)
+                            .await?;
                         count += 1;
                     }
                     Err(e) => {

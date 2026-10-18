@@ -386,7 +386,7 @@ impl App {
             }
             let n = codec::cut(&window);
             let chunk = self
-                .put_chunk(work, used as i64, window[..n].to_vec())
+                .put_chunk(work, used as i64, window[..n].to_vec(), false)
                 .await?;
             let l = (data.len() - used).min(n);
             let r = n - l;
@@ -650,7 +650,8 @@ impl App {
                         rest = &rest[n..];
                         if window.len() == MAX {
                             let n = codec::cut(&window);
-                            self.put_chunk(id, offset, window[..n].to_vec()).await?;
+                            self.put_chunk(id, offset, window[..n].to_vec(), false)
+                                .await?;
                             offset += n as i64;
                             window.drain(..n);
                         }
@@ -665,7 +666,8 @@ impl App {
         }
         while !window.is_empty() {
             let n = codec::cut(&window);
-            self.put_chunk(id, offset, window[..n].to_vec()).await?;
+            self.put_chunk(id, offset, window[..n].to_vec(), false)
+                .await?;
             offset += n as i64;
             window.drain(..n);
         }

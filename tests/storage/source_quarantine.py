@@ -77,6 +77,7 @@ class Fixture:
         bucket = self.cli('bucket', 'create', self.name, '--storage', self.store['id'])
         self.bucket_id = bucket['id']
         credentials = self.cli('cred', 'create', self.name)
+        self.credentials = credentials
         self.client = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_name='us-east-1',
                                    aws_access_key_id=credentials['access_key'], aws_secret_access_key=credentials['secret_key'], config=client_config)
 

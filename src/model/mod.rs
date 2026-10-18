@@ -21,6 +21,7 @@ mod physical;
 mod profile;
 mod publish;
 pub(crate) mod quota;
+pub(crate) mod recovery;
 pub(crate) mod runtime;
 pub(crate) mod settings;
 pub(crate) mod source;

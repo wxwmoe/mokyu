@@ -1840,11 +1840,11 @@ impl Storage {
         self.background_writable()?;
         let mut operation = self.operations[2].begin();
         self.backend_deletes.fetch_add(1, Ordering::Relaxed);
-        let result = target
-            .backend
-            .delete(path)
-            .await
-            .inspect_err(|e| self.diagnostics.backend(e));
+        let result = match target.backend.delete(path).await {
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            result => result,
+        }
+        .inspect_err(|e| self.diagnostics.backend(e));
         operation.finish(result.is_err());
         result?;
         Ok(())
@@ -2028,6 +2028,12 @@ impl Storage {
             .head_path_for(storage_id, &self.path_for(storage_id, c.location_id)?)
             .await?
             .size)
+    }
+    pub(crate) async fn verify_chunk(&self, chunk: &Chunk) -> Result<()> {
+        self.ensure_key_loaded(chunk.block_key_id).await?;
+        let encoded = self.read_backend(chunk).await?;
+        self.decode(chunk, encoded).await?;
+        Ok(())
     }
     pub(crate) async fn head_path_for(
         &self,

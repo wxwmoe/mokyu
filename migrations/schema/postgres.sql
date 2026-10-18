@@ -643,6 +643,9 @@ CREATE TABLE public.chunk_encodings (
     quarantined_at timestamp with time zone,
     quarantine_code text,
     quarantine_revision bigint DEFAULT 0 NOT NULL,
+    owner_stream uuid,
+    recovery_pending boolean DEFAULT false NOT NULL,
+    CONSTRAINT encodings_owner_exclusive CHECK ((owner_task IS NULL OR owner_stream IS NULL)),
     CONSTRAINT encodings_quarantine CHECK (((quarantined_at IS NULL) = (quarantine_code IS NULL))),
     CONSTRAINT encodings_quarantine_revision CHECK ((quarantine_revision >= 0)),
     CONSTRAINT chunk_encodings_block_key_check CHECK ((((encryption_algorithm = 'none'::text) AND (block_key_id IS NULL)) OR ((encryption_algorithm <> 'none'::text) AND (block_key_id IS NOT NULL)))),
@@ -2198,3 +2201,7 @@ CREATE INDEX runtime_cluster_time ON runtime_samples (sampled_at DESC) WHERE dat
 CREATE INDEX encodings_quarantined ON public.chunk_encodings USING btree (storage_id, encoding_id) WHERE (quarantined_at IS NOT NULL);
 
 CREATE INDEX packs_quarantined ON public.packs USING btree (storage_id, id) WHERE (quarantined_at IS NOT NULL);
+
+ALTER TABLE public.chunk_encodings ADD CONSTRAINT chunk_encodings_owner_stream_fkey FOREIGN KEY (owner_stream) REFERENCES public.streams(id) ON DELETE RESTRICT;
+CREATE INDEX encodings_owner_stream ON public.chunk_encodings USING btree (owner_stream) WHERE (owner_stream IS NOT NULL);
+CREATE INDEX encodings_recovery ON public.chunk_encodings USING btree (storage_id, unreferenced_at, encoding_id) WHERE recovery_pending;

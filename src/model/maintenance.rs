@@ -124,7 +124,7 @@ pub(crate) trait MaintenanceStore: Send + Sync {
     async fn physical_age(&self, packed: bool, id: i64, stored: DateTime<Utc>) -> Result<()>;
     async fn claim_physical(&self, packed: bool, id: i64, grace: f64, minimum: f64)
     -> Result<bool>;
-    async fn delete_physical(&self, packed: bool, id: i64) -> Result<()>;
+    async fn delete_physical(&self, packed: bool, id: i64, retention: f64) -> Result<()>;
     async fn gc_status(&self) -> Result<(Vec<(String, i64)>, bool, bool)>;
     async fn mark_orphans(&self) -> Result<usize>;
 }

@@ -337,3 +337,5 @@ metadata 检查对象映射与区块身份，head 增加存储存在性和长度
 | `POST /api/v1/maintenance/{quarantine,recheck}/execute` | `{preview_id,confirmation}`；要求近期密码验证和对应会话 CSRF，返回 `{task_id}`；重复执行同一预览返回同一任务 |
 
 预览绑定位置、profile、身份和隔离代次；过期或已变化返回冲突。任务复核当前授权和执行 token，事务内提交隔离状态、代次、结果和审计。复检须完整回源校验；接受或 HEAD 成功均不代表恢复完成。任务详情不返回内部授权依据或维护输入快照。隔离列表的 retired/deleting/deleted 项只供查看，不能复检为 ready。
+
+没有单独的正文修复 API。普通 S3/Web 上传持有同存储、同长度及同 BLAKE3 的完整区块时，可以为仅有隔离来源的逻辑区块生成并完整验证新编码。沿用原上传权限和最终发布条件，不能通过 Copy 或解除隔离接口跳过回读。恢复审计使用 `source.recover`，记录逻辑区块、新编码及旧来源摘要，不包含正文或密钥。

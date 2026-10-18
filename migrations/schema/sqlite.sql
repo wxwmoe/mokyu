@@ -114,7 +114,10 @@ CREATE TABLE chunk_encodings (
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     unreferenced_at INTEGER,
     deleted_at INTEGER,
-    stored_at INTEGER, quarantined_at INTEGER, quarantine_code TEXT CONSTRAINT encodings_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)), quarantine_revision INTEGER NOT NULL DEFAULT 0 CONSTRAINT encodings_quarantine_revision CHECK (quarantine_revision >= 0),
+    stored_at INTEGER, quarantined_at INTEGER, quarantine_code TEXT CONSTRAINT encodings_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)), quarantine_revision INTEGER NOT NULL DEFAULT 0 CONSTRAINT encodings_quarantine_revision CHECK (quarantine_revision >= 0), owner_stream BLOB
+    CHECK (owner_stream IS NULL OR length(owner_stream)=16)
+    REFERENCES streams(id) ON DELETE RESTRICT
+    CONSTRAINT encodings_owner_exclusive CHECK (owner_task IS NULL OR owner_stream IS NULL), recovery_pending INTEGER NOT NULL DEFAULT FALSE CHECK (recovery_pending IN (0,1)),
     CONSTRAINT encodings_chunk FOREIGN KEY (storage_id,chunk_id) REFERENCES chunks(storage_id,id) ON DELETE CASCADE,
     CONSTRAINT encodings_owner FOREIGN KEY (owner_task) REFERENCES tasks(id) ON DELETE SET NULL,
     CONSTRAINT encodings_key FOREIGN KEY (block_key_id) REFERENCES managed_keys(id),
@@ -1006,3 +1009,6 @@ INSERT INTO usage_summary(id) VALUES('global');
 CREATE INDEX encodings_quarantined ON chunk_encodings (storage_id,encoding_id) WHERE quarantined_at IS NOT NULL;
 
 CREATE INDEX packs_quarantined ON packs (storage_id,id) WHERE quarantined_at IS NOT NULL;
+
+CREATE INDEX encodings_owner_stream ON chunk_encodings(owner_stream) WHERE owner_stream IS NOT NULL;
+CREATE INDEX encodings_recovery ON chunk_encodings(storage_id,unreferenced_at,encoding_id) WHERE recovery_pending;

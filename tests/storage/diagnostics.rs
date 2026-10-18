@@ -141,6 +141,10 @@ async fn storage_diagnostics_count_shared_failures_and_cache_fallback() -> Resul
     assert!(storage.cached_file(&chunk, id).await?.is_none());
     assert_eq!(storage.statistics()["diagnostics"]["cache"]["missing"], 1);
     assert_eq!(storage.statistics()["diagnostics"]["content"]["hash"], 1);
+    storage.delete_path_for(store.id, &path).await?;
+    storage.delete_path_for(store.id, &path).await?;
+    assert_eq!(storage.statistics()["backend"]["delete"]["failed"], 0);
+    assert!(storage.head_path_for(store.id, &path).await.is_err());
     pool.close().await;
     drop(app);
     drop(owner);

@@ -533,9 +533,14 @@ CREATE TABLE `chunk_encodings` (
   CONSTRAINT `encodings_chunk` FOREIGN KEY (`storage_id`, `chunk_id`) REFERENCES `chunks` (`storage_id`, `id`) ON DELETE CASCADE,
   CONSTRAINT `encodings_key` FOREIGN KEY (`block_key_id`) REFERENCES `managed_keys` (`id`),
   CONSTRAINT `encodings_owner` FOREIGN KEY (`owner_task`) REFERENCES `tasks` (`id`) ON DELETE SET NULL,
+  owner_stream binary(16) DEFAULT NULL,
+  recovery_pending tinyint(1) NOT NULL DEFAULT '0',
+  CONSTRAINT encodings_owner_stream FOREIGN KEY (owner_stream) REFERENCES streams(id) ON DELETE RESTRICT,
   CONSTRAINT encodings_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)),
   CONSTRAINT encodings_quarantine_revision CHECK (quarantine_revision >= 0),
-  KEY encodings_quarantined (storage_id,quarantined_at,encoding_id)
+  KEY encodings_quarantined (storage_id,quarantined_at,encoding_id),
+  KEY encodings_owner_stream (owner_stream),
+  KEY encodings_recovery (recovery_pending,storage_id,unreferenced_at,encoding_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `fragments` (
@@ -994,3 +999,17 @@ INSERT INTO quota_scopes(scope,scope_id) VALUES('project',X'00000000000000000000
 INSERT INTO access_state(id,coverage_since,flushed_at) VALUES(1,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6));
 INSERT INTO maintenance_controls(policy) VALUES('gc'),('pack'),('reuse'),('reclaim'),('repack'),('range'),('cleanup');
 INSERT INTO usage_summary(id) VALUES('global');
+
+-- MySQL disallows a CHECK on owner_task because its foreign key uses SET NULL.
+CREATE TRIGGER encodings_owner_insert BEFORE INSERT ON chunk_encodings FOR EACH ROW
+BEGIN
+    IF NEW.owner_task IS NOT NULL AND NEW.owner_stream IS NOT NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='encoding owners are exclusive';
+    END IF;
+END;
+CREATE TRIGGER encodings_owner_update BEFORE UPDATE ON chunk_encodings FOR EACH ROW
+BEGIN
+    IF NEW.owner_task IS NOT NULL AND NEW.owner_stream IS NOT NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='encoding owners are exclusive';
+    END IF;
+END;

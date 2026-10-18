@@ -934,6 +934,24 @@ pub(super) fn required_keys() -> Scalar<'static, Uuid> {
 
 #[async_trait::async_trait]
 impl ChunkStore for Backend {
+    async fn prepare_repair(
+        &self,
+        input: ChunkCreate,
+        node: Option<crate::model::recovery::RepairNode>,
+    ) -> Result<crate::model::recovery::RepairAllocation> {
+        transactions::prepare_repair(&self.pool, input, node).await
+    }
+    async fn repair_metadata(&self, repair: &crate::model::recovery::Repair) -> Result<()> {
+        transactions::repair_metadata(&self.pool, repair).await
+    }
+    async fn finish_repair(
+        &self,
+        repair: &crate::model::recovery::Repair,
+        offset: i64,
+    ) -> Result<Chunk> {
+        transactions::finish_repair(&self.pool, repair, offset).await
+    }
+
     async fn storage_for_stream(&self, stream: Uuid) -> Result<Option<Uuid>> {
         Ok(storage_for_stream(stream).fetch_one(&self.pool).await?)
     }
@@ -4776,7 +4794,7 @@ pub(super) fn fail_startup_chunks() -> Statement<'static> {
 }
 pub(super) fn retire_startup_encodings() -> Statement<'static> {
     sqlx::query(
-        "UPDATE chunk_encodings SET state='retired',unreferenced_at=COALESCE(unreferenced_at,now()) WHERE state='uploading'",
+        "UPDATE chunk_encodings SET owner_stream=NULL,state='retired',unreferenced_at=COALESCE(unreferenced_at,now()) WHERE state='uploading'",
     )
 }
 pub(super) fn retire_startup_packs() -> Statement<'static> {
@@ -4874,7 +4892,7 @@ pub(super) fn remove_stream_extents(id: Uuid, batch: i64) -> Scalar<'static, Opt
     sqlx::query_scalar("DELETE FROM extents WHERE stream_id=$1 AND offset_bytes IN (SELECT offset_bytes FROM extents WHERE stream_id=$1 ORDER BY offset_bytes LIMIT $2) RETURNING chunk_id").bind(id).bind(batch)
 }
 pub(super) fn remove_empty_stream(id: Uuid) -> Statement<'static> {
-    sqlx::query("DELETE FROM streams s WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM chunks WHERE owner_stream=s.id) AND NOT EXISTS(SELECT 1 FROM fragments WHERE owner_stream=s.id)").bind(id)
+    sqlx::query("DELETE FROM streams s WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM chunks WHERE owner_stream=s.id) AND NOT EXISTS(SELECT 1 FROM fragments WHERE owner_stream=s.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE owner_stream=s.id)").bind(id)
 }
 pub(super) fn stale_fragments<'q>(
     batch: i64,
@@ -4905,7 +4923,7 @@ pub(super) fn lock_reclaim_chunk(
     storage: Uuid,
     grace: f64,
 ) -> Rows<'static, (Option<Uuid>,)> {
-    sqlx::query_as("SELECT owner_stream FROM chunks WHERE id=$1 AND storage_id=$2 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) FOR UPDATE").bind(id).bind(storage).bind(grace)
+    sqlx::query_as("SELECT owner_stream FROM chunks WHERE id=$1 AND storage_id=$2 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=chunks.id AND owner_stream IS NOT NULL) FOR UPDATE").bind(id).bind(storage).bind(grace)
 }
 pub(super) fn claim_reclaim_chunk(id: i64, storage: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE chunks SET state='deleting',pack_id=NULL WHERE id=$1 AND storage_id=$2")
@@ -4955,13 +4973,13 @@ pub(super) fn cleanup_history<'q>(
             "DELETE FROM audit_events WHERE id IN (SELECT id FROM audit_events WHERE created_at<now()-$1*interval '1 second' ORDER BY created_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
         }
         "chunks" => {
-            "DELETE FROM chunks WHERE id IN (SELECT id FROM chunks c WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND state<>'deleted') AND NOT EXISTS(SELECT 1 FROM pack_members m JOIN packs p ON p.id=m.pack_id WHERE m.chunk_id=c.id AND p.state<>'deleted') ORDER BY deleted_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
+            "DELETE FROM chunks WHERE id IN (SELECT id FROM chunks c WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND (state<>'deleted' OR recovery_pending OR owner_stream IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pack_members m JOIN packs p ON p.id=m.pack_id WHERE m.chunk_id=c.id AND p.state<>'deleted') ORDER BY deleted_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
         }
         "packs" => {
             "DELETE FROM packs WHERE id IN (SELECT id FROM packs p WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack_id=p.id) ORDER BY deleted_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
         }
         "chunk_encodings" => {
-            "DELETE FROM chunk_encodings WHERE encoding_id IN (SELECT encoding_id FROM chunk_encodings WHERE state='deleted' AND deleted_at<now()-$1*interval '1 second' ORDER BY deleted_at,encoding_id LIMIT $2 FOR UPDATE SKIP LOCKED)"
+            "DELETE FROM chunk_encodings WHERE encoding_id IN (SELECT encoding_id FROM chunk_encodings WHERE state='deleted' AND NOT recovery_pending AND owner_stream IS NULL AND deleted_at<now()-$1*interval '1 second' ORDER BY deleted_at,encoding_id LIMIT $2 FOR UPDATE SKIP LOCKED)"
         }
         "uploads" => {
             "DELETE FROM uploads WHERE id IN (SELECT id FROM uploads u WHERE state IN ('completed','aborted') AND touched_at<now()-$1*interval '1 second' AND NOT (id=ANY($3)) AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id) ORDER BY touched_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
@@ -5023,10 +5041,23 @@ pub(super) fn physical_gc_candidates(
     single: bool,
 ) -> Rows<'static, (i64, Uuid, bool)> {
     let (table, id_column, lease_guard) = physical_table(packed);
+    let state_guard = if packed {
+        "r.state IN ('retired','deleting')"
+    } else {
+        "(r.state IN ('retired','deleting') OR (r.state='deleted' AND r.recovery_pending)) AND r.owner_stream IS NULL"
+    };
+    let unknown = if packed {
+        "r.stored_at IS NULL"
+    } else {
+        "r.stored_at IS NULL OR r.recovery_pending"
+    };
     let lease_guard = if single { "true" } else { lease_guard };
-    sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT r.{id_column},r.location_id,r.stored_at IS NULL FROM {table} r WHERE r.state IN ('retired','deleting') AND r.unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR r.stored_at IS NULL OR r.stored_at<=now()-$3*interval '1 second') AND r.storage_id=$4 AND {lease_guard} AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation'='recheck' AND t.detail->>'source_location'=r.location_id::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) ORDER BY r.unreferenced_at,r.{id_column} LIMIT $2"))).bind(grace).bind(batch).bind(minimum).bind(storage)
+    sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT r.{id_column},r.location_id,({unknown}) FROM {table} r WHERE {state_guard} AND r.unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR r.stored_at IS NULL OR r.stored_at<=now()-$3*interval '1 second') AND r.storage_id=$4 AND {lease_guard} AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation'='recheck' AND t.detail->>'source_location'=r.location_id::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) ORDER BY r.unreferenced_at,r.{id_column} LIMIT $2"))).bind(grace).bind(batch).bind(minimum).bind(storage)
 }
 pub(super) fn physical_gc_age(packed: bool, id: i64, stored: DateTime<Utc>) -> Statement<'static> {
+    if !packed {
+        return sqlx::query("UPDATE chunk_encodings SET stored_at=CASE WHEN recovery_pending THEN $2 ELSE COALESCE(stored_at,$2) END WHERE encoding_id=$1").bind(id).bind(stored);
+    }
     let (table, id_column, _lease_guard) = physical_table(packed);
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE {table} SET stored_at=COALESCE(stored_at,$2) WHERE {id_column}=$1"
@@ -5041,9 +5072,17 @@ pub(super) fn claim_physical_gc(
     minimum: f64,
 ) -> Statement<'static> {
     let (table, id_column, _lease_guard) = physical_table(packed);
-    sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} r SET state='deleting' WHERE NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation'='recheck' AND t.detail->>'source_location'=r.location_id::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND {id_column}=$1 AND state IN ('retired','deleting') AND unreferenced_at<now()-$2*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second')"))).bind(id).bind(grace).bind(minimum)
+    let state_guard = if packed {
+        "state IN ('retired','deleting')"
+    } else {
+        "(state IN ('retired','deleting') OR (state='deleted' AND recovery_pending)) AND owner_stream IS NULL"
+    };
+    sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} r SET state='deleting' WHERE NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation'='recheck' AND t.detail->>'source_location'=r.location_id::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND {id_column}=$1 AND {state_guard} AND unreferenced_at<now()-$2*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second')"))).bind(id).bind(grace).bind(minimum)
 }
-pub(super) fn finish_physical_gc(packed: bool, id: i64) -> Statement<'static> {
+pub(super) fn finish_physical_gc(packed: bool, id: i64, retention: f64) -> Statement<'static> {
+    if !packed {
+        return sqlx::query("UPDATE chunk_encodings SET recovery_pending=recovery_pending AND (deleted_at IS NULL OR deleted_at>clock_timestamp()-$2*interval '1 second'),state='deleted',unreferenced_at=clock_timestamp(),deleted_at=COALESCE(deleted_at,clock_timestamp()) WHERE encoding_id=$1 AND state='deleting'").bind(id).bind(retention);
+    }
     let (table, id_column, _lease_guard) = physical_table(packed);
     sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleted',deleted_at=now() WHERE {id_column}=$1 AND state='deleting'"))).bind(id)
 }
@@ -5279,8 +5318,10 @@ impl MaintenanceStore for Backend {
             .rows_affected()
             != 0)
     }
-    async fn delete_physical(&self, packed: bool, id: i64) -> Result<()> {
-        finish_physical_gc(packed, id).execute(&self.pool).await?;
+    async fn delete_physical(&self, packed: bool, id: i64, retention: f64) -> Result<()> {
+        finish_physical_gc(packed, id, retention)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
     async fn gc_status(&self) -> Result<(Vec<(String, i64)>, bool, bool)> {
@@ -8338,4 +8379,77 @@ pub(super) fn save_source_inputs(task: Uuid, stamp: &Value) -> Statement<'_> {
 }
 pub(super) fn saved_source_inputs(task: Uuid) -> Scalar<'static, Value> {
     sqlx::query_scalar("SELECT detail->'source_inputs' FROM tasks WHERE id=$1").bind(task)
+}
+
+// Recovery candidates are private to their writing stream until full verification.
+pub(super) fn repair_mode() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT deployment_mode='single' AND NOT maintenance FROM mokyu_meta FOR SHARE",
+    )
+}
+pub(super) fn repair_chunk(input: &ChunkCreate) -> Rows<'_, Chunk> {
+    sqlx::query_as("SELECT * FROM chunks WHERE storage_id=$1 AND hash=$2 AND raw_size=$3 AND state='ready' ORDER BY id LIMIT 1 FOR UPDATE")
+        .bind(input.storage).bind(input.hash.as_slice()).bind(input.raw_size)
+}
+pub(super) fn repair_cluster_mode() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT deployment_mode='cluster' AND NOT maintenance FROM mokyu_meta FOR SHARE",
+    )
+}
+pub(super) fn repair_node(node: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT id FROM nodes WHERE id=$1 AND enabled AND NOT recovery_required AND status NOT IN ('released','draining') FOR SHARE").bind(node)
+}
+pub(super) fn repair_lease(stream: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT id FROM stream_leases WHERE stream_id=$1 AND lease_type='write' AND expires_at>clock_timestamp() FOR SHARE").bind(stream)
+}
+pub(super) fn repair_stream(
+    stream: Uuid,
+) -> Rows<'static, (Uuid, String, Option<Uuid>, Option<Uuid>)> {
+    sqlx::query_as("SELECT bucket_id,stream_type,owner_task_id,owner_lease_token FROM streams WHERE id=$1 AND state='writing' FOR UPDATE").bind(stream)
+}
+pub(super) fn repair_object(stream: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT o.write_token FROM objects o JOIN streams s ON s.bucket_id=o.bucket_id AND s.object_key=o.object_key WHERE s.id=$1 FOR UPDATE").bind(stream)
+}
+pub(super) fn repair_part(stream: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT write_token FROM parts WHERE write_token=$1 FOR UPDATE").bind(stream)
+}
+pub(super) fn repair_target(storage: Uuid, key: Option<Uuid>, algorithm: &str) -> Scalar<'_, i64> {
+    sqlx::query_scalar("SELECT p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=$1 AND s.enabled AND s.block_key_id IS NOT DISTINCT FROM $2 AND ((s.block_key_id IS NULL AND $3='none') OR EXISTS(SELECT 1 FROM managed_keys k WHERE k.id=s.block_key_id AND k.key_algorithm=$4 AND k.revoked_at IS NULL)) FOR SHARE").bind(storage).bind(key).bind(algorithm).bind(algorithm)
+}
+pub(super) fn repair_pending(chunk: i64) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=$1)").bind(chunk)
+}
+pub(super) fn insert_repair(chunk: &Chunk, stream: Uuid) -> Scalar<'_, i64> {
+    sqlx::query_scalar("INSERT INTO chunk_encodings(chunk_id,location_id,storage_id,state,created_at,unreferenced_at,owner_stream,recovery_pending,encryption_algorithm,block_key_id,standalone_compressed) VALUES($1,$2,$3,'uploading',$4,clock_timestamp(),$5,TRUE,$6,$7,FALSE) RETURNING encoding_id").bind(chunk.id).bind(chunk.location_id).bind(chunk.storage_id).bind(chunk.created_at).bind(stream).bind(&chunk.algorithm).bind(chunk.block_key_id)
+}
+pub(super) fn repair_candidate(encoding: i64, stream: Uuid) -> Rows<'static, Chunk> {
+    sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.encoding_id=$1 AND l.owner_stream=$2 AND l.owner_task IS NULL AND l.state='uploading' AND l.recovery_pending AND l.quarantined_at IS NULL FOR UPDATE").bind(encoding).bind(stream)
+}
+pub(super) fn save_repair_metadata(chunk: &Chunk, stream: Uuid) -> Statement<'_> {
+    sqlx::query("UPDATE chunk_encodings SET standalone_size=$1,standalone_compressed=$2,nonce=$3 WHERE encoding_id=$4 AND owner_stream=$5 AND state='uploading'").bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(chunk.encoding_id).bind(stream)
+}
+pub(super) fn retire_repair_sources(chunk: i64) -> Statement<'static> {
+    sqlx::query("UPDATE chunk_encodings SET state='retired',unreferenced_at=clock_timestamp() WHERE chunk_id=$1 AND state='ready' AND quarantined_at IS NOT NULL").bind(chunk)
+}
+pub(super) fn publish_repair(encoding: i64, stream: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE chunk_encodings SET state='ready',owner_stream=NULL,recovery_pending=FALSE,unreferenced_at=NULL,stored_at=clock_timestamp() WHERE encoding_id=$1 AND owner_stream=$2 AND state='uploading' AND quarantined_at IS NULL").bind(encoding).bind(stream)
+}
+pub(super) fn discard_verified_repair(encoding: i64, stream: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE chunk_encodings SET state='retired',owner_stream=NULL,recovery_pending=FALSE,unreferenced_at=clock_timestamp(),stored_at=clock_timestamp() WHERE encoding_id=$1 AND owner_stream=$2 AND state='uploading'").bind(encoding).bind(stream)
+}
+pub(super) fn publish_repaired_chunk(chunk: &Chunk) -> Statement<'_> {
+    sqlx::query("UPDATE chunks SET current_encoding_id=$1,pack_id=NULL,standalone_size=$2,standalone_compressed=$3,nonce=$4,encryption_algorithm=$5,block_key_id=$6,unreferenced_at=NULL WHERE id=$7 AND state='ready'").bind(chunk.encoding_id).bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(&chunk.algorithm).bind(chunk.block_key_id).bind(chunk.id)
+}
+
+pub(super) fn retire_stream_encodings(stream: Uuid, batch: i64) -> Statement<'static> {
+    sqlx::query("UPDATE chunk_encodings SET owner_stream=NULL,state='retired',unreferenced_at=clock_timestamp() WHERE encoding_id IN (SELECT encoding_id FROM chunk_encodings WHERE owner_stream=$1 AND state='uploading' ORDER BY encoding_id LIMIT $2 FOR UPDATE)").bind(stream).bind(batch)
+}
+
+pub(super) fn repair_owner(
+    stream: Uuid,
+) -> Rows<'static, (Uuid, String, Option<Uuid>, Option<Uuid>)> {
+    sqlx::query_as("SELECT bucket_id,stream_type,owner_task_id,owner_lease_token FROM streams WHERE id=$1 AND state='writing'").bind(stream)
+}
+pub(super) fn repair_upload(stream: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT id FROM uploads WHERE id=(SELECT r.upload_id FROM quota_writes w JOIN quota_reservations r ON r.id=w.reservation_id WHERE w.stream_id=$1) AND state='active' FOR UPDATE").bind(stream)
 }

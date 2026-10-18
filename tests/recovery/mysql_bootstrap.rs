@@ -55,6 +55,13 @@ async fn structure(db: &mut MySqlConnection) -> Result<BTreeMap<String, String>>
         lines.extend(constraints);
         definitions.insert(table, lines.join("\n"));
     }
+    let triggers: Vec<(String, String, String, String, String)> = sqlx::query_as("SELECT TRIGGER_NAME,ACTION_TIMING,EVENT_MANIPULATION,EVENT_OBJECT_TABLE,ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() ORDER BY TRIGGER_NAME").fetch_all(&mut *db).await?;
+    for (name, timing, event, table, action) in triggers {
+        definitions.insert(
+            format!("trigger:{name}"),
+            format!("{timing} {event} {table}\n{action}"),
+        );
+    }
     Ok(definitions)
 }
 
@@ -190,6 +197,37 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         .await?,
         serde_json::json!({})
     );
+
+    let recovery = migrations
+        .iter()
+        .find(|migration| migration.version == 19)
+        .unwrap();
+    for marker in [
+        "DROP TRIGGER IF EXISTS encodings_owner_insert",
+        "DROP TRIGGER IF EXISTS encodings_owner_update",
+        "UPDATE mokyu_meta SET schema_version=19",
+    ] {
+        let mut interrupted = database(&mut fresh, &options).await?;
+        interrupted
+            .ensure_migrations_table("_sqlx_migrations")
+            .await?;
+        for migration in migrations
+            .iter()
+            .take_while(|migration| migration.version < 19)
+        {
+            interrupted.apply("_sqlx_migrations", migration).await?;
+        }
+        let sql = recovery.sql.as_str();
+        let prefix = &sql[..sql.find(marker).unwrap()];
+        sqlx::raw_sql(sqlx::AssertSqlSafe(prefix))
+            .execute(&mut interrupted)
+            .await?;
+        sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(?,?,FALSE,?,0)")
+            .bind(recovery.version).bind(recovery.description.as_ref()).bind(recovery.checksum.as_ref())
+            .execute(&mut interrupted).await?;
+        migration::run(&mut interrupted).await?;
+        same_structure(&mut interrupted, &mut fresh).await?;
+    }
 
     for sql in [
         "CREATE TABLE unrelated(id INT)",

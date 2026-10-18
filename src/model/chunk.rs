@@ -3,6 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub(crate) struct ChunkCreate {
     pub(crate) storage: Uuid,
     pub(crate) stream: Uuid,
@@ -35,6 +36,13 @@ pub(crate) trait ChunkStore: Send + Sync {
     async fn read_start(&self, stream: Uuid, position: i64) -> Result<Option<i64>>;
     /// The caller serializes this storage/hash until its write or staging finishes.
     async fn allocate(&self, input: ChunkCreate) -> Result<(Chunk, bool)>;
+    async fn prepare_repair(
+        &self,
+        input: ChunkCreate,
+        node: Option<crate::model::recovery::RepairNode>,
+    ) -> Result<super::recovery::RepairAllocation>;
+    async fn repair_metadata(&self, repair: &super::recovery::Repair) -> Result<()>;
+    async fn finish_repair(&self, repair: &super::recovery::Repair, offset: i64) -> Result<Chunk>;
     async fn can_stage_reuse(&self, id: i64) -> Result<bool>;
     async fn mark_uploading(&self, chunk: &Chunk) -> Result<()>;
     async fn reference(

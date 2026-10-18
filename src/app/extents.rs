@@ -39,7 +39,8 @@ impl App {
                 for row in rows {
                     ensure!(row.offset_bytes == offset, "invalid copy mapping");
                     let data = self.extent_bytes(&row).await?;
-                    self.put_chunk(destination, offset, data.to_vec()).await?;
+                    self.put_chunk(destination, offset, data.to_vec(), false)
+                        .await?;
                     offset += i64::from(row.length);
                 }
             }

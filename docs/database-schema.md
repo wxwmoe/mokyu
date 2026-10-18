@@ -99,3 +99,9 @@ PostgreSQL 群集的 `node_reports` 按 node_id 保存一份最新报告，boot_
 `chunk_encodings` 和 `packs` 的 `quarantined_at`、`quarantine_code` 与 `quarantine_revision` 独立于原生命周期状态。隔离时间和代码同时为空或同时有值；隔离/完整复检成功均递增代次。物理来源退休后保留隔离证据，逻辑 chunk 和 extents 不变。
 
 引用与最终发布按固定顺序锁逻辑区块、独立编码、pack，当前写库重新判断合格来源。pack/rewrite/cache 批次在任务内部保存有界的来源 ID/隔离代次快照，发布时逐输入比较；仅重查当前“未隔离”不足以防止中间隔离又解除的竞争。群集完整复检通过有效执行任务保护目标物理位置，单容器使用既有本机 pin。
+
+重传恢复在 `chunk_encodings.owner_stream` 登记 writing stream；它与 `owner_task` 互斥，外键禁止在释放候选前删除流。PostgreSQL/SQLite 用 CHECK，MySQL/MariaDB 用写入触发器保证互斥。`recovery_pending` 标记尚未确认发布结果的恢复候选，不赋予读取或引用资格。
+
+候选登记与最终切换是两个短事务，中间的编码、写入和完整回读不持有新增来源行锁。最终事务比较来源快照并重新验证授权、写代次、模式、节点和存储策略，退休旧独立来源，发布新编码并建立当前写入的引用；pack 成员只解除逻辑 chunk 的当前 pack 绑定，不删除物理成员布局。并发胜者已提供合格来源时，退役本次候选并复用胜者。
+
+流回收先退休并解绑其候选。`recovery_pending=true` 的候选即使已标记 deleted，也继续参与重复物理回收，并阻止 encoding/chunk 历史记录被提前清理；至少经过删除保留窗口后再次成功删除才清除此标记。已验证发布或确认未使用的完整候选沿用正常物理回收规则。

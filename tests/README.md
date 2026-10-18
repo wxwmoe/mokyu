@@ -115,8 +115,46 @@ fixture 示例：
 `python -m tests.storage.source_quarantine` 在独立故障注入服务验证引用前/发布前隔离、Copy/UploadPartCopy/Complete 拒绝、原对象保留、暖正文缓存/Range/304、CSRF、幂等、暂停复检及恢复。要求 `MOKYU_TEST_BINARY`、`MOKYU_TEST_CONFIG`、`MOKYU_TEST_ENDPOINT`、`MOKYU_TEST_WEB`、`MOKYU_TEST_FAULT_DIR`、`MOKYU_TEST_PASSWORD_FILE`，初始管理员用户名为 tester，启用响应缓存。local 使用专用 `MOKYU_TEST_FSYNC_ROOT`；模拟 S3 使用 `MOKYU_TEST_BACKEND` JSON 文件，字段为 endpoint、bucket、region、access_key、secret_key、prefix。测试自行创建独立 storage、桶及凭据，不使用真实桶。
 
 群集另设 `MOKYU_TEST_SOURCE_FAULT_DIRS` 为逗号分隔的 data/worker 故障目录，`MOKYU_TEST_SECOND_CONTROL` 指向第二个 control，以验证并发执行同一预览。配置的 Web origin 须与 MOKYU_TEST_WEB 一致。`python -m tests.storage.pack_quarantine` 使用同一模拟 S3 fixture 验证整个 pack 的精确复检、成员不变、维护模式恢复及普通成员拒绝。两者会修改专用后端的物理测试字节，不用于已有部署。
-同一 fixture 的 python -m tests.storage.quarantine_gc 在完整复检提交前删除逻辑对象并运行独立 GC，核对精确物理保护与退休后的 CAS 拒绝；python -m tests.storage.quarantine_permissions 在最终提交前撤销发起管理员，核对隔离不被解除。
+同一 fixture 的 `python -m tests.storage.quarantine_gc` 在完整复检提交前删除逻辑对象并运行独立 GC，核对精确物理保护与退休后的 CAS 拒绝；`python -m tests.storage.quarantine_permissions` 在最终提交前撤销发起管理员，核对隔离不被解除。
 
-python -m tests.storage.quarantine_replica 另需真实 PostgreSQL 备库、启用从库的数据节点，以及主/从库管理 DSN 文件 MOKYU_TEST_DATABASE_FILE / MOKYU_TEST_REPLICA_DATABASE_FILE。它改写专用测试对象的 extents 来产生分页，暂停 WAL 回放后隔离来源，验证旧快照不能授权 Copy 或冷回源；已开始的流只允许完整正确正文或截断失败。
+`python -m tests.storage.quarantine_replica` 另需真实 PostgreSQL 备库、启用从库的数据节点，以及主/从库管理 DSN 文件 `MOKYU_TEST_DATABASE_FILE` / `MOKYU_TEST_REPLICA_DATABASE_FILE`。它改写专用测试对象的 extents 来产生分页，暂停 WAL 回放后隔离来源，验证旧快照不能授权 Copy 或冷回源；已开始的流只允许完整正确正文或截断失败。
 
-Web 回归 web/tests/source-quarantine.spec.ts 使用真实管理 API 和专用已隔离来源 fixture，验证列表、确认词与完整复检；fixture 格式和环境变量见测试文件。
+Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专用已隔离来源 fixture，验证列表、确认词与完整复检；fixture 格式和环境变量见测试文件。
+
+## 来源重传恢复回归
+
+`source_recovery_contract` 使用全新 `MOKYU_TEST_CONFIG`，验证候选所有权、元数据、并发胜者、ABA、写代次、旧引用及未知候选回收。PostgreSQL 额外验证同 ID 节点重新注册后的凭据隔离、排空和写租约失效。MySQL bootstrap 契约覆盖恢复迁移的中断续跑及触发器结构对比。
+
+以下 Python 入口沿用来源隔离 fixture，自行创建测试 storage 和桶。需要访问同一隔离主库；PostgreSQL 安装 psycopg，MySQL/MariaDB 安装 PyMySQL，数据库连接读取 `MOKYU_TEST_CONFIG`。local 与模拟 S3 应分别运行。
+
+- `tests.recovery.source_repair`：三种编码、坏候选完整回读、覆盖/profile 竞争、旧对象恢复、UploadPart/Web、条件请求、部分正文和错误校验和
+- `tests.recovery.pack_repair`：模拟 S3 上逐成员恢复、旧包布局保留、最后成员解除后回收
+- `tests.recovery.repair_cluster`：两个真实 data 节点，另设 `MOKYU_TEST_SECOND_DATA` 和第一个 data 的 `MOKYU_TEST_NODE_STATE`；故意终止唯一持有 chunk advisory lock 的数据库连接，验证双候选 CAS、独立 GC、撤权、租约过期和排空；只允许专用 PostgreSQL 测试库
+- `tests.recovery.repair_node`：在第一个 data 的进程命名空间内运行，强杀并重启该节点，验证重启保留未过期候选、另一 data 恢复及失效候选清理。另设 `MOKYU_TEST_NODE_CONFIG`、`MOKYU_TEST_DATA`、`MOKYU_TEST_GATEWAY_PID_FILE`；fixture 的 CLI 须通过独立转发端口访问 control，不能把管理命令发给本机 data。排空用例之后先重启 data，再运行此项
+- `tests.recovery.repair_lifecycle`：仅单容器，使用 `MOKYU_TEST_DATA` 和 `MOKYU_TEST_GATEWAY_PID_FILE` 强杀并重启服务，覆盖各恢复检查点与第一次删除后的有限迟到 PUT
+- `tests.recovery.repair_fsync`：沿用 `local_durability.py` 的 LD_PRELOAD 与 fsync fixture，验证恢复不能确认文件或目录同步失败
+
+## 来源写入基准
+
+`python -m tests.benchmarks.source_writes /config/writes.json /results/writes.json` 使用独立 release 服务和可丢弃桶，要求 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`、boto3，以及启用 SQL 采样时的 psycopg。先运行 `python -m tests.benchmarks.source_writes_test`，确保错误正文不能计作成功。
+
+fixture 沿用公共读基准的 `label`、`revision`、`build`、`database_version`、`cache_state`、`seed`、`resources` 和可选 `database_file`，增加：
+
+| 字段 | 含义 |
+| --- | --- |
+| `round` | 本轮唯一非负整数，生成不同的新写入内容 |
+| `credentials_file` | 含 access_key、secret_key、bucket 的受限 JSON 文件 |
+| `endpoints` | 1–8 个 S3 地址，各客户端均匀分配 |
+| `prefix` | 本轮独占对象前缀；脚本不会清理桶 |
+| `seconds` | 每个场景持续秒数，默认 60，上限 600 |
+| `concurrency` | 并发写者，默认 4，上限 32 |
+| `max_operations` | 每场景请求上限，默认 100000，上限 1000000；提前触顶的结果不能声称达到指定持续时间 |
+| `slots_per_worker` | 每个写者覆盖的有限目标 key 数，默认 4，上限 64 |
+| `size` | 普通场景原始正文大小，默认 32768，上限 16MiB |
+| `cases` | `new`、`dedup`、`copy`、`multipart`、`many`、`mixed` 的数组 |
+| `many_source` | `many` 所需的既有对象 key 与 expected_file，完整正文上限 64MiB；须另记录真实 extent 数及是否使用合成布局 |
+| `repair_payloads` | `mixed` 所需的有限原文文件列表，最多 1024；每 32 次请求消耗一份，须事先确认对应来源已隔离 |
+
+`new` 改变固定种子正文的尾部以产生新内容；`dedup` 和 `copy` 复用同一热门来源；`many` 复制预先准备的多 extent 对象；`multipart` 只计 Complete 调用延迟，完整周期还包括初始化、上传单片和读回。每次成功写入均完整 GET 并核对字节和长度，吞吐包含校验耗时，写延迟不含读回。请求或采样错误使脚本失败，空样本百分位为 null。
+
+CPU/cgroup 内存、各节点状态、后端字节/操作与 PostgreSQL SQL 次数和执行时间均记录前后差值；每 100ms 采样活动连接的等待类别。这是采样计数，不能当作精确锁等待秒数。连接池等待未插桩，输出 null。`mixed` 记录实际尝试修复的数量和延迟，需结合恢复审计确认确实命中恢复，不能把普通去重计作修复收益。有限 key 不限制历史物理版本数量，运行前仍须为总字节、保留期及测试清理安排预算。

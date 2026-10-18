@@ -19,12 +19,18 @@ impl App {
         self.seal_uploads(stream, false).await?;
         Ok(())
     }
-    pub async fn put_chunk(&self, stream: Uuid, offset: i64, raw: Vec<u8>) -> Result<Chunk> {
+    pub async fn put_chunk(
+        &self,
+        stream: Uuid,
+        offset: i64,
+        raw: Vec<u8>,
+        retransmitted: bool,
+    ) -> Result<Chunk> {
         tokio::time::timeout(
             std::time::Duration::from_secs(config::seconds(
                 &self.config.requests.upload_idle_timeout,
             )?),
-            self.put_chunk_inner(stream, offset, raw),
+            self.put_chunk_inner(stream, offset, raw, retransmitted),
         )
         .await
         .map_err(|_| s3_error!(RequestTimeout, "upload processing made no progress"))?
@@ -54,7 +60,13 @@ impl App {
         Ok((algorithm, Some(id)))
     }
 
-    async fn put_chunk_inner(&self, stream: Uuid, offset: i64, raw: Vec<u8>) -> Result<Chunk> {
+    async fn put_chunk_inner(
+        &self,
+        stream: Uuid,
+        offset: i64,
+        raw: Vec<u8>,
+        retransmitted: bool,
+    ) -> Result<Chunk> {
         ensure!(!raw.is_empty() && raw.len() <= MAX, "invalid chunk length");
         self.renew_write_lease(stream).await?;
         let hash = *blake3::hash(&raw).as_bytes();
@@ -81,17 +93,27 @@ impl App {
         } else {
             Some(self.cluster()?.claim_chunk(storage_id, &hash).await?)
         };
-        let (c, reused) = self
-            .chunks
-            .allocate(ChunkCreate {
-                storage: storage_id,
-                stream,
-                hash,
-                raw_size: raw.len() as i32,
-                algorithm,
-                key: key_id,
-            })
-            .await?;
+        let input = ChunkCreate {
+            storage: storage_id,
+            stream,
+            hash,
+            raw_size: raw.len() as i32,
+            algorithm,
+            key: key_id,
+        };
+        let (c, reused) = match self.chunks.allocate(input.clone()).await {
+            Ok(value) => value,
+            Err(error)
+                if retransmitted
+                    && matches!(
+                        crate::model::error(&error),
+                        Some(crate::model::Error::SourceUnavailable)
+                    ) =>
+            {
+                return self.repair_chunk(input, offset, raw).await;
+            }
+            Err(error) => return Err(error),
+        };
         if reused {
             #[cfg(feature = "fault-injection")]
             crate::faults::point("source-before-reference").await;
@@ -140,5 +162,66 @@ impl App {
         crate::faults::point("chunk-stored").await;
         self.chunks.complete(stream, offset, &c).await?;
         Ok(c)
+    }
+
+    async fn repair_chunk(&self, input: ChunkCreate, offset: i64, raw: Vec<u8>) -> Result<Chunk> {
+        use crate::model::recovery::{RepairAllocation, RepairNode};
+        let stream = input.stream;
+        let allocation = {
+            let _coord = self.coord.lock().await;
+            self.writable()?;
+            ensure!(
+                !self.draining.load(std::sync::atomic::Ordering::Acquire),
+                crate::model::Error::OperationAborted
+            );
+            let node = self.node.get().map(|state| RepairNode {
+                state: state.clone(),
+                role: self.role.clone(),
+                key: self.secrets.credential_key.clone(),
+            });
+            self.chunks.prepare_repair(input, node).await?
+        };
+        let mut repair = match allocation {
+            RepairAllocation::Existing(chunk) => {
+                self.reference(stream, offset, &chunk).await?;
+                return Ok(chunk);
+            }
+            RepairAllocation::Candidate(repair) => repair,
+        };
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("repair-prepared").await;
+        self.storage
+            .verify_source_namespace(&repair.sources[0])
+            .await?;
+        let (chunk, encoded, cache) = self
+            .storage
+            .encode(repair.chunk.clone(), raw, true, None)
+            .await?;
+        repair.chunk = chunk;
+        self.chunks.repair_metadata(&repair).await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("repair-uploading").await;
+        self.storage.put(&repair.chunk, encoded, cache).await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("repair-stored").await;
+        self.storage.verify_chunk(&repair.chunk).await?;
+        self.storage
+            .verify_source_namespace(&repair.sources[0])
+            .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("repair-before-commit").await;
+        let chunk = {
+            let _coord = self.coord.lock().await;
+            self.writable()?;
+            ensure!(
+                !self.draining.load(std::sync::atomic::Ordering::Acquire),
+                crate::model::Error::OperationAborted
+            );
+            self.chunks.finish_repair(&repair, offset).await?
+        };
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("repair-committed").await;
+        self.seal_uploads(repair.stream, false).await?;
+        Ok(chunk)
     }
 }

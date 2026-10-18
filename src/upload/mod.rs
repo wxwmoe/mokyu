@@ -286,7 +286,10 @@ impl App {
                 rest = &rest[take..];
                 if window.len() == MAX {
                     let n = codec::cut(&window);
-                    let chunk = self.put_chunk(stream, offset, window[..n].to_vec()).await?;
+                    // Cached bytes from previous parts cannot authorize recovery.
+                    let chunk = self
+                        .put_chunk(stream, offset, window[..n].to_vec(), seed.spans.is_empty())
+                        .await?;
                     let taken = self
                         .consume_seed(stream, offset, &chunk, &mut seed, n)
                         .await?;
@@ -314,7 +317,8 @@ impl App {
         } else {
             while !window.is_empty() {
                 let n = codec::cut(&window);
-                self.put_chunk(stream, offset, window[..n].to_vec()).await?;
+                self.put_chunk(stream, offset, window[..n].to_vec(), true)
+                    .await?;
                 window.drain(..n);
                 offset += n as i64;
             }

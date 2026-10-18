@@ -14,6 +14,9 @@ use sqlx::Connection;
 use uuid::Uuid;
 
 async fn history(backend: &Backend, section: &str, batch: i64) -> Result<u64> {
+    // SQLite timestamps must advance before the strict zero-age history cutoff.
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    writer_idle(backend).await?;
     backend
         .cleanup_history(section, 0., batch, &[], 1000)
         .await
@@ -328,7 +331,9 @@ async fn sqlite_maintenance_contract() -> Result<()> {
                 .claim_physical(false, chunk.encoding_id, 0., 0.)
                 .await?
         );
-        backend.delete_physical(false, chunk.encoding_id).await?;
+        backend
+            .delete_physical(false, chunk.encoding_id, 0.)
+            .await?;
     }
     assert_eq!(history(&backend, "chunks", 10).await?, 0);
     backend
@@ -342,7 +347,7 @@ async fn sqlite_maintenance_contract() -> Result<()> {
             .any(|r| r.0 == pack && !r.2)
     );
     assert!(backend.claim_physical(true, pack, 0., 86400.).await?);
-    backend.delete_physical(true, pack).await?;
+    backend.delete_physical(true, pack, 0.).await?;
     assert_eq!(history(&backend, "packs", 1).await?, 1);
     assert_eq!(history(&backend, "chunks", 1).await?, 1);
     assert_eq!(history(&backend, "chunks", 10).await?, 1);
