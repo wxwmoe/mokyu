@@ -1,4 +1,4 @@
--- Current postgres schema, matching migration 0045.
+-- Current postgres schema, matching migration 0046.
 -- The initializer records schema_version and migration checksums after this script succeeds.
 
 SET LOCAL check_function_bodies = false;
@@ -91,7 +91,7 @@ CREATE FUNCTION public.enqueue_pack_extents() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    PERFORM id FROM chunks WHERE id IN (SELECT chunk_id FROM changed) ORDER BY id FOR UPDATE;
+    PERFORM id FROM chunks WHERE id IN (SELECT chunk_id FROM changed) ORDER BY id FOR NO KEY UPDATE;
     UPDATE chunks SET reference_changed_at=now() WHERE id IN (SELECT chunk_id FROM changed);
     INSERT INTO pack_changes(pack_id,reason)
         SELECT DISTINCT c.pack_id,CASE WHEN TG_OP='DELETE' THEN 'reclaim' ELSE 'reuse' END FROM changed e JOIN chunks c ON c.id=e.chunk_id WHERE c.pack_id IS NOT NULL

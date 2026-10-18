@@ -5932,7 +5932,8 @@ async fn require_sources(
     chunks: &[i64],
 ) -> Result<()> {
     use futures_util::TryStreamExt;
-    // Lock all logical rows before any physical row; shared validation locks block quarantine.
+    // Mapping changes take FOR UPDATE; references may update liveness under KEY SHARE.
+    // Lock logical rows before physical rows, whose SHARE locks block quarantine.
     for phase in 0..3 {
         let mut query = queries::source_locks(stream, chunks, phase);
         let mut rows = query.build_query_scalar::<i64>().fetch(&mut *db);

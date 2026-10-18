@@ -107,6 +107,18 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
     job.shards = 1;
     job.shard = 0;
 
+    let mappings: Vec<_> = members
+        .iter()
+        .filter(|chunk| current.contains(&chunk.id))
+        .map(|chunk| crate::model::Mapping {
+            chunk: chunk.clone(),
+            offset_bytes: 0,
+            pack_id: Some(old.id),
+        })
+        .collect();
+    backend
+        .pin_pack_inputs(Execution { id: task, token }, &mappings)
+        .await?;
     let mut new = backend
         .prepare_pack(
             Uuid::new_v4(),

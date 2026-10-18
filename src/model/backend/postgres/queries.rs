@@ -212,7 +212,7 @@ pub(super) fn mark_chunk_uploading(chunk: &Chunk) -> Statement<'_> {
 }
 
 pub(super) fn lock_chunk(id: i64) -> Scalar<'static, String> {
-    sqlx::query_scalar("SELECT state FROM chunks WHERE id=$1 FOR UPDATE").bind(id)
+    sqlx::query_scalar("SELECT state FROM chunks WHERE id=$1 FOR NO KEY UPDATE").bind(id)
 }
 
 pub(super) fn insert_chunk_extent(
@@ -229,7 +229,10 @@ pub(super) fn insert_chunk_extent(
 }
 
 pub(super) fn reference_chunk(id: i64) -> Statement<'static> {
-    sqlx::query("UPDATE chunks SET unreferenced_at=NULL WHERE id=$1").bind(id)
+    sqlx::query(
+        "UPDATE chunks SET unreferenced_at=NULL WHERE id=$1 AND unreferenced_at IS NOT NULL",
+    )
+    .bind(id)
 }
 
 pub(super) fn pin_chunk(id: i64, owner: Uuid) -> Statement<'static> {
@@ -269,7 +272,7 @@ pub(super) fn resize_writing_stream(id: Uuid, size: i64) -> Statement<'static> {
 
 pub(super) fn lock_ready_chunks<'q>(ids: &'q [i64]) -> Scalar<'q, i64> {
     sqlx::query_scalar(
-        "SELECT id FROM chunks WHERE id=ANY($1) AND state='ready' ORDER BY id FOR UPDATE",
+        "SELECT id FROM chunks WHERE id=ANY($1) AND state='ready' ORDER BY id FOR NO KEY UPDATE",
     )
     .bind(ids)
 }
@@ -288,7 +291,10 @@ pub(super) fn copy_extents(
 }
 
 pub(super) fn reference_chunks<'q>(ids: &'q [i64]) -> Statement<'q> {
-    sqlx::query("UPDATE chunks SET unreferenced_at=NULL WHERE id=ANY($1)").bind(ids)
+    sqlx::query(
+        "UPDATE chunks SET unreferenced_at=NULL WHERE id=ANY($1) AND unreferenced_at IS NOT NULL",
+    )
+    .bind(ids)
 }
 
 pub(super) fn pin_chunks<'q>(ids: &'q [i64], owner: Uuid) -> Statement<'q> {
@@ -8182,7 +8188,7 @@ pub(super) fn source_locks(
     });
     source_scope(&mut query, stream, chunks);
     query.push(match phase {
-        0 => " ORDER BY c.id FOR SHARE",
+        0 => " ORDER BY c.id FOR KEY SHARE",
         1 => ") ORDER BY l.encoding_id FOR SHARE",
         _ => ") ORDER BY p.id FOR SHARE",
     });

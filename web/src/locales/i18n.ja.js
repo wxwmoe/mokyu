@@ -9,6 +9,7 @@ export default {
   sourceQuarantined: "隔離中",
   sourceRevision: "隔離リビジョン",
   sourceLocation: "物理位置",
+  sourceState: "ソースの状態",
   sourceMembers: "内容メンバー数",
   recheckSource: "完全検証して隔離を解除",
   quarantineExactSource: "ソースを指定",

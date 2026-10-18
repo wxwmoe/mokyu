@@ -9,6 +9,7 @@ export default {
   sourceQuarantined: "已隔离",
   sourceRevision: "隔离代次",
   sourceLocation: "物理位置",
+  sourceState: "来源状态",
   sourceMembers: "内容成员数",
   recheckSource: "完整复检并解除隔离",
   quarantineExactSource: "选择精确来源",

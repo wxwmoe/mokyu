@@ -9,6 +9,7 @@ export default {
   sourceQuarantined: "Quarantined",
   sourceRevision: "Quarantine revision",
   sourceLocation: "Physical location",
+  sourceState: "Source state",
   sourceMembers: "Content members",
   recheckSource: "Verify and restore source",
   quarantineExactSource: "Select an exact source",
