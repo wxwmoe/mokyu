@@ -198,35 +198,46 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         serde_json::json!({})
     );
 
-    let recovery = migrations
-        .iter()
-        .find(|migration| migration.version == 19)
-        .unwrap();
-    for marker in [
-        "DROP TRIGGER IF EXISTS encodings_owner_insert",
-        "DROP TRIGGER IF EXISTS encodings_owner_update",
-        "UPDATE mokyu_meta SET schema_version=19",
-    ] {
-        let mut interrupted = database(&mut fresh, &options).await?;
-        interrupted
-            .ensure_migrations_table("_sqlx_migrations")
-            .await?;
-        for migration in migrations
+    for version in [19, 20] {
+        let recovery = migrations
             .iter()
-            .take_while(|migration| migration.version < 19)
-        {
-            interrupted.apply("_sqlx_migrations", migration).await?;
-        }
-        let sql = recovery.sql.as_str();
-        let prefix = &sql[..sql.find(marker).unwrap()];
-        sqlx::raw_sql(sqlx::AssertSqlSafe(prefix))
-            .execute(&mut interrupted)
-            .await?;
-        sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(?,?,FALSE,?,0)")
+            .find(|migration| migration.version == version)
+            .unwrap();
+        let markers = if version == 19 {
+            [
+                "DROP TRIGGER IF EXISTS encodings_owner_insert",
+                "DROP TRIGGER IF EXISTS encodings_owner_update",
+                "UPDATE mokyu_meta SET schema_version=19",
+            ]
+        } else {
+            [
+                "EXECUTE mokyu_audit",
+                "DEALLOCATE PREPARE mokyu_audit",
+                "UPDATE mokyu_meta SET schema_version=20",
+            ]
+        };
+        for marker in markers {
+            let mut interrupted = database(&mut fresh, &options).await?;
+            interrupted
+                .ensure_migrations_table("_sqlx_migrations")
+                .await?;
+            for migration in migrations
+                .iter()
+                .take_while(|migration| migration.version < version)
+            {
+                interrupted.apply("_sqlx_migrations", migration).await?;
+            }
+            let sql = recovery.sql.as_str();
+            let prefix = &sql[..sql.find(marker).unwrap()];
+            sqlx::raw_sql(sqlx::AssertSqlSafe(prefix))
+                .execute(&mut interrupted)
+                .await?;
+            sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(?,?,FALSE,?,0)")
             .bind(recovery.version).bind(recovery.description.as_ref()).bind(recovery.checksum.as_ref())
             .execute(&mut interrupted).await?;
-        migration::run(&mut interrupted).await?;
-        same_structure(&mut interrupted, &mut fresh).await?;
+            migration::run(&mut interrupted).await?;
+            same_structure(&mut interrupted, &mut fresh).await?;
+        }
     }
 
     for sql in [

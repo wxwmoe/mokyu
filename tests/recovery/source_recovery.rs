@@ -185,6 +185,31 @@ async fn source_recovery_contract() -> Result<()> {
     assert_eq!(restored.id, chunk.id);
     assert_eq!(restored.encoding_id, a.chunk.encoding_id);
     let reused = stores.chunks.finish_repair(&b, 0).await?;
+    let audit = stores
+        .audit
+        .events(
+            true,
+            None,
+            None,
+            crate::model::audit::Filter {
+                action: Some("source.recover".into()),
+                ..Default::default()
+            },
+            10,
+            true,
+        )
+        .await?;
+    assert_eq!(
+        audit.len(),
+        1,
+        "only the winning repair commits an independent audit event"
+    );
+    assert_eq!(audit[0].source, "cli");
+    assert_eq!(audit[0].outcome, "succeeded");
+    assert_eq!(
+        audit[0].detail["encoding_id"],
+        a.chunk.encoding_id.to_string()
+    );
     assert_eq!(
         reused.encoding_id, restored.encoding_id,
         "loser must reuse the winning source"
@@ -221,6 +246,25 @@ async fn source_recovery_contract() -> Result<()> {
     assert!(
         stores.chunks.finish_repair(&replaced, 0).await.is_err(),
         "superseded write cannot repair shared content"
+    );
+    assert_eq!(
+        stores
+            .audit
+            .events(
+                true,
+                None,
+                None,
+                crate::model::audit::Filter {
+                    action: Some("source.recover".into()),
+                    ..Default::default()
+                },
+                10,
+                true
+            )
+            .await?
+            .len(),
+        1,
+        "rejected repairs must not leave successful events"
     );
 
     let mut claimed = false;

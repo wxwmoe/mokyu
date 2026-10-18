@@ -110,7 +110,7 @@ fixture 示例：
 
 ## 来源隔离回归
 
-`source_quarantine_contract` 使用全新 `MOKYU_TEST_CONFIG` 和 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`，四种数据库共用。验证引用/发布拒绝、执行 token、授权、隔离代次和维护输入 ABA；pack publication 契约另验证健康替代来源。
+`source_quarantine_contract` 使用全新 `MOKYU_TEST_CONFIG` 和 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`，四种数据库共用。验证引用/发布拒绝、执行 token、授权、隔离代次、维护输入 ABA 与独立后台审计；pack publication 契约另验证健康替代来源。
 
 `python -m tests.storage.source_quarantine` 在独立故障注入服务验证引用前/发布前隔离、Copy/UploadPartCopy/Complete 拒绝、原对象保留、暖正文缓存/Range/304、CSRF、幂等、暂停复检及恢复。要求 `MOKYU_TEST_BINARY`、`MOKYU_TEST_CONFIG`、`MOKYU_TEST_ENDPOINT`、`MOKYU_TEST_WEB`、`MOKYU_TEST_FAULT_DIR`、`MOKYU_TEST_PASSWORD_FILE`，初始管理员用户名为 tester，启用响应缓存。local 使用专用 `MOKYU_TEST_FSYNC_ROOT`；模拟 S3 使用 `MOKYU_TEST_BACKEND` JSON 文件，字段为 endpoint、bucket、region、access_key、secret_key、prefix。测试自行创建独立 storage、桶及凭据，不使用真实桶。
 
@@ -127,7 +127,7 @@ Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专�
 
 以下 Python 入口沿用来源隔离 fixture，自行创建测试 storage 和桶。需要访问同一隔离主库；PostgreSQL 安装 psycopg，MySQL/MariaDB 安装 PyMySQL，数据库连接读取 `MOKYU_TEST_CONFIG`。local 与模拟 S3 应分别运行。
 
-- `tests.recovery.source_repair`：三种编码、坏候选完整回读、覆盖/profile 竞争、旧对象恢复、UploadPart/Web、条件请求、部分正文和错误校验和
+- `tests.recovery.source_repair`：三种编码、坏候选完整回读、覆盖/profile 竞争、旧对象恢复、UploadPart/Web、条件请求、部分正文和错误校验和；恢复审计持久化、审计失败时同事务回滚
 - `tests.recovery.pack_repair`：模拟 S3 上逐成员恢复、旧包布局保留、最后成员解除后回收
 - `tests.recovery.repair_cluster`：两个真实 data 节点，另设 `MOKYU_TEST_SECOND_DATA` 和第一个 data 的 `MOKYU_TEST_NODE_STATE`；故意终止唯一持有 chunk advisory lock 的数据库连接，验证双候选 CAS、独立 GC、撤权、租约过期和排空；只允许专用 PostgreSQL 测试库
 - `tests.recovery.repair_node`：在第一个 data 的进程命名空间内运行，强杀并重启该节点，验证重启保留未过期候选、另一 data 恢复及失效候选清理。另设 `MOKYU_TEST_NODE_CONFIG`、`MOKYU_TEST_DATA`、`MOKYU_TEST_GATEWAY_PID_FILE`；fixture 的 CLI 须通过独立转发端口访问 control，不能把管理命令发给本机 data。排空用例之后先重启 data，再运行此项

@@ -212,6 +212,27 @@ async fn source_quarantine_contract() -> Result<()> {
             .is_err()
     );
     assert_eq!(stores.physical.source_snapshot(&scope).await?.revision, 1);
+    let audit = stores
+        .audit
+        .events(
+            true,
+            None,
+            None,
+            crate::model::audit::Filter {
+                action: Some("source.quarantine".into()),
+                ..Default::default()
+            },
+            10,
+            true,
+        )
+        .await?;
+    assert_eq!(
+        audit.len(),
+        1,
+        "background isolation must commit its own audit event"
+    );
+    assert_eq!(audit[0].detail["revision"], "1");
+    assert_eq!(audit[0].outcome, "succeeded");
     assert!(stores.physical.source(chunk.id, false).await.is_err());
     assert!(stores.physical.source(chunk.id, true).await.is_ok());
     assert!(
@@ -310,6 +331,25 @@ async fn source_quarantine_contract() -> Result<()> {
         })
         .await?;
     assert_eq!(stores.physical.source_snapshot(&scope).await?.revision, 2);
+    assert_eq!(
+        stores
+            .audit
+            .events(
+                true,
+                None,
+                None,
+                crate::model::audit::Filter {
+                    action: Some("source.recheck".into()),
+                    ..Default::default()
+                },
+                10,
+                true
+            )
+            .await?
+            .len(),
+        1,
+        "only a successful full recheck is audited as recovered"
+    );
     let outputs = [crate::model::packing::PackOutput {
         chunks: vec![chunk.id],
         pack: None,

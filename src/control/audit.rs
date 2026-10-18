@@ -63,7 +63,7 @@ pub(crate) async fn page(
         || filter
             .source
             .as_deref()
-            .is_some_and(|v| !["web", "token", "cli"].contains(&v))
+            .is_some_and(|v| !["web", "token", "cli", "s3"].contains(&v))
         || filter
             .outcome
             .as_deref()

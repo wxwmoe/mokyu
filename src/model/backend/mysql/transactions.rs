@@ -6353,7 +6353,14 @@ pub(super) async fn source_update(
         queries::complete_task(update.execution.id)
             .execute(&mut *tx)
             .await?;
-        checkpoint_event(&mut tx, action, &snapshot.location().to_string(), detail).await?;
+        queries::source_audit(
+            &operation.principal,
+            action,
+            &snapshot.location().to_string(),
+            detail,
+        )?
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(())
@@ -6725,7 +6732,11 @@ pub(super) async fn finish_repair(
                 == 1,
             crate::model::Error::OperationAborted
         );
-        checkpoint_event(&mut tx, "source.recover", &current.id.to_string(), serde_json::json!({"stream_id":repair.stream,"storage_id":input.storage,"chunk_id":current.id.to_string(),"encoding_id":candidate.encoding_id.to_string(),"sources":sources.iter().map(|source| source.summary()).collect::<Result<Vec<_>>>()?})).await?;
+        let authority = queries::write_authorization(repair.stream)
+            .fetch_one(&mut *tx)
+            .await?
+            .0;
+        queries::source_audit(&authority.principal, "source.recover", &current.id.to_string(), serde_json::json!({"stream_id":repair.stream,"storage_id":input.storage,"chunk_id":current.id.to_string(),"encoding_id":candidate.encoding_id.to_string(),"sources":sources.iter().map(|source| source.summary()).collect::<Result<Vec<_>>>()?}))?.execute(&mut *tx).await?;
         candidate
     };
     queries::insert_chunk_extent(repair.stream, offset, result.raw_size, result.id)

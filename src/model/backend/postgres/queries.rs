@@ -8453,3 +8453,30 @@ pub(super) fn repair_owner(
 pub(super) fn repair_upload(stream: Uuid) -> Scalar<'static, Uuid> {
     sqlx::query_scalar("SELECT id FROM uploads WHERE id=(SELECT r.upload_id FROM quota_writes w JOIN quota_reservations r ON r.id=w.reservation_id WHERE w.stream_id=$1) AND state='active' FOR UPDATE").bind(stream)
 }
+
+pub(super) fn source_audit<'a>(
+    principal: &'a Principal,
+    action: &'a str,
+    target: &'a str,
+    mut detail: Value,
+) -> Result<Statement<'a>> {
+    let (source, fallback, access_key) = match principal {
+        Principal::Service { access_key, .. } => {
+            detail["access_key_id"] = serde_json::json!(access_key);
+            ("s3", "S3 credential", Some(access_key.as_str()))
+        }
+        Principal::User { .. } => ("web", "Deleted account", None),
+        Principal::Token { .. } => ("token", "Deleted account", None),
+        Principal::Local => ("cli", "Local CLI", None),
+        _ => ("cli", "Internal operation", None),
+    };
+    if let Some(id) = crate::model::audit::current() {
+        detail["request_audit_id"] = serde_json::json!(id.to_string());
+    }
+    ensure!(
+        serde_json::to_vec(&detail)?.len() <= 262144,
+        "audit detail exceeds its bound"
+    );
+    Ok(sqlx::query("INSERT INTO audit_events(actor_id,actor_label,token_id,source,action,target,outcome,finished_at,detail) VALUES($1,COALESCE((SELECT username FROM web_users WHERE id=$1),NULLIF(substr((SELECT label FROM s3_credentials WHERE access_key_id=$2),1,64),''),$3),$4,$5,$6,$7,'succeeded',now(),$8)")
+        .bind(principal.user_id()).bind(access_key).bind(fallback).bind(principal.token_id()).bind(source).bind(action).bind(target).bind(detail))
+}

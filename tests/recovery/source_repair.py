@@ -5,6 +5,7 @@ needed for MySQL/MariaDB, psycopg for PostgreSQL; SQLite uses the standard libra
 """
 import base64
 import hashlib
+import json
 import os
 import sqlite3
 import tomllib
@@ -99,6 +100,18 @@ def original_unchanged(fixture, database, original):
     row = next(row for row in current if row['id'] == original['id'])
     assert row['current_encoding_id'] == original['current_encoding_id']
     assert fixture.api('/api/v1/maintenance/quarantines?storage_id=' + fixture.store['id'] + '&source=chunk')['items']
+    assert not database.query("SELECT id FROM audit_events WHERE action='source.recover' AND target=%s", str(original['id']))
+
+
+def recovery_audit(database, original, source):
+    rows = database.query("SELECT source,outcome,detail FROM audit_events WHERE action='source.recover' AND target=%s", str(original['id']))
+    assert len(rows) == 1 and rows[0]['source'] == source and rows[0]['outcome'] == 'succeeded', rows
+    detail = rows[0]['detail']
+    if isinstance(detail, str):
+        detail = json.loads(detail)
+    assert detail['chunk_id'] == str(original['id'])
+    assert detail['encoding_id'] != str(original['current_encoding_id'])
+    assert 'access_key_id' in detail if source == 's3' else 'request_audit_id' in detail
 
 
 def main():
@@ -145,12 +158,28 @@ def main():
         rejected(lambda: failed.result())
         original_unchanged(fixture, database, original)
 
+        if algorithm == 'none':
+            identity = str(int(original['id']))
+            if database.type == 'sqlite':
+                database.query("CREATE TRIGGER reject_recovery_audit BEFORE INSERT ON audit_events WHEN NEW.action='source.recover' AND NEW.target='" + identity + "' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END")
+                remove = 'DROP TRIGGER reject_recovery_audit'
+            else:
+                database.query("ALTER TABLE audit_events ADD CONSTRAINT reject_recovery_audit CHECK(action<>'source.recover' OR target<>'" + identity + "')")
+                maria = database.type == 'mysql' and 'MariaDB' in database.query('SELECT VERSION() AS version')[0]['version']
+                remove = 'ALTER TABLE audit_events DROP ' + ('CONSTRAINT' if database.type == 'postgres' or maria else 'CHECK') + ' reject_recovery_audit'
+            try:
+                rejected(lambda: fixture.put('replace', raw))
+                original_unchanged(fixture, database, original)
+            finally:
+                database.query(remove)
+
         fixture.put('repaired', raw)
         restored = next(row for row in database.chunks(fixture) if row['id'] == original['id'])
         assert restored['current_encoding_id'] != original['current_encoding_id']
         assert restored['hash'] == original['hash'] and restored['raw_size'] == original['raw_size']
         fixture.read('original', raw)
         fixture.read('repaired', raw)
+        recovery_audit(database, original, 's3')
         assert fixture.client.head_object(Bucket=fixture.name, Key='original')['ETag'] == before['ETag']
         assert fixture.bytes(physical) != encoded, 'repair overwrote the damaged evidence'
         healthy = database.query('SELECT owner_stream,recovery_pending,state FROM chunk_encodings WHERE encoding_id=%s', restored['current_encoding_id'])[0]
@@ -170,6 +199,7 @@ def main():
         MultipartUpload={'Parts':[{'ETag':part['ETag'],'PartNumber':1}]})
     fixture.read('multipart', raw)
     fixture.read('original', raw)
+    recovery_audit(database, original, 's3')
 
     fixture = Fixture()
     original, _, _ = isolate(fixture, database, raw)
@@ -184,6 +214,7 @@ def main():
     fixture.api('/api/v1/uploads/' + upload + '/complete', dict(parts=[part.json()]))
     fixture.read('web', raw)
     fixture.read('original', raw)
+    recovery_audit(database, original, 'web')
     print('PASS S3 UploadPart and Web upload recover through the shared chunk boundary', flush=True)
 
     fixture = Fixture()

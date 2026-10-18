@@ -1,4 +1,4 @@
--- Current postgres schema, matching migration 0042.
+-- Current postgres schema, matching migration 0045.
 -- The initializer records schema_version and migration checksums after this script succeeds.
 
 SET LOCAL check_function_bodies = false;
@@ -564,7 +564,7 @@ CREATE TABLE public.audit_events (
     http_status integer,
     detail jsonb DEFAULT '{}'::jsonb NOT NULL,
     CONSTRAINT audit_events_outcome_check CHECK ((outcome = ANY (ARRAY['unknown'::text, 'succeeded'::text, 'failed'::text, 'partial'::text]))),
-    CONSTRAINT audit_events_source_check CHECK ((source = ANY (ARRAY['web'::text, 'token'::text, 'cli'::text])))
+    CONSTRAINT audit_events_source_check CHECK ((source = ANY (ARRAY['web'::text, 'token'::text, 'cli'::text, 's3'::text])))
 );
 
 ALTER TABLE public.audit_events ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (

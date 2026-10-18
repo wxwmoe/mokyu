@@ -1,4 +1,4 @@
--- Current mysql schema, matching migration 0017.
+-- Current mysql schema, matching migration 0020.
 -- The initializer records schema_version and migration checksums after this script succeeds.
 
 CREATE TABLE `access_state` (
@@ -30,7 +30,7 @@ CREATE TABLE `audit_events` (
   KEY `audit_security` (`actor_id`,`action`,`outcome`,`created_at`),
   KEY `audit_created` (`created_at`,`id`),
   CONSTRAINT `audit_outcome` CHECK ((`outcome` in ('unknown','succeeded','failed','partial'))),
-  CONSTRAINT `audit_source` CHECK ((`source` in ('web','token','cli')))
+  CONSTRAINT `audit_source` CHECK ((`source` in ('web','token','cli','s3')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 /*!80000 COLLATE=utf8mb4_0900_bin */ /*M!100603 COLLATE=utf8mb4_nopad_bin */;
 
 CREATE TABLE `maintenance_controls` (

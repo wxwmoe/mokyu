@@ -93,11 +93,20 @@ async fn sqlite_schema_bootstrap_contract() -> Result<()> {
     sqlx::query("INSERT INTO runtime_settings(section,value) VALUES('preserved','{}')")
         .execute(&mut old)
         .await?;
+    sqlx::raw_sql("INSERT INTO audit_events(id,actor_label,source,action) VALUES(41,'operator','cli','preserved'),(99,'operator','cli','removed'); DELETE FROM audit_events WHERE id=99;")
+        .execute(&mut old).await?;
     let id: Vec<u8> = sqlx::query_scalar("SELECT deployment_id FROM mokyu_meta")
         .fetch_one(&mut old)
         .await?;
     migration::run(&mut old).await?;
     assert_eq!(structure(&mut old).await?, structure(&mut fresh).await?);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT action FROM audit_events WHERE id=41")
+            .fetch_one(&mut old)
+            .await?,
+        "preserved"
+    );
+    assert_eq!(sqlx::query("INSERT INTO audit_events(actor_label,source,action) VALUES('credential','s3','source.recover')").execute(&mut old).await?.last_insert_rowid(), 100, "table rebuild must preserve deleted audit identifiers");
     assert_eq!(
         sqlx::query_scalar::<_, Vec<u8>>("SELECT deployment_id FROM mokyu_meta")
             .fetch_one(&mut old)

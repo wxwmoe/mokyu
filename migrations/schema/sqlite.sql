@@ -1,4 +1,4 @@
--- Current sqlite schema, matching migration 0018.
+-- Current sqlite schema, matching migration 0021.
 -- The initializer records schema_version and migration checksums after this script succeeds.
 
 CREATE TABLE access_state (
@@ -23,14 +23,14 @@ CREATE TABLE api_tokens (
     revoked_at INTEGER
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE audit_events (
+CREATE TABLE "audit_events" (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at INTEGER NOT NULL DEFAULT(CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     finished_at INTEGER,
     actor_id BLOB,
     actor_label TEXT NOT NULL,
     token_id BLOB,
-    source TEXT NOT NULL CHECK(source IN ('web','token','cli')),
+    source TEXT NOT NULL CHECK(source IN ('web','token','cli','s3')),
     action TEXT NOT NULL,
     target TEXT NOT NULL DEFAULT '',
     project_id BLOB,
