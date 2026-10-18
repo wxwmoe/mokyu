@@ -198,6 +198,30 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
             .await?;
         }
     }
+    sqlx::query("UPDATE pending_uploads SET next_retry_at=now()+interval '1 hour'")
+        .execute(&pool)
+        .await?;
+    assert!(backend.seal(Uuid::new_v4(), true, 64).await?);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pending_uploads WHERE next_retry_at<=now()"
+        )
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
+    sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id) VALUES($1,2,1,$2)")
+        .bind(stream)
+        .bind(ids[0])
+        .execute(&pool)
+        .await?;
+    assert!(backend.seal(stream, true, 64).await?);
+    let due: Vec<i64> = sqlx::query_scalar(
+        "SELECT chunk_id FROM pending_uploads WHERE next_retry_at<=now() ORDER BY chunk_id",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(due, ids[..2]);
     let result = backend.release(&ids, false).await?;
     assert_eq!(result.keys, vec!["__mokyu/multipart/pending/2"]);
     assert_eq!(
@@ -265,6 +289,21 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
         .execute(&pool)
         .await?;
     sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,owner_task,next_retry_at) VALUES($1,$2,0,1,$3,now())").bind(ids[0]).bind(stream).bind(task).execute(&pool).await?;
+    sqlx::query(
+        "UPDATE pending_uploads SET next_retry_at=now()+interval '1 hour' WHERE chunk_id=$1",
+    )
+    .bind(ids[0])
+    .execute(&pool)
+    .await?;
+    assert!(backend.seal(stream, true, 64).await?);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT next_retry_at>now() FROM pending_uploads WHERE chunk_id=$1"
+        )
+        .bind(ids[0])
+        .fetch_one(&pool)
+        .await?
+    );
     TaskExecutionStore::finish(
         &backend,
         TaskFinish {

@@ -115,6 +115,8 @@ fixture 示例：
 
 `postgres_source_validation_allows_references` 使用指向全新隔离库的 `MOKYU_TEST_DATABASE_URL_FILE`，验证来源资格锁期间仍能建立普通引用，但物理隔离与映射变更必须等待；同时验证重复引用不再更新已清空的存活时间。来源检查还覆盖两种作用域的三阶段锁等待后的新状态、不可用结果后事务及锁仍然有效、空/fragment来源、4097区块和generic/custom计划。
 
+`postgres_pending_release_preserves_only_copy` 验证仍被引用的唯一暂存副本不会提前释放，并覆盖 EOF 重排的 stream 范围、重复引用和已有任务 owner。
+
 `python -m tests.storage.source_quarantine` 在独立故障注入服务验证引用前/发布前隔离、Copy/UploadPartCopy/Complete 拒绝、原对象保留、暖正文缓存/Range/304、CSRF、幂等、暂停复检及恢复。要求 `MOKYU_TEST_BINARY`、`MOKYU_TEST_CONFIG`、`MOKYU_TEST_ENDPOINT`、`MOKYU_TEST_WEB`、`MOKYU_TEST_FAULT_DIR`、`MOKYU_TEST_PASSWORD_FILE`，初始管理员用户名为 tester，启用响应缓存。local 使用专用 `MOKYU_TEST_FSYNC_ROOT`；模拟 S3 使用 `MOKYU_TEST_BACKEND` JSON 文件，字段为 endpoint、bucket、region、access_key、secret_key、prefix。测试自行创建独立 storage、桶及凭据，不使用真实桶。
 
 群集另设 `MOKYU_TEST_SOURCE_FAULT_DIRS` 为逗号分隔的 data/worker 故障目录，`MOKYU_TEST_SECOND_CONTROL` 指向第二个 control，以验证并发执行同一预览。配置的 Web origin 须与 MOKYU_TEST_WEB 一致。`python -m tests.storage.pack_quarantine` 使用同一模拟 S3 fixture 验证整个 pack 的精确复检、成员不变、维护模式恢复及普通成员拒绝。两者会修改专用后端的物理测试字节，不用于已有部署。

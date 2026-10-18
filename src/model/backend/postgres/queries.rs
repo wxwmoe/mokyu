@@ -3568,8 +3568,11 @@ pub(super) fn insert_cached_extent<'q>(input: &'q CacheStage<'q>) -> Statement<'
 pub(super) fn resize_cached_stream(stream: Uuid, size: i64) -> Statement<'static> {
     sqlx::query("UPDATE streams SET size=GREATEST(size,$2),touched_at=now() WHERE id=$1 AND state='writing'").bind(stream).bind(size)
 }
-pub(super) fn seal_stream_uploads(stream: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE pending_uploads SET next_retry_at=LEAST(next_retry_at,now()) WHERE owner_task IS NULL AND chunk_id IN (SELECT chunk_id FROM extents WHERE stream_id=$1)").bind(stream)
+pub(super) fn seal_stream_uploads(stream: Uuid) -> sqlx::RawSql {
+    // A typed UUID allows a fresh plan in one roundtrip as the queue grows.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "UPDATE pending_uploads SET next_retry_at=LEAST(next_retry_at,now()) WHERE owner_task IS NULL AND chunk_id IN (SELECT chunk_id FROM extents WHERE stream_id='{stream}'::uuid)"
+    )))
 }
 pub(super) fn unsealed_uploads(stream: Uuid) -> Rows<'static, (i64, i64, i32)> {
     sqlx::query_as("SELECT p.chunk_id,p.offset_bytes,c.raw_size FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE p.stream_id=$1 AND p.owner_task IS NULL ORDER BY p.offset_bytes LIMIT 1026").bind(stream)
