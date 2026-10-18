@@ -251,6 +251,10 @@ def main():
     rejected(lambda: fixture.client.put_object(Bucket=fixture.name,Key='checksum',Body=raw,
         ContentMD5=base64.b64encode(bytes(16)).decode()))
     fixture.read('checksum', old)
+    if database.type == 'mysql':
+        # Check serial recovery after asynchronous failed-upload cleanup releases its locks.
+        wait(lambda: not database.query("SELECT id FROM streams WHERE bucket_id=%s AND object_key=%s AND state<>'ready'",
+            uuid.UUID(fixture.bucket_id), 'checksum'), 'failed checksum cleanup did not finish')
     fixture.put('retry', raw)
     fixture.read('original', raw)
     print('PASS partial content cannot recover another hash and bad request checksums cannot publish objects', flush=True)

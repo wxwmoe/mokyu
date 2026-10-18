@@ -25,6 +25,7 @@ pub(crate) enum CacheBatch {
         pack: i64,
         ids: Vec<i64>,
     },
+    // Selection has durably claimed the inputs, pinned them and saved their source revisions.
     Encode {
         stream: Option<Uuid>,
         expired: bool,

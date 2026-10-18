@@ -4583,12 +4583,39 @@ pub(super) async fn cache_batch(
     if rows.is_empty() {
         return Ok(CacheBatch::Finished);
     }
-    let ids: Vec<_> = rows.iter().map(|r| r.chunk.id).collect();
-    record_source_inputs(&mut tx, task.id, &ids).await?;
+    let mut ids: Vec<_> = rows.iter().map(|r| r.chunk.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    pin_inputs(&mut tx, task.id, &ids).await?;
+    let current: Vec<(i64, i64, Option<i64>, Option<Uuid>, i64, Option<i64>)> =
+        queries::lock_cache_inputs(&ids, task.id, flush)
+            .build_query_as()
+            .fetch_all(&mut *tx)
+            .await?;
+    let mut expected: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.chunk.id,
+                r.chunk.encoding_id,
+                r.pack_id,
+                stream,
+                r.offset_bytes,
+                if r.chunk.id == first { source } else { None },
+            )
+        })
+        .collect();
+    expected.sort_unstable_by_key(|r| r.0);
+    ensure!(
+        current == expected,
+        "upload inputs changed; retry maintenance"
+    );
     queries::claim_pending_uploads(&ids, task.id)
         .build()
         .execute(&mut *tx)
         .await?;
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("upload-prepare-before-commit").await;
     tx.commit().await?;
     Ok(CacheBatch::Encode {
         stream,
@@ -5281,28 +5308,33 @@ pub(super) async fn pin_pack_inputs(
     }
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     lock_execution(&mut tx, task).await?;
-    let locked: Vec<(i64, Option<i64>, Uuid)> = queries::lock_pack_layout(&ids)
+    pin_inputs(&mut tx, task.id, &ids).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn pin_inputs(db: &mut SqliteConnection, task: Uuid, ids: &[i64]) -> Result<()> {
+    let locked: Vec<(i64, Option<i64>, Uuid)> = queries::lock_pack_layout(ids)
         .build_query_as()
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *db)
         .await?;
     ensure!(
         locked.len() == ids.len(),
         "pack inputs changed; retry maintenance"
     );
-    let owners: Vec<Uuid> = queries::pack_input_owners(&ids)
+    let owners: Vec<Uuid> = queries::pack_input_owners(ids)
         .build_query_scalar()
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *db)
         .await?;
     ensure!(
-        owners.iter().all(|id| *id == task.id),
+        owners.iter().all(|id| *id == task),
         "pack input is already owned"
     );
-    record_source_inputs(&mut tx, task.id, &ids).await?;
-    queries::insert_pack_inputs(task.id, &ids)
+    record_source_inputs(db, task, ids).await?;
+    queries::insert_pack_inputs(task, ids)
         .build()
-        .execute(&mut *tx)
+        .execute(db)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 

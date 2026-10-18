@@ -157,7 +157,10 @@ impl App {
             self.upload_cache.pause(task).await?;
             return Ok(false);
         }
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("upload-before-prepare").await;
         let selection = self.coord.lock().await;
+        self.storage_writable()?;
         let batch = self
             .upload_cache
             .batch(
@@ -201,7 +204,6 @@ impl App {
                 drop(selection);
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("upload-before-work").await;
-                self.pin_pack_inputs(task, &rows).await?;
                 let metadata = if let Some(stream) = stream {
                     self.upload_cache.metadata(stream).await?
                 } else {

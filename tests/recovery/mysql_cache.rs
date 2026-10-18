@@ -208,6 +208,20 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     };
     assert!(backend.batch(stale, &detail, false, 60, 64).await.is_err());
     let batch = backend.batch(task, &detail, false, 60, 64).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pack_inputs WHERE task_id=?")
+            .bind(owner)
+            .fetch_one(db)
+            .await?,
+        2
+    );
+    assert_eq!(
+        backend.raw(owner).await?.unwrap()["detail"]["source_inputs"]
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
     assert!(
         matches!(batch,CacheBatch::Encode{stream:Some(id),expired:false,rows} if id==first && rows.len()==2)
     );
@@ -265,11 +279,6 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     sqlx::query("UPDATE chunk_encodings SET owner_task=? WHERE encoding_id=?")
         .bind(owner)
         .bind(chunks[1].encoding_id)
-        .execute(db)
-        .await?;
-    sqlx::query("INSERT INTO pack_inputs(task_id,chunk_id) VALUES(?,?)")
-        .bind(owner)
-        .bind(ids[1])
         .execute(db)
         .await?;
     assert!(UploadCacheStore::finish(&backend, stale).await.is_err());

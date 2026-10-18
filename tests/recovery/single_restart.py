@@ -12,6 +12,7 @@ from pathlib import Path
 import requests
 import boto3
 from tests.integration import s3, bucket, error, config, endpoint
+from tests.recovery.source_repair import Database
 
 assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
 command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG']]
@@ -135,6 +136,36 @@ try:
         s3.delete_object(Bucket=bucket, Key=key)
         print('PASS single publication crash boundary:', point, flush=True)
 
+    database = Database()
+    for point in ('upload-prepare-before-commit', 'upload-before-work'):
+        gate = faults / 'upload-before-prepare'
+        gate.with_suffix('.hit').unlink(missing_ok=True)
+        gate.touch()
+        key = prefix + '-' + point
+        raw = os.urandom(6 * 1024 * 1024 + 13)
+        s3.put_object(Bucket=bucket, Key=key, Body=raw)
+        wait(gate.with_suffix('.hit').exists)
+        marker = faults / point
+        marker.with_suffix('.hit').unlink(missing_ok=True)
+        marker.touch()
+        gate.unlink()
+        wait(marker.with_suffix('.hit').exists)
+        pins = database.query('SELECT COUNT(*) AS n FROM pack_inputs')[0]['n']
+        assert (pins == 0) if point == 'upload-prepare-before-commit' else (pins > 0), pins
+        kill()
+        marker.unlink()
+        start(maintenance=True)
+        assert database.query('SELECT COUNT(*) AS n FROM pack_inputs')[0]['n'] == 0
+        read(key, raw)
+        complete(cli('cache', 'flush'))
+        assert database.query('SELECT COUNT(*) AS n FROM pending_uploads')[0]['n'] == 0
+        kill()
+        start(maintenance=True)
+        read(key, raw)
+        cli('maintenance', 'disable')
+        s3.delete_object(Bucket=bucket, Key=key)
+        print('PASS acknowledged upload survives preparation crash and cold read:', point, flush=True)
+
     marker = faults / 'upload-before-work'
     marker.with_suffix('.hit').unlink(missing_ok=True)
     marker.touch()
@@ -202,7 +233,7 @@ try:
     client.delete_object(Bucket=local, Key='persistent')
     print('PASS encrypted local storage, managed keys and credentials survive restart', flush=True)
 finally:
-    for point in (*points, 'upload-before-work'):
+    for point in (*points, 'upload-before-work', 'upload-before-prepare', 'upload-prepare-before-commit'):
         (faults / point).unlink(missing_ok=True)
     if not alive():
         start()

@@ -5,6 +5,155 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 #[tokio::test]
+#[cfg(feature = "fault-injection")]
+#[ignore = "requires a fresh PostgreSQL database and MOKYU_TEST_FAULT_DIR"]
+async fn postgres_upload_preparation_is_atomic() -> Result<()> {
+    use crate::model::cache::CacheBatch;
+    use serde_json::json;
+    use std::time::Duration;
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let url = std::fs::read_to_string(std::env::var("MOKYU_TEST_DATABASE_URL_FILE")?)?;
+    let pool = PgPool::connect(url.trim()).await?;
+    assert!(
+        super::queries::metadata_table()
+            .fetch_one(&pool)
+            .await?
+            .is_none()
+    );
+    migration::run(&mut *pool.acquire().await?).await?;
+    let storage = Uuid::new_v4();
+    let bucket = Uuid::new_v4();
+    let stream = Uuid::new_v4();
+    sqlx::query("INSERT INTO storages(id,name,type,path) VALUES($1,'preparation','local','/data/preparation')")
+        .bind(storage).execute(&pool).await?;
+    sqlx::query("INSERT INTO buckets(id,name,storage_id) VALUES($1,'preparation',$2)")
+        .bind(bucket)
+        .bind(storage)
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO streams(id,bucket_id,object_key,stream_type,state) VALUES($1,$2,'preparation','object','writing')")
+        .bind(stream).bind(bucket).execute(&pool).await?;
+    let mut ids = Vec::new();
+    for index in 0..2i64 {
+        let id: i64 = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES($1,$2,32,'none','ready') RETURNING id")
+            .bind(storage).bind(vec![index as u8;32]).fetch_one(&pool).await?;
+        ids.push(id);
+        sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,staging_storage_id,staging_object_key,next_retry_at) VALUES($1,$2,$3,32,$4,$5,now())")
+            .bind(id).bind(stream).bind(index*32).bind(storage).bind(format!("__mokyu/multipart/preparation/{index}")).execute(&pool).await?;
+        super::queries::insert_chunk_extent(stream, index * 32, 32, id)
+            .execute(&pool)
+            .await?;
+    }
+    let first = Execution {
+        id: Uuid::new_v4(),
+        token: Uuid::new_v4(),
+    };
+    let other = Execution {
+        id: Uuid::new_v4(),
+        token: Uuid::new_v4(),
+    };
+    for task in [first, other] {
+        sqlx::query("INSERT INTO tasks(id,task_type,state,lease_token,lease_expires_at) VALUES($1,'upload','running',$2,now()+interval '5 minutes')")
+            .bind(task.id).bind(task.token).execute(&pool).await?;
+    }
+    let faults = std::path::PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
+    let marker = faults.join("upload-prepare-before-commit");
+    std::fs::create_dir_all(&faults)?;
+    let prepare = |task| {
+        let pool = pool.clone();
+        let detail = json!({"first":ids[0]});
+        tokio::spawn(async move {
+            super::transactions::cache_batch(&pool, task, &detail, false, 60, 64).await
+        })
+    };
+    let await_hit = || async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.with_extension("hit").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+    };
+    std::fs::write(&marker, b"")?;
+    let canceled = prepare(first);
+    await_hit().await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pack_inputs")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pending_uploads WHERE owner_task IS NOT NULL"
+        )
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT detail->'source_inputs' IS NULL FROM tasks WHERE id=$1"
+        )
+        .bind(first.id)
+        .fetch_one(&pool)
+        .await?
+    );
+    canceled.abort();
+    assert!(matches!(canceled.await, Err(error) if error.is_cancelled()));
+    std::fs::remove_file(marker.with_extension("hit"))?;
+    let winner = prepare(first);
+    await_hit().await?;
+    let loser = prepare(other);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND pid<>pg_backend_pid())").fetch_one(&pool).await?;
+            if blocked { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        anyhow::Ok(())
+    }).await??;
+    std::fs::remove_file(&marker)?;
+    assert!(matches!(winner.await??,CacheBatch::Encode{rows,..} if rows.len()==2));
+    assert!(loser.await?.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pack_inputs WHERE task_id=$1")
+            .bind(first.id)
+            .fetch_one(&pool)
+            .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pending_uploads WHERE owner_task=$1")
+            .bind(first.id)
+            .fetch_one(&pool)
+            .await?,
+        2
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT detail->'source_inputs' IS NULL FROM tasks WHERE id=$1"
+        )
+        .bind(other.id)
+        .fetch_one(&pool)
+        .await?
+    );
+    super::transactions::cache_finish(&pool, first).await?;
+    assert!(matches!(prepare(other).await??,CacheBatch::Encode{rows,..} if rows.len()==2));
+    super::transactions::cache_finish(&pool, other).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pack_inputs")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires MOKYU_TEST_DATABASE_URL_FILE pointing to a new isolated PostgreSQL database"]
 async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
     assert_eq!(

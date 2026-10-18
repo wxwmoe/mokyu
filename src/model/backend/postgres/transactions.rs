@@ -3031,11 +3031,36 @@ pub(super) async fn cache_batch(
     if rows.is_empty() {
         return Ok(CacheBatch::Finished);
     }
-    let ids: Vec<i64> = rows.iter().map(|r| r.chunk.id).collect();
-    record_source_inputs(&mut tx, task.id, &ids).await?;
+    let mut ids: Vec<i64> = rows.iter().map(|r| r.chunk.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    pin_inputs(&mut tx, task.id, &ids).await?;
+    let current = queries::lock_cache_inputs(&ids, task.id, flush)
+        .fetch_all(&mut *tx)
+        .await?;
+    let mut expected: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.chunk.id,
+                r.chunk.encoding_id,
+                r.pack_id,
+                stream,
+                r.offset_bytes,
+                if r.chunk.id == first { source } else { None },
+            )
+        })
+        .collect();
+    expected.sort_unstable_by_key(|r| r.0);
+    ensure!(
+        current == expected,
+        "upload inputs changed; retry maintenance"
+    );
     queries::claim_pending_uploads(&ids, task.id)
         .execute(&mut *tx)
         .await?;
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("upload-prepare-before-commit").await;
     tx.commit().await?;
     Ok(CacheBatch::Encode {
         stream,
@@ -3170,13 +3195,16 @@ pub(super) async fn pin_pack_inputs(
     ids.dedup();
     let mut tx = pool.begin().await?;
     lock_execution(&mut tx, task).await?;
-    let ready: Vec<i64> = queries::pack_ready_inputs(&ids).fetch_all(&mut *tx).await?;
-    ensure!(ready == ids, "pack inputs changed; retry maintenance");
-    record_source_inputs(&mut tx, task.id, &ids).await?;
-    queries::insert_pack_inputs(task.id, &ids)
-        .execute(&mut *tx)
-        .await?;
+    pin_inputs(&mut tx, task.id, &ids).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+async fn pin_inputs(db: &mut PgConnection, task: Uuid, ids: &[i64]) -> Result<()> {
+    let ready: Vec<i64> = queries::pack_ready_inputs(ids).fetch_all(&mut *db).await?;
+    ensure!(ready == ids, "pack inputs changed; retry maintenance");
+    record_source_inputs(db, task, ids).await?;
+    queries::insert_pack_inputs(task, ids).execute(db).await?;
     Ok(())
 }
 

@@ -47,7 +47,8 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `s3/empty_ranges.py`：签名/匿名 S3、公共 Web 与面板下载的空对象、单字节、suffix/open/closed Range、HEAD 和条件请求。空对象无 Range 正常返回，合法但不可满足的 Range 返回 416 和 `Content-Range: bytes */0`；使用默认 SDK 校验配置，另验证空对象复制。面板验证读取 `MOKYU_TEST_PASSWORD_FILE`，公共 Web 使用 `MOKYU_TEST_PUBLIC_WEB`/`MOKYU_TEST_PUBLIC_HOST`。
 - `control/database_capabilities.py`：管理 API/CLI、配置字段和群集能力边界。
 - `storage/single_lifecycle.py`：提前本地确认、持久上传、pack、rewrite、unpack、巡检、容量和清理。
-- `recovery/single_restart.py`：三个后端共用的 API 契约，覆盖 8 个崩溃点、待上传数据的密钥轮换及 local/S3 加密数据重启读取。
+- `recovery/upload_cache.rs`：PostgreSQL 上传准备的双执行者竞争、取消回滚和 owner/pin/来源代次原子性；需要故障注入构建。
+- `recovery/single_restart.py`：三个后端共用的 API 契约，覆盖 10 个崩溃点，包括上传准备提交前后的 owner/pin 原子恢复、待上传数据的密钥轮换及 local/S3 加密数据重启读取。
 - `recovery/cluster_runtime.py`、`cluster_staging.py`：PostgreSQL 多角色、节点和共享暂存验证。
 - `recovery/maintenance_state.py`：双 control、双 data 和 worker 的维护状态收敛。按文件头部的 fixture 与阶段运行：`enable` 后重启一个 data，执行 `resume`、`failure`、`race`、`drain`。`failure` 在专用库中短暂锁表并取消各节点的状态查询，再释放锁；`drain` 写入停止请求标记后，测试编排器向首个 control 发送 SIGTERM，验证已有连接的迟到管理请求不能恢复写入，完成后重启该节点。
 - `recovery/staged_reads.py`：两个 data 上验证共享暂存查找与后台发布/删除并发，公共及签名读重新选择已发布来源；唯一暂存丢失仍拒绝。另需 `MOKYU_TEST_UPLOAD_FAULT_DIRS`（所有执行上传的 data/worker 故障目录 JSON 数组）和首个 data 的 `MOKYU_TEST_FAULT_DIR`。

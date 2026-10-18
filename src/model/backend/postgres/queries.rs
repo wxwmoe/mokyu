@@ -3654,6 +3654,14 @@ pub(super) fn pending_upload_mappings(
 pub(super) fn upload_stream_metadata(stream: Uuid) -> Rows<'static, (Value, String)> {
     sqlx::query_as("SELECT metadata,object_key FROM streams WHERE id=$1").bind(stream)
 }
+pub(super) fn lock_cache_inputs<'q>(
+    ids: &'q [i64],
+    task: Uuid,
+    flush: bool,
+) -> Rows<'q, (i64, i64, Option<i64>, Option<Uuid>, i64, Option<i64>)> {
+    sqlx::query_as("SELECT c.id,c.current_encoding_id,c.pack_id,p.stream_id,p.offset_bytes,p.source_pack_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE p.chunk_id=ANY($1) AND (p.owner_task IS NULL OR p.owner_task=$2 OR ($3 AND p.owner_task IN (SELECT id FROM tasks WHERE state IN ('paused','failed')))) ORDER BY c.id FOR UPDATE OF p")
+        .bind(ids).bind(task).bind(flush)
+}
 pub(super) fn count_upload_batch(task: Execution) -> Statement<'static> {
     sqlx::query("UPDATE tasks SET processed=processed+1,updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$2 AND ((lease_node_id IS NULL AND lease_expires_at IS NULL) OR lease_expires_at>clock_timestamp())").bind(task.id)
         .bind(task.token)

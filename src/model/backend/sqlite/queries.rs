@@ -5681,6 +5681,20 @@ pub(super) fn pack_input_owners(ids: &[i64]) -> sqlx::QueryBuilder<Sqlite> {
     chunk_ids(&mut query, ids);
     query
 }
+pub(super) fn lock_cache_inputs(
+    ids: &[i64],
+    task: Uuid,
+    flush: bool,
+) -> sqlx::QueryBuilder<Sqlite> {
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT c.id,c.current_encoding_id,c.pack_id,p.stream_id,p.offset_bytes,p.source_pack_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE c.id IN ",
+    );
+    chunk_ids(&mut query, ids);
+    query.push(" AND (p.owner_task IS NULL OR p.owner_task=").push_bind(task)
+        .push(" OR (").push_bind(flush)
+        .push(" AND p.owner_task IN (SELECT id FROM tasks WHERE state IN ('paused','failed')))) ORDER BY c.id");
+    query
+}
 pub(super) fn insert_pack_inputs(task: Uuid, ids: &[i64]) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new("INSERT INTO pack_inputs(task_id,chunk_id) SELECT ");
     query
