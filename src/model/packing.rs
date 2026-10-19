@@ -186,13 +186,7 @@ pub(crate) trait PackingStore: Send + Sync {
     ) -> Result<()>;
     async fn pin_pack_inputs(&self, task: Execution, rows: &[Mapping]) -> Result<()>;
 
-    async fn start_pack(
-        &self,
-        policy: &str,
-        automatic: bool,
-        reuse_seconds: f64,
-        node: Option<Uuid>,
-    ) -> Result<Value>;
+    async fn start_pack(&self, policy: &str, automatic: bool, node: Option<Uuid>) -> Result<Value>;
     async fn start_unpack(&self, pack: Option<i64>, all: bool, node: Option<Uuid>)
     -> Result<Value>;
     async fn insert_pack_members(&self, pack: i64, rows: &[Mapping]) -> Result<()>;

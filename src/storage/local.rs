@@ -2,9 +2,9 @@ use super::cache::UploadCharge;
 use crate::content::codec::MAX;
 use anyhow::{Context, Result, ensure};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 use tokio::{io::AsyncReadExt, sync::Semaphore};
 use uuid::Uuid;
@@ -14,6 +14,60 @@ pub(crate) enum Area {
     Multipart = 0,
     Cache = 1,
     Thumbnails = 2,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn multipart_accounts_allocated_blocks_and_shares_filesystem_reservations() -> Result<()>
+    {
+        let root = std::env::temp_dir().join(format!("mokyu-space-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("multipart"))?;
+        std::fs::create_dir(root.join("storage"))?;
+        let disk = Arc::new(Disk {
+            root: root.clone(),
+            limits: [Some(1024 * 1024), None, None],
+            floor: 0,
+            spaces: Mutex::default(),
+            upload_limit: None,
+            usage: Mutex::new(Usage {
+                used: [0; 3],
+                upload: 0,
+            }),
+            io: Arc::new(Semaphore::new(1)),
+            pending: Mutex::default(),
+        });
+        let pending = disk.space_for(&root)?;
+        assert!(Arc::ptr_eq(
+            &pending,
+            &disk.space_for(&root.join("storage"))?
+        ));
+        let space = Space::claim(&root, 0, 1, &pending)?;
+        assert!(*pending.lock().unwrap() >= 1);
+        drop(space);
+        assert_eq!(*pending.lock().unwrap(), 0);
+        let granularity = fs2::allocation_granularity(&root)?.max(1);
+        assert!(Space::claim(&root, 0, u64::MAX / granularity * granularity, &pending).is_err());
+        assert_eq!(*pending.lock().unwrap(), 0);
+
+        let id = Uuid::new_v4();
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let (_, lease, guard) = disk
+            .append_fragment(id, &[7], lock.clone().lock_owned().await)
+            .await?;
+        let (_, second, guard) = disk.append_fragment(id, &[8], guard).await?;
+        let metadata = std::fs::metadata(disk.fragment_path(id))?;
+        assert_eq!(disk.used()[0], allocated(&metadata));
+        assert_eq!(std::fs::read(disk.fragment_path(id))?, [7, 8]);
+        assert_eq!(*pending.lock().unwrap(), 0);
+        drop((guard, lease, second));
+        disk.remove_fragment(id).await?;
+        assert_eq!(disk.used()[0], 0);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
 pub async fn read_bounded(path: impl AsRef<std::path::Path>, max: usize) -> Result<Vec<u8>> {
     let f = tokio::fs::File::open(path).await?;
@@ -26,13 +80,13 @@ pub async fn read_bounded(path: impl AsRef<std::path::Path>, max: usize) -> Resu
 }
 pub(crate) struct Usage {
     pub(crate) used: [u64; 3],
-    pub(crate) reserved: u64,
     pub(crate) upload: u64,
 }
 pub(crate) struct Disk {
     pub root: PathBuf,
     pub(crate) limits: [Option<u64>; 3],
     pub(crate) floor: u64,
+    pub(crate) spaces: Mutex<HashMap<String, Weak<Mutex<u64>>>>,
     pub(crate) upload_limit: Option<u64>,
     pub(crate) usage: Mutex<Usage>,
     pub(crate) io: Arc<Semaphore>,
@@ -52,16 +106,17 @@ pub(crate) struct Reservation {
     pub(crate) area: Area,
     pub(crate) bytes: u64,
     pub(crate) committed: bool,
+    _space: Space,
 }
 impl Reservation {
     pub(crate) fn commit(mut self) {
-        self.disk.usage.lock().unwrap().reserved -= self.bytes;
         self.committed = true;
     }
     fn commit_written(mut self, bytes: u64) {
         let mut usage = self.disk.usage.lock().unwrap();
-        usage.used[self.area as usize] -= self.bytes.saturating_sub(bytes);
-        usage.reserved -= self.bytes;
+        usage.used[self.area as usize] = usage.used[self.area as usize]
+            .saturating_sub(self.bytes)
+            .saturating_add(bytes);
         self.committed = true;
     }
 }
@@ -70,16 +125,92 @@ impl Drop for Reservation {
         if !self.committed {
             let mut u = self.disk.usage.lock().unwrap();
             u.used[self.area as usize] -= self.bytes;
-            u.reserved -= self.bytes;
         }
     }
 }
+pub(crate) fn allocated(metadata: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.blocks().saturating_mul(512)
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.len()
+    }
+}
+
+pub(crate) struct Space {
+    pending: Arc<Mutex<u64>>,
+    bytes: u64,
+}
+impl Space {
+    pub(crate) fn claim(
+        path: &std::path::Path,
+        floor: u64,
+        bytes: u64,
+        pending: &Arc<Mutex<u64>>,
+    ) -> Result<Self> {
+        let mut reserved = pending.lock().unwrap();
+        let stats = fs2::statvfs(path)?;
+        let granularity = stats.allocation_granularity().max(1);
+        let bytes = bytes
+            .div_ceil(granularity)
+            .checked_mul(granularity)
+            .context("disk reservation overflow")?;
+        let next = reserved
+            .checked_add(bytes)
+            .context("disk reservation overflow")?;
+        ensure!(
+            stats.available_space()
+                >= next
+                    .checked_add(floor)
+                    .context("disk reservation overflow")?,
+            "filesystem free-space floor reached"
+        );
+        *reserved = next;
+        Ok(Self {
+            pending: pending.clone(),
+            bytes,
+        })
+    }
+}
+impl Drop for Space {
+    fn drop(&mut self) {
+        *self.pending.lock().unwrap() -= self.bytes;
+    }
+}
+
 impl Disk {
+    pub(crate) fn space_for(&self, path: &std::path::Path) -> Result<Arc<Mutex<u64>>> {
+        #[cfg(unix)]
+        let key = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(path)?.dev().to_string()
+        };
+        #[cfg(not(unix))]
+        let key = std::fs::canonicalize(path)?
+            .components()
+            .next()
+            .context("filesystem root is missing")?
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned();
+        let mut spaces = self.spaces.lock().unwrap();
+        spaces.retain(|_, space| space.strong_count() > 0);
+        if let Some(space) = spaces.get(&key).and_then(Weak::upgrade) {
+            return Ok(space);
+        }
+        let space = Arc::new(Mutex::new(0));
+        spaces.insert(key, Arc::downgrade(&space));
+        Ok(space)
+    }
+
     fn cache_capacity(&self, usage: &Usage) -> Result<u64> {
         let capacity = usage.used[1].saturating_add(
             fs2::available_space(&self.root)?
                 .saturating_sub(self.floor)
-                .saturating_sub(usage.reserved),
+                .saturating_sub(*self.space_for(&self.root)?.lock().unwrap()),
         );
         Ok(self.limits[1].map_or(capacity, |limit| limit.min(capacity)))
     }
@@ -115,6 +246,15 @@ impl Disk {
     }
     pub(crate) fn reserve(self: &Arc<Self>, area: Area, bytes: u64) -> Result<Reservation> {
         let mut usage = self.usage.lock().unwrap();
+        let bytes = if matches!(area, Area::Multipart) {
+            let granularity = fs2::allocation_granularity(&self.root)?.max(1);
+            bytes
+                .div_ceil(granularity)
+                .checked_mul(granularity)
+                .context("disk accounting overflow")?
+        } else {
+            bytes
+        };
         let next = usage.used[area as usize]
             .checked_add(bytes)
             .context("disk accounting overflow")?;
@@ -122,18 +262,14 @@ impl Disk {
             self.limits[area as usize].is_none_or(|n| next <= n),
             "local storage quota exhausted"
         );
-        let free = fs2::available_space(&self.root)?;
-        ensure!(
-            free.saturating_sub(usage.reserved.saturating_add(bytes)) >= self.floor,
-            "filesystem free-space floor reached"
-        );
+        let space = Space::claim(&self.root, self.floor, bytes, &self.space_for(&self.root)?)?;
         usage.used[area as usize] = next;
-        usage.reserved += bytes;
         Ok(Reservation {
             disk: self.clone(),
             area,
             bytes,
             committed: false,
+            _space: space,
         })
     }
     pub(crate) fn used(&self) -> [u64; 3] {
@@ -185,11 +321,15 @@ impl Disk {
             })();
             if let Err(e) = result {
                 if std::fs::remove_file(&path).is_err() && path.try_exists().unwrap_or(true) {
-                    ticket.commit();
+                    ticket.commit_written(
+                        std::fs::metadata(&path)
+                            .map(|meta| allocated(&meta))
+                            .unwrap_or(data.len() as u64),
+                    );
                 }
                 return Err(e.into());
             }
-            ticket.commit();
+            ticket.commit_written(allocated(&std::fs::metadata(&path)?));
             Ok(lease)
         })
         .await?
@@ -199,7 +339,7 @@ impl Disk {
         match tokio::fs::metadata(&path).await {
             Ok(m) => {
                 tokio::fs::remove_file(path).await?;
-                self.release(Area::Multipart, m.len());
+                self.release(Area::Multipart, allocated(&m));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
@@ -247,7 +387,9 @@ impl Disk {
                 options.mode(0o644);
             }
             let mut file = options.open(&path)?;
-            let offset = file.metadata()?.len();
+            let metadata = file.metadata()?;
+            let offset = metadata.len();
+            let before = allocated(&metadata);
             ensure!(
                 offset <= i64::MAX as u64 - data.len() as u64,
                 "multipart file is too large"
@@ -260,7 +402,7 @@ impl Disk {
                 }
                 Ok::<_, std::io::Error>(())
             })();
-            ticket.commit_written(file.metadata()?.len().saturating_sub(offset));
+            ticket.commit_written(allocated(&file.metadata()?).saturating_sub(before));
             result?;
             Ok((offset as i64, lease, guard))
         })

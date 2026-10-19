@@ -43,20 +43,13 @@ pub(crate) trait UploadCacheStore: Send + Sync {
     async fn bypass(&self, stream: Uuid) -> Result<bool>;
     async fn disable(&self, stream: Uuid) -> Result<()>;
     async fn stage(&self, input: CacheStage<'_>) -> Result<bool>;
-    async fn seal(&self, stream: Uuid, eof: bool, maximum: u64) -> Result<bool>;
+    async fn seal(&self, stream: Uuid, eof: bool) -> Result<bool>;
     async fn status(&self) -> Result<(Value, Vec<Value>)>;
     async fn flush(&self) -> Result<(Uuid, bool)>;
-    async fn enqueue(&self, maximum: u64) -> Result<bool>;
+    async fn enqueue(&self) -> Result<bool>;
     async fn next_attempt(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>>;
     async fn pause(&self, task: Execution) -> Result<()>;
-    async fn batch(
-        &self,
-        task: Execution,
-        detail: &Value,
-        flush: bool,
-        timeout: u64,
-        maximum: u64,
-    ) -> Result<CacheBatch>;
+    async fn batch(&self, task: Execution, detail: &Value, flush: bool) -> Result<CacheBatch>;
     async fn metadata(&self, stream: Uuid) -> Result<Option<(Value, String)>>;
     async fn processed(&self, task: Execution) -> Result<()>;
     async fn finish(&self, task: Execution) -> Result<()>;

@@ -68,8 +68,7 @@ impl App {
         json!({"running":self.cleanup_state.running.try_lock().is_err(),
             "last_run":self.cleanup_state.last_run.lock().unwrap().clone(),
             "interval":c.interval,"batch_size":c.batch_size,"max_duration":c.max_duration,
-            "deleted_chunk_retention":c.deleted_chunk_retention,
-            "upload_retention":c.upload_retention,"task_retention":c.task_retention,"audit_retention":c.audit_retention})
+            "task_retention":c.task_retention,"audit_retention":c.audit_retention})
     }
 
     pub async fn cleanup_history(&self) -> Result<Value> {
@@ -95,16 +94,10 @@ impl App {
                 config::seconds(&c.task_retention)? as f64,
             ),
             ("audit_events", config::seconds(&c.audit_retention)? as f64),
-            (
-                "chunks",
-                config::seconds(&c.deleted_chunk_retention)? as f64,
-            ),
-            ("packs", config::seconds(&c.deleted_chunk_retention)? as f64),
-            (
-                "chunk_encodings",
-                config::seconds(&c.deleted_chunk_retention)? as f64,
-            ),
-            ("uploads", config::seconds(&c.upload_retention)? as f64),
+            ("chunks", 0.0),
+            ("packs", 0.0),
+            ("chunk_encodings", 0.0),
+            ("uploads", 0.0),
             (
                 "integrity_issues",
                 config::seconds(&c.task_retention)? as f64,
@@ -242,10 +235,9 @@ impl App {
         let mut removed = 0;
         let mut compacted = 0;
         let batch = batch_size.max(1) as i64;
-        let idle = config::seconds(&self.config.uploads.idle_timeout)? as f64;
         let expired: Vec<Uuid> = self
             .maintenance_store
-            .expired_uploads(idle, batch, storage_id)
+            .expired_uploads(batch, storage_id)
             .await?;
         for id in expired {
             if Instant::now() >= deadline {
@@ -256,13 +248,9 @@ impl App {
                 continue;
             };
             if !self.is_active(id) {
-                // The upload may have progressed while we waited to claim its lock.
-                let expired: bool = self
-                    .maintenance_store
-                    .upload_expired(id, idle, storage_id)
-                    .await?;
-                if expired {
-                    self.abort_upload(id).await?;
+                let _coord = self.coord.lock().await;
+                if self.multipart.expire(id).await? {
+                    self.wake_gc.notify_one();
                     removed += 1;
                 }
             }
@@ -585,7 +573,7 @@ impl App {
     pub async fn gc_status(&self) -> Result<Value> {
         let (counts, paused, maintenance) = self.maintenance_store.gc_status().await?;
         Ok(
-            json!({"paused":paused,"maintenance":maintenance,"running":self.gc_running.load(Ordering::Acquire),"chunks":counts,"grace":self.config.maintenance.unreferenced_grace,"interval":self.config.maintenance.interval,"min_storage_duration":self.config.backend_defaults.min_storage_duration}),
+            json!({"paused":paused,"maintenance":maintenance,"running":self.gc_running.load(Ordering::Acquire),"chunks":counts,"interval":self.config.maintenance.interval,"profiles":self.storage_profiles.enabled_profiles().await?}),
         )
     }
     pub async fn mark_unreferenced(&self) -> Result<usize> {

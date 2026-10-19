@@ -52,7 +52,7 @@ def main():
         database = Database()
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
         profile.update(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False,
-                       upload_retention='1s', deleted_chunk_retention='1s', unreferenced_grace='1s', min_storage_duration='0s')
+                       min_free_space='16MiB', upload_retention='1s', deleted_chunk_retention='1s', unreferenced_grace='1s', min_storage_duration='0s')
         profile = fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         root = Path(database.config['instance']['data_path']) / 'multipart'
         source_ids = set()

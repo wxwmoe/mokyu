@@ -29,7 +29,7 @@ const types = computed(() => ['local', 's3'].map(value => ({ value, label: t('st
 const keyOptions = computed(() => [{ value: '', label: t('storeNoEncryption') }, ...(keys.data.value || []).filter(row => row.purpose === 'block' && !row.revoked_at).map(row => ({ value: row.id, label: `${row.name} · ${row.algorithm}` }))])
 const profileFields: ProfileField[] = [
   { key: 'connect_timeout', valueType: 'text' }, { key: 'request_timeout', valueType: 'text' }, { key: 'max_retries', valueType: 'number' }, { key: 'retry_timeout', valueType: 'text' }, { key: 'priority_aging', valueType: 'text' },
-  { key: 'min_storage_duration', valueType: 'text' }, { key: 'unreferenced_grace', valueType: 'text' }, { key: 'deleted_chunk_retention', valueType: 'text' }, { key: 'upload_retention', valueType: 'text' },
+  { key: 'min_storage_duration', valueType: 'text' }, { key: 'unreferenced_grace', valueType: 'text' }, { key: 'deleted_chunk_retention', valueType: 'text' }, { key: 'upload_retention', valueType: 'text' }, { key: 'multipart_idle_timeout', valueType: 'text' }, { key: 'min_free_space', valueType: 'text' },
   { key: 'cache_enabled', valueType: 'boolean' }, { key: 'cache_soft_limit', valueType: 'text' }, { key: 'cache_entries', valueType: 'number' }, { key: 'upload_cache', valueType: 'boolean' }, { key: 'upload_cache_size', valueType: 'text' },
   { key: 'compression_enabled', valueType: 'boolean' }, { key: 'compression_strategy', valueType: 'text' }, { key: 'compression_level', valueType: 'number' }, { key: 'compression_sample_level', valueType: 'number' }, { key: 'compression_min_savings_percent', valueType: 'number' }, { key: 'compression_min_savings_bytes', valueType: 'number' },
   { key: 'pack_enabled', valueType: 'boolean' }, { key: 'pack_max_size', valueType: 'text' }, { key: 'pack_upload_flush_timeout', valueType: 'text' }, { key: 'pack_interval', valueType: 'text' }, { key: 'pack_reuse_interval', valueType: 'text' }, { key: 'pack_reclaim_interval', valueType: 'text' }, { key: 'pack_repack_interval', valueType: 'text' }, { key: 'pack_repack_cooldown', valueType: 'text' }, { key: 'pack_reclaim_min_savings_bytes', valueType: 'text' },
@@ -38,10 +38,10 @@ const profileFields: ProfileField[] = [
   { key: 'read_concurrency', valueType: 'number' }, { key: 'upload_concurrency', valueType: 'number' }, { key: 'control_concurrency', valueType: 'number' }, { key: 'pack_byte_budget', valueType: 'text' }, { key: 'integrity_byte_budget', valueType: 'text' }, { key: 'maintenance_concurrency', valueType: 'number' }, { key: 'maintenance_byte_budget', valueType: 'text' }, { key: 'migration_concurrency', valueType: 'number' }, { key: 'migration_byte_budget', valueType: 'text' },
 ]
 const profileGroups = [
-  { title: 'storeGroupLifecycle', fields: profileFields.slice(0, 9) },
-  { title: 'storeGroupCache', fields: profileFields.slice(9, 20) },
-  { title: 'storeGroupPacking', fields: profileFields.slice(20, 38) },
-  { title: 'storeGroupWorker', fields: profileFields.slice(38) },
+  { title: 'storeGroupLifecycle', fields: profileFields.slice(0, 11) },
+  { title: 'storeGroupCache', fields: profileFields.slice(11, 22) },
+  { title: 'storeGroupPacking', fields: profileFields.slice(22, 40) },
+  { title: 'storeGroupWorker', fields: profileFields.slice(40) },
 ]
 const profileGroupHints: Record<string, string> = {
   storeGroupLifecycle: 'storeGroupLifecycleHint', storeGroupCache: 'storeGroupCacheHint',
@@ -55,7 +55,7 @@ function profilePreset(type: string): Record<ProfileKey, string | number | boole
   return {
     cdc_enabled: true, deduplication_enabled: false,
     connect_timeout: '5s', request_timeout: '30s', max_retries: 3, retry_timeout: '120s', priority_aging: '30s',
-    min_storage_duration: '0s', unreferenced_grace: '48h', deleted_chunk_retention: '7d', upload_retention: '24h', cache_enabled: s3,
+    min_storage_duration: '0s', unreferenced_grace: '48h', deleted_chunk_retention: '7d', upload_retention: '24h', multipart_idle_timeout: '24h', min_free_space: s3 ? null : '1GiB', cache_enabled: s3,
     cache_soft_limit: null, cache_entries: null, upload_cache: s3, upload_cache_size: null, compression_enabled: s3,
     compression_strategy: 'always', compression_level: 6, compression_sample_level: 3, compression_min_savings_percent: 2,
     compression_min_savings_bytes: 256, pack_enabled: s3, pack_max_size: '32MiB', pack_upload_flush_timeout: '60s', pack_interval: '1h',
@@ -96,7 +96,10 @@ async function edit(row?: Storage) {
 watch(() => draft.type, value => {
   if (!profileDraft.value) return
   if (!editing.value) profileDraft.value = profilePreset(value)
-  else if (value === 'local') Object.assign(profileDraft.value, { cache_enabled: false, upload_cache: false, pack_enabled: false, pack_range_enabled: false })
+  else {
+    profileDraft.value.min_free_space = value === 'local' ? profileDraft.value.min_free_space || '1GiB' : null
+    if (value === 'local') Object.assign(profileDraft.value, { cache_enabled: false, upload_cache: false, pack_enabled: false, pack_range_enabled: false })
+  }
 })
 watch([() => route.query.edit, () => storages.data.value], async ([name, rows]) => {
   const row = rows?.find(item => item.name === String(name || ''))
@@ -193,11 +196,11 @@ async function toggle(row: Storage) {
         <template v-if="profileDraft">
           <div class="store-form-wide section-heading"><div><h3>{{ t('storeProfile') }}</h3><p class="field-help">{{ t('storeProfileHint') }}</p></div></div>
           <details v-for="(group, index) in profileGroups" :key="group.title" class="store-form-wide profile-group" :open="index === 0">
-            <summary class="profile-group-title"><span><strong>{{ t(group.title) }}</strong><small>{{ t(profileGroupHints[group.title]!) }}</small></span><span>{{ group.fields.length }}</span></summary>
+            <summary class="profile-group-title"><span><strong>{{ t(group.title) }}</strong><small>{{ t(profileGroupHints[group.title]!) }}</small></span><span>{{ group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local').length }}</span></summary>
             <div class="profile-fields">
-              <div v-for="field in group.fields" :key="field.key" :class="field.valueType === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
+              <div v-for="field in group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local')" :key="field.key" :class="field.valueType === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
                 <template v-if="field.valueType === 'boolean'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="Boolean(profileDraft[field.key])" :aria-label="profileLabel(field.key)" :label="profileDisabled(field.key) ? t('storeOptionUnused') : t(Boolean(profileDraft[field.key]) ? 'enabled' : 'disabled')" :disabled="busy || profileDisabled(field.key)" @update:model-value="setProfileBoolean(field.key, $event)" /></template>
-                <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><input :type="field.valueType === 'number' ? 'number' : 'text'" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"></label>
+                <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><input :aria-label="profileLabel(field.key)" :aria-describedby="field.key === 'multipart_idle_timeout' || field.key === 'min_free_space' ? 'storage-profile-' + field.key + '-hint' : undefined" :type="field.valueType === 'number' ? 'number' : 'text'" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"><small v-if="field.key === 'multipart_idle_timeout' || field.key === 'min_free_space'" :id="'storage-profile-' + field.key + '-hint'" class="field-help">{{ t('profileHelp_' + field.key) }}</small></label>
               </div>
             </div>
           </details>

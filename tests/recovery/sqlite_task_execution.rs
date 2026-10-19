@@ -29,7 +29,6 @@ async fn finish(backend: &Backend, execution: Execution, error: Option<&str>) ->
         backend,
         TaskFinish {
             execution,
-            reuse_seconds: 60,
             error: error.map(str::to_owned),
         },
     )
@@ -548,7 +547,7 @@ async fn sqlite_task_execution_contract() -> Result<()> {
     )
     .execute(db)
     .await?;
-    assert!(UploadCacheStore::enqueue(&backend, 64).await?);
+    assert!(UploadCacheStore::enqueue(&backend).await?);
     let task = claimed(&backend, upload, 2).await?;
     finish(&backend, task, Some("again")).await?;
     let (attempts,delay): (i32,i64)=sqlx::query_as("SELECT attempts,next_retry_at-CAST(unixepoch('subsec')*1000000 AS INTEGER) FROM pending_uploads WHERE chunk_id=?").bind(c1.id).fetch_one(db).await?;

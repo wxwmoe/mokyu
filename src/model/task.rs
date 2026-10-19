@@ -67,7 +67,6 @@ pub(crate) struct TaskRecord {
 
 pub(crate) struct TaskFinish {
     pub(crate) execution: Execution,
-    pub(crate) reuse_seconds: u64,
     pub(crate) error: Option<String>,
 }
 

@@ -126,6 +126,28 @@ async fn postgres_schema_bootstrap_contract() -> Result<()> {
         id
     );
 
+    // Materialize legacy upload policy once, including disabled backends.
+    let mut policy = database(&mut fresh, &options).await?;
+    policy.ensure_migrations_table("_sqlx_migrations").await?;
+    queries::migration_identity("storage-registry")
+        .execute(&mut policy)
+        .await?;
+    for entry in migrations.iter().take(47) {
+        policy.apply("_sqlx_migrations", entry).await?;
+    }
+    sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker,enabled) VALUES('00000000-0000-0000-0000-000000000001','policy-upgrade','local','/data/policy-upgrade','{}',false); INSERT INTO storage_profiles(storage_id) VALUES('00000000-0000-0000-0000-000000000001'); INSERT INTO runtime_settings(section,value) VALUES('uploads','{\"idle_timeout\":\"7d\",\"client_idle_timeout\":\"120s\"}') ON CONFLICT(section) DO UPDATE SET value=excluded.value;").execute(&mut policy).await?;
+    migration::run(&mut policy).await?;
+    let upgraded: (String, Option<String>) = sqlx::query_as("SELECT multipart_idle_timeout,min_free_space FROM storage_profiles WHERE storage_id='00000000-0000-0000-0000-000000000001'").fetch_one(&mut policy).await?;
+    assert_eq!(upgraded, ("7d".into(), None));
+    let settings: serde_json::Value =
+        sqlx::query_scalar("SELECT value FROM runtime_settings WHERE section='uploads'")
+            .fetch_one(&mut policy)
+            .await?;
+    assert_eq!(settings, serde_json::json!({"client_idle_timeout":"120s"}));
+    let migrated = contents(&mut policy).await?;
+    migration::run(&mut policy).await?;
+    assert_eq!(contents(&mut policy).await?, migrated);
+
     let mut old = database(&mut fresh, &options).await?;
     old.ensure_migrations_table("_sqlx_migrations").await?;
     queries::migration_identity("storage-registry")

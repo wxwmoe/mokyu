@@ -133,11 +133,12 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     )
     .await?
     .id;
+    sqlx::query("UPDATE storage_profiles SET pack_max_size='96B',pack_upload_flush_timeout='60s' WHERE storage_id=?").bind(storage).execute(db).await?;
     let first = stream(&backend, bucket, "cached-\u{732b}%").await?;
     assert!(!backend.bypass(first).await?);
     assert_eq!(backend.status().await?.0["entries"], 0);
     assert!(backend.next_attempt().await?.is_none());
-    assert!(!UploadCacheStore::enqueue(&backend, 64).await?);
+    assert!(!UploadCacheStore::enqueue(&backend).await?);
     backend.reserve(first, 96, false, None).await?;
     let mut chunks = Vec::new();
     let mut names = Vec::new();
@@ -146,8 +147,8 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
         names.push(stage(&backend, &value, first, i64::from(n) * 32, true).await?);
         chunks.push(value);
         if n == 1 {
-            assert!(!backend.seal(first, false, 96).await?);
-            assert!(!UploadCacheStore::enqueue(&backend, 64).await?);
+            assert!(!backend.seal(first, false).await?);
+            assert!(!UploadCacheStore::enqueue(&backend).await?);
         }
     }
     let ids: Vec<_> = chunks.iter().map(|c| c.id).collect();
@@ -187,8 +188,12 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     StreamStore::finish(&backend, first, 96, "etag", json!({})).await?;
     assert!(backend.publish(first, None, None, None).await?);
     assert!(backend.release(&ids, false).await?.keys.is_empty());
-    assert!(backend.seal(first, false, 96).await?);
-    assert!(UploadCacheStore::enqueue(&backend, 64).await?);
+    assert!(backend.seal(first, false).await?);
+    sqlx::query("UPDATE storage_profiles SET pack_max_size='64B' WHERE storage_id=?")
+        .bind(storage)
+        .execute(db)
+        .await?;
+    assert!(UploadCacheStore::enqueue(&backend).await?);
     let owner: Uuid = sqlx::query_scalar("SELECT owner_task FROM pending_uploads WHERE chunk_id=?")
         .bind(ids[0])
         .fetch_one(db)
@@ -206,8 +211,8 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
         id: owner,
         token: Uuid::new_v4(),
     };
-    assert!(backend.batch(stale, &detail, false, 60, 64).await.is_err());
-    let batch = backend.batch(task, &detail, false, 60, 64).await?;
+    assert!(backend.batch(stale, &detail, false).await.is_err());
+    let batch = backend.batch(task, &detail, false).await?;
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pack_inputs WHERE task_id=?")
             .bind(owner)
@@ -229,7 +234,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     backend.reference(copy, 0, ids[0], 32).await?;
     assert_eq!(backend.status().await?.1.len(), 4);
     assert!(
-        matches!(backend.batch(task,&detail,false,60,64).await?,CacheBatch::Encode{rows,..} if rows.len()==1)
+        matches!(backend.batch(task,&detail,false).await?,CacheBatch::Encode{rows,..} if rows.len()==1)
     );
     sqlx::query("DELETE FROM extents WHERE stream_id=?")
         .bind(copy)
@@ -241,7 +246,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     .execute(db)
     .await?;
     assert!(matches!(
-        backend.batch(task, &detail, false, 60, 64).await?,
+        backend.batch(task, &detail, false).await?,
         CacheBatch::Encode { expired: true, .. }
     ));
     backend.processed(stale).await?;
@@ -250,7 +255,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     assert_eq!(backend.raw(owner).await?.unwrap()["processed"], 1);
     durable(&backend, &chunks[0]).await?;
     assert!(
-        matches!(backend.batch(task,&detail,false,60,64).await?,CacheBatch::Release(id) if id==ids[0])
+        matches!(backend.batch(task,&detail,false).await?,CacheBatch::Release(id) if id==ids[0])
     );
     let previous_generation: i64 =
         sqlx::query_scalar("SELECT generation FROM pack_maintenance WHERE stream_id=?")
@@ -331,7 +336,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
         .execute(db)
         .await?;
     assert!(matches!(
-        backend.batch(flush, &snapshot, true, 60, 64).await?,
+        backend.batch(flush, &snapshot, true).await?,
         CacheBatch::Wait
     ));
     sqlx::query("DELETE FROM pack_inputs WHERE task_id=?")
@@ -347,14 +352,9 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
         .bind(ids[2])
         .execute(db)
         .await?;
+    assert!(backend.batch(flush, &json!({}), true).await.is_err());
     assert!(
-        backend
-            .batch(flush, &json!({}), true, 60, 64)
-            .await
-            .is_err()
-    );
-    assert!(
-        matches!(backend.batch(flush,&snapshot,true,60,64).await?,CacheBatch::Encode{rows,..} if rows.len()==1)
+        matches!(backend.batch(flush,&snapshot,true).await?,CacheBatch::Encode{rows,..} if rows.len()==1)
     );
     assert_eq!(
         sqlx::query_scalar::<_, Uuid>("SELECT owner_task FROM pending_uploads WHERE chunk_id=?")
@@ -372,7 +372,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     let late_chunk = chunk(&backend, storage, later, 9).await?;
     let late_name = stage(&backend, &late_chunk, later, 0, true).await?;
     assert!(matches!(
-        backend.batch(flush, &snapshot, true, 60, 64).await?,
+        backend.batch(flush, &snapshot, true).await?,
         CacheBatch::Finished
     ));
     UploadCacheStore::finish(&backend, flush).await?;
@@ -386,10 +386,10 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     sqlx::query("UPDATE pending_uploads SET owner_task=?,next_retry_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)-1000000,attempts=1,last_error='test' WHERE chunk_id=?").bind(retry).bind(late_chunk.id).execute(db).await?;
     assert!(backend.next_attempt().await?.unwrap() < chrono::Utc::now());
     assert_eq!(backend.status().await?.0["failed_entries"], 1);
-    assert!(UploadCacheStore::enqueue(&backend, 64).await?);
+    assert!(UploadCacheStore::enqueue(&backend).await?);
     assert_eq!(backend.raw(retry).await?.unwrap()["state"], "queued");
     assert!(backend.raw(retry).await?.unwrap()["error"].is_null());
-    assert!(!UploadCacheStore::enqueue(&backend, 64).await?);
+    assert!(!UploadCacheStore::enqueue(&backend).await?);
     let retry = execute(&backend, retry).await?;
     UploadCacheStore::pause(&backend, retry).await?;
     assert!(UploadCacheStore::finish(&backend, retry).await.is_err());
@@ -397,17 +397,17 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     let current = execute(&backend, retry.id).await?;
     assert!(
         backend
-            .batch(retry, &json!({"first":late_chunk.id}), false, 60, 64)
+            .batch(retry, &json!({"first":late_chunk.id}), false)
             .await
             .is_err()
     );
     assert!(matches!(
-        backend.batch(current, &json!({}), false, 60, 64).await?,
+        backend.batch(current, &json!({}), false).await?,
         CacheBatch::Finished
     ));
     assert!(matches!(
         backend
-            .batch(current, &json!({"first":late_chunk.id}), false, 60, 64)
+            .batch(current, &json!({"first":late_chunk.id}), false)
             .await?,
         CacheBatch::Encode { .. }
     ));
@@ -448,8 +448,8 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
             .keys
             .is_empty()
     );
-    backend.seal(reused, true, 64).await?;
-    assert!(UploadCacheStore::enqueue(&backend, 64).await?);
+    backend.seal(reused, true).await?;
+    assert!(UploadCacheStore::enqueue(&backend).await?);
     let owner: Uuid = sqlx::query_scalar("SELECT owner_task FROM pending_uploads WHERE chunk_id=?")
         .bind(ids[0])
         .fetch_one(db)
@@ -457,7 +457,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     let task = execute(&backend, owner).await?;
     let detail = backend.raw(owner).await?.unwrap()["detail"].clone();
     assert!(
-        matches!(backend.batch(task,&detail,false,60,64).await?,CacheBatch::Rewrite{pack,ids,..} if pack==ready_pack && ids.len()==2)
+        matches!(backend.batch(task,&detail,false).await?,CacheBatch::Rewrite{pack,ids,..} if pack==ready_pack && ids.len()==2)
     );
     assert_eq!(
         backend
@@ -560,7 +560,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
         .begin_with(super::queries::BEGIN_WRITE)
         .await?;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        assert!(!UploadCacheStore::enqueue(&backend, 64).await?);
+        assert!(!UploadCacheStore::enqueue(&backend).await?);
         assert_eq!(backend.status().await?.0["entries"], 0);
         assert!(backend.pins(&[], None).await?.is_empty());
         assert!(backend.next_attempt().await?.is_none());

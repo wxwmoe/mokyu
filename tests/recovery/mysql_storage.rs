@@ -88,9 +88,38 @@ async fn mysql_storage_contract() -> Result<()> {
     let row = backend.record("local").await?.unwrap();
     assert_eq!(row.identity_marker, local.identity_marker);
     assert_eq!(backend.enabled().await?.len(), 1);
-    assert!(backend.exists(local.id).await?);
-    assert!(!backend.exists(Uuid::new_v4()).await?);
+    assert!(backend.load(local.id).await.is_ok());
+    assert!(backend.load(Uuid::new_v4()).await.is_err());
     let profile = backend.load(local.id).await?;
+    assert_eq!(profile.multipart_idle_timeout, "24h");
+    assert_eq!(profile.min_free_space.as_deref(), Some("1GiB"));
+    sqlx::query("UPDATE storage_profiles SET min_free_space=NULL WHERE storage_id=?")
+        .bind(local.id)
+        .execute(db)
+        .await?;
+    StorageProfileStore::initialize(&backend, "64MiB").await?;
+    let migrated = backend.load(local.id).await?;
+    assert_eq!(migrated.min_free_space.as_deref(), Some("64MiB"));
+    StorageProfileStore::initialize(&backend, "2GiB").await?;
+    assert_eq!(backend.load(local.id).await?.revision, migrated.revision);
+    let mut invalid = migrated.clone();
+    invalid.multipart_idle_timeout = "18446744073709551615d".into();
+    assert!(crate::storage::profile::validate(&invalid, "local").is_err());
+    invalid = migrated.clone();
+    invalid.min_free_space = None;
+    assert!(crate::storage::profile::validate(&invalid, "local").is_err());
+    let mut restore = migrated;
+    restore.min_free_space = profile.min_free_space;
+    backend.update("local".into(), restore).await?;
+    let profile = backend.load(local.id).await?;
+    assert_eq!(profile.min_storage_seconds()?, 0);
+    let mut changed = profile.clone();
+    changed.min_storage_duration = "30d".into();
+    assert_eq!(changed.min_storage_seconds()?, 30 * 86400);
+    for invalid in ["", "-1d", "30", "30days", "18446744073709551615d"] {
+        changed.min_storage_duration = invalid.into();
+        assert!(changed.min_storage_seconds().is_err());
+    }
     assert!(
         !profile.cache_enabled
             && !profile.upload_cache
@@ -126,7 +155,7 @@ async fn mysql_storage_contract() -> Result<()> {
     );
     assert!(creation.writer.finish().await.is_err());
     assert!(backend.named("invalid").await?.is_none());
-    assert!(!backend.exists(invalid.id).await?);
+    assert!(backend.load(invalid.id).await.is_err());
     let mut creation = backend.creation().await?;
     assert!(
         creation

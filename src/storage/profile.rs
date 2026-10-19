@@ -22,6 +22,8 @@ pub(crate) struct StorageProfile {
     pub unreferenced_grace: String,
     pub deleted_chunk_retention: String,
     pub upload_retention: String,
+    pub multipart_idle_timeout: String,
+    pub min_free_space: Option<String>,
     pub cache_enabled: bool,
     pub cache_soft_limit: Option<String>,
     pub cache_entries: Option<i64>,
@@ -113,6 +115,43 @@ impl StorageProfile {
         }
     }
 
+    pub(crate) fn maintenance_interval(&self, policy: &str) -> Result<u64> {
+        crate::config::seconds(match policy {
+            "pack" => &self.pack_interval,
+            "reuse" => &self.pack_reuse_interval,
+            "reclaim" => &self.pack_reclaim_interval,
+            "repack" => &self.pack_repack_interval,
+            "range" => &self.pack_range_interval,
+            _ => anyhow::bail!("unknown storage maintenance policy"),
+        })
+    }
+
+    pub(crate) fn validate_budget(
+        &self,
+        config: &crate::config::Config,
+        budget: &crate::config::Budget,
+    ) -> Result<()> {
+        let workspace = self
+            .compression_config(&config.instance.compression_idle_timeout)
+            .workspace_bytes()?;
+        if self.pack_enabled {
+            let maximum = crate::config::bytes(&self.pack_max_size)?;
+            let payload = maximum + 12 + 44 * (maximum / crate::content::codec::MIN as u64 + 1);
+            anyhow::ensure!(
+                (payload * 4 + workspace).div_ceil(1024 * 1024)
+                    <= u64::from(budget.pack_memory_units),
+                "storage pack_max_size exceeds node memory budget"
+            );
+        }
+        anyhow::ensure!(
+            crate::config::seconds(&config.metrics.access_retention)?
+                >= crate::config::seconds(&self.pack_range_window)?
+                    .max(crate::config::seconds(&self.pack_range_repack_window)?),
+            "statistics.access_retention must cover storage Range windows"
+        );
+        Ok(())
+    }
+
     pub(crate) fn min_storage_seconds(&self) -> Result<u64> {
         if self.min_storage_duration == "0s" {
             Ok(0)
@@ -124,9 +163,12 @@ impl StorageProfile {
 
     pub(crate) fn compression_config(
         &self,
-        base: &crate::content::compression::Config,
+        idle_timeout: &str,
     ) -> crate::content::compression::Config {
-        let mut config = base.clone();
+        let mut config = crate::content::compression::Config {
+            context_idle_timeout: idle_timeout.into(),
+            ..Default::default()
+        };
         config.enabled = self.compression_enabled;
         config.strategy = match self.compression_strategy.as_str() {
             "never" => crate::content::compression::Strategy::Never,
@@ -143,6 +185,13 @@ impl StorageProfile {
 
 pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::Result<()> {
     use crate::config::{bytes, cache_bytes, seconds};
+    match (storage_type, profile.min_free_space.as_deref()) {
+        ("local", Some(floor)) => {
+            bytes(floor)?;
+        }
+        ("s3", None) => {}
+        _ => anyhow::bail!("min_free_space is required only for local storage"),
+    }
     anyhow::ensure!(
         profile.cdc_enabled
             || (!profile.compression_enabled
@@ -165,9 +214,7 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         ),
         "compression strategy must be never, always, or sample"
     );
-    profile
-        .compression_config(&crate::content::compression::Config::default())
-        .validate()?;
+    profile.compression_config("30s").validate()?;
     for duration in [
         &profile.connect_timeout,
         &profile.request_timeout,
@@ -176,6 +223,7 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         &profile.unreferenced_grace,
         &profile.deleted_chunk_retention,
         &profile.upload_retention,
+        &profile.multipart_idle_timeout,
         &profile.pack_upload_flush_timeout,
         &profile.pack_interval,
         &profile.pack_reuse_interval,
@@ -189,10 +237,17 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         &profile.pack_range_repack_retry_interval,
         &profile.integrity_batch_timeout,
     ] {
-        seconds(duration)?;
+        anyhow::ensure!(
+            seconds(duration)? <= i64::MAX as u64 / 1_000_000,
+            "storage duration exceeds the database timestamp range"
+        );
     }
+    profile.pack_config().validate()?;
     if profile.min_storage_duration != "0s" {
-        seconds(&profile.min_storage_duration)?;
+        anyhow::ensure!(
+            seconds(&profile.min_storage_duration)? <= i64::MAX as u64 / 1_000_000,
+            "storage duration exceeds the database timestamp range"
+        );
     }
     for size in [
         &profile.pack_max_size,

@@ -137,12 +137,20 @@ async fn mysql_inventory_contract() -> Result<()> {
     );
     assert_eq!(
         inventory["live"],
-        json!({"chunks":4,"reference_bytes":500,"raw_bytes":400,"pending_raw_bytes":100,"stored_bytes":150,"payload_bytes":150})
+        json!({"raw_objects":0,"chunks":4,"reference_bytes":500,"raw_bytes":400,"pending_raw_bytes":100,"stored_bytes":150,"payload_bytes":150})
     );
     assert_eq!(
         inventory["unreferenced"],
         json!({"chunks":1,"eligible_chunks":1,"stored_bytes":100,"eligible_bytes":100})
     );
+    sqlx::query("UPDATE storage_profiles SET unreferenced_grace='7d',deleted_chunk_retention='90d' WHERE storage_id=?").bind(a).execute(db).await?;
+    let delayed = backend
+        .inventory(&config.metrics, &config.maintenance)
+        .await?;
+    assert_eq!(delayed["unreferenced"]["eligible_chunks"], 0);
+    assert_eq!(delayed["unreferenced"]["eligible_bytes"], 0);
+    assert_eq!(delayed["cleanup"]["chunks"]["eligible"], 0);
+    sqlx::query("UPDATE storage_profiles SET unreferenced_grace='48h',deleted_chunk_retention='7d' WHERE storage_id=?").bind(a).execute(db).await?;
     assert_eq!(inventory["tasks"], json!({"completed":1}));
     assert_eq!(inventory["uploads"], json!({}));
     for name in ["chunks", "chunk_encodings", "tasks"] {
@@ -151,7 +159,7 @@ async fn mysql_inventory_contract() -> Result<()> {
     }
     DateTime::parse_from_rfc3339(inventory["as_of"].as_str().unwrap())?;
     let tables = inventory["database"].as_array().unwrap();
-    assert_eq!(tables.len(), 23);
+    assert_eq!(tables.len(), 26);
     assert!(tables.iter().all(|v| v["total_bytes"].is_i64()
         && v["index_bytes"].is_i64()
         && v["live_rows_estimate"].is_i64()

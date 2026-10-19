@@ -41,6 +41,7 @@ impl App {
             };
             if self
                 .maintenance_schedule()
+                .await?
                 .iter()
                 .any(|(k, _, _)| *k == policy)
                 && (self.maintenance_paused(policy).await?

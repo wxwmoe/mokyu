@@ -29,6 +29,7 @@ async fn postgres_upload_preparation_is_atomic() -> Result<()> {
     let stream = Uuid::new_v4();
     sqlx::query("INSERT INTO storages(id,name,type,path) VALUES($1,'preparation','local','/data/preparation')")
         .bind(storage).execute(&pool).await?;
+    sqlx::query("INSERT INTO storage_profiles(storage_id,pack_max_size,pack_upload_flush_timeout) VALUES($1,'64B','60s')").bind(storage).execute(&pool).await?;
     sqlx::query("INSERT INTO buckets(id,name,storage_id) VALUES($1,'preparation',$2)")
         .bind(bucket)
         .bind(storage)
@@ -65,9 +66,9 @@ async fn postgres_upload_preparation_is_atomic() -> Result<()> {
     let prepare = |task| {
         let pool = pool.clone();
         let detail = json!({"first":ids[0]});
-        tokio::spawn(async move {
-            super::transactions::cache_batch(&pool, task, &detail, false, 60, 64).await
-        })
+        tokio::spawn(
+            async move { super::transactions::cache_batch(&pool, task, &detail, false).await },
+        )
     };
     let await_hit = || async {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -201,7 +202,7 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
     sqlx::query("UPDATE pending_uploads SET next_retry_at=now()+interval '1 hour'")
         .execute(&pool)
         .await?;
-    assert!(backend.seal(Uuid::new_v4(), true, 64).await?);
+    assert!(backend.seal(Uuid::new_v4(), true).await?);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM pending_uploads WHERE next_retry_at<=now()"
@@ -215,7 +216,7 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
         .bind(ids[0])
         .execute(&pool)
         .await?;
-    assert!(backend.seal(stream, true, 64).await?);
+    assert!(backend.seal(stream, true).await?);
     let due: Vec<i64> = sqlx::query_scalar(
         "SELECT chunk_id FROM pending_uploads WHERE next_retry_at<=now() ORDER BY chunk_id",
     )
@@ -295,7 +296,7 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
     .bind(ids[0])
     .execute(&pool)
     .await?;
-    assert!(backend.seal(stream, true, 64).await?);
+    assert!(backend.seal(stream, true).await?);
     assert!(
         sqlx::query_scalar::<_, bool>(
             "SELECT next_retry_at>now() FROM pending_uploads WHERE chunk_id=$1"
@@ -308,7 +309,6 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
         &backend,
         TaskFinish {
             execution,
-            reuse_seconds: 60,
             error: Some("test failure".into()),
         },
     )

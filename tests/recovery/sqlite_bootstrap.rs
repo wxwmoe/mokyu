@@ -95,6 +95,28 @@ async fn sqlite_schema_bootstrap_contract() -> Result<()> {
     assert_eq!(contents(&mut fresh).await?, before);
 
     // Upgrade an actual old schema with data; preserve identity and user values.
+    // Materialize legacy upload policy once, including disabled backends.
+    let mut policy = SqliteConnection::connect("sqlite::memory:").await?;
+    policy.ensure_migrations_table("_sqlx_migrations").await?;
+    for entry in migrations.iter().take(22) {
+        policy.apply("_sqlx_migrations", entry).await?;
+    }
+    sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker,enabled) VALUES(X'00000000000000000000000000000001','policy-upgrade','local','/data/policy-upgrade','{}',false); INSERT INTO storage_profiles(storage_id) VALUES(X'00000000000000000000000000000001'); INSERT INTO runtime_settings(section,value) VALUES('uploads','{\"idle_timeout\":\"7d\",\"client_idle_timeout\":\"120s\"}');").execute(&mut policy).await?;
+    migration::run(&mut policy).await?;
+    let upgraded: (String, Option<String>) = sqlx::query_as("SELECT multipart_idle_timeout,min_free_space FROM storage_profiles WHERE storage_id=X'00000000000000000000000000000001'").fetch_one(&mut policy).await?;
+    assert_eq!(upgraded, ("7d".into(), None));
+    let settings: serde_json::Value = serde_json::from_str(
+        &sqlx::query_scalar::<_, String>(
+            "SELECT value FROM runtime_settings WHERE section='uploads'",
+        )
+        .fetch_one(&mut policy)
+        .await?,
+    )?;
+    assert_eq!(settings, serde_json::json!({"client_idle_timeout":"120s"}));
+    let migrated = contents(&mut policy).await?;
+    migration::run(&mut policy).await?;
+    assert_eq!(contents(&mut policy).await?, migrated);
+
     let mut old = SqliteConnection::connect("sqlite::memory:").await?;
     old.ensure_migrations_table("_sqlx_migrations").await?;
     for migration in migrations.iter().take(17) {

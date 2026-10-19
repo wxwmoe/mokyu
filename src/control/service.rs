@@ -50,6 +50,7 @@ pub(super) async fn status(
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<ServiceStatus>, HttpError> {
     let access = app.authorization.admin(&actor.principal).await?;
+    access.finish().await?;
     let raw = app.status().await?;
     let loaded_revisions = app
         .runtime_revisions
@@ -57,9 +58,12 @@ pub(super) async fn status(
         .map(|revisions| revisions.clone())
         .unwrap_or_default();
     let revisions = app.runtime_settings.revisions().await?;
-    let restart_required = revisions.into_iter().any(|(section, revision)| {
-        loaded_revisions.get(&section).copied().unwrap_or_default() != revision
-    });
+    let restart_required = app
+        .restart_required
+        .load(std::sync::atomic::Ordering::Acquire)
+        || revisions.into_iter().any(|(section, revision)| {
+            loaded_revisions.get(&section).copied().unwrap_or_default() != revision
+        });
     let mut counters = Vec::new();
     for key in [
         "db_pool_size",
@@ -118,7 +122,6 @@ pub(super) async fn status(
             });
         }
     }
-    access.finish().await?;
     Ok(Json(ServiceStatus {
         deployment_mode: text(&raw["deployment_mode"]),
         current_node: (raw["deployment_mode"] == "cluster").then(|| NodeContext {
@@ -149,8 +152,8 @@ pub(super) async fn config(
     Extension(actor): Extension<Identity>,
 ) -> Result<Json<Vec<ConfigField>>, HttpError> {
     let access = app.authorization.admin(&actor.principal).await?;
-    let fields = config_fields(&app, app.runtime_settings.inspect().await?)?;
     access.finish().await?;
+    let fields = config_fields(&app, app.runtime_settings.inspect().await?)?;
     Ok(Json(fields))
 }
 

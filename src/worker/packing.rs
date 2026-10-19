@@ -27,8 +27,10 @@ impl App {
 
     pub async fn pack_status(&self) -> Result<Value> {
         let rows: Vec<Value> = self.packing.pack_totals().await?;
+        let profiles = self.storage_profiles.enabled_profiles().await?;
         Ok(
-            json!({"enabled":self.pack_creation_allowed(),"range_optimization":self.config.local_pack.range_optimization,"packs":rows,"max_size":self.config.local_pack.max_size}),
+            json!({"enabled":self.pack_creation_allowed() && profiles.iter().any(|profile| profile.pack_enabled),
+            "range_optimization":profiles.iter().any(|profile| profile.pack_range_enabled),"packs":rows,"profiles":profiles}),
         )
     }
     pub async fn pack_start(&self, policy: &str) -> Result<Value> {
@@ -39,7 +41,14 @@ impl App {
         if !["pack", "reuse", "reclaim", "repack", "range"].contains(&policy) {
             return Err(s3s::s3_error!(InvalidArgument, "unknown pack maintenance policy").into());
         }
-        if policy == "range" && !self.config.local_pack.range_optimization {
+        if policy == "range"
+            && !self
+                .storage_profiles
+                .enabled_profiles()
+                .await?
+                .iter()
+                .any(|profile| profile.pack_range_enabled)
+        {
             return Err(s3s::s3_error!(OperationAborted, "Range optimization is disabled").into());
         }
         if matches!(policy, "pack" | "repack") && !self.pack_creation_allowed() {
@@ -57,7 +66,6 @@ impl App {
             .start_pack(
                 policy,
                 automatic,
-                config::seconds(&self.config.local_pack.reuse_interval)? as f64,
                 self.node.get().map(|state| state.node_id),
             )
             .await?;
@@ -80,7 +88,15 @@ impl App {
                 s3s::s3_error!(InvalidArgument, "specify one positive pack ID or --all").into(),
             );
         }
-        if all && self.pack_creation_allowed() {
+        if all
+            && self.pack_creation_allowed()
+            && self
+                .storage_profiles
+                .enabled_profiles()
+                .await?
+                .iter()
+                .any(|profile| profile.pack_enabled)
+        {
             return Err(s3s::s3_error!(
                 OperationAborted,
                 "stop new pack creation before unpacking all packs"
@@ -281,7 +297,7 @@ impl App {
             .await?;
         drop(coord);
         let strategy = match settings.compression_strategy {
-            None => self.config.local_compression.strategy,
+            None => anyhow::bail!("storage pack compression policy is missing"),
             Some(CompressionStrategy::Never) => crate::content::compression::Strategy::Never,
             Some(CompressionStrategy::Always) => crate::content::compression::Strategy::Always,
             Some(CompressionStrategy::Sample) => crate::content::compression::Strategy::Sample,
@@ -289,7 +305,7 @@ impl App {
         let should_try = match settings.compression_strategy {
             Some(CompressionStrategy::Never) => false,
             Some(_) => true,
-            None => self.config.local_compression.should_try(content_type, key),
+            None => anyhow::bail!("storage pack compression policy is missing"),
         };
         let (p, encoded) = self
             .storage

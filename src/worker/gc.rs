@@ -185,10 +185,7 @@ impl App {
             .list_physical_for(
                 storage_id,
                 cursor,
-                profile
-                    .maintenance_concurrency
-                    .unwrap_or(self.config.maintenance.batch_size as i32)
-                    .max(1) as usize,
+                self.config.maintenance.batch_size as usize,
             )
             .await?;
         if let Some(limit) = profile

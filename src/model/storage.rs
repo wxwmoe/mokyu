@@ -89,7 +89,7 @@ pub(crate) trait StorageInitializer: Send {
         upload: Option<i32>,
         control: Option<i32>,
         profile: Option<StorageProfile>,
-    ) -> Result<()>;
+    ) -> Result<StorageProfile>;
     async fn finish(self: Box<Self>) -> Result<()>;
 }
 #[must_use = "keep the storage locks until verification and update finish"]

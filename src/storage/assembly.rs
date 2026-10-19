@@ -70,12 +70,12 @@ pub(crate) async fn prepare(
     model: &dyn MultipartStore,
     upload: Uuid,
     source: Uuid,
+    floor: u64,
 ) -> Result<(tokio::fs::File, Prepared, bool)> {
     let destination = destination.to_owned();
     let checkpoint_path = destination.clone();
-    let floor = storage.disk.floor;
     let support = storage.reflink.clone();
-    let pending = storage.raw_reserved.clone();
+    let pending = storage.disk.space_for(destination.parent().unwrap())?;
     let permit = storage.disk.io.clone().acquire_owned().await?;
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
     let copied = Arc::new(AtomicBool::new(false));
@@ -212,7 +212,9 @@ fn build_with(
             "multipart range exceeds source"
         );
         ensure!(
-            fs2::available_space(destination.parent().unwrap())? >= floor,
+            fs2::available_space(destination.parent().unwrap())?
+                .saturating_sub(*pending.lock().unwrap())
+                >= floor,
             "filesystem free-space floor reached"
         );
         if clone_range(
@@ -233,7 +235,12 @@ fn build_with(
                 let count = remaining.min(buffer.len());
                 source.read_exact(&mut buffer[..count])?;
                 hash.update(&buffer[..count]);
-                let reservation = Space::claim(destination, floor, count as u64, pending)?;
+                let reservation = super::local::Space::claim(
+                    destination.parent().unwrap(),
+                    floor,
+                    count as u64,
+                    pending,
+                )?;
                 file.write_all(&buffer[..count])?;
                 drop(reservation);
                 remaining -= count;
@@ -428,8 +435,8 @@ fn compact_file(path: &Path, ranges: &[(i64, i32)]) -> Result<u64> {
         if end < metadata.len() {
             file.set_len(end)?;
         }
-        // Punched holes still count against the staging quota until the file is removed.
-        Ok(metadata.len() - end)
+        Ok(super::local::allocated(&metadata)
+            .saturating_sub(super::local::allocated(&file.metadata()?)))
     }
 }
 
@@ -457,35 +464,6 @@ fn punch(file: &File, start: u64, length: u64) -> Result<()> {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn punch(_: &File, _: u64, _: u64) -> Result<()> {
     Ok(())
-}
-
-struct Space {
-    pending: Arc<Mutex<u64>>,
-    bytes: u64,
-}
-impl Space {
-    fn claim(path: &Path, floor: u64, bytes: u64, pending: &Arc<Mutex<u64>>) -> Result<Self> {
-        let mut reserved = pending.lock().unwrap();
-        ensure!(
-            fs2::available_space(path.parent().unwrap())?
-                .saturating_sub(*reserved)
-                .saturating_sub(bytes)
-                >= floor,
-            "filesystem free-space floor reached"
-        );
-        *reserved = reserved
-            .checked_add(bytes)
-            .context("raw reservation overflow")?;
-        Ok(Self {
-            pending: pending.clone(),
-            bytes,
-        })
-    }
-}
-impl Drop for Space {
-    fn drop(&mut self) {
-        *self.pending.lock().unwrap() -= self.bytes;
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -563,11 +541,12 @@ mod tests {
         assert_eq!(compact_file(&source, &[(32768, 32768)])?, 0);
         assert_eq!(std::fs::read(&published)?, data);
         std::fs::remove_file(&published)?;
-        assert_eq!(compact_file(&source, &[(32768, 32768)])?, 65536);
+        let released = compact_file(&source, &[(32768, 32768)])?;
+        assert!((65536..=98304).contains(&released));
         let retained = std::fs::read(&source)?;
         assert_eq!(&retained[32768..], &data[32768..65536]);
         assert!(compact_file(&source, &[(0, 131072)]).is_err());
-        assert_eq!(compact_file(&source, &[])?, 65536);
+        assert_eq!(compact_file(&source, &[])?, 131072 - released);
         assert_eq!(std::fs::metadata(&source)?.len(), 0);
         std::fs::remove_dir_all(root)?;
         Ok(())

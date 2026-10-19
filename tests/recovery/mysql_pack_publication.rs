@@ -31,7 +31,6 @@ pub(super) async fn finish(backend: &Backend, task: Execution) -> Result<()> {
         backend,
         TaskFinish {
             execution: task,
-            reuse_seconds: 60,
             error: None,
         },
     )
@@ -363,7 +362,6 @@ async fn mysql_pack_publication_contract() -> Result<()> {
         &backend,
         TaskFinish {
             execution: task,
-            reuse_seconds: 60,
             error: Some("upload failed".into()),
         },
     )

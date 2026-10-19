@@ -1,7 +1,4 @@
-use super::{
-    BackendDefaults, Budget, Config, Database, DatabaseType, Instance, LocalCache, RuntimeSettings,
-    Secrets,
-};
+use super::{Budget, Config, Database, DatabaseType, Instance, RuntimeSettings, Secrets};
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
 use serde::Deserialize;
@@ -28,14 +25,6 @@ impl FileConfig {
             database: self.database,
             replica_database: self.replica_database,
             instance: self.instance.clone(),
-            backend_defaults: BackendDefaults::default(),
-            local_cache: LocalCache::default(),
-            local_compression: crate::content::compression::Config {
-                context_idle_timeout: self.instance.compression_idle_timeout.clone(),
-                ..Default::default()
-            },
-            local_integrity: Default::default(),
-            local_pack: Default::default(),
             runtime: RuntimeSettings::default(),
         }
     }

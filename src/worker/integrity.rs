@@ -4,7 +4,7 @@ use crate::{
     config,
     content::codec::{Chunk, IntegrityError},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,45 +13,6 @@ use std::{
     time::{Duration, Instant},
 };
 use uuid::Uuid;
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Config {
-    pub concurrency: usize,
-    pub requests_per_second: Option<u32>,
-    pub bandwidth: Option<String>,
-    pub request_timeout: String,
-}
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            concurrency: 1,
-            requests_per_second: None,
-            bandwidth: None,
-            request_timeout: "30s".into(),
-        }
-    }
-}
-impl Config {
-    pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.concurrency > 0,
-            "integrity.concurrency must be positive"
-        );
-        ensure!(
-            self.requests_per_second.is_none_or(|n| n > 0),
-            "integrity.requests_per_second must be positive"
-        );
-        if let Some(v) = &self.bandwidth {
-            config::bytes(v)?;
-        }
-        ensure!(
-            config::seconds(&self.request_timeout)? <= 120,
-            "integrity.request_timeout must be 1s..120s"
-        );
-        Ok(())
-    }
-}
 
 #[derive(
     Clone,
@@ -127,19 +88,8 @@ impl App {
         if self.role == "single" {
             return self.storage.acquire_integrity_rate(
                 storage_id,
-                request_rate.or(self
-                    .config
-                    .local_integrity
-                    .requests_per_second
-                    .map(f64::from)),
-                byte_rate.or(self
-                    .config
-                    .local_integrity
-                    .bandwidth
-                    .as_deref()
-                    .map(config::bytes)
-                    .transpose()?
-                    .map(|rate| rate as f64)),
+                request_rate,
+                byte_rate,
                 requests as f64,
                 bytes.max(0) as f64,
             );
@@ -221,7 +171,7 @@ impl App {
         } else if d.phase == "chunks" {
             let count = profile
                 .as_ref()
-                .map_or(self.config.local_integrity.concurrency, |p| {
+                .map_or(self.budget.read_concurrency, |p| {
                     p.integrity_concurrency as usize
                 })
                 .min(self.budget.read_concurrency)
@@ -314,17 +264,10 @@ impl App {
                         .as_ref()
                         .and_then(|p| p.integrity_rps)
                         .map(|r| r as f64)
-                        .or_else(|| {
-                            self.config
-                                .local_integrity
-                                .requests_per_second
-                                .map(f64::from)
-                        })
                         .map_or(0.0, |r| requests as f64 / r);
                     let byte_delay = profile
                         .as_ref()
                         .and_then(|p| p.integrity_bandwidth.as_deref())
-                        .or(self.config.local_integrity.bandwidth.as_deref())
                         .map(config::bytes)
                         .transpose()?
                         .map_or(0.0, |r| bytes as f64 / r as f64);
@@ -593,7 +536,10 @@ impl App {
         };
         let result = tokio::time::timeout(
             Duration::from_secs(config::seconds(
-                &self.config.local_integrity.request_timeout,
+                &self
+                    .storage
+                    .profile(c.storage_id.context("chunk has no storage")?)?
+                    .integrity_batch_timeout,
             )?),
             result,
         )

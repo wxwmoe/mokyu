@@ -356,7 +356,7 @@ async fn sqlite_packing_contract() -> Result<()> {
         .bind(storage)
         .execute(db)
         .await?;
-    let range = backend.start_pack("range", false, 0., None).await?;
+    let range = backend.start_pack("range", false, None).await?;
     let range = crate::model::task::Execution {
         id: range["task_id"].as_str().unwrap().parse()?,
         token: Uuid::new_v4(),
@@ -466,7 +466,7 @@ async fn sqlite_packing_contract() -> Result<()> {
     assert_eq!(visible[0].chunk_id, rows[1].chunk.id.to_string());
     assert!(
         backend
-            .start_pack("pack", false, 0., Some(Uuid::new_v4()))
+            .start_pack("pack", false, Some(Uuid::new_v4()))
             .await
             .is_err()
     );

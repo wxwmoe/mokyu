@@ -837,7 +837,7 @@ pub(super) fn insert_storage_profile(
     control: Option<i32>,
     remote: bool,
 ) -> Statement<'static> {
-    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency,upload_concurrency,control_concurrency,cache_enabled,upload_cache,compression_enabled,pack_enabled,pack_range_enabled) VALUES(?,?,?,?,?,?,?,?,?)").bind(id).bind(read).bind(upload).bind(control).bind(remote).bind(remote).bind(remote).bind(remote).bind(remote)
+    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency,upload_concurrency,control_concurrency,cache_enabled,upload_cache,compression_enabled,pack_enabled,pack_range_enabled,min_free_space) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id).bind(read).bind(upload).bind(control).bind(remote).bind(remote).bind(remote).bind(remote).bind(remote).bind((!remote).then_some("1GiB"))
 }
 
 pub(super) fn update_storage_record(record: &BackendRecord, key: Option<Uuid>) -> Statement<'_> {
@@ -870,7 +870,7 @@ pub(super) fn enabled_storage(id: Uuid) -> Rows<'static, StorageRecord> {
 }
 
 pub(super) fn storage_profile(id: Uuid) -> Rows<'static, crate::storage::profile::StorageProfile> {
-    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=?")
+    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=?")
         .bind(id)
 }
 
@@ -893,7 +893,7 @@ pub(super) fn storage_profile_target<'q>(name: &'q str) -> Rows<'q, (Uuid, Strin
 }
 
 pub(super) fn storage_profile_lock(id: Uuid) -> Rows<'static, StorageProfile> {
-    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=?").bind(id)
+    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=?").bind(id)
 }
 
 const VIEW_ORDERED: &str = "SELECT s.id,s.name,s.type AS storage_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id ORDER BY s.name";
@@ -952,6 +952,11 @@ impl StorageRecordStore for Backend {
 
 #[async_trait::async_trait]
 impl StorageProfileStore for Backend {
+    async fn initialize(&self, min_free_space: &str) -> Result<()> {
+        crate::config::bytes(min_free_space)?;
+        sqlx::query("UPDATE storage_profiles SET min_free_space=?,revision=revision+1,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE min_free_space IS NULL AND storage_id IN (SELECT id FROM storages WHERE type='local')").bind(min_free_space).execute(&self.write).await?;
+        Ok(())
+    }
     async fn update(
         &self,
         name: String,
@@ -960,15 +965,9 @@ impl StorageProfileStore for Backend {
         transactions::update_storage_profile(&self.write, name, profile).await
     }
 
-    async fn exists(&self, storage_id: Uuid) -> Result<bool> {
-        Ok(
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_profiles WHERE storage_id=?)")
-                .bind(storage_id)
-                .fetch_one(&self.read)
-                .await?,
-        )
+    async fn enabled_profiles(&self) -> Result<Vec<StorageProfile>> {
+        Ok(sqlx::query_as("SELECT p.* FROM storage_profiles p JOIN storages s ON s.id=p.storage_id WHERE s.enabled ORDER BY s.id").fetch_all(&self.read).await?)
     }
-
     async fn load(
         &self,
         storage_id: uuid::Uuid,
@@ -1054,6 +1053,8 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for crate::storage::profile::StorageProfil
             unreferenced_grace: row.try_get("unreferenced_grace")?,
             deleted_chunk_retention: row.try_get("deleted_chunk_retention")?,
             upload_retention: row.try_get("upload_retention")?,
+            multipart_idle_timeout: row.try_get("multipart_idle_timeout")?,
+            min_free_space: row.try_get("min_free_space")?,
             cache_enabled: row.try_get("cache_enabled")?,
             cache_soft_limit: row.try_get("cache_soft_limit")?,
             cache_entries: row.try_get("cache_entries")?,
@@ -1102,7 +1103,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for crate::storage::profile::StorageProfil
 }
 
 pub(super) fn save_storage_profile(profile: &StorageProfile) -> Statement<'_> {
-    sqlx::query("UPDATE storage_profiles SET cdc_enabled=?,deduplication_enabled=?,connect_timeout=?,request_timeout=?,max_retries=?,retry_timeout=?,priority_aging=?,min_storage_duration=?,unreferenced_grace=?,deleted_chunk_retention=?,upload_retention=?,cache_enabled=?,cache_soft_limit=?,cache_entries=?,upload_cache=?,upload_cache_size=?,compression_enabled=?,compression_strategy=?,compression_level=?,compression_sample_level=?,compression_min_savings_percent=?,compression_min_savings_bytes=?,pack_enabled=?,pack_max_size=?,pack_upload_flush_timeout=?,pack_interval=?,pack_reuse_interval=?,pack_reclaim_interval=?,pack_repack_interval=?,pack_repack_cooldown=?,pack_reclaim_min_savings_bytes=?,pack_range_enabled=?,pack_range_interval=?,pack_range_window=?,pack_range_min_downloads=?,pack_range_min_savings_percent=?,pack_range_min_savings_bytes=?,pack_range_repack_after=?,pack_range_repack_window=?,pack_range_repack_retry_interval=?,pack_concurrency=?,integrity_concurrency=?,integrity_rps=?,integrity_bandwidth=?,integrity_batch_timeout=?,read_concurrency=?,upload_concurrency=?,control_concurrency=?,pack_byte_budget=?,integrity_byte_budget=?,maintenance_concurrency=?,maintenance_byte_budget=?,migration_concurrency=?,migration_byte_budget=?,revision=revision+1,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE storage_id=? AND revision=?")
+    sqlx::query("UPDATE storage_profiles SET cdc_enabled=?,deduplication_enabled=?,connect_timeout=?,request_timeout=?,max_retries=?,retry_timeout=?,priority_aging=?,min_storage_duration=?,unreferenced_grace=?,deleted_chunk_retention=?,upload_retention=?,multipart_idle_timeout=?,min_free_space=?,cache_enabled=?,cache_soft_limit=?,cache_entries=?,upload_cache=?,upload_cache_size=?,compression_enabled=?,compression_strategy=?,compression_level=?,compression_sample_level=?,compression_min_savings_percent=?,compression_min_savings_bytes=?,pack_enabled=?,pack_max_size=?,pack_upload_flush_timeout=?,pack_interval=?,pack_reuse_interval=?,pack_reclaim_interval=?,pack_repack_interval=?,pack_repack_cooldown=?,pack_reclaim_min_savings_bytes=?,pack_range_enabled=?,pack_range_interval=?,pack_range_window=?,pack_range_min_downloads=?,pack_range_min_savings_percent=?,pack_range_min_savings_bytes=?,pack_range_repack_after=?,pack_range_repack_window=?,pack_range_repack_retry_interval=?,pack_concurrency=?,integrity_concurrency=?,integrity_rps=?,integrity_bandwidth=?,integrity_batch_timeout=?,read_concurrency=?,upload_concurrency=?,control_concurrency=?,pack_byte_budget=?,integrity_byte_budget=?,maintenance_concurrency=?,maintenance_byte_budget=?,migration_concurrency=?,migration_byte_budget=?,revision=revision+1,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE storage_id=? AND revision=?")
         .bind(profile.cdc_enabled)
         .bind(profile.deduplication_enabled)
         .bind(&profile.connect_timeout)
@@ -1114,6 +1115,8 @@ pub(super) fn save_storage_profile(profile: &StorageProfile) -> Statement<'_> {
         .bind(&profile.unreferenced_grace)
         .bind(&profile.deleted_chunk_retention)
         .bind(&profile.upload_retention)
+        .bind(&profile.multipart_idle_timeout)
+        .bind(&profile.min_free_space)
         .bind(profile.cache_enabled)
         .bind(&profile.cache_soft_limit)
         .bind(profile.cache_entries)
@@ -3132,8 +3135,8 @@ pub(super) fn touch_upload(upload: Uuid) -> Statement<'static> {
 pub(super) fn begin_upload_completion(upload: Uuid, hash: &str) -> Statement<'_> {
     sqlx::query("UPDATE uploads SET state='completing',manifest_hash=?,touched_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state='active'").bind(hash).bind(upload)
 }
-pub(super) fn abort_multipart(upload: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE uploads SET state='aborted',touched_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state IN ('active','completing')").bind(upload)
+pub(super) fn abort_multipart(id: Uuid, expired: bool) -> Statement<'static> {
+    sqlx::query("UPDATE uploads SET state='aborted',touched_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state IN ('active','completing') AND (NOT ? OR (state='active' AND EXISTS(SELECT 1 FROM buckets b JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE b.id=uploads.bucket_id AND uploads.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-(CAST(substr(p.multipart_idle_timeout,1,length(p.multipart_idle_timeout)-1) AS INTEGER)*CASE substr(p.multipart_idle_timeout,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000)))").bind(id).bind(expired)
 }
 pub(super) fn lock_upload_active(upload: Uuid) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT state='active' FROM uploads WHERE id=?").bind(upload)
@@ -3206,7 +3209,7 @@ pub(super) async fn durable_uploads(
     Ok(())
 }
 
-const TRANSFER_VIEW: &str = "SELECT u.id,u.bucket_id,b.name bucket_name,u.object_key,u.state,IIF(w.upload_id IS NULL,'s3','web') source,w.user_id,COALESCE(NULLIF(a.display_name,''),NULLIF(a.username,''),c.label,'S3 application') owner,w.file_name,CAST(w.expected_size AS TEXT) expected_size,CAST(w.part_size AS TEXT) part_size,w.modified_at,CAST(IIF(u.state='completed',COALESCE(s.size,w.expected_size,0),COALESCE((SELECT SUM(quota_size) FROM parts WHERE upload_id=u.id),0)) AS TEXT) received_bytes,(SELECT COUNT(*) FROM parts WHERE upload_id=u.id) parts,CASE WHEN u.state<>'completed' THEN 'pending' WHEN u.durable_at IS NOT NULL THEN 'stored' WHEN u.output_stream IS NULL THEN 'unavailable' WHEN EXISTS(SELECT 1 FROM extents e JOIN chunks ch ON ch.id=e.chunk_id WHERE e.stream_id=u.output_stream AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=ch.id AND l.state='ready') AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=ch.pack_id AND p.state='ready')) THEN 'pending' ELSE 'stored' END remote_state,u.created_at,u.touched_at,u.durable_at FROM uploads u JOIN buckets b ON b.id=u.bucket_id LEFT JOIN web_uploads w ON w.upload_id=u.id LEFT JOIN web_users a ON a.id=w.user_id LEFT JOIN s3_credentials c ON c.access_key_id=u.access_key LEFT JOIN streams s ON s.id=u.output_stream WHERE ";
+const TRANSFER_VIEW: &str = "SELECT u.id,u.bucket_id,b.name bucket_name,u.object_key,u.state,IIF(w.upload_id IS NULL,'s3','web') source,w.user_id,COALESCE(NULLIF(a.display_name,''),NULLIF(a.username,''),c.label,'S3 application') owner,w.file_name,CAST(w.expected_size AS TEXT) expected_size,CAST(w.part_size AS TEXT) part_size,w.modified_at,CAST(IIF(u.state='completed',COALESCE(s.size,w.expected_size,0),COALESCE((SELECT SUM(quota_size) FROM parts WHERE upload_id=u.id),0)) AS TEXT) received_bytes,(SELECT COUNT(*) FROM parts WHERE upload_id=u.id) parts,CASE WHEN u.state<>'completed' THEN 'pending' WHEN u.durable_at IS NOT NULL THEN 'stored' WHEN u.output_stream IS NULL THEN 'unavailable' WHEN EXISTS(SELECT 1 FROM extents e JOIN chunks ch ON ch.id=e.chunk_id WHERE e.stream_id=u.output_stream AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=ch.id AND l.state='ready') AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=ch.pack_id AND p.state='ready')) THEN 'pending' ELSE 'stored' END remote_state,u.created_at,u.touched_at,p.multipart_idle_timeout,u.durable_at FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storage_profiles p ON p.storage_id=b.storage_id LEFT JOIN web_uploads w ON w.upload_id=u.id LEFT JOIN web_users a ON a.id=w.user_id LEFT JOIN s3_credentials c ON c.access_key_id=u.access_key LEFT JOIN streams s ON s.id=u.output_stream WHERE ";
 
 pub(super) fn upload_transfers(
     admin: bool,
@@ -3431,7 +3434,18 @@ impl MultipartStore for Backend {
         Ok(())
     }
     async fn abort(&self, authority: &crate::authorization::Permit, upload: Uuid) -> Result<()> {
-        transactions::abort_multipart(&self.write, authority, upload).await
+        transactions::abort_multipart(&self.write, authority, upload, false)
+            .await
+            .map(|_| ())
+    }
+    async fn expire(&self, upload: Uuid) -> Result<bool> {
+        transactions::abort_multipart(
+            &self.write,
+            &crate::authorization::Permit::system(),
+            upload,
+            true,
+        )
+        .await
     }
     async fn parts(&self, upload: Uuid, after: i32, limit: i64) -> Result<Vec<UploadPart>> {
         sqlx::query("SELECT p.part_number,s.size,s.etag,s.touched_at,s.checksums FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=? AND p.part_number>? ORDER BY p.part_number LIMIT ?").bind(upload).bind(after).bind(limit).fetch_all(&self.read).await?.iter().map(|row| Ok((row.try_get("part_number")?,row.try_get("size")?,row.try_get("etag")?,date(row,"touched_at")?,row.try_get("checksums")?))).collect()
@@ -3520,6 +3534,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for Transfer {
             remote_state: row.try_get("remote_state")?,
             created_at: date(row, "created_at")?,
             touched_at: date(row, "touched_at")?,
+            multipart_idle_timeout: row.try_get("multipart_idle_timeout")?,
             expires_at: None,
             can_resume: false,
         })
@@ -4702,8 +4717,8 @@ pub(super) fn ready_cached_chunk(chunk: i64) -> Statement<'static> {
 pub(super) fn seal_stream_uploads(stream: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE pending_uploads SET next_retry_at=MIN(next_retry_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE owner_task IS NULL AND chunk_id IN (SELECT chunk_id FROM extents WHERE stream_id=?)").bind(stream)
 }
-pub(super) fn unsealed_uploads(stream: Uuid) -> Rows<'static, (i64, i64, i32)> {
-    sqlx::query_as("SELECT p.chunk_id,p.offset_bytes,c.raw_size FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE p.stream_id=? AND p.owner_task IS NULL ORDER BY p.offset_bytes LIMIT 1026").bind(stream)
+pub(super) fn unsealed_uploads(stream: Uuid) -> Rows<'static, (i64, i64, i32, String)> {
+    sqlx::query_as("SELECT p.chunk_id,p.offset_bytes,c.raw_size,sp.pack_max_size FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id JOIN storage_profiles sp ON sp.storage_id=c.storage_id WHERE p.stream_id=? AND p.owner_task IS NULL ORDER BY p.offset_bytes LIMIT 1026").bind(stream)
 }
 pub(super) fn seal_upload_chunks(ids: &[i64]) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new(
@@ -4859,8 +4874,8 @@ impl UploadCacheStore for Backend {
     async fn stage(&self, input: CacheStage<'_>) -> Result<bool> {
         transactions::cache_stage(&self.write, input).await
     }
-    async fn seal(&self, stream: Uuid, eof: bool, maximum: u64) -> Result<bool> {
-        transactions::cache_seal(&self.read, &self.write, stream, eof, maximum).await
+    async fn seal(&self, stream: Uuid, eof: bool) -> Result<bool> {
+        transactions::cache_seal(&self.read, &self.write, stream, eof).await
     }
     async fn status(&self) -> Result<(Value, Vec<Value>)> {
         transactions::cache_status(&self.read).await
@@ -4868,7 +4883,7 @@ impl UploadCacheStore for Backend {
     async fn flush(&self) -> Result<(Uuid, bool)> {
         transactions::cache_flush(&self.write).await
     }
-    async fn enqueue(&self, maximum: u64) -> Result<bool> {
+    async fn enqueue(&self) -> Result<bool> {
         if retryable_upload()
             .fetch_optional(&self.read)
             .await?
@@ -4877,7 +4892,7 @@ impl UploadCacheStore for Backend {
         {
             return Ok(false);
         }
-        transactions::cache_enqueue(&self.write, maximum).await
+        transactions::cache_enqueue(&self.write).await
     }
     async fn next_attempt(&self) -> Result<Option<DateTime<Utc>>> {
         let micros: Option<i64> = sqlx::query_scalar("SELECT MIN(p.next_retry_at) FROM pending_uploads p LEFT JOIN tasks t ON t.id=p.owner_task WHERE p.owner_task IS NULL OR (t.task_type='upload' AND t.state='failed')").fetch_one(&self.read).await?;
@@ -4886,15 +4901,8 @@ impl UploadCacheStore for Backend {
     async fn pause(&self, task: Execution) -> Result<()> {
         TaskControlStore::pause(self, task).await
     }
-    async fn batch(
-        &self,
-        task: Execution,
-        detail: &Value,
-        flush: bool,
-        timeout: u64,
-        maximum: u64,
-    ) -> Result<CacheBatch> {
-        transactions::cache_batch(&self.write, task, detail, flush, timeout, maximum).await
+    async fn batch(&self, task: Execution, detail: &Value, flush: bool) -> Result<CacheBatch> {
+        transactions::cache_batch(&self.write, task, detail, flush).await
     }
     async fn metadata(&self, stream: Uuid) -> Result<Option<(Value, String)>> {
         sqlx::query("SELECT metadata,object_key FROM streams WHERE id=?")
@@ -4987,12 +4995,14 @@ pub(super) fn lock_task_finish(task: Execution) -> Rows<'static, (String, String
         .bind(task.id)
         .bind(task.token)
 }
-pub(super) fn defer_pack_changes(task: Uuid, seconds: i64) -> Statement<'static> {
-    sqlx::query("UPDATE pack_changes SET next_check_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)+? WHERE pack_id IN (SELECT c.pack_id FROM pack_inputs i JOIN chunks c ON c.id=i.chunk_id WHERE i.task_id=?)").bind(seconds).bind(task)
+pub(super) fn defer_pack_changes(id: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE pack_changes SET next_check_at=(SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)+(CAST(substr(sp.pack_reuse_interval,1,length(sp.pack_reuse_interval)-1) AS INTEGER)*CASE substr(sp.pack_reuse_interval,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000 FROM packs p JOIN storage_profiles sp ON sp.storage_id=p.storage_id WHERE p.id=pack_changes.pack_id) WHERE pack_id IN (SELECT c.pack_id FROM pack_inputs i JOIN chunks c ON c.id=i.chunk_id WHERE i.task_id=?)").bind(id)
 }
-pub(super) fn defer_pack_maintenance(task: Uuid, seconds: i64) -> Statement<'static> {
-    sqlx::query("UPDATE pack_maintenance SET next_check_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)+? WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=?)").bind(seconds).bind(task)
+
+pub(super) fn defer_pack_maintenance(id: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE pack_maintenance SET next_check_at=(SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)+(CAST(substr(sp.pack_reuse_interval,1,length(sp.pack_reuse_interval)-1) AS INTEGER)*CASE substr(sp.pack_reuse_interval,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000 FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storage_profiles sp ON sp.storage_id=b.storage_id WHERE s.id=pack_maintenance.stream_id) WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=?)").bind(id)
 }
+
 pub(super) fn backoff_pending_uploads(task: Uuid, error: &str, retain: bool) -> Statement<'_> {
     sqlx::query("UPDATE pending_uploads SET next_retry_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)+MIN(300,1 << MIN(attempts,8))*1000000,attempts=MIN(attempts+1,30),last_error=?,owner_task=IIF(?,owner_task,NULL) WHERE owner_task=?").bind(error).bind(retain).bind(task)
 }
@@ -5480,15 +5490,9 @@ impl PackingStore for Backend {
     async fn pin_pack_inputs(&self, task: Execution, rows: &[Mapping]) -> Result<()> {
         transactions::pin_pack_inputs(&self.write, task, rows).await
     }
-    async fn start_pack(
-        &self,
-        policy: &str,
-        automatic: bool,
-        reuse_seconds: f64,
-        node: Option<Uuid>,
-    ) -> Result<Value> {
+    async fn start_pack(&self, policy: &str, automatic: bool, node: Option<Uuid>) -> Result<Value> {
         ensure!(node.is_none(), "SQLite does not support cluster nodes");
-        transactions::start_pack(&self.write, policy, automatic, reuse_seconds).await
+        transactions::start_pack(&self.write, policy, automatic).await
     }
     async fn start_unpack(
         &self,
@@ -5976,9 +5980,6 @@ pub(super) fn lock_pack_policy(policy: &str) -> Scalar<'_, String> {
 }
 pub(super) fn active_pack_task(policy: &str) -> Scalar<'_, Uuid> {
     sqlx::query_scalar("SELECT id FROM tasks WHERE task_type='pack' AND json_extract(detail,'$.policy')=? AND state IN ('queued','running') LIMIT 1").bind(policy)
-}
-pub(super) fn recent_pack_failure(policy: &str, seconds: f64) -> Scalar<'_, Uuid> {
-    sqlx::query_scalar("SELECT id FROM tasks WHERE task_type='pack' AND json_extract(detail,'$.policy')=? AND state='failed' AND updated_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)-CAST(?*1000000 AS INTEGER) ORDER BY updated_at DESC,id LIMIT 1").bind(policy).bind(seconds)
 }
 pub(super) fn pack_storages(policy: Option<&str>) -> Rows<'_, (Uuid, i64)> {
     sqlx::query_as("SELECT s.id,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.enabled AND CASE WHEN ? IN ('pack','repack') THEN p.pack_enabled WHEN ?='range' THEN p.pack_range_enabled ELSE TRUE END ORDER BY s.created_at,s.id").bind(policy).bind(policy)
@@ -6707,10 +6708,27 @@ pub(super) async fn cleanup_history(
         ),
         _ => anyhow::bail!("unknown cleanup section"),
     };
+    let duration = match section {
+        "chunks" | "packs" | "chunk_encodings" => Some(
+            "(SELECT (CAST(substr(sp.deleted_chunk_retention,1,length(sp.deleted_chunk_retention)-1) AS INTEGER)*CASE substr(sp.deleted_chunk_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=h.storage_id)",
+        ),
+        "uploads" => Some(
+            "(SELECT (CAST(substr(sp.upload_retention,1,length(sp.upload_retention)-1) AS INTEGER)*CASE substr(sp.upload_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM buckets b JOIN storage_profiles sp ON sp.storage_id=b.storage_id WHERE b.id=h.bucket_id)",
+        ),
+        _ => None,
+    };
     let mut query = sqlx::QueryBuilder::new(format!(
-        "DELETE FROM {table} WHERE {id} IN (SELECT h.{id} FROM {table} h WHERE {guard} AND {time}<CAST(unixepoch('subsec')*1000000 AS INTEGER)-"
+        "DELETE FROM {table} WHERE {id} IN (SELECT h.{id} FROM {table} h WHERE {guard} AND {time}<"
     ));
-    query.push_bind((age * 1_000_000.) as i64);
+    if let Some(duration) = duration {
+        query.push(format!(
+            "CAST(unixepoch('subsec')*1000000 AS INTEGER)-({duration})*1000000"
+        ));
+    } else {
+        query
+            .push("CAST(unixepoch('subsec')*1000000 AS INTEGER)-")
+            .push_bind((age * 1_000_000.) as i64);
+    }
     if section == "uploads" && !active.is_empty() {
         query.push(" AND h.id NOT IN ");
         uuid_ids(&mut query, active);
@@ -6839,17 +6857,10 @@ impl MaintenanceStore for Backend {
     async fn fragment_uploads(&self, id: Uuid) -> Result<Vec<Uuid>> {
         Ok(sqlx::query_scalar("SELECT DISTINCT p.upload_id FROM parts p JOIN extents e ON e.stream_id=p.stream_id WHERE e.fragment_id=?").bind(id).fetch_all(&self.read).await?)
     }
-    async fn expired_uploads(
-        &self,
-        idle: f64,
-        batch: i64,
-        storage: Option<Uuid>,
-    ) -> Result<Vec<Uuid>> {
-        Ok(sqlx::query_scalar("SELECT u.id FROM uploads u JOIN buckets b ON b.id=u.bucket_id WHERE (? IS NULL OR b.storage_id=?) AND u.state='active' AND u.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? ORDER BY u.touched_at,u.id LIMIT ?").bind(storage).bind(storage).bind((idle*1_000_000.) as i64).bind(batch).fetch_all(&self.read).await?)
+    async fn expired_uploads(&self, batch: i64, storage: Option<Uuid>) -> Result<Vec<Uuid>> {
+        Ok(sqlx::query_scalar("SELECT u.id FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE (? IS NULL OR b.storage_id=?) AND u.state='active' AND u.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-(CAST(substr(p.multipart_idle_timeout,1,length(p.multipart_idle_timeout)-1) AS INTEGER)*CASE substr(p.multipart_idle_timeout,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000 ORDER BY u.touched_at,u.id LIMIT ?").bind(storage).bind(storage).bind(batch).fetch_all(&self.read).await?)
     }
-    async fn upload_expired(&self, id: Uuid, idle: f64, storage: Option<Uuid>) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM uploads u JOIN buckets b ON b.id=u.bucket_id WHERE u.id=? AND (? IS NULL OR b.storage_id=?) AND u.state='active' AND u.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?)").bind(id).bind(storage).bind(storage).bind((idle*1_000_000.) as i64).fetch_one(&self.read).await?)
-    }
+
     async fn stale_streams(
         &self,
         active: &[Uuid],
@@ -7145,11 +7156,15 @@ pub(super) fn inventory_live() -> Scalar<'static, Value> {
         "WITH refs AS (SELECT e.chunk_id,SUM(e.length) AS bytes FROM objects o JOIN extents e ON e.stream_id=o.stream_id WHERE e.chunk_id IS NOT NULL GROUP BY e.chunk_id), raw_live AS (SELECT id,size FROM raw_sources r WHERE EXISTS(SELECT 1 FROM raw_ranges e JOIN objects o ON o.stream_id=e.stream_id WHERE e.source_id=r.id)), physical AS (SELECT l.standalone_size AS bytes,l.standalone_size-IIF(l.encryption_algorithm='none',0,16) AS payload FROM refs r JOIN chunks c ON c.id=r.chunk_id JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' UNION ALL SELECT p.stored_size,p.stored_size-IIF(p.encryption_algorithm='none',0,16) FROM packs p WHERE state='ready' AND EXISTS(SELECT 1 FROM refs r JOIN chunks c ON c.id=r.chunk_id WHERE c.pack_id=p.id) UNION ALL SELECT size,size FROM raw_live) SELECT JSON_OBJECT('raw_objects',(SELECT COUNT(*) FROM raw_live),'chunks',COUNT(*),'reference_bytes',CAST((COALESCE(SUM(r.bytes),0)+(SELECT COALESCE(SUM(e.length),0) FROM raw_ranges e JOIN objects o ON o.stream_id=e.stream_id)) AS INTEGER),'raw_bytes',CAST((COALESCE(SUM(c.raw_size),0)+(SELECT COALESCE(SUM(size),0) FROM raw_live)) AS INTEGER),'pending_raw_bytes',CAST(COALESCE(SUM(IIF(c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND state='ready'),c.raw_size,0)),0) AS INTEGER),'stored_bytes',(SELECT CAST(COALESCE(SUM(bytes),0) AS INTEGER) FROM physical),'payload_bytes',(SELECT CAST(COALESCE(SUM(payload),0) AS INTEGER) FROM physical)) FROM refs r JOIN chunks c ON c.id=r.chunk_id",
     )
 }
-pub(super) fn inventory_unreferenced(grace: f64) -> Scalar<'static, Value> {
-    sqlx::query_scalar("SELECT JSON_OBJECT('chunks',COUNT(*),'eligible_chunks',CAST(COALESCE(SUM(unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id)),0) AS INTEGER)) FROM chunks c WHERE state IN ('ready','failed','deleting') AND unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)").bind((grace*1_000_000.) as i64)
+pub(super) fn inventory_unreferenced() -> Scalar<'static, Value> {
+    sqlx::query_scalar(
+        "SELECT JSON_OBJECT('chunks',COUNT(*),'eligible_chunks',CAST(COALESCE(SUM(unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.unreferenced_grace,1,length(sp.unreferenced_grace)-1) AS INTEGER)*CASE substr(sp.unreferenced_grace,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=c.storage_id))*1000000 AND owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id)),0) AS INTEGER)) FROM chunks c WHERE state IN ('ready','failed','deleting') AND unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)",
+    )
 }
-pub(super) fn inventory_reclaimable(grace: f64) -> Scalar<'static, Value> {
-    sqlx::query_scalar("SELECT JSON_OBJECT('bytes',CAST(COALESCE(SUM(bytes),0) AS INTEGER),'eligible',CAST(COALESCE(SUM(IIF(since<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?,bytes,0)),0) AS INTEGER)) FROM (SELECT l.standalone_size AS bytes,COALESCE(l.unreferenced_at,c.unreferenced_at) AS since FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('retired','deleting') OR (l.state='ready' AND c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) UNION ALL SELECT stored_size,unreferenced_at FROM packs WHERE state IN ('retired','deleting') UNION ALL SELECT size,unreferenced_at FROM raw_sources r WHERE r.owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id)) p").bind((grace*1_000_000.) as i64)
+pub(super) fn inventory_reclaimable() -> Scalar<'static, Value> {
+    sqlx::query_scalar(
+        "SELECT JSON_OBJECT('bytes',CAST(COALESCE(SUM(bytes),0) AS INTEGER),'eligible',CAST(COALESCE(SUM(IIF(since<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.unreferenced_grace,1,length(sp.unreferenced_grace)-1) AS INTEGER)*CASE substr(sp.unreferenced_grace,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=p.storage_id))*1000000,bytes,0)),0) AS INTEGER)) FROM (SELECT l.standalone_size AS bytes,COALESCE(l.unreferenced_at,c.unreferenced_at) AS since,l.storage_id FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('retired','deleting') OR (l.state='ready' AND c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) UNION ALL SELECT stored_size,unreferenced_at,storage_id FROM packs WHERE state IN ('retired','deleting') UNION ALL SELECT size,unreferenced_at,storage_id FROM raw_sources r WHERE r.owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id)) p",
+    )
 }
 pub(super) fn inventory_tasks() -> Scalar<'static, Value> {
     sqlx::query_scalar(
@@ -7163,17 +7178,15 @@ pub(super) fn inventory_uploads() -> Scalar<'static, Value> {
 }
 pub(super) async fn inventory_cleanup(
     connection: &mut sqlx::SqliteConnection,
-    chunks: f64,
-    uploads: f64,
     tasks: f64,
 ) -> Result<Value> {
-    let rows:Vec<(String,i64,Option<i64>)>=sqlx::query_as("WITH cutoffs AS (SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AS chunks,CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AS uploads,CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AS tasks) SELECT 'chunks',COUNT(*),MIN(deleted_at) FROM chunks c WHERE state='deleted' AND deleted_at<(SELECT chunks FROM cutoffs) AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND (state<>'deleted' OR recovery_pending OR owner_stream IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pack_members WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM cache_pins WHERE chunk_id=c.id)
-        UNION ALL SELECT 'uploads',COUNT(*),MIN(touched_at) FROM uploads u WHERE state IN ('completed','aborted') AND touched_at<(SELECT uploads FROM cutoffs) AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id) AND NOT EXISTS(SELECT 1 FROM quota_reservations WHERE upload_id=u.id)
+    let rows:Vec<(String,i64,Option<i64>)>=sqlx::query_as("WITH cutoffs AS (SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AS tasks) SELECT 'chunks',COUNT(*),MIN(deleted_at) FROM chunks c WHERE state='deleted' AND deleted_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.deleted_chunk_retention,1,length(sp.deleted_chunk_retention)-1) AS INTEGER)*CASE substr(sp.deleted_chunk_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=c.storage_id))*1000000 AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND (state<>'deleted' OR recovery_pending OR owner_stream IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pack_members WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM cache_pins WHERE chunk_id=c.id)
+        UNION ALL SELECT 'uploads',COUNT(*),MIN(touched_at) FROM uploads u WHERE state IN ('completed','aborted') AND touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.upload_retention,1,length(sp.upload_retention)-1) AS INTEGER)*CASE substr(sp.upload_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=(SELECT storage_id FROM buckets WHERE id=u.bucket_id)))*1000000 AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id) AND NOT EXISTS(SELECT 1 FROM quota_reservations WHERE upload_id=u.id)
         UNION ALL SELECT 'tasks',COUNT(*),MIN(updated_at) FROM tasks t WHERE state='completed' AND updated_at<(SELECT tasks FROM cutoffs) AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id)
         UNION ALL SELECT 'integrity_issues',COUNT(*),MIN(t.updated_at) FROM integrity_issues i JOIN tasks t ON t.id=i.task_id WHERE t.state='completed' AND t.updated_at<(SELECT tasks FROM cutoffs)
         UNION ALL SELECT 'sessions',COUNT(*),MIN(expires_at) FROM sessions s WHERE expires_at<CAST(unixepoch('subsec')*1000000 AS INTEGER) AND NOT EXISTS(SELECT 1 FROM session_refresh_tokens r WHERE r.session_id=s.id AND r.revoked_at IS NULL AND r.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))
-        UNION ALL SELECT 'packs',COUNT(*),MIN(deleted_at) FROM packs p WHERE state='deleted' AND deleted_at<(SELECT chunks FROM cutoffs) AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack_id=p.id)
-        UNION ALL SELECT 'chunk_encodings',COUNT(*),MIN(deleted_at) FROM chunk_encodings WHERE state='deleted' AND deleted_at<(SELECT chunks FROM cutoffs)").bind((chunks*1_000_000.) as i64).bind((uploads*1_000_000.) as i64).bind((tasks*1_000_000.) as i64).fetch_all(connection).await?;
+        UNION ALL SELECT 'packs',COUNT(*),MIN(deleted_at) FROM packs p WHERE state='deleted' AND deleted_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.deleted_chunk_retention,1,length(sp.deleted_chunk_retention)-1) AS INTEGER)*CASE substr(sp.deleted_chunk_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=p.storage_id))*1000000 AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack_id=p.id)
+        UNION ALL SELECT 'chunk_encodings',COUNT(*),MIN(deleted_at) FROM chunk_encodings ce WHERE state='deleted' AND deleted_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.deleted_chunk_retention,1,length(sp.deleted_chunk_retention)-1) AS INTEGER)*CASE substr(sp.deleted_chunk_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=ce.storage_id))*1000000").bind((tasks*1_000_000.) as i64).fetch_all(connection).await?;
     let mut result = serde_json::Map::new();
     for (name, eligible, oldest) in rows {
         result.insert(
@@ -7183,6 +7196,7 @@ pub(super) async fn inventory_cleanup(
     }
     Ok(Value::Object(result))
 }
+
 pub(super) fn inventory_database() -> Scalar<'static, Value> {
     sqlx::query_scalar(
         "SELECT json_object('table',s.tbl_name,'total_bytes',SUM(d.pgsize),'index_bytes',SUM(IIF(s.type='index',d.pgsize,0)),'live_rows_estimate',NULL,'dead_rows_estimate',NULL,'last_autovacuum',NULL,'last_autoanalyze',NULL) FROM dbstat('main',TRUE) d JOIN sqlite_schema s ON s.name=d.name WHERE s.tbl_name IN ('chunks','extents','raw_sources','raw_ranges','streams','objects','uploads','parts','fragments','multipart_files','tasks','sessions','session_refresh_tokens','integrity_issues','chunk_encodings','packs','pack_members','pack_maintenance','pack_changes','pack_inputs','chunk_access_stats','chunk_access_windows','pack_access_windows','pack_member_access_windows','pending_uploads','cache_pins') GROUP BY s.tbl_name ORDER BY s.tbl_name",
@@ -8080,4 +8094,15 @@ pub(super) fn remap_multipart_range<'a>(
 pub(super) fn pending_multipart_reclaim(id: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE multipart_files SET reclaim_pending=true WHERE id=? AND state='sealed'")
         .bind(id)
+}
+
+pub(super) fn cache_policy(chunk: i64) -> Rows<'static, (String, String)> {
+    sqlx::query_as("SELECT p.pack_max_size,p.pack_upload_flush_timeout FROM chunks c JOIN storage_profiles p ON p.storage_id=c.storage_id WHERE c.id=?").bind(chunk)
+}
+
+pub(super) fn pack_policy_due(storage: Uuid, policy: &str, seconds: u64) -> Scalar<'_, bool> {
+    sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM storage_maintenance WHERE storage_id=? AND policy=? AND last_scheduled_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000)").bind(storage).bind(policy).bind(seconds as i64)
+}
+pub(super) fn pack_policy_scheduled(storage: Uuid, policy: &str) -> Statement<'_> {
+    sqlx::query("INSERT INTO storage_maintenance(storage_id,policy,last_scheduled_at) VALUES(?,?,CAST(unixepoch('subsec')*1000000 AS INTEGER)) ON CONFLICT(storage_id,policy) DO UPDATE SET last_scheduled_at=excluded.last_scheduled_at").bind(storage).bind(policy)
 }

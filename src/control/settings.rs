@@ -72,7 +72,6 @@ fn validate_value(configured: &crate::config::Config, section: &str, value: &Val
             "upload_idle_timeout",
         ],
         "uploads" => &[
-            "idle_timeout",
             "sweep_interval",
             "client_idle_timeout",
             "max_active_uploads",
@@ -142,6 +141,11 @@ pub(crate) async fn set_section_value(
     value: Value,
 ) -> Result<Value> {
     validate_value(&app.config, section, &value)?;
+    let mut proposed = app.config.clone();
+    crate::model::apply_runtime_section(&mut proposed, section, value.clone())?;
+    for profile in app.storage_profiles.enabled_profiles().await? {
+        profile.validate_budget(&proposed, &app.budget)?;
+    }
     Ok(app
         .runtime_settings
         .save(principal, section, revision, value)

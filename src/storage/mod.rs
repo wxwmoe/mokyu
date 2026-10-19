@@ -62,7 +62,6 @@ pub struct Storage {
     record_store: Arc<dyn crate::model::StorageRecordStore>,
     pub source_gate: tokio::sync::RwLock<()>,
     physical_pins: Mutex<HashMap<Uuid, std::sync::Weak<AtomicUsize>>>,
-    raw_reserved: Arc<Mutex<u64>>,
     pack_misses: Mutex<HashMap<i64, std::sync::Weak<PackFetch>>>,
     pack_live: Mutex<HashMap<i64, std::sync::Weak<LoadedPack>>>,
     pack_memory: Arc<Semaphore>,
@@ -83,9 +82,9 @@ pub struct Storage {
     pub secrets: Arc<Secrets>,
     pub(crate) cpu: Arc<Semaphore>,
     pub compression: Arc<crate::content::compression::Pool>,
-    compression_enabled: bool,
-    base_storage: config::BackendDefaults,
-    base_compression: crate::content::compression::Config,
+    compression_idle_timeout: String,
+    compression_workspace: u64,
+    restart_required: Arc<std::sync::atomic::AtomicBool>,
     cpu_jobs: usize,
     pub reads: Arc<crate::storage::resource_gate::Gate>,
     pub writes: Arc<crate::storage::resource_gate::Gate>,
@@ -97,7 +96,6 @@ pub struct Storage {
     cache_fills: Arc<Mutex<HashSet<Uuid>>>,
     max_entries: usize,
     capacity: Option<u64>,
-    min_compression_savings_percent: u8,
     misses: Mutex<HashMap<(i64, Uuid), std::sync::Weak<FetchResult>>>,
     pub backend_gets: Arc<std::sync::atomic::AtomicU64>,
     pub cache_hits: std::sync::atomic::AtomicU64,
@@ -117,7 +115,7 @@ async fn build_store(
     cluster: &Option<Arc<dyn crate::model::cluster::ClusterStore>>,
     row: crate::model::StorageRecord,
     profile: &StorageProfile,
-    base_compression: &crate::content::compression::Config,
+    compression_idle_timeout: &str,
     cpu_jobs: usize,
     default_cache_entries: usize,
     defaults: (usize, usize, usize),
@@ -158,11 +156,12 @@ async fn build_store(
             .join("raw")
     });
     let compression = Arc::new(crate::content::compression::Pool::new(
-        profile.compression_config(base_compression),
+        profile.compression_config(compression_idle_timeout),
         cpu_jobs,
     )?);
     let aging = Duration::from_secs(config::seconds(&profile.priority_aging)?);
     Ok(StoreBackend {
+        profile: Arc::new(profile.clone()),
         backend: target.backend,
         multipart: target.multipart,
         streaming: target.streaming,
@@ -284,12 +283,13 @@ impl Storage {
         managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
         record_store: Arc<dyn crate::model::StorageRecordStore>,
         maintenance: Arc<std::sync::atomic::AtomicBool>,
+        restart_required: Arc<std::sync::atomic::AtomicBool>,
         cluster_mode: bool,
         use_target: bool,
     ) -> Result<Self> {
         let cluster = if cluster_mode { cluster } else { None };
         let pack_units = budget.pack_memory_units;
-        let mut compression = c.local_compression.clone();
+        let mut compression = crate::content::compression::Config::default();
         compression.context_idle_timeout = c.instance.compression_idle_timeout.clone();
         let rows: Vec<crate::model::StorageRecord> = if use_target {
             record_store.enabled().await?
@@ -315,6 +315,7 @@ impl Storage {
                 Some(config::cache_bytes(&c.instance.thumbnail_cache_size)?),
             ],
             floor: config::bytes(&c.instance.min_free_space)?,
+            spaces: Mutex::default(),
             upload_limit: c
                 .instance
                 .upload_cache_size
@@ -323,13 +324,12 @@ impl Storage {
                 .transpose()?,
             usage: Mutex::new(Usage {
                 used: [0; 3],
-                reserved: 0,
                 upload: 0,
             }),
             io: Arc::new(Semaphore::new(budget.cpu_jobs)),
             pending: Mutex::new(HashSet::new()),
         });
-        let aging = Duration::from_secs(config::seconds(&c.backend_defaults.priority_aging)?);
+        let aging = Duration::from_secs(30);
         let defaults = (
             budget.storage_read_slots,
             budget.storage_upload_slots,
@@ -351,7 +351,7 @@ impl Storage {
                 &cluster,
                 row,
                 &profile,
-                &compression,
+                &c.instance.compression_idle_timeout,
                 budget.cpu_jobs,
                 c.instance.cache_entries.unwrap_or(budget.cache_entries),
                 defaults,
@@ -375,7 +375,6 @@ impl Storage {
             record_store,
             source_gate: tokio::sync::RwLock::new(()),
             physical_pins: Mutex::new(HashMap::new()),
-            raw_reserved: Arc::new(Mutex::new(0)),
             pack_misses: Mutex::new(HashMap::new()),
             pack_live: Mutex::new(HashMap::new()),
             pack_memory: Arc::new(Semaphore::new(pack_units as usize)),
@@ -404,9 +403,9 @@ impl Storage {
                 compression.clone(),
                 budget.cpu_jobs,
             )?),
-            compression_enabled: c.local_compression.enabled,
-            base_storage: c.backend_defaults.clone(),
-            base_compression: compression,
+            compression_idle_timeout: c.instance.compression_idle_timeout.clone(),
+            compression_workspace: budget.compression_workspace,
+            restart_required,
             cpu_jobs: budget.cpu_jobs,
             reads: crate::storage::resource_gate::Gate::new(budget.storage_read_slots, aging),
             writes: crate::storage::resource_gate::Gate::new(budget.storage_upload_slots, aging),
@@ -423,7 +422,6 @@ impl Storage {
                 .as_deref()
                 .map(config::cache_bytes)
                 .transpose()?,
-            min_compression_savings_percent: c.local_cache.min_compression_savings_percent,
             misses: Mutex::new(HashMap::new()),
             backend_gets: Arc::new(0.into()),
             cache_hits: 0.into(),
@@ -484,42 +482,52 @@ impl Storage {
             .cloned()
             .with_context(|| format!("store {storage_id} is not enabled"))
     }
-    fn local_cache(&self, storage_id: Option<Uuid>) -> CachePolicy {
-        storage_id
-            .and_then(|id| self.targets.read().unwrap().get(&id).cloned())
-            .map(|target| CachePolicy {
-                enabled: target.cache_enabled,
-                capacity: target.cache_capacity.or(self.capacity),
-                max_entries: target.cache_entries,
-                upload_cache: target.upload_cache,
-                upload_capacity: target.upload_cache_size,
-            })
-            .unwrap_or(CachePolicy {
-                enabled: true,
-                capacity: self.capacity,
-                max_entries: self.max_entries,
-                upload_cache: true,
-                upload_capacity: None,
-            })
+    fn local_space(&self, target: &StoreBackend, bytes: u64) -> Result<Option<local::Space>> {
+        if !target.is_local {
+            return Ok(None);
+        }
+        let root = target
+            .raw_root
+            .as_ref()
+            .and_then(|path| path.parent())
+            .context("local storage path is missing")?;
+        let floor = config::bytes(
+            target
+                .profile
+                .min_free_space
+                .as_deref()
+                .context("local storage floor is missing")?,
+        )?;
+        Ok(Some(local::Space::claim(
+            root,
+            floor,
+            bytes,
+            &self.disk.space_for(root)?,
+        )?))
+    }
+    fn local_cache(&self, storage_id: Option<Uuid>) -> Result<CachePolicy> {
+        let target = self.store_backend(storage_id.context("source has no storage")?)?;
+        Ok(CachePolicy {
+            enabled: target.cache_enabled,
+            capacity: target.cache_capacity.or(self.capacity),
+            max_entries: target.cache_entries,
+            upload_cache: target.upload_cache,
+            upload_capacity: target.upload_cache_size,
+        })
     }
     fn compression_for(
         &self,
         storage_id: Option<Uuid>,
-    ) -> (Arc<crate::content::compression::Pool>, bool, u8) {
-        storage_id
-            .and_then(|id| self.targets.read().unwrap().get(&id).cloned())
-            .map(|target| {
-                (
-                    target.compression.clone(),
-                    target.compression_enabled,
-                    target.min_compression_savings_percent,
-                )
-            })
-            .unwrap_or((
-                self.compression.clone(),
-                self.compression_enabled,
-                self.min_compression_savings_percent,
-            ))
+    ) -> Result<(Arc<crate::content::compression::Pool>, bool, u8)> {
+        let target = self.store_backend(storage_id.context("source has no storage")?)?;
+        Ok((
+            target.compression.clone(),
+            target.compression_enabled,
+            target.min_compression_savings_percent,
+        ))
+    }
+    pub(crate) fn profile(&self, storage: Uuid) -> Result<Arc<StorageProfile>> {
+        Ok(self.store_backend(storage)?.profile.clone())
     }
     pub(crate) fn pack_config(&self, storage: Uuid) -> Result<Arc<crate::content::pack::Config>> {
         Ok(self.store_backend(storage)?.pack_config.clone())
@@ -579,6 +587,20 @@ impl Storage {
                 .load(storage_id)
                 .await
                 .with_context(|| format!("storage profile is missing for {storage_id}"))?;
+            let workspace = profile
+                .compression_config(&self.compression_idle_timeout)
+                .workspace_bytes()?;
+            let maximum = config::bytes(&profile.pack_max_size)?;
+            let payload = maximum + 12 + 44 * (maximum / codec::MIN as u64 + 1);
+            if workspace > self.compression_workspace
+                || (profile.pack_enabled
+                    && (payload * 4 + workspace).div_ceil(1024 * 1024)
+                        > u64::from(self.pack_memory_units))
+            {
+                self.restart_required.store(true, Ordering::Release);
+                tracing::warn!(%storage_id, "storage profile saved; restart required to resize node memory budgets");
+                return Ok(());
+            }
             Some(
                 build_store(
                     StoreOptions::from_profile(&profile)?,
@@ -586,7 +608,7 @@ impl Storage {
                     &self.cluster,
                     row,
                     &profile,
-                    &self.base_compression,
+                    &self.compression_idle_timeout,
                     self.cpu_jobs,
                     self.max_entries,
                     self.store_defaults,
@@ -723,13 +745,14 @@ impl Storage {
         Ok(())
     }
     pub(crate) async fn initialize_store(&self, record: StoreRecord) -> Result<()> {
-        self.initialize_store_with_profile(record, None).await
+        let profile = self.profile_store.load(record.id).await?;
+        self.initialize_store_with_profile(record, &profile).await
     }
 
     pub(crate) async fn initialize_store_with_profile(
         &self,
         record: StoreRecord,
-        profile: Option<&StorageProfile>,
+        profile: &StorageProfile,
     ) -> Result<()> {
         if record.r#type == "local" {
             tokio::fs::create_dir_all(
@@ -740,14 +763,7 @@ impl Storage {
             )
             .await?;
         }
-        let profile_exists: bool = self.profile_store.exists(record.id).await?;
-        let options = if let Some(profile) = profile {
-            StoreOptions::from_profile(profile)?
-        } else if profile_exists {
-            StoreOptions::from_profile(&self.profile_store.load(record.id).await?)?
-        } else {
-            StoreOptions::new(&self.base_storage)?
-        };
+        let options = StoreOptions::from_profile(profile)?;
         let target = VerifiedStore::build(&record, options, &self.secrets)?;
         let _permit = crate::storage::resource_gate::PRIORITY
             .scope(
@@ -1074,7 +1090,7 @@ impl Storage {
         }
         let permit = self.cpu.clone().acquire_owned().await?;
         let c = c.clone();
-        let (compression, _, _) = self.compression_for(c.storage_id);
+        let (compression, _, _) = self.compression_for(c.storage_id)?;
         Ok(tokio::task::spawn_blocking(move || {
             let _permit = permit;
             crate::content::codec::decode_cache(&c, data, true, &compression)
@@ -1087,9 +1103,9 @@ impl Storage {
         data: Bytes,
         compressed: bool,
     ) -> Result<Option<UploadPin>> {
-        let policy = self.local_cache(c.storage_id);
+        let policy = self.local_cache(c.storage_id)?;
         let id = cache::cache_id(c);
-        if !self.cluster_mode && (!policy.enabled || !policy.upload_cache) {
+        if !self.cluster_mode && !policy.upload_cache {
             return Ok(None);
         }
         if self.cluster_mode {
@@ -1250,7 +1266,7 @@ impl Storage {
         while let Some(e) = parts.next_entry().await? {
             if e.file_type().await?.is_file() {
                 self.disk
-                    .account_existing(Area::Multipart, e.metadata().await?.len());
+                    .account_existing(Area::Multipart, local::allocated(&e.metadata().await?));
             }
         }
         let mut dirs = tokio::fs::read_dir(self.disk.root.join("chunks")).await?;
@@ -1307,7 +1323,7 @@ impl Storage {
         let memory = memory.cloned();
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
-        let (compression, compression_enabled, threshold) = self.compression_for(c.storage_id);
+        let (compression, compression_enabled, threshold) = self.compression_for(c.storage_id)?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _memory = memory;
@@ -1330,7 +1346,7 @@ impl Storage {
         let permit = self.cpu.clone().acquire_owned().await?;
         let c = c.clone();
         let secrets = self.secrets.clone();
-        let (compression, _, threshold) = self.compression_for(c.storage_id);
+        let (compression, _, threshold) = self.compression_for(c.storage_id)?;
         let diagnostics = self.diagnostics.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -1353,6 +1369,7 @@ impl Storage {
         let size = encoded.len();
         #[cfg(feature = "fault-injection")]
         crate::faults::point("storage-put-permitted").await;
+        let space = self.local_space(&target, size as u64)?;
         let result = target
             .backend
             .put(
@@ -1363,6 +1380,7 @@ impl Storage {
             .inspect_err(|e| self.diagnostics.backend(e));
         operation.finish(result.is_err());
         result?;
+        drop(space);
         drop(permit);
         self.operations[1].bytes(size as u64);
         self.backend_write_bytes
@@ -1373,7 +1391,7 @@ impl Storage {
         Ok(())
     }
     async fn cached_file(&self, c: &Chunk, id: Uuid) -> Result<Option<Bytes>> {
-        if !self.local_cache(c.storage_id).enabled {
+        if !self.local_cache(c.storage_id)?.enabled {
             return Ok(None);
         }
         let cached = {
@@ -1397,7 +1415,7 @@ impl Storage {
                 let size = data.len() as u64;
                 let permit = self.cpu.clone().acquire_owned().await?;
                 let chunk = c.clone();
-                let (compression, _, _) = self.compression_for(c.storage_id);
+                let (compression, _, _) = self.compression_for(c.storage_id)?;
                 let decoded = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
                     codec::decode_cache(&chunk, Bytes::from(data), compressed, &compression)
@@ -1548,11 +1566,15 @@ impl Storage {
         })
     }
     fn fill_read(self: &Arc<Self>, c: &Chunk, data: Bytes, compressed: Option<bool>) {
-        let policy = self.local_cache(c.storage_id);
+        let Ok(policy) = self.local_cache(c.storage_id) else {
+            return;
+        };
         if !policy.enabled {
             return;
         }
-        let (pool, _, _) = self.compression_for(c.storage_id);
+        let Ok((pool, _, _)) = self.compression_for(c.storage_id) else {
+            return;
+        };
         let Ok(workspace) = pool.workspace_bytes() else {
             return;
         };
@@ -1584,7 +1606,7 @@ impl Storage {
         );
     }
     async fn fill(self: &Arc<Self>, c: &Chunk, data: Bytes) -> Result<()> {
-        let policy = self.local_cache(c.storage_id);
+        let policy = self.local_cache(c.storage_id)?;
         if !policy.enabled {
             return Ok(());
         }
@@ -1593,7 +1615,7 @@ impl Storage {
         };
         let storage = self.clone();
         let id = cache::cache_id(c);
-        let (_, _, threshold) = self.compression_for(c.storage_id);
+        let (_, _, threshold) = self.compression_for(c.storage_id)?;
         let compressed = codec::cache_compressed(c, threshold);
         tokio::spawn(async move {
             let _permit = permit;
@@ -1768,7 +1790,7 @@ impl Storage {
                 let encoded = self.read_backend(&physical).await?;
                 let (raw, cache) = self.decode(&physical, encoded).await?;
                 if physical.compressed == c.compressed && physical.stored_size == c.stored_size {
-                    let (_, _, threshold) = self.compression_for(c.storage_id);
+                    let (_, _, threshold) = self.compression_for(c.storage_id)?;
                     self.fill_read(c, cache, Some(codec::cache_compressed(c, threshold)));
                 } else {
                     self.fill_read(c, raw.clone(), None);
@@ -1837,7 +1859,7 @@ impl Storage {
         }
     }
     pub async fn pack_memory(&self, size: usize) -> Result<tokio::sync::OwnedSemaphorePermit> {
-        let workspace = self.compression.workspace_bytes()?;
+        let workspace = self.compression_workspace;
         let units = (size as u64 * 4 + workspace).div_ceil(1024 * 1024);
         ensure!(
             units <= u64::from(self.pack_memory_units),
@@ -1850,7 +1872,7 @@ impl Storage {
             .await?)
     }
     pub async fn pack_work(&self, size: usize) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>> {
-        let units = (size as u64 * 4 + self.compression.workspace_bytes()?).div_ceil(1024 * 1024);
+        let units = (size as u64 * 4 + self.compression_workspace).div_ceil(1024 * 1024);
         ensure!(
             units <= u64::from(self.pack_memory_units),
             "pack rewrite exceeds available memory budget"
@@ -1876,7 +1898,7 @@ impl Storage {
         let memory = memory.clone();
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
-        let (pool, compression_enabled, _) = self.compression_for(p.storage_id);
+        let (pool, compression_enabled, _) = self.compression_for(p.storage_id)?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _memory = memory;
@@ -1903,6 +1925,7 @@ impl Storage {
         let size = data.len() as u64;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("storage-put-permitted").await;
+        let _space = self.local_space(&target, size)?;
         let result = target
             .backend
             .put(path, Bytes::from(data).into())
@@ -1931,6 +1954,10 @@ impl Storage {
         Ok(())
     }
     fn background_writable(&self) -> Result<()> {
+        ensure!(
+            !self.restart_required.load(Ordering::Acquire),
+            "restart required before storage writes resume"
+        );
         ensure!(
             !self.maintenance.load(Ordering::Acquire)
                 || crate::upload::cache::FLUSH
@@ -2021,7 +2048,7 @@ impl Storage {
                     drop(read_permit);
                     let permit = self.cpu.clone().acquire_owned().await?;
                     let secrets = self.secrets.clone();
-                    let (pool, _, _) = self.compression_for(p.storage_id);
+                    let (pool, _, _) = self.compression_for(p.storage_id)?;
                     let pack = p.clone();
                     let diagnostics = self.diagnostics.clone();
                     let (data, memory) = tokio::task::spawn_blocking(move || {
@@ -2075,20 +2102,20 @@ impl Storage {
         Ok(())
     }
     pub async fn fill_raw(&self, c: &Chunk, raw: Bytes) -> Result<()> {
-        if !self.local_cache(c.storage_id).enabled {
+        if !self.local_cache(c.storage_id)?.enabled {
             return Ok(());
         }
         let (data, compressed) = self.cache_payload(c, raw).await?;
-        let policy = self.local_cache(c.storage_id);
+        let policy = self.local_cache(c.storage_id)?;
         self.fill_owned(cache::cache_id(c), &data, compressed, policy)
             .await
     }
     pub async fn cache_payload(&self, c: &Chunk, raw: Bytes) -> Result<(Bytes, bool)> {
-        let policy = self.local_cache(c.storage_id);
+        let policy = self.local_cache(c.storage_id)?;
         if !policy.enabled {
             return Ok((raw, false));
         }
-        let (pool, enabled, threshold) = self.compression_for(c.storage_id);
+        let (pool, enabled, threshold) = self.compression_for(c.storage_id)?;
         if enabled && codec::cache_compressed(c, threshold) {
             let permit = self.cpu.clone().acquire_owned().await?;
             let input = raw.clone();

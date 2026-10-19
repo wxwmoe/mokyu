@@ -2100,11 +2100,11 @@ export interface components {
             concurrency: number;
             controls: components["schemas"]["Policy"][];
             maintenance: boolean;
-            min_storage_duration: string;
             pack_configured: boolean;
             pack_creation_enabled: boolean;
             pack_creation_paused: boolean;
             preparing_packs: string;
+            profiles: components["schemas"]["StorageProfile"][];
         };
         ManagedKeyInput: {
             algorithm?: string | null;
@@ -2728,7 +2728,9 @@ export interface components {
             migration_byte_budget?: string | null;
             /** Format: int32 */
             migration_concurrency?: number | null;
+            min_free_space?: string | null;
             min_storage_duration: string;
+            multipart_idle_timeout: string;
             pack_byte_budget?: string | null;
             /** Format: int32 */
             pack_concurrency: number;

@@ -268,61 +268,6 @@ impl ReplicaDatabase {
 }
 #[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct BackendDefaults {
-    #[serde(default = "connect_timeout")]
-    pub connect_timeout: String,
-    #[serde(default = "request_timeout")]
-    pub request_timeout: String,
-    #[serde(default = "backend_retries")]
-    pub max_retries: usize,
-    #[serde(default = "retry_timeout")]
-    pub retry_timeout: String,
-    #[serde(default = "priority_aging")]
-    pub priority_aging: String,
-    #[serde(default = "no_minimum_storage_duration")]
-    pub min_storage_duration: String,
-}
-impl Default for BackendDefaults {
-    fn default() -> Self {
-        Self {
-            connect_timeout: connect_timeout(),
-            request_timeout: request_timeout(),
-            max_retries: backend_retries(),
-            retry_timeout: retry_timeout(),
-            priority_aging: priority_aging(),
-            min_storage_duration: no_minimum_storage_duration(),
-        }
-    }
-}
-impl BackendDefaults {
-    pub fn min_storage_seconds(&self) -> Result<u64> {
-        if self.min_storage_duration == "0s" {
-            Ok(0)
-        } else {
-            seconds(&self.min_storage_duration).context("invalid storage.min_storage_duration")
-        }
-    }
-}
-fn no_minimum_storage_duration() -> String {
-    "0s".into()
-}
-fn connect_timeout() -> String {
-    "5s".into()
-}
-fn request_timeout() -> String {
-    "30s".into()
-}
-fn retry_timeout() -> String {
-    "120s".into()
-}
-fn priority_aging() -> String {
-    "30s".into()
-}
-fn backend_retries() -> usize {
-    3
-}
-#[derive(Clone, Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
 pub struct WebSettings {
     pub origin: String,
     pub secure_cookie: bool,
@@ -407,7 +352,6 @@ impl Default for RequestSettings {
 pub struct UploadSettings {
     pub staging_storage_id: Option<uuid::Uuid>,
     pub staging_bytes_limit: Option<String>,
-    pub idle_timeout: String,
     pub sweep_interval: String,
     pub client_idle_timeout: String,
     pub max_active_uploads: Option<i64>,
@@ -417,24 +361,9 @@ impl Default for UploadSettings {
         Self {
             staging_storage_id: None,
             staging_bytes_limit: None,
-            idle_timeout: "24h".into(),
             sweep_interval: "5m".into(),
             client_idle_timeout: "120s".into(),
             max_active_uploads: None,
-        }
-    }
-}
-#[derive(Clone, Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct LocalCache {
-    pub upload_cache: bool,
-    pub min_compression_savings_percent: u8,
-}
-impl Default for LocalCache {
-    fn default() -> Self {
-        Self {
-            upload_cache: true,
-            min_compression_savings_percent: 20,
         }
     }
 }
@@ -446,10 +375,6 @@ pub struct Maintenance {
     pub max_duration: String,
     pub task_retention: String,
     pub audit_retention: String,
-    // These storage-scoped defaults remain in memory until storage profiles load.
-    pub unreferenced_grace: String,
-    pub deleted_chunk_retention: String,
-    pub upload_retention: String,
 }
 impl Default for Maintenance {
     fn default() -> Self {
@@ -459,9 +384,6 @@ impl Default for Maintenance {
             max_duration: "5s".into(),
             task_retention: "30d".into(),
             audit_retention: "90d".into(),
-            unreferenced_grace: "48h".into(),
-            deleted_chunk_retention: "7d".into(),
-            upload_retention: "24h".into(),
         }
     }
 }

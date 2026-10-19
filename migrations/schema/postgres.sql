@@ -1,4 +1,4 @@
--- Current postgres schema, matching migration 0046.
+-- Current postgres schema, matching migration 0048.
 -- The initializer records schema_version and migration checksums after this script succeeds.
 
 SET LOCAL check_function_bodies = false;
@@ -1162,6 +1162,8 @@ CREATE TABLE public.storage_permits (
 );
 
 CREATE TABLE public.storage_profiles (
+    multipart_idle_timeout text DEFAULT '24h'::text NOT NULL,
+    min_free_space text,
     storage_id uuid NOT NULL,
     revision bigint DEFAULT 1 NOT NULL,
     connect_timeout text DEFAULT '5s'::text NOT NULL,
@@ -2171,9 +2173,10 @@ INSERT INTO public.projects(id,name,builtin) VALUES('00000000-0000-0000-0000-000
 INSERT INTO public.runtime_settings(section,value) VALUES
     ('web','{"origin":"http://localhost:9002","secure_cookie":true,"session_lifetime":"12h","gravatar_base_url":"https://www.gravatar.com/avatar/"}'),
     ('requests','{"s3_domain":null,"s3_region":"us-east-1","s3_chunk_limit":"8MiB","read_idle_timeout":"120s","upload_idle_timeout":"120s"}'),
-    ('uploads','{"idle_timeout":"24h","sweep_interval":"5m","max_active_uploads":null,"staging_storage_id":null,"client_idle_timeout":"120s","staging_bytes_limit":null}'),
+    ('uploads','{"sweep_interval":"5m","max_active_uploads":null,"staging_storage_id":null,"client_idle_timeout":"120s","staging_bytes_limit":null}'),
     ('metrics','{"scope_limit":64,"query_timeout":"2m","access_retention":"14d","refresh_interval":"15m","runtime_interval":"1m","storage_interval":"15m","runtime_retention":"24h","storage_retention":"7d","access_flush_interval":"1m"}'),
     ('maintenance','{"interval":"30m","batch_size":1000,"max_duration":"5s","task_retention":"30d","audit_retention":"90d"}');
+UPDATE public.runtime_settings SET revision=2 WHERE section='uploads';
 INSERT INTO maintenance_controls(policy) VALUES('gc'),('pack'),('reuse'),('reclaim'),('repack'),('range'),('cleanup');
 INSERT INTO usage_summary(id) VALUES('global');
 
@@ -2258,3 +2261,10 @@ CREATE INDEX multipart_files_reclaim ON multipart_files(storage_id,id) WHERE rec
 ALTER TABLE fragments ADD COLUMN file_id uuid REFERENCES multipart_files(id);
 ALTER TABLE fragments ADD COLUMN file_offset bigint CHECK ((file_id IS NULL)=(file_offset IS NULL) AND (file_offset IS NULL OR file_offset>=0));
 CREATE INDEX fragments_file ON fragments(file_id,file_offset) WHERE file_id IS NOT NULL;
+
+CREATE TABLE storage_maintenance (
+    storage_id uuid NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    policy text NOT NULL,
+    last_scheduled_at timestamptz NOT NULL,
+    PRIMARY KEY(storage_id,policy)
+);

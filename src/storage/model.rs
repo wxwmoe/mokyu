@@ -65,15 +65,6 @@ pub(crate) struct Options {
 }
 
 impl Options {
-    pub fn new(config: &config::BackendDefaults) -> Result<Self> {
-        Ok(Self {
-            connect_timeout: Duration::from_secs(config::seconds(&config.connect_timeout)?),
-            request_timeout: Duration::from_secs(config::seconds(&config.request_timeout)?),
-            retry_timeout: Duration::from_secs(config::seconds(&config.retry_timeout)?),
-            max_retries: config.max_retries,
-        })
-    }
-
     pub fn from_profile(profile: &StorageProfile) -> Result<Self> {
         Ok(Self {
             connect_timeout: Duration::from_secs(config::seconds(&profile.connect_timeout)?),

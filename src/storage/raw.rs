@@ -24,8 +24,8 @@ pub(crate) struct LocalWriter<'a> {
     temporary: PathBuf,
     destination: PathBuf,
     size: u64,
+    buffer: Vec<u8>,
     hash: Option<blake3::Hasher>,
-    reserved: u64,
     pending: Arc<Mutex<u64>>,
     floor: u64,
     prepared: bool,
@@ -33,13 +33,6 @@ pub(crate) struct LocalWriter<'a> {
     _target: Arc<StoreBackend>,
     _permit: StorePermit,
     _global: resource_gate::Permit,
-}
-
-impl Drop for LocalWriter<'_> {
-    fn drop(&mut self) {
-        *self.pending.lock().unwrap() -= self.reserved;
-        // The journaled source owns incomplete files until normal GC removes them.
-    }
 }
 
 async fn sync_directory(path: &Path) -> Result<()> {
@@ -67,35 +60,21 @@ fn path(root: &Path, id: Uuid) -> PathBuf {
 }
 
 impl LocalWriter<'_> {
-    fn reserve(&mut self, size: u64) -> Result<()> {
-        if size <= self.reserved {
-            return Ok(());
-        }
-        let path = self.destination.parent().unwrap().to_owned();
-        let extra = size - self.reserved;
-        let mut pending = self.pending.lock().unwrap();
-        ensure!(
-            fs2::available_space(path)?
-                .saturating_sub(*pending)
-                .saturating_sub(extra)
-                >= self.floor,
-            "filesystem free-space floor reached"
-        );
-        *pending = pending
-            .checked_add(extra)
-            .context("raw reservation overflow")?;
-        self.reserved = size;
-        Ok(())
-    }
-
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
         let size = self
             .size
             .checked_add(data.len() as u64)
             .context("raw length overflow")?;
         if !self.prepared {
-            self.reserve(size)?;
-            self.file.write_all(data).await?;
+            let mut rest = data;
+            while !rest.is_empty() {
+                let count = rest.len().min(BUFFER - self.buffer.len());
+                self.buffer.extend_from_slice(&rest[..count]);
+                rest = &rest[count..];
+                if self.buffer.len() == BUFFER {
+                    self.flush_buffer().await?;
+                }
+            }
         }
         self.size = size;
         if let Some(hash) = &mut self.hash {
@@ -104,8 +83,25 @@ impl LocalWriter<'_> {
         Ok(())
     }
 
+    async fn flush_buffer(&mut self) -> Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let _space = super::local::Space::claim(
+            self.destination.parent().unwrap(),
+            self.floor,
+            self.buffer.len() as u64,
+            &self.pending,
+        )?;
+        self.file.write_all(&self.buffer).await?;
+        self.file.flush().await?;
+        self.buffer.clear();
+        Ok(())
+    }
+
     pub async fn finish(mut self, expected: u64) -> Result<Option<[u8; 32]>> {
         ensure!(self.size == expected, "raw receive length mismatch");
+        self.flush_buffer().await?;
         self.file.flush().await?;
         self.file.sync_all().await?;
         #[cfg(feature = "fault-injection")]
@@ -220,23 +216,28 @@ impl Storage {
         #[cfg(unix)]
         options.mode(0o644);
         let file = options.open(&temporary).await?;
-        let mut writer = LocalWriter {
+        let writer = LocalWriter {
             storage: self,
             file,
             temporary,
-            destination,
+            destination: destination.clone(),
             size: 0,
+            buffer: Vec::with_capacity(BUFFER),
             hash,
-            reserved: 0,
-            pending: self.raw_reserved.clone(),
-            floor: self.disk.floor,
+            pending: self.disk.space_for(destination.parent().unwrap())?,
+            floor: crate::config::bytes(
+                target
+                    .profile
+                    .min_free_space
+                    .as_deref()
+                    .context("local storage floor is missing")?,
+            )?,
             prepared: false,
             retained: false,
             _target: target,
             _permit: permit,
             _global: global,
         };
-        writer.reserve(declared.unwrap_or(0).max(0) as u64)?;
         Ok(RawWriter::Local(writer))
     }
 
@@ -452,6 +453,7 @@ impl RawWriter<'_> {
             app.multipart.as_ref(),
             upload,
             source,
+            writer.floor,
         )
         .await?;
         writer.file = file;

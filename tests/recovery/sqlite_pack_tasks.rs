@@ -36,11 +36,11 @@ async fn sqlite_pack_task_contract() -> Result<()> {
     let db = &backend.write;
     backend.initialize_admin("admin", "password", false).await?;
     assert!(
-        transactions::start_pack(db, "invalid", false, 60.)
+        transactions::start_pack(db, "invalid", false)
             .await
             .is_err()
     );
-    let empty = id(&transactions::start_pack(db, "pack", false, 60.).await?);
+    let empty = id(&transactions::start_pack(db, "pack", false).await?);
     let row = backend.raw(empty).await?.unwrap();
     assert_eq!(row["state"], "completed");
     assert_eq!(row["detail"]["storages"], json!([]));
@@ -59,8 +59,8 @@ async fn sqlite_pack_task_contract() -> Result<()> {
     .execute(db)
     .await?;
     let (a, b) = tokio::join!(
-        transactions::start_pack(db, "pack", false, 60.),
-        transactions::start_pack(db, "pack", false, 60.)
+        transactions::start_pack(db, "pack", false),
+        transactions::start_pack(db, "pack", false)
     );
     let a = a?;
     let b = b?;
@@ -91,10 +91,9 @@ async fn sqlite_pack_task_contract() -> Result<()> {
         .bind(pack_task)
         .execute(db)
         .await?;
-    let retry = transactions::start_pack(db, "pack", true, 60.).await?;
-    assert_eq!(id(&retry), pack_task);
-    assert_eq!(retry["retry_pending"], true);
-    let manual = id(&transactions::start_pack(db, "pack", false, 60.).await?);
+    let retry = transactions::start_pack(db, "pack", true).await?;
+    assert_eq!(retry["idle"], true);
+    let manual = id(&transactions::start_pack(db, "pack", false).await?);
     assert_ne!(manual, pack_task);
     sqlx::query("UPDATE tasks SET state='completed' WHERE id=?")
         .bind(manual)
@@ -104,8 +103,11 @@ async fn sqlite_pack_task_contract() -> Result<()> {
         .bind(pack_task)
         .execute(db)
         .await?;
+    sqlx::query("UPDATE storage_maintenance SET last_scheduled_at=946684800000000")
+        .execute(db)
+        .await?;
     assert_ne!(
-        id(&transactions::start_pack(db, "pack", true, 60.).await?),
+        id(&transactions::start_pack(db, "pack", true).await?),
         pack_task
     );
 

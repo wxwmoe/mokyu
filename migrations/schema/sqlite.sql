@@ -1,4 +1,4 @@
--- Current sqlite schema, matching migration 0021.
+-- Current sqlite schema, matching migration 0023.
 -- The initializer records schema_version and migration checksums after this script succeeds.
 
 CREATE TABLE access_state (
@@ -629,7 +629,7 @@ CREATE TABLE storage_profiles (
     maintenance_byte_budget TEXT,
     migration_concurrency INTEGER,
     migration_byte_budget TEXT,
-    updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), cdc_enabled INTEGER NOT NULL DEFAULT 1 CHECK (cdc_enabled IN (0,1)), deduplication_enabled INTEGER NOT NULL DEFAULT 0 CHECK (deduplication_enabled IN (0,1)),
+    updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), cdc_enabled INTEGER NOT NULL DEFAULT 1 CHECK (cdc_enabled IN (0,1)), deduplication_enabled INTEGER NOT NULL DEFAULT 0 CHECK (deduplication_enabled IN (0,1)), multipart_idle_timeout TEXT NOT NULL DEFAULT '24h', min_free_space TEXT,
     CONSTRAINT storage_profiles_storage FOREIGN KEY (storage_id) REFERENCES storages(id) ON DELETE CASCADE,
     CONSTRAINT storage_profiles_revision CHECK (revision>0),
     CONSTRAINT storage_profiles_max_retries CHECK (max_retries BETWEEN 0 AND 100),
@@ -1061,3 +1061,10 @@ CREATE INDEX multipart_files_reclaim ON multipart_files(storage_id,id) WHERE rec
 ALTER TABLE fragments ADD COLUMN file_id BLOB REFERENCES multipart_files(id);
 ALTER TABLE fragments ADD COLUMN file_offset INTEGER CHECK ((file_id IS NULL)=(file_offset IS NULL) AND (file_offset IS NULL OR file_offset>=0));
 CREATE INDEX fragments_file ON fragments(file_id,file_offset) WHERE file_id IS NOT NULL;
+
+CREATE TABLE storage_maintenance (
+    storage_id BLOB NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    policy TEXT NOT NULL,
+    last_scheduled_at INTEGER NOT NULL,
+    PRIMARY KEY(storage_id,policy)
+) STRICT;

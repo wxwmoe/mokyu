@@ -95,7 +95,7 @@ runtime 设置保存在 `runtime_settings`，只有以下五组。Web 使用固�
 | --- | --- | --- |
 | `web` | origin、cookie、session、Gravatar | 部署共享 |
 | `requests` | 读写空闲超时、请求行为 | 部署共享，重启提示按字段显示 |
-| `uploads` | staging storage、共享 staging 字节上限、上传过期与活动上传限制 | 部署共享；群集 storage 共享 |
+| `uploads` | staging storage、共享 staging 字节上限、客户端空闲超时与活动上传限制 | 部署共享；群集 storage 共享 |
 | `metrics` | storage/runtime/access 采样间隔、保留期和查询超时 | 部署共享 |
 | `maintenance` | GC、清理、任务保留、审计保留和批量大小 | 部署共享 |
 
@@ -113,13 +113,17 @@ profile 是类型化字段，不是任意 JSON。字段包括：
 - `cdc_enabled` 默认 true；local 和 S3 均可关闭。关闭时必须清除 block key，同时禁用压缩、pack 和 pack Range；Web 在草稿中联动这些值，保存后生效，重新开启不会恢复旧 key。已有对象保持可读；
 
 - 连接超时、请求超时、重试次数、重试窗口、优先级老化、最低存储期限、未引用宽限和删除保留期；
+- `multipart_idle_timeout`：未完成上传的空闲期限，默认 `24h`，可设置 `7d`；只有实际写入进展续期，查询列表不会延长期限；
+- local 的 `min_free_space`：目标后端文件系统的最低可用空间，默认 `1GiB`；S3 不提供此项；
 - cache 开关、大小和条目、待上传缓存；
 - compression 的 `never`、`always`、`sample`、等级、采样等级和最小节省阈值；
 - pack 开关、大小、刷新/复用/回收/合包/Range 参数；local storage 不创建新区块包，Web 会固定关闭该选项；
 - `pack_concurrency`、`integrity_concurrency`、`integrity_rps`、`integrity_bandwidth`、`integrity_batch_timeout`；
 - storage 级 read/upload/control、pack、integrity、maintenance、migration 并发和字节预算。
 
-这些并发、速率和字节预算在 Web storage 页面及 `storage profile` CLI 中调整，保存后下一批任务使用新值，不要求重启。单容器使用进程内并发队列和巡检速率账户，群集通过 PostgreSQL 共享这些额度。巡检同时检查 RPS 与字节预算，任一不足时均不扣减；大于一秒带宽预算的单批仍可前进。修改 profile 保留已消耗额度；单容器重启或重新启用 storage 后允许一次有界突发。
+后端策略在 Web storage 页面及 `storage profile` CLI 中独立调整。并发、速率和字节预算保存后下一批任务使用新值；调大压缩工作区或 pack 大小若超出节点已分配的内存容量，会标记需要重启并暂停数据服务，重启后重新计算节点预算。预算本身不足的配置会被拒绝。单容器使用进程内并发队列和巡检速率账户，群集通过 PostgreSQL 共享这些额度。巡检同时检查 RPS 与字节预算，任一不足时均不扣减；大于一秒带宽预算的单批仍可前进。修改 profile 保留已消耗额度；单容器重启或重新启用 storage 后允许一次有界突发。
+
+旧部署升级时，运行设置中的上传空闲期限会一次写入已有后端，随后移除全局项；已有 local 后端的磁盘余量会在启动监听前一次写入。之后各后端独立保存，修改节点参数不会覆盖这些值。`instance.min_free_space` 继续保护节点数据目录中的 Multipart 暂存和缓存；同一文件系统上的并发写入共享预留账户，目标后端另按自己的余量限制检查。
 
 ## 加密、压缩与存量维护
 

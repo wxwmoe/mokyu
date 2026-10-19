@@ -278,11 +278,25 @@ pub(crate) async fn profile(
     Ok(Json(app.storage_profiles.load(storage_id).await?))
 }
 
+async fn validate_profile_capacity(app: &App, profile: &StorageProfile) -> anyhow::Result<()> {
+    let mut profiles = app.storage_profiles.enabled_profiles().await?;
+    profiles.retain(|current| current.storage_id != profile.storage_id);
+    profiles.push(profile.clone());
+    let budget = app
+        .config
+        .budget_for(&profiles)
+        .map_err(|error| s3s::s3_error!(InvalidArgument, "{error}"))?;
+    profile
+        .validate_budget(&app.config, &budget)
+        .map_err(|error| s3s::s3_error!(InvalidArgument, "{error}").into())
+}
+
 pub(crate) async fn update_profile(
     app: &App,
     name: String,
     profile: StorageProfile,
 ) -> anyhow::Result<StorageProfile> {
+    validate_profile_capacity(app, &profile).await?;
     let id = app.storage_profiles.update(name, profile).await?;
     app.storage.refresh_store(id).await?;
     app.storage_profiles.load(id).await
@@ -311,6 +325,7 @@ pub(crate) async fn update_profile_route(
 }
 
 pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Result<StorageView> {
+    let mut profiles = app.storage_profiles.enabled_profiles().await?;
     let crate::model::storage::StorageCreation {
         deployment: deployment_id,
         mode,
@@ -342,10 +357,19 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
         storage_identity_marker(deployment_id, id)?,
     )?;
     if let Some(profile) = &input.profile {
+        for (alias, value) in [
+            (input.read_concurrency, profile.read_concurrency),
+            (input.upload_concurrency, profile.upload_concurrency),
+            (input.control_concurrency, profile.control_concurrency),
+        ] {
+            anyhow::ensure!(
+                alias.is_none() || alias == value,
+                "concurrency conflicts with storage profile"
+            );
+        }
         validate_profile(profile, &record.r#type)?;
     }
-    let profile_for_init = input.profile.clone();
-    writer
+    let profile_for_init = writer
         .prepare(
             &record,
             input.block_key_id,
@@ -355,8 +379,16 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
             input.profile,
         )
         .await?;
+    profiles.push(profile_for_init.clone());
+    let budget = app
+        .config
+        .budget_for(&profiles)
+        .map_err(|error| s3s::s3_error!(InvalidArgument, "{error}"))?;
+    profile_for_init
+        .validate_budget(&app.config, &budget)
+        .map_err(|error| s3s::s3_error!(InvalidArgument, "{error}"))?;
     app.storage
-        .initialize_store_with_profile(record.clone(), profile_for_init.as_ref())
+        .initialize_store_with_profile(record.clone(), &profile_for_init)
         .await?;
     writer.finish().await?;
     app.storage.refresh_store(record.id).await?;
@@ -549,6 +581,13 @@ pub(crate) async fn update_record(
         requested.control_concurrency = control_concurrency;
         requested
     };
+    if changing_type {
+        requested.min_free_space = if record.r#type == "local" {
+            Some(requested.min_free_space.unwrap_or_else(|| "1GiB".into()))
+        } else {
+            None
+        };
+    }
     if record.r#type == "local" {
         requested.cache_enabled = false;
         requested.upload_cache = false;
@@ -556,6 +595,7 @@ pub(crate) async fn update_record(
         requested.pack_range_enabled = false;
     }
     validate_profile(&requested, &record.r#type)?;
+    validate_profile_capacity(app, &requested).await?;
     if changing_type {
         // Never let old connections resume after a successful or uncertain relocation.
         app.restart_required

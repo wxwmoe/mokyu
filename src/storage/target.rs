@@ -3,6 +3,7 @@ use object_store::ObjectStore;
 use std::sync::Arc;
 
 pub(crate) struct StoreBackend {
+    pub profile: Arc<crate::storage::profile::StorageProfile>,
     pub(crate) backend: Arc<dyn ObjectStore>,
     pub(crate) multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
     pub(crate) streaming: Option<super::s3::Streaming>,

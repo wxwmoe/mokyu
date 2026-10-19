@@ -41,10 +41,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             .min(app.budget.read_concurrency)
             .clamp(1, 4),
     )
-    .chain(std::iter::repeat_n(
-        1,
-        app.config.local_pack.maintenance_concurrency,
-    ))
+    .chain(std::iter::repeat_n(1, app.budget.cpu_jobs.clamp(1, 4)))
     .chain(std::iter::repeat_n(
         2,
         app.budget
@@ -66,7 +63,7 @@ async fn run_single(app: Arc<App>) -> Result<()> {
             .cpu_jobs
             .min(app.budget.read_concurrency)
             .clamp(1, 4),
-        app.config.local_pack.maintenance_concurrency,
+        app.budget.cpu_jobs.clamp(1, 4),
         app.budget
             .cpu_jobs
             .min(app.budget.upload_concurrency)
@@ -298,7 +295,7 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<()> {
                 .await
                 .map(|profile| config::seconds(&profile.integrity_batch_timeout))??
         } else {
-            config::seconds(&app.config.local_integrity.request_timeout)?
+            config::seconds(&app.config.maintenance.max_duration)?
         };
         match tokio::time::timeout(
             Duration::from_secs(timeout),
@@ -362,7 +359,6 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<()> {
     app.task_execution
         .finish(crate::model::TaskFinish {
             execution,
-            reuse_seconds: config::seconds(&app.config.local_pack.reuse_interval)?,
             error: result.as_ref().err().map(ToString::to_string),
         })
         .await?;

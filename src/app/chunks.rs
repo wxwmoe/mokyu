@@ -90,6 +90,7 @@ impl App {
             .storage_for_stream(stream)
             .await?
             .context("stream has no store")?;
+        let profile = self.storage.profile(storage_id)?;
         let mutex = self.content_lock(storage_id, hash);
         let _guard = mutex.lock().await;
         let (algorithm, key_id) = self.store_encoding(storage_id).await?;
@@ -122,7 +123,7 @@ impl App {
         if reused {
             #[cfg(feature = "fault-injection")]
             crate::faults::point("source-before-reference").await;
-            if self.config.local_cache.upload_cache && self.chunks.can_stage_reuse(c.id).await? {
+            if profile.upload_cache && self.chunks.can_stage_reuse(c.id).await? {
                 let (data, compressed) = self
                     .storage
                     .cache_payload(&c, Bytes::copy_from_slice(&raw))
@@ -151,7 +152,7 @@ impl App {
                 cache.clone(),
                 crate::content::codec::cache_compressed(
                     &c,
-                    self.config.local_cache.min_compression_savings_percent,
+                    profile.compression_min_savings_percent as u8,
                 ),
                 true,
             )

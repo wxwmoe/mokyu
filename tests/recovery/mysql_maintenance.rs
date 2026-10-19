@@ -172,7 +172,41 @@ async fn mysql_maintenance_contract() -> Result<()> {
         .bind(pending)
         .execute(db)
         .await?;
-    assert!(!backend.upload_expired(pending, 60., None).await?);
+    sqlx::query("UPDATE storage_profiles SET multipart_idle_timeout='60s' WHERE storage_id=?")
+        .bind(storage)
+        .execute(db)
+        .await?;
+    assert!(!backend.expired_uploads(100, None).await?.contains(&pending));
+    let expiring = Uuid::new_v4();
+    sqlx::query("INSERT INTO uploads(id,bucket_id,object_key,access_key,state,touched_at) VALUES(?,?,'expiring','fixture','active',UTC_TIMESTAMP(6)-INTERVAL 1 HOUR)").bind(expiring).bind(bucket).execute(db).await?;
+    assert!(
+        backend
+            .expired_uploads(100, Some(storage))
+            .await?
+            .contains(&expiring)
+    );
+    crate::model::MultipartStore::touch(&backend, expiring).await?;
+    assert!(!crate::model::MultipartStore::expire(&backend, expiring).await?);
+    sqlx::query("UPDATE uploads SET touched_at=UTC_TIMESTAMP(6)-INTERVAL 1 HOUR WHERE id=?")
+        .bind(expiring)
+        .execute(db)
+        .await?;
+    sqlx::query("UPDATE storage_profiles SET multipart_idle_timeout='2h' WHERE storage_id=?")
+        .bind(storage)
+        .execute(db)
+        .await?;
+    assert!(!crate::model::MultipartStore::expire(&backend, expiring).await?);
+    sqlx::query("UPDATE storage_profiles SET multipart_idle_timeout='60s' WHERE storage_id=?")
+        .bind(storage)
+        .execute(db)
+        .await?;
+    assert!(crate::model::MultipartStore::expire(&backend, expiring).await?);
+    assert!(!crate::model::MultipartStore::expire(&backend, expiring).await?);
+    assert!(!crate::model::MultipartStore::expire(&backend, Uuid::new_v4()).await?);
+    sqlx::query("DELETE FROM uploads WHERE id=?")
+        .bind(expiring)
+        .execute(db)
+        .await?;
     let gc = TaskControlStore::enqueue(&backend, "gc", None, json!({})).await?;
     queries::claim_task(gc, Uuid::new_v4()).execute(db).await?;
     backend.recover(true).await?;
@@ -199,14 +233,20 @@ async fn mysql_maintenance_contract() -> Result<()> {
             .await?,
         0
     );
-    assert!(backend.upload_expired(pending, 60., Some(storage)).await?);
     assert!(
-        !backend
-            .upload_expired(pending, 60., Some(Uuid::new_v4()))
+        backend
+            .expired_uploads(100, Some(storage))
             .await?
+            .contains(&pending)
+    );
+    assert!(
+        backend
+            .expired_uploads(100, Some(Uuid::new_v4()))
+            .await?
+            .is_empty()
     );
     assert_eq!(
-        backend.expired_uploads(60., 1, Some(storage)).await?,
+        backend.expired_uploads(1, Some(storage)).await?,
         vec![pending]
     );
     assert!(!backend.claim_stream(stream, None, Some(86400.)).await?);
@@ -341,6 +381,14 @@ async fn mysql_maintenance_contract() -> Result<()> {
     );
     assert!(backend.claim_physical(true, pack, 0., 86400.).await?);
     backend.delete_physical(true, pack, 0.).await?;
+    assert_eq!(history(&backend, "packs", 1).await?, 0);
+    for table in ["packs", "chunks", "chunk_encodings"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {table} SET deleted_at=UTC_TIMESTAMP(6)-INTERVAL 8 DAY WHERE state='deleted'"
+        )))
+        .execute(db)
+        .await?;
+    }
     assert_eq!(history(&backend, "packs", 1).await?, 1);
     assert_eq!(history(&backend, "chunks", 1).await?, 1);
     assert_eq!(history(&backend, "chunks", 10).await?, 1);
@@ -351,6 +399,11 @@ async fn mysql_maintenance_contract() -> Result<()> {
             .await?,
         0
     );
+    assert_eq!(history(&backend, "uploads", 10).await?, 0);
+    sqlx::query("UPDATE uploads SET touched_at=UTC_TIMESTAMP(6)-INTERVAL 8 DAY WHERE id=?")
+        .bind(upload)
+        .execute(db)
+        .await?;
     assert_eq!(history(&backend, "uploads", 10).await?, 1);
     assert!(!backend.gc_status().await?.0.is_empty());
     assert!(!backend.gc_paused().await?);

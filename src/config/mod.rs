@@ -7,8 +7,8 @@ pub(crate) mod runtime;
 pub use file::FileConfig;
 pub use limits::{Budget, bytes, cache_bytes, seconds};
 pub use runtime::{
-    BackendDefaults, Database, DatabaseType, Instance, LocalCache, Maintenance, MetricsSettings,
-    ReplicaDatabase, RequestSettings, RuntimeSettings, Secrets, UploadSettings, WebSettings,
+    Database, DatabaseType, Instance, Maintenance, MetricsSettings, ReplicaDatabase,
+    RequestSettings, RuntimeSettings, Secrets, UploadSettings, WebSettings,
 };
 
 #[derive(Clone, Deserialize)]
@@ -19,16 +19,6 @@ pub struct Config {
     pub replica_database: Option<ReplicaDatabase>,
     #[serde(skip)]
     pub instance: Instance,
-    #[serde(skip)]
-    pub backend_defaults: BackendDefaults,
-    #[serde(skip)]
-    pub local_cache: LocalCache,
-    #[serde(skip)]
-    pub local_compression: crate::content::compression::Config,
-    #[serde(skip)]
-    pub local_integrity: crate::worker::integrity::Config,
-    #[serde(skip)]
-    pub local_pack: crate::content::pack::Config,
     #[serde(flatten)]
     pub runtime: RuntimeSettings,
 }
@@ -84,17 +74,6 @@ mod tests {
         ] {
             control.gravatar_base_url = invalid.into();
             assert!(control.gravatar_origin().is_err(), "{invalid}");
-        }
-    }
-    #[test]
-    fn storage_minimum_age_is_optional_and_allows_zero() {
-        let mut storage: BackendDefaults = toml::from_str("").unwrap();
-        assert_eq!(storage.min_storage_seconds().unwrap(), 0);
-        storage.min_storage_duration = "30d".into();
-        assert_eq!(storage.min_storage_seconds().unwrap(), 30 * 86400);
-        for invalid in ["", "-1d", "30", "30days", "18446744073709551615d"] {
-            storage.min_storage_duration = invalid.into();
-            assert!(storage.min_storage_seconds().is_err());
         }
     }
     #[test]

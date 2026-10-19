@@ -1,6 +1,6 @@
 use crate::model::task::Execution;
 use crate::{app::App, config};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -22,26 +22,41 @@ impl App {
     }
 
     pub(crate) fn pack_creation_allowed(&self) -> bool {
-        self.config.local_pack.enabled && !self.pack_creation_paused.load(Ordering::Acquire)
+        !self.pack_creation_paused.load(Ordering::Acquire)
     }
     pub async fn pack_creation_change(&self, paused: bool) -> Result<Value> {
         let _coord = self.coord.lock().await;
         self.maintenance_store.pack_creation(paused).await?;
         self.pack_creation_paused.store(paused, Ordering::Release);
         self.wake_tasks.notify_waiters();
-        Ok(json!({"paused":paused,"enabled":self.pack_creation_allowed()}))
+        let configured = self
+            .storage_profiles
+            .enabled_profiles()
+            .await?
+            .iter()
+            .any(|profile| profile.pack_enabled);
+        Ok(json!({"paused":paused,"enabled":configured && self.pack_creation_allowed()}))
     }
-    pub(crate) fn maintenance_schedule(&self) -> [(&'static str, &str, bool); 7] {
-        let p = &self.config.local_pack;
-        [
-            ("pack", &p.interval, self.pack_creation_allowed()),
-            ("reuse", &p.reuse_interval, true),
-            ("reclaim", &p.reclaim_interval, true),
-            ("repack", &p.repack_interval, self.pack_creation_allowed()),
-            ("range", &p.range_interval, p.range_optimization),
-            ("gc", &self.config.maintenance.interval, true),
-            ("cleanup", &self.config.maintenance.interval, true),
-        ]
+    pub(crate) async fn maintenance_schedule(&self) -> Result<Vec<(&'static str, u64, bool)>> {
+        let profiles = self.storage_profiles.enabled_profiles().await?;
+        let mut schedule = Vec::new();
+        for policy in ["pack", "reuse", "reclaim", "repack", "range"] {
+            let minimum = profiles
+                .iter()
+                .filter(|profile| match policy {
+                    "pack" | "repack" => profile.pack_enabled && self.pack_creation_allowed(),
+                    "range" => profile.pack_range_enabled,
+                    _ => true,
+                })
+                .map(|profile| profile.maintenance_interval(policy))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .min();
+            schedule.push((policy, minimum.unwrap_or(0), minimum.is_some()));
+        }
+        let interval = config::seconds(&self.config.maintenance.interval)?;
+        schedule.extend([("gc", interval, true), ("cleanup", interval, true)]);
+        Ok(schedule)
     }
 
     pub(crate) async fn maintenance_paused(&self, policy: &str) -> Result<bool> {
@@ -51,13 +66,15 @@ impl App {
     pub async fn maintenance_status(&self) -> Result<Value> {
         let mut rows: Vec<Value> = self.maintenance_store.controls().await?;
         let global = self.maintenance.load(Ordering::Acquire);
+        let schedule = self.maintenance_schedule().await?;
+        let profiles = self.storage_profiles.enabled_profiles().await?;
+        let configured = profiles.iter().any(|profile| profile.pack_enabled);
         for row in &mut rows {
-            let (_, interval, enabled) = self
-                .maintenance_schedule()
-                .into_iter()
+            let (_, seconds, enabled) = schedule
+                .iter()
+                .copied()
                 .find(|(policy, _, _)| row["policy"] == *policy)
                 .unwrap();
-            let seconds = config::seconds(interval)?;
             row["enabled"] = json!(enabled);
             row["interval_seconds"] = json!(seconds);
             row["next_run_at"] =
@@ -86,16 +103,17 @@ impl App {
             })
             .collect();
         Ok(
-            json!({"maintenance":global,"controls":rows,"concurrency":self.config.local_pack.maintenance_concurrency,
-            "pack_configured":self.config.local_pack.enabled,"pack_creation_paused":self.pack_creation_paused.load(Ordering::Acquire),
-            "pack_creation_enabled":self.pack_creation_allowed(),"preparing_packs":preparing,"active_operations":self.active.lock().unwrap().len(),
-            "backend_prefixes":backend_prefixes,"min_storage_duration":self.config.backend_defaults.min_storage_duration}),
+            json!({"maintenance":global,"controls":rows,"concurrency":self.budget.cpu_jobs.clamp(1, 4),
+            "pack_configured":configured,"pack_creation_paused":self.pack_creation_paused.load(Ordering::Acquire),
+            "pack_creation_enabled":configured && self.pack_creation_allowed(),"preparing_packs":preparing,"active_operations":self.active.lock().unwrap().len(),
+            "backend_prefixes":backend_prefixes,"profiles":profiles}),
         )
     }
 
     pub async fn maintenance_change(&self, policy: &str, paused: bool) -> Result<Value> {
         if !self
             .maintenance_schedule()
+            .await?
             .iter()
             .any(|(k, _, _)| *k == policy)
         {
@@ -157,11 +175,7 @@ impl App {
         } else {
             None
         };
-        let batch = profile
-            .as_ref()
-            .and_then(|value| value.maintenance_concurrency)
-            .unwrap_or(self.config.maintenance.batch_size as i32)
-            .max(1) as usize;
+        let batch = self.config.maintenance.batch_size as usize;
         let maintenance_byte_budget = profile
             .as_ref()
             .and_then(|value| value.maintenance_byte_budget.as_deref())
@@ -177,9 +191,8 @@ impl App {
                     batch,
                     profile
                         .as_ref()
-                        .map(|value| config::seconds(&value.upload_retention))
-                        .transpose()?
-                        .unwrap_or(config::seconds(&self.config.maintenance.upload_retention)?),
+                        .context("missing scoped storage profile")
+                        .and_then(|profile| config::seconds(&profile.upload_retention))?,
                 )
                 .await?
             } else {
@@ -204,7 +217,7 @@ impl App {
             )
         } else {
             let report = if let Some(storage_id) = scoped_storage {
-                json!({"storage_id":storage_id,"deleted":self.cleanup_scoped(storage_id,batch,profile.as_ref().map(|value| config::seconds(&value.deleted_chunk_retention)).transpose()?.unwrap_or(config::seconds(&self.config.maintenance.deleted_chunk_retention)?)).await?})
+                json!({"storage_id":storage_id,"deleted":self.cleanup_scoped(storage_id,batch,config::seconds(&profile.as_ref().context("missing scoped storage profile")?.deleted_chunk_retention)?).await?})
             } else {
                 self.cleanup_history().await?
             };
@@ -243,7 +256,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
         {
             let controls: Vec<(String, bool, Option<f64>)> =
                 app.maintenance_store.schedule().await?;
-            for (policy, interval, enabled) in app.maintenance_schedule() {
+            for (policy, interval, enabled) in app.maintenance_schedule().await? {
                 let (_, paused, age) = controls.iter().find(|(k, _, _)| k == policy).unwrap();
                 if !enabled
                     || *paused
@@ -251,7 +264,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 {
                     continue;
                 }
-                let due = age.is_none_or(|age| age >= config::seconds(interval).unwrap() as f64);
+                let due = age.is_none_or(|age| age >= interval as f64);
                 let changed = policy == "reuse" && app.maintenance_store.reuse_due().await?;
                 if due || changed {
                     let result = if matches!(policy, "gc" | "cleanup") {

@@ -59,7 +59,7 @@ def main():
         configure(cache_enabled=True, success=False)
         configure(upload_cache=True, success=False)
     configure(pack_enabled=True, success=False)
-    for size in [0, 1, 4096, 1024 * 1024 + 17, 5 * 1024 * 1024 + 31]:
+    for size in [0, 1, 4096, 256 * 1024 - 1, 256 * 1024, 256 * 1024 + 1, 1024 * 1024 + 17, 5 * 1024 * 1024 + 31]:
         data = (b'raw-object-payload-' * (size // len(b'raw-object-payload-') + 1))[:size]
         key = str(size)
         reply = put(key, data, ContentType='application/octet-stream', Metadata={'raw-test': key})

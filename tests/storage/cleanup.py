@@ -51,7 +51,10 @@ def upload(key, body, complete=False):
 
 cli('gc', 'pause')
 policy = cli('cleanup', 'status')
-assert policy['deleted_chunk_retention'] == '7d' and policy['upload_retention'] == '24h'
+storage_name = db.execute("SELECT s.name FROM storages s JOIN buckets b ON b.storage_id=s.id WHERE b.name=%s", (bucket,)).fetchone()[0]
+profile = cli('storage', 'profile', 'show', storage_name)
+assert profile['deleted_chunk_retention'] == '7d' and profile['upload_retention'] == '24h'
+assert profile['multipart_idle_timeout'] == '72h'
 assert policy['task_retention'] == '30d' and policy['batch_size'] == 3 and policy['max_duration'] == '1s'
 body = os.urandom(512 * 1024)
 finished, manifest = upload('cleanup/finished', body, True)

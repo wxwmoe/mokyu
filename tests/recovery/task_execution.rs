@@ -120,7 +120,6 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
             &backend,
             TaskFinish {
                 execution: old,
-                reuse_seconds: 60,
                 error,
             },
         )
@@ -171,7 +170,6 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
         &backend,
         TaskFinish {
             execution: old,
-            reuse_seconds: 60,
             error: None,
         },
     )
@@ -192,7 +190,6 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
         &backend,
         TaskFinish {
             execution: current,
-            reuse_seconds: 60,
             error: None,
         },
     )

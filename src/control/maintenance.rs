@@ -88,7 +88,7 @@ pub(super) struct MaintenanceStatus {
     preparing_packs: String,
     active_operations: usize,
     backend_prefixes: Vec<BackendPrefix>,
-    min_storage_duration: String,
+    profiles: Vec<crate::storage::profile::StorageProfile>,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 struct BackendPrefix {

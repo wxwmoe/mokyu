@@ -173,7 +173,6 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         .await?;
     let failure = |token| TaskFinish {
         execution: Execution { id: task, token },
-        reuse_seconds: 60,
         error: Some("interrupted batch".into()),
     };
     first.finish(failure(tokens[winner])).await?;
@@ -254,7 +253,6 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         local
             .finish(TaskFinish {
                 execution: old,
-                reuse_seconds: 60,
                 error: Some("stale".into()),
             })
             .await?;
@@ -266,7 +264,6 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         local
             .finish(TaskFinish {
                 execution: current,
-                reuse_seconds: 60,
                 error: None,
             })
             .await?;

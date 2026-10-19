@@ -54,6 +54,9 @@ pub(crate) struct Transfer {
     pub(crate) created_at: DateTime<Utc>,
     pub(crate) touched_at: DateTime<Utc>,
     pub(crate) expires_at: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) multipart_idle_timeout: String,
     pub(crate) can_resume: bool,
 }
 
@@ -180,6 +183,7 @@ pub(crate) trait MultipartStore: Send + Sync {
     async fn begin_complete(&self, authority: &Permit, upload: Uuid, hash: &str) -> Result<()>;
     async fn retry_complete(&self, upload: Uuid) -> Result<()>;
     async fn abort(&self, authority: &Permit, upload: Uuid) -> Result<()>;
+    async fn expire(&self, upload: Uuid) -> Result<bool>;
     async fn parts(&self, upload: Uuid, after: i32, limit: i64) -> Result<Vec<UploadPart>>;
     async fn uploads(
         &self,

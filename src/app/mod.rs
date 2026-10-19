@@ -230,7 +230,7 @@ pub struct App {
     pub pack_creation_paused: std::sync::atomic::AtomicBool,
     pub gc_running: std::sync::atomic::AtomicBool,
     started_mode: String,
-    pub(crate) restart_required: std::sync::atomic::AtomicBool,
+    pub(crate) restart_required: Arc<std::sync::atomic::AtomicBool>,
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: Arc<tokio::sync::Notify>,
     hashes: Mutex<HashMap<(Uuid, [u8; 32]), Weak<tokio::sync::Mutex<()>>>>,
@@ -256,6 +256,12 @@ impl App {
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("another gateway owns this data directory")?;
         let (stores, owner) = crate::model::connect(&config, &mut secrets, &budget, role).await?;
+        stores
+            .storage_profiles
+            .initialize(&config.instance.min_free_space)
+            .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("storage-profiles-initialized").await;
         let defaults = crate::model::runtime_defaults(&config);
         stores.runtime_settings.ensure(&defaults).await?;
         let runtime_defaults = defaults
@@ -265,7 +271,18 @@ impl App {
         let runtime_revisions =
             crate::model::load_runtime_settings(stores.runtime_settings.as_ref(), &mut config)
                 .await?;
-        let mut budget = config.budget()?;
+        let mut profiles = Vec::new();
+        for storage in stores.storage_records.list().await? {
+            let profile = stores.storage_profiles.load(storage.id).await?;
+            crate::storage::profile::validate(&profile, &storage.storage_type)?;
+            if storage.enabled {
+                profiles.push(profile);
+            }
+        }
+        let mut budget = config.budget_for(&profiles)?;
+        for profile in &profiles {
+            profile.validate_budget(&config, &budget)?;
+        }
         if role != "data" {
             budget.database_read_connections = 0;
         }
@@ -279,6 +296,7 @@ impl App {
         let maintenance = Arc::new(std::sync::atomic::AtomicBool::new(state.maintenance));
         let pack_creation_paused = state.pack_creation_paused;
         let secrets = Arc::new(secrets);
+        let restart_required = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let storage = Arc::new(
             Storage::new(
                 &config,
@@ -291,6 +309,7 @@ impl App {
                 stores.managed_keys.clone(),
                 stores.storage_records.clone(),
                 maintenance.clone(),
+                restart_required.clone(),
                 role != "single",
                 use_storage,
             )
@@ -366,7 +385,7 @@ impl App {
             pack_creation_paused: pack_creation_paused.into(),
             gc_running: false.into(),
             started_mode: state.mode,
-            restart_required: false.into(),
+            restart_required,
             wake_gc: Arc::new(tokio::sync::Notify::new()),
             wake_tasks: Arc::new(tokio::sync::Notify::new()),
             hashes: Mutex::new(HashMap::new()),

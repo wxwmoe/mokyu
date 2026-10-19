@@ -91,7 +91,6 @@ pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
         (
             "uploads",
             json!({
-                "idle_timeout": configured.uploads.idle_timeout.clone(),
                 "sweep_interval": configured.uploads.sweep_interval.clone(),
                 "client_idle_timeout": configured.uploads.client_idle_timeout.clone(),
                 "max_active_uploads": configured.uploads.max_active_uploads,

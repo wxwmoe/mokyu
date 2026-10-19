@@ -1,4 +1,4 @@
--- Current mysql schema, matching migration 0020.
+-- Current mysql schema, matching migration 0022.
 -- The initializer records schema_version and migration checksums after this script succeeds.
 
 CREATE TABLE `access_state` (
@@ -242,6 +242,8 @@ CREATE TABLE `storage_profiles` (
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     cdc_enabled boolean NOT NULL DEFAULT TRUE,
     deduplication_enabled boolean NOT NULL DEFAULT FALSE,
+  `multipart_idle_timeout` varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '24h',
+  `min_free_space` varchar(32) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
   PRIMARY KEY (`storage_id`),
   CONSTRAINT `storage_profiles_cache_entries` CHECK (((`cache_entries` is null) or (`cache_entries` > 0))),
   CONSTRAINT `storage_profiles_compression_bytes` CHECK ((`compression_min_savings_bytes` >= 0)),
@@ -1072,3 +1074,11 @@ ALTER TABLE fragments ADD COLUMN file_id binary(16), ADD COLUMN file_offset bigi
     ADD FOREIGN KEY (file_id) REFERENCES multipart_files(id),
     ADD CHECK ((file_id IS NULL)=(file_offset IS NULL) AND (file_offset IS NULL OR file_offset>=0)),
     ADD INDEX fragments_file (file_id,file_offset);
+
+CREATE TABLE storage_maintenance (
+    storage_id binary(16) NOT NULL,
+    policy varchar(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    last_scheduled_at datetime(6) NOT NULL,
+    PRIMARY KEY(storage_id,policy),
+    CONSTRAINT storage_maintenance_storage_fk FOREIGN KEY(storage_id) REFERENCES storages(id) ON DELETE CASCADE
+) ENGINE=InnoDB;

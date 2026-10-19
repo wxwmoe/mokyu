@@ -813,7 +813,7 @@ impl StorageInitializer for StorageInitialization {
         upload: Option<i32>,
         control: Option<i32>,
         mut profile: Option<StorageProfile>,
-    ) -> Result<()> {
+    ) -> Result<StorageProfile> {
         ensure!(!self.attempted, "storage preparation was already attempted");
         self.attempted = true;
         if let Some(profile) = &mut profile {
@@ -833,9 +833,13 @@ impl StorageInitializer for StorageInitialization {
         // Validate native constraints, then release the writer before external storage I/O.
         let mut tx = self.write.begin_with(queries::BEGIN_WRITE).await?;
         prepared.insert(&mut tx).await?;
+        let effective = queries::storage_profile(record.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        validate_storage_profile(&effective, &record.r#type)?;
         tx.rollback().await?;
         self.prepared = Some(prepared);
-        Ok(())
+        Ok(effective)
     }
     async fn finish(mut self: Box<Self>) -> Result<()> {
         let prepared = self.prepared.take().context("storage was not prepared")?;
@@ -2777,18 +2781,37 @@ pub(super) async fn abort_multipart(
     pool: &sqlx::SqlitePool,
     authority: &crate::authorization::Permit,
     upload: uuid::Uuid,
-) -> Result<()> {
+    expired: bool,
+) -> Result<bool> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     lock_permit(&mut tx, authority).await?;
-    let parent = queries::lock_upload(upload)
+    let Some(parent) = queries::lock_upload(upload)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| s3s::s3_error!(NoSuchUpload))?;
+    else {
+        if expired {
+            return Ok(false);
+        }
+        return Err(s3s::s3_error!(NoSuchUpload).into());
+    };
+    if expired && parent.state != "active" {
+        return Ok(false);
+    }
     ensure!(
         matches!(parent.state.as_str(), "active" | "completing"),
         s3s::s3_error!(NoSuchUpload)
     );
-    queries::abort_multipart(upload).execute(&mut *tx).await?;
+    if queries::abort_multipart(upload, expired)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        == 0
+    {
+        if expired {
+            return Ok(false);
+        }
+        return Err(s3s::s3_error!(NoSuchUpload).into());
+    }
     let mut accounts = lock_quota(&mut tx, parent.bucket_id).await?;
     close_upload_quota(&mut tx, &mut accounts, upload).await?;
     for stream in queries::upload_part_streams(upload)
@@ -2811,7 +2834,7 @@ pub(super) async fn abort_multipart(
         .await?;
     }
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 pub(super) async fn upload_transfers(
@@ -4436,7 +4459,6 @@ pub(super) async fn cache_seal(
     pool: &SqlitePool,
     stream: Uuid,
     eof: bool,
-    maximum: u64,
 ) -> Result<bool> {
     if eof {
         queries::seal_stream_uploads(stream).execute(pool).await?;
@@ -4447,7 +4469,8 @@ pub(super) async fn cache_seal(
     let mut total = 0u64;
     let mut end = None;
     let mut sealed = false;
-    for (id, offset, size) in rows {
+    for (id, offset, size, maximum) in rows {
+        let maximum = crate::config::bytes(&maximum)?;
         if !ids.is_empty() && (end != Some(offset) || total + size as u64 > maximum) {
             sealed = true;
             break;
@@ -4488,7 +4511,7 @@ pub(super) async fn cache_flush(pool: &SqlitePool) -> Result<(Uuid, bool)> {
     Ok((id, false))
 }
 
-pub(super) async fn cache_enqueue(pool: &SqlitePool, maximum: u64) -> Result<bool> {
+pub(super) async fn cache_enqueue(pool: &SqlitePool) -> Result<bool> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     if let Some(id) = queries::retryable_upload().fetch_optional(&mut *tx).await? {
         queries::queue_upload_retry(id).execute(&mut *tx).await?;
@@ -4506,6 +4529,8 @@ pub(super) async fn cache_enqueue(pool: &SqlitePool, maximum: u64) -> Result<boo
         serde_json::json!({"first":first,"stream_id":stream,"source_pack_id":source}),
     )
     .await?;
+    let (maximum, _) = queries::cache_policy(first).fetch_one(&mut *tx).await?;
+    let maximum = crate::config::bytes(&maximum)?;
     let candidates = queries::pending_upload_segment(first, stream, source)
         .fetch_all(&mut *tx)
         .await?;
@@ -4536,8 +4561,6 @@ pub(super) async fn cache_batch(
     task: Execution,
     detail: &Value,
     flush: bool,
-    timeout: u64,
-    maximum: u64,
 ) -> Result<CacheBatch> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     lock_execution(&mut tx, task).await?;
@@ -4573,6 +4596,9 @@ pub(super) async fn cache_batch(
     {
         return Ok(CacheBatch::Release(first));
     }
+    let (maximum, timeout) = queries::cache_policy(first).fetch_one(&mut *tx).await?;
+    let maximum = crate::config::bytes(&maximum)?;
+    let timeout = crate::config::seconds(&timeout)?;
     let Some((stream, offset, source, expired)) = queries::pending_upload(
         first,
         i64::try_from(timeout)?
@@ -4765,13 +4791,10 @@ pub(super) async fn finish_task(pool: &SqlitePool, input: crate::model::TaskFini
     };
     let failed = state == "running" && input.error.is_some();
     if failed && matches!(task_type.as_str(), "pack" | "unpack") {
-        let delay = i64::try_from(input.reuse_seconds)?
-            .checked_mul(1_000_000)
-            .context("task retry delay overflow")?;
-        queries::defer_pack_changes(task.id, delay)
+        queries::defer_pack_changes(task.id)
             .execute(&mut *tx)
             .await?;
-        queries::defer_pack_maintenance(task.id, delay)
+        queries::defer_pack_maintenance(task.id)
             .execute(&mut *tx)
             .await?;
     }
@@ -5127,12 +5150,7 @@ pub(super) async fn commit_rewrite_pack(
     Ok(())
 }
 
-pub(super) async fn start_pack(
-    pool: &SqlitePool,
-    policy: &str,
-    automatic: bool,
-    reuse_seconds: f64,
-) -> Result<Value> {
+pub(super) async fn start_pack(pool: &SqlitePool, policy: &str, automatic: bool) -> Result<Value> {
     ensure!(
         matches!(policy, "pack" | "reuse" | "reclaim" | "repack" | "range"),
         "invalid pack policy"
@@ -5147,18 +5165,31 @@ pub(super) async fn start_pack(
     {
         return Ok(serde_json::json!({"task_id":id,"existing":true}));
     }
-    if automatic
-        && let Some(id) = queries::recent_pack_failure(policy, reuse_seconds)
-            .fetch_optional(&mut *tx)
-            .await?
-    {
-        return Ok(serde_json::json!({"task_id":id,"retry_pending":true}));
-    }
     let storages = queries::pack_storages(Some(policy))
         .fetch_all(&mut *tx)
         .await?;
     let detail =
         serde_json::json!({"policy":policy,"upper_time":chrono::Utc::now(),"automatic":automatic});
+    let mut due = Vec::new();
+    for row in storages {
+        let profile = queries::storage_profile(row.0).fetch_one(&mut *tx).await?;
+        if automatic
+            && !queries::pack_policy_due(row.0, policy, profile.maintenance_interval(policy)?)
+                .fetch_one(&mut *tx)
+                .await?
+        {
+            continue;
+        }
+        queries::pack_policy_scheduled(row.0, policy)
+            .execute(&mut *tx)
+            .await?;
+        due.push(row);
+    }
+    let storages = due;
+    if automatic && storages.is_empty() {
+        tx.commit().await?;
+        return Ok(serde_json::json!({"idle":true}));
+    }
     let id = enqueue_storage_task(&mut tx, "pack", detail, &storages).await?;
     tx.commit().await?;
     Ok(serde_json::json!({"task_id":id}))
@@ -6367,14 +6398,13 @@ pub(super) async fn collect_inventory(
             chunks[field]=json!(physical.as_array().unwrap().iter().filter(|p|states.contains(&p["state"].as_str().unwrap_or_default())).map(|p|p["stored_bytes"].as_i64().unwrap_or(0)).sum::<i64>());
         }
         let live=queries::inventory_live().fetch_one(&mut *tx).await?;
-        let grace=crate::config::seconds(&maintenance.unreferenced_grace)? as f64;
-        let mut unreferenced=queries::inventory_unreferenced(grace).fetch_one(&mut *tx).await?;
-        let reclaimable=queries::inventory_reclaimable(grace).fetch_one(&mut *tx).await?;
+        let mut unreferenced=queries::inventory_unreferenced().fetch_one(&mut *tx).await?;
+        let reclaimable=queries::inventory_reclaimable().fetch_one(&mut *tx).await?;
         unreferenced["stored_bytes"]=reclaimable["bytes"].clone();
         unreferenced["eligible_bytes"]=reclaimable["eligible"].clone();
         let tasks=queries::inventory_tasks().fetch_one(&mut *tx).await?;
         let uploads=queries::inventory_uploads().fetch_one(&mut *tx).await?;
-        let cleanup=queries::inventory_cleanup(&mut tx,crate::config::seconds(&maintenance.deleted_chunk_retention)? as f64,crate::config::seconds(&maintenance.upload_retention)? as f64,crate::config::seconds(&maintenance.task_retention)? as f64).await?;
+        let cleanup=queries::inventory_cleanup(&mut tx,crate::config::seconds(&maintenance.task_retention)? as f64).await?;
         let database=queries::inventory_database().fetch_all(&mut *tx).await?;
         let usage=queries::collect_usage().fetch_all(&mut *tx).await?;
         tx.commit().await?;

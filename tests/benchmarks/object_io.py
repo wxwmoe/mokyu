@@ -148,7 +148,7 @@ def measure(fixture, credentials, database=None):
                         if writing:
                             committed.append(sequence)
                 except Exception as error:
-                    code = getattr(error, 'response', {}).get('Error', {}).get('Code')
+                    code = (getattr(error, 'response', None) or {}).get('Error', {}).get('Code')
                     with lock:
                         errors[code or type(error).__name__] += 1
 

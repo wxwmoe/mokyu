@@ -93,10 +93,18 @@ async fn page(app: &App, actor: &Identity, q: Filter, id: Option<Uuid>) -> Resul
             limit,
         )
         .await?;
-    let idle = config::seconds(&app.config.uploads.idle_timeout)?;
     for row in &mut rows {
-        row.expires_at = matches!(row.state.as_str(), "active" | "completing")
-            .then(|| row.touched_at + chrono::Duration::seconds(idle as i64));
+        row.expires_at = if matches!(row.state.as_str(), "active" | "completing") {
+            Some(
+                row.touched_at
+                    .checked_add_signed(chrono::Duration::seconds(config::seconds(
+                        &row.multipart_idle_timeout,
+                    )? as i64))
+                    .context("Multipart expiry exceeds the timestamp range")?,
+            )
+        } else {
+            None
+        };
         row.can_resume = row.state == "active" && row.user_id == Some(actor.id);
     }
     let next = if more {

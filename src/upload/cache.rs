@@ -35,7 +35,10 @@ impl App {
         compressed: bool,
         new: bool,
     ) -> Result<bool> {
-        if self.role == "single" && !self.config.local_cache.upload_cache {
+        let profile = self
+            .storage
+            .profile(c.storage_id.context("chunk has no store")?)?;
+        if !profile.upload_cache {
             return Ok(false);
         }
         if self.upload_cache.bypass(stream).await? {
@@ -69,7 +72,7 @@ impl App {
             pin.staging_object_key.clone()
         };
         let size = pin.size as i64;
-        let timeout = config::seconds(&self.config.local_pack.upload_cache_timeout)?;
+        let timeout = config::seconds(&profile.pack_upload_flush_timeout)?;
         let local = !pin.remote;
         let local_id = if local {
             Some(
@@ -112,11 +115,7 @@ impl App {
     pub async fn seal_uploads(&self, stream: Uuid, eof: bool) -> Result<()> {
         if self
             .upload_cache
-            .seal(
-                stream,
-                eof || !self.pack_creation_allowed(),
-                config::bytes(&self.config.local_pack.max_size)?,
-            )
+            .seal(stream, eof || !self.pack_creation_allowed())
             .await?
         {
             self.wake_tasks.notify_waiters();
@@ -127,7 +126,7 @@ impl App {
         let (total, limit, used) = self.storage.disk.upload_capacity()?;
         let (pending, pins) = self.upload_cache.status().await?;
         Ok(
-            json!({"enabled":self.config.local_cache.upload_cache,"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"fallbacks":FALLBACKS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100}),
+            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"fallbacks":FALLBACKS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100}),
         )
     }
     pub async fn cache_flush_start(&self) -> Result<Value> {
@@ -148,9 +147,7 @@ impl App {
         if self.ensure_mode().is_err() || self.maintenance.load(Ordering::Acquire) {
             return Ok(false);
         }
-        self.upload_cache
-            .enqueue(config::bytes(&self.config.local_pack.max_size)?)
-            .await
+        self.upload_cache.enqueue().await
     }
     pub async fn upload_batch(&self, task: Execution, detail: Value, flush: bool) -> Result<bool> {
         if !flush && self.maintenance.load(Ordering::Acquire) {
@@ -161,16 +158,7 @@ impl App {
         crate::faults::point("upload-before-prepare").await;
         let selection = self.coord.lock().await;
         self.storage_writable()?;
-        let batch = self
-            .upload_cache
-            .batch(
-                task,
-                &detail,
-                flush,
-                config::seconds(&self.config.local_pack.upload_cache_timeout)?,
-                config::bytes(&self.config.local_pack.max_size)?,
-            )
-            .await?;
+        let batch = self.upload_cache.batch(task, &detail, flush).await?;
         match batch {
             CacheBatch::Wait => {
                 drop(selection);

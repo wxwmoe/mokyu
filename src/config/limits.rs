@@ -11,6 +11,8 @@ pub struct Budget {
     pub cpu_jobs: usize,
     pub data_slots: usize,
     pub slot_bytes: u64,
+    #[serde(skip)]
+    pub compression_workspace: u64,
     pub upload_concurrency: usize,
     pub read_concurrency: usize,
     pub storage_concurrency: usize,
@@ -79,8 +81,6 @@ impl Config {
         c.web.validate()?;
         cache_bytes(&c.instance.thumbnail_cache_size)?;
         seconds(&c.instance.compression_idle_timeout)?;
-        c.local_compression.validate()?;
-        c.local_pack.validate()?;
         bytes(&c.requests.s3_chunk_limit)?;
         ensure!(
             !c.requests.s3_region.trim().is_empty(),
@@ -89,18 +89,11 @@ impl Config {
         if let Some(domain) = &c.requests.s3_domain {
             s3s::host::SingleDomain::new(domain)?;
         }
-        ensure!(
-            c.backend_defaults.max_retries <= 100,
-            "storage.max_retries must be 0..100"
-        );
         seconds(&c.requests.read_idle_timeout)?;
         seconds(&c.requests.upload_idle_timeout)?;
         seconds(&c.metrics.access_flush_interval)?;
         ensure!(
-            seconds(&c.metrics.access_retention)?
-                >= seconds(&c.local_pack.range_repack_window)?
-                    .max(seconds(&c.local_pack.range_window)?)
-                    .max(7 * 24 * 3600),
+            seconds(&c.metrics.access_retention)? >= 7 * 24 * 3600,
             "statistics.access_retention must cover seven days and the configured Range windows"
         );
         for value in [
@@ -118,14 +111,6 @@ impl Config {
                 value > 0,
                 "connection and storage slot budgets must be positive"
             );
-        }
-        for value in [
-            &c.backend_defaults.connect_timeout,
-            &c.backend_defaults.request_timeout,
-            &c.backend_defaults.retry_timeout,
-            &c.backend_defaults.priority_aging,
-        ] {
-            seconds(value)?;
         }
         for listen in [
             &c.instance.listen_s3,
@@ -180,17 +165,11 @@ impl Config {
                     && c.uploads.staging_bytes_limit.is_none()),
             "shared staging requires PostgreSQL"
         );
-        c.backend_defaults.min_storage_seconds()?;
         for value in [
-            &c.uploads.idle_timeout,
             &c.uploads.sweep_interval,
             &c.uploads.client_idle_timeout,
             &c.maintenance.interval,
-            &c.maintenance.unreferenced_grace,
-            &c.maintenance.interval,
             &c.maintenance.max_duration,
-            &c.maintenance.deleted_chunk_retention,
-            &c.maintenance.upload_retention,
             &c.maintenance.task_retention,
             &c.maintenance.audit_retention,
             &c.metrics.refresh_interval,
@@ -210,7 +189,6 @@ impl Config {
                 "instance.name must contain 1..128 safe bytes"
             );
         }
-        c.local_integrity.validate()?;
         ensure!(
             seconds(&c.metrics.query_timeout)? <= i32::MAX as u64 / 1000,
             "statistics.query_timeout exceeds PostgreSQL's statement timeout limit"
@@ -246,14 +224,6 @@ impl Config {
             cache_bytes(v)?;
         }
         ensure!(
-            c.local_cache.min_compression_savings_percent <= 100,
-            "cache.min_compression_savings_percent must be 0..100"
-        );
-        ensure!(
-            c.maintenance.batch_size > 0 && c.maintenance.batch_size <= 10_000,
-            "gc.batch_size must be 1..10000"
-        );
-        ensure!(
             c.maintenance.batch_size > 0 && c.maintenance.batch_size <= 10_000,
             "cleanup.batch_size must be 1..10000"
         );
@@ -269,6 +239,13 @@ impl Config {
     }
 
     pub fn budget(&self) -> Result<Budget> {
+        self.budget_for(&[])
+    }
+
+    pub(crate) fn budget_for(
+        &self,
+        profiles: &[crate::storage::profile::StorageProfile],
+    ) -> Result<Budget> {
         let mut environment = Environment {
             available_cpus: std::thread::available_parallelism().ok().map(usize::from),
             ..Environment::default()
@@ -352,15 +329,21 @@ impl Config {
             .transpose()?
             .unwrap_or(memory / 4);
         let aws_chunk = bytes(&self.requests.s3_chunk_limit)?;
-        let mut compression_budget = self.local_compression.clone();
-        if matches!(
-            self.local_pack.compression_strategy,
-            Some(crate::content::pack::CompressionStrategy::Sample)
-        ) {
-            compression_budget.strategy = crate::content::compression::Strategy::Sample;
+        // Reserve room for a newly created default backend as well as existing profiles.
+        let mut workspace = crate::content::compression::Config::default().workspace_bytes()?;
+        let mut maximum = 32 * 1024 * 1024;
+        for profile in profiles {
+            workspace = workspace.max(
+                profile
+                    .compression_config(&self.instance.compression_idle_timeout)
+                    .workspace_bytes()?,
+            );
+            if profile.pack_enabled {
+                maximum = maximum.max(bytes(&profile.pack_max_size)?);
+            }
         }
         let slot_bytes = SLOT_BYTES
-            .checked_add(compression_budget.workspace_bytes()?)
+            .checked_add(workspace)
             .context("compression workspace budget overflow")?
             .checked_add(
                 aws_chunk
@@ -371,23 +354,16 @@ impl Config {
             .context("AWS chunk limit overflow")?;
         ensure!(
             slot_bytes <= usize::MAX as u64 && slot_bytes <= inflight / 2 && inflight <= memory / 2,
-            "stream_memory_budget must allow two data slots ({} bytes each at compression.level={}, compression.sample_level={}) and leave half of memory for runtime/cache/OS",
-            slot_bytes,
-            self.local_compression.level,
-            self.local_compression.sample_level
+            "stream_memory_budget must allow two data slots ({} bytes each) and leave half of memory for runtime/cache/OS",
+            slot_bytes
         );
         let slots = (inflight / slot_bytes) as usize;
         let remaining = memory
             .saturating_sub(slots as u64 * slot_bytes)
             .saturating_sub(memory / 4);
-        let pack_required = if self.local_pack.enabled {
-            let maximum = bytes(&self.local_pack.max_size)?;
+        let pack_required = {
             let payload = maximum + 12 + 44 * (maximum / crate::content::codec::MIN as u64 + 1);
-            (payload * 4 + compression_budget.workspace_bytes()?).div_ceil(1024 * 1024)
-                * 1024
-                * 1024
-        } else {
-            0
+            (payload * 4 + workspace).div_ceil(1024 * 1024) * 1024 * 1024
         };
         let cache_maximum = remaining
             .saturating_sub(pack_required.saturating_mul(2))
@@ -408,12 +384,10 @@ impl Config {
             * 65536;
         let pack_memory_units =
             ((remaining - response_cache_bytes) / 2 / (1024 * 1024)).min(u32::MAX as u64) as u32;
-        if self.local_pack.enabled {
-            let maximum = bytes(&self.local_pack.max_size)?;
+        {
             let payload = maximum + 12 + 44 * (maximum / crate::content::codec::MIN as u64 + 1);
             ensure!(
-                (payload * 4 + compression_budget.workspace_bytes()?).div_ceil(1024 * 1024)
-                    <= u64::from(pack_memory_units),
+                (payload * 4 + workspace).div_ceil(1024 * 1024) <= u64::from(pack_memory_units),
                 "pack.max_size exceeds effective memory; lower the pack size or increase the container memory limit"
             );
         }
@@ -475,6 +449,7 @@ impl Config {
             cpu_jobs,
             data_slots: slots,
             slot_bytes,
+            compression_workspace: workspace,
             upload_concurrency: uploads,
             read_concurrency: reads,
             storage_concurrency: backend,
