@@ -4,7 +4,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-pub(crate) type RecoveryFragment = (Uuid, i32, Vec<u8>, Option<Uuid>, Option<String>);
+#[derive(sqlx::FromRow)]
+pub(crate) struct RecoveryFragment {
+    pub(crate) id: Uuid,
+    #[sqlx(flatten)]
+    pub(crate) source: crate::model::FragmentSource,
+}
 
 #[must_use = "keep the deletion guard alive until fragment I/O completes"]
 pub(crate) struct FragmentCleanup {
@@ -12,6 +17,7 @@ pub(crate) struct FragmentCleanup {
     pub(crate) owner: Option<Uuid>,
     pub(crate) storage: Option<Uuid>,
     pub(crate) key: Option<String>,
+    pub(crate) file: Option<Uuid>,
     pub(crate) deletion: Box<dyn FragmentDeletion>,
 }
 #[async_trait]

@@ -5,7 +5,7 @@ use crate::{
     content::codec,
     upload::checksum,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use s3s::{
     S3, S3Request, S3Response, S3Result,
@@ -453,6 +453,7 @@ impl S3 for Gateway {
                 .0
                 .receive(
                     id,
+                    b.storage_id.context("bucket has no storage")?,
                     body,
                     &req.headers,
                     req.trailing_headers,
@@ -606,14 +607,18 @@ impl S3 for Gateway {
                 out.checksum_type = checksum(&s.checksums, "type").map(ChecksumType::from);
             }
             let permits = self.0.admit(false).await?;
-            out.body = Some(self.0.body(
-                s,
-                pin.expect("body read is protected"),
-                range.start as i64..range.end as i64,
-                permits,
-                requested.is_some(),
-                None,
-            ));
+            out.body = Some(
+                self.0
+                    .body(
+                        s,
+                        pin.expect("body read is protected"),
+                        range.start as i64..range.end as i64,
+                        permits,
+                        requested.is_some(),
+                        None,
+                    )
+                    .await?,
+            );
             Ok(S3Response::new(out))
         }
         .await
@@ -1027,7 +1032,9 @@ impl S3 for Gateway {
                 )
                 .await?;
             self.0.reserve_quota(id, source.size, false, None).await?;
-            self.0.copy_extents(id, &source).await?;
+            _source_pin
+                .with_read_lease(self.0.copy_extents(id, &source))
+                .await?;
             self.0
                 .finish_stream(id, source.size, &source.etag, source.checksums)
                 .await?;

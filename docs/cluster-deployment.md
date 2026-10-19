@@ -113,9 +113,9 @@ docker exec mokyu-control mokyu cli cluster mode single
 
 群集模式禁用 local 存储。单容器模式切换到群集模式时，Mokyu 会检查存储和运行状态，不会替部署管理员上传文件：
 
-1. 手动把 local 目录中的规范 S3 文件结构迁移到目标 S3 前缀或供应商。
-2. 在 Web 或 CLI 修改 storage 的连接信息。保存时核对远端 `meta.json`；文件缺失或内容不匹配时拒绝保存。
-3. 确认所有 local storage 已改为 S3 后再执行 `cluster mode cluster`。
+1. 选择迁移方式：新建 S3 storage 和目标桶，由 Web/CLI 的对象复制或移动任务迁移；或在单容器维护状态下，自行完整搬运原存储命名空间和根 `meta.json` 到 S3，再修改原 storage 的类型与连接参数。具体边界见[存储格式](storage-format.md#原始文件)。
+2. 自行搬迁前完成或中止 Multipart、排空待写来源及后台任务，停用公共/S3 入口和后台清理，复制后核对完整性；修改类型后重启单容器。由 Mokyu 跨存储迁移时核对任务结果，再移除原 local 桶和 storage。桶的 storage 绑定不直接更改。
+3. 配置共享 S3 暂存，确认没有 local storage 后再执行 `cluster mode cluster`。
 
 桶绑定的 `storage_id` 永久不变；同一 storage 的桶共享去重，不跨 storage 去重。跨 storage 的对象迁移由 Mokyu 异步任务负责复制、权限、校验和发布一致性；部署管理员负责目标容量、凭据、网络和供应商策略。
 

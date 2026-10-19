@@ -96,8 +96,8 @@ pub enum Integrity {
         storage: Uuid,
         #[arg(long, value_enum)]
         source: crate::model::source::SourceType,
-        #[arg(long, default_value_t = 0)]
-        after: i64,
+        #[arg(long, default_value = "")]
+        after: String,
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },

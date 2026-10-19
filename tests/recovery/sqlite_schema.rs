@@ -1,7 +1,7 @@
 use super::{connection, queries};
 use crate::authorization::DEFAULT_PROJECT;
 use crate::config::Config;
-use crate::model::AccountStore;
+use crate::model::{AccountStore, StorageProfileStore};
 use anyhow::Result;
 use uuid::Uuid;
 
@@ -35,8 +35,53 @@ async fn sqlite_data_schema_contract() -> Result<()> {
     let other = super::storage_tests::fixture_named(&backend, "other").await?;
     assert_eq!(
         queries::schema_version().fetch_one(&backend.read).await?,
-        18
+        22
     );
+    let profile = backend.load(storage).await?;
+    assert!(profile.cdc_enabled);
+    assert!(!profile.deduplication_enabled);
+    let mut legacy = serde_json::to_value(profile)?;
+    legacy.as_object_mut().unwrap().remove("cdc_enabled");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("deduplication_enabled");
+    assert!(serde_json::from_value::<crate::storage::profile::StorageProfile>(legacy)?.cdc_enabled);
+    let raw = Uuid::new_v4();
+    sqlx::query("INSERT INTO raw_sources(id,storage_id,profile_revision) VALUES(?,?,1)")
+        .bind(raw)
+        .bind(storage)
+        .execute(db)
+        .await?;
+    for invalid in [
+        "UPDATE raw_sources SET state='ready' WHERE id=?",
+        "UPDATE raw_sources SET size=-1 WHERE id=?",
+        "UPDATE raw_sources SET revision=0 WHERE id=?",
+        "UPDATE raw_sources SET medium='memory' WHERE id=?",
+        "UPDATE raw_sources SET boot_id=randomblob(16) WHERE id=?",
+        "UPDATE raw_sources SET digest=x'00' WHERE id=?",
+    ] {
+        assert!(
+            sqlx::query(invalid).bind(raw).execute(db).await.is_err(),
+            "{invalid}"
+        );
+    }
+    sqlx::query("UPDATE raw_sources SET state='ready',digest=? WHERE id=?")
+        .bind([0u8; 16].as_slice())
+        .bind(raw)
+        .execute(db)
+        .await?;
+    assert!(
+        sqlx::query("DELETE FROM storages WHERE id=?")
+            .bind(storage)
+            .execute(db)
+            .await
+            .is_err()
+    );
+    sqlx::query("DELETE FROM raw_sources WHERE id=?")
+        .bind(raw)
+        .execute(db)
+        .await?;
     let first = chunk(db, storage).await?;
     assert!(chunk(db, storage).await.is_err());
     let encoding_one = encoding(db, storage, first).await?;

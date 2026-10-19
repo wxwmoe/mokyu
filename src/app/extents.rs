@@ -30,6 +30,12 @@ impl App {
             .storage_for_stream(destination)
             .await?
             .context("destination stream has no store")?;
+        let raw_revision = self.storage.raw_policy(destination_target)?;
+        if source.payload_type == "raw" || raw_revision.is_some() {
+            return self
+                .copy_payload(destination, destination_target, raw_revision, source)
+                .await;
+        }
         if source_target != destination_target {
             let mut offset = 0;
             while offset < source.size {
@@ -71,6 +77,199 @@ impl App {
         }
         Ok(())
     }
+
+    pub(crate) fn payload_bytes<'a>(
+        &'a self,
+        source: &'a StoredStream,
+    ) -> impl futures_util::Stream<Item = Result<Bytes>> + Send + 'a {
+        async_stream::try_stream! {
+            let mut offset = 0;
+            if source.payload_type=="raw" {
+                use md5::{Digest, Md5};
+                loop {
+                    let rows = self.raw.page(source.id,offset,source.size).await?;
+                    (!rows.is_empty()).then_some(()).context("raw mapping is incomplete")?;
+                    let before = offset;
+                    for row in rows {
+                        if row.offset_bytes+row.length<=offset && source.size!=0 { continue; }
+                        row.validate()?;
+                        (row.offset_bytes==offset).then_some(()).context("raw mapping has gaps or overlaps")?;
+                        let whole_source = row.source_offset == 0 && row.length == row.source.size;
+                        let mut digest = Md5::new();
+                        let mut reader = self.storage.raw_reader(&row.source,!whole_source).await?;
+                        reader.file.seek(std::io::SeekFrom::Start(row.source_offset as u64)).await?;
+                        let mut remaining = row.length;
+                        while remaining>0 {
+                            self.ensure_mode()?;
+                            let mut buffer = vec![0; remaining.min(256*1024) as usize];
+                            let count = reader.file.read(&mut buffer).await?;
+                            (count>0).then_some(()).context("raw source was truncated")?;
+                            buffer.truncate(count);
+                            if whole_source { digest.update(&buffer); }
+                            remaining -= count as i64;
+                            offset += count as i64;
+                            self.storage.backend_read_bytes.fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+                            yield Bytes::from(buffer);
+                        }
+                        if whole_source {
+                            (Some(digest.finalize().as_slice()) == row.source.digest.as_deref())
+                                .then_some(()).context(crate::content::codec::IntegrityError::Hash)?;
+                        }
+                    }
+                    if offset==source.size { break; }
+                    (offset>before && offset<source.size).then_some(()).context("raw mapping length mismatch")?;
+                }
+            } else {
+                while offset<source.size {
+                    let rows = self.chunks.extents(source.id,offset,source.size).await?;
+                    (!rows.is_empty()).then_some(()).context("object mapping is incomplete")?;
+                    for row in rows {
+                        (row.offset_bytes==offset).then_some(()).context("object mapping has gaps or overlaps")?;
+                        let data = self.extent_bytes(&row).await?;
+                        offset += i64::from(row.length);
+                        yield data;
+                    }
+                }
+                (offset==source.size).then_some(()).context("object mapping length mismatch")?;
+            }
+        }
+    }
+
+    pub(crate) fn replay_payload<'a>(
+        &'a self,
+        destination: Uuid,
+        sources: &'a [StoredStream],
+        range: std::ops::Range<u64>,
+    ) -> futures_util::stream::BoxStream<'a, Result<Bytes>> {
+        Box::pin(async_stream::try_stream! {
+            let mut base = 0u64;
+            let mut emitted = 0u64;
+            let mut renewed = tokio::time::Instant::now();
+            self.renew_write_lease(destination).await?;
+            for source in sources {
+                let end = base.checked_add(source.size as u64).context("replay size overflow")?;
+                if range.start >= end { base = end; continue; }
+                if range.end <= base { break; }
+                let mut position = range.start.saturating_sub(base) as i64;
+                let until = (range.end.min(end) - base) as i64;
+                let mut cursor = if source.payload_type == "raw" || position == 0 { position }
+                    else { self.chunks.read_start(source.id, position).await?.context("replay source mapping is missing")? };
+                while position < until {
+                    self.ensure_mode()?;
+                    if renewed.elapsed() >= std::time::Duration::from_secs(5) {
+                        self.renew_write_lease(destination).await?;
+                        renewed = tokio::time::Instant::now();
+                    }
+                    let before = position;
+                    if source.payload_type == "raw" {
+                        for row in self.raw.page(source.id, position, until).await? {
+                            if row.offset_bytes + row.length <= position { continue; }
+                            row.validate()?;
+                            (row.offset_bytes <= position).then_some(()).context("replay source mapping has a gap")?;
+                            let end = (row.offset_bytes + row.length).min(until);
+                            let mut reader = self.storage.raw_reader(&row.source, false).await?;
+                            reader.file.seek(std::io::SeekFrom::Start((row.source_offset + position - row.offset_bytes) as u64)).await?;
+                            while position < end {
+                                let mut bytes = vec![0; (end - position).min(256 * 1024) as usize];
+                                let count = reader.file.read(&mut bytes).await?;
+                                (count > 0).then_some(()).context("replay raw source was truncated")?;
+                                bytes.truncate(count);
+                                position += count as i64;
+                                emitted += count as u64;
+                                self.storage.backend_read_bytes.fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+                                if renewed.elapsed() >= std::time::Duration::from_secs(5) {
+                                    self.renew_write_lease(destination).await?;
+                                    renewed = tokio::time::Instant::now();
+                                }
+                                yield Bytes::from(bytes);
+                            }
+                            if position == until { break; }
+                        }
+                    } else {
+                        for row in self.chunks.extents(source.id, cursor, until).await? {
+                            (row.offset_bytes <= position && row.offset_bytes + i64::from(row.length) > position)
+                                .then_some(()).context("replay source mapping has a gap")?;
+                            let bytes = self.extent_bytes(&row).await?;
+                            let skip = (position - row.offset_bytes) as usize;
+                            let count = (bytes.len() - skip).min((until - position) as usize);
+                            position += count as i64;
+                            emitted += count as u64;
+                            cursor = row.offset_bytes + i64::from(row.length);
+                            yield bytes.slice(skip..skip + count);
+                            if position == until { break; }
+                        }
+                    }
+                    (position > before).then_some(()).context("replay source is incomplete")?;
+                }
+                base = end;
+            }
+            (emitted == range.end - range.start).then_some(()).context("replay length mismatch")?;
+        })
+    }
+
+    async fn copy_payload(
+        &self,
+        destination: Uuid,
+        storage: Uuid,
+        revision: Option<i64>,
+        source: &StoredStream,
+    ) -> Result<()> {
+        use md5::{Digest, Md5};
+        let mut input = Box::pin(self.payload_bytes(source));
+        let mut offset = 0;
+        if let Some(revision) = revision {
+            let id = self.raw.begin(destination, storage, revision).await?;
+            let mut writer = self
+                .storage
+                .raw_replay_writer(storage, id, source.size, &[])
+                .await?;
+            let mut digest = Md5::new();
+            while let Some(data) = input.next().await {
+                let data = data?;
+                self.renew_write_lease(destination).await?;
+                digest.update(&data);
+                writer.write(&data).await?;
+                offset += data.len() as i64;
+            }
+            ensure!(offset == source.size, "copy length mismatch");
+            let hash = writer
+                .finish_replay(offset as u64, |range| {
+                    self.replay_payload(destination, std::slice::from_ref(source), range)
+                })
+                .await?;
+            self.raw
+                .finish(destination, id, offset, &digest.finalize())
+                .await?;
+            self.deduplicate_raw(destination, storage, id, hash).await?;
+        } else {
+            let mut window = Vec::with_capacity(MAX);
+            while let Some(data) = input.next().await {
+                let data = data?;
+                let mut rest = data.as_ref();
+                while !rest.is_empty() {
+                    let count = (MAX - window.len()).min(rest.len());
+                    window.extend_from_slice(&rest[..count]);
+                    rest = &rest[count..];
+                    if window.len() == MAX {
+                        let count = crate::content::codec::cut(&window);
+                        self.put_chunk(destination, offset, window[..count].to_vec(), false)
+                            .await?;
+                        offset += count as i64;
+                        window.drain(..count);
+                    }
+                }
+            }
+            while !window.is_empty() {
+                let count = crate::content::codec::cut(&window);
+                self.put_chunk(destination, offset, window[..count].to_vec(), false)
+                    .await?;
+                offset += count as i64;
+                window.drain(..count);
+            }
+            ensure!(offset == source.size, "copy length mismatch");
+        }
+        Ok(())
+    }
     pub async fn extent_bytes_with(
         &self,
         e: &Extent,
@@ -99,14 +298,11 @@ impl App {
             self.storage.get_with(&c, Some(context)).await?
         } else {
             let id = e.fragment_id.context("extent has no source")?;
+            let _gate = self.storage.source_gate.read().await;
             let source = self.chunks.fragment(id).await?;
             let data = self
                 .storage
-                .read_fragment(
-                    id,
-                    source.staging_storage_id,
-                    source.staging_object_key.as_deref(),
-                )
+                .read_fragment(id, &source)
                 .await
                 .context("multipart fragment missing")?;
             ensure!(
@@ -119,7 +315,7 @@ impl App {
         };
         e.slice(data)
     }
-    pub fn body(
+    pub async fn body(
         self: &Arc<Self>,
         stream: StoredStream,
         pin: Active,
@@ -127,7 +323,10 @@ impl App {
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
         range: bool,
         capture: Option<Arc<Mutex<super::responses::Mapping>>>,
-    ) -> StreamingBlob {
+    ) -> Result<StreamingBlob> {
+        if stream.payload_type == "raw" {
+            return self.raw_body(stream, pin, span, permits).await;
+        }
         let app = self.clone();
         let (start, end) = (span.start, span.end);
         let body = async_stream::try_stream! {
@@ -177,8 +376,8 @@ impl App {
             }}
         };
         let body = Mutex::new(Box::pin(limited));
-        StreamingBlob::wrap(futures_util::stream::poll_fn(move |cx| {
-            futures_util::Stream::poll_next(body.lock().unwrap().as_mut(), cx)
-        }))
+        Ok(StreamingBlob::wrap(futures_util::stream::poll_fn(
+            move |cx| futures_util::Stream::poll_next(body.lock().unwrap().as_mut(), cx),
+        )))
     }
 }

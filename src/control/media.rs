@@ -313,14 +313,9 @@ pub(super) async fn text(
     let end = stream.size.min(TEXT_LIMIT as i64);
     let truncated = stream.size > end;
     let permits = app.admit(false).await?;
-    let body = Body::new(s3s::Body::from(app.body(
-        stream,
-        pin,
-        0..end,
-        permits,
-        true,
-        None,
-    )));
+    let body = Body::new(s3s::Body::from(
+        app.body(stream, pin, 0..end, permits, true, None).await?,
+    ));
     let bytes = axum::body::to_bytes(body, TEXT_LIMIT).await?;
     Ok(Json(TextPreview {
         text: String::from_utf8_lossy(&bytes).into_owned(),
@@ -370,14 +365,9 @@ pub(super) async fn thumbnail(
             .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "PreviewBusy"))?;
         let id = stream.id;
         let end = stream.size;
-        let body = Body::new(s3s::Body::from(app.body(
-            stream,
-            pin,
-            0..end,
-            permits,
-            false,
-            None,
-        )));
+        let body = Body::new(s3s::Body::from(
+            app.body(stream, pin, 0..end, permits, false, None).await?,
+        ));
         let source = tokio::time::timeout(
             Duration::from_secs(15),
             axum::body::to_bytes(body, source_limit),

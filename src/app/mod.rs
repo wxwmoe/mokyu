@@ -25,6 +25,7 @@ pub(crate) mod extents;
 pub(crate) mod listing;
 pub(crate) mod publish;
 pub(crate) mod quota;
+pub(crate) mod raw;
 pub(crate) mod responses;
 pub(crate) mod streams;
 
@@ -50,6 +51,9 @@ pub struct StoredStream {
     pub bucket_id: Uuid,
     pub object_key: String,
     pub stream_type: String,
+    pub payload_type: String,
+    #[serde(skip)]
+    pub payload_revision: i64,
     pub state: String,
     pub size: i64,
     pub etag: String,
@@ -140,6 +144,25 @@ impl Drop for Active {
     }
 }
 impl Active {
+    pub(crate) async fn with_read_lease<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let Some(lease) = &self.read_lease else {
+            return future.await;
+        };
+        self.renew_read_lease().await?;
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(
+            (lease.ttl_seconds / 3).max(1) as u64,
+        ));
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                result = &mut future => return result,
+                _ = tick.tick() => self.renew_read_lease().await?,
+            }
+        }
+    }
     pub(crate) fn allow_replica(&mut self) {
         if let Some(lease) = &mut self.read_lease {
             lease.replica = true;
@@ -186,6 +209,7 @@ pub struct App {
     pub task_execution: Arc<dyn crate::model::TaskExecutionStore>,
     pub storage_profiles: Arc<dyn crate::model::StorageProfileStore>,
     pub stream_store: Arc<dyn crate::model::StreamStore>,
+    pub(crate) raw: Arc<dyn crate::model::raw::RawStore>,
     pub node: std::sync::OnceLock<crate::cluster::NodeState>,
     pub node_boot: std::sync::OnceLock<Uuid>,
     pub storage: Arc<Storage>,
@@ -206,7 +230,7 @@ pub struct App {
     pub pack_creation_paused: std::sync::atomic::AtomicBool,
     pub gc_running: std::sync::atomic::AtomicBool,
     started_mode: String,
-    restart_required: std::sync::atomic::AtomicBool,
+    pub(crate) restart_required: std::sync::atomic::AtomicBool,
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: Arc<tokio::sync::Notify>,
     hashes: Mutex<HashMap<(Uuid, [u8; 32]), Weak<tokio::sync::Mutex<()>>>>,
@@ -263,6 +287,7 @@ impl App {
                 stores.physical.clone(),
                 stores.cluster.clone(),
                 stores.storage_profiles.clone(),
+                stores.raw.clone(),
                 stores.managed_keys.clone(),
                 stores.storage_records.clone(),
                 maintenance.clone(),
@@ -323,6 +348,7 @@ impl App {
             task_execution: stores.task_execution,
             storage_profiles: stores.storage_profiles,
             stream_store: stores.streams,
+            raw: stores.raw,
             node: std::sync::OnceLock::new(),
             node_boot: std::sync::OnceLock::new(),
             storage,

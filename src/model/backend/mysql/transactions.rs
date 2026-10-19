@@ -304,6 +304,21 @@ pub(super) async fn cleanup_stream(pool: &MySqlPool, id: Uuid, batch: i64) -> Re
         return Ok(0);
     }
     forget_quota_write(&mut tx, &mut accounts, id).await?;
+    let raw = queries::raw_cleanup_ranges(id, batch.clamp(1, 128))
+        .fetch_all(&mut *tx)
+        .await?;
+    if let Some((last, _)) = raw.last() {
+        let mut sources: Vec<_> = raw.iter().map(|(_, source)| *source).collect();
+        sources.sort_unstable();
+        sources.dedup();
+        for source in sources {
+            queries::raw_source(source).fetch_one(&mut *tx).await?;
+            queries::raw_touch_unreferenced(source)
+                .execute(&mut *tx)
+                .await?;
+        }
+        queries::raw_detach(id, *last).execute(&mut *tx).await?;
+    }
     let candidates = queries::retire_stream_encodings(id, batch)
         .execute(&mut *tx)
         .await?
@@ -322,7 +337,7 @@ pub(super) async fn cleanup_stream(pool: &MySqlPool, id: Uuid, batch: i64) -> Re
             .rows_affected();
     }
     tx.commit().await?;
-    Ok(extents + (candidates + detached + removed) as usize)
+    Ok(raw.len() + extents + (candidates + detached + removed) as usize)
 }
 struct FragmentDelete {
     tx: Transaction<'static, MySql>,
@@ -339,7 +354,7 @@ impl FragmentDeletion for FragmentDelete {
 }
 pub(super) async fn claim_fragment(pool: &MySqlPool, id: Uuid) -> Result<Option<FragmentCleanup>> {
     let mut tx = pool.begin().await?;
-    let Some((sealed, owner)) = queries::lock_cleanup_fragment(id)
+    let Some((sealed, owner, file)) = queries::lock_cleanup_fragment(id)
         .fetch_optional(&mut *tx)
         .await?
     else {
@@ -347,6 +362,7 @@ pub(super) async fn claim_fragment(pool: &MySqlPool, id: Uuid) -> Result<Option<
     };
     Ok(Some(FragmentCleanup {
         sealed,
+        file,
         owner,
         storage: None,
         key: None,
@@ -2462,6 +2478,10 @@ async fn validate_copy(
             && stream.public_read == public,
         crate::model::Error::OperationAborted
     );
+    if stream.payload_type == "raw" {
+        validate_raw(connection, id, stream.size).await?;
+        return Ok(stream);
+    }
     ensure!(
         !queries::incomplete_extents(id)
             .fetch_one(&mut *connection)
@@ -3502,14 +3522,18 @@ pub(super) async fn commit_upload_part(
         info.state == "writing",
         crate::model::Error::OperationAborted
     );
-    let (end, contiguous) = queries::extent_continuity(stream)
-        .fetch_one(&mut *tx)
-        .await?;
-    ensure!(
-        end == info.size && contiguous,
-        "part mapping has gaps or overlaps"
-    );
-    require_sources(&mut tx, Some(stream), &[]).await?;
+    if info.payload_type == "raw" {
+        validate_raw(&mut tx, stream, info.size).await?;
+    } else {
+        let (end, contiguous) = queries::extent_continuity(stream)
+            .fetch_one(&mut *tx)
+            .await?;
+        ensure!(
+            end == info.size && contiguous,
+            "part mapping has gaps or overlaps"
+        );
+        require_sources(&mut tx, Some(stream), &[]).await?;
+    }
     let mut accounts = lock_quota(&mut tx, bucket).await?;
     let mut row = queries::quota_reservation(upload)
         .fetch_one(&mut *tx)
@@ -4375,16 +4399,20 @@ pub(super) async fn publish(
         if_match.as_ref(),
         if_none.as_ref(),
     )?;
-    ensure!(
-        !queries::incomplete_extents(id).fetch_one(&mut *tx).await?,
-        "cannot publish an incomplete generation"
-    );
-    let (end, contiguous) = queries::extent_continuity(id).fetch_one(&mut *tx).await?;
-    ensure!(
-        end == stream.size && contiguous,
-        "cannot publish a mapping with gaps or overlaps"
-    );
-    require_sources(&mut tx, Some(id), &[]).await?;
+    if stream.payload_type == "raw" {
+        validate_raw(&mut tx, id, stream.size).await?;
+    } else {
+        ensure!(
+            !queries::incomplete_extents(id).fetch_one(&mut *tx).await?,
+            "cannot publish an incomplete generation"
+        );
+        let (end, contiguous) = queries::extent_continuity(id).fetch_one(&mut *tx).await?;
+        ensure!(
+            end == stream.size && contiguous,
+            "cannot publish a mapping with gaps or overlaps"
+        );
+        require_sources(&mut tx, Some(id), &[]).await?;
+    }
     let mut accounts = lock_quota(&mut tx, stream.bucket_id).await?;
     replace_object_quota(
         &mut tx,
@@ -6146,15 +6174,17 @@ pub(super) async fn update_storage_profile(
     profile: StorageProfile,
 ) -> anyhow::Result<Uuid> {
     let mut tx = pool.begin().await?;
-    let (storage_id, storage_type): (Uuid, String) = queries::storage_profile_target(&name)
-        .fetch_optional(&mut *tx)
-        .await?
-        .context("storage was not found")?;
+    let (storage_id, storage_type, key): (Uuid, String, Option<Uuid>) =
+        queries::storage_profile_target(&name)
+            .fetch_optional(&mut *tx)
+            .await?
+            .context("storage was not found")?;
     anyhow::ensure!(
         profile.storage_id == storage_id,
         "storage profile belongs to another storage"
     );
     validate_storage_profile(&profile, &storage_type)?;
+    profile.validate_key(key)?;
     save_storage_profile(&mut tx, &profile).await?;
     checkpoint_event(
         &mut tx,
@@ -6195,6 +6225,7 @@ impl StorageInitializer for StorageInitialization {
             profile.storage_id = record.id;
             profile.revision = 1;
             validate_storage_profile(&profile, &record.r#type)?;
+            profile.validate_key(key)?;
             save_storage_profile(&mut tx, &profile).await?;
         }
         self.tx = Some(tx);
@@ -6225,6 +6256,7 @@ pub(super) async fn storage_creation(pool: &MySqlPool) -> Result<StorageCreation
 }
 
 struct StorageModification {
+    original_type: String,
     tx: Transaction<'static, MySql>,
     id: Uuid,
 }
@@ -6236,11 +6268,16 @@ pub(super) async fn storage_edit(pool: &MySqlPool, name: &str) -> Result<Storage
         .fetch_one(&mut *tx)
         .await?;
     let id = row.id;
+    let original_type = row.r#type.clone();
     Ok(StorageEdit {
         row,
         profile,
         mode,
-        update: Box::new(StorageModification { tx, id }),
+        update: Box::new(StorageModification {
+            tx,
+            id,
+            original_type,
+        }),
     })
 }
 #[async_trait::async_trait]
@@ -6256,6 +6293,25 @@ impl StorageUpdate for StorageModification {
             "storage update belongs to another storage"
         );
         validate_storage_profile(profile, &record.r#type)?;
+        profile.validate_key(key)?;
+        if self.original_type != record.r#type {
+            ensure!(
+                queries::storage_relocation_ready()
+                    .fetch_one(&mut *self.tx)
+                    .await?,
+                crate::model::Error::StorageNotDrained
+            );
+            queries::relocate_raw_sources(
+                record.id,
+                if record.r#type == "local" {
+                    "local"
+                } else {
+                    "shared_s3"
+                },
+            )
+            .execute(&mut *self.tx)
+            .await?;
+        }
         validate_block_key(&mut self.tx, key).await?;
         queries::update_storage_record(record, key)
             .execute(&mut *self.tx)
@@ -6282,6 +6338,12 @@ pub(super) async fn storage_current_key(
     } else {
         None
     };
+    if key_id.is_some() {
+        queries::storage_profile_lock(row.id)
+            .fetch_one(&mut *tx)
+            .await?
+            .validate_key(key_id)?;
+    }
     queries::update_storage_key(row.id, key_id)
         .execute(&mut *tx)
         .await?;
@@ -6786,4 +6848,227 @@ pub(super) async fn finish_repair(
         .await?;
     tx.commit().await?;
     Ok(result)
+}
+
+pub(super) async fn begin_raw(
+    pool: &sqlx::MySqlPool,
+    stream: Uuid,
+    storage: Uuid,
+    revision: i64,
+) -> Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    let (storage_type, unencoded, current, cdc) = queries::raw_target(stream, storage)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(crate::model::Error::OperationAborted)?;
+    ensure!(
+        matches!(storage_type.as_str(), "local" | "s3") && unencoded && !cdc && current == revision,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        queries::raw_prepare(stream)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    let id = Uuid::new_v4();
+    queries::raw_insert(
+        id,
+        stream,
+        storage,
+        revision,
+        if storage_type == "local" {
+            "local"
+        } else {
+            "shared_s3"
+        },
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub(super) async fn finish_raw(
+    pool: &sqlx::MySqlPool,
+    stream: Uuid,
+    source: Uuid,
+    size: i64,
+    digest: &[u8],
+) -> Result<()> {
+    ensure!(
+        size >= 0 && digest.len() == 16,
+        "invalid received raw source"
+    );
+    let mut tx = pool.begin().await?;
+    ensure!(
+        queries::raw_lock_stream(stream)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some(),
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        queries::raw_finish(stream, source, size, digest)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    queries::raw_attach(stream, source, size)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn validate_raw(db: &mut sqlx::MySqlConnection, stream: Uuid, size: i64) -> Result<()> {
+    let sources = queries::raw_sources_lock(stream)
+        .fetch_all(&mut *db)
+        .await?;
+    ensure!(!sources.is_empty(), "raw generation has no source");
+    for source in sources {
+        source.validate()?;
+    }
+    let (end, contiguous) = queries::raw_continuity(stream).fetch_one(db).await?;
+    ensure!(
+        end == size && contiguous,
+        "cannot publish an incomplete raw generation"
+    );
+    Ok(())
+}
+
+pub(super) async fn deduplicate_raw(
+    pool: &sqlx::MySqlPool,
+    stream: Uuid,
+    source: Uuid,
+    hash: &[u8],
+) -> Result<bool> {
+    ensure!(hash.len() == 32, "invalid raw content hash");
+    let received = queries::raw_source(source).fetch_one(pool).await?;
+    let mut tx = pool.begin().await?;
+    ensure!(
+        queries::raw_lock_stream(stream)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some(),
+        crate::model::Error::OperationAborted
+    );
+    let current = queries::raw_source(source).fetch_one(&mut *tx).await?;
+    ensure!(current == received, crate::model::Error::SourceUnavailable);
+    current.validate()?;
+    validate_raw(&mut tx, stream, current.size).await?;
+    let duplicate = queries::raw_duplicate(current.storage_id, hash, current.size)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let mut reused = false;
+    if let Some(candidate) = duplicate {
+        if candidate.id == source {
+            return Ok(false);
+        }
+        if candidate.validate().is_ok() && candidate.medium == current.medium {
+            ensure!(
+                queries::raw_share(stream, source, candidate.id, current.size)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                    == 1,
+                crate::model::Error::OperationAborted
+            );
+            queries::raw_reference(candidate.id)
+                .execute(&mut *tx)
+                .await?;
+            queries::raw_touch_unreferenced(source)
+                .execute(&mut *tx)
+                .await?;
+            reused = true;
+        } else {
+            queries::raw_hash(candidate.id, None)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    if !reused {
+        queries::raw_hash(source, Some(hash))
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(reused)
+}
+
+pub(super) async fn multipart_file(pool: &MySqlPool, upload: Uuid) -> Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    ensure!(
+        queries::lock_local_upload(upload)
+            .fetch_optional(&mut *tx)
+            .await?
+            .as_deref()
+            == Some("active"),
+        crate::model::Error::OperationAborted
+    );
+    let id = if let Some(id) = queries::current_multipart_file(upload)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        id
+    } else {
+        let id = Uuid::new_v4();
+        ensure!(
+            queries::insert_multipart_file(id, upload)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
+        id
+    };
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub(super) async fn remap_multipart_file(
+    pool: &MySqlPool,
+    upload: Uuid,
+    source: Uuid,
+    ranges: &[crate::model::multipart::FileRemap],
+) -> Result<()> {
+    ensure!(
+        !ranges.is_empty() && ranges.len() <= 64,
+        "invalid multipart checkpoint batch"
+    );
+    let mut tx = pool.begin().await?;
+    ensure!(
+        queries::lock_local_upload(upload)
+            .fetch_optional(&mut *tx)
+            .await?
+            .as_deref()
+            == Some("completing"),
+        crate::model::Error::OperationAborted
+    );
+    queries::insert_multipart_checkpoint(upload, source)
+        .execute(&mut *tx)
+        .await?;
+    for range in ranges {
+        ensure!(
+            queries::remap_multipart_range(upload, source, range)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
+    }
+    let files: std::collections::BTreeSet<_> = ranges.iter().map(|range| range.file).collect();
+    for file in files {
+        queries::pending_multipart_reclaim(file)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }

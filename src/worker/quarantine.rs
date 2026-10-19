@@ -18,19 +18,35 @@ impl App {
     ) -> Result<crate::model::source::SourcePage> {
         self.authorization.admin(principal).await?.finish().await?;
         let limit = query.limit.unwrap_or(50);
-        ensure!(
-            (1..=200).contains(&limit) && query.after >= 0,
-            s3s::s3_error!(InvalidArgument)
-        );
-        let mut items = self
-            .physical
-            .quarantines(
-                query.storage_id,
-                query.source == crate::model::source::SourceType::Pack,
-                query.after,
-                limit + 1,
-            )
-            .await?;
+        ensure!((1..=200).contains(&limit), s3s::s3_error!(InvalidArgument));
+        let mut items = if query.source == crate::model::source::SourceType::Raw {
+            let after = if query.after.is_empty() {
+                uuid::Uuid::nil()
+            } else {
+                uuid::Uuid::parse_str(&query.after).map_err(|_| s3s::s3_error!(InvalidArgument))?
+            };
+            self.raw
+                .quarantines(query.storage_id, after, limit + 1)
+                .await?
+        } else {
+            let after = if query.after.is_empty() {
+                0
+            } else {
+                query
+                    .after
+                    .parse::<i64>()
+                    .map_err(|_| s3s::s3_error!(InvalidArgument))?
+            };
+            ensure!(after >= 0, s3s::s3_error!(InvalidArgument));
+            self.physical
+                .quarantines(
+                    query.storage_id,
+                    query.source == crate::model::source::SourceType::Pack,
+                    after,
+                    limit + 1,
+                )
+                .await?
+        };
         let next = if items.len() > limit as usize {
             Some(items[limit as usize - 1].scope.id.clone())
         } else {
@@ -57,7 +73,7 @@ impl App {
     ) -> Result<SourceOperation> {
         self.authorization.admin(principal).await?.finish().await?;
         self.source_writable()?;
-        scope.number()?;
+        scope.validate()?;
         let snapshot = self.physical.source_snapshot(&scope).await?;
         ensure!(
             snapshot.state == "ready" && snapshot.quarantine_code.is_some() == recheck,
@@ -78,6 +94,7 @@ impl App {
             let bytes = match &snapshot.physical {
                 crate::model::PhysicalSource::Chunk(c) => i64::from(c.raw_size),
                 crate::model::PhysicalSource::Pack(p) => p.raw_size,
+                crate::model::PhysicalSource::Raw(r) => r.size,
             };
             ensure!(
                 self.acquire_profile_rate(scope.storage_id, &profile, 2, bytes)
@@ -176,6 +193,7 @@ impl App {
             let bytes = match &snapshot.physical {
                 crate::model::PhysicalSource::Chunk(c) => i64::from(c.raw_size),
                 crate::model::PhysicalSource::Pack(p) => p.raw_size,
+                crate::model::PhysicalSource::Raw(r) => r.size,
             };
             if !self
                 .acquire_profile_rate(snapshot.scope.storage_id, &profile, 2, bytes)

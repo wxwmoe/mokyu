@@ -10,6 +10,7 @@ pub(crate) type StagedUpload = (i64, Option<Uuid>, Option<String>, i64);
 pub(crate) enum PhysicalSource {
     Chunk(Chunk),
     Pack(Pack),
+    Raw(crate::model::raw::RawSource),
 }
 
 #[async_trait]

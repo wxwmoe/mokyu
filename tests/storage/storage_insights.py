@@ -23,6 +23,8 @@ with psycopg.connect(connection) as db:
     db.execute('''CREATE TEMP TABLE buckets(id uuid,project_id uuid);
       CREATE TEMP TABLE objects(bucket_id uuid,stream_id uuid);
       CREATE TEMP TABLE extents(stream_id uuid,chunk_id bigint,source_offset int,length int);
+      CREATE TEMP TABLE raw_ranges(stream_id uuid,source_id uuid,length bigint);
+      CREATE TEMP TABLE raw_sources(id uuid,size bigint,state text,owner_stream uuid);
       CREATE TEMP TABLE chunks(id bigint,pack_id bigint,unreferenced_at timestamptz);
       CREATE TEMP TABLE chunk_encodings(encoding_id bigint,chunk_id bigint,state text,standalone_size bigint);
       CREATE TEMP TABLE packs(id bigint,state text,stored_size bigint);

@@ -12,6 +12,21 @@ use uuid::Uuid;
 use super::App;
 
 impl App {
+    pub(crate) fn content_lock(
+        &self,
+        storage_id: Uuid,
+        hash: [u8; 32],
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut m = self.hashes.lock().unwrap();
+        m.retain(|_, v| v.strong_count() > 0);
+        if let Some(l) = m.get(&(storage_id, hash)).and_then(Weak::upgrade) {
+            l
+        } else {
+            let l = Arc::new(tokio::sync::Mutex::new(()));
+            m.insert((storage_id, hash), Arc::downgrade(&l));
+            l
+        }
+    }
     pub(crate) async fn reference(&self, stream: Uuid, offset: i64, c: &Chunk) -> Result<()> {
         self.chunks
             .reference(stream, offset, c.id, c.raw_size)
@@ -75,17 +90,7 @@ impl App {
             .storage_for_stream(stream)
             .await?
             .context("stream has no store")?;
-        let mutex = {
-            let mut m = self.hashes.lock().unwrap();
-            m.retain(|_, v| v.strong_count() > 0);
-            if let Some(l) = m.get(&(storage_id, hash)).and_then(Weak::upgrade) {
-                l
-            } else {
-                let l = Arc::new(tokio::sync::Mutex::new(()));
-                m.insert((storage_id, hash), Arc::downgrade(&l));
-                l
-            }
-        };
+        let mutex = self.content_lock(storage_id, hash);
         let _guard = mutex.lock().await;
         let (algorithm, key_id) = self.store_encoding(storage_id).await?;
         let _claim = if self.role == "single" {

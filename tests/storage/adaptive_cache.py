@@ -65,7 +65,7 @@ for name, raw, extension in [
         assert original[:4] == bytes.fromhex('28b52ffd') and len(original) == payload_size
     else:
         assert original == raw
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
     before = status()
     read(key, raw)
     read(key, raw[13:73], Range='bytes=13-72')

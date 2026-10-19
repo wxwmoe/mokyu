@@ -48,7 +48,7 @@ docker exec mokyu mokyu cli bucket cors media /config/cors.json
 | `storage show NAME` | 显示一个存储的当前配置，不执行连接检查 |
 | `storage create NAME local --init [--key KEY] [--path PATH] [--prefix PREFIX]` | 明确初始化空的本地存储；省略 `--path` 使用 `/data/storage`，返回存储信息 |
 | `storage create NAME s3 --init [--key KEY] -e URL -b NAME -r REGION -a KEY -s SECRET [-p PREFIX]` | 明确初始化空的 S3 存储并写入 `meta.json`，返回存储信息 |
-| `storage update NAME [--type local\|s3] [--key KEY] [--path PATH] [-e URL] [-b NAME] [-r REGION] [-p PREFIX] [-a KEY] [-s SECRET] [--read N\|--clear-read-concurrency] [--upload N\|--clear-upload-concurrency] [--control N\|--clear-control-concurrency] [--enabled true\|false]` | 修改存储连接信息、当前 block key、并发上限或启停；保存前核对已有 `meta.json`，不返回凭据 |
+| `storage update NAME [--type local\|s3] [--key KEY] [--path PATH] [-e URL] [-b NAME] [-r REGION] [-p PREFIX] [-a KEY] [-s SECRET] [--read N\|--clear-read-concurrency] [--upload N\|--clear-upload-concurrency] [--control N\|--clear-control-concurrency] [--enabled true\|false]` | 修改存储连接信息、当前 block key、并发上限或启停；切换 type 需单容器维护状态并排空上传、任务及待写来源，成功后重启；保存前核对已有 `meta.json`，不返回凭据 |
 | `storage check NAME` | 读取并核对存储的 `meta.json`，返回检查结果 |
 | `storage key set NAME KEY` | 将存储绑定到未撤销的 block key 名称或 UUID |
 | `storage key clear NAME` | 解除存储的当前 block key，新写入区块不加密 |
@@ -277,8 +277,8 @@ docker exec mokyu mokyu cli task resume TASK_UUID
 
 | 命令 | 说明 |
 | --- | --- |
-| `integrity quarantines --storage UUID --source chunk\|pack [--after ID] [--limit N]` | 按存储和类型分页，默认 50，最多 200 |
-| `integrity quarantine --storage UUID --source chunk\|pack ID [--confirm FINGERPRINT]` | 无 confirm 时完整核查并预览；指定返回的 fingerprint 后再次核查并提交隔离任务 |
-| `integrity recheck --storage UUID --source chunk\|pack ID [--confirm FINGERPRINT]` | 预览已隔离来源；确认后异步完整回源复检，成功才解除 |
+| `integrity quarantines --storage UUID --source chunk\|pack\|raw [--after ID] [--limit N]` | 按存储和类型分页，默认 50，最多 200 |
+| `integrity quarantine --storage UUID --source chunk\|pack\|raw ID [--confirm FINGERPRINT]` | 无 confirm 时完整核查并预览；指定返回的 fingerprint 后再次核查并提交隔离任务 |
+| `integrity recheck --storage UUID --source chunk\|pack\|raw ID [--confirm FINGERPRINT]` | 预览已隔离来源；确认后异步完整回源复检，成功才解除 |
 
-ID 是独立 encoding ID 或 pack ID。CLI 与面板使用同一授权、来源代次和任务边界；无强制解除选项。隔离/复检允许维护模式，排空时拒绝。任务入队不代表成功，使用 `task show UUID` 核对状态与结果；普通巡检不会自动隔离，故障计数也不会触发改库。
+ID 是独立 encoding ID、pack ID 或 raw source ID。CLI 与面板使用同一授权、来源代次和任务边界；无强制解除选项。隔离/复检允许维护模式，排空时拒绝。任务入队不代表成功，使用 `task show UUID` 核对状态与结果；普通巡检不会自动隔离，故障计数也不会触发改库。

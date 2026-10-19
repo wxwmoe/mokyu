@@ -6,6 +6,7 @@ pub(crate) enum Error {
     OperationAborted,
     QueryCancelled,
     StorageProfileConflict,
+    StorageNotDrained,
     LocalStorageFeatures,
     LastAdministrator,
     BucketAlreadyExists,
@@ -23,6 +24,9 @@ impl fmt::Display for Error {
             Self::OperationAborted => "operation was aborted",
             Self::QueryCancelled => "database query was cancelled",
             Self::StorageProfileConflict => "storage profile changed",
+            Self::StorageNotDrained => {
+                "storage relocation requires single mode, maintenance and drained operations"
+            }
             Self::LocalStorageFeatures => "local storage does not support these features",
             Self::LastAdministrator => "the last administrator must remain enabled",
             Self::BucketAlreadyExists => "bucket already exists",
@@ -49,6 +53,7 @@ mod tests {
             Error::OperationAborted,
             Error::QueryCancelled,
             Error::StorageProfileConflict,
+            Error::StorageNotDrained,
             Error::LocalStorageFeatures,
             Error::LastAdministrator,
             Error::BucketAlreadyExists,

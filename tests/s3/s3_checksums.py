@@ -23,10 +23,10 @@ for algorithm in ['CRC32', 'SHA1', 'SHA256']:
           **{field: encoded(algorithm, data)})
     assert read('checksum')[0] == data
 
-for algorithm, checksum_type in [('CRC32', 'FULL_OBJECT'), ('SHA256', 'COMPOSITE')]:
+for algorithm, checksum_type, part_mib in [('CRC32', 'FULL_OBJECT', 5), ('SHA256', 'COMPOSITE', 16)]:
     field = 'Checksum' + algorithm
     key = 'checksum-multipart'
-    chunks = [os.urandom(5 * 1024 * 1024), os.urandom(271_000)]
+    chunks = [os.urandom(part_mib * 1024 * 1024), os.urandom(271_000)]
     upload = s3.create_multipart_upload(Bucket=bucket, Key=key,
                                         ChecksumAlgorithm=algorithm, ChecksumType=checksum_type)['UploadId']
     manifest = []

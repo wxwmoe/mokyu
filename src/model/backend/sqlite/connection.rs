@@ -58,6 +58,7 @@ pub(crate) async fn connect(
         publish: backend.clone(),
         quota: backend.clone(),
         streams: backend.clone(),
+        raw: backend.clone(),
         task_control: backend.clone(),
         task_execution: backend.clone(),
         storage_profiles: backend.clone(),
@@ -138,7 +139,7 @@ fn claim(path: &Path) -> Result<(PathBuf, File, PathBuf)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        directories.mode(0o700);
+        directories.mode(0o755);
     }
     directories.create(parent)?;
     let path = match std::fs::symlink_metadata(&path) {

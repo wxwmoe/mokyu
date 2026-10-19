@@ -135,6 +135,13 @@ pub(super) async fn object_chunks(
     if object.id != q.version {
         return Err(s3s::s3_error!(PreconditionFailed).into());
     }
+    if object.payload_type == "raw" {
+        return Ok(Json(insights::ChunkPage {
+            payload_type: object.payload_type,
+            chunks: Vec::new(),
+            next_offset: None,
+        }));
+    }
     let mut rows = app
         .objects
         .chunks(object.id, q.after.unwrap_or(-1), limit + 1)
@@ -161,6 +168,7 @@ pub(super) async fn object_chunks(
         .map(serde_json::from_value)
         .collect::<Result<_, _>>()?;
     Ok(Json(insights::ChunkPage {
+        payload_type: object.payload_type,
         chunks,
         next_offset,
     }))

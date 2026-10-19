@@ -477,14 +477,17 @@ pub(crate) async fn respond(
         Body::empty()
     } else {
         let permits = app.admit(false).await?;
-        Body::new(s3s::Body::from(app.body(
-            s,
-            pin.expect("body read is protected"),
-            span.start as i64..span.end as i64,
-            permits,
-            range.is_some(),
-            None,
-        )))
+        Body::new(s3s::Body::from(
+            app.body(
+                s,
+                pin.expect("body read is protected"),
+                span.start as i64..span.end as i64,
+                permits,
+                range.is_some(),
+                None,
+            )
+            .await?,
+        ))
     };
     Ok(response.body(body)?)
 }

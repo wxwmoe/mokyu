@@ -79,3 +79,34 @@ pub(super) fn credential() -> Result<String> {
     aws_lc_rs::rand::fill(&mut bytes).map_err(|_| anyhow::anyhow!("randomness unavailable"))?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn node_credentials_remain_private_after_replacement() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("mokyu-identity-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root)?;
+        let path = root.join("node.json");
+        let state = NodeState {
+            node_id: Uuid::new_v4(),
+            credential: credential()?,
+        };
+        for _ in 0..2 {
+            write_state(&path, &state).await?;
+            assert_eq!(
+                std::fs::metadata(&path)?.permissions().mode() & 0o777,
+                0o600
+            );
+            assert!(!path.with_extension("json.tmp").exists());
+            assert_eq!(
+                read_state(&path).await?.unwrap().credential,
+                state.credential
+            );
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}

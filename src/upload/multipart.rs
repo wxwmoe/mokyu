@@ -8,6 +8,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use md5::{Digest, Md5};
 use s3s::{S3Request, S3Response, dto::*, s3_error};
 use serde_json::{Value, json};
@@ -233,6 +234,7 @@ impl App {
         let (_, etag, sums) = self
             .receive(
                 id,
+                b.storage_id.context("bucket has no storage")?,
                 body,
                 &req.headers,
                 req.trailing_headers,
@@ -254,7 +256,12 @@ impl App {
         }
         self.seal_uploads(id, false).await?;
         // A late predecessor can now transfer its tail using an already durable successor.
-        if let Err(e) = self.stitch_pair(u.id, i.part_number).await {
+        if self
+            .storage
+            .raw_policy(b.storage_id.context("bucket has no storage")?)?
+            .is_none()
+            && let Err(e) = self.stitch_pair(u.id, i.part_number).await
+        {
             tracing::warn!(error=%e,"multipart boundary remains recoverable for retry");
         }
         self.wake_gc.notify_one();
@@ -335,7 +342,7 @@ impl App {
         let Some((metadata, rows)) = self.multipart.pair(upload, number).await? else {
             return Ok(());
         };
-        if rows.len() != 2 {
+        if rows.len() != 2 || rows.iter().any(|row| row.payload_type == "raw") {
             return Ok(());
         }
         let left = &rows[0];
@@ -544,6 +551,9 @@ impl App {
             return Err(s3_error!(InvalidRequest, "multipart size mismatch").into());
         }
         let etag = format!("{}-{}", hex::encode(etag_hash.finalize()), parts.len());
+        if self.role == "single" {
+            self.multipart.seal_files(u.id).await?;
+        }
         let _coord = self.coord.lock().await;
         self.multipart
             .begin_complete(&authority, u.id, &hash)
@@ -577,6 +587,10 @@ impl App {
                 if result.is_err() {
                     let _ = app.multipart.retry_complete(u.id).await;
                 }
+                drop(_pins);
+                drop(_upin);
+                drop(_guard);
+                app.wake_gc.notify_one();
                 result.map_err(crate::app::internal)
             }
             .in_current_span(),
@@ -628,35 +642,87 @@ impl App {
             )
             .await?;
         self.complete_quota(u.id, id, total).await?;
-        let mut window = Vec::with_capacity(MAX);
+        let storage = self
+            .objects
+            .storage(u.bucket_id)
+            .await?
+            .context("bucket has no storage")?;
+        let raw_revision = self.storage.raw_policy(storage)?;
+        let mut raw_writer = if let Some(revision) = raw_revision {
+            let source = self.raw.begin(id, storage, revision).await?;
+            Some((
+                source,
+                self.storage
+                    .raw_replay_writer(
+                        storage,
+                        source,
+                        total,
+                        &parts.iter().map(|part| part.size).collect::<Vec<_>>(),
+                    )
+                    .await?,
+            ))
+        } else {
+            None
+        };
+        let mut window = if raw_revision.is_some() {
+            Vec::new()
+        } else {
+            Vec::with_capacity(MAX)
+        };
+        let mut prepared = if raw_revision.is_some() && self.storage.is_local(storage)? {
+            if let Some(ranges) = self.local_part_ranges(parts).await? {
+                let (source, writer) = raw_writer.as_mut().unwrap();
+                writer.prepare_local(ranges, self, u.id, *source).await?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut offset = 0;
         let mut full = Integrity::new(&hyper::HeaderMap::new(), u.checksum_algorithm.as_deref())?;
-        let context = crate::storage::ReadContext::default();
         for part in parts {
             let mut part_hash = Md5::new();
             let mut pos = 0;
-            while pos < part.size {
-                let rows = self.chunks.extents(part.id, pos, part.size).await?;
-                ensure!(!rows.is_empty(), "part mapping incomplete");
-                for row in rows {
-                    ensure!(row.offset_bytes == pos, "part mapping has gap");
-                    let data = self.extent_bytes_with(&row, &context).await?;
-                    part_hash.update(&data);
-                    full.update(&data);
-                    let mut rest = data.as_ref();
-                    while !rest.is_empty() {
-                        let n = (MAX - window.len()).min(rest.len());
-                        window.extend_from_slice(&rest[..n]);
-                        rest = &rest[n..];
-                        if window.len() == MAX {
-                            let n = codec::cut(&window);
-                            self.put_chunk(id, offset, window[..n].to_vec(), false)
-                                .await?;
-                            offset += n as i64;
-                            window.drain(..n);
-                        }
+            let mut input = Box::pin(self.payload_bytes(part));
+            loop {
+                let data = if let Some(prepared) = prepared.as_mut() {
+                    if pos == part.size {
+                        None
+                    } else {
+                        prepared.next().await?
                     }
-                    pos += row.length as i64;
+                } else {
+                    input.next().await.transpose()?
+                };
+                let Some(data) = data else {
+                    break;
+                };
+                ensure!(
+                    pos + data.len() as i64 <= part.size,
+                    "assembled part exceeds length"
+                );
+                part_hash.update(&data);
+                full.update(&data);
+                pos += data.len() as i64;
+                if let Some((_, writer)) = raw_writer.as_mut() {
+                    self.renew_write_lease(id).await?;
+                    writer.write(&data).await?;
+                    offset += data.len() as i64;
+                    continue;
+                }
+                let mut rest = data.as_ref();
+                while !rest.is_empty() {
+                    let n = (MAX - window.len()).min(rest.len());
+                    window.extend_from_slice(&rest[..n]);
+                    rest = &rest[n..];
+                    if window.len() == MAX {
+                        let n = codec::cut(&window);
+                        self.put_chunk(id, offset, window[..n].to_vec(), false)
+                            .await?;
+                        offset += n as i64;
+                        window.drain(..n);
+                    }
                 }
             }
             ensure!(
@@ -672,7 +738,7 @@ impl App {
             window.drain(..n);
         }
         ensure!(offset == total, "assembled size mismatch");
-        let (_, mut sums) = full.finish(None)?;
+        let (payload_digest, mut sums) = full.finish(None)?;
         if let Some(alg) = &u.checksum_algorithm {
             let name = alg.to_ascii_lowercase();
             if u.checksum_type.as_deref() == Some("COMPOSITE") {
@@ -699,6 +765,16 @@ impl App {
                 return Err(s3_error!(BadDigest).into());
             }
         }
+        if let Some((source, writer)) = raw_writer {
+            let content_hash = writer
+                .finish_replay(total as u64, |range| self.replay_payload(id, parts, range))
+                .await?;
+            self.raw
+                .finish(id, source, total, &hex::decode(payload_digest)?)
+                .await?;
+            self.deduplicate_raw(id, storage, source, content_hash)
+                .await?;
+        }
         self.finish_stream(id, total, etag, sums.clone()).await?;
         let result = json!({"etag":etag,"checksums":sums});
         self.publish_complete(
@@ -709,6 +785,64 @@ impl App {
         )
         .await?;
         Ok(completion_output(&i.bucket, &i.key, &result))
+    }
+    async fn local_part_ranges(
+        &self,
+        parts: &[StoredStream],
+    ) -> Result<Option<Vec<crate::storage::assembly::Range>>> {
+        let mut ranges = Vec::new();
+        let mut fragments = std::collections::HashSet::new();
+        for part in parts {
+            let mut cursor = 0;
+            while cursor < part.size {
+                let rows = self.multipart.local_ranges(part.id, cursor).await?;
+                ensure!(!rows.is_empty(), "multipart part has a missing extent");
+                for row in rows {
+                    let Some(id) = row.fragment_id else {
+                        return Ok(None);
+                    };
+                    if !fragments.insert(id) {
+                        return Ok(None);
+                    }
+                    if row.source_offset != 0 || row.size != Some(row.length) {
+                        return Ok(None);
+                    }
+                    ensure!(
+                        row.offset_bytes == cursor && row.length > 0,
+                        "multipart extent is not contiguous"
+                    );
+                    let offset = row.file_offset.unwrap_or(0);
+                    ensure!(
+                        offset >= 0 && row.file_id.is_some() == row.file_offset.is_some(),
+                        "invalid multipart source offset"
+                    );
+                    let hash: [u8; 32] = row
+                        .hash
+                        .context("fragment hash missing")?
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("invalid fragment hash"))?;
+                    ranges.push(crate::storage::assembly::Range {
+                        path: self.storage.multipart_path(
+                            row.file_id.unwrap_or(id),
+                            row.file_storage,
+                            row.raw_source,
+                        )?,
+                        offset: offset as u64,
+                        length: row.length as usize,
+                        hash,
+                        fragment: Some(id),
+                        file: row.file_id,
+                    });
+                    cursor += row.length as i64;
+                    // Bound per-request layout memory; larger manifests retain streaming assembly.
+                    if ranges.len() > 4096 {
+                        return Ok(None);
+                    }
+                }
+            }
+            ensure!(cursor == part.size, "multipart extent exceeds part");
+        }
+        Ok(Some(ranges))
     }
     pub async fn abort_multipart(
         &self,

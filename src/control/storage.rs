@@ -383,6 +383,50 @@ pub(crate) async fn update_record(
     name: String,
     input: StoragePatch,
 ) -> anyhow::Result<StorageView> {
+    let changing_type = if let Some(requested) = &input.storage_type {
+        validate_storage_type(requested)?;
+        app.storage_records
+            .record(&name)
+            .await?
+            .is_some_and(|row| row.r#type != *requested)
+    } else {
+        false
+    };
+    let _coord = if changing_type {
+        Some(app.coord.lock().await)
+    } else {
+        None
+    };
+    let mut _cleanup = None;
+    let mut _local = None;
+    if changing_type {
+        use std::sync::atomic::Ordering;
+        anyhow::ensure!(app.role == "single", crate::model::Error::StorageNotDrained);
+        app.ensure_mode()?;
+        anyhow::ensure!(
+            app.maintenance.load(Ordering::Acquire),
+            crate::model::Error::StorageNotDrained
+        );
+        anyhow::ensure!(
+            app.active.lock().unwrap().is_empty(),
+            crate::model::Error::StorageNotDrained
+        );
+        anyhow::ensure!(
+            !app.gc_running.load(Ordering::Acquire),
+            crate::model::Error::StorageNotDrained
+        );
+        _cleanup = Some(
+            app.cleanup_state
+                .running
+                .try_lock()
+                .map_err(|_| crate::model::Error::StorageNotDrained)?,
+        );
+        _local = Some(
+            app.local_cleanup
+                .try_lock()
+                .map_err(|_| crate::model::Error::StorageNotDrained)?,
+        );
+    }
     let StorageEdit {
         row,
         profile,
@@ -398,6 +442,10 @@ pub(crate) async fn update_record(
         .clone()
         .unwrap_or_else(|| row.r#type.clone());
     validate_storage_type(&storage_type)?;
+    anyhow::ensure!(
+        row.r#type == storage_type || changing_type,
+        "storage changed while preparing the update; retry"
+    );
     anyhow::ensure!(
         !(mode == "cluster" && storage_type == "local"),
         "local storages are unavailable in cluster mode"
@@ -508,8 +556,36 @@ pub(crate) async fn update_record(
         requested.pack_range_enabled = false;
     }
     validate_profile(&requested, &record.r#type)?;
-    update.finish(&record, block_key_id, &requested).await?;
-    app.storage.refresh_store(row.id).await?;
+    if changing_type {
+        // Never let old connections resume after a successful or uncertain relocation.
+        app.restart_required
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    #[cfg(feature = "fault-injection")]
+    if changing_type {
+        crate::faults::point("storage-relocating").await;
+    }
+    let result = update.finish(&record, block_key_id, &requested).await;
+    if let Err(error) = result {
+        if changing_type
+            && app
+                .storage_records
+                .record(&name)
+                .await?
+                .is_some_and(|current| current.r#type == row.r#type)
+        {
+            app.restart_required
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        return Err(error);
+    }
+    #[cfg(feature = "fault-injection")]
+    if changing_type {
+        crate::faults::point("storage-relocated").await;
+    }
+    if !changing_type {
+        app.storage.refresh_store(row.id).await?;
+    }
     app.storage_records.view(row.id).await
 }
 

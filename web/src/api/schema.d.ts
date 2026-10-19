@@ -1826,6 +1826,7 @@ export interface components {
         ChunkPage: {
             items: components["schemas"]["ObjectChunk"][];
             next_cursor?: string | null;
+            payload_type: string;
         };
         ClusterOverview: components["schemas"]["ClusterStatus"] & {
             nodes: components["schemas"]["NodeCount"][];
@@ -2371,6 +2372,7 @@ export interface components {
             gc_bytes: string;
             indexed_bytes: string;
             pack_objects: string;
+            raw_objects?: string;
             retained_bytes: string;
             selected_bytes: string;
             unconfirmed_bytes: string;
@@ -2632,7 +2634,7 @@ export interface components {
             storage_id: string;
         };
         /** @enum {string} */
-        SourceType: "chunk" | "pack";
+        SourceType: "chunk" | "pack" | "raw";
         StorageInput: {
             access_key?: string | null;
             /** Format: uuid */
@@ -2695,6 +2697,7 @@ export interface components {
             /** Format: int64 */
             cache_entries?: number | null;
             cache_soft_limit?: string | null;
+            cdc_enabled?: boolean;
             compression_enabled: boolean;
             /** Format: int32 */
             compression_level: number;
@@ -2708,6 +2711,7 @@ export interface components {
             connect_timeout: string;
             /** Format: int32 */
             control_concurrency?: number | null;
+            deduplication_enabled?: boolean;
             deleted_chunk_retention: string;
             integrity_bandwidth?: string | null;
             integrity_batch_timeout: string;
@@ -4603,7 +4607,7 @@ export interface operations {
             query: {
                 storage_id: string;
                 source: components["schemas"]["SourceType"];
-                after?: number;
+                after?: string;
                 limit?: number | null;
             };
             header?: never;

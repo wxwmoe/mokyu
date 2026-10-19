@@ -41,8 +41,12 @@ impl Diagnostics {
             Some(IntegrityError::Authentication) => 1,
             Some(IntegrityError::Decompression) => 2,
             Some(IntegrityError::Hash) => 3,
-            Some(IntegrityError::Metadata) => 4,
+            Some(IntegrityError::Metadata | IntegrityError::RawMetadata) => 4,
             Some(IntegrityError::MissingKey) => 5,
+            Some(IntegrityError::RemoteMissing) => {
+                self.backend[2].fetch_add(1, Relaxed);
+                return;
+            }
             _ => return,
         };
         self.content[index].fetch_add(1, Relaxed);

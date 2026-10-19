@@ -15,6 +15,7 @@ pub const MAX: usize = 4 * 1024 * 1024;
 pub enum IntegrityError {
     Length,
     Metadata,
+    RawMetadata,
     MissingKey,
     Authentication,
     Decompression,
@@ -27,6 +28,7 @@ impl IntegrityError {
         match self {
             Self::Length => "length_mismatch",
             Self::Metadata => "chunk_metadata",
+            Self::RawMetadata => "raw_metadata",
             Self::MissingKey => "missing_key",
             Self::Authentication => "authentication_failed",
             Self::Decompression => "decompression_failed",
@@ -39,6 +41,7 @@ impl IntegrityError {
         [
             Self::Length,
             Self::Metadata,
+            Self::RawMetadata,
             Self::MissingKey,
             Self::Authentication,
             Self::Decompression,

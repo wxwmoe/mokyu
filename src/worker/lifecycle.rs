@@ -194,19 +194,17 @@ impl App {
         }
         let mut cursor = Uuid::nil();
         loop {
-            let rows: Vec<(Uuid, i32, Vec<u8>, Option<Uuid>, Option<String>)> =
-                self.maintenance_store.recovery_fragments(cursor).await?;
+            let rows = self.maintenance_store.recovery_fragments(cursor).await?;
             if rows.is_empty() {
                 break;
             }
-            for (id, size, hash, staging_storage_id, staging_object_key) in rows {
-                let data = self
-                    .storage
-                    .read_fragment(id, staging_storage_id, staging_object_key.as_deref())
-                    .await;
+            for row in rows {
+                let id = row.id;
+                let source = row.source;
+                let data = self.storage.read_fragment(id, &source).await;
                 if !data.is_ok_and(|bytes| {
-                    bytes.len() == size as usize
-                        && blake3::hash(&bytes).as_bytes() == hash.as_slice()
+                    bytes.len() == source.size as usize
+                        && blake3::hash(&bytes).as_bytes() == source.hash.as_slice()
                 }) {
                     let uploads: Vec<Uuid> = self.maintenance_store.fragment_uploads(id).await?;
                     for upload in uploads {
@@ -233,6 +231,7 @@ impl App {
         let Ok(_running) = self.local_cleanup.try_lock() else {
             return Ok(0);
         };
+        self.ensure_mode()?;
         if self.role != "single" {
             self.cluster()?.expire_stream_leases().await?;
         }
@@ -241,6 +240,7 @@ impl App {
         let deadline = Instant::now()
             + Duration::from_secs(config::seconds(&self.config.maintenance.max_duration)?);
         let mut removed = 0;
+        let mut compacted = 0;
         let batch = batch_size.max(1) as i64;
         let idle = config::seconds(&self.config.uploads.idle_timeout)? as f64;
         let expired: Vec<Uuid> = self
@@ -324,11 +324,54 @@ impl App {
             }
             // Keep the row locked against new references while releasing coord for I/O.
             drop(coord);
-            self.storage
-                .remove_fragment(id, fragment.storage, fragment.key.as_deref())
-                .await?;
+            if fragment.file.is_none() {
+                self.storage
+                    .remove_fragment(id, fragment.storage, fragment.key.as_deref())
+                    .await?;
+            }
             fragment.deletion.finish().await?;
             removed += 1;
+        }
+        if self.role == "single" {
+            for file in self.multipart.unused_files(storage_id, batch).await? {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let upload = file.upload_id;
+                let lock = self.operation_lock(upload.unwrap_or(file.id));
+                let Ok(_guard) = lock.try_lock() else {
+                    continue;
+                };
+                if upload.is_some_and(|id| self.is_active(id)) || self.storage.disk.pending(file.id)
+                {
+                    continue;
+                }
+                let _gate = self.storage.source_gate.write().await;
+                if self.multipart.claim_file(file.id).await? {
+                    self.storage.remove_multipart_file(&file).await?;
+                    self.multipart.remove_file(file.id).await?;
+                    removed += 1;
+                }
+            }
+            for file in self.multipart.pending_files(storage_id, batch).await? {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let lock = self.operation_lock(file.upload_id.unwrap_or(file.id));
+                let Ok(_guard) = lock.try_lock() else {
+                    continue;
+                };
+                if file.upload_id.is_some_and(|id| self.is_active(id)) {
+                    continue;
+                }
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("multipart-reclaim-pending").await;
+                let _io = self.storage.disk.io.clone().acquire_owned().await?;
+                let _gate = self.storage.source_gate.write().await;
+                crate::storage::assembly::compact(&self.storage, self.multipart.as_ref(), file.id)
+                    .await?;
+                compacted += 1;
+            }
         }
         if Instant::now() < deadline {
             // Epoch tombstones must be checked while writers cannot create a new stream.
@@ -340,7 +383,7 @@ impl App {
                 removed += count as usize;
             }
         }
-        if removed > 0 {
+        if removed > 0 || compacted > 0 {
             self.wake_gc.notify_one();
         }
         Ok(removed)
@@ -491,6 +534,49 @@ impl App {
                         tracing::warn!(error=%e,packed,id,"physical deletion will be retried");
                         self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
                     }
+                }
+            }
+        }
+        for source in self
+            .raw
+            .candidates(
+                storage_id,
+                grace as i64,
+                min_storage_seconds as i64,
+                batch.clamp(1, 128) as i64,
+            )
+            .await?
+        {
+            let coord = self.coord.lock().await;
+            if self.maintenance.load(Ordering::Acquire) {
+                return Ok(count);
+            }
+            let guard = self.storage.source_gate.write().await;
+            if self.storage.physical_active(source.id) {
+                continue;
+            }
+            let claimed = self
+                .raw
+                .claim(
+                    source.id,
+                    source.revision,
+                    grace as i64,
+                    min_storage_seconds as i64,
+                )
+                .await?;
+            drop(guard);
+            drop(coord);
+            if !claimed {
+                continue;
+            }
+            match self.storage.remove_raw(&source).await {
+                Ok(()) => {
+                    self.raw.removed(source.id).await?;
+                    count += 1;
+                }
+                Err(error) => {
+                    self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(source=%source.id,%error,"raw deletion will be retried");
                 }
             }
         }

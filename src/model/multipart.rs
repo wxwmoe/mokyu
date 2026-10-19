@@ -78,6 +78,38 @@ pub(crate) struct ReceivedPart {
 pub(crate) type UploadPart = (i32, i64, String, DateTime<Utc>, Value);
 pub(crate) type SeedSpan = (Uuid, i64, usize);
 
+#[derive(sqlx::FromRow)]
+pub(crate) struct LocalPartRange {
+    pub(crate) offset_bytes: i64,
+    pub(crate) length: i32,
+    pub(crate) source_offset: i32,
+    pub(crate) fragment_id: Option<Uuid>,
+    pub(crate) size: Option<i32>,
+    pub(crate) hash: Option<Vec<u8>>,
+    pub(crate) file_id: Option<Uuid>,
+    pub(crate) file_offset: Option<i64>,
+    pub(crate) file_storage: Option<Uuid>,
+    pub(crate) raw_source: Option<Uuid>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct MultipartFile {
+    pub(crate) id: Uuid,
+    pub(crate) upload_id: Option<Uuid>,
+    pub(crate) storage_id: Uuid,
+    pub(crate) source_id: Option<Uuid>,
+    pub(crate) state: String,
+}
+
+pub(crate) struct FileRemap {
+    pub(crate) fragment: Uuid,
+    pub(crate) file: Uuid,
+    pub(crate) offset: i64,
+    pub(crate) destination: i64,
+    pub(crate) size: i32,
+    pub(crate) hash: [u8; 32],
+}
+
 pub(crate) struct MultipartCreate<'a> {
     pub authority: &'a Permit,
     pub bucket: Uuid,
@@ -110,6 +142,17 @@ pub(crate) struct PartStitch {
 
 #[async_trait]
 pub(crate) trait MultipartStore: Send + Sync {
+    async fn file(&self, upload: Uuid) -> Result<Uuid>;
+    async fn seal_files(&self, upload: Uuid) -> Result<()>;
+    async fn local_ranges(&self, stream: Uuid, after: i64) -> Result<Vec<LocalPartRange>>;
+    async fn file_location(&self, id: Uuid) -> Result<Option<MultipartFile>>;
+    async fn file_ranges(&self, id: Uuid) -> Result<Vec<(i64, i32)>>;
+    async fn remap_file(&self, upload: Uuid, source: Uuid, ranges: &[FileRemap]) -> Result<()>;
+    async fn pending_files(&self, storage: Option<Uuid>, limit: i64) -> Result<Vec<MultipartFile>>;
+    async fn clear_reclaim(&self, id: Uuid) -> Result<()>;
+    async fn unused_files(&self, storage: Option<Uuid>, limit: i64) -> Result<Vec<MultipartFile>>;
+    async fn claim_file(&self, id: Uuid) -> Result<bool>;
+    async fn remove_file(&self, id: Uuid) -> Result<()>;
     async fn upload(&self, id: Uuid, bucket: Uuid, key: &str, access: &str) -> Result<Upload>;
     async fn create(&self, input: MultipartCreate<'_>) -> Result<(Uuid, bool)>;
     async fn begin_part(

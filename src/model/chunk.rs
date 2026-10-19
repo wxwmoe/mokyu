@@ -23,6 +23,10 @@ pub(crate) struct FragmentSource {
     pub(crate) hash: Vec<u8>,
     pub(crate) staging_storage_id: Option<Uuid>,
     pub(crate) staging_object_key: Option<String>,
+    pub(crate) file_id: Option<Uuid>,
+    pub(crate) file_offset: Option<i64>,
+    pub(crate) file_storage: Option<Uuid>,
+    pub(crate) raw_source: Option<Uuid>,
 }
 
 #[async_trait]

@@ -46,6 +46,16 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `recovery/truncated_stream.py`：PostgreSQL 专用数据库构造 513 个有 source offset 的 extent，删除最后完整 extent 后，已读过和绕过缓存的完整/尾部 Range 均不得静默成功；恢复后字节正确。使用 `MOKYU_TEST_DATABASE_FILE` 和与发布测试相同的 endpoint 设置。
 - `s3/empty_ranges.py`：签名/匿名 S3、公共 Web 与面板下载的空对象、单字节、suffix/open/closed Range、HEAD 和条件请求。空对象无 Range 正常返回，合法但不可满足的 Range 返回 416 和 `Content-Range: bytes */0`；使用默认 SDK 校验配置，另验证空对象复制。面板验证读取 `MOKYU_TEST_PASSWORD_FILE`，公共 Web 使用 `MOKYU_TEST_PUBLIC_WEB`/`MOKYU_TEST_PUBLIC_HOST`。
 - `control/database_capabilities.py`：管理 API/CLI、配置字段和群集能力边界。
+- `storage/raw_objects.py`：raw 的 PUT/HEAD/Range/条件请求、Multipart、Copy 和 chunks 切换；远端设置 `MOKYU_TEST_STORAGE_TYPE=s3`。
+- `storage/raw_lifecycle.py`：本地 raw 损坏隔离/复检、复用 Multipart 暂存、失败 Complete、用量和读取/GC 竞争。
+- `storage/raw_deduplication.py`：四数据库的可选整文件去重、并发与跨分片边界、跨桶用量归属及坏来源排除；复用 source_quarantine 的 fixture，设置 `MOKYU_TEST_BACKEND` 可验证远端 raw。
+- `storage/raw_migration.py`：raw 与加密 chunks、raw 与 raw 的跨存储 copy/move，支持独立远端 S3 fixture。
+- `storage/raw_streaming.py`：raw 大分片、原始 ETag、完整摘要和跨分片 Range；`--part-mib`、`--repeat`、`--label` 记录 UploadPart/Complete 耗时和服务 RSS，`--order sequential|reverse` 选择上传顺序。默认远端需 `MOKYU_TEST_BACKEND`，本地使用 `--local` 且不设置该变量；`MOKYU_TEST_PID_FILE` 必须属于同一容器。不同构建或服务预算的数字不能直接比较。
+- `storage/raw_replay.py`：暂停 Copy/Multipart 校验后的回放，修改远端 raw 或本地暂存来源，验证失败不会替换原对象或丢失已上传分片，恢复源数据后重试成功；需要 `MOKYU_TEST_BACKEND` 和故障注入构建。
+- `recovery/raw_crashes.py`：独占启动/停止隔离服务，验证 raw 发布前后强杀、响应丢失、fsync EIO 和孤儿回收，使用与 `local_durability.py` 相同的 fsync 注入环境。
+- `recovery/file_permissions.py`：接管已初始化但停止的隔离 SQLite 服务，验证严格/宽松继承 umask、普通载荷和暂存0644、目录0755、SQLite伴随文件0600、Multipart发布及重启；需Linux隔离容器内root以切换到UID65534验证实际读权限，环境沿用 `source_quarantine`，不设置 `MOKYU_TEST_BACKEND`。
+- `recovery/local_multipart.py`：独占已初始化但停止的隔离服务，验证本地候选文件按需扩展、连续布局 inode 复用、乱序/替换/所选清单、上传和 Complete 强杀、两批积压上限、确认/映射/回收强杀、Abort、最后一批异步回收及 GC 后全部成功对象的长度/SHA-256 校验；环境沿用 `source_quarantine` fixture。配合 `recovery/fsync.c` 和 `LD_PRELOAD`，设置 `MOKYU_TEST_FSYNC_FAULT` / `MOKYU_TEST_FSYNC_TRACE` 覆盖文件与目录确认失败；另设 `MOKYU_TEST_SPACE_FAULT` 注入目标盘低空间，验证保留来源和重试。`--cross-filesystem` 要求 `MOKYU_TEST_FSYNC_ROOT` 与实例 Multipart 目录位于不同文件系统，用于验证复制回退。Rust 专项 `real_reflink_preserves_sources_and_copy_on_write` 需独立且支持 reflink 的 `MOKYU_TEST_REFLINK_DIR`，显式 `--ignored` 运行并断言实际克隆及 COW 隔离。
+- `recovery/raw_cluster.py`：两个实际 data 节点的共享 Multipart 暂存、跨节点 Complete/去重/读取，以及慢校验续租与 GC；另设 `MOKYU_TEST_PEER_ENDPOINT`，服务端 `read_idle_timeout=30s`，故障目录指向第一个 data 节点。
 - `storage/single_lifecycle.py`：提前本地确认、持久上传、pack、rewrite、unpack、巡检、容量和清理。
 - `recovery/upload_cache.rs`：PostgreSQL 上传准备的双执行者竞争、取消回滚和 owner/pin/来源代次原子性；需要故障注入构建。
 - `recovery/single_restart.py`：三个后端共用的 API 契约，覆盖 10 个崩溃点，包括上传准备提交前后的 owner/pin 原子恢复、待上传数据的密钥轮换及 local/S3 加密数据重启读取。
@@ -177,3 +187,5 @@ fixture 沿用公共读基准的 `label`、`revision`、`build`、`database_vers
 CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值。PostgreSQL 以 userid/dbid/queryid/toplevel 区分语句，保存完整 SQL、执行/计划时间、行数、buffer 和 WAL；统计重置会报错。记录 track/track_planning/fsync/synchronous_commit 设置，track=all 的内外层耗时不能相加。每 100ms 按 application_name 采样等待类别、事件和阻塞关系，每秒采样上传积压；这些计数不能当作精确等待秒数，application_name 也不参与 SQL 统计分组。连接池等待未插桩，输出 null。
 
 启用 drain 后分别保留请求窗口和含排空的 SQL/CPU/后端成本、待处理队列与 ready 编码数；不能把延后落盘当成提速。`mixed` 分别记录健康与恢复请求延迟，需结合恢复审计确认命中恢复。各比较版本须从等价历史/队列状态开始，统一预热、统计刷新和 ANALYZE 相位；至少三组交错配对，详细 tracing 只作独立归因。有限 key 不限制历史物理版本数量，运行前仍须安排总字节、保留期及清理预算。
+
+- `python -m tests.recovery.storage_relocation`: owns a stopped isolated service, copies one complete local namespace to an isolated S3 fixture and back, verifies maintenance/upload/read guards and crash boundaries. Set `MOKYU_TEST_RELOCATION_BACKEND` to the fixture credential file and the usual `source_quarantine` environment, without `MOKYU_TEST_BACKEND`.

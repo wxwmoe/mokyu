@@ -26,7 +26,7 @@ watch(selected, () => { objectAfter.value = null })
 const quarantine = ref(false), quarantineInput = ref<Record<string, unknown>>({})
 function sourceScope(issue: { code: string; detail: unknown }) {
   const source = issue.detail as Record<string, any>
-  const id = source?.source === 'pack' ? source.pack_id : source?.encoding_id
+  const id = source?.source === 'raw' ? source.location_id : source?.source === 'pack' ? source.pack_id : source?.encoding_id
   const storage = source?.storage_id || detail.value.storage_id
   return id && storage && ['remote_missing', 'length_mismatch', 'authentication_failed', 'decompression_failed', 'hash_mismatch'].includes(issue.code) ? { storage_id: storage, source: source.source, id: String(id) } : null
 }

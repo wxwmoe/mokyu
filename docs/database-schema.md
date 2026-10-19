@@ -2,7 +2,7 @@
 
 数据库保存对象目录、权限、存储映射、任务和运行状态；载荷位于 storage 或受保护的暂存目录。本文只列出当前公开语义，完整类型、约束、索引和触发器以 [`migrations/`](../migrations) 为准。
 
-全新安装执行所选后端的迁移：PostgreSQL 使用 `migrations/*.sql`，MySQL 使用 `migrations/mysql/*.sql`，SQLite 使用 `migrations/sqlite/*.sql`。已发布迁移不可修改。PostgreSQL 的单容器和群集使用同一套表；MySQL 和 SQLite 只有单容器表，不保存节点、lease、子任务或共享 staging。群集的 control、worker、data 共享 PostgreSQL，各自保留独立 `instance.data_path` 和 `node.json`。
+全新安装使用 `migrations/schema/{postgres,mysql,sqlite}.sql` 的对应最新结构；已初始化数据库执行所选后端的增量迁移：PostgreSQL 使用 `migrations/*.sql`，MySQL 使用 `migrations/mysql/*.sql`，SQLite 使用 `migrations/sqlite/*.sql`。已发布迁移不可修改。PostgreSQL 的单容器和群集使用同一套表；MySQL 和 SQLite 只有单容器表，不保存节点、lease、子任务或共享 staging。群集的 control、worker、data 共享 PostgreSQL，各自保留独立 `instance.data_path` 和 `node.json`。
 
 下表描述共有数据含义，并列出 PostgreSQL 群集字段；原生类型和约束以各后端迁移为准。MySQL/MariaDB 共用 `migrations/mysql/`，使用二进制 UUID、自增 BIGINT 内容 ID、UTC `DATETIME(6)` 和二进制对象键。名称比较区分大小写和尾空格；MySQL 使用原生 JSON，MariaDB 使用带 JSON 有效性约束的文本表示。引用、配额和任务更新在同一事务中显式完成；容量 scope 的桶集合使用关联表。SQLite 使用 STRICT 表、16 字节 UUID、整数自增内容 ID、UTC 微秒整数时间、JSON 文本和二进制对象键；写事务使用 `BEGIN IMMEDIATE`，引用与配额同样在事务内显式维护。原生类型不影响对外 ID、分页、时间和字节数的接口语义。
 
@@ -28,17 +28,28 @@
 | 表 | 关键字段 | 约束 |
 | --- | --- | --- |
 | `storages` | `id`、`name`、`type`、`path`、`endpoint_url`、`remote_bucket_name`、`region`、`prefix`、加密凭据、`identity_marker`、`block_key_id`、`enabled` | `type` 为 `local` 或 `s3`；保存连接信息时核对已有 `meta.json`，不会把空目标隐式初始化 |
-| `storage_profiles` | `storage_id`、`revision`、连接/重试、cache、compression、pack、integrity、migration、并发和字节预算字段 | 每个 storage 一行类型化策略；storage 级读写/control/维护及完整性预算在群集内共享 |
+| `storage_profiles` | `storage_id`、`revision`、`cdc_enabled`、`deduplication_enabled`、连接/重试、cache、compression、pack、integrity、migration、并发和字节预算字段 | 每个 storage 一行类型化策略；storage 级读写/control/维护及完整性预算在群集内共享 |
 | `storage_permits` | `token`、`storage_id`、`direction`、`holder_id`、`acquired_at`、`expires_at` | 短租约，按 storage 和方向限制群集总并发 |
 | `buckets` | `id`、`name`、`project_id`、`storage_id`、设置和状态字段 | `storage_id` 创建时绑定且不可修改；同一 storage 内去重，跨 storage 不去重 |
 | `bucket_domains` | `host`、`bucket_id` | 公共 Host 到桶的唯一映射 |
-| `objects`、`streams`、`extents`、`fragments` | `object_key`、`stream_type`、`write_token`、`catalog_category`、范围映射、片段状态 | 对象目录和版本发布；完整 ready stream 才能发布；catalog_category 是文件分类，catalog_type 是 MIME type |
+| `objects`、`streams`、`extents`、`fragments` | `object_key`、`stream_type`、`payload_type`、`payload_revision`、`write_token`、`catalog_category`、范围映射、片段状态 | 对象目录和版本发布；完整 ready stream 才能发布；catalog_category 是文件分类，catalog_type 是 MIME type |
 
 storage 连接和 profile 修改只改变后续写入及新请求的策略。存量载荷的加密、压缩或区块包转换必须显式启动 `storage rewrite` 或 `storage unpack` 任务。
 
 `streams.http_compression` 是内部响应压缩摘要：PostgreSQL 使用 JSONB，MySQL/MariaDB 使用 JSON，SQLite 使用带 json_valid 检查的 TEXT，默认 `{}`，不通过对象 API 暴露。`estimated_size` 在最终发布时按 extent 引用累计，重复引用重复计数；完整独立区块采用已知存储长度，其余采用原始长度。`version` 是压缩策略修订；`zstd`、`br`、`gzip` 缺失表示未知，0 表示完整尝试收益不足，正数是实际编码长度。
 
 各算法观测通过后端原子更新合并，同策略保留未知键，切换策略只保留有效预估并清除全部旧算法结果；旧节点不能覆盖新策略。观测只写 ready stream，遵守维护、运行模式与所有者边界，不改变对象时间、ETag 或目录 revision。内存队列有界且允许丢弃，数据库中没有额外观测任务或租约；读取不等待回写。
+
+## 原始来源与范围
+
+`streams.payload_type` 为 `chunks`（默认）或 `raw`，`payload_revision` 为正整数、默认 1。旧对象继续采用原表示；原始对象不创建 `extents` 或 `chunks` 行。
+
+| 表 | 字段与约束 | 索引与生命周期 |
+| --- | --- | --- |
+| `raw_sources` | UUID `id` 主键；`storage_id` 非空外键，`owner_stream` 可空外键、删除 stream 时置空；`medium` 默认 local、`durability` 默认 durable、`boot_id` 可空；`state` 默认 writing；`size` 非负、默认 0；`digest` 可空 16 字节、ready 时必须存在；`content_hash` 可空 32 字节、`upload_id` 可空；正整数 `revision` 默认 1、`profile_revision` 非空；可空隔离时间/代码；创建和未引用时间默认当前时间 | 按 storage/state/unreferenced_at/id 查回收候选，按 owner 查未完成写入；非空内容摘要按 storage/content_hash/size 唯一；被 raw_ranges 引用时不可删除 |
+| `raw_ranges` | `stream_id` 外键、删除 stream 时级联；`offset_bytes` 与 `length` 非负；`source_id` 非空来源外键；`source_offset` 非负、默认 0 | 主键 `(stream_id,offset_bytes)`，来源反查索引；发布事务检查有序连续、边界与来源健康，GC 分批释放引用 |
+
+UUID、时间、整数分别使用各数据库既有原生类型。原始来源使用 local 或 shared_s3，确认策略为 durable；完整读取校验长度和 MD5。逻辑用量按对象字节计量，物理用量按独立来源去重，并将共享收益归属到相应桶和项目；raw 没有编码节省。物理库存同时区分保留引用及待回收来源。
 
 ## 逻辑区块和物理来源
 

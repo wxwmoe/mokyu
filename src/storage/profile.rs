@@ -9,6 +9,10 @@ use uuid::Uuid;
 pub(crate) struct StorageProfile {
     pub storage_id: Uuid,
     pub revision: i64,
+    #[serde(default = "cdc_enabled")]
+    pub cdc_enabled: bool,
+    #[serde(default)]
+    pub deduplication_enabled: bool,
     pub connect_timeout: String,
     pub request_timeout: String,
     pub max_retries: i32,
@@ -63,7 +67,18 @@ pub(crate) struct StorageProfile {
     pub migration_byte_budget: Option<String>,
 }
 
+fn cdc_enabled() -> bool {
+    true
+}
+
 impl StorageProfile {
+    pub(crate) fn validate_key(&self, key: Option<Uuid>) -> Result<()> {
+        anyhow::ensure!(
+            self.cdc_enabled || key.is_none(),
+            "raw storage cannot enable encryption"
+        );
+        Ok(())
+    }
     pub(crate) fn pack_config(&self) -> crate::content::pack::Config {
         use crate::content::pack::{CompressionStrategy, Config};
         Config {
@@ -128,6 +143,13 @@ impl StorageProfile {
 
 pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::Result<()> {
     use crate::config::{bytes, cache_bytes, seconds};
+    anyhow::ensure!(
+        profile.cdc_enabled
+            || (!profile.compression_enabled
+                && !profile.pack_enabled
+                && !profile.pack_range_enabled),
+        "raw storage cannot enable compression or packs"
+    );
     if storage_type == "local"
         && (profile.cache_enabled
             || profile.upload_cache

@@ -249,6 +249,8 @@ async fn sqlite_content_contract() -> Result<()> {
             hash: [7; 32],
             staging_storage: None,
             staging_key: None,
+            file: None,
+            file_offset: None,
         })
         .await?;
     let tail = backend.fragment(fragment).await?;
@@ -264,7 +266,9 @@ async fn sqlite_content_contract() -> Result<()> {
                 size: 5,
                 hash: [8; 32],
                 staging_storage: None,
-                staging_key: None
+                staging_key: None,
+                file: None,
+                file_offset: None,
             })
             .await
             .is_err()
@@ -283,7 +287,9 @@ async fn sqlite_content_contract() -> Result<()> {
                 size: 5,
                 hash: [9; 32],
                 staging_storage: Some(storage),
-                staging_key: Some("invalid".into())
+                staging_key: Some("invalid".into()),
+                file: None,
+                file_offset: None,
             })
             .await
             .is_err()

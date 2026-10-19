@@ -388,42 +388,48 @@ impl App {
                 json!({"state":s.state,"stream_type":s.stream_type}),
             ));
         }
-        let rows = self
-            .integrity_store
-            .ranges(s.id, cursor.after_extent)
-            .await?;
-        let more = rows.len() > 64;
-        for r in rows.iter().take(64) {
-            if r.offset_bytes != cursor.position {
-                found.push(Finding::object(&s,"mapping_gap",r.offset_bytes,json!({"expected_offset":cursor.position.to_string(),"actual_offset":r.offset_bytes.to_string()})));
-            }
-            if r.fragment_id.is_some()
-                || r.chunk_id.is_none()
-                || r.state.as_deref() != Some("ready")
-                || r.raw_size
-                    .is_none_or(|n| i64::from(r.source_offset) + i64::from(r.length) > i64::from(n))
-            {
-                found.push(Finding::object(
-                    &s,
-                    "mapping_source",
-                    r.offset_bytes,
-                    json!({"chunk_id":r.chunk_id.map(|n|n.to_string())}),
-                ));
-            }
-            cursor.position = r
-                .offset_bytes
-                .checked_add(i64::from(r.length))
-                .unwrap_or_else(|| {
+        let more = if s.payload_type == "raw" {
+            self.inspect_raw_mapping(&s, d, cursor, &mut found).await?
+        } else {
+            let rows = self
+                .integrity_store
+                .ranges(s.id, cursor.after_extent)
+                .await?;
+            let more = rows.len() > 64;
+            for r in rows.iter().take(64) {
+                if r.offset_bytes != cursor.position {
+                    found.push(Finding::object(&s,"mapping_gap",r.offset_bytes,json!({"expected_offset":cursor.position.to_string(),"actual_offset":r.offset_bytes.to_string()})));
+                }
+                if r.fragment_id.is_some()
+                    || r.chunk_id.is_none()
+                    || r.state.as_deref() != Some("ready")
+                    || r.raw_size.is_none_or(|n| {
+                        i64::from(r.source_offset) + i64::from(r.length) > i64::from(n)
+                    })
+                {
                     found.push(Finding::object(
                         &s,
                         "mapping_source",
                         r.offset_bytes,
-                        json!({"overflow":true}),
+                        json!({"chunk_id":r.chunk_id.map(|n|n.to_string())}),
                     ));
-                    i64::MAX
-                });
-            cursor.after_extent = r.offset_bytes;
-        }
+                }
+                cursor.position = r
+                    .offset_bytes
+                    .checked_add(i64::from(r.length))
+                    .unwrap_or_else(|| {
+                        found.push(Finding::object(
+                            &s,
+                            "mapping_source",
+                            r.offset_bytes,
+                            json!({"overflow":true}),
+                        ));
+                        i64::MAX
+                    });
+                cursor.after_extent = r.offset_bytes;
+            }
+            more
+        };
         if !more {
             if cursor.position != s.size {
                 found.push(Finding::object(
@@ -450,6 +456,113 @@ impl App {
         }
         drop(pin);
         Ok(())
+    }
+
+    async fn inspect_raw_mapping(
+        &self,
+        stream: &StoredStream,
+        detail: &mut Detail,
+        cursor: &mut Cursor,
+        found: &mut Vec<Finding>,
+    ) -> Result<bool> {
+        let rows: Vec<_> = self
+            .raw
+            .page(stream.id, cursor.position, stream.size)
+            .await?
+            .into_iter()
+            .filter(|row| row.offset_bytes > cursor.after_extent)
+            .take(65)
+            .collect();
+        if rows.is_empty() && cursor.after_extent < 0 {
+            found.push(Finding::object(
+                stream,
+                "mapping_source",
+                0,
+                json!({"source":"raw"}),
+            ));
+        }
+        for row in rows.iter().take(64) {
+            let source = &row.source;
+            if row.offset_bytes != cursor.position {
+                found.push(Finding::object(
+                    stream,
+                    "mapping_gap",
+                    row.offset_bytes,
+                    json!({"expected_offset":cursor.position.to_string(),"source":"raw"}),
+                ));
+            }
+            let profile = self.storage_profiles.load(source.storage_id).await?;
+            if detail.mode != Mode::Metadata
+                && !self
+                    .acquire_profile_rate(
+                        source.storage_id,
+                        &profile,
+                        1,
+                        if detail.mode == Mode::Full {
+                            source.size
+                        } else {
+                            0
+                        },
+                    )
+                    .await?
+            {
+                return Ok(true);
+            }
+            let result: Result<()> = tokio::time::timeout(
+                Duration::from_secs(config::seconds(&profile.integrity_batch_timeout)?),
+                async {
+                    row.validate()?;
+                    if detail.mode != Mode::Metadata {
+                        let _slot = self.slots.acquire().await?;
+                        let _permit = if detail.storage_id != Some(source.storage_id) {
+                            Some(
+                                self.storage
+                                    .profile_permit(source.storage_id, "integrity")
+                                    .await?,
+                            )
+                        } else {
+                            None
+                        };
+                        let _reader = self
+                            .storage
+                            .raw_reader(source, detail.mode == Mode::Full)
+                            .await?;
+                        if detail.mode == Mode::Full {
+                            detail.bytes_checked += source.size as u64;
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .await
+            .context("raw integrity backend timeout; resume to retry")?;
+            if let Err(error) = result {
+                let code = if let Some(error) = error.downcast_ref::<IntegrityError>() {
+                    error.code()
+                } else if crate::model::error(&error)
+                    == Some(crate::model::Error::SourceUnavailable)
+                {
+                    "source_unavailable"
+                } else {
+                    return Err(error.context("raw integrity check failed; resume to retry"));
+                };
+                let mut finding = Finding::object(
+                    stream,
+                    code,
+                    row.offset_bytes,
+                    json!({"source":"raw","storage_id":source.storage_id,"location_id":source.id,
+                        "quarantine_code":source.quarantine_code}),
+                );
+                finding.location_id = Some(source.id);
+                found.push(finding);
+            }
+            cursor.position = row
+                .offset_bytes
+                .checked_add(row.length)
+                .context("raw mapping overflow")?;
+            cursor.after_extent = row.offset_bytes;
+        }
+        Ok(rows.len() > 64)
     }
 
     async fn chunk_pin(&self, c: &Chunk, d: &Detail) -> Result<Option<Active>> {

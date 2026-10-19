@@ -59,7 +59,9 @@ impl App {
             )
             .await?;
         let result: Result<()> = async {
-            self.copy_extents(destination, &source).await?;
+            _source_pin
+                .with_read_lease(self.copy_extents(destination, &source))
+                .await?;
             self.finish_stream(
                 destination,
                 source.size,

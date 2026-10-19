@@ -58,10 +58,10 @@ pub(crate) fn identity_marker(deployment: Uuid, id: Uuid) -> Result<Value> {
 
 #[derive(Clone, Copy)]
 pub(crate) struct Options {
-    connect_timeout: Duration,
-    request_timeout: Duration,
-    retry_timeout: Duration,
-    max_retries: usize,
+    pub(super) connect_timeout: Duration,
+    pub(super) request_timeout: Duration,
+    pub(super) retry_timeout: Duration,
+    pub(super) max_retries: usize,
 }
 
 impl Options {
@@ -86,6 +86,8 @@ impl Options {
 
 pub(crate) struct Store {
     pub backend: Arc<dyn ObjectStore>,
+    pub multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
+    pub streaming: Option<super::s3::Streaming>,
     identity_marker: Value,
     verified: tokio::sync::OnceCell<()>,
 }
@@ -101,15 +103,19 @@ impl Store {
                 && meta.pack_layout == "uuid-prefix2-v1",
             "unsupported storage identity marker"
         );
+        let mut multipart: Option<Arc<dyn object_store::multipart::MultipartStore>> = None;
+        let mut streaming = None;
+        let prefix = Path::parse(&row.prefix)?;
         let backend: Arc<dyn ObjectStore> = match row.r#type.as_str() {
-            "local" => Arc::new(
+            "local" => Arc::new(PrefixStore::new(
                 LocalFileSystem::new_with_prefix(
                     row.path
                         .as_deref()
                         .context("local storage path is missing")?,
                 )?
                 .with_fsync(true),
-            ),
+                prefix.clone(),
+            )),
             "s3" => {
                 let access = codec::unprotect(
                     row.access_key_encrypted
@@ -125,7 +131,13 @@ impl Store {
                     &secrets.credential_key,
                     format!("storage-{}-secret", row.id).as_bytes(),
                 )?;
-                Arc::new(
+                let client = reqwest::Client::builder()
+                    .connect_timeout(options.connect_timeout)
+                    .timeout(options.request_timeout)
+                    .http1_only()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()?;
+                let store = Arc::new(PrefixStore::new(
                     AmazonS3Builder::new()
                         .with_endpoint(
                             row.endpoint_url
@@ -153,13 +165,24 @@ impl Store {
                             retry_timeout: options.retry_timeout,
                             ..Default::default()
                         })
+                        .with_http_connector(super::s3::Connector(client.clone()))
                         .build()?,
-                )
+                    prefix.clone(),
+                ));
+                multipart = Some(store.clone());
+                streaming = Some(super::s3::Streaming {
+                    signer: store.clone(),
+                    client,
+                    options,
+                });
+                store
             }
             _ => anyhow::bail!("unknown storage type"),
         };
         Ok(Self {
-            backend: Arc::new(PrefixStore::new(backend, Path::parse(&row.prefix)?)),
+            backend,
+            multipart,
+            streaming,
             identity_marker: row.identity_marker.clone(),
             verified: tokio::sync::OnceCell::new(),
         })
@@ -232,6 +255,8 @@ mod tests {
         let expected = identity_marker(Uuid::new_v4(), id).unwrap();
         let target = Store {
             backend: Arc::new(PrefixStore::new(store, "test/nested")),
+            multipart: None,
+            streaming: None,
             identity_marker: expected.clone(),
             verified: tokio::sync::OnceCell::new(),
         };

@@ -17,6 +17,7 @@ mod tests;
 pub(crate) enum SourceType {
     Chunk,
     Pack,
+    Raw,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -27,6 +28,17 @@ pub(crate) struct SourceScope {
     pub id: String,
 }
 impl SourceScope {
+    pub fn validate(&self) -> Result<()> {
+        if self.source == SourceType::Raw {
+            self.uuid()?;
+        } else {
+            self.number()?;
+        }
+        Ok(())
+    }
+    pub fn uuid(&self) -> Result<Uuid> {
+        Uuid::parse_str(&self.id).map_err(|_| s3s::s3_error!(InvalidArgument).into())
+    }
     pub fn number(&self) -> Result<i64> {
         let id = self
             .id
@@ -61,6 +73,7 @@ impl SourceSnapshot {
         match &self.physical {
             PhysicalSource::Chunk(c) => c.location_id,
             PhysicalSource::Pack(p) => p.location_id,
+            PhysicalSource::Raw(r) => r.id,
         }
     }
     pub fn summary(&self) -> Result<Value> {
@@ -68,7 +81,7 @@ impl SourceSnapshot {
             json!({"storage_id":self.scope.storage_id,"source":self.scope.source,"id":self.scope.id,
             "location_id":self.location(),"state":self.state,"revision":self.revision.to_string(),
             "quarantine_code":self.quarantine_code,"fingerprint":self.fingerprint()?,
-            "members":match &self.physical { PhysicalSource::Chunk(_) => 1, PhysicalSource::Pack(p) => p.member_count }}),
+            "members":match &self.physical { PhysicalSource::Chunk(_) | PhysicalSource::Raw(_) => 1, PhysicalSource::Pack(p) => p.member_count }}),
         )
     }
 }
@@ -90,7 +103,7 @@ pub(crate) struct SourceQuery {
     pub storage_id: Uuid,
     pub source: SourceType,
     #[serde(default)]
-    pub after: i64,
+    pub after: String,
     pub limit: Option<i64>,
 }
 

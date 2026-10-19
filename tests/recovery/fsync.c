@@ -1,4 +1,4 @@
-/* Linux test interposer: fail only fsync under the dedicated backend root. */
+/* Linux test interposer: sync and free-space failures under the dedicated backend root. */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 int fsync(int fd) {
@@ -51,5 +52,29 @@ int fsync(int fd) {
         close(log);
     }
     errno = saved;
+    return result;
+}
+
+static int low_space(const char *path) {
+    const char *root = getenv("MOKYU_TEST_FSYNC_ROOT");
+    const char *fault = getenv("MOKYU_TEST_SPACE_FAULT");
+    if (!root || !fault || access(fault, F_OK)) return 0;
+    size_t prefix = strlen(root);
+    return !strncmp(path, root, prefix) && (!path[prefix] || path[prefix] == '/');
+}
+
+int statvfs(const char *path, struct statvfs *info) {
+    int (*query)(const char *, struct statvfs *) = dlsym(RTLD_NEXT, "statvfs");
+    if (!query) return errno = ENOSYS, -1;
+    int result = query(path, info);
+    if (!result && low_space(path)) info->f_bavail = 0;
+    return result;
+}
+
+int statvfs64(const char *path, struct statvfs64 *info) {
+    int (*query)(const char *, struct statvfs64 *) = dlsym(RTLD_NEXT, "statvfs64");
+    if (!query) return errno = ENOSYS, -1;
+    int result = query(path, info);
+    if (!result && low_space(path)) info->f_bavail = 0;
     return result;
 }

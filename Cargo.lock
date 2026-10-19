@@ -1737,6 +1737,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
+ "libc",
  "log",
  "md-5 0.10.6",
  "object_store",

@@ -34,7 +34,7 @@ fn available(stream: &StoredStream, metadata: &Metadata, encoding: Encoding) -> 
     if encoding == Encoding::Identity {
         return true;
     }
-    if stream.size < 1024 {
+    if stream.size < 1024 || stream.payload_type == "raw" {
         return false;
     }
     let summary = &stream.http_compression;
@@ -315,7 +315,8 @@ pub(crate) async fn read(
             encoding: encoding.name(),
             policy: POLICY,
         };
-        let use_cache = !checksum
+        let use_cache = stream.payload_type == "chunks"
+            && !checksum
             && cacheable(request)
             && cacheable(&headers)
             && app.response_cache.eligible(&stream);
@@ -412,14 +413,16 @@ pub(crate) async fn read(
             let observation = observation(app, &stream, encoding);
             let mut pin = pin.take().expect("body read is protected");
             pin.allow_replica();
-            let body = app.body(
-                stream,
-                pin,
-                span.start as i64..span.end as i64,
-                permits,
-                range.is_some(),
-                capture,
-            );
+            let body = app
+                .body(
+                    stream,
+                    pin,
+                    span.start as i64..span.end as i64,
+                    permits,
+                    range.is_some(),
+                    capture,
+                )
+                .await?;
             Some(if encoding == Encoding::Identity && builder.is_none() {
                 body
             } else {

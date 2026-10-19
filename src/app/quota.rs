@@ -24,6 +24,7 @@ pub(crate) fn database_error(error: &anyhow::Error) -> Option<s3s::S3Error> {
         | Error::DomainInUse
         | Error::BucketNotDrained
         | Error::ObjectAlreadyExists
+        | Error::StorageNotDrained
         | Error::StorageProfileConflict) => {
             let code = match reason {
                 Error::LastAdministrator => "LastAdministrator",
@@ -32,6 +33,7 @@ pub(crate) fn database_error(error: &anyhow::Error) -> Option<s3s::S3Error> {
                 Error::DomainInUse => "DomainInUse",
                 Error::BucketNotDrained => "BucketNotDrained",
                 Error::StorageProfileConflict => "StorageProfileConflict",
+                Error::StorageNotDrained => "StorageNotDrained",
                 Error::ObjectAlreadyExists => "ObjectAlreadyExists",
                 _ => unreachable!(),
             };
@@ -85,6 +87,7 @@ mod tests {
             (Error::BucketNotDrained, "BucketNotDrained"),
             (Error::ObjectAlreadyExists, "ObjectAlreadyExists"),
             (Error::StorageProfileConflict, "StorageProfileConflict"),
+            (Error::StorageNotDrained, "StorageNotDrained"),
         ] {
             let error = database_error(&source.into()).unwrap();
             assert_eq!(error.code().as_str(), code);

@@ -27,6 +27,12 @@ pub(crate) struct PhysicalUsage {
     pub(crate) unconfirmed_bytes: String,
     pub(crate) chunk_objects: String,
     pub(crate) pack_objects: String,
+    #[serde(default = "zero")]
+    pub(crate) raw_objects: String,
+}
+
+fn zero() -> String {
+    "0".into()
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

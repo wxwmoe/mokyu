@@ -28,6 +28,8 @@ pub(crate) struct StreamTail {
     pub(crate) hash: [u8; 32],
     pub(crate) staging_storage: Option<Uuid>,
     pub(crate) staging_key: Option<String>,
+    pub(crate) file: Option<Uuid>,
+    pub(crate) file_offset: Option<i64>,
 }
 
 #[derive(sqlx::FromRow)]

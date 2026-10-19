@@ -230,6 +230,7 @@ impl App {
     pub async fn receive(
         &self,
         stream: Uuid,
+        storage: Uuid,
         mut body: StreamingBlob,
         headers: &HeaderMap,
         trailers: Option<TrailingHeaders>,
@@ -251,8 +252,23 @@ impl App {
             .reserve_quota(stream, declared.unwrap_or(0), false, upload)
             .await?;
         let mut offset = 0i64;
-        let mut window = Vec::with_capacity(MAX);
-        let mut seed = if let Some((id, number)) = upload {
+        let raw_revision = self.storage.raw_policy(storage)?;
+        let raw_part = upload.is_some() && raw_revision.is_some();
+        let mut raw = if let Some(revision) = raw_revision.filter(|_| upload.is_none()) {
+            let source = self.raw.begin(stream, storage, revision).await?;
+            Some((
+                source,
+                self.storage.raw_writer(storage, source, declared).await?,
+            ))
+        } else {
+            None
+        };
+        let mut window = if raw.is_some() {
+            Vec::new()
+        } else {
+            Vec::with_capacity(MAX)
+        };
+        let mut seed = if let Some((id, number)) = upload.filter(|_| raw.is_none() && !raw_part) {
             self.multipart_seed(id, number).await?
         } else {
             crate::upload::multipart::Seed::empty(Uuid::nil())
@@ -279,12 +295,30 @@ impl App {
                 reserved = self.reserve_quota(stream, received, true, upload).await?;
             }
             check.update(&data);
+            if touch.elapsed() >= Duration::from_secs(5) {
+                self.renew_write_lease(stream).await?;
+                if let Some((upload, _)) = upload {
+                    self.multipart.touch(upload).await?;
+                }
+                touch = Instant::now();
+            }
+            if let Some((_, writer)) = raw.as_mut() {
+                writer.write(&data).await?;
+                continue;
+            }
             let mut rest = data.as_ref();
             while !rest.is_empty() {
                 let take = (MAX - window.len()).min(rest.len());
                 window.extend_from_slice(&rest[..take]);
                 rest = &rest[take..];
                 if window.len() == MAX {
+                    if raw_part {
+                        self.raw_tail(stream, storage, upload.unwrap().0, offset, &window)
+                            .await?;
+                        offset += window.len() as i64;
+                        window.clear();
+                        continue;
+                    }
                     let n = codec::cut(&window);
                     // Cached bytes from previous parts cannot authorize recovery.
                     let chunk = self
@@ -297,12 +331,6 @@ impl App {
                     offset += taken as i64;
                 }
             }
-            if touch.elapsed() >= Duration::from_secs(5) {
-                if let Some((upload, _)) = upload {
-                    self.multipart.touch(upload).await?;
-                }
-                touch = Instant::now();
-            }
         }
         if declared.is_some_and(|n| received != n) {
             return Err(s3_error!(IncompleteBody).into());
@@ -311,9 +339,20 @@ impl App {
         if reserved != received {
             self.reserve_quota(stream, received, false, upload).await?;
         }
-        if upload.is_some() {
+        if let Some((source, writer)) = raw {
+            let hash = writer.finish(received as u64).await?;
+            self.raw
+                .finish(stream, source, received, &hex::decode(&etag)?)
+                .await?;
+            self.deduplicate_raw(stream, storage, source, hash).await?;
+        } else if upload.is_some() {
             let prefix = seed.spans.iter().map(|s| s.2).sum::<usize>();
-            self.tail(stream, offset, &window[prefix..]).await?;
+            if raw_part {
+                self.raw_tail(stream, storage, upload.unwrap().0, offset, &window)
+                    .await?;
+            } else {
+                self.tail(stream, offset, &window[prefix..]).await?;
+            }
         } else {
             while !window.is_empty() {
                 let n = codec::cut(&window);

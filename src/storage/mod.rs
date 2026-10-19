@@ -2,6 +2,7 @@ use crate::{
     config::{self, Budget, Config, Secrets},
     content::codec::{self, Chunk, MAX},
 };
+pub(crate) mod assembly;
 pub(crate) mod cache;
 mod diagnostics;
 pub(crate) mod local;
@@ -10,7 +11,9 @@ pub(crate) mod model;
 pub(crate) mod permits;
 pub(crate) mod profile;
 mod rate;
+pub(crate) mod raw;
 pub(crate) mod resource_gate;
+mod s3;
 pub(crate) mod target;
 
 #[cfg(all(test, feature = "fault-injection"))]
@@ -53,10 +56,13 @@ pub struct Storage {
     physical: Arc<dyn crate::model::PhysicalStore>,
     cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
     profile_store: Arc<dyn crate::model::StorageProfileStore>,
+    raw_store: Arc<dyn crate::model::raw::RawStore>,
+    reflink: Arc<Mutex<HashMap<(u64, u64), bool>>>,
     managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
     record_store: Arc<dyn crate::model::StorageRecordStore>,
     pub source_gate: tokio::sync::RwLock<()>,
     physical_pins: Mutex<HashMap<Uuid, std::sync::Weak<AtomicUsize>>>,
+    raw_reserved: Arc<Mutex<u64>>,
     pack_misses: Mutex<HashMap<i64, std::sync::Weak<PackFetch>>>,
     pack_live: Mutex<HashMap<i64, std::sync::Weak<LoadedPack>>>,
     pack_memory: Arc<Semaphore>,
@@ -93,7 +99,7 @@ pub struct Storage {
     capacity: Option<u64>,
     min_compression_savings_percent: u8,
     misses: Mutex<HashMap<(i64, Uuid), std::sync::Weak<FetchResult>>>,
-    pub backend_gets: std::sync::atomic::AtomicU64,
+    pub backend_gets: Arc<std::sync::atomic::AtomicU64>,
     pub cache_hits: std::sync::atomic::AtomicU64,
     pub backend_puts: std::sync::atomic::AtomicU64,
     pub backend_deletes: std::sync::atomic::AtomicU64,
@@ -146,6 +152,11 @@ async fn build_store(
         enabled: true,
     };
     let target = VerifiedStore::build(&record, options, secrets)?;
+    let raw_root = record.path.as_ref().map(|path| {
+        PathBuf::from(path)
+            .join(prefix.trim_matches('/'))
+            .join("raw")
+    });
     let compression = Arc::new(crate::content::compression::Pool::new(
         profile.compression_config(base_compression),
         cpu_jobs,
@@ -153,6 +164,12 @@ async fn build_store(
     let aging = Duration::from_secs(config::seconds(&profile.priority_aging)?);
     Ok(StoreBackend {
         backend: target.backend,
+        multipart: target.multipart,
+        streaming: target.streaming,
+        raw_root,
+        cdc_enabled: profile.cdc_enabled,
+        deduplication_enabled: profile.deduplication_enabled,
+        profile_revision: profile.revision,
         is_local,
         prefix: prefix.trim_matches('/').into(),
         revision,
@@ -263,6 +280,7 @@ impl Storage {
         physical: Arc<dyn crate::model::PhysicalStore>,
         cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
         profile_store: Arc<dyn crate::model::StorageProfileStore>,
+        raw_store: Arc<dyn crate::model::raw::RawStore>,
         managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
         record_store: Arc<dyn crate::model::StorageRecordStore>,
         maintenance: Arc<std::sync::atomic::AtomicBool>,
@@ -351,10 +369,13 @@ impl Storage {
             physical,
             cluster,
             profile_store,
+            raw_store,
+            reflink: Arc::new(Mutex::new(HashMap::new())),
             managed_keys,
             record_store,
             source_gate: tokio::sync::RwLock::new(()),
             physical_pins: Mutex::new(HashMap::new()),
+            raw_reserved: Arc::new(Mutex::new(0)),
             pack_misses: Mutex::new(HashMap::new()),
             pack_live: Mutex::new(HashMap::new()),
             pack_memory: Arc::new(Semaphore::new(pack_units as usize)),
@@ -404,7 +425,7 @@ impl Storage {
                 .transpose()?,
             min_compression_savings_percent: c.local_cache.min_compression_savings_percent,
             misses: Mutex::new(HashMap::new()),
-            backend_gets: 0.into(),
+            backend_gets: Arc::new(0.into()),
             cache_hits: 0.into(),
             backend_puts: 0.into(),
             backend_deletes: 0.into(),
@@ -957,13 +978,72 @@ impl Storage {
     pub(crate) async fn read_fragment(
         &self,
         id: Uuid,
-        storage_id: Option<Uuid>,
-        key: Option<&str>,
+        source: &crate::model::FragmentSource,
     ) -> Result<Vec<u8>> {
-        if let (Some(storage_id), Some(key)) = (storage_id, key) {
+        if let (Some(storage_id), Some(key)) = (
+            source.staging_storage_id,
+            source.staging_object_key.as_deref(),
+        ) {
             return self.read_staged(storage_id, key, MAX).await;
         }
+        if let Some(file) = source.file_id {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            let offset = source
+                .file_offset
+                .context("multipart file offset missing")?;
+            ensure!(
+                offset >= 0 && source.size > 0 && source.size as usize <= MAX,
+                "invalid multipart range"
+            );
+            let mut file = tokio::fs::File::open(self.multipart_path(
+                file,
+                source.file_storage,
+                source.raw_source,
+            )?)
+            .await?;
+            let length = file.metadata().await?.len();
+            ensure!(
+                (offset as u64)
+                    .checked_add(source.size as u64)
+                    .is_some_and(|end| end <= length),
+                "multipart range exceeds file"
+            );
+            file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
+            let mut bytes = vec![0; source.size as usize];
+            file.read_exact(&mut bytes).await?;
+            return Ok(bytes);
+        }
         read_bounded(self.disk.fragment_path(id), MAX).await
+    }
+    pub(crate) fn multipart_path(
+        &self,
+        file: Uuid,
+        storage: Option<Uuid>,
+        source: Option<Uuid>,
+    ) -> Result<std::path::PathBuf> {
+        if let Some(source) = source {
+            let backend = self.store_backend(storage.context("multipart storage missing")?)?;
+            let root = backend
+                .raw_root
+                .as_ref()
+                .context("multipart checkpoint requires local storage")?;
+            return Ok(root.join(chunk_name(source)).with_extension("partial"));
+        }
+        Ok(self.disk.fragment_path(file))
+    }
+    pub(crate) async fn remove_multipart_file(
+        &self,
+        file: &crate::model::multipart::MultipartFile,
+    ) -> Result<()> {
+        if file.source_id.is_none() {
+            return self.disk.remove_fragment(file.id).await;
+        }
+        let path = self.multipart_path(file.id, Some(file.storage_id), file.source_id)?;
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
     pub(crate) async fn remove_fragment(
         &self,
@@ -1115,7 +1195,7 @@ impl Storage {
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .mode(0o600)
+                .mode(0o644)
                 .open(&tmp)
                 .await?;
             f.write_all(&data).await?;
@@ -1593,7 +1673,7 @@ impl Storage {
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .mode(0o600)
+                .mode(0o644)
                 .open(&tmp)
                 .await?;
             f.write_all(data).await?;
@@ -1753,6 +1833,7 @@ impl Storage {
                 let pin = self.physical_pin(pack.location_id);
                 Ok(Source::Pack(pack, pin))
             }
+            crate::model::PhysicalSource::Raw(_) => anyhow::bail!("chunk resolved to a raw source"),
         }
     }
     pub async fn pack_memory(&self, size: usize) -> Result<tokio::sync::OwnedSemaphorePermit> {
@@ -2095,6 +2176,12 @@ impl Storage {
         &self,
         snapshot: &crate::model::source::SourceSnapshot,
     ) -> Result<u64> {
+        if let crate::model::PhysicalSource::Raw(raw) = &snapshot.physical {
+            let mut raw = raw.clone();
+            raw.quarantine_code = None;
+            let _reader = self.raw_reader(&raw, true).await?;
+            return Ok(raw.size as u64);
+        }
         let (source, chunk) = {
             let _gate = self.source_gate.read().await;
             let pin = self.physical_pin(snapshot.location());
@@ -2111,6 +2198,7 @@ impl Storage {
                         .clone();
                     (Source::Pack(pack.clone(), pin), chunk)
                 }
+                crate::model::PhysicalSource::Raw(_) => unreachable!(),
             }
         };
         self.inspect_source(

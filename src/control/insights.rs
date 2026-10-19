@@ -34,6 +34,7 @@ pub(super) struct ObjectChunk {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct ChunkPage {
+    pub payload_type: String,
     #[serde(rename = "items")]
     pub chunks: Vec<ObjectChunk>,
     #[serde(rename = "next_cursor")]

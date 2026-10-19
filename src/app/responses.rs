@@ -503,6 +503,8 @@ mod tests {
             bucket_id: Uuid::new_v4(),
             object_key: "object".into(),
             stream_type: "object".into(),
+            payload_type: "chunks".into(),
+            payload_revision: 1,
             state: "ready".into(),
             size: i64::from(size),
             etag: "etag".into(),

@@ -53,6 +53,7 @@ const hasBlockKeys = computed(() => (keys.data.value || []).some(row => row.purp
 function profilePreset(type: string): Record<ProfileKey, string | number | boolean | null> {
   const s3 = type !== 'local'
   return {
+    cdc_enabled: true, deduplication_enabled: false,
     connect_timeout: '5s', request_timeout: '30s', max_retries: 3, retry_timeout: '120s', priority_aging: '30s',
     min_storage_duration: '0s', unreferenced_grace: '48h', deleted_chunk_retention: '7d', upload_retention: '24h', cache_enabled: s3,
     cache_soft_limit: null, cache_entries: null, upload_cache: s3, upload_cache_size: null, compression_enabled: s3,
@@ -92,7 +93,11 @@ async function edit(row?: Storage) {
     } finally { busy.value = false }
   }
 }
-watch(() => draft.type, value => { if (profileDraft.value) profileDraft.value = profilePreset(value) })
+watch(() => draft.type, value => {
+  if (!profileDraft.value) return
+  if (!editing.value) profileDraft.value = profilePreset(value)
+  else if (value === 'local') Object.assign(profileDraft.value, { cache_enabled: false, upload_cache: false, pack_enabled: false, pack_range_enabled: false })
+})
 watch([() => route.query.edit, () => storages.data.value], async ([name, rows]) => {
   const row = rows?.find(item => item.name === String(name || ''))
   if (row && !open.value) await edit(row)
@@ -101,9 +106,9 @@ watch(open, value => {
   if (!value && route.query.edit) void router.replace({ query: { ...route.query, edit: undefined } })
 })
 function input() {
-  const limits = { block_key_id: draft.block_key_id || null }
+  const limits = { block_key_id: draft.block_key_id || null, prefix: draft.prefix.trim() }
   if (draft.type === 'local') return { type: 'local', path: draft.path.trim() || '/data/storage', ...limits }
-  return { type: 's3', endpoint: draft.endpoint.trim(), bucket: draft.bucket.trim(), region: draft.region.trim(), prefix: draft.prefix.trim(), ...limits, ...(draft.access_key.trim() ? { access_key: draft.access_key.trim() } : {}), ...(draft.secret_key.trim() ? { secret_key: draft.secret_key.trim() } : {}) }
+  return { type: 's3', endpoint: draft.endpoint.trim(), bucket: draft.bucket.trim(), region: draft.region.trim(), ...limits, ...(draft.access_key.trim() ? { access_key: draft.access_key.trim() } : {}), ...(draft.secret_key.trim() ? { secret_key: draft.secret_key.trim() } : {}) }
 }
 function profileInput(field: ProfileField, event: Event) {
   if (!profileDraft.value) return
@@ -111,10 +116,16 @@ function profileInput(field: ProfileField, event: Event) {
   profileDraft.value[field.key] = field.valueType === 'boolean' ? target.checked : field.valueType === 'number' ? (target.value ? Number(target.value) : null) : target.value
 }
 function setProfileBoolean(key: ProfileKey, value: boolean) {
-  if (profileDraft.value) profileDraft.value[key] = value
+  if (!profileDraft.value) return
+  profileDraft.value[key] = value
+  if (key === 'cdc_enabled' && !value) {
+    Object.assign(profileDraft.value, { compression_enabled: false, pack_enabled: false, pack_range_enabled: false })
+    draft.block_key_id = ''
+  }
 }
 function profileDisabled(key: string) {
-  return draft.type === 'local' && (key.startsWith('cache_') || key.startsWith('pack_'))
+  return (draft.type === 'local' && (key.startsWith('cache_') || key.startsWith('pack_') || key.startsWith('upload_cache')))
+    || (profileDraft.value?.cdc_enabled === false && (key.startsWith('compression_') || key.startsWith('pack_')))
 }
 async function save() {
   busy.value = true
@@ -133,7 +144,7 @@ async function save() {
     open.value = false
     await queries.invalidateQueries({ queryKey: ['storages'] })
     await queries.invalidateQueries({ queryKey: ['bucket-projects'] })
-    notify(t(editing.value ? 'storeUpdated' : 'storeCreated'))
+    notify(t(editing.value && editing.value.type !== draft.type ? 'storeRelocated' : editing.value ? 'storeUpdated' : 'storeCreated'))
   } catch (error) { report(error) } finally { busy.value = false }
 }
 async function toggle(row: Storage) {
@@ -163,18 +174,21 @@ async function toggle(row: Storage) {
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeConnection') }}</h3><p class="field-help">{{ t('storeConnectionHint') }}</p></div></div>
         <label v-if="!editing">{{ t('storeName') }}<input v-model="draft.name" required maxlength="128" autocomplete="off" :disabled="busy"></label>
         <label class="store-type-field">{{ t('storeType') }}<UiSelect v-model="draft.type" :options="types" :label="t('storeType')" :disabled="busy" /></label>
+        <p v-if="editing && editing.type !== draft.type" class="store-form-wide field-help">{{ t('storeRelocationHint') }}</p>
         <div class="store-form-wide preset-actions"><span class="field-help">{{ t('storePresetHint') }}</span><button type="button" :disabled="busy" @click="applyPreset">{{ t('loadPreset') }}</button></div>
         <label v-if="draft.type === 'local'" class="store-form-wide">{{ t('storePath') }}<input v-model="draft.path" required maxlength="4096" autocomplete="off" :disabled="busy"></label>
         <template v-else>
           <label>{{ t('storeEndpoint') }}<input v-model="draft.endpoint" required type="url" placeholder="https://s3.example.com" autocomplete="url" :disabled="busy"></label>
           <label>{{ t('storeBucket') }}<input v-model="draft.bucket" required autocomplete="off" :disabled="busy"></label>
           <label>{{ t('storeRegion') }}<input v-model="draft.region" required autocomplete="off" :disabled="busy"></label>
-          <label class="store-form-wide">{{ t('storePrefix') }}<input v-model="draft.prefix" autocomplete="off" :disabled="busy"></label>
           <label>{{ t('storeAccessKey') }}<input v-model="draft.access_key" autocomplete="off" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label>
           <label>{{ t('storeSecretKey') }}<input v-model="draft.secret_key" type="password" autocomplete="new-password" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label>
         </template>
+        <label class="store-form-wide">{{ t('storePrefix') }}<input v-model="draft.prefix" autocomplete="off" :disabled="busy"></label>
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeChunkPolicy') }}</h3><p class="field-help">{{ t('storeChunkPolicyHint') }}</p></div></div>
-        <label class="store-form-wide">{{ t('storeCurrentKey') }}<UiSelect v-model="draft.block_key_id" :options="keyOptions" :label="t('storeCurrentKey')" :disabled="busy" /></label>
+        <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled)" :label="t('profile_cdc_enabled')" :disabled="busy" @update:model-value="setProfileBoolean('cdc_enabled', $event)" /><p class="field-help">{{ t('storeCdcHint') }}</p></div>
+        <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled || profileDraft.deduplication_enabled)" :label="t('profile_deduplication_enabled')" :disabled="busy || Boolean(profileDraft.cdc_enabled)" @update:model-value="setProfileBoolean('deduplication_enabled', $event)" /><p class="field-help">{{ t(profileDraft.cdc_enabled ? 'storeChunkDedupHint' : 'storeRawDedupHint') }}</p></div>
+        <label class="store-form-wide">{{ t('storeCurrentKey') }}<UiSelect v-model="draft.block_key_id" :options="keyOptions" :label="t('storeCurrentKey')" :disabled="busy || profileDraft?.cdc_enabled === false" /></label>
       <p class="store-form-wide field-help">{{ t(hasBlockKeys ? 'storeKeyHint' : 'storeNoKeyHint') }} <a href="/credentials?tab=managed&create=block" target="_blank" rel="noreferrer">{{ t('manageKeys') }}</a></p>
         <template v-if="profileDraft">
           <div class="store-form-wide section-heading"><div><h3>{{ t('storeProfile') }}</h3><p class="field-help">{{ t('storeProfileHint') }}</p></div></div>

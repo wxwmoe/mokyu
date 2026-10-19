@@ -4,6 +4,12 @@ use std::sync::Arc;
 
 pub(crate) struct StoreBackend {
     pub(crate) backend: Arc<dyn ObjectStore>,
+    pub(crate) multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
+    pub(crate) streaming: Option<super::s3::Streaming>,
+    pub(crate) raw_root: Option<std::path::PathBuf>,
+    pub(crate) cdc_enabled: bool,
+    pub(crate) deduplication_enabled: bool,
+    pub(crate) profile_revision: i64,
     pub(crate) is_local: bool,
     pub(crate) prefix: String,
     pub(crate) revision: i64,

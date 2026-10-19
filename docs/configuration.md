@@ -29,7 +29,7 @@
 
 群集模式下，每个 control、worker、data 都从自己的 `[database]` 连接 PostgreSQL。Mokyu 不负责 PostgreSQL 故障转移；需要高可用时使用 PostgreSQL 自己的主备或集群地址。
 
-SQLite 使用 WAL、外键和 FULL 同步，数据库及其 `-wal`、`-shm` 文件必须位于可写的本地持久文件系统，不支持网络共享盘。默认文件是 `/data/mokyu.db`；新建数据库和锁文件权限为 `0600`，新建父目录为 `0700`。一个数据库文件只允许一个 Mokyu 实例，符号链接按实际路径识别，数据库硬链接被拒绝。文件被替换或运行锁丢失时进程退出。
+SQLite 使用 WAL、外键和 FULL 同步，数据库及其 `-wal`、`-shm` 文件必须位于可写的本地持久文件系统，不支持网络共享盘。默认文件是 `/data/mokyu.db`；新建数据库和锁文件权限为 `0600`，新建父目录为 `0755`。一个数据库文件只允许一个 Mokyu 实例，符号链接按实际路径识别，数据库硬链接被拒绝。文件被替换或运行锁丢失时进程退出。
 
 SQLite 将 `instance.database_connections` 中的一个连接用于串行写入，其余用于只读查询；设置为 `1` 时读写共用一个连接。更高的连接数不增加同时写入的事务数。
 
@@ -103,9 +103,14 @@ runtime section 使用 revision 乐观并发。冲突返回当前 revision；重
 
 ## storage profile
 
-存储连接和所有后端行为都在 storage 创建/修改表单中配置。新建默认选择 S3；选择 local 或 S3 只切换未保存的草稿和差异预设，“载入预设”只修改草稿，取消不写数据库。保存已有 storage 时始终读取并核对 `meta.json`，空目标不能被编辑流程隐式初始化。
+存储连接和所有后端行为都在 storage 创建/修改表单中配置。新建默认选择 S3；选择 local 或 S3 只切换未保存的草稿和差异预设，“载入预设”只修改草稿，取消不写数据库。保存已有 storage 时始终读取并核对 `meta.json`，空目标不能被编辑流程隐式初始化。 单容器维护状态支持完整搬迁后切换 local/S3 类型，要求上传、待写来源及后台任务已排空，并在保存后重启；步骤见[存储格式](storage-format.md#原始文件)。
+
+同一 storage 的完整物理目录可由管理员搬迁；也可新建 storage，通过 Mokyu 复制/移动对象。物理搬迁必须保留根 `meta.json` 和全部路径，不需要 `raw/meta.json`。
 
 profile 是类型化字段，不是任意 JSON。字段包括：
+
+- `deduplication_enabled` 默认 false，仅控制 raw 的整文件去重；chunks 固定启用区块去重。更改仅影响新写入；关闭不会拆开已有共享文件；
+- `cdc_enabled` 默认 true；local 和 S3 均可关闭。关闭时必须清除 block key，同时禁用压缩、pack 和 pack Range；Web 在草稿中联动这些值，保存后生效，重新开启不会恢复旧 key。已有对象保持可读；
 
 - 连接超时、请求超时、重试次数、重试窗口、优先级老化、最低存储期限、未引用宽限和删除保留期；
 - cache 开关、大小和条目、待上传缓存；
@@ -120,7 +125,7 @@ profile 是类型化字段，不是任意 JSON。字段包括：
 
 block key 在数据库生成，创建后算法和材料不可更改。支持 AES-256-GCM、ChaCha20-Poly1305 和无加密，默认 AES-256-GCM；storage 只绑定已有 block key，未找到匹配算法的 key 时表单提供“在新标签页创建 key”的入口，不会在保存 storage 时隐式生成。
 
-切换 storage 当前 key、压缩规则或区块包策略只影响新写入。`storage rewrite` 是显式、可预览、可确认、可暂停、可重试的低优先级任务，按 encoding/pack fingerprint 重写需要转换的存量来源；保存表单、local/S3 切换和“载入预设”都不会自动启动 rewrite。旧 key 在所有物理来源和任务释放后才可删除。单容器 rewrite 只创建一个任务，保存扫描上界和游标，按区块 ID 顺序推进；群集保留分片子任务。
+切换 storage 当前 key、压缩规则或区块包策略只影响新写入。`storage rewrite` 是显式、可预览、可确认、可暂停、可重试的低优先级任务，按 encoding/pack fingerprint 重写需要转换的存量来源；保存表单和“载入预设”都不会自动启动 rewrite。旧 key 在所有物理来源和任务释放后才可删除。单容器 rewrite 只创建一个任务，保存扫描上界和游标，按区块 ID 顺序推进；群集保留分片子任务。
 
 ## 模式与 CLI
 

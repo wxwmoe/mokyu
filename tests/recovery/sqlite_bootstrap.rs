@@ -53,6 +53,16 @@ async fn structure(db: &mut SqliteConnection) -> Result<Vec<(String, String, Str
     Ok(sqlx::query_as("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' AND sql IS NOT NULL ORDER BY type,name").fetch_all(db).await?)
 }
 
+async fn same_structure(left: &mut SqliteConnection, right: &mut SqliteConnection) -> Result<()> {
+    let left = structure(left).await?;
+    let right = structure(right).await?;
+    assert_eq!(left.len(), right.len());
+    for (actual, expected) in left.iter().zip(&right) {
+        assert_eq!(actual, expected, "{} {}", expected.0, expected.1);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_schema_bootstrap_contract() -> Result<()> {
     let mut fresh = SqliteConnection::connect("sqlite::memory:").await?;
@@ -60,7 +70,7 @@ async fn sqlite_schema_bootstrap_contract() -> Result<()> {
     let migrations = sqlx::migrate!("./migrations/sqlite");
     migrations.run(&mut history).await?;
     migration::run(&mut fresh).await?;
-    assert_eq!(structure(&mut fresh).await?, structure(&mut history).await?);
+    same_structure(&mut fresh, &mut history).await?;
     assert_eq!(contents(&mut fresh).await?, contents(&mut history).await?);
     assert_eq!(
         queries::migrations().fetch_all(&mut fresh).await?,
@@ -99,7 +109,7 @@ async fn sqlite_schema_bootstrap_contract() -> Result<()> {
         .fetch_one(&mut old)
         .await?;
     migration::run(&mut old).await?;
-    assert_eq!(structure(&mut old).await?, structure(&mut fresh).await?);
+    same_structure(&mut old, &mut fresh).await?;
     assert_eq!(
         sqlx::query_scalar::<_, String>("SELECT action FROM audit_events WHERE id=41")
             .fetch_one(&mut old)

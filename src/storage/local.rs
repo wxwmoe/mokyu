@@ -58,6 +58,12 @@ impl Reservation {
         self.disk.usage.lock().unwrap().reserved -= self.bytes;
         self.committed = true;
     }
+    fn commit_written(mut self, bytes: u64) {
+        let mut usage = self.disk.usage.lock().unwrap();
+        usage.used[self.area as usize] -= self.bytes.saturating_sub(bytes);
+        usage.reserved -= self.bytes;
+        self.committed = true;
+    }
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
@@ -199,5 +205,65 @@ impl Disk {
             Err(e) => return Err(e.into()),
         }
         Ok(())
+    }
+
+    pub(crate) async fn append_fragment(
+        self: &Arc<Self>,
+        id: Uuid,
+        data: &[u8],
+        guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<(i64, Fragment, tokio::sync::OwnedMutexGuard<()>)> {
+        ensure!(
+            !data.is_empty() && data.len() <= MAX,
+            "invalid fragment length"
+        );
+        let permit = self.io.clone().acquire_owned().await?;
+        let ticket = self.reserve(Area::Multipart, data.len() as u64)?;
+        let path = self.fragment_path(id);
+        self.pending.lock().unwrap().insert(id);
+        let lease = Fragment {
+            id,
+            disk: self.clone(),
+        };
+        let data = data.to_vec();
+        tokio::task::spawn_blocking(move || {
+            // Cancellation must not release the upload lock while the file is still changing.
+            let guard = guard;
+            let _permit = permit;
+            use std::io::Write;
+            let created = match std::fs::symlink_metadata(&path) {
+                Ok(meta) => {
+                    ensure!(meta.is_file(), "multipart file was replaced");
+                    false
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => return Err(error.into()),
+            };
+            let mut options = std::fs::OpenOptions::new();
+            options.append(true).create_new(created);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o644);
+            }
+            let mut file = options.open(&path)?;
+            let offset = file.metadata()?.len();
+            ensure!(
+                offset <= i64::MAX as u64 - data.len() as u64,
+                "multipart file is too large"
+            );
+            let result = (|| {
+                file.write_all(&data)?;
+                file.sync_all()?;
+                if created {
+                    std::fs::File::open(path.parent().unwrap())?.sync_all()?;
+                }
+                Ok::<_, std::io::Error>(())
+            })();
+            ticket.commit_written(file.metadata()?.len().saturating_sub(offset));
+            result?;
+            Ok((offset as i64, lease, guard))
+        })
+        .await?
     }
 }

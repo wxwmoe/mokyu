@@ -85,16 +85,25 @@ async fn mysql_maintenance_contract() -> Result<()> {
             hash: [9; 32],
             staging_storage: None,
             staging_key: None,
+            file: None,
+            file_offset: None,
         })
         .await?;
     assert!(backend.fragment_exists(fragment).await?);
     let recovery = backend.recovery_fragments(Uuid::nil()).await?;
     assert_eq!(recovery.len(), 1);
     assert_eq!(
-        (recovery[0].0, recovery[0].1, recovery[0].2.clone()),
+        (
+            recovery[0].id,
+            recovery[0].source.size,
+            recovery[0].source.hash.clone()
+        ),
         (fragment, 8, vec![9; 32])
     );
-    assert!(recovery[0].3.is_none() && recovery[0].4.is_none());
+    assert!(
+        recovery[0].source.staging_storage_id.is_none()
+            && recovery[0].source.staging_object_key.is_none()
+    );
     assert!(backend.recovery_fragments(fragment).await?.is_empty());
     assert!(backend.claim_fragment(fragment).await?.is_none());
     assert!(

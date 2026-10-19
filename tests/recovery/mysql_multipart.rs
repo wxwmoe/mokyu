@@ -473,6 +473,8 @@ async fn mysql_multipart_contract() -> Result<()> {
                 hash: [2; 32],
                 staging_storage: None,
                 staging_key: None,
+                file: None,
+                file_offset: None,
             })
             .await?;
     }

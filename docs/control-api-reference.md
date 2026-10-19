@@ -185,9 +185,9 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | --- | --- |
 | `GET /api/v1/storages` | 列出存储；返回 id、name、type、连接范围、prefix、block_key_id、三项并发上限、profile_revision、enabled、created_at、updated_at，不返回凭据 |
 | `POST /api/v1/storages` | 创建存储；请求包含 `{name,type,initialize,path?,endpoint?,bucket?,region?,prefix?,block_key_id?,access_key?,secret_key?,profile?}`，type 为 `local` 或 `s3`；`initialize` 必须明确为 `true`，profile 使用完整 typed storage profile |
-| `PUT /api/v1/storages/{name}` | 修改 type、连接字段、prefix、block_key_id 或 enabled；name 和 id 不可修改；并发、压缩、区块包、缓存和维护预算通过 profile 保存 |
+| `PUT /api/v1/storages/{name}` | 修改连接字段、prefix、block_key_id 或 enabled；name 和 id 不可修改；切换 type 需单容器维护状态并排空上传、任务及待写来源，核对目标 meta 后保存，成功后须重启；并发、压缩、区块包、缓存和维护预算通过 profile 保存 |
 | `POST /api/v1/storages/{name}/check` | 读取并核对已有 `meta.json`，无请求体 |
-| `GET /api/v1/storages/{name}/profile` | 读取该 storage 的 typed profile；连接超时、重试、压缩、pack、cache、integrity、配额与生命周期字段均在 profile 内 |
+| `GET /api/v1/storages/{name}/profile` | 读取该 storage 的 typed profile；CDC 联动开关、连接超时、重试、压缩、pack、cache、integrity、配额与生命周期字段均在 profile 内 |
 | `PUT /api/v1/storages/{name}/key` | 设置或清除 `{key?}` 形式的 block key 绑定；返回新的 profile revision |
 | `POST /api/v1/storages/{name}/rewrite` | 对存量物理编码执行 `preview`、`start`、`status`、`pause`、`resume` 或 `retry`；`start` 必须提交预览 confirmation |
 | `POST /api/v1/storages/{name}/unpack` | 对指定 pack 执行 `preview` 或 `start`；请求 `{action,pack_id,confirmation?}`，start 必须提交预览 confirmation |
@@ -198,7 +198,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 
 `storage_id` 表示逻辑存储后端；物理对象位置使用 `location_id`，不会把物理位置 UUID 当作存储名称或桶绑定。区块编码和 pack 的 block key 字段统一为 `block_key_id`。
 
-请求中的 type、字段组合或存储名称无效时不会写入数据库；存储不存在、命名空间非空、`meta.json` 缺失或身份不匹配也会拒绝操作并返回错误。确认具体错误时使用响应中的 `code` 和 `request_id`；不要通过重复创建来初始化已有存储。
+存储类型切换未满足单容器维护状态或排空条件时返回 `409 StorageNotDrained`，不会改变连接；成功后当前进程要求重启。请求中的 type、字段组合或存储名称无效时不会写入数据库；存储不存在、命名空间非空、`meta.json` 缺失或身份不匹配也会拒绝操作并返回错误。确认具体错误时使用响应中的 `code` 和 `request_id`；不要通过重复创建来初始化已有存储。
 
 ## 存储洞察
 
@@ -327,11 +327,11 @@ metadata 检查对象映射与区块身份，head 增加存储存在性和长度
 
 ## 来源隔离与复检
 
-仅管理员可操作。`source` 为 `chunk`（独立编码）或 `pack`，`id` 是该 encoding/pack 的正十进制字符串，不是对象或逻辑 chunk ID。
+仅管理员可操作。`source` 为 `chunk`（独立编码）、`pack` 或 `raw`（原始文件）。`id` 是 encoding/pack 的正十进制字符串，raw 则使用原始来源 UUID，不是对象或逻辑 chunk ID。
 
 | 方法与路径 | 用途 |
 | --- | --- |
-| `GET /api/v1/maintenance/quarantines` | 必须提供 `storage_id`、`source`；`after` 默认 0、`limit` 默认 50，范围 1～200；返回 `{items,next}`，next 为下一页游标或 null |
+| `GET /api/v1/maintenance/quarantines` | 必须提供 `storage_id`、`source`；`after` 为可省略的字符串游标、`limit` 默认 50，范围 1～200；返回 `{items,next}`，next 为下一页游标或 null |
 | `POST /api/v1/maintenance/quarantine/preview` | `{storage_id,source,id}`；完整核查精确物理来源及命名空间，返回带确认词的维护预览 |
 | `POST /api/v1/maintenance/recheck/preview` | 相同范围，目标须已隔离；预览不解除隔离 |
 | `POST /api/v1/maintenance/{quarantine,recheck}/execute` | `{preview_id,confirmation}`；要求近期密码验证和对应会话 CSRF，返回 `{task_id}`；重复执行同一预览返回同一任务 |

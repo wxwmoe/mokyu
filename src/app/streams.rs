@@ -119,6 +119,44 @@ impl App {
                 hash: *blake3::hash(data).as_bytes(),
                 staging_storage: staging_storage_id,
                 staging_key: staging_object_key,
+                file: None,
+                file_offset: None,
+            })
+            .await
+    }
+
+    pub(crate) async fn raw_tail(
+        &self,
+        stream: Uuid,
+        storage: Uuid,
+        upload: Uuid,
+        offset: i64,
+        data: &[u8],
+    ) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        if self.role != "single" || !self.storage.is_local(storage)? {
+            return self.tail(stream, offset, data).await;
+        }
+        let lock = self.operation_lock(upload);
+        let guard = lock.lock_owned().await;
+        let file = self.multipart.file(upload).await?;
+        let (position, _lease, _guard) =
+            self.storage.disk.append_fragment(file, data, guard).await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("multipart-file-synced").await;
+        self.stream_store
+            .append_tail(crate::model::StreamTail {
+                fragment: Uuid::new_v4(),
+                stream,
+                offset,
+                size: data.len() as i32,
+                hash: *blake3::hash(data).as_bytes(),
+                staging_storage: None,
+                staging_key: None,
+                file: Some(file),
+                file_offset: Some(position),
             })
             .await
     }

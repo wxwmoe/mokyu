@@ -56,20 +56,20 @@ pub(super) async fn inventory_chunks(connection: &mut sqlx::MySqlConnection) -> 
     Ok(serde_json::json!({"states":rows.into_iter().collect::<std::collections::BTreeMap<_, _>>()}))
 }
 pub(super) async fn inventory_physical(connection: &mut sqlx::MySqlConnection) -> Result<Value> {
-    let rows:Vec<(String,String,i64,i64)>=sqlx::query_as("SELECT source_type,state,COUNT(*),CAST(COALESCE(SUM(stored_size),0) AS SIGNED) FROM (SELECT 'chunk' AS source_type,state,standalone_size AS stored_size FROM chunk_encodings UNION ALL SELECT 'pack',state,stored_size FROM packs) sources GROUP BY source_type,state ORDER BY source_type,state").fetch_all(connection).await?;
+    let rows:Vec<(String,String,i64,i64)>=sqlx::query_as("SELECT source_type,state,COUNT(*),CAST(COALESCE(SUM(stored_size),0) AS SIGNED) FROM (SELECT 'chunk' AS source_type,state,standalone_size AS stored_size FROM chunk_encodings UNION ALL SELECT 'pack',state,stored_size FROM packs UNION ALL SELECT 'raw',state,size FROM raw_sources) sources GROUP BY source_type,state ORDER BY source_type,state").fetch_all(connection).await?;
     Ok(Value::Array(rows.into_iter().map(|(source_type,state,objects,stored_bytes)|serde_json::json!({"source_type":source_type,"state":state,"objects":objects,"stored_bytes":stored_bytes})).collect()))
 }
 pub(super) fn inventory_live() -> Scalar<'static, Value> {
     // Old MariaDB can crash when reexecuting this prepared CTE with changed data.
     sqlx::query_scalar(
-        "WITH refs AS (SELECT e.chunk_id,SUM(e.length) AS bytes FROM objects o JOIN extents e ON e.stream_id=o.stream_id WHERE e.chunk_id IS NOT NULL GROUP BY e.chunk_id), physical AS (SELECT l.standalone_size AS bytes,l.standalone_size-IF(l.encryption_algorithm='none',0,16) AS payload FROM refs r JOIN chunks c ON c.id=r.chunk_id JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' UNION ALL SELECT p.stored_size,p.stored_size-IF(p.encryption_algorithm='none',0,16) FROM packs p WHERE state='ready' AND EXISTS(SELECT 1 FROM refs r JOIN chunks c ON c.id=r.chunk_id WHERE c.pack_id=p.id)) SELECT JSON_OBJECT('chunks',COUNT(*),'reference_bytes',CAST(COALESCE(SUM(r.bytes),0) AS SIGNED),'raw_bytes',CAST(COALESCE(SUM(c.raw_size),0) AS SIGNED),'pending_raw_bytes',CAST(COALESCE(SUM(IF(c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND state='ready'),c.raw_size,0)),0) AS SIGNED),'stored_bytes',(SELECT CAST(COALESCE(SUM(bytes),0) AS SIGNED) FROM physical),'payload_bytes',(SELECT CAST(COALESCE(SUM(payload),0) AS SIGNED) FROM physical)) FROM refs r JOIN chunks c ON c.id=r.chunk_id",
+        "WITH refs AS (SELECT e.chunk_id,SUM(e.length) AS bytes FROM objects o JOIN extents e ON e.stream_id=o.stream_id WHERE e.chunk_id IS NOT NULL GROUP BY e.chunk_id), raw_live AS (SELECT id,size FROM raw_sources r WHERE EXISTS(SELECT 1 FROM raw_ranges e JOIN objects o ON o.stream_id=e.stream_id WHERE e.source_id=r.id)), physical AS (SELECT l.standalone_size AS bytes,l.standalone_size-IF(l.encryption_algorithm='none',0,16) AS payload FROM refs r JOIN chunks c ON c.id=r.chunk_id JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' UNION ALL SELECT p.stored_size,p.stored_size-IF(p.encryption_algorithm='none',0,16) FROM packs p WHERE state='ready' AND EXISTS(SELECT 1 FROM refs r JOIN chunks c ON c.id=r.chunk_id WHERE c.pack_id=p.id) UNION ALL SELECT size,size FROM raw_live) SELECT JSON_OBJECT('raw_objects',(SELECT COUNT(*) FROM raw_live),'chunks',COUNT(*),'reference_bytes',CAST((COALESCE(SUM(r.bytes),0)+(SELECT COALESCE(SUM(e.length),0) FROM raw_ranges e JOIN objects o ON o.stream_id=e.stream_id)) AS SIGNED),'raw_bytes',CAST((COALESCE(SUM(c.raw_size),0)+(SELECT COALESCE(SUM(size),0) FROM raw_live)) AS SIGNED),'pending_raw_bytes',CAST(COALESCE(SUM(IF(c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND state='ready'),c.raw_size,0)),0) AS SIGNED),'stored_bytes',(SELECT CAST(COALESCE(SUM(bytes),0) AS SIGNED) FROM physical),'payload_bytes',(SELECT CAST(COALESCE(SUM(payload),0) AS SIGNED) FROM physical)) FROM refs r JOIN chunks c ON c.id=r.chunk_id",
     ).persistent(false)
 }
 pub(super) fn inventory_unreferenced(grace: f64) -> Scalar<'static, Value> {
     sqlx::query_scalar("SELECT JSON_OBJECT('chunks',COUNT(*),'eligible_chunks',CAST(COALESCE(SUM(unreferenced_at<TIMESTAMPADD(MICROSECOND,-?,CURRENT_TIMESTAMP(6)) AND owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id)),0) AS SIGNED)) FROM chunks c WHERE state IN ('ready','failed','deleting') AND unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)").bind(grace*1_000_000.)
 }
 pub(super) fn inventory_reclaimable(grace: f64) -> Scalar<'static, Value> {
-    sqlx::query_scalar("SELECT JSON_OBJECT('bytes',CAST(COALESCE(SUM(bytes),0) AS SIGNED),'eligible',CAST(COALESCE(SUM(IF(since<TIMESTAMPADD(MICROSECOND,-?,CURRENT_TIMESTAMP(6)),bytes,0)),0) AS SIGNED)) FROM (SELECT l.standalone_size AS bytes,COALESCE(l.unreferenced_at,c.unreferenced_at) AS since FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('retired','deleting') OR (l.state='ready' AND c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) UNION ALL SELECT stored_size,unreferenced_at FROM packs WHERE state IN ('retired','deleting')) p").bind(grace*1_000_000.)
+    sqlx::query_scalar("SELECT JSON_OBJECT('bytes',CAST(COALESCE(SUM(bytes),0) AS SIGNED),'eligible',CAST(COALESCE(SUM(IF(since<TIMESTAMPADD(MICROSECOND,-?,CURRENT_TIMESTAMP(6)),bytes,0)),0) AS SIGNED)) FROM (SELECT l.standalone_size AS bytes,COALESCE(l.unreferenced_at,c.unreferenced_at) AS since FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('retired','deleting') OR (l.state='ready' AND c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) UNION ALL SELECT stored_size,unreferenced_at FROM packs WHERE state IN ('retired','deleting') UNION ALL SELECT size,unreferenced_at FROM raw_sources r WHERE r.owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id)) p").bind(grace*1_000_000.)
 }
 pub(super) fn inventory_tasks() -> Scalar<'static, Value> {
     sqlx::query_scalar(
@@ -107,7 +107,7 @@ pub(super) async fn inventory_cleanup(
 }
 pub(super) fn inventory_database() -> Scalar<'static, Value> {
     sqlx::query_scalar(
-        "SELECT JSON_OBJECT('table',TABLE_NAME,'total_bytes',CAST(DATA_LENGTH+INDEX_LENGTH AS SIGNED),'index_bytes',CAST(INDEX_LENGTH AS SIGNED),'live_rows_estimate',CAST(TABLE_ROWS AS SIGNED),'dead_rows_estimate',NULL,'last_autovacuum',NULL,'last_autoanalyze',NULL) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('chunks','extents','streams','objects','uploads','parts','fragments','tasks','sessions','session_refresh_tokens','integrity_issues','chunk_encodings','packs','pack_members','pack_maintenance','pack_changes','pack_inputs','chunk_access_stats','chunk_access_windows','pack_access_windows','pack_member_access_windows','pending_uploads','cache_pins') ORDER BY TABLE_NAME",
+        "SELECT JSON_OBJECT('table',TABLE_NAME,'total_bytes',CAST(DATA_LENGTH+INDEX_LENGTH AS SIGNED),'index_bytes',CAST(INDEX_LENGTH AS SIGNED),'live_rows_estimate',CAST(TABLE_ROWS AS SIGNED),'dead_rows_estimate',NULL,'last_autovacuum',NULL,'last_autoanalyze',NULL) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('chunks','extents','raw_sources','raw_ranges','streams','objects','uploads','parts','fragments','multipart_files','tasks','sessions','session_refresh_tokens','integrity_issues','chunk_encodings','packs','pack_members','pack_maintenance','pack_changes','pack_inputs','chunk_access_stats','chunk_access_windows','pack_access_windows','pack_member_access_windows','pending_uploads','cache_pins') ORDER BY TABLE_NAME",
     )
 }
 pub(super) fn storage_inventory_buckets(storage: Uuid) -> Rows<'static, (i64, i64, i64)> {
@@ -117,7 +117,7 @@ pub(super) fn storage_inventory_chunks(storage: Uuid) -> Rows<'static, (i64, i64
     sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(standalone_size),0) AS SIGNED) FROM chunks WHERE storage_id=? AND state IN ('ready','deleting')").bind(storage)
 }
 pub(super) fn storage_inventory_physical(storage: Uuid) -> Rows<'static, (i64, i64)> {
-    sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(bytes),0) AS SIGNED) FROM (SELECT standalone_size AS bytes FROM chunk_encodings WHERE storage_id=? AND state IN ('ready','retired','deleting') UNION ALL SELECT stored_size FROM packs WHERE storage_id=? AND state IN ('ready','retired','deleting')) p").bind(storage).bind(storage)
+    sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(bytes),0) AS SIGNED) FROM (SELECT standalone_size AS bytes FROM chunk_encodings WHERE storage_id=? AND state IN ('ready','retired','deleting') UNION ALL SELECT stored_size FROM packs WHERE storage_id=? AND state IN ('ready','retired','deleting') UNION ALL SELECT size FROM raw_sources WHERE storage_id=? AND state<>'writing') p").bind(storage).bind(storage).bind(storage)
 }
 
 #[async_trait::async_trait]
@@ -266,11 +266,11 @@ pub(super) async fn save_usage(
 }
 
 // Merge intervals before allocating each covered segment across projects and their buckets.
-pub(super) const USAGE_SUMMARY: &str = r#"WITH raw_ranges AS (
+pub(super) const USAGE_SUMMARY: &str = r#"WITH chunk_ranges AS (
     SELECT DISTINCT o.bucket_id,b.project_id,e.chunk_id,e.source_offset AS lo,e.source_offset+e.length AS hi
     FROM objects o JOIN buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=o.stream_id WHERE e.chunk_id IS NOT NULL
 ), ordered_ranges AS (
-    SELECT r.*,MAX(hi) OVER(PARTITION BY bucket_id,chunk_id ORDER BY lo,hi ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previous_hi FROM raw_ranges r
+    SELECT r.*,MAX(hi) OVER(PARTITION BY bucket_id,chunk_id ORDER BY lo,hi ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previous_hi FROM chunk_ranges r
 ), grouped_ranges AS (
     SELECT r.*,SUM(IF(previous_hi IS NULL OR lo>previous_hi,1,0)) OVER(PARTITION BY bucket_id,chunk_id ORDER BY lo,hi ROWS UNBOUNDED PRECEDING) AS group_id FROM ordered_ranges r
 ), ranges AS (
@@ -314,6 +314,31 @@ pub(super) const USAGE_SUMMARY: &str = r#"WITH raw_ranges AS (
     UNION ALL SELECT m.scope_id,COUNT(b.id),COALESCE(SUM(q.used_bytes),0),COALESCE(SUM(q.object_count),0) FROM usage_buckets m JOIN buckets b ON b.id=m.bucket_id LEFT JOIN quota_scopes q ON q.scope='bucket' AND q.scope_id=b.id GROUP BY m.scope_id
 ), scope_logical AS (
     SELECT s.id,COALESCE(l.buckets,0) AS buckets,COALESCE(l.bytes,0) AS bytes,COALESCE(l.objects,0) AS objects FROM usage_summary s LEFT JOIN logical_totals l ON l.id=s.id
+), raw_references AS (
+    SELECT DISTINCT o.bucket_id,b.project_id,r.id AS source_id,r.size
+    FROM objects o JOIN buckets b ON b.id=o.bucket_id JOIN raw_ranges e ON e.stream_id=o.stream_id JOIN raw_sources r ON r.id=e.source_id
+), raw_project_counts AS (
+    SELECT source_id,COUNT(DISTINCT project_id) AS n FROM raw_references GROUP BY source_id
+), raw_allocated AS (
+    SELECT r.*,CAST(r.size AS DECIMAL(65,24))/p.n/COUNT(*) OVER(PARTITION BY r.source_id,r.project_id) AS attributed
+    FROM raw_references r JOIN raw_project_counts p USING(source_id)
+), raw_scopes AS (
+    SELECT id,SUM(size) AS bytes,SUM(attributed) AS attributed FROM (
+        SELECT s.scope_id AS id,r.source_id,MAX(r.size) AS size,SUM(r.attributed) AS attributed
+        FROM scope_buckets s JOIN raw_allocated r ON r.bucket_id=s.bucket_id GROUP BY s.scope_id,r.source_id
+    ) scoped_raw GROUP BY id
+), raw_inventory AS (
+    SELECT r.*,
+        EXISTS(SELECT 1 FROM raw_ranges e JOIN objects o ON o.stream_id=e.stream_id WHERE e.source_id=r.id) AS selected,
+        r.owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges e WHERE e.source_id=r.id) AS garbage
+    FROM raw_sources r
+), raw_physical AS (
+    SELECT COALESCE(SUM(CASE WHEN state<>'writing' THEN size ELSE 0 END),0) AS indexed_bytes,
+        COALESCE(SUM(CASE WHEN selected THEN size ELSE 0 END),0) AS selected_bytes,
+        COALESCE(SUM(CASE WHEN NOT selected AND NOT garbage AND state<>'writing' THEN size ELSE 0 END),0) AS retained_bytes,
+        COALESCE(SUM(CASE WHEN NOT selected AND garbage THEN size ELSE 0 END),0) AS gc_bytes,
+        COALESCE(SUM(CASE WHEN state='writing' THEN size ELSE 0 END),0) AS unconfirmed_bytes,
+        COUNT(*) AS raw_objects FROM raw_inventory
 ), physical AS (
     SELECT 'chunk' AS source_type,e.encoding_id AS source_id,e.state,e.standalone_size AS stored_size,
         e.state IN ('retired','deleting') OR (c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) AS garbage
@@ -321,26 +346,27 @@ pub(super) const USAGE_SUMMARY: &str = r#"WITH raw_ranges AS (
     UNION ALL SELECT 'pack',id,state,stored_size,state IN ('retired','deleting') FROM packs WHERE state<>'deleted'
 ), bridge AS (
     SELECT JSON_OBJECT(
-        'indexed_bytes',CAST(COALESCE(SUM(IF(p.state IN ('ready','retired','deleting'),p.stored_size,0)),0) AS CHAR),
-        'selected_bytes',CAST(COALESCE(SUM(IF(t.source_id IS NOT NULL,p.stored_size,0)),0) AS CHAR),
-        'retained_bytes',CAST(COALESCE(SUM(IF(t.source_id IS NULL AND p.state IN ('ready','retired','deleting') AND NOT p.garbage,p.stored_size,0)),0) AS CHAR),
-        'gc_bytes',CAST(COALESCE(SUM(IF(t.source_id IS NULL AND p.garbage,p.stored_size,0)),0) AS CHAR),
-        'unconfirmed_bytes',CAST(COALESCE(SUM(IF(p.state IN ('preparing','uploading'),p.stored_size,0)),0) AS CHAR),
+        'indexed_bytes',CAST((COALESCE(SUM(IF(p.state IN ('ready','retired','deleting'),p.stored_size,0)),0))+(SELECT indexed_bytes FROM raw_physical) AS CHAR),
+        'selected_bytes',CAST((COALESCE(SUM(IF(t.source_id IS NOT NULL,p.stored_size,0)),0))+(SELECT selected_bytes FROM raw_physical) AS CHAR),
+        'retained_bytes',CAST((COALESCE(SUM(IF(t.source_id IS NULL AND p.state IN ('ready','retired','deleting') AND NOT p.garbage,p.stored_size,0)),0))+(SELECT retained_bytes FROM raw_physical) AS CHAR),
+        'gc_bytes',CAST((COALESCE(SUM(IF(t.source_id IS NULL AND p.garbage,p.stored_size,0)),0))+(SELECT gc_bytes FROM raw_physical) AS CHAR),
+        'unconfirmed_bytes',CAST((COALESCE(SUM(IF(p.state IN ('preparing','uploading'),p.stored_size,0)),0))+(SELECT unconfirmed_bytes FROM raw_physical) AS CHAR),
         'chunk_objects',CAST(COALESCE(SUM(p.source_type='chunk' AND p.state IN ('ready','retired','deleting')),0) AS CHAR),
+        'raw_objects',CAST((SELECT raw_objects FROM raw_physical) AS CHAR),
         'pack_objects',CAST(COALESCE(SUM(p.source_type='pack' AND p.state IN ('ready','retired','deleting')),0) AS CHAR)
     ) AS data FROM physical p LEFT JOIN source_totals t ON t.source_type=p.source_type AND t.source_id=p.source_id AND t.source_type<>'pending'
 )
 SELECT l.id,JSON_OBJECT(
     'buckets',CAST(l.buckets AS CHAR),'objects',CAST(l.objects AS CHAR),'logical_bytes',CAST(l.bytes AS CHAR),
-    'unique_bytes',CAST(COALESCE(u.bytes,0) AS CHAR),'attributed_raw_bytes',CAST(ROUND(COALESCE(a.raw_bytes,0),6) AS CHAR),
-    'encoded_bytes',IF(COALESCE(a.complete,TRUE),CAST(ROUND(COALESCE(a.encoded_bytes,0),6) AS CHAR),NULL),
-    'encoded_known_bytes',CAST(ROUND(COALESCE(a.encoded_bytes,0),6) AS CHAR),
-    'local_savings',CAST(l.bytes-COALESCE(u.bytes,0) AS CHAR),'shared_savings',CAST(ROUND(COALESCE(u.bytes,0)-COALESCE(a.raw_bytes,0),6) AS CHAR),
-    'encoding_savings',IF(COALESCE(a.complete,TRUE),CAST(ROUND(COALESCE(a.raw_bytes,0)-COALESCE(a.encoded_bytes,0),6) AS CHAR),NULL),
+    'unique_bytes',CAST((COALESCE(u.bytes,0)+COALESCE(r.bytes,0)) AS CHAR),'attributed_raw_bytes',CAST(ROUND((COALESCE(a.raw_bytes,0)+COALESCE(r.attributed,0)),6) AS CHAR),
+    'encoded_bytes',IF(COALESCE(a.complete,TRUE),CAST(ROUND((COALESCE(a.encoded_bytes,0)+COALESCE(r.attributed,0)),6) AS CHAR),NULL),
+    'encoded_known_bytes',CAST(ROUND((COALESCE(a.encoded_bytes,0)+COALESCE(r.attributed,0)),6) AS CHAR),
+    'local_savings',CAST(l.bytes-(COALESCE(u.bytes,0)+COALESCE(r.bytes,0)) AS CHAR),'shared_savings',CAST(ROUND((COALESCE(u.bytes,0)+COALESCE(r.bytes,0))-(COALESCE(a.raw_bytes,0)+COALESCE(r.attributed,0)),6) AS CHAR),
+    'encoding_savings',IF(COALESCE(a.complete,TRUE),CAST(ROUND((COALESCE(a.raw_bytes,0)+COALESCE(r.attributed,0))-(COALESCE(a.encoded_bytes,0)+COALESCE(r.attributed,0)),6) AS CHAR),NULL),
     'chunks',CAST(COALESCE(u.chunks,0) AS CHAR),'packs',CAST(COALESCE(u.packs,0) AS CHAR),
     'packed_bytes',CAST(COALESCE(u.packed_bytes,0) AS CHAR),'pending_bytes',CAST(COALESCE(u.pending_bytes,0) AS CHAR),
     'physical',JSON_EXTRACT(IF(l.id='global',(SELECT data FROM bridge),NULL),'$')
-) AS data FROM scope_logical l LEFT JOIN scope_unique u ON u.scope_id=l.id LEFT JOIN scope_allocated a ON a.scope_id=l.id
+) AS data FROM scope_logical l LEFT JOIN scope_unique u ON u.scope_id=l.id LEFT JOIN scope_allocated a ON a.scope_id=l.id LEFT JOIN raw_scopes r ON r.id=l.id
 "#;
 pub(super) async fn collect_usage(
     connection: &mut sqlx::MySqlConnection,
@@ -609,7 +635,7 @@ pub(super) async fn remove_stream_extents(
     Ok(rows.len())
 }
 pub(super) fn cleanup_stream_empty(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=?) AND NOT EXISTS(SELECT 1 FROM chunks WHERE owner_stream=?) AND NOT EXISTS(SELECT 1 FROM fragments WHERE owner_stream=?) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE owner_stream=?)").bind(id).bind(id).bind(id).bind(id)
+    sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM raw_ranges WHERE stream_id=?) AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=?) AND NOT EXISTS(SELECT 1 FROM chunks WHERE owner_stream=?) AND NOT EXISTS(SELECT 1 FROM fragments WHERE owner_stream=?) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE owner_stream=?)").bind(id).bind(id).bind(id).bind(id).bind(id)
 }
 pub(super) fn detach_upload_output(id: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE uploads SET output_stream=NULL WHERE output_stream=? AND state IN ('completed','aborted')").bind(id)
@@ -637,8 +663,8 @@ pub(super) fn stale_fragments(
     query.push("NOT EXISTS(SELECT 1 FROM streams s WHERE s.id=f.owner_stream AND s.state='writing'))) ORDER BY f.created_at,f.id LIMIT ").push_bind(batch);
     query
 }
-pub(super) fn lock_cleanup_fragment(id: Uuid) -> Rows<'static, (bool, Option<Uuid>)> {
-    sqlx::query_as("SELECT sealed,owner_stream FROM fragments f WHERE id=? AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) FOR UPDATE SKIP LOCKED").bind(id)
+pub(super) fn lock_cleanup_fragment(id: Uuid) -> Rows<'static, (bool, Option<Uuid>, Option<Uuid>)> {
+    sqlx::query_as("SELECT sealed,owner_stream,file_id FROM fragments f WHERE id=? AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) FOR UPDATE SKIP LOCKED").bind(id)
 }
 pub(super) fn remove_fragment_row(id: Uuid) -> Statement<'static> {
     sqlx::query("DELETE FROM fragments WHERE id=?").bind(id)
@@ -887,18 +913,14 @@ impl MaintenanceStore for Backend {
     }
     async fn fragment_exists(&self, id: Uuid) -> Result<bool> {
         Ok(
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fragments WHERE id=?)")
-                .bind(id)
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fragments WHERE id=?) OR EXISTS(SELECT 1 FROM multipart_files WHERE id=?)")
+                .bind(id).bind(id)
                 .fetch_one(&self.pool)
                 .await?,
         )
     }
     async fn recovery_fragments(&self, after: Uuid) -> Result<Vec<RecoveryFragment>> {
-        let rows:Vec<(Uuid,i32,Vec<u8>)>=sqlx::query_as("SELECT id,size,hash FROM fragments f WHERE id>? AND EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) ORDER BY id LIMIT 128").bind(after).fetch_all(&self.pool).await?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, size, hash)| (id, size, hash, None, None))
-            .collect())
+        Ok(sqlx::query_as("SELECT f.id,f.size,f.hash,f.file_id,f.file_offset,m.storage_id AS file_storage,m.source_id AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id>? AND EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) ORDER BY f.id LIMIT 128").bind(after).fetch_all(&self.pool).await?)
     }
     async fn fragment_uploads(&self, id: Uuid) -> Result<Vec<Uuid>> {
         Ok(sqlx::query_scalar("SELECT DISTINCT p.upload_id FROM parts p JOIN extents e ON e.stream_id=p.stream_id WHERE e.fragment_id=?").bind(id).fetch_all(&self.pool).await?)
@@ -4115,6 +4137,79 @@ pub(super) fn upload_transfers(
 
 #[async_trait::async_trait]
 impl MultipartStore for Backend {
+    async fn pending_files(
+        &self,
+        storage: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
+        Ok(sqlx::query_as("SELECT id,upload_id,storage_id,source_id,state FROM multipart_files WHERE reclaim_pending AND state='sealed' AND (? IS NULL OR storage_id=?) ORDER BY id LIMIT ?").bind(storage).bind(storage).bind(limit).fetch_all(&self.pool).await?)
+    }
+    async fn clear_reclaim(&self, id: Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE multipart_files SET reclaim_pending=false WHERE id=? AND state='sealed'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+    async fn file_location(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<crate::model::multipart::MultipartFile>> {
+        Ok(sqlx::query_as(
+            "SELECT id,upload_id,storage_id,source_id,state FROM multipart_files WHERE id=?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+    async fn file_ranges(&self, id: Uuid) -> Result<Vec<(i64, i32)>> {
+        Ok(sqlx::query_as("SELECT file_offset,size FROM fragments WHERE file_id=? ORDER BY file_offset LIMIT 4097").bind(id).fetch_all(&self.pool).await?)
+    }
+    async fn remap_file(
+        &self,
+        upload: Uuid,
+        source: Uuid,
+        ranges: &[crate::model::multipart::FileRemap],
+    ) -> Result<()> {
+        transactions::remap_multipart_file(&self.pool, upload, source, ranges).await
+    }
+    async fn file(&self, upload: Uuid) -> Result<Uuid> {
+        transactions::multipart_file(&self.pool, upload).await
+    }
+    async fn seal_files(&self, upload: Uuid) -> Result<()> {
+        sqlx::query("UPDATE multipart_files SET state='sealed' WHERE upload_id=? AND state='open'")
+            .bind(upload)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+    async fn local_ranges(
+        &self,
+        stream: Uuid,
+        after: i64,
+    ) -> Result<Vec<crate::model::multipart::LocalPartRange>> {
+        Ok(sqlx::query_as("SELECT e.offset_bytes,e.length,e.source_offset,e.fragment_id,f.size,f.hash,f.file_id,f.file_offset,m.storage_id AS file_storage,m.source_id AS raw_source FROM extents e LEFT JOIN fragments f ON f.id=e.fragment_id LEFT JOIN multipart_files m ON m.id=f.file_id WHERE e.stream_id=? AND e.offset_bytes>=? ORDER BY e.offset_bytes LIMIT 64").bind(stream).bind(after).fetch_all(&self.pool).await?)
+    }
+    async fn unused_files(
+        &self,
+        storage: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
+        Ok(sqlx::query_as("SELECT f.id,f.upload_id,f.storage_id,f.source_id,f.state FROM multipart_files f WHERE (? IS NULL OR storage_id=?) AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing'))) ORDER BY f.id LIMIT ?").bind(storage).bind(storage).bind(limit).fetch_all(&self.pool).await?)
+    }
+    async fn claim_file(&self, id: Uuid) -> Result<bool> {
+        Ok(sqlx::query("UPDATE multipart_files AS f SET state='deleting' WHERE id=? AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing')))").bind(id).execute(&self.pool).await?.rows_affected()>0)
+    }
+    async fn remove_file(&self, id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM multipart_files WHERE id=? AND state='deleting'")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn upload(&self, id: Uuid, bucket: Uuid, key: &str, access: &str) -> Result<Upload> {
         sqlx::query_as("SELECT * FROM uploads WHERE id=? AND bucket_id=? AND object_key=? AND access_key=? AND state<>'aborted'").bind(id).bind(bucket).bind(key.as_bytes()).bind(access).fetch_optional(&self.pool).await?.ok_or_else(||s3s::s3_error!(NoSuchUpload).into())
     }
@@ -4732,11 +4827,15 @@ pub(super) fn claim_object(bucket: Uuid, key: &str, token: Uuid) -> Statement<'_
 }
 
 pub(super) fn insert_fragment(tail: &StreamTail) -> Statement<'_> {
-    sqlx::query("INSERT INTO fragments(id,size,hash,owner_stream) VALUES(?,?,?,?)")
-        .bind(tail.fragment)
-        .bind(tail.size)
-        .bind(tail.hash.as_slice())
-        .bind(tail.stream)
+    sqlx::query(
+        "INSERT INTO fragments(id,size,hash,owner_stream,file_id,file_offset) VALUES(?,?,?,?,?,?)",
+    )
+    .bind(tail.fragment)
+    .bind(tail.size)
+    .bind(tail.hash.as_slice())
+    .bind(tail.stream)
+    .bind(tail.file)
+    .bind(tail.file_offset)
 }
 
 pub(super) fn seal_fragment(id: Uuid) -> Statement<'static> {
@@ -4992,10 +5091,12 @@ impl ChunkStore for Backend {
         Ok(query.build_query_as().fetch_optional(&self.pool).await?)
     }
     async fn fragment(&self, id: Uuid) -> Result<FragmentSource> {
-        Ok(sqlx::query_as("SELECT size,hash FROM fragments WHERE id=?")
-            .bind(id)
-            .fetch_one(&self.pool)
-            .await?)
+        Ok(
+            sqlx::query_as("SELECT f.size,f.hash,f.file_id,f.file_offset,m.storage_id AS file_storage,m.source_id AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id=?")
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await?,
+        )
     }
     async fn extents(&self, stream: Uuid, from: i64, until: i64) -> Result<Vec<Extent>> {
         Ok(sqlx::query_as("SELECT * FROM extents WHERE stream_id=? AND offset_bytes>=? AND offset_bytes<? ORDER BY offset_bytes LIMIT 64").bind(stream).bind(from).bind(until).fetch_all(&self.pool).await?)
@@ -5158,6 +5259,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for StoredStream {
             bucket_id: row.try_get("bucket_id")?,
             object_key: object_key(row)?,
             stream_type: row.try_get("stream_type")?,
+            payload_type: row.try_get("payload_type")?,
+            payload_revision: row.try_get("payload_revision")?,
             state: row.try_get("state")?,
             size: row.try_get("size")?,
             etag: row.try_get("etag")?,
@@ -5215,6 +5318,10 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for FragmentSource {
         Ok(Self {
             size: row.try_get("size")?,
             hash: row.try_get("hash")?,
+            file_id: row.try_get("file_id")?,
+            file_offset: row.try_get("file_offset")?,
+            file_storage: row.try_get("file_storage")?,
+            raw_source: row.try_get("raw_source")?,
             staging_storage_id: None,
             staging_object_key: None,
         })
@@ -7065,20 +7172,30 @@ pub(super) fn enabled_storage(id: Uuid) -> Rows<'static, StorageRecord> {
 }
 
 pub(super) fn storage_profile(id: Uuid) -> Rows<'static, crate::storage::profile::StorageProfile> {
-    sqlx::query_as("SELECT storage_id,revision,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=?")
+    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=?")
         .bind(id)
+}
+
+pub(super) fn storage_relocation_ready() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT maintenance AND NOT EXISTS(SELECT 1 FROM tasks WHERE state IN ('queued','running','paused')) AND NOT EXISTS(SELECT 1 FROM uploads WHERE state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM streams WHERE state='writing') AND NOT EXISTS(SELECT 1 FROM pending_uploads) AND NOT EXISTS(SELECT 1 FROM extents e JOIN streams s ON s.id=e.stream_id WHERE e.fragment_id IS NOT NULL AND s.state IN ('ready','writing')) AND NOT EXISTS(SELECT 1 FROM raw_sources WHERE state='writing' OR durability<>'durable' OR medium='memory' OR upload_id IS NOT NULL) FROM mokyu_meta WHERE id=1",
+    )
+}
+
+pub(super) fn relocate_raw_sources(id: Uuid, medium: &'static str) -> Statement<'static> {
+    sqlx::query("UPDATE raw_sources SET medium=?,revision=revision+1 WHERE storage_id=? AND medium IN ('local','shared_s3')").bind(medium).bind(id)
 }
 
 pub(super) fn storage_row_lock<'q>(name: &'q str) -> Rows<'q, crate::model::storage::StorageRow> {
     sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,access_key_encrypted,secret_key_encrypted,identity_marker,block_key_id,enabled FROM storages WHERE name=? FOR UPDATE").bind(name)
 }
 
-pub(super) fn storage_profile_target<'q>(name: &'q str) -> Rows<'q, (Uuid, String)> {
-    sqlx::query_as("SELECT id,type FROM storages WHERE name=? FOR UPDATE").bind(name)
+pub(super) fn storage_profile_target<'q>(name: &'q str) -> Rows<'q, (Uuid, String, Option<Uuid>)> {
+    sqlx::query_as("SELECT id,type,block_key_id FROM storages WHERE name=? FOR UPDATE").bind(name)
 }
 
 pub(super) fn storage_profile_lock(id: Uuid) -> Rows<'static, StorageProfile> {
-    sqlx::query_as("SELECT storage_id,revision,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=? FOR UPDATE").bind(id)
+    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=? FOR UPDATE").bind(id)
 }
 
 const VIEW_ORDERED: &str = "SELECT s.id,s.name,s.type AS storage_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id ORDER BY s.name";
@@ -7228,6 +7345,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for crate::storage::profile::S
         Ok(Self {
             storage_id: row.try_get("storage_id")?,
             revision: row.try_get("revision")?,
+            cdc_enabled: row.try_get("cdc_enabled")?,
+            deduplication_enabled: row.try_get("deduplication_enabled")?,
             connect_timeout: row.try_get("connect_timeout")?,
             request_timeout: row.try_get("request_timeout")?,
             max_retries: row.try_get("max_retries")?,
@@ -7285,7 +7404,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for crate::storage::profile::S
 }
 
 pub(super) fn save_storage_profile(profile: &StorageProfile) -> Statement<'_> {
-    sqlx::query("UPDATE storage_profiles SET connect_timeout=?,request_timeout=?,max_retries=?,retry_timeout=?,priority_aging=?,min_storage_duration=?,unreferenced_grace=?,deleted_chunk_retention=?,upload_retention=?,cache_enabled=?,cache_soft_limit=?,cache_entries=?,upload_cache=?,upload_cache_size=?,compression_enabled=?,compression_strategy=?,compression_level=?,compression_sample_level=?,compression_min_savings_percent=?,compression_min_savings_bytes=?,pack_enabled=?,pack_max_size=?,pack_upload_flush_timeout=?,pack_interval=?,pack_reuse_interval=?,pack_reclaim_interval=?,pack_repack_interval=?,pack_repack_cooldown=?,pack_reclaim_min_savings_bytes=?,pack_range_enabled=?,pack_range_interval=?,pack_range_window=?,pack_range_min_downloads=?,pack_range_min_savings_percent=?,pack_range_min_savings_bytes=?,pack_range_repack_after=?,pack_range_repack_window=?,pack_range_repack_retry_interval=?,pack_concurrency=?,integrity_concurrency=?,integrity_rps=?,integrity_bandwidth=?,integrity_batch_timeout=?,read_concurrency=?,upload_concurrency=?,control_concurrency=?,pack_byte_budget=?,integrity_byte_budget=?,maintenance_concurrency=?,maintenance_byte_budget=?,migration_concurrency=?,migration_byte_budget=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP(6) WHERE storage_id=? AND revision=?")
+    sqlx::query("UPDATE storage_profiles SET cdc_enabled=?,deduplication_enabled=?,connect_timeout=?,request_timeout=?,max_retries=?,retry_timeout=?,priority_aging=?,min_storage_duration=?,unreferenced_grace=?,deleted_chunk_retention=?,upload_retention=?,cache_enabled=?,cache_soft_limit=?,cache_entries=?,upload_cache=?,upload_cache_size=?,compression_enabled=?,compression_strategy=?,compression_level=?,compression_sample_level=?,compression_min_savings_percent=?,compression_min_savings_bytes=?,pack_enabled=?,pack_max_size=?,pack_upload_flush_timeout=?,pack_interval=?,pack_reuse_interval=?,pack_reclaim_interval=?,pack_repack_interval=?,pack_repack_cooldown=?,pack_reclaim_min_savings_bytes=?,pack_range_enabled=?,pack_range_interval=?,pack_range_window=?,pack_range_min_downloads=?,pack_range_min_savings_percent=?,pack_range_min_savings_bytes=?,pack_range_repack_after=?,pack_range_repack_window=?,pack_range_repack_retry_interval=?,pack_concurrency=?,integrity_concurrency=?,integrity_rps=?,integrity_bandwidth=?,integrity_batch_timeout=?,read_concurrency=?,upload_concurrency=?,control_concurrency=?,pack_byte_budget=?,integrity_byte_budget=?,maintenance_concurrency=?,maintenance_byte_budget=?,migration_concurrency=?,migration_byte_budget=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP(6) WHERE storage_id=? AND revision=?")
+        .bind(profile.cdc_enabled)
+        .bind(profile.deduplication_enabled)
         .bind(&profile.connect_timeout)
         .bind(&profile.request_timeout)
         .bind(profile.max_retries)
@@ -7398,11 +7519,25 @@ pub(super) async fn source_snapshot(
     lock: bool,
 ) -> Result<crate::model::source::SourceSnapshot> {
     use crate::model::source::{SourceSnapshot, manifest_digest};
-    let id = scope.number()?;
     let suffix = if lock { " LOCK IN SHARE MODE" } else { "" };
     let (storage_revision, marker): (i64, sqlx::types::Json<Value>) = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT p.revision,s.identity_marker FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=? AND s.enabled{suffix}")))
         .bind(scope.storage_id).fetch_one(&mut *db).await?;
     let suffix = if lock { " FOR UPDATE" } else { "" };
+    if scope.source == crate::model::source::SourceType::Raw {
+        let raw: RawSource = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT r.id AS raw_id,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=? AND r.storage_id=?{suffix}")))
+            .bind(scope.uuid()?).bind(scope.storage_id).fetch_one(&mut *db).await?;
+        return Ok(SourceSnapshot {
+            scope: scope.clone(),
+            state: raw.state.clone(),
+            revision: raw.revision,
+            quarantine_code: raw.quarantine_code.clone(),
+            physical: PhysicalSource::Raw(raw),
+            storage_revision,
+            identity_marker: marker.0,
+            manifest_digest: None,
+        });
+    }
+    let id = scope.number()?;
     let (table, column) = if scope.packed() {
         ("packs", "id")
     } else {
@@ -7481,6 +7616,10 @@ pub(super) fn change_source<'a>(
     snapshot: &crate::model::source::SourceSnapshot,
     code: Option<&'a str>,
 ) -> Result<Statement<'a>> {
+    if snapshot.scope.source == crate::model::source::SourceType::Raw {
+        return Ok(sqlx::query("UPDATE raw_sources SET quarantined_at=CASE WHEN ? IS NULL THEN NULL ELSE UTC_TIMESTAMP(6) END,quarantine_code=?,revision=revision+1 WHERE id=? AND storage_id=? AND revision=? AND state='ready'")
+            .bind(code).bind(code).bind(snapshot.scope.uuid()?).bind(snapshot.scope.storage_id).bind(snapshot.revision));
+    }
     let (table, id) = if snapshot.scope.packed() {
         ("packs", "id")
     } else {
@@ -7652,4 +7791,203 @@ pub(super) fn source_audit<'a>(
     );
     Ok(sqlx::query("INSERT INTO audit_events(actor_id,actor_label,token_id,source,action,target,outcome,finished_at,detail) VALUES(?,COALESCE((SELECT username FROM web_users WHERE id=?),NULLIF(substr((SELECT label FROM s3_credentials WHERE access_key_id=?),1,64),''),?),?,?,?,?, 'succeeded',CURRENT_TIMESTAMP(6),?)")
         .bind(principal.user_id()).bind(principal.user_id()).bind(access_key).bind(fallback).bind(principal.token_id()).bind(source).bind(action).bind(target).bind(detail))
+}
+
+use crate::model::raw::{RawRange, RawSource, RawStore};
+pub(super) fn raw_target(stream: Uuid, storage: Uuid) -> Rows<'static, (String, bool, i64, bool)> {
+    sqlx::query_as("SELECT t.type,(t.block_key_id IS NULL AND NOT p.compression_enabled AND NOT p.pack_enabled),p.revision,p.cdc_enabled FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storages t ON t.id=b.storage_id JOIN storage_profiles p ON p.storage_id=t.id WHERE s.id=? AND t.id=? AND t.enabled AND s.state='writing' FOR UPDATE").bind(stream).bind(storage)
+}
+pub(super) fn raw_prepare(stream: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE streams SET payload_type='raw' WHERE id=? AND state='writing' AND payload_type='chunks' AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=?) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE stream_id=?)").bind(stream).bind(stream).bind(stream)
+}
+pub(super) fn raw_insert(
+    id: Uuid,
+    stream: Uuid,
+    storage: Uuid,
+    revision: i64,
+    medium: &'static str,
+) -> Statement<'static> {
+    sqlx::query(
+        "INSERT INTO raw_sources(id,owner_stream,storage_id,profile_revision,medium) VALUES(?,?,?,?,?)",
+    )
+    .bind(id)
+    .bind(stream)
+    .bind(storage)
+    .bind(revision).bind(medium)
+}
+pub(super) fn raw_finish(stream: Uuid, source: Uuid, size: i64, digest: &[u8]) -> Statement<'_> {
+    sqlx::query("UPDATE raw_sources SET size=?,digest=?,state='ready',owner_stream=NULL,upload_id=NULL WHERE id=? AND owner_stream=? AND state='writing'").bind(size).bind(digest).bind(source).bind(stream)
+}
+pub(super) fn raw_attach(stream: Uuid, source: Uuid, size: i64) -> Statement<'static> {
+    sqlx::query("INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_id) VALUES(?,0,?,?)")
+        .bind(stream)
+        .bind(size)
+        .bind(source)
+}
+pub(super) fn raw_sources_lock(stream: Uuid) -> Rows<'static, RawSource> {
+    sqlx::query_as("SELECT r.id AS raw_id,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id IN (SELECT source_id FROM raw_ranges WHERE stream_id=?) ORDER BY r.id FOR UPDATE").bind(stream)
+}
+pub(super) fn raw_continuity(stream: Uuid) -> Rows<'static, (i64, bool)> {
+    sqlx::query_as("SELECT totals.end_bytes,totals.contiguous<>0 AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=?) FROM (SELECT COALESCE(MAX(e.offset_bytes+e.length),0) AS end_bytes,COALESCE(MIN(e.offset_bytes=e.previous_end AND e.source_offset+e.length<=r.size),1) AS contiguous FROM (SELECT *,COALESCE(MAX(offset_bytes+length) OVER(ORDER BY offset_bytes ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING),0) AS previous_end FROM raw_ranges WHERE stream_id=?) e JOIN raw_sources r ON r.id=e.source_id) totals").bind(stream).bind(stream)
+}
+pub(super) fn raw_cleanup_ranges(stream: Uuid, batch: i64) -> Rows<'static, (i64, Uuid)> {
+    sqlx::query_as("SELECT offset_bytes,source_id FROM raw_ranges WHERE stream_id=? ORDER BY offset_bytes LIMIT ?").bind(stream).bind(batch)
+}
+pub(super) fn raw_touch_unreferenced(source: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE raw_sources SET unreferenced_at=UTC_TIMESTAMP(6) WHERE id=?").bind(source)
+}
+pub(super) fn raw_detach(stream: Uuid, end: i64) -> Statement<'static> {
+    sqlx::query("DELETE FROM raw_ranges WHERE stream_id=? AND offset_bytes<=?")
+        .bind(stream)
+        .bind(end)
+}
+
+#[async_trait::async_trait]
+impl RawStore for Backend {
+    async fn set_upload(&self, source: Uuid, upload: &str) -> Result<()> {
+        anyhow::ensure!(
+            !upload.is_empty() && upload.len() <= 4096,
+            "invalid raw multipart upload id"
+        );
+        let changed = sqlx::query("UPDATE raw_sources SET upload_id=? WHERE id=? AND state='writing' AND medium='shared_s3' AND upload_id IS NULL")
+            .bind(upload).bind(source).execute(&self.pool).await?.rows_affected();
+        anyhow::ensure!(changed == 1, crate::model::Error::OperationAborted);
+        Ok(())
+    }
+    async fn upload_id(&self, source: Uuid) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT upload_id FROM raw_sources WHERE id=?")
+                .bind(source)
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten(),
+        )
+    }
+    async fn deduplicate(&self, stream: Uuid, source: Uuid, hash: &[u8]) -> Result<bool> {
+        transactions::deduplicate_raw(&self.pool, stream, source, hash).await
+    }
+
+    async fn quarantines(
+        &self,
+        storage: Uuid,
+        after: Uuid,
+        limit: i64,
+    ) -> Result<Vec<crate::model::source::QuarantinedSource>> {
+        use crate::model::source::{QuarantinedSource, SourceScope, SourceType};
+        let rows: Vec<(Uuid,String,String,String,i64)> = sqlx::query_as("SELECT id,state,DATE_FORMAT(quarantined_at,'%Y-%m-%dT%H:%i:%s.%fZ'),quarantine_code,revision FROM raw_sources WHERE storage_id=? AND id>? AND quarantined_at IS NOT NULL ORDER BY id LIMIT ?")
+            .bind(storage).bind(after).bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, state, quarantined_at, code, revision)| QuarantinedSource {
+                    scope: SourceScope {
+                        storage_id: storage,
+                        source: SourceType::Raw,
+                        id: id.to_string(),
+                    },
+                    location_id: id,
+                    state,
+                    quarantined_at,
+                    code,
+                    revision: revision.to_string(),
+                },
+            )
+            .collect())
+    }
+    async fn begin(&self, stream: Uuid, storage: Uuid, profile_revision: i64) -> Result<Uuid> {
+        transactions::begin_raw(&self.pool, stream, storage, profile_revision).await
+    }
+    async fn finish(&self, stream: Uuid, source: Uuid, size: i64, digest: &[u8]) -> Result<()> {
+        transactions::finish_raw(&self.pool, stream, source, size, digest).await
+    }
+    async fn page(&self, stream: Uuid, start: i64, end: i64) -> Result<Vec<RawRange>> {
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=? AND e.offset_bytes+e.length>=? AND e.offset_bytes<=? ORDER BY e.offset_bytes LIMIT 128")
+            .bind(stream).bind(start).bind(end).fetch_all(&self.pool).await?)
+    }
+    async fn candidates(
+        &self,
+        storage: Uuid,
+        grace: i64,
+        minimum: i64,
+        limit: i64,
+    ) -> Result<Vec<RawSource>> {
+        anyhow::ensure!(
+            (1..=128).contains(&limit) && grace >= 0 && minimum >= 0,
+            "invalid raw cleanup bounds"
+        );
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=? AND r.owner_stream IS NULL AND r.unreferenced_at<DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL ? SECOND) AND r.created_at<DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL ? SECOND) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) ORDER BY r.unreferenced_at,r.id LIMIT ?")
+            .bind(storage).bind(grace).bind(minimum).bind(limit).fetch_all(&self.pool).await?)
+    }
+    async fn claim(&self, source: Uuid, revision: i64, grace: i64, minimum: i64) -> Result<bool> {
+        Ok(sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=? AND revision=? AND owner_stream IS NULL AND unreferenced_at<DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL ? SECOND) AND created_at<DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL ? SECOND) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)")
+            .bind(source).bind(revision).bind(grace).bind(minimum).execute(&self.pool).await?.rows_affected()==1)
+    }
+    async fn removed(&self, source: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM raw_sources WHERE id=? AND state='deleting' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)")
+            .bind(source).execute(&self.pool).await?;
+        Ok(())
+    }
+}
+
+pub(super) fn raw_lock_stream(stream: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar(
+        "SELECT id FROM streams WHERE id=? AND state='writing' AND payload_type='raw' FOR UPDATE ",
+    )
+    .bind(stream)
+}
+
+pub(super) fn raw_source(id: Uuid) -> Rows<'static, RawSource> {
+    sqlx::query_as("SELECT r.id AS raw_id,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=? FOR UPDATE").bind(id)
+}
+
+pub(super) fn raw_duplicate(storage: Uuid, hash: &[u8], size: i64) -> Rows<'_, RawSource> {
+    sqlx::query_as("SELECT r.id AS raw_id,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=? AND r.content_hash=? AND r.size=? FOR UPDATE")
+        .bind(storage).bind(hash).bind(size)
+}
+pub(super) fn raw_hash(id: Uuid, hash: Option<&[u8]>) -> Statement<'_> {
+    sqlx::query("UPDATE raw_sources SET content_hash=? WHERE id=?")
+        .bind(hash)
+        .bind(id)
+}
+pub(super) fn raw_share(
+    stream: Uuid,
+    previous: Uuid,
+    replacement: Uuid,
+    size: i64,
+) -> Statement<'static> {
+    sqlx::query("UPDATE raw_ranges SET source_id=? WHERE stream_id=? AND source_id=? AND offset_bytes=0 AND source_offset=0 AND length=?")
+        .bind(replacement).bind(stream).bind(previous).bind(size)
+}
+
+pub(super) fn raw_reference(source: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE raw_sources SET revision=revision+1 WHERE id=?").bind(source)
+}
+
+pub(super) fn lock_local_upload(upload: Uuid) -> Scalar<'static, String> {
+    sqlx::query_scalar("SELECT state FROM uploads WHERE id=? FOR UPDATE").bind(upload)
+}
+pub(super) fn current_multipart_file(upload: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar(
+        "SELECT id FROM multipart_files WHERE upload_id=? AND state='open' ORDER BY id LIMIT 1",
+    )
+    .bind(upload)
+}
+pub(super) fn insert_multipart_file(id: Uuid, upload: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO multipart_files(id,upload_id,storage_id) SELECT ?,u.id,b.storage_id FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id WHERE u.id=? AND u.state='active' AND s.type='local'").bind(id).bind(upload)
+}
+
+pub(super) fn insert_multipart_checkpoint(upload: Uuid, source: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO multipart_files(id,upload_id,storage_id,source_id,state) SELECT r.id,?,r.storage_id,r.id,'sealed' FROM raw_sources r WHERE r.id=? AND r.state='writing' AND r.medium='local' AND r.owner_stream IS NOT NULL ON DUPLICATE KEY UPDATE id=multipart_files.id").bind(upload).bind(source)
+}
+pub(super) fn remap_multipart_range<'a>(
+    upload: Uuid,
+    source: Uuid,
+    range: &'a crate::model::multipart::FileRemap,
+) -> Statement<'a> {
+    sqlx::query("UPDATE fragments SET file_id=?,file_offset=? WHERE id=? AND file_id=? AND file_offset=? AND size=? AND hash=? AND sealed AND EXISTS(SELECT 1 FROM extents e JOIN parts p ON p.stream_id=e.stream_id WHERE e.fragment_id=fragments.id AND p.upload_id=?)").bind(source).bind(range.destination).bind(range.fragment).bind(range.file).bind(range.offset).bind(range.size).bind(range.hash.as_slice()).bind(upload)
+}
+
+pub(super) fn pending_multipart_reclaim(id: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE multipart_files SET reclaim_pending=true WHERE id=? AND state='sealed'")
+        .bind(id)
 }

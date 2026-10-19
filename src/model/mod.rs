@@ -21,6 +21,7 @@ mod physical;
 mod profile;
 mod publish;
 pub(crate) mod quota;
+pub(crate) mod raw;
 pub(crate) mod recovery;
 pub(crate) mod runtime;
 pub(crate) mod settings;
@@ -89,6 +90,7 @@ pub(crate) struct Stores {
     pub(crate) publish: Arc<dyn PublishStore>,
     pub(crate) quota: Arc<dyn QuotaStore>,
     pub(crate) streams: Arc<dyn StreamStore>,
+    pub(crate) raw: Arc<dyn raw::RawStore>,
     pub(crate) task_control: Arc<dyn TaskControlStore>,
     pub(crate) task_execution: Arc<dyn TaskExecutionStore>,
     pub(crate) storage_profiles: Arc<dyn StorageProfileStore>,
