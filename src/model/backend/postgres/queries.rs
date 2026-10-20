@@ -7229,7 +7229,12 @@ impl ClusterStore for Backend {
         Ok(())
     }
     async fn claim_chunk(&self, storage: Uuid, hash: &[u8; 32]) -> Result<Box<dyn Send>> {
-        transactions::claim_chunk(&self.pool, storage, hash).await
+        ensure!(
+            self.pool.options().get_max_connections() >= 4,
+            "cluster chunk claims require at least four database connections"
+        );
+        let permit = self.chunk_claims.clone().acquire_owned().await?;
+        transactions::claim_chunk(&self.pool, storage, hash, permit).await
     }
     async fn profile_changes(&self) -> Result<Box<dyn crate::model::cluster::ProfileChanges>> {
         connection::profile_changes(&self.pool).await

@@ -7,6 +7,130 @@ use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "requires a fresh isolated PostgreSQL database"]
+async fn postgres_claim_pool_progress() -> Result<()> {
+    use crate::model::cluster::ClusterStore;
+    use sqlx::{
+        Connection, PgConnection,
+        postgres::{PgListener, PgPoolOptions},
+    };
+    use std::{sync::Arc, time::Duration};
+    use tokio::time::timeout;
+
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let url = std::fs::read_to_string(std::env::var("MOKYU_TEST_DATABASE_URL_FILE")?)?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(url.trim())
+        .await?;
+    let backend = Arc::new(Backend::new(
+        pool.clone(),
+        PgConnection::connect(url.trim()).await?,
+        false,
+    ));
+    let _profile = backend.profile_changes().await?;
+    let mut tasks = PgListener::connect_with(&pool).await?;
+    tasks.listen("mokyu_tasks").await?;
+    let storage = Uuid::new_v4();
+    let first = backend.claim_chunk(storage, &[1; 32]).await?;
+    let mut waiting = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.claim_chunk(storage, &[2; 32]).await }
+    });
+    assert!(
+        timeout(Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err(),
+        "a queued claim consumed query capacity"
+    );
+    assert_eq!(
+        timeout(
+            Duration::from_secs(2),
+            sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&pool)
+        )
+        .await??,
+        1
+    );
+    waiting.abort();
+    assert!(matches!(waiting.await, Err(error) if error.is_cancelled()));
+    drop(first);
+    let first = timeout(
+        Duration::from_secs(2),
+        backend.claim_chunk(storage, &[1; 32]),
+    )
+    .await??;
+
+    let other_pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(url.trim())
+        .await?;
+    let other = Arc::new(Backend::new(
+        other_pool.clone(),
+        PgConnection::connect(url.trim()).await?,
+        false,
+    ));
+    let _other_profile = other.profile_changes().await?;
+    let mut other_tasks = PgListener::connect_with(&other_pool).await?;
+    other_tasks.listen("mokyu_tasks").await?;
+    let mut blocked = tokio::spawn({
+        let other = other.clone();
+        async move { other.claim_chunk(storage, &[1; 32]).await }
+    });
+    assert!(
+        timeout(Duration::from_millis(100), &mut blocked)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        timeout(
+            Duration::from_secs(2),
+            sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&other_pool)
+        )
+        .await??,
+        1
+    );
+    blocked.abort();
+    assert!(matches!(blocked.await, Err(error) if error.is_cancelled()));
+    let mut independent = tokio::spawn({
+        let other = other.clone();
+        async move { other.claim_chunk(storage, &[2; 32]).await }
+    });
+    assert!(
+        timeout(Duration::from_millis(100), &mut independent)
+            .await
+            .is_err(),
+        "cancelled SQL released its budget before rollback"
+    );
+    assert_eq!(
+        timeout(
+            Duration::from_secs(2),
+            sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&other_pool)
+        )
+        .await??,
+        1
+    );
+    drop(first);
+    drop(timeout(Duration::from_secs(2), independent).await???);
+    let recovered = timeout(Duration::from_secs(2), other.claim_chunk(storage, &[1; 32])).await??;
+    drop(recovered);
+
+    let small = PgPoolOptions::new()
+        .max_connections(3)
+        .connect(url.trim())
+        .await?;
+    let small = Backend::new(small, PgConnection::connect(url.trim()).await?, false);
+    assert!(
+        timeout(Duration::from_secs(1), small.claim_chunk(storage, &[3; 32]))
+            .await?
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh isolated PostgreSQL database"]
 async fn postgres_storage_policy_expiration() -> Result<()> {
     use crate::model::{MultipartStore, StorageProfileStore};
     assert_eq!(

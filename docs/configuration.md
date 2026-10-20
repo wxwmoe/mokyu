@@ -70,7 +70,7 @@ SQLite 将 `instance.database_connections` 中的一个连接用于串行写入�
 | `instance.upload_cache_size` | 自动 | 本地待上传暂存上限 |
 | `instance.thumbnail_cache_size` | `256MiB` | 缩略图缓存上限 |
 | `instance.request_connections` | 自动 | 本节点 HTTP/S3 请求连接池上限 |
-| `instance.database_connections` | 自动 | 本节点数据库连接池上限 |
+| `instance.database_connections` | 自动 | 本节点数据库连接池上限；群集 control 至少 5，data/worker 至少 4；高并发需增加预算 |
 | `instance.database_read_connections` | 启用从库时 `min(4, max(1, database_connections / 4))` | data 从库池的独立上限；正整数，需同时配置 replica_database；不扣减主库预算 |
 | `instance.cpu_jobs` | 自动 | 本节点压缩、哈希和加解密等阻塞计算预算 |
 | `instance.stream_memory_budget` | 自动 | 数据流临时内存预算，不是 RSS 硬限制 |

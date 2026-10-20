@@ -162,7 +162,9 @@ Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专�
 
 ## 来源写入基准
 
-### 锁表清理
+### 锁与连接池
+
+`postgres_claim_pool_progress` 使用新隔离 PostgreSQL 库，以 `--ignored` 运行，覆盖两条 LISTEN、claim 配额等待、数据库锁等待取消及回滚完成后配额恢复。`python -m tests.recovery.claim_pool` 沿用双 data 来源恢复 fixture，设置 `MOKYU_TEST_SECOND_DATA`，两 data 的连接池均为 4；验证暂停上传时查询能推进、同内容互斥、跨节点独立写和完整读回。`MOKYU_TEST_EXPECT_CLAIM_BLOCKED=1` 仅用于旧版负对照，确认池饥饿及失败后安全重试。连接丢失、旧候选与撤权继续由 `tests.recovery.repair_cluster` 覆盖。
 
 `postgres_source_validation_allows_references` 使用新的隔离 PostgreSQL 库及 `MOKYU_TEST_DATABASE_URL_FILE`，以 `--ignored` 运行。覆盖来源锁与活跃引用、隔离、打包映射竞争；等待期间从独立块切换为 pack 后仍须持物理锁，空/fragment 来源和 4097 块的 generic/custom plan 均须正确。
 

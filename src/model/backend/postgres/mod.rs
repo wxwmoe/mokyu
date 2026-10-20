@@ -27,6 +27,7 @@ pub(crate) struct Backend {
     database_info: Option<crate::model::runtime::DatabaseInfo>,
     pool: PgPool,
     owner: tokio::sync::Mutex<PgConnection>,
+    chunk_claims: Arc<tokio::sync::Semaphore>,
     single: bool,
     replica: Option<connection::Replica>,
 }
@@ -35,6 +36,10 @@ impl Backend {
     pub(crate) fn new(pool: PgPool, owner: PgConnection, single: bool) -> Self {
         Self {
             database_info: None,
+            // Two LISTEN sessions and one query connection must outlive stalled uploads.
+            chunk_claims: Arc::new(tokio::sync::Semaphore::new(
+                pool.options().get_max_connections().saturating_sub(3) as usize,
+            )),
             pool,
             owner: tokio::sync::Mutex::new(owner),
             single,

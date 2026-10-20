@@ -37,6 +37,18 @@ impl Config {
             self.replica_database.is_none() || role != "single",
             "replica_database requires cluster mode"
         );
+        let minimum = match role {
+            "data" | "worker" => 4,
+            // LISTEN, two coordinators, an admin guard and its query.
+            "control" => 5,
+            _ => 1,
+        };
+        anyhow::ensure!(
+            self.instance
+                .database_connections
+                .is_none_or(|value| value >= minimum),
+            "instance.database_connections must be at least {minimum} for {role}"
+        );
         Ok(())
     }
 }
@@ -52,6 +64,25 @@ mod tests {
     use super::file::secret_value;
     use super::*;
     use std::{fs, path::Path};
+
+    #[test]
+    fn cluster_connection_limits_leave_room_for_queries() {
+        let mut config = toml::from_str::<FileConfig>("[database]\ntype='postgres'\n")
+            .unwrap()
+            .into_config();
+        for (role, minimum) in [("single", 1), ("control", 5), ("data", 4), ("worker", 4)] {
+            config.instance.database_connections = None;
+            assert!(config.validate_role(role).is_ok());
+            for connections in 1..=5 {
+                config.instance.database_connections = Some(connections);
+                assert_eq!(
+                    config.validate_role(role).is_ok(),
+                    connections >= minimum,
+                    "{role}: {connections}"
+                );
+            }
+        }
+    }
     #[test]
     fn avatar_mirror_requires_a_safe_https_origin() {
         let mut control = WebSettings::default();

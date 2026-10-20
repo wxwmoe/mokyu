@@ -418,14 +418,38 @@ pub(super) async fn setup_account(
     Ok(())
 }
 
+struct ChunkClaim(
+    Option<(
+        Transaction<'static, Postgres>,
+        tokio::sync::OwnedSemaphorePermit,
+    )>,
+);
+
+impl Drop for ChunkClaim {
+    fn drop(&mut self) {
+        if let Some((transaction, permit)) = self.0.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            // A cancelled advisory wait still occupies its connection until rollback completes.
+            runtime.spawn(async move {
+                if let Err(error) = transaction.rollback().await {
+                    tracing::warn!(%error, "chunk claim release failed");
+                }
+                drop(permit);
+            });
+        }
+    }
+}
+
 pub(super) async fn claim_chunk(
     pool: &PgPool,
     storage: Uuid,
     hash: &[u8; 32],
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<Box<dyn Send>> {
-    let mut claim = pool.begin().await?;
+    let mut claim = ChunkClaim(Some((pool.begin().await?, permit)));
     queries::claim_chunk_hash(storage, hash)
-        .execute(&mut *claim)
+        .execute(&mut *claim.0.as_mut().unwrap().0)
         .await?;
     Ok(Box::new(claim))
 }
