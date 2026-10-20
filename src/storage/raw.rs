@@ -186,7 +186,8 @@ impl Storage {
         self.verify_raw_target(&target).await?;
         let permit = target.writes.acquire().await?;
         let global = self.writes.acquire().await?;
-        let hash = target.deduplication_enabled.then(blake3::Hasher::new);
+        let hash = (target.deduplication_enabled && target.profile.write_processing == "inline")
+            .then(blake3::Hasher::new);
         if !target.is_local {
             remote_size(declared.unwrap_or(0).max(0) as u64)?;
             return Ok(RawWriter::Remote(RemoteWriter {

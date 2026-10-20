@@ -16,6 +16,7 @@ test('local CDC changes stay in the draft until saved and disable incompatible s
   const profileUrl = '/api/v1/storages/' + name + '/profile'
   const original = await (await request.get(profileUrl)).json()
   expect(original.cdc_enabled).toBe(true)
+  expect(original.write_processing).toBe('inline')
   expect(original.multipart_idle_timeout).toBe('24h')
   expect(original.min_free_space).toBe('1GiB')
   const errors: string[] = []
@@ -84,6 +85,12 @@ test('local CDC changes stay in the draft until saved and disable incompatible s
   await floor.fill('64MiB')
   await cdc.click()
   await dedup.click()
+  await editor.getByRole('combobox', { name: en.profile_write_processing, exact: true }).click()
+  await page.getByRole('option', { name: en.storeProcessing_background, exact: true }).click()
+  expect((await (await request.get(profileUrl)).json()).write_processing).toBe('inline')
+  await editor.getByRole('combobox', { name: en.profile_write_processing, exact: true }).scrollIntoViewIfNeeded()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await editor.screenshot({ path: info.outputPath('raw-processing-mobile.png') })
   const saved = page.waitForResponse(reply => reply.url().endsWith('/api/v1/storages/' + name) && reply.request().method() === 'PUT')
   await editor.getByRole('button', { name: en.save, exact: true }).click()
   expect((await saved).status()).toBe(200)
@@ -91,6 +98,7 @@ test('local CDC changes stay in the draft until saved and disable incompatible s
   const current = await (await request.get(profileUrl)).json()
   expect(current.cdc_enabled).toBe(false)
   expect(current.deduplication_enabled).toBe(true)
+  expect(current.write_processing).toBe('background')
   expect(current.compression_enabled).toBe(false)
   expect(current.multipart_idle_timeout).toBe('7d')
   expect(current.min_free_space).toBe('64MiB')

@@ -78,6 +78,21 @@ def payload(base, sequence):
     return base[:-suffix] + sequence.to_bytes(16, 'big')[-suffix:]
 
 
+def drain_raw(database, bucket, seconds):
+    started = time.perf_counter()
+    first = None
+    while True:
+        current = database.query('''SELECT count(*) AS pending,
+            COALESCE(sum(CASE WHEN w.last_error IS NOT NULL THEN 1 ELSE 0 END),0) AS failed
+            FROM raw_processing w JOIN streams s ON s.id=w.stream_id
+            JOIN buckets b ON b.id=s.bucket_id WHERE b.name=%s''', bucket)[0]
+        first = first or current
+        elapsed = time.perf_counter() - started
+        if current['pending'] == 0 or current['failed'] or elapsed >= seconds:
+            return dict(seconds=elapsed, before=first, after=current, completed=current['pending'] == 0)
+        time.sleep(.05)
+
+
 def measure(fixture, credentials, database=None):
     operation = fixture['operation']
     seconds = float(fixture.get('seconds', 30))
@@ -88,6 +103,13 @@ def measure(fixture, credentials, database=None):
     assert 1 <= seconds <= 600 and 1 <= concurrency <= 64 and 1 <= maximum <= 1000000
     assert 0 <= size <= 64 * 1024 * 1024
     assert (maximum + 1) * size <= int(fixture['max_total_bytes']), 'workload exceeds its byte budget'
+    raw_drain_seconds = int(fixture.get('raw_drain_seconds', 0))
+    assert 0 <= raw_drain_seconds <= 600
+    raw_database = None
+    if raw_drain_seconds:
+        assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
+        from tests.recovery.source_repair import Database
+        raw_database = Database()
     base = random.Random(fixture['seed']).randbytes(size)
     prefix = fixture['prefix'].rstrip('/')
     assert prefix, 'an isolated nonempty prefix is required'
@@ -113,6 +135,8 @@ def measure(fixture, credentials, database=None):
         source = prefix + '/source'
         clients[0].put_object(Bucket=bucket, Key=source, Body=base)
         readback(clients[0], bucket, source, base)
+        if raw_database:
+            assert drain_raw(raw_database, bucket, raw_drain_seconds)['completed'], 'warmup raw processing did not drain'
         before_status = statuses()
         before_sql = sql_snapshot(database)
         before_cpu = {name: cpu(path) for name, path in resources.items()}
@@ -168,6 +192,18 @@ def measure(fixture, credentials, database=None):
         after_disk = {name: disk(path) for name, path in resources.items()}
         after_sql = sql_snapshot(database)
         after_status = statuses()
+        drained = None
+        if raw_database:
+            drained = drain_raw(raw_database, bucket, raw_drain_seconds)
+            drained['total_seconds'] = time.perf_counter() - started
+            drained['completed_operations_per_second'] = len(samples) / drained['total_seconds']
+            drained['resources'] = {name: dict(
+                cpu_delta={key: value - before_cpu[name][key] for key, value in cpu(path).items()},
+                io_delta={device: {field: value - before_disk[name].get(device, {}).get(field, 0)
+                    for field, value in values.items()} for device, values in disk(path).items()},
+                memory_current=int((path / 'memory.current').read_text())) for name, path in resources.items()}
+            if not drained['completed']:
+                errors['raw_processing:incomplete'] += 1
         verification_started = time.perf_counter()
         verified = 0
         for sequence in committed:
@@ -182,6 +218,7 @@ def measure(fixture, credentials, database=None):
         return dict(operation=operation, attempts=attempted, acknowledged=len(samples), errors=dict(errors),
             seconds=elapsed, operations_per_second=len(samples) / elapsed,
             client_process_cpu_seconds=client_cpu,
+            raw_processing=drained,
             latency=percentiles([sample[0] for sample in samples]),
             stages={name: percentiles([stage[name] for _, stage in samples if name in stage]) for name in names},
             verification=dict(objects=verified, expected=len(committed),

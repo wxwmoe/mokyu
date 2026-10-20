@@ -1,4 +1,9 @@
 export default {
+  "profile_write_processing": "処理のタイミング",
+  "storeProcessing_inline": "応答前に処理",
+  "storeProcessing_background": "バックグラウンドで処理",
+  "storeProcessingHint": "バックグラウンドの重複排除はファイル全体を確実に保存してから応答します。重複の確認と余分なファイルの回収を待つ間も読み取りできます",
+
   physical_raw: "元ファイル",
   "storeRawDedupHint": "このストレージ内で内容が同じファイルを再利用します。raw では既定で無効で、新しい書き込みにのみ適用されます",
   "storeChunkDedupHint": "チャンクは常に重複排除を使用します",

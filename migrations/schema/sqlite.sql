@@ -629,7 +629,7 @@ CREATE TABLE storage_profiles (
     maintenance_byte_budget TEXT,
     migration_concurrency INTEGER,
     migration_byte_budget TEXT,
-    updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), cdc_enabled INTEGER NOT NULL DEFAULT 1 CHECK (cdc_enabled IN (0,1)), deduplication_enabled INTEGER NOT NULL DEFAULT 0 CHECK (deduplication_enabled IN (0,1)), multipart_idle_timeout TEXT NOT NULL DEFAULT '24h', min_free_space TEXT,
+    updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), cdc_enabled INTEGER NOT NULL DEFAULT 1 CHECK (cdc_enabled IN (0,1)), deduplication_enabled INTEGER NOT NULL DEFAULT 0 CHECK (deduplication_enabled IN (0,1)), multipart_idle_timeout TEXT NOT NULL DEFAULT '24h', min_free_space TEXT, write_processing TEXT NOT NULL DEFAULT 'inline',
     CONSTRAINT storage_profiles_storage FOREIGN KEY (storage_id) REFERENCES storages(id) ON DELETE CASCADE,
     CONSTRAINT storage_profiles_revision CHECK (revision>0),
     CONSTRAINT storage_profiles_max_retries CHECK (max_retries BETWEEN 0 AND 100),
@@ -1068,3 +1068,19 @@ CREATE TABLE storage_maintenance (
     last_scheduled_at INTEGER NOT NULL,
     PRIMARY KEY(storage_id,policy)
 ) STRICT;
+
+CREATE TABLE raw_processing (
+    stream_id BLOB PRIMARY KEY REFERENCES streams(id) ON DELETE CASCADE,
+    source_id BLOB NOT NULL REFERENCES raw_sources(id) ON DELETE CASCADE,
+    payload_revision INTEGER NOT NULL,
+    content_hash BLOB CHECK (content_hash IS NULL OR length(content_hash)=32),
+    source_revision INTEGER,
+    token BLOB,
+    lease_expires_at INTEGER,
+    next_attempt_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+) STRICT;
+CREATE INDEX raw_processing_due ON raw_processing(next_attempt_at,stream_id);
+
+UPDATE mokyu_meta SET schema_version=24 WHERE id=1;

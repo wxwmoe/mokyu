@@ -53,7 +53,7 @@ const hasBlockKeys = computed(() => (keys.data.value || []).some(row => row.purp
 function profilePreset(type: string): Record<ProfileKey, string | number | boolean | null> {
   const s3 = type !== 'local'
   return {
-    cdc_enabled: true, deduplication_enabled: false,
+    cdc_enabled: true, deduplication_enabled: false, write_processing: 'inline',
     connect_timeout: '5s', request_timeout: '30s', max_retries: 3, retry_timeout: '120s', priority_aging: '30s',
     min_storage_duration: '0s', unreferenced_grace: '48h', deleted_chunk_retention: '7d', upload_retention: '24h', multipart_idle_timeout: '24h', min_free_space: s3 ? null : '1GiB', cache_enabled: s3,
     cache_soft_limit: null, cache_entries: null, upload_cache: s3, upload_cache_size: null, compression_enabled: s3,
@@ -121,6 +121,7 @@ function profileInput(field: ProfileField, event: Event) {
 function setProfileBoolean(key: ProfileKey, value: boolean) {
   if (!profileDraft.value) return
   profileDraft.value[key] = value
+  if (key === 'cdc_enabled' && value) profileDraft.value.write_processing = 'inline'
   if (key === 'cdc_enabled' && !value) {
     Object.assign(profileDraft.value, { compression_enabled: false, pack_enabled: false, pack_range_enabled: false })
     draft.block_key_id = ''
@@ -191,6 +192,7 @@ async function toggle(row: Storage) {
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeChunkPolicy') }}</h3><p class="field-help">{{ t('storeChunkPolicyHint') }}</p></div></div>
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled)" :label="t('profile_cdc_enabled')" :disabled="busy" @update:model-value="setProfileBoolean('cdc_enabled', $event)" /><p class="field-help">{{ t('storeCdcHint') }}</p></div>
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled || profileDraft.deduplication_enabled)" :label="t('profile_deduplication_enabled')" :disabled="busy || Boolean(profileDraft.cdc_enabled)" @update:model-value="setProfileBoolean('deduplication_enabled', $event)" /><p class="field-help">{{ t(profileDraft.cdc_enabled ? 'storeChunkDedupHint' : 'storeRawDedupHint') }}</p></div>
+        <div v-if="profileDraft && !profileDraft.cdc_enabled" class="store-form-wide"><label>{{ t('profile_write_processing') }}<UiSelect :model-value="String(profileDraft.write_processing)" :options="['inline', 'background'].map(value => ({ value, label: t('storeProcessing_' + value) }))" :label="t('profile_write_processing')" :disabled="busy || !profileDraft.deduplication_enabled" @update:model-value="profileDraft.write_processing = $event" /></label><p class="field-help">{{ t('storeProcessingHint') }}</p></div>
         <label class="store-form-wide">{{ t('storeCurrentKey') }}<UiSelect v-model="draft.block_key_id" :options="keyOptions" :label="t('storeCurrentKey')" :disabled="busy || profileDraft?.cdc_enabled === false" /></label>
       <p class="store-form-wide field-help">{{ t(hasBlockKeys ? 'storeKeyHint' : 'storeNoKeyHint') }} <a href="/credentials?tab=managed&create=block" target="_blank" rel="noreferrer">{{ t('manageKeys') }}</a></p>
         <template v-if="profileDraft">

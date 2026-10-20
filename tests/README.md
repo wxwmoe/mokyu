@@ -159,6 +159,8 @@ Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专�
 
 fixture 使用 `revision`、`build`、`database_version`、`cache_state`、`seed`、`credentials_file`、`prefix` 和可选 `resources`/PostgreSQL `database_file`，另设单个 `endpoint`、`operation`、`size`、`seconds`、`concurrency`、`max_operations`、`max_total_bytes`。正文大小 0–64MiB，并发 1–64，持续 1–600 秒，请求最多一百万；包括预热对象的 `(max_operations + 1) × size` 必须在字节预算内。每轮使用独占前缀，脚本不会删除数据；触及请求上限时按实际时间报告。
 
+raw 后台去重比较可设置 `raw_drain_seconds`（1–600）并提供对应隔离库的 `MOKYU_TEST_CONFIG`；预热及请求结束后等待该桶的处理记录排空，完整读回放在排空后。报告分别保留 ACK 窗口和包括排空的时间、完成速率、CPU/磁盘成本；失败或超时不能计为稳态完成。排空轮询本身有数据库开销，比较双方须使用同样设置。
+
 报告保存各操作百分位、实际请求窗口吞吐、读回校验数量/错误、CPU、cgroup 内存（含匿名页/文件页/脏页）、逐设备 I/O 字节/次数及节点状态。逐设备计数不叠加，以免重复计算分区和底层设备。PostgreSQL SQL 差值是整个测量窗口的数据库总成本，包含后台工作，不是逐请求前台 SQL 计数；没有采集时为 null，不能解读成零。公共 Web/匿名 S3 的编码读取继续使用公共读基准；所有比较记录应用/页缓存状态，统一资源与确认策略，并发超出服务准入额度的 SlowDown 必须计为错误，不能只报告成功请求。
 
 ### 写入与立即读回
@@ -191,3 +193,5 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 启用 drain 后分别保留请求窗口和含排空的 SQL/CPU/后端成本、待处理队列与 ready 编码数；不能把延后落盘当成提速。`mixed` 分别记录健康与恢复请求延迟，需结合恢复审计确认命中恢复。各比较版本须从等价历史/队列状态开始，统一预热、统计刷新和 ANALYZE 相位；至少三组交错配对，详细 tracing 只作独立归因。有限 key 不限制历史物理版本数量，运行前仍须安排总字节、保留期及清理预算。
 
 - `python -m tests.recovery.storage_relocation`: owns a stopped isolated service, copies one complete local namespace to an isolated S3 fixture and back, verifies maintenance/upload/read guards and crash boundaries. Set `MOKYU_TEST_RELOCATION_BACKEND` to the fixture credential file and the usual `source_quarantine` environment, without `MOKYU_TEST_BACKEND`.
+- `python -m tests.recovery.raw_processing`：自行启动已初始化但停止的专用服务，沿用来源隔离的环境变量。覆盖空闲 raw 后台不会吞掉任务通知、可靠 ACK 先于后台去重、接收策略保持、两处强杀恢复、读者占用、Multipart/Copy、删除和坏来源拒绝；local 与模拟 S3、四种数据库分别运行。
+- `python -m tests.recovery.raw_processing_cluster`：沿用 `raw_cluster` 的双 data/共享 S3 fixture，将两节点故障目录写入 `MOKYU_TEST_SOURCE_FAULT_DIRS`；验证共享读者保护、处理租约过期接手、停用节点拒绝提交、无租约领取恢复和迟到执行者不能重复切换。数据库保留两个 LISTEN 连接后，用一个查询连接和行锁等待验证续租不会停止事务推进。

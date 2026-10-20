@@ -3,6 +3,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub(crate) type Processor<'a> = Option<(
+    &'a crate::cluster::NodeState,
+    &'a str,
+    &'a crate::content::codec::Key,
+)>;
+
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, sqlx::FromRow)]
 pub(crate) struct RawSource {
     #[sqlx(rename = "raw_id")]
@@ -50,6 +56,18 @@ pub(crate) struct RawRange {
     pub source_offset: i64,
 }
 
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub(crate) struct RawProcessing {
+    pub stream: Uuid,
+    pub source: Uuid,
+    pub bucket: Uuid,
+    pub object_key: String,
+    pub payload_revision: i64,
+    pub content_hash: Option<Vec<u8>>,
+    pub source_revision: Option<i64>,
+    pub token: Uuid,
+}
+
 impl RawRange {
     pub fn validate(&self) -> Result<()> {
         self.source.validate()?;
@@ -70,6 +88,29 @@ impl RawRange {
 
 #[async_trait]
 pub(crate) trait RawStore: Send + Sync {
+    async fn claim_processing(
+        &self,
+        token: Uuid,
+        node: Processor<'_>,
+    ) -> Result<Option<RawProcessing>>;
+    async fn renew_processing(&self, work: &RawProcessing, node: Processor<'_>) -> Result<bool>;
+    async fn save_processing_hash(
+        &self,
+        work: &RawProcessing,
+        revision: i64,
+        hash: &[u8],
+    ) -> Result<()>;
+    async fn retry_processing(&self, work: &RawProcessing, error: Option<&str>) -> Result<()>;
+    async fn cancel_processing(&self, work: &RawProcessing) -> Result<()>;
+    async fn finish_processing(
+        &self,
+        work: &RawProcessing,
+        source: &RawSource,
+        hash: &[u8],
+        lease: Option<Uuid>,
+        node: Processor<'_>,
+    ) -> Result<bool>;
+    async fn processing_status(&self) -> Result<serde_json::Value>;
     async fn begin(&self, stream: Uuid, storage: Uuid, profile_revision: i64) -> Result<Uuid>;
     async fn finish(&self, stream: Uuid, source: Uuid, size: i64, digest: &[u8]) -> Result<()>;
     async fn set_upload(&self, source: Uuid, upload: &str) -> Result<()>;

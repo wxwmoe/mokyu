@@ -137,6 +137,7 @@ async fn postgres_fragment_deletion_holds_lock() -> Result<()> {
         "INSERT INTO extents(stream_id,offset_bytes,length,fragment_id) VALUES($1,0,1,$2)";
 
     let guard = backend.claim_fragment(fragment).await?.unwrap();
+    assert!(backend.claim_fragment(fragment).await?.is_none());
     let mut writer = pool.begin().await?;
     sqlx::query("SET LOCAL lock_timeout='100ms'")
         .execute(&mut *writer)

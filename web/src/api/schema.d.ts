@@ -2769,6 +2769,7 @@ export interface components {
             /** Format: int32 */
             upload_concurrency?: number | null;
             upload_retention: string;
+            write_processing?: string;
         };
         StorageUnpackInput: {
             action: string;

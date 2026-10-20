@@ -13,6 +13,8 @@ pub(crate) struct StorageProfile {
     pub cdc_enabled: bool,
     #[serde(default)]
     pub deduplication_enabled: bool,
+    #[serde(default = "write_processing")]
+    pub write_processing: String,
     pub connect_timeout: String,
     pub request_timeout: String,
     pub max_retries: i32,
@@ -71,6 +73,10 @@ pub(crate) struct StorageProfile {
 
 fn cdc_enabled() -> bool {
     true
+}
+
+fn write_processing() -> String {
+    "inline".into()
 }
 
 impl StorageProfile {
@@ -198,6 +204,20 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
                 && !profile.pack_enabled
                 && !profile.pack_range_enabled),
         "raw storage cannot enable compression or packs"
+    );
+    anyhow::ensure!(
+        matches!(profile.write_processing.as_str(), "inline" | "background"),
+        s3s::s3_error!(
+            InvalidArgument,
+            "write_processing must be inline or background"
+        )
+    );
+    anyhow::ensure!(
+        !profile.cdc_enabled || profile.write_processing == "inline",
+        s3s::s3_error!(
+            InvalidArgument,
+            "background processing currently requires raw storage"
+        )
     );
     if storage_type == "local"
         && (profile.cache_enabled

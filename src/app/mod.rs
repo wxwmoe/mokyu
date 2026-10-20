@@ -144,6 +144,9 @@ impl Drop for Active {
     }
 }
 impl Active {
+    pub(crate) fn read_lease_id(&self) -> Option<Uuid> {
+        self.read_lease.as_ref().map(|lease| lease.id)
+    }
     pub(crate) async fn with_read_lease<T>(
         &self,
         future: impl std::future::Future<Output = Result<T>>,
@@ -155,12 +158,15 @@ impl Active {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(
             (lease.ttl_seconds / 3).max(1) as u64,
         ));
-        tokio::pin!(future);
-        loop {
-            tokio::select! {
-                result = &mut future => return result,
-                _ = tick.tick() => self.renew_read_lease().await?,
-            }
+        // Renewal must not suspend work holding the only database connection.
+        tokio::select! {
+            result = future => result,
+            result = async {
+                loop {
+                    tick.tick().await;
+                    self.renew_read_lease().await?;
+                }
+            } => result,
         }
     }
     pub(crate) fn allow_replica(&mut self) {

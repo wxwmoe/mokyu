@@ -49,6 +49,7 @@ class Fixture:
         self.name = 'source-' + uuid.uuid4().hex[:12]
         self.web = os.environ['MOKYU_TEST_WEB']
         self.faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
+        self.faults.mkdir(parents=True, exist_ok=True)
         self.password = (os.environ.get('MOKYU_TEST_PASSWORD') or Path(os.environ['MOKYU_TEST_PASSWORD_FILE']).read_text()).strip()
         self.session = requests.Session()
         response = self.session.post(self.web + '/api/v1/auth/login', headers={'Origin': self.web},

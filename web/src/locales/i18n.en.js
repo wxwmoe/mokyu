@@ -1,4 +1,9 @@
 export default {
+  "profile_write_processing": "Processing time",
+  "storeProcessing_inline": "Before responding",
+  "storeProcessing_background": "In the background",
+  "storeProcessingHint": "Background deduplication starts after the complete file is reliably stored. Reads continue while duplicate files wait to be reclaimed.",
+
   physical_raw: "Raw file",
   "storeRawDedupHint": "Reuse identical whole files within this storage. Disabled by default for raw files; changing this setting only affects new writes.",
   "storeChunkDedupHint": "Chunks always use deduplication.",

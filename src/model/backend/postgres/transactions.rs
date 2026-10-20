@@ -6591,7 +6591,7 @@ pub(super) async fn begin_raw(
     revision: i64,
 ) -> Result<Uuid> {
     let mut tx = pool.begin().await?;
-    let (storage_type, unencoded, current, cdc) = queries::raw_target(stream, storage)
+    let (storage_type, unencoded, current, cdc, background) = queries::raw_target(stream, storage)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(crate::model::Error::OperationAborted)?;
@@ -6621,6 +6621,11 @@ pub(super) async fn begin_raw(
     )
     .execute(&mut *tx)
     .await?;
+    if background {
+        queries::raw_enqueue_processing(stream, id)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(id)
 }
@@ -6698,42 +6703,52 @@ pub(super) async fn deduplicate_raw(
     ensure!(current == received, crate::model::Error::SourceUnavailable);
     current.validate()?;
     validate_raw(&mut tx, stream, current.size).await?;
+    let reused = share_raw(&mut tx, stream, &current, hash).await?;
+    tx.commit().await?;
+    Ok(reused)
+}
+
+async fn share_raw(
+    db: &mut sqlx::PgConnection,
+    stream: Uuid,
+    current: &crate::model::raw::RawSource,
+    hash: &[u8],
+) -> Result<bool> {
     let duplicate = queries::raw_duplicate(current.storage_id, hash, current.size)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *db)
         .await?;
     let mut reused = false;
     if let Some(candidate) = duplicate {
-        if candidate.id == source {
+        if candidate.id == current.id {
             return Ok(false);
         }
         if candidate.validate().is_ok() && candidate.medium == current.medium {
             ensure!(
-                queries::raw_share(stream, source, candidate.id, current.size)
-                    .execute(&mut *tx)
+                queries::raw_share(stream, current.id, candidate.id, current.size)
+                    .execute(&mut *db)
                     .await?
                     .rows_affected()
                     == 1,
                 crate::model::Error::OperationAborted
             );
             queries::raw_reference(candidate.id)
-                .execute(&mut *tx)
+                .execute(&mut *db)
                 .await?;
-            queries::raw_touch_unreferenced(source)
-                .execute(&mut *tx)
+            queries::raw_touch_unreferenced(current.id)
+                .execute(&mut *db)
                 .await?;
             reused = true;
         } else {
             queries::raw_hash(candidate.id, None)
-                .execute(&mut *tx)
+                .execute(&mut *db)
                 .await?;
         }
     }
     if !reused {
-        queries::raw_hash(source, Some(hash))
-            .execute(&mut *tx)
+        queries::raw_hash(current.id, Some(hash))
+            .execute(&mut *db)
             .await?;
     }
-    tx.commit().await?;
     Ok(reused)
 }
 
@@ -6808,4 +6823,125 @@ pub(super) async fn remap_multipart_file(
     }
     tx.commit().await?;
     Ok(())
+}
+
+pub(super) async fn claim_raw_processing(
+    pool: &sqlx::PgPool,
+    node: crate::model::raw::Processor<'_>,
+    token: Uuid,
+) -> Result<Option<crate::model::raw::RawProcessing>> {
+    let mut tx = pool.begin().await?;
+    raw_processor(&mut tx, node).await?;
+    let single = node.is_none();
+    let Some(stream) = queries::raw_processing_due(single)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        return Ok(None);
+    };
+    queries::raw_processing_claim(stream, token, single)
+        .execute(&mut *tx)
+        .await?;
+    let work = queries::raw_processing_record(stream)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(work))
+}
+
+pub(super) async fn finish_raw_processing(
+    pool: &sqlx::PgPool,
+    work: &crate::model::raw::RawProcessing,
+    source: &crate::model::raw::RawSource,
+    hash: &[u8],
+    lease: Option<Uuid>,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<bool> {
+    ensure!(hash.len() == 32, "invalid raw content hash");
+    let mut tx = pool.begin().await?;
+    raw_processor(&mut tx, node).await?;
+    queries::claim_chunk_hash(source.storage_id, hash)
+        .execute(&mut *tx)
+        .await?;
+    let current_stream = queries::raw_processing_stream(work)
+        .fetch_optional(&mut *tx)
+        .await?;
+    ensure!(
+        queries::raw_processing_owned(work)
+            .fetch_optional(&mut *tx)
+            .await?
+            == Some(source.id),
+        crate::model::Error::OperationAborted
+    );
+    if current_stream.is_none() {
+        queries::raw_processing_delete(work)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(true);
+    }
+    if let Some(lease) = lease {
+        if queries::raw_processing_readers(work.stream, lease)
+            .fetch_one(&mut *tx)
+            .await?
+        {
+            return Ok(false);
+        }
+    }
+    let current = queries::raw_source(source.id).fetch_one(&mut *tx).await?;
+    ensure!(current == *source, crate::model::Error::SourceUnavailable);
+    current.validate()?;
+    validate_raw(&mut tx, work.stream, current.size).await?;
+    if share_raw(&mut tx, work.stream, &current, hash).await? {
+        queries::raw_processing_changed(work.stream)
+            .execute(&mut *tx)
+            .await?;
+    }
+    queries::raw_processing_delete(work)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+async fn raw_processor(
+    db: &mut PgConnection,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<()> {
+    if let Some((state, role, key)) = node {
+        validate_node(&mut *db, state, role, key).await?;
+        ensure!(
+            queries::repair_node(state.node_id)
+                .fetch_optional(&mut *db)
+                .await?
+                .is_some(),
+            crate::model::Error::OperationAborted
+        );
+        ensure!(
+            queries::repair_cluster_mode().fetch_one(db).await?,
+            crate::model::Error::OperationAborted
+        );
+    } else {
+        ensure!(
+            queries::repair_mode().fetch_one(db).await?,
+            crate::model::Error::OperationAborted
+        );
+    }
+    Ok(())
+}
+
+pub(super) async fn renew_raw_processing(
+    pool: &PgPool,
+    work: &crate::model::raw::RawProcessing,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    raw_processor(&mut tx, node).await?;
+    let renewed = queries::renew_raw_processing(work)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        == 1;
+    tx.commit().await?;
+    Ok(renewed)
 }

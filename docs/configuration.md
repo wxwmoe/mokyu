@@ -110,6 +110,7 @@ runtime section 使用 revision 乐观并发。冲突返回当前 revision；重
 profile 是类型化字段，不是任意 JSON。字段包括：
 
 - `deduplication_enabled` 默认 false，仅控制 raw 的整文件去重；chunks 固定启用区块去重。更改仅影响新写入；关闭不会拆开已有共享文件；
+- `write_processing` 默认 `inline`；raw 开启去重时可选 `background`，完整文件与对象映射可靠提交后响应，再由后台计算内容身份和共享来源。后台工作持久保存，重启继续，已有工作保持接收时的去重设置；当前 CDC 必须使用 `inline`；
 - `cdc_enabled` 默认 true；local 和 S3 均可关闭。关闭时必须清除 block key，同时禁用压缩、pack 和 pack Range；Web 在草稿中联动这些值，保存后生效，重新开启不会恢复旧 key。已有对象保持可读；
 
 - 连接超时、请求超时、重试次数、重试窗口、优先级老化、最低存储期限、未引用宽限和删除保留期；

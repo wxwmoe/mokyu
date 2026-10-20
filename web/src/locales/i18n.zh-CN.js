@@ -1,4 +1,9 @@
 export default {
+  "profile_write_processing": "处理时机",
+  "storeProcessing_inline": "响应前处理",
+  "storeProcessing_background": "后台处理",
+  "storeProcessingHint": "后台去重先可靠保存完整文件并响应；查重和多余文件回收随后执行，期间仍可读取",
+
   physical_raw: "原始文件",
   "storeRawDedupHint": "在此存储内复用内容相同的完整文件；raw 默认关闭，仅影响新写入",
   "storeChunkDedupHint": "区块固定启用去重",

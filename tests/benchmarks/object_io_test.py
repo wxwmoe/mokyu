@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from tests.benchmarks.object_io import disk, memory, payload, readback, request
+from tests.benchmarks.object_io import disk, drain_raw, memory, payload, readback, request
 
 
 class Client:
@@ -41,6 +41,21 @@ class Client:
 
 
 class TimingTests(unittest.TestCase):
+    def test_background_drain_cannot_hide_failure_or_timeout(self):
+        from unittest.mock import Mock
+        database = Mock()
+        database.query.side_effect = [[dict(pending=2, failed=0)], [dict(pending=0, failed=0)]]
+        with patch('tests.benchmarks.object_io.time.sleep'):
+            result = drain_raw(database, 'bucket', 1)
+        self.assertTrue(result['completed'])
+        self.assertEqual(result['before']['pending'], 2)
+        database.query.side_effect = None
+        for pending, failed in [(1, 1), (1, 0)]:
+            database.query.return_value = [dict(pending=pending, failed=failed)]
+            result = drain_raw(database, 'bucket', 0)
+            self.assertFalse(result['completed'])
+            self.assertEqual(result['after']['pending'], 1)
+
     def test_write_has_no_hidden_read(self):
         client = Client()
         request(client, 'bucket', 'key', b'data', 'put')

@@ -7182,7 +7182,7 @@ pub(super) fn enabled_storage(id: Uuid) -> Rows<'static, StorageRecord> {
 }
 
 pub(super) fn storage_profile(id: Uuid) -> Rows<'static, crate::storage::profile::StorageProfile> {
-    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=?")
+    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,write_processing,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=?")
         .bind(id)
 }
 
@@ -7205,7 +7205,7 @@ pub(super) fn storage_profile_target<'q>(name: &'q str) -> Rows<'q, (Uuid, Strin
 }
 
 pub(super) fn storage_profile_lock(id: Uuid) -> Rows<'static, StorageProfile> {
-    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=? FOR UPDATE").bind(id)
+    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,write_processing,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=? FOR UPDATE").bind(id)
 }
 
 const VIEW_ORDERED: &str = "SELECT s.id,s.name,s.type AS storage_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id ORDER BY s.name";
@@ -7356,6 +7356,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for crate::storage::profile::S
             revision: row.try_get("revision")?,
             cdc_enabled: row.try_get("cdc_enabled")?,
             deduplication_enabled: row.try_get("deduplication_enabled")?,
+            write_processing: row.try_get("write_processing")?,
             connect_timeout: row.try_get("connect_timeout")?,
             request_timeout: row.try_get("request_timeout")?,
             max_retries: row.try_get("max_retries")?,
@@ -7415,9 +7416,10 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for crate::storage::profile::S
 }
 
 pub(super) fn save_storage_profile(profile: &StorageProfile) -> Statement<'_> {
-    sqlx::query("UPDATE storage_profiles SET cdc_enabled=?,deduplication_enabled=?,connect_timeout=?,request_timeout=?,max_retries=?,retry_timeout=?,priority_aging=?,min_storage_duration=?,unreferenced_grace=?,deleted_chunk_retention=?,upload_retention=?,multipart_idle_timeout=?,min_free_space=?,cache_enabled=?,cache_soft_limit=?,cache_entries=?,upload_cache=?,upload_cache_size=?,compression_enabled=?,compression_strategy=?,compression_level=?,compression_sample_level=?,compression_min_savings_percent=?,compression_min_savings_bytes=?,pack_enabled=?,pack_max_size=?,pack_upload_flush_timeout=?,pack_interval=?,pack_reuse_interval=?,pack_reclaim_interval=?,pack_repack_interval=?,pack_repack_cooldown=?,pack_reclaim_min_savings_bytes=?,pack_range_enabled=?,pack_range_interval=?,pack_range_window=?,pack_range_min_downloads=?,pack_range_min_savings_percent=?,pack_range_min_savings_bytes=?,pack_range_repack_after=?,pack_range_repack_window=?,pack_range_repack_retry_interval=?,pack_concurrency=?,integrity_concurrency=?,integrity_rps=?,integrity_bandwidth=?,integrity_batch_timeout=?,read_concurrency=?,upload_concurrency=?,control_concurrency=?,pack_byte_budget=?,integrity_byte_budget=?,maintenance_concurrency=?,maintenance_byte_budget=?,migration_concurrency=?,migration_byte_budget=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP(6) WHERE storage_id=? AND revision=?")
+    sqlx::query("UPDATE storage_profiles SET cdc_enabled=?,deduplication_enabled=?,write_processing=?,connect_timeout=?,request_timeout=?,max_retries=?,retry_timeout=?,priority_aging=?,min_storage_duration=?,unreferenced_grace=?,deleted_chunk_retention=?,upload_retention=?,multipart_idle_timeout=?,min_free_space=?,cache_enabled=?,cache_soft_limit=?,cache_entries=?,upload_cache=?,upload_cache_size=?,compression_enabled=?,compression_strategy=?,compression_level=?,compression_sample_level=?,compression_min_savings_percent=?,compression_min_savings_bytes=?,pack_enabled=?,pack_max_size=?,pack_upload_flush_timeout=?,pack_interval=?,pack_reuse_interval=?,pack_reclaim_interval=?,pack_repack_interval=?,pack_repack_cooldown=?,pack_reclaim_min_savings_bytes=?,pack_range_enabled=?,pack_range_interval=?,pack_range_window=?,pack_range_min_downloads=?,pack_range_min_savings_percent=?,pack_range_min_savings_bytes=?,pack_range_repack_after=?,pack_range_repack_window=?,pack_range_repack_retry_interval=?,pack_concurrency=?,integrity_concurrency=?,integrity_rps=?,integrity_bandwidth=?,integrity_batch_timeout=?,read_concurrency=?,upload_concurrency=?,control_concurrency=?,pack_byte_budget=?,integrity_byte_budget=?,maintenance_concurrency=?,maintenance_byte_budget=?,migration_concurrency=?,migration_byte_budget=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP(6) WHERE storage_id=? AND revision=?")
         .bind(profile.cdc_enabled)
         .bind(profile.deduplication_enabled)
+        .bind(&profile.write_processing)
         .bind(&profile.connect_timeout)
         .bind(&profile.request_timeout)
         .bind(profile.max_retries)
@@ -7806,9 +7808,12 @@ pub(super) fn source_audit<'a>(
         .bind(principal.user_id()).bind(principal.user_id()).bind(access_key).bind(fallback).bind(principal.token_id()).bind(source).bind(action).bind(target).bind(detail))
 }
 
-use crate::model::raw::{RawRange, RawSource, RawStore};
-pub(super) fn raw_target(stream: Uuid, storage: Uuid) -> Rows<'static, (String, bool, i64, bool)> {
-    sqlx::query_as("SELECT t.type,(t.block_key_id IS NULL AND NOT p.compression_enabled AND NOT p.pack_enabled),p.revision,p.cdc_enabled FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storages t ON t.id=b.storage_id JOIN storage_profiles p ON p.storage_id=t.id WHERE s.id=? AND t.id=? AND t.enabled AND s.state='writing' FOR UPDATE").bind(stream).bind(storage)
+use crate::model::raw::{RawProcessing, RawRange, RawSource, RawStore};
+pub(super) fn raw_target(
+    stream: Uuid,
+    storage: Uuid,
+) -> Rows<'static, (String, bool, i64, bool, bool)> {
+    sqlx::query_as("SELECT t.type,(t.block_key_id IS NULL AND NOT p.compression_enabled AND NOT p.pack_enabled),p.revision,p.cdc_enabled,(p.deduplication_enabled AND p.write_processing='background') FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storages t ON t.id=b.storage_id JOIN storage_profiles p ON p.storage_id=t.id WHERE s.id=? AND t.id=? AND t.enabled AND s.state='writing' FOR UPDATE").bind(stream).bind(storage)
 }
 pub(super) fn raw_prepare(stream: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE streams SET payload_type='raw' WHERE id=? AND state='writing' AND payload_type='chunks' AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=?) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE stream_id=?)").bind(stream).bind(stream).bind(stream)
@@ -7857,6 +7862,59 @@ pub(super) fn raw_detach(stream: Uuid, end: i64) -> Statement<'static> {
 
 #[async_trait::async_trait]
 impl RawStore for Backend {
+    async fn claim_processing(
+        &self,
+        token: Uuid,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<Option<RawProcessing>> {
+        transactions::claim_raw_processing(&self.pool, node.is_none(), token).await
+    }
+    async fn renew_processing(
+        &self,
+        work: &RawProcessing,
+        _node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        Ok(sqlx::query("UPDATE raw_processing SET lease_expires_at=TIMESTAMPADD(SECOND,120,UTC_TIMESTAMP(6)) WHERE stream_id=? AND token=? AND (lease_expires_at IS NULL OR lease_expires_at>UTC_TIMESTAMP(6))")
+            .bind(work.stream).bind(work.token).execute(&self.pool).await?.rows_affected() == 1)
+    }
+    async fn save_processing_hash(
+        &self,
+        work: &RawProcessing,
+        revision: i64,
+        hash: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(hash.len() == 32, "invalid raw processing hash");
+        anyhow::ensure!(sqlx::query("UPDATE raw_processing SET content_hash=?,source_revision=? WHERE stream_id=? AND token=? AND (lease_expires_at IS NULL OR lease_expires_at>UTC_TIMESTAMP(6))")
+            .bind(hash).bind(revision).bind(work.stream).bind(work.token).execute(&self.pool).await?.rows_affected()==1,
+            crate::model::Error::OperationAborted);
+        Ok(())
+    }
+    async fn retry_processing(&self, work: &RawProcessing, error: Option<&str>) -> Result<()> {
+        let error = error.map(|message| message.chars().take(1024).collect::<String>());
+        sqlx::query("UPDATE raw_processing SET token=NULL,lease_expires_at=NULL,last_error=?,attempts=attempts+?,next_attempt_at=TIMESTAMPADD(SECOND,?,UTC_TIMESTAMP(6)) WHERE stream_id=? AND token=?")
+            .bind(&error).bind(i32::from(error.is_some())).bind(if error.is_some() {30i64} else {1}).bind(work.stream).bind(work.token).execute(&self.pool).await?;
+        Ok(())
+    }
+    async fn cancel_processing(&self, work: &RawProcessing) -> Result<()> {
+        raw_processing_delete(work).execute(&self.pool).await?;
+        Ok(())
+    }
+    async fn finish_processing(
+        &self,
+        work: &RawProcessing,
+        source: &RawSource,
+        hash: &[u8],
+        lease: Option<Uuid>,
+        _node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::finish_raw_processing(&self.pool, work, source, hash, lease).await
+    }
+    async fn processing_status(&self) -> Result<Value> {
+        let (pending,failed,bytes): (i64,i64,i64)=sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(w.last_error IS NOT NULL),0) AS SIGNED),CAST(COALESCE(SUM(r.size),0) AS SIGNED) FROM raw_processing w JOIN raw_sources r ON r.id=w.source_id")
+            .fetch_one(&self.pool).await?;
+        Ok(serde_json::json!({"pending":pending,"failed":failed,"bytes":bytes}))
+    }
+
     async fn set_upload(&self, source: Uuid, upload: &str) -> Result<()> {
         anyhow::ensure!(
             !upload.is_empty() && upload.len() <= 4096,
@@ -8014,4 +8072,38 @@ pub(super) fn pack_policy_due(storage: Uuid, policy: &str, seconds: u64) -> Scal
 }
 pub(super) fn pack_policy_scheduled(storage: Uuid, policy: &str) -> Statement<'_> {
     sqlx::query("INSERT INTO storage_maintenance(storage_id,policy,last_scheduled_at) VALUES(?,?,UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE last_scheduled_at=UTC_TIMESTAMP(6)").bind(storage).bind(policy)
+}
+
+pub(super) fn raw_enqueue_processing(stream: Uuid, source: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO raw_processing(stream_id,source_id,payload_revision) SELECT id,?,payload_revision FROM streams WHERE id=?").bind(source).bind(stream)
+}
+
+pub(super) fn raw_processing_due(single: bool) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT w.stream_id FROM raw_processing w JOIN streams s ON s.id=w.stream_id WHERE s.state<>'writing' AND (s.state<>'ready' OR EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id)) AND w.next_attempt_at<=UTC_TIMESTAMP(6) AND (? OR w.token IS NULL OR w.lease_expires_at<UTC_TIMESTAMP(6)) ORDER BY w.next_attempt_at,w.stream_id LIMIT 1 FOR UPDATE").bind(single)
+}
+
+pub(super) fn raw_processing_claim(stream: Uuid, token: Uuid, single: bool) -> Statement<'static> {
+    sqlx::query("UPDATE raw_processing SET token=?,lease_expires_at=CASE WHEN ? THEN NULL ELSE TIMESTAMPADD(SECOND,120,UTC_TIMESTAMP(6)) END WHERE stream_id=?").bind(token).bind(single).bind(stream)
+}
+
+pub(super) fn raw_processing_record(stream: Uuid) -> Rows<'static, RawProcessing> {
+    sqlx::query_as("SELECT w.stream_id AS stream,w.source_id AS source,s.bucket_id AS bucket,CONVERT(s.object_key USING utf8mb4) AS object_key,w.payload_revision,w.content_hash,w.source_revision,w.token FROM raw_processing w JOIN streams s ON s.id=w.stream_id WHERE w.stream_id=?").bind(stream)
+}
+
+pub(super) fn raw_processing_owned(work: &RawProcessing) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT source_id FROM raw_processing WHERE stream_id=? AND token=? AND (lease_expires_at IS NULL OR lease_expires_at>UTC_TIMESTAMP(6)) FOR UPDATE").bind(work.stream).bind(work.token)
+}
+
+pub(super) fn raw_processing_delete(work: &RawProcessing) -> Statement<'static> {
+    sqlx::query("DELETE FROM raw_processing WHERE stream_id=? AND token=?")
+        .bind(work.stream)
+        .bind(work.token)
+}
+
+pub(super) fn raw_processing_stream(work: &RawProcessing) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT id FROM streams WHERE id=? AND state='ready' AND payload_type='raw' AND payload_revision=? AND EXISTS(SELECT 1 FROM objects WHERE stream_id=streams.id) FOR UPDATE").bind(work.stream).bind(work.payload_revision)
+}
+
+pub(super) fn raw_processing_changed(stream: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE streams SET payload_revision=payload_revision+1 WHERE id=?").bind(stream)
 }

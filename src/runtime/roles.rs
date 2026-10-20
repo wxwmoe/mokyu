@@ -70,6 +70,7 @@ async fn run_single(app: Arc<app::App>) -> Result<()> {
         result = serve_router(control_listener, control::router(app.clone()), connections.clone()) => result?,
         result = lifecycle::run(app.clone()) => result?,
         result = worker::scheduler::run(app.clone()) => result?,
+        result = worker::raw::run(app.clone()) => result?,
         result = maintenance::run(app.clone()) => result?,
         result = stats::run(app.clone()) => result?,
         result = control::insights::runtime_loop(app.clone()) => result?,
@@ -112,6 +113,7 @@ async fn run_worker(app: Arc<app::App>) -> Result<()> {
         result = cluster::node_loop(app.clone(), "worker") => result?,
         result = serve_router(status_listener, http::status_router(app.clone()), Arc::new(Semaphore::new(4))) => result?,
         result = worker::scheduler::run(app.clone()) => result?,
+        result = worker::raw::run(app.clone()) => result?,
         result = app.storage.compression.run() => result?,
         _ = shutdown_signal() => tracing::info!(role="worker", "stopping listeners; draining active operations"),
     }
@@ -137,6 +139,7 @@ async fn run_data(app: Arc<app::App>) -> Result<()> {
         result = cluster::report::run(app.clone(), false) => result?,
         result = cluster::node_loop(app.clone(), "data") => result?,
         result = worker::scheduler::run(app.clone()) => result?,
+        result = worker::raw::run(app.clone()) => result?,
         result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
         result = serve_router(web_listener, http::public_router(app.clone()), connections.clone()) => result?,
         result = serve_router(status_listener, http::status_router(app.clone()), Arc::new(Semaphore::new(4))) => result?,
