@@ -49,7 +49,10 @@ impl App {
         {
             return Err(s3_error!(OperationAborted).into());
         }
+        drop(_coord);
         self.wake_gc.notify_one();
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("object-before-seal").await;
         self.seal_uploads(id, true).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("object-published").await;

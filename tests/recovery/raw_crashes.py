@@ -49,7 +49,7 @@ def main():
         expected = b'previous durable value'
         fixture.put('original', expected)
         points = ('raw-part-uploaded' if fixture.backend else 'raw-file-durable',
-                  'raw-file-published', 'object-published')
+                  'raw-file-published', 'object-before-seal', 'object-published')
         for point in points:
             pattern = point.encode() + b'\n'
             data = (pattern * (7 * 1024 * 1024 // len(pattern) + 1))[:7 * 1024 * 1024] if fixture.backend else pattern * 2048
@@ -70,7 +70,7 @@ def main():
                 else:
                     raise AssertionError('crashed request unexpectedly returned success')
             start()
-            if point == 'object-published':
+            if point in ('object-before-seal', 'object-published'):
                 expected = data
             fixture.read('original', expected)
             print('PASS raw crash boundary ' + point, flush=True)
