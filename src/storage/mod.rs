@@ -12,6 +12,7 @@ pub(crate) mod permits;
 pub(crate) mod profile;
 mod rate;
 pub(crate) mod raw;
+mod raw_cache;
 pub(crate) mod resource_gate;
 mod s3;
 pub(crate) mod target;
@@ -97,6 +98,7 @@ pub struct Storage {
     max_entries: usize,
     capacity: Option<u64>,
     misses: Mutex<HashMap<(i64, Uuid), std::sync::Weak<FetchResult>>>,
+    raw_misses: Mutex<HashMap<Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     pub backend_gets: Arc<std::sync::atomic::AtomicU64>,
     pub cache_hits: std::sync::atomic::AtomicU64,
     pub backend_puts: std::sync::atomic::AtomicU64,
@@ -296,7 +298,15 @@ impl Storage {
         } else {
             Vec::new()
         };
-        for name in ["multipart", "chunks"] {
+        for row in &rows {
+            if let Some(path) = &row.path {
+                local::validate_storage_path(
+                    &c.instance.data_path,
+                    &PathBuf::from(path).join(row.prefix.trim_matches('/')),
+                )?;
+            }
+        }
+        for name in ["multipart", "chunks", "raw"] {
             tokio::fs::create_dir_all(c.instance.data_path.join(name)).await?;
         }
         let disk = Arc::new(Disk {
@@ -423,6 +433,7 @@ impl Storage {
                 .map(config::cache_bytes)
                 .transpose()?,
             misses: Mutex::new(HashMap::new()),
+            raw_misses: Mutex::new(HashMap::new()),
             backend_gets: Arc::new(0.into()),
             cache_hits: 0.into(),
             backend_puts: 0.into(),
@@ -582,6 +593,12 @@ impl Storage {
         let _refresh = self.refresh.lock().await;
         let row = self.record_store.enabled_by_id(storage_id).await?;
         let backend = if let Some(row) = row {
+            if let Some(path) = &row.path {
+                local::validate_storage_path(
+                    &self.disk.root,
+                    &PathBuf::from(path).join(row.prefix.trim_matches('/')),
+                )?;
+            }
             let profile = self
                 .profile_store
                 .load(storage_id)
@@ -755,6 +772,16 @@ impl Storage {
         profile: &StorageProfile,
     ) -> Result<()> {
         if record.r#type == "local" {
+            local::validate_storage_path(
+                &self.disk.root,
+                &PathBuf::from(
+                    record
+                        .path
+                        .as_ref()
+                        .context("local store path is missing")?,
+                )
+                .join(record.prefix.trim_matches('/')),
+            )?;
             tokio::fs::create_dir_all(
                 record
                     .path
@@ -774,6 +801,12 @@ impl Storage {
         target.initialize().await
     }
     pub(crate) async fn verify_store_record(&self, record: StoreRecord) -> Result<()> {
+        if let Some(path) = &record.path {
+            local::validate_storage_path(
+                &self.disk.root,
+                &PathBuf::from(path).join(record.prefix.trim_matches('/')),
+            )?;
+        }
         let profile = self
             .profile_store
             .load(record.id)
@@ -822,11 +855,7 @@ impl Storage {
         Ok(())
     }
     fn cache_path(&self, id: Uuid, compressed: bool) -> PathBuf {
-        self.disk
-            .root
-            .join("chunks")
-            .join(chunk_name(id))
-            .with_extension(if compressed { "zst" } else { "raw" })
+        CacheFile::Chunk(compressed).path(&self.disk.root, id)
     }
     async fn restore_upload_pins(&self) -> Result<()> {
         let mut after = 0i64;
@@ -1158,7 +1187,7 @@ impl Storage {
         };
         if let Some(e) = fifo.entries.get(&id) {
             let removal = CacheRemoval::new(&e.pins);
-            let path = self.cache_path(id, e.compressed);
+            let path = e.file.path(&self.disk.root, id);
             drop(fifo);
             let result = tokio::fs::remove_file(path).await;
             fifo = self.fifo.lock().await;
@@ -1183,7 +1212,7 @@ impl Storage {
             };
             let entry = &fifo.entries[&victim];
             let removal = CacheRemoval::new(&entry.pins);
-            let path = self.cache_path(victim, entry.compressed);
+            let path = entry.file.path(&self.disk.root, victim);
             drop(fifo);
             #[cfg(feature = "fault-injection")]
             crate::faults::point("cache-delete").await;
@@ -1269,45 +1298,52 @@ impl Storage {
                     .account_existing(Area::Multipart, local::allocated(&e.metadata().await?));
             }
         }
-        let mut dirs = tokio::fs::read_dir(self.disk.root.join("chunks")).await?;
-        while let Some(dir) = dirs.next_entry().await? {
-            if !dir.file_type().await?.is_dir() {
-                continue;
-            }
-            let mut files = tokio::fs::read_dir(dir.path()).await?;
-            while let Some(file) = files.next_entry().await? {
-                if !file.file_type().await?.is_file() {
+        for directory in ["chunks", "raw"] {
+            let mut dirs = tokio::fs::read_dir(self.disk.root.join(directory)).await?;
+            while let Some(dir) = dirs.next_entry().await? {
+                if !dir.file_type().await?.is_dir() {
                     continue;
                 }
-                let len = file.metadata().await?.len();
-                let cached = parse_cache_name(&format!(
-                    "{}/{}",
-                    dir.file_name().to_string_lossy(),
-                    file.file_name().to_string_lossy()
-                ));
-                let mut fifo = self.fifo.lock().await;
-                if cached.is_some_and(|(id, compressed)| {
-                    self.upload_pins
-                        .lock()
-                        .unwrap()
-                        .get(&id)
-                        .is_some_and(|p| p.compressed == compressed)
-                }) {
-                    // Restored durable entries are protected and accounted before any eviction.
-                    continue;
-                }
-                if let Some((id, compressed)) = cached.filter(|(id, _)| {
-                    (1..=MAX as u64).contains(&len)
-                        && !fifo.entries.contains_key(id)
-                        && fifo.entries.len() < self.max_entries
-                        && self
-                            .capacity
-                            .is_none_or(|c| self.disk.used()[1].saturating_add(len) <= c)
-                }) {
-                    fifo.insert(id, len, compressed);
-                    self.disk.account_existing(Area::Cache, len);
-                } else {
-                    tokio::fs::remove_file(file.path()).await?;
+                let mut files = tokio::fs::read_dir(dir.path()).await?;
+                while let Some(file) = files.next_entry().await? {
+                    if !file.file_type().await?.is_file() {
+                        continue;
+                    }
+                    let len = file.metadata().await?.len();
+                    let name = format!(
+                        "{}/{}",
+                        dir.file_name().to_string_lossy(),
+                        file.file_name().to_string_lossy()
+                    );
+                    let cached = if directory == "raw" {
+                        parse_chunk_name(&name).map(|id| (id, CacheFile::Raw))
+                    } else {
+                        parse_cache_name(&name)
+                            .map(|(id, compressed)| (id, CacheFile::Chunk(compressed)))
+                    };
+                    let mut fifo = self.fifo.lock().await;
+                    if cached.is_some_and(|(id, format)| {
+                        self.upload_pins
+                            .lock()
+                            .unwrap()
+                            .get(&id)
+                            .is_some_and(|p| format == CacheFile::Chunk(p.compressed))
+                    }) {
+                        continue;
+                    }
+                    if let Some((id, format)) = cached.filter(|(id, format)| {
+                        (matches!(format, CacheFile::Raw) || (1..=MAX as u64).contains(&len))
+                            && !fifo.entries.contains_key(id)
+                            && fifo.entries.len() < self.max_entries
+                            && self
+                                .capacity
+                                .is_none_or(|c| self.disk.used()[1].saturating_add(len) <= c)
+                    }) {
+                        fifo.insert(id, len, format);
+                        self.disk.account_existing(Area::Cache, len);
+                    } else {
+                        tokio::fs::remove_file(file.path()).await?;
+                    }
                 }
             }
         }
@@ -1385,8 +1421,8 @@ impl Storage {
         self.operations[1].bytes(size as u64);
         self.backend_write_bytes
             .fetch_add(size as u64, Ordering::Relaxed);
-        if let Err(e) = self.fill(c, cache).await {
-            tracing::warn!(error=%e,"cache fill failed; backend upload is durable");
+        if let Ok((_, _, threshold)) = self.compression_for(c.storage_id) {
+            self.fill_read(c, cache, Some(codec::cache_compressed(c, threshold)));
         }
         Ok(())
     }
@@ -1400,9 +1436,12 @@ impl Storage {
                 if !e.valid || e.pins.load(Ordering::Relaxed) == usize::MAX {
                     return None;
                 }
+                let CacheFile::Chunk(compressed) = e.file else {
+                    return None;
+                };
                 e.pins.fetch_add(1, Ordering::Relaxed);
                 e.frequency = e.frequency.saturating_add(1).min(3);
-                Some((CachePin(e.pins.clone()), e.compressed))
+                Some((CachePin(e.pins.clone()), compressed))
             })
         };
         if let Some((pin, compressed)) = cached {
@@ -1532,7 +1571,7 @@ impl Storage {
             return Ok(());
         }
         let removal = CacheRemoval::new(&entry.pins);
-        let path = self.cache_path(id, entry.compressed);
+        let path = entry.file.path(&self.disk.root, id);
         drop(fifo);
         #[cfg(feature = "fault-injection")]
         crate::faults::point("cache-delete").await;
@@ -1605,23 +1644,39 @@ impl Storage {
             }),
         );
     }
-    async fn fill(self: &Arc<Self>, c: &Chunk, data: Bytes) -> Result<()> {
-        let policy = self.local_cache(c.storage_id)?;
-        if !policy.enabled {
-            return Ok(());
+    async fn reserve_cache(&self, size: u64, policy: CachePolicy) -> Result<Option<Reservation>> {
+        let mut fifo = self.fifo.lock().await;
+        loop {
+            if fifo.entries.len() < policy.max_entries
+                && let Ok(ticket) = self.disk.reserve(Area::Cache, size)
+            {
+                return Ok(Some(ticket));
+            }
+            let capacity = policy.capacity.unwrap_or(self.disk.used()[1].max(size));
+            let Some(victim) = fifo.victim(capacity) else {
+                return Ok(None);
+            };
+            let entry = &fifo.entries[&victim];
+            let removal = CacheRemoval::new(&entry.pins);
+            let path = entry.file.path(&self.disk.root, victim);
+            drop(fifo);
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("cache-delete").await;
+            let result = tokio::fs::remove_file(path).await;
+            fifo = self.fifo.lock().await;
+            match result {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    fifo.restore_victim(victim);
+                    return Err(e.into());
+                }
+            }
+            if let Some(e) = fifo.evict(victim, policy.max_entries) {
+                self.disk.release(Area::Cache, e.size);
+            }
+            drop(removal);
         }
-        let Ok(permit) = self.fills.clone().try_acquire_owned() else {
-            return Ok(());
-        };
-        let storage = self.clone();
-        let id = cache::cache_id(c);
-        let (_, _, threshold) = self.compression_for(c.storage_id)?;
-        let compressed = codec::cache_compressed(c, threshold);
-        tokio::spawn(async move {
-            let _permit = permit;
-            storage.fill_owned(id, &data, compressed, policy).await
-        })
-        .await?
     }
     async fn fill_owned(
         &self,
@@ -1647,44 +1702,12 @@ impl Storage {
         }
         // Serialize publication/invalidation while cache hits only need the FIFO index lock.
         let _write = self.cache_writes.lock().await;
-        let mut fifo = self.fifo.lock().await;
-        let ticket = {
-            if fifo.entries.contains_key(&id) {
-                return Ok(());
-            }
-            loop {
-                if fifo.entries.len() < policy.max_entries
-                    && let Ok(ticket) = self.disk.reserve(Area::Cache, size)
-                {
-                    break ticket;
-                }
-                let capacity = policy.capacity.unwrap_or(self.disk.used()[1].max(size));
-                let Some(victim) = fifo.victim(capacity) else {
-                    return Ok(());
-                };
-                let entry = &fifo.entries[&victim];
-                let removal = CacheRemoval::new(&entry.pins);
-                let path = self.cache_path(victim, entry.compressed);
-                drop(fifo);
-                #[cfg(feature = "fault-injection")]
-                crate::faults::point("cache-delete").await;
-                let result = tokio::fs::remove_file(path).await;
-                fifo = self.fifo.lock().await;
-                match result {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        fifo.restore_victim(victim);
-                        return Err(e.into());
-                    }
-                }
-                if let Some(e) = fifo.evict(victim, policy.max_entries) {
-                    self.disk.release(Area::Cache, e.size);
-                }
-                drop(removal);
-            }
+        if self.fifo.lock().await.entries.contains_key(&id) {
+            return Ok(());
+        }
+        let Some(ticket) = self.reserve_cache(size, policy).await? else {
+            return Ok(());
         };
-        drop(fifo);
         let path = self.cache_path(id, compressed);
         #[cfg(feature = "fault-injection")]
         crate::faults::point("cache-reserved").await;
@@ -2206,7 +2229,7 @@ impl Storage {
         if let crate::model::PhysicalSource::Raw(raw) = &snapshot.physical {
             let mut raw = raw.clone();
             raw.quarantine_code = None;
-            let _reader = self.raw_reader(&raw, true).await?;
+            let _reader = self.raw_reader_uncached(&raw, true).await?;
             return Ok(raw.size as u64);
         }
         let (source, chunk) = {
@@ -2570,7 +2593,7 @@ mod tests {
                 q.restore_victim(id);
                 assert_eq!(q.entries.len(), 1);
                 let e = &q.entries[&id];
-                assert!(e.queue == queue && e.size == 100 && e.compressed);
+                assert!(e.queue == queue && e.size == 100 && e.file == CacheFile::Chunk(true));
                 assert_eq!(e.frequency, 0);
                 assert_eq!(q.small_bytes, if queue == Queue::Small { 100 } else { 0 });
                 assert_eq!(q.small.len() + q.main.len(), 1);

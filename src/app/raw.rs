@@ -93,7 +93,7 @@ impl App {
                     (count>0).then_some(()).context("raw source was truncated")?;
                     buffer.truncate(count);
                     remaining -= count as i64;
-                    app.storage.backend_read_bytes.fetch_add(count as u64,std::sync::atomic::Ordering::Relaxed);
+                    reader.file.account_read(&app.storage, count as u64);
                     yield Bytes::from(buffer);
                 }
             }

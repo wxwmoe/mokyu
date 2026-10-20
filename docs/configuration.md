@@ -64,7 +64,7 @@ SQLite 将 `instance.database_connections` 中的一个连接用于串行写入�
 | `instance.data_path` | `/data` | 本节点持久目录，保存 multipart、缓存和锁，群集角色另保存 node.json |
 | `instance.min_free_space` | `1GiB` | 本地文件写入后必须保留的空间 |
 | `instance.multipart_limit` | 自动 | 单容器本地 multipart 暂存上限；群集使用共享 staging storage |
-| `instance.cache_size` | 自动 | 本地区块缓存字节上限 |
+| `instance.cache_size` | 自动 | 本地 chunks/raw 文件缓存共用字节上限 |
 | `instance.cache_entries` | 自动 | 本地缓存索引条目上限 |
 | `instance.response_cache_size` | `0B` | 完整公共响应的内存额度；示例显式设为 `64MiB`，省略或 `0B` 关闭；启用至少 `4MiB`，需要重启 |
 | `instance.upload_cache_size` | 自动 | 本地待上传暂存上限 |
@@ -116,7 +116,7 @@ profile 是类型化字段，不是任意 JSON。字段包括：
 - 连接超时、请求超时、重试次数、重试窗口、优先级老化、最低存储期限、未引用宽限和删除保留期；
 - `multipart_idle_timeout`：未完成上传的空闲期限，默认 `24h`，可设置 `7d`；只有实际写入进展续期，查询列表不会延长期限；
 - local 的 `min_free_space`：目标后端文件系统的最低可用空间，默认 `1GiB`；S3 不提供此项；
-- cache 开关、大小和条目、待上传缓存；
+- cache 开关、大小和条目由 S3 的 chunks/raw 磁盘读缓存共用；当前待上传缓存用于 chunks，raw 写入等待最终后端确认；
 - compression 的 `never`、`always`、`sample`、等级、采样等级和最小节省阈值；
 - pack 开关、大小、刷新/复用/回收/合包/Range 参数；local storage 不创建新区块包，Web 会固定关闭该选项；
 - `pack_concurrency`、`integrity_concurrency`、`integrity_rps`、`integrity_bandwidth`、`integrity_batch_timeout`；

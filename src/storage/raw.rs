@@ -125,8 +125,8 @@ impl LocalWriter<'_> {
 pub(crate) struct RawReader {
     pub file: RawFile,
     _pin: CachePin,
-    _permit: StorePermit,
-    _global: resource_gate::Permit,
+    _permit: Option<StorePermit>,
+    _global: Option<resource_gate::Permit>,
 }
 
 impl Storage {
@@ -242,10 +242,97 @@ impl Storage {
         Ok(RawWriter::Local(writer))
     }
 
-    pub(crate) async fn raw_reader(&self, source: &RawSource, verify: bool) -> Result<RawReader> {
+    pub(crate) async fn raw_reader(
+        self: &Arc<Self>,
+        source: &RawSource,
+        verify: bool,
+    ) -> Result<RawReader> {
+        self.raw_cached_reader(source, verify)
+            .await
+            .inspect_err(|error| self.diagnostics.content(error))
+    }
+
+    pub(crate) async fn raw_reader_uncached(
+        &self,
+        source: &RawSource,
+        verify: bool,
+    ) -> Result<RawReader> {
         self.raw_reader_inner(source, verify)
             .await
             .inspect_err(|error| self.diagnostics.content(error))
+    }
+
+    async fn raw_cached_reader(
+        self: &Arc<Self>,
+        source: &RawSource,
+        verify: bool,
+    ) -> Result<RawReader> {
+        source.validate()?;
+        let target = self.store_backend(source.storage_id)?;
+        let policy = self.local_cache(Some(source.storage_id))?;
+        if target.is_local
+            || !policy.enabled
+            || policy
+                .capacity
+                .is_some_and(|limit| source.size as u64 > limit)
+        {
+            return self.raw_reader_inner(source, verify).await;
+        }
+        let pin = {
+            let _gate = self.source_gate.read().await;
+            self.physical_pin(source.id)
+        };
+        self.verify_raw_target(&target).await?;
+        self.cache_lookups.fetch_add(1, Ordering::Relaxed);
+        if let Some(file) = self.cached_raw(source).await {
+            return Ok(RawReader {
+                file,
+                _pin: pin,
+                _permit: None,
+                _global: None,
+            });
+        }
+        let lock = self.raw_cache_lock(source.id);
+        let _miss = lock.lock().await;
+        if let Some(file) = self.cached_raw(source).await {
+            return Ok(RawReader {
+                file,
+                _pin: pin,
+                _permit: None,
+                _global: None,
+            });
+        }
+        let mut reader = self.raw_reader_inner(source, false).await?;
+        if verify {
+            let mut cache = match self.begin_raw_cache(source).await {
+                Ok(cache) => cache,
+                Err(error) => {
+                    tracing::warn!(error=%error, "raw cache unavailable; reading backend");
+                    None
+                }
+            };
+            let _cpu = self.cpu.acquire().await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-before-verify").await;
+            let size = verify_file(&mut reader.file, source, Some(&mut cache)).await?;
+            self.backend_read_bytes.fetch_add(size, Ordering::Relaxed);
+            drop(_cpu);
+            if let Some(cache) = cache {
+                match self.finish_raw_cache(cache, source, &target).await {
+                    Ok(Some(file)) => {
+                        reader.file = file;
+                        reader._permit = None;
+                        reader._global = None;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(error=%error, "raw cache publication failed; reading backend")
+                    }
+                }
+            }
+            reader.file.rewind().await?;
+        }
+        Ok(reader)
     }
 
     async fn raw_reader_inner(&self, source: &RawSource, verify: bool) -> Result<RawReader> {
@@ -300,31 +387,15 @@ impl Storage {
             let _cpu = self.cpu.acquire().await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("raw-before-verify").await;
-            let mut digest = Md5::new();
-            let mut buffer = vec![0; BUFFER];
-            let mut size = 0u64;
-            loop {
-                let count = file.read(&mut buffer).await?;
-                if count == 0 {
-                    break;
-                }
-                size += count as u64;
-                ensure!(size <= source.size as u64, IntegrityError::Length);
-                digest.update(&buffer[..count]);
-            }
-            ensure!(size == source.size as u64, IntegrityError::Length);
-            ensure!(
-                Some(digest.finalize().as_slice()) == source.digest.as_deref(),
-                IntegrityError::Hash
-            );
+            let size = verify_file(&mut file, source, None).await?;
             file.rewind().await?;
             self.backend_read_bytes.fetch_add(size, Ordering::Relaxed);
         }
         Ok(RawReader {
             file,
             _pin: pin,
-            _permit: permit,
-            _global: global,
+            _permit: Some(permit),
+            _global: Some(global),
         })
     }
 
@@ -375,6 +446,43 @@ impl Storage {
         self.backend_deletes.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+}
+
+pub(super) async fn verify_file(
+    file: &mut RawFile,
+    source: &RawSource,
+    mut cache: Option<&mut Option<super::raw_cache::Write>>,
+) -> Result<u64> {
+    let mut digest = Md5::new();
+    let mut buffer = vec![0; BUFFER];
+    let mut size = 0u64;
+    loop {
+        let count = file.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        size += count as u64;
+        ensure!(size <= source.size as u64, IntegrityError::Length);
+        digest.update(&buffer[..count]);
+        if let Some(cache) = cache.as_deref_mut()
+            && let Some(write) = cache.as_mut()
+            && let Err(error) = write
+                .file
+                .as_mut()
+                .unwrap()
+                .write_all(&buffer[..count])
+                .await
+        {
+            tracing::warn!(error=%error, "raw cache write failed; reading backend");
+            *cache = None;
+        }
+    }
+    ensure!(size == source.size as u64, IntegrityError::Length);
+    ensure!(
+        Some(digest.finalize().as_slice()) == source.digest.as_deref(),
+        IntegrityError::Hash
+    );
+    Ok(size)
 }
 
 fn raw_io_error(error: std::io::Error) -> anyhow::Error {
@@ -689,6 +797,10 @@ impl RawWriter<'_> {
 
 pub(crate) enum RawFile {
     Local(tokio::fs::File),
+    Cached {
+        file: tokio::fs::File,
+        _pin: CachePin,
+    },
     Remote(RemoteReader),
 }
 
@@ -705,9 +817,17 @@ pub(crate) struct RemoteReader {
 }
 
 impl RawFile {
+    pub(crate) fn account_read(&self, storage: &Storage, size: u64) {
+        let counter = if matches!(self, Self::Cached { .. }) {
+            &storage.cache_hit_bytes
+        } else {
+            &storage.backend_read_bytes
+        };
+        counter.fetch_add(size, Ordering::Relaxed);
+    }
     pub async fn seek(&mut self, position: std::io::SeekFrom) -> Result<u64> {
         match self {
-            Self::Local(file) => Ok(file.seek(position).await?),
+            Self::Local(file) | Self::Cached { file, .. } => Ok(file.seek(position).await?),
             Self::Remote(reader) => {
                 let std::io::SeekFrom::Start(offset) = position else {
                     anyhow::bail!("raw reads require an absolute offset");
@@ -725,11 +845,9 @@ impl RawFile {
         Ok(())
     }
     pub async fn read(&mut self, output: &mut [u8]) -> Result<usize> {
-        let Self::Remote(reader) = self else {
-            let Self::Local(file) = self else {
-                unreachable!()
-            };
-            return Ok(file.read(output).await?);
+        let reader = match self {
+            Self::Local(file) | Self::Cached { file, .. } => return Ok(file.read(output).await?),
+            Self::Remote(reader) => reader,
         };
         if output.is_empty() || reader.offset == reader.size {
             return Ok(0);

@@ -23,13 +23,35 @@ pub(super) fn cache_id(chunk: &Chunk) -> Uuid {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+pub(crate) enum CacheFile {
+    Chunk(bool),
+    Raw,
+}
+impl CacheFile {
+    pub(crate) fn path(self, root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
+        match self {
+            Self::Chunk(compressed) => root
+                .join("chunks")
+                .join(super::chunk_name(id))
+                .with_extension(if compressed { "zst" } else { "raw" }),
+            Self::Raw => root.join("raw").join(super::chunk_name(id)),
+        }
+    }
+}
+impl From<bool> for CacheFile {
+    fn from(compressed: bool) -> Self {
+        Self::Chunk(compressed)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Queue {
     Small,
     Main,
 }
 pub(crate) struct Entry {
     pub(crate) size: u64,
-    pub(crate) compressed: bool,
+    pub(crate) file: CacheFile,
     pub(crate) frequency: u8,
     pub(crate) pins: Arc<AtomicUsize>,
     pub(crate) queue: Queue,
@@ -166,7 +188,7 @@ pub(crate) struct Fifo {
     pub(crate) small_bytes: u64,
 }
 impl Fifo {
-    pub(crate) fn insert(&mut self, id: Uuid, size: u64, compressed: bool) {
+    pub(crate) fn insert(&mut self, id: Uuid, size: u64, file: impl Into<CacheFile>) {
         if self.entries.contains_key(&id) {
             return;
         }
@@ -185,7 +207,7 @@ impl Fifo {
             id,
             Entry {
                 size,
-                compressed,
+                file: file.into(),
                 frequency: 0,
                 pins: Arc::new(AtomicUsize::new(0)),
                 queue,

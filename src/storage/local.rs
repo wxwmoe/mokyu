@@ -20,6 +20,26 @@ pub(crate) enum Area {
 mod tests {
     use super::*;
 
+    #[test]
+    fn storage_namespaces_cannot_alias_disposable_cache_files() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("mokyu-paths-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("raw"))?;
+        for name in ["raw", "chunks", "multipart", "thumbnails"] {
+            assert!(validate_storage_path(&root, &root.join(name)).is_err());
+            assert!(validate_storage_path(&root, &root.join(name).join("backend")).is_err());
+        }
+        assert!(validate_storage_path(&root, &root).is_err());
+        assert!(validate_storage_path(&root, root.parent().unwrap()).is_err());
+        validate_storage_path(&root, &root.join("storage"))?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("raw"), root.join("alias"))?;
+            assert!(validate_storage_path(&root, &root.join("alias/new")).is_err());
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn multipart_accounts_allocated_blocks_and_shares_filesystem_reservations() -> Result<()>
     {
@@ -138,6 +158,46 @@ pub(crate) fn allocated(metadata: &std::fs::Metadata) -> u64 {
     {
         metadata.len()
     }
+}
+
+pub(crate) fn validate_storage_path(
+    data: &std::path::Path,
+    storage: &std::path::Path,
+) -> Result<()> {
+    fn resolve(path: &std::path::Path) -> Result<PathBuf> {
+        let mut path = std::path::absolute(path)?;
+        let mut missing = Vec::new();
+        loop {
+            match std::fs::canonicalize(&path) {
+                Ok(root) => {
+                    path = root;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(
+                        path.file_name()
+                            .context("storage path has no parent")?
+                            .to_owned(),
+                    );
+                    ensure!(path.pop(), "storage path has no parent");
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for component in missing.into_iter().rev() {
+            path.push(component);
+        }
+        Ok(path)
+    }
+    let storage = resolve(storage)?;
+    for name in ["chunks", "raw", "multipart", "thumbnails"] {
+        let reserved = resolve(&data.join(name))?;
+        ensure!(
+            !storage.starts_with(&reserved) && !reserved.starts_with(&storage),
+            "local storage overlaps the instance cache or temporary namespace"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) struct Space {

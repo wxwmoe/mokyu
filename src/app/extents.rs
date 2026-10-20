@@ -108,7 +108,7 @@ impl App {
                             if whole_source { digest.update(&buffer); }
                             remaining -= count as i64;
                             offset += count as i64;
-                            self.storage.backend_read_bytes.fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+                            reader.file.account_read(&self.storage, count as u64);
                             yield Bytes::from(buffer);
                         }
                         if whole_source {
@@ -176,7 +176,7 @@ impl App {
                                 bytes.truncate(count);
                                 position += count as i64;
                                 emitted += count as u64;
-                                self.storage.backend_read_bytes.fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+                                reader.file.account_read(&self.storage, count as u64);
                                 if renewed.elapsed() >= std::time::Duration::from_secs(5) {
                                     self.renew_write_lease(destination).await?;
                                     renewed = tokio::time::Instant::now();

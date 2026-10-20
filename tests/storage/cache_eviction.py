@@ -33,6 +33,13 @@ def status():
         os.environ['MOKYU_TEST_CONFIG'], 'cli', 'status'], text=True))
 
 
+def await_fills():
+    deadline = time.monotonic() + 15
+    while status()['cache_jobs_active']:
+        assert time.monotonic() < deadline, 'cache work did not finish'
+        time.sleep(.02)
+
+
 def read(key, expected):
     with s3.get_object(Bucket=bucket, Key=key)['Body'] as body:
         assert body.read() == expected
@@ -58,6 +65,7 @@ for extension in ('.raw', '.zst'):
         old = os.urandom(65536) if extension == '.raw' else os.urandom(16) * 4096
         new = os.urandom(32768)
         s3.put_object(Bucket=bucket, Key=key, Body=old)
+        await_fills()
         path = cache_path(key, extension)
         cached = path.read_bytes()
         assert status()['local_bytes'][1] == len(cached)
@@ -75,6 +83,7 @@ for extension in ('.raw', '.zst'):
             else:
                 raise AssertionError('cache deletion must fail with the test permissions')
             s3.put_object(Bucket=bucket, Key=key + '-new', Body=new)
+            await_fills()
             new_path = cache_path(key + '-new', '.raw')
             assert path.read_bytes() == cached and not new_path.exists()
             for _ in range(3):
@@ -101,6 +110,7 @@ for extension in ('.raw', '.zst'):
 new_path.unlink()
 last = os.urandom(16384)
 s3.put_object(Bucket=bucket, Key=prefix + 'missing-candidate', Body=last)
+await_fills()
 assert cache_path(prefix + 'missing-candidate', '.raw').read_bytes() == last
 assert status()['local_bytes'][1] == len(last)
 before = status()['backend_gets']

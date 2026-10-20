@@ -33,6 +33,13 @@ def status():
         os.environ['MOKYU_TEST_CONFIG'], 'cli', 'status'], text=True))
 
 
+def await_fills():
+    deadline = time.monotonic() + 15
+    while status()['cache_jobs_active']:
+        assert time.monotonic() < deadline, 'cache work did not finish'
+        time.sleep(.02)
+
+
 def read(key, expected, **kwargs):
     with s3.get_object(Bucket=bucket, Key=key, **kwargs)['Body'] as body:
         assert body.read() == expected
@@ -49,6 +56,7 @@ for name, raw, extension in [
 ]:
     key = prefix + name
     s3.put_object(Bucket=bucket, Key=key, Body=raw)
+    await_fills()
     rows = db.execute('''SELECT l.location_id,c.raw_size,l.standalone_size,l.standalone_compressed,l.encryption_algorithm
         FROM objects o JOIN buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=o.stream_id
         JOIN chunks c ON c.id=e.chunk_id JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE b.name=%s AND o.object_key=%s''', (bucket, key)).fetchall()

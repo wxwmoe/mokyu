@@ -4,9 +4,11 @@ Uses the source_quarantine fixture on control, a remote backend, and
 MOKYU_TEST_PEER_ENDPOINT for the second data node. Fault markers target the
 first data node. Configure read_idle_timeout=30s and a disposable primary DB.
 """
+import argparse
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import boto3
 from botocore.config import Config
@@ -16,6 +18,10 @@ from tests.storage.source_quarantine import Fixture, wait
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--cache', action='store_true',
+                        help='enable raw file cache; requires two MOKYU_TEST_CACHE_DIRS and sufficient node cache budgets')
+    args = parser.parse_args()
     fixture = Fixture()
     assert fixture.backend is not None
     database = Database()
@@ -29,7 +35,7 @@ def main():
         aws_secret_access_key=fixture.credentials['secret_key'], config=fixture.client.meta.config)
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile.update(cdc_enabled=False, deduplication_enabled=True, pack_range_enabled=False,
-                   unreferenced_grace='1s', upload_retention='1s')
+                   cache_enabled=args.cache, unreferenced_grace='1s', upload_retention='1s')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
 
     def mapping(key):
@@ -54,10 +60,21 @@ def main():
     peer.complete_multipart_upload(Bucket=fixture.name, Key='multipart', UploadId=upload,
                                    MultipartUpload={'Parts': manifest})
     fixture.read('multipart', data)
+    identity = mapping('multipart')['id'].hex
+    if args.cache:
+        directories = [Path(value) for value in os.environ['MOKYU_TEST_CACHE_DIRS'].split(',')]
+        assert len(directories) == 2
+        cached = directories[0] / identity[:2] / identity
+        inode = cached.stat().st_ino
     fixture.put('whole', data)
     assert mapping('whole')['id'] == mapping('multipart')['id']
+    fixture.read('whole', data)
     with peer.get_object(Bucket=fixture.name, Key='whole')['Body'] as body:
         assert body.read() == data
+    if args.cache:
+        assert cached.stat().st_ino == inode
+        for directory in directories:
+            assert (directory / identity[:2] / identity).stat().st_size == len(data)
 
     concurrent = b'concurrent raw cluster identity' * 1024
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -73,7 +90,9 @@ def main():
     old = mapping('retiring')
     identity = uuid.UUID(str(old['id']))
     physical = fixture.prefix + 'raw/' + identity.hex[:2] + '/' + identity.hex
-    marker = fixture.arm('raw-before-verify')
+    if args.cache:
+        fixture.read('retiring', original)
+    marker = fixture.arm('raw-cache-hit' if args.cache else 'raw-before-verify')
     with ThreadPoolExecutor(max_workers=1) as pool:
         reader = pool.submit(fixture.read, 'retiring', original)
         try:

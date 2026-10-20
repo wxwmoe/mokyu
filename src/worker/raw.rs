@@ -125,7 +125,7 @@ async fn process(app: &App, work: &RawProcessing) -> Result<bool> {
                 return Ok(false);
             };
             let hash = async {
-                let mut reader = app.storage.raw_reader(source, false).await?;
+                let mut reader = app.storage.raw_reader_uncached(source, false).await?;
                 let mut hash = blake3::Hasher::new();
                 let mut digest = Md5::new();
                 let mut buffer = vec![0; 256 * 1024];

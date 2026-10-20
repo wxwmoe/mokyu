@@ -49,6 +49,7 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `storage/raw_objects.py`：raw 的 PUT/HEAD/Range/条件请求、Multipart、Copy 和 chunks 切换；远端设置 `MOKYU_TEST_STORAGE_TYPE=s3`。
 - `storage/raw_lifecycle.py`：本地 raw 损坏隔离/复检、复用 Multipart 暂存、失败 Complete、用量和读取/GC 竞争。
 - `storage/raw_deduplication.py`：四数据库的可选整文件去重、并发与跨分片边界、跨桶用量归属及坏来源排除；复用 source_quarantine 的 fixture，设置 `MOKYU_TEST_BACKEND` 可验证远端 raw。
+- `storage/raw_cache.py`：独占已初始化但停止的隔离服务，使用 9MiB 文件缓存和关闭的响应缓存、独立 S3 fixture，验证并发冷读/Range、坏缓存回退、pin/淘汰、巡检绕过、隔离/恢复代次、重启和覆盖，以及成功 PUT 不等待可选区块缓存填充；环境沿用 `source_quarantine`。
 - `storage/raw_migration.py`：raw 与加密 chunks、raw 与 raw 的跨存储 copy/move，支持独立远端 S3 fixture。
 - `storage/raw_streaming.py`：raw 大分片、原始 ETag、完整摘要和跨分片 Range；`--part-mib`、`--repeat`、`--label` 记录 UploadPart/Complete 耗时和服务 RSS，`--order sequential|reverse` 选择上传顺序。默认远端需 `MOKYU_TEST_BACKEND`，本地使用 `--local` 且不设置该变量；`MOKYU_TEST_PID_FILE` 必须属于同一容器。不同构建或服务预算的数字不能直接比较。
 - `storage/raw_replay.py`：暂停 Copy/Multipart 校验后的回放，修改远端 raw 或本地暂存来源，验证失败不会替换原对象或丢失已上传分片，恢复源数据后重试成功；需要 `MOKYU_TEST_BACKEND` 和故障注入构建。
@@ -57,7 +58,7 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `recovery/local_multipart.py`：独占已初始化但停止的隔离服务，验证本地候选文件按需扩展、连续布局 inode 复用、乱序/替换/所选清单、上传和 Complete 强杀、两批积压上限、确认/映射/回收强杀、Abort、最后一批异步回收及 GC 后全部成功对象的长度/SHA-256 校验；环境沿用 `source_quarantine` fixture。配合 `recovery/fsync.c` 和 `LD_PRELOAD`，设置 `MOKYU_TEST_FSYNC_FAULT` / `MOKYU_TEST_FSYNC_TRACE` 覆盖文件与目录确认失败；另设 `MOKYU_TEST_SPACE_FAULT` 注入目标盘低空间，验证保留来源和重试。`--cross-filesystem` 要求 `MOKYU_TEST_FSYNC_ROOT` 与实例 Multipart 目录位于不同文件系统，用于验证复制回退。Rust 专项 `real_reflink_preserves_sources_and_copy_on_write` 需独立且支持 reflink 的 `MOKYU_TEST_REFLINK_DIR`，显式 `--ignored` 运行并断言实际克隆及 COW 隔离。
 - `recovery/storage_policy.py`：旧运行参数物化到各后端、监听前中断恢复、不同后端的 Multipart 空闲期限、查询不续期、写入续期、目标盘余量隔离，以及内存预算准入和重启生效。先用上一结构的程序初始化隔离实例后停止，由测试持有服务进程；使用 `source_quarantine.py` 的环境参数。原生 `*_storage_contract`、`*_maintenance_contract` 与 `postgres_storage_policy_expiration` 补测事务内重新判断和活跃分片租约。
 - `recovery/cluster_policy.py`：真实双 data 节点共享 S3 的后端独立 Multipart 期限、跨节点写入续期和较长期限上传继续完成；环境沿用 `raw_cluster.py`，通过维护入口触发回收。
-- `recovery/raw_cluster.py`：两个实际 data 节点的共享 Multipart 暂存、跨节点 Complete/去重/读取，以及慢校验续租与 GC；另设 `MOKYU_TEST_PEER_ENDPOINT`，服务端 `read_idle_timeout=30s`，故障目录指向第一个 data 节点。
+- `recovery/raw_cluster.py`：两个实际 data 节点的共享 Multipart 暂存、跨节点 Complete/去重/读取，以及慢校验续租与 GC；另设 `MOKYU_TEST_PEER_ENDPOINT`，服务端 `read_idle_timeout=30s`，故障目录指向第一个 data 节点。`--cache` 额外验证两节点 raw 文件缓存及慢缓存命中续租；节点文件缓存至少 32MiB，并用 `MOKYU_TEST_CACHE_DIRS` 传入两个逗号分隔的 data/raw 路径。
 - `storage/single_lifecycle.py`：提前本地确认、持久上传、pack、rewrite、unpack、巡检、容量和清理。
 - `recovery/upload_cache.rs`：PostgreSQL 上传准备的双执行者竞争、取消回滚和 owner/pin/来源代次原子性；需要故障注入构建。
 - `recovery/single_restart.py`：三个后端共用的 API 契约，覆盖 10 个崩溃点，包括上传准备提交前后的 owner/pin 原子恢复、待上传数据的密钥轮换及 local/S3 加密数据重启读取。

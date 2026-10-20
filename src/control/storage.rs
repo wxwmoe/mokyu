@@ -224,6 +224,12 @@ fn build_record(
                 )?),
             )
         };
+    if let Some(path) = &path {
+        crate::storage::local::validate_storage_path(
+            &app.config.instance.data_path,
+            &std::path::PathBuf::from(path).join(prefix.trim_matches('/')),
+        )?;
+    }
     Ok(BackendRecord {
         id,
         name,
