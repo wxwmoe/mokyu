@@ -768,6 +768,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/key-replacements/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["key_replacement_status"];
+        put?: never;
+        post: operations["key_replacement_apply"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/keys": {
         parameters: {
             query?: never;
@@ -795,6 +811,22 @@ export interface paths {
         put?: never;
         post?: never;
         delete: operations["managed_key_revoke"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/keys/{id}/replace-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["key_replacement_preview"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2065,6 +2097,48 @@ export interface components {
         JobPage: {
             items: components["schemas"]["Job"][];
             next_cursor?: string | null;
+        };
+        KeyReplacementApplied: {
+            cluster: boolean;
+            pending: string[];
+            result: components["schemas"]["KeyReplacementResult"];
+        };
+        KeyReplacementInput: {
+            name?: string | null;
+            /** Format: uuid */
+            target?: string | null;
+        };
+        KeyReplacementPreview: {
+            algorithm: string;
+            create: boolean;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            source: string;
+            source_name: string;
+            storages: components["schemas"]["KeyReplacementStorage"][];
+            /** Format: uuid */
+            target: string;
+            target_name: string;
+        };
+        KeyReplacementResult: {
+            /** Format: date-time */
+            committed_at: string;
+            preview: components["schemas"]["KeyReplacementPreview"];
+        };
+        KeyReplacementStatus: {
+            preview: components["schemas"]["KeyReplacementPreview"];
+            result?: components["schemas"]["KeyReplacementResult"] | null;
+        };
+        KeyReplacementStorage: {
+            enabled: boolean;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** Format: int64 */
+            revision: number;
         };
         Limits: {
             bucket_count_limit?: string | null;
@@ -4462,6 +4536,48 @@ export interface operations {
             };
         };
     };
+    key_replacement_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyReplacementStatus"];
+                };
+            };
+        };
+    };
+    key_replacement_apply: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyReplacementApplied"];
+                };
+            };
+        };
+    };
     managed_keys: {
         parameters: {
             query?: never;
@@ -4520,6 +4636,31 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    key_replacement_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["KeyReplacementInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyReplacementPreview"];
+                };
             };
         };
     };

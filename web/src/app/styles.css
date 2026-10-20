@@ -783,3 +783,9 @@ body { background: radial-gradient(ellipse at 85% 0%, color-mix(in srgb, var(--r
 .runtime-coverage.is-partial > strong { color: var(--cream); }
 .cluster-runtime { padding: 24px; margin-top: 24px; }
 @media (max-width: 720px) { .cluster-runtime { padding: 16px; } }
+
+.key-replacement-storages { list-style: none; padding: 0; margin: 16px 0; max-height: 240px; overflow: auto; }
+.key-replacement-storages li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
+.key-replacement-storages li > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.key-replacement-saved { margin-top: 18px; color: var(--ink); font-weight: var(--ui-weight, 800); }
+.key-replacement-footer { flex-wrap: wrap; }

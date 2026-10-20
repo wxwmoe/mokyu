@@ -16,7 +16,7 @@ const notices = computed<StatusNotice[]>(() => {
   if (!admin.value || !value) return []
   const rows: StatusNotice[] = []
   const keys = value.nonce_alerts || []
-  if (keys.length) rows.push({ tone: keys.some(key => key.state === 'exhausted') ? 'danger' : 'warning', title: t('nonceBannerTitle'), description: t('nonceBannerHint', { names: keys.map(key => key.name).join(', ') }), action: t('managedKeys'), to: '/credentials?tab=managed' })
+  if (keys.length) rows.push({ tone: keys.some(key => key.state === 'exhausted') ? 'danger' : 'warning', title: t('nonceBannerTitle'), description: t('nonceBannerHint', { names: keys.map(key => key.name).join(', ') }), action: t('managedKeys'), to: '/credentials?tab=managed' + (keys.find(key => key.storage_count > 0) ? '&replace_key=' + keys.find(key => key.storage_count > 0)!.key_id : '') })
   if (value.recovery_required) rows.push({ tone: 'danger', title: t('recoveryBannerTitle'), description: t('recoveryBannerHint'), action: t('openServiceStatus'), to: '/service' })
   if (value.mode_mismatch) rows.push({ tone: 'danger', title: t('modeMismatchBannerTitle'), description: t('modeMismatchBannerHint'), action: t('openServiceStatus'), to: '/service' })
   if (cluster.value) {

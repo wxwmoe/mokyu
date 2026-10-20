@@ -86,9 +86,10 @@ impl App {
         let start = Instant::now();
         let duration = Duration::from_secs(config::seconds(&c.max_duration)?);
         let batch = c.batch_size as i64;
-        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"refresh_tokens":0,"integrity_issues":0,"packs":0,"chunk_encodings":0,"audit_events":0,"media_operations":0,"maintenance_previews":0});
+        let mut deleted = json!({"chunks":0,"uploads":0,"tasks":0,"sessions":0,"refresh_tokens":0,"integrity_issues":0,"packs":0,"chunk_encodings":0,"audit_events":0,"media_operations":0,"maintenance_previews":0,"key_replacements":0});
         let mut batches = 0;
         let sections = [
+            ("key_replacements", 0.0),
             ("maintenance_previews", 0.0),
             (
                 "media_operations",

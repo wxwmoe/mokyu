@@ -4458,6 +4458,26 @@ pub(super) fn revoke_managed_key(id: Uuid) -> Statement<'static> {
 
 #[async_trait::async_trait]
 impl ManagedKeyStore for Backend {
+    async fn replacement_preview(
+        &self,
+        principal: &Principal,
+        source: Uuid,
+        input: KeyReplacementInput,
+    ) -> Result<KeyReplacementPreview> {
+        transactions::key_replacement_preview(&self.write, principal, source, input).await
+    }
+    async fn replacement(&self, principal: &Principal, id: Uuid) -> Result<ReplacementRow> {
+        transactions::key_replacement(&self.write, principal, id).await
+    }
+    async fn replace(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        input: Option<ManagedKeyCreate>,
+    ) -> Result<KeyReplacementResult> {
+        transactions::replace_keys(&self.write, principal, id, input).await
+    }
+
     async fn nonce_observations(&self) -> Result<Vec<crate::model::key_usage::NonceRow>> {
         Ok(sqlx::query_as("SELECT k.id,k.name,c.reserved_id,p.reserved_id,(SELECT count(*) FROM storages s WHERE s.block_key_id=k.id),EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state='uploading') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state='preparing') OR EXISTS(SELECT 1 FROM chunks c WHERE c.block_key_id=k.id AND c.state IN ('preparing','uploading')) OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tasks t WHERE replace(lower(json_extract(t.detail,'$.target_key_id')),'-','')=lower(hex(k.id)) AND t.state IN ('queued','running','paused','failed')),o.data,o.revision FROM managed_keys k LEFT JOIN nonce_counters c ON c.block_key_id=k.id AND c.type_tag=0 LEFT JOIN nonce_counters p ON p.block_key_id=k.id AND p.type_tag=1 LEFT JOIN nonce_observations o ON o.block_key_id=k.id WHERE k.purpose='block' AND k.revoked_at IS NULL ORDER BY k.id").fetch_all(&self.read).await?)
     }
@@ -6651,6 +6671,7 @@ pub(super) async fn cleanup_history(
     active: &[Uuid],
 ) -> Result<u64> {
     let (table, id, time, guard) = match section {
+        "key_replacements" => ("key_replacements", "id", "expires_at", "TRUE"),
         "maintenance_previews" => ("maintenance_previews", "id", "expires_at", "TRUE"),
         "media_operations" => ("media_operations", "id", "created_at", "TRUE"),
         "audit_events" => ("audit_events", "id", "created_at", "TRUE"),
@@ -8222,4 +8243,37 @@ pub(super) fn incompatible_payload(version: i64) -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM packs) OR EXISTS(SELECT 1 FROM fragments) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM uploads)",
     )
+}
+
+use crate::model::key_replacement::{
+    KeyReplacementInput, KeyReplacementPreview, KeyReplacementResult, KeyReplacementStorage,
+    ReplacementRow,
+};
+
+pub(super) fn replacement_storages(source: Uuid) -> Rows<'static, KeyReplacementStorage> {
+    sqlx::query_as("SELECT s.id,s.name,s.enabled,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.block_key_id=? ORDER BY s.id ").bind(source)
+}
+pub(super) fn replacement_key(id: Uuid) -> Rows<'static, (String, String)> {
+    sqlx::query_as("SELECT name,key_algorithm FROM managed_keys WHERE id=? AND purpose='block' AND revoked_at IS NULL ").bind(id)
+}
+pub(super) fn replacement_capacity(id: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT count(*)=2 AND min(reserved_id)>=0 AND max(reserved_id)<=9223372036854775743 FROM nonce_counters WHERE block_key_id=?").bind(id)
+}
+pub(super) fn insert_key_replacement<'q>(
+    actor: &'q str,
+    plan: &'q KeyReplacementPreview,
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO key_replacements(id,actor,plan,expires_at) VALUES(?,?,?,?)")
+        .bind(plan.id)
+        .bind(actor)
+        .bind(sqlx::types::Json(plan))
+        .bind(plan.expires_at.timestamp_micros())
+}
+pub(super) fn key_replacement<'q>(id: Uuid, actor: &'q str) -> Rows<'q, ReplacementRow> {
+    sqlx::query_as("SELECT plan,result FROM key_replacements WHERE id=? AND actor=? ")
+        .bind(id)
+        .bind(actor)
+}
+pub(super) fn complete_key_replacement(result: &KeyReplacementResult) -> Statement<'_> {
+    sqlx::query("UPDATE key_replacements SET result=?,expires_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)+604800000000 WHERE id=? AND result IS NULL").bind(sqlx::types::Json(result)).bind(result.preview.id)
 }

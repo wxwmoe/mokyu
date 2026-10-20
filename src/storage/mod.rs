@@ -2041,12 +2041,22 @@ impl Storage {
         Ok(())
     }
     pub(crate) async fn ensure_key_loaded(&self, id: Option<Uuid>) -> Result<()> {
-        let Some(name) = self.secrets.key_name(id) else {
+        let Some(id) = id else {
             return Ok(());
         };
-        if self.secrets.key(&name).is_some() {
+        if self.secrets.key_for_id(Some(id)).is_some() {
             return Ok(());
         }
+        let name = match self.secrets.key_name(Some(id)) {
+            Some(name) => name,
+            None => {
+                self.managed_keys
+                    .active_block(id)
+                    .await?
+                    .context("block key was not found")?
+                    .0
+            }
+        };
         self.managed_keys.ensure_loaded(&self.secrets, &name).await
     }
     pub(crate) async fn ensure_key_loaded_name(&self, name: &str) -> Result<()> {

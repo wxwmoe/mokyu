@@ -123,6 +123,9 @@ docker exec mokyu mokyu cli bucket cors media /config/cors.json
 | --- | --- |
 | `key list` | 列出名称、用途、算法、指纹、存储使用状态和撤销状态，不返回密钥材料 |
 | `key create NAME PURPOSE [-a aes-256-gcm\|chacha20-poly1305]` | 在数据库生成不可读的随机密钥；PURPOSE 为 access/signing/block，block 默认 AES-256-GCM |
+| `key replace-preview SOURCE_UUID [--name NAME \| --target TARGET_UUID]` | 预览使用源 block key 的全部存储（含停用项）；默认新建同算法密钥，返回十分钟有效的预览 ID；此时不创建密钥 |
+| `key replacement PREVIEW_UUID` | 查询当前操作者保存的预览及已提交结果 |
+| `key replace PREVIEW_UUID` | 原子替换全部关联存储，返回已提交结果和本机待生效列表；七天内用同一 ID 重试，不重复创建密钥 |
 | `key revoke UUID` | 撤销未被存储、物理编码、待上传或任务使用的密钥；历史区块仍使用数据库中的密钥材料读取 |
 
 凭据/Token 设置文件上限 512 KiB。JSON 中的权限与有效期语义见[管理 API](control-api-reference.md#应用密钥与-api-token)。创建凭据的输出应保存到应用私有配置。密码默认在终端隐藏输入并再次确认，使用 `docker exec -it`；非终端须指定 `--stdin`。不接受明文命令参数，自动化时可从 stdin 读取一行：

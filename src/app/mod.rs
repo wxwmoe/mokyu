@@ -415,6 +415,8 @@ impl App {
                         profile_app.storage.refresh_storages().await?;
                         loop {
                             let storage_id = listener.next().await?;
+                            #[cfg(feature = "fault-injection")]
+                            crate::faults::point("storage-profile-notification").await;
                             profile_app.storage.refresh_store(storage_id).await?;
                         }
                     }

@@ -270,6 +270,9 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 | `POST /api/v1/maintenance/{operation}/execute` | `{preview_id,confirmation}`，operation 为 unpack/sweep |
 | `GET /api/v1/keys` | 管理员密钥元数据；有效 block key 的 `nonce_capacity` 返回当前可预留比例、两个用途的十进制计数、近期时间估算及采样状态；诊断不可用时为空，不返回密钥材料 |
 | `POST /api/v1/keys` | 只按名称和用途生成数据库密钥 |
+| `POST /api/v1/keys/{id}/replace-preview` | `{target?,name?}`；预览全部当前关联存储及 profile revision，二者不能同时指定；缺省新建同算法密钥，预览十分钟有效 |
+| `GET /api/v1/key-replacements/{id}` | 当前操作者的持久预览和可空提交结果；浏览器账号、个人 Token、CLI 节点相互独立 |
+| `POST /api/v1/key-replacements/{id}` | 近期验证后原子提交；范围或 revision 改变返回 409；结果保留七天供同次重试，返回 `pending` 本机刷新未完成的存储及 `cluster` 标记 |
 | `DELETE /api/v1/keys/{id}` | 撤销并删除未被任何 storage 或物理来源使用的数据库密钥 |
 
 暂停在工作边界生效，已经发出的请求可完成。新包开关覆盖上传与所有维护路径；全部拆包需停止生成并等 preparing 包排空，未完成的全部拆包阻止恢复生成。旧载荷仍受 GC 宽限和最低存储期保护。

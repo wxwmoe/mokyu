@@ -2354,3 +2354,12 @@ CREATE TABLE nonce_observations (
 );
 
 CREATE INDEX chunks_pending_key ON chunks(block_key_id) WHERE state IN ('preparing','uploading');
+
+CREATE TABLE key_replacements (
+    id uuid PRIMARY KEY,
+    actor text NOT NULL,
+    plan jsonb NOT NULL,
+    result jsonb,
+    expires_at timestamptz NOT NULL
+);
+CREATE INDEX key_replacements_expiry ON key_replacements(expires_at);

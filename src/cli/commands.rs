@@ -378,6 +378,19 @@ pub enum ControlSettings {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Keys {
     List,
+    ReplacePreview {
+        source: Uuid,
+        #[arg(long, conflicts_with = "name")]
+        target: Option<Uuid>,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Replacement {
+        id: Uuid,
+    },
+    Replace {
+        id: Uuid,
+    },
     Create {
         name: String,
         #[arg(value_parser = ["access", "signing", "block"])]
@@ -536,7 +549,7 @@ impl Command {
                 command: StorageProfiles::Show { .. },
             })
             | Self::Settings(Settings::Control(ControlSettings::Show) | Settings::Get { .. })
-            | Self::Keys(Keys::List)
+            | Self::Keys(Keys::List | Keys::Replacement { .. })
             | Self::Setup(Setup::Token)
             | Self::Cluster(Cluster::Status | Cluster::Nodes { .. }) => None,
             Self::Bucket(_) => Some("bucket.change"),

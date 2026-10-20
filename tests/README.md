@@ -32,6 +32,12 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `python -m tests.recovery.nonce_ranges` 接管已初始化但停止的专用服务，沿用来源隔离 fixture 的配置、管理员密码、故障目录和 S3 后端环境。覆盖加密区块和 pack、直接去重不分配、提交前后强杀、缺失计数、耗尽、换 key 及未加密/raw 零分配。旧格式由数据库迁移拒绝测试覆盖，不提供旧密文读取兼容。
 
+`key_replacement_contract` 使用 `MOKYU_TEST_CONFIG` 指向全新隔离数据库，以 `--ignored` 运行，覆盖停用存储、关联范围及修订冲突、审计失败回滚、并发重复确认、目标校验、关闭重连和旧操作重试；四种数据库分别运行。
+
+`python -m tests.recovery.key_replacement` 接管已初始化但停止的专用服务，沿用来源隔离 fixture 的配置，并设置 `MOKYU_TEST_FSYNC_ROOT`。覆盖提交前后强杀、响应丢失、旧加密区块及 pack 读取、去重复用、保存后的刷新失败与重试、API/CLI 身份隔离。
+
+`python -m tests.recovery.key_replacement_cluster` 使用双 data 的 PostgreSQL/S3 fixture，设置 `MOKYU_TEST_PEER_ENDPOINT` 和两节点的 `MOKYU_TEST_SOURCE_FAULT_DIRS`。覆盖新密钥首次跨节点读取、在途写入保留旧密钥、通知阻塞后的周期刷新和离线节点重启；运行器收到配置目录下 `replacement-control/stop-peer` 或 `start-peer` 文件后，停止或启动第二个 data，并写入同名 `.done` 文件确认。两个 `key-capacity.spec.ts` / `key-replacement.spec.ts` 浏览器入口验证三语、明暗主题、320–1440px、阈值配色、键盘提示和预览恢复。
+
 MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由其他客户端登录预热认证缓存。关闭 TLS 时，`caching_sha2_password` 的首次认证依赖 SQLx 的 `mysql-rsa` 功能。
 
 `cleanup_reacquires_returning_connection`、`cleanup_yields_to_busy_writer_and_recovers`、`cleanup_propagates_pool_errors`、`cleanup_cancels_busy_database_transaction` 属于普通 Rust 测试，使用独立 SQLite 临时库和单写连接覆盖清理连续领取、忙写者下有界退让和取消后恢复、外部写事务占用时取消 BEGIN、真实连接池错误。

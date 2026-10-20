@@ -17,6 +17,24 @@ pub(crate) struct ManagedKeyRecord {
 
 #[async_trait]
 pub(crate) trait ManagedKeyStore: Send + Sync {
+    async fn replacement_preview(
+        &self,
+        principal: &Principal,
+        source: Uuid,
+        input: crate::model::key_replacement::KeyReplacementInput,
+    ) -> Result<crate::model::key_replacement::KeyReplacementPreview>;
+    async fn replacement(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<crate::model::key_replacement::ReplacementRow>;
+    async fn replace(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        input: Option<ManagedKeyCreate>,
+    ) -> Result<crate::model::key_replacement::KeyReplacementResult>;
+
     async fn nonce_observations(&self) -> Result<Vec<crate::model::key_usage::NonceRow>>;
     async fn save_nonce_history(
         &self,
@@ -209,3 +227,14 @@ mod nonce_tests {
 #[cfg(test)]
 #[path = "../../tests/recovery/nonces.rs"]
 mod database_tests;
+
+pub(crate) fn validate_name(name: &str) -> Result<()> {
+    anyhow::ensure!(
+        (1..=128).contains(&name.trim().len())
+            && !name.chars().any(char::is_control)
+            && !name.contains('/')
+            && name.trim() != "__credentials",
+        "managed key name must contain 1..128 safe bytes"
+    );
+    Ok(())
+}

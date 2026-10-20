@@ -12,6 +12,7 @@ mod error;
 mod id;
 pub(crate) mod integrity;
 pub(crate) mod key;
+pub(crate) mod key_replacement;
 pub(crate) mod key_usage;
 pub(crate) mod maintenance;
 pub(crate) mod metrics;

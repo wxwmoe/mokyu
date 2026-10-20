@@ -527,6 +527,25 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             )?),
         },
         Command::Keys(command) => match command {
+            Keys::ReplacePreview {
+                source,
+                target,
+                name,
+            } => Ok(serde_json::to_value(
+                super::managed_keys::preview_replacement(
+                    app,
+                    principal,
+                    source,
+                    crate::model::key_replacement::KeyReplacementInput { target, name },
+                )
+                .await?,
+            )?),
+            Keys::Replacement { id } => Ok(serde_json::to_value(
+                super::managed_keys::replacement_status(app, principal, id).await?,
+            )?),
+            Keys::Replace { id } => Ok(serde_json::to_value(
+                super::managed_keys::replace_associated(app, principal, id).await?,
+            )?),
             Keys::List => Ok(serde_json::to_value(
                 super::managed_keys::list_rows(app.managed_keys.as_ref(), principal).await?,
             )?),
