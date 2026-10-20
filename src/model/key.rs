@@ -17,6 +17,34 @@ pub(crate) struct ManagedKeyRecord {
 
 #[async_trait]
 pub(crate) trait ManagedKeyStore: Send + Sync {
+    async fn nonce_observations(&self) -> Result<Vec<crate::model::key_usage::NonceRow>>;
+    async fn save_nonce_history(
+        &self,
+        key: Uuid,
+        previous: Option<i64>,
+        history: crate::model::key_usage::NonceHistory,
+    ) -> Result<()>;
+    async fn nonce_status(&self) -> Result<Vec<crate::model::key_usage::NonceCapacity>> {
+        let now = Utc::now();
+        Ok(self
+            .nonce_observations()
+            .await?
+            .iter()
+            .map(|row| crate::model::key_usage::capacity(row, now))
+            .collect())
+    }
+    async fn sample_nonces(&self) -> Result<()> {
+        for row in self.nonce_observations().await? {
+            let (Some(chunk), Some(pack)) = (row.2, row.3) else {
+                continue;
+            };
+            let mut history = row.6.map(|v| v.0).unwrap_or_default();
+            if history.sample([chunk, pack], Utc::now().timestamp()) {
+                self.save_nonce_history(row.0, row.7, history).await?;
+            }
+        }
+        Ok(())
+    }
     async fn reserve_nonce(&self, key: Uuid, type_tag: u8, units: u32) -> Result<(i64, i64)>;
     async fn resolve_block(&self, name: &str) -> Result<Option<ManagedKeyRecord>>;
     async fn active_block(&self, id: Uuid) -> Result<Option<(String, String)>>;
@@ -60,6 +88,7 @@ pub(crate) trait ManagedKeyStore: Send + Sync {
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ManagedKeyView {
+    pub nonce_capacity: Option<crate::model::key_usage::NonceCapacity>,
     pub id: Uuid,
     pub name: String,
     pub purpose: String,

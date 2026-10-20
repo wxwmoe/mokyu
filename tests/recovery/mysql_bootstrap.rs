@@ -313,7 +313,7 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         serde_json::json!({})
     );
 
-    for version in [19, 20, 24, 25] {
+    for version in [19, 20, 24, 25, 26] {
         let recovery = migrations
             .iter()
             .find(|migration| migration.version == version)
@@ -330,6 +330,8 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
                 "DEALLOCATE PREPARE mokyu_audit",
                 "UPDATE mokyu_meta SET schema_version=20",
             ]
+        } else if version == 26 {
+            vec!["UPDATE mokyu_meta SET schema_version=26"]
         } else if version == 25 {
             vec![
                 "ALTER TABLE chunks ALTER COLUMN format SET DEFAULT 2",

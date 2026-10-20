@@ -2117,6 +2117,7 @@ export interface components {
             id: string;
             in_use: boolean;
             name: string;
+            nonce_capacity?: components["schemas"]["NonceCapacity"] | null;
             purpose: string;
             /** Format: date-time */
             revoked_at?: string | null;
@@ -2241,6 +2242,32 @@ export interface components {
             sampled_at?: string | null;
             settings: unknown;
             work: string;
+        };
+        NonceCapacity: {
+            counters: components["schemas"]["NonceCounter"][];
+            /** Format: uuid */
+            key_id: string;
+            name: string;
+            pending: boolean;
+            remaining?: string | null;
+            /** Format: date-time */
+            sampled_at?: string | null;
+            stale: boolean;
+            state: string;
+            /** Format: int64 */
+            storage_count: number;
+        };
+        NonceCounter: {
+            available?: string | null;
+            /** Format: int64 */
+            estimated_days?: number | null;
+            /** Format: int64 */
+            observed_seconds: number;
+            reason?: string | null;
+            remaining?: string | null;
+            reserved_id?: string | null;
+            /** Format: int32 */
+            type_tag: number;
         };
         ObjectChunk: {
             algorithm: string;
@@ -2568,6 +2595,7 @@ export interface components {
             inventory_stale: boolean;
             maintenance: boolean;
             mode_mismatch: boolean;
+            nonce_alerts: components["schemas"]["NonceCapacity"][];
             recovery_required: boolean;
             restart_required: boolean;
             started_at: string;

@@ -17,6 +17,7 @@ pub(super) struct RuntimeCounter {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct ServiceStatus {
+    nonce_alerts: Vec<crate::model::key_usage::NonceCapacity>,
     deployment_mode: String,
     current_node: Option<NodeContext>,
     version: &'static str,
@@ -122,7 +123,15 @@ pub(super) async fn status(
             });
         }
     }
+    let nonce_alerts = app
+        .managed_keys
+        .nonce_status()
+        .await?
+        .into_iter()
+        .filter(|row| (row.storage_count > 0 || row.pending) && row.state != "normal")
+        .collect();
     Ok(Json(ServiceStatus {
+        nonce_alerts,
         deployment_mode: text(&raw["deployment_mode"]),
         current_node: (raw["deployment_mode"] == "cluster").then(|| NodeContext {
             id: app.node.get().map(|node| node.node_id),

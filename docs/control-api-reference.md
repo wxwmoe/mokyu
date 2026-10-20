@@ -268,7 +268,7 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 | `POST /api/v1/maintenance/sweep/preview` | 根据已完成清查准备删除确认 |
 | `POST /api/v1/maintenance/unpack/preview` | 单包 `{pack_id}` 或全部 `{all:true}` 拆包预览 |
 | `POST /api/v1/maintenance/{operation}/execute` | `{preview_id,confirmation}`，operation 为 unpack/sweep |
-| `GET /api/v1/keys` | 列出数据库密钥元数据，不返回密钥材料 |
+| `GET /api/v1/keys` | 管理员密钥元数据；有效 block key 的 `nonce_capacity` 返回当前可预留比例、两个用途的十进制计数、近期时间估算及采样状态；诊断不可用时为空，不返回密钥材料 |
 | `POST /api/v1/keys` | 只按名称和用途生成数据库密钥 |
 | `DELETE /api/v1/keys/{id}` | 撤销并删除未被任何 storage 或物理来源使用的数据库密钥 |
 

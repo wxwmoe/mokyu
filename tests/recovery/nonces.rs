@@ -17,7 +17,7 @@ async fn nonce_database_contract() -> Result<()> {
     let (config, mut secrets, budget) = Config::load(Path::new(&path))?;
     let (stores, _owner) = crate::model::connect(&config, &mut secrets, &budget, "single").await?;
     stores.runtime.initialize(false).await?;
-    let store = stores.managed_keys;
+    let store = stores.managed_keys.clone();
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
     let input = |id, material: [u8; 32]| -> Result<ManagedKeyCreate> {
@@ -49,7 +49,59 @@ async fn nonce_database_contract() -> Result<()> {
     store
         .create(&Principal::Local, input(second, [138; 32])?)
         .await?;
+    let initial = store.nonce_status().await?;
+    assert_eq!(
+        initial
+            .iter()
+            .find(|v| v.key_id == first)
+            .unwrap()
+            .remaining
+            .as_deref(),
+        Some("100")
+    );
+    store.sample_nonces().await?;
+    let sampled = store.nonce_observations().await?;
+    let observed = sampled.iter().find(|v| v.0 == first).unwrap();
+    assert!(observed.6.is_some());
+    assert_eq!(observed.7, Some(1));
+    store.sample_nonces().await?;
+    assert_eq!(
+        store
+            .nonce_observations()
+            .await?
+            .iter()
+            .find(|v| v.0 == first)
+            .unwrap()
+            .7,
+        Some(1)
+    );
     assert_eq!(store.reserve_nonce(first, nonce::CHUNK, 1).await?, (1, 64));
+    assert_eq!(
+        store
+            .nonce_status()
+            .await?
+            .iter()
+            .find(|v| v.key_id == first)
+            .unwrap()
+            .remaining
+            .as_deref(),
+        Some("100")
+    );
+    // A stale collector cannot overwrite a later collector's history.
+    store
+        .save_nonce_history(first, Some(1), observed.6.as_ref().unwrap().0.clone())
+        .await?;
+    store
+        .save_nonce_history(first, Some(1), Default::default())
+        .await?;
+    let saved = store.nonce_observations().await?;
+    let saved = saved.iter().find(|v| v.0 == first).unwrap();
+    assert_eq!(saved.7, Some(2));
+    assert!(
+        crate::model::key_usage::capacity(saved, chrono::Utc::now())
+            .sampled_at
+            .is_some()
+    );
     assert_eq!(store.reserve_nonce(first, nonce::PACK, 1).await?, (1, 64));
     assert_eq!(store.reserve_nonce(second, nonce::CHUNK, 1).await?, (1, 64));
     assert_eq!(
@@ -113,5 +165,21 @@ async fn nonce_database_contract() -> Result<()> {
             .await
             .is_err()
     );
+    assert!(
+        !store
+            .nonce_status()
+            .await?
+            .iter()
+            .any(|v| v.key_id == second)
+    );
+    drop(store);
+    drop(stores);
+    drop(_owner);
+    let (config, mut secrets, budget) = Config::load(Path::new(&path))?;
+    let (stores, _owner) = crate::model::connect(&config, &mut secrets, &budget, "single").await?;
+    let restored = stores.managed_keys.nonce_status().await?;
+    let restored = restored.iter().find(|v| v.key_id == first).unwrap();
+    assert!(restored.sampled_at.is_some());
+    assert_eq!(restored.remaining.as_deref(), Some("100"));
     Ok(())
 }

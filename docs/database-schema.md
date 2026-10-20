@@ -22,6 +22,7 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 | `runtime_settings` | `section`、`value`、`revision`、`updated_at`、`updated_by_user_id` | 类型化的 `web`、`requests`、`uploads`、`metrics`、`maintenance` 分组；Web/CLI 按 revision 更新 |
 | `managed_keys` | `id`、`name`、`purpose`、`key_algorithm`、`secret_encrypted`、`fingerprint`、`created_at`、`revoked_at` | Mokyu 生成的 access/signing/block key；密文由 deployment key 保护，fingerprint 全局唯一并在吊销后保留；block 支持 AES-256-GCM、ChaCha20-Poly1305，存储也可关闭加密 |
 | `nonce_counters` | `block_key_id`、`type_tag`、`reserved_id` | `(block_key_id,type_tag)` 复合主键；引用托管密钥，类型标记为 0–31，当前 0 为独立区块编码、1 为区块包；非负 `BIGINT` 高水位默认 0，SQLite 为 `INTEGER`，提交后不回退 |
+| `nonce_observations` | `block_key_id`、`data`、`revision` | 密钥外键主键；非空 JSON 趋势摘要（SQLite 为合法 JSON 文本）及正整数 CAS 修订，无默认值；每个密钥最多保留 289 个采样点和持久预警，不用于分配或恢复序号 |
 | `setup_tokens` | `token_hash`、`created_at`、`expires_at` | Web 首次管理员设置的一次性 token；CLI 初始化不依赖它 |
 | `web_users`、`sessions`、`api_tokens` | 用户、会话和个人 API token 字段 | Web 认证、CSRF、授权修订和会话撤销 |
 | `nodes` | `id`、`name`、`role`、`credential_encrypted`、`enabled`、`status`、`recovery_required`、`lease_expires_at` | control/worker/data 节点注册、凭据和状态；节点直接连接 PostgreSQL |

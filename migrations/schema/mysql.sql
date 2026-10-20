@@ -1128,3 +1128,10 @@ INSERT INTO nonce_counters(block_key_id,type_tag,reserved_id) SELECT k.id,1,GREA
 UPDATE mokyu_meta SET schema_version=24 WHERE id=1;
 
 ALTER TABLE chunks ADD COLUMN uuid binary(16) NOT NULL;
+
+CREATE TABLE IF NOT EXISTS nonce_observations (
+    block_key_id BINARY(16) NOT NULL PRIMARY KEY,
+    data JSON NOT NULL,
+    revision BIGINT NOT NULL CHECK (revision > 0),
+    CONSTRAINT nonce_observations_key FOREIGN KEY(block_key_id) REFERENCES managed_keys(id)
+) ENGINE=InnoDB;

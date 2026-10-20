@@ -46,7 +46,20 @@ pub(crate) async fn list_rows(
     store: &dyn crate::model::ManagedKeyStore,
     principal: &Principal,
 ) -> Result<Vec<ManagedKeyView>> {
-    store.list(principal).await
+    let mut rows = store.list(principal).await?;
+    let capacity = match store.nonce_status().await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "key capacity is unavailable");
+            Vec::new()
+        }
+    };
+    let mut capacity: std::collections::HashMap<_, _> =
+        capacity.into_iter().map(|v| (v.key_id, v)).collect();
+    for row in &mut rows {
+        row.nonce_capacity = capacity.remove(&row.id);
+    }
+    Ok(rows)
 }
 
 pub(crate) async fn create_record(

@@ -415,7 +415,10 @@ impl App {
 
 pub async fn run(app: Arc<App>) -> Result<()> {
     const LEADER_KEY: i64 = 734922709851031;
-    let interval = Duration::from_secs(config::seconds(&app.config.metrics.refresh_interval)?);
+    let inventory_interval =
+        Duration::from_secs(config::seconds(&app.config.metrics.refresh_interval)?);
+    let interval = inventory_interval.min(Duration::from_secs(300));
+    let mut next_inventory = Instant::now();
     loop {
         let leader = if app.role == "single" {
             None
@@ -425,62 +428,74 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             tokio::time::sleep(interval).await;
             continue;
         };
+        match tokio::time::timeout(Duration::from_secs(10), app.managed_keys.sample_nonces()).await
         {
-            let mut saved = app.statistics.inventory.lock().unwrap();
-            saved["collecting"] = json!(true);
-            saved["last_attempt_at"] = json!(Utc::now());
+            Ok(Ok(())) => (),
+            error => tracing::warn!(?error, "nonce observation failed; keeping previous history"),
         }
-        let timeout = Duration::from_secs(config::seconds(&app.config.metrics.query_timeout)?);
-        let result = tokio::time::timeout(timeout, async {
-            let snapshot = app
-                .metrics
-                .inventory(&app.config.metrics, &app.config.maintenance)
-                .await?;
-            let storages = if app.role == "single"
-                && !app.maintenance.load(std::sync::atomic::Ordering::Acquire)
+        if Instant::now() >= next_inventory {
+            next_inventory = Instant::now() + inventory_interval;
             {
-                let mut snapshots = json!({});
-                for storage in app.maintenance_store.storages().await? {
-                    #[cfg(feature = "fault-injection")]
-                    crate::faults::point("inventory-storage").await;
-                    snapshots[storage.to_string()] = app.metrics.storage_inventory(storage).await?;
-                }
-                Some(snapshots)
-            } else {
-                None
-            };
-            Ok::<_, anyhow::Error>((snapshot, storages))
-        })
-        .await;
-        {
-            let mut saved = app.statistics.inventory.lock().unwrap();
-            saved["collecting"] = json!(false);
-            match result {
-                Ok(Ok((snapshot, storages))) => {
-                    saved["snapshot"] = snapshot;
-                    if let Some(storages) = storages {
-                        saved["storages"] = storages;
+                let mut saved = app.statistics.inventory.lock().unwrap();
+                saved["collecting"] = json!(true);
+                saved["last_attempt_at"] = json!(Utc::now());
+            }
+            let timeout = Duration::from_secs(config::seconds(&app.config.metrics.query_timeout)?);
+            let result = tokio::time::timeout(timeout, async {
+                let snapshot = app
+                    .metrics
+                    .inventory(&app.config.metrics, &app.config.maintenance)
+                    .await?;
+                let storages = if app.role == "single"
+                    && !app.maintenance.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    let mut snapshots = json!({});
+                    for storage in app.maintenance_store.storages().await? {
+                        #[cfg(feature = "fault-injection")]
+                        crate::faults::point("inventory-storage").await;
+                        snapshots[storage.to_string()] =
+                            app.metrics.storage_inventory(storage).await?;
                     }
-                    saved["last_error"] = Value::Null;
-                }
-                error => {
-                    tracing::warn!(
-                        ?error,
-                        "statistics refresh failed; keeping previous snapshot"
-                    );
-                    saved["last_error"] = json!("refresh_failed");
+                    Some(snapshots)
+                } else {
+                    None
+                };
+                Ok::<_, anyhow::Error>((snapshot, storages))
+            })
+            .await;
+            {
+                let mut saved = app.statistics.inventory.lock().unwrap();
+                saved["collecting"] = json!(false);
+                match result {
+                    Ok(Ok((snapshot, storages))) => {
+                        saved["snapshot"] = snapshot;
+                        if let Some(storages) = storages {
+                            saved["storages"] = storages;
+                        }
+                        saved["last_error"] = Value::Null;
+                    }
+                    error => {
+                        tracing::warn!(
+                            ?error,
+                            "statistics refresh failed; keeping previous snapshot"
+                        );
+                        saved["last_error"] = json!("refresh_failed");
+                    }
                 }
             }
-        }
-        if app.role != "single"
-            && !app.maintenance.load(std::sync::atomic::Ordering::Acquire)
-            && let Err(error) = app.usage_start().await
-        {
-            tracing::warn!(%error, "usage task scheduling failed");
+            if app.role != "single"
+                && !app.maintenance.load(std::sync::atomic::Ordering::Acquire)
+                && let Err(error) = app.usage_start().await
+            {
+                tracing::warn!(%error, "usage task scheduling failed");
+            }
         }
         tokio::select! {
             _ = tokio::time::sleep(interval) => (),
-            _ = app.statistics.wake.notified() => tokio::time::sleep(Duration::from_secs(5)).await,
+            _ = app.statistics.wake.notified() => {
+                next_inventory = Instant::now();
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            },
         }
         if let Some(leader) = leader {
             leader.finish().await?;

@@ -1061,6 +1061,19 @@ impl StorageRecordStore for Backend {
 
 #[async_trait::async_trait]
 impl ManagedKeyStore for Backend {
+    async fn nonce_observations(&self) -> Result<Vec<crate::model::key_usage::NonceRow>> {
+        Ok(sqlx::query_as("SELECT k.id,k.name,c.reserved_id,p.reserved_id,(SELECT count(*) FROM storages s WHERE s.block_key_id=k.id),EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state='uploading') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state='preparing') OR EXISTS(SELECT 1 FROM chunks c WHERE c.block_key_id=k.id AND c.state IN ('preparing','uploading')) OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),o.data,o.revision FROM managed_keys k LEFT JOIN nonce_counters c ON c.block_key_id=k.id AND c.type_tag=0 LEFT JOIN nonce_counters p ON p.block_key_id=k.id AND p.type_tag=1 LEFT JOIN nonce_observations o ON o.block_key_id=k.id WHERE k.purpose='block' AND k.revoked_at IS NULL ORDER BY k.id").fetch_all(&self.pool).await?)
+    }
+    async fn save_nonce_history(
+        &self,
+        key: Uuid,
+        previous: Option<i64>,
+        history: crate::model::key_usage::NonceHistory,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO nonce_observations(block_key_id,data,revision) VALUES($1,$2,1) ON CONFLICT(block_key_id) DO UPDATE SET data=EXCLUDED.data,revision=nonce_observations.revision+1 WHERE nonce_observations.revision=$3").bind(key).bind(sqlx::types::Json(history)).bind(previous.unwrap_or(0)).execute(&self.pool).await?;
+        Ok(())
+    }
+
     async fn reserve_nonce(&self, key: Uuid, type_tag: u8, units: u32) -> Result<(i64, i64)> {
         transactions::reserve_nonce(&self.pool, key, type_tag, units).await
     }
@@ -3077,6 +3090,7 @@ pub(super) fn managed_key_view(
     (id, name, purpose, algorithm, active, fingerprint, created_at, revoked_at): ManagedKeyViewRow,
 ) -> ManagedKeyView {
     ManagedKeyView {
+        nonce_capacity: None,
         id,
         name,
         purpose,
