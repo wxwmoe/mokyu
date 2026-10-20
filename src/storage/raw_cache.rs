@@ -42,14 +42,7 @@ impl Drop for Write {
 
 impl Storage {
     pub(super) fn raw_cache_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
-        let mut misses = self.raw_misses.lock().unwrap();
-        misses.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = misses.get(&id).and_then(std::sync::Weak::upgrade) {
-            return lock;
-        }
-        let lock = Arc::new(tokio::sync::Mutex::new(()));
-        misses.insert(id, Arc::downgrade(&lock));
-        lock
+        self.raw_misses.get(id)
     }
 
     pub(super) async fn cached_raw(&self, source: &RawSource) -> Option<RawFile> {

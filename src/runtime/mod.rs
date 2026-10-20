@@ -1,5 +1,6 @@
 mod args;
 mod listeners;
+pub(crate) mod locks;
 mod roles;
 
 use self::{

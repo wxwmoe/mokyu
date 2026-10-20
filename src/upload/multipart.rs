@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use md5::{Digest, Md5};
 use s3s::{S3Request, S3Response, dto::*, s3_error};
 use serde_json::{Value, json};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -63,15 +63,7 @@ impl App {
         }
     }
     pub fn operation_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.operation_locks.lock().unwrap();
-        locks.retain(|_, v| v.strong_count() > 0);
-        if let Some(lock) = locks.get(&id).and_then(Weak::upgrade) {
-            lock
-        } else {
-            let lock = Arc::new(tokio::sync::Mutex::new(()));
-            locks.insert(id, Arc::downgrade(&lock));
-            lock
-        }
+        self.operation_locks.get(id)
     }
     pub async fn get_upload(
         &self,

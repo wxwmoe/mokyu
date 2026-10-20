@@ -100,7 +100,7 @@ pub struct Storage {
     max_entries: usize,
     capacity: Option<u64>,
     misses: Mutex<HashMap<(Id, Uuid), std::sync::Weak<FetchResult>>>,
-    raw_misses: Mutex<HashMap<Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    raw_misses: crate::runtime::locks::Locks<Uuid>,
     pub backend_gets: Arc<std::sync::atomic::AtomicU64>,
     pub cache_hits: std::sync::atomic::AtomicU64,
     pub backend_puts: std::sync::atomic::AtomicU64,
@@ -436,7 +436,7 @@ impl Storage {
                 .map(config::cache_bytes)
                 .transpose()?,
             misses: Mutex::new(HashMap::new()),
-            raw_misses: Mutex::new(HashMap::new()),
+            raw_misses: Default::default(),
             backend_gets: Arc::new(0.into()),
             cache_hits: 0.into(),
             backend_puts: 0.into(),

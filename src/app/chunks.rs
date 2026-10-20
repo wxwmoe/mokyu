@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use s3s::s3_error;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::App;
@@ -18,15 +18,7 @@ impl App {
         storage_id: Uuid,
         hash: [u8; 32],
     ) -> Arc<tokio::sync::Mutex<()>> {
-        let mut m = self.hashes.lock().unwrap();
-        m.retain(|_, v| v.strong_count() > 0);
-        if let Some(l) = m.get(&(storage_id, hash)).and_then(Weak::upgrade) {
-            l
-        } else {
-            let l = Arc::new(tokio::sync::Mutex::new(()));
-            m.insert((storage_id, hash), Arc::downgrade(&l));
-            l
-        }
+        self.hashes.get((storage_id, hash))
     }
     pub(crate) async fn reference(&self, stream: Id, offset: i64, c: &Chunk) -> Result<()> {
         self.chunks

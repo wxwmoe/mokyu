@@ -162,6 +162,19 @@ Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专�
 
 ## 来源写入基准
 
+### 锁表清理
+
+`tests/benchmarks/lock_tables.rs` 比较每次扫描与实际摊销清理实现，覆盖 1/64/4096 个活跃键、单线程/四线程、命中/换键，交替运行三轮并输出 CSV。使用同一 Rust 工具链的 release Tokio 产物，在隔离构建容器内执行：
+
+```sh
+deps="${CARGO_TARGET_DIR:-target}/release/deps"
+tokio_rlib=$(ls -t "$deps"/libtokio-*.rlib | head -1)
+rustc --edition=2024 -O tests/benchmarks/lock_tables.rs --extern "tokio=$tokio_rlib" -L "dependency=$deps" -o /tmp/mokyu-lock-tables
+/tmp/mokyu-lock-tables
+```
+
+先完成 `cargo build --release --locked`；锁身份、取消等待和闲置容量回收由普通 Rust 测试覆盖。此入口只计锁表操作，不代表对象请求吞吐；端到端比较继续使用下述对象基准。
+
 ### 独立操作计时
 
 `python -m tests.benchmarks.object_io /config/io.json /results/io.json` 分别计量 `put`、`get`、`head` 或 `multipart`，要求 release 构建与 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`。先运行 `python -m tests.benchmarks.object_io_test`。普通写入只计收到 ACK 的耗时，每个成功对象使用唯一 key，全部完整读回校验在计时及资源采样窗口之外；GET 计完整正文校验并另记首字节，Multipart 同时记录 Create、UploadPart、Complete 和完整生命周期。写入 ACK 不代表异步后台已排空，应另外记录排空时间与资源。

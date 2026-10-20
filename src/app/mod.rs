@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, RwLock, Weak},
+    sync::{Arc, Mutex, RwLock},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
@@ -241,8 +241,8 @@ pub struct App {
     pub(crate) restart_required: Arc<std::sync::atomic::AtomicBool>,
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: Arc<tokio::sync::Notify>,
-    hashes: Mutex<HashMap<(Uuid, [u8; 32]), Weak<tokio::sync::Mutex<()>>>>,
-    pub operation_locks: Mutex<HashMap<Uuid, Weak<tokio::sync::Mutex<()>>>>,
+    hashes: crate::runtime::locks::Locks<(Uuid, [u8; 32])>,
+    pub operation_locks: crate::runtime::locks::Locks<Uuid>,
     _file_lock: std::fs::File,
 }
 impl App {
@@ -397,8 +397,8 @@ impl App {
             restart_required,
             wake_gc: Arc::new(tokio::sync::Notify::new()),
             wake_tasks: Arc::new(tokio::sync::Notify::new()),
-            hashes: Mutex::new(HashMap::new()),
-            operation_locks: Mutex::new(HashMap::new()),
+            hashes: Default::default(),
+            operation_locks: Default::default(),
             _file_lock: lock,
         });
         compression::Observations::start(Arc::downgrade(&app), compression_receiver);
