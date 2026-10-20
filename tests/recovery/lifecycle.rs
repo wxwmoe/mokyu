@@ -332,7 +332,7 @@ async fn postgres_source_validation_allows_references() -> Result<()> {
     let pack: Id = sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,digest) VALUES($1,'none',2,2,2,'ready',$2) RETURNING id")
         .bind(storage).bind(vec![0u8;32]).fetch_one(&pool).await?;
     for scope in [Some(stream), None] {
-        for phase in 0..3 {
+        for phase in 0..4 {
             sqlx::query("UPDATE chunks SET state='ready',pack_id=$2 WHERE id=$1")
                 .bind(chunk)
                 .bind(if phase == 2 { Some(pack) } else { None })
@@ -360,9 +360,23 @@ async fn postgres_source_validation_allows_references() -> Result<()> {
                     sqlx::query("UPDATE chunk_encodings SET quarantined_at=now(),quarantine_code='hash_mismatch',quarantine_revision=quarantine_revision+1 WHERE encoding_id=$1")
                     .bind(encoding).execute(&mut *changing).await?;
                 }
-                _ => {
+                2 => {
                     sqlx::query("UPDATE packs SET quarantined_at=now(),quarantine_code='hash_mismatch',quarantine_revision=quarantine_revision+1 WHERE id=$1")
                     .bind(pack).execute(&mut *changing).await?;
+                }
+                _ => {
+                    super::queries::lock_pack_layout(&ids)
+                        .fetch_all(&mut *changing)
+                        .await?;
+                    sqlx::query("UPDATE chunks SET pack_id=$2 WHERE id=$1")
+                        .bind(chunk)
+                        .bind(pack)
+                        .execute(&mut *changing)
+                        .await?;
+                    sqlx::query("UPDATE chunk_encodings SET state='retired' WHERE encoding_id=$1")
+                        .bind(encoding)
+                        .execute(&mut *changing)
+                        .await?;
                 }
             }
             let mut validation = pool.begin().await?;
@@ -391,7 +405,28 @@ async fn postgres_source_validation_allows_references() -> Result<()> {
             let (healthy, released) =
                 tokio::join!(available(&mut validation, scope, &ids), release);
             released?;
-            assert!(!healthy?, "source changed while waiting in phase {phase}");
+            assert_eq!(
+                healthy?,
+                phase == 3,
+                "source changed while waiting in phase {phase}"
+            );
+            if phase == 3 {
+                // A newly packed mapping observed after waiting still needs its physical lock.
+                let mut quarantine = pool.begin().await?;
+                sqlx::query("SET LOCAL lock_timeout='100ms'")
+                    .execute(&mut *quarantine)
+                    .await?;
+                let blocked = sqlx::query("UPDATE packs SET quarantined_at=now() WHERE id=$1")
+                    .bind(pack)
+                    .execute(&mut *quarantine)
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    blocked.as_database_error().unwrap().code().as_deref(),
+                    Some("55P03")
+                );
+                quarantine.rollback().await?;
+            }
             assert_eq!(
                 sqlx::query_scalar::<_, i32>("SELECT 1")
                     .fetch_one(&mut *validation)

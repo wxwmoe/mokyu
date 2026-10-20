@@ -164,6 +164,8 @@ Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专�
 
 ### 锁表清理
 
+`postgres_source_validation_allows_references` 使用新的隔离 PostgreSQL 库及 `MOKYU_TEST_DATABASE_URL_FILE`，以 `--ignored` 运行。覆盖来源锁与活跃引用、隔离、打包映射竞争；等待期间从独立块切换为 pack 后仍须持物理锁，空/fragment 来源和 4097 块的 generic/custom plan 均须正确。
+
 `python -m tests.recovery.publish_coordination` 沿用来源隔离的运行中单容器 fixture，覆盖 chunks/raw 的 PUT/Copy/Complete：发布后暂停封口时读取能推进、请求不能提前 ACK、删除及 GC 不能跨越活动写者的 pin。`raw_crashes` 另验证该边界强杀后的恢复。用于旧实现负对照时可设置 `MOKYU_TEST_EXPECT_PUBLISH_BLOCKED=1`，在旧的发布后检查点确认读取确实阻塞。
 
 `tests/benchmarks/lock_tables.rs` 比较每次扫描与实际摊销清理实现，覆盖 1/64/4096 个活跃键、单线程/四线程、命中/换键，交替运行三轮并输出 CSV。使用同一 Rust 工具链的 release Tokio 产物，在隔离构建容器内执行：

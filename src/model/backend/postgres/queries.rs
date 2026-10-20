@@ -8247,12 +8247,14 @@ pub(super) fn source_locks(
     phase: u8,
 ) -> sqlx::QueryBuilder<Postgres> {
     let mut query = sqlx::QueryBuilder::new(match phase {
-        0 => "SELECT c.id FROM chunks c WHERE ",
+        // Stream generic plans may scan unrelated chunks; avoid fetching their pack column.
+        0 if stream.is_some() => "SELECT TRUE FROM chunks c WHERE ",
+        0 => "SELECT c.pack_id IS NOT NULL FROM chunks c WHERE ",
         1 => {
-            "SELECT l.encoding_id FROM chunk_encodings l WHERE l.state='ready' AND l.chunk_id IN (SELECT c.id FROM chunks c WHERE "
+            "SELECT TRUE FROM chunk_encodings l WHERE l.state='ready' AND l.chunk_id IN (SELECT c.id FROM chunks c WHERE "
         }
         2 => {
-            "SELECT p.id FROM packs p WHERE p.state='ready' AND p.id IN (SELECT c.pack_id FROM chunks c WHERE "
+            "SELECT TRUE FROM packs p WHERE p.state='ready' AND p.id IN (SELECT c.pack_id FROM chunks c WHERE "
         }
         _ => unreachable!(),
     });

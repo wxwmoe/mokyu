@@ -6047,10 +6047,18 @@ pub(super) async fn require_sources(
     use futures_util::TryStreamExt;
     // Mapping changes take FOR UPDATE; references may update liveness under KEY SHARE.
     // Lock logical rows before physical rows, whose SHARE locks block quarantine.
+    let mut packed = stream.is_some();
     for phase in 0..3 {
+        if phase == 2 && !packed {
+            break;
+        }
         let mut query = queries::source_locks(stream, chunks, phase);
-        let mut rows = query.build_query_scalar::<Id>().fetch(&mut *db);
-        while rows.try_next().await?.is_some() {}
+        let mut rows = query.build_query_scalar::<bool>().fetch(&mut *db);
+        while let Some(has_pack) = rows.try_next().await? {
+            if phase == 0 {
+                packed |= has_pack;
+            }
+        }
     }
     ensure!(
         !queries::unavailable_sources(stream, chunks)
