@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::model::task::Execution;
 use crate::{
     app::App,
@@ -61,7 +62,7 @@ impl App {
             .context("missing Range snapshot")?
             .parse::<chrono::DateTime<chrono::Utc>>()?;
         // Check only packs with new pressure evidence, at most once per sweep. Larger downloads go first.
-        let id: Option<i64> = self
+        let id: Option<Id> = self
             .packing
             .next_range_pack(
                 storage,
@@ -83,7 +84,7 @@ impl App {
     async fn optimize_range_pack(
         &self,
         task: Execution,
-        id: i64,
+        id: Id,
         settings: &crate::content::pack::Config,
     ) -> Result<(usize, Value)> {
         let mut report = json!({"pack_id":id.to_string(),"applied":false});
@@ -95,7 +96,7 @@ impl App {
         let window = config::seconds(&settings.range_window)? as f64;
         let (partial, observed, full): (i64, i64, i64) =
             self.packing.pack_range_totals(id, window).await?;
-        let hits: HashMap<i64, i64> = self
+        let hits: HashMap<Id, i64> = self
             .packing
             .pack_member_hits(id, window)
             .await?
@@ -152,7 +153,7 @@ impl App {
             report["reason"] = json!("no_smaller_contiguous_layout");
             return Ok((0, report));
         }
-        let evaluate = |sources: Vec<(Vec<i64>, i64)>| {
+        let evaluate = |sources: Vec<(Vec<Id>, i64)>| {
             let mut traffic = 0i64;
             let mut requests = 0i64;
             let mut bytes = 0i64;
@@ -186,7 +187,7 @@ impl App {
                             })
                             .sum::<i64>()
                             + if g.len() > 1 {
-                                12 + 44 * g.len() as i64
+                                12 + crate::content::pack::MEMBER_SIZE as i64 * g.len() as i64
                             } else {
                                 0
                             },
@@ -234,7 +235,7 @@ impl App {
     }
     pub(crate) async fn defer_range_repack(
         &self,
-        stream: Uuid,
+        stream: Id,
         from: i64,
         settings: &crate::content::pack::Config,
     ) -> Result<()> {

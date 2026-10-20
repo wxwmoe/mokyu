@@ -1,5 +1,6 @@
 use super::local::Disk;
 use crate::content::codec::Chunk;
+use crate::model::Id;
 use bytes::Bytes;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -12,14 +13,7 @@ pub(super) fn cache_id(chunk: &Chunk) -> Uuid {
     if !chunk.location_id.is_nil() {
         return chunk.location_id;
     }
-    // Packed chunks retain a cache identity after their standalone encoding is retired.
-    let mut identity = [0; 24];
-    identity[..16].copy_from_slice(chunk.storage_id.unwrap_or_default().as_bytes());
-    identity[16..].copy_from_slice(&chunk.id.to_be_bytes());
-    let hash = blake3::derive_key("mokyu logical chunk cache", &identity);
-    let mut id = [0; 16];
-    id.copy_from_slice(&hash[..16]);
-    Uuid::from_bytes(id)
+    chunk.uuid
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -115,7 +109,7 @@ pub(crate) struct LoadedPack {
 }
 #[derive(Default)]
 pub(crate) struct DownloadUsage {
-    pub(crate) members: HashMap<i64, (usize, usize)>,
+    pub(crate) members: HashMap<Id, (usize, usize)>,
     pub(crate) observed: bool,
     pub(crate) range: bool,
     pub(crate) full: bool,
@@ -168,7 +162,7 @@ impl ReadContext {
     }
     pub(crate) async fn touch(&self, c: &Chunk) {
         if let Some(p) = self.pack.lock().await.as_ref()
-            && p.data.members.iter().any(|m| m.id == c.id)
+            && p.data.members.iter().any(|m| m.id == c.uuid)
         {
             p.touch(c, self.observe, self.range);
         }

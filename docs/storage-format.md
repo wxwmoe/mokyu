@@ -11,8 +11,8 @@ local 和 S3 storage 均可关闭 profile 的 `cdc_enabled`，新写入以原始
 复制可领先持久确认两个有界批次；确认目标范围和目录后，事务更新分片映射，再释放旧候选中无引用的范围。最后一批回收交给后台 GC，待回收标记和范围映射随数据库保存，重启后继续处理；Complete 仍等待最终文件、校验和元数据发布。其他硬链接存在或文件系统不支持打洞时保留旧范围，空间不足会拒绝继续复制，已有分片仍可重试。
 
 ```text
-<storage.prefix>/raw/<UUID 前两位>/<32 位小写 UUID>
-<storage.prefix>/raw/<UUID 前两位>/<32 位小写 UUID>.partial
+<storage.prefix>/raw/<UUID 后两位>/<32 位小写 UUID>
+<storage.prefix>/raw/<UUID 后两位>/<32 位小写 UUID>.partial
 ```
 
 raw 与区块、区块包共用根目录 `meta.json` 的命名空间身份，不另建 raw 标记。本地与 S3 使用相同的最终相对路径和原始文件字节。物理路径只使用服务端 UUID，不使用桶名或对象键。`.partial` 用于本地接收和可恢复的 Multipart 组装；已确认范围可能仍被上传引用，不能手动删除，引用释放后由 GC 清理。远端使用有界 S3 multipart 传输，并记录 upload ID 供失败清理。Multipart 完成、Copy 和迁移按总长规划远端分片，从现有来源流式读取并校验，重试重新读取相同范围，不将整个分片放入内存；分片最多 10,000 个、每片不超过 5 GiB，仍受后端自身对象大小和请求超时限制。建议为远端配置 `AbortIncompleteMultipartUpload` 生命周期规则，清理创建请求已成功但响应丢失、尚无法登记 ID 的上传。
@@ -36,29 +36,29 @@ raw 与区块、区块包共用根目录 `meta.json` 的命名空间身份，不
 - 每个物理来源独立决定压缩和加密。compression profile 支持 `never`、`always`、`sample`；区块包压缩独立记录。新策略不会隐式重写已有来源。
 - 加密支持 `none`、AES-256-GCM 和 ChaCha20-Poly1305；认证标签附在密文末尾。block key 由数据库管理，key 算法创建后不可更改。
 
-逻辑区块的 `chunks.id` 在重写、迁移和重新打包时保持不变。物理区块编码使用新的 `encoding_id`，区块包使用自己的 `pack_id`；旧来源在新来源提交后按 GC 宽限回收。
+逻辑区块的持久 UUID 在同一 storage 的重写和重新打包时保持不变。PostgreSQL 使用数据库生成的 UUIDv7 主键；MySQL/MariaDB 和 SQLite 保留整数主键，`chunks.uuid` 保存 Mokyu 生成的 UUIDv7。物理区块编码与区块包各有独立 UUID；重写创建新的物理身份，旧来源在新来源提交后按 GC 宽限回收。
 
 ## 物理编码和完整性
 
-每个 ready 独立来源保存 `location_id`、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce_id`、nonce 和 `encoding_fingerprint`；区块包保存对应的 `pack_fingerprint`。fingerprint 绑定 key、算法、压缩和 storage profile，`storage rewrite` 用它判断是否需要处理。
+每个 ready 独立来源保存物理 UUID、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce_id`、nonce 和 `encoding_fingerprint`；区块包保存对应的 `pack_fingerprint`。fingerprint 绑定 key、算法、压缩和 storage profile，`storage rewrite` 用它判断是否需要处理。
 
-加密 AAD 绑定格式编号、物理编码 ID、storage UUID、明文哈希、原始长度、编码长度、压缩标志、算法和 block key UUID。读取顺序固定为认证、解密、有界解压、长度检查和 BLAKE3 检查；任何元数据或载荷不匹配都报告完整性错误。
+区块格式为 2，AAD 标记为 `MOKYU\0\0\x03`，绑定持久逻辑 UUID、物理 UUID、明文哈希、原始长度、编码长度、压缩标志、算法和 block key UUID。数据库整数主键不进入密文格式。读取顺序固定为认证、解密、有界解压、长度检查和 BLAKE3 检查；任何元数据或载荷不匹配都报告完整性错误。
 
 nonce 为 12 字节：前 4 字节编码来源类型和 UTC 日期，后 8 字节为独立的正整数 `nonce_id`。加密的物理区块编码和区块包分别使用类型标记 0 和 1；未加密来源的 `nonce_id`、nonce 和 `block_key_id` 均为空。逻辑区块、pack 成员和 raw 不单独分配 nonce。
 
 `nonce_counters` 按 block key 和类型标记保存已预留高水位。进程在实际加密前按近期使用速率领取 64–65536 个编号，大小为 64 的倍数，数据库提交成功后才开始使用。重启、失败或取消留下的余量不回收；启动、读取、无加密写入和直接去重命中不领取范围。可用余量不足 64 时拒绝新预留，需要创建新的实际 block key 并切换关联存储；已有有效范围仍可用完。同一密钥材料不能以其他名称重新开始计数。
 
-数据库恢复、计数回滚或独立克隆后，恢复写入前必须更换新的实际 block key，并保留历史 key 读取存量来源。已有密文使用记录中的 nonce 解密；升级不会重新编码文件。
+数据库恢复、计数回滚或独立克隆后，恢复写入前必须更换新的实际 block key，并保留历史 key 读取存量来源。当前格式密文使用记录中的 nonce 解密。旧文件格式不提供兼容读取；带旧对象或来源的数据库拒绝原地升级，须用可读取原数据的部署经 S3 接口迁移逻辑对象，不能直接复制旧载荷到新部署。
 
 ## 存储布局
 
 ```text
 <storage.prefix>/meta.json
-<storage.prefix>/<UUID 前两位>/<32 位小写 UUID>
-<storage.prefix>/packs/<UUID 前两位>/<32 位小写 UUID>
+<storage.prefix>/<UUID 后两位>/<32 位小写 UUID>
+<storage.prefix>/packs/<UUID 后两位>/<32 位小写 UUID>
 ```
 
-`meta.json` 包含 `format_version`、`deployment_id`、`storage_id`、chunk/pack layout、创建时间和版本诊断字段。创建 storage 时只允许在目标命名空间为空的情况下用条件写入初始化；编辑已有 storage 时必须读取并匹配完整 meta，缺失或不匹配会拒绝保存。修改 prefix 不会自动搬迁载荷。
+`meta.json` 的 `format_version` 为 4，chunk/pack layout 分别为 `uuid-suffix2`、`uuid-suffix2-pack`，按 UUID 最后两位十六进制字符分目录，区块包位于 `packs/` 下。它包含 `deployment_id`、`storage_id`、chunk/pack layout、创建时间和版本诊断字段。创建 storage 时只允许在目标命名空间为空的情况下用条件写入初始化；编辑已有 storage 时必须读取并匹配完整 meta，缺失或不匹配会拒绝保存。修改 prefix 不会自动搬迁载荷。
 
 独立区块直接使用 UUID 分片路径。sweep 同时识别此前文档中的 `chunks/<分片>/<UUID>` 路径；任何仍被物理索引记录的 UUID 都受到保护。
 
@@ -72,7 +72,7 @@ nonce 为 12 字节：前 4 字节编码来源类型和 UTC 日期，后 8 字�
 
 ## 区块包
 
-区块包只收集同一 storage、完整且连续的 CDC 区块，成员至少两个，原始成员总长受 profile 的 `pack_max_size` 限制。包整体可压缩并按包的 key 加密，成员索引和未压缩载荷摘要写入包头及数据库。
+区块包只收集同一 storage、完整且连续的 CDC 区块，成员至少两个，原始成员总长受 profile 的 `pack_max_size` 限制。包整体可压缩并按包的 key 加密，成员索引和未压缩载荷摘要写入包头及数据库。包头及 AAD 标记为 `MOKYU\0\0\x04`；包头由 8 字节标记、4 字节成员数和每成员 52 字节索引组成，索引依次为 16 字节逻辑区块 UUID、32 字节 BLAKE3 和 4 字节原始长度，整数按大端保存。随后顺序保存成员原始正文。
 
 local storage 不创建新区块包；已有包保持可读，显式 `storage unpack` 才会拆包。S3 storage 可由普通 pack 调度器处理符合条件的存量独立区块，也可由显式 `storage rewrite` 按当前 profile 全量重写。保存 storage 表单或载入预设都不会自动启动这些任务。
 
@@ -81,9 +81,9 @@ local storage 不创建新区块包；已有包保持可读，显式 `storage un
 单容器模式的本地目录由 `instance.data_path` 指定：
 
 ```text
-<data_path>/chunks/<前两位>/<UUID>.zst
-<data_path>/chunks/<前两位>/<UUID>.raw
-<data_path>/raw/<前两位>/<UUID>
+<data_path>/chunks/<后两位>/<UUID>.zst
+<data_path>/chunks/<后两位>/<UUID>.raw
+<data_path>/raw/<后两位>/<UUID>
 <data_path>/multipart/<fragment or candidate UUID>
 <data_path>/node.json
 ```
@@ -98,7 +98,7 @@ Linux 下，Mokyu 启动时设置 umask 为 `0022`；新建目录使用 `0755`�
 
 区块的可选磁盘读缓存填充在有界后台任务中执行，成功 PUT 不等待读缓存填充；缓存额度不足或填充失败不影响已验证正文，响应完成不代表缓存已经写入。上传暂存仍按持久化要求落盘后确认。
 
-远端 raw 的首次严格读取边校验边流式填充文件，完成后复用同一文件输出，避免为正文再完整下载一次；并发相同来源复用填充结果。缓存命中仍校验完整文件，Range 从同一文件句柄读取，不把大对象作为区块或整文件 Bytes 放入内存。raw 与 chunks 共用节点缓存额度、索引和淘汰保护；raw 缓存直接使用后端文件的 `raw_sources.id`，UUID 均为 32 位小写无连字符格式。覆盖使用新来源 UUID，去重引用共享同一缓存文件；命名不代替权限、来源状态和长度、摘要校验。后台完整性检查和来源复检直接检查后端，损坏缓存只能回源重建，不能证明后端健康。
+远端 raw 的首次严格读取边校验边流式填充文件，完成后复用同一文件输出，避免为正文再完整下载一次；并发相同来源复用填充结果。缓存命中仍校验完整文件，Range 从同一文件句柄读取，不把大对象作为区块或整文件 Bytes 放入内存。raw 与 chunks 共用节点缓存额度、索引和淘汰保护；独立区块缓存复用后端物理 UUID，解包缓存复用数据库批量读取的逻辑区块 UUID，不派生缓存 UUID；raw 缓存直接使用后端文件 UUID（PostgreSQL 的 `raw_sources.id`，MySQL/MariaDB/SQLite 的 `raw_sources.location_id`），UUID 均为 32 位小写无连字符格式。覆盖使用新来源 UUID，去重引用共享同一缓存文件；命名不代替权限、来源状态和长度、摘要校验。后台完整性检查和来源复检直接检查后端，损坏缓存只能回源重建，不能证明后端健康。
 
 重启恢复完整缓存文件，清理未完成填充；正在发送的文件持有 pin，实际删除后才释放缓存占用。本地 storage 的根目录不得与 data 目录中的 raw、chunks、multipart、thumbnails 命名空间重叠，符号链接按实际路径检查。
 

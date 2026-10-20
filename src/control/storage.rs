@@ -1,4 +1,5 @@
 use super::Identity;
+use crate::model::Id;
 use crate::{
     app::App,
     content::codec,
@@ -87,7 +88,7 @@ pub(crate) struct StorageKeyInput {
 #[serde(deny_unknown_fields)]
 pub(crate) struct StorageUnpackInput {
     action: String,
-    pack_id: i64,
+    pack_id: String,
     confirmation: Option<String>,
 }
 
@@ -446,7 +447,7 @@ pub(crate) async fn update_record(
             crate::model::Error::StorageNotDrained
         );
         anyhow::ensure!(
-            app.active.lock().unwrap().is_empty(),
+            app.active_operations() == 0,
             crate::model::Error::StorageNotDrained
         );
         anyhow::ensure!(
@@ -686,20 +687,19 @@ pub(crate) async fn unpack(
         .id(&name, None)
         .await?
         .context("storage was not found")?;
-    let belongs = app.packing.in_storage(input.pack_id, storage_id).await?;
+    let pack_id = Id::parse(&input.pack_id, app.config.database.backend)?;
+    let belongs = app.packing.in_storage(pack_id, storage_id).await?;
     if !belongs {
         return Err(anyhow::anyhow!("pack was not found in storage").into());
     }
     match input.action.as_str() {
-        "preview" => Ok(Json(
-            app.unpack_start(Some(input.pack_id), false, false).await?,
-        )),
+        "preview" => Ok(Json(app.unpack_start(Some(pack_id), false, false).await?)),
         "start" => {
             let confirmation = input
                 .confirmation
                 .as_deref()
                 .context("confirmation is required")?;
-            let preview = app.unpack_start(Some(input.pack_id), false, false).await?;
+            let preview = app.unpack_start(Some(pack_id), false, false).await?;
             let expected = blake3::hash(&serde_json::to_vec(&preview)?)
                 .to_hex()
                 .to_string();
@@ -707,13 +707,13 @@ pub(crate) async fn unpack(
                 return Err(anyhow::anyhow!("preview confirmation mismatch").into());
             }
             Ok(Json(
-                app.unpack_checked(Some(input.pack_id), false, true, Some(&expected))
+                app.unpack_checked(Some(pack_id), false, true, Some(&expected))
                     .await?,
             ))
         }
         "status" => Ok(Json(
             app.task_control
-                .unpack_status(input.pack_id)
+                .unpack_status(pack_id)
                 .await?
                 .unwrap_or_else(|| serde_json::json!({"status":"missing"})),
         )),

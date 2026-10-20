@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{
     config,
     content::codec::{Chunk, MAX},
@@ -27,7 +28,7 @@ impl App {
             l
         }
     }
-    pub(crate) async fn reference(&self, stream: Uuid, offset: i64, c: &Chunk) -> Result<()> {
+    pub(crate) async fn reference(&self, stream: Id, offset: i64, c: &Chunk) -> Result<()> {
         self.chunks
             .reference(stream, offset, c.id, c.raw_size)
             .await?;
@@ -36,7 +37,7 @@ impl App {
     }
     pub async fn put_chunk(
         &self,
-        stream: Uuid,
+        stream: Id,
         offset: i64,
         raw: Vec<u8>,
         retransmitted: bool,
@@ -77,7 +78,7 @@ impl App {
 
     async fn put_chunk_inner(
         &self,
-        stream: Uuid,
+        stream: Id,
         offset: i64,
         raw: Vec<u8>,
         retransmitted: bool,
@@ -140,8 +141,6 @@ impl App {
         }
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-allocated").await;
-        let mut c = c;
-        c.location_id = Uuid::new_v4();
         let (c, encoded, cache) = self.storage.encode(c, raw, true, None).await?;
         self.chunks.mark_uploading(&c).await?;
         if self

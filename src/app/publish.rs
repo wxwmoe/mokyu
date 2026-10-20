@@ -1,4 +1,5 @@
 use crate::authorization::Principal;
+use crate::model::Id;
 use anyhow::Result;
 use s3s::{dto::ETagCondition, s3_error};
 use serde_json::Value;
@@ -9,7 +10,7 @@ use super::App;
 impl App {
     pub async fn finish_stream(
         &self,
-        id: Uuid,
+        id: Id,
         size: i64,
         etag: &str,
         checksums: Value,
@@ -22,7 +23,7 @@ impl App {
     }
     pub async fn publish(
         &self,
-        id: Uuid,
+        id: Id,
         if_match: Option<&s3s::dto::ETagCondition>,
         if_none: Option<&s3s::dto::ETagCondition>,
     ) -> Result<()> {
@@ -30,7 +31,7 @@ impl App {
     }
     pub async fn publish_complete(
         &self,
-        id: Uuid,
+        id: Id,
         if_match: Option<&s3s::dto::ETagCondition>,
         if_none: Option<&s3s::dto::ETagCondition>,
         completion: Option<(Uuid, String, Value)>,
@@ -67,7 +68,7 @@ impl App {
         principal: &Principal,
         bucket: Uuid,
         key: &str,
-        expected: Option<Uuid>,
+        expected: Option<Id>,
         public: Option<bool>,
     ) -> Result<()> {
         self.writable()?;

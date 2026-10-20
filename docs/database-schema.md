@@ -6,6 +6,10 @@
 
 下表描述共有数据含义，并列出 PostgreSQL 群集字段；原生类型和约束以各后端迁移为准。MySQL/MariaDB 共用 `migrations/mysql/`，使用二进制 UUID、自增 BIGINT 内容 ID、UTC `DATETIME(6)` 和二进制对象键。名称比较区分大小写和尾空格；MySQL 使用原生 JSON，MariaDB 使用带 JSON 有效性约束的文本表示。引用、配额和任务更新在同一事务中显式完成；容量 scope 的桶集合使用关联表。SQLite 使用 STRICT 表、16 字节 UUID、整数自增内容 ID、UTC 微秒整数时间、JSON 文本和二进制对象键；写事务使用 `BEGIN IMMEDIATE`，引用与配额同样在事务内显式维护。原生类型不影响对外 ID、分页、时间和字节数的接口语义。
 
+PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采用 `UUID` 主键，默认由 `uuidv7()` 生成，所有关联列使用同类型；自然键、复合键、偏移和计数保持原意。MySQL/MariaDB 和 SQLite 的对应主键、外键继续使用整数，仅 `chunks` 增加非空的 16 字节 `uuid`；物理编码和区块包复用既有 `location_id`，streams、raw_sources、fragments、quota_reservations 及其引用也使用原生整数；raw_sources.location_id 和 fragments.location_id 保存非空唯一的文件 UUID。multipart_files 与 Multipart UploadId 保留稳定 UUID，用于共享暂存文件和协议身份。PostgreSQL 的物理编码和区块包直接以主键作为文件 UUID，无单独 `location_id` 列。API 将身份作为不透明字符串，不要求各数据库部署的 ID 形态相同。
+
+旧文件身份格式的升级只允许没有对象或来源数据的数据库；存在旧数据时在结构修改前终止，须通过 S3 逻辑迁移。新装结构与空库迁移得到相同结构。
+
 容量分摊在 SQLite 中使用浮点比例并按接口精度输出；配额与实际对象字节账本始终使用整数。数据库空间来自本后端原生统计：SQLite 汇总表和索引页，无法提供的 PG 专属行估算与 vacuum 时间返回 null。
 
 `stream_leases` 只用于群集的跨节点读取与写入保护。单容器通过进程内活动引用协调读写和 GC，不创建或续期 stream lease；请求取消释放引用，重启后按持久状态恢复未完成写入。`storage_permits` 也只供群集协调 storage 并发；单容器使用按 storage 和方向共享的进程内队列。
@@ -47,7 +51,7 @@ storage 连接和 profile 修改只改变后续写入及新请求的策略；已
 
 | 表 | 字段与约束 | 索引与生命周期 |
 | --- | --- | --- |
-| `raw_sources` | UUID `id` 主键；`storage_id` 非空外键，`owner_stream` 可空外键、删除 stream 时置空；`medium` 默认 local、`durability` 默认 durable、`boot_id` 可空；`state` 默认 writing；`size` 非负、默认 0；`digest` 可空 16 字节、ready 时必须存在；`content_hash` 可空 32 字节、`upload_id` 可空；正整数 `revision` 默认 1、`profile_revision` 非空；可空隔离时间/代码；创建和未引用时间默认当前时间 | 按 storage/state/unreferenced_at/id 查回收候选，按 owner 查未完成写入；非空内容摘要按 storage/content_hash/size 唯一；被 raw_ranges 引用时不可删除 |
+| `raw_sources` | 原生 `id` 主键；MySQL/MariaDB/SQLite 另有非空唯一的文件 UUID `location_id`，PostgreSQL 复用主键；`storage_id` 非空外键，`owner_stream` 可空外键、删除 stream 时置空；`medium` 默认 local、`durability` 默认 durable、`boot_id` 可空；`state` 默认 writing；`size` 非负、默认 0；`digest` 可空 16 字节、ready 时必须存在；`content_hash` 可空 32 字节、`upload_id` 可空；正整数 `revision` 默认 1、`profile_revision` 非空；可空隔离时间/代码；创建和未引用时间默认当前时间 | 按 storage/state/unreferenced_at/id 查回收候选，按 owner 查未完成写入；非空内容摘要按 storage/content_hash/size 唯一；被 raw_ranges 引用时不可删除 |
 | `raw_ranges` | `stream_id` 外键、删除 stream 时级联；`offset_bytes` 与 `length` 非负；`source_id` 非空来源外键；`source_offset` 非负、默认 0 | 主键 `(stream_id,offset_bytes)`，来源反查索引；发布事务检查有序连续、边界与来源健康，GC 分批释放引用 |
 | `raw_processing` | `stream_id` 主键及级联外键，`source_id` 非空级联外键；`payload_revision` 非空；可空 32 字节 `content_hash`、`source_revision`、执行 `token` 和 `lease_expires_at`；`next_attempt_at` 默认当前时间、`attempts` 默认 0、`last_error` 可空 | 按 `(next_attempt_at,stream_id)` 扫描已发布 raw 对象；单容器直接执行，群集领取/续租及最终提交验证节点身份；读保护排空后原子切换来源，删除对象取消无用工作 |
 
@@ -57,9 +61,9 @@ UUID、时间、整数分别使用各数据库既有原生类型。原始来源�
 
 | 表 | 关键字段 | 说明 |
 | --- | --- | --- |
-| `chunks` | `id`、`storage_id`、`hash`、`raw_size`、`standalone_size`、`encryption_algorithm`、`block_key_id`、`standalone_compressed`、`current_encoding_id`、`pack_id`、状态和回收时间 | 按 `storage_id + hash + raw_size` 去重；逻辑区块身份不因重写改变 |
-| `chunk_encodings` | `encoding_id`、`chunk_id`、`location_id`、`storage_id`、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce_id`、`nonce`、`encoding_fingerprint`、状态和发布时间 | 独立区块的实际物理来源；同一逻辑区块最多一个 ready 独立来源 |
-| `packs`、`pack_members` | pack 的 `location_id`、`storage_id`、`nonce_id`、加密/压缩字段、`pack_fingerprint` 及成员偏移 | 区块包来源和成员映射；只收纳同一 storage 的完整区块 |
+| `chunks` | `id`、持久 UUID、`storage_id`、`hash`、`raw_size`、`standalone_size`、`encryption_algorithm`、`block_key_id`、`standalone_compressed`、`current_encoding_id`、`pack_id`、状态和回收时间 | 按 `storage_id + hash + raw_size` 去重；逻辑区块身份不因重写改变 |
+| `chunk_encodings` | `encoding_id`、`chunk_id`、物理 UUID、`storage_id`、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce_id`、`nonce`、`encoding_fingerprint`、状态和发布时间 | 独立区块的实际物理来源；同一逻辑区块最多一个 ready 独立来源 |
+| `packs`、`pack_members` | pack 的主键与物理 UUID、`storage_id`、`nonce_id`、加密/压缩字段、`pack_fingerprint` 及成员偏移 | 区块包来源和成员映射；只收纳同一 storage 的完整区块 |
 | `pack_inputs`、`pack_maintenance`、`pack_changes` | 任务输入保护、游标、generation 和下一次检查时间 | 使打包、复用、回收和 Range 优化可恢复 |
 
 `encoding_fingerprint` 和 `pack_fingerprint` 由 key、算法、压缩及对应 profile 计算。保存 profile 不自动重写存量；rewrite 根据 fingerprint 跳过已符合策略的来源。

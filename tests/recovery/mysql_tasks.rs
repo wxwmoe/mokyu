@@ -74,10 +74,10 @@ async fn mysql_task_control_contract() -> Result<()> {
         .await?;
 
     assert_eq!(
-        backend.unpack_status(7).await?.unwrap()["id"],
+        backend.unpack_status(7.into()).await?.unwrap()["id"],
         json!(unpack)
     );
-    assert!(backend.unpack_status(8).await?.is_none());
+    assert!(backend.unpack_status(8.into()).await?.is_none());
     assert_eq!(
         backend.rewrite_status(storage).await?.unwrap()["id"],
         json!(rewrite)

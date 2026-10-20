@@ -1,6 +1,7 @@
 use super::connection;
 use crate::authorization::{Action, DEFAULT_PROJECT, Permit, Principal};
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::{
     ChunkCreate, ChunkStore, PhysicalSource, PhysicalStore, StreamCreate, StreamStore, StreamTail,
 };
@@ -22,7 +23,7 @@ fn stream(bucket: Uuid, key: &str) -> StreamCreate {
     }
 }
 
-fn chunk(storage: Uuid, stream: Uuid, hash: u8) -> ChunkCreate {
+fn chunk(storage: Uuid, stream: Id, hash: u8) -> ChunkCreate {
     ChunkCreate {
         storage,
         stream,
@@ -130,7 +131,7 @@ async fn sqlite_content_contract() -> Result<()> {
     invalid.algorithm = "chacha20-poly1305".into();
     assert!(backend.allocate(invalid).await.is_err());
     let (mut physical, reused) = backend.allocate(chunk(storage, first, 1)).await?;
-    assert!(!reused && physical.id > 0 && physical.encoding_id > 0);
+    assert!(!reused && physical.id > 0.into() && physical.encoding_id > 0.into());
     let failed = physical.clone();
     (physical, _) = backend.allocate(chunk(storage, first, 1)).await?;
     assert!(physical.id > failed.id && physical.encoding_id > failed.encoding_id);
@@ -253,7 +254,12 @@ async fn sqlite_content_contract() -> Result<()> {
             file_offset: None,
         })
         .await?;
-    let tail = backend.fragment(fragment).await?;
+    let fragment_id: Id = sqlx::query_scalar("SELECT id FROM fragments WHERE location_id=?")
+        .bind(fragment)
+        .fetch_one(db)
+        .await?;
+    let tail = backend.fragment(fragment_id).await?;
+    assert_eq!(tail.location_id, fragment);
     assert_eq!(tail.size, 5);
     assert!(tail.staging_storage_id.is_none() && tail.staging_object_key.is_none());
     let failed_tail = Uuid::new_v4();
@@ -273,7 +279,7 @@ async fn sqlite_content_contract() -> Result<()> {
             .await
             .is_err()
     );
-    let sealed: bool = sqlx::query_scalar("SELECT sealed FROM fragments WHERE id=?")
+    let sealed: bool = sqlx::query_scalar("SELECT sealed FROM fragments WHERE location_id=?")
         .bind(failed_tail)
         .fetch_one(db)
         .await?;
@@ -296,7 +302,7 @@ async fn sqlite_content_contract() -> Result<()> {
     );
 
     sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,next_retry_at) VALUES(?,?,0,32,CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(physical.id).bind(next).execute(db).await?;
-    let pins = backend.upload_pins(0).await?;
+    let pins = backend.upload_pins(0.into()).await?;
     assert_eq!(pins.len(), 1);
     assert_eq!(pins[0], (physical.id, None, None, 32));
     assert!(backend.pending_source(physical.id).await?.is_none());
@@ -328,20 +334,20 @@ async fn sqlite_content_contract() -> Result<()> {
         .execute(db)
         .await?;
     assert!(backend.indexed(pack_location).await?);
-    assert!(backend.pack_contains(pack, physical.id).await?);
+    assert!(backend.pack_contains(pack.into(), physical.id).await?);
     assert!(!backend.pending_only(physical.id).await?);
     assert!(
-        matches!(backend.source(physical.id, false).await?,PhysicalSource::Pack(p) if p.id==pack)
+        matches!(backend.source(physical.id, false).await?,PhysicalSource::Pack(p) if p.id==pack.into())
     );
-    assert_eq!(backend.inspection_members(pack).await?[0].1, 0);
-    assert!(backend.inspection(task, pack).await?.is_none());
-    backend.record_inspection(task, pack, None).await?;
+    assert_eq!(backend.inspection_members(pack.into()).await?[0].1, 0);
+    assert!(backend.inspection(task, pack.into()).await?.is_none());
+    backend.record_inspection(task, pack.into(), None).await?;
     backend
-        .record_inspection(task, pack, Some("ignored"))
+        .record_inspection(task, pack.into(), Some("ignored"))
         .await?;
-    assert_eq!(backend.inspection(task, pack).await?, Some(None));
-    assert_eq!(backend.ready_chunks(&[physical.id]).await?.len(), 1);
-    assert!(backend.ready_chunks(&[]).await?.is_empty());
+    assert_eq!(backend.inspection(task, pack.into()).await?, Some(None));
+    assert_eq!(backend.pack_chunks(pack.into()).await?.len(), 1);
+    assert!(backend.pack_chunks(0.into()).await?.is_empty());
     sqlx::query("DELETE FROM pending_uploads WHERE chunk_id=?")
         .bind(physical.id)
         .execute(db)

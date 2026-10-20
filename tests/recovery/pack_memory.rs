@@ -70,8 +70,9 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
             let raw = Bytes::from(vec![id as u8; 128 * 1024]);
             (
                 Chunk {
-                    id,
-                    encoding_id: id,
+                    uuid: Uuid::now_v7(),
+                    id: id.into(),
+                    encoding_id: id.into(),
                     location_id: Uuid::new_v4(),
                     storage_id: Some(store_id),
                     hash: blake3::hash(&raw).as_bytes().to_vec(),
@@ -81,7 +82,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
                     block_key_id: None,
                     compressed: false,
                     nonce: None,
-                    format: 1,
+                    format: 2,
                     state: "ready".into(),
                     created_at: chrono::Utc::now(),
                 },
@@ -90,7 +91,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
         })
         .collect();
     let template = Pack {
-        id: 1,
+        id: 1.into(),
         location_id: Uuid::new_v4(),
         storage_id: Some(store_id),
         algorithm: "none".into(),
@@ -117,7 +118,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
         .bind(pack.stored_size).bind(&pack.digest).execute(&pool).await?;
     let mut offset = 0i64;
     for (index, (chunk, _)) in members.iter().enumerate() {
-        sqlx::query("INSERT INTO chunks(id,storage_id,hash,raw_size,encryption_algorithm,state,current_encoding_id,pack_id) VALUES(?,?,?,?,'none','ready',?,?)")
+        sqlx::query("INSERT INTO chunks(uuid,id,storage_id,hash,raw_size,encryption_algorithm,state,current_encoding_id,pack_id) VALUES(?,?,?,?,?,'none','ready',?,?)").bind(chunk.uuid)
             .bind(chunk.id).bind(store_id).bind(&chunk.hash).bind(chunk.raw_size).bind(chunk.id).bind(pack.id).execute(&pool).await?;
         sqlx::query(
             "INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) VALUES(?,?,?,?)",

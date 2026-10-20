@@ -1,6 +1,7 @@
 use super::{Backend, connection, queries, transactions};
 use crate::authorization::{Action, DEFAULT_PROJECT, Permit, Principal};
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::quota::Limits;
 use crate::model::{
     ChunkCreate, ChunkStore, PhysicalStore, PublishStore, QuotaStore, StreamCreate, StreamStore,
@@ -9,7 +10,7 @@ use anyhow::Result;
 use serde_json::json;
 use uuid::Uuid;
 
-async fn stream(backend: &Backend, bucket: Uuid, key: &str) -> Result<Uuid> {
+async fn stream(backend: &Backend, bucket: Uuid, key: &str) -> Result<Id> {
     backend
         .create(StreamCreate {
             authority: Permit::for_action(Principal::Local, bucket, Action::Write),
@@ -59,7 +60,7 @@ async fn usage(
     }
     Ok(())
 }
-async fn abandon(backend: &Backend, bucket: Uuid, stream: Uuid) -> Result<()> {
+async fn abandon(backend: &Backend, bucket: Uuid, stream: Id) -> Result<()> {
     let mut tx = backend.pool.begin().await?;
     queries::publish_stream_record(stream)
         .fetch_one(&mut *tx)
@@ -142,7 +143,7 @@ async fn mysql_quota_and_publication_contract() -> Result<()> {
     );
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.save(&Principal::Local, "bucket", bucket, limits(Some(999), None))
         )
         .await
@@ -364,7 +365,7 @@ async fn mysql_quota_and_publication_contract() -> Result<()> {
     usage(&backend, bucket, 64, 64, 64, 2).await?;
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.publish(
                 output,
                 None,

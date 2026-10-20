@@ -50,12 +50,12 @@ def read(key, expected):
 
 
 def cache_path(key, extension):
-    rows = db.execute('''SELECT l.location_id FROM objects o
+    rows = db.execute('''SELECT l.encoding_id FROM objects o
         JOIN buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=o.stream_id
         JOIN chunks c ON c.id=e.chunk_id JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE b.name=%s AND o.object_key=%s''', (bucket, key)).fetchall()
     assert len(rows) == 1
     name = rows[0][0].hex
-    return root / name[:2] / (name + extension)
+    return root / name[-2:] / (name + extension)
 
 
 assert status()['resources']['cache_entries'] == 1

@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{
     config::{self, Budget, Config, Secrets},
     content::codec::{self, Chunk, MAX},
@@ -64,8 +65,8 @@ pub struct Storage {
     record_store: Arc<dyn crate::model::StorageRecordStore>,
     pub source_gate: tokio::sync::RwLock<()>,
     physical_pins: Mutex<HashMap<Uuid, std::sync::Weak<AtomicUsize>>>,
-    pack_misses: Mutex<HashMap<i64, std::sync::Weak<PackFetch>>>,
-    pack_live: Mutex<HashMap<i64, std::sync::Weak<LoadedPack>>>,
+    pack_misses: Mutex<HashMap<Id, std::sync::Weak<PackFetch>>>,
+    pack_live: Mutex<HashMap<Id, std::sync::Weak<LoadedPack>>>,
     pack_memory: Arc<Semaphore>,
     pack_memory_units: u32,
     pack_work: Arc<Semaphore>,
@@ -98,7 +99,7 @@ pub struct Storage {
     cache_fills: Arc<Mutex<HashSet<Uuid>>>,
     max_entries: usize,
     capacity: Option<u64>,
-    misses: Mutex<HashMap<(i64, Uuid), std::sync::Weak<FetchResult>>>,
+    misses: Mutex<HashMap<(Id, Uuid), std::sync::Weak<FetchResult>>>,
     raw_misses: Mutex<HashMap<Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     pub backend_gets: Arc<std::sync::atomic::AtomicU64>,
     pub cache_hits: std::sync::atomic::AtomicU64,
@@ -610,7 +611,9 @@ impl Storage {
                 .compression_config(&self.compression_idle_timeout)
                 .workspace_bytes()?;
             let maximum = config::bytes(&profile.pack_max_size)?;
-            let payload = maximum + 12 + 44 * (maximum / codec::MIN as u64 + 1);
+            let payload = maximum
+                + 12
+                + crate::content::pack::MEMBER_SIZE as u64 * (maximum / codec::MIN as u64 + 1);
             if workspace > self.compression_workspace
                 || (profile.pack_enabled
                     && (payload * 4 + workspace).div_ceil(1024 * 1024)
@@ -860,9 +863,9 @@ impl Storage {
         CacheFile::Chunk(compressed).path(&self.disk.root, id)
     }
     async fn restore_upload_pins(&self) -> Result<()> {
-        let mut after = 0i64;
+        let mut after = Id::default();
         loop {
-            let rows: Vec<(i64, Option<Uuid>, Option<String>, i64)> =
+            let rows: Vec<(Id, Option<Uuid>, Option<String>, i64)> =
                 self.physical.upload_pins(after).await?;
             if rows.is_empty() {
                 break;
@@ -1085,7 +1088,11 @@ impl Storage {
         if file.source_id.is_none() {
             return self.disk.remove_fragment(file.id).await;
         }
-        let path = self.multipart_path(file.id, Some(file.storage_id), file.source_id)?;
+        let path = self.multipart_path(
+            file.id,
+            Some(file.storage_id),
+            file.source_id.map(|_| file.id),
+        )?;
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1764,7 +1771,7 @@ impl Storage {
             let current = context.pack.lock().await;
             if let Some(loaded) = current
                 .as_ref()
-                .filter(|p| p.data.members.iter().any(|m| m.id == c.id))
+                .filter(|p| p.data.members.iter().any(|m| m.id == c.uuid))
             {
                 loaded.touch(c, context.observe, context.range);
                 return loaded.data.chunk(c);
@@ -1877,7 +1884,7 @@ impl Storage {
             .and_then(std::sync::Weak::upgrade)
             .is_some_and(|p| p.load(Ordering::Relaxed) > 0)
     }
-    async fn source(&self, id: i64, inspection: bool) -> Result<Source> {
+    async fn source(&self, id: Id, inspection: bool) -> Result<Source> {
         let _gate = self.source_gate.read().await;
         match self.physical.source(id, inspection).await? {
             crate::model::PhysicalSource::Chunk(chunk) => {
@@ -2156,8 +2163,7 @@ impl Storage {
             .map_err(|e| anyhow::anyhow!("pack read failed: {e:#}"))
     }
     async fn fill_pack(self: &Arc<Self>, loaded: &LoadedPack) -> Result<()> {
-        let ids: Vec<i64> = loaded.data.members.iter().map(|m| m.id).collect();
-        let chunks: Vec<Chunk> = self.physical.ready_chunks(&ids).await?;
+        let chunks: Vec<Chunk> = self.physical.pack_chunks(loaded.pack.id).await?;
         for c in chunks {
             self.fill_raw(&c, loaded.data.chunk(&c)?).await?;
         }
@@ -2410,11 +2416,13 @@ impl Storage {
                                 crate::content::pack::decode(&pack, data, &secrets, &pool)?;
                             for ((c, offset), member) in members.iter().zip(&decoded.members) {
                                 ensure!(
-                                    member.id == c.id
+                                    member.id == c.uuid
                                         && member.hash.as_slice() == c.hash
                                         && member.len == c.raw_size as usize
                                         && member.start
-                                            == 12 + 44 * members.len() + *offset as usize,
+                                            == 12
+                                                + crate::content::pack::MEMBER_SIZE * members.len()
+                                                + *offset as usize,
                                     codec::IntegrityError::Metadata
                                 );
                             }

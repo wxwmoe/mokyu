@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{
     app::{App, Bucket},
     authorization::{Action, Principal},
@@ -562,7 +563,8 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 .await
         }
         Command::Integrity(Integrity::Issues { id, after, limit }) => {
-            app.integrity_issues(id, after, limit).await
+            app.integrity_issues(id, Id::parse(&after, app.config.database.backend)?, limit)
+                .await
         }
         Command::Integrity(Integrity::Quarantines {
             storage,
@@ -675,7 +677,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             app.maintenance_store.mode(enabled).await?;
             app.maintenance
                 .store(enabled, std::sync::atomic::Ordering::Release);
-            Ok(json!({"maintenance":enabled,"active_operations":app.active.lock().unwrap().len()}))
+            Ok(json!({"maintenance":enabled,"active_operations":app.active_operations()}))
         }
         Command::Task(Tasks::List) => {
             let mut tasks = app.task_control.all().await?;

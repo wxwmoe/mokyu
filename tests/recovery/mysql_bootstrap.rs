@@ -40,15 +40,31 @@ async fn structure(db: &mut MySqlConnection) -> Result<BTreeMap<String, String>>
             .replace("CHARACTER SET ascii COLLATE", "COLLATE")
             .replace("_utf8mb4'", "'")
             .replace("_ascii'", "'");
-        // Constraint declaration order does not affect MariaDB's structure.
+        // Index and constraint declaration order does not change the effective structure.
+        let unordered = |line: &str| {
+            let line = line.trim_start();
+            line.starts_with("CONSTRAINT ")
+                || line.starts_with("KEY ")
+                || line.starts_with("UNIQUE KEY ")
+        };
         let mut lines: Vec<_> = sql
             .lines()
-            .filter(|line| !line.trim_start().starts_with("CONSTRAINT "))
-            .map(str::to_owned)
+            .filter(|line| !unordered(line))
+            .map(|line| {
+                // The next allocated value is data, not a schema difference.
+                if line.starts_with(") ") {
+                    line.split_whitespace()
+                        .filter(|part| !part.starts_with("AUTO_INCREMENT="))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    line.to_owned()
+                }
+            })
             .collect();
         let mut constraints: Vec<_> = sql
             .lines()
-            .filter(|line| line.trim_start().starts_with("CONSTRAINT "))
+            .filter(|line| unordered(line))
             .map(|line| line.trim_end_matches(',').to_owned())
             .collect();
         constraints.sort();
@@ -226,6 +242,49 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
     migration::run(&mut policy).await?;
     assert_eq!(contents(&mut policy).await?, migrated);
 
+    // Old physical identities are rejected without changing their rows or schema.
+    let mut incompatible = database(&mut fresh, &options).await?;
+    incompatible
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for entry in migrations.iter().take(21) {
+        incompatible.apply("_sqlx_migrations", entry).await?;
+    }
+    sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker) VALUES(UNHEX('00000000000000000000000000000001'),'old-file','local','/data/old-file','{}'); INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES(UNHEX('00000000000000000000000000000001'),UNHEX(REPEAT('01',32)),1,'none','preparing');").execute(&mut incompatible).await?;
+    let schema = structure(&mut incompatible).await?;
+    let data = contents(&mut incompatible).await?;
+    let error = migration::run(&mut incompatible).await.unwrap_err();
+    assert!(format!("{error:#}").contains("S3"));
+    assert_eq!(structure(&mut incompatible).await?, schema);
+    assert_eq!(contents(&mut incompatible).await?, data);
+    sqlx::query("DELETE FROM chunks")
+        .execute(&mut incompatible)
+        .await?;
+    for (insert, remove) in [
+        (
+            "INSERT INTO raw_sources(id,storage_id,profile_revision) VALUES(UNHEX('00000000000000000000000000000001'),UNHEX('00000000000000000000000000000001'),1)",
+            "DELETE FROM raw_sources",
+        ),
+        (
+            "INSERT INTO multipart_files(id,storage_id) VALUES(UNHEX('00000000000000000000000000000001'),UNHEX('00000000000000000000000000000001'))",
+            "DELETE FROM multipart_files",
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(insert))
+            .execute(&mut incompatible)
+            .await?;
+        let data = contents(&mut incompatible).await?;
+        let error = migration::run(&mut incompatible).await.unwrap_err();
+        assert!(format!("{error:#}").contains("S3"));
+        assert_eq!(structure(&mut incompatible).await?, schema);
+        assert_eq!(contents(&mut incompatible).await?, data);
+        sqlx::query(sqlx::AssertSqlSafe(remove))
+            .execute(&mut incompatible)
+            .await?;
+    }
+    migration::run(&mut incompatible).await?;
+    same_structure(&mut incompatible, &mut fresh).await?;
+
     let mut old = database(&mut fresh, &options).await?;
     old.ensure_migrations_table("_sqlx_migrations").await?;
     for migration in migrations.iter().take(16) {
@@ -254,7 +313,7 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         serde_json::json!({})
     );
 
-    for version in [19, 20, 24] {
+    for version in [19, 20, 24, 25] {
         let recovery = migrations
             .iter()
             .find(|migration| migration.version == version)
@@ -270,6 +329,13 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
                 "EXECUTE mokyu_audit",
                 "DEALLOCATE PREPARE mokyu_audit",
                 "UPDATE mokyu_meta SET schema_version=20",
+            ]
+        } else if version == 25 {
+            vec![
+                "ALTER TABLE chunks ALTER COLUMN format SET DEFAULT 2",
+                "ALTER TABLE streams MODIFY COLUMN",
+                "ALTER TABLE extents ADD CONSTRAINT",
+                "UPDATE mokyu_meta SET schema_version=25",
             ]
         } else {
             vec![
@@ -291,7 +357,7 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
                 interrupted.apply("_sqlx_migrations", migration).await?;
             }
             let sql = recovery.sql.as_str();
-            let prefix = &sql[..sql.find(marker).unwrap()];
+            let prefix = &sql[..sql.find(marker).expect("migration recovery marker")];
             sqlx::raw_sql(sqlx::AssertSqlSafe(prefix))
                 .execute(&mut interrupted)
                 .await?;

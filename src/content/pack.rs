@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{
     config::{self, Secrets},
     content::codec::{self, Chunk},
@@ -11,8 +12,9 @@ use uuid::Uuid;
 
 pub const MAX_RAW: usize = 256 * 1024 * 1024;
 pub const MAX_MEMBERS: usize = 4096;
-pub const MAX_PAYLOAD: usize = MAX_RAW + 12 + MAX_MEMBERS * 44;
-const MAGIC: &[u8; 8] = b"MOKYU\x00\x00\x02";
+pub const MEMBER_SIZE: usize = 52;
+pub const MAX_PAYLOAD: usize = MAX_RAW + 12 + MAX_MEMBERS * MEMBER_SIZE;
+const MAGIC: &[u8; 8] = b"MOKYU\x00\x00\x04";
 
 #[derive(Clone, Copy, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,7 +112,7 @@ impl Config {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Pack {
-    pub id: i64,
+    pub id: Id,
     pub location_id: Uuid,
     pub storage_id: Option<Uuid>,
     pub algorithm: String,
@@ -156,12 +158,12 @@ impl Pack {
     }
     pub fn payload_size(&self) -> Result<usize> {
         ensure!(
-            self.id > 0
+            self.id.is_valid()
                 && (1..=MAX_RAW as i64).contains(&self.raw_size)
                 && (2..=MAX_MEMBERS as i32).contains(&self.member_count),
             "invalid pack dimensions"
         );
-        Ok(self.raw_size as usize + 12 + self.member_count as usize * 44)
+        Ok(self.raw_size as usize + 12 + self.member_count as usize * MEMBER_SIZE)
     }
     fn aad(&self) -> Result<Vec<u8>> {
         self.payload_size()?;
@@ -173,7 +175,6 @@ impl Pack {
         let digest = self.digest.as_deref().context("missing pack digest")?;
         ensure!(digest.len() == 32, "invalid pack digest");
         let mut aad = MAGIC.to_vec();
-        aad.extend_from_slice(&self.id.to_be_bytes());
         aad.extend_from_slice(self.location_id.as_bytes());
         aad.extend_from_slice(&self.raw_size.to_be_bytes());
         aad.extend_from_slice(&stored.to_be_bytes());
@@ -199,7 +200,7 @@ impl Pack {
 }
 
 pub struct Member {
-    pub id: i64,
+    pub id: Uuid,
     pub hash: [u8; 32],
     pub start: usize,
     pub len: usize,
@@ -213,7 +214,7 @@ impl Decoded {
         let m = self
             .members
             .iter()
-            .find(|m| m.id == c.id)
+            .find(|m| m.id == c.uuid)
             .context("chunk absent from pack")?;
         ensure!(
             m.len == c.raw_size as usize && m.hash.as_slice() == c.hash,
@@ -245,8 +246,9 @@ pub fn encode(
     let mut seen = std::collections::HashSet::new();
     for (c, data) in members {
         ensure!(
-            seen.insert(c.id)
-                && c.id > 0
+            seen.insert(c.uuid)
+                && !c.uuid.is_nil()
+                && c.id.is_valid()
                 && !data.is_empty()
                 && data.len() <= codec::MAX
                 && data.len() == c.raw_size as usize
@@ -255,7 +257,7 @@ pub fn encode(
                 && c.block_key_id == members[0].0.block_key_id,
             "invalid pack member"
         );
-        raw.extend_from_slice(&c.id.to_be_bytes());
+        raw.extend_from_slice(c.uuid.as_bytes());
         raw.extend_from_slice(&c.hash);
         raw.extend_from_slice(&(data.len() as u32).to_be_bytes());
     }
@@ -339,14 +341,14 @@ pub fn decode(p: &Pack, mut data: Vec<u8>, secrets: &Secrets, pool: &Pool) -> Re
         codec::IntegrityError::Metadata
     );
     let mut members = Vec::with_capacity(p.member_count as usize);
-    let mut offset = 12 + p.member_count as usize * 44;
+    let mut offset = 12 + p.member_count as usize * MEMBER_SIZE;
     let mut seen = std::collections::HashSet::new();
-    for entry in raw[12..offset].chunks_exact(44) {
-        let id = i64::from_be_bytes(entry[..8].try_into()?);
-        let hash: [u8; 32] = entry[8..40].try_into()?;
-        let len = u32::from_be_bytes(entry[40..44].try_into()?) as usize;
+    for entry in raw[12..offset].chunks_exact(MEMBER_SIZE) {
+        let id = Uuid::from_bytes(entry[..16].try_into()?);
+        let hash: [u8; 32] = entry[16..48].try_into()?;
+        let len = u32::from_be_bytes(entry[48..52].try_into()?) as usize;
         ensure!(
-            id > 0
+            !id.is_nil()
                 && seen.insert(id)
                 && (1..=codec::MAX).contains(&len)
                 && offset + len <= raw.len(),
@@ -406,8 +408,9 @@ mod tests {
                     let raw = Bytes::from(vec![id as u8; codec::MIN + id as usize]);
                     (
                         Chunk {
-                            id,
-                            encoding_id: id,
+                            uuid: Uuid::now_v7(),
+                            id: id.into(),
+                            encoding_id: id.into(),
                             location_id: Uuid::new_v4(),
                             storage_id: None,
                             hash: blake3::hash(&raw).as_bytes().to_vec(),
@@ -417,7 +420,7 @@ mod tests {
                             block_key_id: (algorithm != "none").then_some(Uuid::from_u128(0x200)),
                             compressed: false,
                             nonce: None,
-                            format: 1,
+                            format: 2,
                             state: "ready".into(),
                             created_at: date,
                         },
@@ -426,7 +429,7 @@ mod tests {
                 })
                 .collect();
             let p = Pack {
-                id: 7,
+                id: 7.into(),
                 location_id: Uuid::new_v4(),
                 storage_id: None,
                 algorithm: algorithm.into(),
@@ -448,8 +451,8 @@ mod tests {
                 encode(p, &members, &secrets, &pool, Strategy::Always, true).unwrap();
             let decoded = decode(&p, encoded.clone(), &secrets, &pool).unwrap();
             assert!(p.compressed);
-            assert_eq!(&p.aad().unwrap()[..8], b"MOKYU\x00\x00\x02");
-            assert_eq!(&decoded.bytes[..8], b"MOKYU\x00\x00\x02");
+            assert_eq!(&p.aad().unwrap()[..8], b"MOKYU\x00\x00\x04");
+            assert_eq!(&decoded.bytes[..8], b"MOKYU\x00\x00\x04");
             for (c, raw) in &members {
                 assert_eq!(decoded.chunk(c).unwrap(), *raw);
             }
@@ -470,7 +473,7 @@ mod tests {
                 decoded.bytes
             );
             if algorithm == "none" {
-                for (offset, value) in [(0, b'X'), (5, 1), (6, 1), (7, 0), (7, 1), (7, 3)] {
+                for (offset, value) in [(0, b'X'), (5, 1), (6, 1), (7, 0), (7, 1), (7, 2), (7, 3)] {
                     let mut damaged = decoded.bytes.to_vec();
                     damaged[offset] = value;
                     let mut changed = uncompressed.clone();

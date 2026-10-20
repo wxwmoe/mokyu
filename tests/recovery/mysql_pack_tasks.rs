@@ -201,7 +201,7 @@ async fn mysql_pack_task_contract() -> Result<()> {
         token: Uuid::new_v4(),
     };
     let pack = cache_tests::pack(&backend, first, task.id).await?;
-    let specific = id(&transactions::start_unpack(db, Some(pack), false).await?);
+    let specific = id(&transactions::start_unpack(db, Some(pack.into()), false).await?);
     assert_eq!(
         backend.raw(specific).await?.unwrap()["detail"]["storages"]
             .as_array()
@@ -210,11 +210,11 @@ async fn mysql_pack_task_contract() -> Result<()> {
         1
     );
     assert_eq!(
-        id(&transactions::start_unpack(db, Some(pack), false).await?),
+        id(&transactions::start_unpack(db, Some(pack.into()), false).await?),
         specific
     );
     assert_ne!(
-        id(&transactions::start_unpack(db, Some(pack), true).await?),
+        id(&transactions::start_unpack(db, Some(pack.into()), true).await?),
         specific
     );
     sqlx::query("INSERT INTO pack_changes(pack_id,generation) VALUES(?,2)")
@@ -222,11 +222,11 @@ async fn mysql_pack_task_contract() -> Result<()> {
         .execute(db)
         .await?;
     assert!(
-        transactions::finish_pack_change(db, stale, pack, 2)
+        transactions::finish_pack_change(db, stale, pack.into(), 2)
             .await
             .is_err()
     );
-    transactions::finish_pack_change(db, task, pack, 1).await?;
+    transactions::finish_pack_change(db, task, pack.into(), 1).await?;
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT generation FROM pack_changes WHERE pack_id=?")
             .bind(pack)
@@ -274,7 +274,7 @@ async fn mysql_pack_task_contract() -> Result<()> {
         1
     );
     assert!(
-        transactions::record_range(db, stale, pack, 2, json!({"decision":"split"}))
+        transactions::record_range(db, stale, pack.into(), 2, json!({"decision":"split"}))
             .await
             .is_err()
     );
@@ -284,8 +284,8 @@ async fn mysql_pack_task_contract() -> Result<()> {
             .fetch_one(db)
             .await?
     );
-    transactions::record_range(db, task, pack, 2, json!({"decision":"split"})).await?;
-    transactions::record_range(db, task, pack, 1, json!({"decision":"keep"})).await?;
+    transactions::record_range(db, task, pack.into(), 2, json!({"decision":"split"})).await?;
+    transactions::record_range(db, task, pack.into(), 1, json!({"decision":"keep"})).await?;
     let row = backend.raw(task.id).await?.unwrap();
     assert_eq!(row["processed"], 3);
     assert_eq!(row["detail"]["evaluated"], 2);
@@ -297,7 +297,7 @@ async fn mysql_pack_task_contract() -> Result<()> {
             .await?
     );
     transactions::finish_pack_queue(db, task, stream, 2).await?;
-    transactions::finish_pack_change(db, task, pack, 2).await?;
+    transactions::finish_pack_change(db, task, pack.into(), 2).await?;
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pack_maintenance WHERE stream_id=?")
             .bind(stream)

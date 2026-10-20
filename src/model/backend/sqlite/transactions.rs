@@ -1,5 +1,6 @@
 //! SQLite transactions serialize writes before reading their decision state.
 use super::queries;
+use crate::model::Id;
 use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, SqliteConnection};
 
@@ -414,7 +415,7 @@ pub(super) async fn setup_account(
 
 pub(crate) async fn checkpoint_audit(
     db: &mut SqliteConnection,
-    id: i64,
+    id: Id,
     action: &str,
     target: &str,
     project: Option<Uuid>,
@@ -1778,7 +1779,7 @@ async fn supersede_object_quota(
     connection: &mut SqliteConnection,
     bucket: uuid::Uuid,
     key: &str,
-    stream: uuid::Uuid,
+    stream: Id,
 ) -> Result<()> {
     let mut accounts = lock_quota(connection, bucket).await?;
     for mut row in queries::superseded_reservations(bucket, key, stream)
@@ -1797,10 +1798,7 @@ async fn supersede_object_quota(
     Ok(())
 }
 
-pub(super) async fn create_stream(
-    pool: &sqlx::SqlitePool,
-    mut input: StreamCreate,
-) -> Result<uuid::Uuid> {
+pub(super) async fn create_stream(pool: &sqlx::SqlitePool, mut input: StreamCreate) -> Result<Id> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     if let Some((task, token)) = input.owner {
         ensure!(
@@ -1832,8 +1830,8 @@ pub(super) async fn create_stream(
             crate::model::Error::OperationAborted
         );
     }
-    let id = uuid::Uuid::new_v4();
-    queries::insert_stream(id, &input).execute(&mut *tx).await?;
+    let inserted = queries::insert_stream(&input).execute(&mut *tx).await?;
+    let id = Id::from(inserted.last_insert_rowid());
     if input.claim_object {
         queries::claim_object(input.bucket, &input.key, id)
             .execute(&mut *tx)
@@ -1849,15 +1847,18 @@ pub(super) async fn append_tail(pool: &sqlx::SqlitePool, tail: StreamTail) -> Re
         tail.staging_storage.is_none() && tail.staging_key.is_none(),
         "shared staging is unavailable in single mode"
     );
-    queries::insert_fragment(&tail).execute(pool).await?;
+    let fragment = Id::from(
+        queries::insert_fragment(&tail)
+            .execute(pool)
+            .await?
+            .last_insert_rowid(),
+    );
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     #[cfg(feature = "fault-injection")]
     crate::faults::point("fragment-persisted").await;
     writing_stream(&mut tx, tail.stream).await?;
-    queries::seal_fragment(tail.fragment)
-        .execute(&mut *tx)
-        .await?;
-    queries::insert_fragment_extent(&tail)
+    queries::seal_fragment(fragment).execute(&mut *tx).await?;
+    queries::insert_fragment_extent(&tail, fragment)
         .execute(&mut *tx)
         .await?;
     queries::resize_writing_stream(tail.stream, tail.offset + i64::from(tail.size))
@@ -1867,7 +1868,7 @@ pub(super) async fn append_tail(pool: &sqlx::SqlitePool, tail: StreamTail) -> Re
     Ok(())
 }
 
-async fn writing_stream(connection: &mut SqliteConnection, stream: uuid::Uuid) -> Result<()> {
+async fn writing_stream(connection: &mut SqliteConnection, stream: Id) -> Result<()> {
     ensure!(
         queries::lock_writing_stream(stream)
             .fetch_optional(connection)
@@ -1901,11 +1902,13 @@ pub(super) async fn allocate_chunk(
         let chunk = queries::insert_chunk(&input)
             .execute(&mut *tx)
             .await?
-            .last_insert_rowid();
+            .last_insert_rowid()
+            .into();
         let encoding = queries::allocate_encoding(chunk)
             .execute(&mut *tx)
             .await?
-            .last_insert_rowid();
+            .last_insert_rowid()
+            .into();
         queries::set_chunk_encoding(chunk, encoding)
             .execute(&mut *tx)
             .await?;
@@ -1921,9 +1924,9 @@ pub(super) async fn allocate_chunk(
 
 pub(super) async fn reference_chunk(
     pool: &sqlx::SqlitePool,
-    stream: uuid::Uuid,
+    stream: Id,
     offset: i64,
-    chunk: i64,
+    chunk: Id,
     size: i32,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
@@ -1950,7 +1953,7 @@ pub(super) async fn reference_chunk(
 
 pub(super) async fn complete_chunk_write(
     pool: &sqlx::SqlitePool,
-    stream: uuid::Uuid,
+    stream: Id,
     offset: i64,
     chunk: &Chunk,
 ) -> Result<()> {
@@ -1992,11 +1995,11 @@ pub(super) async fn complete_chunk_write(
 
 pub(super) async fn copy_chunk_references(
     pool: &sqlx::SqlitePool,
-    destination: uuid::Uuid,
-    source: uuid::Uuid,
+    destination: Id,
+    source: Id,
     offset: i64,
     end: i64,
-    chunks: &[i64],
+    chunks: &[Id],
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     writing_stream(&mut tx, destination).await?;
@@ -2108,7 +2111,7 @@ pub(super) async fn save_quota(
 
 pub(super) async fn reserve_quota(
     pool: &sqlx::SqlitePool,
-    stream: uuid::Uuid,
+    stream: Id,
     required: i64,
     padding: bool,
     upload: Option<(uuid::Uuid, i32)>,
@@ -2149,18 +2152,17 @@ pub(super) async fn reserve_quota(
         );
         0
     };
-    let owner = upload.map_or(stream, |v| v.0);
-    let mut reservation = if let Some(row) = queries::quota_reservation(owner)
-        .fetch_optional(&mut *tx)
-        .await?
+    let mut reservation = if let Some(row) =
+        queries::owned_quota_reservation(stream, upload.map(|v| v.0))
+            .fetch_optional(&mut *tx)
+            .await?
     {
         row
     } else {
         let credit = queries::quota_credit(info.bucket_id, &info.object_key)
             .fetch_optional(&mut *tx)
             .await?;
-        queries::insert_quota_reservation(
-            owner,
+        let result = queries::insert_quota_reservation(
             info.bucket_id,
             &info.object_key,
             upload.is_none().then_some(stream),
@@ -2169,11 +2171,12 @@ pub(super) async fn reserve_quota(
         )
         .execute(&mut *tx)
         .await?;
-        queries::quota_reservation(owner)
+        queries::quota_reservation(Id::from(result.last_insert_rowid()))
             .fetch_one(&mut *tx)
             .await?
     };
     ensure!(!reservation.closed, crate::model::Error::OperationAborted);
+    let owner = reservation.id;
     queries::insert_quota_write(stream, owner)
         .execute(&mut *tx)
         .await?;
@@ -2232,7 +2235,7 @@ pub(super) async fn reserve_quota(
 pub(super) async fn complete_quota(
     pool: &sqlx::SqlitePool,
     upload: uuid::Uuid,
-    stream: uuid::Uuid,
+    stream: Id,
     size: i64,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
@@ -2248,7 +2251,7 @@ pub(super) async fn complete_quota(
         crate::model::Error::OperationAborted
     );
     lock_quota(&mut tx, bucket).await?;
-    let row = queries::quota_reservation(upload)
+    let row = queries::owned_quota_reservation(Id::default(), Some(upload))
         .fetch_one(&mut *tx)
         .await?;
     ensure!(
@@ -2265,7 +2268,7 @@ pub(super) async fn complete_quota(
 pub(super) async fn forget_quota_write(
     connection: &mut SqliteConnection,
     accounts: &mut [QuotaAccount; 2],
-    stream: uuid::Uuid,
+    stream: Id,
 ) -> Result<()> {
     let Some(write) = queries::quota_write(stream)
         .fetch_optional(&mut *connection)
@@ -2310,7 +2313,7 @@ pub(super) async fn close_upload_quota(
     accounts: &mut [QuotaAccount; 2],
     upload: uuid::Uuid,
 ) -> Result<()> {
-    let Some(mut row) = queries::quota_reservation(upload)
+    let Some(mut row) = queries::owned_quota_reservation(Id::default(), Some(upload))
         .fetch_optional(&mut *connection)
         .await?
     else {
@@ -2319,18 +2322,18 @@ pub(super) async fn close_upload_quota(
     if row.closed {
         return Ok(());
     }
-    let pending = queries::pending_quota_writes(upload)
+    let pending = queries::pending_quota_writes(row.id)
         .fetch_one(&mut *connection)
         .await?;
     change_reservation(connection, accounts, &mut row, 0, pending, 0).await?;
-    queries::clear_write_contributions(upload)
+    queries::clear_write_contributions(row.id)
         .execute(&mut *connection)
         .await?;
-    queries::close_quota_reservation(upload)
+    queries::close_quota_reservation(row.id)
         .execute(&mut *connection)
         .await?;
     if pending == 0 {
-        queries::delete_quota_reservation(upload)
+        queries::delete_quota_reservation(row.id)
             .execute(connection)
             .await?;
     }
@@ -2342,8 +2345,8 @@ pub(super) async fn replace_object_quota(
     accounts: &mut [QuotaAccount; 2],
     bucket: uuid::Uuid,
     key: &str,
-    old: Option<(uuid::Uuid, i64)>,
-    new: Option<(uuid::Uuid, i64)>,
+    old: Option<(Id, i64)>,
+    new: Option<(Id, i64)>,
 ) -> Result<()> {
     if old.map(|v| v.0) == new.map(|v| v.0) {
         return Ok(());
@@ -2403,7 +2406,7 @@ pub(super) async fn replace_object_quota(
 
 pub(super) async fn publish(
     pool: &sqlx::SqlitePool,
-    id: uuid::Uuid,
+    id: Id,
     if_match: Option<s3s::dto::ETagCondition>,
     if_none: Option<s3s::dto::ETagCondition>,
     completion: Option<(uuid::Uuid, String, serde_json::Value)>,
@@ -2598,7 +2601,7 @@ pub(super) async fn begin_upload_part(
     authority: &crate::authorization::Permit,
     upload: uuid::Uuid,
     number: i32,
-    stream: uuid::Uuid,
+    stream: Id,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     lock_permit(&mut tx, authority).await?;
@@ -2622,11 +2625,11 @@ pub(super) async fn begin_upload_part(
     {
         let mut accounts = lock_quota(&mut tx, parent.bucket_id).await?;
         if let Some(write) = queries::quota_write(token).fetch_optional(&mut *tx).await? {
-            let mut row = queries::quota_reservation(upload)
+            let mut row = queries::owned_quota_reservation(Id::default(), Some(upload))
                 .fetch_one(&mut *tx)
                 .await?;
             ensure!(
-                write.reservation_id == upload && !row.closed,
+                write.reservation_id == row.id && !row.closed,
                 "invalid part reservation"
             );
             let (logical, inflight, credit) = (
@@ -2653,7 +2656,7 @@ pub(super) async fn commit_upload_part(
     bucket: uuid::Uuid,
     upload: uuid::Uuid,
     number: i32,
-    stream: uuid::Uuid,
+    stream: Id,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     lock_permit(&mut tx, authority).await?;
@@ -2701,12 +2704,12 @@ pub(super) async fn commit_upload_part(
         require_sources(&mut tx, Some(stream), &[]).await?;
     }
     let mut accounts = lock_quota(&mut tx, bucket).await?;
-    let mut row = queries::quota_reservation(upload)
+    let mut row = queries::owned_quota_reservation(Id::default(), Some(upload))
         .fetch_one(&mut *tx)
         .await?;
     let write = queries::quota_write(stream).fetch_one(&mut *tx).await?;
     ensure!(
-        write.reservation_id == upload && write.allocated_bytes >= info.size && !row.closed,
+        write.reservation_id == row.id && write.allocated_bytes >= info.size && !row.closed,
         "part is not reserved"
     );
     let logical = quota_number(
@@ -2745,7 +2748,7 @@ pub(super) async fn commit_upload_part(
     Ok(())
 }
 
-pub(super) async fn retire_upload_work(pool: &sqlx::SqlitePool, stream: uuid::Uuid) -> Result<()> {
+pub(super) async fn retire_upload_work(pool: &sqlx::SqlitePool, stream: Id) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     let info = queries::publish_stream_record(stream)
         .fetch_one(&mut *tx)
@@ -2877,10 +2880,10 @@ pub(super) async fn upload_transfers(
 
 async fn replace_upload_range(
     connection: &mut SqliteConnection,
-    stream: uuid::Uuid,
+    stream: Id,
     offset: i64,
     length: usize,
-    chunk: i64,
+    chunk: Id,
     source: usize,
 ) -> Result<()> {
     if length == 0 {
@@ -3692,9 +3695,9 @@ async fn remove_object_reference(
     connection: &mut SqliteConnection,
     bucket: Uuid,
     key: &str,
-    old: Option<Uuid>,
+    old: Option<Id>,
 ) -> Result<()> {
-    let token = Uuid::new_v4();
+    let token = Id::default();
     queries::remove_object(bucket, key, token)
         .execute(&mut *connection)
         .await?;
@@ -3748,7 +3751,7 @@ async fn record_media_operation(
 }
 async fn complete_media_operation(
     connection: &mut Transaction<'_, Sqlite>,
-    version: Option<Uuid>,
+    version: Option<Id>,
 ) -> Result<()> {
     record_media_operation(
         connection,
@@ -3819,8 +3822,8 @@ async fn selected_object(
     connection: &mut SqliteConnection,
     bucket: Uuid,
     key: &str,
-    expected: Option<Uuid>,
-) -> Result<Option<Uuid>> {
+    expected: Option<Id>,
+) -> Result<Option<Id>> {
     let actual = queries::lock_object_version(bucket, key)
         .fetch_optional(connection)
         .await?
@@ -3831,7 +3834,7 @@ async fn selected_object(
 async fn selected_objects(
     connection: &mut SqliteConnection,
     input: &ObjectTransfer<'_>,
-) -> Result<Option<Uuid>> {
+) -> Result<Option<Id>> {
     let mut objects = [
         (
             input.source_bucket,
@@ -3850,7 +3853,7 @@ async fn selected_objects(
 async fn replace_object_reference(
     connection: &mut SqliteConnection,
     stream: &crate::app::StoredStream,
-    old: Option<Uuid>,
+    old: Option<Id>,
 ) -> Result<()> {
     queries::claim_object(stream.bucket_id, &stream.object_key, stream.id)
         .execute(&mut *connection)
@@ -3990,7 +3993,7 @@ pub(super) async fn move_object(
 
 async fn validate_copy(
     connection: &mut SqliteConnection,
-    id: Uuid,
+    id: Id,
     bucket: Uuid,
     key: &str,
     public: bool,
@@ -4028,7 +4031,7 @@ pub(super) async fn publish_copy(
     pool: &SqlitePool,
     permit: &Permit,
     input: ObjectTransfer<'_>,
-    id: Uuid,
+    id: Id,
     public: bool,
     expected_public: Option<bool>,
 ) -> Result<()> {
@@ -4117,7 +4120,7 @@ pub(super) async fn queue_storage_migration(
 pub(super) async fn complete_storage_migration(
     pool: &SqlitePool,
     task: Execution,
-    id: Uuid,
+    id: Id,
     job: &StorageMigration,
 ) -> Result<()> {
     ensure!(
@@ -4184,7 +4187,7 @@ pub(super) async fn complete_storage_migration(
     Ok(())
 }
 
-pub(super) async fn abandon_copy(pool: &SqlitePool, id: Uuid) -> Result<()> {
+pub(super) async fn abandon_copy(pool: &SqlitePool, id: Id) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     let stream = queries::publish_stream_record(id)
         .fetch_optional(&mut *tx)
@@ -4462,7 +4465,7 @@ pub(super) async fn cache_stage(pool: &SqlitePool, input: CacheStage<'_>) -> Res
 pub(super) async fn cache_seal(
     read: &SqlitePool,
     pool: &SqlitePool,
-    stream: Uuid,
+    stream: Id,
     eof: bool,
 ) -> Result<bool> {
     if eof {
@@ -4581,7 +4584,7 @@ pub(super) async fn cache_batch(
             .fetch_optional(&mut *tx)
             .await?
     } else {
-        detail["first"].as_i64()
+        Id::from_json(&detail["first"])?
     };
     let Some(first) = first else {
         return Ok(if let Some(upper) = upper {
@@ -4661,7 +4664,7 @@ pub(super) async fn cache_batch(
     ids.sort_unstable();
     ids.dedup();
     pin_inputs(&mut tx, task.id, &ids).await?;
-    let current: Vec<(i64, i64, Option<i64>, Option<Uuid>, i64, Option<i64>)> =
+    let current: Vec<(Id, Id, Option<Id>, Option<Id>, i64, Option<Id>)> =
         queries::lock_cache_inputs(&ids, task.id, flush)
             .build_query_as()
             .fetch_all(&mut *tx)
@@ -4723,11 +4726,11 @@ pub(super) async fn cache_finish(pool: &SqlitePool, task: Execution) -> Result<(
 
 pub(super) async fn cache_release(
     pool: &SqlitePool,
-    ids: &[i64],
+    ids: &[Id],
     existing_pack: bool,
 ) -> Result<CacheRelease> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    let rows: Vec<(i64, Option<String>)> = queries::lock_pending_chunks(ids)
+    let rows: Vec<(Id, Option<String>)> = queries::lock_pending_chunks(ids)
         .build_query_as()
         .fetch_all(&mut *tx)
         .await?;
@@ -4869,7 +4872,7 @@ pub(super) async fn scoped_pack_page(
     pool: &SqlitePool,
     principal: &Principal,
     scope: &ScopeQuery,
-    after: i64,
+    after: Id,
     limit: i64,
     state: Option<&str>,
 ) -> Result<Vec<PackSummary>> {
@@ -4900,8 +4903,8 @@ pub(super) async fn scoped_pack_detail(
     pool: &SqlitePool,
     principal: &Principal,
     scope: &ScopeQuery,
-    id: i64,
-    after: i64,
+    id: Id,
+    after: Id,
     limit: i64,
 ) -> Result<(PackSummary, Vec<PackMember>, bool)> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -4936,7 +4939,7 @@ pub(super) async fn scoped_pack_objects(
     pool: &SqlitePool,
     principal: &Principal,
     scope: &ScopeQuery,
-    id: i64,
+    id: Id,
     cursor: Option<(Uuid, String)>,
 ) -> Result<Vec<PackObject>> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -4990,7 +4993,7 @@ pub(super) async fn start_rewrite(
         .await?;
     let detail = serde_json::json!({"execution_mode":"single","storage_id":input.storage_id,"upper_chunk_id":upper,"profile_revision":input.profile_revision,"target_key_id":input.target_key_id,"target_key":input.target_key,"target_algorithm":input.target_algorithm});
     let id = enqueue_task(&mut tx, "rewrite", None, detail).await?;
-    if input.shards == 0 || upper == 0 {
+    if input.shards == 0 || !upper.is_valid() {
         queries::complete_task(id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
@@ -5079,9 +5082,9 @@ pub(super) async fn commit_rewrite_pack(
     task: Execution,
     old: &Pack,
     new: &Pack,
-    current: &[i64],
+    current: &[Id],
     members: &[Chunk],
-    first: i64,
+    first: Id,
 ) -> Result<()> {
     ensure!(
         old.storage_id == new.storage_id
@@ -5200,7 +5203,7 @@ pub(super) async fn start_pack(pool: &SqlitePool, policy: &str, automatic: bool)
     Ok(serde_json::json!({"task_id":id}))
 }
 
-pub(super) async fn start_unpack(pool: &SqlitePool, pack: Option<i64>, all: bool) -> Result<Value> {
+pub(super) async fn start_unpack(pool: &SqlitePool, pack: Option<Id>, all: bool) -> Result<Value> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     queries::lock_pack_policy("pack")
         .fetch_one(&mut *tx)
@@ -5297,7 +5300,7 @@ fn advance_storage_scope(detail: &mut Value) -> Result<bool> {
 pub(super) async fn finish_pack_change(
     pool: &SqlitePool,
     task: Execution,
-    pack: i64,
+    pack: Id,
     generation: i64,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
@@ -5311,7 +5314,7 @@ pub(super) async fn finish_pack_change(
 pub(super) async fn defer_pack_queue(
     pool: &SqlitePool,
     task: Execution,
-    stream: Uuid,
+    stream: Id,
     generation: i64,
     later: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
@@ -5326,7 +5329,7 @@ pub(super) async fn defer_pack_queue(
 pub(super) async fn finish_pack_queue(
     pool: &SqlitePool,
     task: Execution,
-    stream: Uuid,
+    stream: Id,
     generation: i64,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
@@ -5340,7 +5343,7 @@ pub(super) async fn finish_pack_queue(
 pub(super) async fn advance_pack_queue(
     pool: &SqlitePool,
     task: Execution,
-    stream: Uuid,
+    stream: Id,
     generation: i64,
     cursor: i64,
 ) -> Result<()> {
@@ -5355,7 +5358,7 @@ pub(super) async fn advance_pack_queue(
 pub(super) async fn record_range(
     pool: &SqlitePool,
     task: Execution,
-    pack: i64,
+    pack: Id,
     processed: usize,
     decision: Value,
 ) -> Result<()> {
@@ -5392,8 +5395,8 @@ pub(super) async fn pin_pack_inputs(
     Ok(())
 }
 
-async fn pin_inputs(db: &mut SqliteConnection, task: Uuid, ids: &[i64]) -> Result<()> {
-    let locked: Vec<(i64, Option<i64>, Uuid)> = queries::lock_pack_layout(ids)
+async fn pin_inputs(db: &mut SqliteConnection, task: Uuid, ids: &[Id]) -> Result<()> {
+    let locked: Vec<(Id, Option<Id>, Uuid)> = queries::lock_pack_layout(ids)
         .build_query_as()
         .fetch_all(&mut *db)
         .await?;
@@ -5421,7 +5424,7 @@ pub(super) async fn prepare_encoding(
     pool: &SqlitePool,
     physical: &Chunk,
     task: Execution,
-) -> Result<i64> {
+) -> Result<Id> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     lock_execution(&mut tx, task).await?;
     if let Some(key) = physical.block_key_id {
@@ -5432,7 +5435,8 @@ pub(super) async fn prepare_encoding(
     let id = queries::prepare_encoding(physical, task)
         .execute(&mut *tx)
         .await?
-        .last_insert_rowid();
+        .last_insert_rowid()
+        .into();
     queries::refresh_encoding_fingerprint(&mut tx, id).await?;
     tx.commit().await?;
     Ok(id)
@@ -5440,7 +5444,6 @@ pub(super) async fn prepare_encoding(
 
 pub(super) async fn prepare_pack(
     pool: &SqlitePool,
-    location: Uuid,
     storage: Uuid,
     algorithm: &str,
     key: Option<Uuid>,
@@ -5455,10 +5458,11 @@ pub(super) async fn prepare_pack(
             .fetch_one(&mut *tx)
             .await?;
     }
-    let id = queries::prepare_pack(location, storage, algorithm, key, bytes, count, task)
+    let id = queries::prepare_pack(storage, algorithm, key, bytes, count, task)
         .execute(&mut *tx)
         .await?
-        .last_insert_rowid();
+        .last_insert_rowid()
+        .into();
     queries::refresh_pack_fingerprint(&mut tx, id).await?;
     let pack = queries::pack_record(id).fetch_one(&mut *tx).await?;
     tx.commit().await?;
@@ -5482,7 +5486,7 @@ pub(super) async fn pack_metadata(pool: &SqlitePool, pack: &Pack) -> Result<()> 
 
 pub(super) async fn insert_pack_members(
     pool: &SqlitePool,
-    pack: i64,
+    pack: Id,
     rows: &[Mapping],
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
@@ -5532,7 +5536,7 @@ pub(super) async fn commit_pack_outputs(
     );
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     lock_execution(&mut tx, task).await?;
-    let current: Vec<(i64, Option<i64>, Uuid)> = queries::lock_pack_layout(&ids)
+    let current: Vec<(Id, Option<Id>, Uuid)> = queries::lock_pack_layout(&ids)
         .build_query_as()
         .fetch_all(&mut *tx)
         .await?;
@@ -5707,7 +5711,7 @@ pub(super) async fn commit_pack_outputs(
     Ok(())
 }
 
-pub(super) async fn pack_detail(pool: &SqlitePool, id: i64) -> Result<(Value, Vec<Value>)> {
+pub(super) async fn pack_detail(pool: &SqlitePool, id: Id) -> Result<(Value, Vec<Value>)> {
     let mut tx = pool.begin().await?;
     let value = queries::pack_detail(&mut tx, id).await?;
     tx.commit().await?;
@@ -5715,9 +5719,9 @@ pub(super) async fn pack_detail(pool: &SqlitePool, id: i64) -> Result<(Value, Ve
 }
 pub(super) async fn rewrite_candidates(
     pool: &SqlitePool,
-    after: i64,
+    after: Id,
     job: &crate::model::packing::RewriteTask,
-) -> Result<(Option<Chunk>, Option<(i64, i64)>)> {
+) -> Result<(Option<Chunk>, Option<(Id, Id)>)> {
     let mut tx = pool.begin().await?;
     let loose = queries::rewrite_loose_candidate(after, job)
         .build_query_as()
@@ -5732,8 +5736,8 @@ pub(super) async fn rewrite_candidates(
 }
 pub(super) async fn rewrite_pack_inputs(
     pool: &SqlitePool,
-    pack: i64,
-) -> Result<(Pack, Vec<Chunk>, Vec<i64>)> {
+    pack: Id,
+) -> Result<(Pack, Vec<Chunk>, Vec<Id>)> {
     let mut tx = pool.begin().await?;
     let old = queries::pack_record(pack).fetch_one(&mut *tx).await?;
     let members = queries::rewrite_members(pack)
@@ -5884,7 +5888,7 @@ pub(super) async fn checkpoint_integrity(
 pub(super) async fn integrity_objects(
     pool: &SqlitePool,
     task: Uuid,
-    issue: i64,
+    issue: Id,
     after: Option<(Uuid, String)>,
 ) -> Result<Vec<Value>> {
     let mut tx = pool.begin().await?;
@@ -5918,7 +5922,7 @@ pub(super) async fn recover_runtime(pool: &SqlitePool, maintenance: bool) -> Res
 }
 pub(super) async fn claim_stale_stream(
     pool: &SqlitePool,
-    id: Uuid,
+    id: Id,
     storage: Option<Uuid>,
     retention: Option<f64>,
 ) -> Result<bool> {
@@ -5926,7 +5930,7 @@ pub(super) async fn claim_stale_stream(
         return Ok(false);
     };
     if queries::lock_stale_stream(id, storage, retention)
-        .build_query_scalar::<Uuid>()
+        .build_query_scalar::<Id>()
         .fetch_optional(&mut *tx)
         .await?
         .is_none()
@@ -5939,7 +5943,7 @@ pub(super) async fn claim_stale_stream(
     tx.commit().await?;
     Ok(true)
 }
-pub(super) async fn cleanup_stream(pool: &SqlitePool, id: Uuid, batch: i64) -> Result<usize> {
+pub(super) async fn cleanup_stream(pool: &SqlitePool, id: Id, batch: i64) -> Result<usize> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     let Some(bucket) = queries::cleanup_stream_bucket(id)
         .fetch_optional(&mut *tx)
@@ -5994,7 +5998,7 @@ pub(super) async fn cleanup_stream(pool: &SqlitePool, id: Uuid, batch: i64) -> R
 // Keep new references fenced until the local fragment file has been removed.
 struct FragmentDelete {
     tx: Transaction<'static, Sqlite>,
-    id: Uuid,
+    id: Id,
 }
 #[async_trait::async_trait]
 impl FragmentDeletion for FragmentDelete {
@@ -6005,17 +6009,18 @@ impl FragmentDeletion for FragmentDelete {
         Ok(())
     }
 }
-pub(super) async fn claim_fragment(pool: &SqlitePool, id: Uuid) -> Result<Option<FragmentCleanup>> {
+pub(super) async fn claim_fragment(pool: &SqlitePool, id: Id) -> Result<Option<FragmentCleanup>> {
     let Some(mut tx) = try_cleanup_transaction(pool).await? else {
         return Ok(None);
     };
-    let Some((sealed, owner, file)) = queries::lock_cleanup_fragment(id)
+    let Some((location_id, sealed, owner, file)) = queries::lock_cleanup_fragment(id)
         .fetch_optional(&mut *tx)
         .await?
     else {
         return Ok(None);
     };
     Ok(Some(FragmentCleanup {
+        location_id,
         sealed,
         file,
         owner,
@@ -6036,10 +6041,10 @@ pub(super) async fn cleanup_tombstones(
 }
 pub(super) async fn retire_chunk(
     pool: &SqlitePool,
-    id: i64,
+    id: Id,
     storage: Uuid,
     grace: f64,
-    active: &[Uuid],
+    active: &[Id],
 ) -> Result<Option<Vec<Uuid>>> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     let Some((owner,)) = queries::lock_reclaim_chunk(id, storage, grace)
@@ -6648,8 +6653,8 @@ pub(super) async fn expire_access(pool: &SqlitePool, retention: f64, batch: i64)
 
 async fn require_sources(
     db: &mut sqlx::SqliteConnection,
-    stream: Option<Uuid>,
-    chunks: &[i64],
+    stream: Option<Id>,
+    chunks: &[Id],
 ) -> Result<()> {
     use futures_util::TryStreamExt;
     // Lock all logical rows before any physical row; shared validation locks block quarantine.
@@ -6745,7 +6750,7 @@ pub(super) async fn source_update(
     Ok(())
 }
 
-async fn require_inputs(db: &mut sqlx::SqliteConnection, chunks: &[i64]) -> Result<()> {
+async fn require_inputs(db: &mut sqlx::SqliteConnection, chunks: &[Id]) -> Result<()> {
     require_sources(db, None, chunks).await?;
     ensure!(
         !queries::quarantined_inputs(chunks)
@@ -6759,8 +6764,8 @@ async fn require_inputs(db: &mut sqlx::SqliteConnection, chunks: &[i64]) -> Resu
 
 async fn lock_splice_sources(
     db: &mut sqlx::SqliteConnection,
-    streams: &[Uuid],
-    chunk: i64,
+    streams: &[Id],
+    chunk: Id,
 ) -> Result<()> {
     use futures_util::TryStreamExt;
     for physical in [false, true] {
@@ -6771,8 +6776,8 @@ async fn lock_splice_sources(
     require_sources(db, None, &[chunk]).await
 }
 
-async fn source_input_stamp(db: &mut sqlx::SqliteConnection, chunks: &[i64]) -> Result<Value> {
-    let rows: Vec<(i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+async fn source_input_stamp(db: &mut sqlx::SqliteConnection, chunks: &[Id]) -> Result<Value> {
+    let rows: Vec<(Id, Option<Id>, Option<i64>, Option<Id>, Option<i64>)> =
         queries::source_input_versions(chunks)
             .build_query_as()
             .fetch_all(db)
@@ -6791,7 +6796,7 @@ async fn source_input_stamp(db: &mut sqlx::SqliteConnection, chunks: &[i64]) -> 
 async fn record_source_inputs(
     db: &mut sqlx::SqliteConnection,
     task: Uuid,
-    chunks: &[i64],
+    chunks: &[Id],
 ) -> Result<()> {
     require_inputs(db, chunks).await?;
     let stamp = source_input_stamp(db, chunks).await?;
@@ -6803,7 +6808,7 @@ async fn record_source_inputs(
 async fn check_source_inputs(
     db: &mut sqlx::SqliteConnection,
     task: Uuid,
-    chunks: &[i64],
+    chunks: &[Id],
 ) -> Result<()> {
     require_inputs(db, chunks).await?;
     let stamp = source_input_stamp(db, chunks).await?;
@@ -6821,7 +6826,7 @@ async fn check_source_inputs(
 
 async fn repair_writer(
     db: &mut sqlx::SqliteConnection,
-    stream: Uuid,
+    stream: Id,
     node: Option<&crate::model::recovery::RepairNode>,
 ) -> Result<()> {
     let authority = queries::write_authorization(stream)
@@ -6905,7 +6910,7 @@ async fn repair_sources(
             .await?,
         crate::model::Error::SourceUnavailable
     );
-    let rows: Vec<(i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+    let rows: Vec<(Id, Option<Id>, Option<i64>, Option<Id>, Option<i64>)> =
         queries::source_input_versions(&[chunk.id])
             .build_query_as()
             .fetch_all(&mut *db)
@@ -6970,7 +6975,7 @@ pub(super) async fn prepare_repair(
             .all(|source| source.storage_revision == revision),
         crate::model::Error::OperationAborted
     );
-    chunk.location_id = Uuid::new_v4();
+    chunk.location_id = Uuid::now_v7();
     chunk.algorithm = input.algorithm;
     chunk.block_key_id = input.key;
     chunk.stored_size = None;
@@ -6979,7 +6984,8 @@ pub(super) async fn prepare_repair(
     chunk.encoding_id = queries::insert_repair(&chunk, input.stream)
         .execute(&mut *tx)
         .await?
-        .last_insert_rowid();
+        .last_insert_rowid()
+        .into();
     let repair = Repair {
         stream: input.stream,
         node,
@@ -7135,10 +7141,10 @@ pub(super) async fn finish_repair(
 
 pub(super) async fn begin_raw(
     pool: &sqlx::SqlitePool,
-    stream: Uuid,
+    stream: Id,
     storage: Uuid,
     revision: i64,
-) -> Result<Uuid> {
+) -> Result<(Id, Uuid)> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     let (storage_type, unencoded, current, cdc, background) = queries::raw_target(stream, storage)
         .fetch_optional(&mut *tx)
@@ -7156,9 +7162,9 @@ pub(super) async fn begin_raw(
             == 1,
         crate::model::Error::OperationAborted
     );
-    let id = Uuid::new_v4();
-    queries::raw_insert(
-        id,
+    let location = Uuid::now_v7();
+    let inserted = queries::raw_insert(
+        location,
         stream,
         storage,
         revision,
@@ -7170,19 +7176,20 @@ pub(super) async fn begin_raw(
     )
     .execute(&mut *tx)
     .await?;
+    let id = Id::from(inserted.last_insert_rowid());
     if background {
         queries::raw_enqueue_processing(stream, id)
             .execute(&mut *tx)
             .await?;
     }
     tx.commit().await?;
-    Ok(id)
+    Ok((id, location))
 }
 
 pub(super) async fn finish_raw(
     pool: &sqlx::SqlitePool,
-    stream: Uuid,
-    source: Uuid,
+    stream: Id,
+    source: Id,
     size: i64,
     digest: &[u8],
 ) -> Result<()> {
@@ -7213,7 +7220,7 @@ pub(super) async fn finish_raw(
     Ok(())
 }
 
-async fn validate_raw(db: &mut sqlx::SqliteConnection, stream: Uuid, size: i64) -> Result<()> {
+async fn validate_raw(db: &mut sqlx::SqliteConnection, stream: Id, size: i64) -> Result<()> {
     let sources = queries::raw_sources_lock(stream)
         .fetch_all(&mut *db)
         .await?;
@@ -7231,8 +7238,8 @@ async fn validate_raw(db: &mut sqlx::SqliteConnection, stream: Uuid, size: i64) 
 
 pub(super) async fn deduplicate_raw(
     pool: &sqlx::SqlitePool,
-    stream: Uuid,
-    source: Uuid,
+    stream: Id,
+    source: Id,
     hash: &[u8],
 ) -> Result<bool> {
     ensure!(hash.len() == 32, "invalid raw content hash");
@@ -7256,7 +7263,7 @@ pub(super) async fn deduplicate_raw(
 
 async fn share_raw(
     db: &mut sqlx::SqliteConnection,
-    stream: Uuid,
+    stream: Id,
     current: &crate::model::raw::RawSource,
     hash: &[u8],
 ) -> Result<bool> {
@@ -7314,7 +7321,7 @@ pub(super) async fn multipart_file(pool: &SqlitePool, upload: Uuid) -> Result<Uu
     {
         id
     } else {
-        let id = Uuid::new_v4();
+        let id = Uuid::now_v7();
         ensure!(
             queries::insert_multipart_file(id, upload)
                 .execute(&mut *tx)
@@ -7332,7 +7339,7 @@ pub(super) async fn multipart_file(pool: &SqlitePool, upload: Uuid) -> Result<Uu
 pub(super) async fn remap_multipart_file(
     pool: &SqlitePool,
     upload: Uuid,
-    source: Uuid,
+    source: Id,
     ranges: &[crate::model::multipart::FileRemap],
 ) -> Result<()> {
     ensure!(

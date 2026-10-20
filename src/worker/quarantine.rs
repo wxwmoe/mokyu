@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{
     app::App,
     authorization::Principal,
@@ -21,23 +22,19 @@ impl App {
         ensure!((1..=200).contains(&limit), s3s::s3_error!(InvalidArgument));
         let mut items = if query.source == crate::model::source::SourceType::Raw {
             let after = if query.after.is_empty() {
-                uuid::Uuid::nil()
+                Id::default()
             } else {
-                uuid::Uuid::parse_str(&query.after).map_err(|_| s3s::s3_error!(InvalidArgument))?
+                Id::parse(&query.after, self.config.database.backend)?
             };
             self.raw
                 .quarantines(query.storage_id, after, limit + 1)
                 .await?
         } else {
             let after = if query.after.is_empty() {
-                0
+                Id::default()
             } else {
-                query
-                    .after
-                    .parse::<i64>()
-                    .map_err(|_| s3s::s3_error!(InvalidArgument))?
+                Id::parse(&query.after, self.config.database.backend)?
             };
-            ensure!(after >= 0, s3s::s3_error!(InvalidArgument));
             self.physical
                 .quarantines(
                     query.storage_id,
@@ -74,6 +71,7 @@ impl App {
         self.authorization.admin(principal).await?.finish().await?;
         self.source_writable()?;
         scope.validate()?;
+        scope.identity()?.validate(self.config.database.backend)?;
         let snapshot = self.physical.source_snapshot(&scope).await?;
         ensure!(
             snapshot.state == "ready" && snapshot.quarantine_code.is_some() == recheck,

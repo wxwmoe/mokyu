@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::Id;
 use crate::{
     authorization::{Action, Permit, Principal},
     model::{
@@ -8,8 +9,9 @@ use crate::{
     },
 };
 use serde_json::json;
+use uuid::Uuid;
 
-async fn stream(stores: &Stores, bucket: Uuid, key: &str) -> Result<Uuid> {
+async fn stream(stores: &Stores, bucket: Uuid, key: &str) -> Result<Id> {
     let id = stores
         .streams
         .create(StreamCreate {
@@ -27,7 +29,7 @@ async fn stream(stores: &Stores, bucket: Uuid, key: &str) -> Result<Uuid> {
     stores.quota.reserve(id, 32, false, None).await?;
     Ok(id)
 }
-fn input(storage: Uuid, stream: Uuid) -> ChunkCreate {
+fn input(storage: Uuid, stream: Id) -> ChunkCreate {
     ChunkCreate {
         storage,
         stream,
@@ -37,7 +39,7 @@ fn input(storage: Uuid, stream: Uuid) -> ChunkCreate {
         key: None,
     }
 }
-async fn quarantine(stores: &Stores, storage: Uuid, encoding: i64, clear: bool) -> Result<()> {
+async fn quarantine(stores: &Stores, storage: Uuid, encoding: Id, clear: bool) -> Result<()> {
     let scope = SourceScope {
         storage_id: storage,
         source: SourceType::Chunk,
@@ -83,7 +85,7 @@ async fn quarantine(stores: &Stores, storage: Uuid, encoding: i64, clear: bool) 
         })
         .await
 }
-async fn candidate(stores: &Stores, storage: Uuid, stream: Uuid) -> Result<Repair> {
+async fn candidate(stores: &Stores, storage: Uuid, stream: Id) -> Result<Repair> {
     let RepairAllocation::Candidate(candidate) = stores
         .chunks
         .prepare_repair(input(storage, stream), None)
@@ -140,6 +142,12 @@ async fn source_recovery_contract() -> Result<()> {
         )
         .await?;
     creation.writer.finish().await?;
+    let mut profile = stores.storage_profiles.load(storage).await?;
+    profile.deleted_chunk_retention = "1s".into();
+    stores
+        .storage_profiles
+        .update("recovery".into(), profile)
+        .await?;
     let bucket = stores
         .buckets
         .create(
@@ -154,7 +162,12 @@ async fn source_recovery_contract() -> Result<()> {
         .id;
     let original = stream(&stores, bucket, "original").await?;
     let (mut chunk, _) = stores.chunks.allocate(input(storage, original)).await?;
-    chunk.location_id = Uuid::new_v4();
+    assert_eq!(chunk.uuid.get_version_num(), 7);
+    assert_eq!(chunk.location_id.get_version_num(), 7);
+    if let Id::Uuid(id) = chunk.id {
+        assert_eq!(id, chunk.uuid);
+        assert_eq!(chunk.encoding_id, Id::Uuid(chunk.location_id));
+    }
     chunk.stored_size = Some(32);
     stores.chunks.mark_uploading(&chunk).await?;
     stores.physical.register_encoding(&chunk).await?;
@@ -183,6 +196,7 @@ async fn source_recovery_contract() -> Result<()> {
     metadata(&stores, &mut b).await?;
     let restored = stores.chunks.finish_repair(&a, 0).await?;
     assert_eq!(restored.id, chunk.id);
+    assert_eq!(restored.uuid, chunk.uuid);
     assert_eq!(restored.encoding_id, a.chunk.encoding_id);
     let reused = stores.chunks.finish_repair(&b, 0).await?;
     let audit = stores
@@ -225,7 +239,10 @@ async fn source_recovery_contract() -> Result<()> {
         stores.chunks.extents(second, 0, 32).await?[0].chunk_id,
         Some(chunk.id)
     );
-    let old = stores.physical.quarantines(storage, false, 0, 10).await?;
+    let old = stores
+        .physical
+        .quarantines(storage, false, 0.into(), 10)
+        .await?;
     assert_eq!(old.len(), 1);
     assert_eq!(old[0].state, "retired");
 
@@ -324,6 +341,7 @@ async fn source_recovery_contract() -> Result<()> {
             .iter()
             .any(|row| row.0 == encoding)
     );
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     stores
         .maintenance
         .cleanup_history("chunk_encodings", -1., 100, &[], 1000)

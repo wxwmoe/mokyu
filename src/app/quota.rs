@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::model::Id;
 use crate::model::{self, Error};
 use anyhow::Result;
 use uuid::Uuid;
@@ -48,7 +49,7 @@ pub(crate) fn database_error(error: &anyhow::Error) -> Option<s3s::S3Error> {
 impl App {
     pub(crate) async fn reserve_quota(
         &self,
-        stream: Uuid,
+        stream: Id,
         size: i64,
         padding: bool,
         upload: Option<(Uuid, i32)>,
@@ -56,7 +57,7 @@ impl App {
         self.quota.reserve(stream, size, padding, upload).await
     }
 
-    pub(crate) async fn complete_quota(&self, upload: Uuid, stream: Uuid, size: i64) -> Result<()> {
+    pub(crate) async fn complete_quota(&self, upload: Uuid, stream: Id, size: i64) -> Result<()> {
         self.quota.complete(upload, stream, size).await
     }
 }

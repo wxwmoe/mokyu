@@ -119,7 +119,7 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
     );
     assert_eq!(
         queries::schema_version().fetch_one(&backend.read).await?,
-        18
+        26
     );
     assert_eq!(
         queries::journal_mode().fetch_one(&backend.read).await?,

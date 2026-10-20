@@ -21,7 +21,7 @@ def main():
     pack = detail['pack']
     members = detail['members']
     assert len(members) >= 2
-    physical = fixture.prefix + 'packs/' + pack['location_id'].replace('-', '')[:2] + '/' + pack['location_id'].replace('-', '')
+    physical = fixture.prefix + 'packs/' + pack['location_id'].replace('-', '')[-2:] + '/' + pack['location_id'].replace('-', '')
     original = fixture.bytes(physical)
     fixture.bytes(physical, bytes([original[0] ^ 1]) + original[1:])
     scope = dict(storage_id=fixture.store['id'], source='pack', id=pack_id)

@@ -87,7 +87,7 @@ impl App {
                 "enable maintenance before destructive backend sweep"
             );
             ensure!(
-                self.active.lock().unwrap().is_empty(),
+                self.active_operations() == 0,
                 "wait for active uploads, completions and reads to drain"
             );
         }
@@ -131,7 +131,13 @@ impl App {
             }
             return Ok(false);
         }
-        let active: Vec<Uuid> = self.active.lock().unwrap().keys().copied().collect();
+        let active: Vec<Uuid> = self
+            .active_uploads
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
         let completed = self
             .buckets
             .purge_batch(id, bucket, cursor, batch, &active)
@@ -154,7 +160,7 @@ impl App {
                 "maintenance was disabled; sweep stopped"
             );
             ensure!(
-                self.active.lock().unwrap().is_empty(),
+                self.active_operations() == 0,
                 "active data operations have not drained"
             );
             ensure!(

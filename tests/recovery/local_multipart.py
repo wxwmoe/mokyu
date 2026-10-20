@@ -71,8 +71,8 @@ def main():
                 if row['source_id'] is None:
                     row['path'] = root / identifier(row['id']).hex
                 else:
-                    ident = identifier(row['source_id']).hex
-                    row['path'] = (fixture.root / 'raw' / ident[:2] / ident).with_suffix('.partial')
+                    ident = identifier(row['id']).hex
+                    row['path'] = (fixture.root / 'raw' / ident[-2:] / ident).with_suffix('.partial')
                 source_ids.add(row['path'])
             return rows
 
@@ -92,11 +92,11 @@ def main():
             return reply
 
         def raw_path(key):
-            row, = database.query('''SELECT r.source_id AS id FROM objects o JOIN raw_ranges r ON r.stream_id=o.stream_id
-                WHERE o.bucket_id=%s AND o.object_key=%s''',
+            row, = database.query(f'''SELECT s.{database.raw_location} AS id FROM objects o JOIN raw_ranges r ON r.stream_id=o.stream_id
+                JOIN raw_sources s ON s.id=r.source_id WHERE o.bucket_id=%s AND o.object_key=%s''',
                 uuid.UUID(fixture.bucket_id), key if database.type == 'postgres' else key.encode())
             ident = identifier(row['id']).hex
-            return fixture.root / 'raw' / ident[:2] / ident
+            return fixture.root / 'raw' / ident[-2:] / ident
 
         data = [os.urandom(5 * 1024 * 1024 + 3), os.urandom(5 * 1024 * 1024 + 5), b'last part']
         upload = create('sequential')
@@ -219,11 +219,11 @@ def main():
                 try:
                     wait(lambda: marker.with_suffix('.hit').exists() or request.done(), 'copy did not reach ' + point)
                     assert not request.done(), request.exception()
-                    row, = database.query('''SELECT r.id FROM raw_sources r JOIN streams s ON s.id=r.owner_stream
+                    row, = database.query(f'''SELECT r.{database.raw_location} AS id FROM raw_sources r JOIN streams s ON s.id=r.owner_stream
                         WHERE r.storage_id=%s AND s.object_key=%s AND r.state='writing' ''',
                         uuid.UUID(fixture.store['id']), key if database.type == 'postgres' else key.encode())
                     ident = identifier(row['id']).hex
-                    checkpoint_path = (fixture.root / 'raw' / ident[:2] / ident).with_suffix('.partial')
+                    checkpoint_path = (fixture.root / 'raw' / ident[-2:] / ident).with_suffix('.partial')
                     source_ids.add(checkpoint_path)
                     # One copying batch may lead one confirmation batch; each is below 20 MiB.
                     wait(lambda: checkpoint_path.stat().st_size >= 32 * 1024 * 1024,

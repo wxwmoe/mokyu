@@ -362,7 +362,10 @@ impl Config {
             .saturating_sub(slots as u64 * slot_bytes)
             .saturating_sub(memory / 4);
         let pack_required = {
-            let payload = maximum + 12 + 44 * (maximum / crate::content::codec::MIN as u64 + 1);
+            let payload = maximum
+                + 12
+                + crate::content::pack::MEMBER_SIZE as u64
+                    * (maximum / crate::content::codec::MIN as u64 + 1);
             (payload * 4 + workspace).div_ceil(1024 * 1024) * 1024 * 1024
         };
         let cache_maximum = remaining
@@ -385,7 +388,10 @@ impl Config {
         let pack_memory_units =
             ((remaining - response_cache_bytes) / 2 / (1024 * 1024)).min(u32::MAX as u64) as u32;
         {
-            let payload = maximum + 12 + 44 * (maximum / crate::content::codec::MIN as u64 + 1);
+            let payload = maximum
+                + 12
+                + crate::content::pack::MEMBER_SIZE as u64
+                    * (maximum / crate::content::codec::MIN as u64 + 1);
             ensure!(
                 (payload * 4 + workspace).div_ceil(1024 * 1024) <= u64::from(pack_memory_units),
                 "pack.max_size exceeds effective memory; lower the pack size or increase the container memory limit"

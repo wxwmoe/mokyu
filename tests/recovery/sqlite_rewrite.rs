@@ -125,7 +125,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
     );
     let input = RewriteTask {
         storage_id: storage,
-        upper_chunk_id: 0,
+        upper_chunk_id: 0.into(),
         shard: 0,
         shards: 1,
         profile_revision: 2,
@@ -155,8 +155,8 @@ async fn sqlite_rewrite_contract() -> Result<()> {
         token: Uuid::new_v4(),
     };
     assert_eq!(
-        queries::rewrite_pack_candidate(0, &job)
-            .build_query_as::<(i64, i64)>()
+        queries::rewrite_pack_candidate(0.into(), &job)
+            .build_query_as::<(crate::model::Id, crate::model::Id)>()
             .fetch_optional(db)
             .await?,
         Some((rows[0].chunk.id, pack_a.id))
@@ -189,7 +189,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
     }];
     transactions::pin_pack_inputs(db, task, &inputs).await?;
     let mut replacement =
-        transactions::prepare_pack(db, Uuid::new_v4(), storage, "none", None, 64, 2, task).await?;
+        transactions::prepare_pack(db, storage, "none", None, 64, 2, task).await?;
     replacement.compressed = true;
     replacement.stored_size = Some(36);
     replacement.digest = Some(vec![8; 32]);
@@ -257,7 +257,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
     // Advancing past the maximum member ID would skip the interleaved second pack.
     assert_eq!(
         queries::rewrite_pack_candidate(rows[0].chunk.id, &job)
-            .build_query_as::<(i64, i64)>()
+            .build_query_as::<(crate::model::Id, crate::model::Id)>()
             .fetch_optional(db)
             .await?,
         Some((rows[1].chunk.id, pack_b.id))
@@ -279,7 +279,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
         .collect();
     transactions::pin_pack_inputs(db, task, &inputs).await?;
     let mut replacement =
-        transactions::prepare_pack(db, Uuid::new_v4(), storage, "none", None, 64, 2, task).await?;
+        transactions::prepare_pack(db, storage, "none", None, 64, 2, task).await?;
     replacement.compressed = true;
     replacement.stored_size = Some(36);
     replacement.digest = Some(vec![8; 32]);
@@ -294,14 +294,14 @@ async fn sqlite_rewrite_contract() -> Result<()> {
     )
     .await?;
     assert!(
-        queries::rewrite_pack_candidate(0, &job)
-            .build_query_as::<(i64, i64)>()
+        queries::rewrite_pack_candidate(0.into(), &job)
+            .build_query_as::<(crate::model::Id, crate::model::Id)>()
             .fetch_optional(db)
             .await?
             .is_none()
     );
 
-    let mut after = 0;
+    let mut after = crate::model::Id::default();
     let mut changed = Vec::new();
     while let Some(source) = queries::rewrite_loose_candidate(after, &job)
         .build_query_as::<Chunk>()
@@ -329,7 +329,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
                 .is_err()
         );
         let mut changed_source = source.clone();
-        changed_source.encoding_id += 10000;
+        changed_source.encoding_id = i64::MAX.into();
         assert!(
             transactions::commit_rewrite_chunk(db, task, &changed_source, &physical)
                 .await

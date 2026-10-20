@@ -1,6 +1,7 @@
 use super::{Backend, connection, queries};
 use crate::authorization::{Action, DEFAULT_PROJECT, Permit, Principal};
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::multipart::{
     MultipartCreate, PartStitch, SeedConsumption, TransferFilter, WebUpload,
 };
@@ -26,7 +27,7 @@ fn upload<'a>(authority: &'a Permit, key: &'a str) -> MultipartCreate<'a> {
         max_active: None,
     }
 }
-async fn part(backend: &Backend, authority: &Permit, key: &str) -> Result<Uuid> {
+async fn part(backend: &Backend, authority: &Permit, key: &str) -> Result<Id> {
     StreamStore::create(
         backend,
         StreamCreate {
@@ -181,9 +182,12 @@ async fn mysql_multipart_contract() -> Result<()> {
         .finish(original, 32, "part", json!({"sha256":"checksum"}))
         .await?;
     assert!(
-        crate::model::audit::scope(-1, backend.commit_part(&authority, bucket, id, 1, original))
-            .await
-            .is_err()
+        crate::model::audit::scope(
+            (-1).into(),
+            backend.commit_part(&authority, bucket, id, 1, original)
+        )
+        .await
+        .is_err()
     );
     assert!(backend.part(id, 1).await?.is_none());
     usage(&backend, bucket, 32, 32).await?;

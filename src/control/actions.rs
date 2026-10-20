@@ -1,4 +1,5 @@
 use super::{Identity, media::ObjectMetadata};
+use crate::model::Id;
 use crate::model::object::{
     MediaAction, ObjectTransfer, Outcome, RECEIPT, Receipt, StorageMigration,
 };
@@ -25,9 +26,9 @@ use uuid::Uuid;
 pub(super) struct Item {
     client_id: Uuid,
     key: String,
-    version: Uuid,
+    version: Id,
     target_key: Option<String>,
-    target_version: Option<Uuid>,
+    target_version: Option<Id>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -163,6 +164,12 @@ pub(super) async fn batch(
             })
     }) {
         return Err(invalid().into());
+    }
+    for item in &input.objects {
+        item.version.validate(app.config.database.backend)?;
+        if let Some(version) = item.target_version {
+            version.validate(app.config.database.backend)?;
+        }
     }
     let permit = authority(&actor, &input);
     let mut results = Vec::with_capacity(input.objects.len());

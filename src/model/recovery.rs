@@ -1,6 +1,6 @@
+use crate::model::Id;
 use crate::{content::codec::Chunk, model::source::SourceSnapshot};
 use anyhow::{Result, ensure};
-use uuid::Uuid;
 
 #[cfg(test)]
 #[path = "../../tests/recovery/source_recovery.rs"]
@@ -20,7 +20,7 @@ pub(crate) struct RepairNode {
 
 #[derive(Clone)]
 pub(crate) struct Repair {
-    pub stream: Uuid,
+    pub stream: Id,
     pub node: Option<RepairNode>,
     pub chunk: Chunk,
     pub sources: Vec<SourceSnapshot>,

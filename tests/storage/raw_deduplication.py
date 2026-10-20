@@ -25,7 +25,7 @@ def main():
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
 
     def source(key, bucket_id=bucket):
-        rows = database.query('''SELECT r.id,r.content_hash,r.size,r.digest,r.medium,r.upload_id
+        rows = database.query(f'''SELECT r.id,r.{database.raw_location} AS file_uuid,r.content_hash,r.size,r.digest,r.medium,r.upload_id
             FROM objects o JOIN raw_ranges e ON e.stream_id=o.stream_id
             JOIN raw_sources r ON r.id=e.source_id
             WHERE o.bucket_id=%s AND o.object_key=%s''', bucket_id, key if database.type == 'postgres' else key.encode())
@@ -114,11 +114,11 @@ def main():
     assert Decimal(usage['attributed_raw_bytes']) == len(data) / 2, usage
     print('PASS raw usage counts unique files and attributes cross-bucket sharing', flush=True)
 
-    identity = uuid.UUID(bytes=bytes(shared['id'])) if database.type != 'postgres' else uuid.UUID(str(shared['id']))
-    relative = 'raw/' + identity.hex[:2] + '/' + identity.hex
+    identity = uuid.UUID(bytes=bytes(shared['file_uuid'])) if database.type != 'postgres' else uuid.UUID(str(shared['file_uuid']))
+    relative = 'raw/' + identity.hex[-2:] + '/' + identity.hex
     physical = fixture.prefix + relative if fixture.backend else str(fixture.root / relative)
     fixture.bytes(physical, different)
-    scope = dict(storage_id=str(storage), source='raw', id=str(identity))
+    scope = dict(storage_id=str(storage), source='raw', id=str(shared['id']))
     fixture.finished(fixture.execute('quarantine', fixture.preview('quarantine', scope)))
     fixture.put('retransmitted', data)
     recovered = source('retransmitted')

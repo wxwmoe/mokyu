@@ -3,6 +3,7 @@ use super::{
     contract::{self, BucketView},
     insights,
 };
+use crate::model::Id;
 use crate::{app::App, authorization::Action, http::HttpError};
 use anyhow::Result;
 use axum::{
@@ -112,7 +113,7 @@ pub(super) async fn save_website(
 #[derive(Deserialize, utoipa::IntoParams)]
 pub(crate) struct ChunkQuery {
     key: String,
-    version: Uuid,
+    version: Id,
     after: Option<i64>,
     limit: Option<i64>,
 }
@@ -127,6 +128,7 @@ pub(super) async fn object_chunks(
         .principal
         .require(app.authorization.as_ref(), bucket, Action::Inspect)
         .await?;
+    q.version.validate(app.config.database.backend)?;
     let limit = q.limit.unwrap_or(100);
     if !(1..=200).contains(&limit) || q.after.is_some_and(|a| a < 0) {
         return Err(s3s::s3_error!(InvalidArgument).into());

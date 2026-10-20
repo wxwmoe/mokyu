@@ -7,7 +7,7 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator.locking = false;
     migrator
 };
-const SCHEMA_VERSION: i64 = 50;
+const SCHEMA_VERSION: i64 = 51;
 const LEGACY_SCHEMA_VERSION: i32 = 33;
 
 pub(super) async fn run(owner: &mut PgConnection) -> Result<()> {
@@ -37,6 +37,14 @@ async fn run_locked(owner: &mut PgConnection) -> Result<()> {
         i64::from(version) <= SCHEMA_VERSION,
         "database schema is newer than this binary; downgrade is unsupported"
     );
+    if i64::from(version) < 51 {
+        ensure!(
+            !queries::incompatible_payload(version)
+                .fetch_one(&mut *owner)
+                .await?,
+            "file identity format requires an empty store; migrate logical objects through S3"
+        );
+    }
     ensure!(
         version >= LEGACY_SCHEMA_VERSION,
         "unsupported database schema version; migrate logical objects through S3"

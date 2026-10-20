@@ -1,4 +1,5 @@
 use crate::config::Secrets;
+use crate::model::Id;
 use anyhow::{Context, Result, bail, ensure};
 use aws_lc_rs::aead::{AES_256_GCM, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use bytes::Bytes;
@@ -64,8 +65,8 @@ pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
     aad(c).context(IntegrityError::Metadata)?;
     let tag = if c.algorithm == "none" { 0 } else { 16 };
     ensure!(
-        c.id > 0
-            && c.encoding_id > 0
+        c.id.is_valid()
+            && c.encoding_id.is_valid()
             && c.state == "ready"
             && c.stored_size
                 .is_some_and(|n| n > tag && n <= MAX as i32 + tag),
@@ -94,8 +95,9 @@ pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
 
 #[derive(Clone, serde::Deserialize, Serialize)]
 pub struct Chunk {
-    pub id: i64,
-    pub encoding_id: i64,
+    pub id: Id,
+    pub uuid: Uuid,
+    pub encoding_id: Id,
     pub location_id: Uuid,
     pub storage_id: Option<Uuid>,
     pub hash: Vec<u8>,
@@ -178,12 +180,15 @@ impl Key {
 }
 fn aad(c: &Chunk) -> Result<Vec<u8>> {
     ensure!(
-        c.format == 1 && c.hash.len() == 32 && (1..=MAX as i32).contains(&c.raw_size),
+        c.format == 2
+            && !c.uuid.is_nil()
+            && c.hash.len() == 32
+            && (1..=MAX as i32).contains(&c.raw_size),
         "invalid chunk metadata"
     );
     let mut aad = Vec::with_capacity(128 + c.block_key_id.map_or(0, |id| id.to_string().len()));
-    aad.extend_from_slice(b"MOKYU\x00\x00\x01");
-    aad.extend_from_slice(&c.encoding_id.to_be_bytes());
+    aad.extend_from_slice(b"MOKYU\x00\x00\x03");
+    aad.extend_from_slice(c.uuid.as_bytes());
     aad.extend_from_slice(c.location_id.as_bytes());
     aad.extend_from_slice(&c.hash);
     aad.extend_from_slice(&c.raw_size.to_be_bytes());
@@ -324,7 +329,10 @@ pub fn decode_cache(
     compression: &crate::content::compression::Pool,
 ) -> Result<Bytes> {
     ensure!(
-        c.format == 1 && c.hash.len() == 32 && (1..=MAX as i32).contains(&c.raw_size),
+        c.format == 2
+            && !c.uuid.is_nil()
+            && c.hash.len() == 32
+            && (1..=MAX as i32).contains(&c.raw_size),
         "invalid chunk metadata"
     );
     let raw = if compressed {
@@ -424,8 +432,9 @@ mod tests {
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
             let secrets = secrets_for(algorithm);
             let c = Chunk {
-                id: 42,
-                encoding_id: 42,
+                uuid: Uuid::from_u128(41),
+                id: 42.into(),
+                encoding_id: 42.into(),
                 location_id: Uuid::from_u128(42),
                 storage_id: None,
                 hash: blake3::hash(input).as_bytes().to_vec(),
@@ -439,7 +448,7 @@ mod tests {
                         .unwrap()
                         .to_vec()
                 }),
-                format: 1,
+                format: 2,
                 state: "preparing".into(),
                 created_at: "2026-09-21T00:00:00Z".parse().unwrap(),
             };
@@ -458,7 +467,7 @@ mod tests {
                     true,
                 )
                 .unwrap();
-                assert_eq!(independent.encoding_id, 42);
+                assert_eq!(independent.encoding_id, 42.into());
                 assert_eq!(
                     crate::content::nonce::id(independent.nonce.as_deref()),
                     Some(7000)
@@ -496,10 +505,10 @@ mod tests {
             );
             let expected = match algorithm {
                 "none" => "6d6f6b79752d7631",
-                "aes-256-gcm" => "9e5fc108be0795bc4d7780083673095f485cee866149ae4a",
-                _ => "c692b7da947c6766790d4d5f772bc7b664c0eb04afc2c020",
+                "aes-256-gcm" => "9e5fc108be0795bc6000cec3c47a3a003ae287a5b76d34bc",
+                _ => "c692b7da947c6766f31f607589ba734f9784cf667944313c",
             };
-            assert_eq!(&aad(&c).unwrap()[..8], b"MOKYU\x00\x00\x01");
+            assert_eq!(&aad(&c).unwrap()[..8], b"MOKYU\x00\x00\x03");
             assert_eq!(hex::encode(&encoded), expected);
             assert_eq!(
                 decode(&c, encoded, &secrets, 20, &compression)
@@ -597,8 +606,9 @@ mod tests {
                 v
             }] {
                 let c = Chunk {
-                    id: 42,
-                    encoding_id: 42,
+                    uuid: Uuid::now_v7(),
+                    id: 42.into(),
+                    encoding_id: 42.into(),
                     location_id: Uuid::from_u128(42),
                     storage_id: None,
                     hash: blake3::hash(&input).as_bytes().to_vec(),
@@ -612,7 +622,7 @@ mod tests {
                             .unwrap()
                             .to_vec()
                     }),
-                    format: 1,
+                    format: 2,
                     state: "preparing".into(),
                     created_at: "2026-09-21T00:00:00Z".parse().unwrap(),
                 };
@@ -685,9 +695,17 @@ mod tests {
                 assert!(decode(&c, changed, &secrets, 20, &compression).is_err());
                 if algorithm != "none" {
                     let mut changed = c.clone();
+                    changed.uuid = Uuid::now_v7();
+                    assert!(decode(&changed, stored.clone(), &secrets, 20, &compression).is_err());
+                    let mut changed = c.clone();
                     changed.location_id = Uuid::new_v4();
                     assert!(decode(&changed, stored, &secrets, 20, &compression).is_err());
                 }
+                let mut old = c.clone();
+                old.format = 1;
+                assert!(
+                    decode_cache(&old, Bytes::from(input.clone()), false, &compression).is_err()
+                );
                 let mut boundary = c.clone();
                 boundary.raw_size = 1000;
                 boundary.compressed = true;
@@ -723,8 +741,9 @@ mod tests {
                     for (i, (key_id, key)) in secrets.keys.iter().enumerate() {
                         let input = vec![worker as u8; MIN + i];
                         let c = Chunk {
-                            id: 1 + worker * 2 + i as i64,
-                            encoding_id: 1 + worker * 2 + i as i64,
+                            uuid: Uuid::now_v7(),
+                            id: (1 + worker * 2 + i as i64).into(),
+                            encoding_id: (1 + worker * 2 + i as i64).into(),
                             location_id: Uuid::new_v4(),
                             storage_id: None,
                             hash: blake3::hash(&input).as_bytes().to_vec(),
@@ -745,7 +764,7 @@ mod tests {
                                 .unwrap()
                                 .to_vec(),
                             ),
-                            format: 1,
+                            format: 2,
                             state: "preparing".into(),
                             created_at: "2026-09-26T00:00:00Z".parse().unwrap(),
                         };

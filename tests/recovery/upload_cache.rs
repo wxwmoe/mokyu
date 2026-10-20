@@ -1,4 +1,5 @@
 use super::{Backend, migration};
+use crate::model::Id;
 use crate::model::{TaskExecutionStore, TaskFinish, UploadCacheStore, task::Execution};
 use anyhow::Result;
 use sqlx::PgPool;
@@ -26,7 +27,7 @@ async fn postgres_upload_preparation_is_atomic() -> Result<()> {
     migration::run(&mut *pool.acquire().await?).await?;
     let storage = Uuid::new_v4();
     let bucket = Uuid::new_v4();
-    let stream = Uuid::new_v4();
+    let stream = Id::from(Uuid::now_v7());
     sqlx::query("INSERT INTO storages(id,name,type,path) VALUES($1,'preparation','local','/data/preparation')")
         .bind(storage).execute(&pool).await?;
     sqlx::query("INSERT INTO storage_profiles(storage_id,pack_max_size,pack_upload_flush_timeout) VALUES($1,'64B','60s')").bind(storage).execute(&pool).await?;
@@ -39,7 +40,7 @@ async fn postgres_upload_preparation_is_atomic() -> Result<()> {
         .bind(stream).bind(bucket).execute(&pool).await?;
     let mut ids = Vec::new();
     for index in 0..2i64 {
-        let id: i64 = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES($1,$2,32,'none','ready') RETURNING id")
+        let id: Id = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES($1,$2,32,'none','ready') RETURNING id")
             .bind(storage).bind(vec![index as u8;32]).fetch_one(&pool).await?;
         ids.push(id);
         sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,staging_storage_id,staging_object_key,next_retry_at) VALUES($1,$2,$3,32,$4,$5,now())")
@@ -173,7 +174,7 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
     let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let storage = Uuid::new_v4();
     let bucket = Uuid::new_v4();
-    let stream = Uuid::new_v4();
+    let stream = Id::from(Uuid::now_v7());
     sqlx::query("INSERT INTO storages(id,name,type,path) VALUES($1,'pending-release','local','/data/pending-release')").bind(storage).execute(&pool).await?;
     sqlx::query("INSERT INTO buckets(id,name,storage_id) VALUES($1,'pending-release',$2)")
         .bind(bucket)
@@ -183,7 +184,7 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
     sqlx::query("INSERT INTO streams(id,bucket_id,object_key,stream_type,state) VALUES($1,$2,'pending','object','writing')").bind(stream).bind(bucket).execute(&pool).await?;
     let mut ids = Vec::new();
     for n in 0..3i64 {
-        let id: i64 = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES($1,$2,1,'none','ready') RETURNING id")
+        let id: Id = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES($1,$2,1,'none','ready') RETURNING id")
             .bind(storage).bind(vec![n as u8;32]).fetch_one(&pool).await?;
         ids.push(id);
         sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,staging_storage_id,staging_object_key,next_retry_at) VALUES($1,$2,$3,1,$4,$5,now())")
@@ -202,7 +203,7 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
     sqlx::query("UPDATE pending_uploads SET next_retry_at=now()+interval '1 hour'")
         .execute(&pool)
         .await?;
-    assert!(backend.seal(Uuid::new_v4(), true).await?);
+    assert!(backend.seal(Uuid::new_v4().into(), true).await?);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM pending_uploads WHERE next_retry_at<=now()"
@@ -217,7 +218,7 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
         .execute(&pool)
         .await?;
     assert!(backend.seal(stream, true).await?);
-    let due: Vec<i64> = sqlx::query_scalar(
+    let due: Vec<Id> = sqlx::query_scalar(
         "SELECT chunk_id FROM pending_uploads WHERE next_retry_at<=now() ORDER BY chunk_id",
     )
     .fetch_all(&pool)
@@ -229,14 +230,14 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
         result.staged,
         vec![(storage, "__mokyu/multipart/pending/2".into())]
     );
-    let kept: Vec<i64> =
+    let kept: Vec<Id> =
         sqlx::query_scalar("SELECT chunk_id FROM pending_uploads ORDER BY chunk_id")
             .fetch_all(&pool)
             .await?;
     assert_eq!(kept, ids[..2]);
     // One mapping now has a durable encoding; the other has no remaining readers.
-    sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,location_id,storage_id,standalone_size,standalone_compressed,state,encryption_algorithm,created_at) SELECT current_encoding_id,id,$2,storage_id,1,false,'ready','none',now() FROM chunks WHERE id=$1")
-        .bind(ids[0]).bind(Uuid::new_v4()).execute(&pool).await?;
+    sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,standalone_size,standalone_compressed,state,encryption_algorithm,created_at) SELECT current_encoding_id,id,storage_id,1,false,'ready','none',now() FROM chunks WHERE id=$1")
+        .bind(ids[0]).execute(&pool).await?;
     sqlx::query("DELETE FROM extents WHERE chunk_id=$1")
         .bind(ids[1])
         .execute(&pool)

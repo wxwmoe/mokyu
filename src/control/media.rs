@@ -1,4 +1,5 @@
 use super::{Identity, catalog::MediaItem};
+use crate::model::Id;
 use crate::{
     app::{Active, App, Metadata, StoredStream},
     authorization::Action,
@@ -36,7 +37,7 @@ pub struct Thumbnails {
     root: PathBuf,
     disk: Arc<Disk>,
     capacity: u64,
-    entries: Mutex<VecDeque<(Uuid, u64)>>,
+    entries: Mutex<VecDeque<(Id, u64)>>,
     job: Arc<Semaphore>,
 }
 impl Thumbnails {
@@ -64,7 +65,7 @@ impl Thumbnails {
             let id = name
                 .to_str()
                 .and_then(|s| s.strip_prefix("v1-"))
-                .and_then(|s| Uuid::parse_str(s).ok());
+                .and_then(|s| s.parse::<Id>().ok());
             if let Some(id) = id {
                 if self.entries.lock().unwrap().len() == CACHE_ENTRIES {
                     tokio::fs::remove_file(file.path()).await?;
@@ -79,7 +80,7 @@ impl Thumbnails {
         }
         self.trim(0)
     }
-    fn path(&self, id: Uuid) -> PathBuf {
+    fn path(&self, id: Id) -> PathBuf {
         self.root.join(format!("v1-{id}"))
     }
     fn trim(&self, incoming: u64) -> Result<()> {
@@ -107,14 +108,14 @@ impl Thumbnails {
         );
         Ok(())
     }
-    async fn get(&self, id: Uuid) -> Option<Vec<u8>> {
+    async fn get(&self, id: Id) -> Option<Vec<u8>> {
         let data = crate::storage::read_bounded(self.path(id), THUMB_LIMIT + 32)
             .await
             .ok()?;
         (data.len() > 32 && blake3::hash(&data[32..]).as_bytes() == &data[..32])
             .then(|| data[32..].to_vec())
     }
-    fn put(&self, id: Uuid, data: &[u8]) -> Result<()> {
+    fn put(&self, id: Id, data: &[u8]) -> Result<()> {
         if self.capacity == 0 {
             return Ok(());
         }
@@ -153,13 +154,13 @@ impl Thumbnails {
 #[serde(deny_unknown_fields)]
 pub(super) struct ObjectQuery {
     key: String,
-    version: Uuid,
+    version: Id,
 }
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ContentQuery {
     key: String,
-    version: Uuid,
+    version: Id,
     #[serde(default)]
     preview: bool,
 }
@@ -220,6 +221,7 @@ async fn current(
     q: &ObjectQuery,
     action: Action,
 ) -> Result<(StoredStream, Active)> {
+    q.version.validate(app.config.database.backend)?;
     if q.key.is_empty() || q.key.len() > 1024 || q.key.contains('\0') {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }

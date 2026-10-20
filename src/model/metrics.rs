@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{
     authorization::Principal,
     config::{Maintenance, MetricsSettings},
@@ -108,9 +109,9 @@ pub(crate) struct PackCounts {
 
 #[derive(Default)]
 pub(crate) struct AccessBatch {
-    pub(crate) chunks: HashMap<(i64, DateTime<Utc>), ChunkCounts>,
-    pub(crate) packs: HashMap<(i64, DateTime<Utc>), PackCounts>,
-    pub(crate) members: HashMap<(i64, i64, DateTime<Utc>), i64>,
+    pub(crate) chunks: HashMap<(Id, DateTime<Utc>), ChunkCounts>,
+    pub(crate) packs: HashMap<(Id, DateTime<Utc>), PackCounts>,
+    pub(crate) members: HashMap<(Id, Id, DateTime<Utc>), i64>,
     pub(crate) dropped: bool,
 }
 

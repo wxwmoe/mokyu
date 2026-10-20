@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{
     app::StoredStream,
     model::{CachedExtent, ReadExtent},
@@ -21,7 +22,7 @@ const HISTORY: usize = 1024;
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub(crate) struct Key {
     pub bucket: Uuid,
-    pub stream: Uuid,
+    pub stream: Id,
     pub encoding: &'static str,
     pub policy: i32,
 }
@@ -453,7 +454,7 @@ impl Mapping {
         offset: i64,
         length: i32,
         source: i32,
-        chunk: i64,
+        chunk: Id,
         size: i32,
         hash: &[u8],
     ) {
@@ -476,11 +477,14 @@ impl Mapping {
             offset,
             i64::from(length),
             i64::from(source),
-            chunk,
             i64::from(size),
         ] {
             self.hash.update(&value.to_le_bytes());
         }
+        match chunk {
+            Id::Integer(id) => self.hash.update(&id.to_le_bytes()),
+            Id::Uuid(id) => self.hash.update(id.as_bytes()),
+        };
         self.hash.update(hash);
         self.position = end.unwrap();
     }
@@ -499,7 +503,7 @@ mod tests {
     fn fixture(size: i32) -> (StoredStream, Key, ReadExtent) {
         let now = chrono::Utc::now();
         let stream = StoredStream {
-            id: Uuid::new_v4(),
+            id: Uuid::new_v4().into(),
             bucket_id: Uuid::new_v4(),
             object_key: "object".into(),
             stream_type: "object".into(),
@@ -526,13 +530,14 @@ mod tests {
                 stream_id: stream.id,
                 offset_bytes: 0,
                 length: size,
-                chunk_id: Some(1),
+                chunk_id: Some(1.into()),
                 fragment_id: None,
                 source_offset: 0,
             },
             chunk: Chunk {
-                id: 1,
-                encoding_id: 1,
+                uuid: Uuid::now_v7(),
+                id: 1.into(),
+                encoding_id: 1.into(),
                 location_id: Uuid::new_v4(),
                 storage_id: None,
                 hash: vec![1; 32],
@@ -542,7 +547,7 @@ mod tests {
                 block_key_id: None,
                 compressed: false,
                 nonce: None,
-                format: 1,
+                format: 2,
                 state: "ready".into(),
                 created_at: now,
             },
@@ -607,7 +612,7 @@ mod tests {
         let (_, _, mut row) = fixture(8192);
         let mut original = Mapping::new(8192);
         original.record(&row);
-        row.chunk.encoding_id = 2;
+        row.chunk.encoding_id = 2.into();
         row.chunk.location_id = Uuid::new_v4();
         row.chunk.compressed = true;
         let mut rewritten = Mapping::new(8192);
@@ -617,8 +622,8 @@ mod tests {
             cache_offset: Some(0),
             cache_length: Some(8192),
             cache_source: Some(0),
-            cache_chunk: Some(1),
-            cache_ready: Some(1),
+            cache_chunk: Some(1.into()),
+            cache_ready: Some(1.into()),
             cache_size: Some(8192),
             cache_hash: Some(vec![1; 32]),
         };

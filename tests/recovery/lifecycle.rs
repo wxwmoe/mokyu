@@ -1,4 +1,5 @@
 use super::{Backend, migration};
+use crate::model::Id;
 use crate::model::maintenance::MaintenanceStore;
 use anyhow::Result;
 use sqlx::PgPool;
@@ -19,7 +20,7 @@ async fn postgres_storage_policy_expiration() -> Result<()> {
     let storage = Uuid::new_v4();
     let bucket = Uuid::new_v4();
     let upload = Uuid::new_v4();
-    let stream = Uuid::new_v4();
+    let stream = Id::from(Uuid::now_v7());
     sqlx::query(
         "INSERT INTO storages(id,name,type,path) VALUES($1,'policy','local','/data/policy')",
     )
@@ -116,7 +117,7 @@ async fn postgres_fragment_deletion_holds_lock() -> Result<()> {
     let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let storage = Uuid::new_v4();
     let bucket = Uuid::new_v4();
-    let stream = Uuid::new_v4();
+    let stream = Id::from(Uuid::now_v7());
     let fragment = Uuid::new_v4();
     sqlx::query("INSERT INTO storages(id,name,type,path) VALUES($1,'fragment-lock','local','/data/fragment-lock')")
         .bind(storage).execute(&pool).await?;
@@ -136,8 +137,8 @@ async fn postgres_fragment_deletion_holds_lock() -> Result<()> {
     let reference =
         "INSERT INTO extents(stream_id,offset_bytes,length,fragment_id) VALUES($1,0,1,$2)";
 
-    let guard = backend.claim_fragment(fragment).await?.unwrap();
-    assert!(backend.claim_fragment(fragment).await?.is_none());
+    let guard = backend.claim_fragment(fragment.into()).await?.unwrap();
+    assert!(backend.claim_fragment(fragment.into()).await?.is_none());
     let mut writer = pool.begin().await?;
     sqlx::query("SET LOCAL lock_timeout='100ms'")
         .execute(&mut *writer)
@@ -159,14 +160,14 @@ async fn postgres_fragment_deletion_holds_lock() -> Result<()> {
         .bind(fragment)
         .execute(&pool)
         .await?;
-    assert!(backend.claim_fragment(fragment).await?.is_none());
+    assert!(backend.claim_fragment(fragment.into()).await?.is_none());
 
     sqlx::query("DELETE FROM extents WHERE stream_id=$1")
         .bind(stream)
         .execute(&pool)
         .await?;
     backend
-        .claim_fragment(fragment)
+        .claim_fragment(fragment.into())
         .await?
         .unwrap()
         .deletion
@@ -183,7 +184,7 @@ async fn postgres_fragment_deletion_holds_lock() -> Result<()> {
         deleted.as_database_error().unwrap().code().as_deref(),
         Some("23503")
     );
-    assert!(backend.claim_fragment(fragment).await?.is_none());
+    assert!(backend.claim_fragment(fragment.into()).await?.is_none());
     Ok(())
 }
 
@@ -192,8 +193,8 @@ async fn postgres_fragment_deletion_holds_lock() -> Result<()> {
 async fn postgres_source_validation_allows_references() -> Result<()> {
     async fn available(
         db: &mut sqlx::PgConnection,
-        stream: Option<Uuid>,
-        ids: &[i64],
+        stream: Option<Id>,
+        ids: &[Id],
     ) -> Result<bool> {
         match super::transactions::require_sources(db, stream, ids).await {
             Ok(()) => Ok(true),
@@ -221,8 +222,8 @@ async fn postgres_source_validation_allows_references() -> Result<()> {
     migration::run(&mut *pool.acquire().await?).await?;
     let storage = Uuid::new_v4();
     let bucket = Uuid::new_v4();
-    let stream = Uuid::new_v4();
-    let other = Uuid::new_v4();
+    let stream = Id::from(Uuid::now_v7());
+    let other = Id::from(Uuid::now_v7());
     sqlx::query("INSERT INTO storages(id,name,type,path) VALUES($1,'source-lock','local','/data/source-lock')")
         .bind(storage).execute(&pool).await?;
     sqlx::query("INSERT INTO buckets(id,name,storage_id) VALUES($1,'source-lock',$2)")
@@ -234,10 +235,10 @@ async fn postgres_source_validation_allows_references() -> Result<()> {
         sqlx::query("INSERT INTO streams(id,bucket_id,object_key,stream_type,state) VALUES($1,$2,$1::text,'object','writing')")
             .bind(id).bind(bucket).execute(&pool).await?;
     }
-    let chunk: i64 = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES($1,$2,1,'none','ready') RETURNING id")
+    let chunk: Id = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES($1,$2,1,'none','ready') RETURNING id")
         .bind(storage).bind(vec![3u8;32]).fetch_one(&pool).await?;
-    let encoding: i64 = sqlx::query_scalar("INSERT INTO chunk_encodings(encoding_id,chunk_id,location_id,storage_id,standalone_size,standalone_compressed,state,encryption_algorithm,created_at) SELECT current_encoding_id,id,$2,storage_id,1,false,'ready','none',now() FROM chunks WHERE id=$1 RETURNING encoding_id")
-        .bind(chunk).bind(Uuid::new_v4()).fetch_one(&pool).await?;
+    let encoding: Id = sqlx::query_scalar("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,standalone_size,standalone_compressed,state,encryption_algorithm,created_at) SELECT current_encoding_id,id,storage_id,1,false,'ready','none',now() FROM chunks WHERE id=$1 RETURNING encoding_id")
+        .bind(chunk).fetch_one(&pool).await?;
     super::queries::insert_chunk_extent(stream, 0, 1, chunk)
         .execute(&pool)
         .await?;
@@ -328,8 +329,8 @@ async fn postgres_source_validation_allows_references() -> Result<()> {
         .bind(encoding).execute(&pool).await?;
     assert!(!available(&mut *pool.acquire().await?, Some(stream), &[]).await?);
 
-    let pack: i64 = sqlx::query_scalar("INSERT INTO packs(location_id,storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,digest) VALUES($1,$2,'none',2,2,2,'ready',$3) RETURNING id")
-        .bind(Uuid::new_v4()).bind(storage).bind(vec![0u8;32]).fetch_one(&pool).await?;
+    let pack: Id = sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,digest) VALUES($1,'none',2,2,2,'ready',$2) RETURNING id")
+        .bind(storage).bind(vec![0u8;32]).fetch_one(&pool).await?;
     for scope in [Some(stream), None] {
         for phase in 0..3 {
             sqlx::query("UPDATE chunks SET state='ready',pack_id=$2 WHERE id=$1")
@@ -415,7 +416,11 @@ async fn postgres_source_validation_allows_references() -> Result<()> {
         }
     }
 
-    for (scope, ids) in [(Some(other), vec![]), (None, vec![]), (None, vec![-1])] {
+    for (scope, ids) in [
+        (Some(other), vec![]),
+        (None, vec![]),
+        (None, vec![Uuid::now_v7().into()]),
+    ] {
         assert!(available(&mut *pool.acquire().await?, scope, &ids).await?);
     }
     let fragment = Uuid::new_v4();
@@ -435,9 +440,9 @@ async fn postgres_source_validation_allows_references() -> Result<()> {
         .execute(&pool)
         .await?;
 
-    let many: Vec<i64> = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) SELECT $1,digest('source-check-'||i::text,'sha256'),1,'none','ready' FROM generate_series(1,4097) i RETURNING id")
+    let many: Vec<Id> = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) SELECT $1,digest('source-check-'||i::text,'sha256'),1,'none','ready' FROM generate_series(1,4097) i RETURNING id")
         .bind(storage).fetch_all(&pool).await?;
-    sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,location_id,storage_id,standalone_size,standalone_compressed,state,encryption_algorithm,created_at) SELECT current_encoding_id,id,uuidv7(),storage_id,1,false,'ready','none',now() FROM chunks WHERE id=ANY($1)")
+    sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,standalone_size,standalone_compressed,state,encryption_algorithm,created_at) SELECT current_encoding_id,id,storage_id,1,false,'ready','none',now() FROM chunks WHERE id=ANY($1)")
         .bind(&many).execute(&pool).await?;
     sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id) SELECT $1,row_number() OVER(ORDER BY id)-1,1,id FROM chunks WHERE id=ANY($2)")
         .bind(other).bind(&many).execute(&pool).await?;

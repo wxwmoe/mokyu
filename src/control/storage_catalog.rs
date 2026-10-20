@@ -1,4 +1,5 @@
 use super::{Identity, insights::ScopeQuery};
+use crate::model::Id;
 use crate::{app::App, http::HttpError};
 use anyhow::Result;
 use axum::{
@@ -15,7 +16,7 @@ use uuid::Uuid;
 pub(super) struct PackQuery {
     bucket: Option<Uuid>,
     project: Option<Uuid>,
-    after: Option<i64>,
+    after: Option<String>,
     limit: Option<i64>,
     state: Option<String>,
 }
@@ -39,7 +40,7 @@ pub(super) struct PackDetail {
 pub(super) struct MemberQuery {
     bucket: Option<Uuid>,
     project: Option<Uuid>,
-    after: Option<i64>,
+    after: Option<String>,
     limit: Option<i64>,
 }
 #[derive(Deserialize, IntoParams)]
@@ -50,7 +51,7 @@ pub(super) struct ObjectsQuery {
 }
 #[derive(Serialize, Deserialize)]
 struct Cursor {
-    pack: i64,
+    pack: Id,
     bucket: Option<Uuid>,
     project: Option<Uuid>,
     last_bucket: Uuid,
@@ -63,9 +64,9 @@ pub(super) struct PackObjects {
     #[serde(rename = "next_cursor")]
     next: Option<String>,
 }
-fn limit(value: Option<i64>, after: Option<i64>) -> Result<i64> {
+fn limit(value: Option<i64>) -> Result<i64> {
     let value = value.unwrap_or(50);
-    if !(1..=200).contains(&value) || after.is_some_and(|v| v < 0) {
+    if !(1..=200).contains(&value) {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     Ok(value)
@@ -76,7 +77,7 @@ pub(super) async fn packs(
     Extension(actor): Extension<Identity>,
     Query(q): Query<PackQuery>,
 ) -> Result<Json<PackPage>, HttpError> {
-    let limit = limit(q.limit, q.after)?;
+    let limit = limit(q.limit)?;
     if q.state
         .as_deref()
         .is_some_and(|s| !["preparing", "ready", "retired", "deleting", "deleted"].contains(&s))
@@ -91,7 +92,10 @@ pub(super) async fn packs(
                 bucket: q.bucket,
                 project: q.project,
             },
-            q.after.unwrap_or(0),
+            Id::parse(
+                q.after.as_deref().unwrap_or("0"),
+                app.config.database.backend,
+            )?,
             limit + 1,
             q.state.as_deref(),
         )
@@ -100,15 +104,16 @@ pub(super) async fn packs(
     rows.truncate(limit as usize);
     Ok(Json(PackPage { packs: rows, next }))
 }
-#[utoipa::path(get,operation_id="storage_pack",path="/api/v1/storage/packs/{id}",params(("id"=i64,Path),MemberQuery),responses((status=200,body=PackDetail)))]
+#[utoipa::path(get,operation_id="storage_pack",path="/api/v1/storage/packs/{id}",params(("id"=String,Path),MemberQuery),responses((status=200,body=PackDetail)))]
 pub(super) async fn detail(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
-    Path(id): Path<i64>,
+    Path(id): Path<String>,
     Query(q): Query<MemberQuery>,
 ) -> Result<Json<PackDetail>, HttpError> {
-    let limit = limit(q.limit, q.after)?;
-    if id < 1 {
+    let limit = limit(q.limit)?;
+    let id = Id::parse(&id, app.config.database.backend)?;
+    if !id.is_valid() {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     let (pack, mut members, scoped) = app
@@ -120,7 +125,10 @@ pub(super) async fn detail(
                 project: q.project,
             },
             id,
-            q.after.unwrap_or(0),
+            Id::parse(
+                q.after.as_deref().unwrap_or("0"),
+                app.config.database.backend,
+            )?,
             limit + 1,
         )
         .await?;
@@ -134,14 +142,15 @@ pub(super) async fn detail(
         scoped,
     }))
 }
-#[utoipa::path(get,operation_id="storage_pack_objects",path="/api/v1/storage/packs/{id}/objects",params(("id"=i64,Path),ObjectsQuery),responses((status=200,body=PackObjects)))]
+#[utoipa::path(get,operation_id="storage_pack_objects",path="/api/v1/storage/packs/{id}/objects",params(("id"=String,Path),ObjectsQuery),responses((status=200,body=PackObjects)))]
 pub(super) async fn objects(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
-    Path(id): Path<i64>,
+    Path(id): Path<String>,
     Query(q): Query<ObjectsQuery>,
 ) -> Result<Json<PackObjects>, HttpError> {
-    if id < 1 || q.cursor.as_ref().is_some_and(|v| v.len() > 4096) {
+    let id = Id::parse(&id, app.config.database.backend)?;
+    if !id.is_valid() || q.cursor.as_ref().is_some_and(|v| v.len() > 4096) {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     let cursor = q

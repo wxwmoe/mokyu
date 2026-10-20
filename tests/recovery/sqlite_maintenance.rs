@@ -1,6 +1,7 @@
 use super::{Backend, cache_tests, connection, queries};
 use crate::authorization::Principal;
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::bucket::CreateBucket;
 use crate::model::maintenance::MaintenanceStore;
 use crate::model::{
@@ -34,7 +35,7 @@ async fn writer_idle(backend: &Backend) -> Result<()> {
 }
 async fn claim_fragment(
     backend: &Backend,
-    id: Uuid,
+    id: Id,
 ) -> Result<crate::model::maintenance::FragmentCleanup> {
     writer_idle(backend).await?;
     backend
@@ -113,7 +114,13 @@ async fn sqlite_maintenance_contract() -> Result<()> {
         })
         .await?;
     assert!(backend.fragment_exists(fragment).await?);
-    let recovery = backend.recovery_fragments(Uuid::nil()).await?;
+    let location_id = fragment;
+    let fragment: Id = sqlx::query_scalar("SELECT id FROM fragments WHERE location_id=?")
+        .bind(location_id)
+        .fetch_one(db)
+        .await?;
+    let recovery = backend.recovery_fragments(Id::default()).await?;
+    assert_eq!(recovery[0].source.location_id, location_id);
     assert_eq!(recovery.len(), 1);
     assert_eq!(
         (
@@ -300,7 +307,7 @@ async fn sqlite_maintenance_contract() -> Result<()> {
     drop(deletion);
     let deletion = claim_fragment(&backend, fragment).await?;
     deletion.deletion.finish().await?;
-    assert!(!backend.fragment_exists(fragment).await?);
+    assert!(!backend.fragment_exists(location_id).await?);
     assert_eq!(backend.cleanup_stream(stream, 1).await?, 1);
     assert_eq!(backend.cleanup_stream(stream, 1).await?, 0);
     assert!(
@@ -383,17 +390,21 @@ async fn sqlite_maintenance_contract() -> Result<()> {
     }
     assert_eq!(history(&backend, "chunks", 10).await?, 0);
     backend
-        .physical_age(true, pack, Utc::now() - Duration::days(10))
+        .physical_age(true, pack.into(), Utc::now() - Duration::days(10))
         .await?;
     assert!(
         backend
             .physical_candidates(true, 0., 10, 86400., storage)
             .await?
             .iter()
-            .any(|r| r.0 == pack && !r.2)
+            .any(|r| r.0 == pack.into() && !r.2)
     );
-    assert!(backend.claim_physical(true, pack, 0., 86400.).await?);
-    backend.delete_physical(true, pack, 0.).await?;
+    assert!(
+        backend
+            .claim_physical(true, pack.into(), 0., 86400.)
+            .await?
+    );
+    backend.delete_physical(true, pack.into(), 0.).await?;
     assert_eq!(history(&backend, "packs", 1).await?, 0);
     for table in ["packs", "chunks", "chunk_encodings"] {
         sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET deleted_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)-691200000000 WHERE state='deleted'"))).execute(db).await?;
@@ -476,12 +487,15 @@ async fn sqlite_maintenance_contract() -> Result<()> {
             .is_some()
     );
     let unsealed = Uuid::new_v4();
-    sqlx::query("INSERT INTO fragments(id,owner_stream,sealed,size,hash) VALUES(?,?,FALSE,8,?)")
-        .bind(unsealed)
-        .bind(live)
-        .bind([0u8; 32].as_slice())
-        .execute(db)
-        .await?;
+    let inserted = sqlx::query(
+        "INSERT INTO fragments(location_id,owner_stream,sealed,size,hash) VALUES(?,?,FALSE,8,?)",
+    )
+    .bind(unsealed)
+    .bind(live)
+    .bind([0u8; 32].as_slice())
+    .execute(db)
+    .await?;
+    let unsealed: Id = inserted.last_insert_rowid().into();
     assert!(
         !backend
             .stale_fragments(100, &[], Some(storage))

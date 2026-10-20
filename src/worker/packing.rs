@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::model::task::Execution;
 use crate::{
     app::App,
@@ -72,20 +73,23 @@ impl App {
         self.wake_tasks.notify_one();
         Ok(result)
     }
-    pub async fn unpack_start(&self, pack: Option<i64>, all: bool, execute: bool) -> Result<Value> {
+    pub async fn unpack_start(&self, pack: Option<Id>, all: bool, execute: bool) -> Result<Value> {
         self.unpack_checked(pack, all, execute, None).await
     }
     pub(crate) async fn unpack_checked(
         &self,
-        pack: Option<i64>,
+        pack: Option<Id>,
         all: bool,
         execute: bool,
         expected: Option<&str>,
     ) -> Result<Value> {
         let _coord = self.coord.lock().await;
-        if all == pack.is_some() || pack.is_some_and(|id| id <= 0) {
+        if let Some(id) = pack {
+            id.validate(self.config.database.backend)?;
+        }
+        if all == pack.is_some() || pack.is_some_and(|id| !id.is_valid()) {
             return Err(
-                s3s::s3_error!(InvalidArgument, "specify one positive pack ID or --all").into(),
+                s3s::s3_error!(InvalidArgument, "specify one valid pack ID or --all").into(),
             );
         }
         if all
@@ -104,7 +108,7 @@ impl App {
             .into());
         }
         if let Some(id) = pack {
-            ensure!(id > 0, "pack ID must be positive");
+            ensure!(id.is_valid(), "pack ID must be valid");
         }
         let (count, bytes): (i64, i64) = self.packing.unpack_totals(pack).await?;
         let (upper, ids): (String, String) = self.packing.unpack_identity(pack).await?;
@@ -156,11 +160,18 @@ impl App {
         }
         let mut physical = c.clone();
         (physical.algorithm, physical.block_key_id) = self.physical_encoding(c).await?;
-        physical.location_id = Uuid::new_v4();
+        physical.location_id = if matches!(physical.encoding_id, Id::Integer(_)) {
+            Uuid::now_v7()
+        } else {
+            Uuid::nil()
+        };
         physical.created_at = chrono::Utc::now();
         physical.nonce = None;
         // A newly encoded physical copy always consumes a fresh persisted identity.
         physical.encoding_id = self.packing.prepare_encoding(&physical, task).await?;
+        if let Id::Uuid(id) = physical.encoding_id {
+            physical.location_id = id;
+        }
         let (physical, encoded, _) = self
             .storage
             .encode(physical, raw.to_vec(), c.compressed, Some(memory))
@@ -192,7 +203,7 @@ impl App {
         let raw_size: usize = rows.iter().map(|r| r.chunk.raw_size as usize).sum();
         let memory = self
             .storage
-            .pack_work(raw_size + 12 + rows.len() * 44)
+            .pack_work(raw_size + 12 + rows.len() * crate::content::pack::MEMBER_SIZE)
             .await?;
         let mut data = Vec::with_capacity(rows.len());
         for row in rows {
@@ -286,7 +297,6 @@ impl App {
         let p: Pack = self
             .packing
             .prepare_pack(
-                Uuid::new_v4(),
                 storage_id,
                 &algorithm,
                 block_key_id,
@@ -315,7 +325,9 @@ impl App {
             .iter()
             .map(|r| r.chunk.stored_size.unwrap_or(r.chunk.raw_size) as i64)
             .sum();
-        if p.stored_size.unwrap_or(i64::MAX) > old + 12 + rows.len() as i64 * 44 {
+        if p.stored_size.unwrap_or(i64::MAX)
+            > old + 12 + rows.len() as i64 * crate::content::pack::MEMBER_SIZE as i64
+        {
             self.packing.discard_pack(p.id).await?;
             return Ok(None);
         }
@@ -381,7 +393,7 @@ impl App {
     pub(crate) async fn rewrite_pack(
         &self,
         task: Execution,
-        id: i64,
+        id: Id,
         unpack: bool,
     ) -> Result<usize> {
         self.storage_writable()?;
@@ -516,7 +528,7 @@ impl App {
     async fn pack_stream(
         &self,
         task: Execution,
-        stream: Uuid,
+        stream: Id,
         from: i64,
         repack: bool,
         byte_budget: Option<u64>,
@@ -613,7 +625,7 @@ impl App {
                 true,
             )
             .await?;
-        let ids: Vec<i64> = group.iter().map(|r| r.chunk.id).collect();
+        let ids: Vec<Id> = group.iter().map(|r| r.chunk.id).collect();
         let old_size: i64 = self.packing.physical_bytes(&ids).await?;
         let new_size: i64 = outputs
             .iter()
@@ -635,7 +647,10 @@ impl App {
                     })
             })
             .sum();
-        if outputs.len() < physical.len() && new_size <= old_size + 12 + 44 * group.len() as i64 {
+        if outputs.len() < physical.len()
+            && new_size
+                <= old_size + 12 + crate::content::pack::MEMBER_SIZE as i64 * group.len() as i64
+        {
             self.commit_outputs(task, &group, &outputs, false).await?;
             return Ok((cursor, group.len()));
         }
@@ -677,12 +692,12 @@ impl App {
                     "disable pack.enabled while unpacking all packs"
                 );
             }
-            let after = cursor.unwrap_or("0").parse::<i64>()?;
-            let pack: Option<i64> = self
+            let after = cursor.unwrap_or("0").parse::<Id>()?;
+            let pack: Option<Id> = self
                 .packing
                 .next_pack(
                     after,
-                    detail["pack_id"].as_i64(),
+                    Id::from_json(&detail["pack_id"])?,
                     detail["upper_time"]
                         .as_str()
                         .map(|s| s.parse::<chrono::DateTime<chrono::Utc>>())
@@ -700,11 +715,14 @@ impl App {
             ensure!(self.pack_creation_allowed(), "pack creation is disabled");
             let (after, offset) = if let Some(c) = cursor {
                 let (a, b) = c.split_once(':').context("invalid pack cursor")?;
-                (Uuid::parse_str(a)?, b.parse::<i64>()?)
+                (
+                    Id::parse(a, self.config.database.backend)?,
+                    b.parse::<i64>()?,
+                )
             } else {
-                (Uuid::nil(), 0)
+                (Id::default(), 0)
             };
-            let stream: Option<Uuid> = self
+            let stream: Option<Id> = self
                 .packing
                 .next_pack_stream(
                     after,
@@ -761,7 +779,7 @@ impl App {
         let storage_id = Some(storage);
         let settings = self.storage.pack_config(storage)?;
         let next = if matches!(policy, "reuse" | "reclaim") {
-            let row: Option<(i64, i64)> = self
+            let row: Option<(Id, i64)> = self
                 .packing
                 .next_pack_change(cutoff, policy, storage_id)
                 .await?;
@@ -775,7 +793,7 @@ impl App {
                 None
             }
         } else {
-            let row: Option<(Uuid, i64, i64)> = self
+            let row: Option<(Id, i64, i64)> = self
                 .packing
                 .next_pack_queue(cutoff, policy, storage_id)
                 .await?;

@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::model::task::Execution;
 use crate::{
     app::{Bucket, StoredStream},
@@ -43,17 +44,17 @@ pub(crate) struct StorageSnapshot {
 pub(crate) struct Cursor {
     pub(crate) bucket: Option<Uuid>,
     pub(crate) key: Option<String>,
-    pub(crate) stream: Option<Uuid>,
+    pub(crate) stream: Option<Id>,
     pub(crate) after_extent: i64,
     pub(crate) position: i64,
-    pub(crate) chunk: i64,
+    pub(crate) chunk: Id,
 }
 pub(crate) struct Finding {
     pub(crate) subject: String,
     pub(crate) code: String,
-    pub(crate) chunk_id: Option<i64>,
+    pub(crate) chunk_id: Option<Id>,
     pub(crate) location_id: Option<Uuid>,
-    pub(crate) stream_id: Option<Uuid>,
+    pub(crate) stream_id: Option<Id>,
     pub(crate) bucket_id: Option<Uuid>,
     pub(crate) key: Option<String>,
     pub(crate) detail: Value,
@@ -63,8 +64,8 @@ pub(crate) struct MappingRange {
     pub(crate) offset_bytes: i64,
     pub(crate) length: i32,
     pub(crate) source_offset: i32,
-    pub(crate) fragment_id: Option<Uuid>,
-    pub(crate) chunk_id: Option<i64>,
+    pub(crate) fragment_id: Option<Id>,
+    pub(crate) chunk_id: Option<Id>,
     pub(crate) state: Option<String>,
     pub(crate) raw_size: Option<i32>,
 }
@@ -77,15 +78,15 @@ pub(crate) trait IntegrityStore: Send + Sync {
         bucket: Option<Bucket>,
         node: Option<Uuid>,
     ) -> Result<(Uuid, usize)>;
-    async fn chunks(&self, detail: &Detail, after: i64, limit: i64) -> Result<Vec<Chunk>>;
+    async fn chunks(&self, detail: &Detail, after: Id, limit: i64) -> Result<Vec<Chunk>>;
     async fn mapping(
         &self,
         detail: &Detail,
         cursor: &Cursor,
     ) -> Result<Option<(StoredStream, Uuid, String)>>;
-    async fn ranges(&self, stream: Uuid, after: i64) -> Result<Vec<MappingRange>>;
-    async fn current(&self, bucket: Uuid, key: &str, stream: Uuid) -> Result<bool>;
-    async fn chunk_stream(&self, chunk: i64, detail: &Detail) -> Result<Option<Uuid>>;
+    async fn ranges(&self, stream: Id, after: i64) -> Result<Vec<MappingRange>>;
+    async fn current(&self, bucket: Uuid, key: &str, stream: Id) -> Result<bool>;
+    async fn chunk_stream(&self, chunk: Id, detail: &Detail) -> Result<Option<Id>>;
     async fn checkpoint(
         &self,
         id: Execution,
@@ -95,12 +96,12 @@ pub(crate) trait IntegrityStore: Send + Sync {
     ) -> Result<()>;
     async fn exists(&self, task: Uuid) -> Result<bool>;
     async fn report_task(&self, task: Uuid) -> Result<Option<Value>>;
-    async fn report_upper(&self, task: Uuid) -> Result<i64>;
-    async fn report_page(&self, task: Uuid, after: i64, upper: i64) -> Result<Vec<Value>>;
+    async fn report_upper(&self, task: Uuid) -> Result<Id>;
+    async fn report_page(&self, task: Uuid, after: Id, upper: Id) -> Result<Vec<Value>>;
     async fn findings(
         &self,
         task: Uuid,
-        after: i64,
+        after: Id,
         limit: i64,
         code: Option<&str>,
     ) -> Result<Vec<Value>>;
@@ -108,7 +109,7 @@ pub(crate) trait IntegrityStore: Send + Sync {
     async fn objects(
         &self,
         task: Uuid,
-        issue: i64,
+        issue: Id,
         after: Option<(Uuid, String)>,
     ) -> Result<Vec<Value>>;
 }

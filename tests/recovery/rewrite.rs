@@ -1,4 +1,5 @@
 use super::{Backend, migration};
+use crate::model::Id;
 use crate::model::{ChunkStore, PackingStore, packing::RewriteTask, task::Execution};
 use anyhow::Result;
 use sqlx::PgPool;
@@ -34,16 +35,16 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
         .bind(task).bind(token).execute(&pool).await?;
     let mut chunks = Vec::new();
     for n in 0..5u8 {
-        let id: i64 = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,standalone_size,encryption_algorithm,state) VALUES($1,$2,1,1,'none','ready') RETURNING id")
+        let id: Id = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,standalone_size,encryption_algorithm,state) VALUES($1,$2,1,1,'none','ready') RETURNING id")
             .bind(storage).bind(vec![n; 32]).fetch_one(&pool).await?;
-        sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,location_id,storage_id,standalone_size,standalone_compressed,state,encryption_algorithm,created_at) SELECT current_encoding_id,id,$2,storage_id,1,false,'ready','none',now() FROM chunks WHERE id=$1")
-            .bind(id).bind(Uuid::new_v4()).execute(&pool).await?;
+        sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,standalone_size,standalone_compressed,state,encryption_algorithm,created_at) SELECT current_encoding_id,id,storage_id,1,false,'ready','none',now() FROM chunks WHERE id=$1")
+            .bind(id).execute(&pool).await?;
         chunks.push(id);
     }
     let mut packs = Vec::new();
     for group in [[chunks[4], chunks[0]], [chunks[3], chunks[1]]] {
-        let id: i64 = sqlx::query_scalar("INSERT INTO packs(location_id,storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,digest) VALUES($1,$2,'none',2,2,2,'ready',$3) RETURNING id")
-            .bind(Uuid::new_v4()).bind(storage).bind(vec![7u8;32]).fetch_one(&pool).await?;
+        let id: Id = sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,digest) VALUES($1,'none',2,2,2,'ready',$2) RETURNING id")
+            .bind(storage).bind(vec![7u8;32]).fetch_one(&pool).await?;
         for (ordinal, chunk) in group.into_iter().enumerate() {
             sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) VALUES($1,$2,$3,$4)")
                 .bind(id).bind(ordinal as i32).bind(chunk).bind(ordinal as i64).execute(&pool).await?;
@@ -78,7 +79,7 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
         target_key: String::new(),
         target_algorithm: "none".into(),
     };
-    let (loose, candidate) = backend.rewrite_candidates(0, &job).await?;
+    let (loose, candidate) = backend.rewrite_candidates(0.into(), &job).await?;
     assert_eq!(loose.unwrap().id, chunks[2]);
     assert_eq!(candidate, Some((chunks[0], packs[0])));
     let (old, members, current) = backend.rewrite_pack_inputs(packs[0]).await?;
@@ -96,13 +97,21 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
     assert_eq!(current, vec![chunks[0]]);
 
     job.shards = 2;
-    job.shard = chunks[0] % 2;
-    assert!(
-        backend
-            .rewrite_candidates(chunks[0], &job)
-            .await?
-            .1
-            .is_none()
+    job.shard =
+        sqlx::query_scalar("SELECT (hashtextextended($1::uuid::text,0) & 9223372036854775807) % 2")
+            .bind(chunks[0])
+            .fetch_one(&pool)
+            .await?;
+    let next = backend.rewrite_candidates(chunks[0], &job).await?.1;
+    let second_shard: i32 = sqlx::query_scalar(
+        "SELECT ((hashtextextended($1::uuid::text,0) & 9223372036854775807) % 2)::int",
+    )
+    .bind(chunks[1])
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        next,
+        (i64::from(second_shard) == job.shard).then_some((chunks[1], packs[1]))
     );
     job.shards = 1;
     job.shard = 0;
@@ -120,15 +129,7 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
         .pin_pack_inputs(Execution { id: task, token }, &mappings)
         .await?;
     let mut new = backend
-        .prepare_pack(
-            Uuid::new_v4(),
-            storage,
-            "none",
-            None,
-            2,
-            2,
-            Execution { id: task, token },
-        )
+        .prepare_pack(storage, "none", None, 2, 2, Execution { id: task, token })
         .await?;
     new.stored_size = Some(2);
     new.digest = Some(vec![8; 32]);
@@ -187,7 +188,7 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
         .await?;
     assert_eq!(detail["execution_mode"], "single");
     assert!(detail.get("role").is_none() && detail.get("shards").is_none());
-    assert_eq!(detail["upper_chunk_id"], chunks[4]);
+    assert_eq!(detail["upper_chunk_id"], serde_json::json!(chunks[4]));
     let children: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks WHERE parent_task_id=$1")
         .bind(id)
         .fetch_one(&pool)

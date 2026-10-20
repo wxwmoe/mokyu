@@ -299,6 +299,8 @@ mod tests {
         }
         let schemas = &schema["components"]["schemas"];
         assert_eq!(schemas["Profile"]["properties"]["id"]["format"], "uuid");
+        assert_eq!(schemas["Id"]["type"], "string");
+        assert!(schemas["Id"].get("format").is_none());
         assert!(
             schemas["BucketView"]["properties"]
                 .get("secret_key")

@@ -1,4 +1,5 @@
 use super::{auth::Identity, contract, maintenance};
+use crate::model::Id;
 use crate::{app::App, http::HttpError};
 use anyhow::Result;
 use axum::{
@@ -40,10 +41,19 @@ pub(super) async fn packs(
     Query(q): Query<IssueQuery>,
 ) -> Result<Json<Value>, HttpError> {
     let limit = q.limit.unwrap_or(100);
-    if !(1..=200).contains(&limit) || q.after.is_some_and(|id| id < 0) {
+    if !(1..=200).contains(&limit) {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
-    let rows = app.packing.page(q.after.unwrap_or(0), limit + 1).await?;
+    let rows = app
+        .packing
+        .page(
+            Id::parse(
+                q.after.as_deref().unwrap_or("0"),
+                app.config.database.backend,
+            )?,
+            limit + 1,
+        )
+        .await?;
     let next = if rows.len() > limit as usize {
         rows[limit as usize - 1]["id"].clone()
     } else {
@@ -57,14 +67,15 @@ pub(super) async fn packs(
     get,
     operation_id = "pack_detail",
     path = "/api/v1/packs/{id}",
-    params(("id" = i64, Path)),
+    params(("id" = String, Path)),
     responses((status = 200, body = Value), (status = 403, body = contract::ErrorBody))
 )]
 pub(super) async fn pack_detail(
     State(app): State<Arc<App>>,
     Extension(_actor): Extension<Identity>,
-    Path(id): Path<i64>,
+    Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpError> {
+    let id = Id::parse(&id, app.config.database.backend)?;
     let (pack, members) = app.packing.detail(id).await?;
     Ok(Json(json!({"pack":pack,"members":members})))
 }
@@ -85,7 +96,7 @@ pub(super) async fn cache_flush(
 }
 #[derive(Deserialize, utoipa::IntoParams)]
 pub(crate) struct IssueQuery {
-    after: Option<i64>,
+    after: Option<String>,
     limit: Option<i64>,
     code: Option<String>,
 }
@@ -96,7 +107,7 @@ struct IntegrityIssue {
     code: String,
     chunk_id: Option<String>,
     location_id: Option<Uuid>,
-    stream_id: Option<Uuid>,
+    stream_id: Option<Id>,
     bucket_id: Option<Uuid>,
     object_key: Option<String>,
     detail: Value,
@@ -120,7 +131,10 @@ pub(super) async fn integrity_issues(
     let value = app
         .integrity_issues_filtered(
             id,
-            q.after.unwrap_or(0),
+            Id::parse(
+                q.after.as_deref().unwrap_or("0"),
+                app.config.database.backend,
+            )?,
             q.limit.unwrap_or(100),
             q.code.as_deref(),
         )
@@ -136,7 +150,7 @@ struct IssueObject {
     bucket_id: Uuid,
     bucket: String,
     key: String,
-    version: Uuid,
+    version: Id,
 }
 #[derive(Deserialize, Serialize, utoipa::ToSchema)]
 pub(crate) struct IssueObjects {
@@ -145,11 +159,11 @@ pub(crate) struct IssueObjects {
     #[serde(rename = "next_cursor", alias = "next")]
     next: Option<(Uuid, String)>,
 }
-#[utoipa::path(get,path="/api/v1/tasks/{id}/issues/{issue}/objects",params(("id"=Uuid,Path),("issue"=i64,Path),IssueObjectsQuery),responses((status=200,body=IssueObjects)))]
+#[utoipa::path(get,path="/api/v1/tasks/{id}/issues/{issue}/objects",params(("id"=Uuid,Path),("issue"=String,Path),IssueObjectsQuery),responses((status=200,body=IssueObjects)))]
 pub(super) async fn integrity_objects(
     State(app): State<Arc<App>>,
     Extension(_actor): Extension<Identity>,
-    Path((id, issue)): Path<(Uuid, i64)>,
+    Path((id, issue)): Path<(Uuid, String)>,
     Query(q): Query<IssueObjectsQuery>,
 ) -> Result<Json<IssueObjects>, HttpError> {
     let after = q
@@ -158,7 +172,8 @@ pub(super) async fn integrity_objects(
         .transpose()
         .map_err(|_| s3s::s3_error!(InvalidArgument))?;
     Ok(Json(serde_json::from_value(
-        app.integrity_objects(id, issue, after).await?,
+        app.integrity_objects(id, Id::parse(&issue, app.config.database.backend)?, after)
+            .await?,
     )?))
 }
 #[utoipa::path(
@@ -189,7 +204,7 @@ pub(super) async fn integrity_report(
     let upper = app.integrity_store.report_upper(id).await?;
     let body = async_stream::try_stream! {
         yield bytes::Bytes::from(format!("{}\n",json!({"type":"task","task":task})));
-        let mut after = 0;
+        let mut after = Id::default();
         let mut count = 0u64;
         loop {
             let rows = app.integrity_store.report_page(id,after,upper).await.map_err(std::io::Error::other)?;

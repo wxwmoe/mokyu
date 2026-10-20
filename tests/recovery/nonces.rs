@@ -36,7 +36,7 @@ async fn nonce_database_contract() -> Result<()> {
     };
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             store.create(&Principal::Local, input(first, [137; 32])?)
         )
         .await

@@ -1,3 +1,4 @@
+use crate::model::Id;
 use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -17,13 +18,13 @@ pub(crate) trait QuotaStore: Send + Sync {
 
     async fn reserve(
         &self,
-        stream: Uuid,
+        stream: Id,
         size: i64,
         padding: bool,
         upload: Option<(Uuid, i32)>,
     ) -> Result<i64>;
 
-    async fn complete(&self, upload: Uuid, stream: Uuid, size: i64) -> Result<()>;
+    async fn complete(&self, upload: Uuid, stream: Id, size: i64) -> Result<()>;
 }
 
 use crate::authorization::Principal;

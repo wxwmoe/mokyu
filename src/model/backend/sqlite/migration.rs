@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, SqliteConnection, migrate::Migrate};
 
 static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 26;
 
 pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
     ensure!(
@@ -19,6 +19,14 @@ pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
         version <= SCHEMA_VERSION,
         "database schema is newer than this binary; downgrade is unsupported"
     );
+    if i64::from(version) < 26 {
+        ensure!(
+            !queries::incompatible_payload(version)
+                .fetch_one(&mut *connection)
+                .await?,
+            "file identity format requires an empty store; migrate logical objects through S3"
+        );
+    }
     ensure!(version >= 1, "unsupported database schema version");
     let applied = queries::migrations().fetch_all(&mut *connection).await?;
     ensure!(

@@ -1,5 +1,6 @@
 use crate::app::{Extent, StoredStream};
 use crate::authorization::{Permit, Principal};
+use crate::model::Id;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -79,14 +80,15 @@ pub(crate) struct ReceivedPart {
 }
 
 pub(crate) type UploadPart = (i32, i64, String, DateTime<Utc>, Value);
-pub(crate) type SeedSpan = (Uuid, i64, usize);
+pub(crate) type SeedSpan = (Id, i64, usize);
 
 #[derive(sqlx::FromRow)]
 pub(crate) struct LocalPartRange {
     pub(crate) offset_bytes: i64,
     pub(crate) length: i32,
     pub(crate) source_offset: i32,
-    pub(crate) fragment_id: Option<Uuid>,
+    pub(crate) fragment_id: Option<Id>,
+    pub(crate) fragment_location: Option<Uuid>,
     pub(crate) size: Option<i32>,
     pub(crate) hash: Option<Vec<u8>>,
     pub(crate) file_id: Option<Uuid>,
@@ -100,12 +102,12 @@ pub(crate) struct MultipartFile {
     pub(crate) id: Uuid,
     pub(crate) upload_id: Option<Uuid>,
     pub(crate) storage_id: Uuid,
-    pub(crate) source_id: Option<Uuid>,
+    pub(crate) source_id: Option<Id>,
     pub(crate) state: String,
 }
 
 pub(crate) struct FileRemap {
-    pub(crate) fragment: Uuid,
+    pub(crate) fragment: Id,
     pub(crate) file: Uuid,
     pub(crate) offset: i64,
     pub(crate) destination: i64,
@@ -127,30 +129,30 @@ pub(crate) struct MultipartCreate<'a> {
 }
 pub(crate) struct SeedConsumption<'a> {
     pub upload: Uuid,
-    pub stream: Uuid,
+    pub stream: Id,
     pub offset: i64,
-    pub chunk: i64,
+    pub chunk: Id,
     pub prefix: usize,
     pub consumed: usize,
     pub spans: &'a mut Vec<SeedSpan>,
 }
 pub(crate) struct PartStitch {
-    pub left: Uuid,
+    pub left: Id,
     pub offset: i64,
     pub left_length: usize,
-    pub right: Uuid,
+    pub right: Id,
     pub right_length: usize,
-    pub chunk: i64,
+    pub chunk: Id,
 }
 
 #[async_trait]
 pub(crate) trait MultipartStore: Send + Sync {
     async fn file(&self, upload: Uuid) -> Result<Uuid>;
     async fn seal_files(&self, upload: Uuid) -> Result<()>;
-    async fn local_ranges(&self, stream: Uuid, after: i64) -> Result<Vec<LocalPartRange>>;
+    async fn local_ranges(&self, stream: Id, after: i64) -> Result<Vec<LocalPartRange>>;
     async fn file_location(&self, id: Uuid) -> Result<Option<MultipartFile>>;
     async fn file_ranges(&self, id: Uuid) -> Result<Vec<(i64, i32)>>;
-    async fn remap_file(&self, upload: Uuid, source: Uuid, ranges: &[FileRemap]) -> Result<()>;
+    async fn remap_file(&self, upload: Uuid, source: Id, ranges: &[FileRemap]) -> Result<()>;
     async fn pending_files(&self, storage: Option<Uuid>, limit: i64) -> Result<Vec<MultipartFile>>;
     async fn clear_reclaim(&self, id: Uuid) -> Result<()>;
     async fn unused_files(&self, storage: Option<Uuid>, limit: i64) -> Result<Vec<MultipartFile>>;
@@ -163,7 +165,7 @@ pub(crate) trait MultipartStore: Send + Sync {
         authority: &Permit,
         upload: Uuid,
         number: i32,
-        stream: Uuid,
+        stream: Id,
     ) -> Result<()>;
     async fn commit_part(
         &self,
@@ -171,15 +173,15 @@ pub(crate) trait MultipartStore: Send + Sync {
         bucket: Uuid,
         upload: Uuid,
         number: i32,
-        stream: Uuid,
+        stream: Id,
     ) -> Result<()>;
     async fn active(&self, upload: Uuid) -> Result<bool>;
     async fn part(&self, upload: Uuid, number: i32) -> Result<Option<StoredStream>>;
-    async fn tail(&self, stream: Uuid) -> Result<Option<Extent>>;
+    async fn tail(&self, stream: Id) -> Result<Option<Extent>>;
     async fn pair(&self, upload: Uuid, number: i32) -> Result<Option<(Value, Vec<StoredStream>)>>;
     async fn consume_seed(&self, input: SeedConsumption<'_>) -> Result<()>;
     async fn stitch(&self, input: PartStitch) -> Result<()>;
-    async fn retire_work(&self, stream: Uuid) -> Result<()>;
+    async fn retire_work(&self, stream: Id) -> Result<()>;
     async fn begin_complete(&self, authority: &Permit, upload: Uuid, hash: &str) -> Result<()>;
     async fn retry_complete(&self, upload: Uuid) -> Result<()>;
     async fn abort(&self, authority: &Permit, upload: Uuid) -> Result<()>;

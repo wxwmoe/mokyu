@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{authorization::Permit, config};
 use anyhow::Result;
 use s3s::s3_error;
@@ -54,7 +55,7 @@ impl App {
         claim_object: bool,
         completion: Option<Uuid>,
         owner: Option<(Uuid, Uuid)>,
-    ) -> Result<(Uuid, Active)> {
+    ) -> Result<(Id, Active)> {
         self.writable()?;
         if key.is_empty() || key.len() > 1024 {
             return Err(s3_error!(InvalidArgument, "invalid object key length").into());
@@ -91,7 +92,7 @@ impl App {
             .max(30)
             .saturating_mul(2) as i64)
     }
-    pub(crate) async fn renew_write_lease(&self, stream: Uuid) -> Result<()> {
+    pub(crate) async fn renew_write_lease(&self, stream: Id) -> Result<()> {
         if self.role != "single" {
             self.cluster()?
                 .renew_write(stream, self.write_lease_seconds()?)
@@ -99,12 +100,12 @@ impl App {
         }
         Ok(())
     }
-    pub async fn tail(&self, stream: Uuid, offset: i64, data: &[u8]) -> Result<()> {
+    pub async fn tail(&self, stream: Id, offset: i64, data: &[u8]) -> Result<()> {
         if data.is_empty() {
             return Ok(());
         }
         self.renew_write_lease(stream).await?;
-        let id = Uuid::new_v4();
+        let id = Uuid::now_v7();
         let (staging_storage_id, staging_object_key, _lease) =
             self.storage.write_fragment(id, data).await.map_err(|e| {
                 tracing::warn!(error=%e,"multipart fragment could not be persisted");
@@ -127,7 +128,7 @@ impl App {
 
     pub(crate) async fn raw_tail(
         &self,
-        stream: Uuid,
+        stream: Id,
         storage: Uuid,
         upload: Uuid,
         offset: i64,
@@ -148,7 +149,7 @@ impl App {
         crate::faults::point("multipart-file-synced").await;
         self.stream_store
             .append_tail(crate::model::StreamTail {
-                fragment: Uuid::new_v4(),
+                fragment: Uuid::now_v7(),
                 stream,
                 offset,
                 size: data.len() as i32,

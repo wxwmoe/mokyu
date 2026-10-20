@@ -46,7 +46,7 @@ async fn sqlite_key_and_content_contract() -> Result<()> {
         })
     };
     assert!(
-        crate::model::audit::scope(-1, backend.create(&Principal::Local, input()?))
+        crate::model::audit::scope((-1).into(), backend.create(&Principal::Local, input()?))
             .await
             .is_err()
     );
@@ -91,8 +91,8 @@ async fn sqlite_key_and_content_contract() -> Result<()> {
     assert!(backend.revoke(&Principal::Local, key).await.is_err());
     backend.current_key("fixture", None).await?;
 
-    let chunk = sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,block_key_id,state) VALUES(?,?,32,'aes-256-gcm',?,'preparing')").bind(storage).bind(vec![1u8;32]).bind(key).execute(db).await?.last_insert_rowid();
-    assert!(sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES(?,?,32,'none','preparing')").bind(storage).bind(vec![1u8;32]).execute(db).await.is_err());
+    let chunk = sqlx::query("INSERT INTO chunks(uuid,storage_id,hash,raw_size,encryption_algorithm,block_key_id,state) VALUES(?,?,?,32,'aes-256-gcm',?,'preparing')").bind(Uuid::now_v7()).bind(storage).bind(vec![1u8;32]).bind(key).execute(db).await?.last_insert_rowid();
+    assert!(sqlx::query("INSERT INTO chunks(uuid,storage_id,hash,raw_size,encryption_algorithm,state) VALUES(?,?,?,32,'none','preparing')").bind(Uuid::now_v7()).bind(storage).bind(vec![1u8;32]).execute(db).await.is_err());
     let encoding = sqlx::query("INSERT INTO chunk_encodings(chunk_id,location_id,storage_id,state,encryption_algorithm,block_key_id,encoding_fingerprint) VALUES(?,?,?,'uploading','aes-256-gcm',?,?)").bind(chunk).bind(Uuid::new_v4()).bind(storage).bind(key).bind("[]").execute(db).await?.last_insert_rowid();
     sqlx::query("UPDATE chunks SET current_encoding_id=? WHERE id=?")
         .bind(encoding)
@@ -171,7 +171,7 @@ async fn sqlite_key_and_content_contract() -> Result<()> {
         .execute(db)
         .await?;
     assert!(
-        crate::model::audit::scope(-1, backend.revoke(&Principal::Local, key))
+        crate::model::audit::scope((-1).into(), backend.revoke(&Principal::Local, key))
             .await
             .is_err()
     );
@@ -199,7 +199,7 @@ async fn sqlite_key_and_content_contract() -> Result<()> {
         .bind(chunk)
         .execute(db)
         .await?;
-    sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES(?,?,32,'none','preparing')").bind(storage).bind(vec![1u8;32]).execute(db).await?;
+    sqlx::query("INSERT INTO chunks(uuid,storage_id,hash,raw_size,encryption_algorithm,state) VALUES(?,?,?,32,'none','preparing')").bind(Uuid::now_v7()).bind(storage).bind(vec![1u8;32]).execute(db).await?;
     backend.check_owner()?;
     backend.read.close().await;
     backend.write.close().await;

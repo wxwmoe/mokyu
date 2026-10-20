@@ -101,7 +101,7 @@ async fn mysql_bucket_contract() -> Result<()> {
         .await?;
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             BucketStore::create(&backend, &Principal::Local, create("rollback"))
         )
         .await
@@ -183,7 +183,7 @@ async fn mysql_bucket_contract() -> Result<()> {
     let before = backend.settings(bucket.id).await?.0;
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.save_settings(&Principal::Local, bucket.id, settings(&before, true, None))
         )
         .await
@@ -393,7 +393,7 @@ async fn mysql_bucket_contract() -> Result<()> {
         .await?;
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.transfer(&Principal::Local, bucket.id, transfer())
         )
         .await

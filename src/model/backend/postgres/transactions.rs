@@ -1,4 +1,5 @@
 //! PostgreSQL transaction boundaries and lock ordering.
+use crate::model::Id;
 use crate::model::task::Execution;
 
 use super::{Backend, normalize_error, queries};
@@ -46,11 +47,9 @@ async fn create_refresh(
     family: Uuid,
     hash: &[u8],
 ) -> Result<Uuid> {
-    let id = Uuid::new_v4();
-    queries::insert_refresh(id, session, family, hash)
-        .execute(&mut **tx)
-        .await?;
-    Ok(id)
+    Ok(queries::insert_refresh(session, family, hash)
+        .fetch_one(&mut **tx)
+        .await?)
 }
 
 async fn replace_session_refresh(
@@ -390,9 +389,8 @@ pub(super) async fn initialize_admin(
         !queries::has_accounts().fetch_one(&mut *tx).await?,
         "an administrator already exists"
     );
-    let id = Uuid::new_v4();
-    queries::insert_initial_admin(id, username, password, require_change)
-        .execute(&mut *tx)
+    let id = queries::insert_initial_admin(username, password, require_change)
+        .fetch_one(&mut *tx)
         .await?;
     security_audit(&mut tx, id, "account.init", true, "cli-init").await?;
     tx.commit().await?;
@@ -411,9 +409,8 @@ pub(super) async fn setup_account(
     if !queries::setup_allowed(supplied).fetch_one(&mut *tx).await? {
         return Err(denied());
     }
-    let user = Uuid::new_v4();
-    queries::insert_setup_admin(user, username, password)
-        .execute(&mut *tx)
+    let user = queries::insert_setup_admin(username, password)
+        .fetch_one(&mut *tx)
         .await?;
     security_audit(&mut tx, user, "account.setup", true, request).await?;
     queries::delete_setup_tokens().execute(&mut *tx).await?;
@@ -463,9 +460,9 @@ pub(super) async fn allocate_chunk(pool: &PgPool, input: ChunkCreate) -> Result<
 
 pub(super) async fn reference_chunk(
     pool: &PgPool,
-    stream: Uuid,
+    stream: Id,
     offset: i64,
-    chunk_id: i64,
+    chunk_id: Id,
     raw_size: i32,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
@@ -494,7 +491,7 @@ pub(super) async fn reference_chunk(
 
 pub(super) async fn complete_chunk_write(
     pool: &PgPool,
-    stream: Uuid,
+    stream: Id,
     offset: i64,
     chunk: &Chunk,
 ) -> Result<()> {
@@ -502,7 +499,7 @@ pub(super) async fn complete_chunk_write(
     require_writing_stream(&mut tx, stream).await?;
     ensure!(
         queries::allocated_source(stream, chunk)
-            .build_query_scalar::<i64>()
+            .build_query_scalar::<Id>()
             .fetch_optional(&mut *tx)
             .await?
             .is_some(),
@@ -530,15 +527,15 @@ pub(super) async fn complete_chunk_write(
 
 pub(super) async fn copy_chunk_references(
     pool: &PgPool,
-    destination: Uuid,
-    source: Uuid,
+    destination: Id,
+    source: Id,
     offset: i64,
     end: i64,
-    chunks: &[i64],
+    chunks: &[Id],
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     require_writing_stream(&mut tx, destination).await?;
-    let locked: Vec<i64> = queries::lock_ready_chunks(chunks)
+    let locked: Vec<Id> = queries::lock_ready_chunks(chunks)
         .fetch_all(&mut *tx)
         .await?;
     ensure!(locked.len() == chunks.len(), "copy source is not ready");
@@ -559,7 +556,7 @@ pub(super) async fn copy_chunk_references(
 
 pub(super) async fn reserve_quota(
     pool: &PgPool,
-    stream: uuid::Uuid,
+    stream: Id,
     size: i64,
     padding: bool,
     upload: Option<(uuid::Uuid, i32)>,
@@ -578,7 +575,7 @@ pub(super) async fn reserve_quota(
 pub(super) async fn complete_quota(
     pool: &PgPool,
     upload: uuid::Uuid,
-    stream: uuid::Uuid,
+    stream: Id,
     size: i64,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
@@ -614,7 +611,7 @@ impl QuotaStore for Backend {
 
     async fn reserve(
         &self,
-        stream: uuid::Uuid,
+        stream: Id,
         size: i64,
         padding: bool,
         upload: Option<(uuid::Uuid, i32)>,
@@ -624,7 +621,7 @@ impl QuotaStore for Backend {
             .map_err(normalize_error)
     }
 
-    async fn complete(&self, upload: uuid::Uuid, stream: uuid::Uuid, size: i64) -> Result<()> {
+    async fn complete(&self, upload: uuid::Uuid, stream: Id, size: i64) -> Result<()> {
         complete_quota(&self.pool, upload, stream, size)
             .await
             .map_err(normalize_error)
@@ -635,7 +632,7 @@ impl QuotaStore for Backend {
 impl PublishStore for Backend {
     async fn publish(
         &self,
-        id: uuid::Uuid,
+        id: Id,
         if_match: Option<s3s::dto::ETagCondition>,
         if_none: Option<s3s::dto::ETagCondition>,
         completion: Option<(uuid::Uuid, String, Value)>,
@@ -657,14 +654,14 @@ impl PublishStore for Backend {
         if bucket_state != "active" {
             return Err(s3s::s3_error!(OperationAborted).into());
         }
-        let (old, epoch): (Option<Uuid>, Uuid) = queries::lock_object_version(bucket, &object_key)
+        let (old, epoch): (Option<Id>, Id) = queries::lock_object_version(bucket, &object_key)
             .fetch_one(&mut *tx)
             .await?;
         if epoch != id || state != "writing" {
             return Err(s3s::s3_error!(OperationAborted, "write was superseded").into());
         }
         if let Some((upload, _, _)) = &completion {
-            let expected: Option<(Option<Uuid>, i64)> = queries::web_upload_expectation(upload)
+            let expected: Option<(Option<Id>, i64)> = queries::web_upload_expectation(upload)
                 .fetch_optional(&mut *tx)
                 .await?;
             if let Some((version, expected_size)) = expected {
@@ -842,7 +839,7 @@ pub(crate) async fn insert_task(
     task_type: &str,
     bucket: Option<uuid::Uuid>,
     detail: Value,
-    audit_id: Option<i64>,
+    audit_id: Option<Id>,
 ) -> Result<()> {
     queries::insert_task(id, task_type, bucket, detail, audit_id)
         .execute(&mut *db)
@@ -855,7 +852,7 @@ pub(crate) async fn insert_task(
 
 pub(super) async fn finish_stream(
     pool: &PgPool,
-    id: uuid::Uuid,
+    id: Id,
     size: i64,
     etag: &str,
     checksums: Value,
@@ -869,10 +866,10 @@ pub(super) async fn finish_stream(
 
 pub(super) async fn apply_publish(
     tx: &mut Transaction<'_, Postgres>,
-    id: uuid::Uuid,
+    id: Id,
     bucket: uuid::Uuid,
     object_key: &str,
-    old: Option<uuid::Uuid>,
+    old: Option<Id>,
     completion: Option<&(uuid::Uuid, String, Value)>,
 ) -> Result<bool> {
     queries::publish_object(bucket, object_key, id)
@@ -904,7 +901,7 @@ pub(super) async fn apply_object_change(
     tx: &mut Transaction<'_, Postgres>,
     bucket: uuid::Uuid,
     object_key: &str,
-    old: Option<uuid::Uuid>,
+    old: Option<Id>,
     public: Option<bool>,
 ) -> Result<()> {
     if let Some(public) = public {
@@ -913,7 +910,7 @@ pub(super) async fn apply_object_change(
             .execute(&mut **tx)
             .await?;
     } else {
-        queries::remove_object(bucket, object_key, uuid::Uuid::new_v4())
+        queries::remove_object(bucket, object_key, Id::default())
             .execute(&mut **tx)
             .await?;
         if let Some(old) = old {
@@ -943,7 +940,7 @@ pub(super) async fn change_object(pool: &PgPool, input: ObjectChange) -> Result<
     if state != "active" {
         return Err(s3s::s3_error!(OperationAborted, "bucket is being purged").into());
     }
-    let old: Option<Uuid> = queries::lock_object_stream(input.bucket, &input.key)
+    let old: Option<Id> = queries::lock_object_stream(input.bucket, &input.key)
         .fetch_optional(&mut *tx)
         .await?
         .flatten();
@@ -980,7 +977,7 @@ impl StreamStore for Backend {
             .ok_or_else(|| s3s::s3_error!(NoSuchKey).into())
     }
 
-    async fn create(&self, input: StreamCreate) -> Result<Uuid> {
+    async fn create(&self, input: StreamCreate) -> Result<Id> {
         create_stream(&self.pool, input, None).await
     }
 
@@ -989,10 +986,10 @@ impl StreamStore for Backend {
         let mut tx = self.pool.begin().await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("fragment-persisted").await;
-        queries::seal_fragment(tail.fragment)
+        queries::seal_fragment(tail.fragment.into())
             .execute(&mut *tx)
             .await?;
-        queries::insert_fragment_extent(tail.stream, tail.offset, tail.size, tail.fragment)
+        queries::insert_fragment_extent(tail.stream, tail.offset, tail.size, tail.fragment.into())
             .execute(&mut *tx)
             .await?;
         queries::resize_stream(tail.stream, tail.offset + i64::from(tail.size))
@@ -1002,7 +999,7 @@ impl StreamStore for Backend {
         Ok(())
     }
 
-    async fn finish(&self, stream: Uuid, size: i64, etag: &str, checksums: Value) -> Result<bool> {
+    async fn finish(&self, stream: Id, size: i64, etag: &str, checksums: Value) -> Result<bool> {
         finish_stream(&self.pool, stream, size, etag, checksums).await
     }
 
@@ -1040,8 +1037,7 @@ pub(super) async fn create_stream(
     pool: &PgPool,
     mut input: StreamCreate,
     ttl_seconds: Option<i64>,
-) -> Result<Uuid> {
-    let id = Uuid::new_v4();
+) -> Result<Id> {
     let mut tx = pool.begin().await?;
     if let Some((task, token)) = input.owner.as_ref() {
         let owned: Option<Uuid> = queries::lock_owned_task(task, token)
@@ -1075,7 +1071,7 @@ pub(super) async fn create_stream(
             );
         }
     }
-    queries::insert_stream(id, &input).execute(&mut *tx).await?;
+    let id = queries::insert_stream(&input).fetch_one(&mut *tx).await?;
     if let Some(ttl) = ttl_seconds {
         create_write_lease(&mut tx, id, ttl).await?;
     }
@@ -1090,22 +1086,20 @@ pub(super) async fn create_stream(
 
 pub(super) async fn create_read_lease(
     tx: &mut Transaction<'_, Postgres>,
-    stream: uuid::Uuid,
+    stream: Id,
     ttl_seconds: i64,
 ) -> Result<uuid::Uuid> {
-    let id = uuid::Uuid::new_v4();
-    queries::create_read_lease(id, stream, ttl_seconds)
-        .execute(&mut **tx)
-        .await?;
-    Ok(id)
+    Ok(queries::create_read_lease(stream, ttl_seconds)
+        .fetch_one(&mut **tx)
+        .await?)
 }
 
 pub(super) async fn create_write_lease(
     tx: &mut Transaction<'_, Postgres>,
-    stream: uuid::Uuid,
+    stream: Id,
     ttl_seconds: i64,
 ) -> Result<()> {
-    queries::create_write_lease(uuid::Uuid::new_v4(), stream, ttl_seconds)
+    queries::create_write_lease(stream, ttl_seconds)
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -1140,7 +1134,7 @@ pub(crate) async fn lock_permit(
 
 pub(crate) async fn checkpoint_audit(
     db: &mut PgConnection,
-    id: i64,
+    id: Id,
     action: &str,
     target: &str,
     project: Option<Uuid>,
@@ -1155,7 +1149,7 @@ pub(crate) async fn checkpoint_audit(
     Ok(())
 }
 
-pub(crate) async fn partial_audit(db: &mut PgConnection, id: i64) -> Result<()> {
+pub(crate) async fn partial_audit(db: &mut PgConnection, id: Id) -> Result<()> {
     queries::partial_audit(id).execute(db).await?;
     Ok(())
 }
@@ -1220,7 +1214,7 @@ pub(super) async fn create_user(
         }
     }
     enable_member_mode(&mut tx, &input.role).await?;
-    let row: Option<User> = queries::insert_user(Uuid::new_v4(), &input)
+    let row: Option<User> = queries::insert_user(&input)
         .fetch_optional(&mut *tx)
         .await?;
     let row = row.ok_or_else(|| s3s::s3_error!(OperationAborted))?;
@@ -1388,9 +1382,7 @@ pub(super) async fn save_project(
             .ok_or_else(|| s3s::s3_error!(NoSuchKey))?
     } else {
         queries::enable_project_mode().execute(&mut *tx).await?;
-        queries::insert_project(Uuid::new_v4(), &input)
-            .fetch_one(&mut *tx)
-            .await?
+        queries::insert_project(&input).fetch_one(&mut *tx).await?
     };
     checkpoint_event(&mut tx,if id.is_some(){"project.update"}else{"project.create"},&row.id.to_string(),serde_json::json!({"project_id":row.id,"name":row.name,"allow_bucket_create":row.allow_bucket_create})).await?;
     tx.commit().await?;
@@ -1776,9 +1768,8 @@ pub(super) async fn create_token(
     let expires = credential::expiration(input.expires_in.as_deref())?;
     let mut tx = token_owner(pool, principal, user, false).await?;
     let revision = token_scope(&mut tx, user, &input).await?;
-    let id = Uuid::new_v4();
-    queries::insert_token(id, user, &input, &material, revision, expires)
-        .execute(&mut *tx)
+    let id = queries::insert_token(user, &input, &material, revision, expires)
+        .fetch_one(&mut *tx)
         .await?;
     replace_token_grants(&mut tx, id, input.grants).await?;
     let token = get_token(&mut tx, id).await?;
@@ -2485,9 +2476,8 @@ pub(super) async fn create_multipart(
             return Err(s3s::s3_error!(SlowDown).into());
         }
     }
-    let id = Uuid::new_v4();
-    queries::insert_multipart(id, &input)
-        .execute(&mut *tx)
+    let id = queries::insert_multipart(&input)
+        .fetch_one(&mut *tx)
         .await?;
     if let Some(web) = input.web {
         queries::insert_web_upload(id, &web, expected)
@@ -2510,7 +2500,7 @@ pub(super) async fn begin_upload_part(
     authority: &Permit,
     upload: Uuid,
     number: i32,
-    stream: Uuid,
+    stream: Id,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     authority.lock(&mut tx).await?;
@@ -2534,7 +2524,7 @@ pub(super) async fn commit_upload_part(
     bucket: Uuid,
     upload: Uuid,
     number: i32,
-    stream: Uuid,
+    stream: Id,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     authority.lock(&mut tx).await?;
@@ -2762,7 +2752,7 @@ pub(super) async fn upload_transfers(
     Ok((rows, more))
 }
 
-async fn mark_unreferenced(tx: &mut Transaction<'_, Postgres>, chunks: &[i64]) -> Result<()> {
+async fn mark_unreferenced(tx: &mut Transaction<'_, Postgres>, chunks: &[Id]) -> Result<()> {
     if !chunks.is_empty() {
         queries::mark_unreferenced_chunks(chunks)
             .execute(&mut **tx)
@@ -2773,10 +2763,10 @@ async fn mark_unreferenced(tx: &mut Transaction<'_, Postgres>, chunks: &[i64]) -
 
 async fn replace_upload_range(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    stream: Uuid,
+    stream: Id,
     offset: i64,
     length: usize,
-    chunk: i64,
+    chunk: Id,
     source: usize,
 ) -> Result<()> {
     if length == 0 {
@@ -2882,7 +2872,7 @@ pub(super) async fn cache_stage(pool: &PgPool, input: CacheStage<'_>) -> Result<
     Ok(true)
 }
 
-pub(super) async fn cache_seal(pool: &PgPool, stream: Uuid, eof: bool) -> Result<bool> {
+pub(super) async fn cache_seal(pool: &PgPool, stream: Id, eof: bool) -> Result<bool> {
     if eof {
         queries::seal_stream_uploads(stream).execute(pool).await?;
         return Ok(true);
@@ -2993,7 +2983,7 @@ pub(super) async fn cache_batch(
             .fetch_optional(&mut *tx)
             .await?
     } else {
-        detail["first"].as_i64()
+        Id::from_json(&detail["first"])?
     };
     let Some(first) = first else {
         return Ok(
@@ -3059,7 +3049,7 @@ pub(super) async fn cache_batch(
     if rows.is_empty() {
         return Ok(CacheBatch::Finished);
     }
-    let mut ids: Vec<i64> = rows.iter().map(|r| r.chunk.id).collect();
+    let mut ids: Vec<Id> = rows.iter().map(|r| r.chunk.id).collect();
     ids.sort_unstable();
     ids.dedup();
     pin_inputs(&mut tx, task.id, &ids).await?;
@@ -3122,7 +3112,7 @@ async fn release_task_inputs(tx: &mut Transaction<'_, Postgres>, task: Uuid) -> 
 
 pub(super) async fn cache_release(
     pool: &PgPool,
-    ids: &[i64],
+    ids: &[Id],
     existing_pack: bool,
 ) -> Result<CacheRelease> {
     let mut tx = pool.begin().await?;
@@ -3218,7 +3208,7 @@ pub(super) async fn pin_pack_inputs(
     task: Execution,
     rows: &[Mapping],
 ) -> Result<()> {
-    let mut ids: Vec<i64> = rows.iter().map(|r| r.chunk.id).collect();
+    let mut ids: Vec<Id> = rows.iter().map(|r| r.chunk.id).collect();
     ids.sort_unstable();
     ids.dedup();
     let mut tx = pool.begin().await?;
@@ -3228,8 +3218,8 @@ pub(super) async fn pin_pack_inputs(
     Ok(())
 }
 
-async fn pin_inputs(db: &mut PgConnection, task: Uuid, ids: &[i64]) -> Result<()> {
-    let ready: Vec<i64> = queries::pack_ready_inputs(ids).fetch_all(&mut *db).await?;
+async fn pin_inputs(db: &mut PgConnection, task: Uuid, ids: &[Id]) -> Result<()> {
+    let ready: Vec<Id> = queries::pack_ready_inputs(ids).fetch_all(&mut *db).await?;
     ensure!(ready == ids, "pack inputs changed; retry maintenance");
     record_source_inputs(db, task, ids).await?;
     queries::insert_pack_inputs(task, ids).execute(db).await?;
@@ -3311,7 +3301,7 @@ pub(super) async fn start_pack(
 pub(super) async fn start_unpack(
     pool: &PgPool,
     single: bool,
-    pack: Option<i64>,
+    pack: Option<Id>,
     all: bool,
     node: Option<Uuid>,
 ) -> Result<Value> {
@@ -3434,7 +3424,7 @@ pub(super) async fn advance_pack_storage(
     Ok(())
 }
 
-pub(super) async fn insert_pack_members(pool: &PgPool, pack: i64, rows: &[Mapping]) -> Result<()> {
+pub(super) async fn insert_pack_members(pool: &PgPool, pack: Id, rows: &[Mapping]) -> Result<()> {
     let mut tx = pool.begin().await?;
     let mut offset = 0i64;
     for (ordinal, row) in rows.iter().enumerate() {
@@ -3455,11 +3445,11 @@ pub(super) async fn commit_pack_outputs(
     settings: &crate::content::pack::Config,
     flush_seconds: f64,
 ) -> Result<()> {
-    let mut ids: Vec<i64> = rows.iter().map(|r| r.chunk.id).collect();
+    let mut ids: Vec<Id> = rows.iter().map(|r| r.chunk.id).collect();
     ids.sort_unstable();
     let mut tx = pool.begin().await?;
     lock_execution(&mut tx, task).await?;
-    let current: Vec<(i64, Option<i64>)> =
+    let current: Vec<(Id, Option<Id>)> =
         queries::lock_pack_layout(&ids).fetch_all(&mut *tx).await?;
     ensure!(
         current.len() == rows.len()
@@ -3546,11 +3536,11 @@ pub(super) async fn commit_pack_outputs(
         .execute(&mut *tx)
         .await?;
     }
-    let retained: Vec<i64> = outputs
+    let retained: Vec<Id> = outputs
         .iter()
         .flat_map(|o| o.chunks.iter().copied())
         .collect();
-    let dead: Vec<i64> = ids
+    let dead: Vec<Id> = ids
         .iter()
         .filter(|id| !retained.contains(id))
         .copied()
@@ -3574,7 +3564,7 @@ pub(super) async fn commit_pack_outputs(
         .execute(&mut *tx)
         .await?;
     }
-    let old: Vec<i64> = rows.iter().filter_map(|r| r.pack_id).collect();
+    let old: Vec<Id> = rows.iter().filter_map(|r| r.pack_id).collect();
     queries::retire_replaced_packs(old)
         .execute(&mut *tx)
         .await?;
@@ -3585,7 +3575,7 @@ pub(super) async fn commit_pack_outputs(
 pub(super) async fn record_range(
     pool: &PgPool,
     task: Execution,
-    id: i64,
+    id: Id,
     processed: usize,
     decision: Value,
 ) -> Result<()> {
@@ -3739,9 +3729,9 @@ pub(super) async fn commit_rewrite_pack(
     token: Uuid,
     old: &Pack,
     new: &Pack,
-    current: &[i64],
+    current: &[Id],
     members: &[Chunk],
-    first: i64,
+    first: Id,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     rewrite_lease(&mut tx, task, token).await?;
@@ -3842,7 +3832,7 @@ pub(super) async fn purge_batch(
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     lock_execution(&mut tx, id).await?;
-    let keys: Vec<(String, Option<Uuid>)> = queries::lock_purge_objects(bucket, cursor, batch)
+    let keys: Vec<(String, Option<Id>)> = queries::lock_purge_objects(bucket, cursor, batch)
         .fetch_all(&mut *tx)
         .await?;
     if !keys.is_empty() {
@@ -3851,7 +3841,7 @@ pub(super) async fn purge_batch(
             if let Some(stream) = stream {
                 queries::retire_stream(*stream).execute(&mut *tx).await?;
             }
-            queries::purge_object(bucket, key, Uuid::new_v4())
+            queries::purge_object(bucket, key, Id::default())
                 .execute(&mut *tx)
                 .await?;
         }
@@ -3923,7 +3913,7 @@ pub(super) async fn recover_runtime(pool: &PgPool, maintenance: bool) -> Result<
 
 pub(super) async fn claim_stale_stream(
     pool: &PgPool,
-    id: Uuid,
+    id: Id,
     storage: Option<Uuid>,
     retention: Option<f64>,
     single: bool,
@@ -3942,7 +3932,7 @@ pub(super) async fn claim_stale_stream(
     tx.commit().await?;
     Ok(true)
 }
-pub(super) async fn cleanup_stream(pool: &PgPool, id: Uuid, batch: i64) -> Result<usize> {
+pub(super) async fn cleanup_stream(pool: &PgPool, id: Id, batch: i64) -> Result<usize> {
     let mut tx = pool.begin().await?;
     queries::cleanup_limits(&mut tx).await?;
     let raw = queries::raw_cleanup_ranges(id, batch.clamp(1, 128))
@@ -3984,7 +3974,7 @@ pub(super) async fn cleanup_stream(pool: &PgPool, id: Uuid, batch: i64) -> Resul
 
 struct FragmentDelete {
     tx: Transaction<'static, Postgres>,
-    id: Uuid,
+    id: Id,
 }
 #[async_trait::async_trait]
 impl FragmentDeletion for FragmentDelete {
@@ -3995,16 +3985,17 @@ impl FragmentDeletion for FragmentDelete {
         Ok(())
     }
 }
-pub(super) async fn claim_fragment(pool: &PgPool, id: Uuid) -> Result<Option<FragmentCleanup>> {
+pub(super) async fn claim_fragment(pool: &PgPool, id: Id) -> Result<Option<FragmentCleanup>> {
     let mut tx = pool.begin().await?;
     queries::cleanup_limits(&mut tx).await?;
-    let Some((sealed, owner, storage, key, file)) = queries::lock_cleanup_fragment(id)
+    let Some((location_id, sealed, owner, storage, key, file)) = queries::lock_cleanup_fragment(id)
         .fetch_optional(&mut *tx)
         .await?
     else {
         return Ok(None);
     };
     Ok(Some(FragmentCleanup {
+        location_id,
         sealed,
         file,
         owner,
@@ -4029,10 +4020,10 @@ pub(super) async fn cleanup_tombstones(
 }
 pub(super) async fn retire_chunk(
     pool: &PgPool,
-    id: i64,
+    id: Id,
     storage: Uuid,
     grace: f64,
-    active: &[Uuid],
+    active: &[Id],
 ) -> Result<Option<Vec<Uuid>>> {
     let mut tx = pool.begin().await?;
     let Some((owner,)) = queries::lock_reclaim_chunk(id, storage, grace)
@@ -4135,7 +4126,7 @@ pub(super) async fn start_integrity(
     let mut details = Vec::with_capacity(storage_rows.len());
     for (storage_id, storage_type) in storage_rows {
         let storage_id = (storage_id != Uuid::nil()).then_some(storage_id);
-        let upper: i64 = if let Some(storage_id) = storage_id {
+        let upper: Id = if let Some(storage_id) = storage_id {
             queries::integrity_upper_chunk(storage_id)
                 .fetch_one(&mut *tx)
                 .await?
@@ -4457,7 +4448,7 @@ use crate::model::object::{ObjectTransfer, Outcome, RECEIPT, StorageMigration};
 
 async fn complete_media_operation(
     tx: &mut Transaction<'_, Postgres>,
-    version: Option<Uuid>,
+    version: Option<Id>,
 ) -> Result<()> {
     record_media_operation(
         tx,
@@ -4531,9 +4522,9 @@ async fn selected_object(
     tx: &mut Transaction<'_, Postgres>,
     bucket: Uuid,
     key: &str,
-    expected: Option<Uuid>,
-) -> Result<Option<Uuid>> {
-    let actual: Option<Uuid> = queries::lock_object_stream(bucket, key)
+    expected: Option<Id>,
+) -> Result<Option<Id>> {
+    let actual: Option<Id> = queries::lock_object_stream(bucket, key)
         .fetch_optional(&mut **tx)
         .await?
         .flatten();
@@ -4550,10 +4541,9 @@ pub(super) async fn begin_media_operation(
     client: Uuid,
     hash: &[u8],
 ) -> Result<(Uuid, Vec<u8>)> {
-    let receipt = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     principal.lock_identity(&mut tx).await?;
-    queries::insert_media_operation(receipt, user, principal.token_id(), client, hash)
+    queries::insert_media_operation(user, principal.token_id(), client, hash)
         .execute(&mut *tx)
         .await?;
     let (id, expected): (Uuid, Vec<u8>) =
@@ -4625,7 +4615,7 @@ pub(super) async fn publish_copy(
     pool: &PgPool,
     permit: &Permit,
     input: ObjectTransfer<'_>,
-    id: Uuid,
+    id: Id,
     public: bool,
     expected_public: Option<bool>,
 ) -> Result<()> {
@@ -4713,7 +4703,7 @@ pub(super) async fn complete_storage_migration(
     pool: &PgPool,
     id: Uuid,
     lease_token: Uuid,
-    destination: Uuid,
+    destination: Id,
     job: &StorageMigration,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
@@ -5190,7 +5180,7 @@ pub(super) async fn scoped_pack_page(
     pool: &PgPool,
     principal: &Principal,
     scope: &ScopeQuery,
-    after: i64,
+    after: Id,
     limit: i64,
     state: Option<&str>,
 ) -> Result<Vec<PackSummary>> {
@@ -5209,8 +5199,8 @@ pub(super) async fn scoped_pack_detail(
     pool: &PgPool,
     principal: &Principal,
     scope: &ScopeQuery,
-    id: i64,
-    after: i64,
+    id: Id,
+    after: Id,
     limit: i64,
 ) -> Result<(PackSummary, Vec<PackMember>, bool)> {
     let mut tx = pool.begin().await?;
@@ -5232,7 +5222,7 @@ pub(super) async fn scoped_pack_objects(
     pool: &PgPool,
     principal: &Principal,
     scope: &ScopeQuery,
-    id: i64,
+    id: Id,
     cursor: Option<(Uuid, String)>,
 ) -> Result<Vec<PackObject>> {
     let mut tx = pool.begin().await?;
@@ -5290,12 +5280,10 @@ pub(super) async fn create_maintenance_preview(
     queries::remove_maintenance_preview(principal.user_id(), principal.token_id(), action)
         .execute(&mut *tx)
         .await?;
-    let id = Uuid::new_v4();
     let fingerprint = blake3::hash(&serde_json::to_vec(&impact)?)
         .to_hex()
         .to_string();
-    let expires_at = queries::create_maintenance_preview(
-        id,
+    let (id, expires_at) = queries::create_maintenance_preview(
         principal.user_id(),
         principal.token_id(),
         action,
@@ -6053,15 +6041,15 @@ pub(super) async fn aggregate_runtime(pool: &PgPool, interval: u64, retention: u
 
 pub(super) async fn require_sources(
     db: &mut sqlx::PgConnection,
-    stream: Option<Uuid>,
-    chunks: &[i64],
+    stream: Option<Id>,
+    chunks: &[Id],
 ) -> Result<()> {
     use futures_util::TryStreamExt;
     // Mapping changes take FOR UPDATE; references may update liveness under KEY SHARE.
     // Lock logical rows before physical rows, whose SHARE locks block quarantine.
     for phase in 0..3 {
         let mut query = queries::source_locks(stream, chunks, phase);
-        let mut rows = query.build_query_scalar::<i64>().fetch(&mut *db);
+        let mut rows = query.build_query_scalar::<Id>().fetch(&mut *db);
         while rows.try_next().await?.is_some() {}
     }
     ensure!(
@@ -6074,7 +6062,7 @@ pub(super) async fn require_sources(
     Ok(())
 }
 
-async fn require_writing_stream(db: &mut PgConnection, stream: Uuid) -> Result<()> {
+async fn require_writing_stream(db: &mut PgConnection, stream: Id) -> Result<()> {
     ensure!(
         queries::source_writing_stream(stream)
             .fetch_optional(db)
@@ -6166,7 +6154,7 @@ pub(super) async fn source_update(
     Ok(())
 }
 
-async fn require_inputs(db: &mut sqlx::PgConnection, chunks: &[i64]) -> Result<()> {
+async fn require_inputs(db: &mut sqlx::PgConnection, chunks: &[Id]) -> Result<()> {
     require_sources(db, None, chunks).await?;
     ensure!(
         !queries::quarantined_inputs(chunks)
@@ -6178,11 +6166,7 @@ async fn require_inputs(db: &mut sqlx::PgConnection, chunks: &[i64]) -> Result<(
     Ok(())
 }
 
-async fn lock_splice_sources(
-    db: &mut sqlx::PgConnection,
-    streams: &[Uuid],
-    chunk: i64,
-) -> Result<()> {
+async fn lock_splice_sources(db: &mut sqlx::PgConnection, streams: &[Id], chunk: Id) -> Result<()> {
     use futures_util::TryStreamExt;
     for physical in [false, true] {
         let mut query = queries::splice_locks(streams, chunk, physical);
@@ -6191,8 +6175,8 @@ async fn lock_splice_sources(
     }
     require_sources(db, None, &[chunk]).await
 }
-async fn source_input_stamp(db: &mut sqlx::PgConnection, chunks: &[i64]) -> Result<Value> {
-    let rows: Vec<(i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+async fn source_input_stamp(db: &mut sqlx::PgConnection, chunks: &[Id]) -> Result<Value> {
+    let rows: Vec<(Id, Option<Id>, Option<i64>, Option<Id>, Option<i64>)> =
         queries::source_input_versions(chunks)
             .build_query_as()
             .fetch_all(db)
@@ -6211,7 +6195,7 @@ async fn source_input_stamp(db: &mut sqlx::PgConnection, chunks: &[i64]) -> Resu
 async fn record_source_inputs(
     db: &mut sqlx::PgConnection,
     task: Uuid,
-    chunks: &[i64],
+    chunks: &[Id],
 ) -> Result<()> {
     require_inputs(db, chunks).await?;
     let stamp = source_input_stamp(db, chunks).await?;
@@ -6220,11 +6204,7 @@ async fn record_source_inputs(
         .await?;
     Ok(())
 }
-async fn check_source_inputs(
-    db: &mut sqlx::PgConnection,
-    task: Uuid,
-    chunks: &[i64],
-) -> Result<()> {
+async fn check_source_inputs(db: &mut sqlx::PgConnection, task: Uuid, chunks: &[Id]) -> Result<()> {
     require_inputs(db, chunks).await?;
     let stamp = source_input_stamp(db, chunks).await?;
     let saved = queries::saved_source_inputs(task).fetch_one(db).await?;
@@ -6241,7 +6221,7 @@ async fn check_source_inputs(
 
 async fn repair_writer(
     db: &mut sqlx::PgConnection,
-    stream: Uuid,
+    stream: Id,
     node: Option<&crate::model::recovery::RepairNode>,
 ) -> Result<()> {
     let authority = queries::write_authorization(stream)
@@ -6349,7 +6329,7 @@ async fn repair_sources(
             .await?,
         crate::model::Error::SourceUnavailable
     );
-    let rows: Vec<(i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+    let rows: Vec<(Id, Option<Id>, Option<i64>, Option<Id>, Option<i64>)> =
         queries::source_input_versions(&[chunk.id])
             .build_query_as()
             .fetch_all(&mut *db)
@@ -6415,7 +6395,7 @@ pub(super) async fn prepare_repair(
             .all(|source| source.storage_revision == revision),
         crate::model::Error::OperationAborted
     );
-    chunk.location_id = Uuid::new_v4();
+    chunk.location_id = Uuid::nil();
     chunk.algorithm = input.algorithm;
     chunk.block_key_id = input.key;
     chunk.stored_size = None;
@@ -6424,6 +6404,9 @@ pub(super) async fn prepare_repair(
     chunk.encoding_id = queries::insert_repair(&chunk, input.stream)
         .fetch_one(&mut *tx)
         .await?;
+    if let Id::Uuid(id) = chunk.encoding_id {
+        chunk.location_id = id;
+    }
     let repair = Repair {
         stream: input.stream,
         node,
@@ -6591,10 +6574,10 @@ pub(super) async fn finish_repair(
 
 pub(super) async fn begin_raw(
     pool: &sqlx::PgPool,
-    stream: Uuid,
+    stream: Id,
     storage: Uuid,
     revision: i64,
-) -> Result<Uuid> {
+) -> Result<(Id, Uuid)> {
     let mut tx = pool.begin().await?;
     let (storage_type, unencoded, current, cdc, background) = queries::raw_target(stream, storage)
         .fetch_optional(&mut *tx)
@@ -6612,9 +6595,7 @@ pub(super) async fn begin_raw(
             == 1,
         crate::model::Error::OperationAborted
     );
-    let id = Uuid::new_v4();
-    queries::raw_insert(
-        id,
+    let id = queries::raw_insert(
         stream,
         storage,
         revision,
@@ -6624,21 +6605,21 @@ pub(super) async fn begin_raw(
             "shared_s3"
         },
     )
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
     if background {
-        queries::raw_enqueue_processing(stream, id)
+        queries::raw_enqueue_processing(stream, id.into())
             .execute(&mut *tx)
             .await?;
     }
     tx.commit().await?;
-    Ok(id)
+    Ok((id.into(), id))
 }
 
 pub(super) async fn finish_raw(
     pool: &sqlx::PgPool,
-    stream: Uuid,
-    source: Uuid,
+    stream: Id,
+    source: Id,
     size: i64,
     digest: &[u8],
 ) -> Result<()> {
@@ -6669,7 +6650,7 @@ pub(super) async fn finish_raw(
     Ok(())
 }
 
-async fn validate_raw(db: &mut sqlx::PgConnection, stream: Uuid, size: i64) -> Result<()> {
+async fn validate_raw(db: &mut sqlx::PgConnection, stream: Id, size: i64) -> Result<()> {
     let sources = queries::raw_sources_lock(stream)
         .fetch_all(&mut *db)
         .await?;
@@ -6687,8 +6668,8 @@ async fn validate_raw(db: &mut sqlx::PgConnection, stream: Uuid, size: i64) -> R
 
 pub(super) async fn deduplicate_raw(
     pool: &sqlx::PgPool,
-    stream: Uuid,
-    source: Uuid,
+    stream: Id,
+    source: Id,
     hash: &[u8],
 ) -> Result<bool> {
     ensure!(hash.len() == 32, "invalid raw content hash");
@@ -6715,7 +6696,7 @@ pub(super) async fn deduplicate_raw(
 
 async fn share_raw(
     db: &mut sqlx::PgConnection,
-    stream: Uuid,
+    stream: Id,
     current: &crate::model::raw::RawSource,
     hash: &[u8],
 ) -> Result<bool> {
@@ -6773,16 +6754,10 @@ pub(super) async fn multipart_file(pool: &PgPool, upload: Uuid) -> Result<Uuid> 
     {
         id
     } else {
-        let id = Uuid::new_v4();
-        ensure!(
-            queries::insert_multipart_file(id, upload)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected()
-                == 1,
-            crate::model::Error::OperationAborted
-        );
-        id
+        queries::insert_multipart_file(upload)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(crate::model::Error::OperationAborted)?
     };
     tx.commit().await?;
     Ok(id)
@@ -6791,7 +6766,7 @@ pub(super) async fn multipart_file(pool: &PgPool, upload: Uuid) -> Result<Uuid> 
 pub(super) async fn remap_multipart_file(
     pool: &PgPool,
     upload: Uuid,
-    source: Uuid,
+    source: Id,
     ranges: &[crate::model::multipart::FileRemap],
 ) -> Result<()> {
     ensure!(

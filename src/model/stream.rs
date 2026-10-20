@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{app::StoredStream, authorization::Permit};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -22,7 +23,7 @@ pub(crate) struct StreamCreate {
 
 pub(crate) struct StreamTail {
     pub(crate) fragment: Uuid,
-    pub(crate) stream: Uuid,
+    pub(crate) stream: Id,
     pub(crate) offset: i64,
     pub(crate) size: i32,
     pub(crate) hash: [u8; 32],
@@ -37,8 +38,8 @@ pub(crate) struct CachedExtent {
     pub cache_offset: Option<i64>,
     pub cache_length: Option<i32>,
     pub cache_source: Option<i32>,
-    pub cache_chunk: Option<i64>,
-    pub cache_ready: Option<i64>,
+    pub cache_chunk: Option<Id>,
+    pub cache_ready: Option<Id>,
     pub cache_size: Option<i32>,
     pub cache_hash: Option<Vec<u8>>,
 }
@@ -52,7 +53,7 @@ pub(crate) struct CachedStream {
 
 #[derive(Clone, Copy)]
 pub(crate) struct CompressionObservation {
-    pub stream: Uuid,
+    pub stream: Id,
     pub version: i32,
     pub encoding: &'static str,
     pub size: i64,
@@ -72,9 +73,9 @@ impl CompressionObservation {
 pub(crate) trait StreamStore: Send + Sync {
     async fn current(&self, bucket: Uuid, key: &str) -> Result<StoredStream>;
     async fn cached(&self, bucket: Uuid, key: &str) -> Result<Option<CachedStream>>;
-    async fn create(&self, input: StreamCreate) -> Result<Uuid>;
+    async fn create(&self, input: StreamCreate) -> Result<Id>;
     async fn append_tail(&self, tail: StreamTail) -> Result<()>;
-    async fn finish(&self, stream: Uuid, size: i64, etag: &str, checksums: Value) -> Result<bool>;
+    async fn finish(&self, stream: Id, size: i64, etag: &str, checksums: Value) -> Result<bool>;
     async fn learn_compression(
         &self,
         observation: CompressionObservation,

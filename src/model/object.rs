@@ -1,4 +1,5 @@
 use crate::authorization::{Permit, Principal};
+use crate::model::Id;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -11,7 +12,7 @@ pub(crate) struct ObjectChange {
     pub(crate) principal: Principal,
     pub(crate) bucket: Uuid,
     pub(crate) key: String,
-    pub(crate) expected: Option<Uuid>,
+    pub(crate) expected: Option<Id>,
     pub(crate) public: Option<bool>,
 }
 
@@ -30,7 +31,7 @@ pub(crate) enum MediaAction {
 pub(crate) struct Outcome {
     pub(crate) status: u16,
     pub(crate) code: Option<String>,
-    pub(crate) output_version: Option<Uuid>,
+    pub(crate) output_version: Option<Id>,
     pub(crate) task_id: Option<Uuid>,
 }
 
@@ -47,20 +48,20 @@ tokio::task_local! { pub(crate) static RECEIPT: Receipt; }
 pub(crate) struct ObjectTransfer<'a> {
     pub(crate) source_bucket: Uuid,
     pub(crate) source_key: &'a str,
-    pub(crate) source_version: Uuid,
+    pub(crate) source_version: Id,
     pub(crate) target_bucket: Uuid,
     pub(crate) target_key: &'a str,
-    pub(crate) target_version: Option<Uuid>,
+    pub(crate) target_version: Option<Id>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct StorageMigration {
     pub(crate) source_bucket: Uuid,
     pub(crate) source_key: String,
-    pub(crate) source_version: Uuid,
+    pub(crate) source_version: Id,
     pub(crate) target_bucket: Uuid,
     pub(crate) target_key: String,
-    pub(crate) target_version: Option<Uuid>,
+    pub(crate) target_version: Option<Id>,
     pub(crate) action: String,
     pub(crate) public_read: bool,
 }
@@ -75,7 +76,7 @@ pub(crate) trait ObjectStore: Send + Sync {
         cursor: Option<CatalogCursor>,
         sizes: (Option<i64>, Option<i64>),
     ) -> Result<Vec<MediaItem>>;
-    async fn chunks(&self, stream: Uuid, after: i64, limit: i64) -> Result<Vec<Value>>;
+    async fn chunks(&self, stream: Id, after: i64, limit: i64) -> Result<Vec<Value>>;
     async fn change(&self, input: ObjectChange) -> Result<bool>;
     async fn begin_operation(
         &self,
@@ -93,7 +94,7 @@ pub(crate) trait ObjectStore: Send + Sync {
         &self,
         permit: &Permit,
         input: ObjectTransfer<'_>,
-        stream: Uuid,
+        stream: Id,
         public: bool,
         expected_public: Option<bool>,
     ) -> Result<()>;
@@ -102,11 +103,11 @@ pub(crate) trait ObjectStore: Send + Sync {
         &self,
         task: Uuid,
         token: Uuid,
-        stream: Uuid,
+        stream: Id,
         job: &StorageMigration,
     ) -> Result<()>;
-    async fn abandon_copy(&self, stream: Uuid) -> Result<()>;
-    async fn abandon_migration(&self, stream: Uuid) -> Result<()>;
+    async fn abandon_copy(&self, stream: Id) -> Result<()>;
+    async fn abandon_migration(&self, stream: Id) -> Result<()>;
 }
 
 #[derive(Serialize, Deserialize, IntoParams)]
@@ -161,7 +162,7 @@ pub(crate) struct CatalogCursor {
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct MediaItem {
-    pub(crate) id: Uuid,
+    pub(crate) id: Id,
     pub(crate) object_key: String,
     pub(crate) size: String,
     pub(crate) content_type: String,

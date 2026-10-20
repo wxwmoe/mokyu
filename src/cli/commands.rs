@@ -1,3 +1,4 @@
+use crate::model::Id;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -82,7 +83,7 @@ pub enum Packs {
         mode: String,
     },
     Unpack {
-        id: Option<i64>,
+        id: Option<Id>,
         #[arg(long, conflicts_with = "id")]
         all: bool,
         #[arg(long)]
@@ -129,8 +130,8 @@ pub enum Integrity {
     },
     Issues {
         id: Uuid,
-        #[arg(long, default_value_t = 0)]
-        after: i64,
+        #[arg(long, default_value = "0")]
+        after: String,
         #[arg(long, default_value_t = 100)]
         limit: i64,
     },

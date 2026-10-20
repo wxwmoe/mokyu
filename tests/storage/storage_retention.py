@@ -130,29 +130,29 @@ def restart(minimum, clear_age=False):
 
 def physical_key(source_type, storage):
     prefix = 'packs/' if source_type == 'packs' else ''
-    return settings['prefix'].rstrip('/') + '/' + prefix + storage.hex[:2] + '/' + storage.hex
+    return settings['prefix'].rstrip('/') + '/' + prefix + storage.hex[-2:] + '/' + storage.hex
 
 
 try:
     assert cli('storage', 'profile', 'show', storage_name)['min_storage_duration'] == '0s'
     raw = os.urandom(15 * 1024 * 1024 + 17)
     s3.put_object(Bucket=bucket, Key='retained', Body=raw)
-    locations = db.execute('SELECT encoding_id,location_id,nonce,stored_at FROM chunk_encodings ORDER BY encoding_id').fetchall()
+    locations = db.execute('SELECT encoding_id,encoding_id,nonce,stored_at FROM chunk_encodings ORDER BY encoding_id').fetchall()
     assert all(row[3] is not None for row in locations)
     puts = cli('status')['backend_puts']
     s3.put_object(Bucket=bucket, Key='retained-copy', Body=raw)
     assert cli('status')['backend_puts'] == puts
-    assert locations == db.execute('SELECT encoding_id,location_id,nonce,stored_at FROM chunk_encodings ORDER BY encoding_id').fetchall()
+    assert locations == db.execute('SELECT encoding_id,encoding_id,nonce,stored_at FROM chunk_encodings ORDER BY encoding_id').fetchall()
     s3.delete_object(Bucket=bucket, Key='retained-copy')
     wait(lambda: (cli('gc', 'run'), scalar("SELECT count(*)=0 FROM streams WHERE object_key='retained-copy'"))[1])
     task('pack', 'run')
-    pack = db.execute("SELECT id,location_id,nonce,stored_at FROM packs WHERE state='ready'").fetchone()
+    pack = db.execute("SELECT id,id,nonce,stored_at FROM packs WHERE state='ready'").fetchone()
     assert pack and pack[3] is not None and read('retained')[0] == raw
 
     # Missing storage timestamps require conservative remote age checks.
     restart('30d', clear_age=True)
-    assert db.execute('SELECT encoding_id,location_id,nonce FROM chunk_encodings ORDER BY encoding_id').fetchall() == [r[:3] for r in locations]
-    assert db.execute('SELECT id,location_id,nonce,stored_at FROM packs').fetchone() == (*pack[:3], None)
+    assert db.execute('SELECT encoding_id,encoding_id,nonce FROM chunk_encodings ORDER BY encoding_id').fetchall() == [r[:3] for r in locations]
+    assert db.execute('SELECT id,id,nonce,stored_at FROM packs').fetchone() == (*pack[:3], None)
     assert scalar('SELECT bool_and(stored_at IS NULL) FROM chunk_encodings')
     assert read('retained')[0] == raw
     cli('maintenance', 'disable')

@@ -1,3 +1,4 @@
+use crate::model::Id;
 use anyhow::Result;
 use async_trait::async_trait;
 use s3s::dto::{ETag, ETagCondition};
@@ -11,7 +12,7 @@ use uuid::Uuid;
 pub(crate) trait PublishStore: Send + Sync {
     async fn publish(
         &self,
-        stream: Uuid,
+        stream: Id,
         if_match: Option<ETagCondition>,
         if_none: Option<ETagCondition>,
         completion: Option<(Uuid, String, Value)>,

@@ -1,4 +1,4 @@
--- Current mysql schema, matching migration 0022.
+-- Current mysql schema, matching migration 0025.
 -- The initializer records schema_version and migration checksums after this script succeeds.
 
 CREATE TABLE `access_state` (
@@ -300,7 +300,7 @@ CREATE TABLE `integrity_issues` (
   `code` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `chunk_id` bigint DEFAULT NULL,
   `location_id` binary(16) DEFAULT NULL,
-  `stream_id` binary(16) DEFAULT NULL,
+  `stream_id` bigint DEFAULT NULL,
   `bucket_id` binary(16) DEFAULT NULL,
   `object_key` varbinary(1024) DEFAULT NULL,
   `detail` json NOT NULL DEFAULT (json_object()),
@@ -392,7 +392,7 @@ CREATE TABLE `pack_changes` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `streams` (
-  `id` binary(16) NOT NULL,
+  `id` bigint NOT NULL AUTO_INCREMENT,
   `bucket_id` binary(16) NOT NULL,
   `object_key` varbinary(1024) NOT NULL,
   `stream_type` varchar(6) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -426,7 +426,7 @@ CREATE TABLE `streams` (
 CREATE TABLE `chunks` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `storage_id` binary(16) NOT NULL,
-  `owner_stream` binary(16) DEFAULT NULL,
+  `owner_stream` bigint DEFAULT NULL,
   `hash` binary(32) NOT NULL,
   `raw_size` int NOT NULL,
   `standalone_size` int DEFAULT NULL,
@@ -434,7 +434,7 @@ CREATE TABLE `chunks` (
   `block_key_id` binary(16) DEFAULT NULL,
   `standalone_compressed` tinyint(1) NOT NULL DEFAULT '0',
   `nonce` varbinary(12) DEFAULT NULL,
-  `format` int NOT NULL DEFAULT '1',
+  `format` int NOT NULL DEFAULT '2',
   `state` varchar(9) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `current_encoding_id` bigint NOT NULL DEFAULT '0',
   `pack_id` bigint DEFAULT NULL,
@@ -459,7 +459,7 @@ CREATE TABLE `chunks` (
   CONSTRAINT `chunks_algorithm` CHECK ((`encryption_algorithm` in ('none','aes-256-gcm','chacha20-poly1305'))),
   CONSTRAINT `chunks_encoding` CHECK (((`current_encoding_id` > 0) or (`state` = 'preparing'))),
   CONSTRAINT `chunks_encryption` CHECK ((((`encryption_algorithm` = 'none') and (`block_key_id` is null)) or ((`encryption_algorithm` <> 'none') and (`block_key_id` is not null)))),
-  CONSTRAINT `chunks_format` CHECK ((`format` = 1)),
+  CONSTRAINT `chunks_format_v2` CHECK ((`format` = 2)),
   CONSTRAINT `chunks_raw_size` CHECK ((`raw_size` between 1 and 4194304)),
   CONSTRAINT `chunks_state` CHECK ((`state` in ('preparing','uploading','ready','failed','deleting','deleted'))),
   CONSTRAINT `chunks_stored_size` CHECK (((`standalone_size` is null) or (`standalone_size` between 1 and 4194320))),
@@ -472,7 +472,7 @@ CREATE TABLE `chunks` (
 CREATE TABLE `cache_pins` (
   `chunk_id` bigint NOT NULL,
   `pin_type` varchar(6) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  `owner_id` binary(16) NOT NULL,
+  `owner_id` bigint NOT NULL,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`chunk_id`,`pin_type`,`owner_id`),
   KEY `cache_pins_owner` (`owner_id`,`chunk_id`),
@@ -540,7 +540,7 @@ CREATE TABLE `chunk_encodings` (
   CONSTRAINT `encodings_chunk` FOREIGN KEY (`storage_id`, `chunk_id`) REFERENCES `chunks` (`storage_id`, `id`) ON DELETE CASCADE,
   CONSTRAINT `encodings_key` FOREIGN KEY (`block_key_id`) REFERENCES `managed_keys` (`id`),
   CONSTRAINT `encodings_owner` FOREIGN KEY (`owner_task`) REFERENCES `tasks` (`id`) ON DELETE SET NULL,
-  owner_stream binary(16) DEFAULT NULL,
+  owner_stream bigint DEFAULT NULL,
   recovery_pending tinyint(1) NOT NULL DEFAULT '0',
   CONSTRAINT encodings_owner_stream FOREIGN KEY (owner_stream) REFERENCES streams(id) ON DELETE RESTRICT,
   CONSTRAINT encodings_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)),
@@ -551,13 +551,15 @@ CREATE TABLE `chunk_encodings` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `fragments` (
-  `id` binary(16) NOT NULL,
-  `owner_stream` binary(16) DEFAULT NULL,
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `location_id` binary(16) NOT NULL,
+  `owner_stream` bigint DEFAULT NULL,
   `sealed` tinyint(1) NOT NULL DEFAULT '0',
   `size` int NOT NULL,
   `hash` binary(32) NOT NULL,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
+  UNIQUE KEY `fragments_location` (`location_id`),
   KEY `fragments_stream` (`owner_stream`),
   KEY `fragments_cleanup` (`created_at`,`id`),
   CONSTRAINT `fragments_size` CHECK ((`size` between 1 and 4194304)),
@@ -565,11 +567,11 @@ CREATE TABLE `fragments` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `extents` (
-  `stream_id` binary(16) NOT NULL,
+  `stream_id` bigint NOT NULL,
   `offset_bytes` bigint NOT NULL,
   `length` int NOT NULL,
   `chunk_id` bigint DEFAULT NULL,
-  `fragment_id` binary(16) DEFAULT NULL,
+  `fragment_id` bigint DEFAULT NULL,
   `source_offset` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`stream_id`,`offset_bytes`),
   KEY `extents_chunk` (`chunk_id`),
@@ -586,8 +588,8 @@ CREATE TABLE `extents` (
 CREATE TABLE `objects` (
   `bucket_id` binary(16) NOT NULL,
   `object_key` varbinary(1024) NOT NULL,
-  `stream_id` binary(16) DEFAULT NULL,
-  `write_token` binary(16) NOT NULL,
+  `stream_id` bigint DEFAULT NULL,
+  `write_token` bigint NOT NULL,
   `catalog_size` bigint DEFAULT NULL,
   `catalog_modified` datetime(6) DEFAULT NULL,
   `catalog_type` text /*!80000 COLLATE utf8mb4_0900_bin */ /*M!100603 COLLATE utf8mb4_nopad_bin */,
@@ -613,7 +615,7 @@ CREATE TABLE `pack_inputs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `pack_maintenance` (
-  `stream_id` binary(16) NOT NULL,
+  `stream_id` bigint NOT NULL,
   `progress_cursor` bigint NOT NULL DEFAULT '0',
   `generation` bigint NOT NULL DEFAULT '1',
   `next_check_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -654,7 +656,7 @@ CREATE TABLE `pack_members` (
 
 CREATE TABLE `pending_uploads` (
   `chunk_id` bigint NOT NULL,
-  `stream_id` binary(16) DEFAULT NULL,
+  `stream_id` bigint DEFAULT NULL,
   `offset_bytes` bigint NOT NULL,
   `staged_size` bigint NOT NULL,
   `cache_key` varchar(40) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
@@ -690,7 +692,7 @@ CREATE TABLE `uploads` (
   `checksum_type` varchar(16) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
   `manifest_hash` varchar(128) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
   `result` json DEFAULT NULL,
-  `output_stream` binary(16) DEFAULT NULL,
+  `output_stream` bigint DEFAULT NULL,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `touched_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `durable_at` datetime(6) DEFAULT NULL,
@@ -707,8 +709,8 @@ CREATE TABLE `uploads` (
 CREATE TABLE `parts` (
   `upload_id` binary(16) NOT NULL,
   `part_number` int NOT NULL,
-  `stream_id` binary(16) DEFAULT NULL,
-  `write_token` binary(16) NOT NULL,
+  `stream_id` bigint DEFAULT NULL,
+  `write_token` bigint NOT NULL,
   `quota_size` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`upload_id`,`part_number`),
   KEY `parts_stream` (`stream_id`),
@@ -719,14 +721,14 @@ CREATE TABLE `parts` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `quota_reservations` (
-  `id` binary(16) NOT NULL,
+  `id` bigint NOT NULL AUTO_INCREMENT,
   `bucket_id` binary(16) NOT NULL,
   `object_key` varbinary(1024) NOT NULL,
-  `stream_id` binary(16) DEFAULT NULL,
+  `stream_id` bigint DEFAULT NULL,
   `upload_id` binary(16) DEFAULT NULL,
-  `result_stream_id` binary(16) DEFAULT NULL,
+  `result_stream_id` bigint DEFAULT NULL,
   `closed` tinyint(1) NOT NULL DEFAULT '0',
-  `replaced_stream_id` binary(16) DEFAULT NULL,
+  `replaced_stream_id` bigint DEFAULT NULL,
   `credit_bytes` bigint NOT NULL DEFAULT '0',
   `logical_bytes` bigint NOT NULL DEFAULT '0',
   `inflight_bytes` bigint NOT NULL DEFAULT '0',
@@ -744,8 +746,8 @@ CREATE TABLE `quota_reservations` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `quota_writes` (
-  `stream_id` binary(16) NOT NULL,
-  `reservation_id` binary(16) NOT NULL,
+  `stream_id` bigint NOT NULL,
+  `reservation_id` bigint NOT NULL,
   `allocated_bytes` bigint NOT NULL DEFAULT '0',
   `contribution_bytes` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`stream_id`),
@@ -976,7 +978,7 @@ CREATE TABLE `web_uploads` (
   `expected_size` bigint NOT NULL,
   `part_size` bigint NOT NULL,
   `modified_at` bigint DEFAULT NULL,
-  `expected_stream_id` binary(16) DEFAULT NULL,
+  `expected_stream_id` bigint DEFAULT NULL,
   PRIMARY KEY (`upload_id`),
   UNIQUE KEY `web_uploads_client` (`user_id`,`client_id`),
   CONSTRAINT `web_uploads_modified` CHECK (((`modified_at` is null) or (`modified_at` >= 0))),
@@ -1022,9 +1024,11 @@ BEGIN
 END;
 
 CREATE TABLE raw_sources (
-    id binary(16) NOT NULL PRIMARY KEY,
+    id bigint NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    location_id binary(16) NOT NULL,
+    CONSTRAINT raw_sources_location UNIQUE (location_id),
     storage_id binary(16) NOT NULL,
-    owner_stream binary(16),
+    owner_stream bigint,
     medium varchar(10) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'local' CHECK (medium IN ('local','memory','shared_s3')),
     durability varchar(8) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'durable' CHECK (durability IN ('durable','buffered','volatile')),
     boot_id binary(16),
@@ -1046,10 +1050,10 @@ CREATE TABLE raw_sources (
     INDEX raw_sources_cleanup(storage_id,state,unreferenced_at,id)
 ) ENGINE=InnoDB;
 CREATE TABLE raw_ranges (
-    stream_id binary(16) NOT NULL,
+    stream_id bigint NOT NULL,
     offset_bytes bigint NOT NULL CHECK (offset_bytes>=0),
     length bigint NOT NULL CHECK (length>=0),
-    source_id binary(16) NOT NULL,
+    source_id bigint NOT NULL,
     source_offset bigint NOT NULL DEFAULT 0 CHECK (source_offset>=0),
     PRIMARY KEY (stream_id,offset_bytes),
     CONSTRAINT raw_ranges_stream FOREIGN KEY (stream_id) REFERENCES streams(id) ON DELETE CASCADE,
@@ -1062,12 +1066,12 @@ CREATE TABLE multipart_files (
     id binary(16) NOT NULL PRIMARY KEY,
     upload_id binary(16),
     storage_id binary(16) NOT NULL,
-    source_id binary(16) UNIQUE,
+    source_id bigint UNIQUE,
     reclaim_pending boolean NOT NULL DEFAULT false,
     state varchar(8) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'open' CHECK (state IN ('open','sealed','deleting')),
     FOREIGN KEY (upload_id) REFERENCES uploads(id) ON DELETE SET NULL,
     FOREIGN KEY (storage_id) REFERENCES storages(id),
-    FOREIGN KEY (source_id) REFERENCES raw_sources(id),
+    CONSTRAINT multipart_files_source FOREIGN KEY (source_id) REFERENCES raw_sources(id),
     INDEX multipart_files_upload (upload_id,state),
     INDEX multipart_files_reclaim (reclaim_pending,storage_id,id)
 ) ENGINE=InnoDB;
@@ -1085,8 +1089,8 @@ CREATE TABLE storage_maintenance (
 ) ENGINE=InnoDB;
 
 CREATE TABLE raw_processing (
-    stream_id binary(16) NOT NULL PRIMARY KEY,
-    source_id binary(16) NOT NULL,
+    stream_id bigint NOT NULL PRIMARY KEY,
+    source_id bigint NOT NULL,
     payload_revision bigint NOT NULL,
     content_hash binary(32),
     source_revision bigint,
@@ -1122,3 +1126,5 @@ INSERT INTO nonce_counters(block_key_id,type_tag,reserved_id) SELECT k.id,0,GREA
 INSERT INTO nonce_counters(block_key_id,type_tag,reserved_id) SELECT k.id,1,GREATEST(COALESCE(t.AUTO_INCREMENT,1)-1,0) FROM managed_keys k CROSS JOIN information_schema.TABLES t WHERE k.purpose='block' AND t.TABLE_SCHEMA=DATABASE() AND t.TABLE_NAME='packs';
 
 UPDATE mokyu_meta SET schema_version=24 WHERE id=1;
+
+ALTER TABLE chunks ADD COLUMN uuid binary(16) NOT NULL;

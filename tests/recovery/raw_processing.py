@@ -35,7 +35,7 @@ def main():
             process.wait(timeout=40)
 
     def identity(value):
-        return value if isinstance(value, uuid.UUID) else uuid.UUID(bytes=bytes(value))
+        return value if isinstance(value, (int, uuid.UUID)) else uuid.UUID(bytes=bytes(value))
 
     try:
         start()
@@ -68,7 +68,7 @@ def main():
             return result
 
         def source(key):
-            rows = database.query('''SELECT r.id,r.content_hash,s.id AS stream_id,s.etag,s.metadata,
+            rows = database.query(f'''SELECT r.id,r.{database.raw_location} AS file_uuid,r.content_hash,s.id AS stream_id,s.etag,s.metadata,
                 s.public_read,s.created_at,s.touched_at,s.payload_revision
                 FROM objects o JOIN streams s ON s.id=o.stream_id JOIN raw_ranges e ON e.stream_id=s.id
                 JOIN raw_sources r ON r.id=e.source_id WHERE o.bucket_id=%s AND o.object_key=%s''',
@@ -185,10 +185,10 @@ def main():
         assert source('empty-a')['id'] == source('empty-b')['id']
         fixture.read('empty-b', b'')
         original = source('first')
-        original_id = identity(original['id'])
-        relative = 'raw/' + original_id.hex[:2] + '/' + original_id.hex
+        original_id = identity(original['file_uuid'])
+        relative = 'raw/' + original_id.hex[-2:] + '/' + original_id.hex
         fixture.bytes(fixture.prefix + relative if fixture.backend else str(fixture.root / relative), b'!' + data[1:])
-        scope = dict(storage_id=fixture.store['id'], source='raw', id=str(original_id))
+        scope = dict(storage_id=fixture.store['id'], source='raw', id=str(identity(original['id'])))
         fixture.finished(fixture.execute('quarantine', fixture.preview('quarantine', scope)))
         fixture.put('healthy-replacement', data)
         wait(drained, 'quarantined candidate prevented healthy independent publication')
@@ -207,8 +207,8 @@ def main():
         fixture.put('corrupt', data)
         wait(lambda: marker.with_suffix('.hit').exists(), 'corrupt work did not pause')
         bad = source('corrupt')
-        ident = identity(bad['id'])
-        relative = 'raw/' + ident.hex[:2] + '/' + ident.hex
+        ident = identity(bad['file_uuid'])
+        relative = 'raw/' + ident.hex[-2:] + '/' + ident.hex
         path = fixture.prefix + relative if fixture.backend else str(fixture.root / relative)
         fixture.bytes(path, b'!' + data[1:])
         marker.unlink()

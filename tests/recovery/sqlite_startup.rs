@@ -50,7 +50,7 @@ async fn sqlite_production_startup_contract() -> Result<()> {
     backend
         .current_key("startup", Some("startup-block"))
         .await?;
-    let chunk=sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,block_key_id,state,current_encoding_id) VALUES(?,?,32,'aes-256-gcm',?,'ready',1)").bind(storage).bind([0u8;32].as_slice()).bind(block).execute(&backend.write).await?.last_insert_rowid();
+    let chunk=sqlx::query("INSERT INTO chunks(uuid,storage_id,hash,raw_size,encryption_algorithm,block_key_id,state,current_encoding_id) VALUES(?,?,?,32,'aes-256-gcm',?,'ready',1)").bind(Uuid::now_v7()).bind(storage).bind([0u8;32].as_slice()).bind(block).execute(&backend.write).await?.last_insert_rowid();
     sqlx::query("INSERT INTO chunk_encodings(chunk_id,location_id,storage_id,standalone_size,state,encryption_algorithm,block_key_id,encoding_fingerprint,nonce,nonce_id) VALUES(?,?,?,48,'ready','aes-256-gcm',?,?,?,1)").bind(chunk).bind(Uuid::new_v4()).bind(storage).bind(block).bind("[]").bind(codec::typed_nonce(chrono::Utc::now(), 1, crate::content::nonce::CHUNK)?.to_vec()).execute(&backend.write).await?;
     backend.read.close().await;
     backend.write.close().await;

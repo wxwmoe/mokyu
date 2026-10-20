@@ -142,7 +142,10 @@ impl StorageProfile {
             .workspace_bytes()?;
         if self.pack_enabled {
             let maximum = crate::config::bytes(&self.pack_max_size)?;
-            let payload = maximum + 12 + 44 * (maximum / crate::content::codec::MIN as u64 + 1);
+            let payload = maximum
+                + 12
+                + crate::content::pack::MEMBER_SIZE as u64
+                    * (maximum / crate::content::codec::MIN as u64 + 1);
             anyhow::ensure!(
                 (payload * 4 + workspace).div_ceil(1024 * 1024)
                     <= u64::from(budget.pack_memory_units),

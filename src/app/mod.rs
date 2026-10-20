@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{
     authorization::{Action, Permit, Principal},
     config::{self, Budget, Config, Secrets},
@@ -47,7 +48,7 @@ pub struct Bucket {
 }
 #[derive(Clone, Serialize)]
 pub struct StoredStream {
-    pub id: Uuid,
+    pub id: Id,
     pub bucket_id: Uuid,
     pub object_key: String,
     pub stream_type: String,
@@ -67,11 +68,11 @@ pub struct StoredStream {
 }
 #[derive(Clone, Serialize)]
 pub struct Extent {
-    pub stream_id: Uuid,
+    pub stream_id: Id,
     pub offset_bytes: i64,
     pub length: i32,
-    pub chunk_id: Option<i64>,
-    pub fragment_id: Option<Uuid>,
+    pub chunk_id: Option<Id>,
+    pub fragment_id: Option<Id>,
     pub source_offset: i32,
 }
 impl Extent {
@@ -94,9 +95,9 @@ pub struct Metadata {
     pub expires: Option<String>,
     pub user: Option<s3s::dto::Metadata>,
 }
-pub struct Active {
-    id: Uuid,
-    registry: Arc<Mutex<HashMap<Uuid, usize>>>,
+pub struct Active<T: Eq + std::hash::Hash = Id> {
+    id: T,
+    registry: Arc<Mutex<HashMap<T, usize>>>,
     wake: Arc<tokio::sync::Notify>,
     read_lease: Option<ReadLease>,
 }
@@ -131,7 +132,7 @@ impl Drop for ReadLease {
         }
     }
 }
-impl Drop for Active {
+impl<T: Eq + std::hash::Hash> Drop for Active<T> {
     fn drop(&mut self) {
         let mut registry = self.registry.lock().unwrap();
         if let Some(n) = registry.get_mut(&self.id) {
@@ -227,7 +228,8 @@ pub struct App {
     pub integrity_pacing: std::sync::Mutex<std::time::Instant>,
     pub local_cleanup: tokio::sync::Mutex<()>,
     pub coord: tokio::sync::Mutex<()>,
-    pub active: Arc<Mutex<HashMap<Uuid, usize>>>,
+    pub active: Arc<Mutex<HashMap<Id, usize>>>,
+    pub active_uploads: Arc<Mutex<HashMap<Uuid, usize>>>,
     pub uploads: Arc<Semaphore>,
     pub reads: Arc<Semaphore>,
     pub slots: Arc<Semaphore>,
@@ -386,6 +388,7 @@ impl App {
             local_cleanup: tokio::sync::Mutex::new(()),
             coord: tokio::sync::Mutex::new(()),
             active: Arc::new(Mutex::new(HashMap::new())),
+            active_uploads: Arc::new(Mutex::new(HashMap::new())),
             maintenance,
             draining: false.into(),
             pack_creation_paused: pack_creation_paused.into(),
@@ -425,10 +428,10 @@ impl App {
         }
         Ok((app, owner))
     }
-    pub fn pin(&self, id: Uuid) -> Active {
+    pub fn pin(&self, id: Id) -> Active {
         self.pin_with_lease(id, None)
     }
-    fn pin_with_lease(&self, id: Uuid, read_lease: Option<ReadLease>) -> Active {
+    fn pin_with_lease(&self, id: Id, read_lease: Option<ReadLease>) -> Active {
         *self.active.lock().unwrap().entry(id).or_default() += 1;
         Active {
             id,
@@ -437,7 +440,22 @@ impl App {
             read_lease,
         }
     }
-    pub fn is_active(&self, id: Uuid) -> bool {
+    pub fn pin_upload(&self, id: Uuid) -> Active<Uuid> {
+        *self.active_uploads.lock().unwrap().entry(id).or_default() += 1;
+        Active {
+            id,
+            registry: self.active_uploads.clone(),
+            wake: self.wake_gc.clone(),
+            read_lease: None,
+        }
+    }
+    pub fn is_upload_active(&self, id: Uuid) -> bool {
+        self.active_uploads.lock().unwrap().contains_key(&id)
+    }
+    pub fn active_operations(&self) -> usize {
+        self.active.lock().unwrap().len() + self.active_uploads.lock().unwrap().len()
+    }
+    pub fn is_active(&self, id: Id) -> bool {
         self.active.lock().unwrap().contains_key(&id)
     }
     pub fn writable(&self) -> Result<()> {
@@ -495,7 +513,7 @@ impl App {
             "enable maintenance before changing deployment mode"
         );
         ensure!(
-            self.active.lock().unwrap().is_empty(),
+            self.active_operations() == 0,
             "wait for active reads and writes to drain"
         );
         ensure!(
@@ -535,7 +553,7 @@ impl App {
             || self
                 .restart_required
                 .load(std::sync::atomic::Ordering::Acquire);
-        let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"role":self.role,"deployment_mode":state.mode,"deployment_mode_revision":state.mode_revision,"mode_mismatch":mismatch,"node_registered":self.node.get().is_some(),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":state.gc_paused,"maintenance":state.maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":pool_size,"db_pool_idle":pool_idle,"data_slots_available":self.slots.available_permits(),"active_streams":self.active.lock().unwrap().len()});
+        let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"role":self.role,"deployment_mode":state.mode,"deployment_mode_revision":state.mode_revision,"mode_mismatch":mismatch,"node_registered":self.node.get().is_some(),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":state.gc_paused,"maintenance":state.maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":pool_size,"db_pool_idle":pool_idle,"data_slots_available":self.slots.available_permits(),"active_streams":self.active_operations()});
         status["runtime"] = self.statistics.runtime();
         status["cache_jobs_active"] = json!(self.storage.cache_jobs_active());
         status["http_compression"] = self.compression_observations.snapshot();

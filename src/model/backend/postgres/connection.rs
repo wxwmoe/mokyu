@@ -1,5 +1,6 @@
 use super::{Backend, migration, queries, transactions};
 use crate::config::{Budget, Config, Secrets};
+use crate::model::Id;
 use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 use std::{
@@ -107,7 +108,7 @@ impl Replica {
 
     pub(super) async fn read(
         &self,
-        stream: uuid::Uuid,
+        stream: Id,
         lease: uuid::Uuid,
         from: i64,
         until: i64,
@@ -121,7 +122,7 @@ impl Replica {
 
     async fn try_read(
         &self,
-        stream: uuid::Uuid,
+        stream: Id,
         lease: uuid::Uuid,
         from: i64,
         until: i64,

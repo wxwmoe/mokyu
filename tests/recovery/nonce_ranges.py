@@ -1,7 +1,6 @@
 """Nonce reservation, crash boundaries and encrypted source publication.
 
 Requires a stopped, initialized disposable service, administrator password and S3 backend.
-MOKYU_TEST_OLD_BINARY optionally seeds encrypted sources before upgrading the database.
 Owns that service process; fault-injection boundaries never run in production.
 """
 import os
@@ -30,9 +29,9 @@ def main():
             process.kill() if crash else process.terminate()
             process.wait(timeout=40)
 
-    def start(binary=None):
+    def start():
         nonlocal process
-        process = subprocess.Popen([binary or command[0], *command[1:]], stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
 
         def ready():
             assert process.poll() is None, "service exited; inspect nonce-ranges.log"
@@ -40,33 +39,7 @@ def main():
         wait(ready, "service did not become ready", seconds=60)
 
     try:
-        old_binary = os.environ.get("MOKYU_TEST_OLD_BINARY")
-        start(old_binary)
-        if old_binary:
-            legacy = Fixture()
-            old_key = legacy.cli("key", "create", legacy.name + "-key", "block")
-            legacy.cli("storage", "key", "set", legacy.name, old_key["id"])
-            legacy_body = os.urandom(12 * 1024 * 1024)
-            legacy.put("legacy", legacy_body)
-            legacy.read("legacy", legacy_body)
-            profile = legacy.cli("storage", "profile", "show", legacy.name)
-            profile.update(pack_enabled=True, pack_max_size="16MiB")
-            legacy.cli("storage", "profile", "set", legacy.name, "-", value=profile)
-            legacy.finished(legacy.cli("pack", "run"))
-            profile = legacy.cli("storage", "profile", "show", legacy.name)
-            profile["pack_enabled"] = False
-            legacy.cli("storage", "profile", "set", legacy.name, "-", value=profile)
-            old_sources = database.query("SELECT nonce FROM chunk_encodings WHERE block_key_id=%s AND nonce IS NOT NULL", uuid.UUID(old_key["id"]))
-            old_packs = database.query("SELECT nonce FROM packs WHERE block_key_id=%s AND nonce IS NOT NULL", uuid.UUID(old_key["id"]))
-            assert old_sources and old_packs
-            stop()
-            start()
-            legacy.read("legacy", legacy_body)
-            for table, previous in [("chunk_encodings", old_sources), ("packs", old_packs)]:
-                current = database.query("SELECT nonce,nonce_id FROM " + table + " WHERE block_key_id=%s AND nonce IS NOT NULL", uuid.UUID(old_key["id"]))
-                assert {bytes(row["nonce"]) for row in current} == {bytes(row["nonce"]) for row in previous}
-                assert all(row["nonce_id"] == int.from_bytes(row["nonce"][4:], "big") for row in current)
-            print("legacy encrypted encodings and packs preserved across migration", flush=True)
+        start()
         fixture = Fixture()
         assert fixture.backend, "select an isolated S3 backend to exercise encrypted packs"
         storage = uuid.UUID(fixture.store["id"])

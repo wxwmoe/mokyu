@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{authorization::Principal, cluster::NodeState, content::codec::Key};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -45,15 +46,15 @@ pub(crate) trait ClusterStore: Send + Sync {
     ) -> Result<(crate::app::StoredStream, Uuid)>;
     async fn read_page(
         &self,
-        stream: Uuid,
+        stream: Id,
         lease: Uuid,
         from: i64,
         until: i64,
     ) -> Result<Vec<super::ReadExtent>>;
-    async fn create_stream(&self, input: super::StreamCreate, ttl_seconds: i64) -> Result<Uuid>;
+    async fn create_stream(&self, input: super::StreamCreate, ttl_seconds: i64) -> Result<Id>;
     async fn renew_read(&self, id: Uuid, ttl_seconds: i64) -> Result<()>;
     async fn release_read(&self, id: Uuid) -> Result<()>;
-    async fn renew_write(&self, stream: Uuid, ttl_seconds: i64) -> Result<()>;
+    async fn renew_write(&self, stream: Id, ttl_seconds: i64) -> Result<()>;
     async fn expire_stream_leases(&self) -> Result<()>;
     async fn claim_chunk(&self, storage: Uuid, hash: &[u8; 32]) -> Result<Box<dyn Send>>;
     async fn profile_changes(&self) -> Result<Box<dyn ProfileChanges>>;

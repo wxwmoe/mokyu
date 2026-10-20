@@ -230,7 +230,7 @@ async fn drain(app: Arc<app::App>) -> Result<()> {
     #[cfg(feature = "fault-injection")]
     crate::faults::point("runtime-draining").await;
     let drain = async {
-        while !app.active.lock().unwrap().is_empty() {
+        while app.active_operations() != 0 {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     };

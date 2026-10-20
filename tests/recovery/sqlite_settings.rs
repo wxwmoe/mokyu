@@ -1,6 +1,7 @@
 use super::{connection, transactions};
 use crate::authorization::Principal;
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::account::{AccountStore, SessionLogin};
 use crate::model::settings::{ControlSettingsPatch, RuntimeSettingsStore};
 use anyhow::Result;
@@ -168,7 +169,7 @@ async fn sqlite_runtime_settings_contract() -> Result<()> {
     );
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.save(&admin, "maintenance", Some(2), snapshot.value.clone())
         )
         .await
@@ -176,12 +177,13 @@ async fn sqlite_runtime_settings_contract() -> Result<()> {
     );
     assert_eq!(backend.row("maintenance").await?.revision, 2);
     assert_eq!(backend.value("maintenance").await?, changed);
-    let audit: i64 = sqlx::query(
+    let audit: Id = (sqlx::query(
         "INSERT INTO audit_events(actor_label,source,action,target) VALUES('test','web','test','')",
     )
     .execute(db)
     .await?
-    .last_insert_rowid();
+    .last_insert_rowid())
+    .into();
     let saved = crate::model::audit::scope(
         audit,
         backend.save(&admin, "maintenance", None, snapshot.value.clone()),
@@ -237,7 +239,7 @@ async fn sqlite_runtime_settings_contract() -> Result<()> {
     assert_eq!(revision, 2);
     assert!(backend.update_web(&admin, patch("3h", 1)).await.is_err());
     assert!(
-        crate::model::audit::scope(-1, backend.update_web(&admin, patch("3h", 2)))
+        crate::model::audit::scope((-1).into(), backend.update_web(&admin, patch("3h", 2)))
             .await
             .is_err()
     );

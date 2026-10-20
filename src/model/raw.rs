@@ -1,3 +1,4 @@
+use crate::model::Id;
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,9 @@ pub(crate) type Processor<'a> = Option<(
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, sqlx::FromRow)]
 pub(crate) struct RawSource {
     #[sqlx(rename = "raw_id")]
-    pub id: Uuid,
+    pub id: Id,
+    #[sqlx(rename = "raw_location")]
+    pub location_id: Uuid,
     #[sqlx(rename = "raw_storage")]
     pub storage_id: Uuid,
     #[sqlx(rename = "raw_size")]
@@ -58,8 +61,8 @@ pub(crate) struct RawRange {
 
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub(crate) struct RawProcessing {
-    pub stream: Uuid,
-    pub source: Uuid,
+    pub stream: Id,
+    pub source: Id,
     pub bucket: Uuid,
     pub object_key: String,
     pub payload_revision: i64,
@@ -111,16 +114,16 @@ pub(crate) trait RawStore: Send + Sync {
         node: Processor<'_>,
     ) -> Result<bool>;
     async fn processing_status(&self) -> Result<serde_json::Value>;
-    async fn begin(&self, stream: Uuid, storage: Uuid, profile_revision: i64) -> Result<Uuid>;
-    async fn finish(&self, stream: Uuid, source: Uuid, size: i64, digest: &[u8]) -> Result<()>;
-    async fn set_upload(&self, source: Uuid, upload: &str) -> Result<()>;
-    async fn upload_id(&self, source: Uuid) -> Result<Option<String>>;
-    async fn deduplicate(&self, stream: Uuid, source: Uuid, hash: &[u8]) -> Result<bool>;
-    async fn page(&self, stream: Uuid, start: i64, end: i64) -> Result<Vec<RawRange>>;
+    async fn begin(&self, stream: Id, storage: Uuid, profile_revision: i64) -> Result<(Id, Uuid)>;
+    async fn finish(&self, stream: Id, source: Id, size: i64, digest: &[u8]) -> Result<()>;
+    async fn set_upload(&self, source: Id, upload: &str) -> Result<()>;
+    async fn upload_id(&self, source: Id) -> Result<Option<String>>;
+    async fn deduplicate(&self, stream: Id, source: Id, hash: &[u8]) -> Result<bool>;
+    async fn page(&self, stream: Id, start: i64, end: i64) -> Result<Vec<RawRange>>;
     async fn quarantines(
         &self,
         storage: Uuid,
-        after: Uuid,
+        after: Id,
         limit: i64,
     ) -> Result<Vec<crate::model::source::QuarantinedSource>>;
     async fn candidates(
@@ -130,8 +133,8 @@ pub(crate) trait RawStore: Send + Sync {
         minimum: i64,
         limit: i64,
     ) -> Result<Vec<RawSource>>;
-    async fn claim(&self, source: Uuid, revision: i64, grace: i64, minimum: i64) -> Result<bool>;
-    async fn removed(&self, source: Uuid) -> Result<()>;
+    async fn claim(&self, source: Id, revision: i64, grace: i64, minimum: i64) -> Result<bool>;
+    async fn removed(&self, source: Id) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -142,7 +145,8 @@ mod tests {
     fn rejects_unavailable_sources_and_overflowing_ranges() {
         let mut range = RawRange {
             source: RawSource {
-                id: Uuid::new_v4(),
+                id: Id::from(1),
+                location_id: Uuid::now_v7(),
                 storage_id: Uuid::new_v4(),
                 size: 1024,
                 digest: Some(vec![0; 16]),

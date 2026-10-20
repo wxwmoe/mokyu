@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{app::App, config};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -36,7 +37,7 @@ impl App {
             return Ok((0, 0));
         }
         let _running = Running(&self.gc_running);
-        let ids: Vec<(i64, i32)> = self
+        let ids: Vec<(Id, i32)> = self
             .maintenance_store
             .chunk_candidates(storage_id, grace_seconds as f64, batch.max(1) as i64)
             .await?;
@@ -115,7 +116,7 @@ impl App {
                         return Ok(());
                     }
                     let active = if section == "uploads" {
-                        self.active
+                        self.active_uploads
                             .lock()
                             .unwrap()
                             .keys()
@@ -185,7 +186,7 @@ impl App {
                 }
             }
         }
-        let mut cursor = Uuid::nil();
+        let mut cursor = Id::default();
         loop {
             let rows = self.maintenance_store.recovery_fragments(cursor).await?;
             if rows.is_empty() {
@@ -194,7 +195,10 @@ impl App {
             for row in rows {
                 let id = row.id;
                 let source = row.source;
-                let data = self.storage.read_fragment(id, &source).await;
+                let data = self
+                    .storage
+                    .read_fragment(source.location_id, &source)
+                    .await;
                 if !data.is_ok_and(|bytes| {
                     bytes.len() == source.size as usize
                         && blake3::hash(&bytes).as_bytes() == source.hash.as_slice()
@@ -247,7 +251,7 @@ impl App {
             let Ok(_guard) = lock.try_lock() else {
                 continue;
             };
-            if !self.is_active(id) {
+            if !self.is_upload_active(id) {
                 let _coord = self.coord.lock().await;
                 if self.multipart.expire(id).await? {
                     self.wake_gc.notify_one();
@@ -255,8 +259,8 @@ impl App {
                 }
             }
         }
-        let active: Vec<Uuid> = self.active.lock().unwrap().keys().copied().collect();
-        let candidates: Vec<Uuid> = self
+        let active: Vec<Id> = self.active.lock().unwrap().keys().copied().collect();
+        let candidates: Vec<Id> = self
             .maintenance_store
             .stale_streams(
                 &active,
@@ -289,8 +293,8 @@ impl App {
             // Keep fragment ownership until its physical object is removed below.
             removed += self.maintenance_store.cleanup_stream(id, batch).await?;
         }
-        let active: Vec<Uuid> = self.active.lock().unwrap().keys().copied().collect();
-        let fragments: Vec<Uuid> = self
+        let active: Vec<Id> = self.active.lock().unwrap().keys().copied().collect();
+        let fragments: Vec<Id> = self
             .maintenance_store
             .stale_fragments(batch, &active, storage_id)
             .await?;
@@ -307,14 +311,18 @@ impl App {
             if !fragment.sealed && fragment.owner.is_some_and(|id| self.is_active(id)) {
                 continue;
             }
-            if self.storage.disk.pending(id) {
+            if self.storage.disk.pending(fragment.location_id) {
                 continue;
             }
             // Keep the row locked against new references while releasing coord for I/O.
             drop(coord);
             if fragment.file.is_none() {
                 self.storage
-                    .remove_fragment(id, fragment.storage, fragment.key.as_deref())
+                    .remove_fragment(
+                        fragment.location_id,
+                        fragment.storage,
+                        fragment.key.as_deref(),
+                    )
                     .await?;
             }
             fragment.deletion.finish().await?;
@@ -330,7 +338,8 @@ impl App {
                 let Ok(_guard) = lock.try_lock() else {
                     continue;
                 };
-                if upload.is_some_and(|id| self.is_active(id)) || self.storage.disk.pending(file.id)
+                if upload.is_some_and(|id| self.is_upload_active(id))
+                    || self.storage.disk.pending(file.id)
                 {
                     continue;
                 }
@@ -349,7 +358,7 @@ impl App {
                 let Ok(_guard) = lock.try_lock() else {
                     continue;
                 };
-                if file.upload_id.is_some_and(|id| self.is_active(id)) {
+                if file.upload_id.is_some_and(|id| self.is_upload_active(id)) {
                     continue;
                 }
                 #[cfg(feature = "fault-injection")]
@@ -411,7 +420,7 @@ impl App {
         }
         Ok(count)
     }
-    async fn reclaim_chunk(&self, id: i64, storage_id: Uuid, grace: f64) -> Result<bool> {
+    async fn reclaim_chunk(&self, id: Id, storage_id: Uuid, grace: f64) -> Result<bool> {
         let coord = self.coord.lock().await;
         if self.maintenance.load(Ordering::Acquire) {
             return Ok(false);
@@ -436,7 +445,7 @@ impl App {
         for location_id in locations {
             if let Err(error) = self.storage.invalidate(location_id).await {
                 self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(chunk_id=id, %location_id, %error, "chunk cache invalidation will be retried");
+                tracing::warn!(chunk_id=%id, %location_id, %error, "chunk cache invalidation will be retried");
                 return Ok(false);
             }
         }
@@ -489,7 +498,7 @@ impl App {
                             ) => {}
                         Err(e) => {
                             self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
-                            tracing::warn!(error=%e,packed,id,"cannot determine remote age; physical deletion deferred");
+                            tracing::warn!(error=%e,packed,%id,"cannot determine remote age; physical deletion deferred");
                             continue;
                         }
                     }
@@ -519,7 +528,7 @@ impl App {
                         count += 1;
                     }
                     Err(e) => {
-                        tracing::warn!(error=%e,packed,id,"physical deletion will be retried");
+                        tracing::warn!(error=%e,packed,%id,"physical deletion will be retried");
                         self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -540,7 +549,7 @@ impl App {
                 return Ok(count);
             }
             let guard = self.storage.source_gate.write().await;
-            if self.storage.physical_active(source.id) {
+            if self.storage.physical_active(source.location_id) {
                 continue;
             }
             let claimed = self
@@ -582,7 +591,7 @@ impl App {
             "enable maintenance before marking unreferenced chunks"
         );
         ensure!(
-            self.active.lock().unwrap().is_empty(),
+            self.active_operations() == 0,
             "active data operations have not drained"
         );
         let _coord = self.coord.lock().await;

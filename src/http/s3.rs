@@ -1,5 +1,6 @@
 use super::errors::HttpError;
 use super::public::cors_headers;
+use crate::model::Id;
 use crate::{
     app::{App, Bucket, Metadata},
     config,
@@ -267,7 +268,7 @@ pub fn decode_path(path: &str) -> Result<String> {
 pub(crate) struct ReadOptions {
     pub public: Option<Bucket>,
     pub preview: Option<bool>,
-    pub version: Option<uuid::Uuid>,
+    pub version: Option<Id>,
 }
 impl ReadOptions {
     pub(super) fn public(bucket: &Bucket) -> Self {
@@ -277,7 +278,7 @@ impl ReadOptions {
             version: None,
         }
     }
-    pub fn managed(preview: bool, version: Option<uuid::Uuid>) -> Self {
+    pub fn managed(preview: bool, version: Option<Id>) -> Self {
         Self {
             public: None,
             preview: Some(preview),

@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::model::multipart::{FileRemap, MultipartStore};
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -21,7 +22,7 @@ pub(crate) struct Range {
     pub offset: u64,
     pub length: usize,
     pub hash: [u8; 32],
-    pub fragment: Option<Uuid>,
+    pub fragment: Option<Id>,
     pub file: Option<Uuid>,
 }
 
@@ -69,7 +70,7 @@ pub(crate) async fn prepare(
     ranges: Vec<Range>,
     model: &dyn MultipartStore,
     upload: Uuid,
-    source: Uuid,
+    source: Id,
     floor: u64,
 ) -> Result<(tokio::fs::File, Prepared, bool)> {
     let destination = destination.to_owned();
@@ -333,7 +334,7 @@ async fn confirm(
     storage: &super::Storage,
     model: &dyn MultipartStore,
     upload: Uuid,
-    source: Uuid,
+    source: Id,
     destination: &Path,
     mut receiver: tokio::sync::mpsc::Receiver<Checkpoint>,
     copied: Arc<AtomicBool>,
@@ -394,7 +395,8 @@ pub(crate) async fn compact(
         // Larger manifests keep their sources until normal file GC.
         return model.clear_reclaim(id).await;
     }
-    let path = storage.multipart_path(id, Some(file.storage_id), file.source_id)?;
+    let path =
+        storage.multipart_path(id, Some(file.storage_id), file.source_id.map(|_| file.id))?;
     let released = tokio::task::spawn_blocking(move || compact_file(&path, &ranges)).await??;
     if file.source_id.is_none() {
         storage

@@ -269,9 +269,12 @@ async fn mysql_storage_contract() -> Result<()> {
     wrong.storage_id = local.id;
     assert!(backend.update("remote".into(), wrong).await.is_err());
     assert!(
-        crate::model::audit::scope(-1, backend.update("remote".into(), changed.clone()))
-            .await
-            .is_err()
+        crate::model::audit::scope(
+            (-1).into(),
+            backend.update("remote".into(), changed.clone())
+        )
+        .await
+        .is_err()
     );
     assert_eq!(backend.load(remote.id).await?.revision, changed.revision);
     let intent = backend
@@ -314,7 +317,7 @@ async fn mysql_storage_contract() -> Result<()> {
     assert_eq!(backend.current_key("local", Some("key")).await?, local.id);
     assert_eq!(backend.view(local.id).await?.block_key_id, Some(key));
     assert!(
-        crate::model::audit::scope(-1, backend.current_key("local", None))
+        crate::model::audit::scope((-1).into(), backend.current_key("local", None))
             .await
             .is_err()
     );

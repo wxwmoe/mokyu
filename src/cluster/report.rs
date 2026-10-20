@@ -33,7 +33,7 @@ async fn collect(app: &App, restricted: bool) -> Result<(Value, Value)> {
     let status = json!({
         "work": work, "runtime": runtime, "resources": app.budget,
         "process_memory": memory, "db_pool_size": size, "db_pool_idle": idle,
-        "active_streams": app.active.lock().unwrap().len(), "data_slots_available": app.slots.available_permits(),
+        "active_streams": app.active_operations(), "data_slots_available": app.slots.available_permits(),
         "upload_slots_available": app.uploads.available_permits(), "read_slots_available": app.reads.available_permits(),
         "io": app.storage.statistics(),
         "cache": {"bytes": local[1], "limit": cache_limit, "upload_bytes": upload_bytes,

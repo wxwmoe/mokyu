@@ -1,4 +1,5 @@
 use super::{Active, App, StoredStream};
+use crate::model::Id;
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -12,9 +13,9 @@ use uuid::Uuid;
 impl App {
     pub(crate) async fn deduplicate_raw(
         &self,
-        stream: Uuid,
+        stream: Id,
         storage: Uuid,
-        source: Uuid,
+        source: Id,
         hash: Option<[u8; 32]>,
     ) -> Result<()> {
         if let Some(hash) = hash {

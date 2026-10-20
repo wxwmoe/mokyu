@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from source_quarantine import Fixture, rejected, wait
+from tests.recovery.source_repair import Database
 
 
 def main():
@@ -21,7 +22,9 @@ def main():
     assert len(paths) == 1, paths
     physical = paths[0]
     source = str(uuid.UUID(Path(physical).name))
-    scope = dict(storage_id=fixture.store['id'], source='raw', id=source)
+    database = Database()
+    row, = database.query(f'SELECT id FROM raw_sources WHERE {database.raw_location}=%s', uuid.UUID(source))
+    scope = dict(storage_id=fixture.store['id'], source='raw', id=str(row['id']))
     fixture.bytes(physical, bytes([data[0] ^ 1]) + data[1:])
     rejected(lambda: fixture.client.get_object(Bucket=fixture.name, Key='original'))
     old = b'preserved overwrite target'
@@ -36,7 +39,7 @@ def main():
                and item['detail']['location_id'] == source for item in issues), issues
     fixture.finished(fixture.execute('quarantine', fixture.preview('quarantine', scope)))
     listed = fixture.cli('integrity', 'quarantines', '--storage', fixture.store['id'], '--source', 'raw')
-    assert len(listed['items']) == 1 and listed['items'][0]['id'] == source, listed
+    assert len(listed['items']) == 1 and listed['items'][0]['id'] == scope['id'], listed
     assert listed['items'][0]['code'] == 'hash_mismatch', listed
     rejected(lambda: fixture.client.copy_object(Bucket=fixture.name, Key='target',
                          CopySource={'Bucket': fixture.name, 'Key': 'original'}))

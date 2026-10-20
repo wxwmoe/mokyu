@@ -57,13 +57,13 @@ for name, raw, extension in [
     key = prefix + name
     s3.put_object(Bucket=bucket, Key=key, Body=raw)
     await_fills()
-    rows = db.execute('''SELECT l.location_id,c.raw_size,l.standalone_size,l.standalone_compressed,l.encryption_algorithm
+    rows = db.execute('''SELECT l.encoding_id,c.raw_size,l.standalone_size,l.standalone_compressed,l.encryption_algorithm
         FROM objects o JOIN buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=o.stream_id
         JOIN chunks c ON c.id=e.chunk_id JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE b.name=%s AND o.object_key=%s''', (bucket, key)).fetchall()
     assert len(rows) == 1
     storage_id, raw_size, stored_size, compressed, algorithm = rows[0]
     name_hex = storage_id.hex
-    path = root / name_hex[:2] / (name_hex + extension)
+    path = root / name_hex[-2:] / (name_hex + extension)
     payload_size = stored_size - (0 if algorithm == 'none' else 16)
     assert raw_size == len(raw)
     if name == 'weak':

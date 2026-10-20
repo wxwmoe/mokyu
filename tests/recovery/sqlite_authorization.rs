@@ -1,6 +1,7 @@
 use super::{connection, queries, transactions};
 use crate::authorization::{Action, DEFAULT_PROJECT, Permit, Principal};
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::account::SessionLogin;
 use crate::model::{AccountStore, AuthorizationStore, RuntimeSettingsStore};
 use anyhow::Result;
@@ -264,12 +265,13 @@ async fn sqlite_authorization_contract() -> Result<()> {
             .is_err()
     );
     guard.rollback().await?;
-    let audit: i64 = sqlx::query(
+    let audit: Id = (sqlx::query(
         "INSERT INTO audit_events(actor_label,source,action,target) VALUES('test','cli','test','')",
     )
     .execute(db)
     .await?
-    .last_insert_rowid();
+    .last_insert_rowid())
+    .into();
     let mut guard = backend.admin(&Principal::Local).await?;
     crate::model::audit::scope(
         audit,
@@ -287,7 +289,7 @@ async fn sqlite_authorization_contract() -> Result<()> {
     let mut guard = backend.admin(&Principal::Local).await?;
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             guard.checkpoint("test.denied", "target", serde_json::json!({}))
         )
         .await

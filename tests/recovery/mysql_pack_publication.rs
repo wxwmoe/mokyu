@@ -42,17 +42,8 @@ pub(super) async fn prepared(
     storage: Uuid,
     rows: &[Mapping],
 ) -> Result<Pack> {
-    let mut pack = transactions::prepare_pack(
-        &backend.pool,
-        Uuid::new_v4(),
-        storage,
-        "none",
-        None,
-        64,
-        2,
-        task,
-    )
-    .await?;
+    let mut pack =
+        transactions::prepare_pack(&backend.pool, storage, "none", None, 64, 2, task).await?;
     pack.stored_size = Some(40);
     pack.compressed = true;
     pack.digest = Some(vec![7; 32]);
@@ -119,14 +110,13 @@ async fn mysql_pack_publication_contract() -> Result<()> {
             .is_err()
     );
     assert!(
-        transactions::prepare_pack(db, Uuid::new_v4(), storage, "none", None, 64, 2, stale)
+        transactions::prepare_pack(db, storage, "none", None, 64, 2, stale)
             .await
             .is_err()
     );
     assert!(
         transactions::prepare_pack(
             db,
-            Uuid::new_v4(),
             storage,
             "aes-256-gcm",
             Some(Uuid::new_v4()),

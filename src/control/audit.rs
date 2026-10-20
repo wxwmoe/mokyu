@@ -1,4 +1,5 @@
 use super::Identity;
+use crate::model::Id;
 use crate::{app::App, authorization::Principal, http::HttpError};
 use anyhow::Result;
 use axum::{
@@ -20,18 +21,18 @@ pub(crate) async fn begin(
     principal: &Principal,
     action: &str,
     request_id: Option<&str>,
-) -> Result<i64> {
+) -> Result<Id> {
     store.begin(principal, action, request_id).await
 }
 
 pub(crate) async fn finish(
     store: &dyn crate::model::AuditStore,
-    id: i64,
+    id: Id,
     status: u16,
     partial: bool,
 ) {
     if let Err(error) = store.finish(id, status, partial).await {
-        tracing::warn!(audit_id=id,%error,"audit result could not be saved; durable intent remains");
+        tracing::warn!(audit_id=%id,%error,"audit result could not be saved; durable intent remains");
     }
 }
 
@@ -53,11 +54,11 @@ pub(crate) async fn page(
     let before = filter
         .after
         .as_ref()
-        .map(|s| s.parse::<i64>())
+        .map(|s| Id::parse(s, app.config.database.backend))
         .transpose()
         .map_err(|_| s3s::s3_error!(InvalidArgument))?;
     if !(1..=if export { 100 } else { 200 }).contains(&limit)
-        || before.is_some_and(|v| v <= 0)
+        || before.is_some_and(|v| !v.is_valid())
         || filter.actor.as_ref().is_some_and(|v| v.len() > 128)
         || filter.action.as_ref().is_some_and(|v| v.len() > 128)
         || filter
@@ -97,9 +98,7 @@ pub(super) async fn get(
     Extension(actor): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<Json<Event>, HttpError> {
-    let id = id
-        .parse::<i64>()
-        .map_err(|_| s3s::s3_error!(InvalidArgument))?;
+    let id = Id::parse(&id, app.config.database.backend)?;
     let event = app
         .audit
         .event(id, actor.admin, actor.id)

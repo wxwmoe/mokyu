@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::model::task::Execution;
 use crate::{app::App, model::packing::RewriteTask};
 use anyhow::{Context, Result, ensure};
@@ -63,7 +64,7 @@ impl App {
         };
         let job = RewriteTask {
             storage_id,
-            upper_chunk_id: 0,
+            upper_chunk_id: Id::default(),
             shard: 0,
             shards,
             profile_revision: profile.revision,
@@ -97,7 +98,7 @@ impl App {
     ) -> Result<bool> {
         let execution = Execution { id, token };
         let job: RewriteTask = serde_json::from_value(detail)?;
-        let after = cursor.unwrap_or("0").parse::<i64>()?;
+        let after = cursor.unwrap_or("0").parse::<Id>()?;
         let profile = self.storage_profiles.load(job.storage_id).await?;
         let _storage_permit = self
             .storage
@@ -141,12 +142,19 @@ impl App {
             .await?;
             let raw = self.storage.get_with(&source, None).await?;
             let mut physical = source.clone();
-            physical.location_id = Uuid::new_v4();
+            physical.location_id = if matches!(physical.encoding_id, Id::Integer(_)) {
+                Uuid::now_v7()
+            } else {
+                Uuid::nil()
+            };
             physical.algorithm = job.target_algorithm.clone();
             physical.block_key_id = job.target_key_id;
             physical.created_at = chrono::Utc::now();
             physical.nonce = None;
             physical.encoding_id = self.packing.prepare_encoding(&physical, execution).await?;
+            if let Id::Uuid(id) = physical.encoding_id {
+                physical.location_id = id;
+            }
             let (physical, encoded, _) = self
                 .storage
                 .encode(physical, raw.to_vec(), source.compressed, None)
@@ -191,11 +199,9 @@ impl App {
                 member.block_key_id = job.target_key_id;
                 encoded_members.push((member, raw));
             }
-            let new_storage_id = Uuid::new_v4();
             let new_pack = self
                 .packing
                 .prepare_pack(
-                    new_storage_id,
                     job.storage_id,
                     &job.target_algorithm,
                     job.target_key_id,
@@ -218,7 +224,9 @@ impl App {
             self.storage
                 .put_path_for(
                     job.storage_id,
-                    &self.storage.pack_path_for(job.storage_id, new_storage_id)?,
+                    &self
+                        .storage
+                        .pack_path_for(job.storage_id, new_pack.location_id)?,
                     encoded,
                 )
                 .await?;

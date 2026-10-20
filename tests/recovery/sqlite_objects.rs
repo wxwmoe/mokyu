@@ -1,6 +1,7 @@
 use super::{Backend, connection};
 use crate::authorization::{Action, DEFAULT_PROJECT, Permit, Principal};
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::bucket::CreateBucket;
 use crate::model::object::{
     CatalogCursor, CatalogFilter, MediaAction, ObjectChange, ObjectTransfer, Outcome, RECEIPT,
@@ -20,10 +21,10 @@ async fn stream(
     bucket: Uuid,
     key: &str,
     size: i64,
-    chunk: i64,
+    chunk: Id,
     claim: bool,
     mime: &str,
-) -> Result<Uuid> {
+) -> Result<Id> {
     let id = StreamStore::create(
         backend,
         crate::model::StreamCreate {
@@ -391,7 +392,7 @@ async fn sqlite_object_contract() -> Result<()> {
                 principal: Principal::Local,
                 bucket: a,
                 key: "a.txt".into(),
-                expected: Some(Uuid::new_v4()),
+                expected: Some(Id::from(i64::MAX)),
                 public: None
             })
             .await
@@ -426,9 +427,12 @@ async fn sqlite_object_contract() -> Result<()> {
         public: Some(true),
     };
     assert!(
-        crate::model::audit::scope(-1, RECEIPT.scope(receipt(), backend.change(change())))
-            .await
-            .is_err()
+        crate::model::audit::scope(
+            (-1).into(),
+            RECEIPT.scope(receipt(), backend.change(change()))
+        )
+        .await
+        .is_err()
     );
     assert!(backend.operation(operation).await?.is_none());
     assert!(!backend.current(a, "a.txt").await?.public_read);

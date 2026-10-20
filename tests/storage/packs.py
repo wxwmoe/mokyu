@@ -222,7 +222,7 @@ assert session.get(web+'/api/v1/packs?limit=0').status_code==400
 assert requests.get(web+'/api/v1/packs').status_code==403
 assert session.post(web+'/api/v1/maintenance/pack/actions',json={'action':'run'}).status_code==403
 assert session.post(web+'/api/v1/maintenance/invalid/actions',headers=headers,json={'action':'run'}).status_code==400
-assert session.post(web+'/api/v1/maintenance/unpack/preview',headers=headers,json={'pack_id':'9007199254740993'}).status_code in (200,404)
+assert session.post(web+'/api/v1/maintenance/unpack/preview',headers=headers,json={'pack_id':'9007199254740993'}).status_code == 400
 assert db.execute('SELECT count(*) FROM pack_inputs').fetchone()[0]==0
 
 # Browser workflows are covered by web/tests/insights.spec.ts and maintenance.spec.ts.

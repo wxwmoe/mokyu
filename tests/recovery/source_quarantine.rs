@@ -1,10 +1,11 @@
 use super::*;
+use crate::model::Id;
 use crate::{
     authorization::{Action, Permit},
     model::{ChunkCreate, Stores, StreamCreate, TaskClaim},
 };
 
-async fn stream(stores: &Stores, bucket: Uuid, key: &str) -> Result<Uuid> {
+async fn stream(stores: &Stores, bucket: Uuid, key: &str) -> Result<Id> {
     stores
         .streams
         .create(StreamCreate {
@@ -45,7 +46,7 @@ async fn task(stores: &Stores) -> Result<Execution> {
     Ok(Execution { id, token })
 }
 
-fn allocation(storage: Uuid, stream: Uuid) -> ChunkCreate {
+fn allocation(storage: Uuid, stream: Id) -> ChunkCreate {
     ChunkCreate {
         storage,
         stream,
@@ -114,7 +115,6 @@ async fn source_quarantine_contract() -> Result<()> {
     stores.quota.reserve(first, 32, false, None).await?;
     let (mut chunk, reused) = stores.chunks.allocate(allocation(storage, first)).await?;
     assert!(!reused);
-    chunk.location_id = Uuid::new_v4();
     chunk.stored_size = Some(32);
     stores.chunks.mark_uploading(&chunk).await?;
     stores.physical.register_encoding(&chunk).await?;
@@ -271,7 +271,7 @@ async fn source_quarantine_contract() -> Result<()> {
     assert_eq!(
         stores
             .physical
-            .quarantines(storage, false, 0, 10)
+            .quarantines(storage, false, 0.into(), 10)
             .await?
             .len(),
         1
@@ -286,7 +286,7 @@ async fn source_quarantine_contract() -> Result<()> {
     assert!(
         stores
             .physical
-            .quarantines(Uuid::new_v4(), false, 0, 10)
+            .quarantines(Uuid::new_v4(), false, 0.into(), 10)
             .await?
             .is_empty()
     );

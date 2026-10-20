@@ -174,6 +174,52 @@ async fn postgres_schema_bootstrap_contract() -> Result<()> {
     migration::run(&mut policy).await?;
     assert_eq!(contents(&mut policy).await?, migrated);
 
+    // Old physical identities are rejected without changing their rows or schema.
+    let mut incompatible = database(&mut fresh, &options).await?;
+    incompatible
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    queries::migration_identity("storage-registry")
+        .execute(&mut incompatible)
+        .await?;
+    for entry in migrations.iter().take(47) {
+        incompatible.apply("_sqlx_migrations", entry).await?;
+    }
+    sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker) VALUES('00000000-0000-0000-0000-000000000001','old-file','local','/data/old-file','{}'); INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES('00000000-0000-0000-0000-000000000001',decode(repeat('01',32),'hex'),1,'none','preparing');").execute(&mut incompatible).await?;
+    let schema = structure(&mut incompatible).await?;
+    let data = contents(&mut incompatible).await?;
+    let error = migration::run(&mut incompatible).await.unwrap_err();
+    assert!(format!("{error:#}").contains("S3"));
+    assert_eq!(structure(&mut incompatible).await?, schema);
+    assert_eq!(contents(&mut incompatible).await?, data);
+    sqlx::query("DELETE FROM chunks")
+        .execute(&mut incompatible)
+        .await?;
+    for (insert, remove) in [
+        (
+            "INSERT INTO raw_sources(id,storage_id,profile_revision) VALUES('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001',1)",
+            "DELETE FROM raw_sources",
+        ),
+        (
+            "INSERT INTO multipart_files(id,storage_id) VALUES('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001')",
+            "DELETE FROM multipart_files",
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(insert))
+            .execute(&mut incompatible)
+            .await?;
+        let data = contents(&mut incompatible).await?;
+        let error = migration::run(&mut incompatible).await.unwrap_err();
+        assert!(format!("{error:#}").contains("S3"));
+        assert_eq!(structure(&mut incompatible).await?, schema);
+        assert_eq!(contents(&mut incompatible).await?, data);
+        sqlx::query(sqlx::AssertSqlSafe(remove))
+            .execute(&mut incompatible)
+            .await?;
+    }
+    migration::run(&mut incompatible).await?;
+    same_structure(&mut incompatible, &mut fresh).await?;
+
     let mut old = database(&mut fresh, &options).await?;
     old.ensure_migrations_table("_sqlx_migrations").await?;
     queries::migration_identity("storage-registry")

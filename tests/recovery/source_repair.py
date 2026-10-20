@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import tomllib
 import uuid
@@ -22,6 +23,7 @@ class Database:
         self.config = config
         self.settings = config['database']
         self.type = self.settings.get('type', 'postgres')
+        self.raw_location = 'id' if self.type == 'postgres' else 'location_id'
 
     def query(self, statement, *parameters):
         settings = self.settings
@@ -40,6 +42,9 @@ class Database:
             connection = psycopg.connect(host=settings['host'], port=settings.get('port', 5432),
                 user=settings['user'], password=settings['password'], dbname=settings['name'],
                 autocommit=True, row_factory=dict_row)
+        if self.type == 'postgres' and 'location_id' in statement:
+            column = 'encoding_id' if 'FROM chunk_encodings' in statement else 'id'
+            statement = re.sub(r'\blocation_id\b', column + ' AS location_id', statement)
         parameters = tuple(value if self.type == 'postgres' else value.bytes if isinstance(value, uuid.UUID)
                            else value for value in parameters)
         try:
@@ -61,7 +66,7 @@ class Database:
 
 def location(fixture, identity, packed=False):
     value = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
-    path = ('packs/' if packed else '') + value.hex[:2] + '/' + value.hex
+    path = ('packs/' if packed else '') + value.hex[-2:] + '/' + value.hex
     return fixture.prefix + path if fixture.backend else str(fixture.root / path)
 
 
@@ -159,7 +164,7 @@ def main():
         original_unchanged(fixture, database, original)
 
         if algorithm == 'none':
-            identity = str(int(original['id']))
+            identity = str(original['id'])
             if database.type == 'sqlite':
                 database.query("CREATE TRIGGER reject_recovery_audit BEFORE INSERT ON audit_events WHEN NEW.action='source.recover' AND NEW.target='" + identity + "' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END")
                 remove = 'DROP TRIGGER reject_recovery_audit'

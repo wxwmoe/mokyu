@@ -1,6 +1,7 @@
 use super::{Backend, cache_tests, connection, storage_tests};
 use crate::authorization::{Action, Permit, Principal};
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::bucket::CreateBucket;
 use crate::model::metrics::MetricsStore;
 use crate::model::{AccountStore, BucketStore, TaskControlStore};
@@ -18,7 +19,7 @@ async fn chunk(
     encoding: Option<&str>,
 ) -> Result<i64> {
     let db = &backend.pool;
-    let id=sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,standalone_size,encryption_algorithm,state,current_encoding_id,unreferenced_at,deleted_at) VALUES(?,?,100,?,'none',?,1,IF(?='deleting',CURRENT_TIMESTAMP(6)-INTERVAL 2 DAY,NULL),IF(?='deleted',CURRENT_TIMESTAMP(6)-INTERVAL 30 DAY,NULL))").bind(storage).bind([n;32].as_slice()).bind(size).bind(state).bind(state).bind(state).execute(db).await?.last_insert_id() as i64;
+    let id=sqlx::query("INSERT INTO chunks(uuid,storage_id,hash,raw_size,standalone_size,encryption_algorithm,state,current_encoding_id,unreferenced_at,deleted_at) VALUES(?,?,?,100,?,'none',?,1,IF(?='deleting',CURRENT_TIMESTAMP(6)-INTERVAL 2 DAY,NULL),IF(?='deleted',CURRENT_TIMESTAMP(6)-INTERVAL 30 DAY,NULL))").bind(Uuid::now_v7()).bind(storage).bind([n;32].as_slice()).bind(size).bind(state).bind(state).bind(state).execute(db).await?.last_insert_id() as i64;
     if let Some(state) = encoding {
         let encoding=sqlx::query("INSERT INTO chunk_encodings(chunk_id,location_id,storage_id,standalone_size,state,encryption_algorithm,encoding_fingerprint,unreferenced_at,deleted_at) VALUES(?,?,?,?,?,'none',?,IF(?='retired',CURRENT_TIMESTAMP(6)-INTERVAL 2 DAY,NULL),IF(?='deleted',CURRENT_TIMESTAMP(6)-INTERVAL 30 DAY,NULL))").bind(id).bind(Uuid::new_v4()).bind(storage).bind(size).bind(state).bind([0u8;32].as_slice()).bind(state).bind(state).execute(db).await?.last_insert_id() as i64;
         sqlx::query("UPDATE chunks SET current_encoding_id=? WHERE id=?")
@@ -29,10 +30,9 @@ async fn chunk(
     }
     Ok(id)
 }
-async fn object(backend: &Backend, bucket: Uuid, chunk: i64, key: &str) -> Result<()> {
-    let stream = Uuid::new_v4();
+async fn object(backend: &Backend, bucket: Uuid, chunk: Id, key: &str) -> Result<()> {
     let db = &backend.pool;
-    sqlx::query("INSERT INTO streams(id,bucket_id,object_key,stream_type,state,size,write_authorization) VALUES(?,?,?,'object','ready',100,?)").bind(stream).bind(bucket).bind(key.as_bytes()).bind(sqlx::types::Json(Permit::for_action(Principal::Local,bucket,Action::Write))).execute(db).await?;
+    let stream = sqlx::query("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,write_authorization) VALUES(?,?,'object','ready',100,?)").bind(bucket).bind(key.as_bytes()).bind(sqlx::types::Json(Permit::for_action(Principal::Local,bucket,Action::Write))).execute(db).await?.last_insert_id() as i64;
     sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES(?,?,?,?)")
         .bind(bucket)
         .bind(key.as_bytes())
@@ -104,7 +104,7 @@ async fn mysql_inventory_contract() -> Result<()> {
         (buckets[0], c3, "pending"),
         (buckets[1], c6, "other"),
     ] {
-        object(&backend, bucket, chunk, key).await?;
+        object(&backend, bucket, chunk.into(), key).await?;
     }
     let task = TaskControlStore::enqueue(&backend, "pack", None, json!({})).await?;
     let mut packs = Vec::new();

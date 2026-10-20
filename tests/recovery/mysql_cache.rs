@@ -2,6 +2,7 @@ use super::{Backend, connection};
 use crate::authorization::{Action, Permit, Principal};
 use crate::config::Config;
 use crate::content::codec::Chunk;
+use crate::model::Id;
 use crate::model::bucket::CreateBucket;
 use crate::model::cache::{CacheBatch, CacheStage};
 use crate::model::task::Execution;
@@ -13,7 +14,7 @@ use anyhow::Result;
 use serde_json::json;
 use uuid::Uuid;
 
-pub(super) async fn stream(backend: &Backend, bucket: Uuid, key: &str) -> Result<Uuid> {
+pub(super) async fn stream(backend: &Backend, bucket: Uuid, key: &str) -> Result<Id> {
     StreamStore::create(
         backend,
         StreamCreate {
@@ -30,12 +31,7 @@ pub(super) async fn stream(backend: &Backend, bucket: Uuid, key: &str) -> Result
     )
     .await
 }
-pub(super) async fn chunk(
-    backend: &Backend,
-    storage: Uuid,
-    stream: Uuid,
-    hash: u8,
-) -> Result<Chunk> {
+pub(super) async fn chunk(backend: &Backend, storage: Uuid, stream: Id, hash: u8) -> Result<Chunk> {
     let (mut chunk, reused) = backend
         .allocate(ChunkCreate {
             storage,
@@ -55,7 +51,7 @@ pub(super) async fn chunk(
 pub(super) async fn stage(
     backend: &Backend,
     chunk: &Chunk,
-    stream: Uuid,
+    stream: Id,
     offset: i64,
     new: bool,
 ) -> Result<String> {
@@ -164,7 +160,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     assert_eq!(backend.pins(&names, Some(storage)).await?, names);
     assert!(backend.pins(&names, Some(Uuid::new_v4())).await?.is_empty());
     assert!(backend.pins(&[], None).await?.is_empty());
-    let restored = backend.upload_pins(0).await?;
+    let restored = backend.upload_pins(0.into()).await?;
     assert_eq!(restored.len(), 3);
     for (index, (id, target, name, size)) in restored.iter().enumerate() {
         assert_eq!(
@@ -184,7 +180,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
             "cached-\u{732b}%".into()
         ))
     );
-    assert!(backend.metadata(Uuid::new_v4()).await?.is_none());
+    assert!(backend.metadata(Id::from(i64::MAX)).await?.is_none());
     StreamStore::finish(&backend, first, 96, "etag", json!({})).await?;
     assert!(backend.publish(first, None, None, None).await?);
     assert!(backend.release(&ids, false).await?.keys.is_empty());
@@ -457,7 +453,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     let task = execute(&backend, owner).await?;
     let detail = backend.raw(owner).await?.unwrap()["detail"].clone();
     assert!(
-        matches!(backend.batch(task,&detail,false).await?,CacheBatch::Rewrite{pack,ids,..} if pack==ready_pack && ids.len()==2)
+        matches!(backend.batch(task,&detail,false).await?,CacheBatch::Rewrite{pack,ids,..} if pack==ready_pack.into() && ids.len()==2)
     );
     assert_eq!(
         backend
@@ -527,7 +523,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
         "uploading"
     );
     let mut stale_source = rollback.clone();
-    stale_source.encoding_id += 1;
+    stale_source.encoding_id = i64::MAX.into();
     assert!(
         stage(&backend, &stale_source, reused, 64, true)
             .await

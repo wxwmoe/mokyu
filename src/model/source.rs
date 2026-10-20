@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{
     authorization::Principal,
     model::{PhysicalSource, task::Execution},
@@ -29,22 +30,15 @@ pub(crate) struct SourceScope {
 }
 impl SourceScope {
     pub fn validate(&self) -> Result<()> {
-        if self.source == SourceType::Raw {
-            self.uuid()?;
-        } else {
-            self.number()?;
-        }
+        self.identity()?;
         Ok(())
     }
-    pub fn uuid(&self) -> Result<Uuid> {
-        Uuid::parse_str(&self.id).map_err(|_| s3s::s3_error!(InvalidArgument).into())
-    }
-    pub fn number(&self) -> Result<i64> {
+    pub fn identity(&self) -> Result<Id> {
         let id = self
             .id
-            .parse::<i64>()
+            .parse::<Id>()
             .map_err(|_| s3s::s3_error!(InvalidArgument))?;
-        ensure!(id > 0, s3s::s3_error!(InvalidArgument));
+        ensure!(id.is_valid(), s3s::s3_error!(InvalidArgument));
         Ok(id)
     }
     pub fn packed(&self) -> bool {
@@ -73,7 +67,7 @@ impl SourceSnapshot {
         match &self.physical {
             PhysicalSource::Chunk(c) => c.location_id,
             PhysicalSource::Pack(p) => p.location_id,
-            PhysicalSource::Raw(r) => r.id,
+            PhysicalSource::Raw(r) => r.location_id,
         }
     }
     pub fn summary(&self) -> Result<Value> {
@@ -141,7 +135,7 @@ pub(crate) struct SourceUpdate<'a> {
 
 pub(crate) fn manifest_digest(
     pack: &crate::content::pack::Pack,
-    members: &[(i64, i64, i32, Vec<u8>)],
+    members: &[(Id, i64, i32, Vec<u8>)],
 ) -> Result<String> {
     use crate::content::codec::IntegrityError;
     ensure!(

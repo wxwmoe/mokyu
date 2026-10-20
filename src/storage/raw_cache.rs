@@ -53,7 +53,7 @@ impl Storage {
     }
 
     pub(super) async fn cached_raw(&self, source: &RawSource) -> Option<RawFile> {
-        let id = source.id;
+        let id = source.location_id;
         let pin = {
             let mut fifo = self.fifo.lock().await;
             let entry = fifo.entries.get_mut(&id)?;
@@ -119,7 +119,7 @@ impl Storage {
     }
 
     pub(super) async fn begin_raw_cache(&self, source: &RawSource) -> Result<Option<Write>> {
-        let id = source.id;
+        let id = source.location_id;
         let policy = self.local_cache(Some(source.storage_id))?;
         let size = source.size as u64;
         if !policy.enabled || policy.capacity.is_some_and(|capacity| size > capacity) {
@@ -179,7 +179,7 @@ impl Storage {
         let target = target.clone();
         // Publication finishes even if the requesting client disconnects.
         tokio::spawn(async move {
-            let id = source.id;
+            let id = source.location_id;
             let _write = storage.cache_writes.lock().await;
             if !Arc::ptr_eq(&storage.store_backend(source.storage_id)?, &target) {
                 return Ok(None);

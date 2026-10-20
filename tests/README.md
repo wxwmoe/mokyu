@@ -30,7 +30,7 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `nonce_database_contract` 使用 `MOKYU_TEST_NONCE_CONFIG` 指向全新的隔离数据库，并要求 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`。通过 `cargo test --features fault-injection nonce_database_contract -- --ignored --nocapture` 验证密钥创建回滚、分域计数、并发分配、重启舍弃余号和密钥材料唯一性；四种数据库分别运行。
 
-`python -m tests.recovery.nonce_ranges` 接管已初始化但停止的专用服务，沿用来源隔离 fixture 的配置、管理员密码、故障目录和 S3 后端环境。覆盖加密区块和 pack、直接去重不分配、提交前后强杀、缺失计数、耗尽、换 key 及未加密/raw 零分配。可设置 `MOKYU_TEST_OLD_BINARY` 先写入旧密文，再验证升级后原字节可读且 nonce 不变；仅用于隔离数据。
+`python -m tests.recovery.nonce_ranges` 接管已初始化但停止的专用服务，沿用来源隔离 fixture 的配置、管理员密码、故障目录和 S3 后端环境。覆盖加密区块和 pack、直接去重不分配、提交前后强杀、缺失计数、耗尽、换 key 及未加密/raw 零分配。旧格式由数据库迁移拒绝测试覆盖，不提供旧密文读取兼容。
 
 MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由其他客户端登录预热认证缓存。关闭 TLS 时，`caching_sha2_password` 的首次认证依赖 SQLx 的 `mysql-rsa` 功能。
 
@@ -53,6 +53,8 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `storage/raw_objects.py`：raw 的 PUT/HEAD/Range/条件请求、Multipart、Copy 和 chunks 切换；远端设置 `MOKYU_TEST_STORAGE_TYPE=s3`。
 - `storage/raw_lifecycle.py`：本地 raw 损坏隔离/复检、复用 Multipart 暂存、失败 Complete、用量和读取/GC 竞争。
 - `storage/raw_deduplication.py`：四数据库的可选整文件去重、并发与跨分片边界、跨桶用量归属及坏来源排除；复用 source_quarantine 的 fixture，设置 `MOKYU_TEST_BACKEND` 可验证远端 raw。
+- `recovery/file_identities.py`：接管已初始化但停止的隔离服务，验证各数据库持久 UUID、物理文件与缓存路径、pack/unpack 逻辑身份稳定、API ID 类型拒绝和重启读取；环境沿用 `source_quarantine`，需要独立 S3 后端。
+- `recovery/cluster_identities.py`：两个真实 data 节点并发写入加密区块，检查 nonce 不重复、共享暂存排空、跨节点读取，以及 pack/unpack 后 UUID、完整正文和 Range 保持一致。使用独立 PostgreSQL 库和 S3 后端，环境沿用 `source_quarantine`，另设 `MOKYU_TEST_PEER_ENDPOINT` 指向第二个 data。
 - `storage/raw_cache.py`：独占已初始化但停止的隔离服务，使用 9MiB 文件缓存和关闭的响应缓存、独立 S3 fixture，验证并发冷读/Range、坏缓存回退、pin/淘汰、巡检绕过、隔离/恢复代次、重启和覆盖，以及成功 PUT 不等待可选区块缓存填充；环境沿用 `source_quarantine`。
 - `storage/raw_migration.py`：raw 与加密 chunks、raw 与 raw 的跨存储 copy/move，支持独立远端 S3 fixture。
 - `storage/raw_streaming.py`：raw 大分片、原始 ETag、完整摘要和跨分片 Range；`--part-mib`、`--repeat`、`--label` 记录 UploadPart/Complete 耗时和服务 RSS，`--order sequential|reverse` 选择上传顺序。默认远端需 `MOKYU_TEST_BACKEND`，本地使用 `--local` 且不设置该变量；`MOKYU_TEST_PID_FILE` 必须属于同一容器。不同构建或服务预算的数字不能直接比较。
@@ -83,6 +85,8 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 `recovery/local_durability.py` 在每种单容器数据库验证 local 文件与目录的 fsync 失败：初始化不登记存储、覆盖失败保留原对象、rewrite 保留旧编码，恢复后可重试。在 Linux 构建容器编译 `cc -shared -fPIC -Wall -Wextra -Werror tests/recovery/fsync.c -ldl -o /test/fsync.so`，仅为被测服务设置 `LD_PRELOAD=/test/fsync.so`。服务和测试共享 `MOKYU_TEST_FSYNC_ROOT`（专用后端根目录，不带末尾斜线）、`MOKYU_TEST_FSYNC_FAULT` 和 `MOKYU_TEST_FSYNC_TRACE`；故障文件、trace 和数据库必须位于后端根目录以外。此检查注入真实 fsync 返回错误，不模拟断电。local 禁止上传缓存，S3 唯一暂存与 flush 由 `storage/single_lifecycle.py` 覆盖。
 
 浏览器验证在包含 Playwright 浏览器的容器中执行 `web` 的 `npm run test:ui`。必须指定隔离服务地址 `MOKYU_TEST_WEB`、状态修改授权及测试账户密码文件；`frontend-auth.spec.ts` 覆盖真实会话刷新和重新打开页面。
+
+`file-identities.spec.ts` 使用含有 ready 区块包的 PostgreSQL 实例，验证 UUID API、区块包列表、详情和关联文件，在 320–1440px 宽度下检查长 UUID 换行和页面溢出；沿用上述浏览器登录环境。
 
 `http-compression.spec.ts` 使用实际 Chromium 缓存验证三种编码与 identity 切换、强弱 ETag 和 304 后的完整正文；设置 `MOKYU_TEST_HTTP_OBJECT` 可同时验证具有压缩收益的公开文本对象 URL。HTTPS 测试需信任专用测试证书，跳过证书错误可能导致浏览器禁用缓存，不能将全为 200 的结果当作重验证通过。
 

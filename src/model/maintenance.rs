@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::model::task::Execution;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -6,15 +7,16 @@ use uuid::Uuid;
 
 #[derive(sqlx::FromRow)]
 pub(crate) struct RecoveryFragment {
-    pub(crate) id: Uuid,
+    pub(crate) id: Id,
     #[sqlx(flatten)]
     pub(crate) source: crate::model::FragmentSource,
 }
 
 #[must_use = "keep the deletion guard alive until fragment I/O completes"]
 pub(crate) struct FragmentCleanup {
+    pub(crate) location_id: Uuid,
     pub(crate) sealed: bool,
-    pub(crate) owner: Option<Uuid>,
+    pub(crate) owner: Option<Id>,
     pub(crate) storage: Option<Uuid>,
     pub(crate) key: Option<String>,
     pub(crate) file: Option<Uuid>,
@@ -66,7 +68,7 @@ pub(crate) trait MaintenanceStore: Send + Sync {
         storage: Uuid,
         grace: f64,
         batch: i64,
-    ) -> Result<Vec<(i64, i32)>>;
+    ) -> Result<Vec<(Id, i32)>>;
     async fn cleanup_history(
         &self,
         section: &str,
@@ -77,41 +79,41 @@ pub(crate) trait MaintenanceStore: Send + Sync {
     ) -> Result<u64>;
     async fn recover(&self, maintenance: bool) -> Result<()>;
     async fn fragment_exists(&self, id: Uuid) -> Result<bool>;
-    async fn recovery_fragments(&self, after: Uuid) -> Result<Vec<RecoveryFragment>>;
-    async fn fragment_uploads(&self, id: Uuid) -> Result<Vec<Uuid>>;
+    async fn recovery_fragments(&self, after: Id) -> Result<Vec<RecoveryFragment>>;
+    async fn fragment_uploads(&self, id: Id) -> Result<Vec<Uuid>>;
     async fn expired_uploads(&self, batch: i64, storage: Option<Uuid>) -> Result<Vec<Uuid>>;
     async fn stale_streams(
         &self,
-        active: &[Uuid],
+        active: &[Id],
         batch: i64,
         storage: Option<Uuid>,
         retention: Option<f64>,
-    ) -> Result<Vec<Uuid>>;
+    ) -> Result<Vec<Id>>;
     async fn claim_stream(
         &self,
-        id: Uuid,
+        id: Id,
         storage: Option<Uuid>,
         retention: Option<f64>,
     ) -> Result<bool>;
-    async fn cleanup_stream(&self, id: Uuid, batch: i64) -> Result<usize>;
+    async fn cleanup_stream(&self, id: Id, batch: i64) -> Result<usize>;
     async fn stale_fragments(
         &self,
         batch: i64,
-        active: &[Uuid],
+        active: &[Id],
         storage: Option<Uuid>,
-    ) -> Result<Vec<Uuid>>;
-    async fn claim_fragment(&self, id: Uuid) -> Result<Option<FragmentCleanup>>;
+    ) -> Result<Vec<Id>>;
+    async fn claim_fragment(&self, id: Id) -> Result<Option<FragmentCleanup>>;
     async fn cleanup_tombstones(&self, storage: Option<Uuid>, batch: i64) -> Result<u64>;
     async fn gc_paused(&self) -> Result<bool>;
     async fn storages(&self) -> Result<Vec<Uuid>>;
     async fn retire_chunk(
         &self,
-        id: i64,
+        id: Id,
         storage: Uuid,
         grace: f64,
-        active: &[Uuid],
+        active: &[Id],
     ) -> Result<Option<Vec<Uuid>>>;
-    async fn delete_chunk(&self, id: i64, storage: Uuid) -> Result<()>;
+    async fn delete_chunk(&self, id: Id, storage: Uuid) -> Result<()>;
     async fn retire_packs(&self, storage: Uuid) -> Result<()>;
     async fn physical_candidates(
         &self,
@@ -120,11 +122,10 @@ pub(crate) trait MaintenanceStore: Send + Sync {
         batch: i64,
         minimum: f64,
         storage: Uuid,
-    ) -> Result<Vec<(i64, Uuid, bool)>>;
-    async fn physical_age(&self, packed: bool, id: i64, stored: DateTime<Utc>) -> Result<()>;
-    async fn claim_physical(&self, packed: bool, id: i64, grace: f64, minimum: f64)
-    -> Result<bool>;
-    async fn delete_physical(&self, packed: bool, id: i64, retention: f64) -> Result<()>;
+    ) -> Result<Vec<(Id, Uuid, bool)>>;
+    async fn physical_age(&self, packed: bool, id: Id, stored: DateTime<Utc>) -> Result<()>;
+    async fn claim_physical(&self, packed: bool, id: Id, grace: f64, minimum: f64) -> Result<bool>;
+    async fn delete_physical(&self, packed: bool, id: Id, retention: f64) -> Result<()>;
     async fn gc_status(&self) -> Result<(Vec<(String, i64)>, bool, bool)>;
     async fn mark_orphans(&self) -> Result<usize>;
 }

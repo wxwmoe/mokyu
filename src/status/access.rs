@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{app::App, config};
 use anyhow::Result;
 use chrono::{DateTime, Timelike, Utc};
@@ -30,7 +31,7 @@ impl Access {
             .with_nanosecond(0)
             .unwrap()
     }
-    pub fn chunk(&self, id: i64, range: bool, bytes: usize, origin: bool) {
+    pub fn chunk(&self, id: Id, range: bool, bytes: usize, origin: bool) {
         let key = (id, Self::hour());
         let mut buffer = self.buffer.lock().unwrap();
         if buffer.chunks.len() + buffer.packs.len() + buffer.members.len() >= self.limit
@@ -48,14 +49,14 @@ impl Access {
     }
     pub fn pack(
         &self,
-        id: i64,
+        id: Id,
         bytes: usize,
         partial: bool,
         useful: usize,
-        members: impl Iterator<Item = i64>,
+        members: impl Iterator<Item = Id>,
     ) {
         let key = (id, Self::hour());
-        let members: Vec<i64> = if partial {
+        let members: Vec<Id> = if partial {
             members.collect()
         } else {
             Vec::new()

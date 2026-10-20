@@ -1,4 +1,5 @@
 use super::{Backend, migration, queries};
+use crate::model::Id;
 use crate::model::{CompressionObservation, StreamStore};
 use anyhow::Result;
 use sqlx::PgPool;
@@ -17,7 +18,7 @@ async fn postgres_compression_contract() -> Result<()> {
     migration::run(&mut *pool.acquire().await?).await?;
     let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), true);
     let bucket = Uuid::new_v4();
-    let stream = Uuid::new_v4();
+    let stream = Id::from(Uuid::now_v7());
     let storage = Uuid::new_v4();
     sqlx::query("INSERT INTO storages(id,name,type,path) VALUES($1,'compression','local','/data/compression')").bind(storage).execute(&pool).await?;
     sqlx::query("INSERT INTO buckets(id,name,storage_id) VALUES($1,'compression',$2)")

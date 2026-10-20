@@ -1,3 +1,4 @@
+use crate::model::Id;
 use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -12,7 +13,7 @@ pub(crate) struct Execution {
 /// schedulers. Callers wake local workers after committed state transitions.
 #[async_trait]
 pub(crate) trait TaskControlStore: Send + Sync {
-    async fn unpack_status(&self, pack: i64) -> Result<Option<Value>>;
+    async fn unpack_status(&self, pack: Id) -> Result<Option<Value>>;
     async fn rewrite_status(&self, storage: Uuid) -> Result<Option<Value>>;
     async fn rewrite_task(&self, storage: Uuid) -> Result<Option<Uuid>>;
 

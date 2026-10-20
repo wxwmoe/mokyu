@@ -1,4 +1,5 @@
 use super::Identity;
+use crate::model::Id;
 use crate::{
     app::App,
     http::{HttpError, problem},
@@ -244,14 +245,14 @@ pub(super) struct PackScope {
     all: bool,
 }
 impl PackScope {
-    fn id(&self) -> Result<Option<i64>> {
+    fn id(&self, backend: crate::config::DatabaseType) -> Result<Option<Id>> {
         let id = self
             .pack_id
             .as_ref()
-            .map(|v| v.parse::<i64>())
+            .map(|v| Id::parse(v, backend))
             .transpose()
             .map_err(|_| s3s::s3_error!(InvalidArgument))?;
-        if self.all == id.is_some() || id.is_some_and(|v| v < 1) {
+        if self.all == id.is_some() || id.is_some_and(|v| !v.is_valid()) {
             return Err(s3s::s3_error!(InvalidArgument).into());
         }
         Ok(id)
@@ -316,7 +317,7 @@ pub(super) async fn recheck_preview(
     Ok(Json(source_preview(&app, &actor, scope, true).await?))
 }
 async fn unpack_impact(app: &App, input: &PackScope) -> Result<Value> {
-    let id = input.id()?;
+    let id = input.id(app.config.database.backend)?;
     app.unpack_start(id, input.all, false).await
 }
 #[utoipa::path(post,path="/api/v1/maintenance/unpack/preview",request_body=PackScope,responses((status=200,body=MaintenancePreview)))]
@@ -330,7 +331,7 @@ pub(super) async fn unpack_preview(
     let phrase = if input.all {
         "UNPACK ALL".into()
     } else {
-        format!("UNPACK {}", input.id()?.unwrap())
+        format!("UNPACK {}", input.id(app.config.database.backend)?.unwrap())
     };
     let result = app
         .maintenance_store
@@ -468,7 +469,12 @@ pub(super) async fn execute(
         crate::worker::REQUEST_ID
             .scope(
                 input.preview_id,
-                app.unpack_checked(scope.id()?, scope.all, true, Some(&fingerprint)),
+                app.unpack_checked(
+                    scope.id(app.config.database.backend)?,
+                    scope.all,
+                    true,
+                    Some(&fingerprint),
+                ),
             )
             .await?
     } else if operation == "sweep" {

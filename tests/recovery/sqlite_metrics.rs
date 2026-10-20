@@ -1,6 +1,7 @@
 use super::{Backend, cache_tests, connection, transactions};
 use crate::authorization::Principal;
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::account::SessionLogin;
 use crate::model::bucket::CreateBucket;
 use crate::model::metrics::{AccessBatch, ChunkCounts, PackCounts, RuntimePoint};
@@ -28,7 +29,7 @@ fn point(at: DateTime<Utc>) -> RuntimePoint {
         rss_bytes: None,
     }
 }
-fn batch(chunk: i64, pack: i64, at: DateTime<Utc>) -> AccessBatch {
+fn batch(chunk: Id, pack: Id, at: DateTime<Utc>) -> AccessBatch {
     let mut batch = AccessBatch::default();
     batch.chunks.insert(
         (chunk, at),
@@ -49,7 +50,7 @@ fn batch(chunk: i64, pack: i64, at: DateTime<Utc>) -> AccessBatch {
         },
     );
     batch.chunks.insert(
-        (i64::MAX, at),
+        (i64::MAX.into(), at),
         ChunkCounts {
             reads: 100,
             ..Default::default()
@@ -66,18 +67,18 @@ fn batch(chunk: i64, pack: i64, at: DateTime<Utc>) -> AccessBatch {
         },
     );
     batch.packs.insert(
-        (i64::MAX, at),
+        (i64::MAX.into(), at),
         PackCounts {
             downloads: 100,
             ..Default::default()
         },
     );
     batch.members.insert((pack, chunk, at), 2);
-    batch.members.insert((pack, i64::MAX, at), 100);
-    batch.members.insert((i64::MAX, chunk, at), 100);
+    batch.members.insert((pack, i64::MAX.into(), at), 100);
+    batch.members.insert((i64::MAX.into(), chunk, at), 100);
     batch
 }
-async fn stats(backend: &Backend, chunk: i64) -> Result<(i64, i64, i64)> {
+async fn stats(backend: &Backend, chunk: Id) -> Result<(i64, i64, i64)> {
     Ok(sqlx::query_as(
         "SELECT read_count,range_read_count,read_bytes FROM chunk_access_stats WHERE chunk_id=?",
     )
@@ -236,7 +237,7 @@ async fn sqlite_access_metrics_contract() -> Result<()> {
     let baseline: i64 = sqlx::query_scalar("SELECT coverage_since FROM access_state")
         .fetch_one(db)
         .await?;
-    transactions::flush_access(db, batch(chunk.id, pack, hour), 60.).await?;
+    transactions::flush_access(db, batch(chunk.id, pack.into(), hour), 60.).await?;
     assert_eq!(stats(&backend, chunk.id).await?, (5, 3, 120));
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chunk_access_stats")
@@ -253,8 +254,8 @@ async fn sqlite_access_metrics_contract() -> Result<()> {
         baseline
     );
     let (a, b) = tokio::join!(
-        transactions::flush_access(db, batch(chunk.id, pack, hour), 60.),
-        transactions::flush_access(db, batch(chunk.id, pack, hour), 60.)
+        transactions::flush_access(db, batch(chunk.id, pack.into(), hour), 60.),
+        transactions::flush_access(db, batch(chunk.id, pack.into(), hour), 60.)
     );
     a?;
     b?;
@@ -273,7 +274,7 @@ async fn sqlite_access_metrics_contract() -> Result<()> {
         .execute(db)
         .await?;
     assert!(
-        transactions::flush_access(db, batch(chunk.id, pack, hour), 60.)
+        transactions::flush_access(db, batch(chunk.id, pack.into(), hour), 60.)
             .await
             .is_err()
     );

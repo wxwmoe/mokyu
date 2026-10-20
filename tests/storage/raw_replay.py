@@ -70,7 +70,8 @@ def main():
         reply = target.client.upload_part(Bucket=target.name, Key='multipart', UploadId=upload,
                                           PartNumber=number, Body=part)
         manifest.append(dict(PartNumber=number, ETag=reply['ETag']))
-    rows = database.query('''SELECT f.id FROM fragments f JOIN parts p ON p.stream_id=f.owner_stream
+    rows = database.query(f'''SELECT COALESCE(f.file_id, f.{database.raw_location}) AS id
+        FROM fragments f JOIN parts p ON p.stream_id=f.owner_stream
         WHERE p.upload_id=%s AND p.part_number=1 ORDER BY f.id''', uuid.UUID(upload))
     assert rows
     identity = rows[0]['id']

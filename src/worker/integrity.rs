@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::model::task::Execution;
 use crate::{
     app::{Active, App, StoredStream},
@@ -496,7 +497,7 @@ impl App {
                     json!({"source":"raw","storage_id":source.storage_id,"location_id":source.id,
                         "quarantine_code":source.quarantine_code}),
                 );
-                finding.location_id = Some(source.id);
+                finding.location_id = Some(source.location_id);
                 found.push(finding);
             }
             cursor.position = row
@@ -586,20 +587,20 @@ impl App {
         Ok(Some((size, issue)))
     }
 
-    pub async fn integrity_issues(&self, id: Uuid, after: i64, limit: i64) -> Result<Value> {
+    pub async fn integrity_issues(&self, id: Uuid, after: Id, limit: i64) -> Result<Value> {
         self.integrity_issues_filtered(id, after, limit, None).await
     }
     pub(crate) async fn integrity_issues_filtered(
         &self,
         id: Uuid,
-        after: i64,
+        after: Id,
         limit: i64,
         code: Option<&str>,
     ) -> Result<Value> {
         if code.is_some_and(|s| s.len() > 64) {
             return Err(s3s::s3_error!(InvalidArgument).into());
         }
-        if after < 0 || !(1..=200).contains(&limit) {
+        if !(1..=200).contains(&limit) {
             return Err(s3s::s3_error!(InvalidArgument).into());
         }
         let exists: bool = self.integrity_store.exists(id).await?;
@@ -622,7 +623,7 @@ impl App {
     pub async fn integrity_objects(
         &self,
         id: Uuid,
-        issue: i64,
+        issue: Id,
         after: Option<(Uuid, String)>,
     ) -> Result<Value> {
         let mut rows = self.integrity_store.objects(id, issue, after).await?;

@@ -9,7 +9,7 @@
 - 登录、首次安装状态、安装提交、info 和 OpenAPI 无需已有会话，其余入口默认拒绝未认证请求。账户与 Token 自助管理仅接受 Cookie；管理员明确签发的 system Token 可调用实例管理入口。
 - 敏感管理写操作要求最近五分钟验证密码；收到 `ReauthenticationRequired` 后调用 `/api/v1/account/reauth` 再重试。system Token 不使用交互式密码验证。
 - JSON 默认上限 16 KiB；桶设置 128 KiB、授权与密钥 512 KiB、对象批量操作和上传完成 2 MiB。UploadPart 按预期分片大小校验。
-- key 按原始 UTF-8 传递，不折叠斜杠、空格或路径段。bigint 身份、字节量及新接口计数使用十进制字符串。游标不可解析或跨筛选范围复用；分页不保证跨请求快照。
+- key 按原始 UTF-8 传递，不折叠斜杠、空格或路径段。身份使用不透明字符串，可能是 UUID 或十进制整数，客户端不得作数值转换；字节量及新接口计数使用十进制字符串。游标不可解析或跨筛选范围复用；分页不保证跨请求快照。
 - 私有响应为 `Cache-Control: private, no-store`。GET 支持 HEAD，HEAD 无正文。错误为 `{error,code,request_id}`，与 `X-Request-ID` 对应；不回显密码、SQL 或请求正文。
 
 | HTTP 状态 | 含义 |

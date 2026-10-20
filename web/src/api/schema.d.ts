@@ -1988,6 +1988,7 @@ export interface components {
             /** Format: uuid */
             preview_id: string;
         };
+        Id: string;
         IntegrityIssue: {
             /** Format: uuid */
             bucket_id?: string | null;
@@ -2000,8 +2001,7 @@ export interface components {
             /** Format: uuid */
             location_id?: string | null;
             object_key?: string | null;
-            /** Format: uuid */
-            stream_id?: string | null;
+            stream_id?: components["schemas"]["Id"] | null;
             /** Format: uuid */
             task_id: string;
         };
@@ -2010,8 +2010,7 @@ export interface components {
             /** Format: uuid */
             bucket_id: string;
             key: string;
-            /** Format: uuid */
-            version: string;
+            version: components["schemas"]["Id"];
         };
         IssueObjects: {
             items: components["schemas"]["IssueObject"][];
@@ -2032,10 +2031,8 @@ export interface components {
             client_id: string;
             key: string;
             target_key?: string | null;
-            /** Format: uuid */
-            target_version?: string | null;
-            /** Format: uuid */
-            version: string;
+            target_version?: components["schemas"]["Id"] | null;
+            version: components["schemas"]["Id"];
         };
         ItemResult: components["schemas"]["Outcome"] & {
             /** Format: uuid */
@@ -2128,8 +2125,7 @@ export interface components {
         MediaAction: "delete" | "private" | "public-read" | "copy" | "move" | "metadata";
         MediaItem: {
             content_type: string;
-            /** Format: uuid */
-            id: string;
+            id: components["schemas"]["Id"];
             /** Format: date-time */
             modified_at: string;
             object_key: string;
@@ -2292,8 +2288,7 @@ export interface components {
         };
         Outcome: {
             code?: string | null;
-            /** Format: uuid */
-            output_version?: string | null;
+            output_version?: components["schemas"]["Id"] | null;
             /** Format: int32 */
             status: number;
             /** Format: uuid */
@@ -2322,8 +2317,7 @@ export interface components {
             key: string;
             public_read: boolean;
             size: string;
-            /** Format: uuid */
-            version: string;
+            version: components["schemas"]["Id"];
         };
         PackObjects: {
             items: components["schemas"]["PackObject"][];
@@ -2774,8 +2768,7 @@ export interface components {
         StorageUnpackInput: {
             action: string;
             confirmation?: string | null;
-            /** Format: int64 */
-            pack_id: number;
+            pack_id: string;
         };
         StorageUsage: {
             attributed_raw_bytes: string;
@@ -3609,7 +3602,7 @@ export interface operations {
         parameters: {
             query: {
                 key: string;
-                version: string;
+                version: components["schemas"]["Id"];
             };
             header?: never;
             path: {
@@ -3633,7 +3626,7 @@ export interface operations {
         parameters: {
             query: {
                 key: string;
-                version: string;
+                version: components["schemas"]["Id"];
                 after?: number | null;
                 limit?: number | null;
             };
@@ -3659,7 +3652,7 @@ export interface operations {
         parameters: {
             query: {
                 key: string;
-                version: string;
+                version: components["schemas"]["Id"];
                 preview?: boolean;
             };
             header?: never;
@@ -3690,7 +3683,7 @@ export interface operations {
         parameters: {
             query: {
                 key: string;
-                version: string;
+                version: components["schemas"]["Id"];
             };
             header?: never;
             path: {
@@ -3714,7 +3707,7 @@ export interface operations {
         parameters: {
             query: {
                 key: string;
-                version: string;
+                version: components["schemas"]["Id"];
             };
             header?: never;
             path: {
@@ -4816,7 +4809,7 @@ export interface operations {
     packs_list: {
         parameters: {
             query?: {
-                after?: number | null;
+                after?: string | null;
                 limit?: number | null;
                 code?: string | null;
             };
@@ -4849,7 +4842,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                id: number;
+                id: string;
             };
             cookie?: never;
         };
@@ -5345,7 +5338,7 @@ export interface operations {
             query?: {
                 bucket?: string | null;
                 project?: string | null;
-                after?: number | null;
+                after?: string | null;
                 limit?: number | null;
                 state?: string | null;
             };
@@ -5370,12 +5363,12 @@ export interface operations {
             query?: {
                 bucket?: string | null;
                 project?: string | null;
-                after?: number | null;
+                after?: string | null;
                 limit?: number | null;
             };
             header?: never;
             path: {
-                id: number;
+                id: string;
             };
             cookie?: never;
         };
@@ -5400,7 +5393,7 @@ export interface operations {
             };
             header?: never;
             path: {
-                id: number;
+                id: string;
             };
             cookie?: never;
         };
@@ -5801,7 +5794,7 @@ export interface operations {
     integrity_issues: {
         parameters: {
             query?: {
-                after?: number | null;
+                after?: string | null;
                 limit?: number | null;
                 code?: string | null;
             };
@@ -5831,7 +5824,7 @@ export interface operations {
             header?: never;
             path: {
                 id: string;
-                issue: number;
+                issue: string;
             };
             cookie?: never;
         };

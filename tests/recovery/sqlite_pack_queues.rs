@@ -1,6 +1,7 @@
 use super::{Backend, cache_tests, connection};
 use crate::authorization::{Action, Permit, Principal};
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::bucket::CreateBucket;
 use crate::model::multipart::{PartStitch, SeedConsumption};
 use crate::model::{
@@ -9,16 +10,15 @@ use crate::model::{
 };
 use anyhow::Result;
 use serde_json::json;
-use uuid::Uuid;
 
-async fn publish(backend: &Backend, stream: Uuid, size: i64) -> Result<()> {
+async fn publish(backend: &Backend, stream: Id, size: i64) -> Result<()> {
     backend.reserve(stream, size, true, None).await?;
     backend.finish(stream, size, "fixture", json!({})).await?;
     assert!(backend.publish(stream, None, None, None).await?);
     Ok(())
 }
 
-async fn queue(backend: &Backend, stream: Uuid) -> Result<Option<(i64, i64, String)>> {
+async fn queue(backend: &Backend, stream: Id) -> Result<Option<(i64, i64, String)>> {
     Ok(sqlx::query_as(
         "SELECT generation,progress_cursor,reason FROM pack_maintenance WHERE stream_id=?",
     )

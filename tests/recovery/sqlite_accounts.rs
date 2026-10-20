@@ -171,13 +171,20 @@ async fn sqlite_account_security_contract() -> Result<()> {
         avatar_enabled: true,
     };
     assert!(
-        crate::model::audit::scope(-1, backend.preferences(user, &current, preferences()))
-            .await
-            .is_err()
+        crate::model::audit::scope(
+            (-1).into(),
+            backend.preferences(user, &current, preferences())
+        )
+        .await
+        .is_err()
     );
     assert_eq!(backend.profile(user).await?.unwrap().display_name, "");
     let audit = audit_intent(&backend).await?;
-    crate::model::audit::scope(audit, backend.preferences(user, &current, preferences())).await?;
+    crate::model::audit::scope(
+        audit.into(),
+        backend.preferences(user, &current, preferences()),
+    )
+    .await?;
     let profile = backend.profile(user).await?.unwrap();
     assert_eq!(
         (profile.display_name.as_str(), profile.avatar_email.as_str()),
@@ -235,7 +242,7 @@ async fn sqlite_account_security_contract() -> Result<()> {
     let next_refresh = hash("password-refresh");
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.change_password(&verified, &current, "password-b", &next_refresh)
         )
         .await

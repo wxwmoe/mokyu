@@ -137,7 +137,7 @@ async fn mysql_credential_contract() -> Result<()> {
     assert!(backend.credential("INVALID").await.is_err());
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.create_credential(&local, credential_input(bucket), material("ROLLBACK"))
         )
         .await
@@ -282,13 +282,13 @@ async fn mysql_credential_contract() -> Result<()> {
     backend.enable_credential(&local, "KEY-B", true).await?;
     let service = backend.service("KEY-B").await?;
     assert!(
-        crate::model::audit::scope(-1, backend.set_grants(&local, "KEY-B", vec![]))
+        crate::model::audit::scope((-1).into(), backend.set_grants(&local, "KEY-B", vec![]))
             .await
             .is_err()
     );
     assert_eq!(backend.actions(&service, bucket).await?.len(), 2);
     assert!(
-        crate::model::audit::scope(-1, backend.revoke_credential(&local, "KEY-B"))
+        crate::model::audit::scope((-1).into(), backend.revoke_credential(&local, "KEY-B"))
             .await
             .is_err()
     );
@@ -412,7 +412,7 @@ async fn mysql_credential_contract() -> Result<()> {
     );
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.update_token(&user, member.id, token.id, token_input(bucket))
         )
         .await
@@ -424,7 +424,7 @@ async fn mysql_credential_contract() -> Result<()> {
     );
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.create_token(&user, member.id, token_input(bucket), token_material(22))
         )
         .await

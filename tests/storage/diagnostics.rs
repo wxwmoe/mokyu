@@ -32,8 +32,9 @@ async fn storage_diagnostics_count_shared_failures_and_cache_fallback() -> Resul
     let storage = app.storage.clone();
     let raw = Bytes::from(vec![73; 128 * 1024]);
     let chunk = Chunk {
-        id: 1,
-        encoding_id: 1,
+        uuid: Uuid::now_v7(),
+        id: 1.into(),
+        encoding_id: 1.into(),
         location_id: Uuid::new_v4(),
         storage_id: Some(store.id),
         hash: blake3::hash(&raw).as_bytes().to_vec(),
@@ -43,11 +44,11 @@ async fn storage_diagnostics_count_shared_failures_and_cache_fallback() -> Resul
         block_key_id: None,
         compressed: false,
         nonce: None,
-        format: 1,
+        format: 2,
         state: "ready".into(),
         created_at: chrono::Utc::now(),
     };
-    sqlx::query("INSERT INTO chunks(id,storage_id,hash,raw_size,encryption_algorithm,state,current_encoding_id,standalone_size) VALUES(1,?,?,?,'none','ready',1,?)")
+    sqlx::query("INSERT INTO chunks(uuid,id,storage_id,hash,raw_size,encryption_algorithm,state,current_encoding_id,standalone_size) VALUES(?,1,?,?,?,'none','ready',1,?)").bind(chunk.uuid)
         .bind(store.id).bind(&chunk.hash).bind(chunk.raw_size).bind(chunk.stored_size).execute(&pool).await?;
     sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,location_id,storage_id,standalone_size,state,encryption_algorithm,encoding_fingerprint) VALUES(1,1,?,?,?,'ready','none','{}')")
         .bind(chunk.location_id).bind(store.id).bind(chunk.stored_size).execute(&pool).await?;

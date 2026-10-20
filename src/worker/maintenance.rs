@@ -105,7 +105,7 @@ impl App {
         Ok(
             json!({"maintenance":global,"controls":rows,"concurrency":self.budget.cpu_jobs.clamp(1, 4),
             "pack_configured":configured,"pack_creation_paused":self.pack_creation_paused.load(Ordering::Acquire),
-            "pack_creation_enabled":configured && self.pack_creation_allowed(),"preparing_packs":preparing,"active_operations":self.active.lock().unwrap().len(),
+            "pack_creation_enabled":configured && self.pack_creation_allowed(),"preparing_packs":preparing,"active_operations":self.active_operations(),
             "backend_prefixes":backend_prefixes,"profiles":profiles}),
         )
     }

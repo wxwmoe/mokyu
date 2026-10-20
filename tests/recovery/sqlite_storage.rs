@@ -275,13 +275,20 @@ async fn sqlite_storage_contract() -> Result<()> {
     wrong.storage_id = local.id;
     assert!(backend.update("remote".into(), wrong).await.is_err());
     assert!(
-        crate::model::audit::scope(-1, backend.update("remote".into(), changed.clone()))
-            .await
-            .is_err()
+        crate::model::audit::scope(
+            (-1).into(),
+            backend.update("remote".into(), changed.clone())
+        )
+        .await
+        .is_err()
     );
     assert_eq!(backend.load(remote.id).await?.revision, changed.revision);
     let intent = sqlx::query("INSERT INTO audit_events(actor_label,source,action,target) VALUES('test','cli','storage.profile.update','')").execute(db).await?.last_insert_rowid();
-    crate::model::audit::scope(intent, backend.update("remote".into(), changed.clone())).await?;
+    crate::model::audit::scope(
+        intent.into(),
+        backend.update("remote".into(), changed.clone()),
+    )
+    .await?;
     assert_eq!(
         sqlx::query_scalar::<_, String>("SELECT outcome FROM audit_events WHERE id=?")
             .bind(intent)
@@ -328,7 +335,7 @@ async fn sqlite_storage_contract() -> Result<()> {
     assert_eq!(backend.current_key("local", Some("key")).await?, local.id);
     assert_eq!(backend.view(local.id).await?.block_key_id, Some(key));
     assert!(
-        crate::model::audit::scope(-1, backend.current_key("local", None))
+        crate::model::audit::scope((-1).into(), backend.current_key("local", None))
             .await
             .is_err()
     );

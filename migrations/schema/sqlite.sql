@@ -1,4 +1,4 @@
--- Current sqlite schema, matching migration 0023.
+-- Current sqlite schema, matching migration 0026.
 -- The initializer records schema_version and migration checksums after this script succeeds.
 
 CREATE TABLE access_state (
@@ -70,7 +70,7 @@ CREATE TABLE buckets (
 CREATE TABLE cache_pins (
     chunk_id INTEGER NOT NULL,
     pin_type TEXT NOT NULL,
-    owner_id BLOB CHECK (owner_id IS NULL OR length(owner_id)=16) NOT NULL,
+    owner_id INTEGER NOT NULL,
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     PRIMARY KEY (chunk_id,pin_type,owner_id),
     CONSTRAINT cache_pins_chunk FOREIGN KEY (chunk_id) REFERENCES chunks(id),
@@ -114,8 +114,7 @@ CREATE TABLE chunk_encodings (
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     unreferenced_at INTEGER,
     deleted_at INTEGER,
-    stored_at INTEGER, quarantined_at INTEGER, quarantine_code TEXT CONSTRAINT encodings_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)), quarantine_revision INTEGER NOT NULL DEFAULT 0 CONSTRAINT encodings_quarantine_revision CHECK (quarantine_revision >= 0), owner_stream BLOB
-    CHECK (owner_stream IS NULL OR length(owner_stream)=16)
+    stored_at INTEGER, quarantined_at INTEGER, quarantine_code TEXT CONSTRAINT encodings_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)), quarantine_revision INTEGER NOT NULL DEFAULT 0 CONSTRAINT encodings_quarantine_revision CHECK (quarantine_revision >= 0), owner_stream INTEGER
     REFERENCES streams(id) ON DELETE RESTRICT
     CONSTRAINT encodings_owner_exclusive CHECK (owner_task IS NULL OR owner_stream IS NULL), recovery_pending INTEGER NOT NULL DEFAULT FALSE CHECK (recovery_pending IN (0,1)),
     CONSTRAINT encodings_chunk FOREIGN KEY (storage_id,chunk_id) REFERENCES chunks(storage_id,id) ON DELETE CASCADE,
@@ -131,7 +130,7 @@ CREATE TABLE chunk_encodings (
 CREATE TABLE chunks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     storage_id BLOB CHECK (storage_id IS NULL OR length(storage_id)=16) NOT NULL,
-    owner_stream BLOB CHECK (owner_stream IS NULL OR length(owner_stream)=16),
+    owner_stream INTEGER,
     hash BLOB CHECK (hash IS NULL OR length(hash)=32) NOT NULL,
     raw_size INTEGER NOT NULL,
     standalone_size INTEGER,
@@ -139,7 +138,8 @@ CREATE TABLE chunks (
     block_key_id BLOB CHECK (block_key_id IS NULL OR length(block_key_id)=16),
     standalone_compressed INTEGER CHECK (standalone_compressed IN (0,1)) NOT NULL DEFAULT FALSE,
     nonce BLOB,
-    format INTEGER NOT NULL DEFAULT 1,
+    uuid BLOB NOT NULL CHECK(length(uuid)=16),
+    format INTEGER NOT NULL DEFAULT 2,
     state TEXT NOT NULL,
     current_encoding_id INTEGER NOT NULL DEFAULT 0,
     pack_id INTEGER,
@@ -158,17 +158,17 @@ CREATE TABLE chunks (
     CONSTRAINT chunks_encryption CHECK ((encryption_algorithm='none' AND block_key_id IS NULL) OR (encryption_algorithm<>'none' AND block_key_id IS NOT NULL)),
     CONSTRAINT chunks_raw_size CHECK (raw_size BETWEEN 1 AND 4194304),
     CONSTRAINT chunks_stored_size CHECK (standalone_size IS NULL OR standalone_size BETWEEN 1 AND 4194320),
-    CONSTRAINT chunks_format CHECK (format=1),
+    CONSTRAINT chunks_format CHECK (format=2),
     CONSTRAINT chunks_state CHECK (state IN ('preparing','uploading','ready','failed','deleting','deleted')),
     CONSTRAINT chunks_encoding CHECK (current_encoding_id>0 OR state='preparing')
 ) STRICT;
 
 CREATE TABLE extents (
-    stream_id BLOB CHECK (stream_id IS NULL OR length(stream_id)=16) NOT NULL,
+    stream_id INTEGER NOT NULL,
     offset_bytes INTEGER NOT NULL,
     length INTEGER NOT NULL,
     chunk_id INTEGER,
-    fragment_id BLOB CHECK (fragment_id IS NULL OR length(fragment_id)=16),
+    fragment_id INTEGER,
     source_offset INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (stream_id,offset_bytes),
     CONSTRAINT extents_stream FOREIGN KEY (stream_id) REFERENCES streams(id) ON DELETE CASCADE,
@@ -181,15 +181,16 @@ CREATE TABLE extents (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE fragments (
-    id BLOB CHECK (id IS NULL OR length(id)=16) NOT NULL PRIMARY KEY,
-    owner_stream BLOB CHECK (owner_stream IS NULL OR length(owner_stream)=16),
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id BLOB NOT NULL UNIQUE CHECK(length(location_id)=16),
+    owner_stream INTEGER,
     sealed INTEGER CHECK (sealed IN (0,1)) NOT NULL DEFAULT FALSE,
     size INTEGER NOT NULL,
     hash BLOB CHECK (hash IS NULL OR length(hash)=32) NOT NULL,
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     CONSTRAINT fragments_stream FOREIGN KEY (owner_stream) REFERENCES streams(id) ON DELETE SET NULL,
     CONSTRAINT fragments_size CHECK (size BETWEEN 1 AND 4194304)
-) STRICT, WITHOUT ROWID;
+) STRICT;
 
 CREATE TABLE integrity_issues (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -198,7 +199,7 @@ CREATE TABLE integrity_issues (
     code TEXT NOT NULL,
     chunk_id INTEGER,
     location_id BLOB CHECK (location_id IS NULL OR length(location_id)=16),
-    stream_id BLOB CHECK (stream_id IS NULL OR length(stream_id)=16),
+    stream_id INTEGER,
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16),
     object_key BLOB,
     detail TEXT CHECK (json_valid(detail)) NOT NULL DEFAULT (JSON_OBJECT()),
@@ -288,8 +289,8 @@ CREATE TABLE mokyu_meta (
 CREATE TABLE objects (
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
     object_key BLOB NOT NULL,
-    stream_id BLOB CHECK (stream_id IS NULL OR length(stream_id)=16),
-    write_token BLOB CHECK (write_token IS NULL OR length(write_token)=16) NOT NULL,
+    stream_id INTEGER,
+    write_token INTEGER NOT NULL,
     catalog_size INTEGER,
     catalog_modified INTEGER,
     catalog_type TEXT,
@@ -334,7 +335,7 @@ CREATE TABLE pack_inputs (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE pack_maintenance (
-    stream_id BLOB CHECK (stream_id IS NULL OR length(stream_id)=16) NOT NULL PRIMARY KEY,
+    stream_id INTEGER NOT NULL PRIMARY KEY,
     progress_cursor INTEGER NOT NULL DEFAULT 0,
     generation INTEGER NOT NULL DEFAULT 1,
     next_check_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
@@ -401,8 +402,8 @@ CREATE TABLE packs (
 CREATE TABLE parts (
     upload_id BLOB CHECK (upload_id IS NULL OR length(upload_id)=16) NOT NULL,
     part_number INTEGER NOT NULL,
-    stream_id BLOB CHECK (stream_id IS NULL OR length(stream_id)=16),
-    write_token BLOB CHECK (write_token IS NULL OR length(write_token)=16) NOT NULL,
+    stream_id INTEGER,
+    write_token INTEGER NOT NULL,
     quota_size INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (upload_id,part_number),
     CONSTRAINT parts_upload FOREIGN KEY (upload_id) REFERENCES uploads(id) ON DELETE CASCADE,
@@ -413,7 +414,7 @@ CREATE TABLE parts (
 
 CREATE TABLE pending_uploads (
     chunk_id INTEGER NOT NULL PRIMARY KEY,
-    stream_id BLOB CHECK (stream_id IS NULL OR length(stream_id)=16),
+    stream_id INTEGER,
     offset_bytes INTEGER NOT NULL,
     staged_size INTEGER NOT NULL,
     cache_key TEXT,
@@ -456,14 +457,14 @@ CREATE TABLE projects (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE quota_reservations (
-    id BLOB CHECK (id IS NULL OR length(id)=16) NOT NULL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
     object_key BLOB NOT NULL,
-    stream_id BLOB CHECK (stream_id IS NULL OR length(stream_id)=16) UNIQUE,
+    stream_id INTEGER UNIQUE,
     upload_id BLOB CHECK (upload_id IS NULL OR length(upload_id)=16) UNIQUE,
-    result_stream_id BLOB CHECK (result_stream_id IS NULL OR length(result_stream_id)=16) UNIQUE,
+    result_stream_id INTEGER UNIQUE,
     closed INTEGER CHECK (closed IN (0,1)) NOT NULL DEFAULT FALSE,
-    replaced_stream_id BLOB CHECK (replaced_stream_id IS NULL OR length(replaced_stream_id)=16),
+    replaced_stream_id INTEGER,
     credit_bytes INTEGER NOT NULL DEFAULT 0,
     logical_bytes INTEGER NOT NULL DEFAULT 0,
     inflight_bytes INTEGER NOT NULL DEFAULT 0,
@@ -473,7 +474,7 @@ CREATE TABLE quota_reservations (
     CONSTRAINT reservations_result FOREIGN KEY (result_stream_id) REFERENCES streams(id) ON DELETE SET NULL,
     CONSTRAINT reservations_owner CHECK ((stream_id IS NULL)<>(upload_id IS NULL)),
     CONSTRAINT reservations_bytes CHECK (credit_bytes>=0 AND logical_bytes>=0 AND inflight_bytes>=0)
-) STRICT, WITHOUT ROWID;
+) STRICT;
 
 CREATE TABLE quota_scopes (
     scope TEXT NOT NULL,
@@ -494,8 +495,8 @@ CREATE TABLE quota_scopes (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE quota_writes (
-    stream_id BLOB CHECK (stream_id IS NULL OR length(stream_id)=16) NOT NULL PRIMARY KEY,
-    reservation_id BLOB CHECK (reservation_id IS NULL OR length(reservation_id)=16) NOT NULL,
+    stream_id INTEGER NOT NULL PRIMARY KEY,
+    reservation_id INTEGER NOT NULL,
     allocated_bytes INTEGER NOT NULL DEFAULT 0,
     contribution_bytes INTEGER NOT NULL DEFAULT 0,
     CONSTRAINT quota_writes_stream FOREIGN KEY (stream_id) REFERENCES streams(id),
@@ -675,7 +676,7 @@ CREATE TABLE storages (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE streams (
-    id BLOB CHECK (id IS NULL OR length(id)=16) NOT NULL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
     object_key BLOB NOT NULL,
     stream_type TEXT NOT NULL,
@@ -697,7 +698,7 @@ CREATE TABLE streams (
     CONSTRAINT streams_type CHECK (stream_type IN ('object','part')),
     CONSTRAINT streams_state CHECK (state IN ('writing','ready','retired','abandoned')),
     CONSTRAINT streams_size CHECK (size>=0)
-) STRICT, WITHOUT ROWID;
+) STRICT;
 
 CREATE TABLE tasks (
     id BLOB CHECK (id IS NULL OR length(id)=16) NOT NULL PRIMARY KEY,
@@ -743,7 +744,7 @@ CREATE TABLE uploads (
     checksum_type TEXT,
     manifest_hash TEXT,
     result TEXT CHECK (json_valid(result)),
-    output_stream BLOB CHECK (output_stream IS NULL OR length(output_stream)=16),
+    output_stream INTEGER,
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     touched_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     durable_at INTEGER,
@@ -784,7 +785,7 @@ CREATE TABLE web_uploads (
     expected_size INTEGER NOT NULL,
     part_size INTEGER NOT NULL,
     modified_at INTEGER,
-    expected_stream_id BLOB CHECK (expected_stream_id IS NULL OR length(expected_stream_id)=16),
+    expected_stream_id INTEGER,
     CONSTRAINT web_uploads_upload FOREIGN KEY (upload_id) REFERENCES uploads(id) ON DELETE CASCADE,
     CONSTRAINT web_uploads_user FOREIGN KEY (user_id) REFERENCES web_users(id) ON DELETE SET NULL,
     CONSTRAINT web_uploads_size CHECK (expected_size BETWEEN 0 AND 53687091200000),
@@ -1014,9 +1015,10 @@ CREATE INDEX encodings_owner_stream ON chunk_encodings(owner_stream) WHERE owner
 CREATE INDEX encodings_recovery ON chunk_encodings(storage_id,unreferenced_at,encoding_id) WHERE recovery_pending;
 
 CREATE TABLE raw_sources (
-    id BLOB NOT NULL PRIMARY KEY CHECK (length(id)=16),
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id BLOB NOT NULL UNIQUE CHECK(length(location_id)=16),
     storage_id BLOB NOT NULL REFERENCES storages(id),
-    owner_stream BLOB REFERENCES streams(id) ON DELETE SET NULL,
+    owner_stream INTEGER REFERENCES streams(id) ON DELETE SET NULL,
     medium TEXT NOT NULL DEFAULT 'local' CHECK (medium IN ('local','memory','shared_s3')),
     durability TEXT NOT NULL DEFAULT 'durable' CHECK (durability IN ('durable','buffered','volatile')),
     boot_id BLOB CHECK (boot_id IS NULL OR length(boot_id)=16),
@@ -1033,14 +1035,14 @@ CREATE TABLE raw_sources (
     unreferenced_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     CHECK (state<>'ready' OR digest IS NOT NULL),
     CHECK ((medium='memory')=(boot_id IS NOT NULL))
-) STRICT, WITHOUT ROWID;
+) STRICT;
 CREATE INDEX raw_sources_cleanup ON raw_sources(storage_id,state,unreferenced_at,id);
 CREATE INDEX raw_sources_owner ON raw_sources(owner_stream) WHERE owner_stream IS NOT NULL;
 CREATE TABLE raw_ranges (
-    stream_id BLOB NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+    stream_id INTEGER NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
     offset_bytes INTEGER NOT NULL CHECK (offset_bytes>=0),
     length INTEGER NOT NULL CHECK (length>=0),
-    source_id BLOB NOT NULL REFERENCES raw_sources(id),
+    source_id INTEGER NOT NULL REFERENCES raw_sources(id),
     source_offset INTEGER NOT NULL DEFAULT 0 CHECK (source_offset>=0),
     PRIMARY KEY (stream_id,offset_bytes)
 ) STRICT, WITHOUT ROWID;
@@ -1052,7 +1054,7 @@ CREATE TABLE multipart_files (
     id BLOB NOT NULL PRIMARY KEY CHECK (length(id)=16),
     upload_id BLOB REFERENCES uploads(id) ON DELETE SET NULL,
     storage_id BLOB NOT NULL REFERENCES storages(id),
-    source_id BLOB UNIQUE REFERENCES raw_sources(id),
+    source_id INTEGER UNIQUE REFERENCES raw_sources(id),
     reclaim_pending INTEGER NOT NULL DEFAULT 0 CHECK (reclaim_pending IN (0,1)),
     state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','sealed','deleting'))
 ) STRICT, WITHOUT ROWID;
@@ -1070,8 +1072,8 @@ CREATE TABLE storage_maintenance (
 ) STRICT;
 
 CREATE TABLE raw_processing (
-    stream_id BLOB PRIMARY KEY REFERENCES streams(id) ON DELETE CASCADE,
-    source_id BLOB NOT NULL REFERENCES raw_sources(id) ON DELETE CASCADE,
+    stream_id INTEGER PRIMARY KEY REFERENCES streams(id) ON DELETE CASCADE,
+    source_id INTEGER NOT NULL REFERENCES raw_sources(id) ON DELETE CASCADE,
     payload_revision INTEGER NOT NULL,
     content_hash BLOB CHECK (content_hash IS NULL OR length(content_hash)=32),
     source_revision INTEGER,

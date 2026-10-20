@@ -1,5 +1,6 @@
 use super::{CachePin, Storage, StoreBackend, StorePermit, resource_gate};
 use crate::content::codec::IntegrityError;
+use crate::model::Id;
 use crate::model::raw::RawSource;
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -133,12 +134,13 @@ impl Storage {
     pub(crate) async fn raw_replay_writer(
         &self,
         storage: Uuid,
-        source: Uuid,
+        source: Id,
+        location: Uuid,
         size: i64,
         parts: &[i64],
     ) -> Result<RawWriter<'_>> {
         let declared = (!self.is_local(storage)?).then_some(size);
-        let writer = self.raw_writer(storage, source, declared).await?;
+        let writer = self.raw_writer(storage, source, location, declared).await?;
         Ok(match writer {
             RawWriter::Remote(writer) if size > PART_SIZE as i64 => {
                 let part_size = replay_part_size(size as u64, parts)?;
@@ -179,7 +181,8 @@ impl Storage {
     pub(crate) async fn raw_writer(
         &self,
         storage: Uuid,
-        source: Uuid,
+        source: Id,
+        location: Uuid,
         declared: Option<i64>,
     ) -> Result<RawWriter<'_>> {
         let target = self.store_backend(storage)?;
@@ -194,7 +197,7 @@ impl Storage {
                 storage: self,
                 source,
                 target,
-                key: remote_path(source),
+                key: remote_path(location),
                 upload: None,
                 parts: Vec::new(),
                 buffer: Vec::new(),
@@ -209,7 +212,7 @@ impl Storage {
             .as_ref()
             .context("raw files require local storage")?;
         directory(root).await?;
-        let destination = path(root, source);
+        let destination = path(root, location);
         directory(destination.parent().unwrap()).await?;
         let temporary = destination.with_extension("partial");
         let mut options = tokio::fs::OpenOptions::new();
@@ -280,7 +283,7 @@ impl Storage {
         }
         let pin = {
             let _gate = self.source_gate.read().await;
-            self.physical_pin(source.id)
+            self.physical_pin(source.location_id)
         };
         self.verify_raw_target(&target).await?;
         self.cache_lookups.fetch_add(1, Ordering::Relaxed);
@@ -292,7 +295,7 @@ impl Storage {
                 _global: None,
             });
         }
-        let lock = self.raw_cache_lock(source.id);
+        let lock = self.raw_cache_lock(source.location_id);
         let _miss = lock.lock().await;
         if let Some(file) = self.cached_raw(source).await {
             return Ok(RawReader {
@@ -339,7 +342,7 @@ impl Storage {
         source.validate()?;
         let pin = {
             let _gate = self.source_gate.read().await;
-            self.physical_pin(source.id)
+            self.physical_pin(source.location_id)
         };
         let target = self.store_backend(source.storage_id)?;
         self.verify_raw_target(&target).await?;
@@ -351,7 +354,7 @@ impl Storage {
                 .raw_root
                 .as_ref()
                 .context("raw local path is missing")?;
-            let file_path = path(root, source.id);
+            let file_path = path(root, source.location_id);
             let metadata = tokio::fs::symlink_metadata(&file_path)
                 .await
                 .map_err(raw_io_error)?;
@@ -367,7 +370,7 @@ impl Storage {
             RawFile::Local(file)
         } else {
             ensure!(source.medium == "shared_s3", "raw source medium changed");
-            let key = remote_path(source.id);
+            let key = remote_path(source.location_id);
             let meta = target.backend.head(&key).await.map_err(remote_error)?;
             self.backend_gets.fetch_add(1, Ordering::Relaxed);
             ensure!(meta.size == source.size as u64, IntegrityError::Length);
@@ -404,7 +407,7 @@ impl Storage {
         self.verify_raw_target(&target).await?;
         if !target.is_local {
             let _permit = target.controls.acquire().await?;
-            let key = remote_path(source.id);
+            let key = remote_path(source.location_id);
             if let Some(upload) = self.raw_store.upload_id(source.id).await? {
                 let multipart = target
                     .multipart
@@ -426,7 +429,7 @@ impl Storage {
             .raw_root
             .as_ref()
             .context("raw files require local storage")?;
-        let destination = path(root, source.id);
+        let destination = path(root, source.location_id);
         if !tokio::fs::try_exists(&destination).await?
             && !tokio::fs::try_exists(destination.with_extension("partial")).await?
         {
@@ -546,7 +549,7 @@ impl RawWriter<'_> {
         ranges: Vec<super::assembly::Range>,
         app: &crate::app::App,
         upload: Uuid,
-        source: Uuid,
+        source: Id,
     ) -> Result<Option<super::assembly::Prepared>> {
         let Self::Local(writer) = self else {
             return Ok(None);
@@ -582,7 +585,7 @@ pub(crate) struct ReplayWriter<'a> {
 
 pub(crate) struct RemoteWriter<'a> {
     storage: &'a Storage,
-    source: Uuid,
+    source: Id,
     target: Arc<StoreBackend>,
     key: ObjectPath,
     upload: Option<String>,

@@ -1,6 +1,7 @@
 use super::{Backend, cache_tests, connection, queries};
 use crate::authorization::Principal;
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::bucket::CreateBucket;
 use crate::model::integrity::{Cursor, Detail, Finding, IntegrityStore};
 use crate::model::task::Execution;
@@ -36,13 +37,13 @@ async fn detail(backend: &Backend, id: Uuid) -> Result<Detail> {
         backend.raw(id).await?.unwrap()["detail"].clone(),
     )?)
 }
-async fn publish(backend: &Backend, stream: Uuid) -> Result<()> {
+async fn publish(backend: &Backend, stream: Id) -> Result<()> {
     backend.reserve(stream, 32, true, None).await?;
     StreamStore::finish(backend, stream, 32, "fixture", json!({})).await?;
     assert!(backend.publish(stream, None, None, None).await?);
     Ok(())
 }
-fn finding(chunk: i64, code: &str) -> Finding {
+fn finding(chunk: Id, code: &str) -> Finding {
     Finding {
         subject: format!("chunk:{chunk}"),
         code: code.into(),
@@ -139,7 +140,7 @@ async fn sqlite_integrity_contract() -> Result<()> {
     assert_eq!(d.storages.len(), 2);
     assert_eq!(d.storages[1].storage_id, Some(second));
     assert_eq!(d.upper_object, Some((buckets[0].id, "m".into())));
-    let selected = backend.chunks(&d, 0, 10).await?;
+    let selected = backend.chunks(&d, 0.into(), 10).await?;
     assert_eq!(
         selected.iter().map(|c| c.id).collect::<Vec<_>>(),
         vec![chunks[0].id, chunks[1].id]
@@ -154,7 +155,7 @@ async fn sqlite_integrity_contract() -> Result<()> {
         (streams[0], buckets[0].id, "A")
     );
     assert!(IntegrityStore::current(&backend, bucket, &key, mapped.id).await?);
-    assert!(!IntegrityStore::current(&backend, bucket, &key, Uuid::new_v4()).await?);
+    assert!(!IntegrityStore::current(&backend, bucket, &key, Id::from(i64::MAX)).await?);
     assert_eq!(
         backend.chunk_stream(chunks[0].id, &d).await?,
         Some(streams[0])
@@ -189,12 +190,15 @@ async fn sqlite_integrity_contract() -> Result<()> {
         .execute(db)
         .await?;
     let fragment = Uuid::new_v4();
-    sqlx::query("INSERT INTO fragments(id,owner_stream,sealed,size,hash) VALUES(?,?,TRUE,8,?)")
-        .bind(fragment)
-        .bind(streams[0])
-        .bind([9u8; 32].as_slice())
-        .execute(db)
-        .await?;
+    let inserted = sqlx::query(
+        "INSERT INTO fragments(location_id,owner_stream,sealed,size,hash) VALUES(?,?,TRUE,8,?)",
+    )
+    .bind(fragment)
+    .bind(streams[0])
+    .bind([9u8; 32].as_slice())
+    .execute(db)
+    .await?;
+    let fragment: Id = inserted.last_insert_rowid().into();
     sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,fragment_id) VALUES(?,32,8,?)")
         .bind(streams[0])
         .bind(fragment)
@@ -266,7 +270,7 @@ async fn sqlite_integrity_contract() -> Result<()> {
             .await
             .is_err()
     );
-    assert_eq!(backend.findings(id, 0, 10, None).await?.len(), 2);
+    assert_eq!(backend.findings(id, 0.into(), 10, None).await?.len(), 2);
     sqlx::query("CREATE TRIGGER fail_integrity_checkpoint BEFORE INSERT ON integrity_issues WHEN NEW.code='FailCheckpoint' BEGIN SELECT RAISE(ABORT,'fixture failure'); END").execute(db).await?;
     assert!(
         backend
@@ -285,7 +289,7 @@ async fn sqlite_integrity_contract() -> Result<()> {
     sqlx::query("DROP TRIGGER fail_integrity_checkpoint")
         .execute(db)
         .await?;
-    assert_eq!(backend.findings(id, 0, 10, None).await?.len(), 2);
+    assert_eq!(backend.findings(id, 0.into(), 10, None).await?.len(), 2);
     assert_eq!(backend.raw(id).await?.unwrap()["cursor"], "duplicate");
     let saved_upper = backend.report_upper(id).await?;
     backend
@@ -293,12 +297,15 @@ async fn sqlite_integrity_contract() -> Result<()> {
             task,
             "later".into(),
             detail(&backend, id).await?,
-            vec![finding(i64::MAX, "Missing")],
+            vec![finding(i64::MAX.into(), "Missing")],
         )
         .await?;
     assert_eq!(detail(&backend, id).await?.issues, 3);
-    assert_eq!(backend.report_page(id, 0, saved_upper).await?.len(), 2);
-    let reports = backend.findings(id, 0, 10, None).await?;
+    assert_eq!(
+        backend.report_page(id, 0.into(), saved_upper).await?.len(),
+        2
+    );
+    let reports = backend.findings(id, 0.into(), 10, None).await?;
     assert_eq!(reports.len(), 3);
     assert_eq!(
         backend.groups(id).await?,
@@ -308,7 +315,7 @@ async fn sqlite_integrity_contract() -> Result<()> {
             ("SizeMismatch".into(), "1".into())
         ]
     );
-    let issue = &backend.findings(id, 0, 10, Some("Corrupt")).await?[0];
+    let issue = &backend.findings(id, 0.into(), 10, Some("Corrupt")).await?[0];
     let issue_id = issue["id"].as_str().unwrap().parse()?;
     assert_eq!(issue["chunk_id"], chunks[0].id.to_string());
     assert!(issue["created_at"].as_str().unwrap().ends_with('Z'));
@@ -333,7 +340,9 @@ async fn sqlite_integrity_contract() -> Result<()> {
             .await
             .is_err()
     );
-    let issue = &backend.findings(id, 0, 10, Some("SizeMismatch")).await?[0];
+    let issue = &backend
+        .findings(id, 0.into(), 10, Some("SizeMismatch"))
+        .await?[0];
     assert_eq!(issue["object_key"], "z\u{2603}");
     assert_eq!(
         backend
@@ -342,7 +351,7 @@ async fn sqlite_integrity_contract() -> Result<()> {
             .len(),
         1
     );
-    let issue = &backend.findings(id, 0, 10, Some("Missing")).await?[0];
+    let issue = &backend.findings(id, 0.into(), 10, Some("Missing")).await?[0];
     assert!(
         backend
             .objects(id, issue["id"].as_str().unwrap().parse()?, None)
@@ -379,7 +388,7 @@ async fn sqlite_integrity_contract() -> Result<()> {
     );
     assert_eq!(
         backend
-            .chunks(&d, 0, 10)
+            .chunks(&d, 0.into(), 10)
             .await?
             .iter()
             .map(|c| c.id)
@@ -430,7 +439,7 @@ async fn sqlite_integrity_contract() -> Result<()> {
     );
     assert_eq!(
         backend
-            .chunks(&d, 0, 10)
+            .chunks(&d, 0.into(), 10)
             .await?
             .iter()
             .map(|c| c.id)
@@ -444,7 +453,12 @@ async fn sqlite_integrity_contract() -> Result<()> {
         .await?;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         assert!(backend.report_task(id).await?.is_some());
-        assert!(backend.report_page(id, 0, i64::MAX).await?.is_empty());
+        assert!(
+            backend
+                .report_page(id, 0.into(), i64::MAX.into())
+                .await?
+                .is_empty()
+        );
         assert!(backend.mapping(&d, &Cursor::default()).await?.is_some());
         anyhow::Ok(())
     })

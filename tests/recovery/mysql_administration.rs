@@ -96,7 +96,7 @@ async fn mysql_administration_contract() -> Result<()> {
         .await?;
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.create_user(&local, user_input("rollback", "member"))
         )
         .await
@@ -226,9 +226,12 @@ async fn mysql_administration_contract() -> Result<()> {
     assert_eq!(rows[0].grants[0].bucket_id, bucket);
     assert_eq!(rows[0].grants[0].actions, Action::ALL);
     assert!(
-        crate::model::audit::scope(-1, backend.save_member(&local, project.id, member.id, None))
-            .await
-            .is_err()
+        crate::model::audit::scope(
+            (-1).into(),
+            backend.save_member(&local, project.id, member.id, None)
+        )
+        .await
+        .is_err()
     );
     assert_eq!(
         backend.actions(&current, bucket).await?,
@@ -319,7 +322,7 @@ async fn mysql_administration_contract() -> Result<()> {
     assert!(backend.authenticate_token(&[4; 32]).await?.is_none());
     assert!(
         crate::model::audit::scope(
-            -1,
+            (-1).into(),
             backend.reset_password(&local, member.id, "next-password", true)
         )
         .await
@@ -347,7 +350,7 @@ async fn mysql_administration_contract() -> Result<()> {
             .is_err()
     );
     assert!(
-        crate::model::audit::scope(-1, backend.delete_user(&local, member.id))
+        crate::model::audit::scope((-1).into(), backend.delete_user(&local, member.id))
             .await
             .is_err()
     );

@@ -1,4 +1,5 @@
 use crate::authorization::Principal;
+use crate::model::Id;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -15,29 +16,29 @@ pub(crate) trait AuditStore: Send + Sync {
         principal: &Principal,
         action: &str,
         request_id: Option<&str>,
-    ) -> Result<i64>;
-    async fn finish(&self, id: i64, status: u16, partial: bool) -> Result<()>;
+    ) -> Result<Id>;
+    async fn finish(&self, id: Id, status: u16, partial: bool) -> Result<()>;
     async fn events(
         &self,
         admin: bool,
         user: Option<Uuid>,
-        before: Option<i64>,
+        before: Option<Id>,
         filter: Filter,
         limit: i64,
         export: bool,
     ) -> Result<Vec<Event>>;
-    async fn event(&self, id: i64, admin: bool, user: Uuid) -> Result<Option<Event>>;
+    async fn event(&self, id: Id, admin: bool, user: Uuid) -> Result<Option<Event>>;
 }
 
-tokio::task_local! { static EVENT: i64; }
+tokio::task_local! { static EVENT: Id; }
 pub(crate) fn active() -> bool {
     EVENT.try_with(|_| ()).is_ok()
 }
-pub(crate) fn current() -> Option<i64> {
+pub(crate) fn current() -> Option<Id> {
     EVENT.try_with(|id| *id).ok()
 }
 
-pub(crate) async fn scope<T>(id: i64, future: impl Future<Output = T>) -> T {
+pub(crate) async fn scope<T>(id: Id, future: impl Future<Output = T>) -> T {
     EVENT.scope(id, future).await
 }
 

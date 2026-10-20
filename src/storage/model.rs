@@ -46,11 +46,11 @@ struct IdentityMarker {
 
 pub(crate) fn identity_marker(deployment: Uuid, id: Uuid) -> Result<Value> {
     Ok(serde_json::to_value(IdentityMarker {
-        format_version: 3,
+        format_version: 4,
         deployment_id: deployment,
         storage_id: id,
-        chunk_layout: "uuid-prefix2".into(),
-        pack_layout: "uuid-prefix2-v1".into(),
+        chunk_layout: "uuid-suffix2".into(),
+        pack_layout: "uuid-suffix2-pack".into(),
         created_at: Utc::now(),
         created_by: format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
     })?)
@@ -88,10 +88,10 @@ impl Store {
         let meta: IdentityMarker = serde_json::from_value(row.identity_marker.clone())
             .context("storage identity marker is missing or invalid")?;
         ensure!(
-            meta.format_version == 3
+            meta.format_version == 4
                 && meta.storage_id == row.id
-                && meta.chunk_layout == "uuid-prefix2"
-                && meta.pack_layout == "uuid-prefix2-v1",
+                && meta.chunk_layout == "uuid-suffix2"
+                && meta.pack_layout == "uuid-suffix2-pack",
             "unsupported storage identity marker"
         );
         let mut multipart: Option<Arc<dyn object_store::multipart::MultipartStore>> = None;

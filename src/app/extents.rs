@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{config, content::codec::MAX};
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -14,11 +15,7 @@ impl App {
         self.extent_bytes_with(e, &crate::storage::ReadContext::default())
             .await
     }
-    pub(crate) async fn copy_extents(
-        &self,
-        destination: Uuid,
-        source: &StoredStream,
-    ) -> Result<()> {
+    pub(crate) async fn copy_extents(&self, destination: Id, source: &StoredStream) -> Result<()> {
         self.renew_write_lease(destination).await?;
         let source_target = self
             .chunks
@@ -137,7 +134,7 @@ impl App {
 
     pub(crate) fn replay_payload<'a>(
         &'a self,
-        destination: Uuid,
+        destination: Id,
         sources: &'a [StoredStream],
         range: std::ops::Range<u64>,
     ) -> futures_util::stream::BoxStream<'a, Result<Bytes>> {
@@ -209,7 +206,7 @@ impl App {
 
     async fn copy_payload(
         &self,
-        destination: Uuid,
+        destination: Id,
         storage: Uuid,
         revision: Option<i64>,
         source: &StoredStream,
@@ -218,10 +215,10 @@ impl App {
         let mut input = Box::pin(self.payload_bytes(source));
         let mut offset = 0;
         if let Some(revision) = revision {
-            let id = self.raw.begin(destination, storage, revision).await?;
+            let (id, location) = self.raw.begin(destination, storage, revision).await?;
             let mut writer = self
                 .storage
-                .raw_replay_writer(storage, id, source.size, &[])
+                .raw_replay_writer(storage, id, location, source.size, &[])
                 .await?;
             let mut digest = Md5::new();
             while let Some(data) = input.next().await {
@@ -302,7 +299,7 @@ impl App {
             let source = self.chunks.fragment(id).await?;
             let data = self
                 .storage
-                .read_fragment(id, &source)
+                .read_fragment(source.location_id, &source)
                 .await
                 .context("multipart fragment missing")?;
             ensure!(

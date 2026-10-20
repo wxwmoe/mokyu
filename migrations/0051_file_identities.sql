@@ -1,0 +1,120 @@
+DO $$
+BEGIN
+    IF EXISTS(SELECT 1 FROM audit_events) OR EXISTS(SELECT 1 FROM cache_pins) OR EXISTS(SELECT 1 FROM chunk_access_stats) OR EXISTS(SELECT 1 FROM chunk_access_windows) OR EXISTS(SELECT 1 FROM chunk_encodings) OR EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM extents) OR EXISTS(SELECT 1 FROM integrity_issues) OR EXISTS(SELECT 1 FROM integrity_packs) OR EXISTS(SELECT 1 FROM pack_access_windows) OR EXISTS(SELECT 1 FROM pack_changes) OR EXISTS(SELECT 1 FROM pack_inputs) OR EXISTS(SELECT 1 FROM pack_member_access_windows) OR EXISTS(SELECT 1 FROM pack_members) OR EXISTS(SELECT 1 FROM packs) OR EXISTS(SELECT 1 FROM pending_uploads) OR EXISTS(SELECT 1 FROM raw_sources) OR EXISTS(SELECT 1 FROM fragments) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM uploads) OR EXISTS(SELECT 1 FROM multipart_files) THEN
+        RAISE EXCEPTION 'UUID identities require empty metadata; migrate logical objects through S3';
+    END IF;
+END $$;
+
+DROP TRIGGER chunk_encodings_fingerprint ON chunk_encodings;
+DROP TRIGGER chunk_locations_storage_binding ON chunk_encodings;
+DROP TRIGGER pack_extents_delete ON extents;
+DROP TRIGGER pack_extents_insert ON extents;
+DROP TRIGGER pack_extents_update ON extents;
+DROP TRIGGER pack_members_storage_binding ON pack_members;
+DROP TRIGGER packs_fingerprint ON packs;
+
+ALTER TABLE cache_pins DROP CONSTRAINT cache_pins_chunk_id_fkey;
+ALTER TABLE chunk_access_stats DROP CONSTRAINT chunk_access_stats_chunk_id_fkey;
+ALTER TABLE chunk_access_windows DROP CONSTRAINT chunk_access_windows_chunk_id_fkey;
+ALTER TABLE chunk_encodings DROP CONSTRAINT chunk_locations_chunk_id_fkey;
+ALTER TABLE chunks DROP CONSTRAINT chunks_pack_id_fkey;
+ALTER TABLE extents DROP CONSTRAINT extents_chunk_id_fkey;
+ALTER TABLE integrity_packs DROP CONSTRAINT integrity_packs_pack_id_fkey;
+ALTER TABLE pack_access_windows DROP CONSTRAINT pack_access_windows_pack_id_fkey;
+ALTER TABLE pack_changes DROP CONSTRAINT pack_changes_pack_id_fkey;
+ALTER TABLE pack_inputs DROP CONSTRAINT pack_inputs_chunk_id_fkey;
+ALTER TABLE pack_member_access_windows DROP CONSTRAINT pack_member_access_windows_chunk_id_fkey;
+ALTER TABLE pack_member_access_windows DROP CONSTRAINT pack_member_access_windows_pack_id_fkey;
+ALTER TABLE pack_members DROP CONSTRAINT pack_members_chunk_id_fkey;
+ALTER TABLE pack_members DROP CONSTRAINT pack_members_pack_id_fkey;
+ALTER TABLE pending_uploads DROP CONSTRAINT pending_uploads_chunk_id_fkey;
+ALTER TABLE pending_uploads DROP CONSTRAINT pending_uploads_source_pack_fkey;
+
+ALTER TABLE chunks ALTER COLUMN current_encoding_id DROP DEFAULT;
+ALTER TABLE chunks ALTER COLUMN id DROP IDENTITY;
+ALTER TABLE chunk_encodings ALTER COLUMN encoding_id DROP IDENTITY;
+ALTER TABLE packs ALTER COLUMN id DROP IDENTITY;
+ALTER TABLE audit_events ALTER COLUMN id DROP IDENTITY;
+ALTER TABLE integrity_issues ALTER COLUMN id DROP IDENTITY;
+ALTER TABLE audit_events ALTER COLUMN id TYPE uuid USING NULL::uuid;
+ALTER TABLE cache_pins ALTER COLUMN chunk_id TYPE uuid USING NULL::uuid;
+ALTER TABLE chunk_access_stats ALTER COLUMN chunk_id TYPE uuid USING NULL::uuid;
+ALTER TABLE chunk_access_windows ALTER COLUMN chunk_id TYPE uuid USING NULL::uuid;
+ALTER TABLE chunk_encodings ALTER COLUMN encoding_id TYPE uuid USING NULL::uuid;
+ALTER TABLE chunk_encodings ALTER COLUMN chunk_id TYPE uuid USING NULL::uuid;
+ALTER TABLE chunks ALTER COLUMN id TYPE uuid USING NULL::uuid;
+ALTER TABLE chunks ALTER COLUMN current_encoding_id TYPE uuid USING NULL::uuid;
+ALTER TABLE chunks ALTER COLUMN pack_id TYPE uuid USING NULL::uuid;
+ALTER TABLE extents ALTER COLUMN chunk_id TYPE uuid USING NULL::uuid;
+ALTER TABLE integrity_issues ALTER COLUMN id TYPE uuid USING NULL::uuid;
+ALTER TABLE integrity_issues ALTER COLUMN chunk_id TYPE uuid USING NULL::uuid;
+ALTER TABLE integrity_packs ALTER COLUMN pack_id TYPE uuid USING NULL::uuid;
+ALTER TABLE pack_access_windows ALTER COLUMN pack_id TYPE uuid USING NULL::uuid;
+ALTER TABLE pack_changes ALTER COLUMN pack_id TYPE uuid USING NULL::uuid;
+ALTER TABLE pack_inputs ALTER COLUMN chunk_id TYPE uuid USING NULL::uuid;
+ALTER TABLE pack_member_access_windows ALTER COLUMN pack_id TYPE uuid USING NULL::uuid;
+ALTER TABLE pack_member_access_windows ALTER COLUMN chunk_id TYPE uuid USING NULL::uuid;
+ALTER TABLE pack_members ALTER COLUMN pack_id TYPE uuid USING NULL::uuid;
+ALTER TABLE pack_members ALTER COLUMN chunk_id TYPE uuid USING NULL::uuid;
+ALTER TABLE packs ALTER COLUMN id TYPE uuid USING NULL::uuid;
+ALTER TABLE pending_uploads ALTER COLUMN chunk_id TYPE uuid USING NULL::uuid;
+ALTER TABLE pending_uploads ALTER COLUMN source_pack_id TYPE uuid USING NULL::uuid;
+
+ALTER TABLE chunk_encodings DROP COLUMN location_id;
+ALTER TABLE packs DROP COLUMN location_id;
+ALTER TABLE chunks ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE chunks ALTER COLUMN current_encoding_id SET DEFAULT uuidv7();
+ALTER TABLE chunk_encodings ALTER COLUMN encoding_id SET DEFAULT uuidv7();
+ALTER TABLE packs ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE audit_events ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE integrity_issues ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE api_tokens ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE buckets ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE fragments ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE maintenance_previews ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE managed_keys ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE media_operations ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE nodes ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE projects ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE quota_reservations ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE session_refresh_tokens ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE sessions ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE storages ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE stream_leases ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE streams ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE tasks ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE web_users ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE uploads ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE raw_sources ALTER COLUMN id SET DEFAULT uuidv7();
+ALTER TABLE multipart_files ALTER COLUMN id SET DEFAULT uuidv7();
+
+ALTER TABLE chunks DROP CONSTRAINT chunks_format_check;
+ALTER TABLE chunks ALTER COLUMN format SET DEFAULT 2;
+ALTER TABLE chunks ADD CONSTRAINT chunks_format_check CHECK(format=2);
+
+ALTER TABLE cache_pins ADD CONSTRAINT cache_pins_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.pending_uploads(chunk_id) ON DELETE CASCADE;
+ALTER TABLE chunk_access_stats ADD CONSTRAINT chunk_access_stats_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.chunks(id) ON DELETE CASCADE;
+ALTER TABLE chunk_access_windows ADD CONSTRAINT chunk_access_windows_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.chunks(id) ON DELETE CASCADE;
+ALTER TABLE chunk_encodings ADD CONSTRAINT chunk_locations_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.chunks(id) ON DELETE CASCADE;
+ALTER TABLE chunks ADD CONSTRAINT chunks_pack_id_fkey FOREIGN KEY (pack_id) REFERENCES public.packs(id);
+ALTER TABLE extents ADD CONSTRAINT extents_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.chunks(id);
+ALTER TABLE integrity_packs ADD CONSTRAINT integrity_packs_pack_id_fkey FOREIGN KEY (pack_id) REFERENCES public.packs(id) ON DELETE CASCADE;
+ALTER TABLE pack_access_windows ADD CONSTRAINT pack_access_windows_pack_id_fkey FOREIGN KEY (pack_id) REFERENCES public.packs(id) ON DELETE CASCADE;
+ALTER TABLE pack_changes ADD CONSTRAINT pack_changes_pack_id_fkey FOREIGN KEY (pack_id) REFERENCES public.packs(id) ON DELETE CASCADE;
+ALTER TABLE pack_inputs ADD CONSTRAINT pack_inputs_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.chunks(id);
+ALTER TABLE pack_member_access_windows ADD CONSTRAINT pack_member_access_windows_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.chunks(id) ON DELETE CASCADE;
+ALTER TABLE pack_member_access_windows ADD CONSTRAINT pack_member_access_windows_pack_id_fkey FOREIGN KEY (pack_id) REFERENCES public.packs(id) ON DELETE CASCADE;
+ALTER TABLE pack_members ADD CONSTRAINT pack_members_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.chunks(id) ON DELETE CASCADE;
+ALTER TABLE pack_members ADD CONSTRAINT pack_members_pack_id_fkey FOREIGN KEY (pack_id) REFERENCES public.packs(id) ON DELETE CASCADE;
+ALTER TABLE pending_uploads ADD CONSTRAINT pending_uploads_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.chunks(id);
+ALTER TABLE pending_uploads ADD CONSTRAINT pending_uploads_source_pack_fkey FOREIGN KEY (source_pack_id) REFERENCES public.packs(id);
+
+CREATE TRIGGER chunk_encodings_fingerprint BEFORE INSERT OR UPDATE OF storage_id, block_key_id, encryption_algorithm, standalone_compressed ON public.chunk_encodings FOR EACH ROW EXECUTE FUNCTION public.refresh_encoding_fingerprint();
+CREATE TRIGGER chunk_locations_storage_binding BEFORE INSERT OR UPDATE OF chunk_id, storage_id ON public.chunk_encodings FOR EACH ROW EXECUTE FUNCTION public.validate_storage_binding();
+CREATE TRIGGER pack_extents_delete AFTER DELETE ON public.extents REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION public.enqueue_pack_extents();
+CREATE TRIGGER pack_extents_insert AFTER INSERT ON public.extents REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION public.enqueue_pack_extents();
+CREATE TRIGGER pack_extents_update AFTER UPDATE ON public.extents REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION public.enqueue_pack_extents();
+CREATE TRIGGER pack_members_storage_binding BEFORE INSERT OR UPDATE OF pack_id, chunk_id ON public.pack_members FOR EACH ROW EXECUTE FUNCTION public.validate_pack_member_binding();
+CREATE TRIGGER packs_fingerprint BEFORE INSERT OR UPDATE OF storage_id, block_key_id, encryption_algorithm, pack_compressed, member_count ON public.packs FOR EACH ROW EXECUTE FUNCTION public.refresh_pack_fingerprint();
+
+UPDATE mokyu_meta SET schema_version=51;

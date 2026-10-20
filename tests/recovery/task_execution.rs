@@ -1,4 +1,6 @@
 use super::{Backend, migration};
+use crate::model::ChunkStore;
+use crate::model::Id;
 use crate::model::{
     Mapping, PackingStore, PhysicalStore, TaskControlStore, TaskExecutionStore, TaskFinish,
     UploadCacheStore, cluster::ClusterStore, packing::PackOutput, task::Execution,
@@ -52,14 +54,17 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
         .bind(old.id).bind(current.token).bind(parent).execute(&pool).await?;
     let mut chunks = Vec::new();
     for n in 0..2u8 {
-        let id: i64 = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,standalone_size,encryption_algorithm,state) VALUES($1,$2,1,1,'none','ready') RETURNING id")
+        let id: Id = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,standalone_size,encryption_algorithm,state) VALUES($1,$2,1,1,'none','ready') RETURNING id")
             .bind(storage).bind(vec![n;32]).fetch_one(&pool).await?;
-        sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,location_id,storage_id,standalone_size,standalone_compressed,state,encryption_algorithm,created_at) SELECT current_encoding_id,id,$2,storage_id,1,false,'ready','none',now() FROM chunks WHERE id=$1")
-            .bind(id).bind(Uuid::new_v4()).execute(&pool).await?;
+        sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,standalone_size,standalone_compressed,state,encryption_algorithm,created_at) SELECT current_encoding_id,id,storage_id,1,false,'ready','none',now() FROM chunks WHERE id=$1")
+            .bind(id).execute(&pool).await?;
         chunks.push(id);
     }
     let chunk = chunks[0];
-    let sources = backend.ready_chunks(&chunks).await?;
+    let mut sources = Vec::new();
+    for chunk in &chunks {
+        sources.push(backend.ready_chunk(*chunk).await?.unwrap());
+    }
     let source = sources
         .iter()
         .find(|source| source.id == chunk)
@@ -76,7 +81,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
         .collect::<Vec<_>>();
     backend.pin_pack_inputs(current, &rows).await?;
     let mut prepared = backend
-        .prepare_pack(Uuid::new_v4(), storage, "none", None, 2, 2, current)
+        .prepare_pack(storage, "none", None, 2, 2, current)
         .await?;
     prepared.stored_size = Some(2);
     prepared.digest = Some(vec![9; 32]);
@@ -98,7 +103,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
     assert!(backend.pin_pack_inputs(old, &rows).await.is_err());
     assert!(
         backend
-            .prepare_pack(Uuid::new_v4(), storage, "none", None, 2, 2, old)
+            .prepare_pack(storage, "none", None, 2, 2, old)
             .await
             .is_err()
     );
@@ -138,7 +143,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
         ("preparing".into(), "uploading".into(), 2, 0)
     );
     assert_eq!(
-        backend.ready_chunks(&[chunk]).await?[0].encoding_id,
+        backend.ready_chunk(chunk).await?.unwrap().encoding_id,
         source.encoding_id
     );
 

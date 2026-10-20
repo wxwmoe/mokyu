@@ -1,6 +1,7 @@
 use super::{Backend, cache_tests, connection, pack_publication_tests};
 use crate::authorization::{DEFAULT_PROJECT, Principal};
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::bucket::CreateBucket;
 use crate::model::metrics::ScopeQuery;
 use crate::model::packing::{PackOutput, PackingStore};
@@ -13,7 +14,7 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
-async fn publish(backend: &Backend, stream: Uuid, size: i64) -> Result<()> {
+async fn publish(backend: &Backend, stream: Id, size: i64) -> Result<()> {
     backend.reserve(stream, size, true, None).await?;
     StreamStore::finish(backend, stream, size, "fixture", json!({})).await?;
     assert!(backend.publish(stream, None, None, None).await?);
@@ -119,7 +120,7 @@ async fn sqlite_packing_contract() -> Result<()> {
     );
     assert_eq!(backend.pack_totals().await?[0]["stored_bytes"], 40);
     assert_eq!(
-        PackingStore::page(&backend, 0, 2).await?[0]["id"],
+        PackingStore::page(&backend, 0.into(), 2).await?[0]["id"],
         pack.id.to_string()
     );
     let (detail, members) = PackingStore::detail(&backend, pack.id).await?;
@@ -134,14 +135,14 @@ async fn sqlite_packing_contract() -> Result<()> {
     let cutoff = Utc::now();
     assert_eq!(
         backend
-            .next_pack(0, None, Some(cutoff), Some(storage))
+            .next_pack(0.into(), None, Some(cutoff), Some(storage))
             .await?,
         Some(pack.id)
     );
     assert_eq!(backend.next_pack(pack.id, None, None, None).await?, None);
     assert_eq!(
         backend
-            .next_pack_stream(Uuid::nil(), -1, cutoff, Some(storage))
+            .next_pack_stream(Id::default(), -1, cutoff, Some(storage))
             .await?,
         Some(stream)
     );
@@ -220,7 +221,9 @@ async fn sqlite_packing_contract() -> Result<()> {
         user_revision: 0,
     };
     let scope = ScopeQuery::default();
-    let page = backend.scoped_page(&principal, &scope, 0, 10, None).await?;
+    let page = backend
+        .scoped_page(&principal, &scope, 0.into(), 10, None)
+        .await?;
     assert_eq!(page.len(), 1);
     assert!(
         page[0].raw_size.is_none()
@@ -229,12 +232,12 @@ async fn sqlite_packing_contract() -> Result<()> {
     );
     assert!(
         backend
-            .scoped_page(&principal, &scope, 0, 10, Some("retired"))
+            .scoped_page(&principal, &scope, 0.into(), 10, Some("retired"))
             .await?
             .is_empty()
     );
     let (_, members, limited) = backend
-        .scoped_detail(&principal, &scope, pack.id, 0, 1)
+        .scoped_detail(&principal, &scope, pack.id, 0.into(), 1)
         .await?;
     assert!(limited);
     assert_eq!(members.len(), 1);
@@ -264,7 +267,7 @@ async fn sqlite_packing_contract() -> Result<()> {
                     bucket: Some(buckets[0]),
                     project: None
                 },
-                0,
+                0.into(),
                 10,
                 None
             )
@@ -293,7 +296,7 @@ async fn sqlite_packing_contract() -> Result<()> {
         vec!["d", "e"]
     );
     let (summary, members, limited) = backend
-        .scoped_detail(&Principal::Local, &scope, pack.id, 0, 10)
+        .scoped_detail(&Principal::Local, &scope, pack.id, 0.into(), 10)
         .await?;
     assert!(!limited);
     assert_eq!(summary.raw_size.as_deref(), Some("64"));
@@ -309,7 +312,7 @@ async fn sqlite_packing_contract() -> Result<()> {
     };
     assert_eq!(
         backend
-            .scoped_detail(&Principal::Local, &scoped_admin, pack.id, 0, 10)
+            .scoped_detail(&Principal::Local, &scoped_admin, pack.id, 0.into(), 10)
             .await?
             .1
             .len(),
@@ -321,7 +324,7 @@ async fn sqlite_packing_contract() -> Result<()> {
         .await?;
     assert!(
         backend
-            .scoped_page(&principal, &scope, 0, 10, None)
+            .scoped_page(&principal, &scope, 0.into(), 10, None)
             .await
             .is_err()
     );
@@ -421,7 +424,7 @@ async fn sqlite_packing_contract() -> Result<()> {
         .await?;
     assert!(
         !backend
-            .scoped_detail(&principal, &scope, pack.id, 0, 10)
+            .scoped_detail(&principal, &scope, pack.id, 0.into(), 10)
             .await?
             .1[0]
             .current_source
@@ -432,13 +435,13 @@ async fn sqlite_packing_contract() -> Result<()> {
         .await?;
     assert!(
         backend
-            .scoped_page(&principal, &scope, 0, 10, None)
+            .scoped_page(&principal, &scope, 0.into(), 10, None)
             .await?
             .is_empty()
     );
     assert!(
         backend
-            .scoped_detail(&principal, &scope, pack.id, 0, 10)
+            .scoped_detail(&principal, &scope, pack.id, 0.into(), 10)
             .await
             .is_err()
     );
@@ -450,7 +453,7 @@ async fn sqlite_packing_contract() -> Result<()> {
     );
     assert_eq!(
         backend
-            .scoped_detail(&Principal::Local, &scope, pack.id, 0, 10)
+            .scoped_detail(&Principal::Local, &scope, pack.id, 0.into(), 10)
             .await?
             .1
             .len(),
@@ -460,7 +463,7 @@ async fn sqlite_packing_contract() -> Result<()> {
     backend.reference(copy, 0, rows[1].chunk.id, 32).await?;
     publish(&backend, copy, 32).await?;
     let (_, visible, _) = backend
-        .scoped_detail(&principal, &scope, pack.id, 0, 1)
+        .scoped_detail(&principal, &scope, pack.id, 0.into(), 1)
         .await?;
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].chunk_id, rows[1].chunk.id.to_string());
@@ -477,13 +480,13 @@ async fn sqlite_packing_contract() -> Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         assert!(
             !backend
-                .scoped_page(&Principal::Local, &scope, 0, 10, None)
+                .scoped_page(&Principal::Local, &scope, 0.into(), 10, None)
                 .await?
                 .is_empty()
         );
         assert_eq!(
             backend
-                .scoped_detail(&Principal::Local, &scope, pack.id, 0, 10)
+                .scoped_detail(&Principal::Local, &scope, pack.id, 0.into(), 10)
                 .await?
                 .1
                 .len(),

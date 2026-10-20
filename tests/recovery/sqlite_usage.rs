@@ -125,7 +125,7 @@ async fn sqlite_usage_contract() -> Result<()> {
             2 | 5 => Some(packs[1]),
             _ => None,
         };
-        let id=sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state,current_encoding_id,pack_id,unreferenced_at) VALUES(?,?,?,'none','ready',1,?,IIF(?,CAST(unixepoch('subsec')*1000000 AS INTEGER),NULL))").bind(storage).bind([n as u8;32].as_slice()).bind(16*unit).bind(pack).bind(n==5).execute(db).await?.last_insert_rowid();
+        let id=sqlx::query("INSERT INTO chunks(uuid,storage_id,hash,raw_size,encryption_algorithm,state,current_encoding_id,pack_id,unreferenced_at) VALUES(?,?,?,?,'none','ready',1,?,IIF(?,CAST(unixepoch('subsec')*1000000 AS INTEGER),NULL))").bind(Uuid::now_v7()).bind(storage).bind([n as u8;32].as_slice()).bind(16*unit).bind(pack).bind(n==5).execute(db).await?.last_insert_rowid();
         chunks.push(id);
     }
     for (chunk, state, size) in [
@@ -152,9 +152,8 @@ async fn sqlite_usage_contract() -> Result<()> {
     ];
     for (n, (name, chunk, offset, length)) in refs.into_iter().enumerate() {
         let bucket = buckets[name];
-        let stream = Uuid::new_v4();
         let key = n.to_string();
-        sqlx::query("INSERT INTO streams(id,bucket_id,object_key,stream_type,state,size,write_authorization) VALUES(?,?,?,'object','ready',?,?)").bind(stream).bind(bucket).bind(key.as_bytes()).bind(length*unit).bind(sqlx::types::Json(Permit::for_action(Principal::Local,bucket,Action::Write))).execute(db).await?;
+        let stream = sqlx::query("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,write_authorization) VALUES(?,?,'object','ready',?,?)").bind(bucket).bind(key.as_bytes()).bind(length*unit).bind(sqlx::types::Json(Permit::for_action(Principal::Local,bucket,Action::Write))).execute(db).await?.last_insert_rowid();
         sqlx::query(
             "INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES(?,?,?,?)",
         )

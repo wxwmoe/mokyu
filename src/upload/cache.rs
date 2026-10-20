@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::model::task::Execution;
 use crate::{
     app::App,
@@ -28,7 +29,7 @@ impl App {
     }
     pub async fn stage_chunk(
         &self,
-        stream: Uuid,
+        stream: Id,
         offset: i64,
         c: &Chunk,
         data: Bytes,
@@ -112,7 +113,7 @@ impl App {
         self.seal_uploads(stream, false).await?;
         Ok(true)
     }
-    pub async fn seal_uploads(&self, stream: Uuid, eof: bool) -> Result<()> {
+    pub async fn seal_uploads(&self, stream: Id, eof: bool) -> Result<()> {
         if self
             .upload_cache
             .seal(stream, eof || !self.pack_creation_allowed())
@@ -212,7 +213,7 @@ impl App {
                 self.commit_outputs(task, &rows, &outputs, false).await?;
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("upload-before-release").await;
-                let ids: Vec<i64> = rows.iter().map(|r| r.chunk.id).collect();
+                let ids: Vec<Id> = rows.iter().map(|r| r.chunk.id).collect();
                 self.release_pending(&ids, false).await?;
             }
         }
@@ -227,7 +228,7 @@ impl App {
         self.upload_cache.finish(id).await?;
         Ok(false)
     }
-    pub async fn release_pending(&self, ids: &[i64], existing_pack: bool) -> Result<()> {
+    pub async fn release_pending(&self, ids: &[Id], existing_pack: bool) -> Result<()> {
         let _coord = self.coord.lock().await;
         let released = self.upload_cache.release(ids, existing_pack).await?;
         for key in released

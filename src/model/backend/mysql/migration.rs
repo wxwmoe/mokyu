@@ -7,7 +7,7 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator.locking = false;
     migrator
 };
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 
 pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
     ensure!(
@@ -23,6 +23,14 @@ pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
         version <= SCHEMA_VERSION,
         "database schema is newer than this binary; downgrade is unsupported"
     );
+    if i64::from(version) < 25 {
+        ensure!(
+            !queries::incompatible_payload(version)
+                .fetch_one(&mut *owner)
+                .await?,
+            "file identity format requires an empty store; migrate logical objects through S3"
+        );
+    }
     ensure!(version >= 1, "unsupported database schema version");
     let applied = queries::migrations().fetch_all(&mut *owner).await?;
     let last = applied
@@ -48,7 +56,7 @@ pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
         if !success {
             // Only explicitly idempotent migrations may resume after MySQL's implicit DDL commits.
             ensure!(
-                matches!(*version, 1..=20 | 24) && index + 1 == applied.len(),
+                matches!(*version, 1..=20 | 24..=25) && index + 1 == applied.len(),
                 "MySQL migration requires manual recovery"
             );
         }

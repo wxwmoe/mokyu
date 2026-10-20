@@ -1,3 +1,4 @@
+use crate::model::Id;
 use crate::{
     app::{Active, App, Extent, StoredStream},
     authorization::{Action, Permit, Principal},
@@ -22,7 +23,7 @@ use crate::model::multipart::{MultipartCreate, PartStitch, SeedConsumption};
 
 pub struct Seed {
     pub upload: Uuid,
-    pub spans: Vec<(Uuid, i64, usize)>,
+    pub spans: Vec<(Id, i64, usize)>,
     pub bytes: Vec<u8>,
     pub pins: Vec<Active>,
 }
@@ -193,7 +194,7 @@ impl App {
             )
             .await?;
         let u = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
-        let _upin = self.pin(u.id);
+        let _upin = self.pin_upload(u.id);
         if i.checksum_algorithm.as_ref().is_some_and(|a| {
             u.checksum_algorithm
                 .as_deref()
@@ -307,7 +308,7 @@ impl App {
     }
     pub async fn consume_seed(
         &self,
-        stream: Uuid,
+        stream: Id,
         offset: i64,
         c: &Chunk,
         seed: &mut Seed,
@@ -560,7 +561,7 @@ impl App {
             .await?;
         drop(_coord);
         let app = self.clone();
-        let upin = self.pin(u.id);
+        let upin = self.pin_upload(u.id);
         let context = req
             .extensions
             .get::<crate::status::stats::RequestContext>()
@@ -649,13 +650,14 @@ impl App {
             .context("bucket has no storage")?;
         let raw_revision = self.storage.raw_policy(storage)?;
         let mut raw_writer = if let Some(revision) = raw_revision {
-            let source = self.raw.begin(id, storage, revision).await?;
+            let (source, location) = self.raw.begin(id, storage, revision).await?;
             Some((
                 source,
                 self.storage
                     .raw_replay_writer(
                         storage,
                         source,
+                        location,
                         total,
                         &parts.iter().map(|part| part.size).collect::<Vec<_>>(),
                     )
@@ -823,7 +825,9 @@ impl App {
                         .map_err(|_| anyhow::anyhow!("invalid fragment hash"))?;
                     ranges.push(crate::storage::assembly::Range {
                         path: self.storage.multipart_path(
-                            row.file_id.unwrap_or(id),
+                            row.file_id
+                                .or(row.fragment_location)
+                                .context("missing fragment location")?,
                             row.file_storage,
                             row.raw_source,
                         )?,

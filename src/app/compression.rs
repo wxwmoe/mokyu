@@ -1,5 +1,6 @@
 use super::App;
 use crate::model::CompressionObservation;
+use crate::model::Id;
 use std::{
     collections::HashSet,
     sync::{
@@ -8,9 +9,10 @@ use std::{
     },
 };
 use tokio::sync::mpsc;
+#[cfg(test)]
 use uuid::Uuid;
 
-type Key = (Uuid, i32, &'static str);
+type Key = (Id, i32, &'static str);
 
 pub(crate) struct Observations {
     sender: mpsc::Sender<CompressionObservation>,
@@ -28,7 +30,7 @@ mod tests {
     fn observations_are_coalesced_and_bounded() {
         let (queue, receiver) = Observations::new();
         let first = CompressionObservation {
-            stream: Uuid::new_v4(),
+            stream: Uuid::new_v4().into(),
             version: 1,
             encoding: "zstd",
             size: 1,
@@ -39,7 +41,7 @@ mod tests {
         assert_eq!(queue.snapshot()["pending"], 1);
         for _ in 0..1000 {
             queue.submit(CompressionObservation {
-                stream: Uuid::new_v4(),
+                stream: Uuid::new_v4().into(),
                 ..first
             });
         }

@@ -64,7 +64,7 @@ def main():
     if args.cache:
         directories = [Path(value) for value in os.environ['MOKYU_TEST_CACHE_DIRS'].split(',')]
         assert len(directories) == 2
-        cached = directories[0] / identity[:2] / identity
+        cached = directories[0] / identity[-2:] / identity
         inode = cached.stat().st_ino
     fixture.put('whole', data)
     assert mapping('whole')['id'] == mapping('multipart')['id']
@@ -74,7 +74,7 @@ def main():
     if args.cache:
         assert cached.stat().st_ino == inode
         for directory in directories:
-            assert (directory / identity[:2] / identity).stat().st_size == len(data)
+            assert (directory / identity[-2:] / identity).stat().st_size == len(data)
 
     concurrent = b'concurrent raw cluster identity' * 1024
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -89,7 +89,7 @@ def main():
     fixture.put('retiring', original)
     old = mapping('retiring')
     identity = uuid.UUID(str(old['id']))
-    physical = fixture.prefix + 'raw/' + identity.hex[:2] + '/' + identity.hex
+    physical = fixture.prefix + 'raw/' + identity.hex[-2:] + '/' + identity.hex
     if args.cache:
         fixture.read('retiring', original)
     marker = fixture.arm('raw-cache-hit' if args.cache else 'raw-before-verify')

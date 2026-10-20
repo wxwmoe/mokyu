@@ -64,16 +64,18 @@ def main():
         def files():
             return [path for path in (data_path / 'raw').glob('*/*') if path.is_file()]
 
-        def source(key):
-            rows = database.query('''SELECT r.id FROM objects o JOIN raw_ranges e ON e.stream_id=o.stream_id
+        def source(key, native=False):
+            rows = database.query(f'''SELECT r.id,r.{database.raw_location} AS file_uuid FROM objects o JOIN raw_ranges e ON e.stream_id=o.stream_id
                 JOIN raw_sources r ON r.id=e.source_id WHERE o.bucket_id=%s AND o.object_key=%s''',
                 uuid.UUID(fixture.bucket_id), key if database.type == 'postgres' else key.encode())
             assert len(rows) == 1, rows
-            value = rows[0]['id']
+            if native:
+                return rows[0]['id']
+            value = rows[0]['file_uuid']
             return value if isinstance(value, uuid.UUID) else uuid.UUID(bytes=bytes(value))
 
         def cache_path(identity):
-            return data_path / 'raw' / identity.hex[:2] / identity.hex
+            return data_path / 'raw' / identity.hex[-2:] / identity.hex
 
         configure(cdc_enabled=False, pack_range_enabled=False, deduplication_enabled=False, cache_enabled=True)
         data = bytes(range(256)) * (6 * 1024 * 1024 // 256)
@@ -160,13 +162,13 @@ def main():
 
         # A healthy cached copy must not hide a corrupt backend from a full recheck.
         identity = source('original')
-        physical = fixture.prefix + 'raw/' + identity.hex[:2] + '/' + identity.hex
+        physical = fixture.prefix + 'raw/' + identity.hex[-2:] + '/' + identity.hex
         fixture.bytes(physical, b'!' + data[1:])
         task = fixture.finished(fixture.cli('integrity', 'check', '--mode', 'full',
                                            '--bucket', fixture.name, '--key', 'original'))
         issues = fixture.api('/api/v1/tasks/' + task['id'] + '/issues')['items']
         assert any(issue['code'] == 'hash_mismatch' for issue in issues), issues
-        scope = dict(storage_id=fixture.store['id'], source='raw', id=str(identity))
+        scope = dict(storage_id=fixture.store['id'], source='raw', id=str(source('original', native=True)))
         fixture.finished(fixture.execute('quarantine', fixture.preview('quarantine', scope)))
         rejected(lambda: fixture.client.get_object(Bucket=fixture.name, Key='original'))
         fixture.recheck(scope, state='failed')
@@ -282,14 +284,14 @@ def main():
             wait(lambda: marker.with_suffix('.hit').exists(), 'background work did not pause')
             fixture.read('background', pending)
             identity = source('background')
-            physical = fixture.prefix + 'raw/' + identity.hex[:2] + '/' + identity.hex
+            physical = fixture.prefix + 'raw/' + identity.hex[-2:] + '/' + identity.hex
             fixture.bytes(physical, b'!' + pending[1:])
         finally:
             marker.unlink(missing_ok=True)
         wait(lambda: database.query('SELECT last_error FROM raw_processing WHERE source_id=%s',
-                                    identity)[0]['last_error'],
+                                    source('background', native=True))[0]['last_error'],
              'background hashing trusted cached bytes instead of the backend')
-        assert database.query('SELECT content_hash FROM raw_sources WHERE id=%s', identity)[0]['content_hash'] is None
+        assert database.query('SELECT content_hash FROM raw_sources WHERE id=%s', source('background', native=True))[0]['content_hash'] is None
         fixture.client.delete_object(Bucket=fixture.name, Key='background')
         print('PASS background deduplication inspects the backend even when a healthy file is cached', flush=True)
     finally:

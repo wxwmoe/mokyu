@@ -79,7 +79,7 @@ try:
     wait(lambda: not pending(prefix + 'pack'))
     sources = {}
     for suffix in ('chunk', 'pack'):
-        row = db.execute('''SELECT c.pack_id,l.location_id,p.location_id,s.prefix
+        row = db.execute('''SELECT c.pack_id,l.encoding_id,p.id,s.prefix
             FROM objects o JOIN buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=o.stream_id
             JOIN chunks c ON c.id=e.chunk_id JOIN storages s ON s.id=c.storage_id
             LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready'
@@ -88,7 +88,7 @@ try:
         pack, standalone, packed, namespace = row
         assert (pack is not None) == (suffix == 'pack'), row
         location = (packed if pack else standalone).hex
-        path = '/'.join(filter(None, [namespace.rstrip('/'), 'packs' if pack else '', location[:2], location]))
+        path = '/'.join(filter(None, [namespace.rstrip('/'), 'packs' if pack else '', location[-2:], location]))
         sources[suffix] = {'Bucket': fixture['bucket'], 'Key': path}
     profile({'cache_enabled': False, 'upload_cache': False})
     for key, raw in content.items():

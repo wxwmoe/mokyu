@@ -1,3 +1,4 @@
+use crate::model::Id;
 pub(crate) mod cache;
 pub(crate) mod multipart;
 
@@ -229,7 +230,7 @@ impl App {
     #[allow(clippy::too_many_arguments)] // Protocol inputs stay explicit at the shared receiver.
     pub async fn receive(
         &self,
-        stream: Uuid,
+        stream: Id,
         storage: Uuid,
         mut body: StreamingBlob,
         headers: &HeaderMap,
@@ -255,10 +256,12 @@ impl App {
         let raw_revision = self.storage.raw_policy(storage)?;
         let raw_part = upload.is_some() && raw_revision.is_some();
         let mut raw = if let Some(revision) = raw_revision.filter(|_| upload.is_none()) {
-            let source = self.raw.begin(stream, storage, revision).await?;
+            let (source, location) = self.raw.begin(stream, storage, revision).await?;
             Some((
                 source,
-                self.storage.raw_writer(storage, source, declared).await?,
+                self.storage
+                    .raw_writer(storage, source, location, declared)
+                    .await?,
             ))
         } else {
             None

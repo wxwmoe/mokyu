@@ -1,16 +1,17 @@
 use super::{connection, queries};
 use crate::authorization::DEFAULT_PROJECT;
 use crate::config::Config;
+use crate::model::Id;
 use crate::model::{AccountStore, StorageProfileStore};
 use anyhow::Result;
 use uuid::Uuid;
 
 async fn chunk(db: &sqlx::SqlitePool, storage: Uuid) -> Result<i64> {
-    Ok(sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES(?,?,32,'none','preparing')")
+    Ok(sqlx::query("INSERT INTO chunks(uuid,storage_id,hash,raw_size,encryption_algorithm,state) VALUES(?,?,?,32,'none','preparing')").bind(Uuid::now_v7())
         .bind(storage).bind([1u8;32].as_slice()).execute(db).await?.last_insert_rowid())
 }
 
-async fn encoding(db: &sqlx::SqlitePool, storage: Uuid, chunk: i64) -> Result<i64> {
+async fn encoding(db: &sqlx::SqlitePool, storage: Uuid, chunk: Id) -> Result<i64> {
     Ok(sqlx::query("INSERT INTO chunk_encodings(chunk_id,location_id,storage_id,standalone_size,state,encryption_algorithm,encoding_fingerprint) VALUES(?,?,?,32,'ready','none','[]')")
         .bind(chunk).bind(Uuid::new_v4()).bind(storage).execute(db).await?.last_insert_rowid())
 }
@@ -35,7 +36,7 @@ async fn sqlite_data_schema_contract() -> Result<()> {
     let other = super::storage_tests::fixture_named(&backend, "other").await?;
     assert_eq!(
         queries::schema_version().fetch_one(&backend.read).await?,
-        22
+        26
     );
     let profile = backend.load(storage).await?;
     assert!(profile.cdc_enabled);
@@ -47,12 +48,14 @@ async fn sqlite_data_schema_contract() -> Result<()> {
         .unwrap()
         .remove("deduplication_enabled");
     assert!(serde_json::from_value::<crate::storage::profile::StorageProfile>(legacy)?.cdc_enabled);
-    let raw = Uuid::new_v4();
-    sqlx::query("INSERT INTO raw_sources(id,storage_id,profile_revision) VALUES(?,?,1)")
-        .bind(raw)
-        .bind(storage)
-        .execute(db)
-        .await?;
+    let raw = sqlx::query(
+        "INSERT INTO raw_sources(location_id,storage_id,profile_revision) VALUES(?,?,1)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(storage)
+    .execute(db)
+    .await?
+    .last_insert_rowid();
     for invalid in [
         "UPDATE raw_sources SET state='ready' WHERE id=?",
         "UPDATE raw_sources SET size=-1 WHERE id=?",
@@ -84,13 +87,13 @@ async fn sqlite_data_schema_contract() -> Result<()> {
         .await?;
     let first = chunk(db, storage).await?;
     assert!(chunk(db, storage).await.is_err());
-    let encoding_one = encoding(db, storage, first).await?;
-    assert!(encoding(db, storage, first).await.is_err());
+    let encoding_one = encoding(db, storage, first.into()).await?;
+    assert!(encoding(db, storage, first.into()).await.is_err());
     sqlx::query("UPDATE chunk_encodings SET state='retired' WHERE encoding_id=?")
         .bind(encoding_one)
         .execute(db)
         .await?;
-    let encoding_two = encoding(db, storage, first).await?;
+    let encoding_two = encoding(db, storage, first.into()).await?;
     assert!(encoding_two > encoding_one);
     sqlx::query("UPDATE chunks SET state='failed',current_encoding_id=? WHERE id=?")
         .bind(encoding_two)
@@ -104,7 +107,7 @@ async fn sqlite_data_schema_contract() -> Result<()> {
         .execute(db)
         .await?;
     let third = chunk(db, storage).await?;
-    let encoding_three = encoding(db, storage, third).await?;
+    let encoding_three = encoding(db, storage, third.into()).await?;
     assert!(third > second && encoding_three > encoding_two);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chunk_encodings")
