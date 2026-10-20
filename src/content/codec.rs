@@ -116,11 +116,8 @@ pub fn cut(input: &[u8]) -> usize {
         .map(|c| c.length)
         .unwrap_or(0)
 }
-pub fn nonce(date: DateTime<Utc>, id: i64) -> Result<[u8; 12]> {
-    typed_nonce(date, id, 0)
-}
 pub fn typed_nonce(date: DateTime<Utc>, id: i64, type_tag: u8) -> Result<[u8; 12]> {
-    ensure!(id > 0, "chunk ID must be positive");
+    ensure!(id > 0, "nonce ID must be positive");
     let day = u32::try_from(date.year())?
         .checked_mul(10_000)
         .and_then(|n| n.checked_add(date.month() * 100 + date.day()))
@@ -226,6 +223,11 @@ pub fn encode(
         input.len() == c.raw_size as usize && blake3::hash(&input).as_bytes() == c.hash.as_slice(),
         "chunk input mismatch"
     );
+    ensure!(
+        (c.algorithm != "none") == c.block_key_id.is_some()
+            && (c.algorithm != "none") == c.nonce.is_some(),
+        "invalid encryption metadata"
+    );
     let compressed = compression.compress(&input, should_compress)?;
     c.compressed = compressed.is_some();
     let tag_len = if c.algorithm == "none" { 0 } else { 16 };
@@ -245,8 +247,16 @@ pub fn encode(
             .key_for_id(c.block_key_id)
             .context("missing chunk key")?;
         ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
-        let n = nonce(c.created_at, c.encoding_id)?;
-        c.nonce = Some(n.to_vec());
+        let n: [u8; 12] = c
+            .nonce
+            .as_deref()
+            .context("missing reserved nonce")?
+            .try_into()?;
+        ensure!(
+            crate::content::nonce::id(Some(&n)).is_some()
+                && n[0] >> 3 == crate::content::nonce::CHUNK,
+            "invalid reserved nonce"
+        );
         #[cfg(feature = "fault-injection")]
         crate::faults::blocking("chunk-encrypting");
         key.cipher
@@ -404,12 +414,14 @@ mod tests {
             })),
         }
     }
+    fn nonce(date: DateTime<Utc>, id: i64) -> Result<[u8; 12]> {
+        typed_nonce(date, id, crate::content::nonce::CHUNK)
+    }
     #[test]
     fn fixed_format_vectors() {
         let compression = crate::content::compression::Pool::new(Default::default(), 1).unwrap();
         let input = b"mokyu-v1";
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
-            let key_id = if algorithm == "none" { "" } else { "test-key" };
             let secrets = secrets_for(algorithm);
             let c = Chunk {
                 id: 42,
@@ -422,11 +434,60 @@ mod tests {
                 algorithm: algorithm.into(),
                 block_key_id: (algorithm != "none").then_some(Uuid::from_u128(0x100)),
                 compressed: false,
-                nonce: None,
+                nonce: (algorithm != "none").then(|| {
+                    nonce("2026-09-21T00:00:00Z".parse().unwrap(), 42)
+                        .unwrap()
+                        .to_vec()
+                }),
                 format: 1,
                 state: "preparing".into(),
                 created_at: "2026-09-21T00:00:00Z".parse().unwrap(),
             };
+            if algorithm != "none" {
+                let mut missing = c.clone();
+                missing.nonce = None;
+                assert!(encode(missing, input.to_vec(), &secrets, 20, &compression, true).is_err());
+                let mut independent = c.clone();
+                independent.nonce = Some(nonce(c.created_at, 7000).unwrap().to_vec());
+                let (independent, encoded, _) = encode(
+                    independent,
+                    input.to_vec(),
+                    &secrets,
+                    20,
+                    &compression,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(independent.encoding_id, 42);
+                assert_eq!(
+                    crate::content::nonce::id(independent.nonce.as_deref()),
+                    Some(7000)
+                );
+                assert_eq!(
+                    decode(&independent, encoded, &secrets, 20, &compression)
+                        .unwrap()
+                        .0
+                        .as_ref(),
+                    input
+                );
+                let mut wrong_domain = c.clone();
+                wrong_domain.nonce = Some(
+                    typed_nonce(c.created_at, 7000, crate::content::nonce::PACK)
+                        .unwrap()
+                        .to_vec(),
+                );
+                assert!(
+                    encode(
+                        wrong_domain,
+                        input.to_vec(),
+                        &secrets,
+                        20,
+                        &compression,
+                        true
+                    )
+                    .is_err()
+                );
+            }
             let (c, encoded, cache) =
                 encode(c, input.to_vec(), &secrets, 20, &compression, true).unwrap();
             assert_eq!(
@@ -468,6 +529,8 @@ mod tests {
             let mut historical = c;
             historical.hash = blake3::hash(&small).as_bytes().to_vec();
             historical.raw_size = small.len() as i32;
+            historical.nonce =
+                (algorithm != "none").then(|| nonce(historical.created_at, 43).unwrap().to_vec());
             let (historical, encoded, cache) =
                 encode(historical, small.clone(), &secrets, 20, &legacy, true).unwrap();
             assert!(historical.compressed);
@@ -487,10 +550,46 @@ mod tests {
         }
     }
     #[test]
+    fn key_registry_rejects_identity_or_material_reuse() {
+        let secrets = secrets_for("aes-256-gcm");
+        assert!(
+            secrets
+                .publish_key_with_id(
+                    Some(Uuid::from_u128(0x100)),
+                    "test-key".into(),
+                    Key::new("aes-256-gcm", [7; 32]).unwrap()
+                )
+                .is_ok()
+        );
+        for (id, name, material) in [
+            (0x101, "renamed-key", [7; 32]),
+            (0x101, "test-key", [7; 32]),
+            (0x100, "test-key", [9; 32]),
+            (0x100, "renamed-key", [9; 32]),
+        ] {
+            assert!(
+                secrets
+                    .publish_key_with_id(
+                        Some(Uuid::from_u128(id)),
+                        name.into(),
+                        Key::new("aes-256-gcm", material).unwrap()
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            secrets
+                .key_for_id(Some(Uuid::from_u128(0x100)))
+                .unwrap()
+                .material,
+            [7; 32]
+        );
+        assert!(secrets.key_for_id(Some(Uuid::from_u128(0x101))).is_none());
+    }
+    #[test]
     fn formats_authenticate_all_metadata_and_payload() {
         let compression = crate::content::compression::Pool::new(Default::default(), 1).unwrap();
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
-            let key_id = if algorithm == "none" { "" } else { "test-key" };
             let secrets = secrets_for(algorithm);
             for input in [vec![3; MIN - 1], {
                 let mut v = vec![0; MAX];
@@ -508,7 +607,11 @@ mod tests {
                     algorithm: algorithm.into(),
                     block_key_id: (algorithm != "none").then_some(Uuid::from_u128(0x100)),
                     compressed: false,
-                    nonce: None,
+                    nonce: (algorithm != "none").then(|| {
+                        nonce("2026-09-21T00:00:00Z".parse().unwrap(), 42)
+                            .unwrap()
+                            .to_vec()
+                    }),
                     format: 1,
                     state: "preparing".into(),
                     created_at: "2026-09-21T00:00:00Z".parse().unwrap(),
@@ -634,7 +737,14 @@ mod tests {
                                 Uuid::from_u128(0x101)
                             }),
                             compressed: false,
-                            nonce: None,
+                            nonce: Some(
+                                nonce(
+                                    "2026-09-26T00:00:00Z".parse().unwrap(),
+                                    1 + worker * 2 + i as i64,
+                                )
+                                .unwrap()
+                                .to_vec(),
+                            ),
                             format: 1,
                             state: "preparing".into(),
                             created_at: "2026-09-26T00:00:00Z".parse().unwrap(),

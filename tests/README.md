@@ -28,6 +28,10 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 增加编号迁移时同步更新对应 `migrations/schema/*.sql` 与迁移入口的快照版本。快照包含最终结构和必需初值，版本行及 `_sqlx_migrations` 由初始化器最后登记。保留原迁移内容与校验和；结构对照包含列、默认值、约束、索引、视图，以及 PostgreSQL 函数、触发器和序列。
 
+`nonce_database_contract` 使用 `MOKYU_TEST_NONCE_CONFIG` 指向全新的隔离数据库，并要求 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`。通过 `cargo test --features fault-injection nonce_database_contract -- --ignored --nocapture` 验证密钥创建回滚、分域计数、并发分配、重启舍弃余号和密钥材料唯一性；四种数据库分别运行。
+
+`python -m tests.recovery.nonce_ranges` 接管已初始化但停止的专用服务，沿用来源隔离 fixture 的配置、管理员密码、故障目录和 S3 后端环境。覆盖加密区块和 pack、直接去重不分配、提交前后强杀、缺失计数、耗尽、换 key 及未加密/raw 零分配。可设置 `MOKYU_TEST_OLD_BINARY` 先写入旧密文，再验证升级后原字节可读且 nonce 不变；仅用于隔离数据。
+
 MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由其他客户端登录预热认证缓存。关闭 TLS 时，`caching_sha2_password` 的首次认证依赖 SQLx 的 `mysql-rsa` 功能。
 
 `cleanup_reacquires_returning_connection`、`cleanup_yields_to_busy_writer_and_recovers`、`cleanup_propagates_pool_errors`、`cleanup_cancels_busy_database_transaction` 属于普通 Rust 测试，使用独立 SQLite 临时库和单写连接覆盖清理连续领取、忙写者下有界退让和取消后恢复、外部写事务占用时取消 BEGIN、真实连接池错误。

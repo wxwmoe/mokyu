@@ -95,6 +95,31 @@ async fn sqlite_schema_bootstrap_contract() -> Result<()> {
     assert_eq!(contents(&mut fresh).await?, before);
 
     // Upgrade an actual old schema with data; preserve identity and user values.
+
+    // Empty live tables must not reset nonce high-water marks consumed by old writers.
+    let mut counters = SqliteConnection::connect("sqlite::memory:").await?;
+    counters.ensure_migrations_table("_sqlx_migrations").await?;
+
+    for entry in migrations.iter().take(24) {
+        counters.apply("_sqlx_migrations", entry).await?;
+    }
+    sqlx::raw_sql("INSERT INTO managed_keys(id,name,purpose,key_algorithm,fingerprint) VALUES(X'00000000000000000000000000000001','legacy-counter','block','aes-256-gcm',zeroblob(32)); DELETE FROM sqlite_sequence WHERE name IN ('chunk_encodings','packs'); INSERT INTO sqlite_sequence(name,seq) VALUES('chunk_encodings',1000000),('packs',2000000);").execute(&mut counters).await?;
+    migration::run(&mut counters).await?;
+    let high: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT type_tag,reserved_id FROM nonce_counters ORDER BY type_tag")
+            .fetch_all(&mut counters)
+            .await?;
+    assert_eq!(high, vec![(0, 1000000), (1, 2000000)]);
+    migration::run(&mut counters).await?;
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT type_tag,reserved_id FROM nonce_counters ORDER BY type_tag"
+        )
+        .fetch_all(&mut counters)
+        .await?,
+        high
+    );
+
     // Materialize legacy upload policy once, including disabled backends.
     let mut policy = SqliteConnection::connect("sqlite::memory:").await?;
     policy.ensure_migrations_table("_sqlx_migrations").await?;

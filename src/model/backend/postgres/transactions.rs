@@ -2378,6 +2378,11 @@ pub(super) async fn create_managed_key(
             .fetch_one(&mut *tx)
             .await?,
     );
+    if input.purpose == "block" {
+        queries::initialize_nonce_counters(input.id)
+            .execute(&mut *tx)
+            .await?;
+    }
     checkpoint_event(&mut tx, "managed_key.create", &input.id.to_string(), json!({"name":result.name,"purpose":result.purpose,"algorithm":result.algorithm,"fingerprint":result.fingerprint})).await?;
     tx.commit().await?;
     Ok(result)
@@ -6944,4 +6949,33 @@ pub(super) async fn renew_raw_processing(
         == 1;
     tx.commit().await?;
     Ok(renewed)
+}
+
+pub(super) async fn reserve_nonce(
+    pool: &PgPool,
+    key: Uuid,
+    type_tag: u8,
+    units: u32,
+) -> Result<(i64, i64)> {
+    ensure!(matches!(type_tag, 0 | 1), "invalid nonce type");
+    let mut tx = pool.begin().await?;
+    let previous = queries::nonce_counter(key, type_tag)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("active encryption key nonce counter is missing")?;
+    let range = crate::model::key::nonce_reservation(previous, units)?;
+    ensure!(
+        queries::advance_nonce(key, type_tag, previous, range.1)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        "nonce reservation changed"
+    );
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("nonce-before-commit").await;
+    tx.commit().await?;
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("nonce-after-commit").await;
+    Ok(range)
 }

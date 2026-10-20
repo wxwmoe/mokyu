@@ -60,6 +60,7 @@ pub struct Storage {
     raw_store: Arc<dyn crate::model::raw::RawStore>,
     reflink: Arc<Mutex<HashMap<(u64, u64), bool>>>,
     managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
+    nonces: crate::content::nonce::Allocator,
     record_store: Arc<dyn crate::model::StorageRecordStore>,
     pub source_gate: tokio::sync::RwLock<()>,
     physical_pins: Mutex<HashMap<Uuid, std::sync::Weak<AtomicUsize>>>,
@@ -382,6 +383,7 @@ impl Storage {
             raw_store,
             reflink: Arc::new(Mutex::new(HashMap::new())),
             managed_keys,
+            nonces: crate::content::nonce::Allocator::default(),
             record_store,
             source_gate: tokio::sync::RwLock::new(()),
             physical_pins: Mutex::new(HashMap::new()),
@@ -1351,11 +1353,19 @@ impl Storage {
     }
     pub async fn encode(
         &self,
-        c: Chunk,
+        mut c: Chunk,
         raw: Vec<u8>,
         should_compress: bool,
         memory: Option<&Arc<tokio::sync::OwnedSemaphorePermit>>,
     ) -> Result<(Chunk, Vec<u8>, Bytes)> {
+        c.nonce = self
+            .encoding_nonce(
+                &c.algorithm,
+                c.block_key_id,
+                c.created_at,
+                crate::content::nonce::CHUNK,
+            )
+            .await?;
         let memory = memory.cloned();
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
@@ -1912,12 +1922,20 @@ impl Storage {
     }
     pub async fn encode_pack(
         &self,
-        p: crate::content::pack::Pack,
+        mut p: crate::content::pack::Pack,
         members: Vec<(Chunk, Bytes)>,
         strategy: crate::content::compression::Strategy,
         should_try: bool,
         memory: &Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<(crate::content::pack::Pack, Vec<u8>)> {
+        p.nonce = self
+            .encoding_nonce(
+                &p.algorithm,
+                p.block_key_id,
+                p.created_at,
+                crate::content::nonce::PACK,
+            )
+            .await?;
         let memory = memory.clone();
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
@@ -1938,6 +1956,27 @@ impl Storage {
         })
         .await?
     }
+    async fn encoding_nonce(
+        &self,
+        algorithm: &str,
+        key: Option<Uuid>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        type_tag: u8,
+    ) -> Result<Option<Vec<u8>>> {
+        ensure!(
+            (algorithm != "none") == key.is_some(),
+            "invalid encryption key metadata"
+        );
+        let Some(key) = key else { return Ok(None) };
+        let id = self
+            .nonces
+            .next(key, type_tag, |units| {
+                self.managed_keys.reserve_nonce(key, type_tag, units)
+            })
+            .await?;
+        Ok(Some(codec::typed_nonce(created_at, id, type_tag)?.to_vec()))
+    }
+
     pub async fn put_path_for(&self, storage_id: Uuid, path: &Path, data: Vec<u8>) -> Result<()> {
         self.ensure_storage_verified(storage_id).await?;
         let target = self.store_backend(storage_id)?;

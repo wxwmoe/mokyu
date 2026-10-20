@@ -273,8 +273,16 @@ pub fn encode(
             .key_for_id(p.block_key_id)
             .context("missing pack key")?;
         ensure!(key.algorithm == p.algorithm, "pack key algorithm mismatch");
-        let n = codec::typed_nonce(p.created_at, p.id, 1)?;
-        p.nonce = Some(n.to_vec());
+        let n: [u8; 12] = p
+            .nonce
+            .as_deref()
+            .context("missing reserved nonce")?
+            .try_into()?;
+        ensure!(
+            crate::content::nonce::id(Some(&n)).is_some()
+                && n[0] >> 3 == crate::content::nonce::PACK,
+            "invalid reserved nonce"
+        );
         key.seal(n, &p.aad()?, &mut encoded)?;
     } else {
         ensure!(
@@ -426,7 +434,11 @@ mod tests {
                 raw_size: members.iter().map(|(c, _)| c.raw_size as i64).sum(),
                 stored_size: None,
                 compressed: false,
-                nonce: None,
+                nonce: (algorithm != "none").then(|| {
+                    codec::typed_nonce(date, 7, crate::content::nonce::PACK)
+                        .unwrap()
+                        .to_vec()
+                }),
                 digest: None,
                 member_count: 3,
                 state: "preparing".into(),

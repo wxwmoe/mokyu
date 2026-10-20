@@ -170,6 +170,43 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         id
     );
 
+    // Empty live tables must not reset nonce high-water marks consumed by old writers.
+    let mut counters = database(&mut fresh, &options).await?;
+    counters.ensure_migrations_table("_sqlx_migrations").await?;
+
+    for entry in migrations.iter().take(23) {
+        counters.apply("_sqlx_migrations", entry).await?;
+    }
+    sqlx::raw_sql("INSERT INTO managed_keys(id,name,purpose,key_algorithm,fingerprint) VALUES(UNHEX('00000000000000000000000000000001'),'legacy-counter','block','aes-256-gcm',UNHEX(REPEAT('01',32))); ALTER TABLE chunk_encodings AUTO_INCREMENT=1000001; ALTER TABLE packs AUTO_INCREMENT=2000001;").execute(&mut counters).await?;
+    migration::run(&mut counters).await?;
+    let high: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT type_tag,reserved_id FROM nonce_counters ORDER BY type_tag")
+            .fetch_all(&mut counters)
+            .await?;
+    assert_eq!(high, vec![(0, 1000000), (1, 2000000)]);
+    migration::run(&mut counters).await?;
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT type_tag,reserved_id FROM nonce_counters ORDER BY type_tag"
+        )
+        .fetch_all(&mut counters)
+        .await?,
+        high
+    );
+    sqlx::query("UPDATE nonce_counters SET reserved_id=9000000 WHERE type_tag=0")
+        .execute(&mut counters)
+        .await?;
+    let replay = migrations.iter().find(|entry| entry.version == 24).unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(replay.sql.as_str()))
+        .execute(&mut counters)
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT reserved_id FROM nonce_counters WHERE type_tag=0")
+            .fetch_one(&mut counters)
+            .await?,
+        9000000
+    );
+
     // Materialize legacy upload policy once, including disabled backends.
     let mut policy = database(&mut fresh, &options).await?;
     policy.ensure_migrations_table("_sqlx_migrations").await?;
@@ -217,22 +254,29 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         serde_json::json!({})
     );
 
-    for version in [19, 20] {
+    for version in [19, 20, 24] {
         let recovery = migrations
             .iter()
             .find(|migration| migration.version == version)
             .unwrap();
         let markers = if version == 19 {
-            [
+            vec![
                 "DROP TRIGGER IF EXISTS encodings_owner_insert",
                 "DROP TRIGGER IF EXISTS encodings_owner_update",
                 "UPDATE mokyu_meta SET schema_version=19",
             ]
-        } else {
-            [
+        } else if version == 20 {
+            vec![
                 "EXECUTE mokyu_audit",
                 "DEALLOCATE PREPARE mokyu_audit",
                 "UPDATE mokyu_meta SET schema_version=20",
+            ]
+        } else {
+            vec![
+                "UPDATE chunk_encodings SET nonce_id",
+                "UPDATE packs SET nonce_id",
+                "SET @mokyu_nonce_ddl = IF(LOCATE",
+                "UPDATE mokyu_meta SET schema_version=24",
             ]
         };
         for marker in markers {

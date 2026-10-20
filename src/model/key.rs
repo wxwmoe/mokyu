@@ -17,6 +17,7 @@ pub(crate) struct ManagedKeyRecord {
 
 #[async_trait]
 pub(crate) trait ManagedKeyStore: Send + Sync {
+    async fn reserve_nonce(&self, key: Uuid, type_tag: u8, units: u32) -> Result<(i64, i64)>;
     async fn resolve_block(&self, name: &str) -> Result<Option<ManagedKeyRecord>>;
     async fn active_block(&self, id: Uuid) -> Result<Option<(String, String)>>;
     async fn for_storage(&self, storage_id: Uuid) -> Result<Option<ManagedKeyRecord>>;
@@ -136,3 +137,46 @@ pub(crate) fn load(secrets: &mut Secrets, rows: Vec<ManagedKeyMaterial>) -> Resu
         .clear();
     Ok(())
 }
+
+pub(crate) fn nonce_reservation(previous: i64, units: u32) -> Result<(i64, i64)> {
+    use crate::content::nonce::{MAX_UNITS, UNIT};
+    ensure!(
+        previous >= 0 && (1..=MAX_UNITS).contains(&units),
+        "invalid nonce reservation request"
+    );
+    let available = (i64::MAX - previous) / UNIT;
+    ensure!(
+        available > 0,
+        "encryption key cannot reserve more nonce IDs; create and select a new key"
+    );
+    let size = i64::from(units).min(available) * UNIT;
+    Ok((previous + 1, previous + size))
+}
+
+#[cfg(test)]
+mod nonce_tests {
+    use super::*;
+    #[test]
+    fn reservations_preserve_partial_tail_and_never_wrap() -> Result<()> {
+        assert_eq!(nonce_reservation(0, 1)?, (1, 64));
+        assert_eq!(nonce_reservation(13, 79)?, (14, 5069));
+        for remaining in [0, 63] {
+            assert!(nonce_reservation(i64::MAX - remaining, 1).is_err());
+        }
+        for remaining in [64, 65] {
+            let previous = i64::MAX - remaining;
+            assert_eq!(
+                nonce_reservation(previous, 1024)?,
+                (previous + 1, previous + 64)
+            );
+        }
+        assert!(nonce_reservation(-1, 1).is_err());
+        assert!(nonce_reservation(0, 0).is_err());
+        assert!(nonce_reservation(0, 1025).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/recovery/nonces.rs"]
+mod database_tests;

@@ -99,6 +99,19 @@ async fn sqlite_key_and_content_contract() -> Result<()> {
         .bind(chunk)
         .execute(db)
         .await?;
+    let nonce_id = backend
+        .reserve_nonce(key, crate::content::nonce::CHUNK, 1)
+        .await?
+        .0;
+    sqlx::query("UPDATE chunk_encodings SET nonce=?,nonce_id=? WHERE encoding_id=?")
+        .bind(
+            codec::typed_nonce(chrono::Utc::now(), nonce_id, crate::content::nonce::CHUNK)?
+                .to_vec(),
+        )
+        .bind(nonce_id)
+        .bind(encoding)
+        .execute(db)
+        .await?;
     for state in ["uploading", "ready", "retired", "deleting"] {
         sqlx::query("UPDATE chunk_encodings SET state=? WHERE encoding_id=?")
             .bind(state)
@@ -174,7 +187,7 @@ async fn sqlite_key_and_content_contract() -> Result<()> {
             .is_some()
     );
 
-    // Deleted physical IDs must not be reused for nonce generation.
+    // Deleted physical identities must not be reassigned to new sources.
     sqlx::query("DELETE FROM chunk_encodings WHERE encoding_id=?")
         .bind(encoding)
         .execute(db)

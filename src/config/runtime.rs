@@ -424,16 +424,34 @@ impl Secrets {
         name: String,
         key: crate::content::codec::Key,
     ) -> Result<()> {
-        if let Some(id) = id {
-            self.key_names
-                .write()
-                .map_err(|_| anyhow::anyhow!("key registry is unavailable"))?
-                .insert(id, name.clone());
-        }
-        self.runtime_keys
+        let mut names = self
+            .key_names
             .write()
-            .map_err(|_| anyhow::anyhow!("key registry is unavailable"))?
-            .insert(name, key);
+            .map_err(|_| anyhow::anyhow!("key registry is unavailable"))?;
+        let mut keys = self
+            .runtime_keys
+            .write()
+            .map_err(|_| anyhow::anyhow!("key registry is unavailable"))?;
+        for (existing_name, existing) in self.keys.iter().chain(keys.iter()) {
+            ensure!(
+                if existing_name == &name {
+                    existing.algorithm == key.algorithm && existing.material == key.material
+                } else {
+                    existing.material != key.material
+                },
+                "managed key identity and material must be immutable and unique"
+            );
+        }
+        if let Some(id) = id {
+            ensure!(
+                names.iter().all(|(existing_id, existing_name)| {
+                    (*existing_id == id) == (existing_name == &name)
+                }),
+                "managed key identity cannot change"
+            );
+            names.insert(id, name.clone());
+        }
+        keys.insert(name, key);
         Ok(())
     }
 }

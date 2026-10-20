@@ -126,6 +126,32 @@ async fn postgres_schema_bootstrap_contract() -> Result<()> {
         id
     );
 
+    // Empty live tables must not reset nonce high-water marks consumed by old writers.
+    let mut counters = database(&mut fresh, &options).await?;
+    counters.ensure_migrations_table("_sqlx_migrations").await?;
+    queries::migration_identity("storage-registry")
+        .execute(&mut counters)
+        .await?;
+    for entry in migrations.iter().take(49) {
+        counters.apply("_sqlx_migrations", entry).await?;
+    }
+    sqlx::raw_sql("INSERT INTO managed_keys(id,name,purpose,key_algorithm,fingerprint) VALUES('00000000-0000-0000-0000-000000000001','legacy-counter','block','aes-256-gcm',decode(repeat('01',32),'hex')); SELECT setval('chunk_locations_id_seq',1000000,true); SELECT setval('packs_id_seq',2000000,true);").execute(&mut counters).await?;
+    migration::run(&mut counters).await?;
+    let high: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT type_tag,reserved_id FROM nonce_counters ORDER BY type_tag")
+            .fetch_all(&mut counters)
+            .await?;
+    assert_eq!(high, vec![(0, 1000000), (1, 2000000)]);
+    migration::run(&mut counters).await?;
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT type_tag,reserved_id FROM nonce_counters ORDER BY type_tag"
+        )
+        .fetch_all(&mut counters)
+        .await?,
+        high
+    );
+
     // Materialize legacy upload policy once, including disabled backends.
     let mut policy = database(&mut fresh, &options).await?;
     policy.ensure_migrations_table("_sqlx_migrations").await?;

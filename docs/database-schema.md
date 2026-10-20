@@ -16,7 +16,8 @@
 | --- | --- | --- |
 | `mokyu_meta` | `schema_version`、`deployment_id`、`deployment_mode`、`deployment_mode_revision`、`deployment_key_fingerprint`、`gc_paused`、`maintenance`、`project_management`、`pack_creation_paused` | 部署身份、single/cluster 模式和持久开关；不保存 deployment key 明文 |
 | `runtime_settings` | `section`、`value`、`revision`、`updated_at`、`updated_by_user_id` | 类型化的 `web`、`requests`、`uploads`、`metrics`、`maintenance` 分组；Web/CLI 按 revision 更新 |
-| `managed_keys` | `id`、`name`、`purpose`、`key_algorithm`、`secret_encrypted`、`fingerprint`、`created_at`、`revoked_at` | 数据库生成的 access/signing/block key；密文由 deployment key 保护，block 支持 AES-256-GCM、ChaCha20-Poly1305 和无加密 |
+| `managed_keys` | `id`、`name`、`purpose`、`key_algorithm`、`secret_encrypted`、`fingerprint`、`created_at`、`revoked_at` | Mokyu 生成的 access/signing/block key；密文由 deployment key 保护，fingerprint 全局唯一并在吊销后保留；block 支持 AES-256-GCM、ChaCha20-Poly1305，存储也可关闭加密 |
+| `nonce_counters` | `block_key_id`、`type_tag`、`reserved_id` | `(block_key_id,type_tag)` 复合主键；引用托管密钥，类型标记为 0–31，当前 0 为独立区块编码、1 为区块包；非负 `BIGINT` 高水位默认 0，SQLite 为 `INTEGER`，提交后不回退 |
 | `setup_tokens` | `token_hash`、`created_at`、`expires_at` | Web 首次管理员设置的一次性 token；CLI 初始化不依赖它 |
 | `web_users`、`sessions`、`api_tokens` | 用户、会话和个人 API token 字段 | Web 认证、CSRF、授权修订和会话撤销 |
 | `nodes` | `id`、`name`、`role`、`credential_encrypted`、`enabled`、`status`、`recovery_required`、`lease_expires_at` | control/worker/data 节点注册、凭据和状态；节点直接连接 PostgreSQL |
@@ -57,11 +58,13 @@ UUID、时间、整数分别使用各数据库既有原生类型。原始来源�
 | 表 | 关键字段 | 说明 |
 | --- | --- | --- |
 | `chunks` | `id`、`storage_id`、`hash`、`raw_size`、`standalone_size`、`encryption_algorithm`、`block_key_id`、`standalone_compressed`、`current_encoding_id`、`pack_id`、状态和回收时间 | 按 `storage_id + hash + raw_size` 去重；逻辑区块身份不因重写改变 |
-| `chunk_encodings` | `encoding_id`、`chunk_id`、`location_id`、`storage_id`、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce`、`encoding_fingerprint`、状态和发布时间 | 独立区块的实际物理来源；同一逻辑区块最多一个 ready 独立来源 |
-| `packs`、`pack_members` | pack 的 `location_id`、`storage_id`、加密/压缩字段、`pack_fingerprint` 及成员偏移 | 区块包来源和成员映射；只收纳同一 storage 的完整区块 |
+| `chunk_encodings` | `encoding_id`、`chunk_id`、`location_id`、`storage_id`、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce_id`、`nonce`、`encoding_fingerprint`、状态和发布时间 | 独立区块的实际物理来源；同一逻辑区块最多一个 ready 独立来源 |
+| `packs`、`pack_members` | pack 的 `location_id`、`storage_id`、`nonce_id`、加密/压缩字段、`pack_fingerprint` 及成员偏移 | 区块包来源和成员映射；只收纳同一 storage 的完整区块 |
 | `pack_inputs`、`pack_maintenance`、`pack_changes` | 任务输入保护、游标、generation 和下一次检查时间 | 使打包、复用、回收和 Range 优化可恢复 |
 
 `encoding_fingerprint` 和 `pack_fingerprint` 由 key、算法、压缩及对应 profile 计算。保存 profile 不自动重写存量；rewrite 根据 fingerprint 跳过已符合策略的来源。
+
+物理来源的 `nonce_id` 是可空正整数 `BIGINT`（SQLite 为 `INTEGER`），默认空。未加密来源同时清空 key、nonce 和 `nonce_id`；加密来源在进入 ready 前必须具备三者。计数预留与业务主键独立，生命周期回收不删除或降低 `nonce_counters` 的高水位，见[存储格式](storage-format.md)。
 
 ## 上传、暂存和配额
 

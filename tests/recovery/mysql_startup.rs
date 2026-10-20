@@ -51,7 +51,7 @@ async fn mysql_production_startup_contract() -> Result<()> {
         .current_key("startup", Some("startup-block"))
         .await?;
     let chunk=sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,block_key_id,state,current_encoding_id) VALUES(?,?,32,'aes-256-gcm',?,'ready',1)").bind(storage).bind([0u8;32].as_slice()).bind(block).execute(&backend.pool).await?.last_insert_id() as i64;
-    sqlx::query("INSERT INTO chunk_encodings(chunk_id,location_id,storage_id,standalone_size,state,encryption_algorithm,block_key_id,encoding_fingerprint) VALUES(?,?,?,48,'ready','aes-256-gcm',?,?)").bind(chunk).bind(Uuid::new_v4()).bind(storage).bind(block).bind([0u8;32].as_slice()).execute(&backend.pool).await?;
+    sqlx::query("INSERT INTO chunk_encodings(chunk_id,location_id,storage_id,standalone_size,state,encryption_algorithm,block_key_id,encoding_fingerprint,nonce,nonce_id) VALUES(?,?,?,48,'ready','aes-256-gcm',?,?,?,1)").bind(chunk).bind(Uuid::new_v4()).bind(storage).bind(block).bind([0u8;32].as_slice()).bind(codec::typed_nonce(chrono::Utc::now(), 1, crate::content::nonce::CHUNK)?.to_vec()).execute(&backend.pool).await?;
     backend.pool.close().await;
     backend.owner.into_inner().close().await?;
 

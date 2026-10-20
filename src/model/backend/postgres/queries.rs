@@ -1069,6 +1069,10 @@ impl StorageRecordStore for Backend {
 
 #[async_trait::async_trait]
 impl ManagedKeyStore for Backend {
+    async fn reserve_nonce(&self, key: Uuid, type_tag: u8, units: u32) -> Result<(i64, i64)> {
+        transactions::reserve_nonce(&self.pool, key, type_tag, units).await
+    }
+
     async fn resolve_block(&self, name: &str) -> Result<Option<crate::model::ManagedKeyRecord>> {
         Ok(resolve_block_key(name)
             .fetch_optional(&self.pool)
@@ -3913,7 +3917,7 @@ impl PhysicalStore for Backend {
         Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'))").bind(chunk).fetch_one(&self.pool).await?)
     }
     async fn register_encoding(&self, chunk: &Chunk) -> Result<()> {
-        sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,location_id,storage_id,standalone_size,standalone_compressed,nonce,state,created_at,unreferenced_at,encryption_algorithm,block_key_id) VALUES($1,$2,$3,$4,$5,$6,$7,'uploading',$8,now(),$9,$10)").bind(chunk.encoding_id).bind(chunk.id).bind(chunk.location_id).bind(chunk.storage_id).bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(chunk.created_at).bind(&chunk.algorithm).bind(chunk.block_key_id).execute(&self.pool).await?;
+        sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,location_id,storage_id,standalone_size,standalone_compressed,nonce,nonce_id,state,created_at,unreferenced_at,encryption_algorithm,block_key_id) VALUES($1,$2,$3,$4,$5,$6,$7,$11,'uploading',$8,now(),$9,$10)").bind(chunk.encoding_id).bind(chunk.id).bind(chunk.location_id).bind(chunk.storage_id).bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(chunk.created_at).bind(&chunk.algorithm).bind(chunk.block_key_id).bind(crate::content::nonce::id(chunk.nonce.as_deref())).execute(&self.pool).await?;
         Ok(())
     }
     async fn ready_chunks(&self, ids: &[i64]) -> Result<Vec<Chunk>> {
@@ -4261,7 +4265,7 @@ impl PackingStore for Backend {
         sqlx::query_scalar("INSERT INTO chunk_encodings(chunk_id,location_id,storage_id,standalone_compressed,state,created_at,unreferenced_at,owner_task,encryption_algorithm,block_key_id) SELECT $1,$2,$3,false,'uploading',$4,now(),$5,$6,$7 FROM (SELECT id FROM tasks WHERE id=$5 AND state='running' AND lease_token=$8 AND ((lease_node_id IS NULL AND lease_expires_at IS NULL) OR lease_expires_at>clock_timestamp()) FOR UPDATE) owner RETURNING encoding_id").bind(physical.id).bind(physical.location_id).bind(physical.storage_id).bind(physical.created_at).bind(task.id).bind(&physical.algorithm).bind(physical.block_key_id).bind(task.token).fetch_optional(&self.pool).await?.context("task execution expired")
     }
     async fn encoding_metadata(&self, physical: &Chunk) -> Result<()> {
-        sqlx::query("UPDATE chunk_encodings SET standalone_size=$2,standalone_compressed=$3,nonce=$4 WHERE encoding_id=$1").bind(physical.encoding_id).bind(physical.stored_size).bind(physical.compressed).bind(&physical.nonce).execute(&self.pool).await?;
+        sqlx::query("UPDATE chunk_encodings SET standalone_size=$2,standalone_compressed=$3,nonce=$4,nonce_id=$5 WHERE encoding_id=$1").bind(physical.encoding_id).bind(physical.stored_size).bind(physical.compressed).bind(&physical.nonce).bind(crate::content::nonce::id(physical.nonce.as_deref())).execute(&self.pool).await?;
         Ok(())
     }
     async fn prepare_pack(
@@ -4285,13 +4289,14 @@ impl PackingStore for Backend {
     }
     async fn pack_metadata(&self, pack: &Pack) -> Result<()> {
         sqlx::query(
-            "UPDATE packs SET stored_size=$2,pack_compressed=$3,nonce=$4,digest=$5 WHERE id=$1",
+            "UPDATE packs SET stored_size=$2,pack_compressed=$3,nonce=$4,digest=$5,nonce_id=$6 WHERE id=$1",
         )
         .bind(pack.id)
         .bind(pack.stored_size)
         .bind(pack.compressed)
         .bind(&pack.nonce)
         .bind(&pack.digest)
+        .bind(crate::content::nonce::id(pack.nonce.as_deref()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -4688,7 +4693,7 @@ pub(super) fn retire_rewrite_encoding(id: i64) -> Statement<'static> {
     sqlx::query("UPDATE chunk_encodings SET state='retired',unreferenced_at=now() WHERE encoding_id=$1 AND state='ready'").bind(id)
 }
 pub(super) fn publish_rewrite_encoding<'q>(physical: &'q Chunk) -> Statement<'q> {
-    sqlx::query("UPDATE chunk_encodings SET standalone_size=$2,standalone_compressed=$3,nonce=$4,state='ready',unreferenced_at=NULL,stored_at=clock_timestamp(),owner_task=NULL WHERE encoding_id=$1 AND state='uploading'").bind(physical.encoding_id).bind(physical.stored_size).bind(physical.compressed).bind(&physical.nonce)
+    sqlx::query("UPDATE chunk_encodings SET standalone_size=$2,standalone_compressed=$3,nonce=$4,nonce_id=$5,state='ready',unreferenced_at=NULL,stored_at=clock_timestamp(),owner_task=NULL WHERE encoding_id=$1 AND state='uploading'").bind(physical.encoding_id).bind(physical.stored_size).bind(physical.compressed).bind(&physical.nonce).bind(crate::content::nonce::id(physical.nonce.as_deref()))
 }
 pub(super) fn publish_rewrite_chunk<'q>(physical: &'q Chunk) -> Statement<'q> {
     sqlx::query("UPDATE chunks SET current_encoding_id=$2,standalone_size=$3,standalone_compressed=$4,nonce=$5,encryption_algorithm=$6,block_key_id=$7 WHERE id=$1 AND state='ready'").bind(physical.id).bind(physical.encoding_id).bind(physical.stored_size).bind(physical.compressed).bind(&physical.nonce).bind(&physical.algorithm).bind(physical.block_key_id)
@@ -4715,7 +4720,7 @@ pub(super) fn lock_rewrite_members(id: i64) -> Scalar<'static, i64> {
     .bind(id)
 }
 pub(super) fn publish_rewrite_pack<'q>(pack: &'q Pack) -> Statement<'q> {
-    sqlx::query("UPDATE packs SET stored_size=$2,pack_compressed=$3,nonce=$4,digest=$5,state='ready',unreferenced_at=NULL,stored_at=clock_timestamp(),owner_task=NULL WHERE id=$1 AND state='preparing'").bind(pack.id).bind(pack.stored_size).bind(pack.compressed).bind(&pack.nonce).bind(&pack.digest)
+    sqlx::query("UPDATE packs SET stored_size=$2,pack_compressed=$3,nonce=$4,nonce_id=$6,digest=$5,state='ready',unreferenced_at=NULL,stored_at=clock_timestamp(),owner_task=NULL WHERE id=$1 AND state='preparing'").bind(pack.id).bind(pack.stored_size).bind(pack.compressed).bind(&pack.nonce).bind(&pack.digest).bind(crate::content::nonce::id(pack.nonce.as_deref()))
 }
 pub(super) fn replace_rewrite_pack(old: i64, new: i64) -> Statement<'static> {
     sqlx::query("UPDATE chunks SET pack_id=$2 WHERE pack_id=$1 AND state='ready'")
@@ -8554,7 +8559,7 @@ pub(super) fn repair_candidate(encoding: i64, stream: Uuid) -> Rows<'static, Chu
     sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.encoding_id=$1 AND l.owner_stream=$2 AND l.owner_task IS NULL AND l.state='uploading' AND l.recovery_pending AND l.quarantined_at IS NULL FOR UPDATE").bind(encoding).bind(stream)
 }
 pub(super) fn save_repair_metadata(chunk: &Chunk, stream: Uuid) -> Statement<'_> {
-    sqlx::query("UPDATE chunk_encodings SET standalone_size=$1,standalone_compressed=$2,nonce=$3 WHERE encoding_id=$4 AND owner_stream=$5 AND state='uploading'").bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(chunk.encoding_id).bind(stream)
+    sqlx::query("UPDATE chunk_encodings SET standalone_size=$1,standalone_compressed=$2,nonce=$3,nonce_id=$6 WHERE encoding_id=$4 AND owner_stream=$5 AND state='uploading'").bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(chunk.encoding_id).bind(stream).bind(crate::content::nonce::id(chunk.nonce.as_deref()))
 }
 pub(super) fn retire_repair_sources(chunk: i64) -> Statement<'static> {
     sqlx::query("UPDATE chunk_encodings SET state='retired',unreferenced_at=clock_timestamp() WHERE chunk_id=$1 AND state='ready' AND quarantined_at IS NOT NULL").bind(chunk)
@@ -8917,4 +8922,24 @@ pub(super) fn raw_processing_readers(stream: Uuid, lease: Uuid) -> Scalar<'stati
 pub(super) fn renew_raw_processing(work: &RawProcessing) -> Statement<'_> {
     sqlx::query("UPDATE raw_processing SET lease_expires_at=clock_timestamp()+interval '120 seconds' WHERE stream_id=$1 AND token=$2 AND (lease_expires_at IS NULL OR lease_expires_at>clock_timestamp())")
         .bind(work.stream).bind(work.token)
+}
+
+pub(super) fn nonce_counter(key: Uuid, type_tag: u8) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT n.reserved_id FROM nonce_counters n JOIN managed_keys k ON k.id=n.block_key_id WHERE n.block_key_id=$1 AND n.type_tag=$2 AND k.purpose='block' AND k.revoked_at IS NULL FOR UPDATE OF n,k").bind(key).bind(i64::from(type_tag))
+}
+
+pub(super) fn advance_nonce(
+    key: Uuid,
+    type_tag: u8,
+    previous: i64,
+    last: i64,
+) -> Statement<'static> {
+    sqlx::query("UPDATE nonce_counters SET reserved_id=$1 WHERE block_key_id=$2 AND type_tag=$3 AND reserved_id=$4").bind(last).bind(key).bind(i64::from(type_tag)).bind(previous)
+}
+
+pub(super) fn initialize_nonce_counters(key: Uuid) -> Statement<'static> {
+    sqlx::query(
+        "INSERT INTO nonce_counters(block_key_id,type_tag,reserved_id) VALUES($1,0,0),($1,1,0)",
+    )
+    .bind(key)
 }

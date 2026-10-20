@@ -40,11 +40,15 @@ raw 与区块、区块包共用根目录 `meta.json` 的命名空间身份，不
 
 ## 物理编码和完整性
 
-每个 ready 独立来源保存 `location_id`、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、nonce 和 `encoding_fingerprint`；区块包保存对应的 `pack_fingerprint`。fingerprint 绑定 key、算法、压缩和 storage profile，`storage rewrite` 用它判断是否需要处理。
+每个 ready 独立来源保存 `location_id`、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce_id`、nonce 和 `encoding_fingerprint`；区块包保存对应的 `pack_fingerprint`。fingerprint 绑定 key、算法、压缩和 storage profile，`storage rewrite` 用它判断是否需要处理。
 
 加密 AAD 绑定格式编号、物理编码 ID、storage UUID、明文哈希、原始长度、编码长度、压缩标志、算法和 block key UUID。读取顺序固定为认证、解密、有界解压、长度检查和 BLAKE3 检查；任何元数据或载荷不匹配都报告完整性错误。
 
-nonce 为 12 字节：前 4 字节编码来源类型和 UTC 日期，后 8 字节为物理 ID。数据库恢复、序列回滚或独立克隆后，恢复写入前必须更换新的实际 block key，并保留历史 key 读取存量来源。
+nonce 为 12 字节：前 4 字节编码来源类型和 UTC 日期，后 8 字节为独立的正整数 `nonce_id`。加密的物理区块编码和区块包分别使用类型标记 0 和 1；未加密来源的 `nonce_id`、nonce 和 `block_key_id` 均为空。逻辑区块、pack 成员和 raw 不单独分配 nonce。
+
+`nonce_counters` 按 block key 和类型标记保存已预留高水位。进程在实际加密前按近期使用速率领取 64–65536 个编号，大小为 64 的倍数，数据库提交成功后才开始使用。重启、失败或取消留下的余量不回收；启动、读取、无加密写入和直接去重命中不领取范围。可用余量不足 64 时拒绝新预留，需要创建新的实际 block key 并切换关联存储；已有有效范围仍可用完。同一密钥材料不能以其他名称重新开始计数。
+
+数据库恢复、计数回滚或独立克隆后，恢复写入前必须更换新的实际 block key，并保留历史 key 读取存量来源。已有密文使用记录中的 nonce 解密；升级不会重新编码文件。
 
 ## 存储布局
 
