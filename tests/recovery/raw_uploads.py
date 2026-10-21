@@ -218,10 +218,12 @@ def main():
         upload = fixture.client.create_multipart_upload(Bucket=fixture.name, Key='multipart')['UploadId']
         pieces = [os.urandom(5 * 1024 * 1024 + 37), b'multipart tail']
         parts = []
-        for number, piece in enumerate(pieces, 1):
+        for number in (2, 1):
+            piece = pieces[number - 1]
             result = fixture.client.upload_part(Bucket=fixture.name, Key='multipart', UploadId=upload,
                                                 PartNumber=number, Body=piece)
             parts.append({'PartNumber': number, 'ETag': result['ETag']})
+        parts.sort(key=lambda part: part['PartNumber'])
         baseline = set(fixture.keys())
         fixture.client.complete_multipart_upload(Bucket=fixture.name, Key='multipart', UploadId=upload,
                                                   MultipartUpload={'Parts': parts})
@@ -234,7 +236,7 @@ def main():
         marker.unlink()
         drain()
         fixture.read('multipart', b''.join(pieces))
-        print('PASS Multipart completion is readable from durable raw cache across restart and final S3 upload', flush=True)
+        print('PASS reordered Multipart checkpoints remain readable from raw cache across restart and final S3 upload', flush=True)
 
         marker = fixture.arm('raw-upload-before-process')
         fixture.put('flush-old', b'flush before cutoff')

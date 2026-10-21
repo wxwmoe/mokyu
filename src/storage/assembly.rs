@@ -397,11 +397,28 @@ pub(crate) async fn compact(
     }
     let path =
         storage.multipart_path(id, Some(file.storage_id), file.source_id.map(|_| file.id))?;
-    let released = tokio::task::spawn_blocking(move || compact_file(&path, &ranges)).await??;
+    let cached = file.source_id.is_some() && !storage.is_local(file.storage_id)?;
+    let (released, shortened) = tokio::task::spawn_blocking(move || {
+        let before = if cached {
+            std::fs::metadata(&path)?.len()
+        } else {
+            0
+        };
+        let released = compact_file(&path, &ranges)?;
+        let shortened = if cached {
+            before.saturating_sub(std::fs::metadata(&path)?.len())
+        } else {
+            0
+        };
+        Ok::<_, anyhow::Error>((released, shortened))
+    })
+    .await??;
     if file.source_id.is_none() {
         storage
             .disk
             .release(super::local::Area::Multipart, released);
+    } else if cached {
+        storage.disk.release(super::local::Area::Cache, shortened);
     }
     model.clear_reclaim(id).await
 }

@@ -360,6 +360,21 @@ impl Disk {
         }
     }
     pub(crate) fn reserve(self: &Arc<Self>, area: Area, bytes: u64) -> Result<Reservation> {
+        self.reserve_space(area, bytes, false)
+    }
+    pub(crate) fn reserve_existing(
+        self: &Arc<Self>,
+        area: Area,
+        bytes: u64,
+    ) -> Result<Reservation> {
+        self.reserve_space(area, bytes, true)
+    }
+    fn reserve_space(
+        self: &Arc<Self>,
+        area: Area,
+        bytes: u64,
+        existing: bool,
+    ) -> Result<Reservation> {
         let mut usage = self.usage.lock().unwrap();
         let bytes = if matches!(area, Area::Multipart) {
             let granularity = fs2::allocation_granularity(&self.root)?.max(1);
@@ -377,7 +392,12 @@ impl Disk {
             self.limits[area as usize].is_none_or(|n| next <= n),
             "local storage quota exhausted"
         );
-        let space = Space::claim(&self.root, self.floor, bytes, &self.space_for(&self.root)?)?;
+        let space = Space::claim(
+            &self.root,
+            self.floor,
+            if existing { 0 } else { bytes },
+            &self.space_for(&self.root)?,
+        )?;
         usage.used[area as usize] = next;
         Ok(Reservation {
             disk: self.clone(),

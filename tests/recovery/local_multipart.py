@@ -18,9 +18,11 @@ from tests.storage.source_quarantine import Fixture, wait
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--cross-filesystem', action='store_true')
+    parser.add_argument('--s3-cache', action='store_true', default=os.environ.get('MOKYU_TEST_MULTIPART_CACHE') == '1')
     arguments = parser.parse_args()
     assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
-    assert not os.environ.get('MOKYU_TEST_BACKEND'), 'local storage required'
+    assert bool(os.environ.get('MOKYU_TEST_BACKEND')) == arguments.s3_cache, 'S3 cache tests require a disposable S3 backend'
+    assert not (arguments.s3_cache and arguments.cross_filesystem), 'node Multipart and raw caches share the data filesystem'
     command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG']]
     faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
     faults.mkdir(parents=True, exist_ok=True)
@@ -52,8 +54,10 @@ def main():
         database = Database()
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
         profile.update(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False,
-                       min_free_space='16MiB', upload_retention='1s', deleted_chunk_retention='1s', unreferenced_grace='1s', min_storage_duration='0s')
+                       upload_retention='1s', deleted_chunk_retention='1s', unreferenced_grace='1s', min_storage_duration='0s')
+        profile.update({'upload_cache': True, 'cache_enabled': True} if arguments.s3_cache else {'min_free_space': '16MiB'})
         profile = fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+        backend_root = Path(database.config['instance']['data_path']) if arguments.s3_cache else fixture.root
         root = Path(database.config['instance']['data_path']) / 'multipart'
         source_ids = set()
         acknowledged = {}
@@ -72,7 +76,7 @@ def main():
                     row['path'] = root / identifier(row['id']).hex
                 else:
                     ident = identifier(row['id']).hex
-                    row['path'] = (fixture.root / 'raw' / ident[-2:] / ident).with_suffix('.partial')
+                    row['path'] = (backend_root / 'raw' / ident[-2:] / ident).with_suffix('.partial')
                 source_ids.add(row['path'])
             return rows
 
@@ -96,7 +100,7 @@ def main():
                 JOIN raw_sources s ON s.id=r.source_id WHERE o.bucket_id=%s AND o.object_key=%s''',
                 uuid.UUID(fixture.bucket_id), key if database.type == 'postgres' else key.encode())
             ident = identifier(row['id']).hex
-            return fixture.root / 'raw' / ident[-2:] / ident
+            return backend_root / 'raw' / ident[-2:] / ident
 
         data = [os.urandom(5 * 1024 * 1024 + 3), os.urandom(5 * 1024 * 1024 + 5), b'last part']
         upload = create('sequential')
@@ -223,7 +227,7 @@ def main():
                         WHERE r.storage_id=%s AND s.object_key=%s AND r.state='writing' ''',
                         uuid.UUID(fixture.store['id']), key if database.type == 'postgres' else key.encode())
                     ident = identifier(row['id']).hex
-                    checkpoint_path = (fixture.root / 'raw' / ident[-2:] / ident).with_suffix('.partial')
+                    checkpoint_path = (backend_root / 'raw' / ident[-2:] / ident).with_suffix('.partial')
                     source_ids.add(checkpoint_path)
                     # One copying batch may lead one confirmation batch; each is below 20 MiB.
                     wait(lambda: checkpoint_path.stat().st_size >= 32 * 1024 * 1024,
@@ -339,7 +343,7 @@ def main():
                     wait(lambda: marker.with_suffix('.hit').exists() or request.done(), 'copy did not reach confirmation')
                     assert not request.done(), request.exception()
                     space.write_text('low\n')
-                    assert os.statvfs(fixture.root).f_bavail == 0, 'space interposer is inactive'
+                    assert os.statvfs(backend_root / 'raw').f_bavail == 0, 'space interposer is inactive'
                     marker.unlink()
                     try:
                         request.result(timeout=30)

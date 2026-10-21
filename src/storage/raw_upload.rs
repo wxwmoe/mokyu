@@ -29,6 +29,7 @@ pub(crate) struct Writer {
     deduplicate: bool,
     background: bool,
     reject_overflow: bool,
+    prepared: bool,
 }
 
 impl Writer {
@@ -65,18 +66,41 @@ impl Writer {
             deduplicate: profile.deduplication_enabled,
             background: profile.write_processing == "background",
             reject_overflow,
+            prepared: false,
         })
     }
 
-    pub async fn write(&mut self, data: &[u8]) -> Result<()> {
-        let size = self
-            .size
-            .checked_add(data.len() as u64)
-            .context("raw receive length overflow")?;
-        super::raw::remote_size(size)?;
+    pub async fn prepare(
+        &mut self,
+        ranges: Vec<super::assembly::Range>,
+        model: std::sync::Arc<dyn crate::model::multipart::MultipartStore>,
+        upload: Uuid,
+    ) -> Result<Option<super::assembly::Prepared>> {
+        ensure!(
+            !self.prepared && self.size == 0,
+            "raw writer is already populated"
+        );
+        let size = ranges
+            .iter()
+            .try_fold(0u64, |total, range| total.checked_add(range.length as u64))
+            .context("assembly size overflow")?;
+        let (file, prepared) = self
+            .file
+            .take()
+            .unwrap()
+            .assemble(
+                self.storage.clone(),
+                ranges,
+                model,
+                upload,
+                self.source,
+                self.location,
+            )
+            .await?;
+        self.file = Some(file);
         if let Some(charge) = self.charge.as_mut() {
             match self.storage.disk.claim_upload_with_limit(
-                data.len() as u64,
+                size,
                 self.target,
                 self.policy.upload_capacity,
             ) {
@@ -90,11 +114,39 @@ impl Writer {
                 }
             }
         }
-        self.file
-            .as_mut()
-            .unwrap()
-            .append(&self.storage, data)
-            .await?;
+        self.prepared = true;
+        Ok(Some(prepared))
+    }
+
+    pub async fn write(&mut self, data: &[u8]) -> Result<()> {
+        let size = self
+            .size
+            .checked_add(data.len() as u64)
+            .context("raw receive length overflow")?;
+        super::raw::remote_size(size)?;
+        if !self.prepared {
+            if let Some(charge) = self.charge.as_mut() {
+                match self.storage.disk.claim_upload_with_limit(
+                    data.len() as u64,
+                    self.target,
+                    self.policy.upload_capacity,
+                ) {
+                    Ok(mut added) => {
+                        charge.size += added.size;
+                        added.size = 0;
+                    }
+                    Err(_) => {
+                        crate::upload::cache::overflow(self.reject_overflow)?;
+                        self.charge = None;
+                    }
+                }
+            }
+            self.file
+                .as_mut()
+                .unwrap()
+                .append(&self.storage, data)
+                .await?;
+        }
         self.size = size;
         Ok(())
     }
@@ -251,6 +303,96 @@ impl Storage {
         Ok(())
     }
 
+    pub(super) async fn restore_raw_checkpoints(&self) -> Result<()> {
+        if self.cluster_mode {
+            return Ok(());
+        }
+        let mut after = Uuid::nil();
+        loop {
+            let rows = self.raw_store.cached_checkpoints(after).await?;
+            if rows.is_empty() {
+                break;
+            }
+            for (location, source) in rows {
+                after = location;
+                let path = CacheFile::Raw.path(&self.disk.root, location);
+                let partial = tokio::fs::symlink_metadata(path.with_extension("partial"))
+                    .await
+                    .context("multipart cache checkpoint is missing; restore its durable file")?;
+                ensure!(partial.is_file(), "multipart cache checkpoint was replaced");
+                let metadata = match tokio::fs::symlink_metadata(&path).await {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        self.disk.account_existing(Area::Cache, partial.len());
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                ensure!(
+                    metadata.is_file() && metadata.len() == partial.len(),
+                    "multipart cache publication changed"
+                );
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    ensure!(
+                        metadata.dev() == partial.dev() && metadata.ino() == partial.ino(),
+                        "multipart cache publication was replaced"
+                    );
+                }
+                if self.raw_upload_pins.lock().unwrap().contains_key(&location) {
+                    continue;
+                }
+                let size = metadata.len();
+                self.disk.account_existing(Area::Cache, size);
+                let mut fifo = self.fifo.lock().await;
+                fifo.insert(location, size, CacheFile::Raw);
+                let pins = fifo.entries[&location].pins.clone();
+                pins.fetch_add(1, Ordering::Relaxed);
+                self.raw_upload_pins.lock().unwrap().insert(
+                    location,
+                    (
+                        source,
+                        UploadPin {
+                            _pin: Some(CachePin(pins)),
+                            _charge: None,
+                            size,
+                            compressed: false,
+                            remote: false,
+                            staging_storage_id: None,
+                            staging_object_key: location.to_string(),
+                        },
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn remove_raw_checkpoint(&self, location: Uuid) -> Result<()> {
+        let _write = self.cache_writes.lock().await;
+        let path = CacheFile::Raw.path(&self.disk.root, location);
+        let partial = path.with_extension("partial");
+        let metadata = match tokio::fs::symlink_metadata(&partial).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let published = self.fifo.lock().await.entries.contains_key(&location);
+        if !published {
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        tokio::fs::remove_file(&partial).await?;
+        if !published {
+            self.disk.release(Area::Cache, metadata.len());
+        }
+        Ok(())
+    }
+
     pub(crate) async fn reconcile_raw_uploads(&self) -> Result<()> {
         let mut after = Id::default();
         let mut retained = std::collections::HashSet::new();
@@ -275,14 +417,21 @@ impl Storage {
             .map(|(id, (source, _))| (*id, *source))
             .collect();
         for (location, source) in unregistered {
-            if self
-                .raw_store
-                .current(source)
-                .await?
-                .is_some_and(|s| s.state == "writing")
+            let current = self.raw_store.current(source).await?;
+            let writing = current
+                .as_ref()
+                .is_some_and(|source| source.state == "writing");
+            if writing
                 || self.raw_store.has_upload(source).await?
+                || self.raw_store.cached_checkpoint(location).await?.is_some()
             {
                 retained.insert(location);
+            }
+            if !writing
+                && current.is_none_or(|source| !source.pending_upload)
+                && let Some((_, pin)) = self.raw_upload_pins.lock().unwrap().get_mut(&location)
+            {
+                pin._charge = None;
             }
         }
         self.raw_upload_pins
@@ -300,7 +449,15 @@ impl Storage {
                 .await?
                 .is_none_or(|source| !source.pending_upload)
         {
-            self.raw_upload_pins.lock().unwrap().remove(&location);
+            let checkpoint = self.raw_store.cached_checkpoint(location).await?.is_some();
+            let mut pins = self.raw_upload_pins.lock().unwrap();
+            if checkpoint {
+                if let Some((_, pin)) = pins.get_mut(&location) {
+                    pin._charge = None;
+                }
+            } else {
+                pins.remove(&location);
+            }
         }
         Ok(())
     }

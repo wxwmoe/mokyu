@@ -150,6 +150,8 @@ pub(crate) trait RawStore: Send + Sync {
     async fn reuse_upload(&self, work: &RawUpload, hash: &[u8], streams: &[Id]) -> Result<bool>;
     async fn complete_upload(&self, work: &RawUpload, hash: Option<&[u8]>) -> Result<()>;
     async fn current(&self, source: Id) -> Result<Option<RawSource>>;
+    async fn cached_checkpoint(&self, location: Uuid) -> Result<Option<Id>>;
+    async fn cached_checkpoints(&self, after: Uuid) -> Result<Vec<(Uuid, Id)>>;
     async fn has_upload(&self, source: Id) -> Result<bool>;
     async fn upload_status(&self) -> Result<serde_json::Value>;
     async fn uploads_before(&self, before: chrono::DateTime<chrono::Utc>) -> Result<bool>;

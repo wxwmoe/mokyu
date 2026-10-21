@@ -79,6 +79,7 @@ UUID、时间、整数分别使用各数据库既有原生类型。原始来源�
 | 表 | 关键字段 | 用途 |
 | --- | --- | --- |
 | `uploads`、`parts`、`web_uploads` | 上传状态、`write_token`、清单、校验和及暂存 storage/object key | S3 multipart 和 Web 上传的幂等、分片及共享暂存 |
+| `multipart_files` | 文件 UUID、`upload_id`、`storage_id`、可空原生 `source_id`、open/sealed/deleting 状态、`reclaim_pending` | 单容器 raw 分片的追加文件和组装检查点；fragments 记录文件 UUID 与偏移。检查点位于本地后端或 S3 的节点写缓存，分片仍引用时不可回收 |
 | `pending_uploads` | `chunk_id`、`stream_id`、`staged_size`、`source_pack_id`、重试和 lease 字段 | 尚未发布的独立来源；群集暂存对象位于 `uploads` runtime 设置选择的 storage 的 `__mokyu/multipart/` 前缀 |
 | `staging_objects` | `storage_id`、`object_key`、`bytes`、`created_at` | 群集共享暂存的数据库字节账本 |
 | `quota_scopes` | `scope`、`scope_id`、用量、`logical_bytes_limit`、`inflight_bytes_limit`、`bucket_count_limit`、`cached_bytes` | project/bucket 配额；NULL 表示不限，0 表示禁止新增 |

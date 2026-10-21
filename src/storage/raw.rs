@@ -536,6 +536,7 @@ impl Storage {
         let target = self.store_backend(source.storage_id)?;
         self.verify_raw_target(&target).await?;
         if !target.is_local {
+            self.remove_raw_checkpoint(source.location_id).await?;
             let _permit = target.controls.acquire().await?;
             let key = remote_path(source.location_id);
             if let Some(upload) = self.raw_store.upload_id(source.id).await? {
@@ -675,6 +676,9 @@ pub(crate) enum RawWriter<'a> {
 }
 
 impl RawWriter<'_> {
+    pub fn can_assemble(&self) -> bool {
+        matches!(self, Self::Local(_) | Self::Pending(_))
+    }
     pub async fn prepare_local(
         &mut self,
         ranges: Vec<super::assembly::Range>,
@@ -682,6 +686,9 @@ impl RawWriter<'_> {
         upload: Uuid,
         source: Id,
     ) -> Result<Option<super::assembly::Prepared>> {
+        if let Self::Pending(writer) = self {
+            return writer.prepare(ranges, app.multipart.clone(), upload).await;
+        }
         let Self::Local(writer) = self else {
             return Ok(None);
         };

@@ -663,7 +663,10 @@ impl App {
         } else {
             Vec::with_capacity(MAX)
         };
-        let mut prepared = if raw_revision.is_some() && self.storage.is_local(storage)? {
+        let mut prepared = if raw_writer
+            .as_ref()
+            .is_some_and(|(_, writer)| writer.can_assemble())
+        {
             if let Some(ranges) = self.local_part_ranges(parts).await? {
                 let (source, writer) = raw_writer.as_mut().unwrap();
                 writer.prepare_local(ranges, self, u.id, *source).await?

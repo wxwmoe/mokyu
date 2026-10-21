@@ -129,7 +129,6 @@ impl App {
     pub(crate) async fn raw_tail(
         &self,
         stream: Id,
-        storage: Uuid,
         upload: Uuid,
         offset: i64,
         data: &[u8],
@@ -137,7 +136,7 @@ impl App {
         if data.is_empty() {
             return Ok(());
         }
-        if self.role != "single" || !self.storage.is_local(storage)? {
+        if self.role != "single" {
             return self.tail(stream, offset, data).await;
         }
         let lock = self.operation_lock(upload);

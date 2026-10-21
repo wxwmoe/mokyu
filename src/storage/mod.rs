@@ -460,6 +460,7 @@ impl Storage {
         };
         s.restore_upload_pins().await?;
         s.restore_raw_uploads().await?;
+        s.restore_raw_checkpoints().await?;
         s.scan().await?;
         Ok(s)
     }
@@ -1079,11 +1080,13 @@ impl Storage {
     ) -> Result<std::path::PathBuf> {
         if let Some(source) = source {
             let backend = self.store_backend(storage.context("multipart storage missing")?)?;
-            let root = backend
-                .raw_root
-                .as_ref()
-                .context("multipart checkpoint requires local storage")?;
-            return Ok(root.join(chunk_name(source)).with_extension("partial"));
+            return Ok(if let Some(root) = &backend.raw_root {
+                root.join(chunk_name(source)).with_extension("partial")
+            } else {
+                CacheFile::Raw
+                    .path(&self.disk.root, source)
+                    .with_extension("partial")
+            });
         }
         Ok(self.disk.fragment_path(file))
     }
@@ -1093,6 +1096,9 @@ impl Storage {
     ) -> Result<()> {
         if file.source_id.is_none() {
             return self.disk.remove_fragment(file.id).await;
+        }
+        if !self.is_local(file.storage_id)? {
+            return self.remove_raw_checkpoint(file.id).await;
         }
         let path = self.multipart_path(
             file.id,
@@ -1338,6 +1344,12 @@ impl Storage {
                         parse_cache_name(&name)
                             .map(|(id, compressed)| (id, CacheFile::Chunk(compressed)))
                     };
+                    if directory == "raw"
+                        && let Some(id) = name.strip_suffix(".partial").and_then(parse_chunk_name)
+                        && self.raw_store.cached_checkpoint(id).await?.is_some()
+                    {
+                        continue;
+                    }
                     let mut fifo = self.fifo.lock().await;
                     if cached.is_some_and(|(id, format)| {
                         format == CacheFile::Raw
@@ -1676,10 +1688,22 @@ impl Storage {
         );
     }
     async fn reserve_cache(&self, size: u64, policy: CachePolicy) -> Result<Option<Reservation>> {
+        self.reserve_cache_space(size, policy, false).await
+    }
+    async fn reserve_cache_space(
+        &self,
+        size: u64,
+        policy: CachePolicy,
+        existing: bool,
+    ) -> Result<Option<Reservation>> {
         let mut fifo = self.fifo.lock().await;
         loop {
             if fifo.entries.len() < policy.max_entries
-                && let Ok(ticket) = self.disk.reserve(Area::Cache, size)
+                && let Ok(ticket) = if existing {
+                    self.disk.reserve_existing(Area::Cache, size)
+                } else {
+                    self.disk.reserve(Area::Cache, size)
+                }
             {
                 return Ok(Some(ticket));
             }

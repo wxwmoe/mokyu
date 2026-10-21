@@ -12,6 +12,7 @@ pub(super) struct File {
     bytes: u64,
     pending: Option<Reservation>,
     published: bool,
+    retained: bool,
     linked: Option<PathBuf>,
 }
 
@@ -36,8 +37,69 @@ impl File {
             bytes: 0,
             pending: None,
             published: false,
+            retained: false,
             linked: None,
         })
+    }
+
+    pub async fn assemble(
+        mut self,
+        storage: Arc<Storage>,
+        ranges: Vec<super::assembly::Range>,
+        model: Arc<dyn crate::model::multipart::MultipartStore>,
+        upload: Uuid,
+        source: crate::model::Id,
+        location: Uuid,
+    ) -> Result<(Self, super::assembly::Prepared)> {
+        // Complete checkpoints and ownership accounting even if the request disappears.
+        tokio::spawn(async move {
+            let size = ranges
+                .iter()
+                .try_fold(0u64, |total, range| total.checked_add(range.length as u64))
+                .ok_or_else(|| anyhow::anyhow!("assembly size overflow"))?;
+            ensure!(
+                self.bytes == 0 && self.policy.capacity.is_none_or(|limit| size <= limit),
+                s3s::s3_error!(SlowDown, "raw request workspace is full")
+            );
+            let reservation = {
+                let _write = storage.cache_writes.lock().await;
+                storage
+                    .reserve_cache_space(size, self.policy, true)
+                    .await?
+                    .ok_or_else(|| s3s::s3_error!(SlowDown, "raw request workspace is full"))?
+            };
+            reservation.commit();
+            self.bytes = size;
+            let result = super::assembly::prepare(
+                &storage,
+                &self.path,
+                ranges,
+                model.as_ref(),
+                upload,
+                source,
+                storage.disk.floor,
+            )
+            .await;
+            self.retained = match &result {
+                Ok((_, _, retained)) => *retained,
+                Err(_) => storage
+                    .raw_store
+                    .cached_checkpoint(location)
+                    .await
+                    .map_or(true, |source| source.is_some()),
+            };
+            if let Ok(metadata) = tokio::fs::metadata(&self.path).await {
+                let actual = metadata.len();
+                storage
+                    .disk
+                    .release(Area::Cache, size.saturating_sub(actual));
+                self.bytes = actual;
+            }
+            let (file, prepared, _) = result?;
+            self.file = Some(file);
+            Ok::<_, anyhow::Error>((self, prepared))
+        })
+        .await?
     }
 
     pub async fn append(&mut self, storage: &Storage, data: &[u8]) -> Result<()> {
@@ -103,10 +165,14 @@ impl File {
         let file = self.file.as_mut().unwrap();
         file.flush().await?;
         file.sync_all().await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("raw-file-durable").await;
         let destination = CacheFile::Raw.path(&storage.disk.root, id);
         tokio::fs::hard_link(&self.path, &destination).await?;
         self.linked = Some(destination.clone());
-        tokio::fs::remove_file(&self.path).await?;
+        if !self.retained {
+            tokio::fs::remove_file(&self.path).await?;
+        }
         self.path = destination;
         self.linked = None;
         tokio::fs::File::open(self.path.parent().unwrap())
@@ -117,6 +183,8 @@ impl File {
             .await?
             .sync_all()
             .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("raw-file-published").await;
         let mut fifo = storage.fifo.lock().await;
         fifo.insert(id, self.bytes, CacheFile::Raw);
         let pins = fifo.entries[&id].pins.clone();
@@ -173,7 +241,7 @@ mod tests {
 
 impl Drop for File {
     fn drop(&mut self) {
-        if self.published {
+        if self.published || self.retained {
             return;
         }
         let file = self.file.take();

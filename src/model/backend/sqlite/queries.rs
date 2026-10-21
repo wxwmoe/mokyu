@@ -7972,6 +7972,12 @@ impl RawStore for Backend {
         transactions::abandon_raw_upload(&self.write, work).await
     }
 
+    async fn cached_checkpoint(&self, location: Uuid) -> Result<Option<Id>> {
+        Ok(sqlx::query_scalar("SELECT source_id FROM multipart_files m WHERE m.id=? AND source_id IS NOT NULL AND m.state<>'deleting' AND EXISTS(SELECT 1 FROM fragments WHERE file_id=m.id)").bind(location).fetch_optional(&self.read).await?)
+    }
+    async fn cached_checkpoints(&self, after: Uuid) -> Result<Vec<(Uuid, Id)>> {
+        Ok(sqlx::query_as("SELECT m.id,m.source_id FROM multipart_files m JOIN storages s ON s.id=m.storage_id WHERE m.id>? AND s.type='s3' AND m.source_id IS NOT NULL AND m.state<>'deleting' AND EXISTS(SELECT 1 FROM fragments WHERE file_id=m.id) ORDER BY m.id LIMIT 128").bind(after).fetch_all(&self.read).await?)
+    }
     async fn has_upload(&self, source: Id) -> Result<bool> {
         Ok(
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_uploads WHERE source_id=?)")
@@ -8241,11 +8247,11 @@ pub(super) fn current_multipart_file(upload: Uuid) -> Scalar<'static, Uuid> {
     .bind(upload)
 }
 pub(super) fn insert_multipart_file(id: Uuid, upload: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO multipart_files(id,upload_id,storage_id) SELECT ?,u.id,b.storage_id FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id WHERE u.id=? AND u.state='active' AND s.type='local'").bind(id).bind(upload)
+    sqlx::query("INSERT INTO multipart_files(id,upload_id,storage_id) SELECT ?,u.id,b.storage_id FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id WHERE u.id=? AND u.state='active' ").bind(id).bind(upload)
 }
 
 pub(super) fn insert_multipart_checkpoint(upload: Uuid, source: Id) -> Statement<'static> {
-    sqlx::query("INSERT INTO multipart_files(id,upload_id,storage_id,source_id,state) SELECT r.location_id,?,r.storage_id,r.id,'sealed' FROM raw_sources r WHERE r.id=? AND r.state='writing' AND r.medium='local' AND r.owner_stream IS NOT NULL ON CONFLICT(id) DO NOTHING").bind(upload).bind(source)
+    sqlx::query("INSERT INTO multipart_files(id,upload_id,storage_id,source_id,state) SELECT r.location_id,?,r.storage_id,r.id,'sealed' FROM raw_sources r WHERE r.id=? AND r.state='writing'  AND r.owner_stream IS NOT NULL ON CONFLICT(id) DO NOTHING").bind(upload).bind(source)
 }
 pub(super) fn remap_multipart_range<'a>(
     upload: Uuid,

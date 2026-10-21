@@ -316,7 +316,7 @@ impl App {
                 rest = &rest[take..];
                 if window.len() == MAX {
                     if raw_part {
-                        self.raw_tail(stream, storage, upload.unwrap().0, offset, &window)
+                        self.raw_tail(stream, upload.unwrap().0, offset, &window)
                             .await?;
                         offset += window.len() as i64;
                         window.clear();
@@ -350,7 +350,7 @@ impl App {
         } else if upload.is_some() {
             let prefix = seed.spans.iter().map(|s| s.2).sum::<usize>();
             if raw_part {
-                self.raw_tail(stream, storage, upload.unwrap().0, offset, &window)
+                self.raw_tail(stream, upload.unwrap().0, offset, &window)
                     .await?;
             } else {
                 self.tail(stream, offset, &window[prefix..]).await?;
