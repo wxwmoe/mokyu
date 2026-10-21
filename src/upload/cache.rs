@@ -18,6 +18,19 @@ use uuid::Uuid;
 
 tokio::task_local! { pub static FLUSH: bool; }
 pub static FALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub static REJECTIONS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn overflow(reject: bool) -> Result<()> {
+    if reject {
+        REJECTIONS.fetch_add(1, Ordering::Relaxed);
+        anyhow::bail!(s3s::s3_error!(
+            SlowDown,
+            "upload cache is full; retry later"
+        ));
+    }
+    FALLBACKS.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
 
 impl App {
     pub fn storage_writable(&self) -> Result<()> {
@@ -50,10 +63,10 @@ impl App {
             Ok(Some(pin)) => pin,
             other => {
                 if let Err(e) = other {
-                    tracing::warn!(error=%e,"upload cache unavailable; switching request to synchronous upload");
+                    tracing::warn!(error=%e,"upload cache staging failed");
                 }
+                overflow(profile.upload_cache_overflow == "reject")?;
                 self.upload_cache.disable(stream).await?;
-                FALLBACKS.fetch_add(1, Ordering::Relaxed);
                 return Ok(false);
             }
         };
@@ -127,7 +140,7 @@ impl App {
         let (total, limit, used) = self.storage.disk.upload_capacity()?;
         let (pending, pins) = self.upload_cache.status().await?;
         Ok(
-            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"fallbacks":FALLBACKS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100,"raw_processing":self.raw.processing_status().await?,"raw_uploads":self.raw.upload_status().await?}),
+            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"fallbacks":FALLBACKS.load(Ordering::Relaxed),"rejections":REJECTIONS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100,"raw_processing":self.raw.processing_status().await?,"raw_uploads":self.raw.upload_status().await?}),
         )
     }
     pub async fn cache_flush_start(&self) -> Result<Value> {

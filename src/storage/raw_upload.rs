@@ -28,6 +28,7 @@ pub(crate) struct Writer {
     revision: i64,
     deduplicate: bool,
     background: bool,
+    reject_overflow: bool,
 }
 
 impl Writer {
@@ -40,10 +41,17 @@ impl Writer {
         let profile = storage.profile(target)?;
         let policy = storage.local_cache(Some(target))?;
         let file = super::raw_request::File::create(storage, location, policy).await?;
-        let charge = storage
+        let reject_overflow = profile.upload_cache_overflow == "reject";
+        let charge = match storage
             .disk
             .claim_upload_with_limit(0, target, policy.upload_capacity)
-            .ok();
+        {
+            Ok(charge) => Some(charge),
+            Err(_) => {
+                crate::upload::cache::overflow(reject_overflow)?;
+                None
+            }
+        };
         Ok(Self {
             storage: storage.clone(),
             source,
@@ -56,6 +64,7 @@ impl Writer {
             revision: profile.revision,
             deduplicate: profile.deduplication_enabled,
             background: profile.write_processing == "background",
+            reject_overflow,
         })
     }
 
@@ -65,11 +74,6 @@ impl Writer {
             .checked_add(data.len() as u64)
             .context("raw receive length overflow")?;
         super::raw::remote_size(size)?;
-        self.file
-            .as_mut()
-            .unwrap()
-            .append(&self.storage, data)
-            .await?;
         if let Some(charge) = self.charge.as_mut() {
             match self.storage.disk.claim_upload_with_limit(
                 data.len() as u64,
@@ -81,11 +85,16 @@ impl Writer {
                     added.size = 0;
                 }
                 Err(_) => {
+                    crate::upload::cache::overflow(self.reject_overflow)?;
                     self.charge = None;
-                    crate::upload::cache::FALLBACKS.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
+        self.file
+            .as_mut()
+            .unwrap()
+            .append(&self.storage, data)
+            .await?;
         self.size = size;
         Ok(())
     }
@@ -109,7 +118,7 @@ impl Writer {
                     background: self.background,
                 });
             }
-            crate::upload::cache::FALLBACKS.fetch_add(1, Ordering::Relaxed);
+            crate::upload::cache::overflow(self.reject_overflow)?;
         }
         self.file.as_mut().unwrap().rewind().await?;
         let mut file = super::raw::RawFile::Local(

@@ -4,6 +4,7 @@ import { SelectRoot, SelectTrigger, SelectValue, SelectPortal, SelectContent, Se
 import { Check, ChevronDown, ChevronUp } from 'lucide-vue-next'
 import { ComboboxRoot, ComboboxAnchor, ComboboxInput, ComboboxTrigger, ComboboxPortal, ComboboxContent, ComboboxViewport, ComboboxItem, ComboboxItemIndicator, ComboboxEmpty } from 'reka-ui'
 import { t } from '../../app/i18n'
+defineOptions({ inheritAttrs: false })
 const props = defineProps<{ options: { value: string; label: string; description?: string; disabled?: boolean }[]; label: string; disabled?: boolean; placeholder?: string; searchable?: boolean }>()
 const value = defineModel<string>({ required: true })
 // Reka reserves an empty item value for clearing the selection.
@@ -15,11 +16,11 @@ watch([selectedLabel, open], ([label, expanded]) => { if (!expanded) search.valu
 </script>
 <template>
   <ComboboxRoot v-if="searchable" v-model="value" v-model:open="open" :disabled="disabled" class="searchable-select">
-    <ComboboxAnchor class="combo-anchor"><ComboboxInput v-model="search" :aria-label="label" :display-value="display" :placeholder="placeholder || label" autocomplete="off" /><ComboboxTrigger class="icon-button" :aria-label="t('openChoices')"><ChevronDown :size="16" /></ComboboxTrigger></ComboboxAnchor>
+    <ComboboxAnchor class="combo-anchor"><ComboboxInput v-bind="$attrs" v-model="search" :aria-label="label" :display-value="display" :placeholder="placeholder || label" autocomplete="off" /><ComboboxTrigger class="icon-button" :aria-label="t('openChoices')"><ChevronDown :size="16" /></ComboboxTrigger></ComboboxAnchor>
     <ComboboxPortal><ComboboxContent class="popover combo-content" position="popper" :side-offset="6" :collision-padding="12"><ComboboxViewport class="menu-viewport"><ComboboxEmpty class="combo-empty">{{ t('noChoiceMatches') }}</ComboboxEmpty><ComboboxItem v-for="option in options" :key="option.value" :value="option.value" :text-value="option.label" :disabled="option.disabled" class="menu-item select-item"><span>{{ option.label }}<small v-if="option.description">{{ option.description }}</small></span><ComboboxItemIndicator><Check :size="16" /></ComboboxItemIndicator></ComboboxItem></ComboboxViewport></ComboboxContent></ComboboxPortal>
   </ComboboxRoot>
   <SelectRoot v-else v-model="selection" :disabled="disabled">
-    <SelectTrigger class="select-trigger" :aria-label="label"><SelectValue :placeholder="placeholder || label">{{ selectedLabel || placeholder || label }}</SelectValue><ChevronDown :size="16" aria-hidden="true" /></SelectTrigger>
+    <SelectTrigger v-bind="$attrs" class="select-trigger" :aria-label="label"><SelectValue :placeholder="placeholder || label">{{ selectedLabel || placeholder || label }}</SelectValue><ChevronDown :size="16" aria-hidden="true" /></SelectTrigger>
     <SelectPortal><SelectContent class="popover select-content" position="popper" :side-offset="6" :collision-padding="12">
       <SelectScrollUpButton class="select-scroll"><ChevronUp :size="16" /></SelectScrollUpButton>
       <SelectViewport class="menu-viewport"><SelectItem v-for="option in options" :key="option.value" :value="'option:' + option.value" :disabled="option.disabled" class="menu-item select-item">

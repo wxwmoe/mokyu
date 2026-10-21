@@ -116,7 +116,7 @@ profile 是类型化字段，不是任意 JSON。字段包括：
 - 连接超时、请求超时、重试次数、重试窗口、优先级老化、最低存储期限、未引用宽限和删除保留期；
 - `multipart_idle_timeout`：未完成上传的空闲期限，默认 `24h`，可设置 `7d`；只有实际写入进展续期，查询列表不会延长期限；
 - local 的 `min_free_space`：目标后端文件系统的最低可用空间，默认 `1GiB`；S3 不提供此项；
-- cache 开关、大小和条目由 S3 的 chunks/raw 磁盘读缓存共用。单容器 S3 raw 可启用 `upload_cache`，文件同步到节点缓存、对象映射提交后响应，随后去重及上传；群集 raw 仍等待最终 S3 确认。本地 storage 不使用磁盘读写缓存。实例待上传总额与后端局部限额同时生效，满额时回退同步处理；关闭缓存或缩小额度不会丢弃既有待上传唯一副本；
+- cache 开关、大小和条目由 S3 的 chunks/raw 磁盘读缓存共用。单容器 S3 raw 可启用 `upload_cache`，文件同步到节点缓存、对象映射提交后响应，随后去重及上传；群集 raw 仍等待最终 S3 确认。本地 storage 不使用磁盘读写缓存。实例待上传总额与后端局部限额同时生效。`upload_cache_overflow` 默认 `fallback`，缓存不可用时回退同步处理；设为 `reject` 则返回 `503 SlowDown`，请客户端稍后重试。关闭缓存时该选项不生效，关闭缓存或缩小额度不会丢弃既有待上传唯一副本；
 - compression 的 `never`、`always`、`sample`、等级、采样等级和最小节省阈值；
 - pack 开关、大小、刷新/复用/回收/合包/Range 参数；local storage 不创建新区块包，Web 会固定关闭该选项；
 - `pack_concurrency`、`integrity_concurrency`、`integrity_rps`、`integrity_bandwidth`、`integrity_batch_timeout`；

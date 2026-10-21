@@ -1138,3 +1138,5 @@ CREATE TABLE raw_uploads (
     last_error TEXT
 );
 CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);
+
+ALTER TABLE storage_profiles ADD COLUMN upload_cache_overflow TEXT NOT NULL DEFAULT 'fallback' CONSTRAINT storage_upload_overflow_check CHECK (upload_cache_overflow IN ('fallback','reject'));

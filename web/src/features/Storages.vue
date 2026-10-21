@@ -30,7 +30,7 @@ const keyOptions = computed(() => [{ value: '', label: t('storeNoEncryption') },
 const profileFields: ProfileField[] = [
   { key: 'connect_timeout', valueType: 'text' }, { key: 'request_timeout', valueType: 'text' }, { key: 'max_retries', valueType: 'number' }, { key: 'retry_timeout', valueType: 'text' }, { key: 'priority_aging', valueType: 'text' },
   { key: 'min_storage_duration', valueType: 'text' }, { key: 'unreferenced_grace', valueType: 'text' }, { key: 'deleted_chunk_retention', valueType: 'text' }, { key: 'upload_retention', valueType: 'text' }, { key: 'multipart_idle_timeout', valueType: 'text' }, { key: 'min_free_space', valueType: 'text' },
-  { key: 'cache_enabled', valueType: 'boolean' }, { key: 'cache_soft_limit', valueType: 'text' }, { key: 'cache_entries', valueType: 'number' }, { key: 'upload_cache', valueType: 'boolean' }, { key: 'upload_cache_size', valueType: 'text' },
+  { key: 'cache_enabled', valueType: 'boolean' }, { key: 'cache_soft_limit', valueType: 'text' }, { key: 'cache_entries', valueType: 'number' }, { key: 'upload_cache', valueType: 'boolean' }, { key: 'upload_cache_size', valueType: 'text' }, { key: 'upload_cache_overflow', valueType: 'text' },
   { key: 'compression_enabled', valueType: 'boolean' }, { key: 'compression_strategy', valueType: 'text' }, { key: 'compression_level', valueType: 'number' }, { key: 'compression_sample_level', valueType: 'number' }, { key: 'compression_min_savings_percent', valueType: 'number' }, { key: 'compression_min_savings_bytes', valueType: 'number' },
   { key: 'pack_enabled', valueType: 'boolean' }, { key: 'pack_max_size', valueType: 'text' }, { key: 'pack_upload_flush_timeout', valueType: 'text' }, { key: 'pack_interval', valueType: 'text' }, { key: 'pack_reuse_interval', valueType: 'text' }, { key: 'pack_reclaim_interval', valueType: 'text' }, { key: 'pack_repack_interval', valueType: 'text' }, { key: 'pack_repack_cooldown', valueType: 'text' }, { key: 'pack_reclaim_min_savings_bytes', valueType: 'text' },
   { key: 'pack_range_enabled', valueType: 'boolean' }, { key: 'pack_range_interval', valueType: 'text' }, { key: 'pack_range_window', valueType: 'text' }, { key: 'pack_range_min_downloads', valueType: 'number' }, { key: 'pack_range_min_savings_percent', valueType: 'number' }, { key: 'pack_range_min_savings_bytes', valueType: 'text' }, { key: 'pack_range_repack_after', valueType: 'text' }, { key: 'pack_range_repack_window', valueType: 'text' }, { key: 'pack_range_repack_retry_interval', valueType: 'text' },
@@ -39,9 +39,9 @@ const profileFields: ProfileField[] = [
 ]
 const profileGroups = [
   { title: 'storeGroupLifecycle', fields: profileFields.slice(0, 11) },
-  { title: 'storeGroupCache', fields: profileFields.slice(11, 22) },
-  { title: 'storeGroupPacking', fields: profileFields.slice(22, 40) },
-  { title: 'storeGroupWorker', fields: profileFields.slice(40) },
+  { title: 'storeGroupCache', fields: profileFields.slice(11, 23) },
+  { title: 'storeGroupPacking', fields: profileFields.slice(23, 41) },
+  { title: 'storeGroupWorker', fields: profileFields.slice(41) },
 ]
 const profileGroupHints: Record<string, string> = {
   storeGroupLifecycle: 'storeGroupLifecycleHint', storeGroupCache: 'storeGroupCacheHint',
@@ -56,7 +56,7 @@ function profilePreset(type: string): Record<ProfileKey, string | number | boole
     cdc_enabled: true, deduplication_enabled: false, write_processing: 'inline',
     connect_timeout: '5s', request_timeout: '30s', max_retries: 3, retry_timeout: '120s', priority_aging: '30s',
     min_storage_duration: '0s', unreferenced_grace: '48h', deleted_chunk_retention: '7d', upload_retention: '24h', multipart_idle_timeout: '24h', min_free_space: s3 ? null : '1GiB', cache_enabled: s3,
-    cache_soft_limit: null, cache_entries: null, upload_cache: s3, upload_cache_size: null, compression_enabled: s3,
+    cache_soft_limit: null, cache_entries: null, upload_cache: s3, upload_cache_size: null, upload_cache_overflow: 'fallback', compression_enabled: s3,
     compression_strategy: 'always', compression_level: 6, compression_sample_level: 3, compression_min_savings_percent: 2,
     compression_min_savings_bytes: 256, pack_enabled: s3, pack_max_size: '32MiB', pack_upload_flush_timeout: '60s', pack_interval: '1h',
     pack_reuse_interval: '5m', pack_reclaim_interval: '30m', pack_repack_interval: '24h', pack_repack_cooldown: '1h',
@@ -129,6 +129,7 @@ function setProfileBoolean(key: ProfileKey, value: boolean) {
 }
 function profileDisabled(key: string) {
   return (draft.type === 'local' && (key.startsWith('cache_') || key.startsWith('pack_') || key.startsWith('upload_cache')))
+    || (key === 'upload_cache_overflow' && !profileDraft.value?.upload_cache)
     || (profileDraft.value?.cdc_enabled === false && (key.startsWith('compression_') || key.startsWith('pack_')))
 }
 async function save() {
@@ -202,6 +203,7 @@ async function toggle(row: Storage) {
             <div class="profile-fields">
               <div v-for="field in group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local')" :key="field.key" :class="field.valueType === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
                 <template v-if="field.valueType === 'boolean'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="Boolean(profileDraft[field.key])" :aria-label="profileLabel(field.key)" :label="profileDisabled(field.key) ? t('storeOptionUnused') : t(Boolean(profileDraft[field.key]) ? 'enabled' : 'disabled')" :disabled="busy || profileDisabled(field.key)" @update:model-value="setProfileBoolean(field.key, $event)" /></template>
+                <label v-else-if="field.key === 'upload_cache_overflow'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.upload_cache_overflow)" :options="['fallback', 'reject'].map(value => ({ value, label: t('storeOverflow_' + value) }))" :label="profileLabel(field.key)" :disabled="busy || profileDisabled(field.key)" aria-describedby="storage-upload-overflow-hint" @update:model-value="profileDraft.upload_cache_overflow = $event" /><small id="storage-upload-overflow-hint" class="field-help">{{ t('storeOverflowHint') }}</small></label>
                 <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><input :aria-label="profileLabel(field.key)" :aria-describedby="field.key === 'multipart_idle_timeout' || field.key === 'min_free_space' ? 'storage-profile-' + field.key + '-hint' : undefined" :type="field.valueType === 'number' ? 'number' : 'text'" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"><small v-if="field.key === 'multipart_idle_timeout' || field.key === 'min_free_space'" :id="'storage-profile-' + field.key + '-hint'" class="field-help">{{ t('profileHelp_' + field.key) }}</small></label>
               </div>
             </div>

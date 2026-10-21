@@ -2861,6 +2861,7 @@ export interface components {
             storage_id: string;
             unreferenced_grace: string;
             upload_cache: boolean;
+            upload_cache_overflow?: string;
             upload_cache_size?: string | null;
             /** Format: int32 */
             upload_concurrency?: number | null;

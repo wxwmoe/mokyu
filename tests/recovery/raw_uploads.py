@@ -137,11 +137,47 @@ def main():
         assert row('fallback')['id'] == row('canonical')['id']
         assert set(fixture.keys()) == baseline
         fixture.read('fallback', data)
+        configure(upload_cache_overflow='reject')
+        stop(crash=True)
+        start()
+        assert fixture.cli('storage', 'profile', 'show', fixture.name)['upload_cache_overflow'] == 'reject'
+        try:
+            fixture.put('canonical', b'rejected raw value' * 8192)
+        except ClientError as error:
+            assert error.response['ResponseMetadata']['HTTPStatusCode'] == 503
+            assert error.response['Error']['Code'] == 'SlowDown'
+        else:
+            raise AssertionError('full raw upload cache accepted a rejected write')
+        fixture.read('canonical', data)
+        assert set(fixture.keys()) == baseline and queued() == 0
+        assert fixture.cli('cache', 'status')['rejections'] >= 1
+        configure(cdc_enabled=True, deduplication_enabled=False, write_processing='inline')
+        chunk_data = os.urandom(2 * 1024 * 1024)
+        try:
+            fixture.put('canonical', chunk_data)
+        except ClientError as error:
+            assert error.response['ResponseMetadata']['HTTPStatusCode'] == 503
+            assert error.response['Error']['Code'] == 'SlowDown'
+        else:
+            raise AssertionError('full chunk upload cache accepted a rejected write')
+        fixture.read('canonical', data)
+        profile = fixture.cli('storage', 'profile', 'show', fixture.name)
+        fixture.cli('storage', 'profile', 'set', fixture.name, '-',
+                    value={**profile, 'upload_cache_overflow': 'invalid'}, succeeds=False)
+        assert fixture.cli('storage', 'profile', 'show', fixture.name)['revision'] == profile['revision']
+        profile.pop('upload_cache_overflow')
+        fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+        assert fixture.cli('storage', 'profile', 'show', fixture.name)['upload_cache_overflow'] == 'fallback'
+        fixture.put('chunk-fallback', chunk_data)
+        fixture.read('chunk-fallback', chunk_data)
+        assert fixture.cli('cache', 'status')['fallbacks'] > 0
+        configure(cdc_enabled=False, deduplication_enabled=True)
         configure(upload_cache_size=None)
         rejected(lambda: fixture.client.put_object(Bucket=fixture.name, Key='canonical', Body=data,
                                                    ContentMD5=base64.b64encode(bytes(16)).decode()))
         fixture.read('canonical', data)
         print('PASS a full upload quota falls back to synchronous pre-upload deduplication and preserves checksum checks', flush=True)
+        print('PASS raw and chunks share persistent fallback/reject policies and reject failed writes with 503 SlowDown', flush=True)
 
         marker = fixture.arm('raw-cache-durable')
         with ThreadPoolExecutor(max_workers=1) as pool:

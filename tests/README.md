@@ -233,3 +233,5 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 `python -m tests.recovery.raw_receiving` owns an isolated initialized service and remote S3 fixture to verify pre-upload raw reuse, bounded request workspace, protocol failures, corruption and crash cleanup. Run it with the `source_quarantine` fixture variables and a disposable primary database.
 
 `python -m tests.recovery.raw_uploads` 接管已初始化但停止的隔离服务，沿用来源隔离 fixture 的配置、故障目录和 S3 后端变量；节点缓存至少 64MiB、上传缓存至少 32MiB。覆盖提前确认后的 GET/HEAD/Range、PUT/Copy/Multipart、关闭缓存与重启、配额回退、条件/校验失败、维护 flush 的时间上界、最终上传后崩溃和唯一缓存损坏。四种数据库分别运行。
+
+`upload-overflow.spec.ts` 使用独立 S3 fixture（`MOKYU_TEST_BACKEND`），自行创建本地后端，验证三语明暗表单、键盘选择、320–1440px、草稿取消/保存及本地禁用。`recovery.raw_uploads` 同时验证 chunks/raw 的 fallback/reject、503 SlowDown、失败写入不覆盖旧对象、重启保存策略、非法选项与缺省字段。

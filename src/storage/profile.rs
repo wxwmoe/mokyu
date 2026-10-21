@@ -31,6 +31,8 @@ pub(crate) struct StorageProfile {
     pub cache_entries: Option<i64>,
     pub upload_cache: bool,
     pub upload_cache_size: Option<String>,
+    #[serde(default = "upload_cache_overflow")]
+    pub upload_cache_overflow: String,
     pub compression_enabled: bool,
     pub compression_strategy: String,
     pub compression_level: i32,
@@ -77,6 +79,10 @@ fn cdc_enabled() -> bool {
 
 fn write_processing() -> String {
     "inline".into()
+}
+
+fn upload_cache_overflow() -> String {
+    "fallback".into()
 }
 
 impl StorageProfile {
@@ -194,6 +200,16 @@ impl StorageProfile {
 
 pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::Result<()> {
     use crate::config::{bytes, cache_bytes, seconds};
+    anyhow::ensure!(
+        matches!(
+            profile.upload_cache_overflow.as_str(),
+            "fallback" | "reject"
+        ),
+        s3s::s3_error!(
+            InvalidArgument,
+            "upload_cache_overflow must be fallback or reject"
+        )
+    );
     match (storage_type, profile.min_free_space.as_deref()) {
         ("local", Some(floor)) => {
             bytes(floor)?;

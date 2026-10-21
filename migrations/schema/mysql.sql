@@ -1157,3 +1157,5 @@ CREATE TABLE raw_uploads (
     CONSTRAINT raw_uploads_source FOREIGN KEY(source_id) REFERENCES raw_sources(id) ON DELETE CASCADE
 );
 CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);
+
+ALTER TABLE storage_profiles ADD COLUMN upload_cache_overflow VARCHAR(16) NOT NULL DEFAULT 'fallback', ADD CONSTRAINT storage_upload_overflow_check CHECK (upload_cache_overflow IN ('fallback','reject'));
