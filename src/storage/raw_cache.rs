@@ -203,7 +203,10 @@ impl Storage {
 mod tests {
     use super::*;
     use crate::storage::local::{Disk, Usage};
-    use std::{collections::HashSet, sync::Mutex};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Mutex,
+    };
     use tokio::sync::Semaphore;
 
     #[tokio::test]
@@ -219,6 +222,7 @@ mod tests {
             usage: Mutex::new(Usage {
                 used: [0; 3],
                 upload: 0,
+                upload_by_storage: HashMap::new(),
             }),
             io: Arc::new(Semaphore::new(1)),
             pending: Mutex::new(HashSet::new()),

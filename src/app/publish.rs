@@ -54,6 +54,7 @@ impl App {
         #[cfg(feature = "fault-injection")]
         crate::faults::point("object-before-seal").await;
         self.seal_uploads(id, true).await?;
+        self.wake_raw_uploads.notify_one();
         #[cfg(feature = "fault-injection")]
         crate::faults::point("object-published").await;
         Ok(())

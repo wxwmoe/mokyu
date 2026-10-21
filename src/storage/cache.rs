@@ -84,11 +84,19 @@ impl Drop for CacheWork {
 }
 pub(crate) struct UploadCharge {
     pub(crate) disk: Arc<Disk>,
+    pub(crate) storage: Uuid,
     pub(crate) size: u64,
 }
 impl Drop for UploadCharge {
     fn drop(&mut self) {
-        self.disk.usage.lock().unwrap().upload -= self.size;
+        let mut usage = self.disk.usage.lock().unwrap();
+        usage.upload -= self.size;
+        if let Some(used) = usage.upload_by_storage.get_mut(&self.storage) {
+            *used -= self.size;
+            if *used == 0 {
+                usage.upload_by_storage.remove(&self.storage);
+            }
+        }
     }
 }
 pub(crate) struct UploadPin {

@@ -162,10 +162,10 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     assert!(backend.pins(&[], None).await?.is_empty());
     let restored = backend.upload_pins(0.into()).await?;
     assert_eq!(restored.len(), 3);
-    for (index, (id, target, name, size)) in restored.iter().enumerate() {
+    for (index, (id, target, name, size, charged_storage)) in restored.iter().enumerate() {
         assert_eq!(
-            (*id, *target, name.as_ref(), *size),
-            (ids[index], Some(storage), Some(&names[index]), 32)
+            (*id, *target, name.as_ref(), *size, *charged_storage),
+            (ids[index], Some(storage), Some(&names[index]), 32, storage)
         );
         assert_eq!(
             backend.pending_source(*id).await?,

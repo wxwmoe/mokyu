@@ -1143,3 +1143,17 @@ CREATE TABLE IF NOT EXISTS key_replacements (
     result JSON,
     expires_at TIMESTAMP(6) NOT NULL, INDEX key_replacements_expiry(expires_at)
 ) ENGINE=InnoDB;
+
+ALTER TABLE raw_sources ADD COLUMN pending_upload BOOLEAN NOT NULL DEFAULT false;
+CREATE TABLE raw_uploads (
+    source_id BIGINT PRIMARY KEY,
+    token BINARY(16),
+    deduplicate BOOLEAN NOT NULL,
+    background BOOLEAN NOT NULL,
+    content_hash BINARY(32),
+    next_attempt_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    CONSTRAINT raw_uploads_source FOREIGN KEY(source_id) REFERENCES raw_sources(id) ON DELETE CASCADE
+);
+CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);

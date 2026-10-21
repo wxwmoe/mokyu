@@ -344,11 +344,9 @@ impl App {
         }
         if let Some((source, writer)) = raw {
             let digest = hex::decode(&etag)?;
-            if !writer.reuse(stream, &digest).await? {
-                let hash = writer.finish(received as u64).await?;
-                self.raw.finish(stream, source, received, &digest).await?;
-                self.deduplicate_raw(stream, storage, source, hash).await?;
-            }
+            let written = writer.finish(stream, received as u64, &digest).await?;
+            self.finish_raw_received(stream, source, storage, received, &digest, written)
+                .await?;
         } else if upload.is_some() {
             let prefix = seed.spans.iter().map(|s| s.2).sum::<usize>();
             if raw_part {

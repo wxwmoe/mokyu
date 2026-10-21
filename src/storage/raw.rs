@@ -131,8 +131,80 @@ pub(crate) struct RawReader {
 }
 
 impl Storage {
+    pub(crate) async fn send_raw(
+        self: &Arc<Self>,
+        target: Uuid,
+        source: Id,
+        location: Uuid,
+        file: &mut RawFile,
+        expected: u64,
+        digest: &[u8],
+        hash: Option<&[u8; 32]>,
+        token: Option<Uuid>,
+    ) -> Result<()> {
+        let mut writer = self
+            .raw_writer_for(
+                target,
+                source,
+                location,
+                Some(expected as i64),
+                false,
+                token,
+            )
+            .await?;
+        let mut buffer = vec![0; BUFFER];
+        let mut received = 0u64;
+        let mut md5 = Md5::new();
+        let mut content = hash.map(|_| blake3::Hasher::new());
+        loop {
+            let count = file.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            received += count as u64;
+            ensure!(received <= expected, IntegrityError::Length);
+            md5.update(&buffer[..count]);
+            if let Some(content) = &mut content {
+                content.update(&buffer[..count]);
+            }
+            writer.write(&buffer[..count]).await?;
+        }
+        ensure!(received == expected, IntegrityError::Length);
+        ensure!(md5.finalize().as_slice() == digest, IntegrityError::Hash);
+        if let Some(hash) = hash {
+            ensure!(
+                content.unwrap().finalize().as_bytes() == hash,
+                IntegrityError::Hash
+            );
+        }
+        Box::pin(writer.finish_received(Id::default(), expected, digest)).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn restart_raw_upload(&self, source: &RawSource, token: Uuid) -> Result<()> {
+        if let Some(upload) = self.raw_store.upload_id(source.id).await? {
+            let target = self.store_backend(source.storage_id)?;
+            let multipart = target
+                .multipart
+                .as_ref()
+                .context("S3 multipart backend is missing")?;
+            let _permit = target.controls.acquire().await?;
+            match multipart
+                .abort_multipart(&remote_path(source.location_id), &upload)
+                .await
+            {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+            self.raw_store
+                .set_pending_upload(source.id, token, None)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn raw_replay_writer(
-        &self,
+        self: &Arc<Self>,
         storage: Uuid,
         source: Id,
         location: Uuid,
@@ -181,18 +253,38 @@ impl Storage {
     }
 
     pub(crate) async fn raw_writer(
-        &self,
+        self: &Arc<Self>,
         storage: Uuid,
         source: Id,
         location: Uuid,
         declared: Option<i64>,
     ) -> Result<RawWriter<'_>> {
+        self.raw_writer_for(storage, source, location, declared, true, None)
+            .await
+    }
+
+    async fn raw_writer_for(
+        self: &Arc<Self>,
+        storage: Uuid,
+        source: Id,
+        location: Uuid,
+        declared: Option<i64>,
+        cache: bool,
+        upload_token: Option<Uuid>,
+    ) -> Result<RawWriter<'_>> {
         let target = self.store_backend(storage)?;
         self.verify_raw_target(&target).await?;
+        if cache && !self.cluster_mode && !target.is_local && target.profile.upload_cache {
+            remote_size(declared.unwrap_or(0).max(0) as u64)?;
+            return Ok(RawWriter::Pending(
+                super::raw_upload::Writer::new(self, storage, source, location).await?,
+            ));
+        }
         let permit = target.writes.acquire().await?;
         let global = self.writes.acquire().await?;
-        let hash = (target.deduplication_enabled && target.profile.write_processing == "inline")
-            .then(blake3::Hasher::new);
+        let hash =
+            (cache && target.deduplication_enabled && target.profile.write_processing == "inline")
+                .then(blake3::Hasher::new);
         if !target.is_local {
             remote_size(declared.unwrap_or(0).max(0) as u64)?;
             return Ok(RawWriter::Remote(RemoteWriter {
@@ -202,6 +294,7 @@ impl Storage {
                 key: remote_path(location),
                 location,
                 upload: None,
+                upload_token,
                 parts: Vec::new(),
                 buffer: Vec::new(),
                 size: 0,
@@ -276,6 +369,9 @@ impl Storage {
         verify: bool,
     ) -> Result<RawReader> {
         source.validate()?;
+        if source.pending_upload {
+            return self.raw_reader_inner(source, verify).await;
+        }
         let target = self.store_backend(source.storage_id)?;
         let policy = self.local_cache(Some(source.storage_id))?;
         if target.is_local
@@ -349,6 +445,35 @@ impl Storage {
             let _gate = self.source_gate.read().await;
             self.physical_pin(source.location_id)
         };
+        if source.pending_upload {
+            ensure!(
+                !self.cluster_mode,
+                "local raw staging is unavailable in cluster mode"
+            );
+            match self.pending_raw(source, verify).await {
+                Ok(file) => {
+                    return Ok(RawReader {
+                        file,
+                        _pin: pin,
+                        _permit: None,
+                        _global: None,
+                    });
+                }
+                Err(error) => {
+                    let current = self.raw_store.current(source.id).await?;
+                    if let Some(current) = current.filter(|r| {
+                        !r.pending_upload
+                            && r.location_id == source.location_id
+                            && r.storage_id == source.storage_id
+                            && r.size == source.size
+                            && r.digest == source.digest
+                    }) {
+                        return Box::pin(self.raw_reader_inner(&current, verify)).await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
         let target = self.store_backend(source.storage_id)?;
         self.verify_raw_target(&target).await?;
         let global = self.reads.acquire().await?;
@@ -505,7 +630,7 @@ const PART_SIZE: usize = 5 * 1024 * 1024;
 const MAX_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_REMOTE_SIZE: u64 = MAX_PART_SIZE * 10000;
 
-fn remote_size(size: u64) -> Result<()> {
+pub(super) fn remote_size(size: u64) -> Result<()> {
     ensure!(
         size <= MAX_REMOTE_SIZE,
         s3s::s3_error!(EntityTooLarge, "raw object exceeds S3 multipart limits")
@@ -544,6 +669,7 @@ fn remote_path(id: Uuid) -> ObjectPath {
 
 pub(crate) enum RawWriter<'a> {
     Local(LocalWriter<'a>),
+    Pending(super::raw_upload::Writer),
     Remote(RemoteWriter<'a>),
     Replay(ReplayWriter<'a>),
 }
@@ -595,6 +721,7 @@ pub(crate) struct RemoteWriter<'a> {
     key: ObjectPath,
     location: Uuid,
     upload: Option<String>,
+    upload_token: Option<Uuid>,
     parts: Vec<object_store::multipart::PartId>,
     buffer: Vec<u8>,
     size: u64,
@@ -614,12 +741,18 @@ impl RemoteWriter<'_> {
             .context("S3 multipart backend is missing")?;
         if self.upload.is_none() {
             let upload = backend.create_multipart(&self.key).await?;
-            if let Err(error) = self
-                .storage
-                .raw_store
-                .set_upload(self.source, &upload)
-                .await
-            {
+            let registered = if let Some(token) = self.upload_token {
+                self.storage
+                    .raw_store
+                    .set_pending_upload(self.source, token, Some(&upload))
+                    .await
+            } else {
+                self.storage
+                    .raw_store
+                    .set_upload(self.source, &upload)
+                    .await
+            };
+            if let Err(error) = registered {
                 let _ = backend.abort_multipart(&self.key, &upload).await;
                 return Err(error);
             }
@@ -658,7 +791,7 @@ impl RawWriter<'_> {
         let writer = match self {
             Self::Remote(writer) => writer,
             Self::Replay(replay) => &replay.writer,
-            Self::Local(_) => return Ok(false),
+            Self::Local(_) | Self::Pending(_) => return Ok(false),
         };
         let Some(hash) = &writer.hash else {
             return Ok(false);
@@ -691,6 +824,7 @@ impl RawWriter<'_> {
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
         match self {
             Self::Local(writer) => writer.write(data).await,
+            Self::Pending(writer) => writer.write(data).await,
             Self::Replay(replay) => {
                 replay.writer.size = replay
                     .writer
@@ -758,9 +892,28 @@ impl RawWriter<'_> {
             }
         }
     }
-    pub async fn finish(self, expected: u64) -> Result<Option<[u8; 32]>> {
+    pub async fn finish(
+        self,
+        stream: Id,
+        expected: u64,
+        digest: &[u8],
+    ) -> Result<super::raw_upload::Written> {
+        if self.reuse(stream, digest).await? {
+            return Ok(super::raw_upload::Written::Reused);
+        }
+        self.finish_received(stream, expected, digest).await
+    }
+    async fn finish_received(
+        self,
+        stream: Id,
+        expected: u64,
+        digest: &[u8],
+    ) -> Result<super::raw_upload::Written> {
         match self {
-            Self::Local(writer) => writer.finish(expected).await,
+            Self::Local(writer) => Ok(super::raw_upload::Written::Final(
+                writer.finish(expected).await?,
+            )),
+            Self::Pending(writer) => writer.finish(stream, expected, digest).await,
             Self::Replay(_) => anyhow::bail!("raw upload requires its replay source"),
             Self::Remote(mut writer) => {
                 ensure!(writer.size == expected, "raw receive length mismatch");
@@ -819,7 +972,11 @@ impl RawWriter<'_> {
                             &writer.key,
                             Bytes::from(writer.buffer).into(),
                             PutOptions {
-                                mode: PutMode::Create,
+                                mode: if writer.upload_token.is_some() {
+                                    PutMode::Overwrite
+                                } else {
+                                    PutMode::Create
+                                },
                                 ..Default::default()
                             },
                         )
@@ -832,20 +989,27 @@ impl RawWriter<'_> {
                 }
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("raw-file-published").await;
-                Ok(writer.hash.as_ref().map(|hash| *hash.finalize().as_bytes()))
+                Ok(super::raw_upload::Written::Final(
+                    writer.hash.as_ref().map(|hash| *hash.finalize().as_bytes()),
+                ))
             }
         }
     }
 
     pub async fn finish_replay<'a>(
         self,
+        stream: Id,
         expected: u64,
+        digest: &[u8],
         mut input: impl FnMut(
             std::ops::Range<u64>,
         ) -> futures_util::stream::BoxStream<'a, Result<Bytes>>,
-    ) -> Result<Option<[u8; 32]>> {
+    ) -> Result<super::raw_upload::Written> {
+        if self.reuse(stream, digest).await? {
+            return Ok(super::raw_upload::Written::Reused);
+        }
         let Self::Replay(mut replay) = self else {
-            return self.finish(expected).await;
+            return self.finish_received(stream, expected, digest).await;
         };
         ensure!(replay.writer.size == expected, "raw replay length mismatch");
         #[cfg(feature = "fault-injection")]
@@ -888,7 +1052,9 @@ impl RawWriter<'_> {
             crate::faults::point("raw-part-uploaded").await;
         }
         ensure!(offset == expected, "raw replay is incomplete");
-        Self::Remote(replay.writer).finish(expected).await
+        Self::Remote(replay.writer)
+            .finish_received(stream, expected, digest)
+            .await
     }
 }
 

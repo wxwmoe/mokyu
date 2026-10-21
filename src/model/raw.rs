@@ -26,6 +26,9 @@ pub(crate) struct RawSource {
     pub state: String,
     #[sqlx(rename = "raw_medium")]
     pub medium: String,
+    #[serde(default)]
+    #[sqlx(rename = "raw_pending")]
+    pub pending_upload: bool,
     #[sqlx(rename = "raw_revision")]
     pub revision: i64,
     #[sqlx(rename = "raw_quarantine")]
@@ -89,6 +92,16 @@ impl RawRange {
     }
 }
 
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub(crate) struct RawUpload {
+    #[sqlx(flatten)]
+    pub source: RawSource,
+    pub token: Option<Uuid>,
+    pub deduplicate: bool,
+    pub background: bool,
+    pub content_hash: Option<Vec<u8>>,
+}
+
 #[async_trait]
 pub(crate) trait RawStore: Send + Sync {
     async fn claim_processing(
@@ -114,6 +127,34 @@ pub(crate) trait RawStore: Send + Sync {
         node: Processor<'_>,
     ) -> Result<bool>;
     async fn processing_status(&self) -> Result<serde_json::Value>;
+    async fn stage_upload(
+        &self,
+        stream: Id,
+        source: Id,
+        size: i64,
+        digest: &[u8],
+        revision: i64,
+        deduplicate: bool,
+        background: bool,
+    ) -> Result<()>;
+    async fn uploads(&self, after: Id) -> Result<Vec<RawUpload>>;
+    async fn claim_upload(
+        &self,
+        token: Uuid,
+        before: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Option<RawUpload>>;
+    async fn retry_upload(&self, work: &RawUpload, error: Option<&str>) -> Result<()>;
+    async fn set_pending_upload(&self, source: Id, token: Uuid, upload: Option<&str>)
+    -> Result<()>;
+    async fn upload_streams(&self, source: Id) -> Result<Vec<Id>>;
+    async fn reuse_upload(&self, work: &RawUpload, hash: &[u8], streams: &[Id]) -> Result<bool>;
+    async fn complete_upload(&self, work: &RawUpload, hash: Option<&[u8]>) -> Result<()>;
+    async fn current(&self, source: Id) -> Result<Option<RawSource>>;
+    async fn has_upload(&self, source: Id) -> Result<bool>;
+    async fn upload_status(&self) -> Result<serde_json::Value>;
+    async fn uploads_before(&self, before: chrono::DateTime<chrono::Utc>) -> Result<bool>;
+    async fn abandon_upload(&self, work: &RawUpload) -> Result<bool>;
+
     async fn reuse(
         &self,
         stream: Id,
@@ -161,6 +202,7 @@ mod tests {
                 digest: Some(vec![0; 16]),
                 state: "ready".into(),
                 medium: "local".into(),
+                pending_upload: false,
                 revision: 1,
                 quarantine_code: None,
             },

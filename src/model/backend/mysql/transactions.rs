@@ -6939,12 +6939,19 @@ pub(super) async fn finish_raw(
     source: Id,
     size: i64,
     digest: &[u8],
+    cached: Option<(i64, bool, bool)>,
 ) -> Result<()> {
     ensure!(
         size >= 0 && digest.len() == 16,
         "invalid received raw source"
     );
     let mut tx = pool.begin().await?;
+    if cached.is_some() {
+        ensure!(
+            queries::repair_mode().fetch_one(&mut *tx).await?,
+            crate::model::Error::OperationAborted
+        );
+    }
     ensure!(
         queries::raw_lock_stream(stream)
             .fetch_optional(&mut *tx)
@@ -6963,6 +6970,22 @@ pub(super) async fn finish_raw(
     queries::raw_attach(stream, source, size)
         .execute(&mut *tx)
         .await?;
+    if let Some((revision, deduplicate, background)) = cached {
+        ensure!(
+            queries::raw_stage(source, revision)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
+        queries::raw_optional_delete(source)
+            .execute(&mut *tx)
+            .await?;
+        queries::raw_queue(source, deduplicate, background)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -7022,7 +7045,11 @@ async fn share_raw(
         if candidate.id == current.id {
             return Ok(false);
         }
-        if candidate.validate().is_ok() && candidate.medium == current.medium {
+        if candidate.validate().is_ok()
+            && !candidate.pending_upload
+            && !current.pending_upload
+            && candidate.medium == current.medium
+        {
             ensure!(
                 queries::raw_share(stream, current.id, candidate.id, current.size)
                     .execute(&mut *db)
@@ -7471,6 +7498,208 @@ pub(super) async fn reuse_raw(
             == 1,
         crate::model::Error::OperationAborted
     );
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub(super) async fn claim_raw_upload(
+    pool: &sqlx::MySqlPool,
+    token: Uuid,
+    before: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Option<crate::model::raw::RawUpload>> {
+    let mut tx = pool.begin().await?;
+    ensure!(
+        queries::raw_upload_mode().fetch_one(&mut *tx).await?,
+        crate::model::Error::OperationAborted
+    );
+    let Some(source) = queries::raw_upload_due(before)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        return Ok(None);
+    };
+    queries::raw_upload_claim(source, token)
+        .execute(&mut *tx)
+        .await?;
+    let work = queries::raw_upload_record(source)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(work))
+}
+
+pub(super) async fn reuse_raw_upload(
+    pool: &sqlx::MySqlPool,
+    work: &crate::model::raw::RawUpload,
+    hash: &[u8],
+    streams: &[Id],
+) -> Result<bool> {
+    ensure!(
+        hash.len() == 32 && streams.len() <= 128,
+        "invalid raw upload merge"
+    );
+    if queries::raw_reusable(
+        work.source.storage_id,
+        hash,
+        work.source.size,
+        work.source.digest.as_deref().unwrap_or_default(),
+    )
+    .fetch_optional(pool)
+    .await?
+    .is_none()
+    {
+        return Ok(false);
+    }
+    let mut tx = pool.begin().await?;
+
+    for stream in streams {
+        queries::raw_upload_stream_lock(*stream)
+            .fetch_optional(&mut *tx)
+            .await?;
+    }
+    let current = queries::raw_upload_record(work.source.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(
+        current.token == work.token && current.token.is_some() && current.source == work.source,
+        crate::model::Error::OperationAborted
+    );
+    current.source.validate()?;
+    let candidate = queries::raw_duplicate(work.source.storage_id, hash, work.source.size)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(candidate) = candidate.filter(|c| {
+        c.id != work.source.id
+            && c.validate().is_ok()
+            && !c.pending_upload
+            && c.medium == "shared_s3"
+            && c.digest == work.source.digest
+    }) else {
+        return Ok(false);
+    };
+    for stream in streams {
+        if queries::raw_upload_share(*stream, work.source.id, candidate.id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0
+        {
+            queries::raw_processing_changed(*stream)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    queries::raw_reference(candidate.id)
+        .execute(&mut *tx)
+        .await?;
+    queries::raw_touch_unreferenced(work.source.id)
+        .execute(&mut *tx)
+        .await?;
+    if !queries::raw_upload_references(work.source.id)
+        .fetch_one(&mut *tx)
+        .await?
+    {
+        queries::raw_upload_delete(work.source.id)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        queries::raw_upload_retry(work, None)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub(super) async fn complete_raw_upload(
+    pool: &sqlx::MySqlPool,
+    work: &crate::model::raw::RawUpload,
+    hash: Option<&[u8]>,
+) -> Result<()> {
+    ensure!(
+        hash.is_none_or(|h| h.len() == 32),
+        "invalid raw upload hash"
+    );
+    let mut tx = pool.begin().await?;
+
+    let current = queries::raw_upload_record(work.source.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(
+        current.token == work.token && current.token.is_some() && current.source == work.source,
+        crate::model::Error::OperationAborted
+    );
+    current.source.validate()?;
+    if current.source.pending_upload {
+        ensure!(
+            queries::raw_uploaded(work.source.id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
+    }
+    let mut duplicate = false;
+    if let Some(hash) = hash {
+        if let Some(candidate) =
+            queries::raw_duplicate(work.source.storage_id, hash, work.source.size)
+                .fetch_optional(&mut *tx)
+                .await?
+        {
+            duplicate = candidate.id != work.source.id
+                && candidate.validate().is_ok()
+                && !candidate.pending_upload
+                && candidate.medium == "shared_s3"
+                && candidate.digest == work.source.digest;
+            if !duplicate && candidate.id != work.source.id {
+                queries::raw_hash(candidate.id, None)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        if !duplicate {
+            queries::raw_hash(work.source.id, Some(hash))
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    if duplicate {
+        queries::raw_upload_hash(work.source.id, hash)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        queries::raw_upload_delete(work.source.id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn abandon_raw_upload(
+    pool: &sqlx::MySqlPool,
+    work: &crate::model::raw::RawUpload,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let current = queries::raw_upload_record(work.source.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(
+        current.token == work.token && current.token.is_some(),
+        crate::model::Error::OperationAborted
+    );
+    if queries::raw_upload_abandon(work.source.id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        == 0
+    {
+        return Ok(false);
+    }
+    queries::raw_upload_delete(work.source.id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(true)
 }

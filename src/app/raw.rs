@@ -11,6 +11,44 @@ use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 
 impl App {
+    pub(crate) async fn finish_raw_received(
+        &self,
+        stream: Id,
+        source: Id,
+        storage: Uuid,
+        size: i64,
+        digest: &[u8],
+        written: crate::storage::raw_upload::Written,
+    ) -> Result<()> {
+        use crate::storage::raw_upload::Written;
+        match written {
+            Written::Final(hash) => {
+                self.raw.finish(stream, source, size, digest).await?;
+                self.deduplicate_raw(stream, storage, source, hash).await?;
+            }
+            Written::Cached {
+                revision,
+                deduplicate,
+                background,
+            } => {
+                let _coord = self.coord.lock().await;
+                self.raw
+                    .stage_upload(
+                        stream,
+                        source,
+                        size,
+                        digest,
+                        revision,
+                        deduplicate,
+                        background,
+                    )
+                    .await?;
+            }
+            Written::Reused => {}
+        }
+        Ok(())
+    }
+
     pub(crate) async fn deduplicate_raw(
         &self,
         stream: Id,

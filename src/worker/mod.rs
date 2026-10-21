@@ -7,6 +7,7 @@ pub(crate) mod packing;
 pub(crate) mod quarantine;
 pub(crate) mod range;
 pub(crate) mod raw;
+pub(crate) mod raw_upload;
 pub(crate) mod rewrite;
 pub(crate) mod scheduler;
 pub(crate) mod task;

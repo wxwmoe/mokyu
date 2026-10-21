@@ -761,14 +761,13 @@ impl App {
         }
         if let Some((source, writer)) = raw_writer {
             let digest = hex::decode(payload_digest)?;
-            if !writer.reuse(id, &digest).await? {
-                let content_hash = writer
-                    .finish_replay(total as u64, |range| self.replay_payload(id, parts, range))
-                    .await?;
-                self.raw.finish(id, source, total, &digest).await?;
-                self.deduplicate_raw(id, storage, source, content_hash)
-                    .await?;
-            }
+            let written = writer
+                .finish_replay(id, total as u64, &digest, |range| {
+                    self.replay_payload(id, parts, range)
+                })
+                .await?;
+            self.finish_raw_received(id, source, storage, total, &digest, written)
+                .await?;
         }
         self.finish_stream(id, total, etag, sums.clone()).await?;
         let result = json!({"etag":etag,"checksums":sums});

@@ -11,6 +11,8 @@ pub(super) struct File {
     policy: CachePolicy,
     bytes: u64,
     pending: Option<Reservation>,
+    published: bool,
+    linked: Option<PathBuf>,
 }
 
 impl File {
@@ -33,6 +35,8 @@ impl File {
             policy,
             bytes: 0,
             pending: None,
+            published: false,
+            linked: None,
         })
     }
 
@@ -59,6 +63,74 @@ impl File {
         self.pending.take().unwrap().commit();
         self.bytes += size;
         Ok(())
+    }
+
+    pub async fn publish(
+        mut self,
+        storage: Arc<Storage>,
+        source: crate::model::Id,
+        id: Uuid,
+        charge: super::UploadCharge,
+    ) -> Result<(Self, bool)> {
+        // Finish publication and pin registration even when the request is cancelled.
+        tokio::spawn(async move {
+            let published = if let Some(pin) = self.publish_inner(&storage, id, charge).await? {
+                storage
+                    .raw_upload_pins
+                    .lock()
+                    .unwrap()
+                    .insert(id, (source, pin));
+                true
+            } else {
+                false
+            };
+            Ok::<_, anyhow::Error>((self, published))
+        })
+        .await?
+    }
+
+    async fn publish_inner(
+        &mut self,
+        storage: &Storage,
+        id: Uuid,
+        charge: super::UploadCharge,
+    ) -> Result<Option<super::UploadPin>> {
+        let _write = storage.cache_writes.lock().await;
+        let Some(reservation) = storage.reserve_cache(0, self.policy).await? else {
+            return Ok(None);
+        };
+        drop(reservation);
+        let file = self.file.as_mut().unwrap();
+        file.flush().await?;
+        file.sync_all().await?;
+        let destination = CacheFile::Raw.path(&storage.disk.root, id);
+        tokio::fs::hard_link(&self.path, &destination).await?;
+        self.linked = Some(destination.clone());
+        tokio::fs::remove_file(&self.path).await?;
+        self.path = destination;
+        self.linked = None;
+        tokio::fs::File::open(self.path.parent().unwrap())
+            .await?
+            .sync_all()
+            .await?;
+        tokio::fs::File::open(storage.disk.root.join("raw"))
+            .await?
+            .sync_all()
+            .await?;
+        let mut fifo = storage.fifo.lock().await;
+        fifo.insert(id, self.bytes, CacheFile::Raw);
+        let pins = fifo.entries[&id].pins.clone();
+        pins.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.published = true;
+        Ok(Some(super::UploadPin {
+            _pin: Some(super::CachePin(pins)),
+            _charge: Some(charge),
+            size: self.bytes,
+            compressed: false,
+            remote: false,
+            staging_storage_id: None,
+            staging_object_key: id.to_string(),
+        }))
     }
 
     pub async fn rewind(&mut self) -> Result<()> {
@@ -101,25 +173,36 @@ mod tests {
 
 impl Drop for File {
     fn drop(&mut self) {
+        if self.published {
+            return;
+        }
         let file = self.file.take();
         let pending = self.pending.take();
-        let path = self.path.clone();
+        let paths = std::iter::once(self.path.clone())
+            .chain(self.linked.take())
+            .collect::<Vec<_>>();
         let disk = self.disk.clone();
         let bytes = self.bytes;
         // Keep every written or in-flight byte charged until cancellation cleanup finishes.
         tokio::spawn(async move {
             drop(file);
-            match tokio::fs::remove_file(path).await {
-                Ok(()) => disk.release(Area::Cache, bytes),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    disk.release(Area::Cache, bytes)
-                }
-                Err(error) => {
-                    if let Some(pending) = pending {
-                        pending.commit();
+            let mut failed = false;
+            for path in paths {
+                match tokio::fs::remove_file(path).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        failed = true;
+                        tracing::warn!(%error,"raw request cleanup failed; retaining disk charge");
                     }
-                    tracing::warn!(%error, "raw request cleanup failed; retaining disk charge");
                 }
+            }
+            if failed {
+                if let Some(pending) = pending {
+                    pending.commit();
+                }
+            } else {
+                disk.release(Area::Cache, bytes);
             }
         });
     }

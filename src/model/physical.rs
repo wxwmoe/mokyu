@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-pub(crate) type StagedUpload = (Id, Option<Uuid>, Option<String>, i64);
+pub(crate) type StagedUpload = (Id, Option<Uuid>, Option<String>, i64, Uuid);
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "source", content = "metadata", rename_all = "snake_case")]

@@ -110,13 +110,13 @@ runtime section 使用 revision 乐观并发。冲突返回当前 revision；重
 profile 是类型化字段，不是任意 JSON。字段包括：
 
 - `deduplication_enabled` 默认 false，仅控制 raw 的整文件去重；chunks 固定启用区块去重。更改仅影响新写入；关闭不会拆开已有共享文件；
-- `write_processing` 默认 `inline`；raw 开启去重时可选 `background`，完整文件与对象映射可靠提交后响应，再由后台计算内容身份和共享来源。后台工作持久保存，重启继续，已有工作保持接收时的去重设置；当前 CDC 必须使用 `inline`；
+- `write_processing` 默认 `inline`；raw 开启去重时可选 `background`。不使用写缓存时，inline 先查重再上传最终来源，background 先可靠发布再计算共享身份；使用写缓存时，两者均在可靠暂存与对象映射提交后响应，inline 优先处理，background 使用维护队列配额。后台工作持久保存，重启继续，已有工作保持接收时的设置；当前 CDC 必须使用 `inline`；
 - `cdc_enabled` 默认 true；local 和 S3 均可关闭。关闭时必须清除 block key，同时禁用压缩、pack 和 pack Range；Web 在草稿中联动这些值，保存后生效，重新开启不会恢复旧 key。已有对象保持可读；
 
 - 连接超时、请求超时、重试次数、重试窗口、优先级老化、最低存储期限、未引用宽限和删除保留期；
 - `multipart_idle_timeout`：未完成上传的空闲期限，默认 `24h`，可设置 `7d`；只有实际写入进展续期，查询列表不会延长期限；
 - local 的 `min_free_space`：目标后端文件系统的最低可用空间，默认 `1GiB`；S3 不提供此项；
-- cache 开关、大小和条目由 S3 的 chunks/raw 磁盘读缓存共用；当前待上传缓存用于 chunks，raw 写入等待最终后端确认；
+- cache 开关、大小和条目由 S3 的 chunks/raw 磁盘读缓存共用。单容器 S3 raw 可启用 `upload_cache`，文件同步到节点缓存、对象映射提交后响应，随后去重及上传；群集 raw 仍等待最终 S3 确认。本地 storage 不使用磁盘读写缓存。实例待上传总额与后端局部限额同时生效，满额时回退同步处理；关闭缓存或缩小额度不会丢弃既有待上传唯一副本；
 - compression 的 `never`、`always`、`sample`、等级、采样等级和最小节省阈值；
 - pack 开关、大小、刷新/复用/回收/合包/Range 参数；local storage 不创建新区块包，Web 会固定关闭该选项；
 - `pack_concurrency`、`integrity_concurrency`、`integrity_rps`、`integrity_bandwidth`、`integrity_batch_timeout`；

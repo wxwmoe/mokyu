@@ -231,3 +231,5 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 - `python -m tests.recovery.raw_processing_cluster`：沿用 `raw_cluster` 的双 data/共享 S3 fixture，将两节点故障目录写入 `MOKYU_TEST_SOURCE_FAULT_DIRS`；验证共享读者保护、处理租约过期接手、停用节点拒绝提交、无租约领取恢复和迟到执行者不能重复切换。数据库保留两个 LISTEN 连接后，用一个查询连接和行锁等待验证续租不会停止事务推进。
 
 `python -m tests.recovery.raw_receiving` owns an isolated initialized service and remote S3 fixture to verify pre-upload raw reuse, bounded request workspace, protocol failures, corruption and crash cleanup. Run it with the `source_quarantine` fixture variables and a disposable primary database.
+
+`python -m tests.recovery.raw_uploads` 接管已初始化但停止的隔离服务，沿用来源隔离 fixture 的配置、故障目录和 S3 后端变量；节点缓存至少 64MiB、上传缓存至少 32MiB。覆盖提前确认后的 GET/HEAD/Range、PUT/Copy/Multipart、关闭缓存与重启、配额回退、条件/校验失败、维护 flush 的时间上界、最终上传后崩溃和唯一缓存损坏。四种数据库分别运行。

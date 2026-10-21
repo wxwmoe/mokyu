@@ -21,6 +21,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn upload_limits_preserve_shared_and_per_storage_budgets() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("mokyu-upload-budget-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root)?;
+        let disk = Arc::new(Disk {
+            root: root.clone(),
+            limits: [None, Some(8192), None],
+            floor: 0,
+            spaces: Mutex::default(),
+            upload_limit: Some(4096),
+            usage: Mutex::new(Usage {
+                used: [0; 3],
+                upload: 0,
+                upload_by_storage: HashMap::new(),
+            }),
+            io: Arc::new(Semaphore::new(1)),
+            pending: Mutex::default(),
+        });
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let a = disk.claim_upload_with_limit(1024, first, Some(1024))?;
+        assert!(disk.claim_upload_with_limit(1, first, Some(1024)).is_err());
+        let b = disk.claim_upload_with_limit(3072, second, Some(8192))?;
+        assert!(disk.claim_upload_with_limit(1, second, Some(8192)).is_err());
+        drop(a);
+        let a = disk.claim_upload_with_limit(1024, first, Some(1024))?;
+        drop((a, b));
+        assert_eq!(disk.usage.lock().unwrap().upload, 0);
+        assert!(disk.usage.lock().unwrap().upload_by_storage.is_empty());
+        let recovered = disk.restore_upload(first, 6144);
+        assert_eq!(disk.usage.lock().unwrap().upload, 6144);
+        assert!(disk.claim_upload_with_limit(1, second, None).is_err());
+        drop(recovered);
+        assert_eq!(disk.usage.lock().unwrap().upload, 0);
+        std::fs::remove_dir(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn storage_namespaces_cannot_alias_disposable_cache_files() -> Result<()> {
         let root = std::env::temp_dir().join(format!("mokyu-paths-{}", Uuid::new_v4()));
         std::fs::create_dir_all(root.join("raw"))?;
@@ -55,6 +93,7 @@ mod tests {
             usage: Mutex::new(Usage {
                 used: [0; 3],
                 upload: 0,
+                upload_by_storage: HashMap::new(),
             }),
             io: Arc::new(Semaphore::new(1)),
             pending: Mutex::default(),
@@ -101,6 +140,7 @@ pub async fn read_bounded(path: impl AsRef<std::path::Path>, max: usize) -> Resu
 pub(crate) struct Usage {
     pub(crate) used: [u64; 3],
     pub(crate) upload: u64,
+    pub(crate) upload_by_storage: HashMap<Uuid, u64>,
 }
 pub(crate) struct Disk {
     pub root: PathBuf,
@@ -286,23 +326,38 @@ impl Disk {
     pub(crate) fn claim_upload_with_limit(
         self: &Arc<Self>,
         size: u64,
+        storage: Uuid,
         configured_limit: Option<u64>,
     ) -> Result<UploadCharge> {
         let mut usage = self.usage.lock().unwrap();
         let total = self.cache_capacity(&usage)?;
-        let limit = configured_limit
-            .or(self.upload_limit)
-            .unwrap_or(total / 5)
-            .min(total);
+        let limit = self.upload_limit.unwrap_or(total / 5).min(total);
+        let local = usage.upload_by_storage.get(&storage).copied().unwrap_or(0);
+        ensure!(
+            configured_limit.is_none_or(|limit| local.saturating_add(size) <= limit),
+            "storage upload cache quota exhausted"
+        );
         ensure!(
             usage.upload.saturating_add(size) <= limit,
             "upload cache quota exhausted"
         );
         usage.upload += size;
+        *usage.upload_by_storage.entry(storage).or_default() += size;
         Ok(UploadCharge {
             disk: self.clone(),
             size,
+            storage,
         })
+    }
+    pub(crate) fn restore_upload(self: &Arc<Self>, storage: Uuid, size: u64) -> UploadCharge {
+        let mut usage = self.usage.lock().unwrap();
+        usage.upload += size;
+        *usage.upload_by_storage.entry(storage).or_default() += size;
+        UploadCharge {
+            disk: self.clone(),
+            storage,
+            size,
+        }
     }
     pub(crate) fn reserve(self: &Arc<Self>, area: Area, bytes: u64) -> Result<Reservation> {
         let mut usage = self.usage.lock().unwrap();

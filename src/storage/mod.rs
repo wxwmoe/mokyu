@@ -15,6 +15,7 @@ mod rate;
 pub(crate) mod raw;
 mod raw_cache;
 mod raw_request;
+pub(crate) mod raw_upload;
 pub(crate) mod resource_gate;
 mod s3;
 pub(crate) mod target;
@@ -96,6 +97,7 @@ pub struct Storage {
     fifo: tokio::sync::Mutex<Fifo>,
     cache_writes: tokio::sync::Mutex<()>,
     upload_pins: Mutex<HashMap<Uuid, UploadPin>>,
+    raw_upload_pins: Mutex<HashMap<Uuid, (crate::model::Id, UploadPin)>>,
     fills: Arc<Semaphore>,
     cache_fills: Arc<Mutex<HashSet<Uuid>>>,
     max_entries: usize,
@@ -312,6 +314,11 @@ impl Storage {
         for name in ["multipart", "chunks", "raw"] {
             tokio::fs::create_dir_all(c.instance.data_path.join(name)).await?;
         }
+        // The parent entries must survive before a cache file can be the only acknowledged copy.
+        tokio::fs::File::open(&c.instance.data_path)
+            .await?
+            .sync_all()
+            .await?;
         let disk = Arc::new(Disk {
             root: c.instance.data_path.clone(),
             limits: [
@@ -338,6 +345,7 @@ impl Storage {
             usage: Mutex::new(Usage {
                 used: [0; 3],
                 upload: 0,
+                upload_by_storage: HashMap::new(),
             }),
             io: Arc::new(Semaphore::new(budget.cpu_jobs)),
             pending: Mutex::new(HashSet::new()),
@@ -427,6 +435,7 @@ impl Storage {
             fifo: tokio::sync::Mutex::new(Fifo::default()),
             cache_writes: tokio::sync::Mutex::new(()),
             upload_pins: Mutex::new(HashMap::new()),
+            raw_upload_pins: Mutex::new(HashMap::new()),
             fills: Arc::new(Semaphore::new(budget.cpu_jobs)),
             cache_fills: Arc::new(Mutex::new(HashSet::new())),
             max_entries: c.instance.cache_entries.unwrap_or(budget.cache_entries),
@@ -450,6 +459,7 @@ impl Storage {
             diagnostics: Arc::default(),
         };
         s.restore_upload_pins().await?;
+        s.restore_raw_uploads().await?;
         s.scan().await?;
         Ok(s)
     }
@@ -866,12 +876,11 @@ impl Storage {
     async fn restore_upload_pins(&self) -> Result<()> {
         let mut after = Id::default();
         loop {
-            let rows: Vec<(Id, Option<Uuid>, Option<String>, i64)> =
-                self.physical.upload_pins(after).await?;
+            let rows = self.physical.upload_pins(after).await?;
             if rows.is_empty() {
                 break;
             }
-            for (id, staging_storage_id, object_key, expected) in rows {
+            for (id, staging_storage_id, object_key, expected, storage_id) in rows {
                 after = id;
                 let Some(object_key) = object_key else {
                     continue;
@@ -894,15 +903,11 @@ impl Storage {
                 let pin = fifo.entries[&key].pins.clone();
                 pin.fetch_add(1, Ordering::Relaxed);
                 self.disk.account_existing(Area::Cache, size);
-                self.disk.usage.lock().unwrap().upload += expected as u64;
                 self.upload_pins.lock().unwrap().insert(
                     key,
                     UploadPin {
                         _pin: Some(CachePin(pin)),
-                        _charge: Some(UploadCharge {
-                            disk: self.disk.clone(),
-                            size: expected as u64,
-                        }),
+                        _charge: Some(self.disk.restore_upload(storage_id, expected as u64)),
                         size: expected as u64,
                         compressed,
                         remote: false,
@@ -1144,6 +1149,7 @@ impl Storage {
     ) -> Result<Option<UploadPin>> {
         let policy = self.local_cache(c.storage_id)?;
         let id = cache::cache_id(c);
+        let storage_id = c.storage_id.context("cached chunk has no storage")?;
         if !self.cluster_mode && !policy.upload_cache {
             return Ok(None);
         }
@@ -1167,13 +1173,14 @@ impl Storage {
         tokio::spawn(async move {
             let _permit = permit;
             storage
-                .stage_upload_owned(id, data, compressed, policy)
+                .stage_upload_owned(storage_id, id, data, compressed, policy)
                 .await
         })
         .await?
     }
     async fn stage_upload_owned(
         &self,
+        storage_id: Uuid,
         id: Uuid,
         data: Bytes,
         compressed: bool,
@@ -1189,9 +1196,9 @@ impl Storage {
         {
             return Ok(None);
         }
-        let Ok(charge) = self
-            .disk
-            .claim_upload_with_limit(size, policy.upload_capacity)
+        let Ok(charge) =
+            self.disk
+                .claim_upload_with_limit(size, storage_id, policy.upload_capacity)
         else {
             return Ok(None);
         };
@@ -1332,6 +1339,12 @@ impl Storage {
                             .map(|(id, compressed)| (id, CacheFile::Chunk(compressed)))
                     };
                     let mut fifo = self.fifo.lock().await;
+                    if cached.is_some_and(|(id, format)| {
+                        format == CacheFile::Raw
+                            && self.raw_upload_pins.lock().unwrap().contains_key(&id)
+                    }) {
+                        continue;
+                    }
                     if cached.is_some_and(|(id, format)| {
                         self.upload_pins
                             .lock()
@@ -1863,7 +1876,7 @@ impl Storage {
         self.physical.register_encoding(c).await?;
         Ok(())
     }
-    fn physical_pin(&self, id: Uuid) -> CachePin {
+    pub(crate) fn physical_pin(&self, id: Uuid) -> CachePin {
         let mut pins = self.physical_pins.lock().unwrap();
         pins.retain(|_, p| p.strong_count() > 0);
         let counter = pins
