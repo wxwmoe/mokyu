@@ -49,6 +49,30 @@ async fn postgres_upload_preparation_is_atomic() -> Result<()> {
             .execute(&pool)
             .await?;
     }
+    sqlx::query("UPDATE pending_uploads SET encoding_policy=$1 WHERE chunk_id=$2")
+        .bind(json!({"compression":{"enabled":false}}))
+        .bind(ids[1])
+        .execute(&pool)
+        .await?;
+    let selected = super::queries::pending_upload_segment(ids[0], Some(stream), None)
+        .fetch_all(&pool)
+        .await?;
+    assert_eq!(
+        selected.iter().map(|r| r.0).collect::<Vec<_>>(),
+        vec![ids[0]]
+    );
+    let selected =
+        super::queries::pending_upload_mappings(ids[0], Some(stream), 0, Uuid::new_v4(), false)
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(
+        selected.iter().map(|r| r.chunk.id).collect::<Vec<_>>(),
+        vec![ids[0]]
+    );
+    sqlx::query("UPDATE pending_uploads SET encoding_policy=NULL WHERE chunk_id=$1")
+        .bind(ids[1])
+        .execute(&pool)
+        .await?;
     let first = Execution {
         id: Uuid::new_v4(),
         token: Uuid::new_v4(),

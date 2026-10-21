@@ -2406,4 +2406,5 @@ ALTER TABLE parts ADD COLUMN remote_error text;
 ALTER TABLE parts ADD COLUMN remote_cached boolean NOT NULL DEFAULT false;
 CREATE INDEX parts_remote_pending ON parts(remote_node_id, remote_retry_at) WHERE remote_node_id IS NOT NULL AND remote_etag IS NULL;
 
-UPDATE mokyu_meta SET schema_version=58 WHERE singleton;
+ALTER TABLE pending_uploads ADD COLUMN encoding_policy JSONB;
+UPDATE mokyu_meta SET schema_version=59 WHERE singleton;

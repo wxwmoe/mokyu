@@ -1,4 +1,4 @@
-"""Two real data nodes share UUID identities, encrypted staging and pack recovery."""
+"""Two real data nodes preserve UUIDs and nonces across local caches and final packs."""
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -29,18 +29,18 @@ def main():
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(put, enumerate(bodies)))
+    storage = uuid.UUID(fixture.store["id"])
+    wait(lambda: not database.query("SELECT 1 FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE c.storage_id=%s", storage),
+         "node-local upload caches did not drain")
     for index, body in enumerate(bodies):
         with clients[1 - index % 2].get_object(Bucket=fixture.name, Key="parallel-" + str(index))["Body"] as result:
             assert result.read() == body
-    storage = uuid.UUID(fixture.store["id"])
-    wait(lambda: not database.query("SELECT 1 FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE c.storage_id=%s", storage),
-         "shared staging did not drain")
     rows = database.query("SELECT encoding_id,nonce_id,nonce FROM chunk_encodings WHERE storage_id=%s AND state='ready'", storage)
     assert len(rows) == len(bodies)
     assert len({row["nonce_id"] for row in rows}) == len(rows)
     assert len({bytes(row["nonce"]) for row in rows}) == len(rows)
     assert all(row["encoding_id"].version == 7 for row in rows)
-    print("PASS two writers reserve distinct nonces and both readers consume shared staging", flush=True)
+    print("PASS two writers reserve distinct nonces and both readers consume final sources", flush=True)
 
     raw = os.urandom(9 * 1024 * 1024 + 17)
     fixture.put("packed", raw)

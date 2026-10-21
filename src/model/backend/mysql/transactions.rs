@@ -1784,7 +1784,11 @@ pub(super) async fn cache_stage(pool: &MySqlPool, input: CacheStage<'_>) -> Resu
         .fetch_one(&mut *tx)
         .await?;
     ensure!(
-        state == if input.new { "uploading" } else { "ready" },
+        if input.new {
+            matches!(state.as_str(), "preparing" | "uploading")
+        } else {
+            state == "ready"
+        },
         "upload source changed"
     );
     ensure!(
@@ -1905,7 +1909,7 @@ pub(super) async fn cache_enqueue(pool: &MySqlPool) -> Result<bool> {
         serde_json::json!({"first":first,"stream_id":stream,"source_pack_id":source}),
     )
     .await?;
-    let (maximum, _) = queries::cache_policy(first).fetch_one(&mut *tx).await?;
+    let (maximum, _, _) = queries::cache_policy(first).fetch_one(&mut *tx).await?;
     let maximum = crate::config::bytes(&maximum)?;
     let candidates = queries::pending_upload_segment(first, stream, source)
         .fetch_all(&mut *tx)
@@ -1972,7 +1976,12 @@ pub(super) async fn cache_batch(
     {
         return Ok(CacheBatch::Release(first));
     }
-    let (maximum, timeout) = queries::cache_policy(first).fetch_one(&mut *tx).await?;
+    let (maximum, timeout, encoding) = queries::cache_policy(first).fetch_one(&mut *tx).await?;
+    let encoding: Option<crate::model::cache::EncodingPolicy> =
+        encoding.map(serde_json::from_value).transpose()?;
+    if let Some(policy) = &encoding {
+        policy.validate()?;
+    }
     let maximum = crate::config::bytes(&maximum)?;
     let timeout = crate::config::seconds(&timeout)?;
     let Some((stream, offset, source, expired)) =
@@ -2062,6 +2071,7 @@ pub(super) async fn cache_batch(
         stream,
         expired,
         rows,
+        encoding,
     })
 }
 

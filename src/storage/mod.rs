@@ -575,6 +575,30 @@ impl Storage {
     pub(crate) fn profile(&self, storage: Uuid) -> Result<Arc<StorageProfile>> {
         Ok(self.store_backend(storage)?.profile.clone())
     }
+    fn encoding_compression(
+        &self,
+        storage: Option<Uuid>,
+        accepted: Option<&crate::content::compression::Config>,
+    ) -> Result<(Arc<crate::content::compression::Pool>, bool, u8)> {
+        let Some(config) = accepted else {
+            return self.compression_for(storage);
+        };
+        ensure!(
+            config.workspace_bytes()? <= self.compression_workspace,
+            "accepted compression policy exceeds node memory budget"
+        );
+        let target = self.store_backend(storage.context("source has no storage")?)?;
+        let pool = if target
+            .profile
+            .compression_config(&self.compression_idle_timeout)
+            == *config
+        {
+            target.compression.clone()
+        } else {
+            Arc::new(crate::content::compression::Pool::new(config.clone(), 1)?)
+        };
+        Ok((pool, config.enabled, config.min_savings_percent))
+    }
     pub(crate) fn pack_config(&self, storage: Uuid) -> Result<Arc<crate::content::pack::Config>> {
         Ok(self.store_backend(storage)?.pack_config.clone())
     }
@@ -1385,7 +1409,10 @@ impl Storage {
         raw: Vec<u8>,
         should_compress: bool,
         memory: Option<&Arc<tokio::sync::OwnedSemaphorePermit>>,
+        accepted: Option<&crate::content::compression::Config>,
     ) -> Result<(Chunk, Vec<u8>, Bytes)> {
+        let (compression, compression_enabled, threshold) =
+            self.encoding_compression(c.storage_id, accepted)?;
         c.nonce = self
             .encoding_nonce(
                 &c.algorithm,
@@ -1397,7 +1424,6 @@ impl Storage {
         let memory = memory.cloned();
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
-        let (compression, compression_enabled, threshold) = self.compression_for(c.storage_id)?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _memory = memory;
@@ -1939,7 +1965,9 @@ impl Storage {
         strategy: crate::content::compression::Strategy,
         should_try: bool,
         memory: &Arc<tokio::sync::OwnedSemaphorePermit>,
+        accepted: Option<&crate::content::compression::Config>,
     ) -> Result<(crate::content::pack::Pack, Vec<u8>)> {
+        let (pool, compression_enabled, _) = self.encoding_compression(p.storage_id, accepted)?;
         p.nonce = self
             .encoding_nonce(
                 &p.algorithm,
@@ -1951,7 +1979,6 @@ impl Storage {
         let memory = memory.clone();
         let permit = self.cpu.clone().acquire_owned().await?;
         let secrets = self.secrets.clone();
-        let (pool, compression_enabled, _) = self.compression_for(p.storage_id)?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _memory = memory;

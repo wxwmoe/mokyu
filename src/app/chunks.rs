@@ -122,7 +122,7 @@ impl App {
                     .cache_payload(&c, Bytes::copy_from_slice(&raw))
                     .await?;
                 if self
-                    .stage_chunk(stream, offset, &c, data, compressed, false)
+                    .stage_chunk(stream, offset, &c, data, compressed, false, &profile)
                     .await?
                 {
                     return Ok(c);
@@ -133,24 +133,23 @@ impl App {
         }
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-allocated").await;
-        let (c, encoded, cache) = self.storage.encode(c, raw, true, None).await?;
-        self.chunks.mark_uploading(&c).await?;
-        if self
-            .stage_chunk(
-                stream,
-                offset,
-                &c,
-                cache.clone(),
-                crate::content::codec::cache_compressed(
+        if profile.upload_cache
+            && self
+                .stage_chunk(
+                    stream,
+                    offset,
                     &c,
-                    profile.compression_min_savings_percent as u8,
-                ),
-                true,
-            )
-            .await?
+                    Bytes::copy_from_slice(&raw),
+                    false,
+                    true,
+                    &profile,
+                )
+                .await?
         {
             return Ok(c);
         }
+        let (c, encoded, cache) = self.storage.encode(c, raw, true, None, None).await?;
+        self.chunks.mark_uploading(&c).await?;
         self.storage.register_location(&c).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-uploading").await;
@@ -192,7 +191,7 @@ impl App {
             .await?;
         let (chunk, encoded, cache) = self
             .storage
-            .encode(repair.chunk.clone(), raw, true, None)
+            .encode(repair.chunk.clone(), raw, true, None, None)
             .await?;
         repair.chunk = chunk;
         self.chunks.repair_metadata(&repair).await?;

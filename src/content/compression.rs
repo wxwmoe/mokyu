@@ -18,7 +18,7 @@ pub enum Strategy {
     Sample,
 }
 
-#[derive(Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub enabled: bool,

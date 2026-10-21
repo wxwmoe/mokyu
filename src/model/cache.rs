@@ -6,6 +6,56 @@ use async_trait::async_trait;
 use serde_json::Value;
 use uuid::Uuid;
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EncodingPolicy {
+    pub compression: crate::content::compression::Config,
+    pub pack_enabled: bool,
+    pub pack_max_size: String,
+    pub pack_flush_timeout: String,
+    pub algorithm: String,
+    pub block_key_id: Option<Uuid>,
+}
+
+impl EncodingPolicy {
+    pub(crate) fn pack_config(&self) -> crate::content::pack::Config {
+        use crate::content::{
+            compression::Strategy,
+            pack::{CompressionStrategy, Config},
+        };
+        Config {
+            enabled: self.pack_enabled,
+            max_size: self.pack_max_size.clone(),
+            upload_cache_timeout: self.pack_flush_timeout.clone(),
+            compression_strategy: Some(if !self.compression.enabled {
+                CompressionStrategy::Never
+            } else {
+                match self.compression.strategy {
+                    Strategy::Never => CompressionStrategy::Never,
+                    Strategy::Always => CompressionStrategy::Always,
+                    Strategy::Sample => CompressionStrategy::Sample,
+                }
+            }),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        self.compression.validate()?;
+        anyhow::ensure!(
+            (crate::content::codec::MAX as u64..=crate::content::pack::MAX_RAW as u64)
+                .contains(&crate::config::bytes(&self.pack_max_size)?),
+            "invalid cached pack size"
+        );
+        crate::config::seconds(&self.pack_flush_timeout)?;
+        anyhow::ensure!(
+            (self.algorithm != "none") == self.block_key_id.is_some(),
+            "invalid cached encryption policy"
+        );
+        Ok(())
+    }
+}
+
 pub(crate) struct CacheStage<'a> {
     pub chunk: &'a Chunk,
     pub stream: Id,
@@ -15,6 +65,7 @@ pub(crate) struct CacheStage<'a> {
     pub storage: Uuid,
     pub key: &'a str,
     pub timeout: u64,
+    pub encoding: Option<&'a Value>,
     pub node: crate::model::raw::Processor<'a>,
 }
 
@@ -32,6 +83,7 @@ pub(crate) enum CacheBatch {
         stream: Option<Id>,
         expired: bool,
         rows: Vec<Mapping>,
+        encoding: Option<EncodingPolicy>,
     },
 }
 

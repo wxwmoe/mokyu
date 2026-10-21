@@ -60,7 +60,7 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `storage/raw_lifecycle.py`：本地 raw 损坏隔离/复检、复用 Multipart 暂存、失败 Complete、用量和读取/GC 竞争。
 - `storage/raw_deduplication.py`：四数据库的可选整文件去重、并发与跨分片边界、跨桶用量归属及坏来源排除；复用 source_quarantine 的 fixture，设置 `MOKYU_TEST_BACKEND` 可验证远端 raw。
 - `recovery/file_identities.py`：接管已初始化但停止的隔离服务，验证各数据库持久 UUID、物理文件与缓存路径、pack/unpack 逻辑身份稳定、API ID 类型拒绝和重启读取；环境沿用 `source_quarantine`，需要独立 S3 后端。
-- `recovery/cluster_identities.py`：两个真实 data 节点并发写入加密区块，检查 nonce 不重复、共享暂存排空、跨节点读取，以及 pack/unpack 后 UUID、完整正文和 Range 保持一致。使用独立 PostgreSQL 库和 S3 后端，环境沿用 `source_quarantine`，另设 `MOKYU_TEST_PEER_ENDPOINT` 指向第二个 data。
+- `recovery/cluster_identities.py`：两个真实 data 节点并发写入加密区块，检查 nonce 不重复、节点本地写缓存排空、跨节点读取，以及 pack/unpack 后 UUID、完整正文和 Range 保持一致。使用独立 PostgreSQL 库和 S3 后端，环境沿用 `source_quarantine`，另设 `MOKYU_TEST_PEER_ENDPOINT` 指向第二个 data。
 - `storage/raw_cache.py`：独占已初始化但停止的隔离服务，使用 9MiB 文件缓存和关闭的响应缓存、独立 S3 fixture，验证并发冷读/Range、坏缓存回退、pin/淘汰、巡检绕过、隔离/恢复代次、重启和覆盖，以及成功 PUT 不等待可选区块缓存填充；环境沿用 `source_quarantine`。
 - `storage/raw_migration.py`：raw 与加密 chunks、raw 与 raw 的跨存储 copy/move，支持独立远端 S3 fixture。
 - `storage/raw_streaming.py`：raw 大分片、原始 ETag、完整摘要和跨分片 Range；`--part-mib`、`--repeat`、`--label` 记录 UploadPart/Complete 耗时和服务 RSS，`--order sequential|reverse` 选择上传顺序。默认远端需 `MOKYU_TEST_BACKEND`，本地使用 `--local` 且不设置该变量；`MOKYU_TEST_PID_FILE` 必须属于同一容器。不同构建或服务预算的数字不能直接比较。
@@ -236,5 +236,7 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 `python -m tests.recovery.raw_receiving` owns an isolated initialized service and remote S3 fixture to verify pre-upload raw reuse, bounded request workspace, protocol failures, corruption and crash cleanup. Run it with the `source_quarantine` fixture variables and a disposable primary database.
 
 `python -m tests.recovery.raw_uploads` 接管已初始化但停止的隔离服务，沿用来源隔离 fixture 的配置、故障目录和 S3 后端变量；节点缓存至少 64MiB、上传缓存至少 32MiB。覆盖提前确认后的 GET/HEAD/Range、PUT/Copy/Multipart、关闭缓存与重启、配额回退、条件/校验失败、维护 flush 的时间上界、最终上传后崩溃和唯一缓存损坏。四种数据库分别运行。
+
+`python -m tests.recovery.cached_encoding` 使用相同的隔离服务与 S3 夹具，覆盖新块在最终编码前的持久确认、零提前 nonce 消耗、读取与去重、重启恢复、压缩/组包/密钥设置变更隔离、旧密钥撤销保护、直接组包后的最终文件数量、独立块压缩和缓存满 reject/fallback。上传缓存至少 8MiB。设置 `MOKYU_TEST_PEER_ENDPOINT` 时复用已启动的双 data 夹具，故障目录列表使用 `MOKYU_TEST_SOURCE_FAULT_DIRS`；单容器入口自行启停服务，四库分别运行。
 
 `upload-overflow.spec.ts` 使用独立 S3 fixture（`MOKYU_TEST_BACKEND`），自行创建本地后端，验证三语明暗表单、键盘选择、320–1440px、草稿取消/保存及本地禁用。`recovery.raw_uploads` 同时验证 chunks/raw 的 fallback/reject、503 SlowDown、失败写入不覆盖旧对象、重启保存策略、非法选项与缺省字段。

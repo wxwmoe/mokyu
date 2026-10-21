@@ -1,5 +1,5 @@
-use crate::model::Id;
 use crate::model::task::Execution;
+use crate::model::{Id, cache::EncodingPolicy};
 use crate::{
     app::App,
     config,
@@ -16,7 +16,15 @@ use uuid::Uuid;
 pub(crate) use crate::model::Mapping;
 pub(crate) use crate::model::packing::PackOutput as Output;
 impl App {
-    async fn physical_encoding(&self, c: &Chunk) -> Result<(String, Option<Uuid>)> {
+    async fn physical_encoding(
+        &self,
+        c: &Chunk,
+        accepted: Option<&EncodingPolicy>,
+    ) -> Result<(String, Option<Uuid>)> {
+        if let Some(policy) = accepted {
+            self.storage.ensure_key_loaded(policy.block_key_id).await?;
+            return Ok((policy.algorithm.clone(), policy.block_key_id));
+        }
         self.store_encoding(c.storage_id.context("chunk has no store")?)
             .await
     }
@@ -147,6 +155,7 @@ impl App {
         c: &Chunk,
         raw: Bytes,
         memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        accepted: Option<&EncodingPolicy>,
     ) -> Result<Output> {
         if let Some((id, size)) = self.packing.ready_encoding(c.id).await? {
             let mut physical = c.clone();
@@ -159,7 +168,7 @@ impl App {
             });
         }
         let mut physical = c.clone();
-        (physical.algorithm, physical.block_key_id) = self.physical_encoding(c).await?;
+        (physical.algorithm, physical.block_key_id) = self.physical_encoding(c, accepted).await?;
         physical.location_id = if matches!(physical.encoding_id, Id::Integer(_)) {
             Uuid::now_v7()
         } else {
@@ -174,7 +183,13 @@ impl App {
         }
         let (physical, encoded, _) = self
             .storage
-            .encode(physical, raw.to_vec(), c.compressed, Some(memory))
+            .encode(
+                physical,
+                raw.to_vec(),
+                c.stored_size.is_none() || c.compressed,
+                Some(memory),
+                accepted.map(|p| &p.compression),
+            )
             .await?;
         self.packing.encoding_metadata(&physical).await?;
         let storage_id = physical.storage_id.context("chunk has no store")?;
@@ -199,6 +214,7 @@ impl App {
         content_type: Option<&str>,
         key: &str,
         allow_pack: bool,
+        accepted: Option<&EncodingPolicy>,
     ) -> Result<Vec<Output>> {
         let raw_size: usize = rows.iter().map(|r| r.chunk.raw_size as usize).sum();
         let memory = self
@@ -213,7 +229,10 @@ impl App {
         if rows.len() == 1 || !allow_pack || !self.pack_creation_allowed() {
             let mut outputs = Vec::new();
             for (c, raw) in data {
-                outputs.push(self.independent_output(task, &c, raw, &memory).await?);
+                outputs.push(
+                    self.independent_output(task, &c, raw, &memory, accepted)
+                        .await?,
+                );
             }
             return Ok(outputs);
         }
@@ -224,7 +243,11 @@ impl App {
                 .chunk
                 .storage_id
                 .context("pack member has no store")?;
-            let settings = self.storage.pack_config(storage)?;
+            let settings = if let Some(policy) = accepted {
+                std::sync::Arc::new(policy.pack_config())
+            } else {
+                self.storage.pack_config(storage)?
+            };
             let maximum = config::bytes(&settings.max_size)?;
             let mut end = start + 1;
             let mut size = rows[start].chunk.raw_size as u64;
@@ -240,7 +263,7 @@ impl App {
             start = end;
             if rows.len() > 1
                 && let Some(output) = self
-                    .try_pack_output(task, rows, data, content_type, key, &memory)
+                    .try_pack_output(task, rows, data, content_type, key, &memory, accepted)
                     .await?
             {
                 outputs.push(output);
@@ -251,7 +274,7 @@ impl App {
             for (rows, data) in [(&rows[..mid], &data[..mid]), (&rows[mid..], &data[mid..])] {
                 if rows.len() > 1
                     && let Some(output) = self
-                        .try_pack_output(task, rows, data, content_type, key, &memory)
+                        .try_pack_output(task, rows, data, content_type, key, &memory, accepted)
                         .await?
                 {
                     outputs.push(output);
@@ -259,7 +282,7 @@ impl App {
                 }
                 for (c, raw) in data {
                     outputs.push(
-                        self.independent_output(task, c, raw.clone(), &memory)
+                        self.independent_output(task, c, raw.clone(), &memory, accepted)
                             .await?,
                     );
                 }
@@ -275,6 +298,7 @@ impl App {
         content_type: Option<&str>,
         key: &str,
         memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        accepted: Option<&EncodingPolicy>,
     ) -> Result<Option<Output>> {
         let coord = self.coord.lock().await;
         if !self.pack_creation_allowed() {
@@ -282,9 +306,13 @@ impl App {
         }
         let raw_size: i64 = rows.iter().map(|r| i64::from(r.chunk.raw_size)).sum();
         let first = &rows[0].chunk;
-        let (algorithm, block_key_id) = self.physical_encoding(first).await?;
+        let (algorithm, block_key_id) = self.physical_encoding(first, accepted).await?;
         let storage_id = first.storage_id.context("pack member has no store")?;
-        let settings = self.storage.pack_config(storage_id)?;
+        let settings = if let Some(policy) = accepted {
+            std::sync::Arc::new(policy.pack_config())
+        } else {
+            self.storage.pack_config(storage_id)?
+        };
         if !settings.enabled || raw_size as u64 > config::bytes(&settings.max_size)? {
             return Ok(None);
         }
@@ -319,7 +347,14 @@ impl App {
         };
         let (p, encoded) = self
             .storage
-            .encode_pack(p, data.to_vec(), strategy, should_try, memory)
+            .encode_pack(
+                p,
+                data.to_vec(),
+                strategy,
+                should_try,
+                memory,
+                accepted.map(|p| &p.compression),
+            )
             .await?;
         let old: i64 = rows
             .iter()
@@ -498,6 +533,7 @@ impl App {
                     None,
                     "",
                     self.pack_creation_allowed() && !unpack,
+                    None,
                 )
                 .await?,
             );
@@ -623,6 +659,7 @@ impl App {
                 metadata["content_type"].as_str(),
                 &key,
                 true,
+                None,
             )
             .await?;
         let ids: Vec<Id> = group.iter().map(|r| r.chunk.id).collect();

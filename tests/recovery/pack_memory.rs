@@ -187,6 +187,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
                                             Strategy::Never,
                                             false,
                                             &memory,
+                                            None,
                                         )
                                         .await?;
                                     let decoded = crate::content::pack::decode(
@@ -202,7 +203,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
                                         chunk.raw_size += 1;
                                     }
                                     let (chunk, bytes, _) = copy
-                                        .encode(chunk, raw.to_vec(), false, Some(&memory))
+                                        .encode(chunk, raw.to_vec(), false, Some(&memory), None)
                                         .await?;
                                     assert_eq!(copy.decode(&chunk, bytes).await?.0, raw);
                                 }

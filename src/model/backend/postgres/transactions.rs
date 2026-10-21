@@ -2902,7 +2902,11 @@ pub(super) async fn cache_stage(pool: &PgPool, input: CacheStage<'_>) -> Result<
         .fetch_one(&mut *tx)
         .await?;
     ensure!(
-        state == if input.new { "uploading" } else { "ready" },
+        if input.new {
+            matches!(state.as_str(), "preparing" | "uploading")
+        } else {
+            state == "ready"
+        },
         "upload source changed"
     );
     if !input.new && source.is_none() {
@@ -3018,7 +3022,7 @@ pub(super) async fn cache_enqueue(pool: &PgPool) -> Result<bool> {
     else {
         return Ok(false);
     };
-    let (maximum, _) = queries::cache_policy(first).fetch_one(&mut *tx).await?;
+    let (maximum, _, _) = queries::cache_policy(first).fetch_one(&mut *tx).await?;
     let maximum = crate::config::bytes(&maximum)?;
     let id = crate::model::REQUEST_ID
         .try_with(|id| *id)
@@ -3092,7 +3096,12 @@ pub(super) async fn cache_batch(
     if durable || unused {
         return Ok(CacheBatch::Release(first));
     }
-    let (maximum, timeout) = queries::cache_policy(first).fetch_one(&mut *tx).await?;
+    let (maximum, timeout, encoding) = queries::cache_policy(first).fetch_one(&mut *tx).await?;
+    let encoding: Option<crate::model::cache::EncodingPolicy> =
+        encoding.map(serde_json::from_value).transpose()?;
+    if let Some(policy) = &encoding {
+        policy.validate()?;
+    }
     let maximum = crate::config::bytes(&maximum)?;
     let timeout = crate::config::seconds(&timeout)?;
     let Some((stream, offset, source, expired)) = queries::pending_upload(first, timeout)
@@ -3175,6 +3184,7 @@ pub(super) async fn cache_batch(
         stream,
         expired,
         rows,
+        encoding,
     })
 }
 

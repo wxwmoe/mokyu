@@ -80,7 +80,7 @@ UUID、时间、整数分别使用各数据库既有原生类型。原始来源�
 | --- | --- | --- |
 | `uploads`、`parts`、`web_uploads` | 上传状态、`write_token`、清单、`completion_token`、`completion_expires_at`、校验和 | S3 multipart 和 Web 上传；完成租约保护同一清单的执行和发布 |
 | `multipart_files` | 文件 UUID、`upload_id`、`storage_id`、可空原生 `source_id`、open/sealed/deleting 状态、`reclaim_pending` | raw 分片的追加文件和单容器组装检查点；群集增加 `node_id`，按所属节点回收；fragments 记录文件 UUID 与偏移。检查点位于本地后端或 S3 的节点写缓存，分片仍引用时不可回收 |
-| `pending_uploads` | `chunk_id`、`stream_id`、`staged_size`、`source_pack_id`、`node_id`、重试和 lease 字段 | 节点本地待上传区块；最终确认后释放写占用并保留读缓存 |
+| `pending_uploads` | `chunk_id`、`stream_id`、`staged_size`、`source_pack_id`、`node_id`、可空 `encoding_policy` JSON、重试和 lease 字段 | 节点本地待上传区块；新块保存接受时的压缩、组包和密钥设置，仅相同设置合并批次；最终确认后释放写占用并保留读缓存 |
 | `staging_objects` | `storage_id`、`object_key`、`bytes`、`created_at` | 群集 CDC Multipart 尾块共享暂存的数据库字节账本 |
 | `quota_scopes` | `scope`、`scope_id`、用量、`logical_bytes_limit`、`inflight_bytes_limit`、`bucket_count_limit`、`cached_bytes` | project/bucket 配额；NULL 表示不限，0 表示禁止新增 |
 | `quota_reservations`、`quota_writes` | reservation、预留、inflight 和替换对象字段 | 接收、覆盖、发布、取消和恢复过程中的事务记账 |

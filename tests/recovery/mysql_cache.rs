@@ -66,6 +66,7 @@ pub(super) async fn stage(
     assert!(
         backend
             .stage(CacheStage {
+                encoding: None,
                 node: None,
                 chunk,
                 stream,
@@ -149,6 +150,31 @@ async fn mysql_upload_cache_contract() -> Result<()> {
         }
     }
     let ids: Vec<_> = chunks.iter().map(|c| c.id).collect();
+    sqlx::query("UPDATE pending_uploads SET encoding_policy=? WHERE chunk_id=?")
+        .bind(json!({"compression":{"enabled":false}}))
+        .bind(ids[1])
+        .execute(db)
+        .await?;
+    let segment = super::queries::pending_upload_segment(ids[0], Some(first), None)
+        .fetch_all(db)
+        .await?;
+    assert_eq!(
+        segment.iter().map(|r| r.0).collect::<Vec<_>>(),
+        vec![ids[0], ids[2]]
+    );
+    let selected =
+        super::queries::pending_upload_mappings(ids[0], Some(first), 0, Uuid::new_v4(), false)
+            .build_query_as::<crate::model::Mapping>()
+            .fetch_all(db)
+            .await?;
+    assert_eq!(
+        selected.iter().map(|r| r.chunk.id).collect::<Vec<_>>(),
+        vec![ids[0], ids[2]]
+    );
+    sqlx::query("UPDATE pending_uploads SET encoding_policy=NULL WHERE chunk_id=?")
+        .bind(ids[1])
+        .execute(db)
+        .await?;
     assert!(backend.next_attempt().await?.unwrap() > chrono::Utc::now());
     let (summary, pins) = backend.status().await?;
     assert_eq!(summary["entries"], 3);
@@ -225,7 +251,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
         2
     );
     assert!(
-        matches!(batch,CacheBatch::Encode{stream:Some(id),expired:false,rows} if id==first && rows.len()==2)
+        matches!(batch,CacheBatch::Encode{stream:Some(id),expired:false,rows,..} if id==first && rows.len()==2)
     );
     let copy = stream(&backend, bucket, "copy").await?;
     backend.reference(copy, 0, ids[0], 32).await?;
@@ -472,6 +498,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     assert!(
         !backend
             .stage(CacheStage {
+                encoding: None,
                 node: None,
                 chunk: &third,
                 stream: reused,
@@ -487,6 +514,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     assert!(
         backend
             .stage(CacheStage {
+                encoding: None,
                 node: None,
                 chunk: &third,
                 stream: reused,
@@ -503,6 +531,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     assert!(
         backend
             .stage(CacheStage {
+                encoding: None,
                 node: None,
                 chunk: &third,
                 stream: first,

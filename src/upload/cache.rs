@@ -4,7 +4,7 @@ use crate::{
     app::App,
     config,
     content::codec::Chunk,
-    model::cache::{CacheBatch, CacheStage},
+    model::cache::{CacheBatch, CacheStage, EncodingPolicy},
     storage::ReadContext,
 };
 use anyhow::{Context, Result};
@@ -48,10 +48,8 @@ impl App {
         data: Bytes,
         compressed: bool,
         new: bool,
+        profile: &crate::storage::profile::StorageProfile,
     ) -> Result<bool> {
-        let profile = self
-            .storage
-            .profile(c.storage_id.context("chunk has no store")?)?;
         if !profile.upload_cache {
             return Ok(false);
         }
@@ -87,6 +85,19 @@ impl App {
         };
         let size = pin.size as i64;
         let timeout = config::seconds(&profile.pack_upload_flush_timeout)?;
+        let encoding = new
+            .then(|| {
+                serde_json::to_value(EncodingPolicy {
+                    compression: profile
+                        .compression_config(&self.config.instance.compression_idle_timeout),
+                    pack_enabled: profile.pack_enabled,
+                    pack_max_size: profile.pack_max_size.clone(),
+                    pack_flush_timeout: profile.pack_upload_flush_timeout.clone(),
+                    algorithm: c.algorithm.clone(),
+                    block_key_id: c.block_key_id,
+                })
+            })
+            .transpose()?;
         let local = !pin.remote;
         let local_id = if local {
             Some(
@@ -111,6 +122,7 @@ impl App {
                 storage,
                 key: &key,
                 timeout,
+                encoding: encoding.as_ref(),
                 node: self
                     .node
                     .get()
@@ -224,6 +236,7 @@ impl App {
                 stream,
                 expired,
                 rows,
+                encoding,
             } => {
                 let _pin = stream.map(|id| self.pin(id));
                 drop(selection);
@@ -244,6 +257,7 @@ impl App {
                         content_type,
                         key,
                         self.pack_creation_allowed() && !flush && !expired,
+                        encoding.as_ref(),
                     )
                     .await?;
                 self.commit_outputs(task, &rows, &outputs, false).await?;

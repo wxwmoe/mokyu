@@ -1143,4 +1143,5 @@ ALTER TABLE storage_profiles ADD COLUMN upload_cache_overflow TEXT NOT NULL DEFA
 
 ALTER TABLE uploads ADD COLUMN completion_token BLOB;
 ALTER TABLE uploads ADD COLUMN completion_expires_at INTEGER;
-UPDATE mokyu_meta SET schema_version=31 WHERE id=1;
+ALTER TABLE pending_uploads ADD COLUMN encoding_policy TEXT CHECK (encoding_policy IS NULL OR json_valid(encoding_policy));
+UPDATE mokyu_meta SET schema_version=32 WHERE id=1;

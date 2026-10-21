@@ -4763,8 +4763,8 @@ pub(super) fn insert_pending_upload<'q>(
     source: Option<Id>,
     timeout: i64,
 ) -> Statement<'q> {
-    sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,cache_key,source_pack_id,next_retry_at) VALUES(?,?,?,?,?,?,CAST(unixepoch('subsec')*1000000 AS INTEGER)+?)")
-        .bind(input.chunk.id).bind(input.stream).bind(input.offset).bind(input.size).bind(input.key).bind(source).bind(timeout)
+    sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,cache_key,source_pack_id,next_retry_at,encoding_policy) VALUES(?,?,?,?,?,?,CAST(unixepoch('subsec')*1000000 AS INTEGER)+?,?)")
+        .bind(input.chunk.id).bind(input.stream).bind(input.offset).bind(input.size).bind(input.key).bind(source).bind(timeout).bind(input.encoding)
 }
 pub(super) fn ready_cached_chunk(chunk: Id) -> Statement<'static> {
     sqlx::query("UPDATE chunks SET state='ready',unreferenced_at=NULL,owner_stream=NULL,reference_changed_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=?").bind(chunk)
@@ -4773,7 +4773,7 @@ pub(super) fn seal_stream_uploads(stream: Id) -> Statement<'static> {
     sqlx::query("UPDATE pending_uploads SET next_retry_at=MIN(next_retry_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE owner_task IS NULL AND chunk_id IN (SELECT chunk_id FROM extents WHERE stream_id=?)").bind(stream)
 }
 pub(super) fn unsealed_uploads(stream: Id) -> Rows<'static, (Id, i64, i32, String)> {
-    sqlx::query_as("SELECT p.chunk_id,p.offset_bytes,c.raw_size,sp.pack_max_size FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id JOIN storage_profiles sp ON sp.storage_id=c.storage_id WHERE p.stream_id=? AND p.owner_task IS NULL ORDER BY p.offset_bytes LIMIT 1026").bind(stream)
+    sqlx::query_as("SELECT p.chunk_id,p.offset_bytes,c.raw_size,COALESCE(json_extract(p.encoding_policy,'$.pack_max_size'),sp.pack_max_size) FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id JOIN storage_profiles sp ON sp.storage_id=c.storage_id WHERE p.stream_id=? AND p.owner_task IS NULL ORDER BY p.offset_bytes LIMIT 1026").bind(stream)
 }
 pub(super) fn seal_upload_chunks(ids: &[Id]) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new(
@@ -4805,8 +4805,8 @@ pub(super) fn pending_upload_segment(
     stream: Option<Id>,
     source: Option<Id>,
 ) -> Rows<'static, (Id, i64, i32)> {
-    sqlx::query_as("SELECT p.chunk_id,p.offset_bytes,c.raw_size FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE p.owner_task IS NULL AND (p.chunk_id=? OR (p.stream_id=? AND p.source_pack_id IS ?)) ORDER BY p.offset_bytes LIMIT 1026")
-        .bind(first).bind(stream).bind(source)
+    sqlx::query_as("SELECT p.chunk_id,p.offset_bytes,c.raw_size FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE p.encoding_policy IS (SELECT encoding_policy FROM pending_uploads WHERE chunk_id=?) AND p.owner_task IS NULL AND (p.chunk_id=? OR (p.stream_id=? AND p.source_pack_id IS ?)) ORDER BY p.offset_bytes LIMIT 1026")
+        .bind(first).bind(first).bind(stream).bind(source)
 }
 pub(super) fn claim_pending_uploads(ids: &[Id], task: Uuid) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new("UPDATE pending_uploads SET owner_task=");
@@ -4845,7 +4845,7 @@ pub(super) fn pending_upload_mappings(
     flush: bool,
 ) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new("SELECT ");
-    query.push(CHUNK_COLUMNS).push(",p.offset_bytes,c.pack_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE (p.chunk_id=").push_bind(first)
+    query.push(CHUNK_COLUMNS).push(",p.offset_bytes,c.pack_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE p.encoding_policy IS (SELECT encoding_policy FROM pending_uploads WHERE chunk_id=").push_bind(first).push(") AND (p.chunk_id=").push_bind(first)
         .push(" OR (p.stream_id=").push_bind(stream).push(" AND p.offset_bytes>").push_bind(offset).push(" AND p.source_pack_id IS NULL)) AND (p.owner_task IS NULL OR p.owner_task=").push_bind(task)
         .push(" OR (").push_bind(flush).push(" AND p.owner_task IN (SELECT id FROM tasks WHERE state IN ('paused','failed')))) ORDER BY p.offset_bytes LIMIT 1026");
     query
@@ -8300,8 +8300,8 @@ pub(super) fn pending_multipart_reclaim(id: Uuid) -> Statement<'static> {
         .bind(id)
 }
 
-pub(super) fn cache_policy(chunk: Id) -> Rows<'static, (String, String)> {
-    sqlx::query_as("SELECT p.pack_max_size,p.pack_upload_flush_timeout FROM chunks c JOIN storage_profiles p ON p.storage_id=c.storage_id WHERE c.id=?").bind(chunk)
+pub(super) fn cache_policy(chunk: Id) -> Rows<'static, (String, String, Option<Value>)> {
+    sqlx::query_as("SELECT COALESCE(json_extract(u.encoding_policy,'$.pack_max_size'),p.pack_max_size),COALESCE(json_extract(u.encoding_policy,'$.pack_flush_timeout'),p.pack_upload_flush_timeout),u.encoding_policy FROM chunks c JOIN storage_profiles p ON p.storage_id=c.storage_id JOIN pending_uploads u ON u.chunk_id=c.id WHERE c.id=?").bind(chunk)
 }
 
 pub(super) fn pack_policy_due(storage: Uuid, policy: &str, seconds: u64) -> Scalar<'_, bool> {

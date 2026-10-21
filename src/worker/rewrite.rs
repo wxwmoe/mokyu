@@ -157,7 +157,7 @@ impl App {
             }
             let (physical, encoded, _) = self
                 .storage
-                .encode(physical, raw.to_vec(), source.compressed, None)
+                .encode(physical, raw.to_vec(), source.compressed, None, None)
                 .await?;
             self.storage
                 .put_path_for(
@@ -219,6 +219,7 @@ impl App {
                     profile.compression_enabled
                         && strategy != crate::content::compression::Strategy::Never,
                     &work,
+                    None,
                 )
                 .await?;
             self.storage
