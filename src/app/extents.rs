@@ -229,15 +229,16 @@ impl App {
                 offset += data.len() as i64;
             }
             ensure!(offset == source.size, "copy length mismatch");
-            let hash = writer
-                .finish_replay(offset as u64, |range| {
-                    self.replay_payload(destination, std::slice::from_ref(source), range)
-                })
-                .await?;
-            self.raw
-                .finish(destination, id, offset, &digest.finalize())
-                .await?;
-            self.deduplicate_raw(destination, storage, id, hash).await?;
+            let digest = digest.finalize();
+            if !writer.reuse(destination, &digest).await? {
+                let hash = writer
+                    .finish_replay(offset as u64, |range| {
+                        self.replay_payload(destination, std::slice::from_ref(source), range)
+                    })
+                    .await?;
+                self.raw.finish(destination, id, offset, &digest).await?;
+                self.deduplicate_raw(destination, storage, id, hash).await?;
+            }
         } else {
             let mut window = Vec::with_capacity(MAX);
             while let Some(data) = input.next().await {

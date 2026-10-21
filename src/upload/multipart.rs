@@ -760,14 +760,15 @@ impl App {
             }
         }
         if let Some((source, writer)) = raw_writer {
-            let content_hash = writer
-                .finish_replay(total as u64, |range| self.replay_payload(id, parts, range))
-                .await?;
-            self.raw
-                .finish(id, source, total, &hex::decode(payload_digest)?)
-                .await?;
-            self.deduplicate_raw(id, storage, source, content_hash)
-                .await?;
+            let digest = hex::decode(payload_digest)?;
+            if !writer.reuse(id, &digest).await? {
+                let content_hash = writer
+                    .finish_replay(total as u64, |range| self.replay_payload(id, parts, range))
+                    .await?;
+                self.raw.finish(id, source, total, &digest).await?;
+                self.deduplicate_raw(id, storage, source, content_hash)
+                    .await?;
+            }
         }
         self.finish_stream(id, total, etag, sums.clone()).await?;
         let result = json!({"etag":etag,"checksums":sums});

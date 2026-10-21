@@ -229,3 +229,5 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 - `python -m tests.recovery.storage_relocation`: owns a stopped isolated service, copies one complete local namespace to an isolated S3 fixture and back, verifies maintenance/upload/read guards and crash boundaries. Set `MOKYU_TEST_RELOCATION_BACKEND` to the fixture credential file and the usual `source_quarantine` environment, without `MOKYU_TEST_BACKEND`.
 - `python -m tests.recovery.raw_processing`：自行启动已初始化但停止的专用服务，沿用来源隔离的环境变量。覆盖空闲 raw 后台不会吞掉任务通知、可靠 ACK 先于后台去重、接收策略保持、两处强杀恢复、读者占用、Multipart/Copy、删除和坏来源拒绝；local 与模拟 S3、四种数据库分别运行。
 - `python -m tests.recovery.raw_processing_cluster`：沿用 `raw_cluster` 的双 data/共享 S3 fixture，将两节点故障目录写入 `MOKYU_TEST_SOURCE_FAULT_DIRS`；验证共享读者保护、处理租约过期接手、停用节点拒绝提交、无租约领取恢复和迟到执行者不能重复切换。数据库保留两个 LISTEN 连接后，用一个查询连接和行锁等待验证续租不会停止事务推进。
+
+`python -m tests.recovery.raw_receiving` owns an isolated initialized service and remote S3 fixture to verify pre-upload raw reuse, bounded request workspace, protocol failures, corruption and crash cleanup. Run it with the `source_quarantine` fixture variables and a disposable primary database.

@@ -114,6 +114,15 @@ pub(crate) trait RawStore: Send + Sync {
         node: Processor<'_>,
     ) -> Result<bool>;
     async fn processing_status(&self) -> Result<serde_json::Value>;
+    async fn reuse(
+        &self,
+        stream: Id,
+        source: Id,
+        storage: Uuid,
+        size: i64,
+        digest: &[u8],
+        hash: &[u8],
+    ) -> Result<bool>;
     async fn begin(&self, stream: Id, storage: Uuid, profile_revision: i64) -> Result<(Id, Uuid)>;
     async fn finish(&self, stream: Id, source: Id, size: i64, digest: &[u8]) -> Result<()>;
     async fn set_upload(&self, source: Id, upload: &str) -> Result<()>;

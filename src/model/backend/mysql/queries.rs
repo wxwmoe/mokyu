@@ -7879,6 +7879,18 @@ pub(super) fn raw_detach(stream: Id, end: i64) -> Statement<'static> {
 
 #[async_trait::async_trait]
 impl RawStore for Backend {
+    async fn reuse(
+        &self,
+        stream: Id,
+        source: Id,
+        storage: Uuid,
+        size: i64,
+        digest: &[u8],
+        hash: &[u8],
+    ) -> Result<bool> {
+        transactions::reuse_raw(&self.pool, stream, source, storage, size, digest, hash).await
+    }
+
     async fn claim_processing(
         &self,
         token: Uuid,
@@ -8196,4 +8208,20 @@ pub(super) fn key_replacement<'q>(id: Uuid, actor: &'q str) -> Rows<'q, Replacem
 }
 pub(super) fn complete_key_replacement(result: &KeyReplacementResult) -> Statement<'_> {
     sqlx::query("UPDATE key_replacements SET result=?,expires_at=CURRENT_TIMESTAMP(6)+INTERVAL 7 DAY WHERE id=? AND result IS NULL").bind(sqlx::types::Json(result)).bind(result.preview.id)
+}
+
+pub(super) fn raw_receiving(source: Id, stream: Id) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT storage_id FROM raw_sources WHERE id=? AND owner_stream=? AND state='writing' AND medium='shared_s3' AND upload_id IS NULL FOR UPDATE").bind(source).bind(stream)
+}
+pub(super) fn raw_discard(source: Id, stream: Id) -> Statement<'static> {
+    sqlx::query("DELETE FROM raw_sources WHERE id=? AND owner_stream=? AND state='writing' AND upload_id IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)").bind(source).bind(stream)
+}
+
+pub(super) fn raw_reusable<'a>(
+    storage: Uuid,
+    hash: &'a [u8],
+    size: i64,
+    digest: &'a [u8],
+) -> Scalar<'a, Id> {
+    sqlx::query_scalar("SELECT id FROM raw_sources WHERE storage_id=? AND content_hash=? AND size=? AND digest=? AND state='ready' AND medium='shared_s3' AND quarantine_code IS NULL").bind(storage).bind(hash).bind(size).bind(digest)
 }

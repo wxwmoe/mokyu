@@ -7179,3 +7179,72 @@ pub(super) async fn replace_keys(
     crate::faults::point("key-replacement-after-commit").await;
     Ok(result)
 }
+
+pub(super) async fn reuse_raw(
+    pool: &sqlx::PgPool,
+    stream: Id,
+    source: Id,
+    storage: Uuid,
+    size: i64,
+    digest: &[u8],
+    hash: &[u8],
+) -> Result<bool> {
+    ensure!(
+        size >= 0 && digest.len() == 16 && hash.len() == 32,
+        "invalid received raw identity"
+    );
+    if queries::raw_reusable(storage, hash, size, digest)
+        .fetch_optional(pool)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("raw-candidate-found").await;
+    let mut tx = pool.begin().await?;
+    queries::claim_chunk_hash(storage, hash)
+        .execute(&mut *tx)
+        .await?;
+    ensure!(
+        queries::raw_lock_stream(stream)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some(),
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        queries::raw_receiving(source, stream)
+            .fetch_optional(&mut *tx)
+            .await?
+            == Some(storage),
+        crate::model::Error::OperationAborted
+    );
+    let candidate = queries::raw_duplicate(storage, hash, size)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(candidate) = candidate.filter(|candidate| {
+        candidate.validate().is_ok()
+            && candidate.medium == "shared_s3"
+            && candidate.digest.as_deref() == Some(digest)
+    }) else {
+        tx.commit().await?;
+        return Ok(false);
+    };
+    queries::raw_attach(stream, candidate.id, size)
+        .execute(&mut *tx)
+        .await?;
+    queries::raw_reference(candidate.id)
+        .execute(&mut *tx)
+        .await?;
+    ensure!(
+        queries::raw_discard(source, stream)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    tx.commit().await?;
+    Ok(true)
+}

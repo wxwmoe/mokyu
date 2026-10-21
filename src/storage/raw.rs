@@ -142,10 +142,12 @@ impl Storage {
         let declared = (!self.is_local(storage)?).then_some(size);
         let writer = self.raw_writer(storage, source, location, declared).await?;
         Ok(match writer {
-            RawWriter::Remote(writer) if size > PART_SIZE as i64 => {
+            RawWriter::Remote(writer) if size >= PART_SIZE as i64 => {
                 let part_size = replay_part_size(size as u64, parts)?;
                 // Avoid rereading when the existing bounded writer sends as few requests.
-                if (size as u64).div_ceil(PART_SIZE as u64) <= (size as u64).div_ceil(part_size) {
+                if writer.hash.is_none()
+                    && (size as u64).div_ceil(PART_SIZE as u64) <= (size as u64).div_ceil(part_size)
+                {
                     return Ok(RawWriter::Remote(writer));
                 }
                 RawWriter::Replay(ReplayWriter {
@@ -198,11 +200,14 @@ impl Storage {
                 source,
                 target,
                 key: remote_path(location),
+                location,
                 upload: None,
                 parts: Vec::new(),
                 buffer: Vec::new(),
                 size: 0,
                 hash,
+                temporary: None,
+                cache_policy: self.local_cache(Some(storage))?,
                 _permit: permit,
                 _global: global,
             }));
@@ -588,11 +593,14 @@ pub(crate) struct RemoteWriter<'a> {
     source: Id,
     target: Arc<StoreBackend>,
     key: ObjectPath,
+    location: Uuid,
     upload: Option<String>,
     parts: Vec<object_store::multipart::PartId>,
     buffer: Vec<u8>,
     size: u64,
     hash: Option<blake3::Hasher>,
+    temporary: Option<super::raw_request::File>,
+    cache_policy: super::CachePolicy,
     _permit: StorePermit,
     _global: resource_gate::Permit,
 }
@@ -646,6 +654,40 @@ impl RemoteWriter<'_> {
 }
 
 impl RawWriter<'_> {
+    pub async fn reuse(&self, stream: Id, digest: &[u8]) -> Result<bool> {
+        let writer = match self {
+            Self::Remote(writer) => writer,
+            Self::Replay(replay) => &replay.writer,
+            Self::Local(_) => return Ok(false),
+        };
+        let Some(hash) = &writer.hash else {
+            return Ok(false);
+        };
+        ensure!(
+            writer.upload.is_none(),
+            "raw content was uploaded before deduplication"
+        );
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("raw-before-reuse").await;
+        let reused = writer
+            .storage
+            .raw_store
+            .reuse(
+                stream,
+                writer.source,
+                writer.target.profile.storage_id,
+                writer.size as i64,
+                digest,
+                hash.finalize().as_bytes(),
+            )
+            .await?;
+        #[cfg(feature = "fault-injection")]
+        if reused {
+            crate::faults::point("raw-reused").await;
+        }
+        Ok(reused)
+    }
+
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
         match self {
             Self::Local(writer) => writer.write(data).await,
@@ -689,7 +731,27 @@ impl RawWriter<'_> {
                     writer.buffer.extend_from_slice(&rest[..count]);
                     rest = &rest[count..];
                     if writer.buffer.len() == PART_SIZE {
-                        writer.part().await?;
+                        if writer.hash.is_some() {
+                            if writer.temporary.is_none() {
+                                writer.temporary = Some(
+                                    super::raw_request::File::create(
+                                        writer.storage,
+                                        writer.location,
+                                        writer.cache_policy,
+                                    )
+                                    .await?,
+                                );
+                            }
+                            writer
+                                .temporary
+                                .as_mut()
+                                .unwrap()
+                                .append(writer.storage, &writer.buffer)
+                                .await?;
+                            writer.buffer.clear();
+                        } else {
+                            writer.part().await?;
+                        }
                     }
                 }
                 Ok(())
@@ -702,6 +764,38 @@ impl RawWriter<'_> {
             Self::Replay(_) => anyhow::bail!("raw upload requires its replay source"),
             Self::Remote(mut writer) => {
                 ensure!(writer.size == expected, "raw receive length mismatch");
+                if let Some(mut temporary) = writer.temporary.take() {
+                    if !writer.buffer.is_empty() {
+                        temporary.append(writer.storage, &writer.buffer).await?;
+                    }
+                    temporary.rewind().await?;
+                    writer.buffer.clear();
+                    let mut buffer = vec![0; BUFFER];
+                    let mut remaining = expected;
+                    let mut hash = blake3::Hasher::new();
+                    while remaining > 0 {
+                        let count = temporary.file.as_mut().unwrap().read(&mut buffer).await?;
+                        ensure!(
+                            count > 0 && count as u64 <= remaining,
+                            IntegrityError::Length
+                        );
+                        remaining -= count as u64;
+                        hash.update(&buffer[..count]);
+                        let mut rest = &buffer[..count];
+                        while !rest.is_empty() {
+                            let count = (PART_SIZE - writer.buffer.len()).min(rest.len());
+                            writer.buffer.extend_from_slice(&rest[..count]);
+                            rest = &rest[count..];
+                            if writer.buffer.len() == PART_SIZE {
+                                writer.part().await?;
+                            }
+                        }
+                    }
+                    ensure!(
+                        Some(hash.finalize()) == writer.hash.as_ref().map(|hash| hash.finalize()),
+                        IntegrityError::Hash
+                    );
+                }
                 if writer.upload.is_some() {
                     if !writer.buffer.is_empty() {
                         writer.part().await?;
