@@ -215,6 +215,7 @@ pub(super) async fn open(
     let mut connection = SqliteConnection::connect_with(&options)
         .await
         .context("cannot open SQLite database")?;
+    let mut synchronous = SqliteSynchronous::Full;
     let initialized: Result<crate::model::runtime::DatabaseInfo> = async {
         let version = queries::version().fetch_one(&mut connection).await?;
         let numbers: Vec<u64> = version
@@ -229,22 +230,49 @@ pub(super) async fn open(
             queries::journal_mode().fetch_one(&mut connection).await? == "wal",
             "SQLite requires WAL support on a local filesystem"
         );
+        #[cfg(any(test, feature = "fault-injection"))]
+        ensure!(
+            queries::synchronous().fetch_one(&mut connection).await? == 2,
+            "SQLite initialization requires FULL synchronization"
+        );
         migration::run(&mut connection).await?;
         transactions::identify(
             &mut connection,
             blake3::hash(&secrets.credential_key.material).as_bytes(),
         )
         .await?;
+        let settings = queries::runtime_setting("io")
+            .fetch_optional(&mut connection)
+            .await?
+            .map(serde_json::from_value::<crate::config::runtime::IoSettings>)
+            .transpose()?
+            .unwrap_or_else(|| config.io.clone());
+        settings.validate()?;
+        ensure!(
+            settings.sqlite_synchronous != "off"
+                || !queries::nonces_reserved()
+                    .fetch_one(&mut connection)
+                    .await?,
+            "SQLite OFF synchronization is unavailable after encryption nonce reservations"
+        );
+        synchronous = match settings.sqlite_synchronous.as_str() {
+            "normal" => SqliteSynchronous::Normal,
+            "off" => SqliteSynchronous::Off,
+            _ => SqliteSynchronous::Full,
+        };
         Ok(crate::model::runtime::DatabaseInfo {
             program: "SQLite",
             version,
             schema_version: queries::schema_version().fetch_one(&mut connection).await?,
             observed_at: chrono::Utc::now(),
+            journal_mode: None,
+            synchronous: None,
         })
     }
     .await;
     connection.close().await?;
-    let database_info = initialized?;
+    let mut database_info = initialized?;
+    let options = options.synchronous(synchronous);
     let pools = || {
         SqlitePoolOptions::new()
             .min_connections(0)
@@ -266,6 +294,16 @@ pub(super) async fn open(
             .connect_with(options.read_only(true).pragma("query_only", "ON"))
             .await?
     };
+    database_info.journal_mode = Some(queries::journal_mode().fetch_one(&write).await?);
+    database_info.synchronous = Some(
+        match queries::synchronous().fetch_one(&write).await? {
+            0 => "off",
+            1 => "normal",
+            2 => "full",
+            _ => anyhow::bail!("unexpected SQLite synchronous mode"),
+        }
+        .into(),
+    );
     let backend = Backend {
         database_info,
         authorization: Default::default(),

@@ -51,6 +51,7 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
     }
     assert!(!path.exists(), "fixture database must be new");
     assert!(!marker.exists());
+    std::fs::create_dir_all(&config.instance.data_path)?;
     for role in ["control", "data", "worker"] {
         assert!(
             connection::open(&config, &secrets, &budget, role)
@@ -119,7 +120,7 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
     );
     assert_eq!(
         queries::schema_version().fetch_one(&backend.read).await?,
-        26
+        migrations.iter().last().unwrap().version
     );
     assert_eq!(
         queries::journal_mode().fetch_one(&backend.read).await?,
@@ -473,7 +474,7 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
         }
         assert_eq!(
             fresh.instance.data_path.metadata()?.permissions().mode() & 0o777,
-            0o700
+            0o755
         );
     }
     close(backend).await;

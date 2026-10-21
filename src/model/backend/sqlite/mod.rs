@@ -78,6 +78,10 @@ mod account_tests;
 mod settings_tests;
 
 #[cfg(test)]
+#[path = "../../../../tests/recovery/sqlite_durability.rs"]
+mod durability_tests;
+
+#[cfg(test)]
 #[path = "../../../../tests/recovery/sqlite_authorization.rs"]
 mod authorization_tests;
 

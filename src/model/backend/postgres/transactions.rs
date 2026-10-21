@@ -2283,7 +2283,12 @@ pub(super) async fn save_runtime_settings(
     let row = queries::save_runtime_settings(section, value, principal.user_id(), revision)
         .fetch_optional(&mut *tx)
         .await?
-        .context("settings revision conflict; reload before saving")?;
+        .ok_or_else(|| {
+            s3s::s3_error!(
+                OperationAborted,
+                "settings revision conflict; reload before saving"
+            )
+        })?;
     checkpoint_event(
         &mut tx,
         "runtime.settings",
@@ -2338,7 +2343,10 @@ pub(super) async fn update_web_settings(
     if let Some(revision) = input.revision {
         anyhow::ensure!(
             revision == current.revision,
-            "settings revision conflict; reload before saving"
+            s3s::s3_error!(
+                OperationAborted,
+                "settings revision conflict; reload before saving"
+            )
         );
     }
     let value = serde_json::json!({

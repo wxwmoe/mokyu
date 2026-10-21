@@ -206,6 +206,8 @@ pub(super) async fn open(
         version,
         schema_version: i64::from(queries::schema_version().fetch_one(&mut owner).await?),
         observed_at: chrono::Utc::now(),
+        journal_mode: None,
+        synchronous: None,
     };
     transactions::identify(
         &mut owner,

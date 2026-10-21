@@ -7,6 +7,10 @@ pub(crate) struct DatabaseInfo {
     pub version: String,
     pub schema_version: i64,
     pub observed_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synchronous: Option<String>,
 }
 
 pub(crate) struct RuntimeState {

@@ -73,6 +73,8 @@ impl Replica {
                         version,
                         schema_version: i64::from(expected.schema_version),
                         observed_at: chrono::Utc::now(),
+                        journal_mode: None,
+                        synchronous: None,
                     });
                     Ok(())
                 })
@@ -331,6 +333,8 @@ pub async fn connect(
         version,
         schema_version: i64::from(queries::schema_version().fetch_one(&mut owner).await?),
         observed_at: chrono::Utc::now(),
+        journal_mode: None,
+        synchronous: None,
     };
     crate::model::key::load(secrets, queries::managed_keys().fetch_all(&pool).await?)?;
     let deployment_fingerprint = blake3::hash(&secrets.credential_key.material);

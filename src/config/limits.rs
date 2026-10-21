@@ -78,6 +78,7 @@ pub fn seconds(s: &str) -> Result<u64> {
 impl Config {
     pub fn validate(&self) -> Result<()> {
         let c = self;
+        c.io.validate()?;
         c.web.validate()?;
         cache_bytes(&c.instance.thumbnail_cache_size)?;
         seconds(&c.instance.compression_idle_timeout)?;

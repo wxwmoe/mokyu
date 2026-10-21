@@ -123,6 +123,9 @@ pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
             }),
         ),
     ];
+    if configured.database.backend == crate::config::DatabaseType::Sqlite {
+        values.push(("io", json!(configured.io)));
+    }
     if !configured.database.backend.supports_cluster() {
         let uploads = values
             .iter_mut()
@@ -140,6 +143,13 @@ pub(crate) fn apply_runtime_section(
     section: &str,
     value: Value,
 ) -> Result<()> {
+    anyhow::ensure!(
+        section != "io" || config.database.backend == crate::config::DatabaseType::Sqlite,
+        s3s::s3_error!(
+            InvalidArgument,
+            "SQLite synchronization settings require SQLite"
+        )
+    );
     if section == "uploads"
         && !config.database.backend.supports_cluster()
         && (value.get("staging_storage_id").is_some() || value.get("staging_bytes_limit").is_some())
@@ -152,6 +162,7 @@ pub(crate) fn apply_runtime_section(
         "uploads" => config.uploads = overlay(&config.uploads, &value)?,
         "metrics" => config.metrics = overlay(&config.metrics, &value)?,
         "maintenance" => config.maintenance = overlay(&config.maintenance, &value)?,
+        "io" => config.io = overlay(&config.io, &value)?,
         _ => anyhow::bail!("unknown runtime settings section {section}"),
     }
     Ok(())

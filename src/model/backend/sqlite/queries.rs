@@ -29,6 +29,20 @@ pub(super) fn version() -> Scalar<'static, String> {
 pub(super) fn journal_mode() -> Scalar<'static, String> {
     sqlx::query_scalar("PRAGMA journal_mode")
 }
+pub(super) fn synchronous() -> Scalar<'static, i64> {
+    sqlx::query_scalar("PRAGMA synchronous")
+}
+pub(super) fn full_synchronous() -> Statement<'static> {
+    sqlx::query("PRAGMA synchronous=FULL")
+}
+pub(super) fn nonces_reserved() -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nonce_counters WHERE reserved_id>0)")
+}
+pub(super) fn nonce_sync_off() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM runtime_settings WHERE section='io' AND json_extract(value,'$.sqlite_synchronous')='off')",
+    )
+}
 #[cfg(test)]
 pub(super) fn tables() -> Scalar<'static, String> {
     sqlx::query_scalar(
@@ -4507,7 +4521,21 @@ impl ManagedKeyStore for Backend {
     }
 
     async fn reserve_nonce(&self, key: Uuid, type_tag: u8, units: u32) -> Result<(i64, i64)> {
-        transactions::reserve_nonce(&self.write, key, type_tag, units).await
+        anyhow::ensure!(
+            self.database_info.synchronous.as_deref() != Some("off"),
+            s3s::s3_error!(
+                InvalidRequest,
+                "encryption requires SQLite FULL or NORMAL synchronization; save the setting and restart"
+            )
+        );
+        transactions::reserve_nonce(
+            &self.write,
+            key,
+            type_tag,
+            units,
+            self.database_info.synchronous.as_deref() == Some("normal"),
+        )
+        .await
     }
 
     async fn resolve_block(&self, name: &str) -> Result<Option<ManagedKeyRecord>> {

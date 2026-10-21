@@ -67,6 +67,7 @@ impl Default for Instance {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeSettings {
+    pub io: IoSettings,
     pub web: WebSettings,
     pub requests: RequestSettings,
     pub uploads: UploadSettings,
@@ -77,12 +78,37 @@ pub struct RuntimeSettings {
 impl Default for RuntimeSettings {
     fn default() -> Self {
         Self {
+            io: IoSettings::default(),
             web: WebSettings::default(),
             requests: RequestSettings::default(),
             uploads: UploadSettings::default(),
             metrics: MetricsSettings::default(),
             maintenance: Default::default(),
         }
+    }
+}
+
+#[derive(Clone, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IoSettings {
+    pub sqlite_synchronous: String,
+}
+
+impl Default for IoSettings {
+    fn default() -> Self {
+        Self {
+            sqlite_synchronous: "full".into(),
+        }
+    }
+}
+
+impl IoSettings {
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            matches!(self.sqlite_synchronous.as_str(), "full" | "normal" | "off"),
+            "sqlite_synchronous must be full, normal or off"
+        );
+        Ok(())
     }
 }
 

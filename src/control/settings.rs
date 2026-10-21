@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use utoipa::ToSchema;
 
-const SECTIONS: &[&str] = &["web", "requests", "uploads", "metrics", "maintenance"];
+const SECTIONS: &[&str] = &["web", "requests", "uploads", "metrics", "maintenance", "io"];
 
 pub(crate) use crate::model::settings::ControlSettingsPatch;
 use crate::model::settings::RuntimeSettingsRow;
@@ -53,62 +53,66 @@ fn valid_section(section: &str) -> Result<()> {
 }
 
 fn validate_value(configured: &crate::config::Config, section: &str, value: &Value) -> Result<()> {
-    valid_section(section)?;
-    let object = value
-        .as_object()
-        .context("runtime settings value must be an object")?;
-    let allowed: &[&str] = match section {
-        "web" => &[
-            "origin",
-            "secure_cookie",
-            "session_lifetime",
-            "gravatar_base_url",
-        ],
-        "requests" => &[
-            "s3_domain",
-            "s3_region",
-            "s3_chunk_limit",
-            "read_idle_timeout",
-            "upload_idle_timeout",
-        ],
-        "uploads" => &[
-            "sweep_interval",
-            "client_idle_timeout",
-            "max_active_uploads",
-            "staging_storage_id",
-            "staging_bytes_limit",
-        ],
-        "metrics" => &[
-            "scope_limit",
-            "storage_interval",
-            "storage_retention",
-            "runtime_interval",
-            "runtime_retention",
-            "refresh_interval",
-            "query_timeout",
-            "access_flush_interval",
-            "access_retention",
-        ],
-        "maintenance" => &[
-            "interval",
-            "batch_size",
-            "max_duration",
-            "task_retention",
-            "audit_retention",
-        ],
-        _ => &[],
-    };
-    for key in object.keys() {
-        anyhow::ensure!(
-            allowed.contains(&key.as_str()),
-            "unknown field in runtime settings"
-        );
-    }
-    let mut config = configured.clone();
-    crate::model::apply_runtime_section(&mut config, section, value.clone())?;
-    config.validate()?;
-    config.budget()?;
-    Ok(())
+    (|| -> Result<()> {
+        valid_section(section)?;
+        let object = value
+            .as_object()
+            .context("runtime settings value must be an object")?;
+        let allowed: &[&str] = match section {
+            "io" => &["sqlite_synchronous"],
+            "web" => &[
+                "origin",
+                "secure_cookie",
+                "session_lifetime",
+                "gravatar_base_url",
+            ],
+            "requests" => &[
+                "s3_domain",
+                "s3_region",
+                "s3_chunk_limit",
+                "read_idle_timeout",
+                "upload_idle_timeout",
+            ],
+            "uploads" => &[
+                "sweep_interval",
+                "client_idle_timeout",
+                "max_active_uploads",
+                "staging_storage_id",
+                "staging_bytes_limit",
+            ],
+            "metrics" => &[
+                "scope_limit",
+                "storage_interval",
+                "storage_retention",
+                "runtime_interval",
+                "runtime_retention",
+                "refresh_interval",
+                "query_timeout",
+                "access_flush_interval",
+                "access_retention",
+            ],
+            "maintenance" => &[
+                "interval",
+                "batch_size",
+                "max_duration",
+                "task_retention",
+                "audit_retention",
+            ],
+            _ => &[],
+        };
+        for key in object.keys() {
+            anyhow::ensure!(
+                allowed.contains(&key.as_str()),
+                "unknown field in runtime settings"
+            );
+        }
+        let mut config = configured.clone();
+        crate::model::apply_runtime_section(&mut config, section, value.clone())?;
+        config.validate()?;
+        config.budget()?;
+        Ok(())
+    })()
+    .map_err(|error| s3s::s3_error!(InvalidArgument, "{error}").into())
 }
 
 fn runtime_view(app: &App, section: &str, value: Value, revision: i64) -> RuntimeSettingsView {

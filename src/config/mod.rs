@@ -66,6 +66,52 @@ mod tests {
     use std::{fs, path::Path};
 
     #[test]
+    fn sqlite_sync_is_explicit_and_database_scoped() {
+        use serde_json::json;
+        for backend in ["postgres", "mysql", "sqlite"] {
+            let mut config =
+                toml::from_str::<FileConfig>(&format!("[database]\ntype='{backend}'\n"))
+                    .unwrap()
+                    .into_config();
+            assert_eq!(config.io.sqlite_synchronous, "full");
+            assert_eq!(
+                crate::model::runtime_defaults(&config)
+                    .iter()
+                    .any(|(name, _)| *name == "io"),
+                backend == "sqlite"
+            );
+            for mode in ["full", "normal", "off"] {
+                let result = crate::model::apply_runtime_section(
+                    &mut config,
+                    "io",
+                    json!({"sqlite_synchronous": mode}),
+                );
+                assert_eq!(result.is_ok(), backend == "sqlite");
+                assert!(config.io.validate().is_ok());
+            }
+            if backend == "sqlite" {
+                for mode in ["", "FULL", "extra", "none"] {
+                    crate::model::apply_runtime_section(
+                        &mut config,
+                        "io",
+                        json!({"sqlite_synchronous": mode}),
+                    )
+                    .unwrap();
+                    assert!(config.io.validate().is_err());
+                }
+                assert!(
+                    crate::model::apply_runtime_section(
+                        &mut config,
+                        "io",
+                        json!({"journal_mode": "off"})
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cluster_connection_limits_leave_room_for_queries() {
         let mut config = toml::from_str::<FileConfig>("[database]\ntype='postgres'\n")
             .unwrap()

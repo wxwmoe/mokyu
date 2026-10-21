@@ -330,6 +330,15 @@ fn environment(app: &App) -> Vec<ConfigField> {
             "unavailable",
         ));
     }
+    for key in ["journal_mode", "synchronous"] {
+        if !info[key].is_null() {
+            fields.push(observed(
+                &format!("database.{key}"),
+                info[key].clone(),
+                "unavailable",
+            ));
+        }
+    }
     let e = &app.budget.environment;
     for (key, value) in [
         ("version", json!(env!("CARGO_PKG_VERSION"))),

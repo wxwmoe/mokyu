@@ -29,9 +29,11 @@
 
 群集模式下，每个 control、worker、data 都从自己的 `[database]` 连接 PostgreSQL。Mokyu 不负责 PostgreSQL 故障转移；需要高可用时使用 PostgreSQL 自己的主备或集群地址。
 
-SQLite 使用 WAL、外键和 FULL 同步，数据库及其 `-wal`、`-shm` 文件必须位于可写的本地持久文件系统，不支持网络共享盘。默认文件是 `/data/mokyu.db`；新建数据库和锁文件权限为 `0600`，新建父目录为 `0755`。一个数据库文件只允许一个 Mokyu 实例，符号链接按实际路径识别，数据库硬链接被拒绝。文件被替换或运行锁丢失时进程退出。
+SQLite 使用 WAL、外键和默认 FULL 同步，数据库及其 `-wal`、`-shm` 文件必须位于可写的本地持久文件系统，不支持网络共享盘。默认文件是 `/data/mokyu.db`；新建数据库和锁文件权限为 `0600`，新建父目录为 `0755`。一个数据库文件只允许一个 Mokyu 实例，符号链接按实际路径识别，数据库硬链接被拒绝。文件被替换或运行锁丢失时进程退出。
 
 SQLite 将 `instance.database_connections` 中的一个连接用于串行写入，其余用于只读查询；设置为 `1` 时读写共用一个连接。更高的连接数不增加同时写入的事务数。
+
+SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`normal`、`off`，保存后重启生效。NORMAL 在断电或系统崩溃后可能丢失已提交事务，OFF 还可能损坏数据库；影响整个元数据库，包括配置、凭据和对象映射。初始化与迁移始终使用 FULL，完成后才按保存值创建运行连接池。NORMAL 下加密 nonce 的预留仍以 FULL 提交；已有任何加密预留的数据库不能设置 OFF，OFF 生效或等待生效期间拒绝新的加密预留。恢复加密写入需保存 FULL/NORMAL 并重启。面板的 `database.journal_mode` 和 `database.synchronous` 显示实际连接读取值；后端存储设置不会修改此选项，其他数据库不提供它。
 
 ## replica_database
 
@@ -89,7 +91,7 @@ SQLite 将 `instance.database_connections` 中的一个连接用于串行写入�
 
 ## runtime 设置
 
-runtime 设置保存在 `runtime_settings`，只有以下五组。Web 使用固定的可爱专项表单，不提供任意 JSON 编辑器；CLI 可用 `settings get/set/reset` 完整管理。
+runtime 设置保存在 `runtime_settings`。Web 使用固定表单，不提供任意 JSON 编辑器；CLI 可用 `settings get/set/reset` 完整管理。
 
 | 分组 | 主要内容 | 作用范围 |
 | --- | --- | --- |
@@ -98,6 +100,7 @@ runtime 设置保存在 `runtime_settings`，只有以下五组。Web 使用固�
 | `uploads` | staging storage、共享 staging 字节上限、客户端空闲超时与活动上传限制 | 部署共享；群集 storage 共享 |
 | `metrics` | storage/runtime/access 采样间隔、保留期和查询超时 | 部署共享 |
 | `maintenance` | GC、清理、任务保留、审计保留和批量大小 | 部署共享 |
+| `io` | `sqlite_synchronous` | 仅 SQLite，整个元数据库，重启生效 |
 
 runtime section 使用 revision 乐观并发。冲突返回当前 revision；重置恢复当前版本默认值。runtime 设置在启动时加载；保存后按各进程实际加载的修订提示重启，不进行热更新。
 

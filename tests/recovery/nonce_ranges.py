@@ -43,6 +43,11 @@ def main():
         fixture = Fixture()
         assert fixture.backend, "select an isolated S3 backend to exercise encrypted packs"
         storage = uuid.UUID(fixture.store["id"])
+        if database.type == "sqlite":
+            fixture.cli("settings", "set", "io", "-", value={"sqlite_synchronous": "normal"})
+            stop()
+            start()
+            print("SQLite encrypted source recovery uses NORMAL metadata synchronization", flush=True)
 
         def configure(**values):
             profile = fixture.cli("storage", "profile", "show", fixture.name)

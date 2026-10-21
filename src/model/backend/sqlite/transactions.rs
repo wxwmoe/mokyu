@@ -528,6 +528,15 @@ pub(super) async fn save_runtime_settings(
     value: Value,
 ) -> Result<RuntimeSettingsRow> {
     let mut tx = admin_transaction(pool, principal).await?;
+    if section == "io" && value["sqlite_synchronous"] == "off" {
+        ensure!(
+            !queries::nonces_reserved().fetch_one(&mut *tx).await?,
+            s3s::s3_error!(
+                InvalidArgument,
+                "SQLite OFF synchronization is unavailable after encryption nonce reservations"
+            )
+        );
+    }
     let revision = match revision {
         Some(revision) => revision,
         None => {
@@ -543,7 +552,10 @@ pub(super) async fn save_runtime_settings(
             .rows_affected();
     ensure!(
         changed == 1,
-        "settings revision conflict; reload before saving"
+        s3s::s3_error!(
+            OperationAborted,
+            "settings revision conflict; reload before saving"
+        )
     );
     let row = queries::runtime_settings_row(section)
         .fetch_one(&mut *tx)
@@ -607,7 +619,10 @@ pub(super) async fn update_web_settings(
     if let Some(revision) = input.revision {
         anyhow::ensure!(
             revision == current.revision,
-            "settings revision conflict; reload before saving"
+            s3s::s3_error!(
+                OperationAborted,
+                "settings revision conflict; reload before saving"
+            )
         );
     }
     let value = serde_json::json!({
@@ -7562,9 +7577,30 @@ pub(super) async fn reserve_nonce(
     key: Uuid,
     type_tag: u8,
     units: u32,
+    force_full: bool,
 ) -> Result<(i64, i64)> {
     ensure!(matches!(type_tag, 0 | 1), "invalid nonce type");
-    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let mut connection = pool.acquire().await?;
+    if force_full {
+        // Discard the temporary override even when reservation is cancelled.
+        connection.close_on_drop();
+        queries::full_synchronous()
+            .execute(&mut *connection)
+            .await?;
+    }
+    let mut tx = connection.begin_with(queries::BEGIN_WRITE).await?;
+    ensure!(
+        !queries::nonce_sync_off().fetch_one(&mut *tx).await?,
+        s3s::s3_error!(
+            InvalidRequest,
+            "encryption requires SQLite FULL or NORMAL synchronization; change the saved OFF setting"
+        )
+    );
+    #[cfg(any(test, feature = "fault-injection"))]
+    ensure!(
+        queries::synchronous().fetch_one(&mut *tx).await? == 2,
+        "nonce reservations require FULL synchronization"
+    );
     let previous = queries::nonce_counter(key, type_tag)
         .fetch_optional(&mut *tx)
         .await?
