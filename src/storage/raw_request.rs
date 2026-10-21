@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
-pub(super) struct File {
+pub(crate) struct File {
     pub file: Option<tokio::fs::File>,
     path: PathBuf,
     disk: Arc<Disk>,

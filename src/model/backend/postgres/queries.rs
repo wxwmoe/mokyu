@@ -177,7 +177,7 @@ pub(super) fn claim_chunk_hash(storage: Uuid, hash: &[u8]) -> Statement<'_> {
 }
 
 pub(super) fn fail_chunk_allocations(input: &ChunkCreate) -> Statement<'_> {
-    sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE storage_id=$1 AND hash=$2 AND raw_size=$3 AND state IN ('preparing','uploading')")
+    sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE storage_id=$1 AND hash=$2 AND raw_size=$3 AND state IN ('preparing','uploading') AND NOT EXISTS (SELECT 1 FROM streams s JOIN tasks t ON t.id=s.owner_task_id WHERE s.id=chunks.owner_stream AND s.state='writing' AND t.state='running' AND t.lease_token=s.owner_lease_token AND (t.lease_expires_at IS NULL OR t.lease_expires_at>clock_timestamp()))")
         .bind(input.storage)
         .bind(input.hash.as_slice())
         .bind(input.raw_size)
@@ -526,7 +526,7 @@ pub(super) fn claim_task<'q>(
     node: Option<Uuid>,
     token: Uuid,
 ) -> Scalar<'q, Uuid> {
-    sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=CASE WHEN $3::uuid IS NOT NULL THEN now()+interval '5 minutes' END,updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR ($3::uuid IS NOT NULL AND t.state='running' AND t.lease_expires_at<now())) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=$1 AND NOT(t.id=ANY($2)) AND (t.execution_scope <> 'node' OR t.target_node_id IS NULL OR t.target_node_id=$3) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND NOT (m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','storage_migration','rewrite','usage')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END AND CASE WHEN c.policy='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.task_type='pack' AND t.detail->>'policy' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR ($3::uuid IS NOT NULL AND state='running' AND lease_expires_at<now())) RETURNING id")
+    sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=CASE WHEN $3::uuid IS NOT NULL THEN now()+interval '5 minutes' END,updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='failed' AND t.detail->>'operation'='cdc' AND t.updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND t.state='running' AND t.lease_expires_at<now())) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=$1 AND NOT(t.id=ANY($2)) AND (t.execution_scope <> 'node' OR t.target_node_id IS NULL OR t.target_node_id=$3) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND NOT (m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','storage_migration','rewrite','usage')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END AND CASE WHEN c.policy='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.task_type='pack' AND t.detail->>'policy' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='failed' AND detail->>'operation'='cdc' AND updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND state='running' AND lease_expires_at<now())) RETURNING id")
         .bind(class)
         .bind(active)
         .bind(node)
@@ -8752,7 +8752,7 @@ pub(super) fn raw_target(
     stream: Id,
     storage: Uuid,
 ) -> Rows<'static, (String, bool, i64, bool, bool)> {
-    sqlx::query_as("SELECT t.type,(t.block_key_id IS NULL AND NOT p.compression_enabled AND NOT p.pack_enabled),p.revision,p.cdc_enabled,(p.deduplication_enabled AND p.write_processing='background') FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storages t ON t.id=b.storage_id JOIN storage_profiles p ON p.storage_id=t.id WHERE s.id=$1 AND t.id=$2 AND t.enabled AND s.state='writing' FOR UPDATE").bind(stream).bind(storage)
+    sqlx::query_as("SELECT t.type,(t.block_key_id IS NULL AND NOT p.compression_enabled AND NOT p.pack_enabled),p.revision,p.cdc_enabled,((p.deduplication_enabled OR p.cdc_enabled) AND p.write_processing='background') FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storages t ON t.id=b.storage_id JOIN storage_profiles p ON p.storage_id=t.id WHERE s.id=$1 AND t.id=$2 AND t.enabled AND s.state='writing' FOR UPDATE").bind(stream).bind(storage)
 }
 pub(super) fn raw_prepare(stream: Id) -> Statement<'static> {
     sqlx::query("UPDATE streams SET payload_type='raw' WHERE id=$1 AND state='writing' AND payload_type='chunks' AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=$2) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE stream_id=$3)").bind(stream).bind(stream).bind(stream)
@@ -8802,6 +8802,41 @@ pub(super) fn raw_detach(stream: Id, end: i64) -> Statement<'static> {
 
 #[async_trait::async_trait]
 impl RawStore for Backend {
+    async fn inline_conversion(
+        &self,
+        stream: Id,
+        source: Id,
+    ) -> Result<crate::model::cache::EncodingPolicy> {
+        transactions::inline_conversion(&self.pool, stream, source).await
+    }
+    async fn begin_conversion(
+        &self,
+        stream: Id,
+        storage: Uuid,
+        revision: i64,
+        encoding: &crate::model::cache::EncodingPolicy,
+    ) -> Result<(Id, Uuid)> {
+        transactions::begin_raw(&self.pool, stream, storage, revision, Some(encoding)).await
+    }
+    async fn commit_conversion_batch(
+        &self,
+        task: Execution,
+        candidate: Id,
+        rows: &[crate::model::Mapping],
+        outputs: &[crate::model::packing::PackOutput],
+    ) -> Result<()> {
+        transactions::commit_conversion_batch(&self.pool, task, candidate, rows, outputs).await
+    }
+    async fn finish_conversion(
+        &self,
+        task: Execution,
+        job: &crate::model::raw::Conversion,
+        source: &RawSource,
+        candidate: Id,
+        lease: Option<Uuid>,
+    ) -> Result<bool> {
+        transactions::finish_conversion(&self.pool, task, job, source, candidate, lease).await
+    }
     async fn uploads_before(
         &self,
         before: chrono::DateTime<chrono::Utc>,
@@ -9038,7 +9073,7 @@ impl RawStore for Backend {
             .collect())
     }
     async fn begin(&self, stream: Id, storage: Uuid, profile_revision: i64) -> Result<(Id, Uuid)> {
-        transactions::begin_raw(&self.pool, stream, storage, profile_revision).await
+        transactions::begin_raw(&self.pool, stream, storage, profile_revision, None).await
     }
     async fn finish(&self, stream: Id, source: Id, size: i64, digest: &[u8]) -> Result<()> {
         transactions::finish_raw(&self.pool, stream, source, size, digest, None, None).await
@@ -9279,7 +9314,7 @@ pub(super) fn raw_upload_due(
     before: Option<chrono::DateTime<chrono::Utc>>,
     owner: Option<Uuid>,
 ) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT u.source_id FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE (u.node_id IS NOT DISTINCT FROM $2) AND ($2::uuid IS NULL OR u.token IS NULL OR u.lease_expires_at<clock_timestamp()) AND u.next_attempt_at<=clock_timestamp() AND r.state='ready' AND ($1::timestamptz IS NULL OR r.created_at<=$1) ORDER BY u.background,u.next_attempt_at,u.source_id LIMIT 1 FOR UPDATE OF u SKIP LOCKED").bind(before).bind(owner)
+    sqlx::query_scalar("SELECT u.source_id FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE (u.node_id IS NOT DISTINCT FROM $2) AND ($2::uuid IS NULL OR u.token IS NULL OR u.lease_expires_at<clock_timestamp()) AND u.next_attempt_at<=clock_timestamp() AND r.state='ready' AND ($1::timestamptz IS NOT NULL OR NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=r.processing_task AND t.state<>'completed')) AND ($1::timestamptz IS NULL OR r.created_at<=$1) ORDER BY u.background,u.next_attempt_at,u.source_id LIMIT 1 FOR UPDATE OF u SKIP LOCKED").bind(before).bind(owner)
 }
 
 pub(super) fn raw_upload_claim(source: Id, token: Uuid, node: Option<Uuid>) -> Statement<'static> {
@@ -9292,7 +9327,7 @@ pub(super) fn raw_queue(
     owner: Option<Uuid>,
 ) -> Statement<'static> {
     sqlx::query(
-        "INSERT INTO raw_uploads(source_id,deduplicate,background,node_id) VALUES($1,$2,$3,$4)",
+        "WITH scoped AS (UPDATE tasks SET execution_scope=CASE WHEN $4::uuid IS NULL THEN 'cluster' ELSE 'node' END,target_node_id=$4 WHERE id=(SELECT processing_task FROM raw_sources WHERE id=$1)) INSERT INTO raw_uploads(source_id,deduplicate,background,node_id) VALUES($1,$2,$3,$4)",
     )
     .bind(source)
     .bind(deduplicate)
@@ -9327,7 +9362,7 @@ pub(super) fn raw_upload_references(source: Id) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=$1)").bind(source)
 }
 pub(super) fn raw_uploaded(source: Id) -> Statement<'static> {
-    sqlx::query("UPDATE raw_sources SET pending_upload=false,medium='shared_s3',upload_id=NULL,revision=revision+1 WHERE id=$1 AND pending_upload").bind(source)
+    sqlx::query("WITH released AS (UPDATE tasks SET execution_scope='cluster',target_node_id=NULL WHERE id=(SELECT processing_task FROM raw_sources WHERE id=$1)) UPDATE raw_sources SET pending_upload=false,medium='shared_s3',upload_id=NULL,revision=revision+1 WHERE id=$1 AND pending_upload").bind(source)
 }
 pub(super) fn raw_upload_hash(source: Id, hash: Option<&[u8]>) -> Statement<'_> {
     sqlx::query("UPDATE raw_uploads SET content_hash=$1,token=NULL,lease_expires_at=NULL,next_attempt_at=clock_timestamp(),last_error=NULL WHERE source_id=$2").bind(hash).bind(source)
@@ -9456,4 +9491,110 @@ pub(super) fn remote_processing_hash(stream: Id, hash: &[u8]) -> Statement<'_> {
     sqlx::query("UPDATE raw_processing SET content_hash=$2 WHERE stream_id=$1")
         .bind(stream)
         .bind(hash)
+}
+
+pub(super) fn conversion_stream(stream: Id) -> Rows<'static, (Uuid, String, i64)> {
+    sqlx::query_as("SELECT bucket_id,object_key,payload_revision FROM streams WHERE id=$1")
+        .bind(stream)
+}
+
+pub(super) fn conversion_key(storage: Uuid, key: Option<Uuid>) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT block_key_id IS NOT DISTINCT FROM $1 FROM storages WHERE id=$2")
+        .bind(key)
+        .bind(storage)
+}
+
+pub(super) fn conversion_link(source: Id, task: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE raw_sources SET processing_task=$1 WHERE id=$2")
+        .bind(task)
+        .bind(source)
+}
+
+pub(super) fn conversion_owned(candidate: Id, task: Uuid, token: Uuid) -> Scalar<'static, Id> {
+    sqlx::query_scalar("SELECT id FROM streams WHERE id=$1 AND state='writing' AND owner_task_id=$2 AND owner_lease_token=$3 FOR UPDATE").bind(candidate).bind(task).bind(token)
+}
+
+pub(super) fn conversion_chunk(chunk: Id, candidate: Id) -> Scalar<'static, Id> {
+    sqlx::query_scalar(
+        "SELECT id FROM chunks WHERE id=$1 AND state='preparing' AND owner_stream=$2 FOR UPDATE",
+    )
+    .bind(chunk)
+    .bind(candidate)
+}
+
+pub(super) fn conversion_ready(chunk: Id, candidate: Id) -> Statement<'static> {
+    sqlx::query("UPDATE chunks SET state='ready',owner_stream=NULL,unreferenced_at=NULL WHERE id=$1 AND owner_stream=$2 AND state='preparing'").bind(chunk).bind(candidate)
+}
+
+pub(super) fn conversion_retire_encoding(encoding: Id) -> Statement<'static> {
+    sqlx::query("UPDATE chunk_encodings SET state='retired',unreferenced_at=clock_timestamp() WHERE encoding_id=$1 AND state IN ('preparing','uploading')").bind(encoding)
+}
+
+pub(super) fn conversion_output_pack(pack: Id, task: Uuid) -> Scalar<'static, Id> {
+    sqlx::query_scalar("SELECT id FROM packs WHERE id=$1 AND owner_task=$2 AND state='preparing' AND stored_size IS NOT NULL AND digest IS NOT NULL FOR UPDATE").bind(pack).bind(task)
+}
+
+pub(super) fn conversion_output_encoding(
+    encoding: Id,
+    task: Uuid,
+    chunk: Id,
+) -> Scalar<'static, Id> {
+    sqlx::query_scalar("SELECT encoding_id FROM chunk_encodings WHERE encoding_id=$1 AND owner_task=$2 AND chunk_id=$3 AND state='uploading' AND standalone_size IS NOT NULL FOR UPDATE").bind(encoding).bind(task).bind(chunk)
+}
+
+pub(super) fn conversion_publish_encoding(encoding: Id) -> Statement<'static> {
+    sqlx::query("UPDATE chunk_encodings SET state='ready',owner_task=NULL,unreferenced_at=NULL,stored_at=clock_timestamp() WHERE encoding_id=$1 AND state='uploading'").bind(encoding)
+}
+
+pub(super) fn conversion_layout(chunk: Id, pack: Option<Id>) -> Statement<'static> {
+    sqlx::query("UPDATE chunks SET pack_id=$1 WHERE id=$2")
+        .bind(pack)
+        .bind(chunk)
+}
+
+pub(super) fn conversion_current(stream: Id, revision: i64) -> Scalar<'static, Id> {
+    sqlx::query_scalar("SELECT id FROM streams WHERE id=$1 AND payload_revision=$2 AND payload_type='raw' AND state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=streams.id) FOR UPDATE").bind(stream).bind(revision)
+}
+
+pub(super) fn conversion_move(candidate: Id, stream: Id) -> Statement<'static> {
+    sqlx::query("UPDATE extents SET stream_id=$1 WHERE stream_id=$2")
+        .bind(stream)
+        .bind(candidate)
+}
+
+pub(super) fn conversion_detach(stream: Id) -> Statement<'static> {
+    sqlx::query("DELETE FROM raw_ranges WHERE stream_id=$1").bind(stream)
+}
+
+pub(super) fn conversion_changed(stream: Id) -> Statement<'static> {
+    sqlx::query(
+        "UPDATE streams SET payload_type='chunks',payload_revision=payload_revision+1 WHERE id=$1",
+    )
+    .bind(stream)
+}
+
+pub(super) fn conversion_abandon(candidate: Id) -> Statement<'static> {
+    sqlx::query("UPDATE streams SET state='abandoned',size=0,owner_task_id=NULL,owner_lease_token=NULL,touched_at=clock_timestamp() WHERE id=$1").bind(candidate)
+}
+
+pub(super) fn conversion_unpin(candidate: Id) -> Statement<'static> {
+    sqlx::query("DELETE FROM cache_pins WHERE owner_id=$1").bind(candidate)
+}
+
+pub(super) fn conversion_no_pending(candidate: Id) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM extents e JOIN pending_uploads p ON p.chunk_id=e.chunk_id WHERE e.stream_id=$1)").bind(candidate)
+}
+
+pub(super) fn conversion_cancel(source: Id) -> Statement<'static> {
+    sqlx::query("DELETE FROM tasks WHERE id=(SELECT processing_task FROM raw_sources WHERE id=$1) AND state<>'running'").bind(source)
+}
+
+pub(super) fn conversion_inline(stream: Id) -> Statement<'static> {
+    sqlx::query("UPDATE streams SET payload_type='chunks' WHERE id=$1 AND state='writing' AND payload_type='raw'").bind(stream)
+}
+
+pub(super) fn conversion_job(
+    source: Id,
+) -> Scalar<'static, sqlx::types::Json<crate::model::raw::Conversion>> {
+    sqlx::query_scalar("SELECT detail FROM tasks WHERE id=(SELECT processing_task FROM raw_sources WHERE id=$1) FOR UPDATE").bind(source)
 }

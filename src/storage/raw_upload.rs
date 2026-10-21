@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 pub(crate) enum Written {
     Final(Option<[u8; 32]>),
+    Chunks(super::raw_request::File),
     Cached {
         revision: i64,
         deduplicate: bool,
@@ -27,6 +28,7 @@ pub(crate) struct Writer {
     size: u64,
     revision: i64,
     deduplicate: bool,
+    convert: bool,
     background: bool,
     reject_overflow: bool,
     prepared: bool,
@@ -63,7 +65,8 @@ impl Writer {
             policy,
             size: 0,
             revision: profile.revision,
-            deduplicate: profile.deduplication_enabled,
+            deduplicate: profile.deduplication_enabled && !profile.cdc_enabled,
+            convert: profile.cdc_enabled,
             background: profile.write_processing == "background",
             reject_overflow,
             prepared: false,
@@ -184,6 +187,9 @@ impl Writer {
                 .await?,
         );
         let hash = hash_file(&mut file, expected, digest, self.deduplicate).await?;
+        if self.convert {
+            return Ok(Written::Chunks(self.file.take().unwrap()));
+        }
         if let Some(hash) = hash {
             if self
                 .storage

@@ -22,6 +22,53 @@ impl App {
     ) -> Result<()> {
         use crate::storage::raw_upload::Written;
         match written {
+            Written::Chunks(mut file) => {
+                use crate::content::codec::{self, MAX};
+                use tokio::io::AsyncReadExt;
+                let encoding = self.raw.inline_conversion(stream, source).await?;
+                self.upload_cache.disable(stream).await?;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("cdc-inline-fallback").await;
+                file.rewind().await?;
+                let mut window = vec![0; MAX];
+                let mut filled = 0usize;
+                let mut offset = 0i64;
+                let mut eof = false;
+                while !eof || filled != 0 {
+                    if !eof && filled < MAX {
+                        let count = file
+                            .file
+                            .as_mut()
+                            .unwrap()
+                            .read(&mut window[filled..])
+                            .await?;
+                        eof = count == 0;
+                        filled += count;
+                        if !eof && filled < MAX {
+                            continue;
+                        }
+                    }
+                    if filled == 0 {
+                        break;
+                    }
+                    let length = codec::cut(&window[..filled]);
+                    self.put_chunk_with(
+                        stream,
+                        offset,
+                        window[..length].to_vec(),
+                        true,
+                        Some(&encoding),
+                    )
+                    .await?;
+                    offset += length as i64;
+                    window.copy_within(length..filled, 0);
+                    filled -= length;
+                }
+                ensure!(
+                    offset == size,
+                    crate::content::codec::IntegrityError::Length
+                );
+            }
             Written::Final(hash) => {
                 self.raw.finish(stream, source, size, digest).await?;
                 self.deduplicate_raw(stream, storage, source, hash).await?;

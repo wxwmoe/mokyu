@@ -85,7 +85,7 @@ def main():
                 ON s.id=w.stream_id WHERE s.bucket_id=%s''', bucket)
 
         configure(write_processing='unknown', succeeds=False)
-        configure(write_processing='background', succeeds=False)
+        configure(write_processing='background')
         configure(cdc_enabled=False, pack_range_enabled=False, deduplication_enabled=True,
                   write_processing='background')
         publication = fixture.arm('source-before-publish')

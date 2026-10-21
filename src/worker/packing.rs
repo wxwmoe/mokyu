@@ -226,11 +226,35 @@ impl App {
             let raw = self.storage.get_with(&row.chunk, Some(context)).await?;
             data.push((row.chunk.clone(), Bytes::copy_from_slice(&raw)));
         }
+        self.pack_data(
+            task,
+            rows,
+            &data,
+            &memory,
+            content_type,
+            key,
+            allow_pack,
+            accepted,
+        )
+        .await
+    }
+
+    pub(crate) async fn pack_data(
+        &self,
+        task: Execution,
+        rows: &[Mapping],
+        data: &[(Chunk, Bytes)],
+        memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        content_type: Option<&str>,
+        key: &str,
+        allow_pack: bool,
+        accepted: Option<&EncodingPolicy>,
+    ) -> Result<Vec<Output>> {
         if rows.len() == 1 || !allow_pack || !self.pack_creation_allowed() {
             let mut outputs = Vec::new();
             for (c, raw) in data {
                 outputs.push(
-                    self.independent_output(task, &c, raw, &memory, accepted)
+                    self.independent_output(task, c, raw.clone(), memory, accepted)
                         .await?,
                 );
             }
@@ -300,7 +324,6 @@ impl App {
         memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         accepted: Option<&EncodingPolicy>,
     ) -> Result<Option<Output>> {
-        let coord = self.coord.lock().await;
         if !self.pack_creation_allowed() {
             return Ok(None);
         }
@@ -322,6 +345,10 @@ impl App {
             "pack members must use one store"
         );
         let _pack_permit = self.storage.pack_permit(storage_id).await?;
+        let coord = self.coord.lock().await;
+        if !self.pack_creation_allowed() {
+            return Ok(None);
+        }
         let p: Pack = self
             .packing
             .prepare_pack(

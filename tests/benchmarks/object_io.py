@@ -82,10 +82,23 @@ def drain_raw(database, bucket, seconds):
     started = time.perf_counter()
     first = None
     while True:
-        current = database.query('''SELECT count(*) AS pending,
-            COALESCE(sum(CASE WHEN w.last_error IS NOT NULL THEN 1 ELSE 0 END),0) AS failed
+        current = database.query('''SELECT count(*) AS pending, COALESCE(sum(failed),0) AS failed FROM (
+            SELECT CASE WHEN w.last_error IS NOT NULL THEN 1 ELSE 0 END AS failed
             FROM raw_processing w JOIN streams s ON s.id=w.stream_id
-            JOIN buckets b ON b.id=s.bucket_id WHERE b.name=%s''', bucket)[0]
+            JOIN buckets b ON b.id=s.bucket_id WHERE b.name=%s
+            UNION ALL
+            SELECT CASE WHEN t.state='failed' THEN 1 ELSE 0 END AS failed
+            FROM raw_sources r JOIN tasks t ON t.id=r.processing_task
+            WHERE t.state<>'completed' AND EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id
+                JOIN buckets b ON b.id=s.bucket_id WHERE e.source_id=r.id AND b.name=%s)
+            UNION ALL
+            SELECT CASE WHEN u.last_error IS NOT NULL THEN 1 ELSE 0 END AS failed FROM raw_uploads u
+            WHERE EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id
+                JOIN buckets b ON b.id=s.bucket_id WHERE e.source_id=u.source_id AND b.name=%s)
+            UNION ALL
+            SELECT 0 AS failed FROM pending_uploads u JOIN streams s ON s.id=u.stream_id
+                JOIN buckets b ON b.id=s.bucket_id WHERE b.name=%s
+            ) backlog''', bucket, bucket, bucket, bucket)[0]
         first = first or current
         elapsed = time.perf_counter() - started
         if current['pending'] == 0 or current['failed'] or elapsed >= seconds:

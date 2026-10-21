@@ -34,11 +34,22 @@ impl App {
         raw: Vec<u8>,
         retransmitted: bool,
     ) -> Result<Chunk> {
+        self.put_chunk_with(stream, offset, raw, retransmitted, None)
+            .await
+    }
+    pub(crate) async fn put_chunk_with(
+        &self,
+        stream: Id,
+        offset: i64,
+        raw: Vec<u8>,
+        retransmitted: bool,
+        accepted: Option<&crate::model::cache::EncodingPolicy>,
+    ) -> Result<Chunk> {
         tokio::time::timeout(
             std::time::Duration::from_secs(config::seconds(
                 &self.config.requests.upload_idle_timeout,
             )?),
-            self.put_chunk_inner(stream, offset, raw, retransmitted),
+            self.put_chunk_inner(stream, offset, raw, retransmitted, accepted),
         )
         .await
         .map_err(|_| s3_error!(RequestTimeout, "upload processing made no progress"))?
@@ -74,6 +85,7 @@ impl App {
         offset: i64,
         raw: Vec<u8>,
         retransmitted: bool,
+        accepted: Option<&crate::model::cache::EncodingPolicy>,
     ) -> Result<Chunk> {
         ensure!(!raw.is_empty() && raw.len() <= MAX, "invalid chunk length");
         self.renew_write_lease(stream).await?;
@@ -86,7 +98,12 @@ impl App {
         let profile = self.storage.profile(storage_id)?;
         let mutex = self.content_lock(storage_id, hash);
         let _guard = mutex.lock().await;
-        let (algorithm, key_id) = self.store_encoding(storage_id).await?;
+        let (algorithm, key_id) = if let Some(policy) = accepted {
+            self.storage.ensure_key_loaded(policy.block_key_id).await?;
+            (policy.algorithm.clone(), policy.block_key_id)
+        } else {
+            self.store_encoding(storage_id).await?
+        };
         let _claim = if self.role == "single" {
             None
         } else {
@@ -109,14 +126,17 @@ impl App {
                         Some(crate::model::Error::SourceUnavailable)
                     ) =>
             {
-                return self.repair_chunk(input, offset, raw).await;
+                return self.repair_chunk(input, offset, raw, accepted).await;
             }
             Err(error) => return Err(error),
         };
         if reused {
             #[cfg(feature = "fault-injection")]
             crate::faults::point("source-before-reference").await;
-            if profile.upload_cache && self.chunks.can_stage_reuse(c.id).await? {
+            if accepted.is_none()
+                && profile.upload_cache
+                && self.chunks.can_stage_reuse(c.id).await?
+            {
                 let (data, compressed) = self
                     .storage
                     .cache_payload(&c, Bytes::copy_from_slice(&raw))
@@ -133,7 +153,8 @@ impl App {
         }
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-allocated").await;
-        if profile.upload_cache
+        if accepted.is_none()
+            && profile.upload_cache
             && self
                 .stage_chunk(
                     stream,
@@ -148,7 +169,10 @@ impl App {
         {
             return Ok(c);
         }
-        let (c, encoded, cache) = self.storage.encode(c, raw, true, None, None).await?;
+        let (c, encoded, cache) = self
+            .storage
+            .encode(c, raw, true, None, accepted.map(|p| &p.compression))
+            .await?;
         self.chunks.mark_uploading(&c).await?;
         self.storage.register_location(&c).await?;
         #[cfg(feature = "fault-injection")]
@@ -160,7 +184,13 @@ impl App {
         Ok(c)
     }
 
-    async fn repair_chunk(&self, input: ChunkCreate, offset: i64, raw: Vec<u8>) -> Result<Chunk> {
+    async fn repair_chunk(
+        &self,
+        input: ChunkCreate,
+        offset: i64,
+        raw: Vec<u8>,
+        accepted: Option<&crate::model::cache::EncodingPolicy>,
+    ) -> Result<Chunk> {
         use crate::model::recovery::{RepairAllocation, RepairNode};
         let stream = input.stream;
         let allocation = {
@@ -191,7 +221,13 @@ impl App {
             .await?;
         let (chunk, encoded, cache) = self
             .storage
-            .encode(repair.chunk.clone(), raw, true, None, None)
+            .encode(
+                repair.chunk.clone(),
+                raw,
+                true,
+                None,
+                accepted.map(|p| &p.compression),
+            )
             .await?;
         repair.chunk = chunk;
         self.chunks.repair_metadata(&repair).await?;

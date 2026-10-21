@@ -231,13 +231,6 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
             "write_processing must be inline or background"
         )
     );
-    anyhow::ensure!(
-        !profile.cdc_enabled || profile.write_processing == "inline",
-        s3s::s3_error!(
-            InvalidArgument,
-            "background processing currently requires raw storage"
-        )
-    );
     if storage_type == "local"
         && (profile.cache_enabled
             || profile.upload_cache

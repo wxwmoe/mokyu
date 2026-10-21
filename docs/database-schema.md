@@ -53,7 +53,7 @@ storage 连接和 profile 修改只改变后续写入及新请求的策略；已
 
 | 表 | 字段与约束 | 索引与生命周期 |
 | --- | --- | --- |
-| `raw_sources` | 原生 `id` 主键；MySQL/MariaDB/SQLite 另有非空唯一的文件 UUID `location_id`，PostgreSQL 复用主键；`storage_id` 非空外键，`owner_stream` 可空外键、删除 stream 时置空；`medium` 默认 local、`durability` 默认 durable、`boot_id` 可空；`state` 默认 writing；`size` 非负、默认 0；`digest` 可空 16 字节、ready 时必须存在；`content_hash` 可空 32 字节、`upload_id` 可空，`pending_upload` 默认 false；正整数 `revision` 默认 1、`profile_revision` 非空；可空隔离时间/代码；创建和未引用时间默认当前时间 | 按 storage/state/unreferenced_at/id 查回收候选，按 owner 查未完成写入；非空内容摘要按 storage/content_hash/size 唯一；被 raw_ranges 引用时不可删除 |
+| `raw_sources` | 原生 `id` 主键；MySQL/MariaDB/SQLite 另有非空唯一的文件 UUID `location_id`，PostgreSQL 复用主键；`storage_id` 非空外键，`owner_stream` 可空外键、删除 stream 时置空；`medium` 默认 local、`durability` 默认 durable、`boot_id` 可空；`state` 默认 writing；`size` 非负、默认 0；`digest` 可空 16 字节、ready 时必须存在；`content_hash` 可空 32 字节、`upload_id` 可空，`pending_upload` 默认 false；可空 `processing_task` 外键指向后台 CDC 的 upload 任务；正整数 `revision` 默认 1、`profile_revision` 非空；可空隔离时间/代码；创建和未引用时间默认当前时间 | 按 storage/state/unreferenced_at/id 查回收候选，按 owner 查未完成写入；非空内容摘要按 storage/content_hash/size 唯一；被 raw_ranges 引用时不可删除 |
 | `raw_ranges` | `stream_id` 外键、删除 stream 时级联；`offset_bytes` 与 `length` 非负；`source_id` 非空来源外键；`source_offset` 非负、默认 0 | 主键 `(stream_id,offset_bytes)`，来源反查索引；发布事务检查有序连续、边界与来源健康，GC 分批释放引用 |
 | `raw_processing` | `stream_id` 主键及级联外键，`source_id` 非空级联外键；`payload_revision` 非空；可空 32 字节 `content_hash`、`source_revision`、执行 `token` 和 `lease_expires_at`；`next_attempt_at` 默认当前时间、`attempts` 默认 0、`last_error` 可空 | 按 `(next_attempt_at,stream_id)` 扫描已发布 raw 对象；单容器直接执行，群集领取/续租及最终提交验证节点身份；读保护排空后原子切换来源，删除对象取消无用工作 |
 

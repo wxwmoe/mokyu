@@ -325,6 +325,13 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<()> {
                 app.pack_batch(execution, cursor.as_deref(), detail, task_type == "unpack"),
             )
             .await
+    } else if detail["operation"] == "cdc" {
+        crate::storage::resource_gate::PRIORITY
+            .scope(
+                crate::storage::resource_gate::MAINTENANCE,
+                app.convert_raw(execution, detail),
+            )
+            .await
     } else if task_type == "upload" || task_type == "cache_flush" {
         crate::storage::resource_gate::PRIORITY
             .scope(

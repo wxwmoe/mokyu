@@ -4631,7 +4631,17 @@ pub(super) async fn allocate_chunk(
         let chunk = Id::try_from(
             queries::insert_chunk(&input)
                 .execute(&mut *tx)
-                .await?
+                .await
+                .map_err(|error| {
+                    if error
+                        .as_database_error()
+                        .is_some_and(|e| e.is_unique_violation())
+                    {
+                        anyhow::Error::from(crate::model::Error::OperationAborted)
+                    } else {
+                        anyhow::Error::from(error)
+                    }
+                })?
                 .last_insert_id(),
         )?;
         let encoding = Id::try_from(
@@ -6921,6 +6931,7 @@ pub(super) async fn begin_raw(
     stream: Id,
     storage: Uuid,
     revision: i64,
+    encoding: Option<&crate::model::cache::EncodingPolicy>,
 ) -> Result<(Id, Uuid)> {
     let mut tx = pool.begin().await?;
     let (storage_type, unencoded, current, cdc, background) = queries::raw_target(stream, storage)
@@ -6928,7 +6939,13 @@ pub(super) async fn begin_raw(
         .await?
         .ok_or(crate::model::Error::OperationAborted)?;
     ensure!(
-        matches!(storage_type.as_str(), "local" | "s3") && unencoded && !cdc && current == revision,
+        matches!(storage_type.as_str(), "local" | "s3")
+            && current == revision
+            && if encoding.is_some() {
+                cdc && background
+            } else {
+                unencoded && !cdc
+            },
         crate::model::Error::OperationAborted
     );
     ensure!(
@@ -6954,7 +6971,46 @@ pub(super) async fn begin_raw(
     .execute(&mut *tx)
     .await?;
     let id = Id::try_from(inserted.last_insert_id())?;
-    if background {
+    if let Some(encoding) = encoding {
+        encoding.validate()?;
+        ensure!(
+            queries::conversion_key(storage, encoding.block_key_id)
+                .fetch_one(&mut *tx)
+                .await?,
+            crate::model::Error::OperationAborted
+        );
+        if let Some(key) = encoding.block_key_id {
+            let (_, algorithm) = queries::replacement_key(key)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(crate::model::Error::OperationAborted)?;
+            ensure!(
+                algorithm == encoding.algorithm,
+                crate::model::Error::OperationAborted
+            );
+        }
+        let (bucket, object_key, payload_revision) = queries::conversion_stream(stream)
+            .fetch_one(&mut *tx)
+            .await?;
+        let job = crate::model::raw::Conversion {
+            stream,
+            source: id.into(),
+            bucket,
+            object_key,
+            payload_revision,
+            encoding: encoding.clone(),
+            target_key_id: encoding.block_key_id,
+        };
+        let mut detail = serde_json::to_value(job)?;
+        detail["operation"] = serde_json::json!("cdc");
+        let task = Uuid::new_v4();
+        queries::insert_task(task, "upload", Some(bucket), detail, None)
+            .execute(&mut *tx)
+            .await?;
+        queries::conversion_link(id.into(), task)
+            .execute(&mut *tx)
+            .await?;
+    } else if background {
         queries::raw_enqueue_processing(stream, id)
             .execute(&mut *tx)
             .await?;
@@ -7732,4 +7788,232 @@ pub(super) async fn abandon_raw_upload(
         .await?;
     tx.commit().await?;
     Ok(true)
+}
+
+pub(super) async fn commit_conversion_batch(
+    pool: &sqlx::MySqlPool,
+    task: Execution,
+    candidate: Id,
+    rows: &[crate::model::Mapping],
+    outputs: &[crate::model::packing::PackOutput],
+) -> Result<()> {
+    ensure!(
+        !rows.is_empty() && rows.len() <= 1024,
+        "invalid conversion batch"
+    );
+    let mut tx = pool.begin().await?;
+    lock_execution(&mut tx, task).await?;
+    writing_stream(&mut tx, candidate).await?;
+    ensure!(
+        queries::conversion_owned(candidate, task.id, task.token)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some(),
+        crate::model::Error::OperationAborted
+    );
+    let expected: std::collections::BTreeSet<_> = rows.iter().map(|r| r.chunk.id).collect();
+    let produced: Vec<_> = outputs
+        .iter()
+        .flat_map(|o| o.chunks.iter().copied())
+        .collect();
+    ensure!(
+        expected.len() == rows.len()
+            && produced.len() == rows.len()
+            && produced
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                == expected,
+        "conversion outputs do not match inputs"
+    );
+    for row in rows {
+        ensure!(
+            queries::conversion_chunk(row.chunk.id, candidate)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some(),
+            crate::model::Error::OperationAborted
+        );
+        queries::conversion_ready(row.chunk.id, candidate)
+            .execute(&mut *tx)
+            .await?;
+        queries::conversion_retire_encoding(row.chunk.encoding_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    for output in outputs {
+        if let Some(pack) = &output.pack {
+            ensure!(
+                output.independent.is_none()
+                    && queries::conversion_output_pack(pack.id, task.id)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .is_some(),
+                crate::model::Error::OperationAborted
+            );
+            queries::publish_prepared_pack(pack.id, task.id)
+                .execute(&mut *tx)
+                .await?;
+        } else if let Some(chunk) = &output.independent {
+            ensure!(
+                output.chunks == [chunk.id]
+                    && queries::conversion_output_encoding(chunk.encoding_id, task.id, chunk.id)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .is_some(),
+                crate::model::Error::OperationAborted
+            );
+            queries::conversion_publish_encoding(chunk.encoding_id)
+                .execute(&mut *tx)
+                .await?;
+            queries::publish_chunk_encoding(chunk.id, chunk.encoding_id)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            anyhow::bail!("conversion output has no physical source");
+        }
+        for chunk in &output.chunks {
+            queries::conversion_layout(*chunk, output.pack.as_ref().map(|p| p.id))
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    for row in rows {
+        queries::insert_chunk_extent(
+            candidate,
+            row.offset_bytes,
+            row.chunk.raw_size,
+            row.chunk.id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        queries::changed_references(&mut tx, &[row.chunk.id], true).await?;
+    }
+    require_sources(&mut tx, Some(candidate), &[]).await?;
+    let end = rows.last().unwrap().offset_bytes + i64::from(rows.last().unwrap().chunk.raw_size);
+    queries::resize_writing_stream(candidate, end)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn finish_conversion(
+    pool: &sqlx::MySqlPool,
+    task: Execution,
+    job: &crate::model::raw::Conversion,
+    source: &crate::model::raw::RawSource,
+    candidate: Id,
+    lease: Option<Uuid>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    lock_execution(&mut tx, task).await?;
+    ensure!(
+        queries::conversion_owned(candidate, task.id, task.token)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some(),
+        crate::model::Error::OperationAborted
+    );
+    if queries::conversion_current(job.stream, job.payload_revision)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_none()
+    {
+        queries::conversion_abandon(candidate)
+            .execute(&mut *tx)
+            .await?;
+        queries::complete_task(task.id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        return Ok(true);
+    }
+    let _ = lease;
+
+    validate_raw(&mut tx, job.stream, source.size).await?;
+    let current = queries::raw_source(source.id).fetch_one(&mut *tx).await?;
+    ensure!(
+        current == *source && source.id == job.source,
+        crate::model::Error::SourceUnavailable
+    );
+    let (end, contiguous) = queries::extent_continuity(candidate)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(
+        end == source.size && contiguous,
+        "conversion candidate is incomplete"
+    );
+    if !queries::conversion_no_pending(candidate)
+        .fetch_one(&mut *tx)
+        .await?
+    {
+        return Ok(false);
+    }
+    require_sources(&mut tx, Some(candidate), &[]).await?;
+    queries::conversion_move(candidate, job.stream)
+        .execute(&mut *tx)
+        .await?;
+    queries::conversion_detach(job.stream)
+        .execute(&mut *tx)
+        .await?;
+    queries::conversion_changed(job.stream)
+        .execute(&mut *tx)
+        .await?;
+    queries::conversion_unpin(candidate)
+        .execute(&mut *tx)
+        .await?;
+    queries::conversion_abandon(candidate)
+        .execute(&mut *tx)
+        .await?;
+    queries::raw_touch_unreferenced(source.id)
+        .execute(&mut *tx)
+        .await?;
+    queries::ready_stream_queues(&mut tx, job.stream).await?;
+    queries::complete_task(task.id).execute(&mut *tx).await?;
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("cdc-switch-before-commit").await;
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub(super) async fn inline_conversion(
+    pool: &sqlx::MySqlPool,
+    stream: Id,
+    source: Id,
+) -> Result<crate::model::cache::EncodingPolicy> {
+    let mut tx = pool.begin().await?;
+    writing_stream(&mut tx, stream).await?;
+    ensure!(
+        queries::raw_receiving(source, stream)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some(),
+        crate::model::Error::OperationAborted
+    );
+    let job = queries::conversion_job(source).fetch_one(&mut *tx).await?.0;
+    ensure!(
+        queries::conversion_cancel(source)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        queries::raw_discard(source, stream)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        queries::conversion_inline(stream)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    tx.commit().await?;
+    Ok(job.encoding)
 }

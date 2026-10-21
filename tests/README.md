@@ -196,7 +196,7 @@ rustc --edition=2024 -O tests/benchmarks/lock_tables.rs --extern "tokio=$tokio_r
 
 fixture 使用 `revision`、`build`、`database_version`、`cache_state`、`seed`、`credentials_file`、`prefix` 和可选 `resources`/PostgreSQL `database_file`，另设单个 `endpoint`、`operation`、`size`、`seconds`、`concurrency`、`max_operations`、`max_total_bytes`。正文大小 0–64MiB，并发 1–64，持续 1–600 秒，请求最多一百万；包括预热对象的 `(max_operations + 1) × size` 必须在字节预算内。每轮使用独占前缀，脚本不会删除数据；触及请求上限时按实际时间报告。
 
-raw 后台去重比较可设置 `raw_drain_seconds`（1–600）并提供对应隔离库的 `MOKYU_TEST_CONFIG`；预热及请求结束后等待该桶的处理记录排空，完整读回放在排空后。报告分别保留 ACK 窗口和包括排空的时间、完成速率、CPU/磁盘成本；失败或超时不能计为稳态完成。排空轮询本身有数据库开销，比较双方须使用同样设置。
+后台写入比较可设置 `raw_drain_seconds`（1–600）并提供对应隔离库的 `MOKYU_TEST_CONFIG`；预热及请求结束后等待该桶的 raw 去重、CDC、raw/chunks 待上传记录排空，完整读回放在排空后。报告分别保留 ACK 窗口和包括排空的时间、完成速率、CPU/磁盘成本；失败或超时不能计为稳态完成。排空轮询本身有数据库开销，比较双方须使用同样设置。
 
 报告保存各操作百分位、实际请求窗口吞吐、读回校验数量/错误、CPU、cgroup 内存（含匿名页/文件页/脏页）、逐设备 I/O 字节/次数及节点状态。逐设备计数不叠加，以免重复计算分区和底层设备。PostgreSQL SQL 差值是整个测量窗口的数据库总成本，包含后台工作，不是逐请求前台 SQL 计数；没有采集时为 null，不能解读成零。公共 Web/匿名 S3 的编码读取继续使用公共读基准；所有比较记录应用/页缓存状态，统一资源与确认策略，并发超出服务准入额度的 SlowDown 必须计为错误，不能只报告成功请求。
 
@@ -238,5 +238,7 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 `python -m tests.recovery.raw_uploads` 接管已初始化但停止的隔离服务，沿用来源隔离 fixture 的配置、故障目录和 S3 后端变量；节点缓存至少 64MiB、上传缓存至少 32MiB。覆盖提前确认后的 GET/HEAD/Range、PUT/Copy/Multipart、关闭缓存与重启、配额回退、条件/校验失败、维护 flush 的时间上界、最终上传后崩溃和唯一缓存损坏。四种数据库分别运行。
 
 `python -m tests.recovery.cached_encoding` 使用相同的隔离服务与 S3 夹具，覆盖新块在最终编码前的持久确认、零提前 nonce 消耗、读取与去重、重启恢复、压缩/组包/密钥设置变更隔离、旧密钥撤销保护、直接组包后的最终文件数量、独立块压缩和缓存满 reject/fallback。上传缓存至少 8MiB。设置 `MOKYU_TEST_PEER_ENDPOINT` 时复用已启动的双 data 夹具，故障目录列表使用 `MOKYU_TEST_SOURCE_FAULT_DIRS`；单容器入口自行启停服务，四库分别运行。
+
+`python -m tests.recovery.background_cdc` 复用上述环境，验证原始表示提前确认、设置冻结、后台直接组包、健康复用、同内容并发、旧读者保护、覆盖/删除、空对象、候选上传后的强杀恢复、坏源拒绝及修复重试、显式缓存刷新和 Multipart。四库分别运行；`MOKYU_TEST_CDC_LOCAL=1` 使用本地后端，双 data 使用同样的 peer/fault 变量。故障点只可用于隔离构建。
 
 `upload-overflow.spec.ts` 使用独立 S3 fixture（`MOKYU_TEST_BACKEND`），自行创建本地后端，验证三语明暗表单、键盘选择、320–1440px、草稿取消/保存及本地禁用。`recovery.raw_uploads` 同时验证 chunks/raw 的 fallback/reject、503 SlowDown、失败写入不覆盖旧对象、重启保存策略、非法选项与缺省字段。

@@ -255,10 +255,31 @@ impl App {
             .reserve_quota(stream, declared.unwrap_or(0), false, upload)
             .await?;
         let mut offset = 0i64;
-        let raw_revision = raw_override.or(self.storage.raw_policy(storage)?);
+        let profile = self.storage.profile(storage)?;
+        let convert =
+            upload.is_none() && profile.cdc_enabled && profile.write_processing == "background";
+        let raw_revision = raw_override
+            .or(self.storage.raw_policy(storage)?)
+            .or(convert.then_some(profile.revision));
         let raw_part = upload.is_some() && raw_revision.is_some();
         let mut raw = if let Some(revision) = raw_revision.filter(|_| upload.is_none()) {
-            let (source, location) = self.raw.begin(stream, storage, revision).await?;
+            let (source, location) = if convert {
+                let (algorithm, block_key_id) = self.store_encoding(storage).await?;
+                let encoding = crate::model::cache::EncodingPolicy {
+                    compression: profile
+                        .compression_config(&self.config.instance.compression_idle_timeout),
+                    pack_enabled: profile.pack_enabled,
+                    pack_max_size: profile.pack_max_size.clone(),
+                    pack_flush_timeout: profile.pack_upload_flush_timeout.clone(),
+                    algorithm,
+                    block_key_id,
+                };
+                self.raw
+                    .begin_conversion(stream, storage, revision, &encoding)
+                    .await?
+            } else {
+                self.raw.begin(stream, storage, revision).await?
+            };
             Some((
                 source,
                 self.storage

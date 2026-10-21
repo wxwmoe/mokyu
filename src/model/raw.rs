@@ -102,8 +102,46 @@ pub(crate) struct RawUpload {
     pub content_hash: Option<Vec<u8>>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Conversion {
+    pub stream: Id,
+    pub source: Id,
+    pub bucket: Uuid,
+    pub object_key: String,
+    pub payload_revision: i64,
+    pub encoding: crate::model::cache::EncodingPolicy,
+    pub target_key_id: Option<Uuid>,
+}
+
 #[async_trait]
 pub(crate) trait RawStore: Send + Sync {
+    async fn inline_conversion(
+        &self,
+        stream: Id,
+        source: Id,
+    ) -> Result<crate::model::cache::EncodingPolicy>;
+    async fn begin_conversion(
+        &self,
+        stream: Id,
+        storage: Uuid,
+        revision: i64,
+        encoding: &crate::model::cache::EncodingPolicy,
+    ) -> Result<(Id, Uuid)>;
+    async fn commit_conversion_batch(
+        &self,
+        task: crate::model::task::Execution,
+        candidate: Id,
+        rows: &[crate::model::Mapping],
+        outputs: &[crate::model::packing::PackOutput],
+    ) -> Result<()>;
+    async fn finish_conversion(
+        &self,
+        task: crate::model::task::Execution,
+        job: &Conversion,
+        source: &RawSource,
+        candidate: Id,
+        lease: Option<Uuid>,
+    ) -> Result<bool>;
     async fn claim_processing(
         &self,
         token: Uuid,
