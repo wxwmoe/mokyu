@@ -136,14 +136,22 @@ impl App {
         if data.is_empty() {
             return Ok(());
         }
-        if self.role != "single" {
-            return self.tail(stream, offset, data).await;
-        }
+        self.renew_write_lease(stream).await?;
         let lock = self.operation_lock(upload);
         let guard = lock.lock_owned().await;
-        let file = self.multipart.file(upload).await?;
-        let (position, _lease, _guard) =
-            self.storage.disk.append_fragment(file, data, guard).await?;
+        let file = self
+            .multipart
+            .file(upload, self.node.get().map(|node| node.node_id))
+            .await?;
+        let (position, _lease, _guard) = self
+            .storage
+            .disk
+            .append_fragment(file, data, guard)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error,"raw multipart file could not be persisted");
+                s3_error!(SlowDown, "local multipart storage unavailable")
+            })?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("multipart-file-synced").await;
         self.stream_store

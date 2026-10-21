@@ -1,0 +1,16 @@
+ALTER TABLE multipart_files ADD COLUMN node_id uuid REFERENCES nodes(id);
+CREATE INDEX multipart_files_node ON multipart_files(node_id, id);
+ALTER TABLE uploads ADD COLUMN raw_source_id uuid REFERENCES raw_sources(id);
+ALTER TABLE uploads ADD COLUMN remote_token uuid;
+ALTER TABLE uploads ADD COLUMN remote_expires_at timestamptz;
+ALTER TABLE uploads ADD COLUMN remote_manifest_hash text;
+CREATE INDEX uploads_raw_source ON uploads(raw_source_id) WHERE raw_source_id IS NOT NULL;
+ALTER TABLE parts ADD COLUMN remote_node_id uuid REFERENCES nodes(id);
+ALTER TABLE parts ADD COLUMN remote_etag text;
+ALTER TABLE parts ADD COLUMN remote_token uuid;
+ALTER TABLE parts ADD COLUMN remote_expires_at timestamptz;
+ALTER TABLE parts ADD COLUMN remote_retry_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE parts ADD COLUMN remote_error text;
+ALTER TABLE parts ADD COLUMN remote_cached boolean NOT NULL DEFAULT false;
+CREATE INDEX parts_remote_pending ON parts(remote_node_id, remote_retry_at) WHERE remote_node_id IS NOT NULL AND remote_etag IS NULL;
+UPDATE mokyu_meta SET schema_version=58 WHERE singleton;

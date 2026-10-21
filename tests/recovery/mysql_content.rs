@@ -287,7 +287,7 @@ async fn mysql_content_contract() -> Result<()> {
     );
 
     sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,next_retry_at) VALUES(?,?,0,32,CURRENT_TIMESTAMP(6))").bind(physical.id).bind(next).execute(db).await?;
-    let pins = backend.upload_pins(0.into()).await?;
+    let pins = backend.upload_pins(0.into(), None).await?;
     assert_eq!(pins.len(), 1);
     assert_eq!(
         pins[0],

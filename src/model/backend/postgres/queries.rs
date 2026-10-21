@@ -1,5 +1,6 @@
 //! PostgreSQL statements, row decoding, and nontransactional operations.
 use crate::model::Id;
+use crate::model::multipart::{RemoteCommit, RemoteOutput, RemotePart, RemoteUpload};
 use crate::model::task::{Execution, TaskFinish};
 
 use super::{Backend, connection, normalize_error, transactions};
@@ -637,12 +638,14 @@ pub(super) fn complete_upload<'q>(
     hash: &'q str,
     result: &'q Value,
     stream: Id,
+    token: Uuid,
 ) -> Statement<'q> {
-    sqlx::query("UPDATE uploads SET state='completed',result=$3,output_stream=$4,touched_at=now() WHERE id=$1 AND state='completing' AND manifest_hash=$2")
+    sqlx::query("UPDATE uploads SET state='completed',result=$3,output_stream=$4,touched_at=now() WHERE id=$1 AND state='completing' AND manifest_hash=$2 AND completion_token=$5 AND completion_expires_at>clock_timestamp()")
         .bind(id)
         .bind(hash)
         .bind(result)
         .bind(stream)
+        .bind(token)
 }
 
 pub(super) fn retire_upload_parts<'q>(id: &'q Uuid) -> Statement<'q> {
@@ -3170,7 +3173,7 @@ pub(super) fn insert_web_upload<'q>(
 }
 
 pub(super) fn lock_upload_state(upload: Uuid) -> Scalar<'static, String> {
-    sqlx::query_scalar("SELECT state FROM uploads WHERE id=$1 FOR UPDATE").bind(upload)
+    sqlx::query_scalar("SELECT CASE WHEN remote_manifest_hash IS NOT NULL AND state='active' THEN 'completing' ELSE state END FROM uploads WHERE id=$1 FOR UPDATE").bind(upload)
 }
 
 pub(super) fn begin_upload_part(upload: Uuid, number: i32, stream: Id) -> Statement<'static> {
@@ -3263,15 +3266,10 @@ pub(super) fn upload_part_pair(
     sqlx::query_as("SELECT s.* FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number IN ($2,$2+1) AND s.state='ready' ORDER BY p.part_number").bind(upload).bind(number)
 }
 
-pub(super) fn begin_upload_completion<'q>(upload: Uuid, hash: &'q str) -> Statement<'q> {
-    sqlx::query("UPDATE uploads SET state='completing',manifest_hash=$2,touched_at=now() WHERE id=$1 AND state='active'").bind(upload).bind(hash)
-}
-
-pub(super) fn retry_upload_completion(upload: Uuid) -> Statement<'static> {
-    sqlx::query(
-        "UPDATE uploads SET state='active',touched_at=now() WHERE id=$1 AND state='completing'",
-    )
-    .bind(upload)
+pub(super) fn begin_upload_completion<'a>(
+    input: &'a crate::model::multipart::Completion<'a>,
+) -> Statement<'a> {
+    sqlx::query("UPDATE uploads SET state='completing',manifest_hash=$2,completion_token=$3,completion_expires_at=clock_timestamp()+interval '120 seconds',touched_at=clock_timestamp() WHERE id=$1").bind(input.upload).bind(input.hash).bind(input.token)
 }
 
 pub(super) fn abort_multipart(id: Uuid, expired: bool) -> Statement<'static> {
@@ -3408,9 +3406,10 @@ impl MultipartStore for Backend {
     async fn pending_files(
         &self,
         storage: Option<Uuid>,
+        node: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
-        Ok(sqlx::query_as("SELECT id,upload_id,storage_id,source_id,state FROM multipart_files WHERE reclaim_pending AND state='sealed' AND ($1::uuid IS NULL OR storage_id=$1) ORDER BY id LIMIT $2").bind(storage).bind(limit).fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT id,upload_id,storage_id,source_id,state FROM multipart_files WHERE node_id IS NOT DISTINCT FROM $3 AND reclaim_pending AND state='sealed' AND ($1::uuid IS NULL OR storage_id=$1) ORDER BY id LIMIT $2").bind(storage).bind(limit).bind(node).fetch_all(&self.pool).await?)
     }
     async fn clear_reclaim(&self, id: Uuid) -> Result<()> {
         sqlx::query(
@@ -3443,8 +3442,8 @@ impl MultipartStore for Backend {
     ) -> Result<()> {
         transactions::remap_multipart_file(&self.pool, upload, source, ranges).await
     }
-    async fn file(&self, upload: Uuid) -> Result<Uuid> {
-        transactions::multipart_file(&self.pool, upload).await
+    async fn file(&self, upload: Uuid, node: Option<Uuid>) -> Result<Uuid> {
+        transactions::multipart_file(&self.pool, upload, node).await
     }
     async fn seal_files(&self, upload: Uuid) -> Result<()> {
         sqlx::query(
@@ -3465,9 +3464,10 @@ impl MultipartStore for Backend {
     async fn unused_files(
         &self,
         storage: Option<Uuid>,
+        node: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
-        Ok(sqlx::query_as("SELECT f.id,f.upload_id,f.storage_id,f.source_id,f.state FROM multipart_files f WHERE ($1::uuid IS NULL OR storage_id=$1) AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing'))) ORDER BY f.id LIMIT $2").bind(storage).bind(limit).fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT f.id,f.upload_id,f.storage_id,f.source_id,f.state FROM multipart_files f WHERE f.node_id IS NOT DISTINCT FROM $3 AND ($1::uuid IS NULL OR storage_id=$1) AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing'))) ORDER BY f.id LIMIT $2").bind(storage).bind(limit).bind(node).fetch_all(&self.pool).await?)
     }
     async fn claim_file(&self, id: Uuid) -> Result<bool> {
         Ok(sqlx::query("UPDATE multipart_files AS f SET state='deleting' WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing')))").bind(id).execute(&self.pool).await?.rows_affected()>0)
@@ -3521,9 +3521,17 @@ impl MultipartStore for Backend {
         retire_upload_stream(stream).execute(&self.pool).await?;
         Ok(())
     }
-    async fn retry_complete(&self, upload: Uuid) -> Result<()> {
-        retry_upload_completion(upload).execute(&self.pool).await?;
+    async fn retry_complete(&self, upload: Uuid, token: Uuid) -> Result<()> {
+        sqlx::query("UPDATE uploads SET state='active',completion_token=NULL,completion_expires_at=NULL,touched_at=clock_timestamp() WHERE id=$1 AND completion_token=$2 AND state='completing'").bind(upload).bind(token).execute(&self.pool).await?;
         Ok(())
+    }
+    async fn renew_complete(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::renew_completion(&self.pool, upload, token, node).await
     }
     async fn parts(&self, upload: Uuid, after: i32, limit: i64) -> Result<Vec<UploadPart>> {
         Ok(upload_parts_page(upload, after, limit)
@@ -3582,8 +3590,10 @@ impl MultipartStore for Backend {
         number: i32,
         stream: Id,
     ) -> Result<()> {
-        transactions::commit_upload_part(&self.pool, authority, bucket, upload, number, stream)
-            .await
+        transactions::commit_upload_part(
+            &self.pool, authority, bucket, upload, number, stream, None,
+        )
+        .await
     }
     async fn consume_seed(&self, input: SeedConsumption<'_>) -> Result<()> {
         transactions::consume_upload_seed(&self.pool, input).await
@@ -3591,8 +3601,8 @@ impl MultipartStore for Backend {
     async fn stitch(&self, input: PartStitch) -> Result<()> {
         transactions::stitch_upload_parts(&self.pool, input).await
     }
-    async fn begin_complete(&self, authority: &Permit, upload: Uuid, hash: &str) -> Result<()> {
-        transactions::begin_upload_completion(&self.pool, authority, upload, hash).await
+    async fn begin_complete(&self, input: crate::model::multipart::Completion<'_>) -> Result<bool> {
+        transactions::begin_upload_completion(&self.pool, input).await
     }
     async fn abort(&self, authority: &Permit, upload: Uuid) -> Result<()> {
         transactions::abort_multipart(&self.pool, authority, upload, false)
@@ -3629,7 +3639,7 @@ pub(super) fn insert_pending_upload<'q>(
     input: &'q CacheStage<'q>,
     source: Option<Id>,
 ) -> Statement<'q> {
-    sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,source_pack_id,staging_storage_id,staging_object_key,next_retry_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()+$8*interval '1 second')").bind(input.chunk.id).bind(input.stream).bind(input.offset).bind(input.size).bind(source).bind(input.storage).bind(input.key).bind(input.timeout as f64)
+    sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,source_pack_id,staging_storage_id,staging_object_key,next_retry_at,node_id) VALUES($1,$2,$3,$4,$5,$6,$7,now()+$8*interval '1 second',$9)").bind(input.chunk.id).bind(input.stream).bind(input.offset).bind(input.size).bind(source).bind(input.storage).bind(input.key).bind(input.timeout as f64).bind(input.node.map(|n| n.0.node_id))
 }
 pub(super) fn insert_upload_pin(chunk: Id, source: Option<Id>, stream: Id) -> Statement<'static> {
     sqlx::query("INSERT INTO cache_pins(chunk_id,pin_type,owner_id) VALUES($1,$2,$3)")
@@ -3677,7 +3687,7 @@ pub(super) fn upload_cache_pins() -> Scalar<'static, Value> {
 }
 pub(super) fn active_cache_flush() -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
-        "SELECT id FROM tasks WHERE task_type='cache_flush' AND state IN ('queued','running') LIMIT 1",
+        "SELECT id FROM tasks WHERE task_type='cache_flush' AND parent_task_id IS NULL AND state IN ('queued','running') LIMIT 1",
     )
 }
 pub(super) fn retryable_upload() -> Scalar<'static, Uuid> {
@@ -3688,9 +3698,9 @@ pub(super) fn retryable_upload() -> Scalar<'static, Uuid> {
 pub(super) fn queue_upload_retry(task: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE tasks SET state='queued',error=NULL,updated_at=now() WHERE id=$1 AND state='failed'").bind(task)
 }
-pub(super) fn due_upload() -> Rows<'static, (Id, Option<Id>, Option<Id>)> {
+pub(super) fn due_upload() -> Rows<'static, (Id, Option<Id>, Option<Id>, Option<Uuid>)> {
     sqlx::query_as(
-        "SELECT chunk_id,stream_id,source_pack_id FROM pending_uploads WHERE owner_task IS NULL AND next_retry_at<=now() ORDER BY next_retry_at,chunk_id LIMIT 1 FOR UPDATE SKIP LOCKED",
+        "SELECT chunk_id,stream_id,source_pack_id,node_id FROM pending_uploads WHERE owner_task IS NULL AND next_retry_at<=now() ORDER BY next_retry_at,chunk_id LIMIT 1 FOR UPDATE SKIP LOCKED",
     )
 }
 pub(super) fn pending_upload_segment(
@@ -3698,7 +3708,7 @@ pub(super) fn pending_upload_segment(
     stream: Option<Id>,
     source: Option<Id>,
 ) -> Rows<'static, (Id, i64, i32)> {
-    sqlx::query_as("SELECT p.chunk_id,p.offset_bytes,c.raw_size FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE p.owner_task IS NULL AND (p.chunk_id=$1 OR ($2::uuid IS NOT NULL AND p.stream_id=$2 AND p.source_pack_id IS NOT DISTINCT FROM $3)) ORDER BY p.offset_bytes LIMIT 1026").bind(first).bind(stream).bind(source)
+    sqlx::query_as("SELECT p.chunk_id,p.offset_bytes,c.raw_size FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE p.owner_task IS NULL AND p.node_id IS NOT DISTINCT FROM (SELECT node_id FROM pending_uploads WHERE chunk_id=$1) AND (p.chunk_id=$1 OR ($2::uuid IS NOT NULL AND p.stream_id=$2 AND p.source_pack_id IS NOT DISTINCT FROM $3)) ORDER BY p.offset_bytes LIMIT 1026").bind(first).bind(stream).bind(source)
 }
 pub(super) fn claim_pending_uploads<'q>(ids: &'q [Id], task: Uuid) -> Statement<'q> {
     sqlx::query("UPDATE pending_uploads SET owner_task=$2 WHERE chunk_id=ANY($1)")
@@ -3710,10 +3720,10 @@ pub(super) fn pause_upload_task(task: Execution) -> Statement<'static> {
         .bind(task.token)
 }
 pub(super) fn flush_candidate<'q>(detail: &'q Value, task: Uuid) -> Scalar<'q, Id> {
-    sqlx::query_scalar("SELECT chunk_id FROM pending_uploads u WHERE created_at<=($1->>'upper_time')::timestamptz AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=u.chunk_id) AND (owner_task IS NULL OR owner_task=$2 OR owner_task IN (SELECT id FROM tasks WHERE state IN ('paused','failed'))) ORDER BY created_at,chunk_id LIMIT 1").bind(detail).bind(task)
+    sqlx::query_scalar("SELECT chunk_id FROM pending_uploads u WHERE u.node_id IS NOT DISTINCT FROM ($1->>'node_id')::uuid AND created_at<=($1->>'upper_time')::timestamptz AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=u.chunk_id) AND (owner_task IS NULL OR owner_task=$2 OR owner_task IN (SELECT id FROM tasks WHERE state IN ('paused','failed'))) ORDER BY created_at,chunk_id LIMIT 1").bind(detail).bind(task)
 }
 pub(super) fn flush_pending<'q>(detail: &'q Value) -> Scalar<'q, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads WHERE created_at<=($1->>'upper_time')::timestamptz)").bind(detail)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads WHERE (($1->>'coordinator')::boolean IS TRUE OR node_id IS NOT DISTINCT FROM ($1->>'node_id')::uuid) AND created_at<=($1->>'upper_time')::timestamptz)").bind(detail)
 }
 pub(super) fn upload_is_durable(chunk: Id) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND (EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=$1 AND state='ready') OR (c.pack_id IS NOT NULL AND c.pack_id IS DISTINCT FROM u.source_pack_id)))").bind(chunk)
@@ -3737,7 +3747,7 @@ pub(super) fn pending_upload_mappings(
     task: Uuid,
     flush: bool,
 ) -> Rows<'static, crate::model::Mapping> {
-    sqlx::query_as("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,p.offset_bytes,c.pack_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE (p.chunk_id=$1 OR ($2::uuid IS NOT NULL AND p.stream_id=$2 AND p.offset_bytes>$3 AND p.source_pack_id IS NULL)) AND (p.owner_task IS NULL OR p.owner_task=$4 OR ($5 AND p.owner_task IN (SELECT id FROM tasks WHERE state IN ('paused','failed')))) ORDER BY p.offset_bytes LIMIT 1026").bind(first).bind(stream).bind(offset).bind(task).bind(flush)
+    sqlx::query_as("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,p.offset_bytes,c.pack_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE p.node_id IS NOT DISTINCT FROM (SELECT node_id FROM pending_uploads WHERE chunk_id=$1) AND (p.chunk_id=$1 OR ($2::uuid IS NOT NULL AND p.stream_id=$2 AND p.offset_bytes>$3 AND p.source_pack_id IS NULL)) AND (p.owner_task IS NULL OR p.owner_task=$4 OR ($5 AND p.owner_task IN (SELECT id FROM tasks WHERE state IN ('paused','failed')))) ORDER BY p.offset_bytes LIMIT 1026").bind(first).bind(stream).bind(offset).bind(task).bind(flush)
 }
 pub(super) fn upload_stream_metadata(stream: Id) -> Rows<'static, (Value, String)> {
     sqlx::query_as("SELECT metadata,object_key FROM streams WHERE id=$1").bind(stream)
@@ -3920,8 +3930,12 @@ impl PhysicalStore for Backend {
         Ok(physical_indexed(location).fetch_one(&self.pool).await?)
     }
 
-    async fn upload_pins(&self, after: Id) -> Result<Vec<crate::model::physical::StagedUpload>> {
-        Ok(sqlx::query_as("SELECT u.chunk_id,u.staging_storage_id,u.staging_object_key,u.staged_size,c.storage_id FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE u.chunk_id>$1 ORDER BY u.chunk_id LIMIT 512").bind(after).fetch_all(&self.pool).await?)
+    async fn upload_pins(
+        &self,
+        after: Id,
+        owner: Option<Uuid>,
+    ) -> Result<Vec<crate::model::physical::StagedUpload>> {
+        Ok(sqlx::query_as("SELECT u.chunk_id,u.staging_storage_id,u.staging_object_key,u.staged_size,c.storage_id FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE u.chunk_id>$1 AND u.node_id IS NOT DISTINCT FROM $2 ORDER BY u.chunk_id LIMIT 512").bind(after).bind(owner).fetch_all(&self.pool).await?)
     }
     async fn pending_source(&self, chunk: Id) -> Result<Option<(Uuid, String)>> {
         Ok(sqlx::query_as("SELECT staging_storage_id,staging_object_key FROM pending_uploads WHERE chunk_id=$1 AND staging_storage_id IS NOT NULL").bind(chunk).fetch_optional(&self.pool).await?)
@@ -5057,7 +5071,7 @@ pub(super) fn cleanup_history<'q>(
             "DELETE FROM chunk_encodings WHERE encoding_id IN (SELECT encoding_id FROM chunk_encodings WHERE state='deleted' AND NOT recovery_pending AND owner_stream IS NULL AND deleted_at<now()-((SELECT (left(sp.deleted_chunk_retention,-1)::bigint*CASE right(sp.deleted_chunk_retention,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=chunk_encodings.storage_id)+$1::double precision*0)*interval '1 second' ORDER BY deleted_at,encoding_id LIMIT $2 FOR UPDATE SKIP LOCKED)"
         }
         "uploads" => {
-            "DELETE FROM uploads WHERE id IN (SELECT id FROM uploads u WHERE state IN ('completed','aborted') AND touched_at<now()-((SELECT (left(sp.upload_retention,-1)::bigint*CASE right(sp.upload_retention,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=(SELECT storage_id FROM buckets WHERE id=u.bucket_id))+$1::double precision*0)*interval '1 second' AND NOT (id=ANY($3)) AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id) ORDER BY touched_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
+            "DELETE FROM uploads WHERE id IN (SELECT id FROM uploads u WHERE state IN ('completed','aborted') AND touched_at<now()-((SELECT (left(sp.upload_retention,-1)::bigint*CASE right(sp.upload_retention,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=(SELECT storage_id FROM buckets WHERE id=u.bucket_id))+$1::double precision*0)*interval '1 second' AND raw_source_id IS NULL AND NOT (id=ANY($3)) AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id) ORDER BY touched_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
         }
         "integrity_issues" => {
             "DELETE FROM integrity_issues WHERE id IN (SELECT i.id FROM integrity_issues i JOIN tasks t ON t.id=i.task_id WHERE t.state='completed' AND t.updated_at<now()-$1*interval '1 second' ORDER BY i.id LIMIT $2 FOR UPDATE OF i SKIP LOCKED)"
@@ -6217,7 +6231,7 @@ pub(super) fn inventory_unreferenced() -> Scalar<'static, Value> {
 
 pub(super) fn inventory_reclaimable() -> Scalar<'static, Value> {
     sqlx::query_scalar(
-        "SELECT jsonb_build_object('bytes',COALESCE(sum(bytes),0),'eligible',COALESCE(sum(bytes) FILTER(WHERE since<now()-((SELECT (left(sp.unreferenced_grace,-1)::bigint*CASE right(sp.unreferenced_grace,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=p.storage_id))*interval '1 second'),0)) FROM (SELECT l.standalone_size bytes,COALESCE(l.unreferenced_at,c.unreferenced_at) since,l.storage_id FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('retired','deleting') OR (l.state='ready' AND c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) UNION ALL SELECT stored_size,unreferenced_at,storage_id FROM packs WHERE state IN ('retired','deleting') UNION ALL SELECT size,unreferenced_at,storage_id FROM raw_sources r WHERE r.owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id)) p",
+        "SELECT jsonb_build_object('bytes',COALESCE(sum(bytes),0),'eligible',COALESCE(sum(bytes) FILTER(WHERE since<now()-((SELECT (left(sp.unreferenced_grace,-1)::bigint*CASE right(sp.unreferenced_grace,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=p.storage_id))*interval '1 second'),0)) FROM (SELECT l.standalone_size bytes,COALESCE(l.unreferenced_at,c.unreferenced_at) since,l.storage_id FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('retired','deleting') OR (l.state='ready' AND c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) UNION ALL SELECT stored_size,unreferenced_at,storage_id FROM packs WHERE state IN ('retired','deleting') UNION ALL SELECT size,unreferenced_at,storage_id FROM raw_sources r WHERE r.owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=r.id)) p",
     )
 }
 
@@ -7157,6 +7171,118 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
+        Ok(remote_upload(upload).fetch_optional(&self.pool).await?)
+    }
+    async fn begin_remote(
+        &self,
+        upload: Uuid,
+        storage: Uuid,
+        revision: i64,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<RemoteUpload> {
+        transactions::begin_remote(&self.pool, upload, storage, revision, node).await
+    }
+    async fn claim_remote(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::claim_remote(&self.pool, upload, token, node).await
+    }
+    async fn initialized_remote(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        upstream: Option<&str>,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::initialized_remote(&self.pool, upload, token, upstream, node).await
+    }
+    async fn commit_remote_part(&self, input: RemoteCommit<'_>) -> Result<()> {
+        transactions::commit_upload_part(
+            &self.pool,
+            input.authority,
+            input.bucket,
+            input.upload,
+            input.number,
+            input.stream,
+            Some(&input),
+        )
+        .await
+    }
+    async fn claim_remote_part(
+        &self,
+        token: Uuid,
+        node: crate::model::raw::Processor<'_>,
+        stream: Option<Id>,
+    ) -> Result<Option<RemotePart>> {
+        transactions::claim_remote_part(&self.pool, token, node, stream).await
+    }
+    async fn renew_remote_part(
+        &self,
+        work: &RemotePart,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::finish_remote_part(&self.pool, work, None, node).await
+    }
+    async fn finish_remote_part(
+        &self,
+        work: &RemotePart,
+        etag: &str,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            !etag.is_empty() && etag.len() <= 1024,
+            "invalid remote part ETag"
+        );
+        transactions::finish_remote_part(&self.pool, work, Some(etag), node).await
+    }
+    async fn retry_remote_part(&self, work: &RemotePart, error: &str) -> Result<()> {
+        sqlx::query("UPDATE parts SET remote_token=NULL,remote_expires_at=NULL,remote_retry_at=clock_timestamp()+interval '2 seconds',remote_error=left($5,1024) WHERE upload_id=$1 AND part_number=$2 AND stream_id=$3 AND remote_token=$4")
+            .bind(work.upload.upload).bind(work.part_number).bind(work.stream.id).bind(work.remote_token).bind(error).execute(&self.pool).await?;
+        Ok(())
+    }
+    async fn remote_parts(
+        &self,
+        upload: Uuid,
+        streams: &[Id],
+    ) -> Result<Vec<(Id, i32, Option<String>)>> {
+        Ok(sqlx::query_as("SELECT stream_id,part_number,remote_etag FROM parts WHERE upload_id=$1 AND stream_id=ANY($2) ORDER BY part_number").bind(upload).bind(streams).fetch_all(&self.pool).await?)
+    }
+    async fn freeze_remote(&self, upload: Uuid, token: Uuid, hash: &str) -> Result<RemoteUpload> {
+        transactions::freeze_remote(&self.pool, upload, token, hash).await
+    }
+    async fn resend_remote(&self, upload: Uuid, token: Uuid, streams: &[Id]) -> Result<()> {
+        sqlx::query("UPDATE parts p SET remote_etag=NULL,remote_retry_at=clock_timestamp() FROM uploads u WHERE u.id=$1 AND u.state='completing' AND u.completion_token=$2 AND u.completion_expires_at>clock_timestamp() AND p.upload_id=u.id AND p.stream_id=ANY($3)").bind(upload).bind(token).bind(streams).execute(&self.pool).await?;
+        Ok(())
+    }
+    async fn adopt_remote(&self, input: RemoteOutput<'_>) -> Result<Uuid> {
+        transactions::adopt_remote(&self.pool, input).await
+    }
+    async fn remote_charges(&self, node: Uuid, after: Id) -> Result<Vec<(Id, Uuid, i64)>> {
+        Ok(sqlx::query_as("SELECT s.id,r.storage_id,s.size FROM parts p JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id JOIN raw_sources r ON r.id=u.raw_source_id WHERE p.remote_node_id=$1 AND p.remote_cached AND p.remote_etag IS NULL AND s.id>$2 AND u.state IN ('active','completing') ORDER BY s.id LIMIT 128").bind(node).bind(after).fetch_all(&self.pool).await?)
+    }
+    async fn claim_remote_cleanup(
+        &self,
+        token: Uuid,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<Option<RemoteUpload>> {
+        transactions::claim_remote_cleanup(&self.pool, token, node).await
+    }
+    async fn clean_remote(&self, upload: Uuid, token: Uuid) -> Result<()> {
+        sqlx::query("UPDATE uploads SET raw_source_id=NULL,remote_token=NULL,remote_expires_at=NULL WHERE id=$1 AND remote_token=$2 AND remote_expires_at>clock_timestamp() AND state IN ('aborted','completed')").bind(upload).bind(token).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn pending_read(&self, streams: &[Id], node: Uuid) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_ranges rr JOIN raw_sources r ON r.id=rr.source_id JOIN raw_uploads u ON u.source_id=r.id WHERE rr.stream_id=ANY($1) AND r.pending_upload AND u.node_id IS DISTINCT FROM $2) OR EXISTS(SELECT 1 FROM extents e JOIN pending_uploads u ON u.chunk_id=e.chunk_id JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=ANY($1) AND u.node_id IS DISTINCT FROM $2 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=c.id AND l.state='ready'))").bind(streams).bind(node).fetch_one(&self.pool).await?)
+    }
+    async fn prioritize_uploads(&self, streams: &[Id]) -> Result<()> {
+        sqlx::query("UPDATE pending_uploads SET next_retry_at=LEAST(next_retry_at,clock_timestamp()) WHERE owner_task IS NULL AND chunk_id IN (SELECT chunk_id FROM extents WHERE stream_id=ANY($1) AND chunk_id IS NOT NULL)").bind(streams).execute(&self.pool).await?;
+        Ok(())
+    }
     async fn read_page(
         &self,
         stream: Id,
@@ -8676,15 +8802,23 @@ pub(super) fn raw_detach(stream: Id, end: i64) -> Statement<'static> {
 
 #[async_trait::async_trait]
 impl RawStore for Backend {
-    async fn uploads_before(&self, before: chrono::DateTime<chrono::Utc>) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE r.created_at<=$1)").bind(before).fetch_one(&self.pool).await?)
+    async fn uploads_before(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+        owner: Option<Uuid>,
+    ) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE r.created_at<=$1 AND ($2::uuid IS NULL OR u.node_id=$2)) OR EXISTS(SELECT 1 FROM parts p JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id WHERE p.remote_node_id IS NOT NULL AND p.remote_etag IS NULL AND ($2::uuid IS NULL OR p.remote_node_id=$2) AND s.created_at<=$1 AND u.state IN ('active','completing'))").bind(before).bind(owner).fetch_one(&self.pool).await?)
     }
     async fn upload_status(&self) -> Result<Value> {
-        let (pending,bytes,failed):(i64,i64,i64)=sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(r.size),0) AS bigint),CAST(COALESCE(SUM(CASE WHEN u.last_error IS NOT NULL THEN 1 ELSE 0 END),0) AS bigint) FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id").fetch_one(&self.pool).await?;
+        let (pending,bytes,failed):(i64,i64,i64)=sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(size),0) AS bigint),CAST(COALESCE(SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END),0) AS bigint) FROM (SELECT r.size,u.last_error FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id UNION ALL SELECT s.size,p.remote_error FROM parts p JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id WHERE p.remote_node_id IS NOT NULL AND p.remote_etag IS NULL AND u.state IN ('active','completing')) waiting").fetch_one(&self.pool).await?;
         Ok(serde_json::json!({"pending":pending,"bytes":bytes,"failed":failed}))
     }
-    async fn abandon_upload(&self, work: &RawUpload) -> Result<bool> {
-        transactions::abandon_raw_upload(&self.pool, work).await
+    async fn abandon_upload(
+        &self,
+        work: &RawUpload,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::abandon_raw_upload(&self.pool, work, node).await
     }
 
     async fn cached_checkpoint(&self, location: Uuid) -> Result<Option<Id>> {
@@ -8710,6 +8844,7 @@ impl RawStore for Backend {
         revision: i64,
         deduplicate: bool,
         background: bool,
+        node: crate::model::raw::Processor<'_>,
     ) -> Result<()> {
         transactions::finish_raw(
             &self.pool,
@@ -8718,18 +8853,27 @@ impl RawStore for Backend {
             size,
             digest,
             Some((revision, deduplicate, background)),
+            node,
         )
         .await
     }
-    async fn uploads(&self, after: Id) -> Result<Vec<RawUpload>> {
-        Ok(raw_uploads(after).fetch_all(&self.pool).await?)
+    async fn uploads(&self, after: Id, owner: Option<Uuid>) -> Result<Vec<RawUpload>> {
+        Ok(raw_uploads(after, owner).fetch_all(&self.pool).await?)
     }
     async fn claim_upload(
         &self,
         token: Uuid,
         before: Option<chrono::DateTime<chrono::Utc>>,
+        node: crate::model::raw::Processor<'_>,
     ) -> Result<Option<RawUpload>> {
-        transactions::claim_raw_upload(&self.pool, token, before).await
+        transactions::claim_raw_upload(&self.pool, token, before, node).await
+    }
+    async fn renew_upload(
+        &self,
+        work: &RawUpload,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::renew_raw_upload(&self.pool, work, node).await
     }
     async fn retry_upload(&self, work: &RawUpload, error: Option<&str>) -> Result<()> {
         raw_upload_retry(work, error).execute(&self.pool).await?;
@@ -8758,11 +8902,22 @@ impl RawStore for Backend {
     async fn upload_streams(&self, source: Id) -> Result<Vec<Id>> {
         Ok(raw_upload_streams(source).fetch_all(&self.pool).await?)
     }
-    async fn reuse_upload(&self, work: &RawUpload, hash: &[u8], streams: &[Id]) -> Result<bool> {
-        transactions::reuse_raw_upload(&self.pool, work, hash, streams).await
+    async fn reuse_upload(
+        &self,
+        work: &RawUpload,
+        hash: &[u8],
+        streams: &[Id],
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::reuse_raw_upload(&self.pool, work, hash, streams, node).await
     }
-    async fn complete_upload(&self, work: &RawUpload, hash: Option<&[u8]>) -> Result<()> {
-        transactions::complete_raw_upload(&self.pool, work, hash).await
+    async fn complete_upload(
+        &self,
+        work: &RawUpload,
+        hash: Option<&[u8]>,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<()> {
+        transactions::complete_raw_upload(&self.pool, work, hash, node).await
     }
     async fn current(&self, source: Id) -> Result<Option<RawSource>> {
         Ok(raw_source(source).fetch_optional(&self.pool).await?)
@@ -8886,7 +9041,7 @@ impl RawStore for Backend {
         transactions::begin_raw(&self.pool, stream, storage, profile_revision).await
     }
     async fn finish(&self, stream: Id, source: Id, size: i64, digest: &[u8]) -> Result<()> {
-        transactions::finish_raw(&self.pool, stream, source, size, digest, None).await
+        transactions::finish_raw(&self.pool, stream, source, size, digest, None, None).await
     }
     async fn page(&self, stream: Id, start: i64, end: i64) -> Result<Vec<RawRange>> {
         Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=$1 AND e.offset_bytes+e.length>=$2 AND e.offset_bytes<=$3 ORDER BY e.offset_bytes LIMIT 128")
@@ -8903,15 +9058,15 @@ impl RawStore for Backend {
             (1..=128).contains(&limit) && grace >= 0 && minimum >= 0,
             "invalid raw cleanup bounds"
         );
-        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=$1 AND r.owner_stream IS NULL AND r.unreferenced_at<now()-$2*interval '1 second' AND r.created_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) ORDER BY r.unreferenced_at,r.id LIMIT $4")
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=$1 AND r.owner_stream IS NULL AND r.unreferenced_at<now()-$2*interval '1 second' AND r.created_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=r.id) ORDER BY r.unreferenced_at,r.id LIMIT $4")
             .bind(storage).bind(grace).bind(minimum).bind(limit).fetch_all(&self.pool).await?)
     }
     async fn claim(&self, source: Id, revision: i64, grace: i64, minimum: i64) -> Result<bool> {
-        Ok(sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND revision=$2 AND owner_stream IS NULL AND unreferenced_at<now()-$3*interval '1 second' AND created_at<now()-$4*interval '1 second' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)")
+        Ok(sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND revision=$2 AND owner_stream IS NULL AND unreferenced_at<now()-$3*interval '1 second' AND created_at<now()-$4*interval '1 second' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)")
             .bind(source).bind(revision).bind(grace).bind(minimum).execute(&self.pool).await?.rows_affected()==1)
     }
     async fn removed(&self, source: Id) -> Result<()> {
-        sqlx::query("DELETE FROM raw_sources WHERE id=$1 AND state='deleting' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)")
+        sqlx::query("DELETE FROM raw_sources WHERE id=$1 AND state='deleting' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)")
             .bind(source).execute(&self.pool).await?;
         Ok(())
     }
@@ -8952,16 +9107,16 @@ pub(super) fn raw_reference(source: Id) -> Statement<'static> {
 }
 
 pub(super) fn lock_local_upload(upload: Uuid) -> Scalar<'static, String> {
-    sqlx::query_scalar("SELECT state FROM uploads WHERE id=$1 FOR UPDATE").bind(upload)
+    sqlx::query_scalar("SELECT CASE WHEN remote_manifest_hash IS NOT NULL AND state='active' THEN 'completing' ELSE state END FROM uploads WHERE id=$1 FOR UPDATE").bind(upload)
 }
-pub(super) fn current_multipart_file(upload: Uuid) -> Scalar<'static, Uuid> {
+pub(super) fn current_multipart_file(upload: Uuid, node: Option<Uuid>) -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
-        "SELECT id FROM multipart_files WHERE upload_id=$1 AND state='open' ORDER BY id LIMIT 1",
+        "SELECT id FROM multipart_files WHERE upload_id=$1 AND node_id IS NOT DISTINCT FROM $2 AND state='open' ORDER BY id LIMIT 1",
     )
-    .bind(upload)
+    .bind(upload).bind(node)
 }
-pub(super) fn insert_multipart_file(upload: Uuid) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("INSERT INTO multipart_files(upload_id,storage_id) SELECT u.id,b.storage_id FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id WHERE u.id=$1 AND u.state='active' AND EXISTS(SELECT 1 FROM mokyu_meta WHERE singleton AND deployment_mode='single') RETURNING id").bind(upload)
+pub(super) fn insert_multipart_file(upload: Uuid, node: Option<Uuid>) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("INSERT INTO multipart_files(upload_id,storage_id,node_id) SELECT u.id,b.storage_id,$2 FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id WHERE u.id=$1 AND u.state='active' AND EXISTS(SELECT 1 FROM mokyu_meta WHERE singleton AND (deployment_mode='cluster')=($2::uuid IS NOT NULL)) RETURNING id").bind(upload).bind(node)
 }
 
 pub(super) fn insert_multipart_checkpoint(upload: Uuid, source: Id) -> Statement<'static> {
@@ -9102,7 +9257,7 @@ pub(super) fn raw_receiving(source: Id, stream: Id) -> Scalar<'static, Uuid> {
     sqlx::query_scalar("SELECT storage_id FROM raw_sources WHERE id=$1 AND owner_stream=$2 AND state='writing' AND medium='shared_s3' AND upload_id IS NULL FOR UPDATE").bind(source).bind(stream)
 }
 pub(super) fn raw_discard(source: Id, stream: Id) -> Statement<'static> {
-    sqlx::query("DELETE FROM raw_sources WHERE id=$1 AND owner_stream=$2 AND state='writing' AND upload_id IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)").bind(source).bind(stream)
+    sqlx::query("DELETE FROM raw_sources WHERE id=$1 AND owner_stream=$2 AND state='writing' AND upload_id IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)").bind(source).bind(stream)
 }
 
 pub(super) fn raw_reusable<'a>(
@@ -9114,26 +9269,35 @@ pub(super) fn raw_reusable<'a>(
     sqlx::query_scalar("SELECT id FROM raw_sources WHERE storage_id=$1 AND content_hash=$2 AND size=$3 AND digest=$4 AND state='ready' AND medium='shared_s3' AND NOT pending_upload AND quarantine_code IS NULL").bind(storage).bind(hash).bind(size).bind(digest)
 }
 
-pub(super) fn raw_uploads(after: Id) -> Rows<'static, RawUpload> {
-    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,u.token,u.deduplicate,u.background,u.content_hash FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE u.source_id>$1 ORDER BY u.source_id LIMIT 128").bind(after)
+pub(super) fn raw_uploads(after: Id, owner: Option<Uuid>) -> Rows<'static, RawUpload> {
+    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,u.token,u.deduplicate,u.background,u.content_hash FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE u.source_id>$1 AND u.node_id IS NOT DISTINCT FROM $2 ORDER BY u.source_id LIMIT 128").bind(after).bind(owner)
 }
 pub(super) fn raw_upload_record(source: Id) -> Rows<'static, RawUpload> {
     sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,u.token,u.deduplicate,u.background,u.content_hash FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE u.source_id=$1 FOR UPDATE").bind(source)
 }
-pub(super) fn raw_upload_due(before: Option<chrono::DateTime<chrono::Utc>>) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT u.source_id FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE u.next_attempt_at<=clock_timestamp() AND r.state='ready' AND ($1::timestamptz IS NULL OR r.created_at<=$1) ORDER BY u.background,u.next_attempt_at,u.source_id LIMIT 1 FOR UPDATE").bind(before)
+pub(super) fn raw_upload_due(
+    before: Option<chrono::DateTime<chrono::Utc>>,
+    owner: Option<Uuid>,
+) -> Scalar<'static, Id> {
+    sqlx::query_scalar("SELECT u.source_id FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE (u.node_id IS NOT DISTINCT FROM $2) AND ($2::uuid IS NULL OR u.token IS NULL OR u.lease_expires_at<clock_timestamp()) AND u.next_attempt_at<=clock_timestamp() AND r.state='ready' AND ($1::timestamptz IS NULL OR r.created_at<=$1) ORDER BY u.background,u.next_attempt_at,u.source_id LIMIT 1 FOR UPDATE OF u SKIP LOCKED").bind(before).bind(owner)
 }
 
-pub(super) fn raw_upload_claim(source: Id, token: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE raw_uploads SET token=$1 WHERE source_id=$2")
-        .bind(token)
-        .bind(source)
+pub(super) fn raw_upload_claim(source: Id, token: Uuid, node: Option<Uuid>) -> Statement<'static> {
+    sqlx::query("UPDATE raw_uploads SET token=$1,node_id=$3,lease_expires_at=CASE WHEN $3::uuid IS NULL THEN NULL ELSE clock_timestamp()+interval '120 seconds' END WHERE source_id=$2").bind(token).bind(source).bind(node)
 }
-pub(super) fn raw_queue(source: Id, deduplicate: bool, background: bool) -> Statement<'static> {
-    sqlx::query("INSERT INTO raw_uploads(source_id,deduplicate,background) VALUES($1,$2,$3)")
-        .bind(source)
-        .bind(deduplicate)
-        .bind(background)
+pub(super) fn raw_queue(
+    source: Id,
+    deduplicate: bool,
+    background: bool,
+    owner: Option<Uuid>,
+) -> Statement<'static> {
+    sqlx::query(
+        "INSERT INTO raw_uploads(source_id,deduplicate,background,node_id) VALUES($1,$2,$3,$4)",
+    )
+    .bind(source)
+    .bind(deduplicate)
+    .bind(background)
+    .bind(owner)
 }
 pub(super) fn raw_stage(source: Id, revision: i64) -> Statement<'static> {
     sqlx::query("UPDATE raw_sources SET pending_upload=true,medium='local' WHERE id=$1 AND state='ready' AND upload_id IS NULL AND profile_revision=$2").bind(source).bind(revision)
@@ -9154,7 +9318,7 @@ pub(super) fn raw_upload_stream_lock(stream: Id) -> Scalar<'static, Id> {
     sqlx::query_scalar("SELECT id FROM streams WHERE id=$1 FOR UPDATE").bind(stream)
 }
 pub(super) fn raw_upload_share(stream: Id, source: Id, candidate: Id) -> Statement<'static> {
-    sqlx::query("UPDATE raw_ranges SET source_id=$1 WHERE stream_id=$2 AND source_id=$3")
+    sqlx::query("UPDATE raw_ranges SET source_id=$1 WHERE stream_id=$2 AND source_id=$3 AND NOT EXISTS(SELECT 1 FROM stream_leases WHERE stream_id=$2 AND lease_type='read' AND expires_at>clock_timestamp())")
         .bind(candidate)
         .bind(stream)
         .bind(source)
@@ -9166,18 +9330,130 @@ pub(super) fn raw_uploaded(source: Id) -> Statement<'static> {
     sqlx::query("UPDATE raw_sources SET pending_upload=false,medium='shared_s3',upload_id=NULL,revision=revision+1 WHERE id=$1 AND pending_upload").bind(source)
 }
 pub(super) fn raw_upload_hash(source: Id, hash: Option<&[u8]>) -> Statement<'_> {
-    sqlx::query("UPDATE raw_uploads SET content_hash=$1,token=NULL,next_attempt_at=clock_timestamp(),last_error=NULL WHERE source_id=$2").bind(hash).bind(source)
+    sqlx::query("UPDATE raw_uploads SET content_hash=$1,token=NULL,lease_expires_at=NULL,next_attempt_at=clock_timestamp(),last_error=NULL WHERE source_id=$2").bind(hash).bind(source)
 }
 pub(super) fn raw_upload_retry<'a>(work: &'a RawUpload, error: Option<&'a str>) -> Statement<'a> {
-    sqlx::query("UPDATE raw_uploads SET token=NULL,last_error=$1,attempts=attempts+$2,next_attempt_at=clock_timestamp()+interval '1 second' WHERE source_id=$3 AND token=$4").bind(error).bind(i32::from(error.is_some())).bind(work.source.id).bind(work.token)
+    sqlx::query("UPDATE raw_uploads SET token=NULL,lease_expires_at=NULL,last_error=$1,attempts=attempts+$2,next_attempt_at=clock_timestamp()+interval '1 second' WHERE source_id=$3 AND token=$4").bind(error).bind(i32::from(error.is_some())).bind(work.source.id).bind(work.token)
 }
 pub(super) fn raw_upload_id(source: Id, token: Uuid, upload: Option<&str>) -> Statement<'_> {
-    sqlx::query("UPDATE raw_sources SET upload_id=$1 WHERE id=$2 AND state='ready' AND pending_upload AND EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=raw_sources.id AND u.token=$3)").bind(upload).bind(source).bind(token)
+    sqlx::query("UPDATE raw_sources SET upload_id=$1 WHERE id=$2 AND state='ready' AND pending_upload AND EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=raw_sources.id AND u.token=$3 AND (u.lease_expires_at IS NULL OR u.lease_expires_at>clock_timestamp()))").bind(upload).bind(source).bind(token)
 }
 
-pub(super) fn raw_upload_mode() -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT deployment_mode='single' FROM mokyu_meta")
+pub(super) fn raw_upload_mode(cluster: bool) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT deployment_mode=$1 FROM mokyu_meta FOR SHARE").bind(if cluster {
+        "cluster"
+    } else {
+        "single"
+    })
 }
 pub(super) fn raw_upload_abandon(source: Id) -> Statement<'static> {
-    sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)").bind(source)
+    sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)").bind(source)
+}
+
+pub(super) fn raw_upload_owned(work: &RawUpload, node: Option<Uuid>) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT token IS NOT NULL AND token=$2 AND node_id IS NOT DISTINCT FROM $3 AND (lease_expires_at IS NULL OR lease_expires_at>clock_timestamp()) FROM raw_uploads WHERE source_id=$1 FOR UPDATE").bind(work.source.id).bind(work.token).bind(node)
+}
+
+pub(super) fn renew_raw_upload(work: &RawUpload, node: Option<Uuid>) -> Statement<'static> {
+    sqlx::query("UPDATE raw_uploads SET lease_expires_at=clock_timestamp()+interval '120 seconds' WHERE source_id=$1 AND token=$2 AND node_id=$3 AND lease_expires_at>clock_timestamp()").bind(work.source.id).bind(work.token).bind(node)
+}
+
+pub(super) fn release_raw_uploads(node: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE raw_uploads SET token=NULL,lease_expires_at=NULL,next_attempt_at=clock_timestamp() WHERE node_id=$1").bind(node)
+}
+
+pub(super) fn cache_nodes() -> Scalar<'static, Uuid> {
+    sqlx::query_scalar(
+        "SELECT node_id FROM pending_uploads WHERE node_id IS NOT NULL UNION SELECT node_id FROM raw_uploads WHERE node_id IS NOT NULL UNION SELECT remote_node_id FROM parts WHERE remote_node_id IS NOT NULL AND remote_etag IS NULL",
+    )
+}
+
+pub(super) fn scope_upload_task(
+    task: Uuid,
+    node: Uuid,
+    parent: Option<Uuid>,
+) -> Statement<'static> {
+    sqlx::query(
+        "UPDATE tasks SET execution_scope='node',target_node_id=$2,parent_task_id=$3 WHERE id=$1",
+    )
+    .bind(task)
+    .bind(node)
+    .bind(parent)
+}
+
+pub(super) fn completion_state(upload: Uuid) -> Rows<'static, (String, Option<String>, bool)> {
+    sqlx::query_as("SELECT state,manifest_hash,COALESCE(completion_expires_at>clock_timestamp(),false) FROM uploads WHERE id=$1 FOR UPDATE").bind(upload)
+}
+pub(super) fn completion_parts(upload: Uuid) -> Rows<'static, (i32, Id)> {
+    sqlx::query_as("SELECT part_number,stream_id FROM parts WHERE upload_id=$1 AND stream_id IS NOT NULL ORDER BY part_number").bind(upload)
+}
+
+pub(super) fn renew_completion(upload: Uuid, token: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE uploads SET completion_expires_at=clock_timestamp()+interval '120 seconds',touched_at=clock_timestamp() WHERE id=$1 AND completion_token=$2 AND state='completing' AND completion_expires_at>clock_timestamp()").bind(upload).bind(token)
+}
+
+pub(super) fn remote_upload(upload: Uuid) -> Rows<'static, RemoteUpload> {
+    sqlx::query_as("SELECT u.id AS remote_upload,u.state AS remote_state,r.id AS remote_source,r.storage_id AS remote_storage,r.profile_revision AS remote_profile,r.upload_id AS remote_upstream,u.remote_manifest_hash AS remote_manifest FROM uploads u JOIN raw_sources r ON r.id=u.raw_source_id WHERE u.id=$1").bind(upload)
+}
+pub(super) fn remote_upload_lock(upload: Uuid) -> Rows<'static, (String, Option<Uuid>)> {
+    sqlx::query_as("SELECT state,raw_source_id FROM uploads WHERE id=$1 FOR UPDATE").bind(upload)
+}
+pub(super) fn insert_remote(upload: Uuid, storage: Uuid, revision: i64) -> Statement<'static> {
+    sqlx::query("WITH candidate AS (INSERT INTO raw_sources(storage_id,profile_revision,medium) SELECT b.storage_id,p.revision,'shared_s3' FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id JOIN storage_profiles p ON p.storage_id=s.id WHERE u.id=$1 AND b.storage_id=$2 AND p.revision=$3 AND s.type='s3' AND NOT p.cdc_enabled AND NOT p.compression_enabled AND s.block_key_id IS NULL AND NOT p.pack_enabled AND s.enabled AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id AND stream_id IS NOT NULL) RETURNING id) UPDATE uploads SET raw_source_id=(SELECT id FROM candidate) WHERE id=$1 AND EXISTS(SELECT 1 FROM candidate)").bind(upload).bind(storage).bind(revision)
+}
+pub(super) fn claim_remote(upload: Uuid, token: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE uploads u SET remote_token=$2,remote_expires_at=clock_timestamp()+interval '120 seconds' FROM raw_sources r WHERE u.id=$1 AND u.state IN ('active','completing') AND r.id=u.raw_source_id AND r.upload_id IS NULL AND r.state='writing' AND (u.remote_expires_at IS NULL OR u.remote_expires_at<=clock_timestamp())").bind(upload).bind(token)
+}
+pub(super) fn remote_initialized(
+    upload: Uuid,
+    token: Uuid,
+    upstream: Option<&str>,
+) -> Scalar<'_, bool> {
+    sqlx::query_scalar("WITH owned AS (UPDATE uploads SET remote_token=NULL,remote_expires_at=NULL WHERE id=$1 AND remote_token=$2 AND remote_expires_at>clock_timestamp() AND state IN ('active','completing') RETURNING raw_source_id), written AS (UPDATE raw_sources SET upload_id=$3 WHERE id=(SELECT raw_source_id FROM owned) AND upload_id IS NULL RETURNING id) SELECT EXISTS(SELECT 1 FROM written)").bind(upload).bind(token).bind(upstream)
+}
+pub(super) fn remote_part_queue(input: &RemoteCommit<'_>) -> Statement<'static> {
+    sqlx::query("UPDATE parts SET remote_node_id=$4,remote_etag=NULL,remote_token=NULL,remote_expires_at=NULL,remote_retry_at=clock_timestamp(),remote_error=NULL,remote_cached=$5 WHERE upload_id=$1 AND part_number=$2 AND write_token=$3 AND EXISTS(SELECT 1 FROM uploads WHERE id=$1 AND raw_source_id IS NOT NULL AND remote_manifest_hash IS NULL)").bind(input.upload).bind(input.number).bind(input.stream).bind(input.node.map(|n| n.0.node_id)).bind(input.cached)
+}
+pub(super) fn remote_part_due(node: Uuid, stream: Option<Id>) -> Rows<'static, (Uuid, i32)> {
+    sqlx::query_as("SELECT p.upload_id,p.part_number FROM parts p JOIN uploads u ON u.id=p.upload_id JOIN raw_sources r ON r.id=u.raw_source_id WHERE p.remote_node_id=$1 AND p.stream_id IS NOT NULL AND ($2::uuid IS NULL OR p.stream_id=$2) AND p.remote_etag IS NULL AND p.remote_retry_at<=clock_timestamp() AND (p.remote_expires_at IS NULL OR p.remote_expires_at<=clock_timestamp()) AND u.state IN ('active','completing') AND r.upload_id IS NOT NULL ORDER BY p.remote_retry_at,p.upload_id,p.part_number LIMIT 1 FOR UPDATE OF p SKIP LOCKED").bind(node).bind(stream)
+}
+pub(super) fn remote_part_claim(upload: Uuid, number: i32, token: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE parts SET remote_token=$3,remote_expires_at=clock_timestamp()+interval '120 seconds' WHERE upload_id=$1 AND part_number=$2").bind(upload).bind(number).bind(token)
+}
+pub(super) async fn remote_part(
+    db: &mut sqlx::PgConnection,
+    upload: Uuid,
+    number: i32,
+) -> Result<RemotePart> {
+    Ok(sqlx::query_as("SELECT u.id AS remote_upload,u.state AS remote_state,r.id AS remote_source,r.storage_id AS remote_storage,r.profile_revision AS remote_profile,r.upload_id AS remote_upstream,u.remote_manifest_hash AS remote_manifest,s.*,p.part_number,p.remote_token FROM parts p JOIN uploads u ON u.id=p.upload_id JOIN raw_sources r ON r.id=u.raw_source_id JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number=$2").bind(upload).bind(number).fetch_one(db).await?)
+}
+pub(super) fn remote_part_finish<'a>(
+    work: &'a RemotePart,
+    etag: Option<&'a str>,
+    node: Uuid,
+) -> Statement<'a> {
+    sqlx::query("UPDATE parts p SET remote_etag=COALESCE($6,remote_etag),remote_error=NULL,remote_token=CASE WHEN $6 IS NULL THEN p.remote_token END,remote_expires_at=CASE WHEN $6 IS NULL THEN clock_timestamp()+interval '120 seconds' END FROM uploads u WHERE p.upload_id=$1 AND p.part_number=$2 AND p.stream_id=$3 AND p.remote_token=$4 AND p.remote_node_id=$5 AND p.remote_expires_at>clock_timestamp() AND u.id=p.upload_id AND u.state IN ('active','completing')").bind(work.upload.upload).bind(work.part_number).bind(work.stream.id).bind(work.remote_token).bind(node).bind(etag)
+}
+pub(super) fn freeze_remote(upload: Uuid, token: Uuid, hash: &str) -> Statement<'_> {
+    sqlx::query("UPDATE uploads SET remote_manifest_hash=$3 WHERE id=$1 AND state='completing' AND completion_token=$2 AND completion_expires_at>clock_timestamp() AND manifest_hash=$3 AND (remote_manifest_hash IS NULL OR remote_manifest_hash=$3) AND raw_source_id IS NOT NULL").bind(upload).bind(token).bind(hash)
+}
+pub(super) fn remote_output_lock(upload: Uuid, token: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT raw_source_id FROM uploads WHERE id=$1 AND state='completing' AND completion_token=$2 AND completion_expires_at>clock_timestamp() AND remote_manifest_hash=manifest_hash FOR UPDATE").bind(upload).bind(token)
+}
+pub(super) fn remote_source_finish<'a>(source: Uuid, input: &'a RemoteOutput<'a>) -> Statement<'a> {
+    sqlx::query("UPDATE raw_sources SET state='ready',size=$2,digest=$3,upload_id=NULL WHERE id=$1 AND quarantine_code IS NULL AND (state='writing' OR (state='ready' AND size=$2 AND digest=$3 AND (content_hash IS NULL OR content_hash=$4)))").bind(source).bind(input.size).bind(input.digest).bind(input.hash)
+}
+pub(super) fn remote_cleanup_due() -> Scalar<'static, Uuid> {
+    sqlx::query_scalar(
+        "SELECT id FROM uploads u WHERE u.raw_source_id IS NOT NULL AND u.state IN ('aborted','completed') AND (u.remote_expires_at IS NULL OR u.remote_expires_at<=clock_timestamp()) AND (u.completion_expires_at IS NULL OR u.completion_expires_at<=clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM parts p WHERE p.upload_id=u.id AND p.remote_expires_at>clock_timestamp()) ORDER BY touched_at LIMIT 1 FOR UPDATE SKIP LOCKED",
+    )
+}
+pub(super) fn remote_cleanup_claim(upload: Uuid, token: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE uploads SET remote_token=$2,remote_expires_at=clock_timestamp()+interval '120 seconds' WHERE id=$1").bind(upload).bind(token)
+}
+
+pub(super) fn remote_processing_hash(stream: Id, hash: &[u8]) -> Statement<'_> {
+    sqlx::query("UPDATE raw_processing SET content_hash=$2 WHERE stream_id=$1")
+        .bind(stream)
+        .bind(hash)
 }

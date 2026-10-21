@@ -460,6 +460,7 @@ impl S3 for Gateway {
                     req.input.content_length,
                     req.input.checksum_algorithm.as_ref().map(|a| a.as_str()),
                     None,
+                    None,
                 )
                 .await?;
             self.0
@@ -545,6 +546,8 @@ impl S3 for Gateway {
                 || i.if_none_match.is_some()
                 || i.if_modified_since.is_some()
                 || i.if_unmodified_since.is_some();
+            let deadline = crate::app::readiness::deadline();
+            let permits = self.0.admit(false).await?;
             let (mut s, mut pin) = if light {
                 (self.0.metadata(b.id, &i.key).await?, None)
             } else {
@@ -570,7 +573,14 @@ impl S3 for Gateway {
                     true,
                 )?;
                 if pin.is_some() {
-                    break;
+                    if !self.0.wait_read(&s, deadline).await? {
+                        break;
+                    }
+                    let current = self.0.bucket(&b.name, false).await?;
+                    if current.state != "active" || current.settings_revision != b.settings_revision
+                    {
+                        return Err(crate::app::readiness::pending());
+                    }
                 }
                 let current = self.0.current(b.id, &i.key).await?;
                 s = current.0;
@@ -606,7 +616,6 @@ impl S3 for Gateway {
                 checksums!(out, &s.checksums);
                 out.checksum_type = checksum(&s.checksums, "type").map(ChecksumType::from);
             }
-            let permits = self.0.admit(false).await?;
             out.body = Some(
                 self.0
                     .body(

@@ -52,6 +52,9 @@ pub async fn initialize(app: &App, role: &str) -> Result<()> {
         app.node.set(state).is_ok(),
         "node identity was already initialized"
     );
+    app.storage
+        .initialize_cache(app.node.get().unwrap().node_id)
+        .await?;
     Ok(())
 }
 

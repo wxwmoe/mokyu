@@ -2378,3 +2378,32 @@ CREATE TABLE raw_uploads (
 CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);
 
 ALTER TABLE storage_profiles ADD COLUMN upload_cache_overflow TEXT NOT NULL DEFAULT 'fallback' CONSTRAINT storage_upload_overflow_check CHECK (upload_cache_overflow IN ('fallback','reject'));
+
+ALTER TABLE raw_uploads ADD COLUMN node_id uuid REFERENCES nodes(id);
+ALTER TABLE raw_uploads ADD COLUMN lease_expires_at timestamptz;
+CREATE INDEX raw_uploads_node ON raw_uploads(node_id) WHERE node_id IS NOT NULL;
+
+ALTER TABLE pending_uploads ADD COLUMN node_id uuid REFERENCES nodes(id);
+CREATE INDEX pending_uploads_node ON pending_uploads(node_id) WHERE node_id IS NOT NULL;
+
+ALTER TABLE uploads ADD COLUMN completion_token uuid;
+ALTER TABLE uploads ADD COLUMN completion_expires_at timestamptz;
+UPDATE mokyu_meta SET schema_version=57 WHERE singleton;
+
+ALTER TABLE multipart_files ADD COLUMN node_id uuid REFERENCES nodes(id);
+CREATE INDEX multipart_files_node ON multipart_files(node_id, id);
+ALTER TABLE uploads ADD COLUMN raw_source_id uuid REFERENCES raw_sources(id);
+ALTER TABLE uploads ADD COLUMN remote_token uuid;
+ALTER TABLE uploads ADD COLUMN remote_expires_at timestamptz;
+ALTER TABLE uploads ADD COLUMN remote_manifest_hash text;
+CREATE INDEX uploads_raw_source ON uploads(raw_source_id) WHERE raw_source_id IS NOT NULL;
+ALTER TABLE parts ADD COLUMN remote_node_id uuid REFERENCES nodes(id);
+ALTER TABLE parts ADD COLUMN remote_etag text;
+ALTER TABLE parts ADD COLUMN remote_token uuid;
+ALTER TABLE parts ADD COLUMN remote_expires_at timestamptz;
+ALTER TABLE parts ADD COLUMN remote_retry_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE parts ADD COLUMN remote_error text;
+ALTER TABLE parts ADD COLUMN remote_cached boolean NOT NULL DEFAULT false;
+CREATE INDEX parts_remote_pending ON parts(remote_node_id, remote_retry_at) WHERE remote_node_id IS NOT NULL AND remote_etag IS NULL;
+
+UPDATE mokyu_meta SET schema_version=58 WHERE singleton;

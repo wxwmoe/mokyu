@@ -329,8 +329,41 @@ impl App {
             fragment.deletion.finish().await?;
             removed += 1;
         }
-        if self.role == "single" {
-            for file in self.multipart.unused_files(storage_id, batch).await? {
+        let (files, ranges) = self
+            .reclaim_multipart_files(storage_id, batch, deadline)
+            .await?;
+        removed += files;
+        compacted += ranges;
+        if Instant::now() < deadline {
+            // Epoch tombstones must be checked while writers cannot create a new stream.
+            if let Ok(_coord) = self.coord.try_lock() {
+                let count = self
+                    .maintenance_store
+                    .cleanup_tombstones(storage_id, batch)
+                    .await?;
+                removed += count as usize;
+            }
+        }
+        if removed > 0 || compacted > 0 {
+            self.wake_gc.notify_one();
+        }
+        Ok(removed)
+    }
+    pub(crate) async fn reclaim_multipart_files(
+        &self,
+        storage_id: Option<Uuid>,
+        batch: i64,
+        deadline: Instant,
+    ) -> Result<(usize, usize)> {
+        let mut removed = 0;
+        let mut compacted = 0;
+        {
+            let owner = self.node.get().map(|node| node.node_id);
+            for file in self
+                .multipart
+                .unused_files(storage_id, owner, batch)
+                .await?
+            {
                 if Instant::now() >= deadline {
                     break;
                 }
@@ -351,7 +384,11 @@ impl App {
                     removed += 1;
                 }
             }
-            for file in self.multipart.pending_files(storage_id, batch).await? {
+            for file in self
+                .multipart
+                .pending_files(storage_id, owner, batch)
+                .await?
+            {
                 if Instant::now() >= deadline {
                     break;
                 }
@@ -371,20 +408,7 @@ impl App {
                 compacted += 1;
             }
         }
-        if Instant::now() < deadline {
-            // Epoch tombstones must be checked while writers cannot create a new stream.
-            if let Ok(_coord) = self.coord.try_lock() {
-                let count = self
-                    .maintenance_store
-                    .cleanup_tombstones(storage_id, batch)
-                    .await?;
-                removed += count as usize;
-            }
-        }
-        if removed > 0 || compacted > 0 {
-            self.wake_gc.notify_one();
-        }
-        Ok(removed)
+        Ok((removed, compacted))
     }
     pub async fn reclaim(&self) -> Result<usize> {
         crate::storage::resource_gate::PRIORITY

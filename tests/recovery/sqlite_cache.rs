@@ -66,6 +66,7 @@ pub(super) async fn stage(
     assert!(
         backend
             .stage(CacheStage {
+                node: None,
                 chunk,
                 stream,
                 offset,
@@ -160,7 +161,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     assert_eq!(backend.pins(&names, Some(storage)).await?, names);
     assert!(backend.pins(&names, Some(Uuid::new_v4())).await?.is_empty());
     assert!(backend.pins(&[], None).await?.is_empty());
-    let restored = backend.upload_pins(0.into()).await?;
+    let restored = backend.upload_pins(0.into(), None).await?;
     assert_eq!(restored.len(), 3);
     for (index, (id, target, name, size, charged_storage)) in restored.iter().enumerate() {
         assert_eq!(
@@ -471,6 +472,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     assert!(
         !backend
             .stage(CacheStage {
+                node: None,
                 chunk: &third,
                 stream: reused,
                 offset: 64,
@@ -485,6 +487,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     assert!(
         backend
             .stage(CacheStage {
+                node: None,
                 chunk: &third,
                 stream: reused,
                 offset: 64,
@@ -500,6 +503,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     assert!(
         backend
             .stage(CacheStage {
+                node: None,
                 chunk: &third,
                 stream: first,
                 offset: 96,

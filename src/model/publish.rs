@@ -15,7 +15,7 @@ pub(crate) trait PublishStore: Send + Sync {
         stream: Id,
         if_match: Option<ETagCondition>,
         if_none: Option<ETagCondition>,
-        completion: Option<(Uuid, String, Value)>,
+        completion: Option<(Uuid, String, Value, Uuid)>,
     ) -> Result<bool>;
 }
 

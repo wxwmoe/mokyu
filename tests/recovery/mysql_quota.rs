@@ -327,7 +327,9 @@ async fn mysql_quota_and_publication_contract() -> Result<()> {
         part_ids[0],
     )
     .await?;
-    sqlx::query("UPDATE uploads SET state='completing',manifest_hash='manifest' WHERE id=?")
+    let completion_token = Uuid::new_v4();
+    sqlx::query("UPDATE uploads SET state='completing',manifest_hash='manifest',completion_token=?,completion_expires_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 120 SECOND) WHERE id=?")
+        .bind(completion_token)
         .bind(upload)
         .execute(db)
         .await?;
@@ -343,7 +345,7 @@ async fn mysql_quota_and_publication_contract() -> Result<()> {
                 wrong_output,
                 None,
                 None,
-                Some((upload, "manifest".into(), json!({})))
+                Some((upload, "manifest".into(), json!({}), completion_token))
             )
             .await
             .is_err()
@@ -358,7 +360,7 @@ async fn mysql_quota_and_publication_contract() -> Result<()> {
                 output,
                 None,
                 None,
-                Some((upload, "wrong".into(), json!({})))
+                Some((upload, "wrong".into(), json!({}), completion_token))
             )
             .await?
     );
@@ -370,7 +372,7 @@ async fn mysql_quota_and_publication_contract() -> Result<()> {
                 output,
                 None,
                 None,
-                Some((upload, "manifest".into(), json!({})))
+                Some((upload, "manifest".into(), json!({}), completion_token))
             )
         )
         .await
@@ -383,7 +385,12 @@ async fn mysql_quota_and_publication_contract() -> Result<()> {
                 output,
                 None,
                 None,
-                Some((upload, "manifest".into(), json!({"etag":"multipart"})))
+                Some((
+                    upload,
+                    "manifest".into(),
+                    json!({"etag":"multipart"}),
+                    completion_token
+                ))
             )
             .await?
     );

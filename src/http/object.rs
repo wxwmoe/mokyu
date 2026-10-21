@@ -169,6 +169,7 @@ pub(crate) async fn read(
     overrides: &HeaderMap,
     checksum: bool,
 ) -> Result<Read> {
+    let deadline = crate::app::readiness::deadline();
     let bucket = bucket_info.id;
     if bucket_info.state != "active" {
         return Err(s3s::s3_error!(AccessDenied).into());
@@ -388,6 +389,23 @@ pub(crate) async fn read(
             cached_mapping = None;
             continue;
         }
+        let permits = if head {
+            None
+        } else {
+            Some(app.admit(false).await?)
+        };
+        if !head && app.wait_read(&stream, deadline).await? {
+            let bucket = app.bucket(&bucket_info.name, false).await?;
+            if bucket.state != "active" || bucket.settings_revision != bucket_info.settings_revision
+            {
+                return Err(crate::app::readiness::pending());
+            }
+            let current = app.current(bucket.id, key).await?;
+            stream = current.0;
+            pin = Some(current.1);
+            cached_mapping = None;
+            continue;
+        }
         let memory = (encoding != Encoding::Identity && !head)
             .then(|| app.storage.http_work())
             .flatten();
@@ -402,7 +420,7 @@ pub(crate) async fn read(
         let body = if head {
             None
         } else {
-            let permits = app.admit(false).await?;
+            let permits = permits.expect("body read was admitted");
             let size = stream.size as u64;
             let builder = if use_cache && range.is_none() {
                 app.response_cache.begin(cache_key, &stream, key)

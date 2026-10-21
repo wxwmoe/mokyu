@@ -12,6 +12,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
 };
+use hyper::body::Body as _;
 use s3s::dto::{ETagCondition, Range, Timestamp, TimestampFormat};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -23,6 +24,10 @@ pub async fn s3_http(
     request: hyper::Request<hyper::body::Incoming>,
     controls: Arc<tokio::sync::Semaphore>,
 ) -> s3s::HttpResponse {
+    let close_on_error = matches!(
+        request.version(),
+        hyper::Version::HTTP_10 | hyper::Version::HTTP_11
+    ) && !request.body().is_end_stream();
     let head = request.method() == Method::HEAD;
     let read = head || request.method() == Method::GET;
     let aws_chunked = request
@@ -152,7 +157,8 @@ pub async fn s3_http(
         let _control = if delete || complete {
             Some(
                 controls
-                    .try_acquire()
+                    .clone()
+                    .try_acquire_owned()
                     .map_err(|_| s3s::s3_error!(SlowDown))?,
             )
         } else {
@@ -207,10 +213,25 @@ pub async fn s3_http(
                 return Err(s3s::s3_error!(IncompleteBody).into());
             }
         }
-        let response = service
+        let mut response = service
             .call(request)
             .await
             .map_err(|e| anyhow::anyhow!("S3 HTTP failure: {e:?}"))?;
+        if complete {
+            let body = std::mem::replace(response.body_mut(), s3s::Body::empty());
+            *response.body_mut() = s3s::Body::http_body_unsync(CompletionBody {
+                inner: body,
+                last: tokio::time::Instant::now(),
+                _permit: _control,
+            });
+            response.headers_mut().insert(
+                hyper::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
+            response
+                .headers_mut()
+                .insert("x-accel-buffering", HeaderValue::from_static("no"));
+        }
         Ok(response)
     }
     .await;
@@ -229,6 +250,14 @@ pub async fn s3_http(
             .to_http_response()
             .expect("static S3 error");
     }
+    // Rejected uploads may leave unread request bytes on an HTTP/1 connection.
+    if close_on_error
+        && (response.status().is_client_error() || response.status().is_server_error())
+    {
+        response
+            .headers_mut()
+            .insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+    }
     super::compression::merge(response.headers_mut(), cors);
     if read {
         super::compression::vary(
@@ -244,6 +273,104 @@ pub async fn s3_http(
             s3s::Body::from(super::object::blob(Box::pin(futures_util::stream::empty())));
     }
     response
+}
+
+struct CompletionBody {
+    inner: s3s::Body,
+    last: tokio::time::Instant,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl hyper::body::Body for CompletionBody {
+    type Data = bytes::Bytes;
+    type Error = <s3s::Body as hyper::body::Body>::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<std::result::Result<hyper::body::Frame<Self::Data>, Self::Error>>>
+    {
+        loop {
+            let result = std::task::ready!(std::pin::Pin::new(&mut self.inner).poll_frame(cx));
+            if let Some(Ok(frame)) = &result {
+                // s3s emits whitespace every 100 ms; preserve XML and trailers without delaying them.
+                if frame
+                    .data_ref()
+                    .is_some_and(|data| data.iter().all(u8::is_ascii_whitespace))
+                    && self.last.elapsed() < Duration::from_secs(5)
+                {
+                    continue;
+                }
+                self.last = tokio::time::Instant::now();
+            }
+            return std::task::Poll::Ready(result);
+        }
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use hyper::body::{Body as _, Frame};
+
+    struct Frames(std::collections::VecDeque<Frame<bytes::Bytes>>);
+    impl hyper::body::Body for Frames {
+        type Data = bytes::Bytes;
+        type Error = std::io::Error;
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Ready(self.0.pop_front().map(Ok))
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_filter_keeps_xml_trailers_and_waiter_admission() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let mut trailers = HeaderMap::new();
+        trailers.insert("x-test-result", HeaderValue::from_static("complete"));
+        let source = Frames(
+            [
+                Frame::data(bytes::Bytes::from_static(b"<?xml version=\"1.0\"?>")),
+                Frame::data(bytes::Bytes::from_static(b" \n")),
+                Frame::data(bytes::Bytes::from_static(b"<Result/>")),
+                Frame::trailers(trailers),
+            ]
+            .into(),
+        );
+        let mut body = CompletionBody {
+            inner: s3s::Body::http_body_unsync(source),
+            last: tokio::time::Instant::now(),
+            _permit: Some(slots.clone().try_acquire_owned().unwrap()),
+        };
+        assert!(slots.try_acquire().is_err());
+        let mut data = Vec::new();
+        let mut trailers = false;
+        while let Some(frame) =
+            futures_util::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+        {
+            let frame = frame.unwrap();
+            if let Some(bytes) = frame.data_ref() {
+                data.extend_from_slice(bytes);
+            }
+            if let Some(headers) = frame.trailers_ref() {
+                assert_eq!(headers["x-test-result"], "complete");
+                trailers = true;
+            }
+        }
+        assert!(trailers);
+        assert_eq!(data, b"<?xml version=\"1.0\"?><Result/>");
+        drop(body);
+        assert!(slots.try_acquire().is_ok());
+    }
 }
 pub fn decode_path(path: &str) -> Result<String> {
     let bytes = path.as_bytes();

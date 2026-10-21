@@ -186,7 +186,10 @@ impl App {
             )
             .await?;
         let u = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
+        ensure!(u.state == "active", s3_error!(NoSuchUpload));
         let _upin = self.pin_upload(u.id);
+        let storage = b.storage_id.context("bucket has no storage")?;
+        let remote = self.remote_multipart(u.id, storage).await?;
         if i.checksum_algorithm.as_ref().is_some_and(|a| {
             u.checksum_algorithm
                 .as_deref()
@@ -224,7 +227,7 @@ impl App {
             .take()
             .unwrap_or_else(|| StreamingBlob::from_bytes(bytes::Bytes::new()));
         let i = &req.input;
-        let (_, etag, sums) = self
+        let (size, etag, sums) = self
             .receive(
                 id,
                 b.storage_id.context("bucket has no storage")?,
@@ -236,23 +239,55 @@ impl App {
                     .as_deref()
                     .or(i.checksum_algorithm.as_ref().map(|a| a.as_str())),
                 Some((u.id, i.part_number)),
+                remote.as_ref().map(|upload| upload.profile),
             )
             .await?;
+        let charge = if remote.is_some() {
+            self.storage.remote_charge(storage, size as u64)?
+        } else {
+            None
+        };
+        let cached = charge.is_some();
         {
             let lock = self.operation_lock(u.id);
             let _guard = lock.lock().await;
             let _coord = self.coord.lock().await;
             self.writable()?;
-            self.multipart
-                .commit_part(&authority, b.id, u.id, i.part_number, id)
-                .await?;
+            if remote.is_some() {
+                self.cluster()?
+                    .commit_remote_part(crate::model::multipart::RemoteCommit {
+                        authority: &authority,
+                        bucket: b.id,
+                        upload: u.id,
+                        number: i.part_number,
+                        stream: id,
+                        cached,
+                        node: crate::worker::raw::processor(self),
+                    })
+                    .await?;
+            } else {
+                self.multipart
+                    .commit_part(&authority, b.id, u.id, i.part_number, id)
+                    .await?;
+            }
+            if let Some(charge) = charge {
+                self.storage.hold_remote_charge(id, charge);
+            }
+        }
+        drop(_permits);
+        if remote.is_some() {
+            self.wake_raw_uploads.notify_one();
+            if !cached {
+                self.wait_remote_part(u.id, id).await?;
+            }
         }
         self.seal_uploads(id, false).await?;
         // A late predecessor can now transfer its tail using an already durable successor.
-        if self
-            .storage
-            .raw_policy(b.storage_id.context("bucket has no storage")?)?
-            .is_none()
+        if remote.is_none()
+            && self
+                .storage
+                .raw_policy(b.storage_id.context("bucket has no storage")?)?
+                .is_none()
             && let Err(e) = self.stitch_pair(u.id, i.part_number).await
         {
             tracing::warn!(error=%e,"multipart boundary remains recoverable for retry");
@@ -413,7 +448,7 @@ impl App {
         principal: Option<&Principal>,
     ) -> Result<S3Response<CompleteMultipartUploadOutput>> {
         reject_features(&req.headers)?;
-        let permits = self.admit(true).await?;
+        self.writable()?;
         let i = &req.input;
         let b = self.bucket(&i.bucket, true).await?;
         let (access, authority) = self
@@ -489,7 +524,10 @@ impl App {
                 u.result.as_ref().context("missing completion result")?,
             )));
         }
-        if u.state != "active" {
+        if u.state == "completing" && u.manifest_hash.as_deref() != Some(&hash) {
+            return Err(s3_error!(InvalidRequest, "upload has another completion manifest").into());
+        }
+        if !matches!(u.state.as_str(), "active" | "completing") {
             return Err(s3_error!(OperationAborted).into());
         }
         if i.checksum_type
@@ -498,19 +536,35 @@ impl App {
         {
             return Err(s3_error!(BadDigest).into());
         }
+        let mut selected = Vec::with_capacity(manifest.len());
         let mut parts = Vec::with_capacity(manifest.len());
         let mut pins = Vec::with_capacity(manifest.len());
         let mut total = 0i64;
         let mut etag_hash = Md5::new();
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("multipart-before-selection").await;
         for (idx, part) in manifest.iter().enumerate() {
-            let s: StoredStream = self
+            let Some(s) = self
                 .multipart
                 .part(
                     u.id,
                     part.part_number.ok_or_else(|| s3_error!(InvalidPart))?,
                 )
                 .await?
-                .ok_or_else(|| s3_error!(InvalidPart))?;
+            else {
+                let current = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
+                if current.state == "completed" && current.manifest_hash.as_deref() == Some(&hash) {
+                    return Ok(S3Response::new(completion_output(
+                        &i.bucket,
+                        &i.key,
+                        current
+                            .result
+                            .as_ref()
+                            .context("missing completion result")?,
+                    )));
+                }
+                return Err(s3_error!(InvalidPart).into());
+            };
             if !part
                 .e_tag
                 .as_ref()
@@ -537,6 +591,7 @@ impl App {
                 .checked_add(s.size)
                 .context("multipart length overflow")?;
             etag_hash.update(hex::decode(&s.etag)?);
+            selected.push((part.part_number.unwrap(), s.id));
             pins.push(self.pin(s.id));
             parts.push(s);
         }
@@ -544,57 +599,145 @@ impl App {
             return Err(s3_error!(InvalidRequest, "multipart size mismatch").into());
         }
         let etag = format!("{}-{}", hex::encode(etag_hash.finalize()), parts.len());
-        if self.role == "single" {
-            self.multipart.seal_files(u.id).await?;
-        }
-        let _coord = self.coord.lock().await;
-        self.multipart
-            .begin_complete(&authority, u.id, &hash)
-            .await?;
-        drop(_coord);
-        let app = self.clone();
-        let upin = self.pin_upload(u.id);
+        self.multipart.seal_files(u.id).await?;
+        let input_bucket = i.bucket.clone();
+        let input_key = i.key.clone();
+        let upload_id = i.upload_id.clone();
+        let expected_hash = hash.clone();
         let context = req
             .extensions
             .get::<crate::status::stats::RequestContext>()
             .cloned();
-        let input = req.input;
-        let headers = req.headers;
-        let audit = crate::control::audit::current();
-        let work = tokio::spawn(
-            async move {
-                let _guard = guard;
-                let _pins = pins;
-                let _upin = upin;
-                let _permits = permits;
-                #[cfg(feature = "fault-injection")]
-                crate::faults::point("multipart-completing").await;
-                let assembly = app.assemble(
-                    &authority, &u, &parts, &input, &headers, total, &etag, &hash,
-                );
-                let result = if let Some(id) = audit {
-                    crate::control::audit::scope(id, assembly).await
-                } else {
-                    assembly.await
-                };
-                if result.is_err() {
-                    let _ = app.multipart.retry_complete(u.id).await;
-                }
-                drop(_pins);
-                drop(_upin);
-                drop(_guard);
-                app.wake_gc.notify_one();
-                result.map_err(crate::app::internal)
+        let token = Uuid::new_v4();
+        let permit = self.completions.clone().try_acquire_owned();
+        let work = if let Ok(permit) = permit {
+            let claimed = self
+                .multipart
+                .begin_complete(crate::model::multipart::Completion {
+                    authority: &authority,
+                    upload: u.id,
+                    hash: &hash,
+                    token,
+                    parts: &selected,
+                    node: self
+                        .node
+                        .get()
+                        .map(|node| (node, self.role.as_str(), &self.secrets.credential_key)),
+                })
+                .await?;
+            drop(guard);
+            if claimed {
+                let app = self.clone();
+                let upin = self.pin_upload(u.id);
+                let input = req.input;
+                let headers = req.headers;
+                let audit = crate::control::audit::current();
+                Some(tokio::spawn(
+                    async move {
+                        let _permit = permit;
+                        let _pins = pins;
+                        let _upin = upin;
+                        let assembly = async {
+                            #[cfg(feature = "fault-injection")]
+                            crate::faults::point("multipart-completing").await;
+                            app.wait_complete_sources(
+                                &parts.iter().map(|part| part.id).collect::<Vec<_>>(),
+                                None,
+                            )
+                            .await?;
+                            app.assemble(
+                                &authority, &u, &parts, &input, &headers, total, &etag, &hash,
+                                token,
+                            )
+                            .await
+                        };
+                        let processing = async {
+                            if let Some(id) = audit {
+                                crate::control::audit::scope(id, assembly).await
+                            } else {
+                                assembly.await
+                            }
+                        };
+                        let renew = async {
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                                app.ensure_mode()?;
+                                ensure!(
+                                    app.multipart
+                                        .renew_complete(
+                                            u.id,
+                                            token,
+                                            app.node.get().map(|node| (
+                                                node,
+                                                app.role.as_str(),
+                                                &app.secrets.credential_key
+                                            ))
+                                        )
+                                        .await?,
+                                    crate::model::Error::OperationAborted
+                                );
+                            }
+                        };
+                        let result =
+                            tokio::select! { result=processing=>result, result=renew=>result };
+                        if result.is_err() {
+                            let _ = app.multipart.retry_complete(u.id, token).await;
+                        }
+                        app.wake_gc.notify_one();
+                        result.map_err(crate::app::internal)
+                    }
+                    .in_current_span(),
+                ))
+            } else {
+                None
             }
-            .in_current_span(),
-        );
+        } else {
+            drop(guard);
+            if u.state != "completing" {
+                return Err(completion_busy().into());
+            }
+            None
+        };
+        let app = self.clone();
+        let bucket = b.id;
         let future = Box::pin(async move {
-            let result = work
-                .await
-                .map_err(|e| crate::app::internal(e.into()))
-                .and_then(|r| r);
+            let result = tokio::time::timeout(completion_timeout(), async move {
+                if let Some(work) = work {
+                    return work
+                        .await
+                        .map_err(|error| crate::app::internal(error.into()))?;
+                }
+                loop {
+                    let current = app
+                        .get_upload(&upload_id, bucket, &input_key, &access)
+                        .await
+                        .map_err(crate::app::internal)?;
+                    if current.manifest_hash.as_deref() != Some(expected_hash.as_str()) {
+                        return Err(s3_error!(
+                            InvalidRequest,
+                            "upload has another completion manifest"
+                        ));
+                    }
+                    if current.state == "completed" {
+                        return Ok(completion_output(
+                            &input_bucket,
+                            &input_key,
+                            current
+                                .result
+                                .as_ref()
+                                .ok_or_else(|| s3_error!(InternalError))?,
+                        ));
+                    }
+                    if current.state != "completing" {
+                        return Err(completion_retry());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err(completion_retry()));
             result.map_err(|mut error| {
-                tracing::warn!(code=?error.code(), "multipart completion failed");
+                tracing::warn!(code=?error.code(), "multipart completion response failed");
                 if let Some(context) = context {
                     context
                         .failed
@@ -609,6 +752,28 @@ impl App {
             ..Default::default()
         }))
     }
+    async fn wait_complete_sources(&self, streams: &[Id], writing: Option<Id>) -> Result<()> {
+        if self.role == "single" {
+            return Ok(());
+        }
+        let cluster = self.cluster()?;
+        let mut prioritized = false;
+        loop {
+            if !cluster.pending_read(streams, Uuid::nil()).await? {
+                return Ok(());
+            }
+            if !prioritized {
+                cluster.prioritize_uploads(streams).await?;
+                self.wake_tasks.notify_waiters();
+                prioritized = true;
+            }
+            self.ensure_mode()?;
+            if let Some(stream) = writing {
+                self.renew_write_lease(stream).await?;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    }
     #[allow(clippy::too_many_arguments)] // Frozen completion inputs are used only by this worker.
     async fn assemble(
         &self,
@@ -620,7 +785,14 @@ impl App {
         total: i64,
         etag: &str,
         hash: &str,
+        token: Uuid,
     ) -> Result<CompleteMultipartUploadOutput> {
+        if self.role != "single" && self.cluster()?.remote_upload(u.id).await?.is_some() {
+            return self
+                .assemble_remote(authority, u, parts, i, headers, total, etag, hash, token)
+                .await;
+        }
+        let slot = self.slots.clone().acquire_owned().await?;
         let (id, _pin) = self
             .new_stream(
                 authority,
@@ -735,33 +907,7 @@ impl App {
             window.drain(..n);
         }
         ensure!(offset == total, "assembled size mismatch");
-        let (payload_digest, mut sums) = full.finish(None)?;
-        if let Some(alg) = &u.checksum_algorithm {
-            let name = alg.to_ascii_lowercase();
-            if u.checksum_type.as_deref() == Some("COMPOSITE") {
-                let mut check = Integrity::new(&hyper::HeaderMap::new(), Some(alg))?;
-                for part in parts {
-                    check.update(&STANDARD.decode(
-                        checksum(&part.checksums, &name).context("part checksum missing")?,
-                    )?);
-                }
-                let (_, composite) = check.finish(None)?;
-                sums[&name] = json!(format!(
-                    "{}-{}",
-                    checksum(&composite, &name).context("composite missing")?,
-                    parts.len()
-                ));
-            }
-            sums["type"] = json!(u.checksum_type);
-        }
-        for (name, value) in headers {
-            if let Some(name) = name.as_str().strip_prefix("x-amz-checksum-")
-                && name != "type"
-                && sums.get(name).and_then(Value::as_str) != Some(value.to_str()?)
-            {
-                return Err(s3_error!(BadDigest).into());
-            }
-        }
+        let (payload_digest, sums) = completion_checksums(full, u, parts, headers)?;
         if let Some((source, writer)) = raw_writer {
             let digest = hex::decode(payload_digest)?;
             let written = writer
@@ -772,13 +918,32 @@ impl App {
             self.finish_raw_received(id, source, storage, total, &digest, written)
                 .await?;
         }
+        drop(slot);
+        self.publish_multipart(id, u, i, total, etag, hash, token, sums)
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn publish_multipart(
+        &self,
+        id: Id,
+        u: &Upload,
+        i: &CompleteMultipartUploadInput,
+        total: i64,
+        etag: &str,
+        hash: &str,
+        token: Uuid,
+        sums: Value,
+    ) -> Result<CompleteMultipartUploadOutput> {
         self.finish_stream(id, total, etag, sums.clone()).await?;
+        self.seal_uploads(id, true).await?;
+        self.wake_raw_uploads.notify_one();
+        self.wait_complete_sources(&[id], Some(id)).await?;
         let result = json!({"etag":etag,"checksums":sums});
         self.publish_complete(
             id,
             i.if_match.as_ref(),
             i.if_none_match.as_ref(),
-            Some((u.id, hash.to_owned(), result.clone())),
+            Some((u.id, hash.to_owned(), result.clone(), token)),
         )
         .await?;
         Ok(completion_output(&i.bucket, &i.key, &result))
@@ -1103,4 +1268,77 @@ fn completion_output(bucket: &str, key: &str, result: &Value) -> CompleteMultipa
     };
     checksums!(out, sums);
     out
+}
+
+fn completion_timeout() -> std::time::Duration {
+    #[cfg(feature = "fault-injection")]
+    if let Ok(value) = std::env::var("MOKYU_TEST_COMPLETE_TIMEOUT_SECONDS") {
+        if let Ok(seconds) = value.parse::<u64>() {
+            return std::time::Duration::from_secs(seconds.clamp(1, 300));
+        }
+    }
+    std::time::Duration::from_secs(300)
+}
+
+fn completion_retry() -> s3s::S3Error {
+    s3_error!(
+        InternalError,
+        "Multipart completion is still in progress. Please retry the same request."
+    )
+}
+
+fn completion_busy() -> s3s::S3Error {
+    let mut error = s3_error!(
+        SlowDown,
+        "multipart completion capacity is full; retry later"
+    );
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert(
+        hyper::header::RETRY_AFTER,
+        hyper::header::HeaderValue::from_static("60"),
+    );
+    headers.insert(
+        hyper::header::CACHE_CONTROL,
+        hyper::header::HeaderValue::from_static("no-store"),
+    );
+    error.set_headers(headers);
+    error
+}
+
+pub(super) fn completion_checksums(
+    full: Integrity,
+    u: &Upload,
+    parts: &[StoredStream],
+    headers: &hyper::HeaderMap,
+) -> Result<(String, Value)> {
+    let (payload_digest, mut sums) = full.finish(None)?;
+    if let Some(alg) = &u.checksum_algorithm {
+        let name = alg.to_ascii_lowercase();
+        if u.checksum_type.as_deref() == Some("COMPOSITE") {
+            let mut check = Integrity::new(&hyper::HeaderMap::new(), Some(alg))?;
+            for part in parts {
+                check.update(
+                    &STANDARD.decode(
+                        checksum(&part.checksums, &name).context("part checksum missing")?,
+                    )?,
+                );
+            }
+            let (_, composite) = check.finish(None)?;
+            sums[&name] = json!(format!(
+                "{}-{}",
+                checksum(&composite, &name).context("composite missing")?,
+                parts.len()
+            ));
+        }
+        sums["type"] = json!(u.checksum_type);
+    }
+    for (name, value) in headers {
+        if let Some(name) = name.as_str().strip_prefix("x-amz-checksum-")
+            && name != "type"
+            && sums.get(name).and_then(Value::as_str) != Some(value.to_str()?)
+        {
+            return Err(s3_error!(BadDigest).into());
+        }
+    }
+    Ok((payload_digest, sums))
 }

@@ -32,6 +32,8 @@ Mokyu 的群集模式让多个进程共享一个 PostgreSQL 数据库和部署�
 
 每个容器使用自己的配置文件和 `instance.data_path` 目录，不共享本地目录。所有容器必须使用同一个不可替换的 `instance.deployment_key`，并连接同一个数据库。data 节点和 worker 仍需要数据库地址，不从 control 读取数据库连接信息。
 
+开启后端写缓存后，raw 和 chunks 在接收节点本地确认即可响应，所属节点负责后续上传。上传完成后文件转为普通读缓存，不另行复制；跨节点需要尚未上传的正文时最多等待约 3 秒，仍未就绪则返回 `503 SlowDown` 和 `Retry-After: 60`。同节点健康缓存可直接读取，HEAD 和列表不等待正文。应持久保存该节点的数据目录及 `node.json`；丢失唯一的本地副本不能由其他节点恢复。
+
 启动命令是镜像的角色开关：
 
 ```sh
@@ -86,7 +88,7 @@ docker exec mokyu-control mokyu cli cluster nodes
 docker exec mokyu-control mokyu cli cluster release <node-name> --confirm
 ```
 
-`cluster status` 返回 deployment mode、enabled 节点数和 local storage 数；`cluster nodes` 返回节点 id、名称、角色、启用状态和最近心跳；`cluster release` 禁用节点、释放其 lease 并把未完成任务重新排队。所有管理命令都经由 control HTTP API 执行，并记录 CLI 审计来源。
+`cluster status` 返回 deployment mode、enabled 节点数和 local storage 数；`cluster nodes` 返回节点 id、名称、角色、启用状态和最近心跳；`cluster release` 禁用节点、释放其 lease 并把未完成任务重新排队。本地待上传文件仍属于原节点，释放节点不会把文件或上传责任转给其他节点，操作前应完成 `cache flush`。所有管理命令都经由 control HTTP API 执行，并记录 CLI 审计来源。
 
 ## 模式切换和恢复
 

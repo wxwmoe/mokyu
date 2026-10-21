@@ -1,5 +1,6 @@
 //! PostgreSQL transaction boundaries and lock ordering.
 use crate::model::Id;
+use crate::model::multipart::{RemoteCommit, RemoteOutput, RemotePart, RemoteUpload};
 use crate::model::task::Execution;
 
 use super::{Backend, normalize_error, queries};
@@ -659,7 +660,7 @@ impl PublishStore for Backend {
         id: Id,
         if_match: Option<s3s::dto::ETagCondition>,
         if_none: Option<s3s::dto::ETagCondition>,
-        completion: Option<(uuid::Uuid, String, Value)>,
+        completion: Option<(uuid::Uuid, String, Value, Uuid)>,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let authority: sqlx::types::Json<crate::authorization::Permit> =
@@ -684,7 +685,7 @@ impl PublishStore for Backend {
         if epoch != id || state != "writing" {
             return Err(s3s::s3_error!(OperationAborted, "write was superseded").into());
         }
-        if let Some((upload, _, _)) = &completion {
+        if let Some((upload, _, _, _)) = &completion {
             let expected: Option<(Option<Id>, i64)> = queries::web_upload_expectation(upload)
                 .fetch_optional(&mut *tx)
                 .await?;
@@ -723,7 +724,7 @@ impl PublishStore for Backend {
         if !apply_publish(&mut tx, id, bucket, &object_key, old, completion.as_ref()).await? {
             return Ok(false);
         }
-        if let Some((upload, _, _)) = &completion {
+        if let Some((upload, _, _, _)) = &completion {
             checkpoint_event(
                 &mut tx,
                 "upload.complete",
@@ -894,7 +895,7 @@ pub(super) async fn apply_publish(
     bucket: uuid::Uuid,
     object_key: &str,
     old: Option<Id>,
-    completion: Option<&(uuid::Uuid, String, Value)>,
+    completion: Option<&(uuid::Uuid, String, Value, Uuid)>,
 ) -> Result<bool> {
     queries::publish_object(bucket, object_key, id)
         .execute(&mut **tx)
@@ -903,8 +904,8 @@ pub(super) async fn apply_publish(
     if let Some(old) = old {
         queries::retire_stream(old).execute(&mut **tx).await?;
     }
-    if let Some((upload, hash, result)) = completion {
-        let changed = queries::complete_upload(upload, hash, result, id)
+    if let Some((upload, hash, result, token)) = completion {
+        let changed = queries::complete_upload(upload, hash, result, id, *token)
             .execute(&mut **tx)
             .await?
             .rows_affected();
@@ -2550,9 +2551,13 @@ pub(super) async fn commit_upload_part(
     upload: Uuid,
     number: i32,
     stream: Id,
+    remote: Option<&RemoteCommit<'_>>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     authority.lock(&mut tx).await?;
+    if let Some(input) = remote {
+        raw_upload_processor(&mut tx, input.node).await?;
+    }
     if queries::multipart_bucket_state(bucket)
         .fetch_one(&mut *tx)
         .await?
@@ -2581,6 +2586,16 @@ pub(super) async fn commit_upload_part(
         validate_raw(&mut tx, stream, size).await?;
     } else {
         require_sources(&mut tx, Some(stream), &[]).await?;
+    }
+    if let Some(input) = remote {
+        ensure!(
+            queries::remote_part_queue(input)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
     }
     queries::publish_upload_part(upload, number, stream)
         .execute(&mut *tx)
@@ -2683,22 +2698,43 @@ pub(super) async fn stitch_upload_parts(pool: &PgPool, input: PartStitch) -> Res
 
 pub(super) async fn begin_upload_completion(
     pool: &PgPool,
-    authority: &Permit,
-    upload: Uuid,
-    hash: &str,
-) -> Result<()> {
+    input: crate::model::multipart::Completion<'_>,
+) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    authority.lock(&mut tx).await?;
-    if queries::begin_upload_completion(upload, hash)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-        != 1
-    {
-        return Err(s3s::s3_error!(OperationAborted).into());
+    input.authority.lock(&mut tx).await?;
+    raw_upload_processor(&mut tx, input.node).await?;
+    let (state, hash, live) = queries::completion_state(input.upload)
+        .fetch_one(&mut *tx)
+        .await?;
+    if matches!(state.as_str(), "completing" | "completed") {
+        ensure!(
+            hash.as_deref() == Some(input.hash),
+            s3s::s3_error!(InvalidRequest, "upload has another completion manifest")
+        );
+        if live || state == "completed" {
+            return Ok(false);
+        }
+    } else {
+        ensure!(state == "active", s3s::s3_error!(OperationAborted));
     }
+    let parts: std::collections::BTreeMap<_, _> = queries::completion_parts(input.upload)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+    ensure!(
+        !input.parts.is_empty()
+            && input
+                .parts
+                .iter()
+                .all(|(number, stream)| parts.get(number) == Some(stream)),
+        s3s::s3_error!(InvalidPart, "selected part generation changed")
+    );
+    queries::begin_upload_completion(&input)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 pub(super) async fn abort_multipart(
@@ -2860,6 +2896,7 @@ use crate::model::cache::{CacheBatch, CacheRelease, CacheStage};
 
 pub(super) async fn cache_stage(pool: &PgPool, input: CacheStage<'_>) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    raw_upload_processor(&mut tx, input.node).await?;
     require_writing_stream(&mut tx, input.stream).await?;
     let (state, source) = queries::lock_cache_source(input.chunk.id)
         .fetch_one(&mut *tx)
@@ -2928,21 +2965,44 @@ pub(super) async fn cache_seal(pool: &PgPool, stream: Id, eof: bool) -> Result<b
 }
 
 pub(super) async fn cache_flush(pool: &PgPool) -> Result<(Uuid, bool)> {
-    if let Some(id) = queries::active_cache_flush().fetch_optional(pool).await? {
+    let mut tx = pool.begin().await?;
+    queries::deployment_mode_lock().fetch_one(&mut *tx).await?;
+    if let Some(id) = queries::active_cache_flush()
+        .fetch_optional(&mut *tx)
+        .await?
+    {
         return Ok((id, true));
     }
     let id = crate::model::REQUEST_ID
         .try_with(|id| *id)
         .unwrap_or_else(|_| Uuid::new_v4());
+    let upper = Utc::now();
+    let nodes = queries::cache_nodes().fetch_all(&mut *tx).await?;
     insert_task(
-        &mut *pool.acquire().await?,
+        &mut tx,
         id,
         "cache_flush",
         None,
-        json!({"upper_time":Utc::now()}),
+        json!({"upper_time":upper,"coordinator":!nodes.is_empty()}),
         crate::model::audit::current(),
     )
     .await?;
+    for node in nodes {
+        let child = Uuid::new_v4();
+        insert_task(
+            &mut tx,
+            child,
+            "cache_flush",
+            None,
+            json!({"upper_time":upper,"node_id":node}),
+            crate::model::audit::current(),
+        )
+        .await?;
+        queries::scope_upload_task(child, node, Some(id))
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
     Ok((id, false))
 }
 
@@ -2953,7 +3013,8 @@ pub(super) async fn cache_enqueue(pool: &PgPool) -> Result<bool> {
         tx.commit().await?;
         return Ok(true);
     }
-    let Some((first, stream, source)) = queries::due_upload().fetch_optional(&mut *tx).await?
+    let Some((first, stream, source, owner)) =
+        queries::due_upload().fetch_optional(&mut *tx).await?
     else {
         return Ok(false);
     };
@@ -2971,6 +3032,11 @@ pub(super) async fn cache_enqueue(pool: &PgPool) -> Result<bool> {
         crate::model::audit::current(),
     )
     .await?;
+    if let Some(node) = owner {
+        queries::scope_upload_task(id, node, None)
+            .execute(&mut *tx)
+            .await?;
+    }
     let candidates = queries::pending_upload_segment(first, stream, source)
         .fetch_all(&mut *tx)
         .await?;
@@ -5764,6 +5830,7 @@ pub(super) async fn release_node(pool: &PgPool, name: &str) -> Result<()> {
         .await?
         .ok_or_else(|| anyhow::anyhow!("node not found or already released"))?;
     queries::release_node_tasks(&id).execute(&mut *tx).await?;
+    queries::release_raw_uploads(id).execute(&mut *tx).await?;
     queries::release_node_permits(&id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
@@ -5830,6 +5897,7 @@ pub(super) async fn recover_node(pool: &PgPool, name: &str, role: &str) -> Resul
         );
         queries::release_node_id(&id).execute(&mut *tx).await?;
         queries::release_node_tasks(&id).execute(&mut *tx).await?;
+        queries::release_raw_uploads(id).execute(&mut *tx).await?;
         queries::release_node_permits(&id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
@@ -6657,6 +6725,7 @@ pub(super) async fn finish_raw(
     size: i64,
     digest: &[u8],
     cached: Option<(i64, bool, bool)>,
+    node: crate::model::raw::Processor<'_>,
 ) -> Result<()> {
     ensure!(
         size >= 0 && digest.len() == 16,
@@ -6664,10 +6733,7 @@ pub(super) async fn finish_raw(
     );
     let mut tx = pool.begin().await?;
     if cached.is_some() {
-        ensure!(
-            queries::repair_mode().fetch_one(&mut *tx).await?,
-            crate::model::Error::OperationAborted
-        );
+        raw_upload_processor(&mut tx, node).await?;
     }
     ensure!(
         queries::raw_lock_stream(stream)
@@ -6699,7 +6765,7 @@ pub(super) async fn finish_raw(
         queries::raw_optional_delete(source)
             .execute(&mut *tx)
             .await?;
-        queries::raw_queue(source, deduplicate, background)
+        queries::raw_queue(source, deduplicate, background, node.map(|n| n.0.node_id))
             .execute(&mut *tx)
             .await?;
     }
@@ -6799,7 +6865,11 @@ async fn share_raw(
     Ok(reused)
 }
 
-pub(super) async fn multipart_file(pool: &PgPool, upload: Uuid) -> Result<Uuid> {
+pub(super) async fn multipart_file(
+    pool: &PgPool,
+    upload: Uuid,
+    node: Option<Uuid>,
+) -> Result<Uuid> {
     let mut tx = pool.begin().await?;
     ensure!(
         queries::lock_local_upload(upload)
@@ -6809,13 +6879,13 @@ pub(super) async fn multipart_file(pool: &PgPool, upload: Uuid) -> Result<Uuid> 
             == Some("active"),
         crate::model::Error::OperationAborted
     );
-    let id = if let Some(id) = queries::current_multipart_file(upload)
+    let id = if let Some(id) = queries::current_multipart_file(upload, node)
         .fetch_optional(&mut *tx)
         .await?
     {
         id
     } else {
-        queries::insert_multipart_file(upload)
+        queries::insert_multipart_file(upload, node)
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(crate::model::Error::OperationAborted)?
@@ -7280,19 +7350,17 @@ pub(super) async fn claim_raw_upload(
     pool: &sqlx::PgPool,
     token: Uuid,
     before: Option<chrono::DateTime<chrono::Utc>>,
+    node: crate::model::raw::Processor<'_>,
 ) -> Result<Option<crate::model::raw::RawUpload>> {
     let mut tx = pool.begin().await?;
-    ensure!(
-        queries::raw_upload_mode().fetch_one(&mut *tx).await?,
-        crate::model::Error::OperationAborted
-    );
-    let Some(source) = queries::raw_upload_due(before)
+    raw_upload_processor(&mut tx, node).await?;
+    let Some(source) = queries::raw_upload_due(before, node.map(|n| n.0.node_id))
         .fetch_optional(&mut *tx)
         .await?
     else {
         return Ok(None);
     };
-    queries::raw_upload_claim(source, token)
+    queries::raw_upload_claim(source, token, node.map(|n| n.0.node_id))
         .execute(&mut *tx)
         .await?;
     let work = queries::raw_upload_record(source)
@@ -7307,6 +7375,7 @@ pub(super) async fn reuse_raw_upload(
     work: &crate::model::raw::RawUpload,
     hash: &[u8],
     streams: &[Id],
+    node: crate::model::raw::Processor<'_>,
 ) -> Result<bool> {
     ensure!(
         hash.len() == 32 && streams.len() <= 128,
@@ -7325,6 +7394,9 @@ pub(super) async fn reuse_raw_upload(
         return Ok(false);
     }
     let mut tx = pool.begin().await?;
+    if node.is_some() {
+        raw_upload_processor(&mut tx, node).await?;
+    }
     queries::claim_chunk_hash(work.source.storage_id, hash)
         .execute(&mut *tx)
         .await?;
@@ -7332,6 +7404,14 @@ pub(super) async fn reuse_raw_upload(
         queries::raw_upload_stream_lock(*stream)
             .fetch_optional(&mut *tx)
             .await?;
+    }
+    if node.is_some() {
+        ensure!(
+            queries::raw_upload_owned(work, node.map(|n| n.0.node_id))
+                .fetch_one(&mut *tx)
+                .await?,
+            crate::model::Error::OperationAborted
+        );
     }
     let current = queries::raw_upload_record(work.source.id)
         .fetch_one(&mut *tx)
@@ -7391,16 +7471,28 @@ pub(super) async fn complete_raw_upload(
     pool: &sqlx::PgPool,
     work: &crate::model::raw::RawUpload,
     hash: Option<&[u8]>,
+    node: crate::model::raw::Processor<'_>,
 ) -> Result<()> {
     ensure!(
         hash.is_none_or(|h| h.len() == 32),
         "invalid raw upload hash"
     );
     let mut tx = pool.begin().await?;
+    if node.is_some() {
+        raw_upload_processor(&mut tx, node).await?;
+    }
     if let Some(hash) = hash {
         queries::claim_chunk_hash(work.source.storage_id, hash)
             .execute(&mut *tx)
             .await?;
+    }
+    if node.is_some() {
+        ensure!(
+            queries::raw_upload_owned(work, node.map(|n| n.0.node_id))
+                .fetch_one(&mut *tx)
+                .await?,
+            crate::model::Error::OperationAborted
+        );
     }
     let current = queries::raw_upload_record(work.source.id)
         .fetch_one(&mut *tx)
@@ -7460,8 +7552,20 @@ pub(super) async fn complete_raw_upload(
 pub(super) async fn abandon_raw_upload(
     pool: &sqlx::PgPool,
     work: &crate::model::raw::RawUpload,
+    node: crate::model::raw::Processor<'_>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    if node.is_some() {
+        raw_upload_processor(&mut tx, node).await?;
+    }
+    if node.is_some() {
+        ensure!(
+            queries::raw_upload_owned(work, node.map(|n| n.0.node_id))
+                .fetch_one(&mut *tx)
+                .await?,
+            crate::model::Error::OperationAborted
+        );
+    }
     let current = queries::raw_upload_record(work.source.id)
         .fetch_one(&mut *tx)
         .await?;
@@ -7482,4 +7586,248 @@ pub(super) async fn abandon_raw_upload(
         .await?;
     tx.commit().await?;
     Ok(true)
+}
+
+pub(super) async fn renew_raw_upload(
+    pool: &PgPool,
+    work: &crate::model::raw::RawUpload,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    raw_upload_processor(&mut tx, node).await?;
+    let renewed = queries::renew_raw_upload(work, node.map(|n| n.0.node_id))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        == 1;
+    tx.commit().await?;
+    Ok(renewed)
+}
+
+async fn raw_upload_processor(
+    db: &mut PgConnection,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<()> {
+    if let Some((state, role, key)) = node {
+        validate_node(&mut *db, state, role, key).await?;
+        ensure!(
+            queries::repair_node(state.node_id)
+                .fetch_optional(&mut *db)
+                .await?
+                .is_some(),
+            crate::model::Error::OperationAborted
+        );
+    }
+    // Cache flush remains available while maintenance blocks ordinary writes.
+    ensure!(
+        queries::raw_upload_mode(node.is_some())
+            .fetch_one(db)
+            .await?,
+        crate::model::Error::OperationAborted
+    );
+    Ok(())
+}
+
+pub(super) async fn renew_completion(
+    pool: &PgPool,
+    upload: Uuid,
+    token: Uuid,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    raw_upload_processor(&mut tx, node).await?;
+    let changed = queries::renew_completion(upload, token)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        == 1;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+pub(super) async fn begin_remote(
+    pool: &PgPool,
+    upload: Uuid,
+    storage: Uuid,
+    revision: i64,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<RemoteUpload> {
+    let mut tx = pool.begin().await?;
+    ensure!(node.is_some(), crate::model::Error::OperationAborted);
+    raw_upload_processor(&mut tx, node).await?;
+    let (state, source) = queries::remote_upload_lock(upload)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(state == "active", crate::model::Error::OperationAborted);
+    if source.is_none() {
+        ensure!(
+            queries::insert_remote(upload, storage, revision)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
+    }
+    let value = queries::remote_upload(upload).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(value)
+}
+pub(super) async fn claim_remote(
+    pool: &PgPool,
+    upload: Uuid,
+    token: Uuid,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    raw_upload_processor(&mut tx, node).await?;
+    let claimed = queries::claim_remote(upload, token)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        == 1;
+    tx.commit().await?;
+    Ok(claimed)
+}
+pub(super) async fn initialized_remote(
+    pool: &PgPool,
+    upload: Uuid,
+    token: Uuid,
+    upstream: Option<&str>,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<bool> {
+    ensure!(
+        upstream.is_none_or(|id| !id.is_empty() && id.len() <= 4096),
+        "invalid remote upload identity"
+    );
+    let mut tx = pool.begin().await?;
+    raw_upload_processor(&mut tx, node).await?;
+    let changed = queries::remote_initialized(upload, token, upstream)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+pub(super) async fn claim_remote_part(
+    pool: &PgPool,
+    token: Uuid,
+    node: crate::model::raw::Processor<'_>,
+    stream: Option<Id>,
+) -> Result<Option<RemotePart>> {
+    let mut tx = pool.begin().await?;
+    raw_upload_processor(&mut tx, node).await?;
+    let node = node.context("native parts require a node")?.0.node_id;
+    let Some((upload, number)) = queries::remote_part_due(node, stream)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        return Ok(None);
+    };
+    queries::remote_part_claim(upload, number, token)
+        .execute(&mut *tx)
+        .await?;
+    let mut value = queries::remote_part(&mut tx, upload, number).await?;
+    value.read_lease = create_read_lease(&mut tx, value.stream.id, 120).await?;
+    tx.commit().await?;
+    Ok(Some(value))
+}
+pub(super) async fn finish_remote_part(
+    pool: &PgPool,
+    work: &RemotePart,
+    etag: Option<&str>,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    raw_upload_processor(&mut tx, node).await?;
+    let changed = queries::remote_part_finish(
+        work,
+        etag,
+        node.context("native parts require a node")?.0.node_id,
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    tx.commit().await?;
+    Ok(changed)
+}
+pub(super) async fn freeze_remote(
+    pool: &PgPool,
+    upload: Uuid,
+    token: Uuid,
+    hash: &str,
+) -> Result<RemoteUpload> {
+    let mut tx = pool.begin().await?;
+    ensure!(
+        queries::freeze_remote(upload, token, hash)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    let value = queries::remote_upload(upload).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(value)
+}
+pub(super) async fn adopt_remote(pool: &PgPool, input: RemoteOutput<'_>) -> Result<Uuid> {
+    ensure!(
+        input.size >= 0 && input.digest.len() == 16 && input.hash.len() == 32,
+        "invalid completed remote source"
+    );
+    let mut tx = pool.begin().await?;
+    let source = queries::remote_output_lock(input.upload, input.token)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(crate::model::Error::OperationAborted)?;
+    require_writing_stream(&mut tx, input.stream).await?;
+    ensure!(
+        queries::raw_prepare(input.stream)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        queries::remote_source_finish(source, &input)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    queries::raw_attach(input.stream, source.into(), input.size)
+        .execute(&mut *tx)
+        .await?;
+    if input.background {
+        queries::raw_enqueue_processing(input.stream, source.into())
+            .execute(&mut *tx)
+            .await?;
+        queries::remote_processing_hash(input.stream, input.hash)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(source)
+}
+pub(super) async fn claim_remote_cleanup(
+    pool: &PgPool,
+    token: Uuid,
+    node: crate::model::raw::Processor<'_>,
+) -> Result<Option<RemoteUpload>> {
+    let mut tx = pool.begin().await?;
+    raw_upload_processor(&mut tx, node).await?;
+    let Some(upload) = queries::remote_cleanup_due()
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        return Ok(None);
+    };
+    queries::remote_cleanup_claim(upload, token)
+        .execute(&mut *tx)
+        .await?;
+    let value = queries::remote_upload(upload).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(Some(value))
 }

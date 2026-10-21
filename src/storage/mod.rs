@@ -9,6 +9,7 @@ mod diagnostics;
 pub(crate) mod local;
 pub(crate) mod location;
 pub(crate) mod model;
+mod multipart;
 pub(crate) mod permits;
 pub(crate) mod profile;
 mod rate;
@@ -84,6 +85,7 @@ pub struct Storage {
     staging_storage_id: Option<Uuid>,
     staging_bytes_limit: Option<u64>,
     cluster_mode: bool,
+    node_id: std::sync::OnceLock<Uuid>,
     pub secrets: Arc<Secrets>,
     pub(crate) cpu: Arc<Semaphore>,
     pub compression: Arc<crate::content::compression::Pool>,
@@ -98,6 +100,7 @@ pub struct Storage {
     cache_writes: tokio::sync::Mutex<()>,
     upload_pins: Mutex<HashMap<Uuid, UploadPin>>,
     raw_upload_pins: Mutex<HashMap<Uuid, (crate::model::Id, UploadPin)>>,
+    remote_charges: Mutex<HashMap<Id, UploadCharge>>,
     fills: Arc<Semaphore>,
     cache_fills: Arc<Mutex<HashSet<Uuid>>>,
     max_entries: usize,
@@ -419,6 +422,7 @@ impl Storage {
                 .map(config::cache_bytes)
                 .transpose()?,
             cluster_mode,
+            node_id: std::sync::OnceLock::new(),
             secrets,
             cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
             compression: Arc::new(crate::content::compression::Pool::new(
@@ -436,6 +440,7 @@ impl Storage {
             cache_writes: tokio::sync::Mutex::new(()),
             upload_pins: Mutex::new(HashMap::new()),
             raw_upload_pins: Mutex::new(HashMap::new()),
+            remote_charges: Mutex::new(HashMap::new()),
             fills: Arc::new(Semaphore::new(budget.cpu_jobs)),
             cache_fills: Arc::new(Mutex::new(HashSet::new())),
             max_entries: c.instance.cache_entries.unwrap_or(budget.cache_entries),
@@ -458,12 +463,27 @@ impl Storage {
             operations: std::array::from_fn(|_| Arc::default()),
             diagnostics: Arc::default(),
         };
-        s.restore_upload_pins().await?;
-        s.restore_raw_uploads().await?;
-        s.restore_raw_checkpoints().await?;
-        s.scan().await?;
+        if !cluster_mode {
+            s.restore_cache().await?;
+        }
         Ok(s)
     }
+    pub(crate) async fn initialize_cache(&self, node: Uuid) -> Result<()> {
+        ensure!(
+            self.node_id.set(node).is_ok(),
+            "cache owner was already initialized"
+        );
+        self.restore_cache().await
+    }
+
+    async fn restore_cache(&self) -> Result<()> {
+        self.reconcile_remote_charges().await?;
+        self.restore_upload_pins().await?;
+        self.restore_raw_uploads().await?;
+        self.restore_raw_checkpoints().await?;
+        self.scan().await
+    }
+
     pub fn statistics(&self) -> serde_json::Value {
         let lookups = self.cache_lookups.load(Ordering::Relaxed);
         let mut diagnostics = self.diagnostics.snapshot();
@@ -877,7 +897,10 @@ impl Storage {
     async fn restore_upload_pins(&self) -> Result<()> {
         let mut after = Id::default();
         loop {
-            let rows = self.physical.upload_pins(after).await?;
+            let rows = self
+                .physical
+                .upload_pins(after, self.node_id.get().copied())
+                .await?;
             if rows.is_empty() {
                 break;
             }
@@ -1134,19 +1157,6 @@ impl Storage {
         }
         Ok(())
     }
-    async fn decode_staged_cache(&self, c: &Chunk, data: Bytes, compressed: bool) -> Result<Bytes> {
-        if !compressed {
-            return Ok(data);
-        }
-        let permit = self.cpu.clone().acquire_owned().await?;
-        let c = c.clone();
-        let (compression, _, _) = self.compression_for(c.storage_id)?;
-        Ok(tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            crate::content::codec::decode_cache(&c, data, true, &compression)
-        })
-        .await??)
-    }
     pub async fn stage_upload(
         self: &Arc<Self>,
         c: &Chunk,
@@ -1156,23 +1166,8 @@ impl Storage {
         let policy = self.local_cache(c.storage_id)?;
         let id = cache::cache_id(c);
         let storage_id = c.storage_id.context("cached chunk has no storage")?;
-        if !self.cluster_mode && !policy.upload_cache {
+        if !policy.upload_cache {
             return Ok(None);
-        }
-        if self.cluster_mode {
-            let storage_id = self.shared_staging_id()?;
-            let raw = self.decode_staged_cache(c, data, compressed).await?;
-            let key = format!("{STAGING_PREFIX}pending/{}", id.simple());
-            self.put_staged(storage_id, &key, raw.clone()).await?;
-            return Ok(Some(UploadPin {
-                _pin: None,
-                _charge: None,
-                size: raw.len() as u64,
-                compressed: false,
-                remote: true,
-                staging_storage_id: Some(storage_id),
-                staging_object_key: key,
-            }));
         }
         let permit = self.fills.clone().acquire_owned().await?;
         let storage = self.clone();
@@ -1470,7 +1465,9 @@ impl Storage {
         Ok(())
     }
     async fn cached_file(&self, c: &Chunk, id: Uuid) -> Result<Option<Bytes>> {
-        if !self.local_cache(c.storage_id)?.enabled {
+        if !self.local_cache(c.storage_id)?.enabled
+            && !self.upload_pins.lock().unwrap().contains_key(&id)
+        {
             return Ok(None);
         }
         let cached = {
@@ -1552,39 +1549,6 @@ impl Storage {
                 return Ok(Some(raw));
             }
         }
-        if let Some((storage_id, key)) = staged.filter(|(_, key)| key.starts_with(STAGING_PREFIX)) {
-            #[cfg(feature = "fault-injection")]
-            crate::faults::point("read-pending-source").await;
-            let raw = match self
-                .read_staged(storage_id, &key, c.raw_size as usize)
-                .await
-            {
-                Ok(raw) => raw,
-                // Publication may remove staging after lookup; fetch reselects a protected source.
-                Err(error)
-                    if matches!(
-                        error.downcast_ref::<object_store::Error>(),
-                        Some(object_store::Error::NotFound { .. })
-                    ) =>
-                {
-                    return Ok(None);
-                }
-                Err(error) => return Err(error),
-            };
-            let validation: Result<()> = (|| {
-                ensure!(
-                    raw.len() == c.raw_size as usize,
-                    codec::IntegrityError::Length
-                );
-                ensure!(
-                    blake3::hash(&raw).as_bytes() == c.hash.as_slice(),
-                    codec::IntegrityError::Hash
-                );
-                Ok(())
-            })();
-            validation.inspect_err(|e| self.diagnostics.content(e))?;
-            return Ok(Some(Bytes::from(raw)));
-        }
         let pending = self
             .upload_pins
             .lock()
@@ -1596,6 +1560,9 @@ impl Storage {
                 .pending_unavailable
                 .fetch_add(1, Ordering::Relaxed);
             return Err(anyhow::anyhow!("pending upload cache is missing or corrupt for chunk {}; preserve data/chunks and restore its durable source", c.id).context(codec::IntegrityError::PendingUnavailable));
+        }
+        if self.cluster_mode && self.physical.pending_only(c.id).await? {
+            return Err(crate::app::readiness::pending());
         }
         Ok(None)
     }

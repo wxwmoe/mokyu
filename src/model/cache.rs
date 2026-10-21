@@ -15,6 +15,7 @@ pub(crate) struct CacheStage<'a> {
     pub storage: Uuid,
     pub key: &'a str,
     pub timeout: u64,
+    pub node: crate::model::raw::Processor<'a>,
 }
 
 pub(crate) enum CacheBatch {

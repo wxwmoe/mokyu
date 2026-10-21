@@ -41,6 +41,9 @@ impl App {
                         revision,
                         deduplicate,
                         background,
+                        self.node
+                            .get()
+                            .map(|node| (node, self.role.as_str(), &self.secrets.credential_key)),
                     )
                     .await?;
             }

@@ -274,7 +274,7 @@ impl Storage {
     ) -> Result<RawWriter<'_>> {
         let target = self.store_backend(storage)?;
         self.verify_raw_target(&target).await?;
-        if cache && !self.cluster_mode && !target.is_local && target.profile.upload_cache {
+        if cache && !target.is_local && target.profile.upload_cache {
             remote_size(declared.unwrap_or(0).max(0) as u64)?;
             return Ok(RawWriter::Pending(
                 super::raw_upload::Writer::new(self, storage, source, location).await?,
@@ -446,10 +446,6 @@ impl Storage {
             self.physical_pin(source.location_id)
         };
         if source.pending_upload {
-            ensure!(
-                !self.cluster_mode,
-                "local raw staging is unavailable in cluster mode"
-            );
             match self.pending_raw(source, verify).await {
                 Ok(file) => {
                     return Ok(RawReader {
@@ -469,6 +465,15 @@ impl Storage {
                             && r.digest == source.digest
                     }) {
                         return Box::pin(self.raw_reader_inner(&current, verify)).await;
+                    }
+                    if self.cluster_mode
+                        && !self
+                            .raw_upload_pins
+                            .lock()
+                            .unwrap()
+                            .contains_key(&source.location_id)
+                    {
+                        return Err(crate::app::readiness::pending());
                     }
                     return Err(error);
                 }
@@ -664,7 +669,7 @@ fn replay_part_size(size: u64, parts: &[i64]) -> Result<u64> {
     Ok(planned)
 }
 
-fn remote_path(id: Uuid) -> ObjectPath {
+pub(super) fn remote_path(id: Uuid) -> ObjectPath {
     ObjectPath::from(format!("raw/{}", super::chunk_name(id)))
 }
 

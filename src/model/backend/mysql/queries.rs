@@ -3923,9 +3923,12 @@ pub(super) fn publish_upload_part(
 pub(super) fn touch_upload(upload: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE uploads SET touched_at=CURRENT_TIMESTAMP(6) WHERE id=?").bind(upload)
 }
-pub(super) fn begin_upload_completion(upload: Uuid, hash: &str) -> Statement<'_> {
-    sqlx::query("UPDATE uploads SET state='completing',manifest_hash=?,touched_at=CURRENT_TIMESTAMP(6) WHERE id=? AND state='active'").bind(hash).bind(upload)
+pub(super) fn begin_upload_completion<'a>(
+    input: &'a crate::model::multipart::Completion<'a>,
+) -> Statement<'a> {
+    sqlx::query("UPDATE uploads SET state='completing',manifest_hash=?,completion_token=?,completion_expires_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 120 SECOND),touched_at=CURRENT_TIMESTAMP(6) WHERE id=?").bind(input.hash).bind(input.token).bind(input.upload)
 }
+
 pub(super) fn abort_multipart(id: Uuid, expired: bool) -> Statement<'static> {
     sqlx::query("UPDATE uploads SET state='aborted',touched_at=CURRENT_TIMESTAMP(6) WHERE id=? AND state IN ('active','completing') AND (NOT ? OR (state='active' AND EXISTS(SELECT 1 FROM buckets b JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE b.id=uploads.bucket_id AND uploads.touched_at<TIMESTAMPADD(SECOND,-(CAST(LEFT(p.multipart_idle_timeout,LENGTH(p.multipart_idle_timeout)-1) AS UNSIGNED)*CASE RIGHT(p.multipart_idle_timeout,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END),CURRENT_TIMESTAMP(6)))))").bind(id).bind(expired)
 }
@@ -4114,6 +4117,7 @@ impl MultipartStore for Backend {
     async fn pending_files(
         &self,
         storage: Option<Uuid>,
+        _node: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
         Ok(sqlx::query_as("SELECT id,upload_id,storage_id,source_id,state FROM multipart_files WHERE reclaim_pending AND state='sealed' AND (? IS NULL OR storage_id=?) ORDER BY id LIMIT ?").bind(storage).bind(storage).bind(limit).fetch_all(&self.pool).await?)
@@ -4149,7 +4153,7 @@ impl MultipartStore for Backend {
     ) -> Result<()> {
         transactions::remap_multipart_file(&self.pool, upload, source, ranges).await
     }
-    async fn file(&self, upload: Uuid) -> Result<Uuid> {
+    async fn file(&self, upload: Uuid, _node: Option<Uuid>) -> Result<Uuid> {
         transactions::multipart_file(&self.pool, upload).await
     }
     async fn seal_files(&self, upload: Uuid) -> Result<()> {
@@ -4169,6 +4173,7 @@ impl MultipartStore for Backend {
     async fn unused_files(
         &self,
         storage: Option<Uuid>,
+        _node: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
         Ok(sqlx::query_as("SELECT f.id,f.upload_id,f.storage_id,f.source_id,f.state FROM multipart_files f WHERE (? IS NULL OR storage_id=?) AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing'))) ORDER BY f.id LIMIT ?").bind(storage).bind(storage).bind(limit).fetch_all(&self.pool).await?)
@@ -4251,17 +4256,20 @@ impl MultipartStore for Backend {
     async fn retire_work(&self, stream: Id) -> Result<()> {
         transactions::retire_upload_work(&self.pool, stream).await
     }
-    async fn begin_complete(
-        &self,
-        authority: &crate::authorization::Permit,
-        upload: Uuid,
-        hash: &str,
-    ) -> Result<()> {
-        transactions::begin_upload_completion(&self.pool, authority, upload, hash).await
+    async fn begin_complete(&self, input: crate::model::multipart::Completion<'_>) -> Result<bool> {
+        transactions::begin_upload_completion(&self.pool, input).await
     }
-    async fn retry_complete(&self, upload: Uuid) -> Result<()> {
-        sqlx::query("UPDATE uploads SET state='active',touched_at=CURRENT_TIMESTAMP(6) WHERE id=? AND state='completing'").bind(upload).execute(&self.pool).await?;
+    async fn retry_complete(&self, upload: Uuid, token: Uuid) -> Result<()> {
+        sqlx::query("UPDATE uploads SET state='active',completion_token=NULL,completion_expires_at=NULL,touched_at=CURRENT_TIMESTAMP(6) WHERE id=? AND completion_token=? AND state='completing'").bind(upload).bind(token).execute(&self.pool).await?;
         Ok(())
+    }
+    async fn renew_complete(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        _node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        Ok(sqlx::query("UPDATE uploads SET completion_expires_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 120 SECOND),touched_at=CURRENT_TIMESTAMP(6) WHERE id=? AND completion_token=? AND state='completing' AND completion_expires_at>CURRENT_TIMESTAMP(6)").bind(upload).bind(token).execute(&self.pool).await?.rows_affected()==1)
     }
     async fn abort(&self, authority: &crate::authorization::Permit, upload: Uuid) -> Result<()> {
         transactions::abort_multipart(&self.pool, authority, upload, false)
@@ -4749,8 +4757,9 @@ pub(super) fn complete_upload<'a>(
     stream: Id,
     hash: &'a str,
     result: &'a Value,
+    token: Uuid,
 ) -> Statement<'a> {
-    sqlx::query("UPDATE uploads SET state='completed',result=?,output_stream=?,touched_at=CURRENT_TIMESTAMP(6) WHERE id=? AND state='completing' AND manifest_hash=?").bind(result).bind(stream).bind(upload).bind(hash)
+    sqlx::query("UPDATE uploads SET state='completed',result=?,output_stream=?,touched_at=CURRENT_TIMESTAMP(6) WHERE id=? AND state='completing' AND manifest_hash=? AND completion_token=? AND completion_expires_at>CURRENT_TIMESTAMP(6)").bind(result).bind(stream).bind(upload).bind(hash).bind(token)
 }
 pub(super) fn upload_part_streams(upload: Uuid) -> Scalar<'static, Id> {
     sqlx::query_scalar("SELECT stream_id FROM parts WHERE upload_id=? AND stream_id IS NOT NULL ORDER BY part_number").bind(upload)
@@ -4765,7 +4774,7 @@ impl PublishStore for Backend {
         stream: Id,
         if_match: Option<s3s::dto::ETagCondition>,
         if_none: Option<s3s::dto::ETagCondition>,
-        completion: Option<(Uuid, String, Value)>,
+        completion: Option<(Uuid, String, Value, Uuid)>,
     ) -> Result<bool> {
         transactions::publish(&self.pool, stream, if_match, if_none, completion).await
     }
@@ -5170,7 +5179,11 @@ impl PhysicalStore for Backend {
     async fn indexed(&self, location: Uuid) -> Result<bool> {
         Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunk_encodings WHERE location_id=?) OR EXISTS(SELECT 1 FROM packs WHERE location_id=?)").bind(location).bind(location).fetch_one(&self.pool).await?)
     }
-    async fn upload_pins(&self, after: Id) -> Result<Vec<crate::model::physical::StagedUpload>> {
+    async fn upload_pins(
+        &self,
+        after: Id,
+        _owner: Option<Uuid>,
+    ) -> Result<Vec<crate::model::physical::StagedUpload>> {
         Ok(sqlx::query_as("SELECT p.chunk_id,IF(p.cache_key IS NULL,NULL,c.storage_id),p.cache_key,p.staged_size,c.storage_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE p.chunk_id>? ORDER BY p.chunk_id LIMIT 512").bind(after).fetch_all(&self.pool).await?)
     }
     async fn pending_source(&self, chunk: Id) -> Result<Option<(Uuid, String)>> {
@@ -7881,14 +7894,22 @@ pub(super) fn raw_detach(stream: Id, end: i64) -> Statement<'static> {
 
 #[async_trait::async_trait]
 impl RawStore for Backend {
-    async fn uploads_before(&self, before: chrono::DateTime<chrono::Utc>) -> Result<bool> {
+    async fn uploads_before(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+        _owner: Option<Uuid>,
+    ) -> Result<bool> {
         Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE r.created_at<=?)").bind(before).fetch_one(&self.pool).await?)
     }
     async fn upload_status(&self) -> Result<Value> {
         let (pending,bytes,failed):(i64,i64,i64)=sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(r.size),0) AS SIGNED),CAST(COALESCE(SUM(CASE WHEN u.last_error IS NOT NULL THEN 1 ELSE 0 END),0) AS SIGNED) FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id").fetch_one(&self.pool).await?;
         Ok(serde_json::json!({"pending":pending,"bytes":bytes,"failed":failed}))
     }
-    async fn abandon_upload(&self, work: &RawUpload) -> Result<bool> {
+    async fn abandon_upload(
+        &self,
+        work: &RawUpload,
+        _node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
         transactions::abandon_raw_upload(&self.pool, work).await
     }
 
@@ -7915,6 +7936,7 @@ impl RawStore for Backend {
         revision: i64,
         deduplicate: bool,
         background: bool,
+        _node: crate::model::raw::Processor<'_>,
     ) -> Result<()> {
         transactions::finish_raw(
             &self.pool,
@@ -7926,13 +7948,14 @@ impl RawStore for Backend {
         )
         .await
     }
-    async fn uploads(&self, after: Id) -> Result<Vec<RawUpload>> {
+    async fn uploads(&self, after: Id, _owner: Option<Uuid>) -> Result<Vec<RawUpload>> {
         Ok(raw_uploads(after).fetch_all(&self.pool).await?)
     }
     async fn claim_upload(
         &self,
         token: Uuid,
         before: Option<chrono::DateTime<chrono::Utc>>,
+        _node: crate::model::raw::Processor<'_>,
     ) -> Result<Option<RawUpload>> {
         transactions::claim_raw_upload(&self.pool, token, before).await
     }
@@ -7963,10 +7986,21 @@ impl RawStore for Backend {
     async fn upload_streams(&self, source: Id) -> Result<Vec<Id>> {
         Ok(raw_upload_streams(source).fetch_all(&self.pool).await?)
     }
-    async fn reuse_upload(&self, work: &RawUpload, hash: &[u8], streams: &[Id]) -> Result<bool> {
+    async fn reuse_upload(
+        &self,
+        work: &RawUpload,
+        hash: &[u8],
+        streams: &[Id],
+        _node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
         transactions::reuse_raw_upload(&self.pool, work, hash, streams).await
     }
-    async fn complete_upload(&self, work: &RawUpload, hash: Option<&[u8]>) -> Result<()> {
+    async fn complete_upload(
+        &self,
+        work: &RawUpload,
+        hash: Option<&[u8]>,
+        _node: crate::model::raw::Processor<'_>,
+    ) -> Result<()> {
         transactions::complete_raw_upload(&self.pool, work, hash).await
     }
     async fn current(&self, source: Id) -> Result<Option<RawSource>> {
@@ -8386,4 +8420,11 @@ pub(super) fn raw_upload_mode() -> Scalar<'static, bool> {
 }
 pub(super) fn raw_upload_abandon(source: Id) -> Statement<'static> {
     sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=? AND owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)").bind(source)
+}
+
+pub(super) fn completion_state(upload: Uuid) -> Rows<'static, (String, Option<String>, bool)> {
+    sqlx::query_as("SELECT state,manifest_hash,COALESCE(completion_expires_at>CURRENT_TIMESTAMP(6),false) FROM uploads WHERE id=? FOR UPDATE").bind(upload)
+}
+pub(super) fn completion_parts(upload: Uuid) -> Rows<'static, (i32, Id)> {
+    sqlx::query_as("SELECT part_number,stream_id FROM parts WHERE upload_id=? AND stream_id IS NOT NULL ORDER BY part_number").bind(upload)
 }

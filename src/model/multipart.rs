@@ -145,17 +145,36 @@ pub(crate) struct PartStitch {
     pub chunk: Id,
 }
 
+pub(crate) struct Completion<'a> {
+    pub authority: &'a Permit,
+    pub upload: Uuid,
+    pub hash: &'a str,
+    pub token: Uuid,
+    pub parts: &'a [(i32, Id)],
+    pub node: crate::model::raw::Processor<'a>,
+}
+
 #[async_trait]
 pub(crate) trait MultipartStore: Send + Sync {
-    async fn file(&self, upload: Uuid) -> Result<Uuid>;
+    async fn file(&self, upload: Uuid, node: Option<Uuid>) -> Result<Uuid>;
     async fn seal_files(&self, upload: Uuid) -> Result<()>;
     async fn local_ranges(&self, stream: Id, after: i64) -> Result<Vec<LocalPartRange>>;
     async fn file_location(&self, id: Uuid) -> Result<Option<MultipartFile>>;
     async fn file_ranges(&self, id: Uuid) -> Result<Vec<(i64, i32)>>;
     async fn remap_file(&self, upload: Uuid, source: Id, ranges: &[FileRemap]) -> Result<()>;
-    async fn pending_files(&self, storage: Option<Uuid>, limit: i64) -> Result<Vec<MultipartFile>>;
+    async fn pending_files(
+        &self,
+        storage: Option<Uuid>,
+        node: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<MultipartFile>>;
     async fn clear_reclaim(&self, id: Uuid) -> Result<()>;
-    async fn unused_files(&self, storage: Option<Uuid>, limit: i64) -> Result<Vec<MultipartFile>>;
+    async fn unused_files(
+        &self,
+        storage: Option<Uuid>,
+        node: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<MultipartFile>>;
     async fn claim_file(&self, id: Uuid) -> Result<bool>;
     async fn remove_file(&self, id: Uuid) -> Result<()>;
     async fn upload(&self, id: Uuid, bucket: Uuid, key: &str, access: &str) -> Result<Upload>;
@@ -182,8 +201,14 @@ pub(crate) trait MultipartStore: Send + Sync {
     async fn consume_seed(&self, input: SeedConsumption<'_>) -> Result<()>;
     async fn stitch(&self, input: PartStitch) -> Result<()>;
     async fn retire_work(&self, stream: Id) -> Result<()>;
-    async fn begin_complete(&self, authority: &Permit, upload: Uuid, hash: &str) -> Result<()>;
-    async fn retry_complete(&self, upload: Uuid) -> Result<()>;
+    async fn begin_complete(&self, input: Completion<'_>) -> Result<bool>;
+    async fn renew_complete(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool>;
+    async fn retry_complete(&self, upload: Uuid, token: Uuid) -> Result<()>;
     async fn abort(&self, authority: &Permit, upload: Uuid) -> Result<()>;
     async fn expire(&self, upload: Uuid) -> Result<bool>;
     async fn parts(&self, upload: Uuid, after: i32, limit: i64) -> Result<Vec<UploadPart>>;
@@ -208,4 +233,54 @@ pub(crate) trait MultipartStore: Send + Sync {
     ) -> Result<(Vec<Transfer>, bool)>;
     async fn bucket_name(&self, bucket: Uuid) -> Result<String>;
     async fn web_parts(&self, upload: Uuid, after: i32) -> Result<Vec<ReceivedPart>>;
+}
+
+#[derive(Clone, sqlx::FromRow)]
+pub(crate) struct RemoteUpload {
+    #[sqlx(rename = "remote_upload")]
+    pub upload: Uuid,
+    #[sqlx(rename = "remote_state")]
+    pub state: String,
+    #[sqlx(rename = "remote_source")]
+    pub source: Uuid,
+    #[sqlx(rename = "remote_storage")]
+    pub storage: Uuid,
+    #[sqlx(rename = "remote_profile")]
+    pub profile: i64,
+    #[sqlx(rename = "remote_upstream")]
+    pub upstream: Option<String>,
+    #[sqlx(rename = "remote_manifest")]
+    pub manifest: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct RemotePart {
+    #[sqlx(flatten)]
+    pub upload: RemoteUpload,
+    #[sqlx(flatten)]
+    pub stream: StoredStream,
+    pub part_number: i32,
+    pub remote_token: Uuid,
+    #[sqlx(default)]
+    pub read_lease: Uuid,
+}
+
+pub(crate) struct RemoteCommit<'a> {
+    pub authority: &'a Permit,
+    pub bucket: Uuid,
+    pub upload: Uuid,
+    pub number: i32,
+    pub stream: Id,
+    pub cached: bool,
+    pub node: crate::model::raw::Processor<'a>,
+}
+
+pub(crate) struct RemoteOutput<'a> {
+    pub upload: Uuid,
+    pub token: Uuid,
+    pub stream: Id,
+    pub size: i64,
+    pub digest: &'a [u8],
+    pub hash: &'a [u8],
+    pub background: bool,
 }

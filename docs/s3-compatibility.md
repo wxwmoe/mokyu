@@ -14,7 +14,7 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | ListObjectsV2 | prefix/delimiter/start-after/continuation-token/encoding-type=url；max-keys 为 0～1000，C 排序，游标绑定桶和前缀 |
 | CreateMultipartUpload | 保存初始元数据、ACL 和校验模式，无需预知总大小 |
 | UploadPart | 编号 1～10000，可并行、乱序、替换；校验并持久保存每个字节的来源后返回 |
-| CompleteMultipartUpload | 按冻结清单执行整文件 CDC，保存幂等结果；除末片外每片至少 5 MiB，ETag 和顺序须正确 |
+| CompleteMultipartUpload | 按冻结清单组装，保存幂等结果；除末片外每片至少 5 MiB，ETag 和顺序须正确 |
 | AbortMultipartUpload | 释放临时引用，与 Complete 互斥 |
 | ListParts | 支持分页，每页的分片元数据一致；跨页不固定快照，不刷新过期时间 |
 | ListMultipartUploads | prefix/delimiter/key+upload-id marker/URL 编码分页，最多 1000 项 |
@@ -71,6 +71,10 @@ ACL 变更对新请求生效，已接纳的读取可以完成；CDN 已缓存内
 | COMPOSITE | part 从 1 连续编号，最终 checksum 保留类型／组合后缀 |
 | AWS chunked | 支持数据上传的签名 chunk 和声明 trailer；单个传输 chunk 受 runtime `requests.s3_chunk_limit` 限制 |
 | 控制请求 | XML 最多 2 MiB，不接受 aws-chunked 编码 |
+
+Complete 在发送响应头前检查授权、清单和分片，工作额度不足返回 `503 SlowDown`、`Retry-After: 60` 和 `Cache-Control: no-store`。开始处理后返回 HTTP 200，每 5 秒发送 XML 空白保活，最多等待 5 分钟；超时在 XML 正文返回 `InternalError` 和 RequestId，客户端必须检查完整正文，不能仅凭 HTTP 200 判断成功。响应设置 `X-Accel-Buffering: no`，反向代理仍需允许长响应。
+
+HTTP 超时或客户端断开不取消已接受的完成工作。相同 UploadId 和清单重试会加入执行或返回已保存结果；另一清单不能替换正在执行的清单。完成工作使用独立有界额度，等待群集所选来源远端就绪期间不占前台上传或正文内存槽位。进程退出后，相同请求可在执行租约到期后恢复，过期执行者不能发布。群集成功响应要求所选分片及最终对象来源已经确认写入后端；仅存于其他节点本地缓存的文件不可由当前节点恢复。
 
 传输错误、长度不符或超时使请求失败并释放未发布来源，不会把短文件当作成功上传。multipart 恢复和发布规则见[存储格式](storage-format.md#分片上传与发布)。
 

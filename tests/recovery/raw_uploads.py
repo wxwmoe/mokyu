@@ -146,6 +146,7 @@ def main():
         except ClientError as error:
             assert error.response['ResponseMetadata']['HTTPStatusCode'] == 503
             assert error.response['Error']['Code'] == 'SlowDown'
+            assert error.response['ResponseMetadata']['HTTPHeaders'].get('connection') == 'close'
         else:
             raise AssertionError('full raw upload cache accepted a rejected write')
         fixture.read('canonical', data)

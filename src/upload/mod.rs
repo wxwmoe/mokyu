@@ -1,6 +1,7 @@
 use crate::model::Id;
 pub(crate) mod cache;
 pub(crate) mod multipart;
+pub(crate) mod remote;
 
 use crate::{
     app::App,
@@ -238,6 +239,7 @@ impl App {
         length: Option<i64>,
         algorithm: Option<&str>,
         upload: Option<(Uuid, i32)>,
+        raw_override: Option<i64>,
     ) -> Result<(i64, String, Value)> {
         let mut check = Integrity::new(headers, algorithm)?;
         let declared = if let Some(v) = headers.get("x-amz-decoded-content-length") {
@@ -253,7 +255,7 @@ impl App {
             .reserve_quota(stream, declared.unwrap_or(0), false, upload)
             .await?;
         let mut offset = 0i64;
-        let raw_revision = self.storage.raw_policy(storage)?;
+        let raw_revision = raw_override.or(self.storage.raw_policy(storage)?);
         let raw_part = upload.is_some() && raw_revision.is_some();
         let mut raw = if let Some(revision) = raw_revision.filter(|_| upload.is_none()) {
             let (source, location) = self.raw.begin(stream, storage, revision).await?;

@@ -27,6 +27,7 @@ pub(crate) mod listing;
 pub(crate) mod publish;
 pub(crate) mod quota;
 pub(crate) mod raw;
+pub(crate) mod readiness;
 pub(crate) mod responses;
 pub(crate) mod streams;
 
@@ -231,6 +232,7 @@ pub struct App {
     pub active: Arc<Mutex<HashMap<Id, usize>>>,
     pub active_uploads: Arc<Mutex<HashMap<Uuid, usize>>>,
     pub uploads: Arc<Semaphore>,
+    pub(crate) completions: Arc<Semaphore>,
     pub reads: Arc<Semaphore>,
     pub slots: Arc<Semaphore>,
     pub maintenance: Arc<std::sync::atomic::AtomicBool>,
@@ -242,6 +244,7 @@ pub struct App {
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: Arc<tokio::sync::Notify>,
     pub(crate) raw_upload_worker: tokio::sync::Mutex<()>,
+    pub(crate) pending_reads: readiness::Reads,
     pub wake_raw_uploads: Arc<tokio::sync::Notify>,
     hashes: crate::runtime::locks::Locks<(Uuid, [u8; 32])>,
     pub operation_locks: crate::runtime::locks::Locks<Uuid>,
@@ -345,6 +348,7 @@ impl App {
             role: role.to_owned(),
             recovery_required: std::sync::atomic::AtomicBool::new(false),
             uploads: Arc::new(Semaphore::new(budget.upload_concurrency)),
+            completions: Arc::new(Semaphore::new(budget.upload_concurrency)),
             reads: Arc::new(Semaphore::new(budget.read_concurrency)),
             slots: Arc::new(Semaphore::new(budget.data_slots)),
             config,
@@ -400,6 +404,7 @@ impl App {
             wake_gc: Arc::new(tokio::sync::Notify::new()),
             wake_tasks: Arc::new(tokio::sync::Notify::new()),
             raw_upload_worker: tokio::sync::Mutex::new(()),
+            pending_reads: readiness::Reads::default(),
             wake_raw_uploads: Arc::new(tokio::sync::Notify::new()),
             hashes: Default::default(),
             operation_locks: Default::default(),
@@ -436,6 +441,18 @@ impl App {
     }
     pub fn pin(&self, id: Id) -> Active {
         self.pin_with_lease(id, None)
+    }
+    pub(crate) fn pin_reader(&self, stream: Id, lease: Uuid, ttl_seconds: i64) -> Active {
+        self.pin_with_lease(
+            stream,
+            Some(ReadLease {
+                id: lease,
+                replica: false,
+                store: self.cluster.as_ref().unwrap().clone(),
+                ttl_seconds,
+                renewed_at: tokio::sync::Mutex::new(tokio::time::Instant::now()),
+            }),
+        )
     }
     fn pin_with_lease(&self, id: Id, read_lease: Option<ReadLease>) -> Active {
         *self.active.lock().unwrap().entry(id).or_default() += 1;

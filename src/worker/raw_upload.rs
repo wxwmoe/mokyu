@@ -1,5 +1,6 @@
+use super::raw::processor;
 use crate::{app::App, model::raw::RawUpload};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
@@ -7,9 +8,13 @@ use std::{
 use uuid::Uuid;
 
 pub(crate) async fn run(app: Arc<App>) -> Result<()> {
-    if app.role != "single" {
+    if !matches!(app.role.as_str(), "single" | "data" | "worker") {
         return std::future::pending().await;
     }
+    uploads(app).await
+}
+
+async fn uploads(app: Arc<App>) -> Result<()> {
     let mut reconciled = tokio::time::Instant::now();
     loop {
         if app.ensure_mode().is_ok()
@@ -21,10 +26,22 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
                 if let Err(error) = app.storage.reconcile_raw_uploads().await {
                     tracing::warn!(%error,"raw upload pins will be reconciled again");
                 }
+                drop(_coord);
+                if let Err(error) = app.remote_housekeeping().await {
+                    tracing::warn!(%error,"native multipart cleanup will retry");
+                }
                 reconciled = tokio::time::Instant::now();
             }
+            let native = match app.transfer_remote_part(None).await {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(%error,"native multipart transfer will retry");
+                    false
+                }
+            };
             match tick(&app, None).await {
                 Ok(true) => continue,
+                Ok(false) if native => continue,
                 Ok(false) => {}
                 Err(error) => tracing::warn!(%error,"raw upload scan will retry"),
             }
@@ -41,9 +58,17 @@ pub(crate) async fn tick(app: &App, before: Option<chrono::DateTime<chrono::Utc>
         return Ok(false);
     };
     let (work, _pin) = {
-        let _coord = app.coord.lock().await;
+        let _coord = if app.role == "single" {
+            Some(app.coord.lock().await)
+        } else {
+            None
+        };
         app.storage_writable()?;
-        let Some(work) = app.raw.claim_upload(Uuid::new_v4(), before).await? else {
+        let Some(work) = app
+            .raw
+            .claim_upload(Uuid::new_v4(), before, processor(app))
+            .await?
+        else {
             return Ok(false);
         };
         let _sources = app.storage.source_gate.read().await;
@@ -56,7 +81,7 @@ pub(crate) async fn tick(app: &App, before: Option<chrono::DateTime<chrono::Utc>
         crate::storage::resource_gate::UPLOAD
     };
     if let Err(error) = crate::storage::resource_gate::PRIORITY
-        .scope(priority, process(app, &work))
+        .scope(priority, execute(app, &work))
         .await
     {
         tracing::warn!(source=%work.source.id,%error,"raw upload will retry");
@@ -70,10 +95,31 @@ pub(crate) async fn tick(app: &App, before: Option<chrono::DateTime<chrono::Utc>
     Ok(true)
 }
 
+async fn execute(app: &App, work: &RawUpload) -> Result<()> {
+    if app.role == "single" {
+        return process(app, work).await;
+    }
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    tick.tick().await;
+    tokio::select! {
+        result=process(app,work)=>result,
+        result=async {
+            loop {
+                tick.tick().await;
+                ensure!(app.raw.renew_upload(work,processor(app)).await?,crate::model::Error::OperationAborted);
+            }
+        }=>result,
+    }
+}
+
 async fn process(app: &App, work: &RawUpload) -> Result<()> {
     {
-        let _coord = app.coord.lock().await;
-        if app.raw.abandon_upload(work).await? {
+        let _coord = if app.role == "single" {
+            Some(app.coord.lock().await)
+        } else {
+            None
+        };
+        if app.raw.abandon_upload(work, processor(app)).await? {
             app.wake_gc.notify_one();
             return Ok(());
         }
@@ -104,13 +150,21 @@ async fn process(app: &App, work: &RawUpload) -> Result<()> {
         let streams = app.raw.upload_streams(work.source.id).await?;
         let lock = app.content_lock(work.source.storage_id, hash);
         let _hash = lock.lock().await;
-        let _coord = app.coord.lock().await;
+        let _coord = if app.role == "single" {
+            Some(app.coord.lock().await)
+        } else {
+            None
+        };
         app.storage_writable()?;
         let streams: Vec<_> = streams
             .into_iter()
             .filter(|stream| !app.is_active(*stream))
             .collect();
-        if app.raw.reuse_upload(work, &hash, &streams).await? {
+        if app
+            .raw
+            .reuse_upload(work, &hash, &streams, processor(app))
+            .await?
+        {
             app.wake_gc.notify_one();
             return Ok(());
         }
@@ -139,9 +193,18 @@ async fn process(app: &App, work: &RawUpload) -> Result<()> {
     }
     #[cfg(feature = "fault-injection")]
     crate::faults::point("raw-upload-before-commit").await;
-    let _coord = app.coord.lock().await;
+    let _coord = if app.role == "single" {
+        Some(app.coord.lock().await)
+    } else {
+        None
+    };
     app.raw
-        .complete_upload(work, hash.as_ref().map(|hash| hash.as_slice()))
+        .complete_upload(
+            work,
+            hash.as_ref().map(|hash| hash.as_slice()),
+            processor(app),
+        )
         .await?;
+    app.wake_gc.notify_one();
     Ok(())
 }

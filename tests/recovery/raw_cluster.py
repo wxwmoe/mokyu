@@ -1,4 +1,4 @@
-"""Two real data nodes share raw staging, deduplication and protected reads.
+"""Two real data nodes use native raw multipart, deduplication and protected reads.
 
 Uses the source_quarantine fixture on control, a remote backend, and
 MOKYU_TEST_PEER_ENDPOINT for the second data node. Fault markers target the
@@ -52,11 +52,13 @@ def main():
     for client, number, part in [(fixture.client, 1, data[:boundary]), (peer, 2, data[boundary:])]:
         result = client.upload_part(Bucket=fixture.name, Key='multipart', UploadId=upload, PartNumber=number, Body=part)
         manifest.append(dict(PartNumber=number, ETag=result['ETag']))
-    rows = database.query('''SELECT f.staging_storage_id,f.staging_object_key FROM parts p
+    rows = database.query('''SELECT f.staging_storage_id,f.file_id,m.node_id FROM parts p
         JOIN extents e ON e.stream_id=p.stream_id JOIN fragments f ON f.id=e.fragment_id
-        WHERE p.upload_id=%s''', uuid.UUID(upload))
-    assert rows and all(row['staging_storage_id'] and row['staging_object_key'].startswith('__mokyu/multipart/fragment/') for row in rows), rows
-    assert not database.query('SELECT id FROM raw_sources WHERE storage_id=%s', uuid.UUID(fixture.store['id']))
+        JOIN multipart_files m ON m.id=f.file_id WHERE p.upload_id=%s''', uuid.UUID(upload))
+    assert rows and all(row['staging_storage_id'] is None and row['file_id'] and row['node_id'] for row in rows), rows
+    assert len({row['node_id'] for row in rows}) == 2
+    native = database.query('SELECT raw_source_id FROM uploads WHERE id=%s', uuid.UUID(upload))[0]['raw_source_id']
+    assert native is not None
     peer.complete_multipart_upload(Bucket=fixture.name, Key='multipart', UploadId=upload,
                                    MultipartUpload={'Parts': manifest})
     fixture.read('multipart', data)
@@ -83,7 +85,7 @@ def main():
         for result in writes:
             result.result(timeout=60)
     assert mapping('a')['id'] == mapping('b')['id']
-    print('PASS raw Multipart uses shared fragments and completes, reads and deduplicates across nodes', flush=True)
+    print('PASS raw Multipart uploads directly to its final backend and completes, reads and deduplicates across nodes', flush=True)
 
     original = b'protected raw reader' * 4096
     fixture.put('retiring', original)

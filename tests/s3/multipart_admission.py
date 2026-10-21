@@ -2,7 +2,7 @@
 
 Uses integration.py's environment plus MOKYU_TEST_BINARY, MOKYU_TEST_CONFIG,
 MOKYU_TEST_DATABASE_FILE and MOKYU_TEST_FAULT_DIR. The derived data budget must
-leave read capacity after every upload slot is occupied. The test bucket must use
+leave foreground capacity while completion work is waiting. The test bucket must use
 a cache-enabled S3 storage with a short upload flush timeout.
 """
 import http.client
@@ -49,9 +49,9 @@ def slots(snapshot):
                  ('upload_slots_available', 'read_slots_available', 'data_slots_available'))
 
 
-def assert_slots(used):
+def assert_foreground_free():
     actual = slots(status())
-    assert actual == (upload_slots - used, read_slots, data_slots - used), actual
+    assert actual == (upload_slots, read_slots, data_slots), actual
 
 
 def released():
@@ -107,7 +107,7 @@ def warmed():
 wait(warmed)
 uploads = [prepare(str(n)) for n in range(upload_slots + 1)]
 
-# All upload workers remain paused after the HTTP handler transfers their permits.
+# Completion jobs retain their own bounded admission without holding foreground slots.
 arm()
 with ThreadPoolExecutor(max_workers=upload_slots) as pool:
     pending = [pool.submit(s3.complete_multipart_upload, **args) for args, _ in uploads[:upload_slots]]
@@ -115,12 +115,12 @@ with ThreadPoolExecutor(max_workers=upload_slots) as pool:
         wait(lambda: marker.with_suffix('.hit').exists()
              and all(state(args) == 'completing' for args, _ in uploads[:upload_slots]))
         assert all(not future.done() for future in pending)
-        assert_slots(upload_slots)
+        assert_foreground_free()
         excess, _ = uploads[upload_slots]
         slowed(s3.complete_multipart_upload, **excess)
-        slowed(s3.put_object, Bucket=bucket, Key=prefix + 'blocked', Body=b'blocked')
-        slowed(s3.upload_part, Bucket=bucket, Key=excess['Key'], UploadId=excess['UploadId'],
-               PartNumber=2, Body=b'blocked')
+        s3.put_object(Bucket=bucket, Key=prefix + 'available', Body=b'available')
+        s3.upload_part(Bucket=bucket, Key=excess['Key'], UploadId=excess['UploadId'],
+                       PartNumber=2, Body=b'available')
         assert state(excess) == 'active'
         before = status()['backend_gets']
         assert read(warm_key)[0] == warm
@@ -130,7 +130,7 @@ with ThreadPoolExecutor(max_workers=upload_slots) as pool:
             response = requests.get(os.environ['MOKYU_TEST_PUBLIC'] + '/' + warm_key,
                 headers={'Host': os.environ.get('MOKYU_TEST_PUBLIC_HOST', 'media.test'), **headers}, timeout=10)
             assert response.status_code == code and response.content == expected
-        wait(lambda: slots(status()) == (0, read_slots, data_slots - upload_slots))
+        wait(lambda: slots(status()) == (upload_slots, read_slots, data_slots))
         assert status()['backend_gets'] == before, ('warm GET/Range should stay in cache', before, status()['backend_gets'])
     finally:
         marker.unlink(missing_ok=True)
@@ -141,7 +141,7 @@ s3.complete_multipart_upload(**uploads[upload_slots][0])
 released()
 for args, data in uploads:
     assert read(args['Key'])[0] == data
-print('PASS completions fill upload quota; excess Complete/PUT/part return 503; cached S3/public GET and Range remain available', flush=True)
+print('PASS completions fill their own quota; excess Complete returns 503 while PUT/part and cached reads remain available', flush=True)
 
 # A checksum mismatch is detected inside the background worker, after admission.
 args, data = prepare('bad-checksum', checksum=True)
@@ -151,7 +151,7 @@ with ThreadPoolExecutor(max_workers=1) as pool:
     pending = pool.submit(s3.complete_multipart_upload, **{**args, 'ChecksumCRC32': wrong})
     try:
         wait(lambda: marker.with_suffix('.hit').exists() and state(args) == 'completing')
-        assert_slots(1)
+        assert_foreground_free()
     finally:
         marker.unlink(missing_ok=True)
     error('BadDigest', pending.result, timeout=20)
@@ -160,7 +160,7 @@ released()
 s3.complete_multipart_upload(**args)
 released()
 assert read(args['Key'])[0] == data
-print('PASS failed merge releases upload/data permits, restores active state and permits retry', flush=True)
+print('PASS failed merge releases completion admission, restores active state and permits retry', flush=True)
 
 # Disconnect the real HTTP client while its detached merge is still paused.
 args, data = prepare('disconnect')
@@ -176,12 +176,12 @@ try:
     connection.request('POST', url.path + '?' + url.query, body=body,
                        headers={'Content-Type': 'application/xml'})
     wait(lambda: marker.with_suffix('.hit').exists() and state(args) == 'completing')
-    assert_slots(1)
+    assert_foreground_free()
     connection.sock.shutdown(socket.SHUT_RDWR)
     connection.close()
     wait(lambda: status()['runtime']['http']['s3']['canceled'] > canceled)
     assert state(args) == 'completing'
-    assert_slots(1)
+    assert_foreground_free()
 finally:
     connection.close()
     marker.unlink(missing_ok=True)
@@ -190,4 +190,4 @@ released()
 assert read(args['Key'])[0] == data
 released()
 db.close()
-print('PASS disconnected client leaves merge/permits alive until completion, then releases both quotas', flush=True)
+print('PASS disconnected client leaves completion alive without consuming foreground quotas', flush=True)

@@ -256,12 +256,12 @@ pub(crate) async fn hash_file(
 
 impl Storage {
     pub(super) async fn restore_raw_uploads(&self) -> Result<()> {
-        if self.cluster_mode {
-            return Ok(());
-        }
         let mut after = Id::default();
         loop {
-            let rows = self.raw_store.uploads(after).await?;
+            let rows = self
+                .raw_store
+                .uploads(after, self.node_id.get().copied())
+                .await?;
             if rows.is_empty() {
                 break;
             }
@@ -397,7 +397,10 @@ impl Storage {
         let mut after = Id::default();
         let mut retained = std::collections::HashSet::new();
         loop {
-            let rows = self.raw_store.uploads(after).await?;
+            let rows = self
+                .raw_store
+                .uploads(after, self.node_id.get().copied())
+                .await?;
             if rows.is_empty() {
                 break;
             }

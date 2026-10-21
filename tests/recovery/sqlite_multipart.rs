@@ -254,15 +254,78 @@ async fn sqlite_multipart_contract() -> Result<()> {
     backend
         .commit_part(&authority, bucket, completed, 1, data)
         .await?;
+    let completion_token = Uuid::new_v4();
     backend
-        .begin_complete(&authority, completed, "manifest")
+        .begin_complete(crate::model::multipart::Completion {
+            authority: &authority,
+            upload: completed,
+            hash: "manifest",
+            token: completion_token,
+            parts: &[(1, data)],
+            node: None,
+        })
         .await?;
     assert!(!backend.active(completed).await?);
+    let competing = Uuid::new_v4();
+    assert!(
+        !backend
+            .begin_complete(crate::model::multipart::Completion {
+                authority: &authority,
+                upload: completed,
+                hash: "manifest",
+                token: competing,
+                parts: &[(1, data)],
+                node: None
+            })
+            .await?
+    );
+    assert!(
+        backend
+            .begin_complete(crate::model::multipart::Completion {
+                authority: &authority,
+                upload: completed,
+                hash: "changed",
+                token: competing,
+                parts: &[(1, data)],
+                node: None
+            })
+            .await
+            .is_err()
+    );
+    assert!(!backend.renew_complete(completed, competing, None).await?);
+    backend.retry_complete(completed, competing).await?;
+    assert!(!backend.active(completed).await?);
+    assert!(
+        backend
+            .renew_complete(completed, completion_token, None)
+            .await?
+    );
     assert!(backend.pair(completed, 1).await?.is_none());
-    backend.retry_complete(completed).await?;
+    backend.retry_complete(completed, completion_token).await?;
     assert!(backend.active(completed).await?);
+    assert!(
+        backend
+            .begin_complete(crate::model::multipart::Completion {
+                authority: &authority,
+                upload: completed,
+                hash: "manifest",
+                token: competing,
+                parts: &[(2, data)],
+                node: None
+            })
+            .await
+            .is_err()
+    );
+    let completion_token = Uuid::new_v4();
     backend
-        .begin_complete(&authority, completed, "manifest")
+        .begin_complete(crate::model::multipart::Completion {
+            authority: &authority,
+            upload: completed,
+            hash: "manifest",
+            token: completion_token,
+            parts: &[(1, data)],
+            node: None,
+        })
         .await?;
     let output = StreamStore::create(
         &backend,
@@ -284,13 +347,63 @@ async fn sqlite_multipart_contract() -> Result<()> {
         .copy_references(output, data, 0, 32, &[chunk.id])
         .await?;
     backend.finish(output, 32, "complete", json!({})).await?;
+    sqlx::query("UPDATE uploads SET completion_expires_at=0 WHERE id=?")
+        .bind(completed)
+        .execute(&backend.write)
+        .await?;
+    assert!(
+        !backend
+            .renew_complete(completed, completion_token, None)
+            .await?
+    );
+    assert!(
+        !backend
+            .publish(
+                output,
+                None,
+                None,
+                Some((completed, "manifest".into(), json!({}), completion_token))
+            )
+            .await?
+    );
+    let expired_token = completion_token;
+    let completion_token = Uuid::new_v4();
+    assert!(
+        backend
+            .begin_complete(crate::model::multipart::Completion {
+                authority: &authority,
+                upload: completed,
+                hash: "manifest",
+                token: completion_token,
+                parts: &[(1, data)],
+                node: None
+            })
+            .await?
+    );
+    backend.retry_complete(completed, expired_token).await?;
+    assert!(!backend.active(completed).await?);
+    assert!(
+        !backend
+            .publish(
+                output,
+                None,
+                None,
+                Some((completed, "manifest".into(), json!({}), expired_token))
+            )
+            .await?
+    );
     assert!(
         backend
             .publish(
                 output,
                 None,
                 None,
-                Some((completed, "manifest".into(), json!({"etag":"complete"})))
+                Some((
+                    completed,
+                    "manifest".into(),
+                    json!({"etag":"complete"}),
+                    completion_token
+                ))
             )
             .await?
     );

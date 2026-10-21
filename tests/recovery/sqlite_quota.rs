@@ -339,7 +339,9 @@ async fn sqlite_quota_and_publication_contract() -> Result<()> {
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    sqlx::query("UPDATE uploads SET state='completing',manifest_hash='manifest' WHERE id=?")
+    let completion_token = Uuid::new_v4();
+    sqlx::query("UPDATE uploads SET state='completing',manifest_hash='manifest',completion_token=?,completion_expires_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)+120000000 WHERE id=?")
+        .bind(completion_token)
         .bind(upload)
         .execute(db)
         .await?;
@@ -355,7 +357,7 @@ async fn sqlite_quota_and_publication_contract() -> Result<()> {
                 wrong_output,
                 None,
                 None,
-                Some((upload, "manifest".into(), json!({})))
+                Some((upload, "manifest".into(), json!({}), completion_token))
             )
             .await
             .is_err()
@@ -370,7 +372,7 @@ async fn sqlite_quota_and_publication_contract() -> Result<()> {
                 output,
                 None,
                 None,
-                Some((upload, "wrong".into(), json!({})))
+                Some((upload, "wrong".into(), json!({}), completion_token))
             )
             .await?
     );
@@ -382,7 +384,7 @@ async fn sqlite_quota_and_publication_contract() -> Result<()> {
                 output,
                 None,
                 None,
-                Some((upload, "manifest".into(), json!({})))
+                Some((upload, "manifest".into(), json!({}), completion_token))
             )
         )
         .await
@@ -395,7 +397,12 @@ async fn sqlite_quota_and_publication_contract() -> Result<()> {
                 output,
                 None,
                 None,
-                Some((upload, "manifest".into(), json!({"etag":"multipart"})))
+                Some((
+                    upload,
+                    "manifest".into(),
+                    json!({"etag":"multipart"}),
+                    completion_token
+                ))
             )
             .await?
     );

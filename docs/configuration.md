@@ -63,7 +63,7 @@ SQLite 将 `instance.database_connections` 中的一个连接用于串行写入�
 | `instance.listen_s3` | `0.0.0.0:9000` | S3 监听 |
 | `instance.data_path` | `/data` | 本节点持久目录，保存 multipart、缓存和锁，群集角色另保存 node.json |
 | `instance.min_free_space` | `1GiB` | 本地文件写入后必须保留的空间 |
-| `instance.multipart_limit` | 自动 | 单容器本地 multipart 暂存上限；群集使用共享 staging storage |
+| `instance.multipart_limit` | 自动 | 节点本地 Multipart 暂存上限，单容器和群集均适用 |
 | `instance.cache_size` | 自动 | 本地 chunks/raw 文件缓存共用字节上限 |
 | `instance.cache_entries` | 自动 | 本地缓存索引条目上限 |
 | `instance.response_cache_size` | `0B` | 完整公共响应的内存额度；示例显式设为 `64MiB`，省略或 `0B` 关闭；启用至少 `4MiB`，需要重启 |
@@ -85,7 +85,7 @@ SQLite 将 `instance.database_connections` 中的一个连接用于串行写入�
 
 示例配置配合 Compose 的 Mokyu 容器 `1GiB` 内存限制，显式设置 `stream_memory_budget = "256MiB"` 和 `response_cache_size = "64MiB"`；PostgreSQL 容器内存另计。省略响应缓存字段的配置仍关闭正文缓存。默认压缩参数下，流式预算可提供 5 个数据槽位，实际预留约 `216MiB`，runtime/OS 预留 `256MiB`，pack 读取与工作区各自动分得约 `244MiB`。S3 storage 的默认 `pack_max_size = "32MiB"` 每个 pack 需约 `140MiB` 额度；local storage 不创建 pack。pack 大小在 storage profile 中配置，节点 pack 内存无需单独填写；更改容器限制、压缩参数或 pack 大小时应一起核对这些预算。
 
-共享 staging 设置只对 PostgreSQL 提供；MySQL、SQLite 不接受这两个设置。PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；multipart 尾块和异步上传使用保留前缀 `__mokyu/multipart/`。单容器模式可使用 `/data/storage` 的 local storage。
+共享 staging 设置只对 PostgreSQL 提供；MySQL、SQLite 不接受这两个设置。PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；仅未闭合的 CDC Multipart 尾块在保留前缀 `__mokyu/multipart/fragment/` 共享暂存；raw Multipart、raw/chunks 写缓存使用所属节点的 `instance.data_path`，最终载荷直接写目标 S3。单容器模式可使用 `/data/storage` 的 local storage。
 
 ## runtime 设置
 

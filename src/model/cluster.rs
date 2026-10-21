@@ -9,6 +9,72 @@ use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait ClusterStore: Send + Sync {
+    async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
+    async fn begin_remote(
+        &self,
+        upload: Uuid,
+        storage: Uuid,
+        revision: i64,
+        node: super::raw::Processor<'_>,
+    ) -> Result<super::multipart::RemoteUpload>;
+    async fn claim_remote(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        node: super::raw::Processor<'_>,
+    ) -> Result<bool>;
+    async fn initialized_remote(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        upstream: Option<&str>,
+        node: super::raw::Processor<'_>,
+    ) -> Result<bool>;
+    async fn commit_remote_part(&self, input: super::multipart::RemoteCommit<'_>) -> Result<()>;
+    async fn claim_remote_part(
+        &self,
+        token: Uuid,
+        node: super::raw::Processor<'_>,
+        stream: Option<Id>,
+    ) -> Result<Option<super::multipart::RemotePart>>;
+    async fn renew_remote_part(
+        &self,
+        work: &super::multipart::RemotePart,
+        node: super::raw::Processor<'_>,
+    ) -> Result<bool>;
+    async fn finish_remote_part(
+        &self,
+        work: &super::multipart::RemotePart,
+        etag: &str,
+        node: super::raw::Processor<'_>,
+    ) -> Result<bool>;
+    async fn retry_remote_part(
+        &self,
+        work: &super::multipart::RemotePart,
+        error: &str,
+    ) -> Result<()>;
+    async fn remote_parts(
+        &self,
+        upload: Uuid,
+        streams: &[Id],
+    ) -> Result<Vec<(Id, i32, Option<String>)>>;
+    async fn freeze_remote(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        hash: &str,
+    ) -> Result<super::multipart::RemoteUpload>;
+    async fn resend_remote(&self, upload: Uuid, token: Uuid, streams: &[Id]) -> Result<()>;
+    async fn adopt_remote(&self, input: super::multipart::RemoteOutput<'_>) -> Result<Uuid>;
+    async fn remote_charges(&self, node: Uuid, after: Id) -> Result<Vec<(Id, Uuid, i64)>>;
+    async fn claim_remote_cleanup(
+        &self,
+        token: Uuid,
+        node: super::raw::Processor<'_>,
+    ) -> Result<Option<super::multipart::RemoteUpload>>;
+    async fn clean_remote(&self, upload: Uuid, token: Uuid) -> Result<()>;
+    async fn pending_read(&self, streams: &[Id], node: Uuid) -> Result<bool>;
+    async fn prioritize_uploads(&self, streams: &[Id]) -> Result<()>;
     async fn claim_staging(&self, storage: Uuid, key: &str, bytes: u64, limit: u64) -> Result<()>;
     async fn release_staging(&self, storage: Uuid, key: &str) -> Result<()>;
     async fn stale_staging(&self, storage: Option<Uuid>) -> Result<Vec<(Uuid, String)>>;

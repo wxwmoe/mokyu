@@ -274,3 +274,97 @@ impl Streaming {
         }
     }
 }
+
+impl Streaming {
+    pub(crate) async fn complete(
+        &self,
+        key: &Path,
+        upload: &str,
+        parts: &[(i32, String)],
+    ) -> Result<bool> {
+        let mut body = Vec::new();
+        let mut serializer = s3s::xml::Serializer::new(&mut body);
+        serializer.element("CompleteMultipartUpload", |xml| {
+            for (number, etag) in parts {
+                xml.element("Part", |xml| {
+                    xml.content("PartNumber", number)?;
+                    xml.content("ETag", etag)
+                })?;
+            }
+            Ok(())
+        })?;
+        let options = SignedUrlOptions::default().with_query([("uploadId", upload.to_owned())]);
+        let url = self
+            .signer
+            .signed_url_opts(
+                reqwest::Method::POST,
+                key,
+                Duration::from_secs(3600),
+                &options,
+            )
+            .await?;
+        let reply = self
+            .client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/xml")
+            .body(body)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
+        let status = reply.status();
+        let mut stream = reply.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(part) = stream.next().await {
+            let part = part.map_err(reqwest::Error::without_url)?;
+            ensure!(
+                bytes.len() + part.len() <= 64 * 1024,
+                "S3 completion response is too large"
+            );
+            bytes.extend_from_slice(&part);
+        }
+        complete_response(status.is_success(), &bytes)
+    }
+}
+
+fn complete_response(success: bool, bytes: &[u8]) -> Result<bool> {
+    let mut xml = s3s::xml::Deserializer::new(bytes);
+    let mut completed = false;
+    let mut code = None;
+    xml.element(|xml, root| {
+        completed = root == b"CompleteMultipartUploadResult";
+        if !completed && root != b"Error" {
+            return Err(s3s::xml::DeError::UnexpectedTagName);
+        }
+        xml.for_each_element(|xml, name| {
+            let value: String = xml.content()?;
+            if name == b"Code" {
+                code = Some(value)
+            }
+            Ok(())
+        })
+    })?;
+    xml.expect_eof()?;
+    if code.as_deref() == Some("InvalidPart") {
+        return Ok(false);
+    }
+    ensure!(
+        success && completed && code.is_none(),
+        "S3 multipart completion failed: {}",
+        code.as_deref().unwrap_or("invalid response")
+    );
+    Ok(true)
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    #[test]
+    fn recognizes_late_errors_and_rejects_invalid_results() {
+        assert!(complete_response(true,b"  <CompleteMultipartUploadResult><ETag>&quot;done&quot;</ETag></CompleteMultipartUploadResult>").unwrap());
+        assert!(!complete_response(true, b"<Error><Code>InvalidPart</Code></Error>").unwrap());
+        assert!(complete_response(true, b"<Error><Code>InternalError</Code></Error>").is_err());
+        assert!(complete_response(false, b"<CompleteMultipartUploadResult/>").is_err());
+        assert!(complete_response(true, b"<CompleteMultipartUploadResult/><Error/>").is_err());
+        assert!(complete_response(true, b"<SomethingElse/>").is_err());
+    }
+}

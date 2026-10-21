@@ -34,7 +34,7 @@ impl App {
         id: Id,
         if_match: Option<&s3s::dto::ETagCondition>,
         if_none: Option<&s3s::dto::ETagCondition>,
-        completion: Option<(Uuid, String, Value)>,
+        completion: Option<(Uuid, String, Value, Uuid)>,
     ) -> Result<()> {
         self.renew_write_lease(id).await?;
         self.writable()?;

@@ -6,7 +6,7 @@
 
 下表描述共有数据含义，并列出 PostgreSQL 群集字段；原生类型和约束以各后端迁移为准。MySQL/MariaDB 共用 `migrations/mysql/`，使用二进制 UUID、自增 BIGINT 内容 ID、UTC `DATETIME(6)` 和二进制对象键。名称比较区分大小写和尾空格；MySQL 使用原生 JSON，MariaDB 使用带 JSON 有效性约束的文本表示。引用、配额和任务更新在同一事务中显式完成；容量 scope 的桶集合使用关联表。SQLite 使用 STRICT 表、16 字节 UUID、整数自增内容 ID、UTC 微秒整数时间、JSON 文本和二进制对象键；写事务使用 `BEGIN IMMEDIATE`，引用与配额同样在事务内显式维护。原生类型不影响对外 ID、分页、时间和字节数的接口语义。
 
-PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采用 `UUID` 主键，默认由 `uuidv7()` 生成，所有关联列使用同类型；自然键、复合键、偏移和计数保持原意。MySQL/MariaDB 和 SQLite 的对应主键、外键继续使用整数，仅 `chunks` 增加非空的 16 字节 `uuid`；物理编码和区块包复用既有 `location_id`，streams、raw_sources、fragments、quota_reservations 及其引用也使用原生整数；raw_sources.location_id 和 fragments.location_id 保存非空唯一的文件 UUID。multipart_files 与 Multipart UploadId 保留稳定 UUID，用于共享暂存文件和协议身份。PostgreSQL 的物理编码和区块包直接以主键作为文件 UUID，无单独 `location_id` 列。API 将身份作为不透明字符串，不要求各数据库部署的 ID 形态相同。
+PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采用 `UUID` 主键，默认由 `uuidv7()` 生成，所有关联列使用同类型；自然键、复合键、偏移和计数保持原意。MySQL/MariaDB 和 SQLite 的对应主键、外键继续使用整数，仅 `chunks` 增加非空的 16 字节 `uuid`；物理编码和区块包复用既有 `location_id`，streams、raw_sources、fragments、quota_reservations 及其引用也使用原生整数；raw_sources.location_id 和 fragments.location_id 保存非空唯一的文件 UUID。multipart_files 与 Multipart UploadId 保留稳定 UUID，用于暂存文件和协议身份。PostgreSQL 的物理编码和区块包直接以主键作为文件 UUID，无单独 `location_id` 列。API 将身份作为不透明字符串，不要求各数据库部署的 ID 形态相同。
 
 旧文件身份格式的升级只允许没有对象或来源数据的数据库；存在旧数据时在结构修改前终止，须通过 S3 逻辑迁移。新装结构与空库迁移得到相同结构。
 
@@ -57,7 +57,7 @@ storage 连接和 profile 修改只改变后续写入及新请求的策略；已
 | `raw_ranges` | `stream_id` 外键、删除 stream 时级联；`offset_bytes` 与 `length` 非负；`source_id` 非空来源外键；`source_offset` 非负、默认 0 | 主键 `(stream_id,offset_bytes)`，来源反查索引；发布事务检查有序连续、边界与来源健康，GC 分批释放引用 |
 | `raw_processing` | `stream_id` 主键及级联外键，`source_id` 非空级联外键；`payload_revision` 非空；可空 32 字节 `content_hash`、`source_revision`、执行 `token` 和 `lease_expires_at`；`next_attempt_at` 默认当前时间、`attempts` 默认 0、`last_error` 可空 | 按 `(next_attempt_at,stream_id)` 扫描已发布 raw 对象；单容器直接执行，群集领取/续租及最终提交验证节点身份；读保护排空后原子切换来源，删除对象取消无用工作 |
 
-| `raw_uploads` | `source_id` 主键及级联外键；可空执行 `token`、32 字节 `content_hash`、`last_error`；`deduplicate`、`background` 固定接收时策略；`next_attempt_at` 默认当前时间、`attempts` 默认 0 | 单容器 S3 raw 的必须排空队列，按来源保存，不依赖原对象名称；失败保留唯一缓存，完成后清除待上传标记并释放 pin |
+| `raw_uploads` | `source_id` 主键及级联外键；可空执行 `token`、32 字节 `content_hash`、`last_error`；`deduplicate`、`background` 固定接收时策略；`next_attempt_at` 默认当前时间、`attempts` 默认 0 | S3 raw 的必须排空队列，群集另保存 `node_id` 和 `lease_expires_at`，只由所属节点处理；按来源保存，不依赖原对象名称；失败保留唯一缓存，完成后清除待上传标记并释放 pin |
 
 UUID、时间、整数分别使用各数据库既有原生类型。原始来源使用 local 或 shared_s3，确认策略为 durable；完整读取校验长度和 MD5。逻辑用量按对象字节计量，物理用量按独立来源去重，并将共享收益归属到相应桶和项目；raw 没有编码节省。物理库存同时区分保留引用及待回收来源。
 
@@ -78,12 +78,14 @@ UUID、时间、整数分别使用各数据库既有原生类型。原始来源�
 
 | 表 | 关键字段 | 用途 |
 | --- | --- | --- |
-| `uploads`、`parts`、`web_uploads` | 上传状态、`write_token`、清单、校验和及暂存 storage/object key | S3 multipart 和 Web 上传的幂等、分片及共享暂存 |
-| `multipart_files` | 文件 UUID、`upload_id`、`storage_id`、可空原生 `source_id`、open/sealed/deleting 状态、`reclaim_pending` | 单容器 raw 分片的追加文件和组装检查点；fragments 记录文件 UUID 与偏移。检查点位于本地后端或 S3 的节点写缓存，分片仍引用时不可回收 |
-| `pending_uploads` | `chunk_id`、`stream_id`、`staged_size`、`source_pack_id`、重试和 lease 字段 | 尚未发布的独立来源；群集暂存对象位于 `uploads` runtime 设置选择的 storage 的 `__mokyu/multipart/` 前缀 |
-| `staging_objects` | `storage_id`、`object_key`、`bytes`、`created_at` | 群集共享暂存的数据库字节账本 |
+| `uploads`、`parts`、`web_uploads` | 上传状态、`write_token`、清单、`completion_token`、`completion_expires_at`、校验和 | S3 multipart 和 Web 上传；完成租约保护同一清单的执行和发布 |
+| `multipart_files` | 文件 UUID、`upload_id`、`storage_id`、可空原生 `source_id`、open/sealed/deleting 状态、`reclaim_pending` | raw 分片的追加文件和单容器组装检查点；群集增加 `node_id`，按所属节点回收；fragments 记录文件 UUID 与偏移。检查点位于本地后端或 S3 的节点写缓存，分片仍引用时不可回收 |
+| `pending_uploads` | `chunk_id`、`stream_id`、`staged_size`、`source_pack_id`、`node_id`、重试和 lease 字段 | 节点本地待上传区块；最终确认后释放写占用并保留读缓存 |
+| `staging_objects` | `storage_id`、`object_key`、`bytes`、`created_at` | 群集 CDC Multipart 尾块共享暂存的数据库字节账本 |
 | `quota_scopes` | `scope`、`scope_id`、用量、`logical_bytes_limit`、`inflight_bytes_limit`、`bucket_count_limit`、`cached_bytes` | project/bucket 配额；NULL 表示不限，0 表示禁止新增 |
 | `quota_reservations`、`quota_writes` | reservation、预留、inflight 和替换对象字段 | 接收、覆盖、发布、取消和恢复过程中的事务记账 |
+
+群集 raw 原生 Multipart 复用 `uploads.raw_source_id` 保护最终候选，`remote_token`、`remote_expires_at` 管理初始化与清理，`remote_manifest_hash` 固定最终清单。`parts` 保存 `remote_node_id`、`remote_etag`、执行 token/租约、重试时间/错误和写缓存计费标志，确认必须匹配确切分片代次和所属节点。原生传输复用 `stream_leases` 保护读取；没有清理完最终候选引用的上传不删除历史记录。
 
 配额按原始逻辑字节计量，与去重和压缩无关。数据库函数在同一事务中锁定 project 和 bucket 账本，保证并发上传不会超额。
 

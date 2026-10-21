@@ -1159,3 +1159,6 @@ CREATE TABLE raw_uploads (
 CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);
 
 ALTER TABLE storage_profiles ADD COLUMN upload_cache_overflow VARCHAR(16) NOT NULL DEFAULT 'fallback', ADD CONSTRAINT storage_upload_overflow_check CHECK (upload_cache_overflow IN ('fallback','reject'));
+
+ALTER TABLE uploads ADD COLUMN completion_token BINARY(16), ADD COLUMN completion_expires_at DATETIME(6);
+UPDATE mokyu_meta SET schema_version=30 WHERE id=1;

@@ -19,7 +19,7 @@ pub(crate) trait PhysicalStore: Send + Sync {
     async fn has_chunks(&self) -> Result<bool>;
     async fn indexed(&self, location: Uuid) -> Result<bool>;
 
-    async fn upload_pins(&self, after: Id) -> Result<Vec<StagedUpload>>;
+    async fn upload_pins(&self, after: Id, owner: Option<Uuid>) -> Result<Vec<StagedUpload>>;
     async fn pending_source(&self, chunk: Id) -> Result<Option<(Uuid, String)>>;
     async fn pending_only(&self, chunk: Id) -> Result<bool>;
     async fn register_encoding(&self, chunk: &Chunk) -> Result<()>;

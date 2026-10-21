@@ -3599,22 +3599,42 @@ pub(super) async fn retire_upload_work(pool: &sqlx::MySqlPool, stream: Id) -> Re
 
 pub(super) async fn begin_upload_completion(
     pool: &sqlx::MySqlPool,
-    authority: &crate::authorization::Permit,
-    upload: uuid::Uuid,
-    hash: &str,
-) -> Result<()> {
+    input: crate::model::multipart::Completion<'_>,
+) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    lock_permit(&mut tx, authority).await?;
+    lock_permit(&mut tx, input.authority).await?;
+    let (state, hash, live) = queries::completion_state(input.upload)
+        .fetch_one(&mut *tx)
+        .await?;
+    if matches!(state.as_str(), "completing" | "completed") {
+        ensure!(
+            hash.as_deref() == Some(input.hash),
+            s3s::s3_error!(InvalidRequest, "upload has another completion manifest")
+        );
+        if live || state == "completed" {
+            return Ok(false);
+        }
+    } else {
+        ensure!(state == "active", s3s::s3_error!(OperationAborted));
+    }
+    let parts: std::collections::BTreeMap<_, _> = queries::completion_parts(input.upload)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
     ensure!(
-        queries::begin_upload_completion(upload, hash)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
-            == 1,
-        crate::model::Error::OperationAborted
+        !input.parts.is_empty()
+            && input
+                .parts
+                .iter()
+                .all(|(number, stream)| parts.get(number) == Some(stream)),
+        s3s::s3_error!(InvalidPart, "selected part generation changed")
     );
+    queries::begin_upload_completion(&input)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 pub(super) async fn abort_multipart(
@@ -4363,7 +4383,7 @@ pub(super) async fn publish(
     id: Id,
     if_match: Option<s3s::dto::ETagCondition>,
     if_none: Option<s3s::dto::ETagCondition>,
-    completion: Option<(uuid::Uuid, String, serde_json::Value)>,
+    completion: Option<(uuid::Uuid, String, serde_json::Value, Uuid)>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     let authority = queries::write_authorization(id)
@@ -4371,7 +4391,7 @@ pub(super) async fn publish(
         .await?
         .0;
     lock_permit(&mut tx, &authority).await?;
-    let upload_target = if let Some((upload, _, _)) = &completion {
+    let upload_target = if let Some((upload, _, _, _)) = &completion {
         let target = queries::quota_upload(*upload, true)
             .fetch_optional(&mut *tx)
             .await?;
@@ -4403,7 +4423,7 @@ pub(super) async fn publish(
         token == id && stream.state == "writing",
         crate::model::Error::OperationAborted
     );
-    if let Some((upload, _, _)) = &completion
+    if let Some((upload, _, _, _)) = &completion
         && let Some((version, size)) = queries::web_upload_expectation(*upload)
             .fetch_optional(&mut *tx)
             .await?
@@ -4455,8 +4475,8 @@ pub(super) async fn publish(
         forget_quota_write(&mut tx, &mut accounts, old).await?;
         queries::retire_stream(old).execute(&mut *tx).await?;
     }
-    if let Some((upload, hash, result)) = completion {
-        if queries::complete_upload(upload, id, &hash, &result)
+    if let Some((upload, hash, result, token)) = completion {
+        if queries::complete_upload(upload, id, &hash, &result, token)
             .execute(&mut *tx)
             .await?
             .rows_affected()

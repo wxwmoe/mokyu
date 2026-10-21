@@ -1,4 +1,4 @@
-"""Verify per-backend Multipart expiry with two real data nodes and shared S3.
+"""Verify per-backend Multipart expiry with two real data nodes and native S3 MPU.
 
 Use the raw_cluster fixture variables; cleanup is triggered through maintenance.
 """
@@ -33,23 +33,25 @@ def main():
         assert touched > before
         peer.list_parts(Bucket=fixture.name, Key='expiry', UploadId=upload)
         assert database.query('SELECT touched_at FROM uploads WHERE id=%s', uuid.UUID(upload))[0]['touched_at'] == touched
-        sources = database.query('''SELECT f.staging_storage_id FROM parts p JOIN extents e ON e.stream_id=p.stream_id
+        sources = database.query('''SELECT f.staging_storage_id,f.file_id,p.remote_etag FROM parts p JOIN extents e ON e.stream_id=p.stream_id
             JOIN fragments f ON f.id=e.fragment_id WHERE p.upload_id=%s''', uuid.UUID(upload))
-        assert sources and all(row['staging_storage_id'] for row in sources)
+        assert sources and all(row['staging_storage_id'] is None and row['file_id'] and row['remote_etag'] for row in sources)
         uploads.append((fixture, peer, upload, [dict(PartNumber=1, ETag=first_part['ETag']), dict(PartNumber=2, ETag=last_part['ETag'])]))
 
     for _, _, upload, _ in uploads:
         database.query("UPDATE uploads SET touched_at=now()-interval '2 days' WHERE id=%s", uuid.UUID(upload))
+        # Advance the same simulated idle period for already-finished part leases.
+        database.query("UPDATE stream_leases SET expires_at=expires_at-interval '2 days' WHERE stream_id IN (SELECT write_token FROM parts WHERE upload_id=%s)", uuid.UUID(upload))
     first.finished(first.cli('maintenance', 'run', 'gc'))
     wait(lambda: database.query('SELECT state FROM uploads WHERE id=%s', uuid.UUID(uploads[0][2]))[0]['state'] == 'aborted',
-         'short backend policy did not expire shared Multipart')
+         'short backend policy did not expire native Multipart')
     assert database.query('SELECT state FROM uploads WHERE id=%s', uuid.UUID(uploads[1][2]))[0]['state'] == 'active'
     fixture, peer, upload, manifest = uploads[0]
     rejected(lambda: peer.complete_multipart_upload(Bucket=fixture.name, Key='expiry', UploadId=upload, MultipartUpload={'Parts': manifest}))
     fixture, peer, upload, manifest = uploads[1]
     peer.complete_multipart_upload(Bucket=fixture.name, Key='expiry', UploadId=upload, MultipartUpload={'Parts': manifest})
     fixture.read('expiry', b'a' * 5 * 1024 * 1024 + b'b')
-    print('PASS shared Multipart uses each backend expiry, renews across nodes and retains the longer-lived upload', flush=True)
+    print('PASS native Multipart uses each backend expiry, renews across nodes and retains the longer-lived upload', flush=True)
 
 
 if __name__ == '__main__':

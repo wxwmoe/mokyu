@@ -136,26 +136,46 @@ pub(crate) trait RawStore: Send + Sync {
         revision: i64,
         deduplicate: bool,
         background: bool,
+        node: Processor<'_>,
     ) -> Result<()>;
-    async fn uploads(&self, after: Id) -> Result<Vec<RawUpload>>;
+    async fn uploads(&self, after: Id, owner: Option<Uuid>) -> Result<Vec<RawUpload>>;
     async fn claim_upload(
         &self,
         token: Uuid,
         before: Option<chrono::DateTime<chrono::Utc>>,
+        node: Processor<'_>,
     ) -> Result<Option<RawUpload>>;
+    async fn renew_upload(&self, _work: &RawUpload, _node: Processor<'_>) -> Result<bool> {
+        anyhow::bail!("cluster raw uploads require PostgreSQL")
+    }
     async fn retry_upload(&self, work: &RawUpload, error: Option<&str>) -> Result<()>;
     async fn set_pending_upload(&self, source: Id, token: Uuid, upload: Option<&str>)
     -> Result<()>;
     async fn upload_streams(&self, source: Id) -> Result<Vec<Id>>;
-    async fn reuse_upload(&self, work: &RawUpload, hash: &[u8], streams: &[Id]) -> Result<bool>;
-    async fn complete_upload(&self, work: &RawUpload, hash: Option<&[u8]>) -> Result<()>;
+    async fn reuse_upload(
+        &self,
+        work: &RawUpload,
+        hash: &[u8],
+        streams: &[Id],
+        node: Processor<'_>,
+    ) -> Result<bool>;
+    async fn complete_upload(
+        &self,
+        work: &RawUpload,
+        hash: Option<&[u8]>,
+        node: Processor<'_>,
+    ) -> Result<()>;
     async fn current(&self, source: Id) -> Result<Option<RawSource>>;
     async fn cached_checkpoint(&self, location: Uuid) -> Result<Option<Id>>;
     async fn cached_checkpoints(&self, after: Uuid) -> Result<Vec<(Uuid, Id)>>;
     async fn has_upload(&self, source: Id) -> Result<bool>;
     async fn upload_status(&self) -> Result<serde_json::Value>;
-    async fn uploads_before(&self, before: chrono::DateTime<chrono::Utc>) -> Result<bool>;
-    async fn abandon_upload(&self, work: &RawUpload) -> Result<bool>;
+    async fn uploads_before(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+        owner: Option<Uuid>,
+    ) -> Result<bool>;
+    async fn abandon_upload(&self, work: &RawUpload, node: Processor<'_>) -> Result<bool>;
 
     async fn reuse(
         &self,

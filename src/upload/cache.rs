@@ -111,6 +111,10 @@ impl App {
                 storage,
                 key: &key,
                 timeout,
+                node: self
+                    .node
+                    .get()
+                    .map(|node| (node, self.role.as_str(), &self.secrets.credential_key)),
             })
             .await?
         {
@@ -180,11 +184,19 @@ impl App {
                 return Ok(true);
             }
             CacheBatch::Finished => {
-                if flush && self.role == "single" {
+                if flush {
                     let before = serde_json::from_value(detail["upper_time"].clone())?;
-                    if self.raw.uploads_before(before).await? {
+                    let owner = if detail["coordinator"] == true {
+                        None
+                    } else {
+                        self.node.get().map(|n| n.node_id)
+                    };
+                    if self.raw.uploads_before(before, owner).await? {
                         drop(selection);
-                        crate::worker::raw_upload::tick(self, Some(before)).await?;
+                        if detail["coordinator"] != true {
+                            crate::worker::raw_upload::tick(self, Some(before)).await?;
+                            self.transfer_remote_part(None).await?;
+                        }
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         return Ok(true);
                     }
