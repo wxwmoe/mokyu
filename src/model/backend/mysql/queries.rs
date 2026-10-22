@@ -31,6 +31,10 @@ type Rows<'q, T> = sqlx::query::QueryAs<'q, MySql, T, MySqlArguments>;
 
 pub(super) const SCHEMA: &str = include_str!("../../../../migrations/schema/mysql.sql");
 
+pub(super) fn flush_time() -> Scalar<'static, DateTime<Utc>> {
+    sqlx::query_scalar("SELECT CURRENT_TIMESTAMP(6)")
+}
+
 pub(super) fn schema_empty() -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT NOT EXISTS(SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()) AND NOT EXISTS(SELECT 1 FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE()) AND NOT EXISTS(SELECT 1 FROM information_schema.EVENTS WHERE EVENT_SCHEMA=DATABASE())",
@@ -2592,11 +2596,7 @@ pub(super) fn seal_upload_chunks(ids: &[Id]) -> sqlx::QueryBuilder<MySql> {
     chunk_ids(&mut query, ids);
     query
 }
-pub(super) fn active_cache_flush() -> Scalar<'static, Uuid> {
-    sqlx::query_scalar(
-        "SELECT id FROM tasks WHERE task_type='cache_flush' AND state IN ('queued','running') LIMIT 1",
-    )
-}
+
 pub(super) fn retryable_upload() -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
         "SELECT t.id FROM tasks t WHERE t.task_type='upload' AND t.state='failed' AND EXISTS(SELECT 1 FROM pending_uploads p WHERE p.owner_task=t.id AND p.next_retry_at<=CURRENT_TIMESTAMP(6)) ORDER BY (SELECT p.next_retry_at FROM pending_uploads p WHERE p.owner_task=t.id ORDER BY p.next_retry_at,p.chunk_id LIMIT 1),(SELECT p.chunk_id FROM pending_uploads p WHERE p.owner_task=t.id ORDER BY p.next_retry_at,p.chunk_id LIMIT 1) LIMIT 1 FOR UPDATE SKIP LOCKED",
@@ -2758,8 +2758,12 @@ impl UploadCacheStore for Backend {
             pins,
         ))
     }
-    async fn flush(&self) -> Result<(Uuid, bool)> {
-        transactions::cache_flush(&self.pool).await
+    async fn flush(&self, node: Option<Uuid>) -> Result<Uuid> {
+        transactions::cache_flush(&self.pool, node).await
+    }
+    async fn backlog(&self, _node: Option<Uuid>) -> Result<Value> {
+        let (entries, bytes, oldest): (i64, i64, Option<DateTime<Utc>>) = sqlx::query_as("SELECT count(*),CAST(COALESCE(sum(size),0) AS SIGNED),min(created_at) FROM (SELECT staged_size AS size,created_at FROM pending_uploads UNION ALL SELECT r.size,r.created_at FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id) waiting").fetch_one(&self.pool).await?;
+        Ok(serde_json::json!({"entries": entries, "bytes": bytes, "oldest_at": oldest}))
     }
     async fn enqueue(&self) -> Result<bool> {
         transactions::cache_enqueue(&self.pool).await
@@ -2813,12 +2817,19 @@ use crate::model::task::{
     JobQuery, TaskClaim, TaskControlStore, TaskExecutionStore, TaskFinish, TaskRecord,
 };
 
-pub(super) fn claim_task_candidate(class: i32, active: &[Uuid]) -> sqlx::QueryBuilder<MySql> {
+pub(super) fn claim_task_candidate(
+    class: i32,
+    active: &[Uuid],
+    draining: bool,
+) -> sqlx::QueryBuilder<MySql> {
     // An ordered index scan keeps SKIP LOCKED from locking a filesort's entire input.
     let mut query = sqlx::QueryBuilder::new(
         "SELECT t.id FROM tasks t FORCE INDEX(tasks_work) WHERE (t.state='queued' OR (t.state='failed' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='cdc' AND t.updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6)))) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=",
     );
     query.push_bind(class);
+    if draining {
+        query.push(" AND t.task_type IN ('upload','cache_flush') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation')),'')<>'cdc'");
+    }
     if !active.is_empty() {
         query.push(" AND t.id NOT IN (");
         let mut ids = query.separated(",");

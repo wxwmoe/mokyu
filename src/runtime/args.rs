@@ -24,6 +24,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cache_flush_wait_keeps_wire_contract() {
+        for args in [
+            vec!["mokyu", "cli", "cache", "flush"],
+            vec![
+                "mokyu",
+                "cli",
+                "cache",
+                "flush",
+                "--wait",
+                "--timeout",
+                "2m",
+            ],
+        ] {
+            let Some(Command::Cli { command }) = Args::try_parse_from(args).unwrap().command else {
+                panic!("CLI command expected")
+            };
+            assert_eq!(
+                serde_json::to_value(&command).unwrap(),
+                serde_json::json!({"Cache":"Flush"})
+            );
+        }
+        let restored: cli::Command =
+            serde_json::from_value(serde_json::json!({"Cache":"Flush"})).unwrap();
+        assert!(matches!(
+            restored,
+            cli::Command::Cache(cli::Cache::Flush { wait: false, .. })
+        ));
+        assert!(
+            Args::try_parse_from(["mokyu", "cli", "cache", "flush", "--timeout", "1s"]).is_err()
+        );
+    }
+
+    #[test]
     fn maintenance_startup() {
         let single = Args::try_parse_from(["mokyu", "--maintenance"]).unwrap();
         assert!(single.maintenance && single.command.is_none());

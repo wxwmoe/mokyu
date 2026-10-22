@@ -261,8 +261,11 @@ docker exec mokyu mokyu cli task resume TASK_UUID
 | --- | --- |
 | `cache status` | 配置及有效额度、待上传字节/条目/最早时间、最近错误、前 100 条 pin 归属；回退次数为本次进程累计 |
 | `cache flush` | 返回 task_id，将创建时已有积压写入独立存储来源；可在维护模式显式执行，支持任务暂停/恢复 |
+| `cache flush --wait [--timeout 5m]` | 等待该任务完成；等待期限为 1s–30m，默认 5m。超时返回 task_id 和非零退出码，服务器任务继续执行 |
 
 新请求仍可产生积压。备份排空需先阻止新写入并等待活跃请求，任务完成后确认 pending 为零。关闭上传缓存不删除已有待上传文件；恢复与备份要求见[部署说明](deployment-and-recovery.md#备份材料)。
+
+每次 flush 独立捕获数据库时间上界，不复用更早的任务。它等待来源持久化，不要求后台 CDC 或去重完成；显式 flush 可以先上传尚未转换的原始文件。正常退出按 `io.shutdown_flush_timeout` 自动排空，群集只等待当前节点的来源。
 
 ## 离线入口
 

@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 fn claim(class: i32, token: Uuid) -> TaskClaim<'static> {
     TaskClaim {
+        draining: false,
         class,
         active: &[],
         token,
@@ -68,6 +69,16 @@ async fn sqlite_task_execution_contract() -> Result<()> {
     })
     .await??;
     held.rollback().await?;
+    let upload =
+        TaskControlStore::enqueue(&backend, "upload", None, json!({"operation":"cdc"})).await?;
+    let flush = UploadCacheStore::flush(&backend, None).await?;
+    let mut request = claim(2, Uuid::new_v4());
+    request.draining = true;
+    let token = request.token;
+    assert_eq!(backend.claim(request).await?, Some(flush));
+    backend.complete(Execution { id: flush, token }).await?;
+    let task = claimed(&backend, upload, 2).await?;
+    backend.complete(task).await?;
     let first = TaskControlStore::enqueue(&backend, "integrity", None, json!({})).await?;
     let tokens = [Uuid::new_v4(), Uuid::new_v4()];
     let (a, b) = tokio::join!(
@@ -123,6 +134,7 @@ async fn sqlite_task_execution_contract() -> Result<()> {
     assert!(
         backend
             .claim(TaskClaim {
+                draining: false,
                 class: 0,
                 active: &[first],
                 token: Uuid::new_v4()

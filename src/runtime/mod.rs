@@ -2,6 +2,7 @@ mod args;
 mod listeners;
 pub(crate) mod locks;
 mod roles;
+mod shutdown;
 
 use self::{
     args::{Args, Command, ToolCommand},

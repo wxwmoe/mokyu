@@ -4549,23 +4549,22 @@ pub(super) async fn cache_seal(
     Ok(sealed)
 }
 
-pub(super) async fn cache_flush(pool: &SqlitePool) -> Result<(Uuid, bool)> {
+pub(super) async fn cache_flush(pool: &SqlitePool, node: Option<Uuid>) -> Result<Uuid> {
+    ensure!(node.is_none(), "node flush requires a cluster database");
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    if let Some(id) = queries::active_cache_flush()
-        .fetch_optional(&mut *tx)
-        .await?
-    {
-        return Ok((id, true));
-    }
+    let upper = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+        queries::flush_time().fetch_one(&mut *tx).await?,
+    )
+    .context("invalid SQLite timestamp")?;
     let id = enqueue_task(
         &mut tx,
         "cache_flush",
         None,
-        serde_json::json!({"upper_time":chrono::Utc::now()}),
+        serde_json::json!({"upper_time":upper}),
     )
     .await?;
     tx.commit().await?;
-    Ok((id, false))
+    Ok(id)
 }
 
 pub(super) async fn cache_enqueue(pool: &SqlitePool) -> Result<bool> {
@@ -4824,7 +4823,7 @@ pub(super) async fn claim_task(
     input: crate::model::TaskClaim<'_>,
 ) -> Result<Option<Uuid>> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    let Some(id) = queries::claim_task_candidate(input.class, input.active)
+    let Some(id) = queries::claim_task_candidate(input.class, input.active, input.draining)
         .build_query_scalar::<Uuid>()
         .fetch_optional(&mut *tx)
         .await?

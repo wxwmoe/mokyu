@@ -1,6 +1,6 @@
 use super::commands::*;
 use super::transport::{cli_target, rpc};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::{
     io::{IsTerminal, Read},
@@ -74,7 +74,57 @@ pub async fn client(path: &Path, mut command: Command) -> Result<()> {
         _ => {}
     }
     let target = cli_target(path)?;
+    let wait = match &command {
+        Command::Cache(Cache::Flush {
+            wait: true,
+            timeout,
+        }) => {
+            let seconds = crate::config::seconds(timeout)?;
+            ensure!(seconds <= 1800, "cache flush timeout must be 1s..30m");
+            Some(std::time::Duration::from_secs(seconds))
+        }
+        _ => None,
+    };
     let result = rpc(&target, &command).await?;
+    if let Some(timeout) = wait {
+        let id =
+            serde_json::from_value(result["task_id"].clone()).context("flush task is missing")?;
+        let completed = tokio::time::timeout(timeout, async {
+            loop {
+                let task = rpc(&target, &Command::Task(Tasks::Show { id })).await?;
+                match task["state"].as_str() {
+                    Some("completed") => return Ok::<_, anyhow::Error>(task),
+                    Some("failed" | "paused") => {
+                        anyhow::bail!("cache flush {id} stopped: {}", task["error"])
+                    }
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+                }
+            }
+        })
+        .await;
+        match completed {
+            Ok(Ok(task)) => println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"task_id": id, "state": "completed", "detail": task["detail"]})
+                )?
+            ),
+            Ok(Err(error)) => {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Err(error);
+            }
+            Err(_) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"task_id": id, "state": "timeout"})
+                    )?
+                );
+                anyhow::bail!("cache flush {id} timed out; the task continues on the server");
+            }
+        }
+        return Ok(());
+    }
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }

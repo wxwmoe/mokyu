@@ -149,7 +149,7 @@ docker exec mokyu mokyu cli gc mark-unreferenced
 
 建立恢复点可选择：
 
-1. 进入维护模式、等待活跃写入排空，显式运行 `cli cache flush` 并等待任务完成，确认 `cli cache status` 无积压；停止网关，再备份数据库、配置和必要的 multipart 数据。
+1. 进入维护模式、等待活跃写入排空，显式运行 `cli cache flush --wait` 并确认成功、`cli cache status` 无积压；停止网关，再备份数据库、配置和必要的 multipart 数据。等待超时只结束 CLI 等待，凭返回的 task_id 检查服务器任务；不能将超时或正常退出的尽力排空视为备份屏障已完成。
 2. 停止写入并取得数据库、配置、multipart 和 chunks 待上传数据的一致快照。
 
 排空只保证该恢复点，不保证此前任意 WAL 时刻：旧数据库可能引用后来已淘汰的本地来源。任意 PITR 还需匹配的数据历史，或关闭提前本地确认并遵守存储 GC 保留窗口。仅备份配置不能恢复本地唯一数据。

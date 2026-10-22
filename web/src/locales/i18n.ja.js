@@ -764,6 +764,8 @@ export default {
   configField_database_version: "データベースバージョン",
   configHelp_database_version: "接続の初期化時に取得したバージョンで、SQLite は内蔵エンジンが対象",
   configField_database_schema_version: "スキーマバージョン",
+  runtimeField_shutdown_flush_timeout: '終了時の書き出し待機',
+  runtimeHelp_shutdown_flush_timeout: '通常終了時に実行中のリクエストと受け付けた書き込みを待つ合計時間、0s から 30m まで、期限後も復旧用のファイルとタスクを保持',
   runtimeGroupIo: "読み書き設定",
   configSection_io: "読み書き設定",
   runtimeField_sqlite_synchronous: "SQLite 同期レベル",

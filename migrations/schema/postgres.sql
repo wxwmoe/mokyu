@@ -2410,3 +2410,7 @@ ALTER TABLE pending_uploads ADD COLUMN encoding_policy JSONB;
 ALTER TABLE raw_sources ADD COLUMN processing_task UUID REFERENCES tasks(id) ON DELETE SET NULL;
 CREATE INDEX raw_sources_processing ON raw_sources(processing_task);
 UPDATE mokyu_meta SET schema_version=60 WHERE singleton;
+
+ALTER TABLE runtime_settings DROP CONSTRAINT runtime_settings_section_check;
+ALTER TABLE runtime_settings ADD CONSTRAINT runtime_settings_section_check CHECK (section IN ('web','requests','uploads','metrics','maintenance','io'));
+UPDATE mokyu_meta SET schema_version=61 WHERE singleton;

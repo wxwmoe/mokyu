@@ -525,12 +525,14 @@ pub(super) fn claim_task<'q>(
     active: &'q [Uuid],
     node: Option<Uuid>,
     token: Uuid,
+    draining: bool,
 ) -> Scalar<'q, Uuid> {
-    sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=CASE WHEN $3::uuid IS NOT NULL THEN now()+interval '5 minutes' END,updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='failed' AND t.detail->>'operation'='cdc' AND t.updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND t.state='running' AND t.lease_expires_at<now())) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=$1 AND NOT(t.id=ANY($2)) AND (t.execution_scope <> 'node' OR t.target_node_id IS NULL OR t.target_node_id=$3) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND NOT (m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','storage_migration','rewrite','usage')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END AND CASE WHEN c.policy='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.task_type='pack' AND t.detail->>'policy' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='failed' AND detail->>'operation'='cdc' AND updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND state='running' AND lease_expires_at<now())) RETURNING id")
+    sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=CASE WHEN $3::uuid IS NOT NULL THEN now()+interval '5 minutes' END,updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='failed' AND t.detail->>'operation'='cdc' AND t.updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND t.state='running' AND t.lease_expires_at<now())) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=$1 AND (NOT $5 OR (t.task_type IN ('upload','cache_flush') AND t.detail->>'operation' IS DISTINCT FROM 'cdc')) AND NOT(t.id=ANY($2)) AND (t.execution_scope <> 'node' OR t.target_node_id IS NULL OR t.target_node_id=$3) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND NOT (m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','storage_migration','rewrite','usage')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END AND CASE WHEN c.policy='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.task_type='pack' AND t.detail->>'policy' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='failed' AND detail->>'operation'='cdc' AND updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND state='running' AND lease_expires_at<now())) RETURNING id")
         .bind(class)
         .bind(active)
         .bind(node)
         .bind(token)
+        .bind(draining)
 }
 
 pub(super) fn lock_storage_permits(key: String) -> Statement<'static> {
@@ -861,6 +863,10 @@ pub(super) fn fsync() -> Scalar<'static, String> {
 }
 
 pub(super) const SCHEMA: &str = include_str!("../../../../migrations/schema/postgres.sql");
+
+pub(super) fn flush_time() -> Scalar<'static, DateTime<Utc>> {
+    sqlx::query_scalar("SELECT clock_timestamp()")
+}
 
 pub(super) fn schema_empty() -> Scalar<'static, bool> {
     sqlx::query_scalar(
@@ -3685,11 +3691,7 @@ pub(super) fn upload_cache_pins() -> Scalar<'static, Value> {
         "SELECT jsonb_build_object('chunk_id',p.chunk_id::text,'pin_type',p.pin_type,'owner_id',p.owner_id,'created_at',p.created_at,'last_error',u.last_error,'attempts',u.attempts,'next_retry_at',u.next_retry_at) FROM cache_pins p JOIN pending_uploads u USING(chunk_id) ORDER BY p.created_at,p.chunk_id LIMIT 100",
     )
 }
-pub(super) fn active_cache_flush() -> Scalar<'static, Uuid> {
-    sqlx::query_scalar(
-        "SELECT id FROM tasks WHERE task_type='cache_flush' AND parent_task_id IS NULL AND state IN ('queued','running') LIMIT 1",
-    )
-}
+
 pub(super) fn retryable_upload() -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
         "SELECT p.owner_task FROM pending_uploads p JOIN tasks t ON t.id=p.owner_task WHERE p.next_retry_at<=now() AND t.task_type='upload' AND t.state='failed' ORDER BY p.next_retry_at,p.chunk_id LIMIT 1 FOR UPDATE OF t SKIP LOCKED",
@@ -3852,8 +3854,12 @@ impl UploadCacheStore for Backend {
     async fn seal(&self, stream: Id, eof: bool) -> Result<bool> {
         transactions::cache_seal(&self.pool, stream, eof).await
     }
-    async fn flush(&self) -> Result<(Uuid, bool)> {
-        transactions::cache_flush(&self.pool).await
+    async fn flush(&self, node: Option<Uuid>) -> Result<Uuid> {
+        transactions::cache_flush(&self.pool, node).await
+    }
+    async fn backlog(&self, node: Option<Uuid>) -> Result<Value> {
+        let (entries, bytes, oldest): (i64, i64, Option<DateTime<Utc>>) = sqlx::query_as("SELECT count(*),COALESCE(sum(size),0)::bigint,min(created_at) FROM (SELECT staged_size AS size,created_at FROM pending_uploads WHERE ($1::uuid IS NULL OR node_id=$1) UNION ALL SELECT r.size,r.created_at FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE ($1::uuid IS NULL OR u.node_id=$1) UNION ALL SELECT s.size,s.created_at FROM parts p JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id WHERE p.remote_node_id IS NOT NULL AND p.remote_etag IS NULL AND ($1::uuid IS NULL OR p.remote_node_id=$1) AND u.state IN ('active','completing')) waiting").bind(node).fetch_one(&self.pool).await?;
+        Ok(serde_json::json!({"entries": entries, "bytes": bytes, "oldest_at": oldest}))
     }
     async fn next_attempt(&self) -> Result<Option<DateTime<Utc>>> {
         Ok(sqlx::query_scalar("SELECT LEAST((SELECT min(next_retry_at) FROM pending_uploads WHERE owner_task IS NULL),(SELECT min(p.next_retry_at) FROM pending_uploads p JOIN tasks t ON t.id=p.owner_task WHERE t.task_type='upload' AND t.state='failed'))")

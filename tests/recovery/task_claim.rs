@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 fn claimant(token: Uuid) -> TaskClaim<'static> {
     TaskClaim {
+        draining: false,
         class: 0,
         active: &[],
         token,
@@ -63,6 +64,33 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         .execute(&pool)
         .await?;
     }
+    let upload = Uuid::new_v4();
+    sqlx::query("INSERT INTO tasks(id,task_type,state,detail) VALUES($1,'upload','queued',$2)")
+        .bind(upload)
+        .bind(serde_json::json!({"operation":"cdc"}))
+        .execute(&pool)
+        .await?;
+    let flush = crate::model::UploadCacheStore::flush(&first, Some(nodes[0].node_id)).await?;
+    let mut request = claimant(Uuid::new_v4());
+    request.class = 2;
+    request.draining = true;
+    assert_eq!(
+        second
+            .claim_task(request, &nodes[1], "worker", &key)
+            .await?,
+        None
+    );
+    let mut request = claimant(Uuid::new_v4());
+    request.class = 2;
+    request.draining = true;
+    assert_eq!(
+        first.claim_task(request, &nodes[0], "worker", &key).await?,
+        Some(flush)
+    );
+    sqlx::query("DELETE FROM tasks WHERE id=ANY($1)")
+        .bind(&[upload, flush][..])
+        .execute(&pool)
+        .await?;
     let task = Uuid::new_v4();
     sqlx::query("INSERT INTO tasks(id,task_type,state) VALUES($1,'integrity','queued')")
         .bind(task)

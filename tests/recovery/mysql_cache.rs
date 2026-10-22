@@ -345,12 +345,11 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     );
     assert!(backend.release(&[], false).await?.keys.is_empty());
 
-    let (left, right) = tokio::join!(backend.flush(), backend.flush());
+    let (left, right) = tokio::join!(backend.flush(None), backend.flush(None));
     let left = left?;
     let right = right?;
-    assert_eq!(left.0, right.0);
-    assert_ne!(left.1, right.1);
-    let flush = execute(&backend, left.0).await?;
+    assert_ne!(left, right);
+    let flush = execute(&backend, left).await?;
     let snapshot = backend.raw(flush.id).await?.unwrap()["detail"].clone();
     let blocker = TaskControlStore::enqueue(&backend, "pack", None, json!({})).await?;
     sqlx::query("INSERT INTO pack_inputs(task_id,chunk_id) VALUES(?,?)")

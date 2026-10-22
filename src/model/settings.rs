@@ -123,9 +123,11 @@ pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
             }),
         ),
     ];
+    let mut io = json!({"shutdown_flush_timeout": configured.io.shutdown_flush_timeout});
     if configured.database.backend == crate::config::DatabaseType::Sqlite {
-        values.push(("io", json!(configured.io)));
+        io["sqlite_synchronous"] = json!(configured.io.sqlite_synchronous);
     }
+    values.push(("io", io));
     if !configured.database.backend.supports_cluster() {
         let uploads = values
             .iter_mut()
@@ -144,7 +146,9 @@ pub(crate) fn apply_runtime_section(
     value: Value,
 ) -> Result<()> {
     anyhow::ensure!(
-        section != "io" || config.database.backend == crate::config::DatabaseType::Sqlite,
+        section != "io"
+            || value.get("sqlite_synchronous").is_none()
+            || config.database.backend == crate::config::DatabaseType::Sqlite,
         s3s::s3_error!(
             InvalidArgument,
             "SQLite synchronization settings require SQLite"

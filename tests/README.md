@@ -24,7 +24,11 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `sqlite_synchronous_contract` 验证默认 FULL、保存后重启生效、FULL/NORMAL/OFF 的写池与所有读连接、连接重建、事务回滚、单连接模式和错误设置拒绝。初始化/迁移在测试构建中断言 FULL。`sqlite_nonce_durability_contract` 检查 NORMAL 预留强制 FULL 后连接恢复、取消/提交边界、并发号段不重叠、OFF 保存与首个预留互斥、已有预留禁止 OFF 和启动校验；模拟进程退出不能代替断电持久性验证。
 
-`python -m tests.recovery.sqlite_sync` 接管已初始化且停止的隔离应用，沿用恢复测试的配置、管理员密码、故障目录和本地存储根目录环境。SQLite 验证 API/CLI 保存、实际同步值、重启和 SIGKILL 读回；其他数据库验证不提供此设置。四库都检查修订冲突返回 409。`web/tests/sqlite-sync.spec.ts` 使用实际应用检查三语表单、取消不保存、键盘操作和重启提示。
+`python -m tests.recovery.sqlite_sync` 接管已初始化且停止的隔离应用，沿用恢复测试的配置、管理员密码、故障目录和本地存储根目录环境。SQLite 验证 API/CLI 保存、实际同步值、重启和 SIGKILL 读回；其他数据库验证仅提供公共 I/O 设置、不提供 SQLite 字段。四库都检查修订冲突返回 409。`web/tests/sqlite-sync.spec.ts` 使用实际应用检查三语同步/退出期限表单、取消不保存、键盘操作和重启提示。
+
+`python -m tests.recovery.shutdown_flush` 使用相同的进程托管环境和独立 S3 后端，节点磁盘缓存至少64MiB、其中上传缓存至少32MiB；验证每次 flush 的数据库时间上界、CLI 等待超时不取消任务、SIGTERM 排空 raw/chunks、暂停 CDC 时原始来源仍可持久化、退出期限及重启恢复。四库分别运行，不能与同一实例上的其他测试并发。
+
+`python -m tests.recovery.cluster_shutdown` 使用双 data 的 `cluster_cache` 环境，编排器额外处理 `stop-peer`、`start-peer` 与 `.done` 标记。验证退出期间继续心跳、只排空当前节点的 raw/chunks/原生 Multipart、其他节点仍可读最终来源，以及只有 CDC 尾块可写共享暂存。
 
 数据库改动需在 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3 的最低版本和当前维护版本验证。MariaDB 复用全部 MySQL 契约和 `MOKYU_TEST_MYSQL_CONFIG`；`mysql_dialect_and_lock_scope_contract` 额外检查 JSON 类型、大小写/尾空格比较和任务领取的锁范围。`migrations.py` 在 PostgreSQL 17 空库验证低版本拒绝且不写入表，在支持版本验证新装、旧版本升级与恢复。
 

@@ -52,6 +52,7 @@ pub(crate) trait TaskControlStore: Send + Sync {
 }
 
 pub(crate) struct TaskClaim<'a> {
+    pub(crate) draining: bool,
     pub(crate) class: i32,
     pub(crate) active: &'a [Uuid],
     pub(crate) token: Uuid,

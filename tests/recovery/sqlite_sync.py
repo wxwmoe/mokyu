@@ -42,7 +42,7 @@ def main():
         assert response.status_code == 409, response.text
         database = tomllib.loads(Path(os.environ['MOKYU_TEST_CONFIG']).read_text())['database']
         if database.get('type', 'postgres') != 'sqlite':
-            assert all(row['section'] != 'io' for row in fixture.api('/api/v1/runtime-settings'))
+            assert fixture.api('/api/v1/runtime-settings/io')['value'] == {'shutdown_flush_timeout': '30s'}
             response = fixture.session.put(fixture.web + '/api/v1/runtime-settings/io', headers=fixture.headers,
                 json={'value': {'sqlite_synchronous': 'off'}, 'revision': 1}, timeout=30)
             assert response.status_code == 400, response.text
@@ -62,7 +62,7 @@ def main():
             return fields['database.synchronous']['value']
 
         assert observed() == 'full'
-        assert fixture.cli('settings', 'get', 'io') == {'sqlite_synchronous': 'full'}
+        assert fixture.cli('settings', 'get', 'io') == {'sqlite_synchronous': 'full', 'shutdown_flush_timeout': '30s'}
         current = fixture.api(url)
         for value in ({'sqlite_synchronous': 'FULL'}, {'sqlite_synchronous': 'extra'}, {'journal_mode': 'off'}):
             response = fixture.session.put(fixture.web + url, headers=fixture.headers,
@@ -98,7 +98,7 @@ def main():
             fixture.read('preserved', data)
             previous = mode
         assert fixture.cli('storage', 'profile', 'show', fixture.name)['revision'] == profile['revision'] + 1
-        assert fixture.cli('settings', 'reset', 'io') == {'sqlite_synchronous': 'full'}
+        assert fixture.cli('settings', 'reset', 'io') == {'sqlite_synchronous': 'full', 'shutdown_flush_timeout': '30s'}
         print('PASS restart applies each level to runtime state and SIGKILL preserves the committed test data', flush=True)
         print('PASS database settings do not mutate storage profiles; process tests do not simulate power loss', flush=True)
 

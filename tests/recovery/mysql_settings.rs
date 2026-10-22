@@ -31,8 +31,8 @@ async fn mysql_runtime_settings_contract() -> Result<()> {
     backend
         .ensure(&[("maintenance", json!({"wrong":true}))])
         .await?;
-    assert_eq!(backend.load().await?.len(), 5);
-    assert_eq!(backend.revisions().await?.len(), 5);
+    assert_eq!(backend.load().await?.len(), defaults.len());
+    assert_eq!(backend.revisions().await?.len(), defaults.len());
     assert!(
         backend
             .inspect()
@@ -65,7 +65,7 @@ async fn mysql_runtime_settings_contract() -> Result<()> {
         session: auth.session_id,
         revision: auth.authorization_revision,
     };
-    assert_eq!(backend.sections(&admin).await?.len(), 5);
+    assert_eq!(backend.sections(&admin).await?.len(), defaults.len());
     assert_eq!(backend.section(&admin, "maintenance").await?.revision, 1);
     for principal in [
         Principal::Node {
@@ -116,7 +116,7 @@ async fn mysql_runtime_settings_contract() -> Result<()> {
         .bind(token)
         .execute(db)
         .await?;
-    assert_eq!(backend.sections(&token_admin).await?.len(), 5);
+    assert_eq!(backend.sections(&token_admin).await?.len(), defaults.len());
     let stale_token = Principal::Token {
         id: token,
         user,
@@ -282,7 +282,7 @@ async fn mysql_runtime_settings_contract() -> Result<()> {
         revision: next.authorization_revision,
     };
     assert_eq!(next.authorization_revision, auth.authorization_revision + 1);
-    assert_eq!(backend.sections(&admin).await?.len(), 5);
+    assert_eq!(backend.sections(&admin).await?.len(), defaults.len());
     sqlx::query("UPDATE web_users SET must_change_password=TRUE WHERE id=?")
         .bind(user)
         .execute(db)

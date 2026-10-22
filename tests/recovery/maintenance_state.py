@@ -166,10 +166,13 @@ elif phase == 'drain':
         response.read()
         stop.touch()
         wait(marker.with_suffix('.hit').exists, 'harness did not signal control', seconds=60)
-        connection.request('POST', '/api/v1/cli', json.dumps({'Maintenance': 'Disable'}), request_headers)
-        response = connection.getresponse()
-        assert response.status == 503, (response.status, response.read())
-        response.read()
+        try:
+            connection.request('POST', '/api/v1/cli', json.dumps({'Maintenance': 'Disable'}), request_headers)
+            response = connection.getresponse()
+            assert response.status == 503, (response.status, response.read())
+            response.read()
+        except (http.client.RemoteDisconnected, ConnectionError):
+            pass
         assert db.execute("SELECT maintenance FROM mokyu_meta WHERE singleton").fetchone() == (False,)
     finally:
         connection.close()

@@ -162,10 +162,7 @@ impl App {
     pub async fn cache_flush_start(&self) -> Result<Value> {
         let _coord = self.coord.lock().await;
         self.ensure_mode()?;
-        let (id, existing) = self.upload_cache.flush().await?;
-        if existing {
-            return Ok(json!({"task_id":id,"existing":true}));
-        }
+        let id = self.upload_cache.flush(None).await?;
         self.wake_tasks.notify_one();
         Ok(json!({"task_id":id}))
     }

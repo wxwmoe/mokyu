@@ -10,6 +10,20 @@ pub async fn recover_stale(app: &App) -> Result<u64> {
     app.cluster()?.recover_tasks().await
 }
 
+pub(crate) async fn flush(app: Arc<App>) -> Result<()> {
+    anyhow::ensure!(
+        app.draining.load(std::sync::atomic::Ordering::Acquire),
+        "flush worker requires shutdown"
+    );
+    // A paused CDC conversion must not occupy the last shutdown flush worker.
+    worker(
+        app,
+        Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+        2,
+    )
+    .await
+}
+
 pub async fn run(app: Arc<App>) -> Result<()> {
     if app.role == "single" {
         return run_single(app).await;
@@ -130,6 +144,7 @@ async fn dispatch_single(
                 let id = app
                     .task_execution
                     .claim(crate::model::TaskClaim {
+                        draining: app.draining.load(std::sync::atomic::Ordering::Acquire),
                         class: class as i32,
                         active: &ids,
                         token,
@@ -209,6 +224,7 @@ async fn worker(
             let mut active = active.lock().await;
             let ids: Vec<Uuid> = active.iter().copied().collect();
             let input = crate::model::TaskClaim {
+                draining: app.draining.load(std::sync::atomic::Ordering::Acquire),
                 class,
                 active: &ids,
                 token,

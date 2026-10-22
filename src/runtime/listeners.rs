@@ -43,6 +43,7 @@ pub(super) async fn serve_s3(
         let s3 = service.clone();
         let app = app.clone();
         let controls = controls.clone();
+        let mut stopping = app.stop_connections.subscribe();
         let service = hyper::service::service_fn(
             move |mut request: hyper::Request<hyper::body::Incoming>| {
                 let app = app.clone();
@@ -65,12 +66,25 @@ pub(super) async fn serve_s3(
         );
         tokio::spawn(async move {
             let _permit = permit;
-            let result = hyper::server::conn::http1::Builder::new()
+            let connection = hyper::server::conn::http1::Builder::new()
                 .timer(TokioTimer::new())
                 .header_read_timeout(Duration::from_secs(15))
                 .max_buf_size(32 * 1024)
-                .serve_connection(TokioIo::new(socket), service)
-                .await;
+                .serve_connection(TokioIo::new(socket), service);
+            tokio::pin!(connection);
+            let stopping_now = *stopping.borrow_and_update();
+            let result = if stopping_now {
+                connection.as_mut().graceful_shutdown();
+                connection.await
+            } else {
+                tokio::select! {
+                    result = &mut connection => result,
+                    _ = stopping.changed() => {
+                        connection.as_mut().graceful_shutdown();
+                        connection.await
+                    }
+                }
+            };
             if let Err(e) = result {
                 tracing::debug!(error=%e,"S3 connection closed");
             }
@@ -81,6 +95,7 @@ pub(super) async fn serve_router(
     listener: TcpListener,
     router: axum::Router,
     connections: Arc<Semaphore>,
+    app: Arc<app::App>,
 ) -> Result<()> {
     loop {
         let (socket, _) = listener.accept().await?;
@@ -90,14 +105,28 @@ pub(super) async fn serve_router(
             Err(_) => continue,
         };
         let service = hyper_util::service::TowerToHyperService::new(router.clone());
+        let mut stopping = app.stop_connections.subscribe();
         tokio::spawn(async move {
             let _permit = permit;
-            let result = hyper::server::conn::http1::Builder::new()
+            let connection = hyper::server::conn::http1::Builder::new()
                 .timer(TokioTimer::new())
                 .header_read_timeout(Duration::from_secs(15))
                 .max_buf_size(32 * 1024)
-                .serve_connection(TokioIo::new(socket), service)
-                .await;
+                .serve_connection(TokioIo::new(socket), service);
+            tokio::pin!(connection);
+            let stopping_now = *stopping.borrow_and_update();
+            let result = if stopping_now {
+                connection.as_mut().graceful_shutdown();
+                connection.await
+            } else {
+                tokio::select! {
+                    result = &mut connection => result,
+                    _ = stopping.changed() => {
+                        connection.as_mut().graceful_shutdown();
+                        connection.await
+                    }
+                }
+            };
             if let Err(e) = result {
                 tracing::debug!(error=%e,"HTTP connection closed");
             }

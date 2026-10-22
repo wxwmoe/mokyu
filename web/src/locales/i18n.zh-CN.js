@@ -764,6 +764,8 @@ export default {
   configField_database_version: "数据库版本",
   configHelp_database_version: "初始化连接时读取的版本，SQLite 为内置引擎版本",
   configField_database_schema_version: "数据库结构版本",
+  runtimeField_shutdown_flush_timeout: '退出排空等待',
+  runtimeHelp_shutdown_flush_timeout: '正常退出时等待活动请求和已确认写入完成的总时限，范围 0s 至 30m，超时保留待处理文件与任务供恢复',
   runtimeGroupIo: "读写设置",
   configSection_io: "读写设置",
   runtimeField_sqlite_synchronous: "SQLite 同步等级",

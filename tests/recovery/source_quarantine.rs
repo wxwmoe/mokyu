@@ -36,6 +36,7 @@ async fn task(stores: &Stores) -> Result<Execution> {
         stores
             .task_execution
             .claim(TaskClaim {
+                draining: false,
                 class: 0,
                 active: &[],
                 token

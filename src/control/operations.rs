@@ -571,7 +571,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             }
         },
         Command::Cache(Cache::Status) => app.upload_cache_status().await,
-        Command::Cache(Cache::Flush) => app.cache_flush_start().await,
+        Command::Cache(Cache::Flush { .. }) => app.cache_flush_start().await,
         Command::Pack(Packs::Status) => app.pack_status().await,
         Command::Pack(Packs::Run { mode }) => app.pack_start(&mode).await,
         Command::Pack(Packs::Unpack { id, all, execute }) => {

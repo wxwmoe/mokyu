@@ -70,10 +70,40 @@ pub enum Command {
     #[command(subcommand)]
     Cache(Cache),
 }
-#[derive(Subcommand, Serialize, Deserialize)]
+#[derive(Subcommand)]
 pub enum Cache {
     Status,
-    Flush,
+    Flush {
+        #[arg(long)]
+        wait: bool,
+        #[arg(long, default_value = "5m", requires = "wait")]
+        timeout: String,
+    },
+}
+
+impl Serialize for Cache {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::Status => "Status",
+            Self::Flush { .. } => "Flush",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Cache {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "Status" => Ok(Self::Status),
+            "Flush" => Ok(Self::Flush {
+                wait: false,
+                timeout: "5m".into(),
+            }),
+            value => Err(serde::de::Error::unknown_variant(
+                value,
+                &["Status", "Flush"],
+            )),
+        }
+    }
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Packs {

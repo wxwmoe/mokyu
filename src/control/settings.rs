@@ -59,7 +59,7 @@ fn validate_value(configured: &crate::config::Config, section: &str, value: &Val
             .as_object()
             .context("runtime settings value must be an object")?;
         let allowed: &[&str] = match section {
-            "io" => &["sqlite_synchronous"],
+            "io" => &["sqlite_synchronous", "shutdown_flush_timeout"],
             "web" => &[
                 "origin",
                 "secure_cookie",

@@ -237,6 +237,7 @@ pub struct App {
     pub slots: Arc<Semaphore>,
     pub maintenance: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) draining: std::sync::atomic::AtomicBool,
+    pub(crate) stop_connections: tokio::sync::watch::Sender<bool>,
     pub pack_creation_paused: std::sync::atomic::AtomicBool,
     pub gc_running: std::sync::atomic::AtomicBool,
     started_mode: String,
@@ -403,6 +404,7 @@ impl App {
             restart_required,
             wake_gc: Arc::new(tokio::sync::Notify::new()),
             wake_tasks: Arc::new(tokio::sync::Notify::new()),
+            stop_connections: tokio::sync::watch::channel(false).0,
             raw_upload_worker: tokio::sync::Mutex::new(()),
             pending_reads: readiness::Reads::default(),
             wake_raw_uploads: Arc::new(tokio::sync::Notify::new()),
@@ -483,7 +485,9 @@ impl App {
     }
     pub fn writable(&self) -> Result<()> {
         self.ensure_mode()?;
-        if self.maintenance.load(std::sync::atomic::Ordering::Acquire) {
+        if self.maintenance.load(std::sync::atomic::Ordering::Acquire)
+            || self.draining.load(std::sync::atomic::Ordering::Acquire)
+        {
             return Err(s3_error!(ServiceUnavailable, "gateway is in maintenance mode").into());
         }
         Ok(())

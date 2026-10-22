@@ -44,14 +44,14 @@ async fn mysql_dialect_and_lock_scope_contract() -> Result<()> {
     assert_eq!(saved["last_rewrite"], detail);
 
     let mut a = db.begin().await?;
-    let locked: Uuid = queries::claim_task_candidate(0, &[])
+    let locked: Uuid = queries::claim_task_candidate(0, &[], false)
         .build_query_scalar()
         .fetch_one(&mut *a)
         .await?;
     let mut b = db.begin().await?;
     let other: Uuid = tokio::time::timeout(
         Duration::from_secs(2),
-        queries::claim_task_candidate(0, &[])
+        queries::claim_task_candidate(0, &[], false)
             .build_query_scalar()
             .fetch_one(&mut *b),
     )

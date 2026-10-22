@@ -13,6 +13,10 @@ type Rows<'q, T> = sqlx::query::QueryAs<'q, Sqlite, T, SqliteArguments>;
 pub(super) const BEGIN_WRITE: &str = "BEGIN IMMEDIATE";
 pub(super) const SCHEMA: &str = include_str!("../../../../migrations/schema/sqlite.sql");
 
+pub(super) fn flush_time() -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)")
+}
+
 pub(super) fn schema_empty() -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*')",
@@ -4810,11 +4814,7 @@ pub(super) fn seal_upload_chunks(ids: &[Id]) -> sqlx::QueryBuilder<Sqlite> {
     chunk_ids(&mut query, ids);
     query
 }
-pub(super) fn active_cache_flush() -> Scalar<'static, Uuid> {
-    sqlx::query_scalar(
-        "SELECT id FROM tasks WHERE task_type='cache_flush' AND state IN ('queued','running') LIMIT 1",
-    )
-}
+
 pub(super) fn retryable_upload() -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
         "SELECT p.owner_task FROM pending_uploads p JOIN tasks t ON t.id=p.owner_task WHERE p.next_retry_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER) AND t.task_type='upload' AND t.state='failed' ORDER BY p.next_retry_at,p.chunk_id LIMIT 1",
@@ -4963,8 +4963,14 @@ impl UploadCacheStore for Backend {
     async fn status(&self) -> Result<(Value, Vec<Value>)> {
         transactions::cache_status(&self.read).await
     }
-    async fn flush(&self) -> Result<(Uuid, bool)> {
-        transactions::cache_flush(&self.write).await
+    async fn flush(&self, node: Option<Uuid>) -> Result<Uuid> {
+        transactions::cache_flush(&self.write, node).await
+    }
+    async fn backlog(&self, _node: Option<Uuid>) -> Result<Value> {
+        let (entries, bytes, oldest): (i64, i64, Option<i64>) = sqlx::query_as("SELECT count(*),CAST(COALESCE(sum(size),0) AS INTEGER),min(created_at) FROM (SELECT staged_size AS size,created_at FROM pending_uploads UNION ALL SELECT r.size,r.created_at FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id) waiting").fetch_one(&self.read).await?;
+        Ok(
+            serde_json::json!({"entries": entries, "bytes": bytes, "oldest_at": oldest.map(datetime).transpose()?}),
+        )
     }
     async fn enqueue(&self) -> Result<bool> {
         if retryable_upload()
@@ -5045,11 +5051,18 @@ pub(super) async fn cache_status(
 
 use crate::model::task::{TaskClaim, TaskExecutionStore, TaskFinish, TaskRecord};
 
-pub(super) fn claim_task_candidate(class: i32, active: &[Uuid]) -> sqlx::QueryBuilder<Sqlite> {
+pub(super) fn claim_task_candidate(
+    class: i32,
+    active: &[Uuid],
+    draining: bool,
+) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new(
         "SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='failed' AND json_extract(t.detail,'$.operation')='cdc' AND t.updated_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-30000000)) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=",
     );
     query.push_bind(class);
+    if draining {
+        query.push(" AND t.task_type IN ('upload','cache_flush') AND COALESCE(json_extract(t.detail,'$.operation'),'')<>'cdc'");
+    }
     if !active.is_empty() {
         query.push(" AND t.id NOT IN (");
         let mut ids = query.separated(",");
@@ -5100,7 +5113,7 @@ pub(super) fn finish_task<'q>(
 #[async_trait::async_trait]
 impl TaskExecutionStore for Backend {
     async fn claim(&self, input: TaskClaim<'_>) -> Result<Option<Uuid>> {
-        if claim_task_candidate(input.class, input.active)
+        if claim_task_candidate(input.class, input.active, input.draining)
             .build_query_scalar::<Uuid>()
             .fetch_optional(&self.read)
             .await?

@@ -69,6 +69,7 @@ async fn quarantine(stores: &Stores, storage: Uuid, encoding: Id, clear: bool) -
         stores
             .task_execution
             .claim(TaskClaim {
+                draining: false,
                 class: 0,
                 active: &[],
                 token

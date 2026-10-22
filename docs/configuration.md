@@ -100,9 +100,11 @@ runtime 设置保存在 `runtime_settings`。Web 使用固定表单，不提供�
 | `uploads` | staging storage、共享 staging 字节上限、客户端空闲超时与活动上传限制 | 部署共享；群集 storage 共享 |
 | `metrics` | storage/runtime/access 采样间隔、保留期和查询超时 | 部署共享 |
 | `maintenance` | GC、清理、任务保留、审计保留和批量大小 | 部署共享 |
-| `io` | `sqlite_synchronous` | 仅 SQLite，整个元数据库，重启生效 |
+| `io` | `shutdown_flush_timeout`；SQLite 另有 `sqlite_synchronous` | 部署共享，重启生效；SQLite 同步设置作用于整个元数据库 |
 
 runtime section 使用 revision 乐观并发。冲突返回当前 revision；重置恢复当前版本默认值。runtime 设置在启动时加载；保存后按各进程实际加载的修订提示重启，不进行热更新。
+
+`io.shutdown_flush_timeout` 默认 `30s`，接受 `0s` 至 `30m`。正常退出在同一期限内等待前台 HTTP 请求结束并排空已确认的写缓存；群集节点只排空自己的缓存，期间保持上传和节点租约。`0s` 跳过等待，未完成来源留待重启恢复。超时日志记录待写条目、字节、最早创建时间和仍活跃的引用，诊断查询最多另用 1 秒。容器的停止宽限应大于此期限；强杀、断电和节点本地磁盘丢失不在正常退出保证内。
 
 ## storage profile
 

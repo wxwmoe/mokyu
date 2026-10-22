@@ -74,12 +74,27 @@ mod tests {
                     .unwrap()
                     .into_config();
             assert_eq!(config.io.sqlite_synchronous, "full");
-            assert_eq!(
+            assert!(
                 crate::model::runtime_defaults(&config)
                     .iter()
-                    .any(|(name, _)| *name == "io"),
-                backend == "sqlite"
+                    .any(|(name, _)| *name == "io")
             );
+            crate::model::apply_runtime_section(
+                &mut config,
+                "io",
+                json!({"shutdown_flush_timeout":"0s"}),
+            )
+            .unwrap();
+            assert_eq!(config.io.shutdown_seconds().unwrap(), 0);
+            for value in ["30m", "1s"] {
+                config.io.shutdown_flush_timeout = value.into();
+                assert!(config.io.shutdown_seconds().is_ok());
+            }
+            for value in ["31m", "bad", "-1s"] {
+                config.io.shutdown_flush_timeout = value.into();
+                assert!(config.io.shutdown_seconds().is_err());
+            }
+            config.io.shutdown_flush_timeout = "30s".into();
             for mode in ["full", "normal", "off"] {
                 let result = crate::model::apply_runtime_section(
                     &mut config,

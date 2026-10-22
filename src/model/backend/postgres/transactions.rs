@@ -773,6 +773,7 @@ pub(super) async fn claim_task(
         input.active,
         node.map(|(state, _, _)| state.node_id),
         input.token,
+        input.draining,
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -2976,29 +2977,32 @@ pub(super) async fn cache_seal(pool: &PgPool, stream: Id, eof: bool) -> Result<b
     Ok(sealed)
 }
 
-pub(super) async fn cache_flush(pool: &PgPool) -> Result<(Uuid, bool)> {
+pub(super) async fn cache_flush(pool: &PgPool, node: Option<Uuid>) -> Result<Uuid> {
     let mut tx = pool.begin().await?;
     queries::deployment_mode_lock().fetch_one(&mut *tx).await?;
-    if let Some(id) = queries::active_cache_flush()
-        .fetch_optional(&mut *tx)
-        .await?
-    {
-        return Ok((id, true));
-    }
     let id = crate::model::REQUEST_ID
         .try_with(|id| *id)
         .unwrap_or_else(|_| Uuid::new_v4());
-    let upper = Utc::now();
-    let nodes = queries::cache_nodes().fetch_all(&mut *tx).await?;
+    let upper = queries::flush_time().fetch_one(&mut *tx).await?;
+    let nodes = if node.is_some() {
+        Vec::new()
+    } else {
+        queries::cache_nodes().fetch_all(&mut *tx).await?
+    };
     insert_task(
         &mut tx,
         id,
         "cache_flush",
         None,
-        json!({"upper_time":upper,"coordinator":!nodes.is_empty()}),
+        json!({"upper_time":upper,"coordinator":!nodes.is_empty(),"node_id":node}),
         crate::model::audit::current(),
     )
     .await?;
+    if let Some(node) = node {
+        queries::scope_upload_task(id, node, None)
+            .execute(&mut *tx)
+            .await?;
+    }
     for node in nodes {
         let child = Uuid::new_v4();
         insert_task(
@@ -3015,7 +3019,7 @@ pub(super) async fn cache_flush(pool: &PgPool) -> Result<(Uuid, bool)> {
             .await?;
     }
     tx.commit().await?;
-    Ok((id, false))
+    Ok(id)
 }
 
 pub(super) async fn cache_enqueue(pool: &PgPool) -> Result<bool> {

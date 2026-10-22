@@ -764,6 +764,8 @@ export default {
   configField_database_version: "Database version",
   configHelp_database_version: "Version read when the connection was initialized; SQLite uses the bundled engine.",
   configField_database_schema_version: "Schema version",
+  runtimeField_shutdown_flush_timeout: 'Shutdown flush timeout',
+  runtimeHelp_shutdown_flush_timeout: 'Wait up to this total duration for active requests and accepted writes during normal shutdown, from 0s to 30m — expiry preserves pending files and tasks for recovery',
   runtimeGroupIo: "Read/write settings",
   configSection_io: "Read/write settings",
   runtimeField_sqlite_synchronous: "SQLite synchronization",

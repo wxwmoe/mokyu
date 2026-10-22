@@ -91,6 +91,7 @@ impl Default for RuntimeSettings {
 #[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IoSettings {
+    pub shutdown_flush_timeout: String,
     pub sqlite_synchronous: String,
 }
 
@@ -98,16 +99,26 @@ impl Default for IoSettings {
     fn default() -> Self {
         Self {
             sqlite_synchronous: "full".into(),
+            shutdown_flush_timeout: "30s".into(),
         }
     }
 }
 
 impl IoSettings {
+    pub(crate) fn shutdown_seconds(&self) -> Result<u64> {
+        if self.shutdown_flush_timeout == "0s" {
+            return Ok(0);
+        }
+        let seconds = super::seconds(&self.shutdown_flush_timeout)?;
+        ensure!(seconds <= 1800, "shutdown_flush_timeout must be 0s..30m");
+        Ok(seconds)
+    }
     pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             matches!(self.sqlite_synchronous.as_str(), "full" | "normal" | "off"),
             "sqlite_synchronous must be full, normal or off"
         );
+        self.shutdown_seconds()?;
         Ok(())
     }
 }
