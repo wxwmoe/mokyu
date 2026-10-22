@@ -362,6 +362,31 @@ mod tests {
     }
 
     #[test]
+    fn write_memory_shares_the_existing_memory_budget() {
+        let file: FileConfig = toml::from_str("[database]\ntype='sqlite'\n").unwrap();
+        let mut config = file.into_config();
+        assert_eq!(config.budget().unwrap().write_memory_bytes, 0);
+        config.instance.write_memory_size = Some("4MiB".into());
+        config.instance.response_cache_size = Some("4MiB".into());
+        let budget = config.budget().unwrap();
+        assert_eq!(budget.write_memory_bytes, 4 * 1024 * 1024);
+        assert!(
+            budget.data_slots as u64 * budget.slot_bytes
+                + budget.memory_bytes / 4
+                + u64::from(budget.pack_memory_units) * 2 * 1024 * 1024
+                + budget.response_cache_bytes
+                + budget.write_memory_bytes
+                <= budget.memory_bytes
+        );
+        for size in ["1B", "3KiB", "18446744073709551615B", "bad"] {
+            config.instance.write_memory_size = Some(size.into());
+            assert!(config.budget().is_err());
+        }
+        config.instance.write_memory_size = Some("0B".into());
+        assert_eq!(config.budget().unwrap().write_memory_bytes, 0);
+    }
+
+    #[test]
     fn compatible_backends_exclude_cluster_settings() {
         let file: FileConfig =
             toml::from_str("[database]\nhost='database'\nname='mokyu'\nuser='mokyu'").unwrap();

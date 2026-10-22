@@ -139,7 +139,24 @@ pub(crate) struct RawReader {
 }
 
 impl Storage {
-    pub(crate) async fn sync_raw(&self, source: &RawSource, verify: bool) -> Result<()> {
+    pub(crate) async fn sync_raw(self: &Arc<Self>, source: &RawSource, verify: bool) -> Result<()> {
+        if let Some(data) = self.raw_memory(source.location_id) {
+            let mut policy = self.local_cache(Some(source.storage_id))?;
+            policy.upload_capacity = None;
+            let charge =
+                self.disk
+                    .claim_upload_with_limit(source.size as u64, source.storage_id, None)?;
+            let mut file =
+                super::raw_request::File::create(self, source.location_id, policy).await?;
+            file.append(self, &data).await?;
+            let (_, published) = file
+                .publish(self.clone(), source.id, source.location_id, charge, false)
+                .await?;
+            ensure!(
+                published,
+                "write memory could not be persisted to the file cache"
+            );
+        }
         let target = self.store_backend(source.storage_id)?;
         if !source.pending_upload && !target.is_local {
             return Ok(());
@@ -168,6 +185,7 @@ impl Storage {
                 sync_directory(root.parent().context("raw root has no parent")?).await?;
             }
             RawFile::Remote(_) => {}
+            RawFile::Memory { .. } => anyhow::bail!("write memory is not durable"),
         }
         Ok(())
     }
@@ -317,7 +335,10 @@ impl Storage {
         let buffered = cache
             && !self.cluster_mode
             && (target.is_local || target.profile.upload_cache)
-            && target.profile.write_durability.as_deref() == Some("buffered");
+            && matches!(
+                target.profile.write_durability.as_deref(),
+                Some("buffered" | "volatile")
+            );
         if buffered {
             self.buffered_writes.store(true, Ordering::Release);
             self.raw_store.buffer(source).await?;
@@ -325,7 +346,8 @@ impl Storage {
         if cache && !target.is_local && target.profile.upload_cache {
             remote_size(declared.unwrap_or(0).max(0) as u64)?;
             return Ok(RawWriter::Pending(
-                super::raw_upload::Writer::new(self, storage, source, location, buffered).await?,
+                super::raw_upload::Writer::new(self, storage, source, location, buffered, declared)
+                    .await?,
             ));
         }
         let permit = target.writes.acquire().await?;
@@ -1121,6 +1143,10 @@ impl RawWriter<'_> {
 
 pub(crate) enum RawFile {
     Local(tokio::fs::File),
+    Memory {
+        data: Bytes,
+        offset: usize,
+    },
     Cached {
         file: tokio::fs::File,
         _pin: CachePin,
@@ -1142,7 +1168,7 @@ pub(crate) struct RemoteReader {
 
 impl RawFile {
     pub(crate) fn account_read(&self, storage: &Storage, size: u64) {
-        let counter = if matches!(self, Self::Cached { .. }) {
+        let counter = if matches!(self, Self::Cached { .. } | Self::Memory { .. }) {
             &storage.cache_hit_bytes
         } else {
             &storage.backend_read_bytes
@@ -1152,6 +1178,14 @@ impl RawFile {
     pub async fn seek(&mut self, position: std::io::SeekFrom) -> Result<u64> {
         match self {
             Self::Local(file) | Self::Cached { file, .. } => Ok(file.seek(position).await?),
+            Self::Memory { data, offset } => {
+                let std::io::SeekFrom::Start(position) = position else {
+                    anyhow::bail!("raw reads require an absolute offset");
+                };
+                ensure!(position <= data.len() as u64, IntegrityError::Length);
+                *offset = position as usize;
+                Ok(position)
+            }
             Self::Remote(reader) => {
                 let std::io::SeekFrom::Start(offset) = position else {
                     anyhow::bail!("raw reads require an absolute offset");
@@ -1171,6 +1205,12 @@ impl RawFile {
     pub async fn read(&mut self, output: &mut [u8]) -> Result<usize> {
         let reader = match self {
             Self::Local(file) | Self::Cached { file, .. } => return Ok(file.read(output).await?),
+            Self::Memory { data, offset } => {
+                let count = output.len().min(data.len() - *offset);
+                output[..count].copy_from_slice(&data[*offset..*offset + count]);
+                *offset += count;
+                return Ok(count);
+            }
             Self::Remote(reader) => reader,
         };
         if output.is_empty() || reader.offset == reader.size {

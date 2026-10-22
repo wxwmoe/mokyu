@@ -8,6 +8,7 @@ pub(crate) mod cache;
 mod diagnostics;
 pub(crate) mod local;
 pub(crate) mod location;
+mod memory;
 pub(crate) mod model;
 mod multipart;
 pub(crate) mod permits;
@@ -57,6 +58,8 @@ pub(crate) const STAGING_PREFIX: &str = "__mokyu/multipart/";
 const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 
 pub struct Storage {
+    pub(crate) write_memory: memory::Pool,
+    pub(crate) boot_id: Uuid,
     pub(crate) buffered_writes: std::sync::atomic::AtomicBool,
     pub(crate) wake_sync: tokio::sync::Notify,
     pub access: Arc<crate::status::access::Access>,
@@ -408,12 +411,14 @@ impl Storage {
             cluster,
             profile_store,
             wake_sync: Default::default(),
+            write_memory: memory::Pool::new(budget.write_memory_bytes),
+            boot_id: Uuid::new_v4(),
             buffered_writes: (!raw_store
                 .buffered(Id::default(), None, None)
                 .await?
                 .is_empty()
                 || !physical
-                    .buffered_chunks(Id::default(), None, None, None)
+                    .buffered_chunks(Id::default(), None, None, None, false)
                     .await?
                     .is_empty())
             .into(),
@@ -488,6 +493,8 @@ impl Storage {
             diagnostics: Arc::default(),
         };
         if !cluster_mode {
+            s.raw_store.recover_memory(s.boot_id).await?;
+            s.physical.recover_memory(s.boot_id).await?;
             s.restore_cache().await?;
         }
         Ok(s)
@@ -978,6 +985,7 @@ impl Storage {
                 self.upload_pins.lock().unwrap().insert(
                     key,
                     UploadPin {
+                        memory: None,
                         _pin: Some(CachePin(pin)),
                         _charge: Some(self.disk.restore_upload(storage_id, expected as u64)),
                         size: expected as u64,
@@ -1205,6 +1213,23 @@ impl Storage {
         }
         Ok(())
     }
+    pub(crate) fn stage_memory(&self, data: Bytes) -> Option<UploadPin> {
+        let size = data.len() as u64;
+        let data = self.write_memory.retain(data)?;
+        Some(UploadPin {
+            memory: Some(data),
+            _pin: None,
+            _charge: None,
+            size,
+            compressed: false,
+            remote: false,
+            staging_storage_id: None,
+            staging_object_key: String::new(),
+        })
+    }
+    pub(crate) fn chunk_memory(&self, id: Uuid) -> Option<Bytes> {
+        self.upload_pins.lock().unwrap().get(&id)?.memory.clone()
+    }
     pub async fn stage_upload(
         self: &Arc<Self>,
         c: &Chunk,
@@ -1228,7 +1253,7 @@ impl Storage {
         })
         .await?
     }
-    async fn stage_upload_owned(
+    pub(super) async fn stage_upload_owned(
         &self,
         storage_id: Uuid,
         id: Uuid,
@@ -1346,6 +1371,7 @@ impl Storage {
         pin.fetch_add(1, Ordering::Relaxed);
         drop(fifo);
         let pin = UploadPin {
+            memory: None,
             _pin: Some(CachePin(pin)),
             _charge: Some(charge),
             size,
@@ -1506,7 +1532,7 @@ impl Storage {
         crate::faults::point("storage-put-permitted").await;
         let space = self.local_space(&target, size as u64)?;
         let backend = if buffered {
-            self.physical.buffer_chunk(c).await?;
+            self.physical.buffer_chunk(c, None).await?;
             self.buffered_writes.store(true, Ordering::Release);
             target
                 .buffered_backend
@@ -1535,6 +1561,17 @@ impl Storage {
         Ok(())
     }
     async fn cached_file(&self, c: &Chunk, id: Uuid) -> Result<Option<Bytes>> {
+        if let Some(data) = self.chunk_memory(id) {
+            ensure!(
+                data.len() == c.raw_size as usize,
+                crate::content::codec::IntegrityError::Length
+            );
+            // RAM retains the verified immutable upload bytes, like a decoded pack cache.
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.cache_hit_bytes
+                .fetch_add(data.len() as u64, Ordering::Relaxed);
+            return Ok(Some(data));
+        }
         if !self.local_cache(c.storage_id)?.enabled
             && !self.upload_pins.lock().unwrap().contains_key(&id)
         {

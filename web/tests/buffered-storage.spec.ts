@@ -63,3 +63,71 @@ test('file durability stays in the draft and saves only for the selected storage
   expect(await (await request.get('/api/v1/runtime-settings/io')).json()).toEqual(database)
   expect(errors).toEqual([])
 })
+
+test('volatile confirmation is a saved S3 cache choice with an explicit RAM warning', async ({ page, request }, info) => {
+  test.setTimeout(120_000)
+  const password = readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8').trim()
+  const backend = JSON.parse(readFileSync(process.env.MOKYU_TEST_BACKEND!, 'utf8'))
+  const origin = process.env.MOKYU_TEST_WEB!
+  const auth = await request.post('/api/v1/auth/login', { headers: { Origin: origin }, data: { username: 'tester', password } })
+  expect(auth.status()).toBe(200)
+  const headers = { Origin: origin, 'X-CSRF-Token': (await auth.json()).csrf_token }
+  const name = 'memory-ui-' + randomUUID().slice(0, 8)
+  const created = await request.post('/api/v1/storages', { headers, data: {
+    name, type: 's3', endpoint: backend.endpoint, bucket: backend.bucket, region: backend.region,
+    prefix: [backend.prefix, name].filter(Boolean).join('/'), access_key: backend.access_key,
+    secret_key: backend.secret_key, initialize: true,
+  } })
+  expect(created.status()).toBe(201)
+  const url = '/api/v1/storages/' + name + '/profile'
+  const original = await (await request.get(url)).json()
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
+  await page.goto('/login')
+  await page.getByRole('textbox', { name: en.username, exact: true }).fill('tester')
+  await page.getByRole('textbox', { name: en.password, exact: true }).fill(password)
+  await page.getByRole('button', { name: en.signIn, exact: true }).click()
+  await expect(page).toHaveURL(/\/overview$/)
+  for (const [locale, text] of [['en', en], ['zh-CN', zh], ['ja', ja]] as const) {
+    for (const theme of ['light', 'dark']) {
+      await request.put('/api/v1/account', { headers, data: { display_name: '', locale, theme, avatar_email: '', avatar_enabled: false } })
+      await page.goto('/storages?edit=' + name)
+      const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
+      const select = editor.getByRole('combobox', { name: text.profile_write_durability, exact: true })
+      await select.focus()
+      await select.press('Space')
+      await page.getByRole('option', { name: text.storeDurability_volatile, exact: true }).focus()
+      await page.keyboard.press('Enter')
+      await expect(editor.locator('#storage-durability-hint')).toHaveText(text.storeMemoryHint)
+      expect((await (await request.get(url)).json()).write_durability).toBe('durable')
+      for (const width of [1440, 768, 390, 320]) {
+        await page.setViewportSize({ width, height: 900 })
+        await select.scrollIntoViewIfNeeded()
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+      }
+      await editor.screenshot({ path: info.outputPath('memory-' + locale + '-' + theme + '-320.png') })
+      await editor.getByRole('button', { name: text.cancel, exact: true }).click()
+      expect((await (await request.get(url)).json()).revision).toBe(original.revision)
+    }
+  }
+  await page.goto('/storages?edit=' + name)
+  const editor = page.getByRole('dialog', { name: ja.editStore, exact: true })
+  const select = editor.getByRole('combobox', { name: ja.profile_write_durability, exact: true })
+  await select.click()
+  await page.getByRole('option', { name: ja.storeDurability_volatile, exact: true }).click()
+  const saved = page.waitForResponse(reply => reply.url().endsWith('/api/v1/storages/' + name) && reply.request().method() === 'PUT')
+  await editor.getByRole('button', { name: ja.save, exact: true }).click()
+  expect((await saved).status()).toBe(200)
+  expect((await (await request.get(url)).json()).write_durability).toBe('volatile')
+  await page.goto('/storages?edit=' + name)
+  await editor.getByText(ja.storeGroupCache, { exact: true }).click()
+  await editor.getByRole('switch', { name: ja.profile_upload_cache, exact: true }).click()
+  await expect(select).toContainText(ja.storeDurability_durable)
+  await select.click()
+  await expect(page.getByRole('option', { name: ja.storeDurability_volatile, exact: true })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await editor.getByRole('button', { name: ja.cancel, exact: true }).click()
+  expect((await (await request.get(url)).json()).write_durability).toBe('volatile')
+  expect(errors).toEqual([])
+})

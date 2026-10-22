@@ -359,6 +359,67 @@ async fn source_recovery_contract() -> Result<()> {
             .is_err()
     );
     assert!(stores.chunks.finish_repair(&repair, 0).await.is_err());
+    let memory_stream = stream(&stores, bucket, "memory").await?;
+    let mut memory_input = input(storage, memory_stream);
+    memory_input.hash[0] = 41;
+    let (chunk, _) = stores.chunks.allocate(memory_input.clone()).await?;
+    assert!(
+        stores
+            .upload_cache
+            .stage(crate::model::cache::CacheStage {
+                chunk: &chunk,
+                stream: memory_stream,
+                offset: 0,
+                new: true,
+                buffered: true,
+                boot_id: Some(Uuid::new_v4()),
+                size: 32,
+                storage,
+                key: &format!("{}.raw", chunk.location_id),
+                timeout: 60,
+                encoding: None,
+                node: None,
+            })
+            .await?
+    );
+    stores
+        .streams
+        .finish(memory_stream, 32, "memory", json!({}))
+        .await?;
+    assert!(
+        stores
+            .publish
+            .publish(memory_stream, None, None, None)
+            .await?
+    );
+    stores.physical.recover_memory(Uuid::new_v4()).await?;
+    stores.maintenance.recover(false).await?;
+    let lost = stores
+        .physical
+        .source_snapshot(&SourceScope {
+            storage_id: storage,
+            source: SourceType::Chunk,
+            id: chunk.encoding_id.to_string(),
+        })
+        .await?;
+    assert_eq!(
+        lost.state, "uploading",
+        "startup cleanup must preserve lost RAM for repair"
+    );
+    assert_eq!(lost.quarantine_code.as_deref(), Some("remote_missing"));
+    assert!(stores.physical.source(chunk.id, false).await.is_err());
+    memory_input.stream = stream(&stores, bucket, "memory-repair").await?;
+    let RepairAllocation::Candidate(mut repair) =
+        stores.chunks.prepare_repair(memory_input, None).await?
+    else {
+        panic!("lost RAM must require verified repair");
+    };
+    metadata(&stores, &mut repair).await?;
+    let repaired = stores.chunks.finish_repair(&repair, 0).await?;
+    assert_eq!(repaired.id, chunk.id);
+    assert_ne!(repaired.encoding_id, chunk.encoding_id);
+    assert!(stores.physical.source(chunk.id, false).await.is_ok());
+
     if let Some(cluster) = stores.cluster.as_ref() {
         use sqlx::Connection;
         let options = sqlx::postgres::PgConnectOptions::new()

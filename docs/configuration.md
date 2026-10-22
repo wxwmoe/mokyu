@@ -69,6 +69,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 | `instance.cache_size` | 自动 | 本地 chunks/raw 文件缓存共用字节上限 |
 | `instance.cache_entries` | 自动 | 本地缓存索引条目上限 |
 | `instance.response_cache_size` | `0B` | 完整公共响应的内存额度；示例显式设为 `64MiB`，省略或 `0B` 关闭；启用至少 `4MiB`，需要重启 |
+| `instance.write_memory_size` | `0B` | 单容器 S3 volatile 写缓存的共享内存额度；示例 `64MiB`，最少 `4KiB`，按 `4KiB` 向下取整，需重启 |
 | `instance.upload_cache_size` | 自动 | 本地待上传暂存上限 |
 | `instance.thumbnail_cache_size` | `256MiB` | 缩略图缓存上限 |
 | `instance.request_connections` | 自动 | 本节点 HTTP/S3 请求连接池上限 |
@@ -85,7 +86,9 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 
 公共响应缓存显式启用后，从原有 pack 内存与工作区预算中划出，不额外增加总预算；control/worker 不启用正文缓存。额度不能超过进程内存的四分之一，并保留流式读写及默认 pack 所需空间。启用或增大前需确认剩余 pack 额度可容纳现有最大 pack 及各 storage profile；历史 pack 可能大于当前创建策略，因此默认不自动缩减它们的读取预算。每个正文的原始与编码长度均不超过总额度的 1/16 或 8 MiB，构建峰值最多占总额度的四分之一；索引、历史与构建元数据预留 1 MiB。淘汰后仍被发送响应引用的正文继续占额度，额度不足时不等待缓存空间，退回正常读取。
 
-示例配置配合 Compose 的 Mokyu 容器 `1GiB` 内存限制，显式设置 `stream_memory_budget = "256MiB"` 和 `response_cache_size = "64MiB"`；PostgreSQL 容器内存另计。省略响应缓存字段的配置仍关闭正文缓存。默认压缩参数下，流式预算可提供 5 个数据槽位，实际预留约 `216MiB`，runtime/OS 预留 `256MiB`，pack 读取与工作区各自动分得约 `244MiB`。S3 storage 的默认 `pack_max_size = "32MiB"` 每个 pack 需约 `140MiB` 额度；local storage 不创建 pack。pack 大小在 storage profile 中配置，节点 pack 内存无需单独填写；更改容器限制、压缩参数或 pack 大小时应一起核对这些预算。
+示例配置配合 Compose 的 Mokyu 容器 `1GiB` 内存限制，显式设置 `stream_memory_budget = "256MiB"`、`response_cache_size = "64MiB"` 和 `write_memory_size = "64MiB"`；PostgreSQL 容器内存另计。省略响应缓存或写入内存字段的配置仍关闭对应内存用途。默认压缩参数下，流式预算可提供 5 个数据槽位，实际预留约 `216MiB`，runtime/OS 预留 `256MiB`，pack 读取与工作区各自动分得约 `212MiB`。S3 storage 的默认 `pack_max_size = "32MiB"` 每个 pack 需约 `140MiB` 额度；local storage 不创建 pack。pack 大小在 storage profile 中配置，节点 pack 内存无需单独填写；更改容器限制、压缩参数或 pack 大小时应一起核对这些预算。
+
+写入内存从同一总预算划出，最多占进程内存四分之一，并保留 stream、响应缓存及默认 pack 的额度。raw 在已知长度且能一次领取完整额度时进入 RAM，未知或过大的长度沿用有界文件暂存；chunks 按完整区块领取。待上传唯一副本不参与淘汰，最后一个读取者释放正文后才返还内存，空对象至少计 `4KiB`。local、群集和 durable/buffered 不使用 RAM 提前确认；写内存为 `0B` 不影响既有流式工作区。
 
 共享 staging 设置只对 PostgreSQL 提供；MySQL、SQLite 不接受这两个设置。PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；仅未闭合的 CDC Multipart 尾块在保留前缀 `__mokyu/multipart/fragment/` 共享暂存；raw Multipart、raw/chunks 写缓存使用所属节点的 `instance.data_path`，最终载荷直接写目标 S3。单容器模式可使用 `/data/storage` 的 local storage。
 
@@ -115,7 +118,7 @@ runtime section 使用 revision 乐观并发。冲突返回当前 revision；重
 profile 是类型化字段，不是任意 JSON。字段包括：
 
 - `deduplication_enabled` 默认 false，仅控制 raw 的整文件去重；chunks 固定启用区块去重。更改仅影响新写入；关闭不会拆开已有共享文件；
-- `write_durability` 仅单容器可选，默认 `durable`；`buffered` 允许 local chunks/raw 和 S3 chunks/raw 写缓存完整写入文件后响应，再由后台同步文件及目录。进程重启会完整核验未同步的文件，断电或系统崩溃可能丢失最近已确认写入；Multipart 分片、复制与迁移仍采用持久确认。没有写缓存的 S3 仍等待最终上传，群集不提供此字段；
+- `write_durability` 仅单容器可选，默认 `durable`；`buffered` 允许 local chunks/raw 和 S3 chunks/raw 写缓存完整写入文件后响应，再由后台同步文件及目录；`volatile` 仅允许开启写缓存的 S3，接收完整内容到有界 RAM 后可响应，额度为零或不足时回退到 buffered 文件。buffered 在断电或系统崩溃时、volatile 在进程结束前尚未排空时，都可能丢失最近已确认的数据。Multipart 分片、复制、迁移和显式排空仍要求持久来源；无写缓存的 S3 请求及缓存满额 fallback 等待最终 S3 完成。重启核验未同步文件并隔离丢失的 RAM 来源，不返回旧对象代替已确认的新版本；这与 SQLite 的数据库同步策略分别生效。
 - `write_processing` 默认 `inline`，开启 CDC 或 raw 去重时可选 `background`。后台 CDC 的普通 PUT 先保存可读 raw，再分块、查重和编码，新块直接生成最终区块或区块包；Multipart 继续按到达数据流式分块。S3 开启写缓存时确认本地文件与对象映射后响应，后台直接从缓存转换，不先上传完整 raw；没有写缓存时先等待完整原始文件可靠保存。本地 storage 不使用磁盘写缓存。raw 的 inline 去重先查重再上传，background 先保存独立文件再查重；已有工作保留接受时的设置和密钥，重启继续，切换表示保留对象元数据并等待已有读者释放保护；
 - `cdc_enabled` 默认 true；local 和 S3 均可关闭。关闭时必须清除 block key，同时禁用压缩、pack 和 pack Range；Web 在草稿中联动这些值，保存后生效，重新开启不会恢复旧 key。已有对象保持可读；
 

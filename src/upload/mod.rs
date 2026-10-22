@@ -387,9 +387,11 @@ impl App {
                 offset += n as i64;
             }
         }
-        let buffered = profile.write_durability.as_deref() == Some("buffered")
-            && (self.storage.is_local(storage)?
-                || (profile.upload_cache && !self.upload_cache.bypass(stream).await?));
+        let buffered = matches!(
+            profile.write_durability.as_deref(),
+            Some("buffered" | "volatile")
+        ) && (self.storage.is_local(storage)?
+            || (profile.upload_cache && !self.upload_cache.bypass(stream).await?));
         if upload.is_some() || !buffered {
             self.sync_stream(stream).await?;
         }

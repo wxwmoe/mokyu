@@ -56,7 +56,7 @@ class Fixture:
                                      json={'username': 'tester', 'password': self.password}, timeout=30)
         response.raise_for_status()
         self.headers = {'Origin': self.web, 'X-CSRF-Token': response.json()['csrf_token']}
-        client_config = Config(s3={'addressing_style': 'path'}, retries={'max_attempts': 0},
+        client_config = Config(signature_version='s3v4', s3={'addressing_style': 'path'}, retries={'max_attempts': 0},
                                request_checksum_calculation='when_required', response_checksum_validation='when_required')
         self.backend = None
         if file := os.environ.get('MOKYU_TEST_BACKEND'):

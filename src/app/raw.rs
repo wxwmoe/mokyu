@@ -77,6 +77,7 @@ impl App {
                 revision,
                 deduplicate,
                 background,
+                boot,
             } => {
                 let _coord = self.coord.lock().await;
                 self.raw
@@ -88,6 +89,7 @@ impl App {
                         revision,
                         deduplicate,
                         background,
+                        boot,
                         self.node
                             .get()
                             .map(|node| (node, self.role.as_str(), &self.secrets.credential_key)),

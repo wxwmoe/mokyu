@@ -58,6 +58,13 @@ pub(crate) struct SourceSnapshot {
     pub manifest_digest: Option<String>,
 }
 impl SourceSnapshot {
+    pub fn repairable(&self) -> bool {
+        self.quarantine_code.is_some()
+            && (self.state == "ready"
+                || (self.scope.source == SourceType::Chunk
+                    && self.state == "uploading"
+                    && self.quarantine_code.as_deref() == Some("remote_missing")))
+    }
     pub fn fingerprint(&self) -> Result<String> {
         Ok(blake3::hash(&serde_json::to_vec(self)?)
             .to_hex()

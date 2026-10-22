@@ -25,6 +25,7 @@ pub struct Budget {
     pub cache_entries: usize,
     pub pack_memory_units: u32,
     pub response_cache_bytes: u64,
+    pub write_memory_bytes: u64,
 }
 
 #[derive(Clone, Default)]
@@ -221,6 +222,9 @@ impl Config {
         if let Some(v) = &c.instance.upload_cache_size {
             cache_bytes(v)?;
         }
+        if let Some(v) = &c.instance.write_memory_size {
+            cache_bytes(v)?;
+        }
         if let Some(v) = &c.instance.response_cache_size {
             cache_bytes(v)?;
         }
@@ -369,6 +373,25 @@ impl Config {
                     * (maximum / crate::content::codec::MIN as u64 + 1);
             (payload * 4 + workspace).div_ceil(1024 * 1024) * 1024 * 1024
         };
+        let write_memory_bytes = self
+            .instance
+            .write_memory_size
+            .as_deref()
+            .map(cache_bytes)
+            .transpose()?
+            .unwrap_or(0);
+        ensure!(
+            write_memory_bytes == 0 || write_memory_bytes >= 4096,
+            "write_memory_size must be 0B or at least 4KiB"
+        );
+        ensure!(
+            write_memory_bytes <= remaining.saturating_sub(pack_required.saturating_mul(2))
+                && write_memory_bytes <= memory / 4
+                && write_memory_bytes / 4096 <= u64::from(u32::MAX),
+            "write_memory_size must fit alongside stream, response cache and pack budgets"
+        );
+        let write_memory_bytes = write_memory_bytes / 4096 * 4096;
+        let remaining = remaining - write_memory_bytes;
         let cache_maximum = remaining
             .saturating_sub(pack_required.saturating_mul(2))
             .min(memory / 4)
@@ -475,6 +498,7 @@ impl Config {
             cache_entries: entries,
             pack_memory_units,
             response_cache_bytes,
+            write_memory_bytes,
         })
     }
 }

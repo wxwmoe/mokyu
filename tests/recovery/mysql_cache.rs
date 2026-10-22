@@ -67,6 +67,7 @@ pub(super) async fn stage(
         backend
             .stage(CacheStage {
                 buffered: false,
+                boot_id: None,
                 encoding: None,
                 node: None,
                 chunk,
@@ -499,6 +500,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
         !backend
             .stage(CacheStage {
                 buffered: false,
+                boot_id: None,
                 encoding: None,
                 node: None,
                 chunk: &third,
@@ -516,6 +518,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
         backend
             .stage(CacheStage {
                 buffered: false,
+                boot_id: None,
                 encoding: None,
                 node: None,
                 chunk: &third,
@@ -534,6 +537,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
         backend
             .stage(CacheStage {
                 buffered: false,
+                boot_id: None,
                 encoding: None,
                 node: None,
                 chunk: &third,

@@ -13,6 +13,7 @@ pub(crate) enum Written {
         revision: i64,
         deduplicate: bool,
         background: bool,
+        boot: Option<Uuid>,
     },
     Reused,
 }
@@ -23,6 +24,7 @@ pub(crate) struct Writer {
     location: Uuid,
     target: Uuid,
     file: Option<super::raw_request::File>,
+    memory: Option<super::memory::Buffer>,
     charge: Option<UploadCharge>,
     policy: super::CachePolicy,
     size: u64,
@@ -42,19 +44,36 @@ impl Writer {
         source: Id,
         location: Uuid,
         buffered: bool,
+        declared: Option<i64>,
     ) -> Result<Self> {
         let profile = storage.profile(target)?;
         let policy = storage.local_cache(Some(target))?;
-        let file = super::raw_request::File::create(storage, location, policy).await?;
+        let memory = (!storage.cluster_mode
+            && profile.write_durability.as_deref() == Some("volatile"))
+        .then(|| {
+            declared
+                .and_then(|size| usize::try_from(size).ok())
+                .and_then(|size| storage.write_memory.buffer(size))
+        })
+        .flatten();
+        let file = if memory.is_none() {
+            Some(super::raw_request::File::create(storage, location, policy).await?)
+        } else {
+            None
+        };
         let reject_overflow = profile.upload_cache_overflow == "reject";
-        let charge = match storage
-            .disk
-            .claim_upload_with_limit(0, target, policy.upload_capacity)
-        {
-            Ok(charge) => Some(charge),
-            Err(_) => {
-                crate::upload::cache::overflow(reject_overflow)?;
-                None
+        let charge = if memory.is_some() {
+            None
+        } else {
+            match storage
+                .disk
+                .claim_upload_with_limit(0, target, policy.upload_capacity)
+            {
+                Ok(charge) => Some(charge),
+                Err(_) => {
+                    crate::upload::cache::overflow(reject_overflow)?;
+                    None
+                }
             }
         };
         Ok(Self {
@@ -62,7 +81,8 @@ impl Writer {
             source,
             location,
             target,
-            file: Some(file),
+            file,
+            memory,
             charge,
             policy,
             size: 0,
@@ -90,6 +110,23 @@ impl Writer {
             .iter()
             .try_fold(0u64, |total, range| total.checked_add(range.length as u64))
             .context("assembly size overflow")?;
+        // Multipart checkpoints always own a durable file, even under volatile PUT policy.
+        if self.memory.take().is_some() {
+            self.file = Some(
+                super::raw_request::File::create(&self.storage, self.location, self.policy).await?,
+            );
+            self.charge = match self.storage.disk.claim_upload_with_limit(
+                0,
+                self.target,
+                self.policy.upload_capacity,
+            ) {
+                Ok(charge) => Some(charge),
+                Err(_) => {
+                    crate::upload::cache::overflow(self.reject_overflow)?;
+                    None
+                }
+            };
+        }
         let (file, prepared) = self
             .file
             .take()
@@ -130,6 +167,11 @@ impl Writer {
             .checked_add(data.len() as u64)
             .context("raw receive length overflow")?;
         super::raw::remote_size(size)?;
+        if let Some(memory) = &mut self.memory {
+            memory.append(data)?;
+            self.size = size;
+            return Ok(());
+        }
         if !self.prepared {
             if let Some(charge) = self.charge.as_mut() {
                 match self.storage.disk.claim_upload_with_limit(
@@ -159,6 +201,32 @@ impl Writer {
 
     pub async fn finish(mut self, stream: Id, expected: u64, digest: &[u8]) -> Result<Written> {
         ensure!(self.size == expected, "raw receive length mismatch");
+        if let Some(memory) = self.memory.take() {
+            self.storage.raw_upload_pins.lock().unwrap().insert(
+                self.location,
+                (
+                    self.source,
+                    UploadPin {
+                        memory: Some(memory.finish()),
+                        _pin: None,
+                        _charge: None,
+                        size: expected,
+                        compressed: false,
+                        remote: false,
+                        staging_storage_id: None,
+                        staging_object_key: self.location.to_string(),
+                    },
+                ),
+            );
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-cache-memory").await;
+            return Ok(Written::Cached {
+                revision: self.revision,
+                deduplicate: self.deduplicate,
+                background: self.background,
+                boot: Some(self.storage.boot_id),
+            });
+        }
         if let Some(charge) = self.charge.take() {
             let (file, published) = self
                 .file
@@ -185,6 +253,7 @@ impl Writer {
                     revision: self.revision,
                     deduplicate: self.deduplicate,
                     background: self.background,
+                    boot: None,
                 });
             }
             crate::upload::cache::overflow(self.reject_overflow)?;
@@ -275,6 +344,16 @@ pub(crate) async fn hash_file(
 }
 
 impl Storage {
+    pub(crate) fn raw_memory(&self, location: Uuid) -> Option<bytes::Bytes> {
+        self.raw_upload_pins
+            .lock()
+            .unwrap()
+            .get(&location)?
+            .1
+            .memory
+            .clone()
+    }
+
     pub(super) async fn restore_raw_uploads(&self) -> Result<()> {
         let mut after = Id::default();
         loop {
@@ -308,6 +387,7 @@ impl Storage {
                     (
                         source.id,
                         UploadPin {
+                            memory: None,
                             _pin: Some(CachePin(pins)),
                             _charge: Some(self.disk.restore_upload(source.storage_id, size)),
                             size,
@@ -374,6 +454,7 @@ impl Storage {
                     (
                         source,
                         UploadPin {
+                            memory: None,
                             _pin: Some(CachePin(pins)),
                             _charge: None,
                             size,
@@ -490,6 +571,19 @@ impl Storage {
         source: &RawSource,
         verify: bool,
     ) -> Result<super::raw::RawFile> {
+        if let Some(data) = self.raw_memory(source.location_id) {
+            ensure!(
+                data.len() as i64 == source.size,
+                crate::content::codec::IntegrityError::Length
+            );
+            let mut file = super::raw::RawFile::Memory { data, offset: 0 };
+            if verify {
+                let _cpu = self.cpu.acquire().await?;
+                super::raw::verify_file(&mut file, source, None).await?;
+                file.rewind().await?;
+            }
+            return Ok(file);
+        }
         let pin = {
             let mut fifo = self.fifo.lock().await;
             let entry = fifo

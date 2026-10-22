@@ -100,6 +100,7 @@ impl Drop for UploadCharge {
     }
 }
 pub(crate) struct UploadPin {
+    pub(crate) memory: Option<Bytes>,
     pub(crate) _pin: Option<CachePin>,
     pub(crate) _charge: Option<UploadCharge>,
     pub size: u64,

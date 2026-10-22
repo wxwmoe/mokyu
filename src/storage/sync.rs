@@ -4,8 +4,34 @@ use anyhow::{Context, Result, ensure};
 use std::sync::atomic::Ordering;
 
 impl Storage {
-    pub(crate) async fn sync_chunk(&self, chunk: &Chunk, verify: bool) -> Result<()> {
+    pub(crate) async fn sync_chunk(
+        self: &std::sync::Arc<Self>,
+        chunk: &Chunk,
+        verify: bool,
+    ) -> Result<bool> {
         let target = self.store_backend(chunk.storage_id.context("chunk has no storage")?)?;
+        if let Some(data) = self.chunk_memory(chunk.location_id) {
+            let mut policy = self.local_cache(chunk.storage_id)?;
+            policy.upload_capacity = None;
+            let storage = self.clone();
+            let storage_id = chunk.storage_id.unwrap();
+            let location = chunk.location_id;
+            // Publication and pin transfer must finish even if the stronger request is cancelled.
+            let persisted = tokio::spawn(async move {
+                let Some(pin) = storage
+                    .stage_upload_owned(storage_id, location, data, false, policy, false)
+                    .await?
+                else {
+                    return Ok::<_, anyhow::Error>(false);
+                };
+                storage.hold_upload(location, pin);
+                Ok(true)
+            })
+            .await??;
+            if !persisted {
+                return Ok(false);
+            }
+        }
         let pending = self.physical.pending_source(chunk.id).await?;
         let mut cache_pin = None;
         let (root, path, cached) = if let Some((_, key)) = pending {
@@ -27,7 +53,7 @@ impl Storage {
         } else if !target.is_local {
             // Final publication can replace the cached source while sync is waiting.
             self.physical.source(chunk.id, false).await?;
-            return Ok(());
+            return Ok(true);
         } else {
             let root = target
                 .raw_root
@@ -70,6 +96,6 @@ impl Storage {
         sync_directory(&root).await?;
         sync_directory(root.parent().context("local root has no parent")?).await?;
         drop(cache_pin);
-        Ok(())
+        Ok(true)
     }
 }

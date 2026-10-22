@@ -1812,7 +1812,9 @@ pub(super) async fn cache_stage(pool: &MySqlPool, input: CacheStage<'_>) -> Resu
             input.new && input.node.is_none(),
             "buffered chunks require single mode"
         );
-        queries::buffer_chunk(input.chunk).execute(&mut *tx).await?;
+        queries::buffer_chunk(input.chunk, input.boot_id)
+            .execute(&mut *tx)
+            .await?;
     }
     queries::ready_cached_chunk(input.chunk.id)
         .execute(&mut *tx)
@@ -6725,7 +6727,8 @@ async fn repair_sources(
             };
             let snapshot = queries::source_snapshot(db, &scope, true).await?;
             ensure!(
-                snapshot.state == "ready" && snapshot.quarantine_code.is_some(),
+                // Only lost RAM placeholders are included before encoding is ready.
+                snapshot.repairable(),
                 crate::model::Error::SourceUnavailable
             );
             sources.push(snapshot);
@@ -7033,7 +7036,7 @@ pub(super) async fn finish_raw(
     source: Id,
     size: i64,
     digest: &[u8],
-    cached: Option<(i64, bool, bool)>,
+    cached: Option<(i64, bool, bool, Option<Uuid>)>,
 ) -> Result<()> {
     ensure!(
         size >= 0 && digest.len() == 16,
@@ -7054,7 +7057,7 @@ pub(super) async fn finish_raw(
         crate::model::Error::OperationAborted
     );
     ensure!(
-        queries::raw_finish(stream, source, size, digest)
+        queries::raw_finish(stream, source, size, digest, cached.is_none())
             .execute(&mut *tx)
             .await?
             .rows_affected()
@@ -7064,9 +7067,9 @@ pub(super) async fn finish_raw(
     queries::raw_attach(stream, source, size)
         .execute(&mut *tx)
         .await?;
-    if let Some((revision, deduplicate, background)) = cached {
+    if let Some((revision, deduplicate, background, boot)) = cached {
         ensure!(
-            queries::raw_stage(source, revision)
+            queries::raw_stage(source, revision, boot)
                 .execute(&mut *tx)
                 .await?
                 .rows_affected()
@@ -8024,4 +8027,47 @@ pub(super) async fn inline_conversion(
     );
     tx.commit().await?;
     Ok(job.encoding)
+}
+
+pub(super) async fn recover_chunk_memory(pool: &sqlx::MySqlPool, boot: Uuid) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    queries::release_memory_pins(boot).execute(&mut *tx).await?;
+    queries::release_memory_chunks(boot)
+        .execute(&mut *tx)
+        .await?;
+    queries::retire_memory_chunks(boot)
+        .execute(&mut *tx)
+        .await?;
+    let lost = queries::quarantine_memory_chunks(boot)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    if lost != 0 {
+        tracing::error!(
+            lost,
+            "volatile chunk sources were lost on restart and quarantined"
+        );
+    }
+    Ok(())
+}
+
+pub(super) async fn recover_raw_memory(pool: &sqlx::MySqlPool, boot: Uuid) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    queries::release_memory_raw(boot).execute(&mut *tx).await?;
+    queries::release_memory_processing(boot)
+        .execute(&mut *tx)
+        .await?;
+    let lost = queries::quarantine_memory_raw(boot)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    if lost != 0 {
+        tracing::error!(
+            lost,
+            "volatile raw sources were lost on restart and quarantined"
+        );
+    }
+    Ok(())
 }

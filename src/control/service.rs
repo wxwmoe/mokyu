@@ -202,6 +202,7 @@ fn config_fields(app: &App, runtime: Vec<(String, Value, i64, bool)>) -> Result<
                 | "cache_size"
                 | "cache_entries"
                 | "response_cache_size"
+                | "write_memory_size"
                 | "upload_cache_size"
                 | "thumbnail_cache_size"
                 | "request_connections"

@@ -56,12 +56,24 @@ impl App {
         if self.upload_cache.bypass(stream).await? {
             return Ok(false);
         }
-        let buffered =
-            new && self.role == "single" && profile.write_durability.as_deref() == Some("buffered");
-        let staged = self
-            .storage
-            .stage_upload(c, data, compressed, buffered)
-            .await;
+        let buffered = new
+            && self.role == "single"
+            && matches!(
+                profile.write_durability.as_deref(),
+                Some("buffered" | "volatile")
+            );
+        let memory = (new
+            && self.role == "single"
+            && profile.write_durability.as_deref() == Some("volatile"))
+        .then(|| self.storage.stage_memory(data.clone()))
+        .flatten();
+        let staged = if let Some(pin) = memory {
+            Ok(Some(pin))
+        } else {
+            self.storage
+                .stage_upload(c, data, compressed, buffered)
+                .await
+        };
         let pin = match staged {
             Ok(Some(pin)) => pin,
             other => {
@@ -103,6 +115,7 @@ impl App {
                 })
             })
             .transpose()?;
+        let boot_id = pin.memory.as_ref().map(|_| self.storage.boot_id);
         let local = !pin.remote;
         let local_id = if local {
             Some(
@@ -124,6 +137,7 @@ impl App {
                 offset,
                 new,
                 buffered,
+                boot_id,
                 size,
                 storage,
                 key: &key,
@@ -166,7 +180,7 @@ impl App {
         let (total, limit, used) = self.storage.disk.upload_capacity()?;
         let (pending, pins) = self.upload_cache.status().await?;
         Ok(
-            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"fallbacks":FALLBACKS.load(Ordering::Relaxed),"rejections":REJECTIONS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100,"raw_processing":self.raw.processing_status().await?,"buffered_files":self.raw.buffered_status().await?,"buffered_chunks":self.physical.buffered_status().await?,"raw_uploads":self.raw.upload_status().await?}),
+            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"write_memory":self.storage.write_memory.status(),"fallbacks":FALLBACKS.load(Ordering::Relaxed),"rejections":REJECTIONS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100,"raw_processing":self.raw.processing_status().await?,"buffered_files":self.raw.buffered_status().await?,"buffered_chunks":self.physical.buffered_status().await?,"raw_uploads":self.raw.upload_status().await?}),
         )
     }
     pub async fn cache_flush_start(&self) -> Result<Value> {

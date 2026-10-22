@@ -115,6 +115,7 @@ pub(crate) struct Conversion {
 
 #[async_trait]
 pub(crate) trait RawStore: Send + Sync {
+    async fn recover_memory(&self, boot: Uuid) -> Result<()>;
     async fn buffer(&self, source: Id) -> Result<()>;
     async fn buffered_status(&self) -> Result<serde_json::Value>;
     async fn buffered(
@@ -190,6 +191,7 @@ pub(crate) trait RawStore: Send + Sync {
         revision: i64,
         deduplicate: bool,
         background: bool,
+        boot: Option<Uuid>,
         node: Processor<'_>,
     ) -> Result<()>;
     async fn uploads(&self, after: Id, owner: Option<Uuid>) -> Result<Vec<RawUpload>>;

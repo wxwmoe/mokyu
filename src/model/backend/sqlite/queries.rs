@@ -2295,7 +2295,7 @@ pub(super) fn complete_chunk(chunk: &Chunk) -> Statement<'_> {
 }
 
 pub(super) fn complete_encoding(encoding: Id) -> Statement<'static> {
-    sqlx::query("UPDATE chunk_encodings SET state='ready',unreferenced_at=NULL,stored_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE encoding_id=? AND state='uploading' AND standalone_size IS NOT NULL").bind(encoding)
+    sqlx::query("UPDATE chunk_encodings SET sync_pending=CASE WHEN boot_id IS NOT NULL THEN FALSE ELSE sync_pending END,boot_id=NULL,state='ready',unreferenced_at=NULL,stored_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE encoding_id=? AND state='uploading' AND standalone_size IS NOT NULL").bind(encoding)
 }
 
 pub(super) fn encoding_key(id: Uuid, algorithm: &str) -> Scalar<'_, Uuid> {
@@ -2446,9 +2446,12 @@ pub(super) fn register_encoding(chunk: &Chunk) -> Statement<'_> {
 
 #[async_trait::async_trait]
 impl PhysicalStore for Backend {
-    async fn buffer_chunk(&self, chunk: &Chunk) -> Result<()> {
+    async fn recover_memory(&self, boot: Uuid) -> Result<()> {
+        transactions::recover_chunk_memory(&self.write, boot).await
+    }
+    async fn buffer_chunk(&self, chunk: &Chunk, boot: Option<Uuid>) -> Result<()> {
         ensure!(
-            buffer_chunk(chunk)
+            buffer_chunk(chunk, boot)
                 .execute(&self.write)
                 .await?
                 .rows_affected()
@@ -2463,9 +2466,13 @@ impl PhysicalStore for Backend {
         before: Option<chrono::DateTime<chrono::Utc>>,
         stream: Option<Id>,
         chunk: Option<Id>,
+        files_only: bool,
     ) -> Result<Vec<Chunk>> {
         let mut query = chunk_query(false);
         query.push(" WHERE c.state='ready' AND l.sync_pending AND l.quarantined_at IS NULL AND l.state IN ('ready','uploading') AND c.id>").push_bind(after);
+        if files_only {
+            query.push(" AND l.boot_id IS NULL");
+        }
         if let Some(before) = before {
             query
                 .push(" AND l.created_at<=")
@@ -2484,12 +2491,12 @@ impl PhysicalStore for Backend {
         Ok(query.build_query_as().fetch_all(&self.write).await?)
     }
     async fn synced_chunk(&self, chunk: &Chunk, failure: Option<&str>) -> Result<()> {
-        sqlx::query("UPDATE chunk_encodings SET sync_pending=CASE WHEN ? IS NULL THEN FALSE ELSE sync_pending END,quarantine_code=?,quarantined_at=CASE WHEN ? IS NULL THEN NULL ELSE CAST(unixepoch('subsec')*1000000 AS INTEGER) END,quarantine_revision=quarantine_revision+CASE WHEN ? IS NULL THEN 0 ELSE 1 END WHERE encoding_id=? AND location_id=? AND sync_pending AND quarantined_at IS NULL AND state IN ('ready','uploading')").bind(failure).bind(failure).bind(failure).bind(failure).bind(chunk.encoding_id).bind(chunk.location_id).execute(&self.write).await?;
+        sqlx::query("UPDATE chunk_encodings SET sync_pending=CASE WHEN ? IS NULL THEN FALSE ELSE sync_pending END,boot_id=CASE WHEN ? IS NULL THEN NULL ELSE boot_id END,quarantine_code=?,quarantined_at=CASE WHEN ? IS NULL THEN NULL ELSE CAST(unixepoch('subsec')*1000000 AS INTEGER) END,quarantine_revision=quarantine_revision+CASE WHEN ? IS NULL THEN 0 ELSE 1 END WHERE encoding_id=? AND location_id=? AND sync_pending AND quarantined_at IS NULL AND state IN ('ready','uploading')").bind(failure).bind(failure).bind(failure).bind(failure).bind(failure).bind(chunk.encoding_id).bind(chunk.location_id).execute(&self.write).await?;
         Ok(())
     }
     async fn buffered_status(&self) -> Result<Value> {
-        let (files, bytes, oldest): (i64,i64,Option<String>) = sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(c.raw_size),0) AS INTEGER),CAST(MIN(l.created_at) AS TEXT) FROM chunk_encodings l JOIN chunks c ON c.current_encoding_id=l.encoding_id WHERE c.state='ready' AND l.sync_pending AND l.state IN ('ready','uploading') AND l.quarantined_at IS NULL").fetch_one(&self.write).await?;
-        Ok(serde_json::json!({"pending":files,"bytes":bytes,"oldest":oldest}))
+        let (files, bytes, oldest, volatile): (i64,i64,Option<String>,i64) = sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(c.raw_size),0) AS INTEGER),CAST(MIN(l.created_at) AS TEXT),CAST(COALESCE(SUM(CASE WHEN l.boot_id IS NOT NULL THEN 1 ELSE 0 END),0) AS INTEGER) FROM chunk_encodings l JOIN chunks c ON c.current_encoding_id=l.encoding_id WHERE c.state='ready' AND l.sync_pending AND l.state IN ('ready','uploading') AND l.quarantined_at IS NULL").fetch_one(&self.write).await?;
+        Ok(serde_json::json!({"pending":files,"bytes":bytes,"oldest":oldest,"volatile":volatile}))
     }
 
     async fn source_snapshot(
@@ -6591,7 +6598,7 @@ pub(super) fn fail_startup_chunks() -> Statement<'static> {
 }
 pub(super) fn retire_startup_encodings() -> Statement<'static> {
     sqlx::query(
-        "UPDATE chunk_encodings SET owner_stream=NULL,state='retired',unreferenced_at=COALESCE(unreferenced_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE state='uploading'",
+        "UPDATE chunk_encodings SET owner_stream=NULL,state='retired',unreferenced_at=COALESCE(unreferenced_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE state='uploading' AND NOT (boot_id IS NOT NULL AND quarantined_at IS NOT NULL AND encoding_id IN (SELECT current_encoding_id FROM chunks WHERE state='ready'))",
     )
 }
 pub(super) fn retire_startup_packs() -> Statement<'static> {
@@ -7910,7 +7917,7 @@ pub(super) fn allocated_source(stream: Id, chunk: &Chunk) -> sqlx::QueryBuilder<
 }
 pub(super) fn source_input_versions(chunks: &[Id]) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT c.id,l.encoding_id,l.quarantine_revision,p.id,p.quarantine_revision FROM chunks c LEFT JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready' WHERE ",
+        "SELECT c.id,l.encoding_id,l.quarantine_revision,p.id,p.quarantine_revision FROM chunks c LEFT JOIN chunk_encodings l ON l.chunk_id=c.id AND (l.state='ready' OR (l.state='uploading' AND l.boot_id IS NOT NULL AND l.quarantined_at IS NOT NULL)) LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready' WHERE ",
     );
     source_scope(&mut query, None, chunks);
     query.push(" ORDER BY c.id,l.encoding_id,p.id");
@@ -7957,10 +7964,10 @@ pub(super) fn save_repair_metadata(chunk: &Chunk, stream: Id) -> Statement<'_> {
     sqlx::query("UPDATE chunk_encodings SET standalone_size=?,standalone_compressed=?,nonce=?,nonce_id=? WHERE encoding_id=? AND owner_stream=? AND state='uploading'").bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(crate::content::nonce::id(chunk.nonce.as_deref())).bind(chunk.encoding_id).bind(stream)
 }
 pub(super) fn retire_repair_sources(chunk: Id) -> Statement<'static> {
-    sqlx::query("UPDATE chunk_encodings SET state='retired',unreferenced_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE chunk_id=? AND state='ready' AND quarantined_at IS NOT NULL").bind(chunk)
+    sqlx::query("UPDATE chunk_encodings SET state='retired',sync_pending=FALSE,boot_id=NULL,unreferenced_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE chunk_id=? AND (state='ready' OR (state='uploading' AND boot_id IS NOT NULL)) AND quarantined_at IS NOT NULL").bind(chunk)
 }
 pub(super) fn publish_repair(encoding: Id, stream: Id) -> Statement<'static> {
-    sqlx::query("UPDATE chunk_encodings SET state='ready',owner_stream=NULL,recovery_pending=FALSE,unreferenced_at=NULL,stored_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE encoding_id=? AND owner_stream=? AND state='uploading' AND quarantined_at IS NULL").bind(encoding).bind(stream)
+    sqlx::query("UPDATE chunk_encodings SET sync_pending=CASE WHEN boot_id IS NOT NULL THEN FALSE ELSE sync_pending END,boot_id=NULL,state='ready',owner_stream=NULL,recovery_pending=FALSE,unreferenced_at=NULL,stored_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE encoding_id=? AND owner_stream=? AND state='uploading' AND quarantined_at IS NULL").bind(encoding).bind(stream)
 }
 pub(super) fn discard_verified_repair(encoding: Id, stream: Id) -> Statement<'static> {
     sqlx::query("UPDATE chunk_encodings SET state='retired',owner_stream=NULL,recovery_pending=FALSE,unreferenced_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),stored_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE encoding_id=? AND owner_stream=? AND state='uploading'").bind(encoding).bind(stream)
@@ -8034,8 +8041,14 @@ pub(super) fn raw_insert(
     .bind(storage)
     .bind(revision).bind(medium)
 }
-pub(super) fn raw_finish(stream: Id, source: Id, size: i64, digest: &[u8]) -> Statement<'_> {
-    sqlx::query("UPDATE raw_sources SET size=?,digest=?,state='ready',owner_stream=NULL,upload_id=NULL WHERE id=? AND owner_stream=? AND state='writing'").bind(size).bind(digest).bind(source).bind(stream)
+pub(super) fn raw_finish(
+    stream: Id,
+    source: Id,
+    size: i64,
+    digest: &[u8],
+    final_source: bool,
+) -> Statement<'_> {
+    sqlx::query("UPDATE raw_sources SET size=?,digest=?,durability=CASE WHEN ? AND medium='shared_s3' THEN 'durable' ELSE durability END,state='ready',owner_stream=NULL,upload_id=NULL WHERE id=? AND owner_stream=? AND state='writing'").bind(size).bind(digest).bind(final_source).bind(source).bind(stream)
 }
 pub(super) fn raw_attach(stream: Id, source: Id, size: i64) -> Statement<'static> {
     sqlx::query("INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_id) VALUES(?,0,?,?)")
@@ -8063,14 +8076,17 @@ pub(super) fn raw_detach(stream: Id, end: i64) -> Statement<'static> {
 
 #[async_trait::async_trait]
 impl RawStore for Backend {
+    async fn recover_memory(&self, boot: Uuid) -> Result<()> {
+        transactions::recover_raw_memory(&self.write, boot).await
+    }
     async fn buffered_status(&self) -> Result<serde_json::Value> {
-        let (pending, bytes, oldest): (i64, i64, Option<i64>) = sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(size),0),MIN(created_at) FROM raw_sources WHERE durability='buffered' AND state='ready' AND quarantine_code IS NULL").fetch_one(&self.read).await?;
+        let (pending, bytes, oldest, volatile): (i64,i64,Option<i64>,i64) = sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(size),0) AS INTEGER),MIN(created_at),CAST(COALESCE(SUM(CASE WHEN medium='memory' THEN 1 ELSE 0 END),0) AS INTEGER) FROM raw_sources WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL").fetch_one(&self.read).await?;
         let oldest = oldest.and_then(chrono::DateTime::from_timestamp_micros);
-        Ok(serde_json::json!({"pending":pending,"bytes":bytes,"oldest":oldest}))
+        Ok(serde_json::json!({"pending":pending,"bytes":bytes,"oldest":oldest,"volatile":volatile}))
     }
 
     async fn buffered_source(&self, source: Id) -> Result<Option<RawSource>> {
-        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=? AND r.durability='buffered' AND r.state='ready' AND r.quarantine_code IS NULL").bind(source).fetch_optional(&self.read).await?)
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=? AND r.durability IN ('buffered','volatile') AND r.state='ready' AND r.quarantine_code IS NULL").bind(source).fetch_optional(&self.read).await?)
     }
     async fn buffered_duplicate(
         &self,
@@ -8078,7 +8094,7 @@ impl RawStore for Backend {
         hash: &[u8],
         size: i64,
     ) -> Result<Option<RawSource>> {
-        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=? AND r.content_hash=? AND r.size=? AND r.durability='buffered' AND r.state='ready' AND r.quarantine_code IS NULL").bind(storage).bind(hash).bind(size).fetch_optional(&self.read).await?)
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=? AND r.content_hash=? AND r.size=? AND r.durability IN ('buffered','volatile') AND r.state='ready' AND r.quarantine_code IS NULL").bind(storage).bind(hash).bind(size).fetch_optional(&self.read).await?)
     }
     async fn buffer(&self, source: Id) -> Result<()> {
         ensure!(sqlx::query("UPDATE raw_sources SET durability='buffered' WHERE id=? AND state='writing' AND owner_stream IS NOT NULL").bind(source).execute(&self.write).await?.rows_affected()==1, crate::model::Error::OperationAborted);
@@ -8090,7 +8106,7 @@ impl RawStore for Backend {
         before: Option<chrono::DateTime<chrono::Utc>>,
         stream: Option<Id>,
     ) -> Result<Vec<RawSource>> {
-        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.durability='buffered' AND r.state='ready' AND r.quarantine_code IS NULL AND r.id>? AND (? IS NULL OR r.created_at<=?) AND (? IS NULL OR EXISTS(SELECT 1 FROM raw_ranges e WHERE e.source_id=r.id AND e.stream_id=?)) ORDER BY r.id LIMIT 128").bind(after).bind(before.map(|t| t.timestamp_micros())).bind(before.map(|t| t.timestamp_micros())).bind(stream).bind(stream).fetch_all(&self.write).await?)
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.durability IN ('buffered','volatile') AND r.state='ready' AND r.quarantine_code IS NULL AND r.id>? AND (? IS NULL OR r.created_at<=?) AND (? IS NULL OR EXISTS(SELECT 1 FROM raw_ranges e WHERE e.source_id=r.id AND e.stream_id=?)) ORDER BY r.id LIMIT 128").bind(after).bind(before.map(|t| t.timestamp_micros())).bind(before.map(|t| t.timestamp_micros())).bind(stream).bind(stream).fetch_all(&self.write).await?)
     }
     async fn synced(&self, source: &RawSource, failure: Option<&str>) -> Result<()> {
         if let Some(code) = failure {
@@ -8098,9 +8114,9 @@ impl RawStore for Backend {
                 crate::model::source::quarantine_code(code),
                 "invalid source quarantine code"
             );
-            sqlx::query("UPDATE raw_sources SET quarantine_code=?,quarantined_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),revision=revision+1 WHERE id=? AND revision=? AND durability='buffered' AND state='ready' AND quarantine_code IS NULL").bind(code).bind(source.id).bind(source.revision).execute(&self.write).await?;
+            sqlx::query("UPDATE raw_sources SET quarantine_code=?,quarantined_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),revision=revision+1 WHERE id=? AND revision=? AND durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL").bind(code).bind(source.id).bind(source.revision).execute(&self.write).await?;
         } else {
-            sqlx::query("UPDATE raw_sources SET durability='durable' WHERE id=? AND revision=? AND durability='buffered' AND state='ready' AND quarantine_code IS NULL").bind(source.id).bind(source.revision).execute(&self.write).await?;
+            sqlx::query("UPDATE raw_sources SET durability='durable',medium=CASE WHEN medium='memory' THEN 'local' ELSE medium END,boot_id=NULL WHERE id=? AND revision=? AND durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL").bind(source.id).bind(source.revision).execute(&self.write).await?;
         }
         Ok(())
     }
@@ -8182,6 +8198,7 @@ impl RawStore for Backend {
         revision: i64,
         deduplicate: bool,
         background: bool,
+        boot: Option<Uuid>,
         _node: crate::model::raw::Processor<'_>,
     ) -> Result<()> {
         transactions::finish_raw(
@@ -8190,7 +8207,7 @@ impl RawStore for Backend {
             source,
             size,
             digest,
-            Some((revision, deduplicate, background)),
+            Some((revision, deduplicate, background, boot)),
         )
         .await
     }
@@ -8621,8 +8638,8 @@ pub(super) fn raw_queue(source: Id, deduplicate: bool, background: bool) -> Stat
         .bind(deduplicate)
         .bind(background)
 }
-pub(super) fn raw_stage(source: Id, revision: i64) -> Statement<'static> {
-    sqlx::query("UPDATE raw_sources SET pending_upload=true,medium='local' WHERE id=? AND state='ready' AND upload_id IS NULL AND profile_revision=?").bind(source).bind(revision)
+pub(super) fn raw_stage(source: Id, revision: i64, boot: Option<Uuid>) -> Statement<'static> {
+    sqlx::query("UPDATE raw_sources SET pending_upload=true,medium=CASE WHEN ? IS NULL THEN 'local' ELSE 'memory' END,boot_id=?,durability=CASE WHEN ? IS NULL THEN durability ELSE 'volatile' END WHERE id=? AND state='ready' AND upload_id IS NULL AND profile_revision=?").bind(boot).bind(boot).bind(boot).bind(source).bind(revision)
 }
 pub(super) fn raw_upload_delete(source: Id) -> Statement<'static> {
     sqlx::query("DELETE FROM raw_uploads WHERE source_id=?").bind(source)
@@ -8649,7 +8666,7 @@ pub(super) fn raw_upload_references(source: Id) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=?)").bind(source)
 }
 pub(super) fn raw_uploaded(source: Id) -> Statement<'static> {
-    sqlx::query("UPDATE raw_sources SET pending_upload=false,medium='shared_s3',durability='durable',upload_id=NULL,revision=revision+1 WHERE id=? AND pending_upload").bind(source)
+    sqlx::query("UPDATE raw_sources SET pending_upload=false,medium='shared_s3',boot_id=NULL,durability='durable',upload_id=NULL,revision=revision+1 WHERE id=? AND pending_upload").bind(source)
 }
 pub(super) fn raw_upload_hash(source: Id, hash: Option<&[u8]>) -> Statement<'_> {
     sqlx::query("UPDATE raw_uploads SET content_hash=?,token=NULL,next_attempt_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),last_error=NULL WHERE source_id=?").bind(hash).bind(source)
@@ -8725,7 +8742,7 @@ pub(super) fn conversion_output_encoding(
 }
 
 pub(super) fn conversion_publish_encoding(encoding: Id) -> Statement<'static> {
-    sqlx::query("UPDATE chunk_encodings SET state='ready',owner_task=NULL,unreferenced_at=NULL,stored_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE encoding_id=? AND state='uploading'").bind(encoding)
+    sqlx::query("UPDATE chunk_encodings SET sync_pending=CASE WHEN boot_id IS NOT NULL THEN FALSE ELSE sync_pending END,boot_id=NULL,state='ready',owner_task=NULL,unreferenced_at=NULL,stored_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE encoding_id=? AND state='uploading'").bind(encoding)
 }
 
 pub(super) fn conversion_layout(chunk: Id, pack: Option<Id>) -> Statement<'static> {
@@ -8784,6 +8801,34 @@ pub(super) fn conversion_job(
     .bind(source)
 }
 
-pub(super) fn buffer_chunk(chunk: &Chunk) -> Statement<'_> {
-    sqlx::query("UPDATE chunk_encodings SET sync_pending=TRUE WHERE encoding_id=? AND chunk_id=? AND location_id=? AND state='uploading'").bind(chunk.encoding_id).bind(chunk.id).bind(chunk.location_id)
+pub(super) fn buffer_chunk(chunk: &Chunk, boot: Option<Uuid>) -> Statement<'_> {
+    sqlx::query("UPDATE chunk_encodings SET sync_pending=TRUE,boot_id=? WHERE encoding_id=? AND chunk_id=? AND location_id=? AND state='uploading'").bind(boot).bind(chunk.encoding_id).bind(chunk.id).bind(chunk.location_id)
+}
+
+pub(super) fn release_memory_pins(boot: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM cache_pins WHERE chunk_id IN (SELECT c.id FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE l.boot_id<>? AND l.sync_pending AND l.state IN ('ready','uploading') AND l.quarantined_at IS NULL)").bind(boot)
+}
+
+pub(super) fn release_memory_chunks(boot: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM pending_uploads WHERE chunk_id IN (SELECT c.id FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE l.boot_id<>? AND l.sync_pending AND l.state IN ('ready','uploading') AND l.quarantined_at IS NULL)").bind(boot)
+}
+
+pub(super) fn retire_memory_chunks(boot: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE chunk_encodings SET state='retired',sync_pending=FALSE,boot_id=NULL,unreferenced_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE boot_id<>? AND sync_pending AND state IN ('ready','uploading') AND quarantined_at IS NULL AND encoding_id IN (SELECT c.current_encoding_id FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE p.state='ready' AND p.quarantined_at IS NULL)").bind(boot)
+}
+
+pub(super) fn quarantine_memory_chunks(boot: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE chunk_encodings SET quarantine_code='remote_missing',quarantined_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),quarantine_revision=quarantine_revision+1 WHERE boot_id<>? AND sync_pending AND state IN ('ready','uploading') AND quarantined_at IS NULL AND encoding_id IN (SELECT current_encoding_id FROM chunks)").bind(boot)
+}
+
+pub(super) fn release_memory_raw(boot: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM raw_uploads WHERE source_id IN (SELECT id FROM raw_sources WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL AND medium='memory' AND boot_id<>?)").bind(boot)
+}
+
+pub(super) fn release_memory_processing(boot: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM raw_processing WHERE source_id IN (SELECT id FROM raw_sources WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL AND medium='memory' AND boot_id<>?)").bind(boot)
+}
+
+pub(super) fn quarantine_memory_raw(boot: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE raw_sources SET pending_upload=FALSE,quarantine_code='remote_missing',quarantined_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),revision=revision+1 WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL AND medium='memory' AND boot_id<>? AND quarantine_code IS NULL").bind(boot)
 }

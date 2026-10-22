@@ -57,11 +57,12 @@ impl App {
         if !self.storage.buffered_writes.load(Ordering::Acquire) {
             return Ok(());
         }
+        self.seal_uploads(stream, true).await?;
         let mut after = Id::default();
         loop {
             let rows = self
                 .physical
-                .buffered_chunks(after, None, Some(stream), None)
+                .buffered_chunks(after, None, Some(stream), None, false)
                 .await?;
             if rows.is_empty() {
                 return Ok(());
@@ -80,7 +81,7 @@ impl App {
     ) -> Result<bool> {
         let rows = self
             .physical
-            .buffered_chunks(*after, before, None, None)
+            .buffered_chunks(*after, before, None, None, !recovery && before.is_none())
             .await?;
         let found = !rows.is_empty();
         for chunk in rows {
@@ -101,27 +102,52 @@ impl App {
         chunk: &crate::content::codec::Chunk,
         verify: bool,
     ) -> Result<()> {
-        let lock = self.operation_locks.get(chunk.location_id);
-        let _sync = lock.lock().await;
-        let _pin = {
-            let _gate = self.storage.source_gate.read().await;
-            self.storage.physical_pin(chunk.location_id)
+        let wait = async {
+            loop {
+                let lock = self.operation_locks.get(chunk.location_id);
+                let sync = lock.lock().await;
+                let pin = {
+                    let _gate = self.storage.source_gate.read().await;
+                    self.storage.physical_pin(chunk.location_id)
+                };
+                let rows = self
+                    .physical
+                    .buffered_chunks(Id::default(), None, None, Some(chunk.id), false)
+                    .await?;
+                let Some(current) = rows
+                    .first()
+                    .filter(|current| current.location_id == chunk.location_id)
+                else {
+                    return Ok(());
+                };
+                if self.storage.sync_chunk(current, verify).await? {
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("buffered-chunk-synced").await;
+                    self.physical.synced_chunk(current, None).await?;
+                    return Ok(());
+                }
+                // A full cache cannot hold a second copy; let the final uploader drain RAM.
+                drop(pin);
+                drop(sync);
+                self.wake_tasks.notify_waiters();
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("buffered-chunk-before-final").await;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
         };
-        let rows = self
-            .physical
-            .buffered_chunks(Id::default(), None, None, Some(chunk.id))
-            .await?;
-        let Some(current) = rows
-            .first()
-            .filter(|current| current.location_id == chunk.location_id)
-        else {
-            return Ok(());
-        };
-        self.storage.sync_chunk(current, verify).await?;
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("buffered-chunk-synced").await;
-        self.physical.synced_chunk(current, None).await?;
-        Ok(())
+        tokio::time::timeout(
+            Duration::from_secs(crate::config::seconds(
+                &self.config.requests.upload_idle_timeout,
+            )?),
+            wait,
+        )
+        .await
+        .map_err(|_| {
+            s3s::s3_error!(
+                SlowDown,
+                "write memory is waiting for durable storage; retry later"
+            )
+        })?
     }
     pub(crate) async fn sync_raw_stream(&self, stream: Id) -> Result<()> {
         if !self.storage.buffered_writes.load(Ordering::Acquire) {
@@ -151,6 +177,9 @@ impl App {
         for source in rows {
             // Retry failures on the next scan without blocking later files.
             *after = source.id;
+            if !recovery && before.is_none() && source.medium == "memory" {
+                continue;
+            }
             if let Err(error) = self.sync_raw_source(&source, recovery).await {
                 if recovery {
                     let code = sync_failure(&error);

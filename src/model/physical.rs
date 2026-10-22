@@ -23,13 +23,15 @@ pub(crate) trait PhysicalStore: Send + Sync {
     async fn pending_source(&self, chunk: Id) -> Result<Option<(Uuid, String)>>;
     async fn pending_only(&self, chunk: Id) -> Result<bool>;
     async fn register_encoding(&self, chunk: &Chunk) -> Result<()>;
-    async fn buffer_chunk(&self, chunk: &Chunk) -> Result<()>;
+    async fn recover_memory(&self, boot: Uuid) -> Result<()>;
+    async fn buffer_chunk(&self, chunk: &Chunk, boot: Option<Uuid>) -> Result<()>;
     async fn buffered_chunks(
         &self,
         after: Id,
         before: Option<chrono::DateTime<chrono::Utc>>,
         stream: Option<Id>,
         chunk: Option<Id>,
+        files_only: bool,
     ) -> Result<Vec<Chunk>>;
     async fn synced_chunk(&self, chunk: &Chunk, failure: Option<&str>) -> Result<()>;
     async fn buffered_status(&self) -> Result<serde_json::Value>;

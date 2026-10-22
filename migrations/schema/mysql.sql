@@ -1171,8 +1171,10 @@ EXECUTE mokyu_cdc;
 DEALLOCATE PREPARE mokyu_cdc;
 UPDATE mokyu_meta SET schema_version=32 WHERE id=1;
 
-ALTER TABLE storage_profiles ADD COLUMN write_durability VARCHAR(16) NOT NULL DEFAULT 'durable', ADD CONSTRAINT storage_write_durability CHECK(write_durability IN ('durable','buffered'));
+ALTER TABLE storage_profiles ADD COLUMN write_durability VARCHAR(16) NOT NULL DEFAULT 'durable', ADD CONSTRAINT storage_write_durability CHECK(write_durability IN ('durable','buffered','volatile'));
 CREATE INDEX raw_sources_sync ON raw_sources(durability,state,quarantine_code,id);
 UPDATE mokyu_meta SET schema_version=33 WHERE id=1;
 
 ALTER TABLE chunk_encodings ADD COLUMN sync_pending BOOLEAN NOT NULL DEFAULT FALSE, ADD INDEX encodings_sync(sync_pending,state,quarantined_at,chunk_id);
+
+ALTER TABLE chunk_encodings ADD COLUMN boot_id BINARY(16) NULL, ADD CONSTRAINT encoding_memory_sync CHECK(boot_id IS NULL OR sync_pending);

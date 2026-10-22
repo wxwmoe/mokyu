@@ -201,6 +201,7 @@ impl File {
         pins.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.published = true;
         Ok(Some(super::UploadPin {
+            memory: None,
             _pin: Some(super::CachePin(pins)),
             _charge: Some(charge),
             size: self.bytes,

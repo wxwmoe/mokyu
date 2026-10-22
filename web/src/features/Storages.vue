@@ -27,6 +27,7 @@ const keys = useQuery({ queryKey: ['managed-keys'], queryFn: ({ signal }) => api
 const open = ref(false), editing = ref<Storage | null>(null), busy = ref(false), checking = ref('')
 const profileDraft = ref<Record<ProfileKey, string | number | boolean | null> | null>(null)
 const draft = reactive({ name: '', type: 's3', path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '', block_key_id: '', enabled: true, initialize: true })
+const durabilityOptions = computed(() => (draft.type === 's3' && profileDraft.value?.upload_cache ? ['durable', 'buffered', 'volatile'] : ['durable', 'buffered']).map(value => ({ value, label: t('storeDurability_' + value) })))
 const types = computed(() => ['local', 's3'].map(value => ({ value, label: t('storeType_' + value) })))
 const keyOptions = computed(() => [{ value: '', label: t('storeNoEncryption') }, ...(keys.data.value || []).filter(row => row.purpose === 'block' && !row.revoked_at).map(row => ({ value: row.id, label: `${row.name} · ${row.algorithm}` }))])
 const profileFields: ProfileField[] = [
@@ -100,7 +101,7 @@ watch(() => draft.type, value => {
   if (!editing.value) profileDraft.value = profilePreset(value)
   else {
     profileDraft.value.min_free_space = value === 'local' ? profileDraft.value.min_free_space || '1GiB' : null
-    if (value === 'local') Object.assign(profileDraft.value, { cache_enabled: false, upload_cache: false, pack_enabled: false, pack_range_enabled: false })
+    if (value === 'local') Object.assign(profileDraft.value, { write_durability: profileDraft.value.write_durability === 'volatile' ? 'durable' : profileDraft.value.write_durability, cache_enabled: false, upload_cache: false, pack_enabled: false, pack_range_enabled: false })
   }
 })
 watch([() => route.query.edit, () => storages.data.value], async ([name, rows]) => {
@@ -123,6 +124,7 @@ function profileInput(field: ProfileField, event: Event) {
 function setProfileBoolean(key: ProfileKey, value: boolean) {
   if (!profileDraft.value) return
   profileDraft.value[key] = value
+  if (key === 'upload_cache' && !value && profileDraft.value.write_durability === 'volatile') profileDraft.value.write_durability = 'durable'
   if (key === 'cdc_enabled' && !value) {
     Object.assign(profileDraft.value, { compression_enabled: false, pack_enabled: false, pack_range_enabled: false })
     draft.block_key_id = ''
@@ -195,7 +197,7 @@ async function toggle(row: Storage) {
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled)" :label="t('profile_cdc_enabled')" :disabled="busy" @update:model-value="setProfileBoolean('cdc_enabled', $event)" /><p class="field-help">{{ t('storeCdcHint') }}</p></div>
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled || profileDraft.deduplication_enabled)" :label="t('profile_deduplication_enabled')" :disabled="busy || Boolean(profileDraft.cdc_enabled)" @update:model-value="setProfileBoolean('deduplication_enabled', $event)" /><p class="field-help">{{ t(profileDraft.cdc_enabled ? 'storeChunkDedupHint' : 'storeRawDedupHint') }}</p></div>
         <div v-if="profileDraft" class="store-form-wide"><label>{{ t('profile_write_processing') }}<UiSelect :model-value="String(profileDraft.write_processing)" :options="['inline', 'background'].map(value => ({ value, label: t('storeProcessing_' + value) }))" :label="t('profile_write_processing')" :disabled="busy || (!profileDraft.cdc_enabled && !profileDraft.deduplication_enabled)" @update:model-value="profileDraft.write_processing = $event" /></label><p class="field-help">{{ t('storeProcessingHint') }}</p></div>
-        <div v-if="profileDraft && status.data.value?.deployment_mode === 'single'" class="store-form-wide"><label>{{ t('profile_write_durability') }}<UiSelect :model-value="String(profileDraft.write_durability ?? 'durable')" :options="['durable', 'buffered'].map(value => ({ value, label: t('storeDurability_' + value) }))" :label="t('profile_write_durability')" :disabled="busy" aria-describedby="storage-durability-hint" @update:model-value="profileDraft.write_durability = $event" /></label><p id="storage-durability-hint" class="field-help">{{ t('storeDurabilityHint') }}</p></div>
+        <div v-if="profileDraft && status.data.value?.deployment_mode === 'single'" class="store-form-wide"><label>{{ t('profile_write_durability') }}<UiSelect :model-value="String(profileDraft.write_durability ?? 'durable')" :options="durabilityOptions" :label="t('profile_write_durability')" :disabled="busy" aria-describedby="storage-durability-hint" @update:model-value="profileDraft.write_durability = $event" /></label><p id="storage-durability-hint" class="field-help">{{ t(profileDraft.write_durability === 'volatile' ? 'storeMemoryHint' : 'storeDurabilityHint') }}</p></div>
         <label class="store-form-wide">{{ t('storeCurrentKey') }}<UiSelect v-model="draft.block_key_id" :options="keyOptions" :label="t('storeCurrentKey')" :disabled="busy || profileDraft?.cdc_enabled === false" /></label>
       <p class="store-form-wide field-help">{{ t(hasBlockKeys ? 'storeKeyHint' : 'storeNoKeyHint') }} <a href="/credentials?tab=managed&create=block" target="_blank" rel="noreferrer">{{ t('manageKeys') }}</a></p>
         <template v-if="profileDraft">

@@ -1148,9 +1148,11 @@ ALTER TABLE raw_sources ADD COLUMN processing_task BLOB REFERENCES tasks(id) ON 
 CREATE INDEX raw_sources_processing ON raw_sources(processing_task);
 UPDATE mokyu_meta SET schema_version=33 WHERE id=1;
 
-ALTER TABLE storage_profiles ADD COLUMN write_durability TEXT NOT NULL DEFAULT 'durable' CHECK(write_durability IN ('durable','buffered'));
-CREATE INDEX raw_sources_sync ON raw_sources(id) WHERE durability='buffered' AND state='ready' AND quarantine_code IS NULL;
+ALTER TABLE storage_profiles ADD COLUMN write_durability TEXT NOT NULL DEFAULT 'durable' CHECK(write_durability IN ('durable','buffered','volatile'));
+CREATE INDEX raw_sources_sync ON raw_sources(id) WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL;
 UPDATE mokyu_meta SET schema_version=34 WHERE id=1;
 
 ALTER TABLE chunk_encodings ADD COLUMN sync_pending INTEGER NOT NULL DEFAULT FALSE CHECK(sync_pending IN (0,1));
 CREATE INDEX encodings_sync ON chunk_encodings(chunk_id) WHERE sync_pending AND state IN ('ready','uploading') AND quarantined_at IS NULL;
+
+ALTER TABLE chunk_encodings ADD COLUMN boot_id BLOB CHECK(boot_id IS NULL OR (length(boot_id)=16 AND sync_pending));

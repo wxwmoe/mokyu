@@ -61,9 +61,7 @@ impl Repair {
         );
         for source in &self.sources {
             ensure!(
-                source.state == "ready"
-                    && source.quarantine_code.is_some()
-                    && Some(source.scope.storage_id) == self.chunk.storage_id,
+                source.repairable() && Some(source.scope.storage_id) == self.chunk.storage_id,
                 crate::model::Error::SourceUnavailable
             );
         }
