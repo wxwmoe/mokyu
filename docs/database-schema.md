@@ -66,7 +66,7 @@ UUID、时间、整数分别使用各数据库既有原生类型。原始来源�
 | 表 | 关键字段 | 说明 |
 | --- | --- | --- |
 | `chunks` | `id`、持久 UUID、`storage_id`、`hash`、`raw_size`、`standalone_size`、`encryption_algorithm`、`block_key_id`、`standalone_compressed`、`current_encoding_id`、`pack_id`、状态和回收时间 | 按 `storage_id + hash + raw_size` 去重；逻辑区块身份不因重写改变 |
-| `chunk_encodings` | `encoding_id`、`chunk_id`、物理 UUID、`storage_id`、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce_id`、`nonce`、`encoding_fingerprint`、状态和发布时间 | 独立区块的实际物理来源；同一逻辑区块最多一个 ready 独立来源 |
+| `chunk_encodings` | `encoding_id`、`chunk_id`、物理 UUID、`storage_id`、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce_id`、`nonce`、`encoding_fingerprint`、`sync_pending`（非空、默认 false）、状态和发布时间 | 独立区块的实际物理来源；同一逻辑区块最多一个 ready 独立来源；encodings_sync 索引枚举尚需文件同步的健康 ready/uploading 来源 |
 | `packs`、`pack_members` | pack 的主键与物理 UUID、`storage_id`、`nonce_id`、加密/压缩字段、`pack_fingerprint` 及成员偏移 | 区块包来源和成员映射；只收纳同一 storage 的完整区块 |
 | `pack_inputs`、`pack_maintenance`、`pack_changes` | 任务输入保护、游标、generation 和下一次检查时间 | 使打包、复用、回收和 Range 优化可恢复 |
 

@@ -60,10 +60,10 @@ pub(super) async fn drain(app: Arc<App>, workers: impl Future<Output = Result<()
     } else {
         let node = app.node.get().map(|node| node.node_id);
         let backlog = tokio::time::timeout(Duration::from_secs(1), async {
-            let (uploads, buffered) =
-                tokio::try_join!(app.upload_cache.backlog(node), app.raw.buffered_status())?;
+            let (uploads, buffered, chunks) =
+                tokio::try_join!(app.upload_cache.backlog(node), app.raw.buffered_status(), app.physical.buffered_status())?;
             Ok::<_, anyhow::Error>(
-                serde_json::json!({"uploads": uploads, "buffered_files": buffered}),
+                serde_json::json!({"uploads": uploads, "buffered_files": buffered, "buffered_chunks": chunks}),
             )
         })
         .await;

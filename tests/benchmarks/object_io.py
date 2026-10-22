@@ -103,7 +103,13 @@ def drain_raw(database, bucket, seconds):
             WHERE r.durability='buffered' AND r.state='ready' AND EXISTS(
                 SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id
                 JOIN buckets b ON b.id=s.bucket_id WHERE e.source_id=r.id AND b.name=%s)
-            ) backlog''', bucket, bucket, bucket, bucket, bucket)[0]
+            UNION ALL
+            SELECT CASE WHEN l.quarantine_code IS NOT NULL THEN 1 ELSE 0 END AS failed
+            FROM chunk_encodings l JOIN chunks c ON c.current_encoding_id=l.encoding_id
+            WHERE l.sync_pending AND l.state IN ('ready','uploading') AND c.state='ready' AND EXISTS(
+                SELECT 1 FROM extents e JOIN streams s ON s.id=e.stream_id
+                JOIN buckets b ON b.id=s.bucket_id WHERE e.chunk_id=c.id AND b.name=%s)
+            ) backlog''', bucket, bucket, bucket, bucket, bucket, bucket)[0]
         first = first or current
         elapsed = time.perf_counter() - started
         if current['pending'] == 0 or current['failed'] or elapsed >= seconds:

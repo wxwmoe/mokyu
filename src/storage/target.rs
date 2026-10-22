@@ -5,6 +5,7 @@ use std::sync::Arc;
 pub(crate) struct StoreBackend {
     pub profile: Arc<crate::storage::profile::StorageProfile>,
     pub(crate) backend: Arc<dyn ObjectStore>,
+    pub(crate) buffered_backend: Option<Arc<dyn ObjectStore>>,
     pub(crate) multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
     pub(crate) streaming: Option<super::s3::Streaming>,
     pub(crate) raw_root: Option<std::path::PathBuf>,

@@ -2930,6 +2930,13 @@ pub(super) async fn cache_stage(pool: &PgPool, input: CacheStage<'_>) -> Result<
     queries::insert_upload_pin(input.chunk.id, source, input.stream)
         .execute(&mut *tx)
         .await?;
+    if input.buffered {
+        ensure!(
+            input.new && input.node.is_none(),
+            "buffered chunks require single mode"
+        );
+        queries::buffer_chunk(input.chunk).execute(&mut *tx).await?;
+    }
     queries::ready_cached_chunk(input.chunk.id)
         .execute(&mut *tx)
         .await?;

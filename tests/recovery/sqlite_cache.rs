@@ -66,6 +66,7 @@ pub(super) async fn stage(
     assert!(
         backend
             .stage(CacheStage {
+                buffered: false,
                 encoding: None,
                 node: None,
                 chunk,
@@ -497,6 +498,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     assert!(
         !backend
             .stage(CacheStage {
+                buffered: false,
                 encoding: None,
                 node: None,
                 chunk: &third,
@@ -513,6 +515,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     assert!(
         backend
             .stage(CacheStage {
+                buffered: false,
                 encoding: None,
                 node: None,
                 chunk: &third,
@@ -530,6 +533,7 @@ async fn sqlite_upload_cache_contract() -> Result<()> {
     assert!(
         backend
             .stage(CacheStage {
+                buffered: false,
                 encoding: None,
                 node: None,
                 chunk: &third,

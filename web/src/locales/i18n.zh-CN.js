@@ -40,7 +40,7 @@ export default {
   "profile_write_durability": "写入确认",
   "storeDurability_durable": "持久确认",
   "storeDurability_buffered": "文件缓冲确认",
-  "storeDurabilityHint": "文件缓冲允许 raw 文件完整写入后响应，由后台同步磁盘，断电或系统崩溃可能丢失最近写入，分块、Multipart 分片及复制仍按持久确认处理",
+  "storeDurabilityHint": "文件缓冲允许本地或写缓存文件完整写入后响应，由后台同步磁盘，断电或系统崩溃可能丢失最近写入，Multipart 分片、复制和迁移仍等待持久文件",
   "storeProcessing_inline": "响应前处理",
   "storeProcessing_background": "后台处理",
   "storeProcessingHint": "后台处理按写入确认策略保存原始文件并响应，分块或去重完成前仍可读取原始文件",

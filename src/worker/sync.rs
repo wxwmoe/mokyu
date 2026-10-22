@@ -14,7 +14,9 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
         return std::future::pending().await;
     }
     let mut after = Id::default();
+    let mut chunks_after = Id::default();
     loop {
+        let mut progressed = false;
         if app.ensure_mode().is_ok() && app.storage.buffered_writes.load(Ordering::Acquire) {
             match crate::storage::resource_gate::PRIORITY
                 .scope(
@@ -23,10 +25,24 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
                 )
                 .await
             {
-                Ok(true) => continue,
+                Ok(true) => progressed = true,
                 Ok(false) => after = Id::default(),
                 Err(error) => tracing::warn!(%error, "buffered file sync will retry"),
             }
+            match crate::storage::resource_gate::PRIORITY
+                .scope(
+                    crate::storage::resource_gate::MAINTENANCE,
+                    app.sync_chunk_batch(None, false, &mut chunks_after),
+                )
+                .await
+            {
+                Ok(true) => progressed = true,
+                Ok(false) => chunks_after = Id::default(),
+                Err(error) => tracing::warn!(%error, "buffered chunk sync will retry"),
+            }
+        }
+        if progressed {
+            continue;
         }
         tokio::select! {
             _ = app.storage.wake_sync.notified() => {}
@@ -36,6 +52,77 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
 }
 
 impl App {
+    pub(crate) async fn sync_stream(&self, stream: Id) -> Result<()> {
+        self.sync_raw_stream(stream).await?;
+        if !self.storage.buffered_writes.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut after = Id::default();
+        loop {
+            let rows = self
+                .physical
+                .buffered_chunks(after, None, Some(stream), None)
+                .await?;
+            if rows.is_empty() {
+                return Ok(());
+            }
+            for chunk in rows {
+                after = chunk.id;
+                self.sync_chunk_source(&chunk, false).await?;
+            }
+        }
+    }
+    pub(crate) async fn sync_chunk_batch(
+        &self,
+        before: Option<chrono::DateTime<chrono::Utc>>,
+        recovery: bool,
+        after: &mut Id,
+    ) -> Result<bool> {
+        let rows = self
+            .physical
+            .buffered_chunks(*after, before, None, None)
+            .await?;
+        let found = !rows.is_empty();
+        for chunk in rows {
+            *after = chunk.id;
+            if let Err(error) = self.sync_chunk_source(&chunk, recovery).await {
+                if recovery && let Some(code) = sync_failure(&error) {
+                    self.physical.synced_chunk(&chunk, Some(code)).await?;
+                    tracing::error!(chunk=%chunk.id, code, "buffered chunk is unavailable after restart");
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+        Ok(found)
+    }
+    async fn sync_chunk_source(
+        &self,
+        chunk: &crate::content::codec::Chunk,
+        verify: bool,
+    ) -> Result<()> {
+        let lock = self.operation_locks.get(chunk.location_id);
+        let _sync = lock.lock().await;
+        let _pin = {
+            let _gate = self.storage.source_gate.read().await;
+            self.storage.physical_pin(chunk.location_id)
+        };
+        let rows = self
+            .physical
+            .buffered_chunks(Id::default(), None, None, Some(chunk.id))
+            .await?;
+        let Some(current) = rows
+            .first()
+            .filter(|current| current.location_id == chunk.location_id)
+        else {
+            return Ok(());
+        };
+        self.storage.sync_chunk(current, verify).await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("buffered-chunk-synced").await;
+        self.physical.synced_chunk(current, None).await?;
+        Ok(())
+    }
     pub(crate) async fn sync_raw_stream(&self, stream: Id) -> Result<()> {
         if !self.storage.buffered_writes.load(Ordering::Acquire) {
             return Ok(());
@@ -66,15 +153,7 @@ impl App {
             *after = source.id;
             if let Err(error) = self.sync_raw_source(&source, recovery).await {
                 if recovery {
-                    let code = match error.downcast_ref::<IntegrityError>() {
-                        Some(IntegrityError::RemoteMissing) => Some("remote_missing"),
-                        Some(IntegrityError::Length) => Some("length_mismatch"),
-                        Some(IntegrityError::Hash) => Some("hash_mismatch"),
-                        _ => error
-                            .downcast_ref::<std::io::Error>()
-                            .filter(|e| e.kind() == std::io::ErrorKind::NotFound)
-                            .map(|_| "remote_missing"),
-                    };
+                    let code = sync_failure(&error);
                     if let Some(code) = code {
                         self.raw.synced(&source, Some(code)).await?;
                         tracing::error!(source=%source.id, storage=%source.storage_id, code, "buffered source is unavailable after restart");
@@ -102,5 +181,15 @@ impl App {
         crate::faults::point("buffered-file-synced").await;
         self.raw.synced(&current, None).await?;
         Ok(())
+    }
+}
+
+fn sync_failure(error: &anyhow::Error) -> Option<&'static str> {
+    match error.downcast_ref::<IntegrityError>() {
+        Some(value) if crate::model::source::quarantine_code(value.code()) => Some(value.code()),
+        _ => error
+            .downcast_ref::<std::io::Error>()
+            .filter(|e| e.kind() == std::io::ErrorKind::NotFound)
+            .map(|_| "remote_missing"),
     }
 }

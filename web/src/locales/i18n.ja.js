@@ -40,7 +40,7 @@ export default {
   "profile_write_durability": "書き込み確認",
   "storeDurability_durable": "永続化後に確認",
   "storeDurability_buffered": "ファイルバッファ確認",
-  "storeDurabilityHint": "raw ファイルの書き込み完了後に応答し、ディスク同期をバックグラウンドで行います、停電やシステム障害で直近のデータを失う可能性があります、チャンク、Multipart パート、コピーは永続化後に確認します",
+  "storeDurabilityHint": "ローカルまたは書き込みキャッシュのファイルが完成した時点で応答し、ディスク同期はバックグラウンドで行います、停電やシステム障害で直近のデータを失う可能性があります、Multipart パート、コピー、移行は永続化を待ちます",
   "storeProcessing_inline": "応答前に処理",
   "storeProcessing_background": "バックグラウンドで処理",
   "storeProcessingHint": "選択した書き込み確認ポリシーに従って元ファイルを保存し、変換が完了するまで元ファイルを読み取れます",

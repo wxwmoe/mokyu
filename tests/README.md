@@ -28,6 +28,8 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `python -m tests.recovery.shutdown_flush` 使用相同的进程托管环境和独立 S3 后端，节点磁盘缓存至少64MiB、其中上传缓存至少32MiB；验证每次 flush 的数据库时间上界、CLI 等待超时不取消任务、SIGTERM 排空 raw/chunks、暂停 CDC 时原始来源仍可持久化、退出期限及重启恢复。四库分别运行，不能与同一实例上的其他测试并发。
 
+`python -m tests.recovery.buffered_writes` 与 `python -m tests.recovery.buffered_chunks` 独占已初始化且停止的单容器服务，沿用上述配置、S3 后端与 fsync 注入环境。分别验证 raw 和 chunks 的提前确认、立即读取、可靠复制/复用屏障、缓存关闭/满额回退、文件与目录同步失败、强杀恢复、损坏隔离、flush 和关闭。区块入口另覆盖 Multipart 分片持久性、加密及后台组包竞态；四库分别运行，建议磁盘缓存128MiB、上传缓存64MiB。`web/tests/buffered-storage.spec.ts` 验证三语草稿取消/保存、键盘和窄屏提示。
+
 `python -m tests.recovery.cluster_shutdown` 使用双 data 的 `cluster_cache` 环境，编排器额外处理 `stop-peer`、`start-peer` 与 `.done` 标记。验证退出期间继续心跳、只排空当前节点的 raw/chunks/原生 Multipart、其他节点仍可读最终来源，以及只有 CDC 尾块可写共享暂存。
 
 数据库改动需在 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3 的最低版本和当前维护版本验证。MariaDB 复用全部 MySQL 契约和 `MOKYU_TEST_MYSQL_CONFIG`；`mysql_dialect_and_lock_scope_contract` 额外检查 JSON 类型、大小写/尾空格比较和任务领取的锁范围。`migrations.py` 在 PostgreSQL 17 空库验证低版本拒绝且不写入表，在支持版本验证新装、旧版本升级与恢复。

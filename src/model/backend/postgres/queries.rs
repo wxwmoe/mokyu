@@ -3903,6 +3903,52 @@ struct InspectionMember {
 
 #[async_trait::async_trait]
 impl PhysicalStore for Backend {
+    async fn buffer_chunk(&self, chunk: &Chunk) -> Result<()> {
+        ensure!(
+            buffer_chunk(chunk)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
+        Ok(())
+    }
+    async fn buffered_chunks(
+        &self,
+        after: Id,
+        before: Option<chrono::DateTime<chrono::Utc>>,
+        stream: Option<Id>,
+        chunk: Option<Id>,
+    ) -> Result<Vec<Chunk>> {
+        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "SELECT c.id,c.current_encoding_id,l.encoding_id AS location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id",
+        );
+        query.push(" WHERE c.state='ready' AND l.sync_pending AND l.quarantined_at IS NULL AND l.state IN ('ready','uploading') AND c.id>").push_bind(after);
+        if let Some(before) = before {
+            query.push(" AND l.created_at<=").push_bind(before);
+        }
+        if let Some(stream) = stream {
+            query
+                .push(" AND EXISTS(SELECT 1 FROM extents e WHERE e.chunk_id=c.id AND e.stream_id=")
+                .push_bind(stream)
+                .push(")");
+        }
+        if let Some(chunk) = chunk {
+            query.push(" AND c.id=").push_bind(chunk);
+        }
+        query.push(" ORDER BY c.id LIMIT 128");
+        Ok(query.build_query_as().fetch_all(&self.pool).await?)
+    }
+    async fn synced_chunk(&self, chunk: &Chunk, failure: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE chunk_encodings SET sync_pending=CASE WHEN $2::text IS NULL THEN FALSE ELSE sync_pending END,quarantine_code=$2,quarantined_at=CASE WHEN $2::text IS NULL THEN NULL ELSE clock_timestamp() END,quarantine_revision=quarantine_revision+CASE WHEN $2::text IS NULL THEN 0 ELSE 1 END WHERE encoding_id=$1 AND sync_pending AND quarantined_at IS NULL AND state IN ('ready','uploading')").bind(chunk.encoding_id).bind(failure).execute(&self.pool).await?;
+        Ok(())
+    }
+    async fn buffered_status(&self) -> Result<Value> {
+        let (files, bytes, oldest): (i64,i64,Option<String>) = sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(c.raw_size),0) AS BIGINT),MIN(l.created_at)::text FROM chunk_encodings l JOIN chunks c ON c.current_encoding_id=l.encoding_id WHERE c.state='ready' AND l.sync_pending AND l.state IN ('ready','uploading') AND l.quarantined_at IS NULL").fetch_one(&self.pool).await?;
+        Ok(serde_json::json!({"pending":files,"bytes":bytes,"oldest":oldest}))
+    }
+
     async fn source_snapshot(
         &self,
         scope: &crate::model::source::SourceScope,
@@ -9649,4 +9695,8 @@ pub(super) fn conversion_job(
     source: Id,
 ) -> Scalar<'static, sqlx::types::Json<crate::model::raw::Conversion>> {
     sqlx::query_scalar("SELECT detail FROM tasks WHERE id=(SELECT processing_task FROM raw_sources WHERE id=$1) FOR UPDATE").bind(source)
+}
+
+pub(super) fn buffer_chunk(chunk: &Chunk) -> Statement<'_> {
+    sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,standalone_size,standalone_compressed,nonce,nonce_id,state,created_at,unreferenced_at,encryption_algorithm,block_key_id,sync_pending) VALUES($1,$2,$3,$4,$5,$6,$10,'uploading',$7,now(),$8,$9,TRUE) ON CONFLICT(encoding_id) DO UPDATE SET sync_pending=TRUE WHERE chunk_encodings.state='uploading'").bind(chunk.encoding_id).bind(chunk.id).bind(chunk.storage_id).bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(chunk.created_at).bind(&chunk.algorithm).bind(chunk.block_key_id).bind(crate::content::nonce::id(chunk.nonce.as_deref()))
 }

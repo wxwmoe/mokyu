@@ -19,6 +19,7 @@ mod raw_request;
 pub(crate) mod raw_upload;
 pub(crate) mod resource_gate;
 mod s3;
+mod sync;
 pub(crate) mod target;
 
 #[cfg(all(test, feature = "fault-injection"))]
@@ -172,7 +173,18 @@ async fn build_store(
         cpu_jobs,
     )?);
     let aging = Duration::from_secs(config::seconds(&profile.priority_aging)?);
+    let buffered_backend = if is_local {
+        Some(Arc::new(object_store::prefix::PrefixStore::new(
+            object_store::local::LocalFileSystem::new_with_prefix(
+                record.path.as_deref().context("local path missing")?,
+            )?,
+            Path::parse(&prefix)?,
+        )) as Arc<dyn ObjectStore>)
+    } else {
+        None
+    };
     Ok(StoreBackend {
+        buffered_backend,
         profile: Arc::new(profile.clone()),
         backend: target.backend,
         multipart: target.multipart,
@@ -392,14 +404,18 @@ impl Storage {
             access: Arc::new(crate::status::access::Access::new(
                 budget.cache_entries.clamp(128, 8192),
             )),
-            physical,
+            physical: physical.clone(),
             cluster,
             profile_store,
             wake_sync: Default::default(),
             buffered_writes: (!raw_store
                 .buffered(Id::default(), None, None)
                 .await?
-                .is_empty())
+                .is_empty()
+                || !physical
+                    .buffered_chunks(Id::default(), None, None, None)
+                    .await?
+                    .is_empty())
             .into(),
             raw_store,
             reflink: Arc::new(Mutex::new(HashMap::new())),
@@ -1194,6 +1210,7 @@ impl Storage {
         c: &Chunk,
         data: Bytes,
         compressed: bool,
+        buffered: bool,
     ) -> Result<Option<UploadPin>> {
         let policy = self.local_cache(c.storage_id)?;
         let id = cache::cache_id(c);
@@ -1206,7 +1223,7 @@ impl Storage {
         tokio::spawn(async move {
             let _permit = permit;
             storage
-                .stage_upload_owned(storage_id, id, data, compressed, policy)
+                .stage_upload_owned(storage_id, id, data, compressed, policy, buffered)
                 .await
         })
         .await?
@@ -1218,6 +1235,7 @@ impl Storage {
         data: Bytes,
         compressed: bool,
         policy: CachePolicy,
+        buffered: bool,
     ) -> Result<Option<UploadPin>> {
         let size = data.len() as u64;
         let _write = self.cache_writes.lock().await;
@@ -1296,18 +1314,18 @@ impl Storage {
             f.write_all(&data).await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("upload-cache-written").await;
-            f.sync_all().await?;
+            if buffered {
+                f.flush().await?;
+            } else {
+                f.sync_all().await?;
+            }
             drop(f);
             tokio::fs::rename(&tmp, &path).await?;
-            tokio::fs::File::open(path.parent().unwrap())
-                .await?
-                .sync_all()
-                .await?;
-            tokio::fs::File::open(self.disk.root.join("chunks"))
-                .await?
-                .sync_all()
-                .await?;
-            Ok::<_, std::io::Error>(())
+            if !buffered {
+                raw::sync_directory(path.parent().unwrap()).await?;
+                raw::sync_directory(&self.disk.root.join("chunks")).await?;
+            }
+            Ok::<_, anyhow::Error>(())
         }
         .await;
         if let Err(e) = result {
@@ -1319,7 +1337,7 @@ impl Storage {
             if retained {
                 ticket.commit();
             }
-            return Err(e.into());
+            return Err(e);
         }
         ticket.commit();
         let mut fifo = self.fifo.lock().await;
@@ -1464,6 +1482,15 @@ impl Storage {
         .await?
     }
     pub async fn put(self: &Arc<Self>, c: &Chunk, encoded: Vec<u8>, cache: Bytes) -> Result<()> {
+        self.put_received(c, encoded, cache, false).await
+    }
+    pub(crate) async fn put_received(
+        self: &Arc<Self>,
+        c: &Chunk,
+        encoded: Vec<u8>,
+        cache: Bytes,
+        buffered: bool,
+    ) -> Result<()> {
         let storage_id = c.storage_id.context("chunk has no store")?;
         self.ensure_storage_verified(storage_id).await?;
         let target = self.store_backend(storage_id)?;
@@ -1478,8 +1505,17 @@ impl Storage {
         #[cfg(feature = "fault-injection")]
         crate::faults::point("storage-put-permitted").await;
         let space = self.local_space(&target, size as u64)?;
-        let result = target
-            .backend
+        let backend = if buffered {
+            self.physical.buffer_chunk(c).await?;
+            self.buffered_writes.store(true, Ordering::Release);
+            target
+                .buffered_backend
+                .as_ref()
+                .context("buffered chunks require local storage")?
+        } else {
+            &target.backend
+        };
+        let result = backend
             .put(
                 &self.path_for(storage_id, c.location_id)?,
                 Bytes::from(encoded).into(),

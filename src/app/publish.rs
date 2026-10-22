@@ -15,7 +15,7 @@ impl App {
         etag: &str,
         checksums: Value,
     ) -> Result<()> {
-        self.sync_raw_stream(id).await?;
+        self.sync_stream(id).await?;
         self.finish_received_stream(id, size, etag, checksums).await
     }
     pub(crate) async fn finish_received_stream(

@@ -56,7 +56,12 @@ impl App {
         if self.upload_cache.bypass(stream).await? {
             return Ok(false);
         }
-        let staged = self.storage.stage_upload(c, data, compressed).await;
+        let buffered =
+            new && self.role == "single" && profile.write_durability.as_deref() == Some("buffered");
+        let staged = self
+            .storage
+            .stage_upload(c, data, compressed, buffered)
+            .await;
         let pin = match staged {
             Ok(Some(pin)) => pin,
             other => {
@@ -118,6 +123,7 @@ impl App {
                 stream,
                 offset,
                 new,
+                buffered,
                 size,
                 storage,
                 key: &key,
@@ -136,6 +142,10 @@ impl App {
             return Ok(false);
         }
         drop(_coord);
+        if buffered {
+            self.storage.buffered_writes.store(true, Ordering::Release);
+            self.storage.wake_sync.notify_one();
+        }
         if self.role == "single" {
             self.wake_tasks.notify_one();
         }
@@ -156,7 +166,7 @@ impl App {
         let (total, limit, used) = self.storage.disk.upload_capacity()?;
         let (pending, pins) = self.upload_cache.status().await?;
         Ok(
-            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"fallbacks":FALLBACKS.load(Ordering::Relaxed),"rejections":REJECTIONS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100,"raw_processing":self.raw.processing_status().await?,"buffered_files":self.raw.buffered_status().await?,"raw_uploads":self.raw.upload_status().await?}),
+            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"fallbacks":FALLBACKS.load(Ordering::Relaxed),"rejections":REJECTIONS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100,"raw_processing":self.raw.processing_status().await?,"buffered_files":self.raw.buffered_status().await?,"buffered_chunks":self.physical.buffered_status().await?,"raw_uploads":self.raw.upload_status().await?}),
         )
     }
     pub async fn cache_flush_start(&self) -> Result<Value> {
@@ -199,6 +209,13 @@ impl App {
                     if self.role == "single"
                         && self
                             .sync_raw_batch(Some(before), false, &mut crate::model::Id::default())
+                            .await?
+                    {
+                        return Ok(true);
+                    }
+                    if self.role == "single"
+                        && self
+                            .sync_chunk_batch(Some(before), false, &mut crate::model::Id::default())
                             .await?
                     {
                         return Ok(true);

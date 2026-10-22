@@ -5,7 +5,7 @@ import en from '../src/locales/i18n.en.js'
 import zh from '../src/locales/i18n.zh-CN.js'
 import ja from '../src/locales/i18n.ja.js'
 
-test('raw durability stays in the draft and saves only for the selected storage', async ({ page, request }, info) => {
+test('file durability stays in the draft and saves only for the selected storage', async ({ page, request }, info) => {
   test.setTimeout(120_000)
   const password = readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8').trim()
   const origin = process.env.MOKYU_TEST_WEB!
@@ -34,6 +34,7 @@ test('raw durability stays in the draft and saves only for the selected storage'
       const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
       const select = editor.getByRole('combobox', { name: text.profile_write_durability, exact: true })
       await expect(select).toBeVisible()
+      await expect(editor.locator('#storage-durability-hint')).toHaveText(text.storeDurabilityHint)
       await select.click()
       await page.getByRole('option', { name: text.storeDurability_buffered, exact: true }).click()
       expect((await (await request.get(url)).json()).write_durability).toBe('durable')

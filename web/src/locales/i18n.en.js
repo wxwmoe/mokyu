@@ -40,7 +40,7 @@ export default {
   "profile_write_durability": "Write acknowledgement",
   "storeDurability_durable": "Durable",
   "storeDurability_buffered": "File buffered",
-  "storeDurabilityHint": "File buffering acknowledges complete raw files before background disk sync, so power loss or a system crash can lose recent writes; chunks, multipart parts and copies still use durable acknowledgement",
+  "storeDurabilityHint": "File buffering acknowledges complete local or cached files before background disk sync, so power loss or a system crash can lose recent writes, multipart parts, copies and migrations still wait for durable files",
   "storeProcessing_inline": "Before responding",
   "storeProcessing_background": "In the background",
   "storeProcessingHint": "Background processing saves the original file under the selected write acknowledgement policy and keeps it readable until conversion finishes",

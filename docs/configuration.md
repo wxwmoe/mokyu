@@ -115,7 +115,7 @@ runtime section 使用 revision 乐观并发。冲突返回当前 revision；重
 profile 是类型化字段，不是任意 JSON。字段包括：
 
 - `deduplication_enabled` 默认 false，仅控制 raw 的整文件去重；chunks 固定启用区块去重。更改仅影响新写入；关闭不会拆开已有共享文件；
-- `write_durability` 仅单容器可选，默认 `durable`；`buffered` 允许 local raw、后台 CDC 的原始 raw 和 S3 raw 写缓存完整写入文件后响应，再由后台同步文件及目录。进程重启会完整核验未同步的文件，断电或系统崩溃可能丢失最近已确认写入；分块、Multipart 分片、复制与迁移仍采用持久确认。没有写缓存的 S3 仍等待最终上传，群集不提供此字段；
+- `write_durability` 仅单容器可选，默认 `durable`；`buffered` 允许 local chunks/raw 和 S3 chunks/raw 写缓存完整写入文件后响应，再由后台同步文件及目录。进程重启会完整核验未同步的文件，断电或系统崩溃可能丢失最近已确认写入；Multipart 分片、复制与迁移仍采用持久确认。没有写缓存的 S3 仍等待最终上传，群集不提供此字段；
 - `write_processing` 默认 `inline`，开启 CDC 或 raw 去重时可选 `background`。后台 CDC 的普通 PUT 先保存可读 raw，再分块、查重和编码，新块直接生成最终区块或区块包；Multipart 继续按到达数据流式分块。S3 开启写缓存时确认本地文件与对象映射后响应，后台直接从缓存转换，不先上传完整 raw；没有写缓存时先等待完整原始文件可靠保存。本地 storage 不使用磁盘写缓存。raw 的 inline 去重先查重再上传，background 先保存独立文件再查重；已有工作保留接受时的设置和密钥，重启继续，切换表示保留对象元数据并等待已有读者释放保护；
 - `cdc_enabled` 默认 true；local 和 S3 均可关闭。关闭时必须清除 block key，同时禁用压缩、pack 和 pack Range；Web 在草稿中联动这些值，保存后生效，重新开启不会恢复旧 key。已有对象保持可读；
 

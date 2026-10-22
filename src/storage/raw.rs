@@ -37,7 +37,7 @@ pub(crate) struct LocalWriter<'a> {
     _global: resource_gate::Permit,
 }
 
-async fn sync_directory(path: &Path) -> Result<()> {
+pub(super) async fn sync_directory(path: &Path) -> Result<()> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || std::fs::File::open(path)?.sync_all()).await??;
     Ok(())

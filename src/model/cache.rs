@@ -61,6 +61,7 @@ pub(crate) struct CacheStage<'a> {
     pub stream: Id,
     pub offset: i64,
     pub new: bool,
+    pub buffered: bool,
     pub size: i64,
     pub storage: Uuid,
     pub key: &'a str,

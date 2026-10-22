@@ -177,7 +177,13 @@ impl App {
         self.storage.register_location(&c).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-uploading").await;
-        self.storage.put(&c, encoded, cache).await?;
+        let buffered = accepted.is_none()
+            && self.role == "single"
+            && profile.write_durability.as_deref() == Some("buffered")
+            && self.storage.is_local(storage_id)?;
+        self.storage
+            .put_received(&c, encoded, cache, buffered)
+            .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-stored").await;
         self.chunks.complete(stream, offset, &c).await?;

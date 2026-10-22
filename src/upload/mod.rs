@@ -387,8 +387,11 @@ impl App {
                 offset += n as i64;
             }
         }
-        if profile.write_durability.as_deref() != Some("buffered") {
-            self.sync_raw_stream(stream).await?;
+        let buffered = profile.write_durability.as_deref() == Some("buffered")
+            && (self.storage.is_local(storage)?
+                || (profile.upload_cache && !self.upload_cache.bypass(stream).await?));
+        if upload.is_some() || !buffered {
+            self.sync_stream(stream).await?;
         }
         self.finish_received_stream(stream, received, &etag, sums.clone())
             .await?;

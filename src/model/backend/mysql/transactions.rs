@@ -1807,6 +1807,13 @@ pub(super) async fn cache_stage(pool: &MySqlPool, input: CacheStage<'_>) -> Resu
     queries::pin_chunk(input.chunk.id, input.stream)
         .execute(&mut *tx)
         .await?;
+    if input.buffered {
+        ensure!(
+            input.new && input.node.is_none(),
+            "buffered chunks require single mode"
+        );
+        queries::buffer_chunk(input.chunk).execute(&mut *tx).await?;
+    }
     queries::ready_cached_chunk(input.chunk.id)
         .execute(&mut *tx)
         .await?;
