@@ -11,6 +11,7 @@ pub(crate) mod raw;
 pub(crate) mod raw_upload;
 pub(crate) mod rewrite;
 pub(crate) mod scheduler;
+pub(crate) mod sync;
 pub(crate) mod task;
 
 pub(crate) use crate::model::REQUEST_ID;

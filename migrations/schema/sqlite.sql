@@ -1147,3 +1147,7 @@ ALTER TABLE pending_uploads ADD COLUMN encoding_policy TEXT CHECK (encoding_poli
 ALTER TABLE raw_sources ADD COLUMN processing_task BLOB REFERENCES tasks(id) ON DELETE SET NULL;
 CREATE INDEX raw_sources_processing ON raw_sources(processing_task);
 UPDATE mokyu_meta SET schema_version=33 WHERE id=1;
+
+ALTER TABLE storage_profiles ADD COLUMN write_durability TEXT NOT NULL DEFAULT 'durable' CHECK(write_durability IN ('durable','buffered'));
+CREATE INDEX raw_sources_sync ON raw_sources(id) WHERE durability='buffered' AND state='ready' AND quarantine_code IS NULL;
+UPDATE mokyu_meta SET schema_version=34 WHERE id=1;

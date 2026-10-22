@@ -20,6 +20,11 @@ def main():
         assert fixture.backend is not None
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
         assert profile['min_free_space'] is None
+        assert 'write_durability' not in profile
+        for durability in ['durable', 'buffered']:
+            fixture.cli('storage', 'profile', 'set', fixture.name, '-',
+                        value={**profile, 'write_durability': durability}, succeeds=False)
+        assert fixture.cli('storage', 'profile', 'show', fixture.name)['revision'] == profile['revision']
         profile.update(cdc_enabled=False, pack_range_enabled=False, multipart_idle_timeout=expiry)
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         peer = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_PEER_ENDPOINT'], region_name='us-east-1',

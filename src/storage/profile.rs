@@ -15,6 +15,8 @@ pub(crate) struct StorageProfile {
     pub deduplication_enabled: bool,
     #[serde(default = "write_processing")]
     pub write_processing: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_durability: Option<String>,
     pub connect_timeout: String,
     pub request_timeout: String,
     pub max_retries: i32,
@@ -208,6 +210,16 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         s3s::s3_error!(
             InvalidArgument,
             "upload_cache_overflow must be fallback or reject"
+        )
+    );
+    anyhow::ensure!(
+        matches!(
+            profile.write_durability.as_deref(),
+            None | Some("durable" | "buffered")
+        ),
+        s3s::s3_error!(
+            InvalidArgument,
+            "write_durability must be durable or buffered"
         )
     );
     match (storage_type, profile.min_free_space.as_deref()) {

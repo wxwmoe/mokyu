@@ -59,8 +59,14 @@ pub(super) async fn drain(app: Arc<App>, workers: impl Future<Output = Result<()
         tracing::info!("shutdown flush completed");
     } else {
         let node = app.node.get().map(|node| node.node_id);
-        let backlog =
-            tokio::time::timeout(Duration::from_secs(1), app.upload_cache.backlog(node)).await;
+        let backlog = tokio::time::timeout(Duration::from_secs(1), async {
+            let (uploads, buffered) =
+                tokio::try_join!(app.upload_cache.backlog(node), app.raw.buffered_status())?;
+            Ok::<_, anyhow::Error>(
+                serde_json::json!({"uploads": uploads, "buffered_files": buffered}),
+            )
+        })
+        .await;
         tracing::warn!(
             ?result,
             ?node,
@@ -89,6 +95,7 @@ pub(super) async fn background(app: Arc<App>) -> Result<()> {
         result = crate::worker::scheduler::run(app.clone()) => result,
         result = crate::worker::raw::run(app.clone()) => result,
         result = crate::worker::raw_upload::run(app.clone()) => result,
+        result = crate::worker::sync::run(app.clone()) => result,
         result = app.storage.compression.run() => result,
     }
 }

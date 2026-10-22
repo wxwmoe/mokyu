@@ -168,6 +168,8 @@ impl App {
     }
 
     pub async fn recover(&self) -> Result<()> {
+        let mut after = crate::model::Id::default();
+        while self.sync_raw_batch(None, true, &mut after).await? {}
         self.maintenance_store
             .recover(self.maintenance.load(Ordering::Acquire))
             .await?;

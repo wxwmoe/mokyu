@@ -285,7 +285,19 @@ pub(crate) async fn profile(
     Ok(Json(app.storage_profiles.load(storage_id).await?))
 }
 
+fn validate_profile_mode(app: &App, profile: &StorageProfile) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        app.role == "single" || profile.write_durability.is_none(),
+        s3s::s3_error!(
+            InvalidArgument,
+            "write_durability is only available in single mode"
+        )
+    );
+    Ok(())
+}
+
 async fn validate_profile_capacity(app: &App, profile: &StorageProfile) -> anyhow::Result<()> {
+    validate_profile_mode(app, profile)?;
     let mut profiles = app.storage_profiles.enabled_profiles().await?;
     profiles.retain(|current| current.storage_id != profile.storage_id);
     profiles.push(profile.clone());
@@ -364,6 +376,7 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
         storage_identity_marker(deployment_id, id)?,
     )?;
     if let Some(profile) = &input.profile {
+        validate_profile_mode(app, profile)?;
         for (alias, value) in [
             (input.read_concurrency, profile.read_concurrency),
             (input.upload_concurrency, profile.upload_concurrency),

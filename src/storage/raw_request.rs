@@ -133,19 +133,21 @@ impl File {
         source: crate::model::Id,
         id: Uuid,
         charge: super::UploadCharge,
+        buffered: bool,
     ) -> Result<(Self, bool)> {
         // Finish publication and pin registration even when the request is cancelled.
         tokio::spawn(async move {
-            let published = if let Some(pin) = self.publish_inner(&storage, id, charge).await? {
-                storage
-                    .raw_upload_pins
-                    .lock()
-                    .unwrap()
-                    .insert(id, (source, pin));
-                true
-            } else {
-                false
-            };
+            let published =
+                if let Some(pin) = self.publish_inner(&storage, id, charge, buffered).await? {
+                    storage
+                        .raw_upload_pins
+                        .lock()
+                        .unwrap()
+                        .insert(id, (source, pin));
+                    true
+                } else {
+                    false
+                };
             Ok::<_, anyhow::Error>((self, published))
         })
         .await?
@@ -156,6 +158,7 @@ impl File {
         storage: &Storage,
         id: Uuid,
         charge: super::UploadCharge,
+        buffered: bool,
     ) -> Result<Option<super::UploadPin>> {
         let _write = storage.cache_writes.lock().await;
         let Some(reservation) = storage.reserve_cache(0, self.policy).await? else {
@@ -164,9 +167,14 @@ impl File {
         drop(reservation);
         let file = self.file.as_mut().unwrap();
         file.flush().await?;
-        file.sync_all().await?;
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("raw-file-durable").await;
+        if !buffered {
+            file.sync_all().await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-file-durable").await;
+        } else {
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-file-buffered").await;
+        }
         let destination = CacheFile::Raw.path(&storage.disk.root, id);
         tokio::fs::hard_link(&self.path, &destination).await?;
         self.linked = Some(destination.clone());
@@ -175,14 +183,16 @@ impl File {
         }
         self.path = destination;
         self.linked = None;
-        tokio::fs::File::open(self.path.parent().unwrap())
-            .await?
-            .sync_all()
-            .await?;
-        tokio::fs::File::open(storage.disk.root.join("raw"))
-            .await?
-            .sync_all()
-            .await?;
+        if !buffered {
+            tokio::fs::File::open(self.path.parent().unwrap())
+                .await?
+                .sync_all()
+                .await?;
+            tokio::fs::File::open(storage.disk.root.join("raw"))
+                .await?
+                .sync_all()
+                .await?;
+        }
         #[cfg(feature = "fault-injection")]
         crate::faults::point("raw-file-published").await;
         let mut fifo = storage.fifo.lock().await;

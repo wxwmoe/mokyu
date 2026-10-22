@@ -7,7 +7,7 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator.locking = false;
     migrator
 };
-const SCHEMA_VERSION: i64 = 32;
+const SCHEMA_VERSION: i64 = 33;
 
 pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
     ensure!(

@@ -161,6 +161,14 @@ async fn process(app: &App, work: &RawProcessing) -> Result<bool> {
         crate::faults::point("raw-processing-before-switch").await;
         let mutex = app.content_lock(source.storage_id, hash);
         let _hash = mutex.lock().await;
+        if app.storage.buffered_writes.load(Ordering::Acquire)
+            && let Some(candidate) = app
+                .raw
+                .buffered_duplicate(source.storage_id, &hash, source.size)
+                .await?
+        {
+            app.sync_raw_source(&candidate, false).await?;
+        }
         let _coord = app.coord.lock().await;
         app.storage_writable()?;
         if app.role == "single"

@@ -2414,3 +2414,7 @@ UPDATE mokyu_meta SET schema_version=60 WHERE singleton;
 ALTER TABLE runtime_settings DROP CONSTRAINT runtime_settings_section_check;
 ALTER TABLE runtime_settings ADD CONSTRAINT runtime_settings_section_check CHECK (section IN ('web','requests','uploads','metrics','maintenance','io'));
 UPDATE mokyu_meta SET schema_version=61 WHERE singleton;
+
+ALTER TABLE storage_profiles ADD COLUMN write_durability TEXT NOT NULL DEFAULT 'durable' CHECK(write_durability IN ('durable','buffered'));
+CREATE INDEX raw_sources_sync ON raw_sources(id) WHERE durability='buffered' AND state='ready' AND quarantine_code IS NULL;
+UPDATE mokyu_meta SET schema_version=62 WHERE singleton;

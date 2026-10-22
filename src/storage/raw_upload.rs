@@ -32,6 +32,7 @@ pub(crate) struct Writer {
     background: bool,
     reject_overflow: bool,
     prepared: bool,
+    buffered: bool,
 }
 
 impl Writer {
@@ -40,6 +41,7 @@ impl Writer {
         target: Uuid,
         source: Id,
         location: Uuid,
+        buffered: bool,
     ) -> Result<Self> {
         let profile = storage.profile(target)?;
         let policy = storage.local_cache(Some(target))?;
@@ -70,6 +72,7 @@ impl Writer {
             background: profile.write_processing == "background",
             reject_overflow,
             prepared: false,
+            buffered,
         })
     }
 
@@ -161,12 +164,23 @@ impl Writer {
                 .file
                 .take()
                 .unwrap()
-                .publish(self.storage.clone(), self.source, self.location, charge)
+                .publish(
+                    self.storage.clone(),
+                    self.source,
+                    self.location,
+                    charge,
+                    self.buffered,
+                )
                 .await?;
             self.file = Some(file);
             if published {
                 #[cfg(feature = "fault-injection")]
-                crate::faults::point("raw-cache-durable").await;
+                crate::faults::point(if self.buffered {
+                    "raw-cache-buffered"
+                } else {
+                    "raw-cache-durable"
+                })
+                .await;
                 return Ok(Written::Cached {
                     revision: self.revision,
                     deduplicate: self.deduplicate,

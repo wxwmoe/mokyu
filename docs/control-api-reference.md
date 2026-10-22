@@ -187,7 +187,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | `POST /api/v1/storages` | 创建存储；请求包含 `{name,type,initialize,path?,endpoint?,bucket?,region?,prefix?,block_key_id?,access_key?,secret_key?,profile?}`，type 为 `local` 或 `s3`；`initialize` 必须明确为 `true`，profile 使用完整 typed storage profile |
 | `PUT /api/v1/storages/{name}` | 修改连接字段、prefix、block_key_id 或 enabled；name 和 id 不可修改；切换 type 需单容器维护状态并排空上传、任务及待写来源，核对目标 meta 后保存，成功后须重启；并发、压缩、区块包、缓存和维护预算通过 profile 保存 |
 | `POST /api/v1/storages/{name}/check` | 读取并核对已有 `meta.json`，无请求体 |
-| `GET /api/v1/storages/{name}/profile` | 读取该 storage 的 typed profile；CDC 联动开关、连接超时、重试、压缩、pack、cache、integrity、配额与生命周期字段均在 profile 内 |
+| `GET /api/v1/storages/{name}/profile` | 读取该 storage 的 typed profile；CDC 联动开关、单容器 write_durability、连接超时、重试、压缩、pack、cache、integrity、配额与生命周期字段均在 profile 内 |
 | `PUT /api/v1/storages/{name}/key` | 设置或清除 `{key?}` 形式的 block key 绑定；返回新的 profile revision |
 | `POST /api/v1/storages/{name}/rewrite` | 对存量物理编码执行 `preview`、`start`、`status`、`pause`、`resume` 或 `retry`；`start` 必须提交预览 confirmation |
 | `POST /api/v1/storages/{name}/unpack` | 对指定 pack 执行 `preview` 或 `start`；请求 `{action,pack_id,confirmation?}`，start 必须提交预览 confirmation |
@@ -222,7 +222,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 
 ## 运行状态
 
-`GET /api/v1/system/status` 与 `cli status` 相同，提供进程、连接池、资源预算、读写名额、存储 read/upload/control 队列和目录索引状态；`cache_jobs_active` 为当前缓存填充/清理任务数；`upload_cache.raw_processing` 提供后台 raw 去重的 `pending`、`failed` 和 `bytes`，失败记录保留并重试，不影响已有独立来源；`upload_cache.raw_uploads` 用同样三个字段表示必须排空的 raw 来源，既有待上传工作不因关闭缓存而丢弃；`upload_cache.fallbacks` 和 `upload_cache.rejections` 分别统计本进程缓存不可用时的同步回退与策略拒绝次数，重启清零。`GET /api/v1/system/config` 提供脱敏配置、来源、值模式和重启要求，不读取秘密文件内容；来源由 `origin` 标识，值模式由 `value_mode` 标识。
+`GET /api/v1/system/status` 与 `cli status` 相同，提供进程、连接池、资源预算、读写名额、存储 read/upload/control 队列和目录索引状态；`cache_jobs_active` 为当前缓存填充/清理任务数；`upload_cache.raw_processing` 提供后台 raw 去重的 `pending`、`failed` 和 `bytes`，失败记录保留并重试，不影响已有独立来源；`upload_cache.raw_uploads` 用同样三个字段表示必须排空的 raw 来源，既有待上传工作不因关闭缓存而丢弃；`upload_cache.buffered_files` 返回待同步 raw 的 `pending`、`bytes` 和 `oldest`，同步失败保留待办；`upload_cache.fallbacks` 和 `upload_cache.rejections` 分别统计本进程缓存不可用时的同步回退与策略拒绝次数，重启清零。`GET /api/v1/system/config` 提供脱敏配置、来源、值模式和重启要求，不读取秘密文件内容；来源由 `origin` 标识，值模式由 `value_mode` 标识。
 
 运行计数本进程累计、重启归零：HTTP started/completed/active/failed/canceled、4xx/5xx、字节及延时；缓存命中/查找、存储请求/字节、GC 成败。失败率为 `(failed+canceled)/completed`，耗时分位数是倍增直方图的近似上界。统计不是账单或逐请求日志；Linux RSS 也不等于含页缓存的容器内存。
 

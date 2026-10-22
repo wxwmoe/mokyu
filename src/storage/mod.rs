@@ -56,6 +56,8 @@ pub(crate) const STAGING_PREFIX: &str = "__mokyu/multipart/";
 const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 
 pub struct Storage {
+    pub(crate) buffered_writes: std::sync::atomic::AtomicBool,
+    pub(crate) wake_sync: tokio::sync::Notify,
     pub access: Arc<crate::status::access::Access>,
     maintenance: Arc<std::sync::atomic::AtomicBool>,
     physical: Arc<dyn crate::model::PhysicalStore>,
@@ -393,6 +395,12 @@ impl Storage {
             physical,
             cluster,
             profile_store,
+            wake_sync: Default::default(),
+            buffered_writes: (!raw_store
+                .buffered(Id::default(), None, None)
+                .await?
+                .is_empty())
+            .into(),
             raw_store,
             reflink: Arc::new(Mutex::new(HashMap::new())),
             managed_keys,

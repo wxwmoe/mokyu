@@ -387,7 +387,10 @@ impl App {
                 offset += n as i64;
             }
         }
-        self.finish_stream(stream, received, &etag, sums.clone())
+        if profile.write_durability.as_deref() != Some("buffered") {
+            self.sync_raw_stream(stream).await?;
+        }
+        self.finish_received_stream(stream, received, &etag, sums.clone())
             .await?;
         Ok((received, etag, sums))
     }

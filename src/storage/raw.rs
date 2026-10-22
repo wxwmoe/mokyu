@@ -31,6 +31,7 @@ pub(crate) struct LocalWriter<'a> {
     floor: u64,
     prepared: bool,
     retained: bool,
+    buffered: bool,
     _target: Arc<StoreBackend>,
     _permit: StorePermit,
     _global: resource_gate::Permit,
@@ -104,15 +105,22 @@ impl LocalWriter<'_> {
         ensure!(self.size == expected, "raw receive length mismatch");
         self.flush_buffer().await?;
         self.file.flush().await?;
-        self.file.sync_all().await?;
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("raw-file-durable").await;
+        if !self.buffered {
+            self.file.sync_all().await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-file-durable").await;
+        } else {
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-file-buffered").await;
+        }
         // A new immutable name must never replace an existing file, even on retry.
         tokio::fs::hard_link(&self.temporary, &self.destination).await?;
         if !self.retained {
             tokio::fs::remove_file(&self.temporary).await?;
         }
-        sync_directory(self.destination.parent().unwrap()).await?;
+        if !self.buffered {
+            sync_directory(self.destination.parent().unwrap()).await?;
+        }
         self.storage.backend_puts.fetch_add(1, Ordering::Relaxed);
         self.storage
             .backend_write_bytes
@@ -131,6 +139,38 @@ pub(crate) struct RawReader {
 }
 
 impl Storage {
+    pub(crate) async fn sync_raw(&self, source: &RawSource, verify: bool) -> Result<()> {
+        let target = self.store_backend(source.storage_id)?;
+        if !source.pending_upload && !target.is_local {
+            return Ok(());
+        }
+        let root = if source.pending_upload {
+            self.disk.root.join("raw")
+        } else {
+            target
+                .raw_root
+                .clone()
+                .context("raw local path is missing")?
+        };
+        let file_path = path(&root, source.location_id);
+        // Distinguish a missing pending cache file from transient database/backend failures.
+        tokio::fs::symlink_metadata(&file_path)
+            .await
+            .map_err(raw_io_error)?;
+        let reader = self.raw_reader_uncached(source, verify).await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("buffered-before-sync").await;
+        match &reader.file {
+            RawFile::Local(file) | RawFile::Cached { file, .. } => {
+                file.sync_all().await?;
+                sync_directory(file_path.parent().unwrap()).await?;
+                sync_directory(&root).await?;
+                sync_directory(root.parent().context("raw root has no parent")?).await?;
+            }
+            RawFile::Remote(_) => {}
+        }
+        Ok(())
+    }
     pub(crate) async fn send_raw(
         self: &Arc<Self>,
         target: Uuid,
@@ -274,10 +314,18 @@ impl Storage {
     ) -> Result<RawWriter<'_>> {
         let target = self.store_backend(storage)?;
         self.verify_raw_target(&target).await?;
+        let buffered = cache
+            && !self.cluster_mode
+            && (target.is_local || target.profile.upload_cache)
+            && target.profile.write_durability.as_deref() == Some("buffered");
+        if buffered {
+            self.buffered_writes.store(true, Ordering::Release);
+            self.raw_store.buffer(source).await?;
+        }
         if cache && !target.is_local && target.profile.upload_cache {
             remote_size(declared.unwrap_or(0).max(0) as u64)?;
             return Ok(RawWriter::Pending(
-                super::raw_upload::Writer::new(self, storage, source, location).await?,
+                super::raw_upload::Writer::new(self, storage, source, location, buffered).await?,
             ));
         }
         let permit = target.writes.acquire().await?;
@@ -336,6 +384,7 @@ impl Storage {
             )?,
             prepared: false,
             retained: false,
+            buffered,
             _target: target,
             _permit: permit,
             _global: global,

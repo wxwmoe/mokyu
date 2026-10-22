@@ -156,7 +156,7 @@ impl App {
         let (total, limit, used) = self.storage.disk.upload_capacity()?;
         let (pending, pins) = self.upload_cache.status().await?;
         Ok(
-            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"fallbacks":FALLBACKS.load(Ordering::Relaxed),"rejections":REJECTIONS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100,"raw_processing":self.raw.processing_status().await?,"raw_uploads":self.raw.upload_status().await?}),
+            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"fallbacks":FALLBACKS.load(Ordering::Relaxed),"rejections":REJECTIONS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100,"raw_processing":self.raw.processing_status().await?,"buffered_files":self.raw.buffered_status().await?,"raw_uploads":self.raw.upload_status().await?}),
         )
     }
     pub async fn cache_flush_start(&self) -> Result<Value> {
@@ -193,15 +193,22 @@ impl App {
                 return Ok(true);
             }
             CacheBatch::Finished => {
+                drop(selection);
                 if flush {
                     let before = serde_json::from_value(detail["upper_time"].clone())?;
+                    if self.role == "single"
+                        && self
+                            .sync_raw_batch(Some(before), false, &mut crate::model::Id::default())
+                            .await?
+                    {
+                        return Ok(true);
+                    }
                     let owner = if detail["coordinator"] == true {
                         None
                     } else {
                         self.node.get().map(|n| n.node_id)
                     };
                     if self.raw.uploads_before(before, owner).await? {
-                        drop(selection);
                         if detail["coordinator"] != true {
                             crate::worker::raw_upload::tick(self, Some(before)).await?;
                             self.transfer_remote_part(None).await?;

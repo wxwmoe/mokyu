@@ -10,6 +10,7 @@ import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
 import { notify, report } from '../app/feedback'
 import { secure } from '../app/security'
+import { useDeployment } from '../app/cluster'
 import UiSwitch from '../components/ui/UiSwitch.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
@@ -20,6 +21,7 @@ type ProfileKey = Exclude<keyof StorageProfile, 'storage_id' | 'revision'>
 type ProfileField = { key: ProfileKey, valueType: 'text' | 'number' | 'boolean' }
 type ManagedKey = components['schemas']['ManagedKeyView']
 const route = useRoute(), router = useRouter()
+const { status } = useDeployment()
 const storages = useQuery({ queryKey: ['storages'], queryFn: ({ signal }) => api<Storage[]>('/api/v1/storages', { signal }) })
 const keys = useQuery({ queryKey: ['managed-keys'], queryFn: ({ signal }) => api<ManagedKey[]>('/api/v1/keys', { signal }) })
 const open = ref(false), editing = ref<Storage | null>(null), busy = ref(false), checking = ref('')
@@ -53,7 +55,7 @@ const hasBlockKeys = computed(() => (keys.data.value || []).some(row => row.purp
 function profilePreset(type: string): Record<ProfileKey, string | number | boolean | null> {
   const s3 = type !== 'local'
   return {
-    cdc_enabled: true, deduplication_enabled: false, write_processing: 'inline',
+    cdc_enabled: true, deduplication_enabled: false, write_processing: 'inline', write_durability: status.data.value?.deployment_mode === 'single' ? 'durable' : null,
     connect_timeout: '5s', request_timeout: '30s', max_retries: 3, retry_timeout: '120s', priority_aging: '30s',
     min_storage_duration: '0s', unreferenced_grace: '48h', deleted_chunk_retention: '7d', upload_retention: '24h', multipart_idle_timeout: '24h', min_free_space: s3 ? null : '1GiB', cache_enabled: s3,
     cache_soft_limit: null, cache_entries: null, upload_cache: s3, upload_cache_size: null, upload_cache_overflow: 'fallback', compression_enabled: s3,
@@ -193,6 +195,7 @@ async function toggle(row: Storage) {
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled)" :label="t('profile_cdc_enabled')" :disabled="busy" @update:model-value="setProfileBoolean('cdc_enabled', $event)" /><p class="field-help">{{ t('storeCdcHint') }}</p></div>
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled || profileDraft.deduplication_enabled)" :label="t('profile_deduplication_enabled')" :disabled="busy || Boolean(profileDraft.cdc_enabled)" @update:model-value="setProfileBoolean('deduplication_enabled', $event)" /><p class="field-help">{{ t(profileDraft.cdc_enabled ? 'storeChunkDedupHint' : 'storeRawDedupHint') }}</p></div>
         <div v-if="profileDraft" class="store-form-wide"><label>{{ t('profile_write_processing') }}<UiSelect :model-value="String(profileDraft.write_processing)" :options="['inline', 'background'].map(value => ({ value, label: t('storeProcessing_' + value) }))" :label="t('profile_write_processing')" :disabled="busy || (!profileDraft.cdc_enabled && !profileDraft.deduplication_enabled)" @update:model-value="profileDraft.write_processing = $event" /></label><p class="field-help">{{ t('storeProcessingHint') }}</p></div>
+        <div v-if="profileDraft && status.data.value?.deployment_mode === 'single'" class="store-form-wide"><label>{{ t('profile_write_durability') }}<UiSelect :model-value="String(profileDraft.write_durability ?? 'durable')" :options="['durable', 'buffered'].map(value => ({ value, label: t('storeDurability_' + value) }))" :label="t('profile_write_durability')" :disabled="busy" aria-describedby="storage-durability-hint" @update:model-value="profileDraft.write_durability = $event" /></label><p id="storage-durability-hint" class="field-help">{{ t('storeDurabilityHint') }}</p></div>
         <label class="store-form-wide">{{ t('storeCurrentKey') }}<UiSelect v-model="draft.block_key_id" :options="keyOptions" :label="t('storeCurrentKey')" :disabled="busy || profileDraft?.cdc_enabled === false" /></label>
       <p class="store-form-wide field-help">{{ t(hasBlockKeys ? 'storeKeyHint' : 'storeNoKeyHint') }} <a href="/credentials?tab=managed&create=block" target="_blank" rel="noreferrer">{{ t('manageKeys') }}</a></p>
         <template v-if="profileDraft">

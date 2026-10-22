@@ -115,6 +115,22 @@ pub(crate) struct Conversion {
 
 #[async_trait]
 pub(crate) trait RawStore: Send + Sync {
+    async fn buffer(&self, source: Id) -> Result<()>;
+    async fn buffered_status(&self) -> Result<serde_json::Value>;
+    async fn buffered(
+        &self,
+        after: Id,
+        before: Option<chrono::DateTime<chrono::Utc>>,
+        stream: Option<Id>,
+    ) -> Result<Vec<RawSource>>;
+    async fn synced(&self, source: &RawSource, failure: Option<&str>) -> Result<()>;
+    async fn buffered_source(&self, source: Id) -> Result<Option<RawSource>>;
+    async fn buffered_duplicate(
+        &self,
+        storage: Uuid,
+        hash: &[u8],
+        size: i64,
+    ) -> Result<Option<RawSource>>;
     async fn inline_conversion(
         &self,
         stream: Id,

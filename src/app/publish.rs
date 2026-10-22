@@ -15,6 +15,16 @@ impl App {
         etag: &str,
         checksums: Value,
     ) -> Result<()> {
+        self.sync_raw_stream(id).await?;
+        self.finish_received_stream(id, size, etag, checksums).await
+    }
+    pub(crate) async fn finish_received_stream(
+        &self,
+        id: Id,
+        size: i64,
+        etag: &str,
+        checksums: Value,
+    ) -> Result<()> {
         self.renew_write_lease(id).await?;
         if !self.stream_store.finish(id, size, etag, checksums).await? {
             return Err(s3_error!(OperationAborted).into());
@@ -50,6 +60,13 @@ impl App {
             return Err(s3_error!(OperationAborted).into());
         }
         drop(_coord);
+        if self
+            .storage
+            .buffered_writes
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.storage.wake_sync.notify_one();
+        }
         self.wake_gc.notify_one();
         #[cfg(feature = "fault-injection")]
         crate::faults::point("object-before-seal").await;

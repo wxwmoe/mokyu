@@ -576,7 +576,7 @@ pub(super) fn release_storage_permit(token: Uuid) -> Statement<'static> {
 }
 
 pub(super) fn storage_profile(id: Uuid) -> Rows<'static, crate::storage::profile::StorageProfile> {
-    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,write_processing,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,upload_cache_overflow,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=$1")
+    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,write_processing,CASE WHEN (SELECT deployment_mode FROM mokyu_meta WHERE singleton)='single' THEN write_durability END AS write_durability,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,upload_cache_overflow,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=$1")
         .bind(id)
 }
 
@@ -6884,6 +6884,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::storage::profile::S
             cdc_enabled: row.try_get("cdc_enabled")?,
             deduplication_enabled: row.try_get("deduplication_enabled")?,
             write_processing: row.try_get("write_processing")?,
+            write_durability: row.try_get("write_durability")?,
             connect_timeout: row.try_get("connect_timeout")?,
             request_timeout: row.try_get("request_timeout")?,
             max_retries: row.try_get("max_retries")?,
@@ -6947,6 +6948,7 @@ const PROFILE_COLUMNS: &[&str] = &[
     "cdc_enabled",
     "deduplication_enabled",
     "write_processing",
+    "write_durability",
     "connect_timeout",
     "request_timeout",
     "max_retries",
@@ -7016,9 +7018,12 @@ pub(super) fn save_storage_profile(
     let statement = format!(
         "UPDATE storage_profiles AS current SET ({columns})=(SELECT {requested} FROM jsonb_populate_record(current,$2::jsonb) AS requested),revision=revision+1,updated_at=now() WHERE current.storage_id=$1 AND current.revision=$3"
     );
+    let mut value = serde_json::to_value(profile)?;
+    value["write_durability"] =
+        serde_json::json!(profile.write_durability.as_deref().unwrap_or("durable"));
     Ok(sqlx::query(sqlx::AssertSqlSafe(statement))
         .bind(profile.storage_id)
-        .bind(serde_json::to_value(profile)?)
+        .bind(value)
         .bind(profile.revision))
 }
 
@@ -7075,7 +7080,7 @@ pub(super) fn insert_storage_profile(
 }
 
 pub(super) fn storage_profile_lock(id: Uuid) -> Rows<'static, StorageProfile> {
-    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,write_processing,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,upload_cache_overflow,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=$1 FOR UPDATE").bind(id)
+    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,write_processing,CASE WHEN (SELECT deployment_mode FROM mokyu_meta WHERE singleton)='single' THEN write_durability END AS write_durability,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,upload_cache_overflow,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=$1 FOR UPDATE").bind(id)
 }
 
 pub(super) fn update_storage_record<'q>(
@@ -8808,6 +8813,47 @@ pub(super) fn raw_detach(stream: Id, end: i64) -> Statement<'static> {
 
 #[async_trait::async_trait]
 impl RawStore for Backend {
+    async fn buffered_status(&self) -> Result<serde_json::Value> {
+        let (pending, bytes, oldest): (i64, i64, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(size),0)::bigint,MIN(created_at) FROM raw_sources WHERE durability='buffered' AND state='ready' AND quarantine_code IS NULL").fetch_one(&self.pool).await?;
+        Ok(serde_json::json!({"pending":pending,"bytes":bytes,"oldest":oldest}))
+    }
+
+    async fn buffered_source(&self, source: Id) -> Result<Option<RawSource>> {
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=$1 AND r.durability='buffered' AND r.state='ready' AND r.quarantine_code IS NULL").bind(source).fetch_optional(&self.pool).await?)
+    }
+    async fn buffered_duplicate(
+        &self,
+        storage: Uuid,
+        hash: &[u8],
+        size: i64,
+    ) -> Result<Option<RawSource>> {
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=$1 AND r.content_hash=$2 AND r.size=$3 AND r.durability='buffered' AND r.state='ready' AND r.quarantine_code IS NULL").bind(storage).bind(hash).bind(size).fetch_optional(&self.pool).await?)
+    }
+    async fn buffer(&self, source: Id) -> Result<()> {
+        ensure!(sqlx::query("UPDATE raw_sources SET durability='buffered' WHERE id=$1 AND state='writing' AND owner_stream IS NOT NULL").bind(source).execute(&self.pool).await?.rows_affected()==1, crate::model::Error::OperationAborted);
+        Ok(())
+    }
+    async fn buffered(
+        &self,
+        after: Id,
+        before: Option<chrono::DateTime<chrono::Utc>>,
+        stream: Option<Id>,
+    ) -> Result<Vec<RawSource>> {
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.durability='buffered' AND r.state='ready' AND r.quarantine_code IS NULL AND r.id>$1 AND ($2::timestamptz IS NULL OR r.created_at<=$3) AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM raw_ranges e WHERE e.source_id=r.id AND e.stream_id=$5)) ORDER BY r.id LIMIT 128").bind(after).bind(before).bind(before).bind(stream).bind(stream).fetch_all(&self.pool).await?)
+    }
+    async fn synced(&self, source: &RawSource, failure: Option<&str>) -> Result<()> {
+        if let Some(code) = failure {
+            ensure!(
+                crate::model::source::quarantine_code(code),
+                "invalid source quarantine code"
+            );
+            sqlx::query("UPDATE raw_sources SET quarantine_code=$1,quarantined_at=clock_timestamp(),revision=revision+1 WHERE id=$2 AND revision=$3 AND durability='buffered' AND state='ready' AND quarantine_code IS NULL").bind(code).bind(source.id).bind(source.revision).execute(&self.pool).await?;
+        } else {
+            sqlx::query("UPDATE raw_sources SET durability='durable' WHERE id=$1 AND revision=$2 AND durability='buffered' AND state='ready' AND quarantine_code IS NULL").bind(source.id).bind(source.revision).execute(&self.pool).await?;
+        }
+        Ok(())
+    }
+
     async fn inline_conversion(
         &self,
         stream: Id,
@@ -9368,7 +9414,7 @@ pub(super) fn raw_upload_references(source: Id) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=$1)").bind(source)
 }
 pub(super) fn raw_uploaded(source: Id) -> Statement<'static> {
-    sqlx::query("WITH released AS (UPDATE tasks SET execution_scope='cluster',target_node_id=NULL WHERE id=(SELECT processing_task FROM raw_sources WHERE id=$1)) UPDATE raw_sources SET pending_upload=false,medium='shared_s3',upload_id=NULL,revision=revision+1 WHERE id=$1 AND pending_upload").bind(source)
+    sqlx::query("WITH released AS (UPDATE tasks SET execution_scope='cluster',target_node_id=NULL WHERE id=(SELECT processing_task FROM raw_sources WHERE id=$1)) UPDATE raw_sources SET pending_upload=false,medium='shared_s3',durability='durable',upload_id=NULL,revision=revision+1 WHERE id=$1 AND pending_upload").bind(source)
 }
 pub(super) fn raw_upload_hash(source: Id, hash: Option<&[u8]>) -> Statement<'_> {
     sqlx::query("UPDATE raw_uploads SET content_hash=$1,token=NULL,lease_expires_at=NULL,next_attempt_at=clock_timestamp(),last_error=NULL WHERE source_id=$2").bind(hash).bind(source)
