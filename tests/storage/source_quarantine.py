@@ -130,6 +130,7 @@ class Fixture:
         roots = os.environ.get('MOKYU_TEST_SOURCE_FAULT_DIRS', str(self.faults)).split(',') if name == 'source-before-commit' else [self.faults]
         paths = [Path(root) / name for root in roots]
         for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.with_suffix('.hit').unlink(missing_ok=True)
             path.touch()
         return Fault(paths)
