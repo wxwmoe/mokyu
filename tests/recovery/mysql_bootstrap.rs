@@ -367,7 +367,7 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         serde_json::json!({})
     );
 
-    for version in [19, 20, 24, 25, 26, 27, 35, 36, 37] {
+    for version in [19, 20, 24, 25, 26, 27, 35, 36, 37, 38] {
         let recovery = migrations
             .iter()
             .find(|migration| migration.version == version)
@@ -383,6 +383,11 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
                 "EXECUTE mokyu_audit",
                 "DEALLOCATE PREPARE mokyu_audit",
                 "UPDATE mokyu_meta SET schema_version=20",
+            ]
+        } else if version == 38 {
+            vec![
+                "SET @mokyu_source_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='source_validation_max_age')",
+                "UPDATE mokyu_meta SET schema_version=38",
             ]
         } else if version == 37 {
             vec![

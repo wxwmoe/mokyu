@@ -3,7 +3,10 @@ use crate::model::{Id, ReadRoute, ReadSnapshot, raw::RawRange};
 use anyhow::Result;
 use std::{
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use uuid::Uuid;
 
@@ -14,7 +17,8 @@ pub(crate) struct Prepared {
     key: String,
     access: Option<String>,
     pin: Mutex<Option<Active>>,
-    _source: Option<crate::storage::CachePin>,
+    source: Mutex<Option<crate::storage::CachePin>>,
+    raw_ready: AtomicBool,
     cached: Option<Arc<super::public_reads::Entry>>,
 }
 
@@ -67,7 +71,7 @@ pub(crate) fn raw(stream: Id, revision: i64) -> Option<RawRange> {
     REQUEST
         .try_with(|prepared| {
             let prepared = prepared.as_ref().filter(|read| {
-                read.cached.is_none()
+                read.raw_ready.load(Ordering::Acquire)
                     && read
                         .snapshot
                         .stream
@@ -107,6 +111,29 @@ pub(crate) fn is_raw(bucket: Uuid, key: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+// The caller holds coord; source_gate makes selecting a cached source atomic with local GC.
+pub(crate) async fn pin_cached(
+    app: &App,
+    bucket: Uuid,
+    key: &str,
+) -> Option<(StoredStream, Active)> {
+    let prepared = REQUEST.try_with(|read| read.clone()).ok().flatten()?;
+    if prepared.snapshot.bucket.id != bucket || prepared.key != key {
+        return None;
+    }
+    let entry = prepared.cached.as_ref()?;
+    let _sources = app.storage.source_gate.read().await;
+    if !app.public_reads.raw_current(entry, &app.storage) {
+        return None;
+    }
+    let stream = prepared.snapshot.stream.as_ref()?;
+    let raw = prepared.snapshot.raw.as_ref()?;
+    let pin = app.pin(stream.id);
+    *prepared.source.lock().unwrap() = Some(app.storage.physical_pin(raw.source.location_id));
+    prepared.raw_ready.store(true, Ordering::Release);
+    Some((stream.clone(), pin))
 }
 
 pub(crate) fn secret(access: &str) -> Option<Option<Vec<u8>>> {
@@ -156,7 +183,8 @@ impl App {
                 snapshot: entry.snapshot.clone(),
                 access: None,
                 pin: Mutex::new(None),
-                _source: None,
+                source: Mutex::new(None),
+                raw_ready: AtomicBool::new(false),
                 cached: Some(entry),
             })));
         }
@@ -195,7 +223,8 @@ impl App {
             key,
             access: access.map(str::to_owned),
             pin: Mutex::new(pin),
-            _source: source,
+            source: Mutex::new(source),
+            raw_ready: AtomicBool::new(true),
             cached: None,
         })))
     }

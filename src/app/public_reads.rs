@@ -143,6 +143,34 @@ impl Cache {
         self.index.lock().unwrap().generation
     }
 
+    pub fn raw_current(&self, entry: &Arc<Entry>, storage: &crate::storage::Storage) -> bool {
+        let index = self.index.lock().unwrap();
+        if index.changing != 0
+            || entry.mapping.is_none()
+            || entry.generation != index.generation
+            || !index
+                .entries
+                .get(&key(&entry.route))
+                .is_some_and(|current| Arc::ptr_eq(current, entry))
+            || entry.verified.elapsed() >= entry.age
+        {
+            return false;
+        }
+        let Some(raw) = &entry.snapshot.raw else {
+            return false;
+        };
+        entry.profiles.iter().all(|(id, revision)| {
+            storage.profile(*id).is_ok_and(|profile| {
+                profile.revision == *revision
+                    && profile.public_cache_validation == "background"
+                    && profile.read_source_validation == "background"
+                    && profile.source_validation_seconds().is_ok_and(|seconds| {
+                        entry.verified.elapsed() < Duration::from_secs(seconds)
+                    })
+            })
+        }) && raw.source.validate().is_ok()
+    }
+
     pub fn get(&self, route: &ReadRoute, storage: &crate::storage::Storage) -> Option<Arc<Entry>> {
         let index = self.index.lock().unwrap();
         if index.changing != 0 {

@@ -214,6 +214,8 @@ impl App {
         let _coord = self.coord.lock().await;
         self.source_writable()?;
         let _cache = self.public_reads.changing();
+        let _sources = self.storage.source_gate.write().await;
+        self.storage.source_reads.clear();
         self.physical
             .source_update(SourceUpdate {
                 execution,

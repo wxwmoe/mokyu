@@ -1,7 +1,10 @@
 export default {
+  profileHelp_read_source_validation: "Source snapshots can briefly retain previous health status on another node, their hard expiry and physical reader protection remain enforced",
+  profile_read_source_validation: "Source health validation",
+  profile_source_validation_max_age: "Maximum source snapshot age",
   profile_write_flush_interval: "Coalescing delay",
   profile_write_backlog_max_age: "Backlog age limit",
-  storeGroupReading: "Public reads",
+  storeGroupReading: "Read policy",
   storeGroupReadingHint: "Background validation can serve a previous public permission or object version until its hard expiry on other nodes. Local changes invalidate snapshots before confirmation.",
   profile_public_cache_validation: "Public permission validation",
   profile_public_cache_refresh_interval: "Refresh interval",

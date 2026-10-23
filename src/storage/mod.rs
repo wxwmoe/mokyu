@@ -21,6 +21,7 @@ mod raw_request;
 pub(crate) mod raw_upload;
 pub(crate) mod resource_gate;
 mod s3;
+mod sources;
 mod sync;
 pub(crate) mod target;
 
@@ -75,6 +76,7 @@ pub struct Storage {
     nonces: crate::content::nonce::Allocator,
     record_store: Arc<dyn crate::model::StorageRecordStore>,
     pub source_gate: tokio::sync::RwLock<()>,
+    pub(crate) source_reads: sources::Cache,
     physical_pins: Mutex<HashMap<Uuid, std::sync::Weak<AtomicUsize>>>,
     pack_misses: Mutex<HashMap<Id, std::sync::Weak<PackFetch>>>,
     pack_live: Mutex<HashMap<Id, std::sync::Weak<LoadedPack>>>,
@@ -113,7 +115,7 @@ pub struct Storage {
     cache_fills: Arc<Mutex<HashSet<Uuid>>>,
     max_entries: usize,
     capacity: Option<u64>,
-    misses: Mutex<HashMap<(Id, Uuid), std::sync::Weak<FetchResult>>>,
+    misses: Mutex<HashMap<(Id, Uuid, bool), std::sync::Weak<FetchResult>>>,
     raw_misses: crate::runtime::locks::Locks<Uuid>,
     pub backend_gets: Arc<std::sync::atomic::AtomicU64>,
     pub cache_hits: std::sync::atomic::AtomicU64,
@@ -440,6 +442,7 @@ impl Storage {
             nonces: crate::content::nonce::Allocator::default(),
             record_store,
             source_gate: tokio::sync::RwLock::new(()),
+            source_reads: sources::Cache::new(),
             physical_pins: Mutex::new(HashMap::new()),
             pack_misses: Mutex::new(HashMap::new()),
             pack_live: Mutex::new(HashMap::new()),
@@ -552,7 +555,7 @@ impl Storage {
                 .sum();
             diagnostics["waiting_canceled"][direction] = serde_json::json!(canceled);
         }
-        serde_json::json!({"backend":{"get":self.operations[0].snapshot(),"put":self.operations[1].snapshot(),"delete":self.operations[2].snapshot(),"head":self.operations[3].snapshot()},"diagnostics":diagnostics,
+        serde_json::json!({"backend":{"get":self.operations[0].snapshot(),"put":self.operations[1].snapshot(),"delete":self.operations[2].snapshot(),"head":self.operations[3].snapshot()},"diagnostics":diagnostics,"source_cache":self.source_reads.snapshot(),
             "cache_lookups":lookups,"cache_hit_rate":crate::status::stats::ratio(self.cache_hits.load(Ordering::Relaxed),lookups).map(|v| v.min(1.0)),
             "cpu_slots_available":self.cpu.available_permits(),"backend_queues":{"read":self.reads.snapshot(),"upload":self.writes.snapshot(),"control":self.controls.snapshot()},
             "cache_limit_bytes":self.capacity,"multipart_limit_bytes":self.disk.limits[0]})
@@ -755,6 +758,7 @@ impl Storage {
             targets.remove(&storage_id);
             self.integrity_rates.lock().unwrap().remove(&storage_id);
         }
+        self.source_reads.clear();
         Ok(())
     }
     pub async fn refresh_storages(&self) -> Result<()> {
@@ -1917,7 +1921,11 @@ impl Storage {
         let lock = {
             let mut map = self.misses.lock().unwrap();
             map.retain(|_, v| v.strong_count() > 0);
-            let key = (c.id, c.location_id);
+            let key = (
+                c.id,
+                c.location_id,
+                context.is_some_and(|context| context.observe),
+            );
             if let Some(lock) = map.get(&key).and_then(|v| v.upgrade()) {
                 lock
             } else {
@@ -1955,7 +1963,10 @@ impl Storage {
             }
             return Ok((raw, None));
         }
-        match self.source(c.id, false).await? {
+        match self
+            .read_source(c, context.is_some_and(|context| context.observe))
+            .await?
+        {
             Source::Chunk(physical, _pin) => {
                 self.ensure_key_loaded(physical.block_key_id).await?;
                 let encoded = self.read_backend(&physical).await?;
@@ -2008,6 +2019,7 @@ impl Storage {
         CachePin(counter)
     }
     pub fn physical_active(&self, id: Uuid) -> bool {
+        self.source_reads.prune();
         self.physical_pins
             .lock()
             .unwrap()

@@ -8,6 +8,7 @@ import requests
 from botocore.config import Config
 
 from tests.storage.source_quarantine import Fixture, wait
+from tests.recovery.source_repair import Database
 
 
 def main():
@@ -15,7 +16,8 @@ def main():
     assert fixture.backend
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile.update(cdc_enabled=False, pack_range_enabled=False, upload_cache=False,
-                   public_cache_validation='background', public_cache_refresh_interval='3s', public_cache_max_age='3s')
+                   public_cache_validation='background', public_cache_refresh_interval='3s', public_cache_max_age='3s',
+                   read_source_validation='background', source_validation_max_age='3s')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     domain = fixture.name + '.public.test'
     fixture.cli('domain', 'set', domain, fixture.name)
@@ -79,6 +81,40 @@ def main():
     time.sleep(3.1)
     assert read(1).status_code == 404
     print('PASS overwrite and deletion converge within the peer hard deadline with leases on body misses', flush=True)
+
+    profile = fixture.cli('storage', 'profile', 'show', fixture.name)
+    profile.update(cdc_enabled=True, public_cache_validation='strict')
+    fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+    body = b'Cluster source snapshots retain read leases and hard health expiry.\n' * 512
+    fixture.client.put_object(Bucket=fixture.name, Key='cached', Body=body, ACL='public-read', CacheControl='no-store')
+    def source_stats(value):
+        if isinstance(value, dict):
+            if 'source_cache' in value:
+                return value['source_cache']
+            for child in value.values():
+                if result := source_stats(child):
+                    return result
+        return None
+    for node in range(2):
+        def loaded_source():
+            assert read(node).content == body
+            assert read(node, web=True).content == body
+            return source_stats(status(node))['hits'] > 0
+        wait(loaded_source, 'data node did not cache its protected chunk source', seconds=45)
+    database = Database()
+    chunk, = database.chunks(fixture)
+    database.query("UPDATE chunk_encodings SET quarantine_code='hash_mismatch',quarantined_at=created_at WHERE encoding_id=%s", chunk['current_encoding_id'])
+    try:
+        time.sleep(3.2)
+        for node in range(2):
+            try:
+                assert read(node).status_code >= 400, 'data node served an expired health snapshot'
+            except requests.exceptions.ChunkedEncodingError:
+                pass
+    finally:
+        database.query('UPDATE chunk_encodings SET quarantine_code=NULL,quarantined_at=NULL WHERE encoding_id=%s', chunk['current_encoding_id'])
+    assert all(read(node).content == body for node in range(2))
+    print('PASS both data nodes cache protected chunk sources, enforce health expiry and recover after state restoration', flush=True)
 
 
 if __name__ == '__main__':

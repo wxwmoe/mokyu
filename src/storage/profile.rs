@@ -29,6 +29,10 @@ pub(crate) struct StorageProfile {
     pub public_cache_refresh_interval: String,
     #[serde(default = "public_cache_max_age")]
     pub public_cache_max_age: String,
+    #[serde(default = "public_cache_validation")]
+    pub read_source_validation: String,
+    #[serde(default = "public_cache_max_age")]
+    pub source_validation_max_age: String,
     pub connect_timeout: String,
     pub request_timeout: String,
     pub max_retries: i32,
@@ -119,6 +123,24 @@ fn public_cache_max_age() -> String {
 }
 
 impl StorageProfile {
+    pub(crate) fn source_validation_seconds(&self) -> Result<u64> {
+        let invalid = || {
+            s3s::s3_error!(
+                InvalidArgument,
+                "read_source_validation must be strict or background and source_validation_max_age must be 1s..5m"
+            )
+        };
+        let age = crate::config::seconds(&self.source_validation_max_age).map_err(|_| invalid())?;
+        anyhow::ensure!(
+            (1..=300).contains(&age)
+                && matches!(
+                    self.read_source_validation.as_str(),
+                    "strict" | "background"
+                ),
+            invalid()
+        );
+        Ok(age)
+    }
     pub(crate) fn public_cache_times(&self) -> Result<(u64, u64)> {
         let invalid = || {
             s3s::s3_error!(
@@ -276,6 +298,7 @@ impl StorageProfile {
 pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::Result<()> {
     use crate::config::{bytes, cache_bytes, seconds};
     profile.public_cache_times()?;
+    profile.source_validation_seconds()?;
     profile.write_flush_seconds()?;
     profile.write_backlog_seconds()?;
     anyhow::ensure!(

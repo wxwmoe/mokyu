@@ -1,7 +1,10 @@
 export default {
+  profileHelp_read_source_validation: "ソースの状態は他ノードの変更後も期限内で再利用されますが、有効期限と読み取り中の保護は常に適用されます",
+  profile_read_source_validation: "ソースの状態検証",
+  profile_source_validation_max_age: "ソースの有効期限",
   profile_write_flush_interval: "まとめ待機",
   profile_write_backlog_max_age: "滞留時間の上限",
-  storeGroupReading: "公開読み取り",
+  storeGroupReading: "読み取りポリシー",
   storeGroupReadingHint: "バックグラウンド検証では他のノードが有効期限まで以前の公開権限やオブジェクトを返す場合があります。同じノードの変更は応答前にスナップショットを無効化します",
   profile_public_cache_validation: "公開権限の検証",
   profile_public_cache_refresh_interval: "更新間隔",

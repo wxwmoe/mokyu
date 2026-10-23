@@ -70,7 +70,7 @@ async fn storage_diagnostics_count_shared_failures_and_cache_fallback() -> Resul
                     .misses
                     .lock()
                     .unwrap()
-                    .get(&(chunk.id, chunk.location_id))
+                    .get(&(chunk.id, chunk.location_id, false))
                     .is_some_and(|entry| entry.strong_count() == 16)
             {
                 break;

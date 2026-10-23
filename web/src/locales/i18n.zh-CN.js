@@ -1,7 +1,10 @@
 export default {
+  profileHelp_read_source_validation: "来源快照可能在短时间内保留其他节点的旧健康状态，硬期限与物理文件读取保护始终生效",
+  profile_read_source_validation: "来源健康验证",
+  profile_source_validation_max_age: "来源快照有效期",
   profile_write_flush_interval: "合并等待",
   profile_write_backlog_max_age: "积压最长时间",
-  storeGroupReading: "公共读取",
+  storeGroupReading: "读取策略",
   storeGroupReadingHint: "后台验证允许其他节点在硬期限内返回旧的公开权限或对象版本，本机变更在确认前使快照失效",
   profile_public_cache_validation: "公开权限验证",
   profile_public_cache_refresh_interval: "刷新间隔",

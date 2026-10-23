@@ -2857,10 +2857,12 @@ export interface components {
             public_cache_validation?: string;
             /** Format: int32 */
             read_concurrency?: number | null;
+            read_source_validation?: string;
             request_timeout: string;
             retry_timeout: string;
             /** Format: int64 */
             revision: number;
+            source_validation_max_age?: string;
             /** Format: uuid */
             storage_id: string;
             unreferenced_grace: string;

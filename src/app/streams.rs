@@ -29,9 +29,13 @@ impl App {
         let _guard = self.coord.lock().await;
         self.ensure_mode()?;
         let (stream, pin) = if self.role == "single" {
-            let stream = self.stream_store.current(bucket, key).await?;
-            let pin = self.pin(stream.id);
-            (stream, pin)
+            if let Some(current) = super::reads::pin_cached(self, bucket, key).await {
+                current
+            } else {
+                let stream = self.stream_store.current(bucket, key).await?;
+                let pin = self.pin(stream.id);
+                (stream, pin)
+            }
         } else {
             let ttl = self.read_lease_seconds()?;
             let started = tokio::time::Instant::now();
