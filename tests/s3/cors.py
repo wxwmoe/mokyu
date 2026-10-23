@@ -21,7 +21,9 @@ reply = session.post(manage + '/api/v1/auth/login', headers={'Origin': manage},
                      json={'username': 'tester', 'password': os.environ['MOKYU_TEST_PASSWORD']})
 reply.raise_for_status()
 auth = {'Origin': manage, 'X-CSRF-Token': reply.json()['csrf_token']}
-bucket_id = next(b['id'] for b in session.get(manage + '/api/v1/buckets').json() if b['name'] == bucket)
+buckets = session.get(manage + '/api/v1/buckets')
+assert buckets.status_code == 200, (buckets.status_code, buckets.text)
+bucket_id = next(b['id'] for b in buckets.json() if b['name'] == bucket)
 settings = manage + '/api/v1/buckets/' + bucket_id + '/cors'
 original = session.get(settings).json()
 key = 'cors-check/\u4e2d\u6587 +%2F.bin'

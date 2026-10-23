@@ -16,7 +16,7 @@ use uuid::Uuid;
 const UNIT: usize = 64;
 const ENTRIES: usize = 256;
 const INDEX_BYTES: usize = 64 * 1024;
-const ENTRY_BYTES: usize = 64 * 1024;
+const ENTRY_BYTES: usize = 128 * 1024;
 pub(crate) const CACHE_BYTES: usize = 1024 * 1024;
 
 struct Rule {
@@ -447,6 +447,28 @@ mod tests {
                 .contains_key("access-control-allow-origin")
         );
         assert_eq!(cache.parses.load(Relaxed), 1);
+    }
+
+    #[test]
+    fn hundred_compact_rules_share_one_bounded_parse() {
+        let cache = Cache::new(CACHE_BYTES);
+        let mut bucket = bucket();
+        bucket.cors = json!((0..100).map(|index| json!({
+            "origins": [format!("https://site{index}.test")],
+            "methods": ["GET", "HEAD"], "headers": ["range"], "expose": ["ETag"], "max_age": 60,
+        })).collect::<Vec<_>>());
+        validate_cors(&bucket.cors).unwrap();
+        for index in 0..100 {
+            let origin = format!("https://site{index}.test");
+            let headers = cors_headers(&cache, &bucket, &request(&origin), "GET").unwrap();
+            assert_eq!(headers["access-control-allow-origin"], origin.as_str());
+        }
+        assert_eq!(cache.parses.load(Relaxed), 1);
+        assert_eq!(cache.hits.load(Relaxed), 99);
+        assert_eq!(cache.bypassed.load(Relaxed), 0);
+        assert_eq!(cache.snapshot()["entries"], 1);
+        assert!(cache.snapshot()["live_bytes"].as_u64().unwrap() <= ENTRY_BYTES as u64);
+        assert!(cache.snapshot()["live_bytes"].as_u64().unwrap() < CACHE_BYTES as u64);
     }
 
     #[test]

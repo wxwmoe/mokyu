@@ -15,6 +15,7 @@ use uuid::Uuid;
 const UNIT: usize = 256;
 const LIMIT: usize = 1024 * 1024;
 const INDEX: usize = 128 * 1024;
+const ENTRY_BYTES: usize = 256 * 1024;
 const ENTRIES: usize = 256;
 type Key = [u8; 32];
 
@@ -275,7 +276,7 @@ impl Cache {
             .into_iter()
             .map(json_bytes)
             .sum::<usize>();
-        if bytes > 64 * 1024 {
+        if bytes > ENTRY_BYTES {
             return;
         }
         let mut index = self.index.lock().unwrap();
@@ -560,6 +561,60 @@ mod tests {
         assert!(cache.index.lock().unwrap().entries.is_empty());
         drop(entry);
         assert_eq!(cache.memory.available_permits(), available);
+    }
+
+    #[test]
+    fn large_cors_snapshots_remain_bounded_and_oversized_metadata_is_not_cached() {
+        let (cache, _receiver) = Cache::new();
+        let (route, mut snapshot) = fixture();
+        Arc::make_mut(&mut snapshot).bucket.cors = json!(
+            (0..100)
+                .map(|n| json!({
+                    "origins": [format!("https://site{n}.test")],
+                    "methods": ["GET", "HEAD"],
+                    "headers": ["range"],
+                    "expose": ["ETag"],
+                    "max_age": 60
+                }))
+                .collect::<Vec<_>>()
+        );
+        let generation = cache.generation();
+        for n in 0..20 {
+            let route = ReadRoute::Host {
+                host: "media.test".into(),
+                key: n.to_string(),
+            };
+            cache.put(
+                &route,
+                snapshot.clone(),
+                None,
+                vec![],
+                (1, 5),
+                (Instant::now(), generation),
+            );
+            let state = cache.snapshot();
+            assert!(state["entries"].as_u64().unwrap() > 0);
+            assert!(state["used_bytes"].as_u64().unwrap() <= LIMIT as u64);
+        }
+        assert!(cache.snapshot()["entries"].as_u64().unwrap() < 20);
+        let snapshot = Arc::make_mut(&mut snapshot);
+        snapshot.stream.as_mut().unwrap().metadata = json!({"value": "x".repeat(ENTRY_BYTES)});
+        cache.put(
+            &route,
+            Arc::new(snapshot.clone()),
+            None,
+            vec![],
+            (1, 5),
+            (Instant::now(), generation),
+        );
+        assert!(
+            !cache
+                .index
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key(&key(&route))
+        );
     }
 
     #[test]

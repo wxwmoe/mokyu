@@ -112,6 +112,22 @@ def main():
         assert state['public_read_cache']['entries'] == 3, state['public_read_cache']
         print('PASS zero body budget retains bounded public metadata and zero-SQL HEAD across four routes', flush=True)
 
+        large_rules = [dict(origins=[f'https://site{n}.test'], methods=['GET', 'HEAD'],
+                           headers=['range'], expose=['ETag'], max_age=60) for n in range(100)]
+        fixture.cli('bucket', 'cors', fixture.name, '-', value=large_rules)
+        for route in range(4):
+            assert read(route, 'HEAD', Origin='https://site99.test').status_code == 200
+            response = read(route, 'HEAD', Origin='https://site99.test')
+            assert count(response) == 0 and response.headers['Access-Control-Allow-Origin'] == 'https://site99.test'
+        state = fixture.cli('status')
+        for cache, used in (('public_read_cache', 'used_bytes'), ('cors_cache', 'live_bytes')):
+            assert 0 < state[cache][used] <= state[cache]['limit_bytes'], state[cache]
+        fixture.cli('bucket', 'cors', fixture.name, '-', value=rules)
+        for route in range(4):
+            assert 'Access-Control-Allow-Origin' not in read(route, 'HEAD', Origin='https://site99.test').headers
+            assert read(route, 'HEAD', Origin='https://client.test').headers['Access-Control-Allow-Origin'] == 'https://client.test'
+        print('PASS large CORS policies reuse zero-SQL snapshots within budget and invalidate on replacement', flush=True)
+
         stop()
         start('4MiB')
         fixture.client.put_object(Bucket=fixture.name, Key='cold-coordination', Body=body, ACL='public-read')
