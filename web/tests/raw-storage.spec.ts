@@ -1,3 +1,4 @@
+import { openStorageGroup } from './storage-form'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { test, expect } from '@playwright/test'
@@ -28,6 +29,7 @@ test('local CDC changes stay in the draft until saved and disable incompatible s
   await expect(page).toHaveURL(/\/overview$/)
   await page.goto('/storages?edit=' + name)
   const editor = page.getByRole('dialog', { name: en.editStore, exact: true })
+  await openStorageGroup(editor, 'storeGroupLifecycle')
   const expiry = editor.getByRole('textbox', { name: en.profile_multipart_idle_timeout, exact: true })
   const floor = editor.getByRole('textbox', { name: en.profile_min_free_space, exact: true })
   await expect(expiry).toHaveValue('24h')
@@ -38,7 +40,7 @@ test('local CDC changes stay in the draft until saved and disable incompatible s
   const dedup = editor.getByRole('switch', { name: en.profile_deduplication_enabled, exact: true })
   await expect(dedup).toBeChecked()
   await expect(dedup).toBeDisabled()
-  await editor.locator('details.profile-group').nth(1).locator('summary').click()
+  await openStorageGroup(editor, 'storeGroupCache')
   const compression = editor.getByRole('switch', { name: en.profile_compression_enabled, exact: true })
   await compression.click()
   await expect(compression).toBeChecked()
@@ -78,6 +80,7 @@ test('local CDC changes stay in the draft until saved and disable incompatible s
   await editor.getByRole('button', { name: en.cancel, exact: true }).click()
   expect((await (await request.get(profileUrl)).json()).cdc_enabled).toBe(true)
   await page.goto('/storages?edit=' + name)
+  await openStorageGroup(editor, 'storeGroupLifecycle')
   await expect(cdc).toBeChecked()
   await expect(expiry).toHaveValue('24h')
   await expect(floor).toHaveValue('1GiB')
@@ -85,6 +88,7 @@ test('local CDC changes stay in the draft until saved and disable incompatible s
   await floor.fill('64MiB')
   await cdc.click()
   await dedup.click()
+  await openStorageGroup(editor)
   await editor.getByRole('combobox', { name: en.profile_write_processing, exact: true }).click()
   await page.getByRole('option', { name: en.storeProcessing_background, exact: true }).click()
   expect((await (await request.get(profileUrl)).json()).write_processing).toBe('inline')

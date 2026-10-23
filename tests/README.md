@@ -281,7 +281,7 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 
 `tests/recovery/read_integrity.py` 在隔离四库/本地及远端 S3 上验证额外摘要策略、迟到缓存、后台队列与内存上限、Range/取消、实际坏缓存与真实后端的隔离边界；pack 与加密认证的强制检查还由 Rust 内容格式回归覆盖
 
-`tests/recovery/io_presets.py` 验证三套服务端模板、API/CLI 只读预览、显式保存、版本冲突和无关配置不变，支持单容器与双 data 群集夹具。`web/tests/io-presets.spec.ts` 覆盖三语、明暗主题、键盘、小屏、预览取消、草稿载入和冲突保留；原有 `buffered-storage.spec.ts` 继续验证手动调整各选项。
+`tests/recovery/io_presets.py` 验证三套服务端模板、API/CLI 只读预览、显式保存、版本冲突和无关配置不变，支持单容器与双 data 群集夹具。`web/tests/io-presets.spec.ts` 覆盖三语、明暗主题、键盘、小屏、预览取消、草稿载入和冲突保留；`web/tests/storage-folds.spec.ts` 验证预设常显、详细配置默认折叠、已修改项提示、折叠后的草稿与保存、原生校验定位和服务端校验失败展开；原有 `buffered-storage.spec.ts` 继续验证手动调整各选项。
 
 `python -m tests.recovery.received_responses` verifies hot-path PUT reuse for raw/chunks, signed and anonymous S3/Web/Range, rejected or disconnected uploads, bounded optional admission, no-store and current permissions. With `MOKYU_TEST_BACKEND`, it also verifies shared RAM allocation and independent write-quota release after drain. Uses the isolated recovery fixture and a 4MiB response cache.
 

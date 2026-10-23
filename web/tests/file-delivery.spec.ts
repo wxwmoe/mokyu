@@ -1,3 +1,4 @@
+import { openStorageGroup } from './storage-form'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { test, expect } from '@playwright/test'
@@ -28,6 +29,7 @@ test('local proxy delivery and prefixes are explicit drafts independent of I/O p
       await request.put('/api/v1/account', { headers, data: { display_name: '', locale, theme, avatar_email: '', avatar_enabled: false } })
       await page.goto('/storages?edit=' + name)
       const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
+      await openStorageGroup(editor)
       const mode = editor.getByRole('combobox', { name: text.profile_file_delivery, exact: true })
       await expect(mode).toContainText(text.storeDelivery_application)
       await expect(editor.getByRole('textbox', { name: text.profile_file_delivery_prefix, exact: true })).toHaveCount(0)
@@ -53,6 +55,7 @@ test('local proxy delivery and prefixes are explicit drafts independent of I/O p
   }
   await page.goto('/storages?edit=' + name)
   const editor = page.getByRole('dialog', { name: ja.editStore, exact: true })
+  await openStorageGroup(editor)
   const mode = editor.getByRole('combobox', { name: ja.profile_file_delivery, exact: true })
   await mode.click()
   await page.getByRole('option', { name: ja.storeDelivery_x_accel_redirect, exact: true }).click()
@@ -65,6 +68,7 @@ test('local proxy delivery and prefixes are explicit drafts independent of I/O p
   expect((await save).status()).toBe(200)
   expect((await (await request.get(url)).json()).file_delivery_prefix).toBe('/_mokyu_raw/')
   await page.goto('/storages?edit=' + name)
+  await openStorageGroup(editor)
   await mode.click()
   await page.getByRole('option', { name: ja.storeDelivery_application, exact: true }).click()
   const restore = page.waitForResponse(reply => reply.url().endsWith('/api/v1/storages/' + name) && reply.request().method() === 'PUT')

@@ -1,3 +1,4 @@
+import { openStorageGroup } from './storage-form'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { test, expect } from '@playwright/test'
@@ -41,6 +42,7 @@ test('write policies stay in the draft and save only for the selected storage', 
       await request.put('/api/v1/account', { headers, data: { display_name: '', locale, theme, avatar_email: '', avatar_enabled: false } })
       await page.goto('/storages?edit=' + name)
       const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
+      await openStorageGroup(editor)
       const validation = editor.getByRole('combobox', { name: text.profile_public_cache_validation, exact: true })
       await validation.click()
       await page.getByRole('option', { name: text.storeReadValidation_background, exact: true }).click()
@@ -86,6 +88,7 @@ test('write policies stay in the draft and save only for the selected storage', 
   }
   await page.goto('/storages?edit=' + name)
   const editor = page.getByRole('dialog', { name: ja.editStore, exact: true })
+  await openStorageGroup(editor)
   const validation = editor.getByRole('combobox', { name: ja.profile_public_cache_validation, exact: true })
   await validation.focus()
   await validation.press('Space')
@@ -168,6 +171,7 @@ test('volatile confirmation is a saved S3 cache choice with an explicit RAM warn
       await request.put('/api/v1/account', { headers, data: { display_name: '', locale, theme, avatar_email: '', avatar_enabled: false } })
       await page.goto('/storages?edit=' + name)
       const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
+      await openStorageGroup(editor)
       const select = editor.getByRole('combobox', { name: text.profile_write_durability, exact: true })
       await select.scrollIntoViewIfNeeded()
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
@@ -189,6 +193,7 @@ test('volatile confirmation is a saved S3 cache choice with an explicit RAM warn
   }
   await page.goto('/storages?edit=' + name)
   const editor = page.getByRole('dialog', { name: ja.editStore, exact: true })
+  await openStorageGroup(editor)
   await editor.getByRole('combobox', { name: ja.profile_read_integrity, exact: true }).click()
   await page.getByRole('option', { name: ja.storeReadIntegrity_background, exact: true }).click()
   const select = editor.getByRole('combobox', { name: ja.profile_write_durability, exact: true })
@@ -199,7 +204,7 @@ test('volatile confirmation is a saved S3 cache choice with an explicit RAM warn
   expect((await saved).status()).toBe(200)
   expect((await (await request.get(url)).json()).write_durability).toBe('volatile')
   await page.goto('/storages?edit=' + name)
-  await editor.getByText(ja.storeGroupCache, { exact: true }).click()
+  await openStorageGroup(editor)
   await editor.getByRole('switch', { name: ja.profile_upload_cache, exact: true }).click()
   await expect(select).toContainText(ja.storeDurability_durable)
   await select.click()

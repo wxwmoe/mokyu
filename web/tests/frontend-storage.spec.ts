@@ -1,3 +1,4 @@
+import { openStorageGroup } from './storage-form'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { test, expect, type Page } from '@playwright/test'
@@ -12,7 +13,7 @@ async function login(page: Page) {
   await expect(page).toHaveURL(/\/overview$/)
 }
 
-test('storage details keep maintenance behind confirmation and fit a phone viewport', async ({ page }) => {
+test('storage details keep maintenance behind confirmation and fit a phone viewport', async ({ page }, info) => {
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   await login(page)
@@ -22,7 +23,7 @@ test('storage details keep maintenance behind confirmation and fit a phone viewp
   await expect(card).toBeVisible()
   await card.getByRole('link', { name: en.storeDetails, exact: true }).click()
   await expect(page.getByRole('heading', { name: 'demo', exact: true })).toBeVisible()
-  await page.screenshot({ path: '/work/test-results/storage-details-desktop.png', fullPage: true })
+  await page.screenshot({ path: info.outputPath('storage-details-desktop.png'), fullPage: true })
   await page.getByRole('button', { name: en.checkStore, exact: true }).click()
   const check = page.getByRole('dialog', { name: en.checkStore, exact: true })
   await expect(check).toBeVisible()
@@ -34,10 +35,11 @@ test('storage details keep maintenance behind confirmation and fit a phone viewp
 
   await page.getByRole('button', { name: en.editStore, exact: true }).first().click()
   const editor = page.getByRole('dialog', { name: en.editStore, exact: true })
+  await openStorageGroup(editor, 'storeGroupLifecycle')
   await expect(editor.getByText(en.profile_connect_timeout, { exact: true })).toBeVisible()
   await expect(editor.getByText('connect_timeout', { exact: true })).toHaveCount(0)
-  await editor.locator('details.profile-group').nth(1).locator('summary').click()
-  await expect(editor.getByText(en.storeOptionUnused, { exact: true }).first()).toBeVisible()
+  await openStorageGroup(editor, 'storeGroupCache')
+  await expect(editor.locator('[data-profile-group="storeGroupCache"]').getByText(en.storeOptionUnused, { exact: true }).first()).toBeVisible()
   const unavailableInput = editor.locator('.profile-fields input:disabled').first()
   await expect(unavailableInput).toBeVisible()
   expect(await unavailableInput.evaluate(element => getComputedStyle(element).cursor)).toBe('not-allowed')
@@ -47,7 +49,7 @@ test('storage details keep maintenance behind confirmation and fit a phone viewp
 
   await page.setViewportSize({ width: 390, height: 844 })
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-  await page.screenshot({ path: '/work/test-results/storage-details-mobile.png', fullPage: true })
+  await page.screenshot({ path: info.outputPath('storage-details-mobile.png'), fullPage: true })
 })
 
 test('local storage can be disabled and restored, and invalid settings explain the failure', async ({ page, request }) => {

@@ -1,3 +1,4 @@
+import { openStorageGroup } from './storage-form'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { test, expect } from '@playwright/test'
@@ -42,12 +43,12 @@ test('upload cache overflow stays in the storage draft until saved', async ({ pa
       expect((await request.put('/api/v1/account', { headers, data: { display_name: '', locale, theme, avatar_email: '', avatar_enabled: false } })).ok()).toBe(true)
       await page.goto('/storages?edit=' + name)
       const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
+      await openStorageGroup(editor)
       const processing = editor.getByRole('combobox', { name: text.profile_write_processing, exact: true })
       await expect(processing).toBeEnabled()
       await processing.click()
       await page.getByRole('option', { name: text.storeProcessing_background, exact: true }).click()
       expect((await (await request.get(url)).json()).write_processing).toBe('inline')
-      await editor.locator('details.profile-group').nth(1).locator('summary').click()
       const overflow = editor.getByRole('combobox', { name: text.profile_upload_cache_overflow, exact: true })
       await expect(overflow).toHaveAttribute('aria-describedby', 'storage-upload-overflow-hint')
       await expect(overflow).toHaveText(text.storeOverflow_fallback)
@@ -65,10 +66,10 @@ test('upload cache overflow stays in the storage draft until saved', async ({ pa
       expect((await (await request.get(url)).json()).upload_cache_overflow).toBe('fallback')
       expect((await (await request.get(url)).json()).write_processing).toBe('inline')
       await page.goto('/storages?edit=' + name)
+      await openStorageGroup(editor)
       await expect(processing).toHaveText(text.storeProcessing_inline)
       await processing.click()
       await page.getByRole('option', { name: text.storeProcessing_background, exact: true }).click()
-      await editor.locator('details.profile-group').nth(1).locator('summary').click()
       await expect(overflow).toHaveText(text.storeOverflow_fallback)
       await overflow.scrollIntoViewIfNeeded()
       await overflow.focus()
@@ -86,8 +87,8 @@ test('upload cache overflow stays in the storage draft until saved', async ({ pa
   }
   await page.goto('/storages?edit=' + localName)
   const editor = page.getByRole('dialog', { name: ja.editStore, exact: true })
+  await openStorageGroup(editor)
   await expect(editor.getByRole('combobox', { name: ja.profile_write_processing, exact: true })).toBeEnabled()
-  await editor.locator('details.profile-group').nth(1).locator('summary').click()
   await expect(editor.getByRole('combobox', { name: ja.profile_upload_cache_overflow, exact: true })).toBeDisabled()
   expect((await (await request.get(localUrl)).json()).revision).toBe(local.revision)
   expect(errors).toEqual([])

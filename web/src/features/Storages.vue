@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import ErrorNotice from '../components/ErrorNotice.vue'
 import EmptyState from '../components/EmptyState.vue'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowUpRight, Cloud, Database, HardDrive, Pencil, Plus, RefreshCw, ShieldCheck } from 'lucide-vue-next'
-import { api, queries, write } from '../api/client'
+import { ArrowUpRight, ChevronRight, Cloud, Database, HardDrive, Pencil, Plus, RefreshCw, ShieldCheck } from 'lucide-vue-next'
+import { ApiError, api, queries, write } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
 import { notify, report } from '../app/feedback'
@@ -29,6 +29,8 @@ const profileRevision = ref(1)
 const single = computed(() => status.data.value?.deployment_mode === 'single')
 const open = ref(false), editing = ref<Storage | null>(null), busy = ref(false), checking = ref('')
 const profileDraft = ref<Record<ProfileKey, string | number | boolean | null> | null>(null)
+const originalProfile = ref<typeof profileDraft.value>(null)
+const form = ref<HTMLFormElement | null>(null)
 const draft = reactive({ name: '', type: 's3', path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '', block_key_id: '', enabled: true, initialize: true })
 const durabilityOptions = computed(() => (draft.type === 's3' && profileDraft.value?.upload_cache ? ['durable', 'buffered', 'volatile'] : ['durable', 'buffered']).map(value => ({ value, label: t('storeDurability_' + value) })))
 const types = computed(() => (single.value ? ['local', 's3'] : ['s3']).map(value => ({ value, label: t('storeType_' + value) })))
@@ -61,6 +63,28 @@ const profileGroups = computed(() => [
 const profileGroupHints: Record<string, string> = {
   storeGroupIo: 'storeGroupIoHint', storeGroupLifecycle: 'storeGroupLifecycleHint', storeGroupCache: 'storeGroupCacheHint',
   storeGroupPacking: 'storeGroupPackingHint', storeGroupWorker: 'storeGroupWorkerHint',
+}
+function changedFields(fields: ProfileField[]) {
+  return fields.filter(field => (field.key !== 'min_free_space' || draft.type === 'local')
+    && profileDraft.value?.[field.key] !== originalProfile.value?.[field.key])
+}
+function revealInvalid(event: Event) {
+  const group = event.target instanceof HTMLElement ? event.target.closest('details') : null
+  if (group) group.open = true
+}
+async function revealChangedFields() {
+  await nextTick()
+  let first: HTMLElement | null = null
+  for (const group of profileGroups.value) {
+    for (const field of changedFields(group.fields)) {
+      const element = form.value?.querySelector<HTMLElement>(`[data-profile-field="${field.key}"]`)
+      const details = element?.closest('details')
+      if (details) details.open = true
+      first ||= element?.querySelector<HTMLElement>('input:not(:disabled), button:not(:disabled)') || null
+    }
+  }
+  first?.focus()
+  first?.scrollIntoView({ block: 'nearest' })
 }
 const profileLabel = (key: string) => t('profile_' + key)
 const hasBlockKeys = computed(() => (keys.data.value || []).some(row => row.purpose === 'block' && !row.revoked_at))
@@ -97,6 +121,7 @@ async function edit(row?: Storage) {
   profileRevision.value = row?.profile_revision || 1
   Object.assign(draft, { name: row?.name || '', type: row?.type || 's3', path: row?.path || '/data/storage', endpoint: row?.endpoint || '', bucket: row?.bucket || '', region: row?.region || '', prefix: row?.prefix || '', access_key: '', secret_key: '', block_key_id: row?.block_key_id || '', enabled: row?.enabled ?? true, initialize: true })
   profileDraft.value = profileDefaults(draft.type)
+  originalProfile.value = { ...profileDraft.value }
   open.value = true
   if (row) {
     busy.value = true
@@ -105,6 +130,7 @@ async function edit(row?: Storage) {
       const { storage_id: _storageId, revision, ...editable } = profile
       profileRevision.value = revision
       profileDraft.value = editable as Record<ProfileKey, string | number | boolean | null>
+      originalProfile.value = { ...profileDraft.value }
     } catch (error) {
       report(error)
       open.value = false
@@ -113,7 +139,10 @@ async function edit(row?: Storage) {
 }
 watch(() => draft.type, value => {
   if (!profileDraft.value) return
-  if (!editing.value) profileDraft.value = profileDefaults(value)
+  if (!editing.value) {
+    profileDraft.value = profileDefaults(value)
+    originalProfile.value = { ...profileDraft.value }
+  }
   else {
     profileDraft.value.min_free_space = value === 'local' ? profileDraft.value.min_free_space || '1GiB' : null
     if (value !== 'local') Object.assign(profileDraft.value, { file_delivery: 'application', file_delivery_prefix: null })
@@ -174,7 +203,12 @@ async function save() {
     await queries.invalidateQueries({ queryKey: ['storages'] })
     await queries.invalidateQueries({ queryKey: ['bucket-projects'] })
     notify(t(editing.value && editing.value.type !== draft.type ? 'storeRelocated' : editing.value ? 'storeUpdated' : 'storeCreated'))
-  } catch (error) { report(error) } finally { busy.value = false }
+  } catch (error) {
+    busy.value = false
+    // Validation replies have no field location; reveal changed groups for correction.
+    if (error instanceof ApiError && [400, 422].includes(error.status)) await revealChangedFields()
+    report(error)
+  } finally { busy.value = false }
 }
 async function toggle(row: Storage) {
   checking.value = row.name
@@ -190,14 +224,14 @@ async function toggle(row: Storage) {
     <article v-for="row in storages.data.value" :key="row.id" class="surface store-card">
       <div class="section-heading"><h2><HardDrive v-if="row.type === 'local'" :size="19" /><Cloud v-else :size="19" />{{ row.name }}</h2><span class="badge" :class="{ muted: !row.enabled }">{{ t(row.enabled ? 'storeEnabled' : 'storeDisabled') }}</span></div>
       <div class="store-type"><Database :size="16" />{{ t('storeType_' + row.type) }}</div>
-      <dl class="facts"><template v-if="row.type === 'local'"><dt>{{ t('storePath') }}</dt><dd><code>{{ row.path }}</code></dd></template><template v-else><dt>{{ t('storeEndpoint') }}</dt><dd><code>{{ row.endpoint }}</code></dd><dt>{{ t('storeBucket') }}</dt><dd>{{ row.bucket }}</dd><dt>{{ t('storeRegion') }}</dt><dd>{{ row.region }}</dd><dt>{{ t('storePrefix') }}</dt><dd>{{ row.prefix || '—' }}</dd></template><dt>{{ t('storeCurrentKey') }}</dt><dd><code>{{ row.block_key_id || t('storeNoEncryption') }}</code></dd><dt>{{ t('storeReadConcurrency') }}</dt><dd>{{ row.read_concurrency || '—' }}</dd><dt>{{ t('storeUploadConcurrency') }}</dt><dd>{{ row.upload_concurrency || '—' }}</dd><dt>{{ t('storeControlConcurrency') }}</dt><dd>{{ row.control_concurrency || '—' }}</dd><dt>{{ t('updatedAt') }}</dt><dd>{{ date(row.updated_at) }}</dd></dl>
+      <dl class="facts"><template v-if="row.type === 'local'"><dt>{{ t('storePath') }}</dt><dd><code>{{ row.path }}</code></dd></template><template v-else><dt>{{ t('storeEndpoint') }}</dt><dd><code>{{ row.endpoint }}</code></dd><dt>{{ t('storeBucket') }}</dt><dd>{{ row.bucket }}</dd><dt>{{ t('storeRegion') }}</dt><dd>{{ row.region }}</dd><dt>{{ t('storePrefix') }}</dt><dd>{{ row.prefix || '—' }}</dd></template><dt>{{ t('storeCurrentKey') }}</dt><dd><code>{{ row.block_key_id || t('storeNoEncryption') }}</code></dd><dt>{{ t('updatedAt') }}</dt><dd>{{ date(row.updated_at) }}</dd></dl>
       <p class="store-secret-note"><ShieldCheck :size="15" /><span>{{ t('storeSecretsHint') }}</span></p>
       <div class="actions"><RouterLink class="button" :to="'/storages/' + encodeURIComponent(row.name)"><ArrowUpRight :size="15" />{{ t('storeDetails') }}</RouterLink><button @click="edit(row)"><Pencil :size="15" />{{ t('editStore') }}</button><button :disabled="checking === row.name" @click="toggle(row)">{{ t(row.enabled ? 'disableStore' : 'enableStore') }}</button></div>
     </article>
   </div>
   <EmptyState v-else :title="t('noStores')" :description="t('noStoresHint')" />
   <UiDialog v-model:open="open" :title="t(editing ? 'editStore' : 'createStore')" :description="t('storeEditorHint')" :busy="busy" wide>
-    <form @submit.prevent="save">
+    <form ref="form" @submit.prevent="save" @invalid.capture="revealInvalid">
       <p class="store-draft-note"><Pencil :size="15" />{{ t('storeDraftHint') }}</p>
       <div class="store-form-grid">
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeConnection') }}</h3><p class="field-help">{{ t('storeConnectionHint') }}</p></div></div>
@@ -221,11 +255,11 @@ async function toggle(row: Storage) {
       <p class="store-form-wide field-help">{{ t(hasBlockKeys ? 'storeKeyHint' : 'storeNoKeyHint') }} <a href="/credentials?tab=managed&create=block" target="_blank" rel="noreferrer">{{ t('manageKeys') }}</a></p>
         <template v-if="profileDraft">
           <StoragePolicy v-model="profileDraft" :storage-type="draft.type" :existing-type="editing?.type" :name="editing?.name" :storage-id="editing?.id || '00000000-0000-0000-0000-000000000000'" :revision="profileRevision" :disabled="busy" />
-          <div class="store-form-wide section-heading"><div><h3>{{ t('storeProfile') }}</h3><p class="field-help">{{ t(single ? 'storeProfileHintSingle' : 'storeProfileHint') }}</p></div></div>
-          <details v-for="(group, index) in profileGroups" :key="group.title" class="store-form-wide profile-group" :open="index === 0">
-            <summary class="profile-group-title"><span><strong>{{ t(single && group.title === 'storeGroupWorker' ? 'storeGroupWorkerSingle' : group.title) }}</strong><small>{{ t(single && group.title === 'storeGroupWorker' ? 'storeGroupWorkerHintSingle' : profileGroupHints[group.title]!) }}</small></span><span>{{ group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local').length }}</span></summary>
+          <details v-for="group in profileGroups" :key="group.title" class="store-form-wide profile-group" :data-profile-group="group.title">
+            <summary class="profile-group-title"><strong>{{ t(single && group.title === 'storeGroupWorker' ? 'storeGroupWorkerSingle' : group.title) }}</strong><span v-if="changedFields(group.fields).length" class="profile-changes">{{ t('storeChangedFields', { count: changedFields(group.fields).length }) }}</span><ChevronRight :size="16" aria-hidden="true" /></summary>
+            <p class="field-help">{{ t(single && group.title === 'storeGroupWorker' ? 'storeGroupWorkerHintSingle' : profileGroupHints[group.title]!) }}</p>
             <div class="profile-fields">
-              <div v-for="field in group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local')" :key="field.key" :class="field.valueType === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
+              <div v-for="field in group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local')" :key="field.key" :data-profile-field="field.key" :class="field.valueType === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
                 <label v-if="field.key === 'cors_cache_enabled'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="profileDraft.public_cache_validation === 'background' || Boolean(profileDraft.cors_cache_enabled)" :label="t(profileDraft.public_cache_validation === 'background' || profileDraft.cors_cache_enabled ? 'enabled' : 'disabled')" :disabled="busy || profileDraft.public_cache_validation === 'background'" @update:model-value="setProfileBoolean(field.key, $event)" /><small class="field-help">{{ t('profileHelp_cors_cache_enabled') }}</small></label>
                 <template v-else-if="field.valueType === 'boolean'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="Boolean(profileDraft[field.key])" :aria-label="profileLabel(field.key)" :label="profileDisabled(field.key) ? t('storeOptionUnused') : t(Boolean(profileDraft[field.key]) ? 'enabled' : 'disabled')" :disabled="busy || profileDisabled(field.key)" @update:model-value="setProfileBoolean(field.key, $event)" /></template>
                 <label v-else-if="field.key === 'file_delivery'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.file_delivery)" :options="['application', 'x_accel_redirect', 'x_sendfile'].map(value => ({ value, label: t('storeDelivery_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="setDelivery" /><small class="field-help">{{ t('storeDeliveryHint') }}</small></label>
@@ -236,7 +270,7 @@ async function toggle(row: Storage) {
                 <label v-else-if="field.key === 'read_integrity'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft[field.key])" :options="['inline', 'background', 'off'].map(value => ({ value, label: t('storeReadIntegrity_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft[field.key] = $event" /><small class="field-help">{{ t('profileHelp_read_integrity') }}</small></label>
                 <label v-else-if="['public_cache_validation', 'read_source_validation'].includes(field.key)"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft[field.key])" :options="['strict', 'background'].map(value => ({ value, label: t('storeReadValidation_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft[field.key] = $event" /><small v-if="field.key === 'read_source_validation'" class="field-help">{{ t(single ? 'profileHelp_read_source_validationSingle' : 'profileHelp_read_source_validation') }}</small></label>
                 <label v-else-if="field.key === 'background_scheduling'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.background_scheduling)" :options="['balanced', 'foreground'].map(value => ({ value, label: t('storeScheduling_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" aria-describedby="storage-scheduling-hint" @update:model-value="profileDraft.background_scheduling = $event" /><small id="storage-scheduling-hint" class="field-help">{{ t('storeSchedulingHint') }}</small></label>
-                <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><input :aria-label="profileLabel(field.key)" :aria-describedby="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key) ? 'storage-profile-' + field.key + '-hint' : undefined" :type="field.valueType === 'number' ? 'number' : 'text'" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"><small v-if="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key)" :id="'storage-profile-' + field.key + '-hint'" class="field-help">{{ t('profileHelp_' + field.key) }}</small></label>
+                <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><input :aria-label="profileLabel(field.key)" :aria-describedby="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key) ? 'storage-profile-' + field.key + '-hint' : undefined" :type="field.valueType === 'number' ? 'number' : 'text'" :min="field.key.endsWith('_concurrency') ? 1 : undefined" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"><small v-if="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key)" :id="'storage-profile-' + field.key + '-hint'" class="field-help">{{ t('profileHelp_' + field.key) }}</small></label>
               </div>
             </div>
           </details>

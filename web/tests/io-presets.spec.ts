@@ -1,3 +1,4 @@
+import { openStorageGroup } from './storage-form'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { test, expect } from '@playwright/test'
@@ -32,6 +33,9 @@ test('I/O presets preview changes, load only the draft and preserve conflicts', 
       const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
       await expect(editor.locator('.storage-policy .badge')).toHaveText(text.ioPreset_reliable)
       expect(await editor.innerText()).not.toMatch(/cluster|群集|クラスター/i)
+      await expect(editor.locator('details[open]')).toHaveCount(0)
+      await expect(editor.getByRole('combobox', { name: text.storeIoPreset, exact: true })).toBeVisible()
+      await openStorageGroup(editor)
       const standalone = editor.locator('label').filter({ has: page.locator('span', { hasText: text.profile_cors_cache_enabled }) }).getByRole('switch')
       await expect(standalone).toBeEnabled()
       await expect(standalone).not.toBeChecked()
@@ -39,6 +43,7 @@ test('I/O presets preview changes, load only the draft and preserve conflicts', 
       await expect(standalone).toBeChecked()
       expect(await (await request.get(url)).json()).toEqual(original)
       await standalone.click()
+      await editor.locator('[data-profile-group="storeGroupIo"] summary').click()
       for (const preset of ['cached', 'throughput', 'reliable'] as const) {
         const picker = editor.getByRole('combobox', { name: text.storeIoPreset, exact: true })
         await picker.focus()
@@ -63,6 +68,9 @@ test('I/O presets preview changes, load only the draft and preserve conflicts', 
       await editor.getByRole('button', { name: text.storeIoPreview, exact: true }).click()
       await page.getByRole('dialog', { name: text.storeIoPreview, exact: true }).getByRole('button', { name: text.storeIoApplyDraft, exact: true }).click()
       await expect(editor.locator('.storage-policy .badge')).toHaveText(text.ioPreset_throughput)
+      await expect(editor.locator('details[open]')).toHaveCount(0)
+      await expect(editor.locator('[data-profile-group="storeGroupIo"] .profile-changes')).toBeVisible()
+      await openStorageGroup(editor)
       const cors = editor.locator('label').filter({ has: page.locator('span', { hasText: text.profile_cors_cache_enabled }) }).getByRole('switch')
       await expect(cors).toBeChecked()
       await expect(cors).toBeDisabled()
@@ -91,6 +99,7 @@ test('I/O presets preview changes, load only the draft and preserve conflicts', 
   await page.goto('/storages?edit=' + name)
   await expect(editor.locator('.storage-policy .badge')).toHaveText(ja.ioPreset_cached)
   expect((await request.put(url, { headers, data: { ...saved, request_timeout: '31s' } })).status()).toBe(200)
+  await openStorageGroup(editor)
   await editor.getByRole('combobox', { name: ja.profile_read_integrity, exact: true }).click()
   await page.getByRole('option', { name: ja.storeReadIntegrity_off, exact: true }).click()
   const conflict = page.waitForResponse(reply => reply.url().endsWith('/api/v1/storages/' + name) && reply.request().method() === 'PUT')
