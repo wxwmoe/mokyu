@@ -51,6 +51,17 @@ def warm(name, data, encoding='identity'):
 assert status()['response_cache']['limit_bytes'] > 0
 put('text', text)
 put('noise', noise)
+put('identity-input', text)
+warm('identity-input', text)
+for encoding in ['zstd', 'br', 'gzip']:
+    before = status()
+    warm('identity-input', text, encoding)
+    after = status()
+    assert after['backend_gets'] == before['backend_gets'], 'encoding reread a cached identity source'
+    assert after['cache_hits'] == before['cache_hits'], 'encoding reread the disk cache'
+    response, _ = read('identity-input', encoding, web=bool(os.environ.get('MOKYU_TEST_PUBLIC_WEB')))
+    assert response.headers['Content-Encoding'] == encoding
+print('PASS first encoded representations reuse a validated identity body without source IO', flush=True)
 for name, original in [('text', text), ('noise', noise)]:
     for encoding in (['zstd', 'br', 'gzip', 'identity'] if name == 'text' else ['identity']):
         encoded = warm(name, original, encoding)

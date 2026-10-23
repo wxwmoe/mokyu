@@ -55,9 +55,13 @@ def main():
         for _ in range(3):
             assert clients[node].get_object(Bucket=fixture.name, Key='cached')['Body'].read() == body
         for encoding in ('identity', 'gzip', 'br', 'zstd'):
+            source_before = status(node)
             for _ in range(3):
                 reply, data = read(node, encoding)
                 assert reply.status_code == 200 and data == body, (node, encoding, reply.status_code, reply.headers)
+            source_after = status(node)
+            assert source_after['backend_gets'] == source_before['backend_gets'], 'node reread an identity source for encoding'
+            assert source_after['cache_hits'] == source_before['cache_hits'], 'node reread a disk cache for encoding'
             before = status(node)
             reply, data = read(node, encoding, web=True)
             assert data == body and reply.headers['Access-Control-Allow-Origin'] == 'https://client.test'

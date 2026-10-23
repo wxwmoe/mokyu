@@ -448,6 +448,7 @@ impl Cache {
             raw_size: stream.size,
             etag: stream.etag.clone(),
             capture: Arc::new(Mutex::new(Mapping::new(stream.size))),
+            mapping: None,
             signal,
             buffer: None,
             published: false,
@@ -574,12 +575,22 @@ pub(crate) struct Builder {
     raw_size: i64,
     etag: String,
     pub capture: Arc<Mutex<Mapping>>,
+    mapping: Option<[u8; 32]>,
     signal: Arc<Notify>,
     buffer: Option<Buffer>,
     published: bool,
 }
 
 impl Builder {
+    pub fn reuse(&mut self, entry: &Entry) {
+        self.mapping = Some(entry.mapping);
+        let mut capture = self.capture.lock().unwrap();
+        capture.storages = entry.storages.clone();
+        capture.checks = entry.checks.clone();
+        capture.read_epoch = entry.read_epoch;
+        capture.finished = true;
+    }
+
     pub fn len(&self) -> usize {
         self.buffer.as_ref().map_or(0, |buffer| buffer.bytes.len())
     }
@@ -646,7 +657,10 @@ impl Builder {
         };
         let (mapping, checks, read_epoch, storages) = {
             let capture = self.capture.lock().unwrap();
-            let Some(mapping) = capture.signature() else {
+            if !capture.valid {
+                return;
+            }
+            let Some(mapping) = self.mapping.or_else(|| capture.signature()) else {
                 return;
             };
             if !capture.checks.iter().all(|check| check.cacheable()) {
@@ -889,6 +903,53 @@ mod tests {
     use super::*;
     use crate::{app::Extent, content::codec::Chunk};
     use serde_json::json;
+
+    #[test]
+    fn reencoded_entries_keep_the_source_mapping_and_storage_fence() {
+        let cache = Cache::new(4 * 1024 * 1024);
+        let (stream, key, mut row) = fixture(8192);
+        let storage = Uuid::new_v4();
+        row.chunk.storage_id = Some(storage);
+        assert!(cache.begin(key, &stream, &stream.object_key).is_none());
+        let mut builder = cache.begin(key, &stream, &stream.object_key).unwrap();
+        {
+            let mut capture = builder.capture.lock().unwrap();
+            capture.record(&row);
+            capture.start_read(43);
+            capture.finish_source();
+        }
+        assert!(builder.append(&[7; 8192]));
+        builder.finish();
+        let original = cache.get(key).unwrap();
+        let encoded = Key {
+            encoding: "gzip",
+            ..key
+        };
+        assert!(cache.begin(encoded, &stream, &stream.object_key).is_none());
+        let mut builder = cache.begin(encoded, &stream, &stream.object_key).unwrap();
+        builder.reuse(&original);
+        assert!(builder.append(&[3; 32]));
+        builder.finish();
+        let entry = cache.get(encoded).unwrap();
+        assert_eq!(entry.mapping, original.mapping);
+        assert_eq!(entry.storages, original.storages);
+        assert_eq!(entry.read_epoch, 43);
+        let late = Key {
+            encoding: "br",
+            ..key
+        };
+        assert!(cache.begin(late, &stream, &stream.object_key).is_none());
+        let mut builder = cache.begin(late, &stream, &stream.object_key).unwrap();
+        builder.reuse(&original);
+        assert!(builder.append(&[5; 32]));
+        cache.storage_policy(storage, true);
+        builder.finish();
+        assert!(cache.get(key).is_none());
+        assert!(cache.get(encoded).is_none());
+        assert!(cache.get(late).is_none());
+        assert_eq!(original.bytes.as_ref(), &[7; 8192]);
+        assert_eq!(cache.snapshot()["candidate_bytes"], 0);
+    }
 
     #[test]
     fn pinned_allocations_do_not_flush_the_cache_for_an_unfunded_candidate() {

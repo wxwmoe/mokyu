@@ -23,6 +23,7 @@ def arm(name):
     return fault
 
 put('canceled', text)
+warm('canceled', text)
 read('canceled', 'gzip')
 before = status()['response_cache']['entries']
 fault = arm('http-compression-finish')
@@ -40,6 +41,7 @@ finally:
 warm('canceled', text, 'gzip')
 
 put('replaced', text)
+warm('replaced', text)
 read('replaced', 'gzip')
 fault = arm('http-compression-finish')
 with ThreadPoolExecutor(max_workers=1) as pool:

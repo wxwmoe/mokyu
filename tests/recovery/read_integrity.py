@@ -104,6 +104,51 @@ def main():
             assert get(fixture).content == body, 'reliable mode reused an unchecked cached body'
             print('PASS default inline, profile validation, explicit off and cache fencing on strict switch', flush=True)
 
+            encoded = Fixture()
+            policy(encoded, cdc_enabled=False, pack_range_enabled=False, read_integrity='off')
+            text = b'Identity-derived representations retain the original integrity evidence.\n' * 1800
+            encoded.client.put_object(Bucket=encoded.name, Key='raw', Body=text, ACL='public-read', ContentType='text/plain')
+            physical, = encoded.keys()
+            altered = b'X' + text[1:]
+            encoded.bytes(physical, altered)
+            for _ in range(3):
+                assert get(encoded).content == altered
+            before = status(encoded)
+            for _ in range(3):
+                response = get(encoded, **{'Accept-Encoding': 'gzip'})
+                assert response.headers.get('Content-Encoding') == 'gzip' and response.content == altered
+            assert status(encoded)['backend_gets'] == before['backend_gets']
+            encoded.bytes(physical, text)
+            policy(encoded, read_integrity='inline')
+            response = get(encoded, **{'Accept-Encoding': 'gzip'})
+            assert response.content == text, 'derived encoding lost the unchecked source epoch'
+
+            pending = Fixture()
+            policy(pending, cdc_enabled=False, pack_range_enabled=False, read_integrity='background')
+            pending.client.put_object(Bucket=pending.name, Key='raw', Body=text, ACL='public-read', ContentType='text/plain')
+            physical, = pending.keys()
+            pending.bytes(physical, altered)
+            marker = arm(pending, 'read-integrity-check')
+            try:
+                for _ in range(3):
+                    assert get(pending).content == altered
+                wait(lambda: marker.with_suffix('.hit').exists(), 'pending identity was not checked')
+                before = status(pending)
+                for _ in range(3):
+                    response = get(pending, **{'Accept-Encoding': 'gzip'})
+                    assert response.headers.get('Content-Encoding') == 'gzip' and response.content == altered
+                assert status(pending)['backend_gets'] == before['backend_gets']
+                assert checks(pending)['active'] == before['read_checks']['active']
+            finally:
+                marker.unlink(missing_ok=True)
+            wait(lambda: confirmed(pending, 'raw'), 'pending source failure was not isolated')
+            settled(pending)
+            try:
+                assert get(pending, **{'Accept-Encoding': 'gzip'}).status_code >= 400
+            except requests.exceptions.ChunkedEncodingError:
+                pass
+            print('PASS identity-derived encodings retain unchecked epochs and pending failure evidence', flush=True)
+
             race = Fixture()
             policy(race, cdc_enabled=False, pack_range_enabled=False, read_integrity='off')
             put(race, 'raw', body)

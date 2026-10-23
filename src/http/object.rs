@@ -384,65 +384,84 @@ pub(crate) async fn read(
             && cacheable(request)
             && cacheable(&headers)
             && app.response_cache.eligible(&stream);
+        let mut input = None;
         if use_cache {
-            let cached = if head {
-                app.response_cache.get(cache_key)
-            } else {
-                app.response_cache.lookup(cache_key).await
-            };
-            if let Some(entry) = cached {
-                let mut valid = entry.usable(app.storage.read_epoch())
-                    && entry.raw_size == stream.size
-                    && entry.etag == stream.etag;
-                if valid
-                    && !head
-                    && let Some(mapping) = cached_mapping
-                {
-                    valid = mapping == entry.mapping;
-                } else if valid && !head {
-                    let mapping = match app.response_mapping(&stream).await {
-                        Ok(mapping) => mapping,
-                        Err(error) => {
-                            app.response_cache.remove(cache_key, &entry);
-                            return Err(error);
-                        }
-                    };
-                    valid = mapping.map(|mapping| mapping.0) == Some(entry.mapping);
+            for (position, cached_key) in [
+                cache_key,
+                responses::Key {
+                    encoding: "identity",
+                    ..cache_key
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if position == 1 && (head || encoding == Encoding::Identity) {
+                    break;
                 }
-                if valid {
-                    let bytes = if encoding == Encoding::Identity {
-                        entry.bytes.slice(span.start as usize..span.end as usize)
-                    } else {
-                        entry.bytes.clone()
-                    };
-                    headers.insert(header::CONTENT_LENGTH, bytes.len().to_string().parse()?);
-                    if !head {
-                        app.response_cache.hit();
-                        if cached_mapping.is_some() || crate::app::reads::is_raw(bucket, key) {
-                            app.response_cache.validated();
-                        }
-                        if let Some(observe) = observation(app, &stream, encoding) {
-                            observe(stream.size as u64, entry.bytes.len() as u64);
-                        }
+                let cached = if head || position == 1 {
+                    app.response_cache.get(cached_key)
+                } else {
+                    app.response_cache.lookup(cached_key).await
+                };
+                if let Some(entry) = cached {
+                    let mut valid = entry.usable(app.storage.read_epoch())
+                        && entry.raw_size == stream.size
+                        && entry.etag == stream.etag;
+                    if valid
+                        && !head
+                        && let Some(mapping) = cached_mapping
+                    {
+                        valid = mapping == entry.mapping;
+                    } else if valid && !head {
+                        let mapping = match app.response_mapping(&stream).await {
+                            Ok(mapping) => mapping,
+                            Err(error) => {
+                                app.response_cache.remove(cached_key, &entry);
+                                return Err(error);
+                            }
+                        };
+                        valid = mapping.map(|mapping| mapping.0) == Some(entry.mapping);
                     }
-                    drop(pin.take());
-                    return Ok(Read {
-                        status: if range.is_some() {
-                            StatusCode::PARTIAL_CONTENT
+                    if valid {
+                        if position == 1 {
+                            input = Some(entry);
+                            break;
+                        }
+                        let bytes = if encoding == Encoding::Identity {
+                            entry.bytes.slice(span.start as usize..span.end as usize)
                         } else {
-                            StatusCode::OK
-                        },
-                        headers,
-                        body: (!head).then(|| cached_body(bytes)),
-                        metadata,
-                        checksums: stream.checksums,
-                        partial: range.is_some(),
-                    });
+                            entry.bytes.clone()
+                        };
+                        headers.insert(header::CONTENT_LENGTH, bytes.len().to_string().parse()?);
+                        if !head {
+                            app.response_cache.hit();
+                            if cached_mapping.is_some() || crate::app::reads::is_raw(bucket, key) {
+                                app.response_cache.validated();
+                            }
+                            if let Some(observe) = observation(app, &stream, encoding) {
+                                observe(stream.size as u64, entry.bytes.len() as u64);
+                            }
+                        }
+                        drop(pin.take());
+                        return Ok(Read {
+                            status: if range.is_some() {
+                                StatusCode::PARTIAL_CONTENT
+                            } else {
+                                StatusCode::OK
+                            },
+                            headers,
+                            body: (!head).then(|| cached_body(bytes)),
+                            metadata,
+                            checksums: stream.checksums,
+                            partial: range.is_some(),
+                        });
+                    }
+                    app.response_cache.remove(cached_key, &entry);
                 }
-                app.response_cache.remove(cache_key, &entry);
             }
         }
-        if !head && pin.is_none() {
+        if !head && pin.is_none() && input.is_none() {
             // A cache miss must acquire source protection and recheck the current representation.
             let current = app.current(bucket, key).await?;
             stream = current.0;
@@ -455,7 +474,7 @@ pub(crate) async fn read(
         } else {
             Some(app.admit(false).await?)
         };
-        if !head && app.wait_read(&stream, deadline).await? {
+        if !head && input.is_none() && app.wait_read(&stream, deadline).await? {
             let bucket = app.bucket(&bucket_info.name, false).await?;
             if bucket.state != "active" || bucket.settings_revision != bucket_info.settings_revision
             {
@@ -483,17 +502,30 @@ pub(crate) async fn read(
         } else {
             let permits = permits.expect("body read was admitted");
             let size = stream.size as u64;
-            let builder = if use_cache && range.is_none() {
+            let mut builder = if use_cache && range.is_none() {
                 app.response_cache.begin(cache_key, &stream, key)
             } else {
                 None
             };
-            let capture = builder.as_ref().map(|builder| builder.capture.clone());
             let observation = observation(app, &stream, encoding);
-            let mut pin = pin.take().expect("body read is protected");
-            pin.allow_replica();
-            let body = app
-                .body(
+            let body = if let Some(entry) = input {
+                if let Some(builder) = &mut builder {
+                    builder.reuse(&entry);
+                }
+                app.response_cache.hit();
+                if cached_mapping.is_some() || crate::app::reads::is_raw(bucket, key) {
+                    app.response_cache.validated();
+                }
+                drop(pin.take());
+                blob(Box::pin(async_stream::try_stream! {
+                    let _permits = permits;
+                    yield entry.bytes.clone();
+                }))
+            } else {
+                let capture = builder.as_ref().map(|builder| builder.capture.clone());
+                let mut pin = pin.take().expect("body read is protected");
+                pin.allow_replica();
+                app.body(
                     stream,
                     pin,
                     span.start as i64..span.end as i64,
@@ -501,7 +533,8 @@ pub(crate) async fn read(
                     range.is_some(),
                     capture,
                 )
-                .await?;
+                .await?
+            };
             Some(if encoding == Encoding::Identity && builder.is_none() {
                 body
             } else {
