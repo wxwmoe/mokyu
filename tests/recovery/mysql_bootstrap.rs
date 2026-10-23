@@ -1,6 +1,6 @@
 use super::{migration, queries};
 use crate::config::Config;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::{Connection, MySqlConnection, Row, migrate::Migrate, mysql::MySqlConnectOptions};
 use std::collections::BTreeMap;
@@ -367,7 +367,7 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         serde_json::json!({})
     );
 
-    for version in [19, 20, 24, 25, 26, 27, 35, 36] {
+    for version in [19, 20, 24, 25, 26, 27, 35, 36, 37] {
         let recovery = migrations
             .iter()
             .find(|migration| migration.version == version)
@@ -383,6 +383,12 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
                 "EXECUTE mokyu_audit",
                 "DEALLOCATE PREPARE mokyu_audit",
                 "UPDATE mokyu_meta SET schema_version=20",
+            ]
+        } else if version == 37 {
+            vec![
+                "SET @mokyu_public_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='public_cache_refresh_interval')",
+                "SET @mokyu_public_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='public_cache_max_age')",
+                "UPDATE mokyu_meta SET schema_version=37",
             ]
         } else if version == 36 {
             vec![
@@ -433,7 +439,9 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
             sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(?,?,FALSE,?,0)")
             .bind(recovery.version).bind(recovery.description.as_ref()).bind(recovery.checksum.as_ref())
             .execute(&mut interrupted).await?;
-            migration::run(&mut interrupted).await?;
+            migration::run(&mut interrupted)
+                .await
+                .with_context(|| format!("resume migration {version} before {marker}"))?;
             same_structure(&mut interrupted, &mut fresh).await?;
         }
     }

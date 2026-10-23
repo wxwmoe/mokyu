@@ -54,6 +54,7 @@ pub(crate) struct CachedStream {
     pub extents: Vec<CachedExtent>,
 }
 
+#[derive(Clone, Debug, Hash)]
 pub(crate) enum ReadRoute {
     Bucket {
         name: String,
@@ -78,6 +79,7 @@ impl ReadRoute {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ReadSnapshot {
     pub bucket: Bucket,
     pub stream: Option<StoredStream>,

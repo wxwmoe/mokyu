@@ -18,7 +18,7 @@
 
 公共 Web 和匿名 S3 对象也可流式协商这三种编码，签名请求保持原始表示；收益、ETag、Range 和条件请求规则见 [S3 兼容性](s3-compatibility.md#公共响应压缩)。编码与普通磁盘缓存填充共用现有工作内存预算，额度不足时优先保证原始读写。压缩收益通过有界内存队列回写，重启或停机可丢弃待学习统计；`cli status` 的 `http_compression` 展示 pending/written/dropped/failed 计数。
 
-示例配置通过 `instance.response_cache_size = "64MiB"` 启用热门完整正文的进程内缓存；省略该项或设为 `0B` 时关闭，配套内存和 pack 预算见[配置参考](configuration.md)。Web 与匿名 S3 按不可变内容及编码共享正文，签名 S3 在鉴权后复用原文；每次仍检查当前权限与逻辑映射，命中时不重新读取磁盘或编码。校验不通过或条目被淘汰时重新取得来源保护。候选只在完整读取并校验后发布，取消、超限或内存不足时放弃填充。重启会清空缓存，无需备份；`cli status` 的 `response_cache` 区分存活字节、构建额度、淘汰后仍被响应持有的字节以及 `validated_hits`（成功快照校验的正文命中）。
+示例配置通过 `instance.response_cache_size = "64MiB"` 启用热门完整正文的进程内缓存；省略该项或设为 `0B` 时关闭，配套内存和 pack 预算见[配置参考](configuration.md)。Web 与匿名 S3 按不可变内容及编码共享正文，签名 S3 在鉴权后复用原文；默认逐请求检查当前权限与逻辑映射，命中时不重新读取磁盘或编码。后端 profile 的 `public_cache_validation=background` 可为匿名 S3/Web 复用有硬期限的公开快照，跨节点撤销权限存在明确的有效期窗口，配置与限制见[配置参考](configuration.md)。校验不通过或条目被淘汰时重新取得来源保护。候选只在完整读取并校验后发布，取消、超限或内存不足时放弃填充。重启会清空缓存，无需备份；`cli status` 的 `response_cache` 区分存活字节、构建额度、淘汰后仍被响应持有的字节以及 `validated_hits`（成功快照校验的正文命中）。
 
 独立前端使用 [web](../web/README.md) 的 `dist/`，将 `/api/v1/` 同源反代至管理端口，只有前端页面使用 SPA fallback。管理 Origin 必须是浏览器实际访问的地址；管理 API 不应缓存，也不使用桶的 CORS 规则。首次设置、头像与安全头要求与内嵌部署相同。
 

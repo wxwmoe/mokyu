@@ -143,6 +143,7 @@ pub(crate) async fn create_bucket(
     input: CreateBucket,
 ) -> Result<Bucket> {
     app.writable()?;
+    let _cache = app.public_reads.changing();
     app.buckets.create(principal, input).await
 }
 
@@ -156,6 +157,7 @@ pub(crate) async fn delete_bucket(
     app.writable()?;
     let _coord = app.coord.lock().await;
     app.writable()?;
+    let _cache = app.public_reads.changing();
     app.buckets
         .delete(principal, bucket, name, confirmation)
         .await
@@ -167,6 +169,7 @@ pub(crate) async fn domain_change(
     bucket: Option<Uuid>,
 ) -> Result<()> {
     app.writable()?;
+    let _cache = app.public_reads.changing();
     app.buckets
         .change_domain(principal, &host(value)?, bucket)
         .await
@@ -318,6 +321,7 @@ pub(super) async fn save(
                 .collect::<Result<Vec<_>>>()
         })
         .transpose()?;
+    let _cache = app.public_reads.changing();
     app.buckets
         .save_settings(
             &actor.principal,
@@ -415,6 +419,7 @@ pub(super) async fn transfer(
     app.writable()?;
     let _coord = app.coord.lock().await;
     app.writable()?;
+    let _cache = app.public_reads.changing();
     Ok(Json(
         app.buckets
             .transfer(&actor.principal, bucket, input)

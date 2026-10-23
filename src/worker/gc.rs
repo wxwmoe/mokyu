@@ -22,6 +22,7 @@ impl App {
         self.writable()?;
         let _coord = self.coord.lock().await;
         self.writable()?;
+        let _cache = self.public_reads.changing();
         let result = self
             .buckets
             .start_purge(principal, name, id, confirmation)

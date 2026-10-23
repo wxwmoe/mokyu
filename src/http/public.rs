@@ -120,6 +120,7 @@ async fn public(
                 key: key.clone(),
             },
             None,
+            super::object::reuse_public(request.headers()),
         )
         .await?
     } else {
@@ -127,6 +128,17 @@ async fn public(
     };
     let bucket = if let Some(read) = &prepared {
         Some(read.snapshot.bucket.clone())
+    } else if request.method() == Method::OPTIONS
+        && super::object::reuse_public(request.headers())
+        && let Some(bucket) = app.public_reads.bucket(
+            &crate::model::ReadRoute::Host {
+                host: host.clone(),
+                key: String::new(),
+            },
+            &app.storage,
+        )
+    {
+        Some(bucket)
     } else {
         app.buckets.by_host(&host).await?
     };

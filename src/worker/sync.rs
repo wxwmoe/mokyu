@@ -204,6 +204,7 @@ impl App {
                 if recovery {
                     let code = sync_failure(&error);
                     if let Some(code) = code {
+                        let _cache = self.public_reads.changing();
                         self.raw.synced(&source, Some(code)).await?;
                         tracing::error!(source=%source.id, storage=%source.storage_id, code, "buffered source is unavailable after restart");
                         continue;
@@ -228,6 +229,7 @@ impl App {
         self.storage.sync_raw(&current, verify).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("buffered-file-synced").await;
+        let _cache = self.public_reads.changing();
         self.raw.synced(&current, None).await?;
         Ok(())
     }

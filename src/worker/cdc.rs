@@ -226,9 +226,11 @@ impl App {
                                 .copied()
                                 .unwrap_or(0)
                                 > 1;
-                        !reading
-                            && self
-                                .raw
+                        if reading {
+                            false
+                        } else {
+                            let _cache = self.public_reads.changing();
+                            self.raw
                                 .finish_conversion(
                                     task,
                                     &job,
@@ -237,6 +239,7 @@ impl App {
                                     pin.read_lease_id(),
                                 )
                                 .await?
+                        }
                     };
                     if done {
                         break;

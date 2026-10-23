@@ -213,6 +213,7 @@ impl App {
         crate::faults::point("source-before-commit").await;
         let _coord = self.coord.lock().await;
         self.source_writable()?;
+        let _cache = self.public_reads.changing();
         self.physical
             .source_update(SourceUpdate {
                 execution,

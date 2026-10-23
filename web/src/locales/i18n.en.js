@@ -1,6 +1,13 @@
 export default {
   profile_write_flush_interval: "Coalescing delay",
   profile_write_backlog_max_age: "Backlog age limit",
+  storeGroupReading: "Public reads",
+  storeGroupReadingHint: "Background validation can serve a previous public permission or object version until its hard expiry on other nodes. Local changes invalidate snapshots before confirmation.",
+  profile_public_cache_validation: "Public permission validation",
+  profile_public_cache_refresh_interval: "Refresh interval",
+  profile_public_cache_max_age: "Maximum snapshot age",
+  storeReadValidation_strict: "Every request",
+  storeReadValidation_background: "In the background",
   profile_background_scheduling: "Background scheduling",
   storeScheduling_balanced: "Balanced",
   storeScheduling_foreground: "Foreground first",

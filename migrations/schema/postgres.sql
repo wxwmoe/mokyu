@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0065.
+-- Generated from the complete postgres migration chain through 0066.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1337,6 +1337,9 @@ CREATE TABLE public.storage_profiles (
     write_flush_interval bigint DEFAULT 0 NOT NULL,
     write_backlog_max_age bigint DEFAULT 300 NOT NULL,
     background_scheduling text DEFAULT 'balanced'::text NOT NULL,
+    public_cache_validation text DEFAULT 'strict'::text NOT NULL,
+    public_cache_refresh_interval text DEFAULT '1s'::text NOT NULL,
+    public_cache_max_age text DEFAULT '5s'::text NOT NULL,
     CONSTRAINT storage_background_scheduling CHECK ((background_scheduling = ANY (ARRAY['balanced'::text, 'foreground'::text]))),
     CONSTRAINT storage_profiles_cache_entries_check CHECK (((cache_entries IS NULL) OR (cache_entries > 0))),
     CONSTRAINT storage_profiles_compression_min_savings_bytes_check CHECK ((compression_min_savings_bytes >= 0)),
@@ -1355,6 +1358,7 @@ CREATE TABLE public.storage_profiles (
     CONSTRAINT storage_profiles_revision_check CHECK ((revision > 0)),
     CONSTRAINT storage_profiles_upload_concurrency_check CHECK (((upload_concurrency IS NULL) OR (upload_concurrency > 0))),
     CONSTRAINT storage_profiles_write_durability_check CHECK ((write_durability = ANY (ARRAY['durable'::text, 'buffered'::text, 'volatile'::text]))),
+    CONSTRAINT storage_public_cache_validation CHECK ((public_cache_validation = ANY (ARRAY['strict'::text, 'background'::text]))),
     CONSTRAINT storage_upload_overflow_check CHECK ((upload_cache_overflow = ANY (ARRAY['fallback'::text, 'reject'::text])))
 );
 

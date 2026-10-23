@@ -37,6 +37,30 @@ pub(crate) fn conditional(request: &HeaderMap) -> bool {
     .any(|name| request.contains_key(name))
 }
 
+pub(crate) fn reuse_public(request: &HeaderMap) -> bool {
+    !conditional(request)
+        && cacheable(request)
+        && !request
+            .get_all(header::CACHE_CONTROL)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|v| {
+                v.split(',').any(|part| {
+                    part.trim()
+                        .split('=')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("no-cache")
+                })
+            })
+        && !request
+            .get_all(header::PRAGMA)
+            .iter()
+            .any(|v| v.as_bytes().eq_ignore_ascii_case(b"no-cache"))
+        && !request.contains_key("x-amz-checksum-mode")
+}
+
 pub(crate) fn beneficial(raw: u64, encoded: u64) -> bool {
     raw >= 1024 && raw.saturating_sub(encoded) >= 128.max(raw.div_ceil(50))
 }
@@ -190,7 +214,9 @@ pub(crate) async fn read(
     }
     let accept = AcceptEncoding::new(request);
     let light = head || conditional(request);
-    let candidate = if !light
+    let public_snapshot = crate::app::reads::cached(bucket, key);
+    let candidate = if public_snapshot.is_none()
+        && !light
         && !checksum
         && cacheable(request)
         && !crate::app::reads::is_raw(bucket, key)
@@ -223,7 +249,10 @@ pub(crate) async fn read(
         None
     };
     let mut cached_mapping = None;
-    let (mut stream, mut pin) = if let Some((stream, mapping)) = candidate {
+    let (mut stream, mut pin) = if let Some((stream, mapping)) = public_snapshot {
+        cached_mapping = mapping;
+        (stream, None)
+    } else if let Some((stream, mapping)) = candidate {
         cached_mapping = Some(mapping);
         #[cfg(feature = "fault-injection")]
         crate::faults::point("read-cache-snapshot").await;

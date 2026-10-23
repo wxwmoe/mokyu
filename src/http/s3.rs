@@ -100,11 +100,23 @@ pub async fn s3_http(
         .flatten();
         let access = access_key(request.headers(), request.uri().query());
         let prepared = if let Some(route) = route {
-            app.prepare_read(&route, access.as_deref()).await?
+            app.prepare_read(
+                &route,
+                access.as_deref(),
+                !signed && super::object::reuse_public(request.headers()),
+            )
+            .await?
         } else {
             None
         };
         let mut bucket: Option<Bucket> = prepared.as_ref().map(|read| read.snapshot.bucket.clone());
+        if request.method() == Method::OPTIONS
+            && !signed
+            && super::object::reuse_public(request.headers())
+            && let Some(route) = read_route(request.uri().path(), virtual_bucket, alias)
+        {
+            bucket = app.public_reads.bucket(&route, &app.storage);
+        }
         if let Some(alias) = alias {
             if bucket.is_none() {
                 bucket = app.buckets.by_name(alias, false).await?;

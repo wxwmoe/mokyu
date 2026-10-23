@@ -1,6 +1,13 @@
 export default {
   profile_write_flush_interval: "合并等待",
   profile_write_backlog_max_age: "积压最长时间",
+  storeGroupReading: "公共读取",
+  storeGroupReadingHint: "后台验证允许其他节点在硬期限内返回旧的公开权限或对象版本，本机变更在确认前使快照失效",
+  profile_public_cache_validation: "公开权限验证",
+  profile_public_cache_refresh_interval: "刷新间隔",
+  profile_public_cache_max_age: "快照最大有效期",
+  storeReadValidation_strict: "每次请求",
+  storeReadValidation_background: "后台验证",
   profile_background_scheduling: "后台调度",
   storeScheduling_balanced: "均衡",
   storeScheduling_foreground: "前台优先",

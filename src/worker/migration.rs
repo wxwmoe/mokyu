@@ -73,6 +73,7 @@ impl App {
             crate::faults::point("migration-before-publish").await;
             let _coord = self.coord.lock().await;
             self.writable()?;
+            let _cache = self.public_reads.changing();
             self.objects
                 .complete_migration(id, lease_token, destination, &job)
                 .await?;

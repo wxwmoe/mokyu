@@ -187,7 +187,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | `POST /api/v1/storages` | 创建存储；请求包含 `{name,type,initialize,path?,endpoint?,bucket?,region?,prefix?,block_key_id?,access_key?,secret_key?,profile?}`，type 为 `local` 或 `s3`；`initialize` 必须明确为 `true`，profile 使用完整 typed storage profile |
 | `PUT /api/v1/storages/{name}` | 修改连接字段、prefix、block_key_id 或 enabled；name 和 id 不可修改；切换 type 需单容器维护状态并排空上传、任务及待写来源，核对目标 meta 后保存，成功后须重启；并发、压缩、区块包、缓存和维护预算通过 profile 保存 |
 | `POST /api/v1/storages/{name}/check` | 读取并核对已有 `meta.json`，无请求体 |
-| `GET /api/v1/storages/{name}/profile` | 读取该 storage 的 typed profile；CDC 联动开关、单容器 write_durability、合并等待 write_flush_interval、积压阈值 write_backlog_max_age、后台调度 background_scheduling、连接超时、重试、压缩、pack、cache、integrity、配额与生命周期字段均在 profile 内 |
+| `GET /api/v1/storages/{name}/profile` | 读取该 storage 的 typed profile；CDC 联动开关、单容器 write_durability、合并等待 write_flush_interval、积压阈值 write_backlog_max_age、后台调度 background_scheduling、公开快照 public_cache_validation / public_cache_refresh_interval / public_cache_max_age、连接超时、重试、压缩、pack、cache、integrity、配额与生命周期字段均在 profile 内 |
 | `PUT /api/v1/storages/{name}/key` | 设置或清除 `{key?}` 形式的 block key 绑定；返回新的 profile revision |
 | `POST /api/v1/storages/{name}/rewrite` | 对存量物理编码执行 `preview`、`start`、`status`、`pause`、`resume` 或 `retry`；`start` 必须提交预览 confirmation |
 | `POST /api/v1/storages/{name}/unpack` | 对指定 pack 执行 `preview` 或 `start`；请求 `{action,pack_id,confirmation?}`，start 必须提交预览 confirmation |
@@ -222,7 +222,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 
 ## 运行状态
 
-`GET /api/v1/system/status` 与 `cli status` 相同，提供进程、连接池、资源预算、读写名额、存储 read/upload/control 队列和目录索引状态；`cache_jobs_active` 为当前缓存填充/清理任务数；`credential_activity` 返回凭据使用时间队列的 `entries`、`pending`、`completed`、`dropped`、`failed`，计数按进程累计，completed 包含已检查但尚未到五分钟回写间隔的记录；`cors_cache` 返回规则缓存的 `entries`、`hits`、`parses`、`invalidated`、`evicted`、`bypassed` 和字节额度，`live_bytes` 包含已淘汰但仍被请求或响应头持有的规则额度；`upload_cache.raw_processing` 提供后台 raw 去重的 `pending`、`failed` 和 `bytes`，失败记录保留并重试，不影响已有独立来源；`upload_cache.raw_uploads` 用同样三个字段表示必须排空的 raw 来源，既有待上传工作不因关闭缓存而丢弃；`upload_cache.buffered_files` 返回待同步 raw 的 `pending`、`bytes` 和 `oldest`，`upload_cache.buffered_chunks` 用相同字段返回待同步区块（bytes 为原始大小），同步失败保留待办；`upload_cache.fallbacks` 和 `upload_cache.rejections` 分别统计本进程缓存不可用时的同步回退与策略拒绝次数，重启清零。`GET /api/v1/system/config` 提供脱敏配置、来源、值模式和重启要求，不读取秘密文件内容；来源由 `origin` 标识，值模式由 `value_mode` 标识。
+`GET /api/v1/system/status` 与 `cli status` 相同，提供进程、连接池、资源预算、读写名额、存储 read/upload/control 队列和目录索引状态；`cache_jobs_active` 为当前缓存填充/清理任务数；`credential_activity` 返回凭据使用时间队列的 `entries`、`pending`、`completed`、`dropped`、`failed`，计数按进程累计，completed 包含已检查但尚未到五分钟回写间隔的记录；`public_read_cache` 返回独立公开快照的 `limit_bytes`、`used_bytes`、`entries`、`hits`、`refreshed`、`failed` 和 `skipped`，失败不延长成功验证期限，已淘汰但仍被请求或队列持有的条目持续计费；`cors_cache` 返回规则缓存的 `entries`、`hits`、`parses`、`invalidated`、`evicted`、`bypassed` 和字节额度，`live_bytes` 包含已淘汰但仍被请求或响应头持有的规则额度；`upload_cache.raw_processing` 提供后台 raw 去重的 `pending`、`failed` 和 `bytes`，失败记录保留并重试，不影响已有独立来源；`upload_cache.raw_uploads` 用同样三个字段表示必须排空的 raw 来源，既有待上传工作不因关闭缓存而丢弃；`upload_cache.buffered_files` 返回待同步 raw 的 `pending`、`bytes` 和 `oldest`，`upload_cache.buffered_chunks` 用相同字段返回待同步区块（bytes 为原始大小），同步失败保留待办；`upload_cache.fallbacks` 和 `upload_cache.rejections` 分别统计本进程缓存不可用时的同步回退与策略拒绝次数，重启清零。`GET /api/v1/system/config` 提供脱敏配置、来源、值模式和重启要求，不读取秘密文件内容；来源由 `origin` 标识，值模式由 `value_mode` 标识。
 
 `upload_cache.write_memory` 返回 `capacity` / `used` 字节额度，含发送中尚未释放的 RAM 正文；`buffered_files` 与 `buffered_chunks` 各自的 `volatile` 是待排空 RAM 来源数；已丢失来源通过 `/api/v1/maintenance/quarantines` 查询，启动日志同时报告数量，不会被计作已排空的健康数据。
 

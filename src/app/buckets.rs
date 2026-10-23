@@ -16,6 +16,7 @@ impl App {
     ) -> Result<Value> {
         self.writable()?;
         crate::http::validate_cors(&rules).map_err(|e| s3_error!(InvalidArgument, "{e}"))?;
+        let _cache = self.public_reads.changing();
         self.buckets.set_cors(principal, bucket, rules).await
     }
     pub async fn admit(

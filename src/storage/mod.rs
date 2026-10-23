@@ -618,6 +618,13 @@ impl Storage {
     pub(crate) fn profile(&self, storage: Uuid) -> Result<Arc<StorageProfile>> {
         Ok(self.store_backend(storage)?.profile.clone())
     }
+    pub(crate) fn public_cache_enabled(&self) -> bool {
+        self.targets
+            .read()
+            .unwrap()
+            .values()
+            .any(|target| target.profile.public_cache_validation == "background")
+    }
     fn encoding_compression(
         &self,
         storage: Option<Uuid>,

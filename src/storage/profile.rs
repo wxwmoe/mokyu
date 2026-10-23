@@ -23,6 +23,12 @@ pub(crate) struct StorageProfile {
     pub write_backlog_max_age: String,
     #[serde(default = "background_scheduling")]
     pub background_scheduling: String,
+    #[serde(default = "public_cache_validation")]
+    pub public_cache_validation: String,
+    #[serde(default = "public_cache_refresh_interval")]
+    pub public_cache_refresh_interval: String,
+    #[serde(default = "public_cache_max_age")]
+    pub public_cache_max_age: String,
     pub connect_timeout: String,
     pub request_timeout: String,
     pub max_retries: i32,
@@ -102,8 +108,43 @@ fn write_backlog_max_age() -> String {
 fn background_scheduling() -> String {
     "balanced".into()
 }
+fn public_cache_validation() -> String {
+    "strict".into()
+}
+fn public_cache_refresh_interval() -> String {
+    "1s".into()
+}
+fn public_cache_max_age() -> String {
+    "5s".into()
+}
 
 impl StorageProfile {
+    pub(crate) fn public_cache_times(&self) -> Result<(u64, u64)> {
+        let invalid = || {
+            s3s::s3_error!(
+                InvalidArgument,
+                "public cache refresh must be 1s..60s and no greater than max age (1s..5m)"
+            )
+        };
+        let refresh =
+            crate::config::seconds(&self.public_cache_refresh_interval).map_err(|_| invalid())?;
+        let age = crate::config::seconds(&self.public_cache_max_age).map_err(|_| invalid())?;
+        anyhow::ensure!(
+            (1..=60).contains(&refresh) && (refresh..=300).contains(&age),
+            invalid()
+        );
+        anyhow::ensure!(
+            matches!(
+                self.public_cache_validation.as_str(),
+                "strict" | "background"
+            ),
+            s3s::s3_error!(
+                InvalidArgument,
+                "public_cache_validation must be strict or background"
+            )
+        );
+        Ok((refresh, age))
+    }
     pub(crate) fn write_flush_seconds(&self) -> Result<u64> {
         if self.write_flush_interval == "0s" {
             return Ok(0);
@@ -234,6 +275,7 @@ impl StorageProfile {
 
 pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::Result<()> {
     use crate::config::{bytes, cache_bytes, seconds};
+    profile.public_cache_times()?;
     profile.write_flush_seconds()?;
     profile.write_backlog_seconds()?;
     anyhow::ensure!(

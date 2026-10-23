@@ -52,6 +52,7 @@ impl App {
         crate::faults::point("source-before-publish").await;
         let _coord = self.coord.lock().await;
         self.writable()?;
+        let cache_change = self.public_reads.changing();
         if !self
             .publish
             .publish(id, if_match.cloned(), if_none.cloned(), completion)
@@ -59,6 +60,7 @@ impl App {
         {
             return Err(s3_error!(OperationAborted).into());
         }
+        drop(cache_change);
         drop(_coord);
         if self
             .storage
@@ -98,6 +100,7 @@ impl App {
         crate::faults::point("management-before-change").await;
         let _coord = self.coord.lock().await;
         self.writable()?;
+        let _cache = self.public_reads.changing();
         if self
             .objects
             .change(crate::model::ObjectChange {

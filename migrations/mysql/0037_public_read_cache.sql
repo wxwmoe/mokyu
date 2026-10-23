@@ -1,0 +1,13 @@
+SET @mokyu_public_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='public_cache_validation'), 'SELECT 1', 'ALTER TABLE storage_profiles ADD COLUMN public_cache_validation VARCHAR(32) NOT NULL DEFAULT ''strict'', ADD CONSTRAINT storage_public_cache_validation CHECK(public_cache_validation IN (''strict'',''background''))');
+PREPARE mokyu_public FROM @mokyu_public_ddl;
+EXECUTE mokyu_public;
+DEALLOCATE PREPARE mokyu_public;
+SET @mokyu_public_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='public_cache_refresh_interval'), 'SELECT 1', 'ALTER TABLE storage_profiles ADD COLUMN public_cache_refresh_interval VARCHAR(32) NOT NULL DEFAULT ''1s''');
+PREPARE mokyu_public FROM @mokyu_public_ddl;
+EXECUTE mokyu_public;
+DEALLOCATE PREPARE mokyu_public;
+SET @mokyu_public_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='public_cache_max_age'), 'SELECT 1', 'ALTER TABLE storage_profiles ADD COLUMN public_cache_max_age VARCHAR(32) NOT NULL DEFAULT ''5s''');
+PREPARE mokyu_public FROM @mokyu_public_ddl;
+EXECUTE mokyu_public;
+DEALLOCATE PREPARE mokyu_public;
+UPDATE mokyu_meta SET schema_version=37 WHERE id=1;

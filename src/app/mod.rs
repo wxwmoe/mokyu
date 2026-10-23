@@ -25,6 +25,7 @@ pub(crate) mod compression;
 pub(crate) mod credential_activity;
 pub(crate) mod extents;
 pub(crate) mod listing;
+pub(crate) mod public_reads;
 pub(crate) mod publish;
 pub(crate) mod quota;
 pub(crate) mod raw;
@@ -229,6 +230,7 @@ pub struct App {
     pub(crate) credential_activity: Arc<credential_activity::Activity>,
     pub response_cache: Arc<responses::Cache>,
     pub(crate) cors_cache: crate::http::cors::Cache,
+    pub(crate) public_reads: Arc<public_reads::Cache>,
     pub cleanup_state: crate::worker::lifecycle::Cleanup,
     pub integrity_pacing: std::sync::Mutex<std::time::Instant>,
     pub local_cleanup: tokio::sync::Mutex<()>,
@@ -349,6 +351,7 @@ impl App {
         let (compression_observations, compression_receiver) = compression::Observations::new();
         let (credential_activity, credential_receiver) = credential_activity::Activity::new();
         let response_cache = responses::Cache::new(budget.response_cache_bytes);
+        let (public_reads, public_receiver) = public_reads::Cache::new();
         let app = Arc::new(Self {
             cluster: stores.cluster,
             role: role.to_owned(),
@@ -396,6 +399,7 @@ impl App {
             compression_observations,
             credential_activity,
             response_cache,
+            public_reads,
             cors_cache: crate::http::cors::Cache::new(crate::http::cors::CACHE_BYTES),
             cleanup_state: crate::worker::lifecycle::Cleanup::default(),
             integrity_pacing: std::sync::Mutex::new(std::time::Instant::now()),
@@ -447,6 +451,7 @@ impl App {
                 }
             });
         }
+        tokio::spawn(public_reads::run(Arc::downgrade(&app), public_receiver));
         Ok((app, owner))
     }
     pub fn pin(&self, id: Id) -> Active {
@@ -595,6 +600,7 @@ impl App {
         status["credential_activity"] = self.credential_activity.snapshot();
         status["response_cache"] = self.response_cache.snapshot();
         status["cors_cache"] = self.cors_cache.snapshot();
+        status["public_read_cache"] = self.public_reads.snapshot();
         status["read_replica"] = self.runtime.read_replica().unwrap_or_else(|| json!({"state":if self.config.replica_database.is_some() {"not_applicable"} else {"disabled"}}));
         status["cleanup"] = self.cleanup_status();
         status["storage"] = self.statistics.inventory(crate::config::seconds(

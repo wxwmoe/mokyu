@@ -2852,6 +2852,9 @@ export interface components {
             pack_reuse_interval: string;
             pack_upload_flush_timeout: string;
             priority_aging: string;
+            public_cache_max_age?: string;
+            public_cache_refresh_interval?: string;
+            public_cache_validation?: string;
             /** Format: int32 */
             read_concurrency?: number | null;
             request_timeout: string;

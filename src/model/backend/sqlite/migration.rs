@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, SqliteConnection, migrate::Migrate};
 
 static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
-const SCHEMA_VERSION: i64 = 37;
+const SCHEMA_VERSION: i64 = 38;
 
 pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
     ensure!(

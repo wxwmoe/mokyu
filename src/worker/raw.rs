@@ -183,6 +183,7 @@ async fn process(app: &App, work: &RawProcessing) -> Result<bool> {
         {
             return Ok(false);
         }
+        let _cache = app.public_reads.changing();
         app.raw
             .finish_processing(work, source, &hash, pin.read_lease_id(), processor(app))
             .await

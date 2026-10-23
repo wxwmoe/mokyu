@@ -1,6 +1,13 @@
 export default {
   profile_write_flush_interval: "まとめ待機",
   profile_write_backlog_max_age: "滞留時間の上限",
+  storeGroupReading: "公開読み取り",
+  storeGroupReadingHint: "バックグラウンド検証では他のノードが有効期限まで以前の公開権限やオブジェクトを返す場合があります。同じノードの変更は応答前にスナップショットを無効化します",
+  profile_public_cache_validation: "公開権限の検証",
+  profile_public_cache_refresh_interval: "更新間隔",
+  profile_public_cache_max_age: "スナップショットの有効期限",
+  storeReadValidation_strict: "リクエストごと",
+  storeReadValidation_background: "バックグラウンド",
   profile_background_scheduling: "バックグラウンド処理",
   storeScheduling_balanced: "均衡",
   storeScheduling_foreground: "リクエスト優先",

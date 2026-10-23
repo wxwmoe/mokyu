@@ -121,6 +121,9 @@ profile 是类型化字段，不是任意 JSON。字段包括：
 
 - `deduplication_enabled` 默认 false，仅控制 raw 的整文件去重；chunks 固定启用区块去重。更改仅影响新写入；关闭不会拆开已有共享文件；
 - `write_durability` 仅单容器可选，默认 `durable`；`buffered` 允许 local chunks/raw 和 S3 chunks/raw 写缓存完整写入文件后响应，再由后台同步文件及目录；`volatile` 仅允许开启写缓存的 S3，接收完整内容到有界 RAM 后可响应，额度为零或不足时回退到 buffered 文件。buffered 在断电或系统崩溃时、volatile 在进程结束前尚未排空时，都可能丢失最近已确认的数据。Multipart 分片、复制、迁移和显式排空仍要求持久来源；无写缓存的 S3 请求及缓存满额 fallback 等待最终 S3 完成。重启核验未同步文件并隔离丢失的 RAM 来源，不返回旧对象代替已确认的新版本；这与 SQLite 的数据库同步策略分别生效。
+- `public_cache_validation` 默认 `strict`，公开 Web 与匿名 S3 读取逐请求验证权限；设为 `background` 后可复用已验证的公开元数据，完整正文命中无需前台数据库查询。签名请求仍实时鉴权，条件请求、`Cache-Control: no-cache`、`Pragma: no-cache` 与校验和读取绕过权限快照。
+- `public_cache_refresh_interval` 默认 `1s`，范围 `1s..60s`；`public_cache_max_age` 默认 `5s`，范围 `1s..5m`，刷新间隔不得超过最大有效期。期限从成功权威验证开始，访问、队列满和刷新失败均不能续期，过期必须前台验证。本机对象权限、覆盖删除、桶、域名和后端配置变更在确认前使快照失效；其他节点可能在硬期限内返回旧权限或旧版本，需立即撤销公开访问的存储应保留 `strict`。
+- 公开元数据使用 runtime 预留内的独立 `1MiB` 有界额度（最多 256 条），正文缓存关闭时仍可复用；热 `HEAD` 和 `OPTIONS` 无需读取文件。正文未命中仍取得来源保护，群集保留数据库读租约。状态 `public_read_cache` 提供条目、额度、命中、刷新失败和队列跳过计数，原始 `private`/`no-store` 元数据不准入。
 - `write_flush_interval` 默认 `0s`，范围 `0s..60s`，控制文件同步和 S3 写缓存排空前的合并等待；后端积压超龄、缓存压力、显式 flush 和正常关闭提前推进，重启恢复不等待此间隔。
 - `write_backlog_max_age` 默认 `5m`，范围 `1s..24h`，超过后优先处理旧来源，新的 S3 缓存写入遵守 `upload_cache_overflow` 的同步回退或 `503 SlowDown` 策略，本地缓冲写入改为等待持久化。年龄来自每秒更新的有界后端快照，刷新失败超过 5 秒时停止接收新的待排空积压；已有来源保留并重试，不按年龄删除。该期限是准入及调度阈值，不保证故障后端在期限内完成上传。
 - `background_scheduling` 默认 `balanced`，可选 `foreground`。前台优先在每个节点上将后台对每个后端读、写和控制并发的占用限制为一半（向下取整且至少一个），有等待时为后台保留一个位置；单槽沿用老化调度。群集共享配额、CPU、进程总 I/O 和数据库预算仍共同约束，配置变化不取消在途工作。

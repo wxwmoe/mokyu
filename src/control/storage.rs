@@ -316,7 +316,9 @@ pub(crate) async fn update_profile(
     profile: StorageProfile,
 ) -> anyhow::Result<StorageProfile> {
     validate_profile_capacity(app, &profile).await?;
+    let _cache = app.public_reads.changing();
     let id = app.storage_profiles.update(name, profile).await?;
+    let _cache = app.public_reads.changing();
     app.storage.refresh_store(id).await?;
     app.storage_profiles.load(id).await
 }
@@ -411,6 +413,7 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
         .initialize_store_with_profile(record.clone(), &profile_for_init)
         .await?;
     writer.finish().await?;
+    let _cache = app.public_reads.changing();
     app.storage.refresh_store(record.id).await?;
     app.storage_records.view(record.id).await
 }
@@ -644,6 +647,7 @@ pub(crate) async fn update_record(
         crate::faults::point("storage-relocated").await;
     }
     if !changing_type {
+        let _cache = app.public_reads.changing();
         app.storage.refresh_store(row.id).await?;
     }
     app.storage_records.view(row.id).await
@@ -658,6 +662,7 @@ pub(crate) async fn set_current_key(
         .storage_records
         .current_key(&name, key.as_deref())
         .await?;
+    let _cache = app.public_reads.changing();
     app.storage.refresh_store(id).await?;
     app.storage_records.view(id).await
 }
