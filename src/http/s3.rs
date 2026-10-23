@@ -1,5 +1,5 @@
+use super::cors_headers;
 use super::errors::HttpError;
-use super::public::cors_headers;
 use crate::model::Id;
 use crate::{
     app::{App, Bucket, Metadata},
@@ -146,7 +146,12 @@ pub async fn s3_http(
             bucket = app.buckets.by_name(&name, true).await?;
         }
         if let Some(bucket) = bucket {
-            cors = cors_headers(&bucket, request.headers(), request.method().as_str())?;
+            cors = cors_headers(
+                &app.cors_cache,
+                &bucket,
+                request.headers(),
+                request.method().as_str(),
+            )?;
             request.extensions_mut().insert(bucket);
         }
         if request.method() == Method::OPTIONS {

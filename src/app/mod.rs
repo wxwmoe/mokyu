@@ -228,6 +228,7 @@ pub struct App {
     pub compression_observations: Arc<compression::Observations>,
     pub(crate) credential_activity: Arc<credential_activity::Activity>,
     pub response_cache: Arc<responses::Cache>,
+    pub(crate) cors_cache: crate::http::cors::Cache,
     pub cleanup_state: crate::worker::lifecycle::Cleanup,
     pub integrity_pacing: std::sync::Mutex<std::time::Instant>,
     pub local_cleanup: tokio::sync::Mutex<()>,
@@ -395,6 +396,7 @@ impl App {
             compression_observations,
             credential_activity,
             response_cache,
+            cors_cache: crate::http::cors::Cache::new(crate::http::cors::CACHE_BYTES),
             cleanup_state: crate::worker::lifecycle::Cleanup::default(),
             integrity_pacing: std::sync::Mutex::new(std::time::Instant::now()),
             local_cleanup: tokio::sync::Mutex::new(()),
@@ -592,6 +594,7 @@ impl App {
         status["http_compression"] = self.compression_observations.snapshot();
         status["credential_activity"] = self.credential_activity.snapshot();
         status["response_cache"] = self.response_cache.snapshot();
+        status["cors_cache"] = self.cors_cache.snapshot();
         status["read_replica"] = self.runtime.read_replica().unwrap_or_else(|| json!({"state":if self.config.replica_database.is_some() {"not_applicable"} else {"disabled"}}));
         status["cleanup"] = self.cleanup_status();
         status["storage"] = self.statistics.inventory(crate::config::seconds(

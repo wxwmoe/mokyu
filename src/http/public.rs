@@ -1,7 +1,8 @@
+use super::cors_headers;
 use super::errors::{ErrorCode, HttpError, unauthorized};
 use super::s3::{ReadOptions, decode_path, respond};
 use crate::app::{App, Bucket};
-use anyhow::{Context, Result, ensure};
+use anyhow::Result;
 use axum::{
     Json, Router,
     body::Body,
@@ -9,138 +10,9 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-#[derive(Clone, serde::Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CorsRule {
-    pub origins: Vec<String>,
-    pub methods: Vec<String>,
-    #[serde(default)]
-    pub headers: Vec<String>,
-    #[serde(default)]
-    pub expose: Vec<String>,
-    #[serde(default)]
-    pub max_age: u32,
-}
-pub fn validate_cors(value: &Value) -> Result<()> {
-    let rules: Vec<CorsRule> =
-        serde_json::from_value(value.clone()).context("invalid CORS document")?;
-    ensure!(rules.len() <= 100, "too many CORS rules");
-    for r in rules {
-        ensure!(
-            !r.origins.is_empty() && !r.methods.is_empty(),
-            "CORS rule requires origins and methods"
-        );
-        for m in r.methods {
-            ensure!(
-                ["GET", "HEAD", "PUT", "POST", "DELETE", "OPTIONS"].contains(&m.as_str()),
-                "invalid CORS method"
-            );
-        }
-        for h in r.headers.into_iter().chain(r.expose) {
-            ensure!(
-                h == "*" || hyper::header::HeaderName::from_bytes(h.as_bytes()).is_ok(),
-                "invalid CORS header"
-            );
-        }
-        for o in r.origins {
-            ensure!(
-                o == "*"
-                    || ((o.starts_with("https://") || o.starts_with("http://"))
-                        && !o.contains(['\r', '\n'])),
-                "invalid CORS origin"
-            );
-        }
-    }
-    Ok(())
-}
-pub fn cors_headers(bucket: &Bucket, headers: &HeaderMap, method: &str) -> Result<HeaderMap> {
-    let mut out = HeaderMap::new();
-    let rules: Vec<CorsRule> = serde_json::from_value(bucket.cors.clone())?;
-    if rules.is_empty() {
-        return Ok(out);
-    }
-    out.insert(
-        "vary",
-        HeaderValue::from_static(if method == "OPTIONS" {
-            "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
-        } else {
-            "Origin"
-        }),
-    );
-    let Some(origin) = headers.get("origin").and_then(|s| s.to_str().ok()) else {
-        return Ok(out);
-    };
-    let (requested, names) = if method == "OPTIONS" {
-        let Some(requested) = headers
-            .get("access-control-request-method")
-            .and_then(|s| s.to_str().ok())
-        else {
-            return Ok(out);
-        };
-        (
-            requested,
-            headers
-                .get("access-control-request-headers")
-                .and_then(|s| s.to_str().ok())
-                .unwrap_or(""),
-        )
-    } else {
-        (method, "")
-    };
-    for r in rules {
-        if !r.origins.iter().any(|o| o == "*" || o == origin)
-            || !r.methods.iter().any(|m| m == requested)
-        {
-            continue;
-        }
-        if !names
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .all(|n| {
-                r.headers
-                    .iter()
-                    .any(|a| a == "*" || a.eq_ignore_ascii_case(n))
-            })
-        {
-            continue;
-        }
-        out.insert(
-            "access-control-allow-origin",
-            HeaderValue::from_str(if r.origins.iter().any(|o| o == "*") {
-                "*"
-            } else {
-                origin
-            })?,
-        );
-        out.insert(
-            "access-control-allow-methods",
-            HeaderValue::from_str(&r.methods.join(", "))?,
-        );
-        if !names.is_empty() {
-            out.insert(
-                "access-control-allow-headers",
-                HeaderValue::from_str(names)?,
-            );
-        }
-        if !r.expose.is_empty() {
-            out.insert(
-                "access-control-expose-headers",
-                HeaderValue::from_str(&r.expose.join(", "))?,
-            );
-        }
-        out.insert(
-            "access-control-max-age",
-            HeaderValue::from_str(&r.max_age.to_string())?,
-        );
-        break;
-    }
-    Ok(out)
-}
 pub fn public_router(app: Arc<App>) -> Router {
     Router::new()
         .fallback(public)
@@ -259,7 +131,12 @@ async fn public(
         app.buckets.by_host(&host).await?
     };
     let bucket = bucket.ok_or_else(unauthorized)?;
-    let cors = cors_headers(&bucket, request.headers(), request.method().as_str())?;
+    let cors = cors_headers(
+        &app.cors_cache,
+        &bucket,
+        request.headers(),
+        request.method().as_str(),
+    )?;
     if request.method() == Method::OPTIONS {
         let mut r = if cors.contains_key("access-control-allow-origin")
             && request

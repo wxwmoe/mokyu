@@ -88,6 +88,8 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 
 示例配置配合 Compose 的 Mokyu 容器 `1GiB` 内存限制，显式设置 `stream_memory_budget = "256MiB"`、`response_cache_size = "64MiB"` 和 `write_memory_size = "64MiB"`；PostgreSQL 容器内存另计。省略响应缓存或写入内存字段的配置仍关闭对应内存用途。默认压缩参数下，流式预算可提供 5 个数据槽位，实际预留约 `216MiB`，runtime/OS 预留 `256MiB`，pack 读取与工作区各自动分得约 `212MiB`。S3 storage 的默认 `pack_max_size = "32MiB"` 每个 pack 需约 `140MiB` 额度；local storage 不创建 pack。pack 大小在 storage profile 中配置，节点 pack 内存无需单独填写；更改容器限制、压缩参数或 pack 大小时应一起核对这些预算。
 
+桶 CORS 解析规则使用 runtime 预留中的独立 `1MiB` 有界缓存，最多 `256` 个桶、每项最多 `64KiB`；正文缓存关闭时仍启用。规则按桶及配置修订复用，Origin、方法和预检头逐请求匹配；超出缓存额度的规则仍正常解析和执行，不增加 SQL 查询。
+
 写入内存从同一总预算划出，最多占进程内存四分之一，并保留 stream、响应缓存及默认 pack 的额度。raw 在已知长度且能一次领取完整额度时进入 RAM，未知或过大的长度沿用有界文件暂存；chunks 按完整区块领取。待上传唯一副本不参与淘汰，最后一个读取者释放正文后才返还内存，空对象至少计 `4KiB`。local、群集和 durable/buffered 不使用 RAM 提前确认；写内存为 `0B` 不影响既有流式工作区。
 
 共享 staging 设置只对 PostgreSQL 提供；MySQL、SQLite 不接受这两个设置。PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；仅未闭合的 CDC Multipart 尾块在保留前缀 `__mokyu/multipart/fragment/` 共享暂存；raw Multipart、raw/chunks 写缓存使用所属节点的 `instance.data_path`，最终载荷直接写目标 S3。单容器模式可使用 `/data/storage` 的 local storage。
