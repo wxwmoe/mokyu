@@ -149,7 +149,7 @@ fixture 示例：
 
 将本轮各容器自己的 cgroup v2 目录分别只读挂入客户端；资源列表应包含客户端、所有参与的 data/control/worker、数据库与共享后端。程序记录实际 CPU/内存上限、CPU 使用与限流增量、采样的 `memory.current` 峰值，节点状态包含前后 RSS、完整正文缓存、从库和后端请求/字节计数。`memory.current` 包含页缓存，不能当作进程 RSS；状态中的 peak RSS 是进程生命周期峰值。PostgreSQL 可选 `database_file` 需要预先启用 `pg_stat_statements`，记录主库分页、快照和租约 SQL 增量；其他数据库省略该项，输出 null，不能解释成零查询。
 
-`cases` 可配置多个对象与入口；`encoding` 支持 identity/gzip/br/zstd，后两者另需 Python `brotli`/`zstandard`。Range 场景通过 `headers.Range`、`status: 206` 和对应切片的 expected_file 表达。`successful_wire_body_bytes` 统计实际读取的编码正文，不含 HTTP 头和帧开销，不以解码长度回填。延迟从请求开始到正文读完，包含连接等待；TTFB 到第一个正文字节。RPS 包含客户端解码校验开销，必须检查客户端 CPU 是否饱和。
+`cases` 可配置多个对象与入口，每组 `urls` 最多 4096 个，按请求序号轮流访问，用于区分单热点和超出缓存容量的热集合；`encoding` 支持 identity/gzip/br/zstd，后两者另需 Python `brotli`/`zstandard`。Range 场景通过 `headers.Range`、`status: 206` 和对应切片的 expected_file 表达。`successful_wire_body_bytes` 统计实际读取的编码正文，不含 HTTP 头和帧开销，不以解码长度回填。延迟从请求开始到正文读完，包含连接等待；TTFB 到第一个正文字节。RPS 包含客户端解码校验开销，必须检查客户端 CPU 是否饱和。
 
 可选 `seconds` 为 1–600 秒，以实际完成的请求数计算速率，仍受 `requests` 上限约束。每个 case 的 `method` 支持 GET/HEAD/OPTIONS，`response_headers` 核对指定响应头；HEAD/OPTIONS 要求无正文。资源报告另含匿名页、文件页、脏页、回写页及逐设备 I/O 差值。
 
@@ -214,9 +214,11 @@ rustc --edition=2024 -O tests/benchmarks/lock_tables.rs --extern "tokio=$tokio_r
 
 fixture 使用 `revision`、`build`、`database_version`、`cache_state`、`seed`、`credentials_file`、`prefix` 和可选 `resources`/PostgreSQL `database_file`，另设单个 `endpoint`、`operation`、`size`、`seconds`、`concurrency`、`max_operations`、`max_total_bytes`。正文大小 0–64MiB，并发 1–64，持续 1–600 秒，请求最多一百万；包括预热对象的 `(max_operations + 1) × size` 必须在字节预算内。每轮使用独占前缀，脚本不会删除数据；触及请求上限时按实际时间报告。
 
-后台写入比较可设置 `raw_drain_seconds`（1–600）并提供对应隔离库的 `MOKYU_TEST_CONFIG`；预热及请求结束后等待该桶的 raw 去重、CDC、raw/chunks 待上传记录排空，完整读回放在排空后。报告分别保留 ACK 窗口和包括排空的时间、完成速率、CPU/磁盘成本；失败或超时不能计为稳态完成。排空轮询本身有数据库开销，比较双方须使用同样设置。
+后台写入比较可设置 `raw_drain_seconds`（1–600）并提供对应隔离库的 `MOKYU_TEST_CONFIG`；该桶必须使用本轮专用 storage。预热及请求结束后等待该 storage 的 raw 去重、CDC、raw/chunks 待上传、文件同步及 pack_inputs 排空，包含已不再被当前对象引用的来源，完整读回放在排空后。积压按义务类别计数，不能相加当成唯一对象数。报告保留请求期积压历史、排空历史，以及 ACK 窗口和包括排空的时间、完成速率、CPU/磁盘成本与采样内存峰值；失败或超时不能计为稳态完成。排空和积压采样本身有数据库开销，比较双方须使用同样设置。
 
-`hot_keys` 默认为 0，表示每次新 key；1–1024 时每个写者使用独立的有限 key 集合，避免不同写者竞争同一目标，计时后核对各 key 最后一次成功写入。`repeat_every` 默认为 0，表示独立载荷；正数表示按该周期复用载荷，用于控制去重命中率。ACK 数仍包含所有成功覆盖，读回数量只包含最终对象，两者不能混用。
+`hot_keys` 默认为 0，表示每次新 key；1–1024 时每个写者使用独立的有限 key 集合，避免不同写者竞争同一目标，计时后核对各 key 最后一次成功写入。`payload_mode` 可选 `tail`（兼容默认，只改尾16字节）、`full`（确定性全内容变化）、`compressible`（随序号变化的重复模式）和 `duplicate`（完全相同）。`repeat_every` 默认为 0，表示序号不复用；正数按周期复用序号，用于控制重复程度。tail 不能代表多区块全新内容。生成耗时/线程CPU与基础样本字节另外报告，生成在请求延迟计时之外，但仍占用吞吐窗口和客户端资源。ACK 数包含所有成功覆盖，读回数量只包含最终对象，两者不能混用。
+
+`requests_per_second` 默认 0（不限速）；正数按总请求率安排发起时刻，最多一百万。工作线程数量固定，不建立无界待发队列；跟不上目标速率时记录调度延迟和实际成功速率，不声称达到目标负载。失败单独记录，保留响应的 Retry-After 分布，不纳入成功延迟分位数。Multipart 当前为单个 UploadPart，不能据此推导多片拼装性能。
 
 报告保存各操作百分位、实际请求窗口吞吐、读回校验数量/错误、CPU、cgroup 内存（含匿名页/文件页/脏页）、逐设备 I/O 字节/次数及节点状态。逐设备计数不叠加，以免重复计算分区和底层设备。PostgreSQL SQL 差值是整个测量窗口的数据库总成本，包含后台工作，不是逐请求前台 SQL 计数；没有采集时为 null，不能解读成零。公共 Web/匿名 S3 的编码读取继续使用公共读基准；所有比较记录应用/页缓存状态，统一资源与确认策略，并发超出服务准入额度的 SlowDown 必须计为错误，不能只报告成功请求。
 

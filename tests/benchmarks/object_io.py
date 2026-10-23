@@ -1,5 +1,6 @@
 """Bounded, operation-specific object IO benchmark; write verification is untimed."""
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -60,49 +61,72 @@ def request(client, bucket, key, body, operation):
     return (time.perf_counter() - start) * 1000, stages
 
 
-def payload(base, sequence):
+def payload(base, sequence, mode='tail'):
+    assert mode in ('tail', 'full', 'compressible', 'duplicate')
+    if mode == 'duplicate':
+        return base
     if not base:
         return b''
+    if mode != 'tail':
+        seed = hashlib.sha256(base[:32]).digest() + sequence.to_bytes(16, 'big')
+        if mode == 'full':
+            return hashlib.shake_256(seed).digest(len(base))
+        pattern = hashlib.shake_256(seed).digest(64)
+        return (pattern * ((len(base) + 63) // 64))[:len(base)]
     suffix = min(16, len(base))
     return base[:-suffix] + sequence.to_bytes(16, 'big')[-suffix:]
+
+
+def backlog(database, bucket):
+    # Dedicated fixture storage includes retired sources no longer reachable from current objects.
+    rows = database.query('''WITH target AS (SELECT storage_id FROM buckets WHERE name=%s)
+        SELECT source, count(*) AS pending, COALESCE(sum(failed),0) AS failed FROM (
+        SELECT 'raw_processing' AS source, CASE WHEN w.last_error IS NOT NULL THEN 1 ELSE 0 END AS failed
+        FROM raw_processing w JOIN raw_sources r ON r.id=w.source_id
+        WHERE r.storage_id IN (SELECT storage_id FROM target)
+        UNION ALL
+        SELECT 'cdc', CASE WHEN t.state='failed' THEN 1 ELSE 0 END
+        FROM raw_sources r JOIN tasks t ON t.id=r.processing_task
+        WHERE t.state<>'completed' AND r.storage_id IN (SELECT storage_id FROM target)
+        UNION ALL
+        SELECT 'raw_uploads', CASE WHEN u.last_error IS NOT NULL THEN 1 ELSE 0 END
+        FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id
+        WHERE r.storage_id IN (SELECT storage_id FROM target)
+        UNION ALL
+        SELECT 'pending_uploads', 0 FROM pending_uploads u JOIN streams s ON s.id=u.stream_id
+        JOIN buckets b ON b.id=s.bucket_id WHERE b.storage_id IN (SELECT storage_id FROM target)
+        UNION ALL
+        SELECT 'raw_sync', CASE WHEN r.quarantine_code IS NOT NULL THEN 1 ELSE 0 END
+        FROM raw_sources r WHERE r.durability='buffered' AND r.state IN ('ready','unavailable')
+        AND r.storage_id IN (SELECT storage_id FROM target)
+        UNION ALL
+        SELECT 'chunk_sync', CASE WHEN l.quarantine_code IS NOT NULL THEN 1 ELSE 0 END
+        FROM chunk_encodings l WHERE l.sync_pending AND l.state IN ('ready','uploading')
+        AND l.storage_id IN (SELECT storage_id FROM target)
+        UNION ALL
+        SELECT 'pack_inputs', CASE WHEN t.state='failed' THEN 1 ELSE 0 END
+        FROM pack_inputs p JOIN chunks c ON c.id=p.chunk_id JOIN tasks t ON t.id=p.task_id
+        WHERE c.storage_id IN (SELECT storage_id FROM target)
+        ) work GROUP BY source''', bucket)
+    sources = {row['source']: dict(pending=int(row['pending']), failed=int(row['failed'])) for row in rows}
+    return dict(pending=sum(row['pending'] for row in sources.values()),
+                failed=sum(row['failed'] for row in sources.values()), sources=sources)
 
 
 def drain_raw(database, bucket, seconds):
     started = time.perf_counter()
     first = None
+    history = []
     while True:
-        current = database.query('''SELECT count(*) AS pending, COALESCE(sum(failed),0) AS failed FROM (
-            SELECT CASE WHEN w.last_error IS NOT NULL THEN 1 ELSE 0 END AS failed
-            FROM raw_processing w JOIN streams s ON s.id=w.stream_id
-            JOIN buckets b ON b.id=s.bucket_id WHERE b.name=%s
-            UNION ALL
-            SELECT CASE WHEN t.state='failed' THEN 1 ELSE 0 END AS failed
-            FROM raw_sources r JOIN tasks t ON t.id=r.processing_task
-            WHERE t.state<>'completed' AND EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id
-                JOIN buckets b ON b.id=s.bucket_id WHERE e.source_id=r.id AND b.name=%s)
-            UNION ALL
-            SELECT CASE WHEN u.last_error IS NOT NULL THEN 1 ELSE 0 END AS failed FROM raw_uploads u
-            WHERE EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id
-                JOIN buckets b ON b.id=s.bucket_id WHERE e.source_id=u.source_id AND b.name=%s)
-            UNION ALL
-            SELECT 0 AS failed FROM pending_uploads u JOIN streams s ON s.id=u.stream_id
-                JOIN buckets b ON b.id=s.bucket_id WHERE b.name=%s
-            UNION ALL
-            SELECT CASE WHEN r.quarantine_code IS NOT NULL THEN 1 ELSE 0 END AS failed FROM raw_sources r
-            WHERE r.durability='buffered' AND r.state='ready' AND EXISTS(
-                SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id
-                JOIN buckets b ON b.id=s.bucket_id WHERE e.source_id=r.id AND b.name=%s)
-            UNION ALL
-            SELECT CASE WHEN l.quarantine_code IS NOT NULL THEN 1 ELSE 0 END AS failed
-            FROM chunk_encodings l JOIN chunks c ON c.current_encoding_id=l.encoding_id
-            WHERE l.sync_pending AND l.state IN ('ready','uploading') AND c.state='ready' AND EXISTS(
-                SELECT 1 FROM extents e JOIN streams s ON s.id=e.stream_id
-                JOIN buckets b ON b.id=s.bucket_id WHERE e.chunk_id=c.id AND b.name=%s)
-            ) backlog''', bucket, bucket, bucket, bucket, bucket, bucket)[0]
+        current = backlog(database, bucket)
         first = first or current
         elapsed = time.perf_counter() - started
-        if current['pending'] == 0 or current['failed'] or elapsed >= seconds:
-            return dict(seconds=elapsed, before=first, after=current, completed=current['pending'] == 0)
+        done = current['pending'] == 0 or current['failed'] or elapsed >= seconds
+        if done or not history or elapsed - history[-1]['seconds'] >= 1:
+            history.append(dict(seconds=elapsed, **current))
+        if done:
+            return dict(seconds=elapsed, before=first, after=current, history=history,
+                        completed=current['pending'] == 0)
         time.sleep(.05)
 
 
@@ -114,11 +138,15 @@ def measure(fixture, credentials, database=None):
     size = int(fixture['size'])
     hot_keys = int(fixture.get('hot_keys', 0))
     repeat_every = int(fixture.get('repeat_every', 0))
+    payload_mode = fixture.get('payload_mode', 'tail')
+    rate = float(fixture.get('requests_per_second', 0))
     assert operation in ('put', 'get', 'head', 'multipart')
     assert 1 <= seconds <= 600 and 1 <= concurrency <= 64 and 1 <= maximum <= 1000000
     assert 0 <= size <= 64 * 1024 * 1024
     assert 0 <= hot_keys <= 1024
     assert 0 <= repeat_every <= maximum
+    assert payload_mode in ('tail', 'full', 'compressible', 'duplicate')
+    assert 0 <= rate <= 1000000
     assert (maximum + 1) * size <= int(fixture['max_total_bytes']), 'workload exceeds its byte budget'
     raw_drain_seconds = int(fixture.get('raw_drain_seconds', 0))
     assert 0 <= raw_drain_seconds <= 600
@@ -146,7 +174,12 @@ def measure(fixture, credentials, database=None):
     samples = []
     committed = {}
     sampling_errors = []
+    backlog_history = []
+    generation_seconds = generation_cpu = 0
+    schedule_lag = []
+    retry_after = Counter()
     peak = {}
+    sample_lock = threading.Lock()
     sampler = None
     try:
         source = prefix + '/source'
@@ -161,27 +194,49 @@ def measure(fixture, credentials, database=None):
         peak = {name: int((path / 'memory.current').read_text()) for name, path in resources.items()}
         memory_peak = {name: memory(path) for name, path in resources.items()}
 
+        def sample_memory():
+            with sample_lock:
+                for name, path in resources.items():
+                    peak[name] = max(peak[name], int((path / 'memory.current').read_text()))
+                    for field, value in memory(path).items():
+                        memory_peak[name][field] = max(memory_peak[name][field], value)
+
         def sample():
             try:
+                next_backlog = 0
                 while not stop.wait(.1):
-                    for name, path in resources.items():
-                        peak[name] = max(peak[name], int((path / 'memory.current').read_text()))
-                        for field, value in memory(path).items():
-                            memory_peak[name][field] = max(memory_peak[name][field], value)
+                    sample_memory()
+                    now = time.perf_counter()
+                    if raw_database and now >= next_backlog:
+                        backlog_history.append(dict(seconds=now-started, **backlog(raw_database, bucket)))
+                        next_backlog = now + 1
             except Exception as error:
                 sampling_errors.append(type(error).__name__)
 
         def worker(index):
-            nonlocal attempted
+            nonlocal attempted, generation_seconds, generation_cpu
             while time.perf_counter() < deadline:
                 with lock:
                     if attempted >= maximum:
                         break
                     sequence = attempted
+                    scheduled = started + sequence / rate if rate else None
+                    if scheduled is not None and scheduled >= deadline:
+                        break
                     attempted += 1
+                if scheduled is not None:
+                    time.sleep(max(0, scheduled - time.perf_counter()))
+                    with lock:
+                        schedule_lag.append(max(0, time.perf_counter() - scheduled) * 1000)
                 writing = operation in ('put', 'multipart')
                 payload_sequence = sequence % repeat_every if repeat_every else sequence
-                body = payload(base, payload_sequence) if writing else base
+                generation_start, cpu_start = time.perf_counter(), time.thread_time()
+                body = payload(base, payload_sequence, payload_mode) if writing else base
+                generated = time.perf_counter() - generation_start
+                generated_cpu = time.thread_time() - cpu_start
+                with lock:
+                    generation_seconds += generated
+                    generation_cpu += generated_cpu
                 key = f'{prefix}/{sequence}' if writing else source
                 if writing and hot_keys:
                     key = f'{prefix}/hot-{index}-{sequence % hot_keys}'
@@ -193,21 +248,26 @@ def measure(fixture, credentials, database=None):
                             committed[key] = payload_sequence
                 except Exception as error:
                     code = (getattr(error, 'response', None) or {}).get('Error', {}).get('Code')
+                    retry = (getattr(error, 'response', None) or {}).get('ResponseMetadata', {}).get('HTTPHeaders', {}).get('retry-after')
                     with lock:
                         errors[code or type(error).__name__] += 1
+                        if retry is not None:
+                            retry_after[retry] += 1
 
-        sampler = threading.Thread(target=sample, daemon=True)
-        sampler.start()
         started = time.perf_counter()
         client_cpu = time.process_time()
         deadline = started + seconds
+        sampler = threading.Thread(target=sample, daemon=True)
+        sampler.start()
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             list(pool.map(worker, range(concurrency)))
         elapsed = time.perf_counter() - started
         client_cpu = time.process_time() - client_cpu
-        stop.set()
-        sampler.join(timeout=5)
-        assert not sampler.is_alive(), 'sampler did not stop'
+        sample_memory()
+        with sample_lock:
+            request_peak = dict(peak)
+            request_memory_peak = {name: dict(values) for name, values in memory_peak.items()}
+        request_memory_after = {name: memory(path) for name, path in resources.items()}
         after_cpu = {name: cpu(path) for name, path in resources.items()}
         after_disk = {name: disk(path) for name, path in resources.items()}
         after_sql = sql_snapshot(database)
@@ -217,18 +277,25 @@ def measure(fixture, credentials, database=None):
             drained = drain_raw(raw_database, bucket, raw_drain_seconds)
             drained['total_seconds'] = time.perf_counter() - started
             drained['completed_operations_per_second'] = len(samples) / drained['total_seconds']
+            if not drained['completed']:
+                errors['raw_processing:incomplete'] += 1
+        stop.set()
+        sampler.join(timeout=15)
+        assert not sampler.is_alive(), 'sampler did not stop'
+        sample_memory()
+        if drained is not None:
             drained['resources'] = {name: dict(
                 cpu_delta={key: value - before_cpu[name][key] for key, value in cpu(path).items()},
                 io_delta={device: {field: value - before_disk[name].get(device, {}).get(field, 0)
                     for field, value in values.items()} for device, values in disk(path).items()},
-                memory_current=int((path / 'memory.current').read_text())) for name, path in resources.items()}
-            if not drained['completed']:
-                errors['raw_processing:incomplete'] += 1
+                memory_current=int((path / 'memory.current').read_text()),
+                sampled_memory_current_max=peak[name], sampled_memory_stat_max=dict(memory_peak[name]))
+                for name, path in resources.items()}
         verification_started = time.perf_counter()
         verified = 0
         for key, sequence in committed.items():
             try:
-                readback(clients[0], bucket, key, payload(base, sequence))
+                readback(clients[0], bucket, key, payload(base, sequence, payload_mode))
                 verified += 1
             except Exception as error:
                 errors['verification:' + type(error).__name__] += 1
@@ -238,6 +305,10 @@ def measure(fixture, credentials, database=None):
         return dict(operation=operation, attempts=attempted, acknowledged=len(samples), errors=dict(errors),
             seconds=elapsed, operations_per_second=len(samples) / elapsed,
             client_process_cpu_seconds=client_cpu,
+            payload_mode=payload_mode, payload_generation_seconds=generation_seconds,
+            payload_generation_cpu_seconds=generation_cpu, base_payload_bytes=len(base),
+            target_requests_per_second=rate, scheduling_lag=percentiles(schedule_lag), retry_after=dict(retry_after),
+            backlog_history=backlog_history, backlog_scope='dedicated fixture storage; obligations, not unique objects',
             raw_processing=drained,
             latency=percentiles([sample[0] for sample in samples]),
             stages={name: percentiles([stage[name] for _, stage in samples if name in stage]) for name in names},
@@ -247,8 +318,8 @@ def measure(fixture, credentials, database=None):
             status_before=before_status, status_after=after_status,
             sql_delta=sql_changes(before_sql, after_sql), sql_scope='measurement window, including background work',
             resources={name: dict(cpu_delta={key: value - before_cpu[name][key] for key, value in after_cpu[name].items()},
-                sampled_memory_current_max=peak[name], cpu_max=(path / 'cpu.max').read_text().strip(),
-                sampled_memory_stat_max=memory_peak[name], memory_after=memory(path),
+                sampled_memory_current_max=request_peak[name], cpu_max=(path / 'cpu.max').read_text().strip(),
+                sampled_memory_stat_max=request_memory_peak[name], memory_after=request_memory_after[name],
                 io_delta={device: {field: value - before_disk[name].get(device, {}).get(field, 0)
                     for field, value in values.items()} for device, values in after_disk[name].items()},
                 memory_max=(path / 'memory.max').read_text().strip(),

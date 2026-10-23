@@ -101,7 +101,7 @@ def measure(fixture, case, database):
     assert 1 <= concurrency <= 64 and 1 <= count <= 1_000_000 and 0 <= warmup <= 100
     assert seconds == 0 or 1 <= seconds <= 600
     urls = case['urls']
-    assert 1 <= len(urls) <= 64
+    assert 1 <= len(urls) <= 4096
     headers = {'Accept-Encoding': case['encoding'], **case.get('headers', {})}
     method = case.get('method', 'GET')
     assert method in ('GET', 'HEAD', 'OPTIONS')

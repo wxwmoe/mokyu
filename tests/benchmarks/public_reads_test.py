@@ -109,6 +109,22 @@ class Accounting(unittest.TestCase):
         self.assertEqual(result['successful_wire_body_bytes'], 0)
         self.assertIn('file', result['resources']['client']['sampled_memory_stat_max'])
 
+    def test_hot_set_visits_each_url(self):
+        urls = [f'http://127.0.0.1:{self.server.server_port}/hot-{i}' for i in range(128)]
+        seen = set()
+        original = Handler.do_GET
+
+        def record(handler):
+            seen.add(handler.path)
+            original(handler)
+
+        with patch.object(Handler, 'do_GET', record):
+            result = measure(dict(concurrency=4, requests=len(urls), warmup=0, resources={}),
+                dict(name='hot-set', urls=urls, encoding='identity', expected_file=str(self.expected)), None)
+        self.assertEqual(result['errors'], {})
+        self.assertEqual(result['successes'], len(urls))
+        self.assertEqual(len(seen), len(urls))
+
     def test_encoded_bytes_are_not_decoded_length(self):
         for encoding in ENCODED:
             with self.subTest(encoding=encoding):
