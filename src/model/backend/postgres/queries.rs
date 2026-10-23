@@ -8968,7 +8968,8 @@ pub(super) fn raw_target(
     stream: Id,
     storage: Uuid,
 ) -> Rows<'static, (String, bool, i64, bool, bool)> {
-    sqlx::query_as("SELECT t.type,(t.block_key_id IS NULL AND NOT p.compression_enabled AND NOT p.pack_enabled),p.revision,p.cdc_enabled,((p.deduplication_enabled OR p.cdc_enabled) AND p.write_processing='background') FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storages t ON t.id=b.storage_id JOIN storage_profiles p ON p.storage_id=t.id WHERE s.id=$1 AND t.id=$2 AND t.enabled AND s.state='writing' FOR UPDATE").bind(stream).bind(storage)
+    // Keep settings stable without blocking another writer's shared bucket lock.
+    sqlx::query_as("SELECT t.type,(t.block_key_id IS NULL AND NOT p.compression_enabled AND NOT p.pack_enabled),p.revision,p.cdc_enabled,((p.deduplication_enabled OR p.cdc_enabled) AND p.write_processing='background') FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storages t ON t.id=b.storage_id JOIN storage_profiles p ON p.storage_id=t.id WHERE s.id=$1 AND t.id=$2 AND t.enabled AND s.state='writing' FOR UPDATE OF s FOR SHARE OF b,t,p").bind(stream).bind(storage)
 }
 pub(super) fn raw_prepare(stream: Id) -> Statement<'static> {
     sqlx::query("UPDATE streams SET payload_type='raw' WHERE id=$1 AND state='writing' AND payload_type='chunks' AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=$2) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE stream_id=$3)").bind(stream).bind(stream).bind(stream)
