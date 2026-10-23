@@ -14,6 +14,7 @@ import { useDeployment } from '../app/cluster'
 import UiSwitch from '../components/ui/UiSwitch.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
+import StoragePolicy from './StoragePolicy.vue'
 
 type Storage = components['schemas']['StorageView']
 type StorageProfile = components['schemas']['StorageProfile']
@@ -24,11 +25,13 @@ const route = useRoute(), router = useRouter()
 const { status } = useDeployment()
 const storages = useQuery({ queryKey: ['storages'], queryFn: ({ signal }) => api<Storage[]>('/api/v1/storages', { signal }) })
 const keys = useQuery({ queryKey: ['managed-keys'], queryFn: ({ signal }) => api<ManagedKey[]>('/api/v1/keys', { signal }) })
+const profileRevision = ref(1)
+const single = computed(() => status.data.value?.deployment_mode === 'single')
 const open = ref(false), editing = ref<Storage | null>(null), busy = ref(false), checking = ref('')
 const profileDraft = ref<Record<ProfileKey, string | number | boolean | null> | null>(null)
 const draft = reactive({ name: '', type: 's3', path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '', block_key_id: '', enabled: true, initialize: true })
 const durabilityOptions = computed(() => (draft.type === 's3' && profileDraft.value?.upload_cache ? ['durable', 'buffered', 'volatile'] : ['durable', 'buffered']).map(value => ({ value, label: t('storeDurability_' + value) })))
-const types = computed(() => ['local', 's3'].map(value => ({ value, label: t('storeType_' + value) })))
+const types = computed(() => (single.value ? ['local', 's3'] : ['s3']).map(value => ({ value, label: t('storeType_' + value) })))
 const keyOptions = computed(() => [{ value: '', label: t('storeNoEncryption') }, ...(keys.data.value || []).filter(row => row.purpose === 'block' && !row.revoked_at).map(row => ({ value: row.id, label: `${row.name} · ${row.algorithm}` }))])
 const profileFields: ProfileField[] = [
   { key: 'connect_timeout', valueType: 'text' }, { key: 'request_timeout', valueType: 'text' }, { key: 'max_retries', valueType: 'number' }, { key: 'retry_timeout', valueType: 'text' }, { key: 'priority_aging', valueType: 'text' },
@@ -40,26 +43,33 @@ const profileFields: ProfileField[] = [
   { key: 'pack_concurrency', valueType: 'number' }, { key: 'integrity_concurrency', valueType: 'number' }, { key: 'integrity_rps', valueType: 'number' }, { key: 'integrity_bandwidth', valueType: 'text' }, { key: 'integrity_batch_timeout', valueType: 'text' },
   { key: 'read_concurrency', valueType: 'number' }, { key: 'upload_concurrency', valueType: 'number' }, { key: 'control_concurrency', valueType: 'number' }, { key: 'pack_byte_budget', valueType: 'text' }, { key: 'integrity_byte_budget', valueType: 'text' }, { key: 'maintenance_concurrency', valueType: 'number' }, { key: 'maintenance_byte_budget', valueType: 'text' }, { key: 'migration_concurrency', valueType: 'number' }, { key: 'migration_byte_budget', valueType: 'text' },
 ]
-const profileGroups = [
-  { title: 'storeGroupReading', fields: [{ key: 'public_cache_validation', valueType: 'text' }, { key: 'public_cache_refresh_interval', valueType: 'text' }, { key: 'public_cache_max_age', valueType: 'text' }, { key: 'read_source_validation', valueType: 'text' }, { key: 'source_validation_max_age', valueType: 'text' }, { key: 'read_integrity', valueType: 'text' }] as ProfileField[] },
-  { title: 'storeGroupLifecycle', fields: profileFields.slice(0, 11) },
-  { title: 'storeGroupCache', fields: profileFields.slice(11, 23) },
-  { title: 'storeGroupPacking', fields: profileFields.slice(23, 41) },
-  { title: 'storeGroupWorker', fields: [...profileFields.slice(41), { key: 'write_flush_interval', valueType: 'text' }, { key: 'write_backlog_max_age', valueType: 'text' }, { key: 'background_scheduling', valueType: 'text' }] as ProfileField[] },
+const ioFields: ProfileField[] = [
+  { key: 'public_cache_validation', valueType: 'text' }, { key: 'public_cache_refresh_interval', valueType: 'text' }, { key: 'public_cache_max_age', valueType: 'text' },
+  { key: 'read_source_validation', valueType: 'text' }, { key: 'source_validation_max_age', valueType: 'text' }, { key: 'read_integrity', valueType: 'text' },
+  { key: 'write_processing', valueType: 'text' }, { key: 'write_durability', valueType: 'text' }, { key: 'upload_cache', valueType: 'boolean' }, { key: 'upload_cache_overflow', valueType: 'text' },
+  { key: 'write_flush_interval', valueType: 'text' }, { key: 'write_backlog_max_age', valueType: 'text' }, { key: 'background_scheduling', valueType: 'text' },
 ]
+const ioKeys = new Set(ioFields.map(field => field.key))
+const profileGroups = computed(() => [
+  { title: 'storeGroupIo', fields: ioFields.filter(field => field.key !== 'write_durability' || single.value) },
+  { title: 'storeGroupLifecycle', fields: profileFields.slice(0, 11) },
+  { title: 'storeGroupCache', fields: profileFields.slice(11, 23).filter(field => !ioKeys.has(field.key)) },
+  { title: 'storeGroupPacking', fields: profileFields.slice(23, 41) },
+  { title: 'storeGroupWorker', fields: profileFields.slice(41) },
+])
 const profileGroupHints: Record<string, string> = {
-  storeGroupReading: 'storeGroupReadingHint', storeGroupLifecycle: 'storeGroupLifecycleHint', storeGroupCache: 'storeGroupCacheHint',
+  storeGroupIo: 'storeGroupIoHint', storeGroupLifecycle: 'storeGroupLifecycleHint', storeGroupCache: 'storeGroupCacheHint',
   storeGroupPacking: 'storeGroupPackingHint', storeGroupWorker: 'storeGroupWorkerHint',
 }
 const profileLabel = (key: string) => t('profile_' + key)
 const hasBlockKeys = computed(() => (keys.data.value || []).some(row => row.purpose === 'block' && !row.revoked_at))
 
-function profilePreset(type: string): Record<ProfileKey, string | number | boolean | null> {
+function profileDefaults(type: string): Record<ProfileKey, string | number | boolean | null> {
   const s3 = type !== 'local'
   return {
     cdc_enabled: true, deduplication_enabled: false, write_processing: 'inline', write_durability: status.data.value?.deployment_mode === 'single' ? 'durable' : null,
     public_cache_validation: 'strict', public_cache_refresh_interval: '1s', public_cache_max_age: '5s', read_source_validation: 'strict', source_validation_max_age: '5s', read_integrity: 'inline',
-    write_flush_interval: '0s', write_backlog_max_age: '5m', background_scheduling: 'balanced',
+    write_flush_interval: '0s', write_backlog_max_age: '300s', background_scheduling: 'balanced',
     connect_timeout: '5s', request_timeout: '30s', max_retries: 3, retry_timeout: '120s', priority_aging: '30s',
     min_storage_duration: '0s', unreferenced_grace: '48h', deleted_chunk_retention: '7d', upload_retention: '24h', multipart_idle_timeout: '24h', min_free_space: s3 ? null : '1GiB', cache_enabled: s3,
     cache_soft_limit: null, cache_entries: null, upload_cache: s3, upload_cache_size: null, upload_cache_overflow: 'fallback', compression_enabled: s3,
@@ -74,24 +84,25 @@ function profilePreset(type: string): Record<ProfileKey, string | number | boole
     maintenance_byte_budget: null, migration_concurrency: null, migration_byte_budget: null,
   } as Record<ProfileKey, string | number | boolean | null>
 }
-function applyPreset() {
+function resetConnection() {
   if (draft.type === 'local') {
     Object.assign(draft, { path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '' })
   } else {
     Object.assign(draft, { endpoint: 'https://s3.amazonaws.com', bucket: '', region: 'us-east-1', prefix: '', access_key: '', secret_key: '' })
   }
-  profileDraft.value = profilePreset(draft.type)
 }
 async function edit(row?: Storage) {
   editing.value = row || null
+  profileRevision.value = row?.profile_revision || 1
   Object.assign(draft, { name: row?.name || '', type: row?.type || 's3', path: row?.path || '/data/storage', endpoint: row?.endpoint || '', bucket: row?.bucket || '', region: row?.region || '', prefix: row?.prefix || '', access_key: '', secret_key: '', block_key_id: row?.block_key_id || '', enabled: row?.enabled ?? true, initialize: true })
-  profileDraft.value = profilePreset(draft.type)
+  profileDraft.value = profileDefaults(draft.type)
   open.value = true
   if (row) {
     busy.value = true
     try {
       const profile = await api<StorageProfile>(`/api/v1/storages/${encodeURIComponent(row.name)}/profile`)
-      const { storage_id: _storageId, revision: _revision, ...editable } = profile
+      const { storage_id: _storageId, revision, ...editable } = profile
+      profileRevision.value = revision
       profileDraft.value = editable as Record<ProfileKey, string | number | boolean | null>
     } catch (error) {
       report(error)
@@ -101,7 +112,7 @@ async function edit(row?: Storage) {
 }
 watch(() => draft.type, value => {
   if (!profileDraft.value) return
-  if (!editing.value) profileDraft.value = profilePreset(value)
+  if (!editing.value) profileDraft.value = profileDefaults(value)
   else {
     profileDraft.value.min_free_space = value === 'local' ? profileDraft.value.min_free_space || '1GiB' : null
     if (value === 'local') Object.assign(profileDraft.value, { write_durability: profileDraft.value.write_durability === 'volatile' ? 'durable' : profileDraft.value.write_durability, cache_enabled: false, upload_cache: false, pack_enabled: false, pack_range_enabled: false })
@@ -144,7 +155,7 @@ async function save() {
     const profile = profileDraft.value
       ? {
           storage_id: editing.value?.id || '00000000-0000-0000-0000-000000000000',
-          revision: editing.value?.profile_revision || 1,
+          revision: profileRevision.value,
           ...profileDraft.value,
         }
       : undefined
@@ -186,7 +197,7 @@ async function toggle(row: Storage) {
         <label v-if="!editing">{{ t('storeName') }}<input v-model="draft.name" required maxlength="128" autocomplete="off" :disabled="busy"></label>
         <label class="store-type-field">{{ t('storeType') }}<UiSelect v-model="draft.type" :options="types" :label="t('storeType')" :disabled="busy" /></label>
         <p v-if="editing && editing.type !== draft.type" class="store-form-wide field-help">{{ t('storeRelocationHint') }}</p>
-        <div class="store-form-wide preset-actions"><span class="field-help">{{ t('storePresetHint') }}</span><button type="button" :disabled="busy" @click="applyPreset">{{ t('loadPreset') }}</button></div>
+        <div class="store-form-wide preset-actions"><span class="field-help">{{ t('storeConnectionDefaultsHint') }}</span><button type="button" :disabled="busy" @click="resetConnection">{{ t('storeConnectionDefaults') }}</button></div>
         <label v-if="draft.type === 'local'" class="store-form-wide">{{ t('storePath') }}<input v-model="draft.path" required maxlength="4096" autocomplete="off" :disabled="busy"></label>
         <template v-else>
           <label>{{ t('storeEndpoint') }}<input v-model="draft.endpoint" required type="url" placeholder="https://s3.example.com" autocomplete="url" :disabled="busy"></label>
@@ -199,20 +210,21 @@ async function toggle(row: Storage) {
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeChunkPolicy') }}</h3><p class="field-help">{{ t('storeChunkPolicyHint') }}</p></div></div>
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled)" :label="t('profile_cdc_enabled')" :disabled="busy" @update:model-value="setProfileBoolean('cdc_enabled', $event)" /><p class="field-help">{{ t('storeCdcHint') }}</p></div>
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled || profileDraft.deduplication_enabled)" :label="t('profile_deduplication_enabled')" :disabled="busy || Boolean(profileDraft.cdc_enabled)" @update:model-value="setProfileBoolean('deduplication_enabled', $event)" /><p class="field-help">{{ t(profileDraft.cdc_enabled ? 'storeChunkDedupHint' : 'storeRawDedupHint') }}</p></div>
-        <div v-if="profileDraft" class="store-form-wide"><label>{{ t('profile_write_processing') }}<UiSelect :model-value="String(profileDraft.write_processing)" :options="['inline', 'background'].map(value => ({ value, label: t('storeProcessing_' + value) }))" :label="t('profile_write_processing')" :disabled="busy || (!profileDraft.cdc_enabled && !profileDraft.deduplication_enabled)" @update:model-value="profileDraft.write_processing = $event" /></label><p class="field-help">{{ t('storeProcessingHint') }}</p></div>
-        <div v-if="profileDraft && status.data.value?.deployment_mode === 'single'" class="store-form-wide"><label>{{ t('profile_write_durability') }}<UiSelect :model-value="String(profileDraft.write_durability ?? 'durable')" :options="durabilityOptions" :label="t('profile_write_durability')" :disabled="busy" aria-describedby="storage-durability-hint" @update:model-value="profileDraft.write_durability = $event" /></label><p id="storage-durability-hint" class="field-help">{{ t(profileDraft.write_durability === 'volatile' ? 'storeMemoryHint' : 'storeDurabilityHint') }}</p></div>
         <label class="store-form-wide">{{ t('storeCurrentKey') }}<UiSelect v-model="draft.block_key_id" :options="keyOptions" :label="t('storeCurrentKey')" :disabled="busy || profileDraft?.cdc_enabled === false" /></label>
       <p class="store-form-wide field-help">{{ t(hasBlockKeys ? 'storeKeyHint' : 'storeNoKeyHint') }} <a href="/credentials?tab=managed&create=block" target="_blank" rel="noreferrer">{{ t('manageKeys') }}</a></p>
         <template v-if="profileDraft">
-          <div class="store-form-wide section-heading"><div><h3>{{ t('storeProfile') }}</h3><p class="field-help">{{ t('storeProfileHint') }}</p></div></div>
+          <StoragePolicy v-model="profileDraft" :storage-type="draft.type" :existing-type="editing?.type" :name="editing?.name" :storage-id="editing?.id || '00000000-0000-0000-0000-000000000000'" :revision="profileRevision" :disabled="busy" />
+          <div class="store-form-wide section-heading"><div><h3>{{ t('storeProfile') }}</h3><p class="field-help">{{ t(single ? 'storeProfileHintSingle' : 'storeProfileHint') }}</p></div></div>
           <details v-for="(group, index) in profileGroups" :key="group.title" class="store-form-wide profile-group" :open="index === 0">
-            <summary class="profile-group-title"><span><strong>{{ t(group.title) }}</strong><small>{{ t(profileGroupHints[group.title]!) }}</small></span><span>{{ group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local').length }}</span></summary>
+            <summary class="profile-group-title"><span><strong>{{ t(single && group.title === 'storeGroupWorker' ? 'storeGroupWorkerSingle' : group.title) }}</strong><small>{{ t(single && group.title === 'storeGroupWorker' ? 'storeGroupWorkerHintSingle' : profileGroupHints[group.title]!) }}</small></span><span>{{ group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local').length }}</span></summary>
             <div class="profile-fields">
               <div v-for="field in group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local')" :key="field.key" :class="field.valueType === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
                 <template v-if="field.valueType === 'boolean'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="Boolean(profileDraft[field.key])" :aria-label="profileLabel(field.key)" :label="profileDisabled(field.key) ? t('storeOptionUnused') : t(Boolean(profileDraft[field.key]) ? 'enabled' : 'disabled')" :disabled="busy || profileDisabled(field.key)" @update:model-value="setProfileBoolean(field.key, $event)" /></template>
+                <label v-else-if="field.key === 'write_processing'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.write_processing)" :options="['inline', 'background'].map(value => ({ value, label: t('storeProcessing_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft.write_processing = $event" /><small class="field-help">{{ t('storeProcessingHint') }}</small></label>
+                <label v-else-if="field.key === 'write_durability'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.write_durability ?? 'durable')" :options="durabilityOptions" :label="profileLabel(field.key)" :disabled="busy" aria-describedby="storage-durability-hint" @update:model-value="profileDraft.write_durability = $event" /><small id="storage-durability-hint" class="field-help">{{ t(profileDraft.write_durability === 'volatile' ? 'storeMemoryHint' : 'storeDurabilityHint') }}</small></label>
                 <label v-else-if="field.key === 'upload_cache_overflow'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.upload_cache_overflow)" :options="['fallback', 'reject'].map(value => ({ value, label: t('storeOverflow_' + value) }))" :label="profileLabel(field.key)" :disabled="busy || profileDisabled(field.key)" aria-describedby="storage-upload-overflow-hint" @update:model-value="profileDraft.upload_cache_overflow = $event" /><small id="storage-upload-overflow-hint" class="field-help">{{ t('storeOverflowHint') }}</small></label>
                 <label v-else-if="field.key === 'read_integrity'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft[field.key])" :options="['inline', 'background', 'off'].map(value => ({ value, label: t('storeReadIntegrity_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft[field.key] = $event" /><small class="field-help">{{ t('profileHelp_read_integrity') }}</small></label>
-                <label v-else-if="['public_cache_validation', 'read_source_validation'].includes(field.key)"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft[field.key])" :options="['strict', 'background'].map(value => ({ value, label: t('storeReadValidation_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft[field.key] = $event" /><small v-if="field.key === 'read_source_validation'" class="field-help">{{ t('profileHelp_read_source_validation') }}</small></label>
+                <label v-else-if="['public_cache_validation', 'read_source_validation'].includes(field.key)"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft[field.key])" :options="['strict', 'background'].map(value => ({ value, label: t('storeReadValidation_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft[field.key] = $event" /><small v-if="field.key === 'read_source_validation'" class="field-help">{{ t(single ? 'profileHelp_read_source_validationSingle' : 'profileHelp_read_source_validation') }}</small></label>
                 <label v-else-if="field.key === 'background_scheduling'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.background_scheduling)" :options="['balanced', 'foreground'].map(value => ({ value, label: t('storeScheduling_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" aria-describedby="storage-scheduling-hint" @update:model-value="profileDraft.background_scheduling = $event" /><small id="storage-scheduling-hint" class="field-help">{{ t('storeSchedulingHint') }}</small></label>
                 <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><input :aria-label="profileLabel(field.key)" :aria-describedby="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key) ? 'storage-profile-' + field.key + '-hint' : undefined" :type="field.valueType === 'number' ? 'number' : 'text'" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"><small v-if="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key)" :id="'storage-profile-' + field.key + '-hint'" class="field-help">{{ t('profileHelp_' + field.key) }}</small></label>
               </div>

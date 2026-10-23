@@ -296,7 +296,10 @@ fn validate_profile_mode(app: &App, profile: &StorageProfile) -> anyhow::Result<
     Ok(())
 }
 
-async fn validate_profile_capacity(app: &App, profile: &StorageProfile) -> anyhow::Result<()> {
+pub(super) async fn validate_profile_capacity(
+    app: &App,
+    profile: &StorageProfile,
+) -> anyhow::Result<()> {
     validate_profile_mode(app, profile)?;
     let mut profiles = app.storage_profiles.enabled_profiles().await?;
     profiles.retain(|current| current.storage_id != profile.storage_id);

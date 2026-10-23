@@ -21,6 +21,7 @@ pub(crate) mod service;
 pub(crate) mod settings;
 pub(crate) mod storage;
 mod storage_catalog;
+pub(crate) mod storage_policy;
 pub(crate) mod system;
 pub(crate) mod tasks;
 pub(crate) mod tokens;

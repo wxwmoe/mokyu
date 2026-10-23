@@ -90,6 +90,10 @@ def main():
             current = fixture.api(url)
             assert not current['restart_required'] and current['revision'] == current['applied_revision']
             assert observed() == mode
+            preview = fixture.cli('storage', 'profile', 'preset', fixture.name, 'reliable')
+            assert preview['constraints']['sqlite_synchronous'] == mode
+            assert ('sqlite_weak' in preview['effects']['warnings']) == (mode != 'full')
+            assert fixture.api(url) == current, 'a backend preset changed global durability'
             fixture.put('saved-' + mode, data + mode.encode())
             stop(crash=True)
             start()

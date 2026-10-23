@@ -345,6 +345,25 @@ pub enum StorageProfiles {
     Show {
         name: String,
     },
+    /// List applicable templates and current node constraints without saving.
+    Presets {
+        name: String,
+    },
+    /// Preview a preset; use --draft to emit JSON for an explicit profile set.
+    Preset {
+        name: String,
+        #[arg(value_parser = ["reliable", "cached", "throughput"])]
+        preset: String,
+        #[arg(long)]
+        draft: bool,
+    },
+    /// Validate a complete draft and show changes without saving.
+    Preview {
+        name: String,
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
     Set {
         name: String,
         file: PathBuf,
@@ -576,7 +595,11 @@ impl Command {
             | Self::Cache(Cache::Status)
             | Self::Storages(Storages::List | Storages::Show { .. })
             | Self::Storages(Storages::Profile {
-                command: StorageProfiles::Show { .. },
+                command:
+                    StorageProfiles::Show { .. }
+                    | StorageProfiles::Presets { .. }
+                    | StorageProfiles::Preset { .. }
+                    | StorageProfiles::Preview { .. },
             })
             | Self::Settings(Settings::Control(ControlSettings::Show) | Settings::Get { .. })
             | Self::Keys(Keys::List | Keys::Replacement { .. })

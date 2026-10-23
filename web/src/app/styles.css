@@ -789,3 +789,16 @@ body { background: radial-gradient(ellipse at 85% 0%, color-mix(in srgb, var(--r
 .key-replacement-storages li > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 .key-replacement-saved { margin-top: 18px; color: var(--ink); font-weight: var(--ui-weight, 800); }
 .key-replacement-footer { flex-wrap: wrap; }
+
+.storage-policy { min-width: 0; padding-top: 12px; }
+.storage-policy .section-heading { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+.policy-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; }
+.policy-picker label { min-width: 0; }
+.policy-effects { display: grid; gap: 8px; margin-bottom: 20px; font-size: var(--small-size, 12px); line-height: 1.65; }
+.policy-effects p { margin: 0; overflow-wrap: anywhere; }
+.policy-effects .policy-warning { border-left: 3px solid var(--cream); background: var(--cream-soft); padding: 8px 12px; border-radius: 0 8px 8px 0; }
+.policy-changes { margin: 0; }
+.policy-changes > div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px 0; border-top: 1px solid var(--line-soft); font-size: var(--small-size, 12px); }
+.policy-changes dt { color: var(--muted); }
+.policy-changes dd { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 480px) { .policy-picker, .policy-changes > div { grid-template-columns: minmax(0, 1fr); } .policy-changes > div { gap: 4px; } }

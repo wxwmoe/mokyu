@@ -1296,6 +1296,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/storage-profile-presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_preset_templates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/storage/packs": {
         parameters: {
             query?: never;
@@ -1418,6 +1434,38 @@ export interface paths {
         get: operations["storage_profile"];
         put: operations["storage_profile_update"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storages/{name}/profile/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_profile_presets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storages/{name}/profile/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_profile_preview"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2037,6 +2085,36 @@ export interface components {
             /** Format: uuid */
             task_id: string;
         };
+        IoConstraints: {
+            database?: string | null;
+            /** Format: int64 */
+            response_cache_bytes?: number | null;
+            shutdown_flush_timeout: string;
+            single: boolean;
+            sqlite_synchronous?: string | null;
+            /** Format: int64 */
+            write_memory_bytes?: number | null;
+        };
+        IoEffects: {
+            /** Format: int64 */
+            public_window_seconds: number;
+            read_integrity: string;
+            /** Format: int64 */
+            source_window_seconds: number;
+            warnings: string[];
+            write_ack: string;
+        };
+        IoPreset: {
+            name: string;
+            values: {
+                [key: string]: unknown;
+            };
+        };
+        IoPresets: {
+            constraints: components["schemas"]["IoConstraints"];
+            presets: components["schemas"]["IoPreset"][];
+            selected?: string | null;
+        };
         IssueObject: {
             bucket: string;
             /** Format: uuid */
@@ -2506,6 +2584,18 @@ export interface components {
             role: string;
             theme?: string | null;
             username: string;
+        };
+        ProfileChange: {
+            after: unknown;
+            before: unknown;
+            field: string;
+        };
+        ProfilePreview: {
+            changes: components["schemas"]["ProfileChange"][];
+            constraints: components["schemas"]["IoConstraints"];
+            effects: components["schemas"]["IoEffects"];
+            profile: components["schemas"]["StorageProfile"];
+            selected?: string | null;
         };
         Project: {
             allow_bucket_create: boolean;
@@ -5513,6 +5603,27 @@ export interface operations {
             };
         };
     };
+    storage_preset_templates: {
+        parameters: {
+            query: {
+                type: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IoPresets"];
+                };
+            };
+        };
+    };
     storage_packs: {
         parameters: {
             query?: {
@@ -5792,6 +5903,60 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    storage_profile_presets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IoPresets"];
+                };
+            };
+        };
+    };
+    storage_profile_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageProfile"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfilePreview"];
                 };
             };
             409: {

@@ -53,6 +53,9 @@ docker exec mokyu mokyu cli bucket cors media /config/cors.json
 | `storage key set NAME KEY` | 将存储绑定到未撤销的 block key 名称或 UUID |
 | `storage key clear NAME` | 解除存储的当前 block key，新写入区块不加密 |
 | `storage profile show NAME` | 显示该 storage 的类型化连接、缓存、压缩、打包、巡检和群集共享预算 |
+| `storage profile presets NAME` | 列出该后端适用的三套读写模板、当前匹配结果和运行限制 |
+| `storage profile preset NAME reliable\|cached\|throughput [--draft]` | 只读预览模板差异及效果；`--draft` 仅输出可编辑的完整 profile JSON |
+| `storage profile preview NAME FILE` | 验证完整草稿并显示差异、写确认点与缓存窗口；不保存配置，支持 stdin `-` |
 | `storage profile set NAME FILE` | 用完整 JSON 替换 storage profile；`FILE` 为 `-` 时从 stdin 读取，要求当前 `revision` |
 | `storage rewrite NAME preview [--key KEY]` | 统计需要按目标 key 或无加密重写的物理区块和区块包，返回确认值 |
 | `storage rewrite NAME start --confirm VALUE [--key KEY]` | 使用 preview 返回的确认值创建低优先级重写任务 |

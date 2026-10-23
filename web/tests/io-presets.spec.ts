@@ -1,0 +1,92 @@
+import { readFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { test, expect } from '@playwright/test'
+import en from '../src/locales/i18n.en.js'
+import zh from '../src/locales/i18n.zh-CN.js'
+import ja from '../src/locales/i18n.ja.js'
+
+test('I/O presets preview changes, load only the draft and preserve conflicts', async ({ page, request }, info) => {
+  test.setTimeout(180_000)
+  const password = readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8').trim()
+  const origin = process.env.MOKYU_TEST_WEB!
+  const login = await request.post('/api/v1/auth/login', { headers: { Origin: origin }, data: { username: 'tester', password } })
+  expect(login.status()).toBe(200)
+  const headers = { Origin: origin, 'X-CSRF-Token': (await login.json()).csrf_token }
+  const name = 'presets-' + randomUUID().slice(0, 8)
+  expect((await request.post('/api/v1/storages', { headers, data: { name, type: 'local', path: process.env.MOKYU_TEST_FSYNC_ROOT + '/' + name, initialize: true } })).status()).toBe(201)
+  const url = '/api/v1/storages/' + name + '/profile'
+  const original = await (await request.get(url)).json()
+  const settings = await (await request.get('/api/v1/runtime-settings/io')).json()
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
+  await page.goto('/login')
+  await page.getByRole('textbox', { name: en.username, exact: true }).fill('tester')
+  await page.getByRole('textbox', { name: en.password, exact: true }).fill(password)
+  await page.getByRole('button', { name: en.signIn, exact: true }).click()
+  await expect(page).toHaveURL(/\/overview$/)
+  for (const [locale, text] of [['en', en], ['zh-CN', zh], ['ja', ja]] as const) {
+    for (const theme of ['light', 'dark']) {
+      await request.put('/api/v1/account', { headers, data: { display_name: '', locale, theme, avatar_email: '', avatar_enabled: false } })
+      await page.goto('/storages?edit=' + name)
+      const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
+      await expect(editor.locator('.storage-policy .badge')).toHaveText(text.ioPreset_reliable)
+      expect(await editor.innerText()).not.toMatch(/cluster|群集|クラスター/i)
+      for (const preset of ['cached', 'throughput', 'reliable'] as const) {
+        const picker = editor.getByRole('combobox', { name: text.storeIoPreset, exact: true })
+        await picker.focus()
+        await picker.press('Space')
+        await page.getByRole('option', { name: text['ioPreset_' + preset], exact: true }).focus()
+        await page.keyboard.press('Enter')
+        await editor.getByRole('button', { name: text.storeIoPreview, exact: true }).click()
+        const preview = page.getByRole('dialog', { name: text.storeIoPreview, exact: true })
+        await expect(preview).toBeVisible()
+        await expect(preview).toContainText('FULL')
+        expect(await (await request.get(url)).json()).toEqual(original)
+        for (const width of [1440, 768, 640, 390, 320]) {
+          await page.setViewportSize({ width, height: 900 })
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+        }
+        if (preset === 'throughput') await preview.screenshot({ path: info.outputPath('preview-' + locale + '-' + theme + '-320.png') })
+        await preview.getByRole('button', { name: text.cancel, exact: true }).click()
+        await expect(editor.locator('.storage-policy .badge')).toHaveText(text.ioPreset_reliable)
+      }
+      await editor.getByRole('combobox', { name: text.storeIoPreset, exact: true }).click()
+      await page.getByRole('option', { name: text.ioPreset_throughput, exact: true }).click()
+      await editor.getByRole('button', { name: text.storeIoPreview, exact: true }).click()
+      await page.getByRole('dialog', { name: text.storeIoPreview, exact: true }).getByRole('button', { name: text.storeIoApplyDraft, exact: true }).click()
+      await expect(editor.locator('.storage-policy .badge')).toHaveText(text.ioPreset_throughput)
+      await expect(editor.getByRole('switch', { name: text.profile_upload_cache, exact: true })).toBeDisabled()
+      expect(await (await request.get(url)).json()).toEqual(original)
+      await editor.getByRole('combobox', { name: text.profile_read_integrity, exact: true }).click()
+      await page.getByRole('option', { name: text.storeReadIntegrity_off, exact: true }).click()
+      await expect(editor.locator('.storage-policy .badge')).toHaveText(text.ioPreset_custom)
+      await editor.getByRole('button', { name: text.cancel, exact: true }).click()
+    }
+  }
+  await page.goto('/storages?edit=' + name)
+  const editor = page.getByRole('dialog', { name: ja.editStore, exact: true })
+  await editor.getByRole('combobox', { name: ja.storeIoPreset, exact: true }).click()
+  await page.getByRole('option', { name: ja.ioPreset_cached, exact: true }).click()
+  await editor.getByRole('button', { name: ja.storeIoPreview, exact: true }).click()
+  await page.getByRole('dialog', { name: ja.storeIoPreview, exact: true }).getByRole('button', { name: ja.storeIoApplyDraft, exact: true }).click()
+  const save = page.waitForResponse(reply => reply.url().endsWith('/api/v1/storages/' + name) && reply.request().method() === 'PUT')
+  await editor.getByRole('button', { name: ja.save, exact: true }).click()
+  expect((await save).status()).toBe(200)
+  const saved = await (await request.get(url)).json()
+  expect(saved.public_cache_validation).toBe('background')
+  expect(saved.write_durability).toBe('durable')
+  expect(saved.revision).toBe(original.revision + 1)
+  await page.goto('/storages?edit=' + name)
+  await expect(editor.locator('.storage-policy .badge')).toHaveText(ja.ioPreset_cached)
+  expect((await request.put(url, { headers, data: { ...saved, request_timeout: '31s' } })).status()).toBe(200)
+  await editor.getByRole('combobox', { name: ja.profile_read_integrity, exact: true }).click()
+  await page.getByRole('option', { name: ja.storeReadIntegrity_off, exact: true }).click()
+  const conflict = page.waitForResponse(reply => reply.url().endsWith('/api/v1/storages/' + name) && reply.request().method() === 'PUT')
+  await editor.getByRole('button', { name: ja.save, exact: true }).click()
+  expect((await conflict).status()).toBe(409)
+  await expect(editor).toBeVisible()
+  await expect(editor.getByRole('combobox', { name: ja.profile_read_integrity, exact: true })).toContainText(ja.storeReadIntegrity_off)
+  expect(await (await request.get('/api/v1/runtime-settings/io')).json()).toEqual(settings)
+  expect(errors).toEqual([])
+})

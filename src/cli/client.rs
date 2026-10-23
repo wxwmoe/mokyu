@@ -26,7 +26,9 @@ pub async fn client(path: &Path, mut command: Command) -> Result<()> {
         Command::User(Users::Membership { file, document, .. })
         | Command::Quota(Quotas::Set { file, document, .. })
         | Command::Storages(Storages::Profile {
-            command: StorageProfiles::Set { file, document, .. },
+            command:
+                StorageProfiles::Set { file, document, .. }
+                | StorageProfiles::Preview { file, document, .. },
         })
         | Command::Token(
             Tokens::Create { file, document, .. } | Tokens::Update { file, document, .. },

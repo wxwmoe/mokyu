@@ -289,6 +289,29 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                     )?),
                 },
                 Storages::Profile { command } => match command {
+                    StorageProfiles::Presets { name } => Ok(serde_json::to_value(
+                        super::storage_policy::named(app, &name).await?,
+                    )?),
+                    StorageProfiles::Preset {
+                        name,
+                        preset,
+                        draft,
+                    } => {
+                        let preview = super::storage_policy::preset(app, &name, &preset).await?;
+                        Ok(if draft {
+                            serde_json::to_value(preview.profile)?
+                        } else {
+                            serde_json::to_value(preview)?
+                        })
+                    }
+                    StorageProfiles::Preview { name, document, .. } => {
+                        let profile = serde_json::from_value(
+                            document.context("missing storage profile document")?,
+                        )?;
+                        Ok(serde_json::to_value(
+                            super::storage_policy::preview(app, &name, profile).await?,
+                        )?)
+                    }
                     StorageProfiles::Show { name } => {
                         let storage_id: uuid::Uuid = app
                             .storage_records
