@@ -267,6 +267,10 @@ impl App {
             .or(convert.then_some(profile.revision));
         let raw_part = upload.is_some() && raw_revision.is_some();
         let mut raw = if let Some(revision) = raw_revision.filter(|_| upload.is_none()) {
+            let buffered = matches!(
+                profile.write_durability.as_deref(),
+                Some("buffered" | "volatile")
+            ) && self.storage.raw_buffered(storage)?;
             let (source, location) = if convert {
                 let (algorithm, block_key_id) = self.store_encoding(storage).await?;
                 let encoding = crate::model::cache::EncodingPolicy {
@@ -279,15 +283,17 @@ impl App {
                     block_key_id,
                 };
                 self.raw
-                    .begin_conversion(stream, storage, revision, &encoding)
+                    .begin_conversion(stream, storage, revision, &encoding, buffered)
                     .await?
             } else {
-                self.raw.begin(stream, storage, revision).await?
+                self.raw.begin(stream, storage, revision, buffered).await?
             };
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-before-writer").await;
             Some((
                 source,
                 self.storage
-                    .raw_writer(storage, source, location, declared)
+                    .raw_writer(storage, source, location, declared, buffered)
                     .await?,
             ))
         } else {

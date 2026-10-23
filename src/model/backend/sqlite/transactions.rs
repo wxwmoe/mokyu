@@ -7212,6 +7212,7 @@ pub(super) async fn begin_raw(
     storage: Uuid,
     revision: i64,
     encoding: Option<&crate::model::cache::EncodingPolicy>,
+    buffered: bool,
 ) -> Result<(Id, Uuid)> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     let (storage_type, unencoded, current, cdc, background) = queries::raw_target(stream, storage)
@@ -7247,6 +7248,7 @@ pub(super) async fn begin_raw(
         } else {
             "shared_s3"
         },
+        buffered,
     )
     .execute(&mut *tx)
     .await?;

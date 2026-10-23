@@ -86,6 +86,8 @@ def main():
         remote.read('delayed', data)
         remote.cli('cache', 'flush', '--wait', '--timeout', '20s')
         assert not raw(remote, 'delayed')['pending_upload']
+        wait(lambda: remote.store['id'] not in remote.cli('cache', 'status')['write_backlog']['oldest'],
+             'flushed storage remained in the backlog snapshot', seconds=10)
         print('PASS raw coalescing retains immediate reads and manual flush bypasses delay', flush=True)
 
         configure(remote, write_flush_interval='0s', write_backlog_max_age='1s', upload_cache_overflow='reject')

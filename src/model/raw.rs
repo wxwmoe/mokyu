@@ -145,6 +145,7 @@ pub(crate) trait RawStore: Send + Sync {
         storage: Uuid,
         revision: i64,
         encoding: &crate::model::cache::EncodingPolicy,
+        buffered: bool,
     ) -> Result<(Id, Uuid)>;
     async fn commit_conversion_batch(
         &self,
@@ -245,7 +246,13 @@ pub(crate) trait RawStore: Send + Sync {
         digest: &[u8],
         hash: &[u8],
     ) -> Result<bool>;
-    async fn begin(&self, stream: Id, storage: Uuid, profile_revision: i64) -> Result<(Id, Uuid)>;
+    async fn begin(
+        &self,
+        stream: Id,
+        storage: Uuid,
+        profile_revision: i64,
+        buffered: bool,
+    ) -> Result<(Id, Uuid)>;
     async fn finish(&self, stream: Id, source: Id, size: i64, digest: &[u8]) -> Result<()>;
     async fn set_upload(&self, source: Id, upload: &str) -> Result<()>;
     async fn upload_id(&self, source: Id) -> Result<Option<String>>;

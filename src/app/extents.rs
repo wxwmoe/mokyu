@@ -215,7 +215,10 @@ impl App {
         let mut input = Box::pin(self.payload_bytes(source));
         let mut offset = 0;
         if let Some(revision) = revision {
-            let (id, location) = self.raw.begin(destination, storage, revision).await?;
+            let (id, location) = self
+                .raw
+                .begin(destination, storage, revision, false)
+                .await?;
             let mut writer = self
                 .storage
                 .raw_replay_writer(storage, id, location, source.size, &[])

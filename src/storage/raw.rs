@@ -208,6 +208,7 @@ impl Storage {
                 Some(expected as i64),
                 false,
                 token,
+                false,
             )
             .await?;
         let mut buffer = vec![0; BUFFER];
@@ -270,7 +271,9 @@ impl Storage {
         parts: &[i64],
     ) -> Result<RawWriter<'_>> {
         let declared = (!self.is_local(storage)?).then_some(size);
-        let writer = self.raw_writer(storage, source, location, declared).await?;
+        let writer = self
+            .raw_writer(storage, source, location, declared, false)
+            .await?;
         Ok(match writer {
             RawWriter::Remote(writer) if size >= PART_SIZE as i64 => {
                 let part_size = replay_part_size(size as u64, parts)?;
@@ -310,17 +313,42 @@ impl Storage {
         Ok(self.store_backend(storage)?.is_local)
     }
 
+    pub(crate) fn raw_buffered(&self, storage: Uuid) -> Result<bool> {
+        let target = self.store_backend(storage)?;
+        Ok(self.buffers_raw(storage, &target))
+    }
+
+    fn buffers_raw(&self, storage: Uuid, target: &StoreBackend) -> bool {
+        !self.write_overdue(storage, &target.profile)
+            && !self.cluster_mode
+            && (target.is_local || target.profile.upload_cache)
+            && matches!(
+                target.profile.write_durability.as_deref(),
+                Some("buffered" | "volatile")
+            )
+    }
+
     pub(crate) async fn raw_writer(
         self: &Arc<Self>,
         storage: Uuid,
         source: Id,
         location: Uuid,
         declared: Option<i64>,
+        recorded_buffered: bool,
     ) -> Result<RawWriter<'_>> {
-        self.raw_writer_for(storage, source, location, declared, true, None)
-            .await
+        self.raw_writer_for(
+            storage,
+            source,
+            location,
+            declared,
+            true,
+            None,
+            recorded_buffered,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)] // Received sources may already record their durability.
     async fn raw_writer_for(
         self: &Arc<Self>,
         storage: Uuid,
@@ -329,19 +357,15 @@ impl Storage {
         declared: Option<i64>,
         cache: bool,
         upload_token: Option<Uuid>,
+        recorded_buffered: bool,
     ) -> Result<RawWriter<'_>> {
         let target = self.store_backend(storage)?;
         self.verify_raw_target(&target).await?;
-        let buffered = cache
-            && !self.write_overdue(storage, &target.profile)
-            && !self.cluster_mode
-            && (target.is_local || target.profile.upload_cache)
-            && matches!(
-                target.profile.write_durability.as_deref(),
-                Some("buffered" | "volatile")
-            );
-        if buffered {
+        let buffered = cache && self.buffers_raw(storage, &target);
+        if buffered || recorded_buffered {
             self.buffered_writes.store(true, Ordering::Release);
+        }
+        if buffered && !recorded_buffered {
             self.raw_store.buffer(source).await?;
         }
         if cache && !target.is_local && target.profile.upload_cache {

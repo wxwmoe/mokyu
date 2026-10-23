@@ -8084,14 +8084,15 @@ pub(super) fn raw_insert(
     storage: Uuid,
     revision: i64,
     medium: &'static str,
+    buffered: bool,
 ) -> Statement<'static> {
     sqlx::query(
-        "INSERT INTO raw_sources(location_id,owner_stream,storage_id,profile_revision,medium) VALUES(?,?,?,?,?)",
+        "INSERT INTO raw_sources(location_id,owner_stream,storage_id,profile_revision,medium,durability) VALUES(?,?,?,?,?,?)",
     )
     .bind(id)
     .bind(stream)
     .bind(storage)
-    .bind(revision).bind(medium)
+    .bind(revision).bind(medium).bind(if buffered { "buffered" } else { "durable" })
 }
 pub(super) fn raw_finish(
     stream: Id,
@@ -8204,8 +8205,17 @@ impl RawStore for Backend {
         storage: Uuid,
         revision: i64,
         encoding: &crate::model::cache::EncodingPolicy,
+        buffered: bool,
     ) -> Result<(Id, Uuid)> {
-        transactions::begin_raw(&self.pool, stream, storage, revision, Some(encoding)).await
+        transactions::begin_raw(
+            &self.pool,
+            stream,
+            storage,
+            revision,
+            Some(encoding),
+            buffered,
+        )
+        .await
     }
     async fn commit_conversion_batch(
         &self,
@@ -8456,8 +8466,22 @@ impl RawStore for Backend {
             )
             .collect())
     }
-    async fn begin(&self, stream: Id, storage: Uuid, profile_revision: i64) -> Result<(Id, Uuid)> {
-        transactions::begin_raw(&self.pool, stream, storage, profile_revision, None).await
+    async fn begin(
+        &self,
+        stream: Id,
+        storage: Uuid,
+        profile_revision: i64,
+        buffered: bool,
+    ) -> Result<(Id, Uuid)> {
+        transactions::begin_raw(
+            &self.pool,
+            stream,
+            storage,
+            profile_revision,
+            None,
+            buffered,
+        )
+        .await
     }
     async fn finish(&self, stream: Id, source: Id, size: i64, digest: &[u8]) -> Result<()> {
         transactions::finish_raw(&self.pool, stream, source, size, digest, None).await

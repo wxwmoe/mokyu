@@ -88,6 +88,52 @@ def main():
         print('PASS durable default and invalid policy validation', flush=True)
 
         configure(fixture, write_durability='buffered')
+        marker = arm(fixture, 'raw-before-writer')
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            request = pool.submit(fixture.put, 'allocated-buffered', b'allocated before writing')
+            try:
+                wait(marker.with_suffix('.hit').exists, 'buffered allocation did not pause')
+                rows = database.query("SELECT durability FROM raw_sources WHERE storage_id=%s AND state='writing'",
+                                      uuid.UUID(fixture.store['id']))
+                assert rows == [{'durability': 'buffered'}], rows
+                assert not request.done()
+            finally:
+                marker.unlink(missing_ok=True)
+            request.result(timeout=30)
+        fixture.read('allocated-buffered', b'allocated before writing')
+        wait(lambda: source(fixture, 'allocated-buffered')['durability'] == 'durable',
+             'allocated buffered source did not synchronize')
+        print('PASS buffered durability is committed before the first file write', flush=True)
+
+        for initial, changed, boundary in [('buffered', 'durable', 'raw-file-durable'),
+                                           ('durable', 'buffered', 'raw-file-buffered')]:
+            configure(fixture, write_durability=initial, deduplication_enabled=False)
+            allocated = arm(fixture, 'raw-before-writer')
+            written = arm(fixture, boundary)
+            key = 'policy-' + initial
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                request = pool.submit(fixture.put, key, key.encode())
+                try:
+                    wait(allocated.with_suffix('.hit').exists, 'policy allocation did not pause')
+                    rows = database.query("SELECT durability FROM raw_sources WHERE storage_id=%s AND state='writing'",
+                                          uuid.UUID(fixture.store['id']))
+                    assert rows == [{'durability': initial}], rows
+                    configure(fixture, write_durability=changed)
+                    allocated.unlink(missing_ok=True)
+                    wait(written.with_suffix('.hit').exists, 'writer ignored the changed durability policy')
+                    rows = database.query("SELECT durability FROM raw_sources WHERE storage_id=%s AND state='writing'",
+                                          uuid.UUID(fixture.store['id']))
+                    assert rows == [{'durability': 'buffered'}], rows
+                    assert not request.done()
+                finally:
+                    allocated.unlink(missing_ok=True)
+                    written.unlink(missing_ok=True)
+                request.result(timeout=30)
+            fixture.read(key, key.encode())
+            wait(lambda: source(fixture, key)['durability'] == 'durable', 'changed policy left an unsynced source')
+        configure(fixture, write_durability='buffered', deduplication_enabled=True)
+        print('PASS policy changes retain conservative durability and required file sync', flush=True)
+
         marker = arm(fixture, 'buffered-before-sync')
         value = os.urandom(256 * 1024)
         fixture.put('buffered', value)

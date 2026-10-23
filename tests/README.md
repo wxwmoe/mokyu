@@ -28,7 +28,7 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `python -m tests.recovery.shutdown_flush` 使用相同的进程托管环境和独立 S3 后端，节点磁盘缓存至少64MiB、其中上传缓存至少32MiB；验证每次 flush 的数据库时间上界、CLI 等待超时不取消任务、SIGTERM 排空 raw/chunks、暂停 CDC 时原始来源仍可持久化、退出期限及重启恢复。四库分别运行，不能与同一实例上的其他测试并发。
 
-`python -m tests.recovery.buffered_writes` 与 `python -m tests.recovery.buffered_chunks` 独占已初始化且停止的单容器服务，沿用上述配置、S3 后端与 fsync 注入环境。分别验证 raw 和 chunks 的提前确认、立即读取、可靠复制/复用屏障、缓存关闭/满额回退、文件与目录同步失败、强杀恢复、损坏隔离、flush 和关闭。区块入口另覆盖 Multipart 分片持久性、加密及后台组包竞态；四库分别运行，建议磁盘缓存128MiB、上传缓存64MiB。`web/tests/buffered-storage.spec.ts` 验证三语草稿取消/保存、键盘和窄屏提示。
+`python -m tests.recovery.buffered_writes` 与 `python -m tests.recovery.buffered_chunks` 独占已初始化且停止的单容器服务，沿用上述配置、S3 后端与 fsync 注入环境。分别验证 raw 和 chunks 的提前确认、立即读取、可靠复制/复用屏障、缓存关闭/满额回退、文件与目录同步失败、强杀恢复、损坏隔离、flush 和关闭。raw 入口另验证首次文件写入前的持久性记录，以及来源创建后切换策略时的同步和状态一致性；区块入口另覆盖 Multipart 分片持久性、加密及后台组包竞态；四库分别运行，建议磁盘缓存128MiB、上传缓存64MiB。`web/tests/buffered-storage.spec.ts` 验证三语草稿取消/保存、键盘和窄屏提示。
 
 `python -m tests.recovery.write_memory` 使用同样的独占服务和隔离 S3 夹具，为本次测试设置 8MiB 写内存和 64MiB 文件缓存，覆盖校验失败/断线释放、raw/chunks RAM 读取与 Range、最后读者计费、Copy/复用持久晋级、强杀后的失效隔离与重传、RAM/文件满额回退和 503、flush 失败保留、Multipart、最终 pack、后台 CDC、退出排空和 0B 回退。
 
