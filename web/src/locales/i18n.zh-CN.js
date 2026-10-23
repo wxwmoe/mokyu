@@ -1,4 +1,12 @@
 export default {
+  profile_file_delivery: "文件交付",
+  profile_file_delivery_prefix: "代理目录前缀",
+  storeDelivery_application: "程序流式输出",
+  storeDelivery_x_accel_redirect: "Nginx X-Accel-Redirect",
+  storeDelivery_x_sendfile: "X-Sendfile",
+  storeDeliveryHint: "代理交付会关闭本后端正文缓存，需要可信代理，HEAD、Range、签名读取和响应前摘要复核仍由程序处理",
+  storeDeliveryPrefixHint: "仅映射 raw 目录，前缀为代理内部 URI 或绝对目录，不包含存储桶或对象路径",
+
   storeIoPolicy: '读写策略',
   storeIoPolicyHint: '选择适合这个后端的读写方式，预设只调整下方策略选项',
   storeIoPreset: '策略预设',

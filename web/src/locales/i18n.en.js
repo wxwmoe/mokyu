@@ -1,4 +1,12 @@
 export default {
+  profile_file_delivery: "File delivery",
+  profile_file_delivery_prefix: "Proxy directory prefix",
+  storeDelivery_application: "Application stream",
+  storeDelivery_x_accel_redirect: "Nginx X-Accel-Redirect",
+  storeDelivery_x_sendfile: "X-Sendfile",
+  storeDeliveryHint: "Proxy delivery disables body caching for this backend, requires a trusted proxy and keeps HEAD, Range, signed reads and inline digest checks in the application",
+  storeDeliveryPrefixHint: "Map only the raw directory, the prefix is the proxy URI or absolute directory and never contains a bucket or object key",
+
   storeIoPolicy: 'Read/write policy',
   storeIoPolicyHint: 'Choose how this backend handles reads and writes, presets adjust only the policy options below',
   storeIoPreset: 'Policy preset',

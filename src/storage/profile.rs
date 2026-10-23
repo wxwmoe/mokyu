@@ -35,6 +35,10 @@ pub(crate) struct StorageProfile {
     pub source_validation_max_age: String,
     #[serde(default = "write_processing")]
     pub read_integrity: String,
+    #[serde(default = "file_delivery")]
+    pub file_delivery: String,
+    #[serde(default, deserialize_with = "delivery_prefix")]
+    pub file_delivery_prefix: Option<String>,
     pub connect_timeout: String,
     pub request_timeout: String,
     pub max_retries: i32,
@@ -91,6 +95,36 @@ pub(crate) struct StorageProfile {
     pub maintenance_byte_budget: Option<String>,
     pub migration_concurrency: Option<i32>,
     pub migration_byte_budget: Option<String>,
+}
+
+fn file_delivery() -> String {
+    "application".into()
+}
+
+fn delivery_prefix<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Ok(
+        Option::<String>::deserialize(deserializer)?.map(|mut prefix| {
+            if !prefix.ends_with('/') {
+                prefix.push('/');
+            }
+            prefix
+        }),
+    )
+}
+
+fn valid_delivery_prefix(prefix: &str) -> bool {
+    prefix.len() > 2
+        && prefix.len() <= 512
+        && prefix.starts_with('/')
+        && prefix.ends_with('/')
+        && prefix
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/_-.".contains(&b))
+        && prefix[1..prefix.len() - 1]
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 fn cdc_enabled() -> bool {
@@ -299,6 +333,28 @@ impl StorageProfile {
 
 pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::Result<()> {
     use crate::config::{bytes, cache_bytes, seconds};
+    anyhow::ensure!(
+        matches!(
+            profile.file_delivery.as_str(),
+            "application" | "x_accel_redirect" | "x_sendfile"
+        ),
+        s3s::s3_error!(InvalidArgument, "invalid file_delivery")
+    );
+    anyhow::ensure!(
+        if profile.file_delivery == "application" {
+            profile.file_delivery_prefix.is_none()
+        } else {
+            storage_type == "local"
+                && profile
+                    .file_delivery_prefix
+                    .as_deref()
+                    .is_some_and(valid_delivery_prefix)
+        },
+        s3s::s3_error!(
+            InvalidArgument,
+            "proxy file delivery requires local storage and a safe absolute directory prefix"
+        )
+    );
     profile.public_cache_times()?;
     profile.source_validation_seconds()?;
     anyhow::ensure!(
@@ -477,4 +533,35 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         "invalid pack range thresholds"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+
+    #[test]
+    fn exported_directories_are_ascii_absolute_and_have_no_traversal() {
+        for prefix in ["/_mokyu_raw/", "/srv/mokyu-1/raw/", "/a.b/"] {
+            assert!(valid_delivery_prefix(prefix));
+        }
+        for prefix in [
+            "",
+            "/",
+            "//host/",
+            "/a//b/",
+            "/a/../b/",
+            "/./",
+            "/%2e%2e/",
+            "/a\\b/",
+            "/a?b/",
+            "/a#b/",
+            "/a b/",
+            "/a\n/",
+            "relative/",
+            "https://host/",
+            "/a",
+        ] {
+            assert!(!valid_delivery_prefix(prefix), "{prefix:?}");
+        }
+    }
 }

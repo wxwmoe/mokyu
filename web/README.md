@@ -2,7 +2,7 @@
 
 默认 Docker 构建会自动编译并嵌入前端，运行容器不需要 Node.js
 
-完整部署见[部署指南](../docs/deployment-and-recovery.md)
+完整部署见[部署指南](../docs/deployment-and-recovery.md)，面板哈希资源的可选 Nginx 缓存见[反代示例](../nginx.example.conf)；对象文件交付见[本地部署](../docs/local-nginx-deployment.md)
 
 单独构建需要 Node.js 24.12 或更高版本，在本目录执行：
 

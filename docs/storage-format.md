@@ -45,6 +45,8 @@ S3 raw 开启 `upload_cache` 后，在 `<data_path>/raw/<后两位>/<UUID>` 同�
 
 也可创建新的目标 storage 和桶，使用管理面板的跨存储复制或移动；任务按目标 CDC、去重、压缩与加密策略接收逻辑内容。该方式不修改原 storage 的连接，允许分批迁移。桶绑定的 storage ID 不变；这两种方式都不是跨数据库迁移。原始对象 Copy 先接收完整内容，再按目标去重设置选择来源；旧读取持有的文件在引用释放和保留期结束前不会回收。
 
+本地 raw 的完整匿名 GET 可按 storage profile 交给受信代理。代理只读挂载原始文件，配置前缀对应 `<storage path>/<prefix>/raw/`，后接 `<后两位>/<UUID>`，不得直接导出对象 key 或整个 data 目录。代理打开前发生回收时，必须回退 Mokyu 重新读取逻辑对象；配置与限制见[代理文件交付](local-nginx-deployment.md)。
+
 ## 后台分块
 
 `cdc_enabled=true` 与 `write_processing=background` 同时启用时，普通 PUT 先接收为不可变 raw。后台任务保存接受时的压缩、组包及密钥设置，分批读取原始文件、计算 CDC/BLAKE3 并引用健康旧块；未命中的连续区块在有界内存中直接编码为最终区块包，不先生成独立区块文件。本地 storage 或关闭组包时直接生成独立编码。Multipart 沿用现有流式分块流程，仅未闭合的尾块需要暂存。

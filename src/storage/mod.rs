@@ -78,6 +78,7 @@ pub struct Storage {
     pub source_gate: tokio::sync::RwLock<()>,
     pub(crate) source_reads: sources::Cache,
     read_epoch: std::sync::atomic::AtomicU64,
+    pub(crate) response_cache: std::sync::OnceLock<std::sync::Weak<crate::app::responses::Cache>>,
     physical_pins: Mutex<HashMap<Uuid, std::sync::Weak<AtomicUsize>>>,
     pack_misses: Mutex<HashMap<(Id, bool), std::sync::Weak<PackFetch>>>,
     pack_live: Mutex<HashMap<(Id, bool), std::sync::Weak<LoadedPack>>>,
@@ -445,6 +446,7 @@ impl Storage {
             source_gate: tokio::sync::RwLock::new(()),
             source_reads: sources::Cache::new(),
             read_epoch: 0.into(),
+            response_cache: std::sync::OnceLock::new(),
             physical_pins: Mutex::new(HashMap::new()),
             pack_misses: Mutex::new(HashMap::new()),
             pack_live: Mutex::new(HashMap::new()),
@@ -705,6 +707,22 @@ impl Storage {
     }
     pub async fn refresh_store(&self, storage_id: Uuid) -> Result<()> {
         let _refresh = self.refresh.lock().await;
+        let result = self.refresh_store_inner(storage_id).await;
+        if result.is_err() {
+            let mut targets = self.targets.write().unwrap();
+            if targets
+                .get(&storage_id)
+                .is_some_and(|target| target.profile.file_delivery != "application")
+            {
+                // A failed refresh must not keep exporting the old proxy path.
+                targets.remove(&storage_id);
+                self.invalidate_reads();
+            }
+        }
+        result
+    }
+
+    async fn refresh_store_inner(&self, storage_id: Uuid) -> Result<()> {
         let row = self.record_store.enabled_by_id(storage_id).await?;
         let backend = if let Some(row) = row {
             if let Some(path) = &row.path {
@@ -753,6 +771,14 @@ impl Storage {
             None
         };
         let mut targets = self.targets.write().unwrap();
+        if let Some(cache) = self.response_cache.get().and_then(std::sync::Weak::upgrade) {
+            cache.storage_policy(
+                storage_id,
+                backend
+                    .as_ref()
+                    .is_none_or(|backend| backend.profile.file_delivery != "application"),
+            );
+        }
         if let Some(mut backend) = backend {
             backend.reuse_gates(&mut self.store_gates.lock().unwrap());
             targets.insert(storage_id, Arc::new(backend));

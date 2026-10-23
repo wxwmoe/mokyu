@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0068.
+-- Generated from the complete postgres migration chain through 0069.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1343,7 +1343,11 @@ CREATE TABLE public.storage_profiles (
     read_source_validation text DEFAULT 'strict'::text NOT NULL,
     source_validation_max_age text DEFAULT '5s'::text NOT NULL,
     read_integrity text DEFAULT 'inline'::text NOT NULL,
+    file_delivery text DEFAULT 'application'::text NOT NULL,
+    file_delivery_prefix text,
     CONSTRAINT storage_background_scheduling CHECK ((background_scheduling = ANY (ARRAY['balanced'::text, 'foreground'::text]))),
+    CONSTRAINT storage_delivery_prefix CHECK ((((file_delivery = 'application'::text) AND (file_delivery_prefix IS NULL)) OR ((file_delivery <> 'application'::text) AND (file_delivery_prefix IS NOT NULL)))),
+    CONSTRAINT storage_file_delivery CHECK ((file_delivery = ANY (ARRAY['application'::text, 'x_accel_redirect'::text, 'x_sendfile'::text]))),
     CONSTRAINT storage_profiles_cache_entries_check CHECK (((cache_entries IS NULL) OR (cache_entries > 0))),
     CONSTRAINT storage_profiles_compression_min_savings_bytes_check CHECK ((compression_min_savings_bytes >= 0)),
     CONSTRAINT storage_profiles_compression_min_savings_percent_check CHECK (((compression_min_savings_percent >= 0) AND (compression_min_savings_percent <= 100))),

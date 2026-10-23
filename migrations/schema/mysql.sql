@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0039.
+-- Generated from the complete mysql migration chain through 0040.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -950,9 +950,13 @@ CREATE TABLE `storage_profiles` (
   `read_source_validation` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT 'strict',
   `source_validation_max_age` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT '5s',
   `read_integrity` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT 'inline',
+  `file_delivery` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT 'application',
+  `file_delivery_prefix` varchar(512) COLLATE ascii_bin DEFAULT NULL,
   PRIMARY KEY (`storage_id`),
   CONSTRAINT `storage_profiles_storage` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`) ON DELETE CASCADE,
   CONSTRAINT `storage_background_scheduling` CHECK ((`background_scheduling` in (_ascii'balanced',_ascii'foreground'))),
+  CONSTRAINT `storage_delivery_prefix` CHECK ((((`file_delivery` = _utf8mb4'application') and (`file_delivery_prefix` is null)) or ((`file_delivery` <> _utf8mb4'application') and (`file_delivery_prefix` is not null)))),
+  CONSTRAINT `storage_file_delivery` CHECK ((`file_delivery` in (_utf8mb4'application',_utf8mb4'x_accel_redirect',_utf8mb4'x_sendfile'))),
   CONSTRAINT `storage_profiles_cache_entries` CHECK (((`cache_entries` is null) or (`cache_entries` > 0))),
   CONSTRAINT `storage_profiles_compression_bytes` CHECK ((`compression_min_savings_bytes` >= 0)),
   CONSTRAINT `storage_profiles_compression_percent` CHECK ((`compression_min_savings_percent` between 0 and 100)),
@@ -970,7 +974,7 @@ CREATE TABLE `storage_profiles` (
   CONSTRAINT `storage_profiles_revision` CHECK ((`revision` > 0)),
   CONSTRAINT `storage_profiles_upload` CHECK (((`upload_concurrency` is null) or (`upload_concurrency` > 0))),
   CONSTRAINT `storage_public_cache_validation` CHECK ((`public_cache_validation` in (_ascii'strict',_ascii'background'))),
-  CONSTRAINT `storage_read_integrity` CHECK ((`read_integrity` in (_utf8mb4'inline',_utf8mb4'background',_utf8mb4'off'))),
+  CONSTRAINT `storage_read_integrity` CHECK ((`read_integrity` in (_ascii'inline',_ascii'background',_ascii'off'))),
   CONSTRAINT `storage_source_validation` CHECK ((`read_source_validation` in (_ascii'strict',_ascii'background'))),
   CONSTRAINT `storage_upload_overflow_check` CHECK ((`upload_cache_overflow` in (_ascii'fallback',_ascii'reject'))),
   CONSTRAINT `storage_write_durability` CHECK ((`write_durability` in (_ascii'durable',_ascii'buffered',_ascii'volatile')))

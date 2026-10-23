@@ -1,4 +1,12 @@
 export default {
+  profile_file_delivery: "ファイル配信",
+  profile_file_delivery_prefix: "プロキシディレクトリ接頭辞",
+  storeDelivery_application: "アプリのストリーム",
+  storeDelivery_x_accel_redirect: "Nginx X-Accel-Redirect",
+  storeDelivery_x_sendfile: "X-Sendfile",
+  storeDeliveryHint: "プロキシ配信はこのストレージの本文キャッシュを無効にします、信頼できるプロキシが必要で、HEAD、Range、署名付き読み取り、応答前の検証はアプリで処理します",
+  storeDeliveryPrefixHint: "raw ディレクトリのみを共有します、接頭辞はプロキシ内部 URI または絶対ディレクトリで、バケットやオブジェクトのパスを含みません",
+
   storeIoPolicy: '読み書きポリシー',
   storeIoPolicyHint: 'このバックエンドの読み書き方法を選択、プリセットは以下のポリシー項目のみを変更',
   storeIoPreset: 'ポリシープリセット',

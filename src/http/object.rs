@@ -215,7 +215,9 @@ pub(crate) async fn read(
     let accept = AcceptEncoding::new(request);
     let light = head || conditional(request);
     let public_snapshot = crate::app::reads::cached(bucket, key);
-    let candidate = if public_snapshot.is_none()
+    let cache_allowed = super::delivery::body_cache(app, bucket, key, bucket_info.storage_id);
+    let candidate = if cache_allowed
+        && public_snapshot.is_none()
         && !light
         && !checksum
         && cacheable(request)
@@ -356,7 +358,28 @@ pub(crate) async fn read(
             encoding: encoding.name(),
             policy: POLICY,
         };
-        let use_cache = !checksum
+        if super::delivery::prepare(
+            app,
+            &stream,
+            &metadata,
+            request,
+            head,
+            checksum,
+            &mut headers,
+        )
+        .await?
+        {
+            return Ok(Read {
+                status: StatusCode::OK,
+                headers,
+                body: None,
+                metadata,
+                checksums: stream.checksums,
+                partial: false,
+            });
+        }
+        let use_cache = cache_allowed
+            && !checksum
             && original_cacheable
             && cacheable(request)
             && cacheable(&headers)
@@ -384,7 +407,7 @@ pub(crate) async fn read(
                             return Err(error);
                         }
                     };
-                    valid = mapping == Some(entry.mapping);
+                    valid = mapping.map(|mapping| mapping.0) == Some(entry.mapping);
                 }
                 if valid {
                     let bytes = if encoding == Encoding::Identity {
@@ -535,7 +558,9 @@ pub(crate) async fn identity_body(
         encoding: "identity",
         policy: POLICY,
     };
-    let cache = cache && app.response_cache.eligible(&stream);
+    let cache = cache
+        && super::delivery::body_cache(app, stream.bucket_id, &stream.object_key, None)
+        && app.response_cache.eligible(&stream);
     if cache && let Some(entry) = app.response_cache.lookup(key).await {
         let mapping = match app.response_mapping(&stream).await {
             Ok(mapping) => mapping,
@@ -547,7 +572,7 @@ pub(crate) async fn identity_body(
         if entry.usable(app.storage.read_epoch())
             && entry.raw_size == stream.size
             && entry.etag == stream.etag
-            && mapping == Some(entry.mapping)
+            && mapping.map(|mapping| mapping.0) == Some(entry.mapping)
         {
             app.response_cache.hit();
             if crate::app::reads::is_raw(stream.bucket_id, &stream.object_key) {

@@ -97,6 +97,22 @@ pub(crate) fn cached(bucket: Uuid, key: &str) -> Option<(StoredStream, Option<[u
         .flatten()
 }
 
+pub(crate) fn storage(bucket: Uuid, key: &str) -> Option<Uuid> {
+    REQUEST
+        .try_with(|prepared| {
+            let read = prepared
+                .as_ref()
+                .filter(|read| read.snapshot.bucket.id == bucket && read.key == key)?;
+            read.snapshot
+                .raw
+                .as_ref()
+                .map(|row| row.source.storage_id)
+                .or(read.snapshot.bucket.storage_id)
+        })
+        .ok()
+        .flatten()
+}
+
 pub(crate) fn is_raw(bucket: Uuid, key: &str) -> bool {
     REQUEST
         .try_with(|prepared| {

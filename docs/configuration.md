@@ -119,6 +119,7 @@ runtime section 使用 revision 乐观并发。冲突返回当前 revision；重
 
 profile 是类型化字段，不是任意 JSON。字段包括：
 
+- `file_delivery` 默认 `application`；仅 local 可选 `x_accel_redirect` / `x_sendfile`，同时必须提供 `file_delivery_prefix`。前缀是代理内部 URI 或所见绝对目录，规范化为尾部 `/`，仅接受 3–512 字节的安全 ASCII 路径，拒绝根目录、点段、重复斜杠、编码字符及查询串。application 的前缀必须为 null；S3 不接受代理交付。开启后该存储不使用正文读缓存，回退请求仍流式读取，其他存储的缓存不受影响；预设不改变交付配置。条件、响应头、只读挂载与回收回退见[代理文件交付](local-nginx-deployment.md)
 - `deduplication_enabled` 默认 false，仅控制 raw 的整文件去重；chunks 固定启用区块去重。更改仅影响新写入；关闭不会拆开已有共享文件；
 - `write_durability` 仅单容器可选，默认 `durable`；`buffered` 允许 local chunks/raw 和 S3 chunks/raw 写缓存完整写入文件后响应，再由后台同步文件及目录；`volatile` 仅允许开启写缓存的 S3，接收完整内容到有界 RAM 后可响应，额度为零或不足时回退到 buffered 文件。buffered 在断电或系统崩溃时、volatile 在进程结束前尚未排空时，都可能丢失最近已确认的数据。Multipart 分片、复制、迁移和显式排空仍要求持久来源；无写缓存的 S3 请求及缓存满额 fallback 等待最终 S3 完成。重启核验未同步文件并隔离丢失的 RAM 来源，不返回旧对象代替已确认的新版本；这与 SQLite 的数据库同步策略分别生效。
 - `public_cache_validation` 默认 `strict`，公开 Web 与匿名 S3 读取逐请求验证权限；设为 `background` 后可复用已验证的公开元数据，完整正文命中无需前台数据库查询。签名请求仍实时鉴权，条件请求、`Cache-Control: no-cache`、`Pragma: no-cache` 与校验和读取绕过权限快照。

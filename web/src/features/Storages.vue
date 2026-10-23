@@ -46,12 +46,13 @@ const profileFields: ProfileField[] = [
 const ioFields: ProfileField[] = [
   { key: 'public_cache_validation', valueType: 'text' }, { key: 'public_cache_refresh_interval', valueType: 'text' }, { key: 'public_cache_max_age', valueType: 'text' },
   { key: 'read_source_validation', valueType: 'text' }, { key: 'source_validation_max_age', valueType: 'text' }, { key: 'read_integrity', valueType: 'text' },
+  { key: 'file_delivery', valueType: 'text' }, { key: 'file_delivery_prefix', valueType: 'text' },
   { key: 'write_processing', valueType: 'text' }, { key: 'write_durability', valueType: 'text' }, { key: 'upload_cache', valueType: 'boolean' }, { key: 'upload_cache_overflow', valueType: 'text' },
   { key: 'write_flush_interval', valueType: 'text' }, { key: 'write_backlog_max_age', valueType: 'text' }, { key: 'background_scheduling', valueType: 'text' },
 ]
 const ioKeys = new Set(ioFields.map(field => field.key))
 const profileGroups = computed(() => [
-  { title: 'storeGroupIo', fields: ioFields.filter(field => field.key !== 'write_durability' || single.value) },
+  { title: 'storeGroupIo', fields: ioFields.filter(field => (field.key !== 'write_durability' || single.value) && (!field.key.startsWith('file_delivery') || draft.type === 'local') && (field.key !== 'file_delivery_prefix' || profileDraft.value?.file_delivery !== 'application')) },
   { title: 'storeGroupLifecycle', fields: profileFields.slice(0, 11) },
   { title: 'storeGroupCache', fields: profileFields.slice(11, 23).filter(field => !ioKeys.has(field.key)) },
   { title: 'storeGroupPacking', fields: profileFields.slice(23, 41) },
@@ -68,7 +69,7 @@ function profileDefaults(type: string): Record<ProfileKey, string | number | boo
   const s3 = type !== 'local'
   return {
     cdc_enabled: true, deduplication_enabled: false, write_processing: 'inline', write_durability: status.data.value?.deployment_mode === 'single' ? 'durable' : null,
-    public_cache_validation: 'strict', public_cache_refresh_interval: '1s', public_cache_max_age: '5s', read_source_validation: 'strict', source_validation_max_age: '5s', read_integrity: 'inline',
+    public_cache_validation: 'strict', public_cache_refresh_interval: '1s', public_cache_max_age: '5s', read_source_validation: 'strict', source_validation_max_age: '5s', read_integrity: 'inline', file_delivery: 'application', file_delivery_prefix: null,
     write_flush_interval: '0s', write_backlog_max_age: '300s', background_scheduling: 'balanced',
     connect_timeout: '5s', request_timeout: '30s', max_retries: 3, retry_timeout: '120s', priority_aging: '30s',
     min_storage_duration: '0s', unreferenced_grace: '48h', deleted_chunk_retention: '7d', upload_retention: '24h', multipart_idle_timeout: '24h', min_free_space: s3 ? null : '1GiB', cache_enabled: s3,
@@ -115,6 +116,7 @@ watch(() => draft.type, value => {
   if (!editing.value) profileDraft.value = profileDefaults(value)
   else {
     profileDraft.value.min_free_space = value === 'local' ? profileDraft.value.min_free_space || '1GiB' : null
+    if (value !== 'local') Object.assign(profileDraft.value, { file_delivery: 'application', file_delivery_prefix: null })
     if (value === 'local') Object.assign(profileDraft.value, { write_durability: profileDraft.value.write_durability === 'volatile' ? 'durable' : profileDraft.value.write_durability, cache_enabled: false, upload_cache: false, pack_enabled: false, pack_range_enabled: false })
   }
 })
@@ -134,6 +136,11 @@ function profileInput(field: ProfileField, event: Event) {
   if (!profileDraft.value) return
   const target = event.target as HTMLInputElement
   profileDraft.value[field.key] = field.valueType === 'boolean' ? target.checked : field.valueType === 'number' ? (target.value ? Number(target.value) : null) : target.value
+}
+function setDelivery(value: string) {
+  if (!profileDraft.value) return
+  profileDraft.value.file_delivery = value
+  profileDraft.value.file_delivery_prefix = value === 'application' ? null : ''
 }
 function setProfileBoolean(key: ProfileKey, value: boolean) {
   if (!profileDraft.value) return
@@ -220,6 +227,8 @@ async function toggle(row: Storage) {
             <div class="profile-fields">
               <div v-for="field in group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local')" :key="field.key" :class="field.valueType === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
                 <template v-if="field.valueType === 'boolean'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="Boolean(profileDraft[field.key])" :aria-label="profileLabel(field.key)" :label="profileDisabled(field.key) ? t('storeOptionUnused') : t(Boolean(profileDraft[field.key]) ? 'enabled' : 'disabled')" :disabled="busy || profileDisabled(field.key)" @update:model-value="setProfileBoolean(field.key, $event)" /></template>
+                <label v-else-if="field.key === 'file_delivery'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.file_delivery)" :options="['application', 'x_accel_redirect', 'x_sendfile'].map(value => ({ value, label: t('storeDelivery_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="setDelivery" /><small class="field-help">{{ t('storeDeliveryHint') }}</small></label>
+                <label v-else-if="field.key === 'file_delivery_prefix'"><span>{{ profileLabel(field.key) }}</span><input :aria-label="profileLabel(field.key)" :value="profileDraft.file_delivery_prefix ?? ''" :placeholder="profileDraft.file_delivery === 'x_accel_redirect' ? '/_mokyu_raw/' : '/srv/mokyu/raw/'" :disabled="busy" @input="profileInput(field, $event)"><small class="field-help">{{ t('storeDeliveryPrefixHint') }}</small></label>
                 <label v-else-if="field.key === 'write_processing'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.write_processing)" :options="['inline', 'background'].map(value => ({ value, label: t('storeProcessing_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft.write_processing = $event" /><small class="field-help">{{ t('storeProcessingHint') }}</small></label>
                 <label v-else-if="field.key === 'write_durability'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.write_durability ?? 'durable')" :options="durabilityOptions" :label="profileLabel(field.key)" :disabled="busy" aria-describedby="storage-durability-hint" @update:model-value="profileDraft.write_durability = $event" /><small id="storage-durability-hint" class="field-help">{{ t(profileDraft.write_durability === 'volatile' ? 'storeMemoryHint' : 'storeDurabilityHint') }}</small></label>
                 <label v-else-if="field.key === 'upload_cache_overflow'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.upload_cache_overflow)" :options="['fallback', 'reject'].map(value => ({ value, label: t('storeOverflow_' + value) }))" :label="profileLabel(field.key)" :disabled="busy || profileDisabled(field.key)" aria-describedby="storage-upload-overflow-hint" @update:model-value="profileDraft.upload_cache_overflow = $event" /><small id="storage-upload-overflow-hint" class="field-help">{{ t('storeOverflowHint') }}</small></label>

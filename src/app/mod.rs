@@ -230,6 +230,7 @@ pub struct App {
     pub compression_observations: Arc<compression::Observations>,
     pub(crate) credential_activity: Arc<credential_activity::Activity>,
     pub response_cache: Arc<responses::Cache>,
+    pub(crate) file_delivery: crate::http::delivery::Counters,
     pub(crate) read_checks: Arc<checks::Checks>,
     pub(crate) cors_cache: crate::http::cors::Cache,
     pub(crate) public_reads: Arc<public_reads::Cache>,
@@ -353,6 +354,10 @@ impl App {
         let (compression_observations, compression_receiver) = compression::Observations::new();
         let (credential_activity, credential_receiver) = credential_activity::Activity::new();
         let response_cache = responses::Cache::new(budget.response_cache_bytes);
+        let _ = storage.response_cache.set(Arc::downgrade(&response_cache));
+        for id in storage.storage_ids() {
+            response_cache.storage_policy(id, storage.profile(id)?.file_delivery != "application");
+        }
         let read_checks = checks::Checks::new(storage.clone());
         let (public_reads, public_receiver) = public_reads::Cache::new();
         let app = Arc::new(Self {
@@ -402,6 +407,7 @@ impl App {
             compression_observations,
             credential_activity,
             response_cache,
+            file_delivery: Default::default(),
             read_checks,
             public_reads,
             cors_cache: crate::http::cors::Cache::new(crate::http::cors::CACHE_BYTES),
@@ -604,6 +610,7 @@ impl App {
         status["http_compression"] = self.compression_observations.snapshot();
         status["credential_activity"] = self.credential_activity.snapshot();
         status["response_cache"] = self.response_cache.snapshot();
+        status["file_delivery"] = self.file_delivery.snapshot();
         status["read_checks"] = self.read_checks.snapshot();
         status["cors_cache"] = self.cors_cache.snapshot();
         status["public_read_cache"] = self.public_reads.snapshot();

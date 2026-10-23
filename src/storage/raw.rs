@@ -415,6 +415,21 @@ impl Storage {
         Ok(RawWriter::Local(writer))
     }
 
+    pub(crate) async fn check_delivery_directory(&self, source: &RawSource) -> Result<()> {
+        let target = self.store_backend(source.storage_id)?;
+        ensure!(target.is_local, "file delivery requires local storage");
+        let root = target
+            .raw_root
+            .as_ref()
+            .context("raw local path is missing")?;
+        let parent = path(root, source.location_id).parent().unwrap().to_owned();
+        ensure!(
+            tokio::fs::symlink_metadata(parent).await?.is_dir(),
+            IntegrityError::RawMetadata
+        );
+        Ok(())
+    }
+
     pub(crate) async fn raw_reader(
         self: &Arc<Self>,
         source: &RawSource,

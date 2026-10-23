@@ -51,6 +51,8 @@ def main():
     if not cluster:
         start()
     try:
+        if proxy := os.environ.get('MOKYU_TEST_PROXY_ENDPOINT'):
+            os.environ['MOKYU_TEST_ENDPOINT'] = proxy
         fixture, database = Fixture(), Database()
         config = fixture.client.meta.config.merge(Config(retries={'total_max_attempts': 1}, read_timeout=30))
         def client(endpoint):
@@ -88,7 +90,8 @@ def main():
         started = time.monotonic()
         response = request(args)
         assert response.status_code == 200 and response.headers['Cache-Control'] == 'no-store'
-        assert response.headers['X-Accel-Buffering'] == 'no' and 'Retry-After' not in response.headers
+        assert response.headers.get('X-Accel-Buffering') == ('no' if not proxy else None)
+        assert 'Retry-After' not in response.headers
         wait(marker.with_suffix('.hit').exists, 'completion did not start')
         original = state(args)
         assert original['state'] == 'completing'

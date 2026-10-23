@@ -42,7 +42,7 @@ impl super::App {
                     return Ok(());
                 }
                 if let Some(mapping) = app.response_mapping(&stream).await? {
-                    received.publish(&app.response_cache, &stream, mapping);
+                    received.publish(&app.response_cache, &stream, mapping.0, mapping.1);
                 }
                 Ok(())
             };
@@ -54,7 +54,7 @@ impl super::App {
     pub(crate) async fn response_mapping(
         &self,
         stream: &StoredStream,
-    ) -> anyhow::Result<Option<[u8; 32]>> {
+    ) -> anyhow::Result<Option<([u8; 32], Vec<Uuid>)>> {
         let mut mapping = Mapping::new(stream.size);
         if stream.payload_type == "raw" {
             let rows = if let Some(row) = super::reads::raw(stream.id, stream.payload_revision) {
@@ -74,7 +74,9 @@ impl super::App {
                 mapping.record(&row);
             }
         }
-        Ok(mapping.signature())
+        Ok(mapping
+            .signature()
+            .map(|signature| (signature, mapping.storages)))
     }
 }
 
@@ -106,6 +108,7 @@ pub(crate) struct Entry {
     pub raw_size: i64,
     pub etag: String,
     pub mapping: [u8; 32],
+    storages: Vec<Uuid>,
     path: [u8; 32],
     ownership: Arc<Ownership>,
     checks: Vec<Arc<super::checks::Evidence>>,
@@ -155,6 +158,8 @@ impl Drop for Allocation {
 #[derive(Default)]
 struct Index {
     ready: HashMap<Key, Arc<Entry>>,
+    blocked: HashSet<Uuid>,
+    generation: u64,
     fifo: VecDeque<Key>,
     seen: HashSet<Key>,
     history: VecDeque<Key>,
@@ -209,6 +214,30 @@ impl Cache {
         })
     }
 
+    pub(crate) fn storage_policy(&self, storage: Uuid, blocked: bool) {
+        let mut index = self.index.lock().unwrap();
+        let changed = if blocked {
+            index.blocked.insert(storage)
+        } else {
+            index.blocked.remove(&storage)
+        };
+        if !changed {
+            return;
+        }
+        index.generation = index.generation.wrapping_add(1);
+        let retired: Vec<_> = index
+            .ready
+            .iter()
+            .filter(|(_, entry)| entry.storages.contains(&storage))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in retired {
+            index.remove(key);
+        }
+        let ready: HashSet<_> = index.ready.keys().copied().collect();
+        index.fifo.retain(|key| ready.contains(key));
+    }
+
     pub fn eligible(&self, stream: &StoredStream) -> bool {
         self.eligible_size(stream.size)
     }
@@ -226,6 +255,7 @@ impl Cache {
         let slot = self.uploads.clone().try_acquire_owned().ok()?;
         let (memory, building) = self.reserve(size as usize)?;
         Some(Upload {
+            generation: self.index.lock().unwrap().generation,
             bytes: Vec::with_capacity(size as usize),
             size: size as usize,
             memory,
@@ -338,6 +368,7 @@ impl Cache {
         let signal = Arc::new(Notify::new());
         index.builders.insert(key, signal.clone());
         Some(Builder {
+            generation: index.generation,
             cache: Arc::downgrade(self),
             key,
             path: path_key(key.bucket, path),
@@ -363,6 +394,7 @@ struct Buffer {
 }
 
 pub(crate) struct Upload {
+    generation: u64,
     bytes: Vec<u8>,
     size: usize,
     memory: OwnedSemaphorePermit,
@@ -371,6 +403,7 @@ pub(crate) struct Upload {
 }
 
 pub(crate) struct Received {
+    generation: u64,
     pub bytes: Bytes,
     ownership: Arc<Ownership>,
     _building: OwnedSemaphorePermit,
@@ -398,6 +431,7 @@ impl Upload {
             charge: self.memory.num_permits() as u64 * UNIT as u64,
         });
         Ok(Received {
+            generation: self.generation,
             bytes: Bytes::from_owner(Allocation {
                 bytes: self.bytes,
                 _memory: self.memory,
@@ -411,7 +445,7 @@ impl Upload {
 }
 
 impl Received {
-    fn publish(self, cache: &Cache, stream: &StoredStream, mapping: [u8; 32]) {
+    fn publish(self, cache: &Cache, stream: &StoredStream, mapping: [u8; 32], storages: Vec<Uuid>) {
         let key = Key {
             bucket: stream.bucket_id,
             stream: stream.id,
@@ -420,7 +454,11 @@ impl Received {
         };
         let path = path_key(stream.bucket_id, &stream.object_key);
         let mut index = cache.index.lock().unwrap();
-        if index.ready.contains_key(&key) || index.builders.contains_key(&key) {
+        if index.generation != self.generation
+            || storages.iter().any(|id| index.blocked.contains(id))
+            || index.ready.contains_key(&key)
+            || index.builders.contains_key(&key)
+        {
             return;
         }
         while index.ready.len() >= ENTRIES {
@@ -434,6 +472,7 @@ impl Received {
                 bytes: self.bytes,
                 etag: stream.etag.clone(),
                 mapping,
+                storages,
                 path,
                 ownership: self.ownership,
                 checks: Vec::new(),
@@ -445,6 +484,7 @@ impl Received {
 }
 
 pub(crate) struct Builder {
+    generation: u64,
     cache: Weak<Cache>,
     key: Key,
     path: [u8; 32],
@@ -468,8 +508,15 @@ impl Builder {
         let Some(cache) = self.cache.upgrade() else {
             return false;
         };
-        if !self.capture.lock().unwrap().valid {
-            return false;
+        {
+            let capture = self.capture.lock().unwrap();
+            let index = cache.index.lock().unwrap();
+            if !capture.valid
+                || index.generation != self.generation
+                || capture.storages.iter().any(|id| index.blocked.contains(id))
+            {
+                return false;
+            }
         }
         let size = self.len().saturating_add(bytes.len());
         if size > cache.entry_limit {
@@ -514,7 +561,7 @@ impl Builder {
         let Some(cache) = self.cache.upgrade() else {
             return;
         };
-        let (mapping, checks, read_epoch) = {
+        let (mapping, checks, read_epoch, storages) = {
             let capture = self.capture.lock().unwrap();
             let Some(mapping) = capture.signature() else {
                 return;
@@ -531,6 +578,7 @@ impl Builder {
                     .cloned()
                     .collect(),
                 capture.read_epoch,
+                capture.storages.clone(),
             )
         };
         let Some(buffer) = self.buffer.take() else {
@@ -550,17 +598,23 @@ impl Builder {
             ownership: ownership.clone(),
         });
         drop(buffer._building);
+        let mut index = cache.index.lock().unwrap();
+        if index.generation != self.generation
+            || storages.iter().any(|id| index.blocked.contains(id))
+        {
+            return;
+        }
         let entry = Arc::new(Entry {
             bytes,
             raw_size: self.raw_size,
             etag: std::mem::take(&mut self.etag),
             mapping,
+            storages,
             checks,
             read_epoch,
             path: self.path,
             ownership,
         });
-        let mut index = cache.index.lock().unwrap();
         while index.ready.len() >= ENTRIES {
             Cache::evict(&mut index);
         }
@@ -588,6 +642,7 @@ impl Drop for Builder {
 
 pub(crate) struct Mapping {
     hash: blake3::Hasher,
+    storages: Vec<Uuid>,
     size: i64,
     position: i64,
     count: usize,
@@ -600,6 +655,7 @@ impl Mapping {
     pub fn new(size: i64) -> Self {
         Self {
             hash: blake3::Hasher::new(),
+            storages: Vec::new(),
             size,
             position: 0,
             count: 0,
@@ -640,6 +696,7 @@ impl Mapping {
         if !self.valid {
             return;
         }
+        self.storages.push(row.source.storage_id);
         self.hash.update(b"raw");
         self.hash.update(row.source.location_id.as_bytes());
         self.hash.update(row.source.storage_id.as_bytes());
@@ -651,6 +708,15 @@ impl Mapping {
         self.count = 1;
     }
     pub fn record(&mut self, row: &ReadExtent) {
+        if let Some(id) = row.chunk.storage_id
+            && !self.storages.contains(&id)
+        {
+            if self.storages.len() == 8 {
+                self.valid = false;
+                return;
+            }
+            self.storages.push(id);
+        }
         if row.extent.chunk_id != Some(row.chunk.id) || row.chunk.state != "ready" {
             self.valid = false;
         }
@@ -737,6 +803,51 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn proxy_delivery_retires_only_its_storage_and_fences_late_admission() {
+        let cache = Cache::new(4 * 1024 * 1024);
+        let storage = Uuid::new_v4();
+        let (mut stream, key, mut row) = fixture(8192);
+        row.chunk.storage_id = Some(storage);
+        assert!(cache.begin(key, &stream, &stream.object_key).is_none());
+        let mut builder = cache.begin(key, &stream, &stream.object_key).unwrap();
+        builder.capture.lock().unwrap().record(&row);
+        builder.capture.lock().unwrap().finish_source();
+        assert!(builder.append(&vec![1; 8192]));
+        builder.finish();
+        let mut upload = cache
+            .receive(key.bucket, &stream.object_key, Some(8192))
+            .unwrap();
+        upload.append(&vec![2; 8192]).unwrap();
+        let received = upload.finish(&cache).unwrap();
+        let (other, other_key, other_row) = fixture(8192);
+        assert!(cache.begin(other_key, &other, &other.object_key).is_none());
+        let mut other_builder = cache.begin(other_key, &other, &other.object_key).unwrap();
+        other_builder.capture.lock().unwrap().record(&other_row);
+        other_builder.capture.lock().unwrap().finish_source();
+        assert!(other_builder.append(&vec![3; 8192]));
+        other_builder.finish();
+        let (late, late_key, _) = fixture(8192);
+        assert!(cache.begin(late_key, &late, &late.object_key).is_none());
+        let mut late_builder = cache.begin(late_key, &late, &late.object_key).unwrap();
+        late_builder.capture.lock().unwrap().record(&row);
+        cache.storage_policy(storage, true);
+        assert!(cache.get(key).is_none());
+        assert!(cache.get(other_key).is_some());
+        assert!(!late_builder.append(&vec![4; 8192]));
+        cache.storage_policy(storage, false);
+        stream.id = Uuid::new_v4().into();
+        received.publish(&cache, &stream, [1; 32], vec![storage]);
+        assert!(
+            cache
+                .get(Key {
+                    stream: stream.id,
+                    ..key
+                })
+                .is_none()
+        );
+    }
+
+    #[test]
     fn upload_admission_reuses_the_received_allocation_and_releases_failed_candidates() {
         let cache = Cache::new(4 * 1024 * 1024);
         let (mut stream, key, row) = fixture(8192);
@@ -781,7 +892,7 @@ mod tests {
         let received = upload.finish(&cache).unwrap();
         assert_eq!(received.bytes.as_ptr(), pointer);
         stream.id = Uuid::new_v4().into();
-        received.publish(&cache, &stream, [7; 32]);
+        received.publish(&cache, &stream, [7; 32], Vec::new());
         let next = Key {
             stream: stream.id,
             ..key

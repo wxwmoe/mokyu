@@ -104,6 +104,8 @@ S3 客户端使用网关 endpoint、逻辑桶和生成的凭据，签名 region 
 
 示例禁用 nginx gzip，并将 `Accept-Encoding` 传给 Mokyu；`Content-Encoding`、`Vary`、`ETag` 和 `Cache-Control` 随响应透传。额外安装的 Brotli、Zstandard 或 gunzip 过滤器也应在这些入口关闭，避免二次转换。TLS、HTTP/2 和 HTTP/3 仍由反向代理终止。
 
+本地 raw 的匿名 S3/Web GET 可交给 Nginx 或 Apache 读取只读目录，完整初始化和回退配置见[SQLite 与本地代理交付](local-nginx-deployment.md)。通用 Nginx 示例中的 `mokyu_control` 还提供可选的有界面板资源缓存，只缓存哈希资源的公开 immutable 成功响应；启用时取消两个标记块的注释并准备可写缓存目录。页面、管理 API、固定文件名和缺失资源不缓存，压缩变体继续按 Vary 区分。
+
 ## 日常维护
 
 ```sh
