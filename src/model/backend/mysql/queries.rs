@@ -2844,13 +2844,13 @@ pub(super) fn claim_task_candidate(
     active: &[Uuid],
     draining: bool,
 ) -> sqlx::QueryBuilder<MySql> {
-    // An ordered index scan keeps SKIP LOCKED from locking a filesort's entire input.
+    // Keep the state prefix: retries span states and a filesort locks every candidate.
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT t.id FROM tasks t FORCE INDEX(tasks_work) WHERE (t.state='queued' OR (t.state='failed' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='cdc' AND t.updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6)))) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=",
+        "SELECT t.id FROM tasks t FORCE INDEX(tasks_work) WHERE (t.state='queued' OR (t.state='failed' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation')) AS BINARY)='cdc' AND t.updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6)))) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=",
     );
     query.push_bind(class);
     if draining {
-        query.push(" AND t.task_type IN ('upload','cache_flush') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation')),'')<>'cdc'");
+        query.push(" AND t.task_type IN ('upload','cache_flush') AND COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation')) AS BINARY),'')<>'cdc'");
     }
     if !active.is_empty() {
         query.push(" AND t.id NOT IN (");
@@ -2860,11 +2860,11 @@ pub(super) fn claim_task_candidate(
         }
         query.push(")");
     }
-    query.push(" AND NOT EXISTS(SELECT 1 FROM mokyu_meta m WHERE (m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','storage_migration','rewrite','usage')) OR EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.policy')) AS BINARY) ELSE CAST(t.task_type AS BINARY) END AND IF(c.policy='gc',m.gc_paused,c.paused)) OR (t.task_type='pack' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.policy')) AS BINARY) IN ('pack','repack') AND m.pack_creation_paused)) ORDER BY t.updated_at,t.id LIMIT 1 FOR UPDATE SKIP LOCKED");
+    query.push(" AND NOT EXISTS(SELECT 1 FROM mokyu_meta m WHERE (m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','storage_migration','rewrite','usage')) OR EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.policy')) AS BINARY) ELSE CAST(t.task_type AS BINARY) END AND IF(c.policy='gc',m.gc_paused,c.paused)) OR (t.task_type='pack' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.policy')) AS BINARY) IN ('pack','repack') AND m.pack_creation_paused)) ORDER BY t.state,t.updated_at,t.id LIMIT 1 FOR UPDATE SKIP LOCKED");
     query
 }
 pub(super) fn claim_task(id: Uuid, token: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP(6)),execution_token=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND (state='queued' OR (state='failed' AND JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation'))='cdc' AND updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6))))").bind(token).bind(id)
+    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP(6)),execution_token=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND (state='queued' OR (state='failed' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation')) AS BINARY)='cdc' AND updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6))))").bind(token).bind(id)
 }
 pub(super) fn task_record(id: Uuid) -> Rows<'static, TaskRecord> {
     sqlx::query_as("SELECT task_type,state,bucket_id,progress_cursor,detail,execution_token FROM tasks WHERE id=?").bind(id)
@@ -3008,7 +3008,7 @@ pub(super) fn task_page(
         query
             .push(" AND (b.storage_id=")
             .push_bind(storage)
-            .push(" OR JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.storage_id'))=")
+            .push(" OR CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.storage_id')) AS BINARY)=")
             .push_bind(storage.to_string())
             .push(" OR JSON_CONTAINS(t.detail,")
             .push_bind(serde_json::json!([{"storage_id":storage}]))
@@ -3045,15 +3045,15 @@ pub(super) fn task_view(id: Uuid) -> sqlx::QueryBuilder<MySql> {
 #[async_trait::async_trait]
 impl TaskControlStore for Backend {
     async fn unpack_status(&self, pack: Id) -> Result<Option<Value>> {
-        sqlx::query("SELECT * FROM tasks WHERE task_type='unpack' AND JSON_UNQUOTE(JSON_EXTRACT(detail,'$.pack_id'))=? ORDER BY created_at DESC,id DESC LIMIT 1")
+        sqlx::query("SELECT * FROM tasks WHERE task_type='unpack' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.pack_id')) AS BINARY)=? ORDER BY created_at DESC,id DESC LIMIT 1")
             .bind(pack.to_string()).fetch_optional(&self.pool).await?.map(|row| task_value(row,false)).transpose()
     }
     async fn rewrite_status(&self, storage: Uuid) -> Result<Option<Value>> {
-        sqlx::query("SELECT * FROM tasks WHERE task_type='rewrite' AND JSON_UNQUOTE(JSON_EXTRACT(detail,'$.storage_id'))=? ORDER BY created_at DESC,id DESC LIMIT 1")
+        sqlx::query("SELECT * FROM tasks WHERE task_type='rewrite' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.storage_id')) AS BINARY)=? ORDER BY created_at DESC,id DESC LIMIT 1")
             .bind(storage.to_string()).fetch_optional(&self.pool).await?.map(|row| task_value(row,false)).transpose()
     }
     async fn rewrite_task(&self, storage: Uuid) -> Result<Option<Uuid>> {
-        Ok(sqlx::query_scalar("SELECT id FROM tasks WHERE task_type='rewrite' AND JSON_UNQUOTE(JSON_EXTRACT(detail,'$.storage_id'))=? ORDER BY created_at DESC,id DESC LIMIT 1")
+        Ok(sqlx::query_scalar("SELECT id FROM tasks WHERE task_type='rewrite' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.storage_id')) AS BINARY)=? ORDER BY created_at DESC,id DESC LIMIT 1")
             .bind(storage.to_string()).fetch_optional(&self.pool).await?)
     }
     async fn page(

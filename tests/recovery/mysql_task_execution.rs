@@ -67,6 +67,13 @@ async fn mysql_task_execution_contract() -> Result<()> {
     backend.complete(Execution { id: flush, token }).await?;
     let task = claimed(&backend, upload, 2).await?;
     backend.complete(task).await?;
+    sqlx::query("UPDATE tasks SET state='failed',updated_at=TIMESTAMPADD(SECOND,-31,CURRENT_TIMESTAMP(6)) WHERE id=?")
+        .bind(upload).execute(db).await?;
+    let mut request = claim(2, Uuid::new_v4());
+    request.draining = true;
+    assert!(backend.claim(request).await?.is_none());
+    let task = claimed(&backend, upload, 2).await?;
+    backend.complete(task).await?;
     let first = TaskControlStore::enqueue(&backend, "integrity", None, json!({})).await?;
     let tokens = [Uuid::new_v4(), Uuid::new_v4()];
     let (a, b) = tokio::join!(

@@ -43,34 +43,41 @@ async fn mysql_dialect_and_lock_scope_contract() -> Result<()> {
         .await?;
     assert_eq!(saved["last_rewrite"], detail);
 
-    let mut a = db.begin().await?;
-    let locked: Uuid = queries::claim_task_candidate(0, &[], false)
-        .build_query_scalar()
-        .fetch_one(&mut *a)
-        .await?;
-    let mut b = db.begin().await?;
-    let other: Uuid = tokio::time::timeout(
-        Duration::from_secs(2),
-        queries::claim_task_candidate(0, &[], false)
+    assert_ne!(first, second);
+    for class in [0, 2] {
+        if class == 2 {
+            sqlx::query("UPDATE tasks SET task_type='upload',detail=?,state=IF(id=?,'failed','queued'),updated_at=TIMESTAMPADD(SECOND,-31,CURRENT_TIMESTAMP(6)) WHERE id IN (?,?)")
+                .bind(json!({"operation":"cdc"})).bind(first).bind(first).bind(second).execute(db).await?;
+        }
+        let mut a = db.begin().await?;
+        let locked: Uuid = queries::claim_task_candidate(class, &[], false)
             .build_query_scalar()
-            .fetch_one(&mut *b),
-    )
-    .await??;
-    assert_ne!(locked, other);
-    assert!([first, second].contains(&locked) && [first, second].contains(&other));
-    // Claiming tasks must not lock the global maintenance or policy rows.
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let mut metadata = db.begin().await?;
-        sqlx::query("SELECT id FROM mokyu_meta FOR UPDATE")
-            .execute(&mut *metadata)
+            .fetch_one(&mut *a)
             .await?;
-        sqlx::query("SELECT policy FROM maintenance_controls FOR UPDATE")
-            .execute(&mut *metadata)
-            .await?;
-        metadata.rollback().await
-    })
-    .await??;
-    b.rollback().await?;
-    a.rollback().await?;
+        let mut b = db.begin().await?;
+        let other: Uuid = tokio::time::timeout(
+            Duration::from_secs(2),
+            queries::claim_task_candidate(class, &[], false)
+                .build_query_scalar()
+                .fetch_one(&mut *b),
+        )
+        .await??;
+        assert_ne!(locked, other);
+        assert!([first, second].contains(&locked) && [first, second].contains(&other));
+        // Claiming tasks must not lock the global maintenance or policy rows.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut metadata = db.begin().await?;
+            sqlx::query("SELECT id FROM mokyu_meta FOR UPDATE")
+                .execute(&mut *metadata)
+                .await?;
+            sqlx::query("SELECT policy FROM maintenance_controls FOR UPDATE")
+                .execute(&mut *metadata)
+                .await?;
+            metadata.rollback().await
+        })
+        .await??;
+        b.rollback().await?;
+        a.rollback().await?;
+    }
     Ok(())
 }
