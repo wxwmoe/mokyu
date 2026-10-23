@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
+from botocore.exceptions import ClientError
 
 from tests.recovery.source_repair import Database
 from tests.storage.source_quarantine import Fixture, wait
@@ -178,6 +179,45 @@ def main():
         fixture.cli('cred', 'enable', fixture.credentials['access_key'])
         print('PASS zero-SQL cached bodies and Range, per-request CORS, fresh conditional/no-cache reads and signed isolation', flush=True)
 
+        warm()
+        invalidated = fixture.cli('status')['cors_cache']['invalidated']
+
+        def unchanged():
+            for route in range(4):
+                response = read(route, Origin='https://client.test')
+                assert response.status_code == 200 and response.content == body
+                assert count(response) == 0, 'unrelated publication invalidated a hot snapshot'
+                assert response.headers['Access-Control-Allow-Origin'] == 'https://client.test'
+            assert fixture.cli('status')['cors_cache']['invalidated'] == invalidated
+
+        fixture.client.put_object(Bucket=fixture.name, Key='unrelated', Body=body, ACL='public-read')
+        unchanged()
+        fixture.client.copy_object(Bucket=fixture.name, Key='unrelated-copy',
+            CopySource={'Bucket': fixture.name, 'Key': 'unrelated'}, ACL='public-read')
+        unchanged()
+        upload = fixture.client.create_multipart_upload(Bucket=fixture.name, Key='unrelated-multipart', ACL='public-read')['UploadId']
+        part = fixture.client.upload_part(Bucket=fixture.name, Key='unrelated-multipart', UploadId=upload, PartNumber=1, Body=body)
+        fixture.client.complete_multipart_upload(Bucket=fixture.name, Key='unrelated-multipart', UploadId=upload,
+            MultipartUpload={'Parts': [{'PartNumber': 1, 'ETag': part['ETag']}]})
+        unchanged()
+        fixture.client.put_object_acl(Bucket=fixture.name, Key='unrelated', ACL='private')
+        fixture.client.delete_object(Bucket=fixture.name, Key='unrelated')
+        unchanged()
+        print('PASS unrelated PUT, Copy, Complete, ACL and delete retain hot aliases and CORS bindings', flush=True)
+
+        policy(public_cache_refresh_interval='1s', public_cache_max_age='3s')
+        warm()
+        fixture.client.put_object(Bucket=fixture.name, Key='unrelated-refresh', Body=b'new object')
+        refreshed = fixture.cli('status')['public_read_cache']['refreshed']
+        time.sleep(1.05)
+        assert read().content == body
+        wait(lambda: fixture.cli('status')['public_read_cache']['refreshed'] > refreshed,
+             'unrelated mutation prevented refresh of a retained snapshot', seconds=2)
+        cached_head(0)
+        policy(public_cache_refresh_interval='10s', public_cache_max_age='30s')
+        warm()
+        print('PASS retained snapshots still refresh after unrelated publication', flush=True)
+
         fixture.client.put_object_acl(Bucket=fixture.name, Key=key, ACL='private')
         assert all(read(route).status_code == 403 for route in range(4))
         fixture.read(key, body)
@@ -194,6 +234,27 @@ def main():
         policy(public_cache_validation='strict')
         assert all(count(read(route)) >= 1 for route in range(4))
         print('PASS local ACL, overwrite, delete, CORS and profile changes invalidate before acknowledgement', flush=True)
+
+        policy(public_cache_validation='background')
+        # Fill is paused before coord so the replacement can publish first.
+        marker = arm('public-cache-fill')
+        try:
+            assert read().content == body
+            wait(marker.with_suffix('.hit').exists, 'old public fill did not pause')
+            put(body[::-1])
+        finally:
+            marker.unlink(missing_ok=True)
+        for route in range(4):
+            assert read(route).content == body[::-1], 'late fill resurrected the replaced object'
+        try:
+            fixture.client.put_object(Bucket=fixture.name, Key=key, Body=b'rejected', ACL='public-read', IfMatch='"wrong"')
+        except ClientError as error:
+            assert error.response['ResponseMetadata']['HTTPStatusCode'] == 412
+        else:
+            raise AssertionError('conditional replacement unexpectedly succeeded')
+        assert all(read(route).content == body[::-1] for route in range(4))
+        put()
+        print('PASS late fill and failed conditional publication retain the current object', flush=True)
 
         policy(public_cache_validation='background', public_cache_refresh_interval='1s', public_cache_max_age='3s')
         warm()

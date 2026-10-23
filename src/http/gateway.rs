@@ -474,6 +474,7 @@ impl S3 for Gateway {
             self.0
                 .publish(
                     id,
+                    (b.id, &req.input.key),
                     req.input.if_match.as_ref(),
                     req.input.if_none_match.as_ref(),
                 )
@@ -1063,7 +1064,12 @@ impl S3 for Gateway {
                 .finish_stream(id, source.size, &source.etag, source.checksums)
                 .await?;
             self.0
-                .publish(id, i.if_match.as_ref(), i.if_none_match.as_ref())
+                .publish(
+                    id,
+                    (b.id, &i.key),
+                    i.if_match.as_ref(),
+                    i.if_none_match.as_ref(),
+                )
                 .await?;
             Ok(S3Response::new(CopyObjectOutput {
                 copy_object_result: Some(CopyObjectResult {

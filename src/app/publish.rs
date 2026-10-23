@@ -34,14 +34,17 @@ impl App {
     pub async fn publish(
         &self,
         id: Id,
+        object: (Uuid, &str),
         if_match: Option<&s3s::dto::ETagCondition>,
         if_none: Option<&s3s::dto::ETagCondition>,
     ) -> Result<()> {
-        self.publish_complete(id, if_match, if_none, None).await
+        self.publish_complete(id, object, if_match, if_none, None)
+            .await
     }
     pub async fn publish_complete(
         &self,
         id: Id,
+        object: (Uuid, &str),
         if_match: Option<&s3s::dto::ETagCondition>,
         if_none: Option<&s3s::dto::ETagCondition>,
         completion: Option<(Uuid, String, Value, Uuid)>,
@@ -52,7 +55,7 @@ impl App {
         crate::faults::point("source-before-publish").await;
         let _coord = self.coord.lock().await;
         self.writable()?;
-        let cache_change = self.public_reads.changing();
+        let cache_change = self.public_reads.changing_object(object.0, object.1);
         if !self
             .publish
             .publish(id, if_match.cloned(), if_none.cloned(), completion)
@@ -100,7 +103,7 @@ impl App {
         crate::faults::point("management-before-change").await;
         let _coord = self.coord.lock().await;
         self.writable()?;
-        let _cache = self.public_reads.changing();
+        let _cache = self.public_reads.changing_object(bucket, key);
         if self
             .objects
             .change(crate::model::ObjectChange {

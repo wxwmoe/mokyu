@@ -28,7 +28,6 @@ pub(crate) struct Entry {
     refresh: Duration,
     age: Duration,
     attempted: Mutex<Instant>,
-    generation: u64,
     _memory: OwnedSemaphorePermit,
 }
 
@@ -64,20 +63,46 @@ pub(crate) enum Work {
     },
 }
 
-pub(crate) struct Change<'a>(&'a Cache);
+pub(crate) struct Change<'a> {
+    cache: &'a Cache,
+    object: Option<(Uuid, &'a str)>,
+}
 impl Drop for Change<'_> {
     fn drop(&mut self) {
-        let mut index = self.0.index.lock().unwrap();
-        index.changing -= 1;
-        clear(&mut index);
-        self.0.cors.change(false);
+        let mut index = self.cache.index.lock().unwrap();
+        invalidate(&mut index, self.object);
+        if self.object.is_none() {
+            index.changing -= 1;
+            self.cache.cors.change(false);
+        }
     }
 }
-fn clear(index: &mut Index) {
+fn invalidate(index: &mut Index, object: Option<(Uuid, &str)>) {
     index.generation = index.generation.wrapping_add(1);
-    index.entries.clear();
-    index.order.clear();
-    index.buckets.clear();
+    if let Some((bucket, key)) = object {
+        index.entries.retain(|_, entry| {
+            entry.snapshot.bucket.id != bucket
+                || entry
+                    .snapshot
+                    .stream
+                    .as_ref()
+                    .is_none_or(|stream| stream.object_key != key)
+        });
+        index.order.retain(|key| index.entries.contains_key(key));
+        index.buckets.retain(|_, entry| entry.strong_count() > 0);
+    } else {
+        index.entries.clear();
+        index.order.clear();
+        index.buckets.clear();
+    }
+}
+
+fn current(index: &Index, entry: &Arc<Entry>) -> bool {
+    index.changing == 0
+        && index
+            .entries
+            .get(&key(&entry.route))
+            .is_some_and(|value| Arc::ptr_eq(value, entry))
 }
 
 fn key(route: &ReadRoute) -> Key {
@@ -149,10 +174,23 @@ impl Cache {
 
     pub fn changing(&self) -> Change<'_> {
         let mut index = self.index.lock().unwrap();
-        clear(&mut index);
+        invalidate(&mut index, None);
         index.changing += 1;
         self.cors.change(true);
-        Change(self)
+        Change {
+            cache: self,
+            object: None,
+        }
+    }
+
+    pub fn changing_object<'a>(&'a self, bucket: Uuid, key: &'a str) -> Change<'a> {
+        // Publishers and cache workers hold coord across both invalidation boundaries.
+        let object = Some((bucket, key));
+        invalidate(&mut self.index.lock().unwrap(), object);
+        Change {
+            cache: self,
+            object,
+        }
     }
 
     pub fn generation(&self) -> u64 {
@@ -161,13 +199,8 @@ impl Cache {
 
     pub fn raw_current(&self, entry: &Arc<Entry>, storage: &crate::storage::Storage) -> bool {
         let index = self.index.lock().unwrap();
-        if index.changing != 0
+        if !current(&index, entry)
             || entry.mapping.is_none()
-            || entry.generation != index.generation
-            || !index
-                .entries
-                .get(&key(&entry.route))
-                .is_some_and(|current| Arc::ptr_eq(current, entry))
             || entry.verified.elapsed() >= entry.age
         {
             return false;
@@ -381,7 +414,6 @@ impl Cache {
                     refresh: Duration::from_secs(times.0),
                     age: Duration::from_secs(times.1),
                     attempted: Mutex::new(verified),
-                    generation,
                     _memory: memory,
                 });
                 index.buckets.retain(|_, entry| entry.strong_count() > 0);
@@ -427,6 +459,11 @@ impl App {
         started: Instant,
         generation: u64,
     ) -> Result<()> {
+        // Some global changes do not hold coord; capture CORS before checking the snapshot fence.
+        let cors_generation = self.cors_cache.generation();
+        if self.public_reads.generation() != generation {
+            return Ok(());
+        }
         let Some(stream) = snapshot
             .stream
             .as_ref()
@@ -489,7 +526,7 @@ impl App {
             &mut Arc::make_mut(&mut snapshot).bucket,
             validation,
             started,
-            generation,
+            cors_generation,
         );
         self.public_reads.put(
             route,
@@ -551,14 +588,18 @@ pub(crate) async fn run(app: Weak<App>, mut receiver: mpsc::Receiver<Work>) {
             let _coord = app.coord.lock().await;
             let _sources = app.storage.source_gate.read().await;
             app.ensure_mode()?;
-            if app.public_reads.generation() != entry.generation {
-                return Ok(false);
-            }
+            let generation = {
+                let index = app.public_reads.index.lock().unwrap();
+                if !current(&index, &entry) {
+                    return Ok(false);
+                }
+                index.generation
+            };
             let started = Instant::now();
             let snapshot = app.stream_store.snapshot(&entry.route, None).await?;
             app.public_reads.remove(&entry);
             if let Some(snapshot) = snapshot {
-                app.cache_public_read(&entry.route, Arc::new(snapshot), started, entry.generation)
+                app.cache_public_read(&entry.route, Arc::new(snapshot), started, generation)
                     .await?;
             }
             Ok::<_, anyhow::Error>(true)
@@ -685,6 +726,89 @@ mod tests {
         assert!(cache.index.lock().unwrap().entries.is_empty());
         drop(entry);
         assert_eq!(cache.memory.available_permits(), available);
+    }
+
+    #[test]
+    fn object_changes_preserve_other_snapshots_and_cors_but_fence_late_builders() {
+        let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let (cache, _receiver) = Cache::new(cors.clone());
+        let (route, snapshot) = fixture();
+        let alias = ReadRoute::Bucket {
+            name: snapshot.bucket.name.clone(),
+            key: "object".into(),
+            alias: None,
+        };
+        let other_route = ReadRoute::Host {
+            host: "media.test".into(),
+            key: "other".into(),
+        };
+        let mut other = (*snapshot).clone();
+        other.stream.as_mut().unwrap().object_key = "other".into();
+        let (foreign_route, foreign) = fixture();
+        let foreign_route = match foreign_route {
+            ReadRoute::Host { key, .. } => ReadRoute::Host {
+                host: "other.test".into(),
+                key,
+            },
+            _ => unreachable!(),
+        };
+        let generation = cache.generation();
+        for (route, snapshot) in [
+            (&route, snapshot.clone()),
+            (&alias, snapshot.clone()),
+            (&other_route, Arc::new(other)),
+            (&foreign_route, foreign),
+        ] {
+            cache.put(
+                route,
+                snapshot,
+                None,
+                vec![],
+                (1, 5),
+                (Instant::now(), generation),
+            );
+        }
+        let (affected, unaffected) = {
+            let index = cache.index.lock().unwrap();
+            (
+                index.entries[&key(&route)].clone(),
+                index.entries[&key(&other_route)].clone(),
+            )
+        };
+        let cors_generation = cors.generation();
+        let change = cache.changing_object(snapshot.bucket.id, "object");
+        let during = cache.generation();
+        {
+            let index = cache.index.lock().unwrap();
+            assert!(!current(&index, &affected));
+            assert!(!index.entries.contains_key(&key(&alias)));
+            assert!(current(&index, &unaffected));
+            assert!(index.entries.contains_key(&key(&foreign_route)));
+        }
+        drop(change);
+        assert_eq!(cors.generation(), cors_generation);
+        for generation in [generation, during] {
+            cache.put(
+                &route,
+                snapshot.clone(),
+                None,
+                vec![],
+                (1, 5),
+                (Instant::now(), generation),
+            );
+            assert!(
+                !cache
+                    .index
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .contains_key(&key(&route))
+            );
+        }
+        assert!(current(&cache.index.lock().unwrap(), &unaffected));
+        drop(cache.changing());
+        assert!(!current(&cache.index.lock().unwrap(), &unaffected));
+        assert!(cors.generation() > cors_generation);
     }
 
     #[test]

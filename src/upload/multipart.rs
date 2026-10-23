@@ -942,6 +942,7 @@ impl App {
         let result = json!({"etag":etag,"checksums":sums});
         self.publish_complete(
             id,
+            (u.bucket_id, &u.object_key),
             i.if_match.as_ref(),
             i.if_none_match.as_ref(),
             Some((u.id, hash.to_owned(), result.clone(), token)),
