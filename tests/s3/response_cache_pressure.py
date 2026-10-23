@@ -61,7 +61,8 @@ with ThreadPoolExecutor(max_workers=1) as pool:
     try:
         wait_until(lambda: fault.with_suffix('.hit').exists())
         assert status()['active_streams'] == 0
-        for number in range(20):
+        # Recently used bodies can survive one eviction pass; wait for actual retirement.
+        for number in range(40):
             data = bytes([number]) + payload[1:]
             name = 'pressure-' + str(number)
             put(name, data)
@@ -71,6 +72,8 @@ with ThreadPoolExecutor(max_workers=1) as pool:
             cache = status()['response_cache']
             assert cache['live_bytes'] + cache['metadata_bytes'] <= cache['limit_bytes']
             assert cache['candidate_bytes'] == 0
+            if cache['retired_bytes'] >= len(payload):
+                break
         assert cache['retired_bytes'] >= len(payload), cache
         assert not pending.done()
     finally:

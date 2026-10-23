@@ -114,6 +114,7 @@ pub(crate) struct Entry {
     ownership: Arc<Ownership>,
     checks: Vec<Arc<super::checks::Evidence>>,
     read_epoch: u64,
+    referenced: AtomicBool,
 }
 
 impl Entry {
@@ -163,7 +164,7 @@ struct Index {
     ready: HashMap<Key, Arc<Entry>>,
     blocked: HashSet<Uuid>,
     generation: u64,
-    fifo: VecDeque<Key>,
+    order: VecDeque<Key>,
     seen: HashSet<Key>,
     history: VecDeque<Key>,
     builders: HashMap<Key, Arc<Notify>>,
@@ -257,7 +258,7 @@ impl Cache {
             index.remove(key);
         }
         let ready: HashSet<_> = index.ready.keys().copied().collect();
-        index.fifo.retain(|key| ready.contains(key));
+        index.order.retain(|key| ready.contains(key));
     }
 
     pub fn eligible(&self, stream: &StoredStream) -> bool {
@@ -287,7 +288,10 @@ impl Cache {
     }
 
     pub fn get(&self, key: Key) -> Option<Arc<Entry>> {
-        self.index.lock().unwrap().ready.get(&key).cloned()
+        let index = self.index.lock().unwrap();
+        let entry = index.ready.get(&key)?;
+        entry.referenced.store(true, Relaxed);
+        Some(entry.clone())
     }
 
     pub fn candidate(&self, bucket: Uuid, key: &str) -> bool {
@@ -339,16 +343,24 @@ impl Cache {
             .is_some_and(|entry| Arc::ptr_eq(entry, expected))
         {
             index.remove(key);
-            index.fifo.retain(|old| *old != key);
+            index.order.retain(|old| *old != key);
         }
     }
 
     fn evict(index: &mut Index) -> bool {
-        let Some(key) = index.fifo.pop_front() else {
-            return false;
-        };
-        index.remove(key);
-        true
+        while let Some(key) = index.order.pop_front() {
+            if index
+                .ready
+                .get(&key)
+                .is_some_and(|entry| entry.referenced.swap(false, Relaxed))
+            {
+                index.order.push_back(key);
+                continue;
+            }
+            index.remove(key);
+            return true;
+        }
+        false
     }
 
     fn grow_index(&self, index: &mut Index, needed: usize) -> bool {
@@ -533,9 +545,10 @@ impl Received {
                 ownership: self.ownership,
                 checks: Vec::new(),
                 read_epoch: 0,
+                referenced: false.into(),
             }),
         );
-        index.fifo.push_back(key);
+        index.order.push_back(key);
     }
 }
 
@@ -670,6 +683,7 @@ impl Builder {
             read_epoch,
             path: self.path,
             ownership,
+            referenced: false.into(),
         });
         let needed = index.ready.len() + 1;
         cache.grow_index(&mut index, needed);
@@ -678,11 +692,11 @@ impl Builder {
         }
         if index.ready.contains_key(&self.key) {
             index.remove(self.key);
-            index.fifo.retain(|key| *key != self.key);
+            index.order.retain(|key| *key != self.key);
         }
         *index.paths.entry(self.path).or_default() += 1;
         index.ready.insert(self.key, entry);
-        index.fifo.push_back(self.key);
+        index.order.push_back(self.key);
         self.published = true;
     }
 }
@@ -859,6 +873,42 @@ mod tests {
     use super::*;
     use crate::{app::Extent, content::codec::Chunk};
     use serde_json::json;
+
+    #[test]
+    fn eviction_gives_used_bodies_a_second_chance_without_keeping_cold_entries_forever() {
+        let mut cache = Cache::new(4 * 1024 * 1024);
+        let limits = Arc::get_mut(&mut cache).unwrap();
+        limits.entries = 3;
+        limits.index.get_mut().unwrap().slots = 3;
+        let insert = || {
+            let (stream, key, row) = fixture(8192);
+            assert!(cache.begin(key, &stream, &stream.object_key).is_none());
+            let mut builder = cache.begin(key, &stream, &stream.object_key).unwrap();
+            builder.capture.lock().unwrap().record(&row);
+            builder.capture.lock().unwrap().finish_source();
+            assert!(builder.append(&[7; 8192]));
+            builder.finish();
+            key
+        };
+        let hot = insert();
+        let cold = insert();
+        let other = insert();
+        assert!(cache.get(hot).is_some());
+        let scan = insert();
+        {
+            let index = cache.index.lock().unwrap();
+            assert!(index.ready.contains_key(&hot));
+            assert!(!index.ready.contains_key(&cold));
+            assert!(index.ready.contains_key(&other));
+            assert!(index.ready.contains_key(&scan));
+        }
+        insert();
+        insert();
+        let index = cache.index.lock().unwrap();
+        assert!(!index.ready.contains_key(&hot));
+        assert_eq!(index.ready.len(), 3);
+        assert_eq!(index.order.len(), 3);
+    }
 
     #[test]
     fn response_budget_grows_small_object_capacity_without_extra_memory() {
