@@ -42,6 +42,7 @@ pub async fn s3_http(
             body
         }
     });
+    let cors_generation = app.cors_cache.generation();
     let mut cors = HeaderMap::new();
     let mut public_alias = false;
     let result: Result<s3s::HttpResponse> = async {
@@ -163,6 +164,8 @@ pub async fn s3_http(
                 &bucket,
                 request.headers(),
                 request.method().as_str(),
+                crate::http::cors::Validation::for_bucket(&app, &bucket),
+                cors_generation,
             )?;
             request.extensions_mut().insert(bucket);
         }

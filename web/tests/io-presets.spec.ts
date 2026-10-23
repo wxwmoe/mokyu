@@ -32,6 +32,13 @@ test('I/O presets preview changes, load only the draft and preserve conflicts', 
       const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
       await expect(editor.locator('.storage-policy .badge')).toHaveText(text.ioPreset_reliable)
       expect(await editor.innerText()).not.toMatch(/cluster|群集|クラスター/i)
+      const standalone = editor.locator('label').filter({ has: page.locator('span', { hasText: text.profile_cors_cache_enabled }) }).getByRole('switch')
+      await expect(standalone).toBeEnabled()
+      await expect(standalone).not.toBeChecked()
+      await standalone.click()
+      await expect(standalone).toBeChecked()
+      expect(await (await request.get(url)).json()).toEqual(original)
+      await standalone.click()
       for (const preset of ['cached', 'throughput', 'reliable'] as const) {
         const picker = editor.getByRole('combobox', { name: text.storeIoPreset, exact: true })
         await picker.focus()
@@ -43,7 +50,7 @@ test('I/O presets preview changes, load only the draft and preserve conflicts', 
         await expect(preview).toBeVisible()
         await expect(preview).toContainText('FULL')
         expect(await (await request.get(url)).json()).toEqual(original)
-        for (const width of [1440, 768, 640, 390, 320]) {
+        for (const width of [1440, 1024, 768, 640, 390, 320]) {
           await page.setViewportSize({ width, height: 900 })
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
         }
@@ -56,6 +63,9 @@ test('I/O presets preview changes, load only the draft and preserve conflicts', 
       await editor.getByRole('button', { name: text.storeIoPreview, exact: true }).click()
       await page.getByRole('dialog', { name: text.storeIoPreview, exact: true }).getByRole('button', { name: text.storeIoApplyDraft, exact: true }).click()
       await expect(editor.locator('.storage-policy .badge')).toHaveText(text.ioPreset_throughput)
+      const cors = editor.locator('label').filter({ has: page.locator('span', { hasText: text.profile_cors_cache_enabled }) }).getByRole('switch')
+      await expect(cors).toBeChecked()
+      await expect(cors).toBeDisabled()
       await expect(editor.getByRole('switch', { name: text.profile_upload_cache, exact: true })).toBeDisabled()
       expect(await (await request.get(url)).json()).toEqual(original)
       await editor.getByRole('combobox', { name: text.profile_read_integrity, exact: true }).click()
@@ -75,6 +85,7 @@ test('I/O presets preview changes, load only the draft and preserve conflicts', 
   expect((await save).status()).toBe(200)
   const saved = await (await request.get(url)).json()
   expect(saved.public_cache_validation).toBe('background')
+  expect(saved.cors_cache_enabled).toBe(true)
   expect(saved.write_durability).toBe('durable')
   expect(saved.revision).toBe(original.revision + 1)
   await page.goto('/storages?edit=' + name)

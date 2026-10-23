@@ -951,4 +951,11 @@ export default {
   clusterSampleWindow: "Latest sampling window",
   configField_database_type: "Database type",
   configHelp_database_type: "Driver used for this connection. Database program identifies the actual server.",
+  runtimeField_cors_cache_size: 'CORS cache memory',
+  runtimeHelp_cors_cache_size: 'Per-node dynamic limit including policies, bucket links and pending work, at least 32KiB and up to 1/16 of instance memory',
+  runtimeField_cors_cache_entries: 'CORS policy limit',
+  runtimeHelp_cors_cache_entries: 'Maximum distinct shared policies per node, not the number of buckets',
+  profile_cors_cache_enabled: 'CORS background cache',
+  profileHelp_cors_cache_enabled: 'Required with background public-read validation, optional otherwise, uses the public cache refresh interval and maximum age',
+
 }

@@ -85,6 +85,14 @@ impl Config {
         seconds(&c.instance.compression_idle_timeout)?;
         bytes(&c.requests.s3_chunk_limit)?;
         ensure!(
+            bytes(&c.requests.cors_cache_size)? >= 32 * 1024,
+            "cors_cache_size must be at least 32KiB"
+        );
+        ensure!(
+            (1..=1_000_000).contains(&c.requests.cors_cache_entries),
+            "cors_cache_entries must be 1..1000000"
+        );
+        ensure!(
             !c.requests.s3_region.trim().is_empty(),
             "s3.signature_region must not be empty"
         );
@@ -361,6 +369,10 @@ impl Config {
             slot_bytes <= usize::MAX as u64 && slot_bytes <= inflight / 2 && inflight <= memory / 2,
             "stream_memory_budget must allow two data slots ({} bytes each) and leave half of memory for runtime/cache/OS",
             slot_bytes
+        );
+        ensure!(
+            cache_bytes(&self.requests.cors_cache_size)? <= memory / 16,
+            "cors_cache_size must fit within one sixteenth of instance memory"
         );
         let slots = (inflight / slot_bytes) as usize;
         let remaining = memory

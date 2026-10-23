@@ -951,4 +951,11 @@ export default {
   clusterSampleWindow: "最近有效采样窗口",
   configField_database_type: "数据库类型",
   configHelp_database_type: "连接使用的驱动类型，实际服务程序见“数据库程序”",
+  runtimeField_cors_cache_size: 'CORS 缓存内存',
+  runtimeHelp_cors_cache_size: '每节点动态上限，包含策略、桶关联和待处理任务，至少 32KiB，不超过实例内存的 1/16',
+  runtimeField_cors_cache_entries: 'CORS 策略上限',
+  runtimeHelp_cors_cache_entries: '每节点共享策略数量上限，不按存储桶计数',
+  profile_cors_cache_enabled: 'CORS 后台缓存',
+  profileHelp_cors_cache_enabled: '公共读后台验证时强制开启，其余情况可选，沿用公共读缓存的刷新间隔与最大有效期',
+
 }

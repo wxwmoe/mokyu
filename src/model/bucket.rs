@@ -121,7 +121,7 @@ impl From<Bucket> for BucketView {
             revision: bucket.settings_revision.to_string(),
             uploads_paused: bucket.uploads_paused,
             public_base_url: bucket.public_base_url,
-            cors: bucket.cors,
+            cors: (*bucket.cors).clone(),
             website_enabled: bucket.website_enabled,
             index_document: bucket.index_document,
             error_document: bucket.error_document,

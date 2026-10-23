@@ -94,16 +94,24 @@ def main():
             url, extra = routes[route]
             return requests.request(method, url, headers={'Accept-Encoding': 'identity', **extra, **headers}, timeout=20)
 
+        def cached_head(route, **headers):
+            def ready():
+                response = read(route, 'HEAD', **headers)
+                assert response.status_code == 200
+                return response if count(response) == 0 else None
+            return wait(ready, 'asynchronous public fill did not finish', seconds=10)
+
         def warm():
             for route in range(4):
                 for _ in range(3):
                     response = read(route)
                     assert response.status_code == 200 and response.content == body, (route, response.status_code, response.text)
+                cached_head(route)
 
         put()
         for route in range(4):
             assert read(route, 'HEAD').status_code == 200
-            response = read(route, 'HEAD', Origin='https://client.test')
+            response = cached_head(route, Origin='https://client.test')
             assert count(response) == 0 and response.headers['Access-Control-Allow-Origin'] == 'https://client.test'
             assert read(route).content == body
         state = fixture.cli('status')
@@ -117,11 +125,14 @@ def main():
         fixture.cli('bucket', 'cors', fixture.name, '-', value=large_rules)
         for route in range(4):
             assert read(route, 'HEAD', Origin='https://site99.test').status_code == 200
-            response = read(route, 'HEAD', Origin='https://site99.test')
+            response = cached_head(route, Origin='https://site99.test')
             assert count(response) == 0 and response.headers['Access-Control-Allow-Origin'] == 'https://site99.test'
         state = fixture.cli('status')
         for cache, used in (('public_read_cache', 'used_bytes'), ('cors_cache', 'live_bytes')):
             assert 0 < state[cache][used] <= state[cache]['limit_bytes'], state[cache]
+        assert state['cors_cache']['buckets'] == 1
+        assert state['cors_cache']['entries'] >= 1  # Old immutable policies remain until capacity pressure.
+        assert state['public_read_cache']['used_bytes'] <= 192 * 1024, 'public snapshots duplicated the shared CORS JSON'
         fixture.cli('bucket', 'cors', fixture.name, '-', value=rules)
         for route in range(4):
             assert 'Access-Control-Allow-Origin' not in read(route, 'HEAD', Origin='https://site99.test').headers
@@ -139,7 +150,8 @@ def main():
         with ThreadPoolExecutor(max_workers=1) as pool:
             pending = pool.submit(requests.head, endpoint + '/' + fixture.name + '/cold-coordination', timeout=20)
             try:
-                wait(marker.with_suffix('.hit').exists, 'fresh reader did not hold coordination')
+                wait(marker.with_suffix('.hit').exists, 'public cache fill did not hold coordination')
+                assert pending.result(timeout=1).status_code == 200, 'cold reader waited for cache fill'
                 response = read()
                 assert response.content == body and count(response) == 0
                 assert response.elapsed.total_seconds() < 1, 'body hit waited for source coordination'

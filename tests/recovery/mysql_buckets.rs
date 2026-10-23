@@ -24,7 +24,7 @@ fn create(name: &str) -> CreateBucket {
 fn settings(bucket: &Bucket, paused: bool, domains: Option<Vec<String>>) -> BucketUpdate {
     BucketUpdate {
         revision: bucket.settings_revision,
-        cors: bucket.cors.clone(),
+        cors: (*bucket.cors).clone(),
         website_enabled: bucket.website_enabled,
         index_document: bucket.index_document.clone(),
         error_document: bucket.error_document.clone(),

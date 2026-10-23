@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0040.
+-- Generated from the complete mysql migration chain through 0041.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -952,11 +952,12 @@ CREATE TABLE `storage_profiles` (
   `read_integrity` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT 'inline',
   `file_delivery` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT 'application',
   `file_delivery_prefix` varchar(512) COLLATE ascii_bin DEFAULT NULL,
+  `cors_cache_enabled` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`storage_id`),
   CONSTRAINT `storage_profiles_storage` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`) ON DELETE CASCADE,
   CONSTRAINT `storage_background_scheduling` CHECK ((`background_scheduling` in (_ascii'balanced',_ascii'foreground'))),
-  CONSTRAINT `storage_delivery_prefix` CHECK ((((`file_delivery` = _utf8mb4'application') and (`file_delivery_prefix` is null)) or ((`file_delivery` <> _utf8mb4'application') and (`file_delivery_prefix` is not null)))),
-  CONSTRAINT `storage_file_delivery` CHECK ((`file_delivery` in (_utf8mb4'application',_utf8mb4'x_accel_redirect',_utf8mb4'x_sendfile'))),
+  CONSTRAINT `storage_delivery_prefix` CHECK ((((`file_delivery` = _ascii'application') and (`file_delivery_prefix` is null)) or ((`file_delivery` <> _ascii'application') and (`file_delivery_prefix` is not null)))),
+  CONSTRAINT `storage_file_delivery` CHECK ((`file_delivery` in (_ascii'application',_ascii'x_accel_redirect',_ascii'x_sendfile'))),
   CONSTRAINT `storage_profiles_cache_entries` CHECK (((`cache_entries` is null) or (`cache_entries` > 0))),
   CONSTRAINT `storage_profiles_compression_bytes` CHECK ((`compression_min_savings_bytes` >= 0)),
   CONSTRAINT `storage_profiles_compression_percent` CHECK ((`compression_min_savings_percent` between 0 and 100)),

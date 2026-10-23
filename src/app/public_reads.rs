@@ -45,11 +45,23 @@ struct Index {
 pub(crate) struct Cache {
     index: Mutex<Index>,
     memory: Arc<Semaphore>,
-    sender: mpsc::Sender<Arc<Entry>>,
+    sender: mpsc::Sender<Work>,
+    cors: Arc<crate::http::cors::Cache>,
     hits: AtomicU64,
     refreshed: AtomicU64,
     failed: AtomicU64,
     skipped: AtomicU64,
+}
+
+pub(crate) enum Work {
+    Refresh(Arc<Entry>),
+    Fill {
+        route: ReadRoute,
+        snapshot: Arc<ReadSnapshot>,
+        started: Instant,
+        generation: u64,
+        _memory: OwnedSemaphorePermit,
+    },
 }
 
 pub(crate) struct Change<'a>(&'a Cache);
@@ -58,6 +70,7 @@ impl Drop for Change<'_> {
         let mut index = self.0.index.lock().unwrap();
         index.changing -= 1;
         clear(&mut index);
+        self.0.cors.change(false);
     }
 }
 fn clear(index: &mut Index) {
@@ -117,13 +130,14 @@ fn json_bytes(value: &serde_json::Value) -> usize {
 }
 
 impl Cache {
-    pub fn new() -> (Arc<Self>, mpsc::Receiver<Arc<Entry>>) {
+    pub fn new(cors: Arc<crate::http::cors::Cache>) -> (Arc<Self>, mpsc::Receiver<Work>) {
         let (sender, receiver) = mpsc::channel(32);
         (
             Arc::new(Self {
                 index: Mutex::new(Index::default()),
                 memory: Arc::new(Semaphore::new((LIMIT - INDEX) / UNIT)),
                 sender,
+                cors,
                 hits: 0.into(),
                 refreshed: 0.into(),
                 failed: 0.into(),
@@ -137,6 +151,7 @@ impl Cache {
         let mut index = self.index.lock().unwrap();
         clear(&mut index);
         index.changing += 1;
+        self.cors.change(true);
         Change(self)
     }
 
@@ -194,7 +209,7 @@ impl Cache {
             && self.index.lock().unwrap().pending.insert(key(route))
         {
             *attempted = Instant::now();
-            if self.sender.try_send(entry.clone()).is_err() {
+            if self.sender.try_send(Work::Refresh(entry.clone())).is_err() {
                 self.index.lock().unwrap().pending.remove(&key(route));
                 self.skipped.fetch_add(1, Relaxed);
             }
@@ -225,6 +240,66 @@ impl Cache {
         }
         self.hits.fetch_add(1, Relaxed);
         Some(entry.snapshot.bucket.clone())
+    }
+
+    pub(crate) fn queue(
+        &self,
+        route: &ReadRoute,
+        snapshot: Arc<ReadSnapshot>,
+        started: Instant,
+        generation: u64,
+    ) {
+        let route_bytes = match route {
+            ReadRoute::Host { host, key } => host.len() + key.len(),
+            ReadRoute::Bucket { name, key, alias } => {
+                name.len() + key.len() + alias.as_ref().map_or(0, |(a, b)| a.len() + b.len())
+            }
+        };
+        if route_bytes > 4096 {
+            return;
+        }
+        let bytes = 8192
+            + route_bytes * 2
+            + snapshot.bucket.cors.bytes()
+            + snapshot.stream.as_ref().map_or(0, |s| {
+                json_bytes(&s.metadata)
+                    + json_bytes(&s.checksums)
+                    + json_bytes(&s.http_compression)
+                    + s.object_key.capacity()
+                    + s.etag.capacity()
+            });
+        if bytes > LIMIT / 2 {
+            return;
+        }
+        let Ok(mut index) = self.index.try_lock() else {
+            return;
+        };
+        let key = key(route);
+        if index.changing != 0 || index.generation != generation || index.pending.contains(&key) {
+            return;
+        }
+        let Ok(memory) = self
+            .memory
+            .clone()
+            .try_acquire_many_owned(bytes.div_ceil(UNIT) as u32)
+        else {
+            return;
+        };
+        index.pending.insert(key);
+        if self
+            .sender
+            .try_send(Work::Fill {
+                route: route.clone(),
+                snapshot,
+                started,
+                generation,
+                _memory: memory,
+            })
+            .is_err()
+        {
+            index.pending.remove(&key);
+            self.skipped.fetch_add(1, Relaxed);
+        }
     }
 
     fn put(
@@ -268,14 +343,18 @@ impl Cache {
             .map(|s| s.capacity())
             .sum::<usize>()
             + [
-                &bucket.cors,
                 &stream.metadata,
                 &stream.checksums,
                 &stream.http_compression,
             ]
             .into_iter()
             .map(json_bytes)
-            .sum::<usize>();
+            .sum::<usize>()
+            + if bucket.cors.charged() {
+                0
+            } else {
+                bucket.cors.bytes()
+            };
         if bytes > ENTRY_BYTES {
             return;
         }
@@ -344,7 +423,7 @@ impl App {
     pub(crate) async fn cache_public_read(
         &self,
         route: &ReadRoute,
-        snapshot: Arc<ReadSnapshot>,
+        mut snapshot: Arc<ReadSnapshot>,
         started: Instant,
         generation: u64,
     ) -> Result<()> {
@@ -405,6 +484,13 @@ impl App {
         profiles.dedup();
         #[cfg(feature = "fault-injection")]
         crate::faults::point("public-cache-validated").await;
+        let validation = crate::http::cors::Validation::for_bucket(self, &snapshot.bucket);
+        self.cors_cache.intern(
+            &mut Arc::make_mut(&mut snapshot).bucket,
+            validation,
+            started,
+            generation,
+        );
         self.public_reads.put(
             route,
             snapshot,
@@ -417,8 +503,45 @@ impl App {
     }
 }
 
-pub(crate) async fn run(app: Weak<App>, mut receiver: mpsc::Receiver<Arc<Entry>>) {
-    while let Some(entry) = receiver.recv().await {
+pub(crate) async fn run(app: Weak<App>, mut receiver: mpsc::Receiver<Work>) {
+    while let Some(work) = receiver.recv().await {
+        if let Work::Fill {
+            route,
+            snapshot,
+            started,
+            generation,
+            _memory,
+        } = work
+        {
+            let Some(app) = app.upgrade() else {
+                return;
+            };
+            let result = tokio::time::timeout(Duration::from_secs(2), async {
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("public-cache-fill").await;
+                let _coord = app.coord.lock().await;
+                let _sources = app.storage.source_gate.read().await;
+                if app.public_reads.generation() == generation {
+                    app.cache_public_read(&route, snapshot, started, generation)
+                        .await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+            app.public_reads
+                .index
+                .lock()
+                .unwrap()
+                .pending
+                .remove(&key(&route));
+            if !matches!(result, Ok(Ok(()))) {
+                app.public_reads.failed.fetch_add(1, Relaxed);
+            }
+            continue;
+        }
+        let Work::Refresh(entry) = work else {
+            unreachable!()
+        };
         let Some(app) = app.upgrade() else {
             return;
         };
@@ -485,7 +608,7 @@ mod tests {
                     settings_revision: 1,
                     uploads_paused: false,
                     public_base_url: String::new(),
-                    cors: json!([]),
+                    cors: json!([]).into(),
                     website_enabled: false,
                     index_document: "index.html".into(),
                     error_document: String::new(),
@@ -517,7 +640,8 @@ mod tests {
 
     #[test]
     fn metadata_invalidation_fences_old_builders_and_retained_entries_keep_their_charge() {
-        let (cache, _receiver) = Cache::new();
+        let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let (cache, _receiver) = Cache::new(cors);
         let (route, snapshot) = fixture();
         let generation = cache.generation();
         let available = cache.memory.available_permits();
@@ -565,7 +689,8 @@ mod tests {
 
     #[test]
     fn large_cors_snapshots_remain_bounded_and_oversized_metadata_is_not_cached() {
-        let (cache, _receiver) = Cache::new();
+        let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let (cache, _receiver) = Cache::new(cors);
         let (route, mut snapshot) = fixture();
         Arc::make_mut(&mut snapshot).bucket.cors = json!(
             (0..100)
@@ -577,7 +702,8 @@ mod tests {
                     "max_age": 60
                 }))
                 .collect::<Vec<_>>()
-        );
+        )
+        .into();
         let generation = cache.generation();
         for n in 0..20 {
             let route = ReadRoute::Host {
@@ -619,7 +745,8 @@ mod tests {
 
     #[test]
     fn metadata_capacity_and_route_boundaries_are_independent_of_body_cache() {
-        let (cache, _receiver) = Cache::new();
+        let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let (cache, _receiver) = Cache::new(cors);
         let (route, snapshot) = fixture();
         let generation = cache.generation();
         for n in 0..1024 {

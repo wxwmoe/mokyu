@@ -367,6 +367,8 @@ pub struct RequestSettings {
     pub s3_domain: Option<String>,
     pub s3_region: String,
     pub s3_chunk_limit: String,
+    pub cors_cache_size: String,
+    pub cors_cache_entries: usize,
     #[serde(default = "data_idle")]
     pub read_idle_timeout: String,
     #[serde(default = "data_idle")]
@@ -381,6 +383,8 @@ impl Default for RequestSettings {
             s3_domain: None,
             s3_region: "us-east-1".into(),
             s3_chunk_limit: "8MiB".into(),
+            cors_cache_size: "1MiB".into(),
+            cors_cache_entries: 256,
             read_idle_timeout: data_idle(),
             upload_idle_timeout: data_idle(),
         }

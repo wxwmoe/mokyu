@@ -951,4 +951,11 @@ export default {
   clusterSampleWindow: "直近の取得期間",
   configField_database_type: "データベースの種類",
   configHelp_database_type: "接続に使用するドライバーで、実際のサーバーは「データベースプログラム」に表示",
+  runtimeField_cors_cache_size: 'CORS キャッシュメモリ',
+  runtimeHelp_cors_cache_size: 'ポリシー、バケット関連と待機中の処理を含むノード別の動的上限、32KiB 以上、インスタンスメモリの 1/16 以下',
+  runtimeField_cors_cache_entries: 'CORS ポリシー上限',
+  runtimeHelp_cors_cache_entries: 'ノード別の共有ポリシー数の上限、バケット数ではありません',
+  profile_cors_cache_enabled: 'CORS バックグラウンドキャッシュ',
+  profileHelp_cors_cache_enabled: '公開読み取りのバックグラウンド検証では必須、それ以外は任意、公開キャッシュの更新間隔と最大有効期間を使用',
+
 }

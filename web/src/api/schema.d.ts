@@ -2898,6 +2898,7 @@ export interface components {
             connect_timeout: string;
             /** Format: int32 */
             control_concurrency?: number | null;
+            cors_cache_enabled?: boolean;
             deduplication_enabled?: boolean;
             deleted_chunk_retention: string;
             file_delivery?: string;

@@ -111,6 +111,7 @@ async fn public(
         )
         .map_err(|_| unauthorized())?
     };
+    let cors_generation = app.cors_cache.generation();
     let prepared = if request.method() == Method::HEAD
         || (request.method() == Method::GET && !super::object::conditional(request.headers()))
     {
@@ -148,6 +149,8 @@ async fn public(
         &bucket,
         request.headers(),
         request.method().as_str(),
+        crate::http::cors::Validation::for_bucket(&app, &bucket),
+        cors_generation,
     )?;
     if request.method() == Method::OPTIONS {
         let mut r = if cors.contains_key("access-control-allow-origin")

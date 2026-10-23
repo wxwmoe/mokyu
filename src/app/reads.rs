@@ -213,13 +213,9 @@ impl App {
             return Ok(None);
         };
         let snapshot = Arc::new(snapshot);
-        if public_cache
-            && access.is_none()
-            && let Err(error) = self
-                .cache_public_read(route, snapshot.clone(), started, generation)
-                .await
-        {
-            tracing::debug!(%error,"public snapshot was not cached");
+        if public_cache && access.is_none() && self.storage.public_cache_enabled() {
+            self.public_reads
+                .queue(route, snapshot.clone(), started, generation);
         }
         // Acquire both pins before GC can claim the selected stream or physical source.
         let pin = (self.role == "single")

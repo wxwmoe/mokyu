@@ -84,6 +84,8 @@ pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
                 "s3_domain": configured.requests.s3_domain.clone(),
                 "s3_region": configured.requests.s3_region.clone(),
                 "s3_chunk_limit": configured.requests.s3_chunk_limit.clone(),
+                "cors_cache_size": configured.requests.cors_cache_size.clone(),
+                "cors_cache_entries": configured.requests.cors_cache_entries,
                 "read_idle_timeout": configured.requests.read_idle_timeout.clone(),
                 "upload_idle_timeout": configured.requests.upload_idle_timeout.clone(),
             }),

@@ -3,11 +3,14 @@ import json
 import os
 import runpy
 import subprocess
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
 from tests.storage.source_quarantine import Fixture, wait
+from tests.recovery.source_repair import Database
 
 
 def main():
@@ -41,7 +44,7 @@ def main():
         stop()
         start()
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        profile.update(cdc_enabled=False, pack_range_enabled=False)
+        profile.update(cdc_enabled=False, pack_range_enabled=False, cors_cache_enabled=True, public_cache_refresh_interval="1s", public_cache_max_age="3s")
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         fixture.cli('domain', 'set', 'cors.example.test', fixture.name)
         credentials = faults / 'cors-credentials.json'
@@ -81,6 +84,10 @@ def main():
             assert 'Origin' in response.headers['Vary'] and 'Access-Control-Allow-Origin' not in response.headers
         assert status()['parses'] == before['parses']
 
+        wait(lambda: status()['buckets'] == 1, 'asynchronous CORS fill did not finish')
+        read(0, origins[0])
+        before = status()
+
         def concurrent(index):
             origin = origins[index % 2]
             method = 'HEAD' if index % 3 == 0 else 'GET'
@@ -90,7 +97,7 @@ def main():
         with ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(concurrent, range(32)))
         after = status()
-        assert after['parses'] == before['parses'] + 1 and after['hits'] == before['hits'] + 31, (before, after)
+        assert after['parses'] == before['parses'] and after['hits'] >= before['hits'] + 32, (before, after)
         assert after['live_bytes'] + after['index_limit_bytes'] <= after['limit_bytes']
         assert 'Access-Control-Allow-Origin' not in read(0, 'https://denied.example.test').headers
         for index in range(len(routes)):
@@ -110,7 +117,7 @@ def main():
         for index in range(len(routes)):
             assert 'Access-Control-Allow-Origin' not in read(index, origins[0]).headers
             assert read(index, origins[1]).headers['Access-Control-Allow-Origin'] == origins[1]
-        assert status()['parses'] == before['parses'] + 1
+        wait(lambda: status()['pending'] == 0, 'CORS update fill did not finish')
         settings_url = fixture.web + '/api/v1/buckets/' + fixture.bucket_id + '/settings'
         original = fixture.session.get(settings_url, timeout=15).json()
         values = {name: original['bucket'][name] for name in ('revision', 'cors', 'website_enabled', 'index_document', 'error_document', 'public_base_url', 'uploads_paused')}
@@ -124,6 +131,41 @@ def main():
             assert response.status_code == 200 and 'Access-Control-Allow-Origin' not in response.headers
             assert 'Origin' not in response.headers.get('Vary', '').split(', ')
         print('PASS CLI, CORS API and complete bucket settings use the current revision, including empty rules', flush=True)
+
+        # A paused worker must not delay misses or reinsert an older local revision.
+        marker = fixture.arm('cors-cache-work')
+        try:
+            save(rules)
+            first = read(0, origins[0])
+            assert first.status_code == 200 and first.elapsed.total_seconds() < 1
+            wait(marker.with_suffix('.hit').exists, 'CORS fill was not queued')
+            save([])
+            assert 'Access-Control-Allow-Origin' not in read(0, origins[0]).headers
+        finally:
+            marker.unlink(missing_ok=True)
+        wait(lambda: status()['pending'] == 0, 'stale work was not drained')
+        assert 'Access-Control-Allow-Origin' not in read(0, origins[0]).headers
+        print('PASS paused fills never block readers or restore an obsolete revision', flush=True)
+
+        # Standalone CORS caching retains a bounded stale window without public object caching.
+        save(rules)
+        read(0, origins[0])
+        wait(lambda: status()['buckets'] == 1, 'standalone CORS cache did not fill')
+        marker = fixture.arm('cors-cache-work')
+        try:
+            time.sleep(1.05)
+            assert read(0, origins[0]).headers['Access-Control-Allow-Origin'] == origins[0]
+            wait(marker.with_suffix('.hit').exists, 'asynchronous CORS validation was not queued')
+            database = Database()
+            database.query('UPDATE buckets SET cors=%s,settings_revision=settings_revision+1 WHERE id=%s', '[]', uuid.UUID(fixture.bucket_id))
+            response = read(0, origins[0])
+            assert response.elapsed.total_seconds() < 1
+            assert response.headers['Access-Control-Allow-Origin'] == origins[0]
+            time.sleep(2.2)
+            assert 'Access-Control-Allow-Origin' not in read(0, origins[0]).headers
+        finally:
+            marker.unlink(missing_ok=True)
+        print('PASS CORS-only background confirmation and hard expiry without response caching', flush=True)
 
         other = Fixture()
         other.client.put_object(Bucket=other.name, Key=key, Body=b'other bucket', ACL='public-read')

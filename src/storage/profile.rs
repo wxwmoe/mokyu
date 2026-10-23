@@ -25,6 +25,8 @@ pub(crate) struct StorageProfile {
     pub background_scheduling: String,
     #[serde(default = "public_cache_validation")]
     pub public_cache_validation: String,
+    #[serde(default)]
+    pub cors_cache_enabled: bool,
     #[serde(default = "public_cache_refresh_interval")]
     pub public_cache_refresh_interval: String,
     #[serde(default = "public_cache_max_age")]

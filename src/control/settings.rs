@@ -70,6 +70,8 @@ fn validate_value(configured: &crate::config::Config, section: &str, value: &Val
                 "s3_domain",
                 "s3_region",
                 "s3_chunk_limit",
+                "cors_cache_size",
+                "cors_cache_entries",
                 "read_idle_timeout",
                 "upload_idle_timeout",
             ],
@@ -115,7 +117,19 @@ fn validate_value(configured: &crate::config::Config, section: &str, value: &Val
     .map_err(|error| s3s::s3_error!(InvalidArgument, "{error}").into())
 }
 
+fn defaults(app: &App, section: &str, value: Value) -> Value {
+    let mut defaults = app
+        .runtime_defaults
+        .get(section)
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let (Some(target), Some(value)) = (defaults.as_object_mut(), value.as_object()) {
+        target.extend(value.clone());
+    }
+    defaults
+}
 fn runtime_view(app: &App, section: &str, value: Value, revision: i64) -> RuntimeSettingsView {
+    let value = defaults(app, section, value);
     let applied_revision = app
         .runtime_revisions
         .read()
@@ -134,7 +148,11 @@ fn runtime_view(app: &App, section: &str, value: Value, revision: i64) -> Runtim
 
 pub(crate) async fn get_section_value(app: &App, section: &str) -> Result<Value> {
     valid_section(section)?;
-    app.runtime_settings.value(section).await
+    Ok(defaults(
+        app,
+        section,
+        app.runtime_settings.value(section).await?,
+    ))
 }
 
 pub(crate) async fn set_section_value(

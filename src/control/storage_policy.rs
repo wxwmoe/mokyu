@@ -65,6 +65,7 @@ fn templates(local: bool, single: bool) -> Vec<IoPreset> {
             let fast = name == "throughput";
             let values = json!({
                 "public_cache_validation": if name == "reliable" { "strict" } else { "background" },
+                "cors_cache_enabled": name != "reliable",
                 "public_cache_refresh_interval": "1s",
                 "public_cache_max_age": if fast { "30s" } else { "5s" },
                 "read_source_validation": if fast { "background" } else { "strict" },
@@ -318,7 +319,7 @@ mod tests {
             let presets = templates(local, single);
             assert_eq!(presets.len(), 3);
             for preset in &presets {
-                assert_eq!(preset.values.len(), if single { 13 } else { 12 });
+                assert_eq!(preset.values.len(), if single { 14 } else { 13 });
                 for field in [
                     "storage_id",
                     "revision",

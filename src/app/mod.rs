@@ -45,7 +45,7 @@ pub struct Bucket {
     pub settings_revision: i64,
     pub uploads_paused: bool,
     pub public_base_url: String,
-    pub cors: Value,
+    pub cors: crate::http::cors::Policy,
     pub website_enabled: bool,
     pub index_document: String,
     pub error_document: String,
@@ -232,7 +232,7 @@ pub struct App {
     pub response_cache: Arc<responses::Cache>,
     pub(crate) file_delivery: crate::http::delivery::Counters,
     pub(crate) read_checks: Arc<checks::Checks>,
-    pub(crate) cors_cache: crate::http::cors::Cache,
+    pub(crate) cors_cache: Arc<crate::http::cors::Cache>,
     pub(crate) public_reads: Arc<public_reads::Cache>,
     pub cleanup_state: crate::worker::lifecycle::Cleanup,
     pub integrity_pacing: std::sync::Mutex<std::time::Instant>,
@@ -359,7 +359,11 @@ impl App {
             response_cache.storage_policy(id, storage.profile(id)?.file_delivery != "application");
         }
         let read_checks = checks::Checks::new(storage.clone());
-        let (public_reads, public_receiver) = public_reads::Cache::new();
+        let (cors_cache, cors_receiver) = crate::http::cors::Cache::new(
+            crate::config::cache_bytes(&config.requests.cors_cache_size)? as usize,
+            config.requests.cors_cache_entries,
+        );
+        let (public_reads, public_receiver) = public_reads::Cache::new(cors_cache.clone());
         let app = Arc::new(Self {
             cluster: stores.cluster,
             role: role.to_owned(),
@@ -410,7 +414,7 @@ impl App {
             file_delivery: Default::default(),
             read_checks,
             public_reads,
-            cors_cache: crate::http::cors::Cache::new(crate::http::cors::CACHE_BYTES),
+            cors_cache,
             cleanup_state: crate::worker::lifecycle::Cleanup::default(),
             integrity_pacing: std::sync::Mutex::new(std::time::Instant::now()),
             local_cleanup: tokio::sync::Mutex::new(()),
@@ -463,6 +467,7 @@ impl App {
         }
         app.read_checks.bind(Arc::downgrade(&app));
         tokio::spawn(public_reads::run(Arc::downgrade(&app), public_receiver));
+        tokio::spawn(crate::http::cors::run(Arc::downgrade(&app), cors_receiver));
         Ok((app, owner))
     }
     pub fn pin(&self, id: Id) -> Active {
