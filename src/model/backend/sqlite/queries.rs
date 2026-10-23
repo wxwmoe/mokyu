@@ -2161,8 +2161,113 @@ pub(super) fn resize_writing_stream(id: Id, size: i64) -> Statement<'static> {
     sqlx::query("UPDATE streams SET size=MAX(size,?),touched_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state='writing'").bind(size).bind(id)
 }
 
+pub(super) async fn read_snapshot(
+    pool: &sqlx::SqlitePool,
+    route: &crate::model::ReadRoute,
+    access: Option<&str>,
+) -> Result<Option<crate::model::ReadSnapshot>> {
+    use crate::model::ReadRoute;
+    use sqlx::{FromRow, Row};
+    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT b.*,s.id AS stream_id,s.bucket_id AS stream_bucket_id,s.object_key AS stream_object_key,s.stream_type AS stream_stream_type,s.payload_type AS stream_payload_type,s.payload_revision AS stream_payload_revision,s.state AS stream_state,s.size AS stream_size,s.etag AS stream_etag,s.metadata AS stream_metadata,s.public_read AS stream_public_read,s.checksums AS stream_checksums,s.http_compression AS stream_http_compression,s.created_at AS stream_created_at,s.touched_at AS stream_touched_at,r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset,c.secret_encrypted AS read_secret,EXISTS(SELECT 1 FROM s3_credential_grants g WHERE g.access_key=c.access_key_id AND g.bucket_id=b.id AND c.project_id=b.project_id AND (g.actions&2)<>0) AS read_allowed FROM buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.object_key=",
+    );
+    match route {
+        ReadRoute::Bucket {
+            key,
+            alias: Some((alias, alias_key)),
+            ..
+        } => {
+            query
+                .push("CASE WHEN b.name=")
+                .push_bind(alias)
+                .push(" THEN ")
+                .push_bind(alias_key.as_bytes())
+                .push(" ELSE ")
+                .push_bind(key.as_bytes())
+                .push(" END");
+        }
+        ReadRoute::Bucket { key, .. } | ReadRoute::Host { key, .. } => {
+            query.push_bind(key.as_bytes());
+        }
+    }
+    query.push(" LEFT JOIN streams s ON s.id=o.stream_id AND s.state='ready' LEFT JOIN raw_ranges e ON e.stream_id=s.id AND e.offset_bytes=0 AND e.length=s.size AND NOT EXISTS(SELECT 1 FROM raw_ranges other WHERE other.stream_id=s.id AND other.offset_bytes<>0) LEFT JOIN raw_sources r ON r.id=e.source_id LEFT JOIN s3_credentials c ON c.access_key_id=")
+        .push_bind(access).push(" AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE b.id=(");
+    match route {
+        ReadRoute::Host { host, .. } => {
+            query
+                .push("SELECT bucket_id FROM bucket_domains WHERE host=")
+                .push_bind(host);
+        }
+        ReadRoute::Bucket {
+            name, alias: None, ..
+        } => {
+            query
+                .push("SELECT id FROM buckets WHERE name=")
+                .push_bind(name);
+        }
+        ReadRoute::Bucket {
+            name,
+            alias: Some((alias, _)),
+            ..
+        } => {
+            query
+                .push("SELECT id FROM buckets WHERE name IN (")
+                .push_bind(name)
+                .push(",")
+                .push_bind(alias)
+                .push(") ORDER BY CASE WHEN name=")
+                .push_bind(alias)
+                .push(" THEN 0 ELSE 1 END LIMIT 1");
+        }
+    }
+    query.push(")");
+    let Some(row) = query.build().fetch_optional(pool).await? else {
+        return Ok(None);
+    };
+    let stream = if row.try_get::<Option<Id>, _>("stream_id")?.is_some() {
+        Some(crate::app::StoredStream {
+            id: row.try_get("stream_id")?,
+            bucket_id: row.try_get("stream_bucket_id")?,
+            object_key: String::from_utf8(row.try_get("stream_object_key")?)?,
+            stream_type: row.try_get("stream_stream_type")?,
+            payload_type: row.try_get("stream_payload_type")?,
+            payload_revision: row.try_get("stream_payload_revision")?,
+            state: row.try_get("stream_state")?,
+            size: row.try_get("stream_size")?,
+            etag: row.try_get("stream_etag")?,
+            metadata: row.try_get("stream_metadata")?,
+            public_read: row.try_get("stream_public_read")?,
+            checksums: row.try_get("stream_checksums")?,
+            http_compression: row.try_get("stream_http_compression")?,
+            created_at: date(&row, "stream_created_at")?,
+            touched_at: date(&row, "stream_touched_at")?,
+        })
+    } else {
+        None
+    };
+    let raw = if row.try_get::<Option<Id>, _>("raw_id")?.is_some() {
+        Some(crate::model::raw::RawRange::from_row(&row)?)
+    } else {
+        None
+    };
+    Ok(Some(crate::model::ReadSnapshot {
+        bucket: Bucket::from_row(&row)?,
+        stream,
+        raw,
+        secret: row.try_get("read_secret")?,
+        allowed: row.try_get("read_allowed")?,
+    }))
+}
+
 #[async_trait::async_trait]
 impl StreamStore for Backend {
+    async fn snapshot(
+        &self,
+        route: &crate::model::ReadRoute,
+        access: Option<&str>,
+    ) -> Result<Option<crate::model::ReadSnapshot>> {
+        read_snapshot(&self.read, route, access).await
+    }
     async fn cached(&self, bucket: Uuid, key: &str) -> Result<Option<crate::model::CachedStream>> {
         use sqlx::FromRow;
         let rows = sqlx::query("SELECT s.*,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN (SELECT * FROM extents WHERE stream_id=(SELECT stream_id FROM objects WHERE bucket_id=? AND object_key=?) ORDER BY offset_bytes LIMIT 65) e ON e.stream_id=s.id LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=? AND o.object_key=? AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key.as_bytes()).bind(bucket).bind(key.as_bytes()).fetch_all(&self.read).await?;

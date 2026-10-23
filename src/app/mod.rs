@@ -29,6 +29,7 @@ pub(crate) mod publish;
 pub(crate) mod quota;
 pub(crate) mod raw;
 pub(crate) mod readiness;
+pub(crate) mod reads;
 pub(crate) mod responses;
 pub(crate) mod streams;
 

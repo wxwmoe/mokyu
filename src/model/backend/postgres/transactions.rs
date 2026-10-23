@@ -992,6 +992,13 @@ pub(super) async fn change_object(pool: &PgPool, input: ObjectChange) -> Result<
 
 #[async_trait::async_trait]
 impl StreamStore for Backend {
+    async fn snapshot(
+        &self,
+        route: &crate::model::ReadRoute,
+        access: Option<&str>,
+    ) -> Result<Option<crate::model::ReadSnapshot>> {
+        queries::read_snapshot(&self.pool, route, access).await
+    }
     async fn cached(&self, bucket: Uuid, key: &str) -> Result<Option<crate::model::CachedStream>> {
         queries::cached_stream(&self.pool, bucket, key).await
     }

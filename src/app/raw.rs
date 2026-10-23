@@ -125,8 +125,13 @@ impl App {
         let mut ranges = Vec::new();
         let mut cursor = 0;
         let mut first = None;
+        let mut prefetched = super::reads::raw(stream.id, stream.payload_revision);
         loop {
-            let rows = self.raw.page(stream.id, cursor, stream.size).await?;
+            let rows = if let Some(row) = prefetched.take() {
+                vec![row]
+            } else {
+                self.raw.page(stream.id, cursor, stream.size).await?
+            };
             ensure!(!rows.is_empty(), "raw mapping is incomplete");
             let before = cursor;
             for row in rows {

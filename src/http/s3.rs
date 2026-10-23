@@ -78,18 +78,40 @@ pub async fn s3_http(
                 q.starts_with("x-amz-")
                     || matches!(q.as_str(), "awsaccesskeyid" | "signature" | "expires")
             });
-        let mut bucket: Option<Bucket> = None;
-        if !signed
+        let alias = (!signed
             && matches!(
                 *request.method(),
                 Method::GET | Method::HEAD | Method::OPTIONS
             )
             && virtual_bucket.is_none()
             && domain.as_ref() != Some(&host)
-            && s3s::path::check_bucket_name(&host)
-        {
-            bucket = app.buckets.by_name(&host, false).await?;
-            if let Some(b) = &bucket {
+            && s3s::path::check_bucket_name(&host))
+        .then_some(host.as_str());
+        // Conditional GETs keep the second authority check after metadata evaluation.
+        let route = (read
+            && (head || !super::object::conditional(request.headers()))
+            && query.iter().all(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower.starts_with("x-amz-")
+                    || lower.starts_with("response-")
+                    || matches!(name.as_str(), "" | "x-id" | "versionId" | "partNumber")
+            }))
+        .then(|| read_route(request.uri().path(), virtual_bucket, alias))
+        .flatten();
+        let access = access_key(request.headers(), request.uri().query());
+        let prepared = if let Some(route) = route {
+            app.prepare_read(&route, access.as_deref()).await?
+        } else {
+            None
+        };
+        let mut bucket: Option<Bucket> = prepared.as_ref().map(|read| read.snapshot.bucket.clone());
+        if let Some(alias) = alias {
+            if bucket.is_none() {
+                bucket = app.buckets.by_name(alias, false).await?;
+            }
+            if let Some(b) = &bucket
+                && b.name == alias
+            {
                 public_alias = true;
                 if b.state != "active" {
                     return Err(s3s::s3_error!(AccessDenied).into());
@@ -213,8 +235,7 @@ pub async fn s3_http(
                 return Err(s3s::s3_error!(IncompleteBody).into());
             }
         }
-        let mut response = service
-            .call(request)
+        let mut response = crate::app::reads::scope(prepared, service.call(request))
             .await
             .map_err(|e| anyhow::anyhow!("S3 HTTP failure: {e:?}"))?;
         if complete {
@@ -275,6 +296,59 @@ pub async fn s3_http(
     response
 }
 
+fn read_route(
+    path: &str,
+    virtual_bucket: Option<&str>,
+    alias: Option<&str>,
+) -> Option<crate::model::ReadRoute> {
+    let decoded = decode_path(path).ok()?;
+    let parsed = s3s::path::parse_virtual_hosted_style(virtual_bucket, &decoded).ok();
+    let (name, key) = match parsed.as_ref().and_then(s3s::path::S3Path::as_object) {
+        Some((name, key)) => (name.to_owned(), key.to_owned()),
+        None if alias.is_some() => (String::new(), String::new()),
+        None => return None,
+    };
+    Some(crate::model::ReadRoute::Bucket {
+        name,
+        key,
+        alias: alias.map(|name| {
+            (
+                name.to_owned(),
+                decoded.strip_prefix('/').unwrap_or(&decoded).to_owned(),
+            )
+        }),
+    })
+}
+
+fn access_key(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
+    // This is a query hint only; s3s still validates the complete signature and requested key.
+    let credential = if let Some(header) = headers.get(hyper::header::AUTHORIZATION) {
+        let header = header.to_str().ok()?.strip_prefix("AWS4-HMAC-SHA256 ")?;
+        let mut values = header
+            .split(',')
+            .filter_map(|part| part.trim().strip_prefix("Credential="));
+        let credential = values.next()?;
+        if values.next().is_some() {
+            return None;
+        }
+        credential.to_owned()
+    } else {
+        let uri = format!("/?{}", query?).parse::<hyper::Uri>().ok()?;
+        let axum::extract::Query(values) =
+            axum::extract::Query::<Vec<(String, String)>>::try_from_uri(&uri).ok()?;
+        let mut values = values
+            .into_iter()
+            .filter(|(name, _)| name == "X-Amz-Credential");
+        let (_, credential) = values.next()?;
+        if values.next().is_some() {
+            return None;
+        }
+        credential
+    };
+    let (key, _) = credential.split_once('/')?;
+    (!key.is_empty() && key.len() <= 128).then(|| key.to_owned())
+}
+
 struct CompletionBody {
     inner: s3s::Body,
     last: tokio::time::Instant,
@@ -319,6 +393,43 @@ impl hyper::body::Body for CompletionBody {
 mod completion_tests {
     use super::*;
     use hyper::body::{Body as _, Frame};
+
+    #[test]
+    fn read_hints_preserve_encoded_keys_and_signature_boundaries() {
+        use crate::model::ReadRoute;
+        let Some(ReadRoute::Bucket {
+            name,
+            key,
+            alias: None,
+        }) = read_route("/bucket/a%2Fb%2B%252F", None, None)
+        else {
+            panic!("object route")
+        };
+        assert_eq!(name, "bucket");
+        assert_eq!(key, "a/b+%2F");
+        let Some(ReadRoute::Bucket { name, key, alias }) =
+            read_route("/other/key", None, Some("public"))
+        else {
+            panic!("alias route")
+        };
+        assert_eq!((name.as_str(), key.as_str()), ("other", "key"));
+        assert_eq!(alias, Some(("public".into(), "other/key".into())));
+        assert!(read_route("/bucket", None, None).is_none());
+        assert!(read_route("/bucket/%xx", None, None).is_none());
+        let Some(ReadRoute::Bucket { name, key, .. }) = read_route("/a%2Fb", Some("virtual"), None)
+        else {
+            panic!("virtual route")
+        };
+        assert_eq!((name.as_str(), key.as_str()), ("virtual", "a/b"));
+        let mut headers = HeaderMap::new();
+        let query = "X-Amz-Credential=access%2F20261023%2Fregion%2Fs3%2Faws4_request";
+        assert_eq!(access_key(&headers, Some(query)).as_deref(), Some("access"));
+        assert!(access_key(&headers, Some(&format!("{query}&{query}"))).is_none());
+        headers.insert("authorization", HeaderValue::from_static("invalid"));
+        assert!(access_key(&headers, Some(query)).is_none());
+        headers.insert("authorization", format!("AWS4-HMAC-SHA256 Credential=header/20261023/region/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature={}", "0".repeat(64)).parse().unwrap());
+        assert_eq!(access_key(&headers, Some(query)).as_deref(), Some("header"));
+    }
 
     struct Frames(std::collections::VecDeque<Frame<bytes::Bytes>>);
     impl hyper::body::Body for Frames {

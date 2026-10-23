@@ -736,6 +736,104 @@ pub(super) fn current_stream<'q>(
     }).bind(bucket).bind(key)
 }
 
+pub(super) async fn read_snapshot(
+    pool: &sqlx::PgPool,
+    route: &crate::model::ReadRoute,
+    access: Option<&str>,
+) -> Result<Option<crate::model::ReadSnapshot>> {
+    use crate::model::ReadRoute;
+    use sqlx::{FromRow, Row};
+    let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT b.*,s.id AS stream_id,s.bucket_id AS stream_bucket_id,s.object_key AS stream_object_key,s.stream_type AS stream_stream_type,s.payload_type AS stream_payload_type,s.payload_revision AS stream_payload_revision,s.state AS stream_state,s.size AS stream_size,s.etag AS stream_etag,s.metadata AS stream_metadata,s.public_read AS stream_public_read,s.checksums AS stream_checksums,s.http_compression AS stream_http_compression,s.created_at AS stream_created_at,s.touched_at AS stream_touched_at,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset,c.secret_encrypted AS read_secret,EXISTS(SELECT 1 FROM s3_credential_grants g WHERE g.access_key=c.access_key_id AND g.bucket_id=b.id AND c.project_id=b.project_id AND 'object.read'=ANY(g.actions)) AS read_allowed FROM buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.object_key=",
+    );
+    match route {
+        ReadRoute::Bucket {
+            key,
+            alias: Some((alias, alias_key)),
+            ..
+        } => {
+            query
+                .push("CASE WHEN b.name=")
+                .push_bind(alias)
+                .push(" THEN ")
+                .push_bind(alias_key)
+                .push(" ELSE ")
+                .push_bind(key)
+                .push(" END");
+        }
+        ReadRoute::Bucket { key, .. } | ReadRoute::Host { key, .. } => {
+            query.push_bind(key);
+        }
+    }
+    query.push(" LEFT JOIN streams s ON s.id=o.stream_id AND s.state='ready' LEFT JOIN raw_ranges e ON e.stream_id=s.id AND e.offset_bytes=0 AND e.length=s.size AND NOT EXISTS(SELECT 1 FROM raw_ranges other WHERE other.stream_id=s.id AND other.offset_bytes<>0) LEFT JOIN raw_sources r ON r.id=e.source_id LEFT JOIN s3_credentials c ON c.access_key_id=")
+        .push_bind(access).push(" AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>now()) WHERE b.id=(");
+    match route {
+        ReadRoute::Host { host, .. } => {
+            query
+                .push("SELECT bucket_id FROM bucket_domains WHERE host=")
+                .push_bind(host);
+        }
+        ReadRoute::Bucket {
+            name, alias: None, ..
+        } => {
+            query
+                .push("SELECT id FROM buckets WHERE name=")
+                .push_bind(name);
+        }
+        ReadRoute::Bucket {
+            name,
+            alias: Some((alias, _)),
+            ..
+        } => {
+            query
+                .push("SELECT id FROM buckets WHERE name IN (")
+                .push_bind(name)
+                .push(",")
+                .push_bind(alias)
+                .push(") ORDER BY CASE WHEN name=")
+                .push_bind(alias)
+                .push(" THEN 0 ELSE 1 END LIMIT 1");
+        }
+    }
+    query.push(")");
+    let Some(row) = query.build().fetch_optional(pool).await? else {
+        return Ok(None);
+    };
+    let stream = if row.try_get::<Option<Id>, _>("stream_id")?.is_some() {
+        Some(crate::app::StoredStream {
+            id: row.try_get("stream_id")?,
+            bucket_id: row.try_get("stream_bucket_id")?,
+            object_key: row.try_get("stream_object_key")?,
+            stream_type: row.try_get("stream_stream_type")?,
+            payload_type: row.try_get("stream_payload_type")?,
+            payload_revision: row.try_get("stream_payload_revision")?,
+            state: row.try_get("stream_state")?,
+            size: row.try_get("stream_size")?,
+            etag: row.try_get("stream_etag")?,
+            metadata: row.try_get("stream_metadata")?,
+            public_read: row.try_get("stream_public_read")?,
+            checksums: row.try_get("stream_checksums")?,
+            http_compression: row.try_get("stream_http_compression")?,
+            created_at: row.try_get("stream_created_at")?,
+            touched_at: row.try_get("stream_touched_at")?,
+        })
+    } else {
+        None
+    };
+    let raw = if row.try_get::<Option<Id>, _>("raw_id")?.is_some() {
+        Some(crate::model::raw::RawRange::from_row(&row)?)
+    } else {
+        None
+    };
+    Ok(Some(crate::model::ReadSnapshot {
+        bucket: Bucket::from_row(&row)?,
+        stream,
+        raw,
+        secret: row.try_get("read_secret")?,
+        allowed: row.try_get("read_allowed")?,
+    }))
+}
+
 pub(super) async fn cached_stream(
     pool: &PgPool,
     bucket: Uuid,

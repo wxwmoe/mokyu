@@ -70,7 +70,8 @@ pub(crate) use settings::{
 };
 pub(crate) use storage::{StorageRecord, StorageRecordStore};
 pub(crate) use stream::{
-    CachedExtent, CachedStream, CompressionObservation, StreamCreate, StreamStore, StreamTail,
+    CachedExtent, CachedStream, CompressionObservation, ReadRoute, ReadSnapshot, StreamCreate,
+    StreamStore, StreamTail,
 };
 pub(crate) use task::{TaskClaim, TaskControlStore, TaskExecutionStore, TaskFinish, TaskRecord};
 

@@ -1,5 +1,8 @@
 use crate::model::Id;
-use crate::{app::StoredStream, authorization::Permit};
+use crate::{
+    app::{Bucket, StoredStream},
+    authorization::Permit,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -51,6 +54,38 @@ pub(crate) struct CachedStream {
     pub extents: Vec<CachedExtent>,
 }
 
+pub(crate) enum ReadRoute {
+    Bucket {
+        name: String,
+        key: String,
+        alias: Option<(String, String)>,
+    },
+    Host {
+        host: String,
+        key: String,
+    },
+}
+
+impl ReadRoute {
+    pub fn key<'a>(&'a self, bucket: &Bucket) -> &'a str {
+        match self {
+            Self::Bucket { key, alias, .. } => alias
+                .as_ref()
+                .filter(|(name, _)| name == &bucket.name)
+                .map_or(key.as_str(), |(_, key)| key),
+            Self::Host { key, .. } => key,
+        }
+    }
+}
+
+pub(crate) struct ReadSnapshot {
+    pub bucket: Bucket,
+    pub stream: Option<StoredStream>,
+    pub raw: Option<crate::model::raw::RawRange>,
+    pub secret: Option<Vec<u8>>,
+    pub allowed: bool,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct CompressionObservation {
     pub stream: Id,
@@ -71,6 +106,11 @@ impl CompressionObservation {
 
 #[async_trait]
 pub(crate) trait StreamStore: Send + Sync {
+    async fn snapshot(
+        &self,
+        route: &ReadRoute,
+        access: Option<&str>,
+    ) -> Result<Option<ReadSnapshot>>;
     async fn current(&self, bucket: Uuid, key: &str) -> Result<StoredStream>;
     async fn cached(&self, bucket: Uuid, key: &str) -> Result<Option<CachedStream>>;
     async fn create(&self, input: StreamCreate) -> Result<Id>;

@@ -19,6 +19,17 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Gateway(pub Arc<App>);
 impl Gateway {
+    async fn authorize_read(&self, access: Option<&str>, bucket: uuid::Uuid) -> Result<()> {
+        if let Some(allowed) = access.and_then(|key| crate::app::reads::allowed(bucket, key)) {
+            return if allowed {
+                Ok(())
+            } else {
+                Err(s3_error!(AccessDenied).into())
+            };
+        }
+        self.0.authorize(access, bucket, Action::Read).await?;
+        Ok(())
+    }
     async fn read_bucket(
         &self,
         name: &str,
@@ -181,12 +192,12 @@ pub fn conditions(
 impl S3Auth for Gateway {
     async fn get_secret_key(&self, key: &str) -> S3Result<SecretKey> {
         async {
-            let encrypted = self
-                .0
-                .credentials
-                .encrypted_secret(key)
-                .await?
-                .ok_or_else(|| s3_error!(InvalidAccessKeyId))?;
+            let encrypted = if let Some(encrypted) = crate::app::reads::secret(key) {
+                encrypted
+            } else {
+                self.0.credentials.encrypted_secret(key).await?
+            }
+            .ok_or_else(|| s3_error!(InvalidAccessKeyId))?;
             Ok(SecretKey::from(codec::unprotect(
                 &encrypted,
                 &self.0.secrets.credential_key,
@@ -552,13 +563,11 @@ impl S3 for Gateway {
             };
             loop {
                 if req.credentials.is_some() || !s.public_read {
-                    self.0
-                        .authorize(
-                            req.credentials.as_ref().map(|c| c.access_key.as_str()),
-                            b.id,
-                            Action::Read,
-                        )
-                        .await?;
+                    self.authorize_read(
+                        req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                        b.id,
+                    )
+                    .await?;
                 }
                 conditions(
                     &s,
@@ -673,13 +682,11 @@ impl S3 for Gateway {
             }
             let s = self.0.metadata(b.id, &i.key).await?;
             if req.credentials.is_some() || !s.public_read {
-                self.0
-                    .authorize(
-                        req.credentials.as_ref().map(|c| c.access_key.as_str()),
-                        b.id,
-                        Action::Read,
-                    )
-                    .await?;
+                self.authorize_read(
+                    req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                    b.id,
+                )
+                .await?;
             }
             conditions(
                 &s,

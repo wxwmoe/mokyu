@@ -26,6 +26,17 @@ pub(crate) struct Read {
     pub partial: bool,
 }
 
+pub(crate) fn conditional(request: &HeaderMap) -> bool {
+    [
+        header::IF_MATCH,
+        header::IF_NONE_MATCH,
+        header::IF_MODIFIED_SINCE,
+        header::IF_UNMODIFIED_SINCE,
+    ]
+    .iter()
+    .any(|name| request.contains_key(name))
+}
+
 pub(crate) fn beneficial(raw: u64, encoded: u64) -> bool {
     raw >= 1024 && raw.saturating_sub(encoded) >= 128.max(raw.div_ceil(50))
 }
@@ -175,15 +186,7 @@ pub(crate) async fn read(
         return Err(s3s::s3_error!(AccessDenied).into());
     }
     let accept = AcceptEncoding::new(request);
-    let light = head
-        || [
-            header::IF_MATCH,
-            header::IF_NONE_MATCH,
-            header::IF_MODIFIED_SINCE,
-            header::IF_UNMODIFIED_SINCE,
-        ]
-        .iter()
-        .any(|name| request.contains_key(name));
+    let light = head || conditional(request);
     let candidate =
         if !light && !checksum && cacheable(request) && app.response_cache.candidate(bucket, key) {
             app.ensure_mode()?;

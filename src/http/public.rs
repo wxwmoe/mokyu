@@ -227,7 +227,37 @@ async fn public(
         .and_then(|s| s.to_str().ok())
         .ok_or_else(unauthorized)?
         .to_ascii_lowercase();
-    let bucket = app.buckets.by_host(&host).await?;
+    let key = if request.method() == Method::OPTIONS {
+        String::new()
+    } else {
+        decode_path(
+            request
+                .uri()
+                .path()
+                .strip_prefix('/')
+                .unwrap_or(request.uri().path()),
+        )
+        .map_err(|_| unauthorized())?
+    };
+    let prepared = if request.method() == Method::HEAD
+        || (request.method() == Method::GET && !super::object::conditional(request.headers()))
+    {
+        app.prepare_read(
+            &crate::model::ReadRoute::Host {
+                host: host.clone(),
+                key: key.clone(),
+            },
+            None,
+        )
+        .await?
+    } else {
+        None
+    };
+    let bucket = if let Some(read) = &prepared {
+        Some(read.snapshot.bucket.clone())
+    } else {
+        app.buckets.by_host(&host).await?
+    };
     let bucket = bucket.ok_or_else(unauthorized)?;
     let cors = cors_headers(&bucket, request.headers(), request.method().as_str())?;
     if request.method() == Method::OPTIONS {
@@ -248,21 +278,16 @@ async fn public(
         }
         return Ok(r);
     }
-    let key = decode_path(
-        request
-            .uri()
-            .path()
-            .strip_prefix('/')
-            .unwrap_or(request.uri().path()),
-    )
-    .map_err(|_| unauthorized())?;
-    let result = respond(
-        app.clone(),
-        bucket.id,
-        &key,
-        request.headers().clone(),
-        request.method().clone(),
-        ReadOptions::public(&bucket),
+    let result = crate::app::reads::scope(
+        prepared,
+        respond(
+            app.clone(),
+            bucket.id,
+            &key,
+            request.headers().clone(),
+            request.method().clone(),
+            ReadOptions::public(&bucket),
+        ),
     )
     .await;
     let result = match result {

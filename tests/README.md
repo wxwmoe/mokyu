@@ -258,3 +258,5 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 `upload-overflow.spec.ts` 使用独立 S3 fixture（`MOKYU_TEST_BACKEND`），自行创建本地后端，验证三语明暗表单、键盘选择、320–1440px、草稿取消/保存及本地禁用。`recovery.raw_uploads` 同时验证 chunks/raw 的 fallback/reject、503 SlowDown、失败写入不覆盖旧对象、重启保存策略、非法选项与缺省字段。
 
 `python -m tests.recovery.credential_activity` uses a stopped isolated service and the source-quarantine fixture variables to verify signed GET/HEAD while credential activity writes are paused, bounded timeout and retry, five-minute coalescing, invalid signature isolation, and restart loss of optional statistics. Run against each supported database.
+
+`python -m tests.recovery.read_snapshots` uses the same stopped-service fixture and a local raw backend. It counts actual SQL by HTTP request ID for signed and anonymous GET/HEAD/Range, including Web domains, S3 path, virtual hosts and public aliases. It also checks CORS, encoded keys, empty objects, presigned URLs, failed/expired/disabled credentials, grants, conditional ACL/version races, pre-open GC pins, and current source quarantine. SQL traces remain in the isolated fault directory; run against each supported database.

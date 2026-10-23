@@ -10,12 +10,22 @@ use super::{Active, App, StoredStream};
 impl App {
     pub async fn metadata(&self, bucket: Uuid, key: &str) -> Result<StoredStream> {
         self.ensure_mode()?;
-        let stream = self.stream_store.current(bucket, key).await?;
+        let stream = if let Some(stream) = super::reads::metadata(bucket, key) {
+            stream?
+        } else {
+            self.stream_store.current(bucket, key).await?
+        };
         #[cfg(feature = "fault-injection")]
         crate::faults::point("read-metadata").await;
         Ok(stream)
     }
     pub async fn current(&self, bucket: Uuid, key: &str) -> Result<(StoredStream, Active)> {
+        if let Some(current) = super::reads::current(bucket, key) {
+            self.ensure_mode()?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("read-pinned").await;
+            return current;
+        }
         let _guard = self.coord.lock().await;
         self.ensure_mode()?;
         let (stream, pin) = if self.role == "single" {
