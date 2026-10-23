@@ -348,7 +348,11 @@ impl Cache {
     }
 
     fn evict(index: &mut Index) -> bool {
-        while let Some(key) = index.order.pop_front() {
+        // Cache admission must not scan the whole hot set while holding the read index.
+        for _ in 0..64 {
+            let Some(key) = index.order.pop_front() else {
+                return false;
+            };
             if index
                 .ready
                 .get(&key)
@@ -389,6 +393,7 @@ impl Cache {
         let units = capacity.div_ceil(UNIT) as u32;
         let building = self.building.clone().try_acquire_many_owned(units).ok()?;
         let mut index = self.index.lock().unwrap();
+        let mut stalled = 0;
         loop {
             if let Ok(memory) = self
                 .memory
@@ -397,9 +402,16 @@ impl Cache {
             {
                 return Some((memory, building));
             }
-            if !Self::evict(&mut index) {
+            let available = self.memory.available_permits();
+            if stalled == 4 || !Self::evict(&mut index) {
                 return None;
             }
+            // Bytes slices can retain allocations after their entries have been evicted.
+            stalled = if self.memory.available_permits() <= available {
+                stalled + 1
+            } else {
+                0
+            };
         }
     }
 
@@ -530,7 +542,9 @@ impl Received {
         let needed = index.ready.len() + 1;
         cache.grow_index(&mut index, needed);
         while index.ready.len() >= index.slots {
-            Cache::evict(&mut index);
+            if !Cache::evict(&mut index) {
+                return;
+            }
         }
         *index.paths.entry(path).or_default() += 1;
         index.ready.insert(
@@ -688,7 +702,9 @@ impl Builder {
         let needed = index.ready.len() + 1;
         cache.grow_index(&mut index, needed);
         while index.ready.len() >= index.slots {
-            Cache::evict(&mut index);
+            if !Cache::evict(&mut index) {
+                return;
+            }
         }
         if index.ready.contains_key(&self.key) {
             index.remove(self.key);
@@ -873,6 +889,73 @@ mod tests {
     use super::*;
     use crate::{app::Extent, content::codec::Chunk};
     use serde_json::json;
+
+    #[test]
+    fn pinned_allocations_do_not_flush_the_cache_for_an_unfunded_candidate() {
+        let cache = Cache::new(4 * 1024 * 1024);
+        let mut retained = Vec::new();
+        for _ in 0..24 {
+            let (stream, key, row) = fixture(128 * 1024);
+            assert!(cache.begin(key, &stream, &stream.object_key).is_none());
+            let mut builder = cache.begin(key, &stream, &stream.object_key).unwrap();
+            builder.capture.lock().unwrap().record(&row);
+            builder.capture.lock().unwrap().finish_source();
+            assert!(builder.append(&vec![7; 128 * 1024]));
+            builder.finish();
+            // Retain only a Bytes slice, not the Entry Arc.
+            retained.push(cache.get(key).unwrap().bytes.slice(0..1));
+        }
+        assert_eq!(cache.snapshot()["live_bytes"], 3 * 1024 * 1024);
+        let (stream, key, row) = fixture(4096);
+        assert!(cache.begin(key, &stream, &stream.object_key).is_none());
+        let mut builder = cache.begin(key, &stream, &stream.object_key).unwrap();
+        assert!(!builder.append(&[1; 4096]));
+        drop(builder);
+        let status = cache.snapshot();
+        assert!(status["entries"].as_u64().unwrap() >= 20, "{status}");
+        assert_eq!(status["live_bytes"], 3 * 1024 * 1024);
+        assert_eq!(status["retired_bytes"], 4 * 128 * 1024);
+        assert_eq!(status["candidate_bytes"], 0);
+        assert!(retained.iter().all(|bytes| bytes.as_ref() == [7]));
+        drop(retained);
+        assert_eq!(cache.snapshot()["retired_bytes"], 0);
+        let mut builder = cache.begin(key, &stream, &stream.object_key).unwrap();
+        builder.capture.lock().unwrap().record(&row);
+        builder.capture.lock().unwrap().finish_source();
+        assert!(builder.append(&[1; 4096]));
+        builder.finish();
+        assert_eq!(cache.get(key).unwrap().bytes.as_ref(), &[1; 4096]);
+    }
+
+    #[test]
+    fn hot_index_pressure_can_skip_admission_and_retry_without_losing_entries() {
+        let mut cache = Cache::new(4 * 1024 * 1024);
+        let limits = Arc::get_mut(&mut cache).unwrap();
+        limits.entries = 80;
+        limits.index.get_mut().unwrap().slots = 80;
+        let fill = |stream: &StoredStream, key, row: &ReadExtent| {
+            let mut builder = cache.begin(key, stream, &stream.object_key).unwrap();
+            builder.capture.lock().unwrap().record(row);
+            builder.capture.lock().unwrap().finish_source();
+            assert!(builder.append(&[7; 4096]));
+            builder.finish();
+        };
+        for _ in 0..80 {
+            let (stream, key, row) = fixture(4096);
+            assert!(cache.begin(key, &stream, &stream.object_key).is_none());
+            fill(&stream, key, &row);
+            assert!(cache.get(key).is_some());
+        }
+        let (stream, key, row) = fixture(4096);
+        assert!(cache.begin(key, &stream, &stream.object_key).is_none());
+        fill(&stream, key, &row);
+        assert!(cache.get(key).is_none());
+        assert_eq!(cache.snapshot()["entries"], 80);
+        assert_eq!(cache.snapshot()["candidate_bytes"], 0);
+        fill(&stream, key, &row);
+        assert!(cache.get(key).is_some());
+        assert_eq!(cache.snapshot()["entries"], 80);
+    }
 
     #[test]
     fn eviction_gives_used_bodies_a_second_chance_without_keeping_cold_entries_forever() {
