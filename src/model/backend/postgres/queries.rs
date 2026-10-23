@@ -840,7 +840,7 @@ pub(super) async fn cached_stream(
     key: &str,
 ) -> Result<Option<crate::model::CachedStream>> {
     use sqlx::{FromRow, Row};
-    let rows = sqlx::query("SELECT s.*,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN LATERAL (SELECT * FROM extents WHERE stream_id=s.id ORDER BY offset_bytes LIMIT 65) e ON TRUE LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=$1 AND o.object_key=$2 AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key).fetch_all(pool).await?;
+    let rows = sqlx::query("SELECT s.id,s.bucket_id,s.object_key,s.stream_type,s.state,s.size,s.etag,s.metadata,s.public_read,s.checksums,s.http_compression,s.created_at,s.touched_at,s.payload_type,s.payload_revision,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN LATERAL (SELECT * FROM extents WHERE stream_id=s.id ORDER BY offset_bytes LIMIT 65) e ON TRUE LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=$1 AND o.object_key=$2 AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key).fetch_all(pool).await?;
     let Some(first) = rows.first() else {
         return Ok(None);
     };

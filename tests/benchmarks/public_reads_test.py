@@ -6,12 +6,12 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import brotli
 import zstandard
 
-from tests.benchmarks.public_reads import evict_pages, measure, status
+from tests.benchmarks.public_reads import evict_pages, measure, sql_counts, status
 
 RAW = b'Exact benchmark body accounting.\n' * 2000
 ENCODED = {'identity': RAW, 'gzip': gzip.compress(RAW), 'br': brotli.compress(RAW),
@@ -41,6 +41,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Accounting(unittest.TestCase):
+    def test_snapshot_counts_cover_both_projections_without_hiding_queries(self):
+        connection = Mock()
+        connection.execute.return_value.fetchall.return_value = [
+            ('SELECT s.*,b.settings_revision,e.offset_bytes AS cache_offset FROM objects o', 3),
+            ('SELECT s.id,s.bucket_id,s.metadata,e.offset_bytes AS cache_offset FROM objects o', 7),
+            ('SELECT s.* FROM streams s', 11),
+            ('SELECT e.*,c.id FROM extents e', 5),
+            ('INSERT INTO stream_leases(stream_id) VALUES($1)', 2),
+        ]
+        self.assertEqual(sql_counts(connection), {'source_pages': 5, 'lease_insert': 2, 'snapshot': 10})
+        self.assertIsNone(sql_counts(None))
+
     def test_busy_pages_cannot_silently_be_counted_as_cold(self):
         def resident(address, size, pages):
             pages[0] = 1

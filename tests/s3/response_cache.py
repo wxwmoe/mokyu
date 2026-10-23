@@ -159,18 +159,22 @@ if os.environ.get('MOKYU_TEST_DATABASE_FILE'):
             assert status()['response_cache']['hits'] == before
         finally:
             db.execute('UPDATE extents SET source_offset=%s WHERE stream_id=%s AND offset_bytes=%s', (row[2], row[0], row[1]))
-        put('fragmented', text)
+        detail = 'm' * 1600
+        put('fragmented', text, Metadata={'detail': detail})
         warm('fragmented', text)
         stream, chunk = db.execute('SELECT e.stream_id,e.chunk_id FROM extents e JOIN objects o ON o.stream_id=e.stream_id JOIN buckets b ON b.id=o.bucket_id WHERE b.name=%s AND o.object_key=%s LIMIT 1', (bucket, prefix + 'fragmented')).fetchone()
-        with db.transaction():
-            db.execute('DELETE FROM extents WHERE stream_id=%s', (stream,))
-            for number in range(65):
-                offset = number * 1000
-                length = 1000 if number < 64 else len(text) - offset
-                db.execute('INSERT INTO extents(stream_id,offset_bytes,length,chunk_id,source_offset) VALUES(%s,%s,%s,%s,%s)', (stream, offset, length, chunk, offset))
-        before = status()['response_cache']['hits']
-        warm('fragmented', text)
-        assert status()['response_cache']['hits'] == before
+        for count in [1, 16, 64, 65]:
+            with db.transaction():
+                db.execute('DELETE FROM extents WHERE stream_id=%s', (stream,))
+                for number in range(count):
+                    offset, end = len(text) * number // count, len(text) * (number + 1) // count
+                    db.execute('INSERT INTO extents(stream_id,offset_bytes,length,chunk_id,source_offset) VALUES(%s,%s,%s,%s,%s)', (stream, offset, end - offset, chunk, offset))
+            before = status()['response_cache']['hits']
+            warm('fragmented', text)
+            hits = status()['response_cache']['hits'] - before
+            assert hits == 0 if count == 65 else hits > 0, (count, hits)
+            response, data = read('fragmented')
+            assert data == text and response.headers['x-amz-meta-detail'] == detail
         if fault_dir := os.environ.get('MOKYU_TEST_FAULT_DIR'):
             put('snapshot', text)
             warm('snapshot', text, 'gzip')

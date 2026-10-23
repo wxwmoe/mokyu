@@ -72,10 +72,11 @@ def status(url):
 def sql_counts(connection):
     if connection is None:
         return None
-    prefixes = {'source_pages': 'SELECT e.*,c.id', 'snapshot': 'SELECT s.*,b.settings_revision',
-                'lease_insert': 'INSERT INTO stream_leases'}
+    prefixes = {'source_pages': 'SELECT e.*,c.id', 'lease_insert': 'INSERT INTO stream_leases'}
     rows = connection.execute('SELECT query,calls FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())').fetchall()
-    return {name: sum(calls for query, calls in rows if query.startswith(prefix)) for name, prefix in prefixes.items()}
+    counts = {name: sum(calls for query, calls in rows if query.startswith(prefix)) for name, prefix in prefixes.items()}
+    counts['snapshot'] = sum(calls for query, calls in rows if query.startswith('SELECT s.') and ' AS cache_offset' in query)
+    return counts
 
 
 def decode(data, encoding):
