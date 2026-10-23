@@ -25,6 +25,7 @@ pub(crate) struct Writer {
     target: Uuid,
     file: Option<super::raw_request::File>,
     memory: Option<super::memory::Buffer>,
+    external_memory: bool,
     charge: Option<UploadCharge>,
     policy: super::CachePolicy,
     size: u64,
@@ -90,6 +91,7 @@ impl Writer {
             target,
             file,
             memory,
+            external_memory: false,
             charge,
             policy,
             size: 0,
@@ -101,6 +103,13 @@ impl Writer {
             prepared: false,
             buffered,
         })
+    }
+
+    pub fn receive_external(&mut self) {
+        if let Some(memory) = &mut self.memory {
+            memory.receive_external();
+            self.external_memory = true;
+        }
     }
 
     pub async fn prepare(
@@ -177,7 +186,9 @@ impl Writer {
             .context("raw receive length overflow")?;
         super::raw::remote_size(size)?;
         if let Some(memory) = &mut self.memory {
-            memory.append(data)?;
+            if !self.external_memory {
+                memory.append(data)?;
+            }
             self.size = size;
             return Ok(());
         }
@@ -209,15 +220,26 @@ impl Writer {
         Ok(())
     }
 
-    pub async fn finish(mut self, stream: Id, expected: u64, digest: &[u8]) -> Result<Written> {
+    pub async fn finish(
+        mut self,
+        stream: Id,
+        expected: u64,
+        digest: &[u8],
+        received: Option<bytes::Bytes>,
+    ) -> Result<Written> {
         ensure!(self.size == expected, "raw receive length mismatch");
         if let Some(memory) = self.memory.take() {
+            let data = if self.external_memory {
+                memory.retain(received.context("received memory is missing")?)?
+            } else {
+                memory.finish()
+            };
             self.storage.raw_upload_pins.lock().unwrap().insert(
                 self.location,
                 (
                     self.source,
                     UploadPin {
-                        memory: Some(memory.finish()),
+                        memory: Some(data),
                         _pin: None,
                         _charge: None,
                         size: expected,

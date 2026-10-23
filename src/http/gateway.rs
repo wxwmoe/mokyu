@@ -456,7 +456,7 @@ impl S3 for Gateway {
                 .body
                 .take()
                 .unwrap_or_else(|| StreamingBlob::from_bytes(bytes::Bytes::new()));
-            let (_, etag, sums) = self
+            let (_, etag, sums, received) = self
                 .0
                 .receive(
                     id,
@@ -468,6 +468,7 @@ impl S3 for Gateway {
                     req.input.checksum_algorithm.as_ref().map(|a| a.as_str()),
                     None,
                     None,
+                    Some((b.id, &req.input.key)),
                 )
                 .await?;
             self.0
@@ -477,6 +478,8 @@ impl S3 for Gateway {
                     req.input.if_none_match.as_ref(),
                 )
                 .await?;
+            self.0
+                .cache_received(id, b.id, req.input.key.clone(), etag.clone(), received);
             let mut out = PutObjectOutput {
                 e_tag: Some(ETag::Strong(etag)),
                 ..Default::default()

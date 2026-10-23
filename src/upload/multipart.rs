@@ -227,7 +227,7 @@ impl App {
             .take()
             .unwrap_or_else(|| StreamingBlob::from_bytes(bytes::Bytes::new()));
         let i = &req.input;
-        let (size, etag, sums) = self
+        let (size, etag, sums, _) = self
             .receive(
                 id,
                 b.storage_id.context("bucket has no storage")?,
@@ -240,6 +240,7 @@ impl App {
                     .or(i.checksum_algorithm.as_ref().map(|a| a.as_str())),
                 Some((u.id, i.part_number)),
                 remote.as_ref().map(|upload| upload.profile),
+                None,
             )
             .await?;
         let charge = if remote.is_some() {

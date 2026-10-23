@@ -35,11 +35,13 @@ def main():
         reply.raise_for_status()
         return reply.json()
 
+    key = 'cached'
+
     def read(node, web=False, method='GET', **headers):
         base = f'http://{hosts[node]}:9001' if web else endpoints[node] + '/' + fixture.name
         if web:
             headers['Host'] = domain
-        return requests.request(method, base + '/cached', headers={'Accept-Encoding': 'identity', **headers}, timeout=15)
+        return requests.request(method, base + '/' + key, headers={'Accept-Encoding': 'identity', **headers}, timeout=15)
 
     for node in range(2):
         def loaded():
@@ -120,11 +122,12 @@ def main():
     profile.update(cdc_enabled=False, pack_range_enabled=False, read_integrity='off',
                    read_source_validation='strict', public_cache_validation='strict')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+    key = 'unchecked'
     body = b'Optional read digests stay behind per-node profile generations.\n' * 1000
-    fixture.client.put_object(Bucket=fixture.name, Key='cached', Body=body, ACL='public-read')
+    fixture.client.put_object(Bucket=fixture.name, Key=key, Body=body, ACL='public-read')
     def raw_path():
         import uuid
-        row, = database.query('SELECT r.id FROM objects o JOIN raw_ranges e ON e.stream_id=o.stream_id JOIN raw_sources r ON r.id=e.source_id WHERE o.bucket_id=%s AND o.object_key=%s', uuid.UUID(fixture.bucket_id), 'cached')
+        row, = database.query('SELECT r.id FROM objects o JOIN raw_ranges e ON e.stream_id=o.stream_id JOIN raw_sources r ON r.id=e.source_id WHERE o.bucket_id=%s AND o.object_key=%s', uuid.UUID(fixture.bucket_id), key)
         identity = str(row['id']).replace('-', '')
         return fixture.prefix + 'raw/' + identity[-2:] + '/' + identity
     physical = raw_path()
@@ -154,7 +157,7 @@ def main():
     profile['read_integrity'] = 'background'
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     body = body[::-1]
-    fixture.client.put_object(Bucket=fixture.name, Key='cached', Body=body, ACL='public-read', CacheControl='no-store')
+    fixture.client.put_object(Bucket=fixture.name, Key=key, Body=body, ACL='public-read', CacheControl='no-store')
     for node in range(2):
         before = status(node)['read_checks']['verified']
         def background_ready():

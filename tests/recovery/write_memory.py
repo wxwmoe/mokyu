@@ -119,6 +119,8 @@ def main():
 
     try:
         settings = re.sub(r'^cache_size = .*$', 'cache_size = "64MiB"', config.read_text(), flags=re.M)
+        settings = re.sub(r'^upload_cache_size = .*\n', '', settings, flags=re.M)
+        settings = settings.replace('[instance]\n', '[instance]\nupload_cache_size = "12MiB"\n')
         config.write_text(settings)
         memory_size('8MiB')
         start()

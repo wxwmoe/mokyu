@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const POLICY: i32 = 1;
+pub(crate) const POLICY: i32 = 1;
 
 pub(crate) struct Read {
     pub status: StatusCode,
@@ -123,7 +123,7 @@ fn conditions(stream: &StoredStream, request: &HeaderMap, etag: &str) -> Result<
     })
 }
 
-fn metadata_headers(metadata: &Metadata) -> Result<HeaderMap> {
+pub(crate) fn metadata_headers(metadata: &Metadata) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,

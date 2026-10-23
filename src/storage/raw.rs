@@ -235,7 +235,7 @@ impl Storage {
                 IntegrityError::Hash
             );
         }
-        Box::pin(writer.finish_received(Id::default(), expected, digest)).await?;
+        Box::pin(writer.finish_received(Id::default(), expected, digest, None)).await?;
         Ok(())
     }
 
@@ -753,6 +753,12 @@ pub(crate) enum RawWriter<'a> {
 }
 
 impl RawWriter<'_> {
+    pub fn receive_external(&mut self) {
+        if let Self::Pending(writer) = self {
+            writer.receive_external();
+        }
+    }
+
     pub fn can_assemble(&self) -> bool {
         matches!(self, Self::Local(_) | Self::Pending(_))
     }
@@ -981,23 +987,26 @@ impl RawWriter<'_> {
         stream: Id,
         expected: u64,
         digest: &[u8],
+        received: Option<Bytes>,
     ) -> Result<super::raw_upload::Written> {
         if self.reuse(stream, digest).await? {
             return Ok(super::raw_upload::Written::Reused);
         }
-        self.finish_received(stream, expected, digest).await
+        self.finish_received(stream, expected, digest, received)
+            .await
     }
     async fn finish_received(
         self,
         stream: Id,
         expected: u64,
         digest: &[u8],
+        received: Option<Bytes>,
     ) -> Result<super::raw_upload::Written> {
         match self {
             Self::Local(writer) => Ok(super::raw_upload::Written::Final(
                 writer.finish(expected).await?,
             )),
-            Self::Pending(writer) => writer.finish(stream, expected, digest).await,
+            Self::Pending(writer) => writer.finish(stream, expected, digest, received).await,
             Self::Replay(_) => anyhow::bail!("raw upload requires its replay source"),
             Self::Remote(mut writer) => {
                 ensure!(writer.size == expected, "raw receive length mismatch");
@@ -1093,7 +1102,7 @@ impl RawWriter<'_> {
             return Ok(super::raw_upload::Written::Reused);
         }
         let Self::Replay(mut replay) = self else {
-            return self.finish_received(stream, expected, digest).await;
+            return self.finish_received(stream, expected, digest, None).await;
         };
         ensure!(replay.writer.size == expected, "raw replay length mismatch");
         #[cfg(feature = "fault-injection")]
@@ -1137,7 +1146,7 @@ impl RawWriter<'_> {
         }
         ensure!(offset == expected, "raw replay is incomplete");
         Self::Remote(replay.writer)
-            .finish_received(stream, expected, digest)
+            .finish_received(stream, expected, digest, None)
             .await
     }
 }

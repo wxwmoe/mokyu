@@ -240,7 +240,8 @@ impl App {
         algorithm: Option<&str>,
         upload: Option<(Uuid, i32)>,
         raw_override: Option<i64>,
-    ) -> Result<(i64, String, Value)> {
+        cache_path: Option<(Uuid, &str)>,
+    ) -> Result<(i64, String, Value, Option<crate::app::responses::Received>)> {
         let mut check = Integrity::new(headers, algorithm)?;
         let declared = if let Some(v) = headers.get("x-amz-decoded-content-length") {
             Some(v.to_str()?.parse::<i64>()?)
@@ -251,6 +252,9 @@ impl App {
             return Err(s3_error!(EntityTooLarge).into());
         }
         let mut received = 0i64;
+        let mut capture = cache_path
+            .filter(|_| upload.is_none())
+            .and_then(|(bucket, path)| self.response_cache.receive(bucket, path, declared));
         let mut reserved = self
             .reserve_quota(stream, declared.unwrap_or(0), false, upload)
             .await?;
@@ -289,6 +293,11 @@ impl App {
         } else {
             None
         };
+        if capture.is_some()
+            && let Some((_, writer)) = &mut raw
+        {
+            writer.receive_external();
+        }
         let mut window = if raw.is_some() {
             Vec::new()
         } else {
@@ -321,6 +330,9 @@ impl App {
                 reserved = self.reserve_quota(stream, received, true, upload).await?;
             }
             check.update(&data);
+            if let Some(capture) = &mut capture {
+                capture.append(&data)?;
+            }
             if touch.elapsed() >= Duration::from_secs(5) {
                 self.renew_write_lease(stream).await?;
                 if let Some((upload, _)) = upload {
@@ -362,12 +374,22 @@ impl App {
             return Err(s3_error!(IncompleteBody).into());
         }
         let (etag, sums) = check.finish(trailers)?;
+        let capture = capture
+            .map(|capture| capture.finish(&self.response_cache))
+            .transpose()?;
         if reserved != received {
             self.reserve_quota(stream, received, false, upload).await?;
         }
         if let Some((source, writer)) = raw {
             let digest = hex::decode(&etag)?;
-            let written = writer.finish(stream, received as u64, &digest).await?;
+            let written = writer
+                .finish(
+                    stream,
+                    received as u64,
+                    &digest,
+                    capture.as_ref().map(|capture| capture.bytes.clone()),
+                )
+                .await?;
             self.finish_raw_received(stream, source, storage, received, &digest, written)
                 .await?;
         } else if upload.is_some() {
@@ -397,7 +419,7 @@ impl App {
         }
         self.finish_received_stream(stream, received, &etag, sums.clone())
             .await?;
-        Ok((received, etag, sums))
+        Ok((received, etag, sums, capture))
     }
 }
 

@@ -15,6 +15,42 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 impl super::App {
+    pub(crate) fn cache_received(
+        self: &Arc<Self>,
+        id: Id,
+        bucket: Uuid,
+        path: String,
+        etag: String,
+        received: Option<Received>,
+    ) {
+        let Some(received) = received else { return };
+        let app = self.clone();
+        tokio::spawn(async move {
+            let work = async {
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("response-upload-before-admit").await;
+                let stream = app.stream_store.current(bucket, &path).await?;
+                if stream.id != id
+                    || stream.etag != etag
+                    || stream.size != received.bytes.len() as i64
+                {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                let metadata: super::Metadata = serde_json::from_value(stream.metadata.clone())?;
+                let headers = crate::http::object::metadata_headers(&metadata)?;
+                if !crate::http::object::cacheable(&headers) {
+                    return Ok(());
+                }
+                if let Some(mapping) = app.response_mapping(&stream).await? {
+                    received.publish(&app.response_cache, &stream, mapping);
+                }
+                Ok(())
+            };
+            // Warming is optional; it must not prolong the accepted write or retain candidates indefinitely.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), work).await;
+        });
+    }
+
     pub(crate) async fn response_mapping(
         &self,
         stream: &StoredStream,
@@ -153,6 +189,7 @@ pub(crate) struct Cache {
     memory: Arc<Semaphore>,
     building: Arc<Semaphore>,
     waiters: Arc<Semaphore>,
+    uploads: Arc<Semaphore>,
     index: Mutex<Index>,
     counters: Arc<Counters>,
 }
@@ -166,15 +203,35 @@ impl Cache {
             memory: Arc::new(Semaphore::new(limit.saturating_sub(METADATA) / UNIT)),
             building: Arc::new(Semaphore::new(limit / 4 / UNIT)),
             waiters: Arc::new(Semaphore::new(32)),
+            uploads: Arc::new(Semaphore::new(16)),
             index: Mutex::new(Index::default()),
             counters: Arc::new(Counters::default()),
         })
     }
 
     pub fn eligible(&self, stream: &StoredStream) -> bool {
-        self.limit >= 4 * 1024 * 1024
-            && stream.size > 0
-            && stream.size as u64 <= self.entry_limit as u64
+        self.eligible_size(stream.size)
+    }
+
+    fn eligible_size(&self, size: i64) -> bool {
+        self.limit >= 4 * 1024 * 1024 && size > 0 && size as u64 <= self.entry_limit as u64
+    }
+
+    pub(crate) fn receive(&self, bucket: Uuid, path: &str, size: Option<i64>) -> Option<Upload> {
+        let size = size?;
+        // Preserve hot-path admission: write-only objects must not displace useful read data.
+        if !self.eligible_size(size) || !self.candidate(bucket, path) {
+            return None;
+        }
+        let slot = self.uploads.clone().try_acquire_owned().ok()?;
+        let (memory, building) = self.reserve(size as usize)?;
+        Some(Upload {
+            bytes: Vec::with_capacity(size as usize),
+            size: size as usize,
+            memory,
+            building,
+            slot,
+        })
     }
 
     pub fn get(&self, key: Key) -> Option<Arc<Entry>> {
@@ -303,6 +360,88 @@ struct Buffer {
     bytes: Vec<u8>,
     memory: OwnedSemaphorePermit,
     _building: OwnedSemaphorePermit,
+}
+
+pub(crate) struct Upload {
+    bytes: Vec<u8>,
+    size: usize,
+    memory: OwnedSemaphorePermit,
+    building: OwnedSemaphorePermit,
+    slot: OwnedSemaphorePermit,
+}
+
+pub(crate) struct Received {
+    pub bytes: Bytes,
+    ownership: Arc<Ownership>,
+    _building: OwnedSemaphorePermit,
+    _slot: OwnedSemaphorePermit,
+}
+
+impl Upload {
+    pub fn append(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            data.len() <= self.size - self.bytes.len(),
+            "response receive length exceeded"
+        );
+        self.bytes.extend_from_slice(data);
+        Ok(())
+    }
+
+    pub fn finish(self, cache: &Cache) -> anyhow::Result<Received> {
+        anyhow::ensure!(
+            self.bytes.len() == self.size,
+            "response receive length mismatch"
+        );
+        let ownership = Arc::new(Ownership {
+            counters: cache.counters.clone(),
+            retired: false.into(),
+            charge: self.memory.num_permits() as u64 * UNIT as u64,
+        });
+        Ok(Received {
+            bytes: Bytes::from_owner(Allocation {
+                bytes: self.bytes,
+                _memory: self.memory,
+                ownership: ownership.clone(),
+            }),
+            ownership,
+            _building: self.building,
+            _slot: self.slot,
+        })
+    }
+}
+
+impl Received {
+    fn publish(self, cache: &Cache, stream: &StoredStream, mapping: [u8; 32]) {
+        let key = Key {
+            bucket: stream.bucket_id,
+            stream: stream.id,
+            encoding: "identity",
+            policy: crate::http::object::POLICY,
+        };
+        let path = path_key(stream.bucket_id, &stream.object_key);
+        let mut index = cache.index.lock().unwrap();
+        if index.ready.contains_key(&key) || index.builders.contains_key(&key) {
+            return;
+        }
+        while index.ready.len() >= ENTRIES {
+            Cache::evict(&mut index);
+        }
+        *index.paths.entry(path).or_default() += 1;
+        index.ready.insert(
+            key,
+            Arc::new(Entry {
+                raw_size: stream.size,
+                bytes: self.bytes,
+                etag: stream.etag.clone(),
+                mapping,
+                path,
+                ownership: self.ownership,
+                checks: Vec::new(),
+                read_epoch: 0,
+            }),
+        );
+        index.fifo.push_back(key);
+    }
 }
 
 pub(crate) struct Builder {
@@ -596,6 +735,70 @@ mod tests {
     use super::*;
     use crate::{app::Extent, content::codec::Chunk};
     use serde_json::json;
+
+    #[test]
+    fn upload_admission_reuses_the_received_allocation_and_releases_failed_candidates() {
+        let cache = Cache::new(4 * 1024 * 1024);
+        let (mut stream, key, row) = fixture(8192);
+        assert!(
+            cache
+                .receive(key.bucket, &stream.object_key, Some(8192))
+                .is_none()
+        );
+        assert!(cache.begin(key, &stream, &stream.object_key).is_none());
+        let mut builder = cache.begin(key, &stream, &stream.object_key).unwrap();
+        builder.capture.lock().unwrap().record(&row);
+        builder.capture.lock().unwrap().finish_source();
+        assert!(builder.append(&vec![1; 8192]));
+        builder.finish();
+        assert!(
+            cache
+                .receive(key.bucket, &stream.object_key, None)
+                .is_none()
+        );
+        assert!(
+            cache
+                .receive(key.bucket, &stream.object_key, Some(0))
+                .is_none()
+        );
+        assert!(
+            cache
+                .receive(key.bucket, &stream.object_key, Some(262145))
+                .is_none()
+        );
+        let baseline = cache.snapshot()["live_bytes"].clone();
+        let mut failed = cache
+            .receive(key.bucket, &stream.object_key, Some(8192))
+            .unwrap();
+        assert!(failed.append(&vec![2; 8193]).is_err());
+        assert!(failed.finish(&cache).is_err());
+        assert_eq!(cache.snapshot()["live_bytes"], baseline);
+        let mut upload = cache
+            .receive(key.bucket, &stream.object_key, Some(8192))
+            .unwrap();
+        upload.append(&vec![3; 8192]).unwrap();
+        let pointer = upload.bytes.as_ptr();
+        let received = upload.finish(&cache).unwrap();
+        assert_eq!(received.bytes.as_ptr(), pointer);
+        stream.id = Uuid::new_v4().into();
+        received.publish(&cache, &stream, [7; 32]);
+        let next = Key {
+            stream: stream.id,
+            ..key
+        };
+        let entry = cache.get(next).unwrap();
+        assert_eq!(entry.bytes.as_ptr(), pointer);
+        assert_eq!(entry.mapping, [7; 32]);
+        assert!(entry.usable(u64::MAX));
+        let reader = entry.bytes.slice(4096..);
+        cache.remove(next, &entry);
+        drop(entry);
+        assert_eq!(cache.snapshot()["retired_bytes"], 8192);
+        drop(reader);
+        assert_eq!(cache.snapshot()["retired_bytes"], 0);
+        assert_eq!(cache.snapshot()["live_bytes"], baseline);
+        assert_eq!(cache.snapshot()["candidate_bytes"], 0);
+    }
 
     #[test]
     fn raw_mapping_requires_a_complete_healthy_source_and_current_representation() {

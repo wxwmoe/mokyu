@@ -61,6 +61,18 @@ impl Pool {
 }
 
 impl Buffer {
+    pub fn receive_external(&mut self) {
+        self.data = Vec::new();
+    }
+
+    pub fn retain(self, data: Bytes) -> Result<Bytes> {
+        ensure!(data.len() == self.limit, "write memory length mismatch");
+        Ok(Bytes::from_owner(Payload {
+            data,
+            _permit: self._permit,
+        }))
+    }
+
     pub fn append(&mut self, data: &[u8]) -> Result<()> {
         ensure!(
             data.len() <= self.limit - self.data.len(),
@@ -90,6 +102,35 @@ impl AsRef<[u8]> for Payload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn received_read_memory_does_not_hold_the_write_charge_after_drain() {
+        let reads = Pool::new(UNIT as u64);
+        let writes = Pool::new(UNIT as u64);
+        let mut incoming = reads.buffer(3).unwrap();
+        incoming.append(b"raw").unwrap();
+        let cached = incoming.finish();
+        let mut reservation = writes.buffer(3).unwrap();
+        reservation.receive_external();
+        assert_eq!(reservation.data.capacity(), 0);
+        let pending = reservation.retain(cached.clone()).unwrap();
+        assert_eq!(pending.as_ptr(), cached.as_ptr());
+        let reader = pending.slice(1..);
+        drop(pending);
+        assert_eq!(writes.status()["used"], UNIT);
+        drop(reader);
+        assert_eq!(writes.status()["used"], 0);
+        assert_eq!(reads.status()["used"], UNIT);
+        drop(cached);
+        assert_eq!(reads.status()["used"], 0);
+        assert!(
+            writes
+                .buffer(3)
+                .unwrap()
+                .retain(Bytes::from_static(b"bad size"))
+                .is_err()
+        );
+    }
 
     #[test]
     fn write_memory_stays_charged_until_the_last_reader_finishes() {
