@@ -720,7 +720,7 @@ async fn save_storage_profile(
     tx: &mut Transaction<'_, Sqlite>,
     profile: &StorageProfile,
 ) -> Result<()> {
-    let affected = queries::save_storage_profile(profile)
+    let affected = queries::save_storage_profile(profile)?
         .execute(&mut **tx)
         .await?
         .rows_affected();
@@ -4576,14 +4576,17 @@ pub(super) async fn cache_flush(pool: &SqlitePool, node: Option<Uuid>) -> Result
     Ok(id)
 }
 
-pub(super) async fn cache_enqueue(pool: &SqlitePool) -> Result<bool> {
+pub(super) async fn cache_enqueue(pool: &SqlitePool, urgent: &[Uuid]) -> Result<bool> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     if let Some(id) = queries::retryable_upload().fetch_optional(&mut *tx).await? {
         queries::queue_upload_retry(id).execute(&mut *tx).await?;
         tx.commit().await?;
         return Ok(true);
     }
-    let Some((first, stream, source)) = queries::due_upload().fetch_optional(&mut *tx).await?
+    let Some((first, stream, source)) = queries::due_upload(urgent)
+        .build_query_as::<(Id, Option<Id>, Option<Id>)>()
+        .fetch_optional(&mut *tx)
+        .await?
     else {
         return Ok(false);
     };
@@ -7890,13 +7893,15 @@ pub(super) async fn claim_raw_upload(
     pool: &sqlx::SqlitePool,
     token: Uuid,
     before: Option<chrono::DateTime<chrono::Utc>>,
+    urgent: &[Uuid],
 ) -> Result<Option<crate::model::raw::RawUpload>> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     ensure!(
         queries::raw_upload_mode().fetch_one(&mut *tx).await?,
         crate::model::Error::OperationAborted
     );
-    let Some(source) = queries::raw_upload_due(before)
+    let Some(source) = queries::raw_upload_due(before, urgent)
+        .build_query_scalar::<Id>()
         .fetch_optional(&mut *tx)
         .await?
     else {

@@ -48,7 +48,13 @@ impl Writer {
     ) -> Result<Self> {
         let profile = storage.profile(target)?;
         let policy = storage.local_cache(Some(target))?;
-        let memory = (!storage.cluster_mode
+        let overdue = storage.write_overdue(target, &profile);
+        if overdue {
+            storage.expedite_writes(target);
+            crate::upload::cache::overflow(profile.upload_cache_overflow == "reject")?;
+        }
+        let memory = (!overdue
+            && !storage.cluster_mode
             && profile.write_durability.as_deref() == Some("volatile"))
         .then(|| {
             declared
@@ -62,7 +68,7 @@ impl Writer {
             None
         };
         let reject_overflow = profile.upload_cache_overflow == "reject";
-        let charge = if memory.is_some() {
+        let charge = if overdue || memory.is_some() {
             None
         } else {
             match storage
@@ -71,6 +77,7 @@ impl Writer {
             {
                 Ok(charge) => Some(charge),
                 Err(_) => {
+                    storage.expedite_writes(target);
                     crate::upload::cache::overflow(reject_overflow)?;
                     None
                 }
@@ -122,6 +129,7 @@ impl Writer {
             ) {
                 Ok(charge) => Some(charge),
                 Err(_) => {
+                    self.storage.expedite_writes(self.target);
                     crate::upload::cache::overflow(self.reject_overflow)?;
                     None
                 }
@@ -152,6 +160,7 @@ impl Writer {
                     added.size = 0;
                 }
                 Err(_) => {
+                    self.storage.expedite_writes(self.target);
                     crate::upload::cache::overflow(self.reject_overflow)?;
                     self.charge = None;
                 }
@@ -184,6 +193,7 @@ impl Writer {
                         added.size = 0;
                     }
                     Err(_) => {
+                        self.storage.expedite_writes(self.target);
                         crate::upload::cache::overflow(self.reject_overflow)?;
                         self.charge = None;
                     }
@@ -256,6 +266,7 @@ impl Writer {
                     boot: None,
                 });
             }
+            self.storage.expedite_writes(self.target);
             crate::upload::cache::overflow(self.reject_overflow)?;
         }
         self.file.as_mut().unwrap().rewind().await?;

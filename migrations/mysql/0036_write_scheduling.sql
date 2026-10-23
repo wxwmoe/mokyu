@@ -1,0 +1,13 @@
+SET @mokyu_write_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='write_flush_interval'), 'SELECT 1', 'ALTER TABLE storage_profiles ADD COLUMN write_flush_interval BIGINT NOT NULL DEFAULT 0');
+PREPARE mokyu_write FROM @mokyu_write_ddl;
+EXECUTE mokyu_write;
+DEALLOCATE PREPARE mokyu_write;
+SET @mokyu_write_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='write_backlog_max_age'), 'SELECT 1', 'ALTER TABLE storage_profiles ADD COLUMN write_backlog_max_age BIGINT NOT NULL DEFAULT 300');
+PREPARE mokyu_write FROM @mokyu_write_ddl;
+EXECUTE mokyu_write;
+DEALLOCATE PREPARE mokyu_write;
+SET @mokyu_write_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='background_scheduling'), 'SELECT 1', 'ALTER TABLE storage_profiles ADD COLUMN background_scheduling VARCHAR(32) NOT NULL DEFAULT ''balanced'', ADD CONSTRAINT storage_background_scheduling CHECK(background_scheduling IN (''balanced'',''foreground''))');
+PREPARE mokyu_write FROM @mokyu_write_ddl;
+EXECUTE mokyu_write;
+DEALLOCATE PREPARE mokyu_write;
+UPDATE mokyu_meta SET schema_version=36 WHERE id=1;

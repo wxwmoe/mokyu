@@ -3031,15 +3031,17 @@ pub(super) async fn cache_flush(pool: &PgPool, node: Option<Uuid>) -> Result<Uui
     Ok(id)
 }
 
-pub(super) async fn cache_enqueue(pool: &PgPool) -> Result<bool> {
+pub(super) async fn cache_enqueue(pool: &PgPool, urgent: &[Uuid]) -> Result<bool> {
     let mut tx = pool.begin().await?;
     if let Some(id) = queries::retryable_upload().fetch_optional(&mut *tx).await? {
         queries::queue_upload_retry(id).execute(&mut *tx).await?;
         tx.commit().await?;
         return Ok(true);
     }
-    let Some((first, stream, source, owner)) =
-        queries::due_upload().fetch_optional(&mut *tx).await?
+    let Some((first, stream, source, owner)) = queries::due_upload(urgent)
+        .build_query_as::<(Id, Option<Id>, Option<Id>, Option<Uuid>)>()
+        .fetch_optional(&mut *tx)
+        .await?
     else {
         return Ok(false);
     };
@@ -7430,10 +7432,12 @@ pub(super) async fn claim_raw_upload(
     token: Uuid,
     before: Option<chrono::DateTime<chrono::Utc>>,
     node: crate::model::raw::Processor<'_>,
+    urgent: &[Uuid],
 ) -> Result<Option<crate::model::raw::RawUpload>> {
     let mut tx = pool.begin().await?;
     raw_upload_processor(&mut tx, node).await?;
-    let Some(source) = queries::raw_upload_due(before, node.map(|n| n.0.node_id))
+    let Some(source) = queries::raw_upload_due(before, node.map(|n| n.0.node_id), urgent)
+        .build_query_scalar::<Id>()
         .fetch_optional(&mut *tx)
         .await?
     else {

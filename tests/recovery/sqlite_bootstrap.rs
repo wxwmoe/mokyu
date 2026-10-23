@@ -71,6 +71,17 @@ async fn sqlite_schema_bootstrap_contract() -> Result<()> {
     migrations.run(&mut history).await?;
     migration::run(&mut fresh).await?;
     same_structure(&mut fresh, &mut history).await?;
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN QUERY PLAN {}",
+        queries::WRITE_BACKLOG
+    )))
+    .fetch_all(&mut fresh)
+    .await?;
+    assert!(
+        plan.iter()
+            .all(|row| !matches!(row.3.as_str(), "SCAN r" | "SCAN c" | "SCAN l")),
+        "backlog scans durable inventory: {plan:?}"
+    );
     assert_eq!(contents(&mut fresh).await?, contents(&mut history).await?);
     assert_eq!(
         queries::migrations().fetch_all(&mut fresh).await?,

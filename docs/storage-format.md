@@ -135,3 +135,5 @@ Linux 下，Mokyu 启动时设置 umask 为 `0022`；新建目录使用 `0755`�
 重启恢复完整缓存文件，清理未完成填充；正在发送的文件持有 pin，实际删除后才释放缓存占用。本地 storage 的根目录不得与 data 目录中的 raw、chunks、multipart、thumbnails 命名空间重叠，符号链接按实际路径检查。
 
 所有写入先持久化文件或远端对象，再提交数据库映射；local 后端在确认成功前同步文件和父目录，同步失败不会发布新映射。对象发布要求 stream 连续、来源 ready、长度和哈希全部匹配。跨 storage 的复制/移动由异步 `storage_migration` 任务完成复制、校验、权限和发布一致性；部署管理员负责两端容量、凭据、网络和供应商策略。
+
+写入调度由每个后端的 `write_flush_interval`、`write_backlog_max_age` 和 `background_scheduling` 控制，取值及准入边界见[配置参考](configuration.md)。`cache status` 的 `write_backlog` 提供各后端最早待写时间与快照距今秒数，合并等待不改变已选择的确认级别或回收保护。

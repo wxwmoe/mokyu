@@ -187,7 +187,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | `POST /api/v1/storages` | 创建存储；请求包含 `{name,type,initialize,path?,endpoint?,bucket?,region?,prefix?,block_key_id?,access_key?,secret_key?,profile?}`，type 为 `local` 或 `s3`；`initialize` 必须明确为 `true`，profile 使用完整 typed storage profile |
 | `PUT /api/v1/storages/{name}` | 修改连接字段、prefix、block_key_id 或 enabled；name 和 id 不可修改；切换 type 需单容器维护状态并排空上传、任务及待写来源，核对目标 meta 后保存，成功后须重启；并发、压缩、区块包、缓存和维护预算通过 profile 保存 |
 | `POST /api/v1/storages/{name}/check` | 读取并核对已有 `meta.json`，无请求体 |
-| `GET /api/v1/storages/{name}/profile` | 读取该 storage 的 typed profile；CDC 联动开关、单容器 write_durability、连接超时、重试、压缩、pack、cache、integrity、配额与生命周期字段均在 profile 内 |
+| `GET /api/v1/storages/{name}/profile` | 读取该 storage 的 typed profile；CDC 联动开关、单容器 write_durability、合并等待 write_flush_interval、积压阈值 write_backlog_max_age、后台调度 background_scheduling、连接超时、重试、压缩、pack、cache、integrity、配额与生命周期字段均在 profile 内 |
 | `PUT /api/v1/storages/{name}/key` | 设置或清除 `{key?}` 形式的 block key 绑定；返回新的 profile revision |
 | `POST /api/v1/storages/{name}/rewrite` | 对存量物理编码执行 `preview`、`start`、`status`、`pause`、`resume` 或 `retry`；`start` 必须提交预览 confirmation |
 | `POST /api/v1/storages/{name}/unpack` | 对指定 pack 执行 `preview` 或 `start`；请求 `{action,pack_id,confirmation?}`，start 必须提交预览 confirmation |

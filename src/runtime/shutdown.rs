@@ -96,6 +96,7 @@ pub(super) async fn background(app: Arc<App>) -> Result<()> {
         result = crate::worker::raw::run(app.clone()) => result,
         result = crate::worker::raw_upload::run(app.clone()) => result,
         result = crate::worker::sync::run(app.clone()) => result,
+        result = app.storage.watch_write_backlog() => result,
         result = app.storage.compression.run() => result,
     }
 }

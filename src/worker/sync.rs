@@ -62,7 +62,7 @@ impl App {
         loop {
             let rows = self
                 .physical
-                .buffered_chunks(after, None, Some(stream), None, false)
+                .buffered_chunks(after, None, Some(stream), None, false, &[])
                 .await?;
             if rows.is_empty() {
                 return Ok(());
@@ -81,7 +81,14 @@ impl App {
     ) -> Result<bool> {
         let rows = self
             .physical
-            .buffered_chunks(*after, before, None, None, !recovery && before.is_none())
+            .buffered_chunks(
+                *after,
+                before,
+                None,
+                None,
+                !recovery && before.is_none(),
+                &self.storage.urgent_writes(),
+            )
             .await?;
         let found = !rows.is_empty();
         for chunk in rows {
@@ -112,7 +119,7 @@ impl App {
                 };
                 let rows = self
                     .physical
-                    .buffered_chunks(Id::default(), None, None, Some(chunk.id), false)
+                    .buffered_chunks(Id::default(), None, None, Some(chunk.id), false, &[])
                     .await?;
                 let Some(current) = rows
                     .first()
@@ -129,6 +136,7 @@ impl App {
                 // A full cache cannot hold a second copy; let the final uploader drain RAM.
                 drop(pin);
                 drop(sync);
+                self.storage.expedite_writes(chunk.storage_id.unwrap());
                 self.wake_tasks.notify_waiters();
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("buffered-chunk-before-final").await;
@@ -155,7 +163,10 @@ impl App {
         }
         let mut after = Id::default();
         loop {
-            let rows = self.raw.buffered(after, None, Some(stream)).await?;
+            let rows = self
+                .raw
+                .buffered(after, None, Some(stream), false, &[])
+                .await?;
             if rows.is_empty() {
                 return Ok(());
             }
@@ -172,7 +183,16 @@ impl App {
         recovery: bool,
         after: &mut Id,
     ) -> Result<bool> {
-        let rows = self.raw.buffered(*after, before, None).await?;
+        let rows = self
+            .raw
+            .buffered(
+                *after,
+                before,
+                None,
+                !recovery && before.is_none(),
+                &self.storage.urgent_writes(),
+            )
+            .await?;
         let found = !rows.is_empty();
         for source in rows {
             // Retry failures on the next scan without blocking later files.

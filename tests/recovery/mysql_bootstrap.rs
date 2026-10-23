@@ -28,6 +28,23 @@ async fn structure(db: &mut MySqlConnection) -> Result<BTreeMap<String, String>>
         .await?;
     let tables: Vec<String> = sqlx::query_scalar("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_NAME").fetch_all(&mut *db).await?;
     let mut definitions = BTreeMap::new();
+    let maria: bool = sqlx::query_scalar("SELECT VERSION() LIKE '%MariaDB%'")
+        .fetch_one(&mut *db)
+        .await?;
+    let checks: Vec<(String, String, String, String)> = if maria {
+        sqlx::query_as("SELECT TABLE_NAME,CONSTRAINT_NAME,CHECK_CLAUSE,'YES' FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE()")
+            .fetch_all(&mut *db).await?
+    } else {
+        sqlx::query_as("SELECT t.TABLE_NAME,c.CONSTRAINT_NAME,c.CHECK_CLAUSE,t.ENFORCED FROM information_schema.CHECK_CONSTRAINTS c JOIN information_schema.TABLE_CONSTRAINTS t ON t.CONSTRAINT_SCHEMA=c.CONSTRAINT_SCHEMA AND t.CONSTRAINT_NAME=c.CONSTRAINT_NAME WHERE c.CONSTRAINT_SCHEMA=DATABASE() AND t.TABLE_SCHEMA=DATABASE()")
+            .fetch_all(&mut *db).await?
+    };
+    let mut table_checks = BTreeMap::<_, Vec<_>>::new();
+    for (table, name, clause, enforced) in checks {
+        table_checks
+            .entry(table)
+            .or_default()
+            .push((name, clause, enforced));
+    }
     for table in tables {
         let row = sqlx::query(sqlx::AssertSqlSafe(format!("SHOW CREATE TABLE `{table}`")))
             .fetch_one(&mut *db)
@@ -40,6 +57,42 @@ async fn structure(db: &mut MySqlConnection) -> Result<BTreeMap<String, String>>
             .replace("CHARACTER SET ascii COLLATE", "COLLATE")
             .replace("_utf8mb4'", "'")
             .replace("_ascii'", "'");
+        let checks = table_checks.remove(&table).unwrap_or_default();
+        let inline_names: Vec<_> = sql
+            .lines()
+            .filter_map(|line| {
+                let column = line.trim_start().strip_prefix('`')?.split('`').next()?;
+                line.contains(" CHECK (").then_some(column.to_owned())
+            })
+            .collect();
+        let mut sql_lines: Vec<String> = sql
+            .lines()
+            .filter(|line| {
+                !(line.trim_start().starts_with("CONSTRAINT ") && line.contains(" CHECK ("))
+            })
+            .map(str::to_owned)
+            .collect();
+        let mut check_definitions = Vec::new();
+        for (name, clause, enforced) in checks {
+            let clause = clause.replace("_utf8mb4'", "'").replace("_ascii'", "'");
+            for line in &mut sql_lines {
+                *line = line.replace(&format!(" CHECK ({clause})"), "");
+            }
+            // Native exports can move anonymous column checks into table checks.
+            let numbered = |prefix: &str| {
+                name.strip_prefix(prefix).is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+                })
+            };
+            let anonymous = inline_names.contains(&name)
+                || numbered("CONSTRAINT_")
+                || numbered(&format!("{table}_chk_"));
+            let name = if anonymous { "" } else { &name };
+            let clause = clause.replace("0 <> `sync_pending`", "`sync_pending` <> 0");
+            check_definitions.push(format!("CHECK {name} {enforced} ({clause})"));
+        }
+        check_definitions.sort();
+        let sql = sql_lines.join("\n");
         // Index and constraint declaration order does not change the effective structure.
         let unordered = |line: &str| {
             let line = line.trim_start();
@@ -69,6 +122,7 @@ async fn structure(db: &mut MySqlConnection) -> Result<BTreeMap<String, String>>
             .collect();
         constraints.sort();
         lines.extend(constraints);
+        lines.extend(check_definitions);
         definitions.insert(table, lines.join("\n"));
     }
     let triggers: Vec<(String, String, String, String, String)> = sqlx::query_as("SELECT TRIGGER_NAME,ACTION_TIMING,EVENT_MANIPULATION,EVENT_OBJECT_TABLE,ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() ORDER BY TRIGGER_NAME").fetch_all(&mut *db).await?;
@@ -313,7 +367,7 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         serde_json::json!({})
     );
 
-    for version in [19, 20, 24, 25, 26, 27, 35] {
+    for version in [19, 20, 24, 25, 26, 27, 35, 36] {
         let recovery = migrations
             .iter()
             .find(|migration| migration.version == version)
@@ -329,6 +383,12 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
                 "EXECUTE mokyu_audit",
                 "DEALLOCATE PREPARE mokyu_audit",
                 "UPDATE mokyu_meta SET schema_version=20",
+            ]
+        } else if version == 36 {
+            vec![
+                "SET @mokyu_write_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='write_backlog_max_age')",
+                "SET @mokyu_write_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='background_scheduling')",
+                "UPDATE mokyu_meta SET schema_version=36",
             ]
         } else if version == 35 {
             vec![

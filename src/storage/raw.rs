@@ -333,6 +333,7 @@ impl Storage {
         let target = self.store_backend(storage)?;
         self.verify_raw_target(&target).await?;
         let buffered = cache
+            && !self.write_overdue(storage, &target.profile)
             && !self.cluster_mode
             && (target.is_local || target.profile.upload_cache)
             && matches!(

@@ -70,8 +70,8 @@ impl StoreGate {
                 self.cluster_limit.load(Ordering::Acquire),
                 Ordering::Release,
             );
-            let (limit, aging) = self.local.settings();
-            gate.local.configure(limit, aging);
+            let (limit, aging, foreground) = self.local.settings();
+            gate.local.configure(limit, aging, foreground);
             gate
         } else {
             registry.insert(key, Arc::downgrade(self));
@@ -174,7 +174,7 @@ mod tests {
         let reloaded = StoreGate::new(&None, id, "upload", 1, Some(1), Duration::ZERO, holder)
             .reuse(&mut registry);
         assert!(Arc::ptr_eq(&reloaded, &first._gate));
-        assert_eq!(reloaded.local.settings(), (1, Duration::ZERO));
+        assert_eq!(reloaded.local.settings(), (1, Duration::ZERO, false));
         let mut waiting = Box::pin(reloaded.acquire());
         assert!(futures_util::poll!(&mut waiting).is_pending());
         drop(first);

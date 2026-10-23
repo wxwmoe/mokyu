@@ -1,5 +1,7 @@
--- Current sqlite schema, matching migration 0026.
--- The initializer records schema_version and migration checksums after this script succeeds.
+-- Generated from the complete sqlite migration chain through 0037.
+-- Do not edit directly. The initializer owns deployment metadata and migration history.
+
+PRAGMA defer_foreign_keys = ON;
 
 CREATE TABLE access_state (
     id INTEGER NOT NULL PRIMARY KEY,
@@ -116,7 +118,7 @@ CREATE TABLE chunk_encodings (
     deleted_at INTEGER,
     stored_at INTEGER, quarantined_at INTEGER, quarantine_code TEXT CONSTRAINT encodings_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)), quarantine_revision INTEGER NOT NULL DEFAULT 0 CONSTRAINT encodings_quarantine_revision CHECK (quarantine_revision >= 0), owner_stream INTEGER
     REFERENCES streams(id) ON DELETE RESTRICT
-    CONSTRAINT encodings_owner_exclusive CHECK (owner_task IS NULL OR owner_stream IS NULL), recovery_pending INTEGER NOT NULL DEFAULT FALSE CHECK (recovery_pending IN (0,1)),
+    CONSTRAINT encodings_owner_exclusive CHECK (owner_task IS NULL OR owner_stream IS NULL), recovery_pending INTEGER NOT NULL DEFAULT FALSE CHECK (recovery_pending IN (0,1)), nonce_id INTEGER, sync_pending INTEGER NOT NULL DEFAULT FALSE CHECK(sync_pending IN (0,1)), boot_id BLOB CHECK(boot_id IS NULL OR (length(boot_id)=16 AND sync_pending)),
     CONSTRAINT encodings_chunk FOREIGN KEY (storage_id,chunk_id) REFERENCES chunks(storage_id,id) ON DELETE CASCADE,
     CONSTRAINT encodings_owner FOREIGN KEY (owner_task) REFERENCES tasks(id) ON DELETE SET NULL,
     CONSTRAINT encodings_key FOREIGN KEY (block_key_id) REFERENCES managed_keys(id),
@@ -187,7 +189,7 @@ CREATE TABLE fragments (
     sealed INTEGER CHECK (sealed IN (0,1)) NOT NULL DEFAULT FALSE,
     size INTEGER NOT NULL,
     hash BLOB CHECK (hash IS NULL OR length(hash)=32) NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
+    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), file_id BLOB REFERENCES multipart_files(id), file_offset INTEGER CHECK ((file_id IS NULL)=(file_offset IS NULL) AND (file_offset IS NULL OR file_offset>=0)),
     CONSTRAINT fragments_stream FOREIGN KEY (owner_stream) REFERENCES streams(id) ON DELETE SET NULL,
     CONSTRAINT fragments_size CHECK (size BETWEEN 1 AND 4194304)
 ) STRICT;
@@ -215,6 +217,14 @@ CREATE TABLE integrity_packs (
     CONSTRAINT integrity_packs_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
     CONSTRAINT integrity_packs_pack FOREIGN KEY (pack_id) REFERENCES packs(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE key_replacements (
+    id BLOB PRIMARY KEY,
+    actor TEXT NOT NULL,
+    plan TEXT NOT NULL CHECK(json_valid(plan)),
+    result TEXT CHECK(result IS NULL OR json_valid(result)),
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
 
 CREATE TABLE maintenance_controls (
     policy TEXT NOT NULL PRIMARY KEY,
@@ -285,6 +295,28 @@ CREATE TABLE mokyu_meta (
     project_management INTEGER NOT NULL DEFAULT 0 CHECK(project_management IN (0,1)),
     pack_creation_paused INTEGER NOT NULL DEFAULT 0 CHECK(pack_creation_paused IN (0,1))
 ) STRICT;
+
+CREATE TABLE multipart_files (
+    id BLOB NOT NULL PRIMARY KEY CHECK (length(id)=16),
+    upload_id BLOB REFERENCES uploads(id) ON DELETE SET NULL,
+    storage_id BLOB NOT NULL REFERENCES storages(id),
+    source_id INTEGER UNIQUE REFERENCES raw_sources(id),
+    reclaim_pending INTEGER NOT NULL DEFAULT 0 CHECK (reclaim_pending IN (0,1)),
+    state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','sealed','deleting'))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE nonce_counters (
+    block_key_id BLOB NOT NULL REFERENCES managed_keys(id),
+    type_tag INTEGER NOT NULL CHECK (type_tag BETWEEN 0 AND 31),
+    reserved_id INTEGER NOT NULL DEFAULT 0 CHECK (reserved_id>=0),
+    PRIMARY KEY (block_key_id,type_tag)
+) STRICT;
+
+CREATE TABLE nonce_observations (
+    block_key_id BLOB NOT NULL PRIMARY KEY REFERENCES managed_keys(id),
+    data TEXT NOT NULL CHECK(json_valid(data)),
+    revision INTEGER NOT NULL CHECK(revision > 0)
+) WITHOUT ROWID;
 
 CREATE TABLE objects (
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
@@ -387,7 +419,7 @@ CREATE TABLE packs (
     unreferenced_at INTEGER,
     deleted_at INTEGER,
     range_checked_at INTEGER,
-    stored_at INTEGER, quarantined_at INTEGER, quarantine_code TEXT CONSTRAINT packs_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)), quarantine_revision INTEGER NOT NULL DEFAULT 0 CONSTRAINT packs_quarantine_revision CHECK (quarantine_revision >= 0),
+    stored_at INTEGER, quarantined_at INTEGER, quarantine_code TEXT CONSTRAINT packs_quarantine CHECK ((quarantined_at IS NULL) = (quarantine_code IS NULL)), quarantine_revision INTEGER NOT NULL DEFAULT 0 CONSTRAINT packs_quarantine_revision CHECK (quarantine_revision >= 0), nonce_id INTEGER,
     CONSTRAINT packs_storage FOREIGN KEY (storage_id) REFERENCES storages(id),
     CONSTRAINT packs_key FOREIGN KEY (block_key_id) REFERENCES managed_keys(id),
     CONSTRAINT packs_owner FOREIGN KEY (owner_task) REFERENCES tasks(id) ON DELETE SET NULL,
@@ -423,7 +455,7 @@ CREATE TABLE pending_uploads (
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     next_retry_at INTEGER NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
+    last_error TEXT, encoding_policy TEXT CHECK (encoding_policy IS NULL OR json_valid(encoding_policy)),
     CONSTRAINT pending_chunk FOREIGN KEY (chunk_id) REFERENCES chunks(id),
     CONSTRAINT pending_stream FOREIGN KEY (stream_id) REFERENCES streams(id) ON DELETE SET NULL,
     CONSTRAINT pending_pack FOREIGN KEY (source_pack_id) REFERENCES packs(id),
@@ -504,6 +536,62 @@ CREATE TABLE quota_writes (
     CONSTRAINT quota_writes_bytes CHECK (allocated_bytes>=0 AND contribution_bytes>=0)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE raw_processing (
+    stream_id INTEGER PRIMARY KEY REFERENCES streams(id) ON DELETE CASCADE,
+    source_id INTEGER NOT NULL REFERENCES raw_sources(id) ON DELETE CASCADE,
+    payload_revision INTEGER NOT NULL,
+    content_hash BLOB CHECK (content_hash IS NULL OR length(content_hash)=32),
+    source_revision INTEGER,
+    token BLOB,
+    lease_expires_at INTEGER,
+    next_attempt_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+) STRICT;
+
+CREATE TABLE raw_ranges (
+    stream_id INTEGER NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+    offset_bytes INTEGER NOT NULL CHECK (offset_bytes>=0),
+    length INTEGER NOT NULL CHECK (length>=0),
+    source_id INTEGER NOT NULL REFERENCES raw_sources(id),
+    source_offset INTEGER NOT NULL DEFAULT 0 CHECK (source_offset>=0),
+    PRIMARY KEY (stream_id,offset_bytes)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE raw_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id BLOB NOT NULL UNIQUE CHECK(length(location_id)=16),
+    storage_id BLOB NOT NULL REFERENCES storages(id),
+    owner_stream INTEGER REFERENCES streams(id) ON DELETE SET NULL,
+    medium TEXT NOT NULL DEFAULT 'local' CHECK (medium IN ('local','memory','shared_s3')),
+    durability TEXT NOT NULL DEFAULT 'durable' CHECK (durability IN ('durable','buffered','volatile')),
+    boot_id BLOB CHECK (boot_id IS NULL OR length(boot_id)=16),
+    state TEXT NOT NULL DEFAULT 'writing' CHECK (state IN ('writing','ready','unavailable','deleting')),
+    size INTEGER NOT NULL DEFAULT 0 CHECK (size>=0),
+    digest BLOB CHECK (digest IS NULL OR length(digest)=16),
+    content_hash BLOB CHECK (content_hash IS NULL OR length(content_hash)=32),
+    upload_id TEXT,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision>0),
+    profile_revision INTEGER NOT NULL CHECK (profile_revision>0),
+    quarantined_at INTEGER,
+    quarantine_code TEXT,
+    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
+    unreferenced_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), pending_upload INTEGER NOT NULL DEFAULT false, processing_task BLOB REFERENCES tasks(id) ON DELETE SET NULL,
+    CHECK (state<>'ready' OR digest IS NOT NULL),
+    CHECK ((medium='memory')=(boot_id IS NOT NULL))
+) STRICT;
+
+CREATE TABLE raw_uploads (
+    source_id INTEGER PRIMARY KEY REFERENCES raw_sources(id) ON DELETE CASCADE,
+    token BLOB,
+    deduplicate INTEGER NOT NULL,
+    background INTEGER NOT NULL,
+    content_hash BLOB,
+    next_attempt_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+);
+
 CREATE TABLE runtime_samples (
     sampled_at INTEGER NOT NULL PRIMARY KEY,
     data TEXT CHECK (json_valid(data)) NOT NULL
@@ -575,6 +663,13 @@ CREATE TABLE setup_tokens (
     expires_at INTEGER NOT NULL
 ) STRICT;
 
+CREATE TABLE storage_maintenance (
+    storage_id BLOB NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    policy TEXT NOT NULL,
+    last_scheduled_at INTEGER NOT NULL,
+    PRIMARY KEY(storage_id,policy)
+) STRICT;
+
 CREATE TABLE storage_profiles (
     storage_id BLOB CHECK (storage_id IS NULL OR length(storage_id)=16) NOT NULL PRIMARY KEY,
     revision INTEGER NOT NULL DEFAULT 1,
@@ -630,7 +725,7 @@ CREATE TABLE storage_profiles (
     maintenance_byte_budget TEXT,
     migration_concurrency INTEGER,
     migration_byte_budget TEXT,
-    updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), cdc_enabled INTEGER NOT NULL DEFAULT 1 CHECK (cdc_enabled IN (0,1)), deduplication_enabled INTEGER NOT NULL DEFAULT 0 CHECK (deduplication_enabled IN (0,1)), multipart_idle_timeout TEXT NOT NULL DEFAULT '24h', min_free_space TEXT, write_processing TEXT NOT NULL DEFAULT 'inline',
+    updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), cdc_enabled INTEGER NOT NULL DEFAULT 1 CHECK (cdc_enabled IN (0,1)), deduplication_enabled INTEGER NOT NULL DEFAULT 0 CHECK (deduplication_enabled IN (0,1)), multipart_idle_timeout TEXT NOT NULL DEFAULT '24h', min_free_space TEXT, write_processing TEXT NOT NULL DEFAULT 'inline', upload_cache_overflow TEXT NOT NULL DEFAULT 'fallback' CONSTRAINT storage_upload_overflow_check CHECK (upload_cache_overflow IN ('fallback','reject')), write_durability TEXT NOT NULL DEFAULT 'durable' CHECK(write_durability IN ('durable','buffered','volatile')), write_flush_interval INTEGER NOT NULL DEFAULT 0, write_backlog_max_age INTEGER NOT NULL DEFAULT 300, background_scheduling TEXT NOT NULL DEFAULT 'balanced' CONSTRAINT storage_background_scheduling CHECK(background_scheduling IN ('balanced','foreground')),
     CONSTRAINT storage_profiles_storage FOREIGN KEY (storage_id) REFERENCES storages(id) ON DELETE CASCADE,
     CONSTRAINT storage_profiles_revision CHECK (revision>0),
     CONSTRAINT storage_profiles_max_retries CHECK (max_retries BETWEEN 0 AND 100),
@@ -747,7 +842,7 @@ CREATE TABLE uploads (
     output_stream INTEGER,
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     touched_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
-    durable_at INTEGER,
+    durable_at INTEGER, completion_token BLOB, completion_expires_at INTEGER,
     CONSTRAINT uploads_bucket FOREIGN KEY (bucket_id) REFERENCES buckets(id),
     CONSTRAINT uploads_output FOREIGN KEY (output_stream) REFERENCES streams(id),
     CONSTRAINT uploads_key CHECK (length(CAST(object_key AS BLOB)) BETWEEN 1 AND 1024),
@@ -811,6 +906,18 @@ CREATE TABLE web_users (
     must_change_password INTEGER NOT NULL DEFAULT 0 CHECK(must_change_password IN (0,1))
 ) STRICT, WITHOUT ROWID;
 
+INSERT INTO "access_state" ("id", "coverage_since", "flushed_at") VALUES (1, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('cleanup', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('gc', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('pack', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('range', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('reclaim', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('repack', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('reuse', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
+INSERT INTO "projects" ("id", "name", "description", "builtin", "allow_bucket_create", "created_at") VALUES (X'00000000000000000000000000000001', 'Default', '', 1, 0, CAST(unixepoch('subsec')*1000000 AS INTEGER));
+INSERT INTO "quota_scopes" ("scope", "scope_id", "used_bytes", "reserved_bytes", "inflight_bytes", "object_count", "bucket_count", "logical_bytes_limit", "inflight_bytes_limit", "bucket_count_limit") VALUES ('project', X'00000000000000000000000000000001', 0, 0, 0, 0, 0, NULL, NULL, NULL);
+INSERT INTO "usage_summary" ("id", "requested_at", "as_of", "data") VALUES ('global', CAST(unixepoch('subsec')*1000000 AS INTEGER), NULL, NULL);
+
 CREATE INDEX api_tokens_user ON api_tokens(user_id);
 
 CREATE INDEX audit_actor ON audit_events(actor_id,id);
@@ -845,6 +952,8 @@ CREATE INDEX chunks_owner_stream_fk ON chunks(owner_stream);
 
 CREATE INDEX chunks_pack_id ON chunks(pack_id);
 
+CREATE INDEX chunks_pending_key ON chunks(block_key_id) WHERE state IN ('preparing','uploading');
+
 CREATE INDEX chunks_repack ON chunks(repack_after,id);
 
 CREATE UNIQUE INDEX chunks_storage_id ON chunks(storage_id,id);
@@ -855,13 +964,23 @@ CREATE INDEX encodings_chunk_id ON chunk_encodings(chunk_id);
 
 CREATE INDEX encodings_gc ON chunk_encodings(state,unreferenced_at,encoding_id);
 
+CREATE INDEX encodings_owner_stream ON chunk_encodings(owner_stream) WHERE owner_stream IS NOT NULL;
+
+CREATE INDEX encodings_quarantined ON chunk_encodings (storage_id,encoding_id) WHERE quarantined_at IS NOT NULL;
+
 CREATE UNIQUE INDEX encodings_ready ON chunk_encodings(chunk_id) WHERE state='ready';
+
+CREATE INDEX encodings_recovery ON chunk_encodings(storage_id,unreferenced_at,encoding_id) WHERE recovery_pending;
+
+CREATE INDEX encodings_sync ON chunk_encodings(chunk_id) WHERE sync_pending AND state IN ('ready','uploading') AND quarantined_at IS NULL;
 
 CREATE INDEX extents_chunk_id_fk ON extents(chunk_id);
 
 CREATE INDEX extents_fragment_id_fk ON extents(fragment_id);
 
 CREATE INDEX fragments_cleanup ON fragments(created_at,id);
+
+CREATE INDEX fragments_file ON fragments(file_id,file_offset) WHERE file_id IS NOT NULL;
 
 CREATE INDEX fragments_owner_stream_fk ON fragments(owner_stream);
 
@@ -873,6 +992,8 @@ CREATE UNIQUE INDEX integrity_issues_subject ON integrity_issues(task_id,subject
 
 CREATE INDEX integrity_packs_pack_id_fk ON integrity_packs(pack_id);
 
+CREATE INDEX key_replacements_expiry ON key_replacements(expires_at);
+
 CREATE INDEX maintenance_previews_expiry ON maintenance_previews(expires_at);
 
 CREATE INDEX maintenance_previews_owner ON maintenance_previews(actor_id,token_id,action,task_id);
@@ -880,6 +1001,8 @@ CREATE INDEX maintenance_previews_owner ON maintenance_previews(actor_id,token_i
 CREATE INDEX maintenance_previews_task_id_fk ON maintenance_previews(task_id);
 
 CREATE INDEX maintenance_previews_token_id_fk ON maintenance_previews(token_id);
+
+CREATE UNIQUE INDEX managed_keys_fingerprint ON managed_keys(fingerprint);
 
 CREATE INDEX media_operations_cleanup ON media_operations(created_at,id);
 
@@ -892,6 +1015,10 @@ CREATE INDEX media_operations_user_id_fk ON media_operations(user_id);
 CREATE INDEX member_grants_bucket ON member_bucket_grants(bucket_id,project_id);
 
 CREATE INDEX member_grants_member ON member_bucket_grants(user_id,project_id);
+
+CREATE INDEX multipart_files_reclaim ON multipart_files(storage_id,id) WHERE reclaim_pending;
+
+CREATE INDEX multipart_files_upload ON multipart_files(upload_id,state);
 
 CREATE INDEX objects_catalog_modified ON objects(bucket_id,catalog_modified,object_key);
 
@@ -921,6 +1048,8 @@ CREATE INDEX packs_gc ON packs(state,unreferenced_at,id);
 
 CREATE INDEX packs_owner_task_fk ON packs(owner_task);
 
+CREATE INDEX packs_quarantined ON packs (storage_id,id) WHERE quarantined_at IS NOT NULL;
+
 CREATE UNIQUE INDEX packs_storage_id ON packs(storage_id,id);
 
 CREATE INDEX parts_stream_id_fk ON parts(stream_id);
@@ -936,6 +1065,22 @@ CREATE INDEX pending_uploads_source_pack_id_fk ON pending_uploads(source_pack_id
 CREATE INDEX project_members_project ON project_members(project_id);
 
 CREATE INDEX quota_writes_reservation_id_fk ON quota_writes(reservation_id);
+
+CREATE INDEX raw_processing_due ON raw_processing(next_attempt_at,stream_id);
+
+CREATE INDEX raw_ranges_source ON raw_ranges(source_id);
+
+CREATE INDEX raw_sources_cleanup ON raw_sources(storage_id,state,unreferenced_at,id);
+
+CREATE UNIQUE INDEX raw_sources_content ON raw_sources(storage_id,content_hash,size);
+
+CREATE INDEX raw_sources_owner ON raw_sources(owner_stream) WHERE owner_stream IS NOT NULL;
+
+CREATE INDEX raw_sources_processing ON raw_sources(processing_task);
+
+CREATE INDEX raw_sources_sync ON raw_sources(id) WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL;
+
+CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);
 
 CREATE UNIQUE INDEX refresh_active ON session_refresh_tokens(session_id) WHERE revoked_at IS NULL;
 
@@ -973,13 +1118,6 @@ CREATE INDEX tasks_state_list ON tasks(state,created_at DESC,id DESC);
 
 CREATE INDEX tasks_work ON tasks(state,updated_at,id);
 
-CREATE VIEW token_bucket_access AS
-SELECT t.id AS token_id,g.bucket_id,
-    g.actions & IIF(u.role='admin',127,COALESCE(a.actions,0)) AS actions
-FROM api_tokens t JOIN web_users u ON u.id=t.user_id
-JOIN token_bucket_grants g ON g.token_id=t.id
-LEFT JOIN user_bucket_access a ON a.user_id=t.user_id AND a.bucket_id=g.bucket_id;
-
 CREATE INDEX token_grants_bucket ON token_bucket_grants(bucket_id);
 
 CREATE INDEX uploads_cleanup ON uploads(state,touched_at,id);
@@ -992,6 +1130,23 @@ CREATE INDEX usage_history_expiry ON usage_history(snapshot_at);
 
 CREATE INDEX usage_requested ON usage_summary(requested_at,id);
 
+CREATE UNIQUE INDEX web_uploads_client ON web_uploads(user_id,client_id);
+
+CREATE TRIGGER chunk_encodings_nonce_insert BEFORE INSERT ON chunk_encodings WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
+
+CREATE TRIGGER chunk_encodings_nonce_update BEFORE UPDATE ON chunk_encodings WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
+
+CREATE TRIGGER packs_nonce_insert BEFORE INSERT ON packs WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
+
+CREATE TRIGGER packs_nonce_update BEFORE UPDATE ON packs WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
+
+CREATE VIEW token_bucket_access AS
+SELECT t.id AS token_id,g.bucket_id,
+    g.actions & IIF(u.role='admin',127,COALESCE(a.actions,0)) AS actions
+FROM api_tokens t JOIN web_users u ON u.id=t.user_id
+JOIN token_bucket_grants g ON g.token_id=t.id
+LEFT JOIN user_bucket_access a ON a.user_id=t.user_id AND a.bucket_id=g.bucket_id;
+
 CREATE VIEW user_bucket_access AS
 SELECT m.user_id,b.id AS bucket_id,
     (CASE m.role WHEN 'reader' THEN 67 WHEN 'writer' THEN 95 WHEN 'maintainer' THEN 127 ELSE 0 END)
@@ -999,160 +1154,6 @@ SELECT m.user_id,b.id AS bucket_id,
 FROM project_members m JOIN buckets b ON b.project_id=m.project_id
 LEFT JOIN member_bucket_grants g ON g.user_id=m.user_id AND g.bucket_id=b.id;
 
-CREATE UNIQUE INDEX web_uploads_client ON web_uploads(user_id,client_id);
-
-INSERT INTO projects(id,name,builtin) VALUES(X'00000000000000000000000000000001','Default',1);
-INSERT INTO quota_scopes(scope,scope_id) VALUES('project',X'00000000000000000000000000000001');
-INSERT INTO access_state(id,coverage_since,flushed_at) VALUES(1,CAST(unixepoch('subsec')*1000000 AS INTEGER),CAST(unixepoch('subsec')*1000000 AS INTEGER));
-INSERT INTO maintenance_controls(policy) VALUES('gc'),('pack'),('reuse'),('reclaim'),('repack'),('range'),('cleanup');
-INSERT INTO usage_summary(id) VALUES('global');
-
-CREATE INDEX encodings_quarantined ON chunk_encodings (storage_id,encoding_id) WHERE quarantined_at IS NOT NULL;
-
-CREATE INDEX packs_quarantined ON packs (storage_id,id) WHERE quarantined_at IS NOT NULL;
-
-CREATE INDEX encodings_owner_stream ON chunk_encodings(owner_stream) WHERE owner_stream IS NOT NULL;
-CREATE INDEX encodings_recovery ON chunk_encodings(storage_id,unreferenced_at,encoding_id) WHERE recovery_pending;
-
-CREATE TABLE raw_sources (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    location_id BLOB NOT NULL UNIQUE CHECK(length(location_id)=16),
-    storage_id BLOB NOT NULL REFERENCES storages(id),
-    owner_stream INTEGER REFERENCES streams(id) ON DELETE SET NULL,
-    medium TEXT NOT NULL DEFAULT 'local' CHECK (medium IN ('local','memory','shared_s3')),
-    durability TEXT NOT NULL DEFAULT 'durable' CHECK (durability IN ('durable','buffered','volatile')),
-    boot_id BLOB CHECK (boot_id IS NULL OR length(boot_id)=16),
-    state TEXT NOT NULL DEFAULT 'writing' CHECK (state IN ('writing','ready','unavailable','deleting')),
-    size INTEGER NOT NULL DEFAULT 0 CHECK (size>=0),
-    digest BLOB CHECK (digest IS NULL OR length(digest)=16),
-    content_hash BLOB CHECK (content_hash IS NULL OR length(content_hash)=32),
-    upload_id TEXT,
-    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision>0),
-    profile_revision INTEGER NOT NULL CHECK (profile_revision>0),
-    quarantined_at INTEGER,
-    quarantine_code TEXT,
-    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
-    unreferenced_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
-    CHECK (state<>'ready' OR digest IS NOT NULL),
-    CHECK ((medium='memory')=(boot_id IS NOT NULL))
-) STRICT;
-CREATE INDEX raw_sources_cleanup ON raw_sources(storage_id,state,unreferenced_at,id);
-CREATE INDEX raw_sources_owner ON raw_sources(owner_stream) WHERE owner_stream IS NOT NULL;
-CREATE TABLE raw_ranges (
-    stream_id INTEGER NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
-    offset_bytes INTEGER NOT NULL CHECK (offset_bytes>=0),
-    length INTEGER NOT NULL CHECK (length>=0),
-    source_id INTEGER NOT NULL REFERENCES raw_sources(id),
-    source_offset INTEGER NOT NULL DEFAULT 0 CHECK (source_offset>=0),
-    PRIMARY KEY (stream_id,offset_bytes)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX raw_ranges_source ON raw_ranges(source_id);
-
-CREATE UNIQUE INDEX raw_sources_content ON raw_sources(storage_id,content_hash,size);
-
-CREATE TABLE multipart_files (
-    id BLOB NOT NULL PRIMARY KEY CHECK (length(id)=16),
-    upload_id BLOB REFERENCES uploads(id) ON DELETE SET NULL,
-    storage_id BLOB NOT NULL REFERENCES storages(id),
-    source_id INTEGER UNIQUE REFERENCES raw_sources(id),
-    reclaim_pending INTEGER NOT NULL DEFAULT 0 CHECK (reclaim_pending IN (0,1)),
-    state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','sealed','deleting'))
-) STRICT, WITHOUT ROWID;
-CREATE INDEX multipart_files_upload ON multipart_files(upload_id,state);
-CREATE INDEX multipart_files_reclaim ON multipart_files(storage_id,id) WHERE reclaim_pending;
-ALTER TABLE fragments ADD COLUMN file_id BLOB REFERENCES multipart_files(id);
-ALTER TABLE fragments ADD COLUMN file_offset INTEGER CHECK ((file_id IS NULL)=(file_offset IS NULL) AND (file_offset IS NULL OR file_offset>=0));
-CREATE INDEX fragments_file ON fragments(file_id,file_offset) WHERE file_id IS NOT NULL;
-
-CREATE TABLE storage_maintenance (
-    storage_id BLOB NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
-    policy TEXT NOT NULL,
-    last_scheduled_at INTEGER NOT NULL,
-    PRIMARY KEY(storage_id,policy)
-) STRICT;
-
-CREATE TABLE raw_processing (
-    stream_id INTEGER PRIMARY KEY REFERENCES streams(id) ON DELETE CASCADE,
-    source_id INTEGER NOT NULL REFERENCES raw_sources(id) ON DELETE CASCADE,
-    payload_revision INTEGER NOT NULL,
-    content_hash BLOB CHECK (content_hash IS NULL OR length(content_hash)=32),
-    source_revision INTEGER,
-    token BLOB,
-    lease_expires_at INTEGER,
-    next_attempt_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
-    attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT
-) STRICT;
-CREATE INDEX raw_processing_due ON raw_processing(next_attempt_at,stream_id);
-
-CREATE TABLE nonce_counters (
-    block_key_id BLOB NOT NULL REFERENCES managed_keys(id),
-    type_tag INTEGER NOT NULL CHECK (type_tag BETWEEN 0 AND 31),
-    reserved_id INTEGER NOT NULL DEFAULT 0 CHECK (reserved_id>=0),
-    PRIMARY KEY (block_key_id,type_tag)
-) STRICT;
-
-CREATE UNIQUE INDEX managed_keys_fingerprint ON managed_keys(fingerprint);
-
-ALTER TABLE chunk_encodings ADD COLUMN nonce_id INTEGER;
-UPDATE chunk_encodings SET nonce_id=encoding_id WHERE nonce IS NOT NULL;
-CREATE TRIGGER chunk_encodings_nonce_insert BEFORE INSERT ON chunk_encodings WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
-CREATE TRIGGER chunk_encodings_nonce_update BEFORE UPDATE ON chunk_encodings WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
-
-ALTER TABLE packs ADD COLUMN nonce_id INTEGER;
-UPDATE packs SET nonce_id=id WHERE nonce IS NOT NULL;
-CREATE TRIGGER packs_nonce_insert BEFORE INSERT ON packs WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
-CREATE TRIGGER packs_nonce_update BEFORE UPDATE ON packs WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
-
-INSERT INTO nonce_counters(block_key_id,type_tag,reserved_id) SELECT id,0,COALESCE((SELECT seq FROM sqlite_sequence WHERE name='chunk_encodings'),0) FROM managed_keys WHERE purpose='block';
-INSERT INTO nonce_counters(block_key_id,type_tag,reserved_id) SELECT id,1,COALESCE((SELECT seq FROM sqlite_sequence WHERE name='packs'),0) FROM managed_keys WHERE purpose='block';
-
-UPDATE mokyu_meta SET schema_version=25 WHERE id=1;
-
-CREATE TABLE nonce_observations (
-    block_key_id BLOB NOT NULL PRIMARY KEY REFERENCES managed_keys(id),
-    data TEXT NOT NULL CHECK(json_valid(data)),
-    revision INTEGER NOT NULL CHECK(revision > 0)
-) WITHOUT ROWID;
-
-CREATE INDEX chunks_pending_key ON chunks(block_key_id) WHERE state IN ('preparing','uploading');
-
-CREATE TABLE key_replacements (
-    id BLOB PRIMARY KEY,
-    actor TEXT NOT NULL,
-    plan TEXT NOT NULL CHECK(json_valid(plan)),
-    result TEXT CHECK(result IS NULL OR json_valid(result)),
-    expires_at INTEGER NOT NULL
-) WITHOUT ROWID;
-CREATE INDEX key_replacements_expiry ON key_replacements(expires_at);
-
-ALTER TABLE raw_sources ADD COLUMN pending_upload INTEGER NOT NULL DEFAULT false;
-CREATE TABLE raw_uploads (
-    source_id INTEGER PRIMARY KEY REFERENCES raw_sources(id) ON DELETE CASCADE,
-    token BLOB,
-    deduplicate INTEGER NOT NULL,
-    background INTEGER NOT NULL,
-    content_hash BLOB,
-    next_attempt_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
-    attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT
-);
-CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);
-
-ALTER TABLE storage_profiles ADD COLUMN upload_cache_overflow TEXT NOT NULL DEFAULT 'fallback' CONSTRAINT storage_upload_overflow_check CHECK (upload_cache_overflow IN ('fallback','reject'));
-
-ALTER TABLE uploads ADD COLUMN completion_token BLOB;
-ALTER TABLE uploads ADD COLUMN completion_expires_at INTEGER;
-ALTER TABLE pending_uploads ADD COLUMN encoding_policy TEXT CHECK (encoding_policy IS NULL OR json_valid(encoding_policy));
-ALTER TABLE raw_sources ADD COLUMN processing_task BLOB REFERENCES tasks(id) ON DELETE SET NULL;
-CREATE INDEX raw_sources_processing ON raw_sources(processing_task);
-UPDATE mokyu_meta SET schema_version=33 WHERE id=1;
-
-ALTER TABLE storage_profiles ADD COLUMN write_durability TEXT NOT NULL DEFAULT 'durable' CHECK(write_durability IN ('durable','buffered','volatile'));
-CREATE INDEX raw_sources_sync ON raw_sources(id) WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL;
-UPDATE mokyu_meta SET schema_version=34 WHERE id=1;
-
-ALTER TABLE chunk_encodings ADD COLUMN sync_pending INTEGER NOT NULL DEFAULT FALSE CHECK(sync_pending IN (0,1));
-CREATE INDEX encodings_sync ON chunk_encodings(chunk_id) WHERE sync_pending AND state IN ('ready','uploading') AND quarantined_at IS NULL;
-
-ALTER TABLE chunk_encodings ADD COLUMN boot_id BLOB CHECK(boot_id IS NULL OR (length(boot_id)=16 AND sync_pending));
+DELETE FROM sqlite_sequence;
+INSERT INTO sqlite_sequence(name,seq) VALUES('audit_events',0);
+INSERT INTO sqlite_sequence(name,seq) VALUES('integrity_issues',0);

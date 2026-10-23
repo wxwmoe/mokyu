@@ -1,4 +1,12 @@
 export default {
+  profile_write_flush_interval: "まとめ待機",
+  profile_write_backlog_max_age: "滞留時間の上限",
+  profile_background_scheduling: "バックグラウンド処理",
+  storeScheduling_balanced: "均衡",
+  storeScheduling_foreground: "リクエスト優先",
+  profileHelp_write_flush_interval: "0s は追加待機なし、最大 60s、キャッシュ逼迫、手動フラッシュと終了時は待機を省略",
+  profileHelp_write_backlog_max_age: "既定は 5m、超過時は書き出しを優先し、新規滞留には満杯時の方針を適用、ローカル書き込みは永続化を待機",
+  storeSchedulingHint: "リクエスト優先ではバックエンドの読み書きと制御枠の半分を確保し、バックグラウンドにも最低一枠を確保、実行中の処理は継続",
   replaceKeyAction: "鍵を変更",
   replaceEdit: "選択を変更",
   replaceStorages: "関連ストレージの鍵を変更",

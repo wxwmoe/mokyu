@@ -547,7 +547,7 @@ async fn mysql_task_execution_contract() -> Result<()> {
     )
     .execute(db)
     .await?;
-    assert!(UploadCacheStore::enqueue(&backend).await?);
+    assert!(UploadCacheStore::enqueue(&backend, &[]).await?);
     let task = claimed(&backend, upload, 2).await?;
     finish(&backend, task, Some("again")).await?;
     let (attempts,delay): (i32,i64)=sqlx::query_as("SELECT attempts,TIMESTAMPDIFF(MICROSECOND,CURRENT_TIMESTAMP(6),next_retry_at) FROM pending_uploads WHERE chunk_id=?").bind(c1.id).fetch_one(db).await?;

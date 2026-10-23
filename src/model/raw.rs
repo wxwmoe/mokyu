@@ -123,6 +123,8 @@ pub(crate) trait RawStore: Send + Sync {
         after: Id,
         before: Option<chrono::DateTime<chrono::Utc>>,
         stream: Option<Id>,
+        normal: bool,
+        urgent: &[Uuid],
     ) -> Result<Vec<RawSource>>;
     async fn synced(&self, source: &RawSource, failure: Option<&str>) -> Result<()>;
     async fn buffered_source(&self, source: Id) -> Result<Option<RawSource>>;
@@ -200,6 +202,7 @@ pub(crate) trait RawStore: Send + Sync {
         token: Uuid,
         before: Option<chrono::DateTime<chrono::Utc>>,
         node: Processor<'_>,
+        urgent: &[Uuid],
     ) -> Result<Option<RawUpload>>;
     async fn renew_upload(&self, _work: &RawUpload, _node: Processor<'_>) -> Result<bool> {
         anyhow::bail!("cluster raw uploads require PostgreSQL")

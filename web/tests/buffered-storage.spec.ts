@@ -5,7 +5,7 @@ import en from '../src/locales/i18n.en.js'
 import zh from '../src/locales/i18n.zh-CN.js'
 import ja from '../src/locales/i18n.ja.js'
 
-test('file durability stays in the draft and saves only for the selected storage', async ({ page, request }, info) => {
+test('write policies stay in the draft and save only for the selected storage', async ({ page, request }, info) => {
   test.setTimeout(120_000)
   const password = readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8').trim()
   const origin = process.env.MOKYU_TEST_WEB!
@@ -38,9 +38,17 @@ test('file durability stays in the draft and saves only for the selected storage
       await select.click()
       await page.getByRole('option', { name: text.storeDurability_buffered, exact: true }).click()
       expect((await (await request.get(url)).json()).write_durability).toBe('durable')
+      await editor.getByText(text.storeGroupWorker, { exact: true }).click()
+      const scheduling = editor.getByRole('combobox', { name: text.profile_background_scheduling, exact: true })
+      await scheduling.click()
+      await page.getByRole('option', { name: text.storeScheduling_foreground, exact: true }).click()
+      await editor.getByRole('textbox', { name: text.profile_write_flush_interval, exact: true }).fill('2s')
+      await editor.getByRole('textbox', { name: text.profile_write_backlog_max_age, exact: true }).fill('7m')
+      await expect(editor.locator('#storage-scheduling-hint')).toHaveText(text.storeSchedulingHint)
+      expect((await (await request.get(url)).json()).background_scheduling).toBe('balanced')
       for (const width of [1440, 1024, 768, 640, 390, 320]) {
         await page.setViewportSize({ width, height: 900 })
-        await select.scrollIntoViewIfNeeded()
+        await scheduling.scrollIntoViewIfNeeded()
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
       }
       await editor.screenshot({ path: info.outputPath('buffered-' + locale + '-' + theme + '-320.png') })
@@ -55,10 +63,22 @@ test('file durability stays in the draft and saves only for the selected storage
   await select.press('Space')
   await page.getByRole('option', { name: ja.storeDurability_buffered, exact: true }).focus()
   await page.keyboard.press('Enter')
+  await editor.getByText(ja.storeGroupWorker, { exact: true }).click()
+  const scheduling = editor.getByRole('combobox', { name: ja.profile_background_scheduling, exact: true })
+  await scheduling.focus()
+  await scheduling.press('Space')
+  await page.getByRole('option', { name: ja.storeScheduling_foreground, exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await editor.getByRole('textbox', { name: ja.profile_write_flush_interval, exact: true }).fill('2s')
+  await editor.getByRole('textbox', { name: ja.profile_write_backlog_max_age, exact: true }).fill('7m')
   const saved = page.waitForResponse(reply => reply.url().endsWith('/api/v1/storages/' + name) && reply.request().method() === 'PUT')
   await editor.getByRole('button', { name: ja.save, exact: true }).click()
   expect((await saved).status()).toBe(200)
   expect((await (await request.get(url)).json()).write_durability).toBe('buffered')
+  const policy = await (await request.get(url)).json()
+  expect(policy.background_scheduling).toBe('foreground')
+  expect(policy.write_flush_interval).toBe('2s')
+  expect(policy.write_backlog_max_age).toBe('420s')
   expect((await (await request.get(url)).json()).revision).toBe(original.revision + 1)
   expect(await (await request.get('/api/v1/runtime-settings/io')).json()).toEqual(database)
   expect(errors).toEqual([])

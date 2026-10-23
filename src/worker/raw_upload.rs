@@ -66,7 +66,12 @@ pub(crate) async fn tick(app: &App, before: Option<chrono::DateTime<chrono::Utc>
         app.storage_writable()?;
         let Some(work) = app
             .raw
-            .claim_upload(Uuid::new_v4(), before, processor(app))
+            .claim_upload(
+                Uuid::new_v4(),
+                before,
+                processor(app),
+                &app.storage.urgent_writes(),
+            )
             .await?
         else {
             return Ok(false);

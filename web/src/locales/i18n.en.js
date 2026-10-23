@@ -1,4 +1,12 @@
 export default {
+  profile_write_flush_interval: "Coalescing delay",
+  profile_write_backlog_max_age: "Backlog age limit",
+  profile_background_scheduling: "Background scheduling",
+  storeScheduling_balanced: "Balanced",
+  storeScheduling_foreground: "Foreground first",
+  profileHelp_write_flush_interval: "0s adds no wait, up to 60s, cache pressure, manual flush and shutdown bypass the delay",
+  profileHelp_write_backlog_max_age: "Defaults to 5m, overdue writes drain first and new backlog follows the overflow policy, local writes require durable acknowledgement",
+  storeSchedulingHint: "Foreground first reserves half of backend read, write and control slots for requests, background work retains at least one slot and running operations continue",
   replaceKeyAction: "Replace key",
   replaceEdit: "Edit selection",
   replaceStorages: "Replace storage keys",

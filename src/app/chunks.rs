@@ -180,6 +180,7 @@ impl App {
         let buffered = accepted.is_none()
             && self.role == "single"
             && profile.write_durability.as_deref() == Some("buffered")
+            && !self.storage.write_overdue(storage_id, &profile)
             && self.storage.is_local(storage_id)?;
         self.storage
             .put_received(&c, encoded, cache, buffered)

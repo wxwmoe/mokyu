@@ -119,6 +119,9 @@ profile 是类型化字段，不是任意 JSON。字段包括：
 
 - `deduplication_enabled` 默认 false，仅控制 raw 的整文件去重；chunks 固定启用区块去重。更改仅影响新写入；关闭不会拆开已有共享文件；
 - `write_durability` 仅单容器可选，默认 `durable`；`buffered` 允许 local chunks/raw 和 S3 chunks/raw 写缓存完整写入文件后响应，再由后台同步文件及目录；`volatile` 仅允许开启写缓存的 S3，接收完整内容到有界 RAM 后可响应，额度为零或不足时回退到 buffered 文件。buffered 在断电或系统崩溃时、volatile 在进程结束前尚未排空时，都可能丢失最近已确认的数据。Multipart 分片、复制、迁移和显式排空仍要求持久来源；无写缓存的 S3 请求及缓存满额 fallback 等待最终 S3 完成。重启核验未同步文件并隔离丢失的 RAM 来源，不返回旧对象代替已确认的新版本；这与 SQLite 的数据库同步策略分别生效。
+- `write_flush_interval` 默认 `0s`，范围 `0s..60s`，控制文件同步和 S3 写缓存排空前的合并等待；后端积压超龄、缓存压力、显式 flush 和正常关闭提前推进，重启恢复不等待此间隔。
+- `write_backlog_max_age` 默认 `5m`，范围 `1s..24h`，超过后优先处理旧来源，新的 S3 缓存写入遵守 `upload_cache_overflow` 的同步回退或 `503 SlowDown` 策略，本地缓冲写入改为等待持久化。年龄来自每秒更新的有界后端快照，刷新失败超过 5 秒时停止接收新的待排空积压；已有来源保留并重试，不按年龄删除。该期限是准入及调度阈值，不保证故障后端在期限内完成上传。
+- `background_scheduling` 默认 `balanced`，可选 `foreground`。前台优先在每个节点上将后台对每个后端读、写和控制并发的占用限制为一半（向下取整且至少一个），有等待时为后台保留一个位置；单槽沿用老化调度。群集共享配额、CPU、进程总 I/O 和数据库预算仍共同约束，配置变化不取消在途工作。
 - `write_processing` 默认 `inline`，开启 CDC 或 raw 去重时可选 `background`。后台 CDC 的普通 PUT 先保存可读 raw，再分块、查重和编码，新块直接生成最终区块或区块包；Multipart 继续按到达数据流式分块。S3 开启写缓存时确认本地文件与对象映射后响应，后台直接从缓存转换，不先上传完整 raw；没有写缓存时先等待完整原始文件可靠保存。本地 storage 不使用磁盘写缓存。raw 的 inline 去重先查重再上传，background 先保存独立文件再查重；已有工作保留接受时的设置和密钥，重启继续，切换表示保留对象元数据并等待已有读者释放保护；
 - `cdc_enabled` 默认 true；local 和 S3 均可关闭。关闭时必须清除 block key，同时禁用压缩、pack 和 pack Range；Web 在草稿中联动这些值，保存后生效，重新开启不会恢复旧 key。已有对象保持可读；
 

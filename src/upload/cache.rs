@@ -56,6 +56,13 @@ impl App {
         if self.upload_cache.bypass(stream).await? {
             return Ok(false);
         }
+        let storage = c.storage_id.context("chunk has no storage")?;
+        if self.storage.write_overdue(storage, profile) {
+            self.storage.expedite_writes(storage);
+            overflow(profile.upload_cache_overflow == "reject")?;
+            self.upload_cache.disable(stream).await?;
+            return Ok(false);
+        }
         let buffered = new
             && self.role == "single"
             && matches!(
@@ -80,6 +87,8 @@ impl App {
                 if let Err(e) = other {
                     tracing::warn!(error=%e,"upload cache staging failed");
                 }
+                self.storage
+                    .expedite_writes(c.storage_id.context("chunk has no storage")?);
                 overflow(profile.upload_cache_overflow == "reject")?;
                 self.upload_cache.disable(stream).await?;
                 return Ok(false);
@@ -180,7 +189,7 @@ impl App {
         let (total, limit, used) = self.storage.disk.upload_capacity()?;
         let (pending, pins) = self.upload_cache.status().await?;
         Ok(
-            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"write_memory":self.storage.write_memory.status(),"fallbacks":FALLBACKS.load(Ordering::Relaxed),"rejections":REJECTIONS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100,"raw_processing":self.raw.processing_status().await?,"buffered_files":self.raw.buffered_status().await?,"buffered_chunks":self.physical.buffered_status().await?,"raw_uploads":self.raw.upload_status().await?}),
+            json!({"enabled":self.storage_profiles.enabled_profiles().await?.iter().any(|profile| profile.upload_cache),"configured_size":self.config.instance.upload_cache_size,"effective_cache_bytes":total,"effective_upload_bytes":limit,"reserved_bytes":used,"write_memory":self.storage.write_memory.status(),"write_backlog":self.storage.write_backlog_status(),"fallbacks":FALLBACKS.load(Ordering::Relaxed),"rejections":REJECTIONS.load(Ordering::Relaxed),"pending":pending,"pins":pins,"pins_limit":100,"raw_processing":self.raw.processing_status().await?,"buffered_files":self.raw.buffered_status().await?,"buffered_chunks":self.physical.buffered_status().await?,"raw_uploads":self.raw.upload_status().await?}),
         )
     }
     pub async fn cache_flush_start(&self) -> Result<Value> {
@@ -198,7 +207,9 @@ impl App {
         if self.ensure_mode().is_err() || self.maintenance.load(Ordering::Acquire) {
             return Ok(false);
         }
-        self.upload_cache.enqueue().await
+        self.upload_cache
+            .enqueue(&self.storage.urgent_writes())
+            .await
     }
     pub async fn upload_batch(&self, task: Execution, detail: Value, flush: bool) -> Result<bool> {
         if !flush && self.maintenance.load(Ordering::Acquire) {

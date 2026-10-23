@@ -4,6 +4,7 @@ use crate::{
     content::codec::{self, Chunk, MAX},
 };
 pub(crate) mod assembly;
+mod backlog;
 pub(crate) mod cache;
 mod diagnostics;
 pub(crate) mod local;
@@ -58,6 +59,7 @@ pub(crate) const STAGING_PREFIX: &str = "__mokyu/multipart/";
 const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 
 pub struct Storage {
+    write_backlog: Mutex<backlog::Backlog>,
     pub(crate) write_memory: memory::Pool,
     pub(crate) boot_id: Uuid,
     pub(crate) buffered_writes: std::sync::atomic::AtomicBool,
@@ -186,7 +188,7 @@ async fn build_store(
     } else {
         None
     };
-    Ok(StoreBackend {
+    let backend = StoreBackend {
         buffered_backend,
         profile: Arc::new(profile.clone()),
         backend: target.backend,
@@ -295,7 +297,16 @@ async fn build_store(
             .map(config::cache_bytes)
             .transpose()?,
         pack_config: Arc::new(profile.pack_config()),
-    })
+    };
+    for gate in [&backend.reads, &backend.writes, &backend.controls] {
+        let (limit, aging, _) = gate.local.settings();
+        gate.local.configure(
+            limit,
+            aging.min(Duration::from_secs(profile.write_backlog_seconds()?)),
+            profile.background_scheduling == "foreground",
+        );
+    }
+    Ok(backend)
 }
 
 impl Storage {
@@ -403,6 +414,7 @@ impl Storage {
             targets.insert(id, Arc::new(backend));
         }
         let s = Self {
+            write_backlog: Mutex::new(backlog::Backlog::new(physical.write_backlog().await?)),
             maintenance,
             access: Arc::new(crate::status::access::Access::new(
                 budget.cache_entries.clamp(128, 8192),
@@ -414,11 +426,11 @@ impl Storage {
             write_memory: memory::Pool::new(budget.write_memory_bytes),
             boot_id: Uuid::new_v4(),
             buffered_writes: (!raw_store
-                .buffered(Id::default(), None, None)
+                .buffered(Id::default(), None, None, false, &[])
                 .await?
                 .is_empty()
                 || !physical
-                    .buffered_chunks(Id::default(), None, None, None, false)
+                    .buffered_chunks(Id::default(), None, None, None, false, &[])
                     .await?
                     .is_empty())
             .into(),

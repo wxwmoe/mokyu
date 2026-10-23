@@ -17,6 +17,7 @@ pub(crate) enum PhysicalSource {
 #[async_trait]
 pub(crate) trait PhysicalStore: Send + Sync {
     async fn has_chunks(&self) -> Result<bool>;
+    async fn write_backlog(&self) -> Result<Vec<(Uuid, chrono::DateTime<chrono::Utc>)>>;
     async fn indexed(&self, location: Uuid) -> Result<bool>;
 
     async fn upload_pins(&self, after: Id, owner: Option<Uuid>) -> Result<Vec<StagedUpload>>;
@@ -32,6 +33,7 @@ pub(crate) trait PhysicalStore: Send + Sync {
         stream: Option<Id>,
         chunk: Option<Id>,
         files_only: bool,
+        urgent: &[Uuid],
     ) -> Result<Vec<Chunk>>;
     async fn synced_chunk(&self, chunk: &Chunk, failure: Option<&str>) -> Result<()>;
     async fn buffered_status(&self) -> Result<serde_json::Value>;

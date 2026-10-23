@@ -17,6 +17,12 @@ pub(crate) struct StorageProfile {
     pub write_processing: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_durability: Option<String>,
+    #[serde(default = "write_flush_interval")]
+    pub write_flush_interval: String,
+    #[serde(default = "write_backlog_max_age")]
+    pub write_backlog_max_age: String,
+    #[serde(default = "background_scheduling")]
+    pub background_scheduling: String,
     pub connect_timeout: String,
     pub request_timeout: String,
     pub max_retries: i32,
@@ -87,7 +93,33 @@ fn upload_cache_overflow() -> String {
     "fallback".into()
 }
 
+fn write_flush_interval() -> String {
+    "0s".into()
+}
+fn write_backlog_max_age() -> String {
+    "5m".into()
+}
+fn background_scheduling() -> String {
+    "balanced".into()
+}
+
 impl StorageProfile {
+    pub(crate) fn write_flush_seconds(&self) -> Result<u64> {
+        if self.write_flush_interval == "0s" {
+            return Ok(0);
+        }
+        let invalid = || s3s::s3_error!(InvalidArgument, "write_flush_interval must be 0s..60s");
+        let seconds = crate::config::seconds(&self.write_flush_interval).map_err(|_| invalid())?;
+        anyhow::ensure!(seconds <= 60, invalid());
+        Ok(seconds)
+    }
+
+    pub(crate) fn write_backlog_seconds(&self) -> Result<u64> {
+        let invalid = || s3s::s3_error!(InvalidArgument, "write_backlog_max_age must be 1s..24h");
+        let seconds = crate::config::seconds(&self.write_backlog_max_age).map_err(|_| invalid())?;
+        anyhow::ensure!(seconds <= 86400, invalid());
+        Ok(seconds)
+    }
     pub(crate) fn validate_key(&self, key: Option<Uuid>) -> Result<()> {
         anyhow::ensure!(
             self.cdc_enabled || key.is_none(),
@@ -202,6 +234,18 @@ impl StorageProfile {
 
 pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::Result<()> {
     use crate::config::{bytes, cache_bytes, seconds};
+    profile.write_flush_seconds()?;
+    profile.write_backlog_seconds()?;
+    anyhow::ensure!(
+        matches!(
+            profile.background_scheduling.as_str(),
+            "balanced" | "foreground"
+        ),
+        s3s::s3_error!(
+            InvalidArgument,
+            "background_scheduling must be balanced or foreground"
+        )
+    );
     anyhow::ensure!(
         matches!(
             profile.upload_cache_overflow.as_str(),

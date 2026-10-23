@@ -1,8 +1,10 @@
--- Current PostgreSQL schema; the initializer records the migration history.
+-- Generated from the complete postgres migration chain through 0065.
+-- Do not edit directly. The initializer owns deployment metadata and migration history.
+
 SET LOCAL check_function_bodies = false;
+SET LOCAL standard_conforming_strings = on;
 SET LOCAL default_tablespace = '';
 SET LOCAL default_table_access_method = heap;
-SET LOCAL search_path = public;
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 
@@ -635,7 +637,10 @@ CREATE TABLE public.chunk_encodings (
     owner_stream uuid,
     recovery_pending boolean DEFAULT false NOT NULL,
     nonce_id bigint,
+    sync_pending boolean DEFAULT false NOT NULL,
+    boot_id uuid,
     CONSTRAINT chunk_encodings_block_key_check CHECK ((((encryption_algorithm = 'none'::text) AND (block_key_id IS NULL)) OR ((encryption_algorithm <> 'none'::text) AND (block_key_id IS NOT NULL)))),
+    CONSTRAINT chunk_encodings_check CHECK (((boot_id IS NULL) OR sync_pending)),
     CONSTRAINT chunk_encodings_fingerprint_size CHECK ((octet_length(encoding_fingerprint) = 32)),
     CONSTRAINT chunk_encodings_nonce_id CHECK ((((encryption_algorithm = 'none'::text) AND (nonce_id IS NULL) AND (nonce IS NULL) AND (block_key_id IS NULL)) OR ((encryption_algorithm <> 'none'::text) AND (block_key_id IS NOT NULL) AND (((nonce IS NULL) AND (nonce_id IS NULL) AND (state <> 'ready'::text)) OR ((nonce IS NOT NULL) AND (nonce_id IS NOT NULL) AND (nonce_id > 0)))))),
     CONSTRAINT chunk_locations_algorithm_check CHECK ((encryption_algorithm = ANY (ARRAY['none'::text, 'aes-256-gcm'::text, 'chacha20-poly1305'::text]))),
@@ -736,6 +741,14 @@ CREATE TABLE public.key_fingerprints (
     CONSTRAINT key_fingerprints_fingerprint_check CHECK ((octet_length(fingerprint) = 32))
 );
 
+CREATE TABLE public.key_replacements (
+    id uuid NOT NULL,
+    actor text NOT NULL,
+    plan jsonb NOT NULL,
+    result jsonb,
+    expires_at timestamp with time zone NOT NULL
+);
+
 CREATE TABLE public.maintenance_controls (
     policy text CONSTRAINT maintenance_controls_kind_not_null NOT NULL,
     paused boolean DEFAULT false NOT NULL,
@@ -817,6 +830,7 @@ CREATE TABLE public.multipart_files (
     source_id uuid,
     reclaim_pending boolean DEFAULT false NOT NULL,
     state text DEFAULT 'open'::text NOT NULL,
+    node_id uuid,
     CONSTRAINT multipart_files_state_check CHECK ((state = ANY (ARRAY['open'::text, 'sealed'::text, 'deleting'::text])))
 );
 
@@ -868,6 +882,13 @@ CREATE TABLE public.nonce_counters (
     reserved_id bigint DEFAULT 0 NOT NULL,
     CONSTRAINT nonce_counters_reserved_id_check CHECK ((reserved_id >= 0)),
     CONSTRAINT nonce_counters_type_tag_check CHECK (((type_tag >= 0) AND (type_tag <= 31)))
+);
+
+CREATE TABLE public.nonce_observations (
+    block_key_id uuid NOT NULL,
+    data jsonb NOT NULL,
+    revision bigint NOT NULL,
+    CONSTRAINT nonce_observations_revision_check CHECK ((revision > 0))
 );
 
 CREATE TABLE public.objects (
@@ -976,6 +997,13 @@ CREATE TABLE public.parts (
     stream_id uuid,
     write_token uuid CONSTRAINT parts_write_epoch_not_null NOT NULL,
     quota_size bigint DEFAULT 0 NOT NULL,
+    remote_node_id uuid,
+    remote_etag text,
+    remote_token uuid,
+    remote_expires_at timestamp with time zone,
+    remote_retry_at timestamp with time zone DEFAULT now() NOT NULL,
+    remote_error text,
+    remote_cached boolean DEFAULT false NOT NULL,
     CONSTRAINT parts_part_number_check CHECK (((part_number >= 1) AND (part_number <= 10000))),
     CONSTRAINT parts_quota_size_check CHECK ((quota_size >= 0))
 )
@@ -994,6 +1022,8 @@ CREATE TABLE public.pending_uploads (
     owner_task uuid,
     staging_storage_id uuid,
     staging_object_key text,
+    node_id uuid,
+    encoding_policy jsonb,
     CONSTRAINT pending_uploads_cache_size_check CHECK ((staged_size > 0)),
     CONSTRAINT pending_uploads_offset_bytes_check CHECK ((offset_bytes >= 0))
 );
@@ -1113,6 +1143,8 @@ CREATE TABLE public.raw_sources (
     quarantine_code text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     unreferenced_at timestamp with time zone DEFAULT now() NOT NULL,
+    pending_upload boolean DEFAULT false NOT NULL,
+    processing_task uuid,
     CONSTRAINT raw_sources_check CHECK (((state <> 'ready'::text) OR (digest IS NOT NULL))),
     CONSTRAINT raw_sources_check1 CHECK (((medium = 'memory'::text) = (boot_id IS NOT NULL))),
     CONSTRAINT raw_sources_content_hash_check CHECK (((content_hash IS NULL) OR (octet_length(content_hash) = 32))),
@@ -1123,6 +1155,19 @@ CREATE TABLE public.raw_sources (
     CONSTRAINT raw_sources_revision_check CHECK ((revision > 0)),
     CONSTRAINT raw_sources_size_check CHECK ((size >= 0)),
     CONSTRAINT raw_sources_state_check CHECK ((state = ANY (ARRAY['writing'::text, 'ready'::text, 'unavailable'::text, 'deleting'::text])))
+);
+
+CREATE TABLE public.raw_uploads (
+    source_id uuid NOT NULL,
+    token uuid,
+    deduplicate boolean NOT NULL,
+    background boolean NOT NULL,
+    content_hash bytea,
+    next_attempt_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    last_error text,
+    node_id uuid,
+    lease_expires_at timestamp with time zone
 );
 
 CREATE TABLE public.runtime_samples (
@@ -1137,7 +1182,7 @@ CREATE TABLE public.runtime_settings (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_by_user_id uuid,
     CONSTRAINT runtime_settings_revision_check CHECK ((revision > 0)),
-    CONSTRAINT runtime_settings_section_check CHECK ((section = ANY (ARRAY['web'::text, 'requests'::text, 'uploads'::text, 'metrics'::text, 'maintenance'::text]))),
+    CONSTRAINT runtime_settings_section_check CHECK ((section = ANY (ARRAY['web'::text, 'requests'::text, 'uploads'::text, 'metrics'::text, 'maintenance'::text, 'io'::text]))),
     CONSTRAINT runtime_settings_value_check CHECK ((jsonb_typeof(value) = 'object'::text))
 );
 
@@ -1226,9 +1271,6 @@ CREATE TABLE public.storage_permits (
 );
 
 CREATE TABLE public.storage_profiles (
-    write_processing text DEFAULT 'inline'::text NOT NULL,
-    multipart_idle_timeout text DEFAULT '24h'::text NOT NULL,
-    min_free_space text,
     storage_id uuid NOT NULL,
     revision bigint DEFAULT 1 NOT NULL,
     connect_timeout text DEFAULT '5s'::text NOT NULL,
@@ -1287,6 +1329,15 @@ CREATE TABLE public.storage_profiles (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     cdc_enabled boolean DEFAULT true NOT NULL,
     deduplication_enabled boolean DEFAULT false NOT NULL,
+    multipart_idle_timeout text DEFAULT '24h'::text NOT NULL,
+    min_free_space text,
+    write_processing text DEFAULT 'inline'::text NOT NULL,
+    upload_cache_overflow text DEFAULT 'fallback'::text NOT NULL,
+    write_durability text DEFAULT 'durable'::text NOT NULL,
+    write_flush_interval bigint DEFAULT 0 NOT NULL,
+    write_backlog_max_age bigint DEFAULT 300 NOT NULL,
+    background_scheduling text DEFAULT 'balanced'::text NOT NULL,
+    CONSTRAINT storage_background_scheduling CHECK ((background_scheduling = ANY (ARRAY['balanced'::text, 'foreground'::text]))),
     CONSTRAINT storage_profiles_cache_entries_check CHECK (((cache_entries IS NULL) OR (cache_entries > 0))),
     CONSTRAINT storage_profiles_compression_min_savings_bytes_check CHECK ((compression_min_savings_bytes >= 0)),
     CONSTRAINT storage_profiles_compression_min_savings_percent_check CHECK (((compression_min_savings_percent >= 0) AND (compression_min_savings_percent <= 100))),
@@ -1302,7 +1353,9 @@ CREATE TABLE public.storage_profiles (
     CONSTRAINT storage_profiles_pack_range_min_savings_percent_check CHECK (((pack_range_min_savings_percent >= 1) AND (pack_range_min_savings_percent <= 100))),
     CONSTRAINT storage_profiles_read_concurrency_check CHECK (((read_concurrency IS NULL) OR (read_concurrency > 0))),
     CONSTRAINT storage_profiles_revision_check CHECK ((revision > 0)),
-    CONSTRAINT storage_profiles_upload_concurrency_check CHECK (((upload_concurrency IS NULL) OR (upload_concurrency > 0)))
+    CONSTRAINT storage_profiles_upload_concurrency_check CHECK (((upload_concurrency IS NULL) OR (upload_concurrency > 0))),
+    CONSTRAINT storage_profiles_write_durability_check CHECK ((write_durability = ANY (ARRAY['durable'::text, 'buffered'::text, 'volatile'::text]))),
+    CONSTRAINT storage_upload_overflow_check CHECK ((upload_cache_overflow = ANY (ARRAY['fallback'::text, 'reject'::text])))
 );
 
 CREATE TABLE public.storage_rate_state (
@@ -1481,6 +1534,12 @@ CREATE TABLE public.uploads (
     durable_at timestamp with time zone,
     staging_storage_id uuid,
     staging_object_key text,
+    completion_token uuid,
+    completion_expires_at timestamp with time zone,
+    raw_source_id uuid,
+    remote_token uuid,
+    remote_expires_at timestamp with time zone,
+    remote_manifest_hash text,
     CONSTRAINT uploads_state_check CHECK ((state = ANY (ARRAY['active'::text, 'completing'::text, 'completed'::text, 'aborted'::text])))
 )
 WITH (autovacuum_vacuum_scale_factor='0.05', autovacuum_analyze_scale_factor='0.02');
@@ -1516,6 +1575,22 @@ CREATE TABLE public.web_uploads (
     CONSTRAINT web_uploads_part_size_check CHECK (((part_size >= 5242880) AND (part_size <= '5368709120'::bigint))),
     CONSTRAINT web_uploads_request_hash_check CHECK ((octet_length(request_hash) = 32))
 );
+
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('cleanup', 'false', now(), now());
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('gc', 'false', now(), now());
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('pack', 'false', now(), now());
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('range', 'false', now(), now());
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('reclaim', 'false', now(), now());
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('repack', 'false', now(), now());
+INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('reuse', 'false', now(), now());
+INSERT INTO "projects" ("id", "name", "description", "builtin", "allow_bucket_create", "created_at") VALUES ('00000000-0000-0000-0000-000000000001', 'Default', '', 'true', 'false', now());
+INSERT INTO "quota_scopes" ("scope", "scope_id", "used_bytes", "reserved_bytes", "inflight_bytes", "object_count", "bucket_count", "logical_bytes_limit", "inflight_bytes_limit", "bucket_count_limit", "cached_bytes", "cached_compressed") VALUES ('project', '00000000-0000-0000-0000-000000000001', '0', '0', '0', '0', '0', NULL, NULL, NULL, '0', 'false');
+INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('maintenance', '{"interval": "30m", "batch_size": 1000, "max_duration": "5s", "task_retention": "30d", "audit_retention": "90d"}', '1', now(), NULL);
+INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('metrics', '{"scope_limit": 64, "query_timeout": "2m", "access_retention": "14d", "refresh_interval": "15m", "runtime_interval": "1m", "storage_interval": "15m", "runtime_retention": "24h", "storage_retention": "7d", "access_flush_interval": "1m"}', '1', now(), NULL);
+INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('requests', '{"s3_domain": null, "s3_region": "us-east-1", "s3_chunk_limit": "8MiB", "read_idle_timeout": "120s", "upload_idle_timeout": "120s"}', '1', now(), NULL);
+INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('uploads', '{"sweep_interval": "5m", "max_active_uploads": null, "staging_storage_id": null, "client_idle_timeout": "120s", "staging_bytes_limit": null}', '2', now(), NULL);
+INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('web', '{"origin": "http://localhost:9002", "secure_cookie": true, "session_lifetime": "12h", "gravatar_base_url": "https://www.gravatar.com/avatar/"}', '1', now(), NULL);
+INSERT INTO "usage_summary" ("id", "bucket_ids", "requested_at", "as_of", "data") VALUES ('global', NULL, now(), NULL, NULL);
 
 ALTER TABLE ONLY public.api_tokens
     ADD CONSTRAINT api_tokens_pkey PRIMARY KEY (id);
@@ -1577,6 +1652,9 @@ ALTER TABLE ONLY public.integrity_packs
 ALTER TABLE ONLY public.key_fingerprints
     ADD CONSTRAINT key_fingerprints_pkey PRIMARY KEY (key_id);
 
+ALTER TABLE ONLY public.key_replacements
+    ADD CONSTRAINT key_replacements_pkey PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.maintenance_controls
     ADD CONSTRAINT maintenance_controls_pkey PRIMARY KEY (policy);
 
@@ -1624,6 +1702,9 @@ ALTER TABLE ONLY public.nodes
 
 ALTER TABLE ONLY public.nonce_counters
     ADD CONSTRAINT nonce_counters_pkey PRIMARY KEY (block_key_id, type_tag);
+
+ALTER TABLE ONLY public.nonce_observations
+    ADD CONSTRAINT nonce_observations_pkey PRIMARY KEY (block_key_id);
 
 ALTER TABLE ONLY public.objects
     ADD CONSTRAINT objects_pkey PRIMARY KEY (bucket_id, object_key);
@@ -1696,6 +1777,9 @@ ALTER TABLE ONLY public.raw_ranges
 
 ALTER TABLE ONLY public.raw_sources
     ADD CONSTRAINT raw_sources_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.raw_uploads
+    ADD CONSTRAINT raw_uploads_pkey PRIMARY KEY (source_id);
 
 ALTER TABLE ONLY public.runtime_samples
     ADD CONSTRAINT runtime_history_pkey PRIMARY KEY (sampled_at);
@@ -1805,6 +1889,8 @@ CREATE INDEX chunks_owner ON public.chunks USING btree (owner_stream) WHERE (own
 
 CREATE INDEX chunks_pack ON public.chunks USING btree (pack_id) WHERE (pack_id IS NOT NULL);
 
+CREATE INDEX chunks_pending_key ON public.chunks USING btree (block_key_id) WHERE (state = ANY (ARRAY['preparing'::text, 'uploading'::text]));
+
 CREATE INDEX chunks_range_repack ON public.chunks USING btree (repack_after, id) WHERE (range_split_at IS NOT NULL);
 
 CREATE INDEX chunks_store ON public.chunks USING btree (storage_id) WHERE (storage_id IS NOT NULL);
@@ -1816,6 +1902,8 @@ CREATE INDEX encodings_owner_stream ON public.chunk_encodings USING btree (owner
 CREATE INDEX encodings_quarantined ON public.chunk_encodings USING btree (storage_id, encoding_id) WHERE (quarantined_at IS NOT NULL);
 
 CREATE INDEX encodings_recovery ON public.chunk_encodings USING btree (storage_id, unreferenced_at, encoding_id) WHERE recovery_pending;
+
+CREATE INDEX encodings_sync ON public.chunk_encodings USING btree (chunk_id) WHERE (sync_pending AND (state = ANY (ARRAY['ready'::text, 'uploading'::text])) AND (quarantined_at IS NULL));
 
 CREATE INDEX extents_chunk ON public.extents USING btree (chunk_id) WHERE (chunk_id IS NOT NULL);
 
@@ -1829,6 +1917,8 @@ CREATE INDEX fragments_owner ON public.fragments USING btree (owner_stream) WHER
 
 CREATE INDEX integrity_issues_page ON public.integrity_issues USING btree (task_id, id);
 
+CREATE INDEX key_replacements_expiry ON public.key_replacements USING btree (expires_at);
+
 CREATE INDEX maintenance_previews_expiry ON public.maintenance_previews USING btree (expires_at);
 
 CREATE UNIQUE INDEX managed_keys_fingerprint ON public.managed_keys USING btree (fingerprint);
@@ -1836,6 +1926,8 @@ CREATE UNIQUE INDEX managed_keys_fingerprint ON public.managed_keys USING btree 
 CREATE INDEX media_operations_cleanup ON public.media_operations USING btree (created_at, id);
 
 CREATE INDEX member_bucket_grants_bucket ON public.member_bucket_grants USING btree (bucket_id, user_id);
+
+CREATE INDEX multipart_files_node ON public.multipart_files USING btree (node_id, id);
 
 CREATE INDEX multipart_files_reclaim ON public.multipart_files USING btree (storage_id, id) WHERE reclaim_pending;
 
@@ -1877,9 +1969,13 @@ CREATE INDEX packs_quarantined ON public.packs USING btree (storage_id, id) WHER
 
 CREATE INDEX packs_store ON public.packs USING btree (storage_id) WHERE (storage_id IS NOT NULL);
 
+CREATE INDEX parts_remote_pending ON public.parts USING btree (remote_node_id, remote_retry_at) WHERE ((remote_node_id IS NOT NULL) AND (remote_etag IS NULL));
+
 CREATE INDEX parts_stream ON public.parts USING btree (stream_id) WHERE (stream_id IS NOT NULL);
 
 CREATE INDEX pending_uploads_due ON public.pending_uploads USING btree (next_retry_at, chunk_id) WHERE (owner_task IS NULL);
+
+CREATE INDEX pending_uploads_node ON public.pending_uploads USING btree (node_id) WHERE (node_id IS NOT NULL);
 
 CREATE INDEX pending_uploads_retry ON public.pending_uploads USING btree (next_retry_at, owner_task) WHERE (owner_task IS NOT NULL);
 
@@ -1908,6 +2004,14 @@ CREATE INDEX raw_sources_cleanup ON public.raw_sources USING btree (storage_id, 
 CREATE UNIQUE INDEX raw_sources_content ON public.raw_sources USING btree (storage_id, content_hash, size);
 
 CREATE INDEX raw_sources_owner ON public.raw_sources USING btree (owner_stream) WHERE (owner_stream IS NOT NULL);
+
+CREATE INDEX raw_sources_processing ON public.raw_sources USING btree (processing_task);
+
+CREATE INDEX raw_sources_sync ON public.raw_sources USING btree (id) WHERE ((durability = ANY (ARRAY['buffered'::text, 'volatile'::text])) AND (state = 'ready'::text) AND (quarantine_code IS NULL));
+
+CREATE INDEX raw_uploads_due ON public.raw_uploads USING btree (next_attempt_at, source_id);
+
+CREATE INDEX raw_uploads_node ON public.raw_uploads USING btree (node_id) WHERE (node_id IS NOT NULL);
 
 CREATE INDEX runtime_cluster_time ON public.runtime_samples USING btree (sampled_at DESC) WHERE ((data ->> 'scope'::text) = 'cluster'::text);
 
@@ -1964,6 +2068,8 @@ CREATE INDEX uploads_finished ON public.uploads USING btree (touched_at, id) WHE
 CREATE INDEX uploads_list ON public.uploads USING btree (bucket_id, object_key, id);
 
 CREATE INDEX uploads_output ON public.uploads USING btree (output_stream) WHERE (output_stream IS NOT NULL);
+
+CREATE INDEX uploads_raw_source ON public.uploads USING btree (raw_source_id) WHERE (raw_source_id IS NOT NULL);
 
 CREATE INDEX uploads_transfers ON public.uploads USING btree (created_at DESC, id);
 
@@ -2139,6 +2245,9 @@ ALTER TABLE ONLY public.member_bucket_grants
     ADD CONSTRAINT member_grants_user_id_project_id_fkey FOREIGN KEY (user_id, project_id) REFERENCES public.project_members(user_id, project_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.multipart_files
+    ADD CONSTRAINT multipart_files_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id);
+
+ALTER TABLE ONLY public.multipart_files
     ADD CONSTRAINT multipart_files_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.raw_sources(id);
 
 ALTER TABLE ONLY public.multipart_files
@@ -2155,6 +2264,9 @@ ALTER TABLE ONLY public.node_runtime_samples
 
 ALTER TABLE ONLY public.nonce_counters
     ADD CONSTRAINT nonce_counters_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);
+
+ALTER TABLE ONLY public.nonce_observations
+    ADD CONSTRAINT nonce_observations_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);
 
 ALTER TABLE ONLY public.objects
     ADD CONSTRAINT objects_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);
@@ -2199,6 +2311,9 @@ ALTER TABLE ONLY public.packs
     ADD CONSTRAINT packs_store_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
 
 ALTER TABLE ONLY public.parts
+    ADD CONSTRAINT parts_remote_node_id_fkey FOREIGN KEY (remote_node_id) REFERENCES public.nodes(id);
+
+ALTER TABLE ONLY public.parts
     ADD CONSTRAINT parts_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id);
 
 ALTER TABLE ONLY public.parts
@@ -2206,6 +2321,9 @@ ALTER TABLE ONLY public.parts
 
 ALTER TABLE ONLY public.pending_uploads
     ADD CONSTRAINT pending_uploads_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.chunks(id);
+
+ALTER TABLE ONLY public.pending_uploads
+    ADD CONSTRAINT pending_uploads_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id);
 
 ALTER TABLE ONLY public.pending_uploads
     ADD CONSTRAINT pending_uploads_owner_task_fkey FOREIGN KEY (owner_task) REFERENCES public.tasks(id) ON DELETE SET NULL;
@@ -2259,7 +2377,16 @@ ALTER TABLE ONLY public.raw_sources
     ADD CONSTRAINT raw_sources_owner_stream_fkey FOREIGN KEY (owner_stream) REFERENCES public.streams(id) ON DELETE SET NULL;
 
 ALTER TABLE ONLY public.raw_sources
+    ADD CONSTRAINT raw_sources_processing_task_fkey FOREIGN KEY (processing_task) REFERENCES public.tasks(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.raw_sources
     ADD CONSTRAINT raw_sources_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.raw_uploads
+    ADD CONSTRAINT raw_uploads_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id);
+
+ALTER TABLE ONLY public.raw_uploads
+    ADD CONSTRAINT raw_uploads_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.raw_sources(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.runtime_settings
     ADD CONSTRAINT runtime_settings_updated_by_fkey FOREIGN KEY (updated_by_user_id) REFERENCES public.web_users(id) ON DELETE SET NULL;
@@ -2328,6 +2455,9 @@ ALTER TABLE ONLY public.uploads
     ADD CONSTRAINT uploads_output_stream_fkey FOREIGN KEY (output_stream) REFERENCES public.streams(id) ON DELETE SET NULL;
 
 ALTER TABLE ONLY public.uploads
+    ADD CONSTRAINT uploads_raw_source_id_fkey FOREIGN KEY (raw_source_id) REFERENCES public.raw_sources(id);
+
+ALTER TABLE ONLY public.uploads
     ADD CONSTRAINT uploads_staging_storage_fkey FOREIGN KEY (staging_storage_id) REFERENCES public.storages(id) ON DELETE SET NULL;
 
 ALTER TABLE ONLY public.web_uploads
@@ -2335,91 +2465,3 @@ ALTER TABLE ONLY public.web_uploads
 
 ALTER TABLE ONLY public.web_uploads
     ADD CONSTRAINT web_uploads_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.web_users(id) ON DELETE SET NULL;
-
-INSERT INTO public.projects(id,name,builtin) VALUES('00000000-0000-0000-0000-000000000001','Default',true);
-INSERT INTO public.runtime_settings(section,value) VALUES
-    ('web','{"origin":"http://localhost:9002","secure_cookie":true,"session_lifetime":"12h","gravatar_base_url":"https://www.gravatar.com/avatar/"}'),
-    ('requests','{"s3_domain":null,"s3_region":"us-east-1","s3_chunk_limit":"8MiB","read_idle_timeout":"120s","upload_idle_timeout":"120s"}'),
-    ('uploads','{"sweep_interval":"5m","max_active_uploads":null,"staging_storage_id":null,"client_idle_timeout":"120s","staging_bytes_limit":null}'),
-    ('metrics','{"scope_limit":64,"query_timeout":"2m","access_retention":"14d","refresh_interval":"15m","runtime_interval":"1m","storage_interval":"15m","runtime_retention":"24h","storage_retention":"7d","access_flush_interval":"1m"}'),
-    ('maintenance','{"interval":"30m","batch_size":1000,"max_duration":"5s","task_retention":"30d","audit_retention":"90d"}');
-UPDATE public.runtime_settings SET revision=2 WHERE section='uploads';
-INSERT INTO maintenance_controls(policy) VALUES('gc'),('pack'),('reuse'),('reclaim'),('repack'),('range'),('cleanup');
-INSERT INTO usage_summary(id) VALUES('global');
-
-CREATE TABLE nonce_observations (
-    block_key_id uuid PRIMARY KEY REFERENCES managed_keys(id),
-    data jsonb NOT NULL,
-    revision bigint NOT NULL CHECK (revision > 0)
-);
-
-CREATE INDEX chunks_pending_key ON chunks(block_key_id) WHERE state IN ('preparing','uploading');
-
-CREATE TABLE key_replacements (
-    id uuid PRIMARY KEY,
-    actor text NOT NULL,
-    plan jsonb NOT NULL,
-    result jsonb,
-    expires_at timestamptz NOT NULL
-);
-CREATE INDEX key_replacements_expiry ON key_replacements(expires_at);
-
-ALTER TABLE raw_sources ADD COLUMN pending_upload boolean NOT NULL DEFAULT false;
-CREATE TABLE raw_uploads (
-    source_id uuid PRIMARY KEY REFERENCES raw_sources(id) ON DELETE CASCADE,
-    token uuid,
-    deduplicate boolean NOT NULL,
-    background boolean NOT NULL,
-    content_hash bytea,
-    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT
-);
-CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);
-
-ALTER TABLE storage_profiles ADD COLUMN upload_cache_overflow TEXT NOT NULL DEFAULT 'fallback' CONSTRAINT storage_upload_overflow_check CHECK (upload_cache_overflow IN ('fallback','reject'));
-
-ALTER TABLE raw_uploads ADD COLUMN node_id uuid REFERENCES nodes(id);
-ALTER TABLE raw_uploads ADD COLUMN lease_expires_at timestamptz;
-CREATE INDEX raw_uploads_node ON raw_uploads(node_id) WHERE node_id IS NOT NULL;
-
-ALTER TABLE pending_uploads ADD COLUMN node_id uuid REFERENCES nodes(id);
-CREATE INDEX pending_uploads_node ON pending_uploads(node_id) WHERE node_id IS NOT NULL;
-
-ALTER TABLE uploads ADD COLUMN completion_token uuid;
-ALTER TABLE uploads ADD COLUMN completion_expires_at timestamptz;
-UPDATE mokyu_meta SET schema_version=57 WHERE singleton;
-
-ALTER TABLE multipart_files ADD COLUMN node_id uuid REFERENCES nodes(id);
-CREATE INDEX multipart_files_node ON multipart_files(node_id, id);
-ALTER TABLE uploads ADD COLUMN raw_source_id uuid REFERENCES raw_sources(id);
-ALTER TABLE uploads ADD COLUMN remote_token uuid;
-ALTER TABLE uploads ADD COLUMN remote_expires_at timestamptz;
-ALTER TABLE uploads ADD COLUMN remote_manifest_hash text;
-CREATE INDEX uploads_raw_source ON uploads(raw_source_id) WHERE raw_source_id IS NOT NULL;
-ALTER TABLE parts ADD COLUMN remote_node_id uuid REFERENCES nodes(id);
-ALTER TABLE parts ADD COLUMN remote_etag text;
-ALTER TABLE parts ADD COLUMN remote_token uuid;
-ALTER TABLE parts ADD COLUMN remote_expires_at timestamptz;
-ALTER TABLE parts ADD COLUMN remote_retry_at timestamptz NOT NULL DEFAULT now();
-ALTER TABLE parts ADD COLUMN remote_error text;
-ALTER TABLE parts ADD COLUMN remote_cached boolean NOT NULL DEFAULT false;
-CREATE INDEX parts_remote_pending ON parts(remote_node_id, remote_retry_at) WHERE remote_node_id IS NOT NULL AND remote_etag IS NULL;
-
-ALTER TABLE pending_uploads ADD COLUMN encoding_policy JSONB;
-ALTER TABLE raw_sources ADD COLUMN processing_task UUID REFERENCES tasks(id) ON DELETE SET NULL;
-CREATE INDEX raw_sources_processing ON raw_sources(processing_task);
-UPDATE mokyu_meta SET schema_version=60 WHERE singleton;
-
-ALTER TABLE runtime_settings DROP CONSTRAINT runtime_settings_section_check;
-ALTER TABLE runtime_settings ADD CONSTRAINT runtime_settings_section_check CHECK (section IN ('web','requests','uploads','metrics','maintenance','io'));
-UPDATE mokyu_meta SET schema_version=61 WHERE singleton;
-
-ALTER TABLE storage_profiles ADD COLUMN write_durability TEXT NOT NULL DEFAULT 'durable' CHECK(write_durability IN ('durable','buffered','volatile'));
-CREATE INDEX raw_sources_sync ON raw_sources(id) WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL;
-UPDATE mokyu_meta SET schema_version=62 WHERE singleton;
-
-ALTER TABLE chunk_encodings ADD COLUMN sync_pending BOOLEAN NOT NULL DEFAULT FALSE;
-CREATE INDEX encodings_sync ON chunk_encodings(chunk_id) WHERE sync_pending AND state IN ('ready','uploading') AND quarantined_at IS NULL;
-
-ALTER TABLE chunk_encodings ADD COLUMN boot_id UUID CHECK(boot_id IS NULL OR sync_pending);

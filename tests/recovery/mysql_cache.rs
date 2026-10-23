@@ -138,7 +138,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     assert!(!backend.bypass(first).await?);
     assert_eq!(backend.status().await?.0["entries"], 0);
     assert!(backend.next_attempt().await?.is_none());
-    assert!(!UploadCacheStore::enqueue(&backend).await?);
+    assert!(!UploadCacheStore::enqueue(&backend, &[]).await?);
     backend.reserve(first, 96, false, None).await?;
     let mut chunks = Vec::new();
     let mut names = Vec::new();
@@ -148,7 +148,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
         chunks.push(value);
         if n == 1 {
             assert!(!backend.seal(first, false).await?);
-            assert!(!UploadCacheStore::enqueue(&backend).await?);
+            assert!(!UploadCacheStore::enqueue(&backend, &[]).await?);
         }
     }
     let ids: Vec<_> = chunks.iter().map(|c| c.id).collect();
@@ -218,7 +218,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
         .bind(storage)
         .execute(db)
         .await?;
-    assert!(UploadCacheStore::enqueue(&backend).await?);
+    assert!(UploadCacheStore::enqueue(&backend, &[]).await?);
     let owner: Uuid = sqlx::query_scalar("SELECT owner_task FROM pending_uploads WHERE chunk_id=?")
         .bind(ids[0])
         .fetch_one(db)
@@ -410,10 +410,10 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     sqlx::query("UPDATE pending_uploads SET owner_task=?,next_retry_at=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)),attempts=1,last_error='test' WHERE chunk_id=?").bind(retry).bind(late_chunk.id).execute(db).await?;
     assert!(backend.next_attempt().await?.unwrap() < chrono::Utc::now());
     assert_eq!(backend.status().await?.0["failed_entries"], 1);
-    assert!(UploadCacheStore::enqueue(&backend).await?);
+    assert!(UploadCacheStore::enqueue(&backend, &[]).await?);
     assert_eq!(backend.raw(retry).await?.unwrap()["state"], "queued");
     assert!(backend.raw(retry).await?.unwrap()["error"].is_null());
-    assert!(!UploadCacheStore::enqueue(&backend).await?);
+    assert!(!UploadCacheStore::enqueue(&backend, &[]).await?);
     let retry = execute(&backend, retry).await?;
     UploadCacheStore::pause(&backend, retry).await?;
     assert!(UploadCacheStore::finish(&backend, retry).await.is_err());
@@ -473,7 +473,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
             .is_empty()
     );
     backend.seal(reused, true).await?;
-    assert!(UploadCacheStore::enqueue(&backend).await?);
+    assert!(UploadCacheStore::enqueue(&backend, &[]).await?);
     let owner: Uuid = sqlx::query_scalar("SELECT owner_task FROM pending_uploads WHERE chunk_id=?")
         .bind(ids[0])
         .fetch_one(db)

@@ -2789,6 +2789,7 @@ export interface components {
         };
         /** @description Typed, revisioned policy shared by every node that serves a storage. */
         StorageProfile: {
+            background_scheduling?: string;
             cache_enabled: boolean;
             /** Format: int64 */
             cache_entries?: number | null;
@@ -2866,7 +2867,9 @@ export interface components {
             /** Format: int32 */
             upload_concurrency?: number | null;
             upload_retention: string;
+            write_backlog_max_age?: string;
             write_durability?: string | null;
+            write_flush_interval?: string;
             write_processing?: string;
         };
         StorageUnpackInput: {

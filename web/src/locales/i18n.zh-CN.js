@@ -1,4 +1,12 @@
 export default {
+  profile_write_flush_interval: "合并等待",
+  profile_write_backlog_max_age: "积压最长时间",
+  profile_background_scheduling: "后台调度",
+  storeScheduling_balanced: "均衡",
+  storeScheduling_foreground: "前台优先",
+  profileHelp_write_flush_interval: "0s 不额外等待，最多 60s，缓存压力、手动排空和退出会提前处理",
+  profileHelp_write_backlog_max_age: "默认 5m，超龄后加快排空，并按写缓存满额策略限制新积压，本地存储转为持久确认",
+  storeSchedulingHint: "前台优先为请求保留一半后端读写与控制并发，后台至少保留一个位置，既有请求不被中断",
   replaceKeyAction: "替换密钥",
   replaceEdit: "修改选择",
   replaceStorages: "替换关联存储密钥",
