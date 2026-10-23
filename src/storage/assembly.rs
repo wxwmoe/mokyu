@@ -16,6 +16,128 @@ use uuid::Uuid;
 const BUFFER: usize = 256 * 1024;
 const CHECKPOINT: usize = 16 * 1024 * 1024;
 
+pub(super) fn probe(storage: &super::Storage, destination: PathBuf) {
+    probe_background(
+        storage.reflink.clone(),
+        storage.disk.io.clone(),
+        storage.disk.root.join("multipart"),
+        destination,
+    );
+}
+
+fn probe_background(
+    support: Arc<Mutex<HashMap<(u64, u64), bool>>>,
+    io: Arc<tokio::sync::Semaphore>,
+    source: PathBuf,
+    destination: PathBuf,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(permit) = io.acquire_owned().await else {
+            return;
+        };
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            // Recovered checkpoints can already reside in the destination filesystem.
+            for source in [&source, &destination] {
+                if let Err(error) = probe_pair(source, &destination, &support) {
+                    tracing::warn!(%error, "reflink probe failed; using copies until restart");
+                }
+            }
+        })
+        .await
+        {
+            tracing::warn!(%error, "reflink probe worker failed; using copies");
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn probe_pair(
+    source: &Path,
+    destination: &Path,
+    support: &Mutex<HashMap<(u64, u64), bool>>,
+) -> Result<()> {
+    probe_with(source, destination, support, |source, destination| {
+        use std::os::unix::fs::OpenOptionsExt;
+        let open = |path| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_TMPFILE | libc::O_EXCL)
+                .mode(0o644)
+                .open(path)
+        };
+        // Anonymous files also disappear if the process exits during the probe.
+        let mut input = open(source)?;
+        let output = open(destination)?;
+        input.write_all(&[73; 4096])?;
+        match clone_file_range(&input, &output, 0, 0, 0) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(
+                        libc::EOPNOTSUPP | libc::ENOTTY | libc::EXDEV | libc::EINVAL | libc::EBADF
+                    )
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn probe_with(
+    source: &Path,
+    destination: &Path,
+    support: &Mutex<HashMap<(u64, u64), bool>>,
+    detect: impl FnOnce(&Path, &Path) -> Result<bool>,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let directory = |mut path: &Path| -> Result<(PathBuf, u64)> {
+        loop {
+            match std::fs::metadata(path) {
+                Ok(metadata) => {
+                    ensure!(metadata.is_dir(), "reflink probe path is not a directory");
+                    return Ok((path.to_owned(), metadata.dev()));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    path = path
+                        .parent()
+                        .context("reflink probe directory is missing")?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    };
+    // Do not create unsynced storage directories ahead of normal publication.
+    let (source, from) = directory(source)?;
+    let (destination, to) = directory(destination)?;
+    {
+        let mut support = support.lock().unwrap();
+        let std::collections::hash_map::Entry::Vacant(entry) = support.entry((from, to)) else {
+            return Ok(());
+        };
+        entry.insert(false);
+    }
+    let supported = from == to && detect(&source, &destination)?;
+    support.lock().unwrap().insert((from, to), supported);
+    tracing::debug!(
+        source_device = from,
+        destination_device = to,
+        supported,
+        "reflink probe completed"
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn probe_pair(_: &Path, _: &Path, _: &Mutex<HashMap<(u64, u64), bool>>) -> Result<()> {
+    Ok(())
+}
+
 #[derive(Clone)]
 pub(crate) struct Range {
     pub path: PathBuf,
@@ -494,11 +616,33 @@ fn clone_range(
     length: u64,
     support: &Mutex<HashMap<(u64, u64), bool>>,
 ) -> Result<bool> {
-    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+    use std::os::unix::fs::MetadataExt;
     let devices = (source.metadata()?.dev(), destination.metadata()?.dev());
-    if support.lock().unwrap().get(&devices) == Some(&false) {
+    if support.lock().unwrap().get(&devices) != Some(&true) {
         return Ok(false);
     }
+    match clone_file_range(source, destination, start, offset, length) {
+        Ok(()) => Ok(true),
+        Err(error) => match error.raw_os_error() {
+            Some(libc::EOPNOTSUPP | libc::ENOTTY | libc::EXDEV) => {
+                support.lock().unwrap().insert(devices, false);
+                Ok(false)
+            }
+            Some(libc::EINVAL) => Ok(false),
+            _ => Err(error.into()),
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clone_file_range(
+    source: &File,
+    destination: &File,
+    start: u64,
+    offset: u64,
+    length: u64,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
     #[repr(C)]
     struct CloneRange {
         source: i64,
@@ -516,17 +660,9 @@ fn clone_range(
     let request = libc::_IOW::<CloneRange>(0x94, 13);
     let result = unsafe { libc::ioctl(destination.as_raw_fd(), request, &range) };
     if result == 0 {
-        support.lock().unwrap().insert(devices, true);
-        return Ok(true);
-    }
-    let error = std::io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::EOPNOTSUPP | libc::ENOTTY | libc::EXDEV) => {
-            support.lock().unwrap().insert(devices, false);
-            Ok(false)
-        }
-        Some(libc::EINVAL) => Ok(false),
-        _ => Err(error.into()),
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -546,6 +682,89 @@ fn clone_range(
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn reflink_probe_waits_for_io_without_blocking_startup() -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!("mokyu-probe-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root)?;
+        let destination = root.join("not-created/raw");
+        let support = Arc::new(Mutex::new(HashMap::new()));
+        let io = Arc::new(tokio::sync::Semaphore::new(0));
+        let task = probe_background(
+            support.clone(),
+            io.clone(),
+            root.clone(),
+            destination.clone(),
+        );
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        assert!(support.lock().unwrap().is_empty());
+        io.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(10), task).await??;
+        let device = std::fs::metadata(&root)?.dev();
+        assert!(support.lock().unwrap().contains_key(&(device, device)));
+        probe_with(&root, &destination, &support, |_, _| {
+            panic!("probe repeated")
+        })?;
+        assert_eq!(std::fs::read_dir(&root)?.count(), 0);
+        std::fs::remove_dir(root)?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn reflink_probes_cache_pending_supported_and_failed_results() -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir();
+        let device = std::fs::metadata(&root)?.dev();
+        for supported in [false, true] {
+            let support = Mutex::new(HashMap::new());
+            probe_with(&root, &root, &support, |_, _| {
+                assert_eq!(support.lock().unwrap()[&(device, device)], false);
+                probe_with(&root, &root, &support, |_, _| panic!("concurrent probe"))?;
+                Ok(supported)
+            })?;
+            assert_eq!(support.lock().unwrap()[&(device, device)], supported);
+            probe_with(&root, &root, &support, |_, _| panic!("probe repeated"))?;
+        }
+        let support = Mutex::new(HashMap::new());
+        assert!(
+            probe_with(&root, &root, &support, |_, _| {
+                Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into())
+            })
+            .is_err()
+        );
+        probe_with(&root, &root, &support, |_, _| {
+            panic!("failed probe repeated")
+        })?;
+        assert!(!support.lock().unwrap()[&(device, device)]);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn unprobed_and_unsupported_files_never_attempt_reflink() -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let path = std::env::temp_dir().join(format!("mokyu-probe-{}", Uuid::new_v4()));
+        std::fs::write(&path, [73; 4096])?;
+        let input = File::open(&path)?;
+        let device = input.metadata()?.dev();
+        let support = Mutex::new(HashMap::new());
+        // A real ioctl against this read-only destination would fail with EBADF.
+        for _ in 0..3 {
+            assert!(!clone_range(&input, &input, 0, 0, 4096, &support)?);
+        }
+        assert!(support.lock().unwrap().is_empty());
+        support.lock().unwrap().insert((device, device), false);
+        for _ in 0..3 {
+            assert!(!clone_range(&input, &input, 0, 0, 4096, &support)?);
+        }
+        assert_eq!(std::fs::read(&path)?, [73; 4096]);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
 
     #[test]
     #[cfg(unix)]
@@ -634,7 +853,8 @@ mod tests {
             [&data[1..5001], &data[8000..8193]].concat()
         );
         assert_eq!(std::fs::read(&source)?, data);
-        assert_eq!(counts.cloned + counts.copied, 5193);
+        assert_eq!(counts.copied, 5193);
+        assert_eq!(counts.cloned, 0);
         assert_eq!(*pending.lock().unwrap(), 0);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -697,6 +917,7 @@ mod tests {
             },
         ];
         let support = Mutex::new(HashMap::new());
+        probe_pair(&root, &root, &support)?;
         let (_, counts) = build(&output, &ranges, 0, &support, &Arc::new(Mutex::new(0)))?;
         assert_eq!(counts.cloned, 2 * 1024 * 1024);
         assert_eq!(counts.copied, 0);

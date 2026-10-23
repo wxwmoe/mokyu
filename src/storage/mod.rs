@@ -516,6 +516,12 @@ impl Storage {
             s.physical.recover_memory(s.boot_id).await?;
             s.restore_cache().await?;
         }
+        assembly::probe(&s, s.disk.root.join("raw"));
+        for target in s.targets.read().unwrap().values() {
+            if let Some(root) = &target.raw_root {
+                assembly::probe(&s, root.clone());
+            }
+        }
         Ok(s)
     }
     pub(crate) async fn initialize_cache(&self, node: Uuid) -> Result<()> {
@@ -781,6 +787,9 @@ impl Storage {
         }
         if let Some(mut backend) = backend {
             backend.reuse_gates(&mut self.store_gates.lock().unwrap());
+            if let Some(root) = &backend.raw_root {
+                assembly::probe(self, root.clone());
+            }
             targets.insert(storage_id, Arc::new(backend));
         } else {
             targets.remove(&storage_id);
