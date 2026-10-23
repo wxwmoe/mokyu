@@ -81,9 +81,10 @@ impl super::App {
 }
 
 const UNIT: usize = 4096;
+pub(super) const MEMORY_UNIT: usize = 256;
 const METADATA: usize = 1024 * 1024;
-const ENTRIES: usize = 512;
-const HISTORY: usize = 1024;
+// Covers entry/index overhead and two bounded admission-history keys per entry.
+const ENTRY_METADATA: usize = 2048;
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub(crate) struct Key {
@@ -157,6 +158,8 @@ impl Drop for Allocation {
 
 #[derive(Default)]
 struct Index {
+    slots: usize,
+    _memory: Vec<OwnedSemaphorePermit>,
     ready: HashMap<Key, Arc<Entry>>,
     blocked: HashSet<Uuid>,
     generation: u64,
@@ -181,7 +184,7 @@ impl Index {
     }
 }
 
-fn path_key(bucket: Uuid, key: &str) -> [u8; 32] {
+pub(super) fn path_key(bucket: Uuid, key: &str) -> [u8; 32] {
     let mut hash = blake3::Hasher::new();
     hash.update(bucket.as_bytes());
     hash.update(key.as_bytes());
@@ -190,8 +193,11 @@ fn path_key(bucket: Uuid, key: &str) -> [u8; 32] {
 
 pub(crate) struct Cache {
     limit: usize,
+    pub(super) public_bytes: usize,
+    entries: usize,
     entry_limit: usize,
-    memory: Arc<Semaphore>,
+    pub(super) memory: Arc<Semaphore>,
+    pub(super) public_memory: Arc<Semaphore>,
     building: Arc<Semaphore>,
     waiters: Arc<Semaphore>,
     uploads: Arc<Semaphore>,
@@ -202,14 +208,30 @@ pub(crate) struct Cache {
 impl Cache {
     pub fn new(bytes: u64) -> Arc<Self> {
         let limit = bytes as usize;
+        let public_bytes = super::public_reads::extra_budget(bytes);
+        let metadata = if limit == 0 {
+            0
+        } else {
+            ((limit - public_bytes) / 8).max(1024 * 1024).div_ceil(UNIT) * UNIT
+        };
         Arc::new(Self {
             limit,
+            public_bytes,
+            entries: metadata / ENTRY_METADATA,
             entry_limit: (limit / 16).min(8 * 1024 * 1024),
-            memory: Arc::new(Semaphore::new(limit.saturating_sub(METADATA) / UNIT)),
+            memory: Arc::new(Semaphore::new(limit.saturating_sub(METADATA) / MEMORY_UNIT)),
+            public_memory: Arc::new(Semaphore::new(public_bytes / MEMORY_UNIT)),
             building: Arc::new(Semaphore::new(limit / 4 / UNIT)),
             waiters: Arc::new(Semaphore::new(32)),
             uploads: Arc::new(Semaphore::new(16)),
-            index: Mutex::new(Index::default()),
+            index: Mutex::new(Index {
+                slots: if limit == 0 {
+                    0
+                } else {
+                    METADATA / ENTRY_METADATA
+                },
+                ..Index::default()
+            }),
             counters: Arc::new(Counters::default()),
         })
     }
@@ -329,12 +351,38 @@ impl Cache {
         true
     }
 
+    fn grow_index(&self, index: &mut Index, needed: usize) -> bool {
+        if needed <= index.slots {
+            return true;
+        }
+        let slots = needed.div_ceil(256).saturating_mul(256).min(self.entries);
+        if slots <= index.slots {
+            return false;
+        }
+        let bytes = (slots - index.slots) * ENTRY_METADATA;
+        let Ok(memory) = self
+            .memory
+            .clone()
+            .try_acquire_many_owned((bytes / MEMORY_UNIT) as u32)
+        else {
+            return false;
+        };
+        // Hash tables retain capacity after eviction, so keep their high-water charge too.
+        index._memory.push(memory);
+        index.slots = slots;
+        true
+    }
+
     fn reserve(&self, capacity: usize) -> Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
         let units = capacity.div_ceil(UNIT) as u32;
         let building = self.building.clone().try_acquire_many_owned(units).ok()?;
         let mut index = self.index.lock().unwrap();
         loop {
-            if let Ok(memory) = self.memory.clone().try_acquire_many_owned(units) {
+            if let Ok(memory) = self
+                .memory
+                .clone()
+                .try_acquire_many_owned(units * (UNIT / MEMORY_UNIT) as u32)
+            {
                 return Some((memory, building));
             }
             if !Self::evict(&mut index) {
@@ -352,7 +400,8 @@ impl Cache {
             return None;
         }
         if !index.seen.contains(&key) {
-            if index.history.len() == HISTORY
+            let needed = (index.history.len() + 1).div_ceil(2);
+            if !self.grow_index(&mut index, needed)
                 && let Some(old) = index.history.pop_front()
             {
                 index.seen.remove(&old);
@@ -383,7 +432,12 @@ impl Cache {
 
     pub fn snapshot(&self) -> serde_json::Value {
         let index = self.index.lock().unwrap();
-        serde_json::json!({"limit_bytes":self.limit,"live_bytes":self.limit.saturating_sub(METADATA).saturating_sub(self.memory.available_permits()*UNIT),"metadata_bytes":if self.limit>0 {METADATA} else {0},"candidate_bytes":self.limit/4-self.building.available_permits()*UNIT,"retired_bytes":self.counters.retired.load(Relaxed),"entries":index.ready.len(),"paths":index.paths.len(),"building":index.builders.len(),"hits":self.counters.hits.load(Relaxed),"validated_hits":self.counters.validated.load(Relaxed),"misses":self.counters.misses.load(Relaxed),"rejected":self.counters.rejected.load(Relaxed),"abandoned":self.counters.abandoned.load(Relaxed)})
+        let metadata = index.slots * ENTRY_METADATA;
+        let public = self.public_bytes - self.public_memory.available_permits() * MEMORY_UNIT;
+        let live = self
+            .limit
+            .saturating_sub(metadata + public + self.memory.available_permits() * MEMORY_UNIT);
+        serde_json::json!({"limit_bytes":self.limit,"live_bytes":live,"metadata_bytes":metadata,"public_bytes":public,"public_limit_bytes":self.public_bytes,"entry_limit":self.entries,"candidate_bytes":self.limit/4-self.building.available_permits()*UNIT,"retired_bytes":self.counters.retired.load(Relaxed),"entries":index.ready.len(),"paths":index.paths.len(),"building":index.builders.len(),"hits":self.counters.hits.load(Relaxed),"validated_hits":self.counters.validated.load(Relaxed),"misses":self.counters.misses.load(Relaxed),"rejected":self.counters.rejected.load(Relaxed),"abandoned":self.counters.abandoned.load(Relaxed)})
     }
 }
 
@@ -428,7 +482,7 @@ impl Upload {
         let ownership = Arc::new(Ownership {
             counters: cache.counters.clone(),
             retired: false.into(),
-            charge: self.memory.num_permits() as u64 * UNIT as u64,
+            charge: self.memory.num_permits() as u64 * MEMORY_UNIT as u64,
         });
         Ok(Received {
             generation: self.generation,
@@ -461,7 +515,9 @@ impl Received {
         {
             return;
         }
-        while index.ready.len() >= ENTRIES {
+        let needed = index.ready.len() + 1;
+        cache.grow_index(&mut index, needed);
+        while index.ready.len() >= index.slots {
             Cache::evict(&mut index);
         }
         *index.paths.entry(path).or_default() += 1;
@@ -590,7 +646,7 @@ impl Builder {
         let ownership = Arc::new(Ownership {
             counters: cache.counters.clone(),
             retired: false.into(),
-            charge: buffer.memory.num_permits() as u64 * UNIT as u64,
+            charge: buffer.memory.num_permits() as u64 * MEMORY_UNIT as u64,
         });
         let bytes = Bytes::from_owner(Allocation {
             bytes: buffer.bytes,
@@ -615,7 +671,9 @@ impl Builder {
             path: self.path,
             ownership,
         });
-        while index.ready.len() >= ENTRIES {
+        let needed = index.ready.len() + 1;
+        cache.grow_index(&mut index, needed);
+        while index.ready.len() >= index.slots {
             Cache::evict(&mut index);
         }
         if index.ready.contains_key(&self.key) {
@@ -801,6 +859,58 @@ mod tests {
     use super::*;
     use crate::{app::Extent, content::codec::Chunk};
     use serde_json::json;
+
+    #[test]
+    fn response_budget_grows_small_object_capacity_without_extra_memory() {
+        for bytes in [0, 4, 8, 64, 256].map(|mib| mib * 1024 * 1024) {
+            let cache = Cache::new(bytes);
+            assert_eq!(
+                cache.memory.available_permits() * MEMORY_UNIT
+                    + cache.index.lock().unwrap().slots * ENTRY_METADATA,
+                bytes as usize
+            );
+            assert_eq!(
+                cache.entry_limit,
+                (bytes as usize / 16).min(8 * 1024 * 1024)
+            );
+        }
+        let cache = Cache::new(64 * 1024 * 1024);
+        let mut keys = Vec::new();
+        for _ in 0..2048 {
+            let (stream, key, row) = fixture(4096);
+            assert!(cache.begin(key, &stream, &stream.object_key).is_none());
+            let mut builder = cache.begin(key, &stream, &stream.object_key).unwrap();
+            builder.capture.lock().unwrap().record(&row);
+            builder.capture.lock().unwrap().finish_source();
+            assert!(builder.append(&[7; 4096]));
+            builder.finish();
+            keys.push(key);
+        }
+        assert!(keys.iter().all(|key| cache.get(*key).is_some()));
+        assert_eq!(cache.snapshot()["live_bytes"], 2048 * 4096);
+        assert!(cache.index.lock().unwrap().history.len() <= cache.entries * 2);
+    }
+
+    #[test]
+    fn unused_metadata_capacity_does_not_displace_large_bodies() {
+        let cache = Cache::new(64 * 1024 * 1024);
+        let mut keys = Vec::new();
+        for _ in 0..15 {
+            let (stream, key, row) = fixture(4 * 1024 * 1024);
+            assert!(cache.begin(key, &stream, &stream.object_key).is_none());
+            let mut builder = cache.begin(key, &stream, &stream.object_key).unwrap();
+            builder.capture.lock().unwrap().record(&row);
+            builder.capture.lock().unwrap().finish_source();
+            assert!(builder.append(&vec![7; 2 * 1024 * 1024]));
+            assert!(builder.append(&vec![7; 2 * 1024 * 1024]));
+            builder.finish();
+            keys.push(key);
+        }
+        assert!(keys.iter().all(|key| cache.get(*key).is_some()));
+        assert_eq!(cache.snapshot()["live_bytes"], 60 * 1024 * 1024);
+        assert_eq!(cache.snapshot()["metadata_bytes"], METADATA);
+        assert_eq!(cache.snapshot()["public_bytes"], 0);
+    }
 
     #[test]
     fn proxy_delivery_retires_only_its_storage_and_fences_late_admission() {
@@ -1133,7 +1243,7 @@ mod tests {
             assert!(cache.begin(key, &stream, &stream.object_key).is_none());
         }
         let index = cache.index.lock().unwrap();
-        assert_eq!(index.history.len(), HISTORY);
-        assert_eq!(index.seen.len(), HISTORY);
+        assert_eq!(index.history.len(), cache.entries * 2);
+        assert_eq!(index.seen.len(), cache.entries * 2);
     }
 }

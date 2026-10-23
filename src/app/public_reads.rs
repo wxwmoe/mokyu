@@ -12,12 +12,15 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use uuid::Uuid;
 
-const UNIT: usize = 256;
+const UNIT: usize = super::responses::MEMORY_UNIT;
 const LIMIT: usize = 1024 * 1024;
 const INDEX: usize = 128 * 1024;
 const ENTRY_BYTES: usize = 256 * 1024;
-const ENTRIES: usize = 256;
 type Key = [u8; 32];
+
+pub(super) fn extra_budget(response_bytes: u64) -> usize {
+    response_bytes.saturating_sub(4 * 1024 * 1024) as usize / 4
+}
 
 pub(crate) struct Entry {
     pub snapshot: Arc<ReadSnapshot>,
@@ -28,12 +31,20 @@ pub(crate) struct Entry {
     refresh: Duration,
     age: Duration,
     attempted: Mutex<Instant>,
-    _memory: OwnedSemaphorePermit,
+    _memory: Memory,
+}
+
+pub(crate) struct Memory {
+    _base: Option<OwnedSemaphorePermit>,
+    _extra: Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)>,
 }
 
 #[derive(Default)]
 struct Index {
+    slots: usize,
+    _memory: Vec<Memory>,
     entries: HashMap<Key, Arc<Entry>>,
+    paths: HashMap<Key, usize>,
     order: VecDeque<Key>,
     buckets: HashMap<Key, Weak<Entry>>,
     pending: HashSet<Key>,
@@ -41,9 +52,28 @@ struct Index {
     changing: usize,
 }
 
+impl Index {
+    fn remove(&mut self, key: Key) {
+        if let Some(entry) = self.entries.remove(&key) {
+            let stream = entry.snapshot.stream.as_ref().unwrap();
+            let path = super::responses::path_key(entry.snapshot.bucket.id, &stream.object_key);
+            if let Some(count) = self.paths.get_mut(&path) {
+                *count -= 1;
+                if *count == 0 {
+                    self.paths.remove(&path);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) struct Cache {
+    limit: usize,
+    entries: usize,
     index: Mutex<Index>,
     memory: Arc<Semaphore>,
+    shared: Arc<Semaphore>,
+    extra: Arc<Semaphore>,
     sender: mpsc::Sender<Work>,
     cors: Arc<crate::http::cors::Cache>,
     hits: AtomicU64,
@@ -59,7 +89,7 @@ pub(crate) enum Work {
         snapshot: Arc<ReadSnapshot>,
         started: Instant,
         generation: u64,
-        _memory: OwnedSemaphorePermit,
+        _memory: Memory,
     },
 }
 
@@ -80,18 +110,33 @@ impl Drop for Change<'_> {
 fn invalidate(index: &mut Index, object: Option<(Uuid, &str)>) {
     index.generation = index.generation.wrapping_add(1);
     if let Some((bucket, key)) = object {
-        index.entries.retain(|_, entry| {
-            entry.snapshot.bucket.id != bucket
-                || entry
-                    .snapshot
-                    .stream
-                    .as_ref()
-                    .is_none_or(|stream| stream.object_key != key)
-        });
+        if !index
+            .paths
+            .contains_key(&super::responses::path_key(bucket, key))
+        {
+            return;
+        }
+        let removed: Vec<_> = index
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.snapshot.bucket.id == bucket
+                    && entry
+                        .snapshot
+                        .stream
+                        .as_ref()
+                        .is_some_and(|stream| stream.object_key == key)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in removed {
+            index.remove(key);
+        }
         index.order.retain(|key| index.entries.contains_key(key));
         index.buckets.retain(|_, entry| entry.strong_count() > 0);
     } else {
         index.entries.clear();
+        index.paths.clear();
         index.order.clear();
         index.buckets.clear();
     }
@@ -155,12 +200,24 @@ fn json_bytes(value: &serde_json::Value) -> usize {
 }
 
 impl Cache {
-    pub fn new(cors: Arc<crate::http::cors::Cache>) -> (Arc<Self>, mpsc::Receiver<Work>) {
+    pub fn new(
+        cors: Arc<crate::http::cors::Cache>,
+        response: &super::responses::Cache,
+    ) -> (Arc<Self>, mpsc::Receiver<Work>) {
         let (sender, receiver) = mpsc::channel(32);
+        let limit = LIMIT + response.public_bytes;
+        let index_bytes = limit / 8;
         (
             Arc::new(Self {
-                index: Mutex::new(Index::default()),
+                limit,
+                entries: index_bytes / 512,
+                index: Mutex::new(Index {
+                    slots: INDEX / 512,
+                    ..Index::default()
+                }),
                 memory: Arc::new(Semaphore::new((LIMIT - INDEX) / UNIT)),
+                shared: response.memory.clone(),
+                extra: response.public_memory.clone(),
                 sender,
                 cors,
                 hits: 0.into(),
@@ -170,6 +227,41 @@ impl Cache {
             }),
             receiver,
         )
+    }
+
+    fn reserve_extra(&self, bytes: usize) -> Option<Memory> {
+        let units = bytes.div_ceil(UNIT) as u32;
+        let quota = self.extra.clone().try_acquire_many_owned(units).ok()?;
+        let shared = self.shared.clone().try_acquire_many_owned(units).ok()?;
+        Some(Memory {
+            _base: None,
+            _extra: Some((quota, shared)),
+        })
+    }
+
+    fn reserve(&self, bytes: usize) -> Option<Memory> {
+        if let Ok(memory) = self
+            .memory
+            .clone()
+            .try_acquire_many_owned(bytes.div_ceil(UNIT) as u32)
+        {
+            return Some(Memory {
+                _base: Some(memory),
+                _extra: None,
+            });
+        }
+        self.reserve_extra(bytes)
+    }
+
+    fn grow_index(&self, index: &mut Index) {
+        if index.entries.len() < index.slots || index.slots == self.entries {
+            return;
+        }
+        let slots = (index.slots + 128).min(self.entries);
+        if let Some(memory) = self.reserve_extra((slots - index.slots) * 512) {
+            index._memory.push(memory);
+            index.slots = slots;
+        }
     }
 
     pub fn changing(&self) -> Change<'_> {
@@ -311,11 +403,7 @@ impl Cache {
         if index.changing != 0 || index.generation != generation || index.pending.contains(&key) {
             return;
         }
-        let Ok(memory) = self
-            .memory
-            .clone()
-            .try_acquire_many_owned(bytes.div_ceil(UNIT) as u32)
-        else {
+        let Some(memory) = self.reserve(bytes) else {
             return;
         };
         index.pending.insert(key);
@@ -396,15 +484,14 @@ impl Cache {
             return;
         }
         let key = key(route);
-        index.entries.remove(&key);
+        index.remove(key);
         index.order.retain(|current| *current != key);
         loop {
-            if index.entries.len() < ENTRIES
-                && let Ok(memory) = self
-                    .memory
-                    .clone()
-                    .try_acquire_many_owned(bytes.div_ceil(UNIT) as u32)
+            self.grow_index(&mut index);
+            if index.entries.len() < index.slots
+                && let Some(memory) = self.reserve(bytes)
             {
+                let path = super::responses::path_key(snapshot.bucket.id, &stream.object_key);
                 let entry = Arc::new(Entry {
                     snapshot,
                     mapping,
@@ -417,19 +504,20 @@ impl Cache {
                     _memory: memory,
                 });
                 index.buckets.retain(|_, entry| entry.strong_count() > 0);
-                if index.buckets.len() < ENTRIES {
+                if index.buckets.len() < index.slots {
                     index
                         .buckets
                         .insert(bucket_key(route), Arc::downgrade(&entry));
                 }
                 index.entries.insert(key, entry);
+                *index.paths.entry(path).or_default() += 1;
                 index.order.push_back(key);
                 return;
             }
             let Some(oldest) = index.order.pop_front() else {
                 return;
             };
-            index.entries.remove(&oldest);
+            index.remove(oldest);
         }
     }
 
@@ -441,13 +529,14 @@ impl Cache {
             .get(&key)
             .is_some_and(|current| Arc::ptr_eq(current, entry))
         {
-            index.entries.remove(&key);
+            index.remove(key);
             index.order.retain(|current| *current != key);
         }
     }
 
     pub fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({"limit_bytes":LIMIT,"used_bytes":LIMIT-self.memory.available_permits()*UNIT,"entries":self.index.lock().unwrap().entries.len(),"hits":self.hits.load(Relaxed),"refreshed":self.refreshed.load(Relaxed),"failed":self.failed.load(Relaxed),"skipped":self.skipped.load(Relaxed)})
+        let extra = self.limit - LIMIT - self.extra.available_permits() * UNIT;
+        serde_json::json!({"limit_bytes":self.limit,"used_bytes":LIMIT-self.memory.available_permits()*UNIT+extra,"entry_limit":self.entries,"entries":self.index.lock().unwrap().entries.len(),"hits":self.hits.load(Relaxed),"refreshed":self.refreshed.load(Relaxed),"failed":self.failed.load(Relaxed),"skipped":self.skipped.load(Relaxed)})
     }
 }
 
@@ -631,6 +720,139 @@ mod tests {
     use crate::app::{Bucket, StoredStream};
     use serde_json::json;
 
+    #[test]
+    fn public_capacity_uses_only_its_share_of_the_response_budget() {
+        let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let body = super::super::responses::Cache::new(64 * 1024 * 1024);
+        let (cache, _receiver) = Cache::new(cors, &body);
+        assert_eq!(cache.limit, 16 * 1024 * 1024);
+        let (_, snapshot) = fixture();
+        for n in 0..2048 {
+            let route = ReadRoute::Host {
+                host: "media.test".into(),
+                key: n.to_string(),
+            };
+            cache.put(
+                &route,
+                snapshot.clone(),
+                None,
+                vec![],
+                (1, 5),
+                (Instant::now(), cache.generation()),
+            );
+        }
+        assert_eq!(cache.snapshot()["entries"], 2048);
+        assert!(cache.snapshot()["used_bytes"].as_u64().unwrap() <= cache.limit as u64);
+        let public = body.snapshot()["public_bytes"].as_u64().unwrap();
+        assert!(public > 0);
+        assert_eq!(body.snapshot()["live_bytes"], 0);
+        assert_eq!(
+            public + body.memory.available_permits() as u64 * UNIT as u64 + 1024 * 1024,
+            64 * 1024 * 1024
+        );
+        drop(cache.changing());
+        // Cleared hash tables still own their capacity; only snapshot allocations are returned.
+        assert_eq!(
+            body.snapshot()["public_bytes"],
+            (cache.index.lock().unwrap().slots - INDEX / 512) * 512
+        );
+    }
+
+    #[test]
+    fn full_body_budget_preserves_the_base_public_cache_without_overcommitting() {
+        let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let body = super::super::responses::Cache::new(64 * 1024 * 1024);
+        let (cache, _receiver) = Cache::new(cors, &body);
+        let held = body
+            .memory
+            .clone()
+            .try_acquire_many_owned(body.memory.available_permits() as u32)
+            .unwrap();
+        let (_, snapshot) = fixture();
+        for n in 0..2048 {
+            let route = ReadRoute::Host {
+                host: "media.test".into(),
+                key: n.to_string(),
+            };
+            cache.put(
+                &route,
+                snapshot.clone(),
+                None,
+                vec![],
+                (1, 5),
+                (Instant::now(), cache.generation()),
+            );
+        }
+        assert!(cache.snapshot()["entries"].as_u64().unwrap() > 0);
+        assert!(cache.snapshot()["used_bytes"].as_u64().unwrap() <= LIMIT as u64);
+        assert_eq!(body.snapshot()["public_bytes"], 0);
+        assert_eq!(body.memory.available_permits(), 0);
+        drop(held);
+        assert_eq!(body.snapshot()["live_bytes"], 0);
+    }
+
+    #[test]
+    fn object_paths_follow_eviction_replacement_and_removal() {
+        let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let (cache, _receiver) = Cache::new(cors, &super::super::responses::Cache::new(0));
+        let (route, snapshot) = fixture();
+        for n in 0..1000 {
+            let mut next = (*snapshot).clone();
+            next.stream.as_mut().unwrap().object_key = n.to_string();
+            let route = ReadRoute::Host {
+                host: "media.test".into(),
+                key: n.to_string(),
+            };
+            cache.put(
+                &route,
+                Arc::new(next),
+                None,
+                vec![],
+                (1, 5),
+                (Instant::now(), cache.generation()),
+            );
+        }
+        {
+            let index = cache.index.lock().unwrap();
+            assert!(index.entries.len() < 1000);
+            assert_eq!(index.paths.len(), index.entries.len());
+            assert_eq!(index.paths.values().sum::<usize>(), index.entries.len());
+        }
+        for key in ["first", "replacement"] {
+            let mut next = (*snapshot).clone();
+            next.stream.as_mut().unwrap().object_key = key.into();
+            cache.put(
+                &route,
+                Arc::new(next),
+                None,
+                vec![],
+                (1, 5),
+                (Instant::now(), cache.generation()),
+            );
+        }
+        let entry = {
+            let index = cache.index.lock().unwrap();
+            assert!(
+                !index.paths.contains_key(&super::super::responses::path_key(
+                    snapshot.bucket.id,
+                    "first"
+                ))
+            );
+            assert_eq!(index.paths.values().sum::<usize>(), index.entries.len());
+            index.entries[&key(&route)].clone()
+        };
+        let generation = cache.generation();
+        drop(cache.changing_object(snapshot.bucket.id, "absent"));
+        assert_ne!(generation, cache.generation());
+        assert!(current(&cache.index.lock().unwrap(), &entry));
+        cache.remove(&entry);
+        assert!(!cache.index.lock().unwrap().paths.contains_key(
+            &super::super::responses::path_key(snapshot.bucket.id, "replacement")
+        ));
+        drop(cache.changing());
+        assert!(cache.index.lock().unwrap().paths.is_empty());
+    }
+
     fn fixture() -> (ReadRoute, Arc<ReadSnapshot>) {
         let id = Uuid::new_v4();
         let now = chrono::Utc::now();
@@ -682,7 +904,7 @@ mod tests {
     #[test]
     fn metadata_invalidation_fences_old_builders_and_retained_entries_keep_their_charge() {
         let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
-        let (cache, _receiver) = Cache::new(cors);
+        let (cache, _receiver) = Cache::new(cors, &super::super::responses::Cache::new(0));
         let (route, snapshot) = fixture();
         let generation = cache.generation();
         let available = cache.memory.available_permits();
@@ -731,7 +953,7 @@ mod tests {
     #[test]
     fn object_changes_preserve_other_snapshots_and_cors_but_fence_late_builders() {
         let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
-        let (cache, _receiver) = Cache::new(cors.clone());
+        let (cache, _receiver) = Cache::new(cors.clone(), &super::super::responses::Cache::new(0));
         let (route, snapshot) = fixture();
         let alias = ReadRoute::Bucket {
             name: snapshot.bucket.name.clone(),
@@ -770,6 +992,8 @@ mod tests {
         }
         let (affected, unaffected) = {
             let index = cache.index.lock().unwrap();
+            assert_eq!(index.paths.values().sum::<usize>(), 4);
+            assert_eq!(index.paths.len(), 3);
             (
                 index.entries[&key(&route)].clone(),
                 index.entries[&key(&other_route)].clone(),
@@ -784,6 +1008,8 @@ mod tests {
             assert!(!index.entries.contains_key(&key(&alias)));
             assert!(current(&index, &unaffected));
             assert!(index.entries.contains_key(&key(&foreign_route)));
+            assert_eq!(index.paths.values().sum::<usize>(), 2);
+            assert_eq!(index.paths.len(), 2);
         }
         drop(change);
         assert_eq!(cors.generation(), cors_generation);
@@ -814,7 +1040,7 @@ mod tests {
     #[test]
     fn large_cors_snapshots_remain_bounded_and_oversized_metadata_is_not_cached() {
         let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
-        let (cache, _receiver) = Cache::new(cors);
+        let (cache, _receiver) = Cache::new(cors, &super::super::responses::Cache::new(0));
         let (route, mut snapshot) = fixture();
         Arc::make_mut(&mut snapshot).bucket.cors = json!(
             (0..100)
@@ -870,7 +1096,7 @@ mod tests {
     #[test]
     fn metadata_capacity_and_route_boundaries_are_independent_of_body_cache() {
         let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
-        let (cache, _receiver) = Cache::new(cors);
+        let (cache, _receiver) = Cache::new(cors, &super::super::responses::Cache::new(0));
         let (route, snapshot) = fixture();
         let generation = cache.generation();
         for n in 0..1024 {
@@ -887,7 +1113,7 @@ mod tests {
                 (Instant::now(), generation),
             );
         }
-        assert!(cache.index.lock().unwrap().entries.len() <= ENTRIES);
+        assert!(cache.index.lock().unwrap().entries.len() <= cache.entries);
         assert!(cache.snapshot()["used_bytes"].as_u64().unwrap() <= LIMIT as u64);
         assert_ne!(
             key(&route),

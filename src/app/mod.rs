@@ -363,7 +363,8 @@ impl App {
             crate::config::cache_bytes(&config.requests.cors_cache_size)? as usize,
             config.requests.cors_cache_entries,
         );
-        let (public_reads, public_receiver) = public_reads::Cache::new(cors_cache.clone());
+        let (public_reads, public_receiver) =
+            public_reads::Cache::new(cors_cache.clone(), &response_cache);
         let app = Arc::new(Self {
             cluster: stores.cluster,
             role: role.to_owned(),
