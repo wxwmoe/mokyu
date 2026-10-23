@@ -259,13 +259,17 @@ async fn worker(
             tokio::select! {_=app.wake_tasks.notified()=>{},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
             continue;
         };
-        execute(app.clone(), id, token).await?;
+        let ready = execute(app.clone(), id, token).await?;
         active.lock().await.remove(&id);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        if ready {
+            tokio::task::yield_now().await;
+        } else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
 
-async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<()> {
+async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
     let crate::model::TaskRecord {
         task_type,
         state,
@@ -278,11 +282,14 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<()> {
         && state == "running"
         && task_token == Some(token);
     if !owned {
-        return Ok(());
+        return Ok(false);
     }
     if !crate::worker::task::fence(&app, id, token).await? {
-        return Ok(());
+        return Ok(false);
     }
+    // Upload paths already wait when a source or another owner is not ready.
+    let upload =
+        matches!(task_type.as_str(), "upload" | "cache_flush") && detail["operation"] != "cdc";
     let execution = Execution { id, token };
     let renewal = (app.role != "single").then(|| renew_lease(app.clone(), id, token));
     let result = if matches!(task_type.as_str(), "gc" | "cleanup") {
@@ -392,12 +399,9 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<()> {
             .gc_failures
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    match result {
-        Ok(true) => {}
-        Ok(false) => {}
-        Err(e) => {
-            tracing::error!(task_id=%id,error=%e,"maintenance task stopped");
-        }
+    let ready = upload && result.is_ok();
+    if let Err(e) = result {
+        tracing::error!(task_id=%id,error=%e,"maintenance task stopped");
     }
-    Ok(())
+    Ok(ready)
 }

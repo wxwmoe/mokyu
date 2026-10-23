@@ -92,6 +92,7 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `recovery/upload_cache.rs`：PostgreSQL 上传准备的双执行者竞争、取消回滚和 owner/pin/来源代次原子性；需要故障注入构建。
 - `recovery/single_restart.py`：三个后端共用的 API 契约，覆盖 10 个崩溃点，包括上传准备提交前后的 owner/pin 原子恢复、待上传数据的密钥轮换及 local/S3 加密数据重启读取。
 - `recovery/cluster_runtime.py`：PostgreSQL 多角色与节点生命周期验证。
+- `recovery/cluster_scheduler.py`：双 data 和独立 worker 的上传归属、通知断连兜底、暂停隔离及空闲数据库工作上限。
 - `recovery/maintenance_state.py`：双 control、双 data 和 worker 的维护状态收敛。按文件头部的 fixture 与阶段运行：`enable` 后重启一个 data，执行 `resume`、`failure`、`race`、`drain`。`failure` 在专用库中短暂锁表并取消各节点的状态查询，再释放锁；`drain` 写入停止请求标记后，测试编排器向首个 control 发送 SIGTERM，验证已有连接的迟到管理请求不能恢复写入，完成后重启该节点。
 - `recovery/cluster_cache.py`：两个 data 的本地 raw/chunks 提前确认、节点所属关系、重启恢复、写缓存转读缓存、签名/匿名/Web GET 有界等待和 CORS、权限复查、全节点维护排空，以及仅依赖最终区块和共享 CDC 尾块的跨节点 Multipart 完成。环境沿用 `raw_cluster.py`，另设 `MOKYU_TEST_SOURCE_FAULT_DIRS` 为两个 data 的逗号分隔故障目录；节点缓存至少 256MiB。编排器处理测试目录 `replacement-control/` 下的 `kill-primary`、`start-primary` 标记，执行后写入同名 `.done` 文件。
 - `s3/read_path.py`：分页 SQL、后台缓存故障和读名额耗尽时的 HEAD/304；可用 `MOKYU_TEST_PUBLIC_WEB`、`MOKYU_TEST_PUBLIC_HOST` 同时验证公共 Web。
@@ -192,6 +193,8 @@ Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专�
 ### 锁与连接池
 
 `postgres_claim_pool_progress` 使用新隔离 PostgreSQL 库，以 `--ignored` 运行，覆盖两条 LISTEN、claim 配额等待、数据库锁等待取消及回滚完成后配额恢复。`python -m tests.recovery.claim_pool` 沿用双 data 来源恢复 fixture，设置 `MOKYU_TEST_SECOND_DATA`，两 data 的连接池均为 4；验证暂停上传时查询能推进、同内容互斥、跨节点独立写和完整读回。`MOKYU_TEST_EXPECT_CLAIM_BLOCKED=1` 仅用于旧版负对照，确认池饥饿及失败后安全重试。连接丢失、旧候选与撤权继续由 `tests.recovery.repair_cluster` 覆盖。
+
+`python -m tests.recovery.cluster_scheduler` 还需要独立 worker，三个执行节点均配置 `instance.cpu_jobs = 1`，使用非零磁盘读缓存和上传缓存预算。沿用上述双 data fixture 的 `MOKYU_TEST_SECOND_DATA` 和 `MOKYU_TEST_SOURCE_FAULT_DIRS`，暂停本节点上传期间验证另一节点推进，主动断开当前隔离数据库的任务 LISTEN 会话，核对重连、暂停后的旧执行不能发布、恢复后跨节点完整读回，以及六秒空闲事务数量有界。
 
 `postgres_source_validation_allows_references` 使用新的隔离 PostgreSQL 库及 `MOKYU_TEST_DATABASE_URL_FILE`，以 `--ignored` 运行。覆盖来源锁与活跃引用、隔离、打包映射竞争；等待期间从独立块切换为 pack 后仍须持物理锁，空/fragment 来源和 4097 块的 generic/custom plan 均须正确。
 
