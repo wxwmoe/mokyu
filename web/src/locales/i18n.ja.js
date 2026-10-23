@@ -1,4 +1,9 @@
 export default {
+  profile_read_integrity: "追加ダイジェスト検証",
+  storeReadIntegrity_inline: "応答前に検証",
+  storeReadIntegrity_background: "バックグラウンド",
+  storeReadIntegrity_off: "無効",
+  profileHelp_read_integrity: "サイズ制限と暗号認証は常に有効です、バックグラウンドが混雑すると検証を省略し、無効では未検証の内容を返すことがあります",
   profileHelp_read_source_validation: "ソースの状態は他ノードの変更後も期限内で再利用されますが、有効期限と読み取り中の保護は常に適用されます",
   profile_read_source_validation: "ソースの状態検証",
   profile_source_validation_max_age: "ソースの有効期限",

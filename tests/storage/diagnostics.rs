@@ -70,7 +70,7 @@ async fn storage_diagnostics_count_shared_failures_and_cache_fallback() -> Resul
                     .misses
                     .lock()
                     .unwrap()
-                    .get(&(chunk.id, chunk.location_id, false))
+                    .get(&(chunk.id, chunk.location_id, false, true))
                     .is_some_and(|entry| entry.strong_count() == 16)
             {
                 break;
@@ -139,7 +139,7 @@ async fn storage_diagnostics_count_shared_failures_and_cache_fallback() -> Resul
         .get_mut(&id)
         .unwrap()
         .valid = true;
-    assert!(storage.cached_file(&chunk, id).await?.is_none());
+    assert!(storage.cached_file(&chunk, id, true).await?.is_none());
     assert_eq!(storage.statistics()["diagnostics"]["cache"]["missing"], 1);
     assert_eq!(storage.statistics()["diagnostics"]["content"]["hash"], 1);
     storage.delete_path_for(store.id, &path).await?;

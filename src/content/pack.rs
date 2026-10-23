@@ -295,7 +295,16 @@ pub fn encode(
     Ok((p, encoded))
 }
 
-pub fn decode(p: &Pack, mut data: Vec<u8>, secrets: &Secrets, pool: &Pool) -> Result<Decoded> {
+pub fn decode(p: &Pack, data: Vec<u8>, secrets: &Secrets, pool: &Pool) -> Result<Decoded> {
+    decode_read(p, data, secrets, pool, true)
+}
+pub fn decode_read(
+    p: &Pack,
+    mut data: Vec<u8>,
+    secrets: &Secrets,
+    pool: &Pool,
+    verify: bool,
+) -> Result<Decoded> {
     let size = p.payload_size().context(codec::IntegrityError::Metadata)?;
     ensure!(
         Some(data.len() as i64) == p.stored_size,
@@ -332,8 +341,9 @@ pub fn decode(p: &Pack, mut data: Vec<u8>, secrets: &Secrets, pool: &Pool) -> Re
     } else {
         data
     };
+    ensure!(raw.len() == size, codec::IntegrityError::Length);
     ensure!(
-        raw.len() == size && Some(blake3::hash(&raw).as_bytes().as_slice()) == p.digest.as_deref(),
+        !verify || Some(blake3::hash(&raw).as_bytes().as_slice()) == p.digest.as_deref(),
         codec::IntegrityError::Hash
     );
     ensure!(
@@ -355,7 +365,7 @@ pub fn decode(p: &Pack, mut data: Vec<u8>, secrets: &Secrets, pool: &Pool) -> Re
             codec::IntegrityError::Metadata
         );
         ensure!(
-            blake3::hash(&raw[offset..offset + len]).as_bytes() == &hash,
+            !verify || blake3::hash(&raw[offset..offset + len]).as_bytes() == &hash,
             codec::IntegrityError::Hash
         );
         members.push(Member {
@@ -467,12 +477,23 @@ mod tests {
             .unwrap();
             assert!(!uncompressed.compressed);
             assert_eq!(
-                decode(&uncompressed, encoded_raw, &secrets, &pool)
+                decode(&uncompressed, encoded_raw.clone(), &secrets, &pool)
                     .unwrap()
                     .bytes,
                 decoded.bytes
             );
+            let mut damaged = encoded_raw.clone();
+            *damaged.last_mut().unwrap() ^= 1;
+            assert!(decode(&uncompressed, damaged.clone(), &secrets, &pool).is_err());
+            let weak = decode_read(&uncompressed, damaged, &secrets, &pool, false);
+            assert_eq!(weak.is_ok(), algorithm == "none");
+            let mut shortened = encoded_raw.clone();
+            shortened.pop();
+            assert!(decode_read(&uncompressed, shortened, &secrets, &pool, false).is_err());
             if algorithm == "none" {
+                let mut broken_index = encoded_raw.clone();
+                broken_index[0] ^= 1;
+                assert!(decode_read(&uncompressed, broken_index, &secrets, &pool, false).is_err());
                 for (offset, value) in [(0, b'X'), (5, 1), (6, 1), (7, 0), (7, 1), (7, 2), (7, 3)] {
                     let mut damaged = decoded.bytes.to_vec();
                     damaged[offset] = value;

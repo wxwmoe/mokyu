@@ -2857,6 +2857,7 @@ export interface components {
             public_cache_validation?: string;
             /** Format: int32 */
             read_concurrency?: number | null;
+            read_integrity?: string;
             read_source_validation?: string;
             request_timeout: string;
             retry_timeout: string;

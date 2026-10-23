@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0038.
+-- Generated from the complete mysql migration chain through 0039.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -949,6 +949,7 @@ CREATE TABLE `storage_profiles` (
   `public_cache_max_age` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT '5s',
   `read_source_validation` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT 'strict',
   `source_validation_max_age` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT '5s',
+  `read_integrity` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT 'inline',
   PRIMARY KEY (`storage_id`),
   CONSTRAINT `storage_profiles_storage` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`) ON DELETE CASCADE,
   CONSTRAINT `storage_background_scheduling` CHECK ((`background_scheduling` in (_ascii'balanced',_ascii'foreground'))),
@@ -969,6 +970,7 @@ CREATE TABLE `storage_profiles` (
   CONSTRAINT `storage_profiles_revision` CHECK ((`revision` > 0)),
   CONSTRAINT `storage_profiles_upload` CHECK (((`upload_concurrency` is null) or (`upload_concurrency` > 0))),
   CONSTRAINT `storage_public_cache_validation` CHECK ((`public_cache_validation` in (_ascii'strict',_ascii'background'))),
+  CONSTRAINT `storage_read_integrity` CHECK ((`read_integrity` in (_utf8mb4'inline',_utf8mb4'background',_utf8mb4'off'))),
   CONSTRAINT `storage_source_validation` CHECK ((`read_source_validation` in (_ascii'strict',_ascii'background'))),
   CONSTRAINT `storage_upload_overflow_check` CHECK ((`upload_cache_overflow` in (_ascii'fallback',_ascii'reject'))),
   CONSTRAINT `storage_write_durability` CHECK ((`write_durability` in (_ascii'durable',_ascii'buffered',_ascii'volatile')))

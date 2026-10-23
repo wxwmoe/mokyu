@@ -272,3 +272,5 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 `python -m tests.recovery.source_read_cache` uses the same stopped-service fixture with no response body budget. It verifies zero-SQL raw reads and Range with explicit source snapshots, independent source expiry, strict and signed bypass, quarantine/recheck invalidation, pre-open pins through overwrite/GC, and bounded chunk refresh failures. Run each supported database locally and set `MOKYU_TEST_BACKEND` for remote raw/chunk/pack coverage. The optional source policy in `tests.recovery.cluster_public_cache` must retain real data-node read leases on body misses.
 
 `python -m tests.recovery.cluster_public_cache` uses the same two-data-node fixture to verify per-node metadata/body reuse, immediate writer-node invalidation, bounded peer permission staleness, current signed credential revocation and convergence after overwrite/delete.
+
+`tests/recovery/read_integrity.py` 在隔离四库/本地及远端 S3 上验证额外摘要策略、迟到缓存、后台队列与内存上限、Range/取消、实际坏缓存与真实后端的隔离边界；pack 与加密认证的强制检查还由 Rust 内容格式回归覆盖

@@ -215,7 +215,7 @@ impl App {
         self.source_writable()?;
         let _cache = self.public_reads.changing();
         let _sources = self.storage.source_gate.write().await;
-        self.storage.source_reads.clear();
+        self.storage.invalidate_reads();
         self.physical
             .source_update(SourceUpdate {
                 execution,

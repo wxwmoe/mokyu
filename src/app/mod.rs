@@ -20,6 +20,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 pub(crate) mod buckets;
+pub(crate) mod checks;
 pub(crate) mod chunks;
 pub(crate) mod compression;
 pub(crate) mod credential_activity;
@@ -229,6 +230,7 @@ pub struct App {
     pub compression_observations: Arc<compression::Observations>,
     pub(crate) credential_activity: Arc<credential_activity::Activity>,
     pub response_cache: Arc<responses::Cache>,
+    pub(crate) read_checks: Arc<checks::Checks>,
     pub(crate) cors_cache: crate::http::cors::Cache,
     pub(crate) public_reads: Arc<public_reads::Cache>,
     pub cleanup_state: crate::worker::lifecycle::Cleanup,
@@ -351,6 +353,7 @@ impl App {
         let (compression_observations, compression_receiver) = compression::Observations::new();
         let (credential_activity, credential_receiver) = credential_activity::Activity::new();
         let response_cache = responses::Cache::new(budget.response_cache_bytes);
+        let read_checks = checks::Checks::new(storage.clone());
         let (public_reads, public_receiver) = public_reads::Cache::new();
         let app = Arc::new(Self {
             cluster: stores.cluster,
@@ -399,6 +402,7 @@ impl App {
             compression_observations,
             credential_activity,
             response_cache,
+            read_checks,
             public_reads,
             cors_cache: crate::http::cors::Cache::new(crate::http::cors::CACHE_BYTES),
             cleanup_state: crate::worker::lifecycle::Cleanup::default(),
@@ -451,6 +455,7 @@ impl App {
                 }
             });
         }
+        app.read_checks.bind(Arc::downgrade(&app));
         tokio::spawn(public_reads::run(Arc::downgrade(&app), public_receiver));
         Ok((app, owner))
     }
@@ -599,6 +604,7 @@ impl App {
         status["http_compression"] = self.compression_observations.snapshot();
         status["credential_activity"] = self.credential_activity.snapshot();
         status["response_cache"] = self.response_cache.snapshot();
+        status["read_checks"] = self.read_checks.snapshot();
         status["cors_cache"] = self.cors_cache.snapshot();
         status["public_read_cache"] = self.public_reads.snapshot();
         status["read_replica"] = self.runtime.read_replica().unwrap_or_else(|| json!({"state":if self.config.replica_database.is_some() {"not_applicable"} else {"disabled"}}));

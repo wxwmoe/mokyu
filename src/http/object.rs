@@ -368,7 +368,9 @@ pub(crate) async fn read(
                 app.response_cache.lookup(cache_key).await
             };
             if let Some(entry) = cached {
-                let mut valid = entry.raw_size == stream.size && entry.etag == stream.etag;
+                let mut valid = entry.usable(app.storage.read_epoch())
+                    && entry.raw_size == stream.size
+                    && entry.etag == stream.etag;
                 if valid
                     && !head
                     && let Some(mapping) = cached_mapping
@@ -542,7 +544,8 @@ pub(crate) async fn identity_body(
                 return Err(error);
             }
         };
-        if entry.raw_size == stream.size
+        if entry.usable(app.storage.read_epoch())
+            && entry.raw_size == stream.size
             && entry.etag == stream.etag
             && mapping == Some(entry.mapping)
         {

@@ -33,6 +33,8 @@ pub(crate) struct StorageProfile {
     pub read_source_validation: String,
     #[serde(default = "public_cache_max_age")]
     pub source_validation_max_age: String,
+    #[serde(default = "write_processing")]
+    pub read_integrity: String,
     pub connect_timeout: String,
     pub request_timeout: String,
     pub max_retries: i32,
@@ -299,6 +301,16 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
     use crate::config::{bytes, cache_bytes, seconds};
     profile.public_cache_times()?;
     profile.source_validation_seconds()?;
+    anyhow::ensure!(
+        matches!(
+            profile.read_integrity.as_str(),
+            "inline" | "background" | "off"
+        ),
+        s3s::s3_error!(
+            InvalidArgument,
+            "read_integrity must be inline, background or off"
+        )
+    );
     profile.write_flush_seconds()?;
     profile.write_backlog_seconds()?;
     anyhow::ensure!(

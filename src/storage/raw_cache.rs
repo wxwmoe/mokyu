@@ -45,7 +45,7 @@ impl Storage {
         self.raw_misses.get(id)
     }
 
-    pub(super) async fn cached_raw(&self, source: &RawSource) -> Option<RawFile> {
+    pub(super) async fn cached_raw(&self, source: &RawSource, verify: bool) -> Option<RawFile> {
         let id = source.location_id;
         let pin = {
             let mut fifo = self.fifo.lock().await;
@@ -67,8 +67,16 @@ impl Storage {
                 "raw cache was replaced"
             );
             let mut file = RawFile::Local(tokio::fs::File::open(path).await?);
-            let _cpu = self.cpu.acquire().await?;
-            verify_file(&mut file, source, None).await?;
+            if let RawFile::Local(file) = &file {
+                ensure!(
+                    file.metadata().await?.len() == source.size as u64,
+                    crate::content::codec::IntegrityError::Length
+                );
+            }
+            if verify {
+                let _cpu = self.cpu.acquire().await?;
+                verify_file(&mut file, source, None).await?;
+            }
             file.rewind().await?;
             let RawFile::Local(file) = file else {
                 unreachable!()

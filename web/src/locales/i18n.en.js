@@ -1,4 +1,9 @@
 export default {
+  profile_read_integrity: "Extra digest verification",
+  storeReadIntegrity_inline: "Before response",
+  storeReadIntegrity_background: "In background",
+  storeReadIntegrity_off: "Off",
+  profileHelp_read_integrity: "Length limits and encryption authentication always apply, background checks may skip when busy and off can return unchecked content",
   profileHelp_read_source_validation: "Source snapshots can briefly retain previous health status on another node, their hard expiry and physical reader protection remain enforced",
   profile_read_source_validation: "Source health validation",
   profile_source_validation_max_age: "Maximum source snapshot age",

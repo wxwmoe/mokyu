@@ -116,6 +116,63 @@ def main():
     assert all(read(node).content == body for node in range(2))
     print('PASS both data nodes cache protected chunk sources, enforce health expiry and recover after state restoration', flush=True)
 
+    profile = fixture.cli('storage', 'profile', 'show', fixture.name)
+    profile.update(cdc_enabled=False, pack_range_enabled=False, read_integrity='off',
+                   read_source_validation='strict', public_cache_validation='strict')
+    fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+    body = b'Optional read digests stay behind per-node profile generations.\n' * 1000
+    fixture.client.put_object(Bucket=fixture.name, Key='cached', Body=body, ACL='public-read')
+    def raw_path():
+        import uuid
+        row, = database.query('SELECT r.id FROM objects o JOIN raw_ranges e ON e.stream_id=o.stream_id JOIN raw_sources r ON r.id=e.source_id WHERE o.bucket_id=%s AND o.object_key=%s', uuid.UUID(fixture.bucket_id), 'cached')
+        identity = str(row['id']).replace('-', '')
+        return fixture.prefix + 'raw/' + identity[-2:] + '/' + identity
+    physical = raw_path()
+    bad = bytes([body[0] ^ 1]) + body[1:]
+    fixture.bytes(physical, bad)
+    for node in range(2):
+        def weak_ready():
+            try:
+                return read(node).content == bad
+            except requests.exceptions.ChunkedEncodingError:
+                return False
+        wait(weak_ready, 'data node did not apply optional digest policy', seconds=45)
+        for _ in range(3):
+            assert read(node).content == bad
+        before = status(node)['response_cache']['hits']
+        assert read(node).content == bad
+        assert status(node)['response_cache']['hits'] > before
+    fixture.bytes(physical, body)
+    profile = fixture.cli('storage', 'profile', 'show', fixture.name)
+    profile['read_integrity'] = 'inline'
+    fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+    for node in range(2):
+        wait(lambda: read(node).content == body, 'new reliable profile reused an unchecked peer cache', seconds=45)
+    print('PASS both data nodes fence unchecked response caches when the reliable profile arrives', flush=True)
+
+    profile = fixture.cli('storage', 'profile', 'show', fixture.name)
+    profile['read_integrity'] = 'background'
+    fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+    body = body[::-1]
+    fixture.client.put_object(Bucket=fixture.name, Key='cached', Body=body, ACL='public-read', CacheControl='no-store')
+    for node in range(2):
+        before = status(node)['read_checks']['verified']
+        def background_ready():
+            assert read(node).content == body
+            return status(node)['read_checks']['verified'] > before
+        wait(background_ready, 'data node did not apply background digests', seconds=45)
+        wait(lambda: status(node)['read_checks']['active'] == 0, 'peer checks did not drain')
+    physical = raw_path()
+    bad = bytes([body[0] ^ 1]) + body[1:]
+    fixture.bytes(physical, bad)
+    assert read(0).content == bad
+    wait(lambda: fixture.api('/api/v1/maintenance/quarantines?storage_id=' + fixture.store['id'] + '&source=raw')['items'],
+         'cluster background check did not isolate confirmed damage')
+    for node in range(2):
+        assert read(node).status_code >= 400
+    print('PASS cluster background detection confirms the backend and commits shared source isolation', flush=True)
+
+
 
 if __name__ == '__main__':
     main()

@@ -72,6 +72,15 @@ pub(crate) struct Entry {
     pub mapping: [u8; 32],
     path: [u8; 32],
     ownership: Arc<Ownership>,
+    checks: Vec<Arc<super::checks::Evidence>>,
+    read_epoch: u64,
+}
+
+impl Entry {
+    pub(crate) fn usable(&self, epoch: u64) -> bool {
+        self.checks.iter().all(|check| check.cacheable())
+            && (self.checks.iter().all(|check| check.verified()) || self.read_epoch == epoch)
+    }
 }
 
 struct Ownership {
@@ -366,8 +375,24 @@ impl Builder {
         let Some(cache) = self.cache.upgrade() else {
             return;
         };
-        let Some(mapping) = self.capture.lock().unwrap().signature() else {
-            return;
+        let (mapping, checks, read_epoch) = {
+            let capture = self.capture.lock().unwrap();
+            let Some(mapping) = capture.signature() else {
+                return;
+            };
+            if !capture.checks.iter().all(|check| check.cacheable()) {
+                return;
+            }
+            (
+                mapping,
+                capture
+                    .checks
+                    .iter()
+                    .filter(|check| !check.verified())
+                    .cloned()
+                    .collect(),
+                capture.read_epoch,
+            )
         };
         let Some(buffer) = self.buffer.take() else {
             return;
@@ -391,6 +416,8 @@ impl Builder {
             raw_size: self.raw_size,
             etag: std::mem::take(&mut self.etag),
             mapping,
+            checks,
+            read_epoch,
             path: self.path,
             ownership,
         });
@@ -427,6 +454,8 @@ pub(crate) struct Mapping {
     count: usize,
     valid: bool,
     finished: bool,
+    checks: Vec<Arc<super::checks::Evidence>>,
+    read_epoch: u64,
 }
 impl Mapping {
     pub fn new(size: i64) -> Self {
@@ -437,7 +466,26 @@ impl Mapping {
             count: 0,
             valid: true,
             finished: false,
+            checks: Vec::new(),
+            read_epoch: 0,
         }
+    }
+    pub fn start_read(&mut self, epoch: u64) {
+        self.read_epoch = epoch;
+    }
+    pub fn record_check(&mut self, check: Arc<super::checks::Evidence>) {
+        if self
+            .checks
+            .iter()
+            .any(|current| Arc::ptr_eq(current, &check))
+        {
+            return;
+        }
+        if self.checks.len() == 64 {
+            self.valid = false;
+            return;
+        }
+        self.checks.push(check);
     }
     pub fn finish_source(&mut self) {
         self.finished = true;

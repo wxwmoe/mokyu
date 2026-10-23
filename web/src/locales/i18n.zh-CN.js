@@ -1,4 +1,9 @@
 export default {
+  profile_read_integrity: "额外摘要复核",
+  storeReadIntegrity_inline: "响应前复核",
+  storeReadIntegrity_background: "后台复核",
+  storeReadIntegrity_off: "关闭",
+  profileHelp_read_integrity: "长度限制与加密认证始终生效，后台繁忙时可能跳过复核，关闭后可能返回未经核验的内容",
   profileHelp_read_source_validation: "来源快照可能在短时间内保留其他节点的旧健康状态，硬期限与物理文件读取保护始终生效",
   profile_read_source_validation: "来源健康验证",
   profile_source_validation_max_age: "来源快照有效期",

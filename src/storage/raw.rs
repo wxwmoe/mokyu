@@ -460,7 +460,7 @@ impl Storage {
         };
         self.verify_raw_target(&target).await?;
         self.cache_lookups.fetch_add(1, Ordering::Relaxed);
-        if let Some(file) = self.cached_raw(source).await {
+        if let Some(file) = self.cached_raw(source, verify).await {
             return Ok(RawReader {
                 file,
                 _pin: pin,
@@ -470,7 +470,7 @@ impl Storage {
         }
         let lock = self.raw_cache_lock(source.location_id);
         let _miss = lock.lock().await;
-        if let Some(file) = self.cached_raw(source).await {
+        if let Some(file) = self.cached_raw(source, verify).await {
             return Ok(RawReader {
                 file,
                 _pin: pin,

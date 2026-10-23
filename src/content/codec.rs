@@ -276,10 +276,20 @@ pub fn encode(
 }
 pub fn decode(
     c: &Chunk,
+    encoded: Vec<u8>,
+    secrets: &Secrets,
+    min_savings_percent: u8,
+    compression: &crate::content::compression::Pool,
+) -> Result<(Bytes, Bytes)> {
+    decode_read(c, encoded, secrets, min_savings_percent, compression, true)
+}
+pub fn decode_read(
+    c: &Chunk,
     mut encoded: Vec<u8>,
     secrets: &Secrets,
     min_savings_percent: u8,
     compression: &crate::content::compression::Pool,
+    verify: bool,
 ) -> Result<(Bytes, Bytes)> {
     ensure!(
         encoded.len() <= MAX + 16 && Some(encoded.len() as i32) == c.stored_size,
@@ -314,7 +324,7 @@ pub fn decode(
     };
     encoded.truncate(plain_len);
     let plain = Bytes::from(encoded);
-    let raw = decode_cache(c, plain.clone(), c.compressed, compression)?;
+    let raw = decode_cache_read(c, plain.clone(), c.compressed, compression, verify)?;
     let cache = if cache_compressed(c, min_savings_percent) {
         plain
     } else {
@@ -327,6 +337,15 @@ pub fn decode_cache(
     data: Bytes,
     compressed: bool,
     compression: &crate::content::compression::Pool,
+) -> Result<Bytes> {
+    decode_cache_read(c, data, compressed, compression, true)
+}
+pub fn decode_cache_read(
+    c: &Chunk,
+    data: Bytes,
+    compressed: bool,
+    compression: &crate::content::compression::Pool,
+    verify: bool,
 ) -> Result<Bytes> {
     ensure!(
         c.format == 2
@@ -355,8 +374,9 @@ pub fn decode_cache(
     } else {
         data
     };
+    ensure!(raw.len() == c.raw_size as usize, IntegrityError::Length);
     ensure!(
-        raw.len() == c.raw_size as usize && blake3::hash(&raw).as_bytes() == c.hash.as_slice(),
+        !verify || blake3::hash(&raw).as_bytes() == c.hash.as_slice(),
         IntegrityError::Hash
     );
     Ok(raw)
@@ -683,6 +703,59 @@ mod tests {
                             .as_ref(),
                         input
                     );
+                }
+                assert_eq!(
+                    decode_read(&c, stored.clone(), &secrets, 20, &compression, false)
+                        .unwrap()
+                        .0
+                        .as_ref(),
+                    input
+                );
+                let mut wrong_hash = c.clone();
+                wrong_hash.hash[0] ^= 1;
+                assert!(
+                    decode_cache(&wrong_hash, Bytes::from(input.clone()), false, &compression)
+                        .is_err()
+                );
+                assert_eq!(
+                    decode_cache_read(
+                        &wrong_hash,
+                        Bytes::from(input.clone()),
+                        false,
+                        &compression,
+                        false
+                    )
+                    .unwrap()
+                    .as_ref(),
+                    input
+                );
+                assert!(
+                    decode_cache_read(
+                        &c,
+                        Bytes::from(input[..input.len() - 1].to_vec()),
+                        false,
+                        &compression,
+                        false
+                    )
+                    .is_err()
+                );
+                assert!(
+                    decode_cache_read(
+                        &oversized,
+                        Bytes::from(input.clone()),
+                        false,
+                        &compression,
+                        false
+                    )
+                    .is_err()
+                );
+                let mut extra = stored.clone();
+                extra.push(0);
+                assert!(decode_read(&c, extra, &secrets, 20, &compression, false).is_err());
+                if algorithm != "none" {
+                    let mut damaged = stored.clone();
+                    damaged[0] ^= 1;
+                    assert!(decode_read(&c, damaged, &secrets, 20, &compression, false).is_err());
                 }
                 let mut changed = stored.clone();
                 changed[0] ^= 1;

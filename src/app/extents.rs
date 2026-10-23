@@ -320,13 +320,19 @@ impl App {
         range: bool,
         capture: Option<Arc<Mutex<super::responses::Mapping>>>,
     ) -> Result<StreamingBlob> {
+        if let Some(capture) = &capture {
+            capture
+                .lock()
+                .unwrap()
+                .start_read(self.storage.read_epoch());
+        }
         if stream.payload_type == "raw" {
             return self.raw_body(stream, pin, span, permits, capture).await;
         }
         let app = self.clone();
         let (start, end) = (span.start, span.end);
         let body = async_stream::try_stream! {
-            let _pin=pin;let _permits=permits;let read_context=Arc::new(crate::storage::ReadContext::user(range));
+            let _pin=pin;let _permits=permits;let read_context=Arc::new(crate::storage::ReadContext::user(range, app.read_checks.clone(), capture.clone()));
             #[cfg(feature="fault-injection")]
             crate::faults::point("read-body").await;
             _pin.renew_read_lease().await?;

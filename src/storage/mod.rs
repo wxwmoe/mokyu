@@ -77,9 +77,10 @@ pub struct Storage {
     record_store: Arc<dyn crate::model::StorageRecordStore>,
     pub source_gate: tokio::sync::RwLock<()>,
     pub(crate) source_reads: sources::Cache,
+    read_epoch: std::sync::atomic::AtomicU64,
     physical_pins: Mutex<HashMap<Uuid, std::sync::Weak<AtomicUsize>>>,
-    pack_misses: Mutex<HashMap<Id, std::sync::Weak<PackFetch>>>,
-    pack_live: Mutex<HashMap<Id, std::sync::Weak<LoadedPack>>>,
+    pack_misses: Mutex<HashMap<(Id, bool), std::sync::Weak<PackFetch>>>,
+    pack_live: Mutex<HashMap<(Id, bool), std::sync::Weak<LoadedPack>>>,
     pack_memory: Arc<Semaphore>,
     pack_memory_units: u32,
     pack_work: Arc<Semaphore>,
@@ -115,7 +116,7 @@ pub struct Storage {
     cache_fills: Arc<Mutex<HashSet<Uuid>>>,
     max_entries: usize,
     capacity: Option<u64>,
-    misses: Mutex<HashMap<(Id, Uuid, bool), std::sync::Weak<FetchResult>>>,
+    misses: Mutex<HashMap<(Id, Uuid, bool, bool), std::sync::Weak<FetchResult>>>,
     raw_misses: crate::runtime::locks::Locks<Uuid>,
     pub backend_gets: Arc<std::sync::atomic::AtomicU64>,
     pub cache_hits: std::sync::atomic::AtomicU64,
@@ -443,6 +444,7 @@ impl Storage {
             record_store,
             source_gate: tokio::sync::RwLock::new(()),
             source_reads: sources::Cache::new(),
+            read_epoch: 0.into(),
             physical_pins: Mutex::new(HashMap::new()),
             pack_misses: Mutex::new(HashMap::new()),
             pack_live: Mutex::new(HashMap::new()),
@@ -758,7 +760,7 @@ impl Storage {
             targets.remove(&storage_id);
             self.integrity_rates.lock().unwrap().remove(&storage_id);
         }
-        self.source_reads.clear();
+        self.invalidate_reads();
         Ok(())
     }
     pub async fn refresh_storages(&self) -> Result<()> {
@@ -1518,6 +1520,14 @@ impl Storage {
         .await?
     }
     pub(crate) async fn decode(&self, c: &Chunk, encoded: Vec<u8>) -> Result<(Bytes, Bytes)> {
+        self.decode_read(c, encoded, true).await
+    }
+    async fn decode_read(
+        &self,
+        c: &Chunk,
+        encoded: Vec<u8>,
+        verify: bool,
+    ) -> Result<(Bytes, Bytes)> {
         let permit = self.cpu.clone().acquire_owned().await?;
         let c = c.clone();
         let secrets = self.secrets.clone();
@@ -1525,7 +1535,7 @@ impl Storage {
         let diagnostics = self.diagnostics.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            codec::decode(&c, encoded, &secrets, threshold, &compression)
+            codec::decode_read(&c, encoded, &secrets, threshold, &compression, verify)
                 .inspect_err(|e| diagnostics.content(e))
         })
         .await?
@@ -1583,7 +1593,12 @@ impl Storage {
         }
         Ok(())
     }
-    async fn cached_file(&self, c: &Chunk, id: Uuid) -> Result<Option<Bytes>> {
+    async fn cached_file(
+        &self,
+        c: &Chunk,
+        id: Uuid,
+        verify: bool,
+    ) -> Result<Option<(Bytes, usize)>> {
         if let Some(data) = self.chunk_memory(id) {
             ensure!(
                 data.len() == c.raw_size as usize,
@@ -1593,7 +1608,7 @@ impl Storage {
             self.cache_hits.fetch_add(1, Ordering::Relaxed);
             self.cache_hit_bytes
                 .fetch_add(data.len() as u64, Ordering::Relaxed);
-            return Ok(Some(data));
+            return Ok(Some((data, 0)));
         }
         if !self.local_cache(c.storage_id)?.enabled
             && !self.upload_pins.lock().unwrap().contains_key(&id)
@@ -1622,18 +1637,29 @@ impl Storage {
             });
             if let Ok(data) = file {
                 let size = data.len() as u64;
+                let retained = if compressed {
+                    c.raw_size as usize
+                } else {
+                    data.capacity()
+                };
                 let permit = self.cpu.clone().acquire_owned().await?;
                 let chunk = c.clone();
                 let (compression, _, _) = self.compression_for(c.storage_id)?;
                 let decoded = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
-                    codec::decode_cache(&chunk, Bytes::from(data), compressed, &compression)
+                    codec::decode_cache_read(
+                        &chunk,
+                        Bytes::from(data),
+                        compressed,
+                        &compression,
+                        verify,
+                    )
                 })
                 .await?;
                 if let Ok(raw) = decoded {
                     self.cache_hits.fetch_add(1, Ordering::Relaxed);
                     self.cache_hit_bytes.fetch_add(size, Ordering::Relaxed);
-                    return Ok(Some(raw));
+                    return Ok(Some((raw, retained)));
                 }
             }
             if missing {
@@ -1663,8 +1689,11 @@ impl Storage {
         Ok(None)
     }
     async fn cached(&self, c: &Chunk) -> Result<Option<Bytes>> {
+        Ok(self.cached_read(c, true).await?.map(|(bytes, _)| bytes))
+    }
+    async fn cached_read(&self, c: &Chunk, verify: bool) -> Result<Option<(Bytes, usize)>> {
         let mut cache_id = cache::cache_id(c);
-        if let Some(raw) = self.cached_file(c, cache_id).await? {
+        if let Some(raw) = self.cached_file(c, cache_id, verify).await? {
             return Ok(Some(raw));
         }
         let staged: Option<(Uuid, String)> = self.physical.pending_source(c.id).await?;
@@ -1675,7 +1704,7 @@ impl Storage {
             && id != cache_id
         {
             cache_id = id;
-            if let Some(raw) = self.cached_file(c, id).await? {
+            if let Some(raw) = self.cached_file(c, id, verify).await? {
                 return Ok(Some(raw));
             }
         }
@@ -1695,6 +1724,30 @@ impl Storage {
             return Err(crate::app::readiness::pending());
         }
         Ok(None)
+    }
+    pub(crate) fn read_epoch(&self) -> u64 {
+        self.read_epoch.load(Ordering::Acquire)
+    }
+    pub(crate) fn invalidate_reads(&self) {
+        self.read_epoch.fetch_add(1, Ordering::AcqRel);
+        self.source_reads.clear();
+    }
+    pub(crate) async fn reject_chunk_cache(&self, chunk: &Chunk) {
+        self.reject_cache(cache::cache_id(chunk)).await;
+        if chunk.location_id.is_nil()
+            && let Ok(Some((_, path))) = self.physical.pending_source(chunk.id).await
+            && let Some(id) = parse_upload_cache_name(&path)
+        {
+            self.reject_cache(id).await;
+        }
+    }
+    pub(crate) async fn reject_cache(&self, id: Uuid) {
+        if let Some(entry) = self.fifo.lock().await.entries.get_mut(&id) {
+            entry.valid = false;
+        }
+        if let Err(error) = self.invalidate(id).await {
+            tracing::debug!(%error, "invalid read cache awaits cleanup");
+        }
     }
     pub(crate) async fn invalidate(&self, id: Uuid) -> Result<()> {
         self.invalidate_entry(id, None).await
@@ -1744,7 +1797,15 @@ impl Storage {
             _memory: memory,
         })
     }
-    fn fill_read(self: &Arc<Self>, c: &Chunk, data: Bytes, compressed: Option<bool>) {
+    pub(crate) fn fill_read(self: &Arc<Self>, c: &Chunk, data: Bytes, compressed: Option<bool>) {
+        if let Ok(fifo) = self.fifo.try_lock()
+            && fifo
+                .entries
+                .get(&cache::cache_id(c))
+                .is_some_and(|entry| entry.valid)
+        {
+            return;
+        }
         let Ok(policy) = self.local_cache(c.storage_id) else {
             return;
         };
@@ -1901,18 +1962,48 @@ impl Storage {
         c: &Chunk,
         context: Option<&ReadContext>,
     ) -> Result<Bytes> {
+        let profile = if context.is_some_and(|context| context.observe) {
+            Some(self.profile(c.storage_id.context("chunk has no store")?)?)
+        } else {
+            None
+        };
+        let mode = profile
+            .as_ref()
+            .map_or("inline", |profile| profile.read_integrity.as_str());
+        let (raw, retained) = self.read_chunk(c, context, mode == "inline").await?;
+        if let Some(context) = context
+            && let Some(checks) = &context.checks
+        {
+            let evidence = match mode {
+                "background" => Some(checks.chunk(c, raw.clone(), retained)),
+                "off" => Some(checks.unchecked()),
+                _ => None,
+            };
+            if let Some(capture) = &context.capture
+                && let Some(evidence) = evidence
+            {
+                capture.lock().unwrap().record_check(evidence);
+            }
+        }
+        Ok(raw)
+    }
+    async fn read_chunk(
+        self: &Arc<Self>,
+        c: &Chunk,
+        context: Option<&ReadContext>,
+        verify: bool,
+    ) -> Result<(Bytes, usize)> {
         self.cache_lookups.fetch_add(1, Ordering::Relaxed);
         if let Some(context) = context {
             let current = context.pack.lock().await;
-            if let Some(loaded) = current
-                .as_ref()
-                .filter(|p| p.data.members.iter().any(|m| m.id == c.uuid))
-            {
+            if let Some(loaded) = current.as_ref().filter(|p| {
+                (!verify || p.verified) && p.data.members.iter().any(|m| m.id == c.uuid)
+            }) {
                 loaded.touch(c, context.observe, context.range);
-                return loaded.data.chunk(c);
+                return Ok((loaded.data.chunk(c)?, c.raw_size as usize));
             }
         }
-        if let Some(raw) = self.cached(c).await? {
+        if let Some(raw) = self.cached_read(c, verify).await? {
             if let Some(context) = context {
                 context.touch(c).await;
             }
@@ -1925,6 +2016,7 @@ impl Storage {
                 c.id,
                 c.location_id,
                 context.is_some_and(|context| context.observe),
+                verify,
             );
             if let Some(lock) = map.get(&key).and_then(|v| v.upgrade()) {
                 lock
@@ -1935,10 +2027,10 @@ impl Storage {
             }
         };
         match lock
-            .get_or_init(|| async { self.fetch(c, context).await.map_err(Arc::new) })
+            .get_or_init(|| async { self.fetch(c, context, verify).await.map_err(Arc::new) })
             .await
         {
-            Ok((raw, loaded)) => {
+            Ok((raw, loaded, retained)) => {
                 if let (Some(context), Some(loaded)) = (context, loaded) {
                     loaded.touch(c, context.observe, context.range);
                     // Prefetch may be advancing to the next pack while waiting for this one's
@@ -1947,7 +2039,7 @@ impl Storage {
                         *current = Some(loaded.clone());
                     }
                 }
-                Ok(raw.clone())
+                Ok((raw.clone(), *retained))
             }
             Err(error) => Err(anyhow::anyhow!("chunk read failed: {error:#}")),
         }
@@ -1956,12 +2048,13 @@ impl Storage {
         self: &Arc<Self>,
         c: &Chunk,
         context: Option<&ReadContext>,
-    ) -> Result<(Bytes, Option<Arc<LoadedPack>>)> {
-        if let Some(raw) = self.cached(c).await? {
+        verify: bool,
+    ) -> Result<(Bytes, Option<Arc<LoadedPack>>, usize)> {
+        if let Some((raw, retained)) = self.cached_read(c, verify).await? {
             if let Some(context) = context {
                 context.touch(c).await;
             }
-            return Ok((raw, None));
+            return Ok((raw, None, retained));
         }
         match self
             .read_source(c, context.is_some_and(|context| context.observe))
@@ -1970,32 +2063,47 @@ impl Storage {
             Source::Chunk(physical, _pin) => {
                 self.ensure_key_loaded(physical.block_key_id).await?;
                 let encoded = self.read_backend(&physical).await?;
-                let (raw, cache) = self.decode(&physical, encoded).await?;
-                if physical.compressed == c.compressed && physical.stored_size == c.stored_size {
-                    let (_, _, threshold) = self.compression_for(c.storage_id)?;
-                    self.fill_read(c, cache, Some(codec::cache_compressed(c, threshold)));
+                let retained = if physical.compressed {
+                    physical.raw_size as usize
                 } else {
-                    self.fill_read(c, raw.clone(), None);
+                    encoded.capacity()
+                };
+                let (raw, cache) = self.decode_read(&physical, encoded, verify).await?;
+                if verify {
+                    if physical.compressed == c.compressed && physical.stored_size == c.stored_size
+                    {
+                        let (_, _, threshold) = self.compression_for(c.storage_id)?;
+                        self.fill_read(c, cache, Some(codec::cache_compressed(c, threshold)));
+                    } else {
+                        self.fill_read(c, raw.clone(), None);
+                    }
                 }
-                Ok((raw, None))
+                Ok((raw, None, retained))
             }
             Source::Pack(pack, _pin) => {
                 if let Some(context) = context {
                     let mut current = context.pack.lock().await;
-                    if let Some(loaded) = current.as_ref().filter(|p| p.pack.id == pack.id) {
+                    if let Some(loaded) = current
+                        .as_ref()
+                        .filter(|p| p.pack.id == pack.id && (!verify || p.verified))
+                    {
                         loaded.touch(c, context.observe, context.range);
-                        return Ok((loaded.data.chunk(c)?, Some(loaded.clone())));
+                        return Ok((
+                            loaded.data.chunk(c)?,
+                            Some(loaded.clone()),
+                            c.raw_size as usize,
+                        ));
                     }
                     *current = None;
-                    let loaded = self.load_pack(pack).await?;
+                    let loaded = self.load_pack_read(pack, verify).await?;
                     loaded.touch(c, context.observe, context.range);
                     let raw = loaded.data.chunk(c)?;
                     *current = Some(loaded.clone());
-                    Ok((raw, Some(loaded)))
+                    Ok((raw, Some(loaded), c.raw_size as usize))
                 } else {
-                    let loaded = self.load_pack(pack).await?;
+                    let loaded = self.load_pack_read(pack, verify).await?;
                     loaded.touch(c, false, false);
-                    Ok((loaded.data.chunk(c)?, Some(loaded)))
+                    Ok((loaded.data.chunk(c)?, Some(loaded), c.raw_size as usize))
                 }
             }
         }
@@ -2214,11 +2322,18 @@ impl Storage {
         self: &Arc<Self>,
         p: crate::content::pack::Pack,
     ) -> Result<Arc<LoadedPack>> {
+        self.load_pack_read(p, true).await
+    }
+    async fn load_pack_read(
+        self: &Arc<Self>,
+        p: crate::content::pack::Pack,
+        verify: bool,
+    ) -> Result<Arc<LoadedPack>> {
         if let Some(live) = self
             .pack_live
             .lock()
             .unwrap()
-            .get(&p.id)
+            .get(&(p.id, verify))
             .and_then(std::sync::Weak::upgrade)
         {
             return Ok(live);
@@ -2226,7 +2341,7 @@ impl Storage {
         let lock = {
             let mut map = self.pack_misses.lock().unwrap();
             map.retain(|_, v| v.strong_count() > 0);
-            map.get(&p.id)
+            map.get(&(p.id, verify))
                 .and_then(std::sync::Weak::upgrade)
                 .unwrap_or_else(|| {
                     let cell = Arc::new(PackFetch {
@@ -2235,7 +2350,7 @@ impl Storage {
                             crate::storage::resource_gate::MAINTENANCE,
                         )),
                     });
-                    map.insert(p.id, Arc::downgrade(&cell));
+                    map.insert((p.id, verify), Arc::downgrade(&cell));
                     cell
                 })
         };
@@ -2278,13 +2393,16 @@ impl Storage {
                         let _permit = permit;
                         #[cfg(feature = "fault-injection")]
                         crate::faults::blocking("pack-decode");
-                        let data = crate::content::pack::decode(&pack, encoded, &secrets, &pool)
-                            .inspect_err(|e| diagnostics.content(e))?;
+                        let data = crate::content::pack::decode_read(
+                            &pack, encoded, &secrets, &pool, verify,
+                        )
+                        .inspect_err(|e| diagnostics.content(e))?;
                         Ok::<_, anyhow::Error>((data, memory))
                     })
                     .await??;
                     let loaded = Arc::new(LoadedPack {
                         pack: p.clone(),
+                        verified: verify,
                         data,
                         _memory: memory,
                         used: Mutex::new(DownloadUsage::default()),
@@ -2293,9 +2411,9 @@ impl Storage {
                     {
                         let mut live = self.pack_live.lock().unwrap();
                         live.retain(|_, v| v.strong_count() > 0);
-                        live.insert(p.id, Arc::downgrade(&loaded));
+                        live.insert((p.id, verify), Arc::downgrade(&loaded));
                     }
-                    if let Ok(permit) = self.fills.clone().try_acquire_owned() {
+                    if verify && let Ok(permit) = self.fills.clone().try_acquire_owned() {
                         let storage = self.clone();
                         let loaded = loaded.clone();
                         tokio::spawn(async move {

@@ -112,6 +112,7 @@ pub(crate) struct UploadPin {
 pub(crate) struct LoadedPack {
     pub pack: crate::content::pack::Pack,
     pub data: crate::content::pack::Decoded,
+    pub(crate) verified: bool,
     pub(crate) _memory: tokio::sync::OwnedSemaphorePermit,
     pub(crate) used: Mutex<DownloadUsage>,
     pub(crate) access: Arc<crate::status::access::Access>,
@@ -160,12 +161,20 @@ pub(crate) struct ReadContext {
     pub(crate) pack: tokio::sync::Mutex<Option<Arc<LoadedPack>>>,
     pub(crate) observe: bool,
     pub(crate) range: bool,
+    pub(crate) checks: Option<Arc<crate::app::checks::Checks>>,
+    pub(crate) capture: Option<Arc<Mutex<crate::app::responses::Mapping>>>,
 }
 impl ReadContext {
-    pub fn user(range: bool) -> Self {
+    pub fn user(
+        range: bool,
+        checks: Arc<crate::app::checks::Checks>,
+        capture: Option<Arc<Mutex<crate::app::responses::Mapping>>>,
+    ) -> Self {
         Self {
             observe: true,
             range,
+            checks: Some(checks),
+            capture,
             ..Default::default()
         }
     }
@@ -291,7 +300,7 @@ impl Fifo {
 }
 
 pub(crate) type FetchResult =
-    tokio::sync::OnceCell<Result<(Bytes, Option<Arc<LoadedPack>>), Arc<anyhow::Error>>>;
+    tokio::sync::OnceCell<Result<(Bytes, Option<Arc<LoadedPack>>, usize), Arc<anyhow::Error>>>;
 pub(crate) struct PackFetch {
     pub(crate) result: tokio::sync::OnceCell<Result<Arc<LoadedPack>, Arc<anyhow::Error>>>,
     pub(crate) priority: Arc<AtomicUsize>,
