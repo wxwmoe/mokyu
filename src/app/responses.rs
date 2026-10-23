@@ -14,6 +14,34 @@ use std::{
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
+impl super::App {
+    pub(crate) async fn response_mapping(
+        &self,
+        stream: &StoredStream,
+    ) -> anyhow::Result<Option<[u8; 32]>> {
+        let mut mapping = Mapping::new(stream.size);
+        if stream.payload_type == "raw" {
+            let rows = if let Some(row) = super::reads::raw(stream.id, stream.payload_revision) {
+                vec![row]
+            } else {
+                self.raw.page(stream.id, 0, stream.size).await?
+            };
+            for row in &rows {
+                self.storage.profile(row.source.storage_id)?;
+                mapping.record_raw(row, stream.payload_revision);
+            }
+        } else {
+            for row in self.chunks.read_extents(stream.id, 0, stream.size).await? {
+                if let Some(storage) = row.chunk.storage_id {
+                    self.storage.profile(storage)?;
+                }
+                mapping.record(&row);
+            }
+        }
+        Ok(mapping.signature())
+    }
+}
+
 const UNIT: usize = 4096;
 const METADATA: usize = 1024 * 1024;
 const ENTRIES: usize = 512;
@@ -414,6 +442,27 @@ impl Mapping {
     pub fn finish_source(&mut self) {
         self.finished = true;
     }
+    pub fn record_raw(&mut self, row: &crate::model::raw::RawRange, revision: i64) {
+        // Only complete immutable files can be verified against their full-source digest.
+        self.valid &= self.count == 0
+            && row.validate().is_ok()
+            && row.offset_bytes == 0
+            && row.source_offset == 0
+            && row.length == self.size
+            && row.source.size == self.size;
+        if !self.valid {
+            return;
+        }
+        self.hash.update(b"raw");
+        self.hash.update(row.source.location_id.as_bytes());
+        self.hash.update(row.source.storage_id.as_bytes());
+        for value in [revision, row.source.revision, row.source.size] {
+            self.hash.update(&value.to_le_bytes());
+        }
+        self.hash.update(row.source.digest.as_ref().unwrap());
+        self.position = self.size;
+        self.count = 1;
+    }
     pub fn record(&mut self, row: &ReadExtent) {
         if row.extent.chunk_id != Some(row.chunk.id) || row.chunk.state != "ready" {
             self.valid = false;
@@ -499,6 +548,59 @@ mod tests {
     use super::*;
     use crate::{app::Extent, content::codec::Chunk};
     use serde_json::json;
+
+    #[test]
+    fn raw_mapping_requires_a_complete_healthy_source_and_current_representation() {
+        let row = crate::model::raw::RawRange {
+            source: crate::model::raw::RawSource {
+                id: 1.into(),
+                location_id: Uuid::now_v7(),
+                storage_id: Uuid::new_v4(),
+                size: 8192,
+                digest: Some(vec![1; 16]),
+                state: "ready".into(),
+                medium: "local".into(),
+                pending_upload: false,
+                revision: 1,
+                quarantine_code: None,
+            },
+            offset_bytes: 0,
+            length: 8192,
+            source_offset: 0,
+        };
+        let signature = |row: &crate::model::raw::RawRange, revision| {
+            let mut mapping = Mapping::new(8192);
+            mapping.record_raw(row, revision);
+            mapping.signature()
+        };
+        let original = signature(&row, 1);
+        assert!(original.is_some());
+        assert_ne!(original, signature(&row, 2));
+        for mutate in [
+            |r: &mut crate::model::raw::RawRange| r.source.revision += 1,
+            |r: &mut crate::model::raw::RawRange| r.source.location_id = Uuid::new_v4(),
+            |r: &mut crate::model::raw::RawRange| r.source.storage_id = Uuid::new_v4(),
+            |r: &mut crate::model::raw::RawRange| r.source.digest = Some(vec![2; 16]),
+            |r: &mut crate::model::raw::RawRange| {
+                r.source.quarantine_code = Some("hash_mismatch".into())
+            },
+            |r: &mut crate::model::raw::RawRange| r.source.state = "deleting".into(),
+            |r: &mut crate::model::raw::RawRange| r.source_offset = 1,
+            |r: &mut crate::model::raw::RawRange| r.length -= 1,
+        ] {
+            let mut changed = row.clone();
+            mutate(&mut changed);
+            assert_ne!(original, signature(&changed, 1));
+        }
+        let mut repeated = Mapping::new(8192);
+        repeated.record_raw(&row, 1);
+        repeated.record_raw(&row, 1);
+        assert!(repeated.signature().is_none());
+        let (_, _, chunk) = fixture(8192);
+        let mut chunks = Mapping::new(8192);
+        chunks.record(&chunk);
+        assert_ne!(original, chunks.signature());
+    }
 
     fn fixture(size: i32) -> (StoredStream, Key, ReadExtent) {
         let now = chrono::Utc::now();

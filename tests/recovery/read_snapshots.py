@@ -142,6 +142,15 @@ def main():
             for change in ('acl', 'overwrite'):
                 fixture.client.put_object(Bucket=fixture.name, Key=key, Body=body, ACL='public-read')
                 etag = fixture.client.head_object(Bucket=fixture.name, Key=key)['ETag']
+                for _ in range(3):
+                    response = requests.get(url, headers={**extra, 'Accept-Encoding': 'identity'}, timeout=10)
+                    assert response.status_code == 200 and response.content == body
+                before = fixture.cli('status')['response_cache']['hits']
+                response = requests.get(url, headers={**extra, 'Accept-Encoding': 'identity'}, timeout=10)
+                assert response.status_code == 200 and response.content == body
+                status = fixture.cli('status')['response_cache']
+                if status['limit_bytes'] >= 4 * 1024 * 1024:
+                    assert status['hits'] == before + 1, status
                 marker = arm('read-metadata')
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     pending = executor.submit(requests.get, url, headers={**extra, 'If-Match': etag}, timeout=30)

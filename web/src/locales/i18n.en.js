@@ -765,7 +765,7 @@ export default {
   quotaEditHint: 'Limits apply to every upload, including administrator and S3 requests.', quotaLogicalLimit: 'Logical storage limit', quotaInflightLimit: 'In-flight upload budget', quotaBucketLimit: 'Bucket count limit', quotaUnit: 'Size unit',
   quotaInflightHint: 'Includes unfinished multipart data and concurrent replacements, even when they reuse old storage allowance.', quotaZeroHint: 'Leave blank for no limit. Zero allows no additional space. Lowering a limit never deletes files.', quotaInvalid: 'Use a non-negative size with up to three decimal places and a whole bucket count.',
   error_QuotaExceeded: 'This upload would exceed a storage or in-flight limit. Free space or ask an administrator to adjust the limit.',
-  configField_instance_response_cache_size: 'Public response cache', configHelp_instance_response_cache_size: 'Memory for complete public responses, disabled by default. Enabling it reduces the pack memory budget.',
+  configField_instance_response_cache_size: 'Object response cache', configHelp_instance_response_cache_size: 'Memory for complete object responses, disabled by default. Enabling it reduces the pack memory budget.',
   configField_effective_response_cache_bytes: 'Effective response cache', configHelp_effective_response_cache_bytes: 'Memory reserved for public response bodies, including builders and evicted data still being sent.',
   configOrigin_environment: "Runtime environment",
   configValueMode_read: "Observed value",

@@ -765,7 +765,7 @@ export default {
   quotaEditHint: '管理者や S3 からのアップロードにも適用されます。', quotaLogicalLimit: '論理容量の上限', quotaInflightLimit: '未完了アップロードの上限', quotaBucketLimit: 'バケット数の上限', quotaUnit: '容量の単位',
   quotaInflightHint: '未完了のパートと同時置換を含みます。既存ファイルの容量を差し引ける場合も対象です。', quotaZeroHint: '空欄は上限なし、0 は追加容量なしです。上限を下げてもファイルは削除されません。', quotaInvalid: '小数点以下 3 桁以内の非負の容量と、整数のバケット数を入力してください。',
   error_QuotaExceeded: '容量または未完了アップロードの上限を超えます。空きを確保するか管理者にご相談ください。',
-  configField_instance_response_cache_size: '公開レスポンスキャッシュ', configHelp_instance_response_cache_size: '完全な公開レスポンス用のメモリで、既定は無効、有効化すると pack のメモリ予算を縮小',
+  configField_instance_response_cache_size: 'オブジェクトレスポンスキャッシュ', configHelp_instance_response_cache_size: '完全なオブジェクトレスポンス用のメモリで、既定は無効、有効化すると pack のメモリ予算を縮小',
   configField_effective_response_cache_bytes: '有効レスポンスキャッシュ容量', configHelp_effective_response_cache_bytes: '構築中やキャッシュから削除後も送信中のデータを含む予約メモリ',
   configOrigin_environment: "実行環境",
   configValueMode_read: "取得値",

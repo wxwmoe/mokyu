@@ -3,6 +3,7 @@ use crate::model::Id;
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use futures_util::StreamExt;
+use md5::{Digest, Md5};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -121,6 +122,7 @@ impl App {
         pin: Active,
         span: std::ops::Range<i64>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
+        capture: Option<Arc<Mutex<super::responses::Mapping>>>,
     ) -> Result<s3s::dto::StreamingBlob> {
         let mut ranges = Vec::new();
         let mut cursor = 0;
@@ -164,6 +166,13 @@ impl App {
                 "raw mapping length mismatch"
             );
         }
+        let capture = capture.filter(|capture| {
+            let mut mapping = capture.lock().unwrap();
+            for row in &ranges {
+                mapping.record_raw(row, stream.payload_revision);
+            }
+            mapping.signature().is_some() && span == (0..stream.size)
+        });
         let app = self.clone();
         let idle = Duration::from_secs(crate::config::seconds(
             &self.config.requests.read_idle_timeout,
@@ -183,6 +192,7 @@ impl App {
                 let mut reader = if let Some(reader)=first.take() {reader} else {app.storage.raw_reader(&row.source,false).await?};
                 reader.file.seek(std::io::SeekFrom::Start((row.source_offset+start-row.offset_bytes) as u64)).await?;
                 let mut remaining = end-start;
+                let mut digest = capture.as_ref().map(|_| Md5::new());
                 while remaining>0 {
                     let mut buffer = vec![0;remaining.min(256*1024) as usize];
                     let count = tokio::time::timeout(idle,_pin.with_read_lease(reader.file.read(&mut buffer))).await??;
@@ -190,6 +200,11 @@ impl App {
                     buffer.truncate(count);
                     remaining -= count as i64;
                     reader.file.account_read(&app.storage, count as u64);
+                    if let Some(digest)=&mut digest { digest.update(&buffer); }
+                    if remaining==0 && let Some(digest)=digest.take() {
+                        (digest.finalize().as_slice()==row.source.digest.as_deref().unwrap()).then_some(()).context(crate::content::codec::IntegrityError::Hash)?;
+                        capture.as_ref().unwrap().lock().unwrap().finish_source();
+                    }
                     yield Bytes::from(buffer);
                 }
             }

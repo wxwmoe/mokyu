@@ -45,7 +45,7 @@ fn available(stream: &StoredStream, metadata: &Metadata, encoding: Encoding) -> 
     if encoding == Encoding::Identity {
         return true;
     }
-    if stream.size < 1024 || stream.payload_type == "raw" {
+    if stream.size < 1024 {
         return false;
     }
     let summary = &stream.http_compression;
@@ -123,25 +123,28 @@ fn metadata_headers(metadata: &Metadata) -> Result<HeaderMap> {
     Ok(headers)
 }
 
-fn cacheable(headers: &HeaderMap) -> bool {
-    !headers
+pub(crate) fn cacheable(headers: &HeaderMap) -> bool {
+    headers
         .get_all(header::CACHE_CONTROL)
         .iter()
         .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .any(|value| {
-            matches!(
-                value
-                    .trim()
-                    .split('=')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_ascii_lowercase()
-                    .as_str(),
-                "private" | "no-store"
-            )
-        })
+        .all(cache_control)
+}
+
+pub(crate) fn cache_control(value: &str) -> bool {
+    !value.split(',').any(|value| {
+        matches!(
+            value
+                .trim()
+                .split('=')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "private" | "no-store"
+        )
+    })
 }
 
 fn observation(
@@ -187,13 +190,17 @@ pub(crate) async fn read(
     }
     let accept = AcceptEncoding::new(request);
     let light = head || conditional(request);
-    let candidate =
-        if !light && !checksum && cacheable(request) && app.response_cache.candidate(bucket, key) {
-            app.ensure_mode()?;
-            app.stream_store.cached(bucket, key).await?
-        } else {
-            None
-        };
+    let candidate = if !light
+        && !checksum
+        && cacheable(request)
+        && !crate::app::reads::is_raw(bucket, key)
+        && app.response_cache.candidate(bucket, key)
+    {
+        app.ensure_mode()?;
+        app.stream_store.cached(bucket, key).await?
+    } else {
+        None
+    };
     let candidate = if let Some(candidate) = candidate {
         if !candidate.bucket_active {
             return Err(s3s::s3_error!(AccessDenied).into());
@@ -234,6 +241,7 @@ pub(crate) async fn read(
         }
         let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
         let mut headers = metadata_headers(&metadata)?;
+        let original_cacheable = cacheable(&headers);
         let original_transform = !compression::no_transform(&headers);
         headers.extend(overrides.clone());
         compression::vary(&mut headers, "Accept-Encoding");
@@ -319,8 +327,8 @@ pub(crate) async fn read(
             encoding: encoding.name(),
             policy: POLICY,
         };
-        let use_cache = stream.payload_type == "chunks"
-            && !checksum
+        let use_cache = !checksum
+            && original_cacheable
             && cacheable(request)
             && cacheable(&headers)
             && app.response_cache.eligible(&stream);
@@ -338,18 +346,14 @@ pub(crate) async fn read(
                 {
                     valid = mapping == entry.mapping;
                 } else if valid && !head {
-                    let rows = match app.chunks.read_extents(stream.id, 0, stream.size).await {
-                        Ok(rows) => rows,
+                    let mapping = match app.response_mapping(&stream).await {
+                        Ok(mapping) => mapping,
                         Err(error) => {
                             app.response_cache.remove(cache_key, &entry);
                             return Err(error);
                         }
                     };
-                    let mut mapping = responses::Mapping::new(stream.size);
-                    for row in &rows {
-                        mapping.record(row);
-                    }
-                    valid = mapping.signature() == Some(entry.mapping);
+                    valid = mapping == Some(entry.mapping);
                 }
                 if valid {
                     let bytes = if encoding == Encoding::Identity {
@@ -360,7 +364,7 @@ pub(crate) async fn read(
                     headers.insert(header::CONTENT_LENGTH, bytes.len().to_string().parse()?);
                     if !head {
                         app.response_cache.hit();
-                        if cached_mapping.is_some() {
+                        if cached_mapping.is_some() || crate::app::reads::is_raw(bucket, key) {
                             app.response_cache.validated();
                         }
                         if let Some(observe) = observation(app, &stream, encoding) {
@@ -480,6 +484,67 @@ pub(crate) async fn read(
             partial: range.is_some(),
         });
     }
+}
+
+pub(crate) async fn identity_body(
+    app: &Arc<App>,
+    stream: StoredStream,
+    pin: crate::app::Active,
+    span: std::ops::Range<i64>,
+    permits: (
+        tokio::sync::OwnedSemaphorePermit,
+        tokio::sync::OwnedSemaphorePermit,
+    ),
+    range: bool,
+    cache: bool,
+) -> Result<StreamingBlob> {
+    let key = responses::Key {
+        bucket: stream.bucket_id,
+        stream: stream.id,
+        encoding: "identity",
+        policy: POLICY,
+    };
+    let cache = cache && app.response_cache.eligible(&stream);
+    if cache && let Some(entry) = app.response_cache.lookup(key).await {
+        let mapping = match app.response_mapping(&stream).await {
+            Ok(mapping) => mapping,
+            Err(error) => {
+                app.response_cache.remove(key, &entry);
+                return Err(error);
+            }
+        };
+        if entry.raw_size == stream.size
+            && entry.etag == stream.etag
+            && mapping == Some(entry.mapping)
+        {
+            app.response_cache.hit();
+            if crate::app::reads::is_raw(stream.bucket_id, &stream.object_key) {
+                app.response_cache.validated();
+            }
+            return Ok(cached_body(
+                entry.bytes.slice(span.start as usize..span.end as usize),
+            ));
+        }
+        app.response_cache.remove(key, &entry);
+    }
+    let builder = if cache && !range {
+        app.response_cache.begin(key, &stream, &stream.object_key)
+    } else {
+        None
+    };
+    let capture = builder.as_ref().map(|builder| builder.capture.clone());
+    let size = stream.size as u64;
+    let body = app.body(stream, pin, span, permits, range, capture).await?;
+    Ok(if let Some(builder) = builder {
+        blob(collect(
+            Box::pin(body.map(|part| part.map_err(io::Error::other))),
+            builder,
+            size,
+            Encoding::Identity,
+        ))
+    } else {
+        body
+    })
 }
 
 fn collect(

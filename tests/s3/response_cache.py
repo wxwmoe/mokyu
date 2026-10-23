@@ -78,7 +78,7 @@ assert response.headers['content-encoding'] == 'zstd'
 
 before = status()['response_cache']['hits']
 assert client.get_object(Bucket=bucket, Key=prefix + 'text')['Body'].read() == text
-assert status()['response_cache']['hits'] == before
+assert status()['response_cache']['hits'] == before + 1
 if os.environ.get('MOKYU_TEST_PUBLIC_WEB'):
     alias = prefix.rstrip('/').replace('/', '-') + '.test'
     cli('domain', 'set', alias, bucket)

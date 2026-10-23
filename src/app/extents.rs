@@ -321,7 +321,7 @@ impl App {
         capture: Option<Arc<Mutex<super::responses::Mapping>>>,
     ) -> Result<StreamingBlob> {
         if stream.payload_type == "raw" {
-            return self.raw_body(stream, pin, span, permits).await;
+            return self.raw_body(stream, pin, span, permits, capture).await;
         }
         let app = self.clone();
         let (start, end) = (span.start, span.end);

@@ -77,6 +77,22 @@ pub(crate) fn raw(stream: Id, revision: i64) -> Option<RawRange> {
         .flatten()
 }
 
+pub(crate) fn is_raw(bucket: Uuid, key: &str) -> bool {
+    REQUEST
+        .try_with(|prepared| {
+            prepared.as_ref().is_some_and(|read| {
+                read.snapshot.bucket.id == bucket
+                    && read.key == key
+                    && read
+                        .snapshot
+                        .stream
+                        .as_ref()
+                        .is_some_and(|stream| stream.payload_type == "raw")
+            })
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) fn secret(access: &str) -> Option<Option<Vec<u8>>> {
     REQUEST
         .try_with(|prepared| {

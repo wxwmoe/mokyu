@@ -601,6 +601,15 @@ impl S3 for Gateway {
                 None => 0..s.size as u64,
             };
             let m: Metadata = serde_json::from_value(s.metadata.clone())?;
+            let cache = i.checksum_mode.is_none()
+                && super::object::cacheable(&req.headers)
+                && [
+                    m.cache_control.as_deref(),
+                    i.response_cache_control.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .all(super::object::cache_control);
             let mut out = GetObjectOutput {
                 content_length: Some((range.end - range.start) as i64),
                 content_range: requested
@@ -622,16 +631,16 @@ impl S3 for Gateway {
                 out.checksum_type = checksum(&s.checksums, "type").map(ChecksumType::from);
             }
             out.body = Some(
-                self.0
-                    .body(
-                        s,
-                        pin.expect("body read is protected"),
-                        range.start as i64..range.end as i64,
-                        permits,
-                        requested.is_some(),
-                        None,
-                    )
-                    .await?,
+                super::object::identity_body(
+                    &self.0,
+                    s,
+                    pin.expect("body read is protected"),
+                    range.start as i64..range.end as i64,
+                    permits,
+                    requested.is_some(),
+                    cache,
+                )
+                .await?,
             );
             Ok(S3Response::new(out))
         }
