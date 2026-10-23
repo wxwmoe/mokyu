@@ -8010,7 +8010,8 @@ pub(super) fn publish_repaired_chunk(chunk: &Chunk) -> Statement<'_> {
 }
 
 pub(super) fn retire_stream_encodings(stream: Id, batch: i64) -> Statement<'static> {
-    sqlx::query("UPDATE chunk_encodings SET owner_stream=NULL,state='retired',unreferenced_at=CURRENT_TIMESTAMP(6) WHERE owner_stream=? AND state='uploading' ORDER BY encoding_id LIMIT ?").bind(stream).bind(batch)
+    // A state-index scan can lock unrelated uploads before filtering their owner.
+    sqlx::query("UPDATE chunk_encodings FORCE INDEX (encodings_owner_stream) SET owner_stream=NULL,state='retired',unreferenced_at=CURRENT_TIMESTAMP(6) WHERE owner_stream=? AND state='uploading' ORDER BY encoding_id LIMIT ?").bind(stream).bind(batch)
 }
 
 pub(super) fn repair_owner(

@@ -134,6 +134,22 @@ async fn mysql_content_contract() -> Result<()> {
     assert!(backend.complete(first, 0, &physical).await.is_err());
     backend.register_encoding(&physical).await?;
     assert!(backend.indexed(physical.location_id).await?);
+    let mut writing = db.begin().await?;
+    assert!(
+        super::queries::allocated_source(first, &physical)
+            .build_query_scalar::<Id>()
+            .fetch_optional(&mut *writing)
+            .await?
+            .is_some()
+    );
+    let retired = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::queries::retire_stream_encodings(Id::from(0), 1000).execute(db),
+    )
+    .await
+    .expect("unrelated stream cleanup blocked an active encoding")?;
+    assert_eq!(retired.rows_affected(), 0);
+    writing.rollback().await?;
     backend.complete(first, 0, &physical).await?;
     assert!(backend.complete(first, 0, &physical).await.is_err());
     let ready = backend.ready_chunk(physical.id).await?.unwrap();
