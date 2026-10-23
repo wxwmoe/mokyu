@@ -1,4 +1,5 @@
 """Per-storage write delay, admission backpressure and durable flush/restart."""
+import datetime
 import os
 import subprocess
 import time
@@ -137,6 +138,41 @@ def main():
         assert raw(local, 'buffered')['durability'] == 'buffered'
         local.read('buffered', data)
         wait(lambda: raw(local, 'buffered')['durability'] == 'durable', 'local sync did not run after delay', seconds=15)
+        skewed = Fixture()
+        configure(skewed, cdc_enabled=False, pack_range_enabled=False, upload_cache=True, cache_enabled=True)
+        backend = os.environ.pop('MOKYU_TEST_BACKEND')
+        try:
+            local_chunks = Fixture()
+        finally:
+            os.environ['MOKYU_TEST_BACKEND'] = backend
+        configure(local_chunks, write_durability='buffered', write_flush_interval='60s',
+                  pack_enabled=False, compression_enabled=False)
+        for fixture in (skewed, chunked, local):
+            configure(fixture, write_flush_interval='60s', write_backlog_max_age='5m')
+        for fixture in (skewed, chunked, local, local_chunks):
+            fixture.put('clock-skew', os.urandom(128 * 1024))
+        assert raw(skewed, 'clock-skew')['pending_upload'] and pending_chunks(chunked)
+        assert raw(local, 'clock-skew')['durability'] == 'buffered'
+        future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
+        future = int(future.timestamp() * 1000000) if database.type == 'sqlite' else future
+        for fixture in (skewed, local):
+            database.query('UPDATE raw_sources SET created_at=%s WHERE storage_id=%s',
+                           future, uuid.UUID(fixture.store['id']))
+        database.query('UPDATE pending_uploads SET created_at=%s WHERE chunk_id IN '
+                       '(SELECT id FROM chunks WHERE storage_id=%s)', future, uuid.UUID(chunked.store['id']))
+        database.query('UPDATE chunk_encodings SET created_at=%s WHERE storage_id=%s',
+                       future, uuid.UUID(local_chunks.store['id']))
+        assert database.query('SELECT COUNT(*) AS count FROM chunk_encodings WHERE storage_id=%s AND sync_pending',
+                              uuid.UUID(local_chunks.store['id']))[0]['count'] > 0
+        for fixture in (skewed, chunked, local, local_chunks):
+            configure(fixture, write_flush_interval='0s')
+        wait(lambda: not raw(skewed, 'clock-skew')['pending_upload'], 'zero delay waited for a future raw timestamp', seconds=20)
+        wait(lambda: pending_chunks(chunked) == 0, 'zero delay waited for a future chunk timestamp', seconds=20)
+        wait(lambda: raw(local, 'clock-skew')['durability'] == 'durable', 'zero delay postponed local raw sync', seconds=20)
+        wait(lambda: database.query('SELECT COUNT(*) AS count FROM chunk_encodings WHERE storage_id=%s AND sync_pending',
+                                    uuid.UUID(local_chunks.store['id']))[0]['count'] == 0,
+             'zero delay postponed local chunk sync', seconds=20)
+        print('PASS zero delay drains raw/chunks and local sync after creation clock skew', flush=True)
         configure(local, write_flush_interval='60s')
         local.put('restart', data)
         assert raw(local, 'restart')['durability'] == 'buffered'

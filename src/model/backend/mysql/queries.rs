@@ -2611,7 +2611,7 @@ fn write_delay(
     storage: &str,
     urgent: &[Uuid],
 ) {
-    query.push(format!(" AND (TIMESTAMPADD(SECOND,LEAST(sp.write_flush_interval,sp.write_backlog_max_age),{created})<=CURRENT_TIMESTAMP(6)"));
+    query.push(format!(" AND (sp.write_flush_interval=0 OR TIMESTAMPADD(SECOND,LEAST(sp.write_flush_interval,sp.write_backlog_max_age),{created})<=CURRENT_TIMESTAMP(6)"));
     if !urgent.is_empty() {
         query.push(format!(" OR {storage} IN ("));
         let mut values = query.separated(",");
