@@ -81,7 +81,7 @@
 
 S3 密钥由管理员管理，属于项目，不随创建者删除；只能授权同项目桶。Token 权限与用户当前权限取交集，空 grants 没有桶权限。`system=true` 仅管理员可签发，必须空 grants，允许全实例管理；仍不能调用 Cookie 专属入口。普通 Token 无全局任务、审计和用户管理权限。
 
-secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployment key 加密。label 1～128 字节，授权最多 1000 桶。`expires_in` 为正时长、最多 3650 天：密钥省略或 null 不到期；Token 省略为 90 天、null 不到期。更新的 `keep_expiry=true` 保留原时间；轮换 overlap 为 0～30 天。最近使用最多五分钟落库一次。
+secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployment key 加密。label 1～128 字节，授权最多 1000 桶。`expires_in` 为正时长、最多 3650 天：密钥省略或 null 不到期；Token 省略为 90 天、null 不到期。更新的 `keep_expiry=true` 保留原时间；轮换 overlap 为 0～30 天。最近使用最多五分钟落库一次。S3 密钥使用时间在签名验证后进入有界后台队列，同一密钥合并回写；排队满、数据库超时或进程退出时允许丢弃本次统计，请求不等待此项回写。
 
 ## 存储桶
 
@@ -222,7 +222,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 
 ## 运行状态
 
-`GET /api/v1/system/status` 与 `cli status` 相同，提供进程、连接池、资源预算、读写名额、存储 read/upload/control 队列和目录索引状态；`cache_jobs_active` 为当前缓存填充/清理任务数；`upload_cache.raw_processing` 提供后台 raw 去重的 `pending`、`failed` 和 `bytes`，失败记录保留并重试，不影响已有独立来源；`upload_cache.raw_uploads` 用同样三个字段表示必须排空的 raw 来源，既有待上传工作不因关闭缓存而丢弃；`upload_cache.buffered_files` 返回待同步 raw 的 `pending`、`bytes` 和 `oldest`，`upload_cache.buffered_chunks` 用相同字段返回待同步区块（bytes 为原始大小），同步失败保留待办；`upload_cache.fallbacks` 和 `upload_cache.rejections` 分别统计本进程缓存不可用时的同步回退与策略拒绝次数，重启清零。`GET /api/v1/system/config` 提供脱敏配置、来源、值模式和重启要求，不读取秘密文件内容；来源由 `origin` 标识，值模式由 `value_mode` 标识。
+`GET /api/v1/system/status` 与 `cli status` 相同，提供进程、连接池、资源预算、读写名额、存储 read/upload/control 队列和目录索引状态；`cache_jobs_active` 为当前缓存填充/清理任务数；`credential_activity` 返回凭据使用时间队列的 `entries`、`pending`、`completed`、`dropped`、`failed`，计数按进程累计，completed 包含已检查但尚未到五分钟回写间隔的记录；`upload_cache.raw_processing` 提供后台 raw 去重的 `pending`、`failed` 和 `bytes`，失败记录保留并重试，不影响已有独立来源；`upload_cache.raw_uploads` 用同样三个字段表示必须排空的 raw 来源，既有待上传工作不因关闭缓存而丢弃；`upload_cache.buffered_files` 返回待同步 raw 的 `pending`、`bytes` 和 `oldest`，`upload_cache.buffered_chunks` 用相同字段返回待同步区块（bytes 为原始大小），同步失败保留待办；`upload_cache.fallbacks` 和 `upload_cache.rejections` 分别统计本进程缓存不可用时的同步回退与策略拒绝次数，重启清零。`GET /api/v1/system/config` 提供脱敏配置、来源、值模式和重启要求，不读取秘密文件内容；来源由 `origin` 标识，值模式由 `value_mode` 标识。
 
 `upload_cache.write_memory` 返回 `capacity` / `used` 字节额度，含发送中尚未释放的 RAM 正文；`buffered_files` 与 `buffered_chunks` 各自的 `volatile` 是待排空 RAM 来源数；已丢失来源通过 `/api/v1/maintenance/quarantines` 查询，启动日志同时报告数量，不会被计作已排空的健康数据。
 

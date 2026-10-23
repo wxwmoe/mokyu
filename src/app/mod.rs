@@ -22,6 +22,7 @@ use uuid::Uuid;
 pub(crate) mod buckets;
 pub(crate) mod chunks;
 pub(crate) mod compression;
+pub(crate) mod credential_activity;
 pub(crate) mod extents;
 pub(crate) mod listing;
 pub(crate) mod publish;
@@ -224,6 +225,7 @@ pub struct App {
     pub thumbnails: Arc<crate::control::media::Thumbnails>,
     pub statistics: crate::status::stats::Statistics,
     pub compression_observations: Arc<compression::Observations>,
+    pub(crate) credential_activity: Arc<credential_activity::Activity>,
     pub response_cache: Arc<responses::Cache>,
     pub cleanup_state: crate::worker::lifecycle::Cleanup,
     pub integrity_pacing: std::sync::Mutex<std::time::Instant>,
@@ -343,6 +345,7 @@ impl App {
         let thumbnails =
             Arc::new(crate::control::media::Thumbnails::new(&config, storage.disk.clone()).await?);
         let (compression_observations, compression_receiver) = compression::Observations::new();
+        let (credential_activity, credential_receiver) = credential_activity::Activity::new();
         let response_cache = responses::Cache::new(budget.response_cache_bytes);
         let app = Arc::new(Self {
             cluster: stores.cluster,
@@ -389,6 +392,7 @@ impl App {
             thumbnails,
             statistics: crate::status::stats::Statistics::default(),
             compression_observations,
+            credential_activity,
             response_cache,
             cleanup_state: crate::worker::lifecycle::Cleanup::default(),
             integrity_pacing: std::sync::Mutex::new(std::time::Instant::now()),
@@ -413,6 +417,7 @@ impl App {
             _file_lock: lock,
         });
         compression::Observations::start(Arc::downgrade(&app), compression_receiver);
+        credential_activity::Activity::start(Arc::downgrade(&app), credential_receiver);
         if app.role != "single" {
             let cluster = app
                 .cluster
@@ -584,6 +589,7 @@ impl App {
         status["runtime"] = self.statistics.runtime();
         status["cache_jobs_active"] = json!(self.storage.cache_jobs_active());
         status["http_compression"] = self.compression_observations.snapshot();
+        status["credential_activity"] = self.credential_activity.snapshot();
         status["response_cache"] = self.response_cache.snapshot();
         status["read_replica"] = self.runtime.read_replica().unwrap_or_else(|| json!({"state":if self.config.replica_database.is_some() {"not_applicable"} else {"disabled"}}));
         status["cleanup"] = self.cleanup_status();

@@ -238,11 +238,7 @@ impl S3Access for Gateway {
             return Err(s3_error!(AccessDenied));
         }
         if let Some(credential) = cx.credentials() {
-            self.0
-                .credentials
-                .touch_credential(&credential.access_key)
-                .await
-                .map_err(internal)?;
+            self.0.credential_activity.record(&credential.access_key);
         }
         Ok(())
     }

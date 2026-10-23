@@ -256,3 +256,5 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 `python -m tests.recovery.background_cdc` 复用上述环境，验证原始表示提前确认、设置冻结、后台直接组包、健康复用、同内容并发、旧读者保护、覆盖/删除、空对象、候选上传后的强杀恢复、坏源拒绝及修复重试、显式缓存刷新和 Multipart。四库分别运行；`MOKYU_TEST_CDC_LOCAL=1` 使用本地后端，双 data 使用同样的 peer/fault 变量。故障点只可用于隔离构建。
 
 `upload-overflow.spec.ts` 使用独立 S3 fixture（`MOKYU_TEST_BACKEND`），自行创建本地后端，验证三语明暗表单、键盘选择、320–1440px、草稿取消/保存及本地禁用。`recovery.raw_uploads` 同时验证 chunks/raw 的 fallback/reject、503 SlowDown、失败写入不覆盖旧对象、重启保存策略、非法选项与缺省字段。
+
+`python -m tests.recovery.credential_activity` uses a stopped isolated service and the source-quarantine fixture variables to verify signed GET/HEAD while credential activity writes are paused, bounded timeout and retry, five-minute coalescing, invalid signature isolation, and restart loss of optional statistics. Run against each supported database.
