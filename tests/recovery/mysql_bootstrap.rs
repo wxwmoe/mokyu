@@ -22,6 +22,53 @@ async fn database(
     Ok(db)
 }
 
+fn constraint(line: &str, table: &str, maria: bool) -> String {
+    let line = line.trim_end_matches(',');
+    if let Some((name, definition)) = line
+        .trim_start()
+        .strip_prefix("CONSTRAINT `")
+        .and_then(|rest| rest.split_once('`'))
+    {
+        let numbered =
+            |name: &str| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit());
+        // MariaDB can assign numeric names to anonymous foreign keys during ALTER TABLE.
+        let anonymous = name
+            .strip_prefix(&format!("{table}_ibfk_"))
+            .is_some_and(numbered)
+            || (maria && numbered(name));
+        if anonymous && definition.starts_with(" FOREIGN KEY ") {
+            return format!("  {}", definition.trim_start());
+        }
+    }
+    line.to_owned()
+}
+
+#[test]
+fn automatic_foreign_key_names_do_not_hide_structural_differences() {
+    let definition =
+        " FOREIGN KEY (`file_id`) REFERENCES `multipart_files` (`id`) ON DELETE CASCADE";
+    let old = format!("  CONSTRAINT `fragments_ibfk_1`{definition},");
+    let new = format!("  CONSTRAINT `1`{definition},");
+    assert_eq!(
+        constraint(&old, "fragments", true),
+        constraint(&new, "fragments", true)
+    );
+    assert_ne!(
+        constraint(&old, "fragments", false),
+        constraint(&new, "fragments", false)
+    );
+    for name in ["fragments_file", "other_ibfk_1", "fragments_ibfk_one"] {
+        let line = format!("  CONSTRAINT `{name}`{definition}");
+        assert_eq!(constraint(&line, "fragments", true), line);
+    }
+    assert_ne!(
+        constraint(&old, "fragments", true),
+        constraint(&new.replace("CASCADE", "RESTRICT"), "fragments", true)
+    );
+    let check = "  CONSTRAINT `1` CHECK (`size` >= 0)";
+    assert_eq!(constraint(check, "fragments", true), check);
+}
+
 async fn structure(db: &mut MySqlConnection) -> Result<BTreeMap<String, String>> {
     let name: String = sqlx::query_scalar("SELECT DATABASE()")
         .fetch_one(&mut *db)
@@ -118,7 +165,7 @@ async fn structure(db: &mut MySqlConnection) -> Result<BTreeMap<String, String>>
         let mut constraints: Vec<_> = sql
             .lines()
             .filter(|line| unordered(line))
-            .map(|line| line.trim_end_matches(',').to_owned())
+            .map(|line| constraint(line, &table, maria))
             .collect();
         constraints.sort();
         lines.extend(constraints);
