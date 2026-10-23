@@ -13,19 +13,8 @@ from pathlib import Path
 import boto3
 from botocore.config import Config
 
-from tests.benchmarks.public_reads import cpu, status
+from tests.benchmarks.public_reads import cpu, disk, memory, status
 from tests.benchmarks.source_writes import percentiles, sql_changes, sql_snapshot
-
-
-def memory(path):
-    values = {key: int(value) for key, value in
-              (line.split() for line in (path / 'memory.stat').read_text().splitlines())}
-    return {key: values[key] for key in ('anon', 'file', 'file_dirty', 'file_writeback')}
-
-
-def disk(path):
-    return {fields[0]: {key: int(value) for key, value in (item.split('=') for item in fields[1:])}
-            for fields in (line.split() for line in (path / 'io.stat').read_text().splitlines())}
 
 
 def readback(client, bucket, key, expected):
@@ -123,9 +112,13 @@ def measure(fixture, credentials, database=None):
     maximum = int(fixture['max_operations'])
     concurrency = int(fixture.get('concurrency', 4))
     size = int(fixture['size'])
+    hot_keys = int(fixture.get('hot_keys', 0))
+    repeat_every = int(fixture.get('repeat_every', 0))
     assert operation in ('put', 'get', 'head', 'multipart')
     assert 1 <= seconds <= 600 and 1 <= concurrency <= 64 and 1 <= maximum <= 1000000
     assert 0 <= size <= 64 * 1024 * 1024
+    assert 0 <= hot_keys <= 1024
+    assert 0 <= repeat_every <= maximum
     assert (maximum + 1) * size <= int(fixture['max_total_bytes']), 'workload exceeds its byte budget'
     raw_drain_seconds = int(fixture.get('raw_drain_seconds', 0))
     assert 0 <= raw_drain_seconds <= 600
@@ -151,7 +144,7 @@ def measure(fixture, credentials, database=None):
     attempted = 0
     errors = Counter()
     samples = []
-    committed = []
+    committed = {}
     sampling_errors = []
     peak = {}
     sampler = None
@@ -187,14 +180,17 @@ def measure(fixture, credentials, database=None):
                     sequence = attempted
                     attempted += 1
                 writing = operation in ('put', 'multipart')
-                body = payload(base, sequence) if writing else base
+                payload_sequence = sequence % repeat_every if repeat_every else sequence
+                body = payload(base, payload_sequence) if writing else base
                 key = f'{prefix}/{sequence}' if writing else source
+                if writing and hot_keys:
+                    key = f'{prefix}/hot-{index}-{sequence % hot_keys}'
                 try:
                     timing = request(clients[index], bucket, key, body, operation)
                     with lock:
                         samples.append(timing)
                         if writing:
-                            committed.append(sequence)
+                            committed[key] = payload_sequence
                 except Exception as error:
                     code = (getattr(error, 'response', None) or {}).get('Error', {}).get('Code')
                     with lock:
@@ -230,9 +226,9 @@ def measure(fixture, credentials, database=None):
                 errors['raw_processing:incomplete'] += 1
         verification_started = time.perf_counter()
         verified = 0
-        for sequence in committed:
+        for key, sequence in committed.items():
             try:
-                readback(clients[0], bucket, f'{prefix}/{sequence}', payload(base, sequence))
+                readback(clients[0], bucket, key, payload(base, sequence))
                 verified += 1
             except Exception as error:
                 errors['verification:' + type(error).__name__] += 1

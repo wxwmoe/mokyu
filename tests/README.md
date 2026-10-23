@@ -151,6 +151,10 @@ fixture 示例：
 
 `cases` 可配置多个对象与入口；`encoding` 支持 identity/gzip/br/zstd，后两者另需 Python `brotli`/`zstandard`。Range 场景通过 `headers.Range`、`status: 206` 和对应切片的 expected_file 表达。`successful_wire_body_bytes` 统计实际读取的编码正文，不含 HTTP 头和帧开销，不以解码长度回填。延迟从请求开始到正文读完，包含连接等待；TTFB 到第一个正文字节。RPS 包含客户端解码校验开销，必须检查客户端 CPU 是否饱和。
 
+可选 `seconds` 为 1–600 秒，以实际完成的请求数计算速率，仍受 `requests` 上限约束。每个 case 的 `method` 支持 GET/HEAD/OPTIONS，`response_headers` 核对指定响应头；HEAD/OPTIONS 要求无正文。资源报告另含匿名页、文件页、脏页、回写页及逐设备 I/O 差值。
+
+Linux 单并发 case 可指定 `evict_files`，仅列出该隔离测试拥有的文件。每次请求前用 `posix_fadvise(DONTNEED)` 驱逐这些文件的页缓存，并用 `mincore` 确认无驻留页；页面仍被使用时最多重试一秒，未成功驱逐即报错，不触碰全局缓存。驱逐耗时不计入请求延迟，但计入整个测量窗口，因此此类 RPS 不能和热读吞吐直接比较。该结果只证明文件页缓存冷读，不证明磁盘控制器、虚拟机宿主或远端介质的缓存状态。
+
 预热失败不会启动并发屏障；请求或校验失败写入结果并非零退出，没有成功样本时百分位为 null。先运行少量请求验证入口，再做交错 off/on/on/off；冷测试必须明确记录外部清理或重启步骤并设 warmup=0，不能把重复同对象的全程称为冷读。固定总预算与新增总预算的比较分别报告，禁止把消除 SQL、缓存命中或小样本吞吐直接作为生产收益。
 
 ## 来源隔离回归
@@ -211,6 +215,8 @@ rustc --edition=2024 -O tests/benchmarks/lock_tables.rs --extern "tokio=$tokio_r
 fixture 使用 `revision`、`build`、`database_version`、`cache_state`、`seed`、`credentials_file`、`prefix` 和可选 `resources`/PostgreSQL `database_file`，另设单个 `endpoint`、`operation`、`size`、`seconds`、`concurrency`、`max_operations`、`max_total_bytes`。正文大小 0–64MiB，并发 1–64，持续 1–600 秒，请求最多一百万；包括预热对象的 `(max_operations + 1) × size` 必须在字节预算内。每轮使用独占前缀，脚本不会删除数据；触及请求上限时按实际时间报告。
 
 后台写入比较可设置 `raw_drain_seconds`（1–600）并提供对应隔离库的 `MOKYU_TEST_CONFIG`；预热及请求结束后等待该桶的 raw 去重、CDC、raw/chunks 待上传记录排空，完整读回放在排空后。报告分别保留 ACK 窗口和包括排空的时间、完成速率、CPU/磁盘成本；失败或超时不能计为稳态完成。排空轮询本身有数据库开销，比较双方须使用同样设置。
+
+`hot_keys` 默认为 0，表示每次新 key；1–1024 时每个写者使用独立的有限 key 集合，避免不同写者竞争同一目标，计时后核对各 key 最后一次成功写入。`repeat_every` 默认为 0，表示独立载荷；正数表示按该周期复用载荷，用于控制去重命中率。ACK 数仍包含所有成功覆盖，读回数量只包含最终对象，两者不能混用。
 
 报告保存各操作百分位、实际请求窗口吞吐、读回校验数量/错误、CPU、cgroup 内存（含匿名页/文件页/脏页）、逐设备 I/O 字节/次数及节点状态。逐设备计数不叠加，以免重复计算分区和底层设备。PostgreSQL SQL 差值是整个测量窗口的数据库总成本，包含后台工作，不是逐请求前台 SQL 计数；没有采集时为 null，不能解读成零。公共 Web/匿名 S3 的编码读取继续使用公共读基准；所有比较记录应用/页缓存状态，统一资源与确认策略，并发超出服务准入额度的 SlowDown 必须计为错误，不能只报告成功请求。
 
@@ -282,3 +288,5 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 `python -m tests.recovery.file_delivery` uses the stopped-service source-quarantine fixture and a 4MiB response budget. It covers local profile validation, one-query cold and zero-query hot raw reads, per-storage body-cache retirement, restoration, file size and symlink checks. With `MOKYU_TEST_PROXY_RUN` set to the application container hostname, it writes `proxy/nginx.conf`, `proxy/apache.conf` and `proxy/raw-path` beside the application config, then waits for `proxy/ready`. The orchestrator mounts only that raw directory read-only at `/srv/raw`, starts Nginx and Apache with mod_xsendfile as `<hostname>-nginx` and `<hostname>-apache`, and creates the marker. HTTP fixtures on 9100/9101 pause the handoff for GC races. Both proxy configurations come directly from the deployment document; Nginx also enables the actual optional control-cache blocks. Run in a private Docker network with isolated data and explicit resource limits.
 
 `python -m tests.recovery.local_deployment` reproduces the documented SQLite/raw CLI initialization. Set `MOKYU_TEST_BINARY`, `MOKYU_TEST_ROOT` to an empty owned directory, and `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`. It owns ports 9000–9002 and starts/stops the service itself; use a fresh Linux container with 1GiB memory and UID/GID 10001 to check the documented file permissions.
+
+`node tests/recovery/sdk_multipart.mjs /fixture.json` uses AWS SDK for JavaScript v3 and an isolated fault-injection service with `MOKYU_TEST_COMPLETE_TIMEOUT_SECONDS=12`. Install the SDK in the test environment, not the application. The private fixture contains `endpoint`, `bucket`, `access_key`, `secret_key` and the service's shared `fault_dir`; require `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`. It checks full PUT/GET/HEAD/Range, two-part uploads, HTTP 200 Error XML rejection/retry, five-second whitespace keepalive under an eight-second socket timeout, and successful result replay. Run raw and chunks separately, including a real reverse proxy; the script leaves its uniquely prefixed objects in the disposable bucket.

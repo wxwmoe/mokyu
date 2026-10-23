@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from tests.benchmarks.object_io import disk, drain_raw, memory, payload, readback, request
+from tests.benchmarks.object_io import disk, drain_raw, measure, memory, payload, readback, request
 
 
 class Client:
@@ -41,6 +41,34 @@ class Client:
 
 
 class TimingTests(unittest.TestCase):
+    def test_overwrite_verifies_final_versions_without_counting_reads_as_writes(self):
+        class Store:
+            def __init__(self):
+                self.objects = {}
+                self.reads = 0
+
+            def put_object(self, **args):
+                self.objects[args['Key']] = args['Body']
+
+            def get_object(self, **args):
+                self.reads += 1
+                body = self.objects[args['Key']]
+                return dict(Body=io.BytesIO(body), ContentLength=len(body))
+
+            def close(self):
+                pass
+
+        client = Store()
+        with patch('tests.benchmarks.object_io.boto3.client', return_value=client):
+            result = measure(dict(operation='put', size=32, seconds=1, max_operations=8,
+                concurrency=1, hot_keys=1, repeat_every=2, max_total_bytes=1024, seed=1, prefix='test', endpoint='http://fixture'),
+                dict(bucket='bucket', access_key='access', secret_key='secret'))
+        self.assertEqual(result['errors'], {})
+        self.assertEqual(result['acknowledged'], 8)
+        self.assertEqual(result['verification']['objects'], 1)
+        self.assertEqual(client.reads, 2)
+        self.assertEqual(client.objects['test/hot-0-0'][-16:], (1).to_bytes(16, 'big'))
+
     def test_background_drain_cannot_hide_failure_or_timeout(self):
         from unittest.mock import Mock
         database = Mock()
