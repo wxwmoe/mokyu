@@ -966,6 +966,38 @@ pub(super) fn flush_time() -> Scalar<'static, DateTime<Utc>> {
     sqlx::query_scalar("SELECT clock_timestamp()")
 }
 
+pub(super) fn upgrade_tables() -> Scalar<'static, String> {
+    sqlx::query_scalar(
+        "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename NOT IN ('_sqlx_migrations','mokyu_meta','key_fingerprints','runtime_settings','maintenance_controls','access_state') ORDER BY tablename",
+    )
+}
+
+pub(super) fn upgrade_has_data(table: &str) -> Scalar<'static, bool> {
+    // Initialization rows and configuration are not stored objects or user-created records.
+    let predicate = match table {
+        "projects" => "id<>'00000000-0000-0000-0000-000000000001'",
+        "quota_scopes" => {
+            "scope<>'project' OR scope_id<>'00000000-0000-0000-0000-000000000001' OR used_bytes<>0 OR reserved_bytes<>0 OR inflight_bytes<>0 OR object_count<>0 OR bucket_count<>0 OR cached_bytes<>0"
+        }
+        "catalog_build" => "scanned<>0 OR cursor_bucket IS NOT NULL OR cursor_key IS NOT NULL",
+        "usage_summary" => {
+            "id<>'global' OR as_of IS NOT NULL OR data IS NOT NULL OR bucket_ids IS NOT NULL"
+        }
+        _ => "TRUE",
+    };
+    let table = format!("public.\"{}\"", table.replace('"', "\"\""));
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM {table} WHERE {predicate})"
+    )))
+}
+
+pub(super) fn lock_upgrade_table(table: &str) -> Statement<'static> {
+    let table = table.replace('"', "\"\"");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "LOCK TABLE public.\"{table}\" IN SHARE MODE"
+    )))
+}
+
 pub(super) fn schema_empty() -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname NOT IN ('public','information_schema')) AND NOT EXISTS(SELECT 1 FROM pg_depend d JOIN pg_namespace n ON d.refclassid='pg_namespace'::regclass AND d.refobjid=n.oid WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_extension WHERE extname<>'plpgsql') AND NOT EXISTS(SELECT 1 FROM pg_event_trigger)",
@@ -1313,11 +1345,6 @@ impl RuntimeSettingsStore for Backend {
 
 #[async_trait::async_trait]
 impl StorageProfileStore for Backend {
-    async fn initialize(&self, min_free_space: &str) -> Result<()> {
-        crate::config::bytes(min_free_space)?;
-        sqlx::query("UPDATE storage_profiles p SET min_free_space=$1,revision=revision+1,updated_at=now() FROM storages s WHERE s.id=p.storage_id AND s.type='local' AND p.min_free_space IS NULL").bind(min_free_space).execute(&self.pool).await?;
-        Ok(())
-    }
     async fn update(
         &self,
         name: String,
@@ -9552,17 +9579,6 @@ pub(super) fn initialize_nonce_counters(key: Uuid) -> Statement<'static> {
         "INSERT INTO nonce_counters(block_key_id,type_tag,reserved_id) VALUES($1,0,0),($1,1,0)",
     )
     .bind(key)
-}
-
-pub(super) fn incompatible_payload(version: i32) -> Scalar<'static, bool> {
-    if version >= 47 {
-        return sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM packs) OR EXISTS(SELECT 1 FROM fragments) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM uploads) OR EXISTS(SELECT 1 FROM raw_sources) OR EXISTS(SELECT 1 FROM multipart_files)",
-        );
-    }
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM packs) OR EXISTS(SELECT 1 FROM fragments) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM uploads)",
-    )
 }
 
 use crate::model::key_replacement::{

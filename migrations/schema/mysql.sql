@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0041.
+-- Generated from the complete mysql migration chain through 0042.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;

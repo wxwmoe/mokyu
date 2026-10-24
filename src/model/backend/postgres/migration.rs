@@ -7,14 +7,15 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator.locking = false;
     migrator
 };
-const SCHEMA_VERSION: i64 = 70;
-const LEGACY_SCHEMA_VERSION: i32 = 33;
+const SCHEMA_VERSION: i64 = 71;
+// Only the 0.0.6 format boundary requires an empty store.
+const EMPTY_UPGRADE_VERSION: i64 = 71;
 
 pub(super) async fn run(owner: &mut PgConnection) -> Result<()> {
     sqlx::raw_sql(queries::MIGRATION_SETUP)
         .execute(&mut *owner)
         .await?;
-    // Inspect and initialize under the same lock as incremental cluster upgrades.
+    // Serialize empty/current decisions across control processes.
     owner.lock().await?;
     let result = run_locked(owner).await;
     let unlock = owner.unlock().await;
@@ -37,18 +38,7 @@ async fn run_locked(owner: &mut PgConnection) -> Result<()> {
         i64::from(version) <= SCHEMA_VERSION,
         "database schema is newer than this binary; downgrade is unsupported"
     );
-    if i64::from(version) < 51 {
-        ensure!(
-            !queries::incompatible_payload(version)
-                .fetch_one(&mut *owner)
-                .await?,
-            "file identity format requires an empty store; migrate logical objects through S3"
-        );
-    }
-    ensure!(
-        version >= LEGACY_SCHEMA_VERSION,
-        "unsupported database schema version; migrate logical objects through S3"
-    );
+    ensure!(version >= 33, "unsupported database schema version");
     ensure!(
         owner.dirty_version("_sqlx_migrations").await?.is_none(),
         "PostgreSQL migration history contains a failed transaction"
@@ -72,14 +62,31 @@ async fn run_locked(owner: &mut PgConnection) -> Result<()> {
             "PostgreSQL migration checksum changed"
         );
     }
-    MIGRATIONS
-        .run(&mut *owner)
-        .await
-        .context("apply database migrations")?;
-    ensure!(
-        i64::from(queries::schema_version().fetch_one(&mut *owner).await?) == SCHEMA_VERSION,
-        "schema version does not match the migration history"
-    );
+    if i64::from(version) < SCHEMA_VERSION {
+        let mut tx = owner.begin().await?;
+        if i64::from(version) < EMPTY_UPGRADE_VERSION {
+            for table in queries::upgrade_tables().fetch_all(&mut *tx).await? {
+                queries::lock_upgrade_table(&table)
+                    .execute(&mut *tx)
+                    .await?;
+                ensure!(
+                    !queries::upgrade_has_data(&table)
+                        .fetch_one(&mut *tx)
+                        .await?,
+                    "database upgrade requires an empty store (table {table})"
+                );
+            }
+        }
+        MIGRATIONS
+            .run(&mut *tx)
+            .await
+            .context("apply database migrations")?;
+        ensure!(
+            i64::from(queries::schema_version().fetch_one(&mut *tx).await?) == SCHEMA_VERSION,
+            "schema version does not match the migration history"
+        );
+        tx.commit().await?;
+    }
     Ok(())
 }
 

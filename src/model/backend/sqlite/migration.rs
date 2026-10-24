@@ -3,7 +3,9 @@ use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, SqliteConnection, migrate::Migrate};
 
 static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
-const SCHEMA_VERSION: i64 = 42;
+const SCHEMA_VERSION: i64 = 43;
+// Only the 0.0.6 format boundary requires an empty store.
+const EMPTY_UPGRADE_VERSION: i64 = 43;
 
 pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
     ensure!(
@@ -19,14 +21,6 @@ pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
         version <= SCHEMA_VERSION,
         "database schema is newer than this binary; downgrade is unsupported"
     );
-    if i64::from(version) < 26 {
-        ensure!(
-            !queries::incompatible_payload(version)
-                .fetch_one(&mut *connection)
-                .await?,
-            "file identity format requires an empty store; migrate logical objects through S3"
-        );
-    }
     ensure!(version >= 1, "unsupported database schema version");
     let applied = queries::migrations().fetch_all(&mut *connection).await?;
     ensure!(
@@ -51,17 +45,28 @@ pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
             "SQLite migration checksum changed"
         );
     }
-    MIGRATIONS
-        .run(&mut *connection)
-        .await
-        .context("apply SQLite migrations")?;
-    ensure!(
-        queries::schema_version()
-            .fetch_one(&mut *connection)
-            .await?
-            == SCHEMA_VERSION,
-        "schema version does not match the SQLite migration history"
-    );
+    if version < SCHEMA_VERSION {
+        let mut tx = connection.begin_with(queries::BEGIN_WRITE).await?;
+        if version < EMPTY_UPGRADE_VERSION {
+            for table in queries::upgrade_tables().fetch_all(&mut *tx).await? {
+                ensure!(
+                    !queries::upgrade_has_data(&table)
+                        .fetch_one(&mut *tx)
+                        .await?,
+                    "database upgrade requires an empty store (table {table})"
+                );
+            }
+        }
+        MIGRATIONS
+            .run(&mut *tx)
+            .await
+            .context("apply database migrations")?;
+        ensure!(
+            queries::schema_version().fetch_one(&mut *tx).await? == SCHEMA_VERSION,
+            "schema version does not match the migration history"
+        );
+        tx.commit().await?;
+    }
     Ok(())
 }
 

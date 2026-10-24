@@ -86,111 +86,42 @@ try:
     db.execute('DROP TABLE buckets')
     print('PASS unknown database refuses initialization without writing schema or history', flush=True)
 
-    # A non-empty 0.0.4 schema is deliberately rejected; an empty schema may
-    # continue through the append-only 0.0.5 migrations so operators can
-    # migrate logical objects manually.
-    db.execute("CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)")
-    with db.transaction():
-        db.execute("SELECT set_config('media_gateway.backend_identity','storage-registry',false)")
-        for path in sorted(migrations.glob('*.sql')):
-            version = int(path.stem.split('_')[0])
-            if version > 33:
-                continue
-            db.execute(path.read_text())
-            db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
-                       (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
-    legacy_history = history()
-    legacy_storage = '00000000-0000-0000-0000-000000000042'
-    db.execute("INSERT INTO storages(id,name,type,path) VALUES(%s,'legacy-local','local','/data/storage')", (legacy_storage,))
-    db.execute("INSERT INTO buckets(id,name,storage_id) VALUES(gen_random_uuid(),'legacy-preserved',%s)", (legacy_storage,))
-    legacy_buckets = db.execute('SELECT * FROM buckets').fetchall()
-    start()
-    stopped_with('0.0.4 data cannot be upgraded in place')
-    assert db.execute("SELECT to_regclass('mokyu_meta')").fetchone()[0] == 'mokyu_meta'
-    assert db.execute('SELECT * FROM buckets').fetchall() == legacy_buckets
-    assert history() == legacy_history
-    db.execute("DROP SCHEMA public CASCADE")
-    db.execute("CREATE SCHEMA public")
-    print('PASS non-empty 0.0.4 schema rejects import without changing data or history', flush=True)
-    with db.transaction():
-        db.execute('DROP SCHEMA public CASCADE')
-        db.execute('CREATE SCHEMA public')
-
-    # An empty 0.0.4 schema is allowed to finish the 0.0.5 baseline.
-    db.execute("CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)")
-    with db.transaction():
-        db.execute("SELECT set_config('media_gateway.backend_identity','storage-registry',false)")
-        for path in sorted(migrations.glob('*.sql')):
-            version = int(path.stem.split('_')[0])
-            if version > 33:
-                continue
-            db.execute(path.read_text())
-            db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
-                       (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
-    db.execute("""CREATE FUNCTION _test_catalog_migration() RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN IF NEW.version=37 THEN PERFORM pg_advisory_xact_lock(734922709859937); END IF;
-        RETURN NEW; END $$""")
-    db.execute('CREATE TRIGGER _test_catalog_migration BEFORE INSERT ON _sqlx_migrations FOR EACH ROW EXECUTE FUNCTION _test_catalog_migration()')
-    with psycopg.connect(conninfo) as blocker:
-        blocker.execute('SELECT pg_advisory_xact_lock(734922709859937)')
+    # A populated old schema is rejected before any migration changes.
+    for version_limit in (33, 70):
+        db.execute("CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)")
+        with db.transaction():
+            db.execute("SELECT set_config('media_gateway.backend_identity','storage-registry',false)")
+            for path in sorted(migrations.glob('*.sql')):
+                version = int(path.stem.split('_')[0])
+                if version > version_limit:
+                    continue
+                db.execute(path.read_text())
+                db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
+                           (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
+        prior_history = history()
+        tables = db.execute("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").fetchall()
+        legacy_storage = '00000000-0000-0000-0000-000000000042'
+        db.execute("INSERT INTO storages(id,name,type,path) VALUES(%s,'legacy-local','local','/data/storage')", (legacy_storage,))
+        db.execute("INSERT INTO buckets(id,name,storage_id) VALUES(gen_random_uuid(),'legacy-preserved',%s)", (legacy_storage,))
+        buckets = db.execute('SELECT * FROM buckets').fetchall()
         start()
-        for _ in range(100):
-            waiting = db.execute("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query ILIKE '%INSERT INTO _sqlx_migrations%'").fetchone()
-            if waiting:
-                break
-            assert process.poll() is None, process.stderr.read()
-            time.sleep(.1)
-        else:
-            raise AssertionError('catalog migration did not reach its history commit')
-        assert db.execute('SELECT pg_terminate_backend(%s)', waiting).fetchone()[0]
-        stopped_with('apply database migrations')
-    assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone() == (36,)
-    assert db.execute("SELECT to_regclass('catalog_build'),to_regclass('objects_catalog_search')").fetchone() == ('catalog_build', None)
-    assert history()[-1][0] == 36
-    db.execute('DROP TRIGGER _test_catalog_migration ON _sqlx_migrations')
-    db.execute('DROP FUNCTION _test_catalog_migration()')
-    print('PASS interrupted catalog baseline rolls back its indexes, removed state and migration history', flush=True)
-    start()
-    ready()
-    assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone()[0] == latest
-    stop()
-    print('PASS empty 0.0.4 schema upgrades to the 0.0.5 baseline', flush=True)
-    reset_local_identity()
-    with db.transaction():
-        db.execute('DROP SCHEMA public CASCADE')
-        db.execute('CREATE SCHEMA public')
-
-    # Preserve policy state and task details when applying the naming migration.
-    db.execute("CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)")
-    with db.transaction():
-        db.execute("SELECT set_config('media_gateway.backend_identity','storage-registry',false)")
-        for path in sorted(migrations.glob('*.sql')):
-            version = int(path.stem.split('_')[0])
-            if version > 34:
-                continue
-            db.execute(path.read_text())
-            db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
-                       (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
-        db.execute("UPDATE maintenance_controls SET paused=true WHERE kind='reuse'")
-        db.execute("INSERT INTO tasks(id,task_type,state,detail) VALUES('00000000-0000-0000-0000-000000000035','pack','paused','{\"kind\":\"reuse\",\"sentinel\":42}')")
-        db.execute("CREATE INDEX objects_catalog_kind ON objects(bucket_id,catalog_kind,object_key) WHERE stream_id IS NOT NULL")
-        db.execute("UPDATE catalog_build SET current_index='objects_catalog_kind'")
-    prior_history = history()
-    start()
-    ready()
-    assert history()[:len(prior_history)] == prior_history
-    assert db.execute("SELECT paused FROM maintenance_controls WHERE policy='reuse'").fetchone() == (True,)
-    assert db.execute("SELECT state,detail FROM tasks WHERE id='00000000-0000-0000-0000-000000000035'").fetchone() == ('paused', {'policy': 'reuse', 'sentinel': 42})
-    assert db.execute("SELECT catalog_category('photo.png','application/octet-stream')").fetchone() == ('image',)
-    assert db.execute("SELECT to_regclass('objects_catalog_category'),to_regclass('tasks_policy_recent'),to_regclass('objects_catalog_kind'),to_regclass('tasks_kind_recent')").fetchone() == ('objects_catalog_category', 'tasks_policy_recent', None, None)
-    assert db.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND (column_name='kind' OR column_name='catalog_kind')").fetchone() == (0,)
-    assert db.execute("SELECT to_regclass('catalog_build')").fetchone() == (None,)
-    stop()
-    print('PASS semantic names preserve policy state, task details, indexes and migration history', flush=True)
-    reset_local_identity()
-    with db.transaction():
-        db.execute('DROP SCHEMA public CASCADE')
-        db.execute('CREATE SCHEMA public')
+        stopped_with('empty store')
+        assert db.execute('SELECT * FROM buckets').fetchall() == buckets
+        assert history() == prior_history
+        assert db.execute("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").fetchall() == tables
+        assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone() == (version_limit,)
+        db.execute('DELETE FROM buckets')
+        db.execute('DELETE FROM storages')
+        start()
+        ready()
+        assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone() == (latest,)
+        assert history()[:len(prior_history)] == prior_history
+        stop()
+        reset_local_identity()
+        with db.transaction():
+            db.execute('DROP SCHEMA public CASCADE')
+            db.execute('CREATE SCHEMA public')
+    print('PASS empty schemas upgrade and populated schemas remain unchanged', flush=True)
 
     start()
     ready()

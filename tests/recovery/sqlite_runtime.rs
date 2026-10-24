@@ -61,14 +61,18 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
     }
     assert!(!path.exists());
     std::fs::create_dir_all(path.parent().unwrap())?;
+    let mut legacy = config.clone();
+    let legacy_path = path.with_file_name("old-schema.db");
+    assert!(!legacy_path.exists());
+    legacy.database.path = Some(legacy_path.clone());
     let options = SqliteConnectOptions::new()
-        .filename(&path)
+        .filename(&legacy_path)
         .create_if_missing(true);
     let mut admin = SqliteConnection::connect_with(&options).await?;
     admin.ensure_migrations_table("_sqlx_migrations").await?;
     sqlx::raw_sql("CREATE TRIGGER test_migration BEFORE INSERT ON _sqlx_migrations BEGIN SELECT RAISE(ABORT,'isolated interruption'); END").execute(&mut admin).await?;
     assert!(
-        connection::open(&config, &secrets, &budget, "single")
+        connection::open(&legacy, &secrets, &budget, "single")
             .await
             .is_err()
     );
@@ -85,14 +89,14 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
     sqlx::raw_sql("DROP TRIGGER test_migration")
         .execute(&mut admin)
         .await?;
-    // A valid old schema exercises incremental upgrade rollback, not bootstrap recovery.
+    // An interrupted empty-schema upgrade must roll back before it can be retried.
     let migrations = sqlx::migrate!("./migrations/sqlite");
     for migration in migrations.iter().take(5) {
         admin.apply("_sqlx_migrations", migration).await?;
     }
     sqlx::raw_sql("CREATE TRIGGER test_migration BEFORE INSERT ON _sqlx_migrations WHEN NEW.version=6 BEGIN SELECT RAISE(ABORT,'isolated late interruption'); END").execute(&mut admin).await?;
     assert!(
-        connection::open(&config, &secrets, &budget, "single")
+        connection::open(&legacy, &secrets, &budget, "single")
             .await
             .is_err()
     );
@@ -108,7 +112,16 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
     sqlx::raw_sql("DROP TRIGGER test_migration")
         .execute(&mut admin)
         .await?;
+    let upgraded = connection::open(&legacy, &secrets, &budget, "single").await?;
+    assert_eq!(
+        queries::schema_version().fetch_one(&upgraded.read).await?,
+        migrations.iter().last().unwrap().version
+    );
+    close(upgraded).await;
     admin.close().await?;
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
 
     let backend = connection::open(&config, &secrets, &budget, "single").await?;
     backend.check_owner()?;

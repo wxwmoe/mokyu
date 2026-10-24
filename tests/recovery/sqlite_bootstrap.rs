@@ -4,9 +4,16 @@ use sqlx::{Connection, Row, SqliteConnection, migrate::Migrate};
 use std::collections::BTreeMap;
 
 async fn contents(db: &mut SqliteConnection) -> Result<BTreeMap<String, Vec<String>>> {
+    read_contents(db, true).await
+}
+
+async fn read_contents(
+    db: &mut SqliteConnection,
+    normalize: bool,
+) -> Result<BTreeMap<String, Vec<String>>> {
     let mut data = BTreeMap::new();
     for table in queries::tables().fetch_all(&mut *db).await? {
-        if table == "_sqlx_migrations" {
+        if normalize && table == "_sqlx_migrations" {
             continue;
         }
         let columns = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -18,17 +25,19 @@ async fn contents(db: &mut SqliteConnection) -> Result<BTreeMap<String, Vec<Stri
         for column in columns {
             let name: String = column.try_get("name")?;
             let column_type: String = column.try_get("type")?;
-            let value = if table == "mokyu_meta" && name == "deployment_id" {
+            let value = if normalize && table == "mokyu_meta" && name == "deployment_id" {
                 "'deployment'".to_owned()
-            } else if matches!(
-                name.as_str(),
-                "created_at"
-                    | "updated_at"
-                    | "last_scheduled_at"
-                    | "coverage_since"
-                    | "flushed_at"
-                    | "requested_at"
-            ) {
+            } else if normalize
+                && matches!(
+                    name.as_str(),
+                    "created_at"
+                        | "updated_at"
+                        | "last_scheduled_at"
+                        | "coverage_since"
+                        | "flushed_at"
+                        | "requested_at"
+                )
+            {
                 format!("CASE WHEN \"{name}\">0 THEN 'timestamp' ELSE \"{name}\" END")
             } else if column_type == "BLOB" {
                 format!("CASE WHEN \"{name}\" IS NOT NULL THEN hex(\"{name}\") END")
@@ -60,6 +69,16 @@ async fn same_structure(left: &mut SqliteConnection, right: &mut SqliteConnectio
     for (actual, expected) in left.iter().zip(&right) {
         assert_eq!(actual, expected, "{} {}", expected.0, expected.1);
     }
+    Ok(())
+}
+
+async fn rejects_unchanged(db: &mut SqliteConnection, message: &str) -> Result<()> {
+    let schema = structure(db).await?;
+    let data = read_contents(db, false).await?;
+    let error = migration::run(db).await.unwrap_err();
+    assert!(format!("{error:#}").contains(message), "{error:#}");
+    assert_eq!(structure(db).await?, schema);
+    assert_eq!(read_contents(db, false).await?, data);
     Ok(())
 }
 
@@ -105,133 +124,61 @@ async fn sqlite_schema_bootstrap_contract() -> Result<()> {
     migration::run(&mut fresh).await?;
     assert_eq!(contents(&mut fresh).await?, before);
 
-    // Upgrade an actual old schema with data; preserve identity and user values.
-
-    // Empty live tables must not reset nonce high-water marks consumed by old writers.
-    let mut counters = SqliteConnection::connect("sqlite::memory:").await?;
-    counters.ensure_migrations_table("_sqlx_migrations").await?;
-
-    for entry in migrations.iter().take(24) {
-        counters.apply("_sqlx_migrations", entry).await?;
-    }
-    sqlx::raw_sql("INSERT INTO managed_keys(id,name,purpose,key_algorithm,fingerprint) VALUES(X'00000000000000000000000000000001','legacy-counter','block','aes-256-gcm',zeroblob(32)); DELETE FROM sqlite_sequence WHERE name IN ('chunk_encodings','packs'); INSERT INTO sqlite_sequence(name,seq) VALUES('chunk_encodings',1000000),('packs',2000000);").execute(&mut counters).await?;
-    migration::run(&mut counters).await?;
-    let high: Vec<(i64, i64)> =
-        sqlx::query_as("SELECT type_tag,reserved_id FROM nonce_counters ORDER BY type_tag")
-            .fetch_all(&mut counters)
+    // Validate history before upgrading an empty schema; preserve populated schemas unchanged.
+    for version in [17, 22, 25, 42].into_iter().chain(
+        migrations
+            .iter()
+            .map(|entry| entry.version)
+            .filter(|version| *version >= 43),
+    ) {
+        let mut old = SqliteConnection::connect("sqlite::memory:").await?;
+        old.ensure_migrations_table("_sqlx_migrations").await?;
+        for entry in migrations
+            .iter()
+            .take_while(|entry| entry.version <= version)
+        {
+            old.apply("_sqlx_migrations", entry).await?;
+        }
+        let mut invalid_history = old.begin().await?;
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version=1")
+            .execute(&mut *invalid_history)
             .await?;
-    assert_eq!(high, vec![(0, 1000000), (1, 2000000)]);
-    migration::run(&mut counters).await?;
-    assert_eq!(
-        sqlx::query_as::<_, (i64, i64)>(
-            "SELECT type_tag,reserved_id FROM nonce_counters ORDER BY type_tag"
-        )
-        .fetch_all(&mut counters)
-        .await?,
-        high
-    );
-
-    // Materialize legacy upload policy once, including disabled backends.
-    let mut policy = SqliteConnection::connect("sqlite::memory:").await?;
-    policy.ensure_migrations_table("_sqlx_migrations").await?;
-    for entry in migrations.iter().take(22) {
-        policy.apply("_sqlx_migrations", entry).await?;
-    }
-    sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker,enabled) VALUES(X'00000000000000000000000000000001','policy-upgrade','local','/data/policy-upgrade','{}',false); INSERT INTO storage_profiles(storage_id) VALUES(X'00000000000000000000000000000001'); INSERT INTO runtime_settings(section,value) VALUES('uploads','{\"idle_timeout\":\"7d\",\"client_idle_timeout\":\"120s\"}');").execute(&mut policy).await?;
-    migration::run(&mut policy).await?;
-    let upgraded: (String, Option<String>) = sqlx::query_as("SELECT multipart_idle_timeout,min_free_space FROM storage_profiles WHERE storage_id=X'00000000000000000000000000000001'").fetch_one(&mut policy).await?;
-    assert_eq!(upgraded, ("7d".into(), None));
-    let settings: serde_json::Value = serde_json::from_str(
-        &sqlx::query_scalar::<_, String>(
-            "SELECT value FROM runtime_settings WHERE section='uploads'",
-        )
-        .fetch_one(&mut policy)
-        .await?,
-    )?;
-    assert_eq!(settings, serde_json::json!({"client_idle_timeout":"120s"}));
-    let migrated = contents(&mut policy).await?;
-    migration::run(&mut policy).await?;
-    assert_eq!(contents(&mut policy).await?, migrated);
-
-    // Old physical identities are rejected without changing their rows or schema.
-    let mut incompatible = SqliteConnection::connect("sqlite::memory:").await?;
-    incompatible
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for entry in migrations.iter().take(22) {
-        incompatible.apply("_sqlx_migrations", entry).await?;
-    }
-    sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker) VALUES(x'00000000000000000000000000000001','old-file','local','/data/old-file','{}'); INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES(x'00000000000000000000000000000001',zeroblob(32),1,'none','preparing');").execute(&mut incompatible).await?;
-    let schema = structure(&mut incompatible).await?;
-    let data = contents(&mut incompatible).await?;
-    let error = migration::run(&mut incompatible).await.unwrap_err();
-    assert!(format!("{error:#}").contains("S3"));
-    assert_eq!(structure(&mut incompatible).await?, schema);
-    assert_eq!(contents(&mut incompatible).await?, data);
-    sqlx::query("DELETE FROM chunks")
-        .execute(&mut incompatible)
-        .await?;
-    for (insert, remove) in [
-        (
-            "INSERT INTO raw_sources(id,storage_id,profile_revision) VALUES(X'00000000000000000000000000000001',X'00000000000000000000000000000001',1)",
-            "DELETE FROM raw_sources",
-        ),
-        (
-            "INSERT INTO multipart_files(id,storage_id) VALUES(X'00000000000000000000000000000001',X'00000000000000000000000000000001')",
-            "DELETE FROM multipart_files",
-        ),
-    ] {
-        sqlx::query(sqlx::AssertSqlSafe(insert))
-            .execute(&mut incompatible)
+        rejects_unchanged(&mut invalid_history, "history").await?;
+        invalid_history.rollback().await?;
+        sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker) VALUES(X'00000000000000000000000000000001','preserved','local','/data/preserved','{}'); INSERT INTO buckets(id,name,storage_id,project_id) VALUES(X'00000000000000000000000000000001','preserved',X'00000000000000000000000000000001',X'00000000000000000000000000000001');")
+            .execute(&mut old).await?;
+        if version >= 43 {
+            migration::run(&mut old).await?;
+            assert_eq!(
+                sqlx::query_scalar::<_, String>("SELECT name FROM buckets")
+                    .fetch_one(&mut old)
+                    .await?,
+                "preserved"
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, String>("SELECT name FROM storages")
+                    .fetch_one(&mut old)
+                    .await?,
+                "preserved"
+            );
+            migration::run(&mut old).await?;
+            continue;
+        }
+        rejects_unchanged(&mut old, "empty store").await?;
+        sqlx::raw_sql("DELETE FROM buckets; DELETE FROM storages;")
+            .execute(&mut old)
             .await?;
-        let data = contents(&mut incompatible).await?;
-        let error = migration::run(&mut incompatible).await.unwrap_err();
-        assert!(format!("{error:#}").contains("S3"));
-        assert_eq!(structure(&mut incompatible).await?, schema);
-        assert_eq!(contents(&mut incompatible).await?, data);
-        sqlx::query(sqlx::AssertSqlSafe(remove))
-            .execute(&mut incompatible)
+        sqlx::query("UPDATE quota_scopes SET used_bytes=1")
+            .execute(&mut old)
             .await?;
+        rejects_unchanged(&mut old, "empty store").await?;
+        sqlx::query("UPDATE quota_scopes SET used_bytes=0")
+            .execute(&mut old)
+            .await?;
+        migration::run(&mut old).await?;
+        same_structure(&mut old, &mut fresh).await?;
+        assert_eq!(contents(&mut old).await?, contents(&mut fresh).await?);
     }
-    migration::run(&mut incompatible).await?;
-    same_structure(&mut incompatible, &mut fresh).await?;
-
-    let mut old = SqliteConnection::connect("sqlite::memory:").await?;
-    old.ensure_migrations_table("_sqlx_migrations").await?;
-    for migration in migrations.iter().take(17) {
-        old.apply("_sqlx_migrations", migration).await?;
-    }
-    sqlx::query("INSERT INTO runtime_settings(section,value) VALUES('preserved','{}')")
-        .execute(&mut old)
-        .await?;
-    sqlx::raw_sql("INSERT INTO audit_events(id,actor_label,source,action) VALUES(41,'operator','cli','preserved'),(99,'operator','cli','removed'); DELETE FROM audit_events WHERE id=99;")
-        .execute(&mut old).await?;
-    let id: Vec<u8> = sqlx::query_scalar("SELECT deployment_id FROM mokyu_meta")
-        .fetch_one(&mut old)
-        .await?;
-    migration::run(&mut old).await?;
-    same_structure(&mut old, &mut fresh).await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT action FROM audit_events WHERE id=41")
-            .fetch_one(&mut old)
-            .await?,
-        "preserved"
-    );
-    assert_eq!(sqlx::query("INSERT INTO audit_events(actor_label,source,action) VALUES('credential','s3','source.recover')").execute(&mut old).await?.last_insert_rowid(), 100, "table rebuild must preserve deleted audit identifiers");
-    assert_eq!(
-        sqlx::query_scalar::<_, Vec<u8>>("SELECT deployment_id FROM mokyu_meta")
-            .fetch_one(&mut old)
-            .await?,
-        id
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT value FROM runtime_settings WHERE section='preserved'"
-        )
-        .fetch_one(&mut old)
-        .await?,
-        "{}"
-    );
 
     for sql in [
         "CREATE TABLE unrelated(id INTEGER)",
@@ -242,9 +189,7 @@ async fn sqlite_schema_bootstrap_contract() -> Result<()> {
     ] {
         let mut invalid = SqliteConnection::connect("sqlite::memory:").await?;
         sqlx::raw_sql(sql).execute(&mut invalid).await?;
-        let before = structure(&mut invalid).await?;
-        assert!(migration::run(&mut invalid).await.is_err());
-        assert_eq!(structure(&mut invalid).await?, before);
+        rejects_unchanged(&mut invalid, "").await?;
     }
     for sql in [
         "UPDATE mokyu_meta SET schema_version=17",
@@ -256,9 +201,7 @@ async fn sqlite_schema_bootstrap_contract() -> Result<()> {
         let mut invalid = SqliteConnection::connect("sqlite::memory:").await?;
         migration::run(&mut invalid).await?;
         sqlx::raw_sql(sql).execute(&mut invalid).await?;
-        let before = queries::migrations().fetch_all(&mut invalid).await?;
-        assert!(migration::run(&mut invalid).await.is_err());
-        assert_eq!(queries::migrations().fetch_all(&mut invalid).await?, before);
+        rejects_unchanged(&mut invalid, "").await?;
     }
 
     // Both DDL failure and failure at final metadata insertion roll back everything.

@@ -36,7 +36,11 @@ async fn sqlite_data_schema_contract() -> Result<()> {
     let other = super::storage_tests::fixture_named(&backend, "other").await?;
     assert_eq!(
         queries::schema_version().fetch_one(&backend.read).await?,
-        26
+        sqlx::migrate!("./migrations/sqlite")
+            .iter()
+            .last()
+            .unwrap()
+            .version
     );
     let profile = backend.load(storage).await?;
     assert!(profile.cdc_enabled);

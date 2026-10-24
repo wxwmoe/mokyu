@@ -1,6 +1,6 @@
 use super::{migration, queries};
 use crate::config::Config;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 use sqlx::{Connection, MySqlConnection, Row, migrate::Migrate, mysql::MySqlConnectOptions};
 use std::collections::BTreeMap;
@@ -197,18 +197,25 @@ async fn same_structure(left: &mut MySqlConnection, right: &mut MySqlConnection)
 }
 
 async fn contents(db: &mut MySqlConnection) -> Result<BTreeMap<String, Vec<String>>> {
+    read_contents(db, true).await
+}
+
+async fn read_contents(
+    db: &mut MySqlConnection,
+    normalize: bool,
+) -> Result<BTreeMap<String, Vec<String>>> {
     let mut data = BTreeMap::new();
     for table in queries::tables().fetch_all(&mut *db).await? {
-        if table == "_sqlx_migrations" {
+        if normalize && table == "_sqlx_migrations" {
             continue;
         }
         let columns: Vec<(String,String)> = sqlx::query_as("SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION").bind(&table).fetch_all(&mut *db).await?;
         let fields: Vec<_> = columns
             .into_iter()
             .map(|(name, column_type)| {
-                let value = if table == "mokyu_meta" && name == "deployment_id" {
+                let value = if normalize && table == "mokyu_meta" && name == "deployment_id" {
                     "'deployment'".to_owned()
-                } else if column_type == "datetime" {
+                } else if normalize && column_type == "datetime" {
                     format!("IF(`{name}` IS NULL,NULL,'timestamp')")
                 } else if matches!(column_type.as_str(), "binary" | "varbinary" | "blob") {
                     format!("HEX(`{name}`)")
@@ -234,6 +241,16 @@ async fn contents(db: &mut MySqlConnection) -> Result<BTreeMap<String, Vec<Strin
         data.insert(table, rows);
     }
     Ok(data)
+}
+
+async fn rejects_unchanged(db: &mut MySqlConnection, message: &str) -> Result<()> {
+    let schema = structure(db).await?;
+    let data = read_contents(db, false).await?;
+    let error = migration::run(db).await.unwrap_err();
+    assert!(format!("{error:#}").contains(message), "{error:#}");
+    assert_eq!(structure(db).await?, schema);
+    assert_eq!(read_contents(db, false).await?, data);
+    Ok(())
 }
 
 #[tokio::test]
@@ -287,225 +304,60 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         id
     );
 
-    // Empty live tables must not reset nonce high-water marks consumed by old writers.
-    let mut counters = database(&mut fresh, &options).await?;
-    counters.ensure_migrations_table("_sqlx_migrations").await?;
-
-    for entry in migrations.iter().take(23) {
-        counters.apply("_sqlx_migrations", entry).await?;
-    }
-    sqlx::raw_sql("INSERT INTO managed_keys(id,name,purpose,key_algorithm,fingerprint) VALUES(UNHEX('00000000000000000000000000000001'),'legacy-counter','block','aes-256-gcm',UNHEX(REPEAT('01',32))); ALTER TABLE chunk_encodings AUTO_INCREMENT=1000001; ALTER TABLE packs AUTO_INCREMENT=2000001;").execute(&mut counters).await?;
-    migration::run(&mut counters).await?;
-    let high: Vec<(i64, i64)> =
-        sqlx::query_as("SELECT type_tag,reserved_id FROM nonce_counters ORDER BY type_tag")
-            .fetch_all(&mut counters)
-            .await?;
-    assert_eq!(high, vec![(0, 1000000), (1, 2000000)]);
-    migration::run(&mut counters).await?;
-    assert_eq!(
-        sqlx::query_as::<_, (i64, i64)>(
-            "SELECT type_tag,reserved_id FROM nonce_counters ORDER BY type_tag"
-        )
-        .fetch_all(&mut counters)
-        .await?,
-        high
-    );
-    sqlx::query("UPDATE nonce_counters SET reserved_id=9000000 WHERE type_tag=0")
-        .execute(&mut counters)
-        .await?;
-    let replay = migrations.iter().find(|entry| entry.version == 24).unwrap();
-    sqlx::raw_sql(sqlx::AssertSqlSafe(replay.sql.as_str()))
-        .execute(&mut counters)
-        .await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT reserved_id FROM nonce_counters WHERE type_tag=0")
-            .fetch_one(&mut counters)
-            .await?,
-        9000000
-    );
-
-    // Materialize legacy upload policy once, including disabled backends.
-    let mut policy = database(&mut fresh, &options).await?;
-    policy.ensure_migrations_table("_sqlx_migrations").await?;
-    for entry in migrations.iter().take(21) {
-        policy.apply("_sqlx_migrations", entry).await?;
-    }
-    sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker,enabled) VALUES(UNHEX('00000000000000000000000000000001'),'policy-upgrade','local','/data/policy-upgrade','{}',false); INSERT INTO storage_profiles(storage_id) VALUES(UNHEX('00000000000000000000000000000001')); INSERT INTO runtime_settings(section,value) VALUES('uploads','{\"idle_timeout\":\"7d\",\"client_idle_timeout\":\"120s\"}');").execute(&mut policy).await?;
-    migration::run(&mut policy).await?;
-    let upgraded: (String, Option<String>) = sqlx::query_as("SELECT multipart_idle_timeout,min_free_space FROM storage_profiles WHERE storage_id=UNHEX('00000000000000000000000000000001')").fetch_one(&mut policy).await?;
-    assert_eq!(upgraded, ("7d".into(), None));
-    let settings: serde_json::Value =
-        sqlx::query_scalar("SELECT value FROM runtime_settings WHERE section='uploads'")
-            .fetch_one(&mut policy)
-            .await?;
-    assert_eq!(settings, serde_json::json!({"client_idle_timeout":"120s"}));
-    let migrated = contents(&mut policy).await?;
-    migration::run(&mut policy).await?;
-    assert_eq!(contents(&mut policy).await?, migrated);
-
-    // Old physical identities are rejected without changing their rows or schema.
-    let mut incompatible = database(&mut fresh, &options).await?;
-    incompatible
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for entry in migrations.iter().take(21) {
-        incompatible.apply("_sqlx_migrations", entry).await?;
-    }
-    sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker) VALUES(UNHEX('00000000000000000000000000000001'),'old-file','local','/data/old-file','{}'); INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state) VALUES(UNHEX('00000000000000000000000000000001'),UNHEX(REPEAT('01',32)),1,'none','preparing');").execute(&mut incompatible).await?;
-    let schema = structure(&mut incompatible).await?;
-    let data = contents(&mut incompatible).await?;
-    let error = migration::run(&mut incompatible).await.unwrap_err();
-    assert!(format!("{error:#}").contains("S3"));
-    assert_eq!(structure(&mut incompatible).await?, schema);
-    assert_eq!(contents(&mut incompatible).await?, data);
-    sqlx::query("DELETE FROM chunks")
-        .execute(&mut incompatible)
-        .await?;
-    for (insert, remove) in [
-        (
-            "INSERT INTO raw_sources(id,storage_id,profile_revision) VALUES(UNHEX('00000000000000000000000000000001'),UNHEX('00000000000000000000000000000001'),1)",
-            "DELETE FROM raw_sources",
-        ),
-        (
-            "INSERT INTO multipart_files(id,storage_id) VALUES(UNHEX('00000000000000000000000000000001'),UNHEX('00000000000000000000000000000001'))",
-            "DELETE FROM multipart_files",
-        ),
-    ] {
-        sqlx::query(sqlx::AssertSqlSafe(insert))
-            .execute(&mut incompatible)
-            .await?;
-        let data = contents(&mut incompatible).await?;
-        let error = migration::run(&mut incompatible).await.unwrap_err();
-        assert!(format!("{error:#}").contains("S3"));
-        assert_eq!(structure(&mut incompatible).await?, schema);
-        assert_eq!(contents(&mut incompatible).await?, data);
-        sqlx::query(sqlx::AssertSqlSafe(remove))
-            .execute(&mut incompatible)
-            .await?;
-    }
-    migration::run(&mut incompatible).await?;
-    same_structure(&mut incompatible, &mut fresh).await?;
-
-    let mut old = database(&mut fresh, &options).await?;
-    old.ensure_migrations_table("_sqlx_migrations").await?;
-    for migration in migrations.iter().take(16) {
-        old.apply("_sqlx_migrations", migration).await?;
-    }
-    sqlx::query("INSERT INTO runtime_settings(section,value) VALUES('preserved',JSON_OBJECT())")
-        .execute(&mut old)
-        .await?;
-    let id: uuid::Uuid = sqlx::query_scalar("SELECT deployment_id FROM mokyu_meta")
-        .fetch_one(&mut old)
-        .await?;
-    migration::run(&mut old).await?;
-    same_structure(&mut old, &mut fresh).await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, uuid::Uuid>("SELECT deployment_id FROM mokyu_meta")
-            .fetch_one(&mut old)
-            .await?,
-        id
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, Value>(
-            "SELECT value FROM runtime_settings WHERE section='preserved'"
-        )
-        .fetch_one(&mut old)
-        .await?,
-        serde_json::json!({})
-    );
-
-    for version in [19, 20, 24, 25, 26, 27, 35, 36, 37, 38, 39, 40] {
-        let recovery = migrations
+    // Validate history before upgrading an empty schema; preserve populated schemas unchanged.
+    for version in [16, 21, 24, 41].into_iter().chain(
+        migrations
             .iter()
-            .find(|migration| migration.version == version)
-            .unwrap();
-        let markers = if version == 19 {
-            vec![
-                "DROP TRIGGER IF EXISTS encodings_owner_insert",
-                "DROP TRIGGER IF EXISTS encodings_owner_update",
-                "UPDATE mokyu_meta SET schema_version=19",
-            ]
-        } else if version == 20 {
-            vec![
-                "EXECUTE mokyu_audit",
-                "DEALLOCATE PREPARE mokyu_audit",
-                "UPDATE mokyu_meta SET schema_version=20",
-            ]
-        } else if version == 40 {
-            vec![
-                "DEALLOCATE PREPARE mokyu_file_delivery",
-                "UPDATE mokyu_meta SET schema_version=40",
-            ]
-        } else if version == 39 {
-            vec![
-                "DEALLOCATE PREPARE mokyu_read_integrity",
-                "UPDATE mokyu_meta SET schema_version=39",
-            ]
-        } else if version == 38 {
-            vec![
-                "SET @mokyu_source_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='source_validation_max_age')",
-                "UPDATE mokyu_meta SET schema_version=38",
-            ]
-        } else if version == 37 {
-            vec![
-                "SET @mokyu_public_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='public_cache_refresh_interval')",
-                "SET @mokyu_public_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='public_cache_max_age')",
-                "UPDATE mokyu_meta SET schema_version=37",
-            ]
-        } else if version == 36 {
-            vec![
-                "SET @mokyu_write_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='write_backlog_max_age')",
-                "SET @mokyu_write_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='storage_profiles' AND COLUMN_NAME='background_scheduling')",
-                "UPDATE mokyu_meta SET schema_version=36",
-            ]
-        } else if version == 35 {
-            vec![
-                "EXECUTE mokyu_memory",
-                "UPDATE mokyu_meta SET schema_version=35",
-            ]
-        } else if version == 27 {
-            vec!["UPDATE mokyu_meta SET schema_version=27"]
-        } else if version == 26 {
-            vec!["UPDATE mokyu_meta SET schema_version=26"]
-        } else if version == 25 {
-            vec![
-                "ALTER TABLE chunks ALTER COLUMN format SET DEFAULT 2",
-                "ALTER TABLE streams MODIFY COLUMN",
-                "ALTER TABLE extents ADD CONSTRAINT",
-                "UPDATE mokyu_meta SET schema_version=25",
-            ]
-        } else {
-            vec![
-                "UPDATE chunk_encodings SET nonce_id",
-                "UPDATE packs SET nonce_id",
-                "SET @mokyu_nonce_ddl = IF(LOCATE",
-                "UPDATE mokyu_meta SET schema_version=24",
-            ]
-        };
-        for marker in markers {
-            let mut interrupted = database(&mut fresh, &options).await?;
-            interrupted
-                .ensure_migrations_table("_sqlx_migrations")
-                .await?;
-            for migration in migrations
-                .iter()
-                .take_while(|migration| migration.version < version)
-            {
-                interrupted.apply("_sqlx_migrations", migration).await?;
-            }
-            let sql = recovery.sql.as_str();
-            let prefix = &sql[..sql.find(marker).expect("migration recovery marker")];
-            sqlx::raw_sql(sqlx::AssertSqlSafe(prefix))
-                .execute(&mut interrupted)
-                .await?;
-            sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(?,?,FALSE,?,0)")
-            .bind(recovery.version).bind(recovery.description.as_ref()).bind(recovery.checksum.as_ref())
-            .execute(&mut interrupted).await?;
-            migration::run(&mut interrupted)
-                .await
-                .with_context(|| format!("resume migration {version} before {marker}"))?;
-            same_structure(&mut interrupted, &mut fresh).await?;
+            .map(|entry| entry.version)
+            .filter(|version| *version >= 42),
+    ) {
+        let mut old = database(&mut fresh, &options).await?;
+        old.ensure_migrations_table("_sqlx_migrations").await?;
+        for entry in migrations
+            .iter()
+            .take_while(|entry| entry.version <= version)
+        {
+            old.apply("_sqlx_migrations", entry).await?;
         }
+        let mut invalid_history = old.begin().await?;
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version=1")
+            .execute(&mut *invalid_history)
+            .await?;
+        rejects_unchanged(&mut invalid_history, "history").await?;
+        invalid_history.rollback().await?;
+        sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker) VALUES(UNHEX('00000000000000000000000000000001'),'preserved','local','/data/preserved','{}'); INSERT INTO buckets(id,name,storage_id,project_id) VALUES(UNHEX('00000000000000000000000000000001'),'preserved',UNHEX('00000000000000000000000000000001'),UNHEX('00000000000000000000000000000001'));")
+            .execute(&mut old).await?;
+        if version >= 42 {
+            migration::run(&mut old).await?;
+            assert_eq!(
+                sqlx::query_scalar::<_, String>("SELECT name FROM buckets")
+                    .fetch_one(&mut old)
+                    .await?,
+                "preserved"
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, String>("SELECT name FROM storages")
+                    .fetch_one(&mut old)
+                    .await?,
+                "preserved"
+            );
+            migration::run(&mut old).await?;
+            continue;
+        }
+        rejects_unchanged(&mut old, "empty store").await?;
+        sqlx::raw_sql("DELETE FROM buckets; DELETE FROM storages;")
+            .execute(&mut old)
+            .await?;
+        sqlx::query("UPDATE quota_scopes SET used_bytes=1")
+            .execute(&mut old)
+            .await?;
+        rejects_unchanged(&mut old, "empty store").await?;
+        sqlx::query("UPDATE quota_scopes SET used_bytes=0")
+            .execute(&mut old)
+            .await?;
+        migration::run(&mut old).await?;
+        same_structure(&mut old, &mut fresh).await?;
+        assert_eq!(contents(&mut old).await?, contents(&mut fresh).await?);
     }
 
     for sql in [
@@ -518,21 +370,18 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
     ] {
         let mut invalid = database(&mut fresh, &options).await?;
         sqlx::raw_sql(sql).execute(&mut invalid).await?;
-        let before = structure(&mut invalid).await?;
-        assert!(migration::run(&mut invalid).await.is_err());
-        assert_eq!(structure(&mut invalid).await?, before);
+        rejects_unchanged(&mut invalid, "").await?;
     }
     for sql in [
         "UPDATE mokyu_meta SET schema_version=16",
         "DELETE FROM _sqlx_migrations WHERE version=1",
         "UPDATE _sqlx_migrations SET checksum=REPEAT(CHAR(0),48) WHERE version=1",
+        "UPDATE _sqlx_migrations SET success=FALSE WHERE version=40",
         "DELETE FROM mokyu_meta",
     ] {
         let mut tx = fresh.begin().await?;
         sqlx::raw_sql(sql).execute(&mut *tx).await?;
-        let before = queries::migrations().fetch_all(&mut *tx).await?;
-        assert!(migration::run(&mut tx).await.is_err());
-        assert_eq!(queries::migrations().fetch_all(&mut *tx).await?, before);
+        rejects_unchanged(&mut tx, "").await?;
         tx.rollback().await?;
     }
 

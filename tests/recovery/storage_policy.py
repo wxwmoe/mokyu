@@ -1,9 +1,8 @@
-"""Verify backend policy migration, independent expiry and target disk floors.
+"""Verify backend policy restart, independent expiry and target disk floors.
 
-Run against a stopped disposable service initialized by the preceding schema.
-The fixture owns process startup and injects a crash before listener startup.
+Run against a stopped disposable service initialized with the current schema.
+The fixture owns process startup and uses the local cleanup fault point.
 """
-import json
 import os
 import subprocess
 import uuid
@@ -19,44 +18,29 @@ def main():
     command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG']]
     faults = Path(os.environ['MOKYU_TEST_FAULT_DIR'])
     faults.mkdir(parents=True, exist_ok=True)
-    marker = faults / 'storage-profiles-initialized'
     process = None
     log = (faults / 'storage-policy.log').open('a')
 
-    def stop(crash=False):
+    def stop():
         if process and process.poll() is None:
-            process.kill() if crash else process.terminate()
+            process.terminate()
             process.wait(timeout=40)
 
-    def start(ready=True):
+    def start():
         nonlocal process
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
-        if ready:
-            def available():
-                assert process.poll() is None, 'service exited; inspect storage-policy.log'
-                return subprocess.run(command + ['cli', 'status', '--ready'], capture_output=True, timeout=5).returncode == 0
-            wait(available, 'service did not start', seconds=60)
+        def available():
+            assert process.poll() is None, 'service exited; inspect storage-policy.log'
+            return subprocess.run(command + ['cli', 'status', '--ready'], capture_output=True, timeout=5).returncode == 0
+        wait(available, 'service did not start', seconds=60)
 
     try:
-        rows = database.query("SELECT value FROM runtime_settings WHERE section='uploads'")
-        value = rows[0]['value'] if isinstance(rows[0]['value'], dict) else json.loads(rows[0]['value'])
-        value['idle_timeout'] = '7d'
-        database.query("UPDATE runtime_settings SET value=%s WHERE section='uploads'", json.dumps(value))
         config_path = Path(os.environ['MOKYU_TEST_CONFIG'])
         text = config_path.read_text()
         text = text.replace('database_connections = 8', 'database_connections = 1')
         text = text.replace('stream_memory_budget = "512MiB"', 'stream_memory_budget = "384MiB"')
         config_path.write_text(text)
-        marker.touch()
-        start(False)
-        wait(lambda: marker.with_suffix('.hit').exists(), 'startup did not materialize profiles')
-        stop(True)
-        before = database.query('SELECT revision,min_free_space,multipart_idle_timeout FROM storage_profiles ORDER BY storage_id')
-        assert before and all(row['min_free_space'] == database.config['instance']['min_free_space'] and row['multipart_idle_timeout'] == '7d' for row in before)
-        marker.unlink()
         start()
-        assert database.query('SELECT revision,min_free_space,multipart_idle_timeout FROM storage_profiles ORDER BY storage_id') == before
-        print('PASS legacy policy materialization and crash/restart idempotence', flush=True)
 
         first, second = Fixture(), Fixture()
         for fixture, age in [(first, '24h'), (second, '7d')]:
@@ -64,6 +48,11 @@ def main():
             assert profile['multipart_idle_timeout'] == '24h' and profile['min_free_space'] == '1GiB'
             profile.update(cdc_enabled=False, pack_range_enabled=False, multipart_idle_timeout=age, min_free_space='64MiB')
             fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+        before = database.query('SELECT revision,min_free_space,multipart_idle_timeout FROM storage_profiles ORDER BY storage_id')
+        stop()
+        start()
+        assert database.query('SELECT revision,min_free_space,multipart_idle_timeout FROM storage_profiles ORDER BY storage_id') == before
+        print('PASS restart preserves backend policies and revisions', flush=True)
         settings = first.cli('settings', 'get', 'uploads')
         assert 'idle_timeout' not in settings.get('value', settings)
         cleanup = first.arm('local-cleanup')
@@ -124,7 +113,6 @@ def main():
         capacity.read('resized', b'resized workspace' * 4096)
         print('PASS memory growth requires restart, oversized settings preserve the previous revision', flush=True)
     finally:
-        marker.unlink(missing_ok=True)
         (faults / 'local-cleanup').unlink(missing_ok=True)
         stop()
         log.close()

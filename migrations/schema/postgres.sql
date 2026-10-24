@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0070.
+-- Generated from the complete postgres migration chain through 0071.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;

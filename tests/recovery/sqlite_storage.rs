@@ -99,25 +99,12 @@ async fn sqlite_storage_contract() -> Result<()> {
     let profile = backend.load(local.id).await?;
     assert_eq!(profile.multipart_idle_timeout, "24h");
     assert_eq!(profile.min_free_space.as_deref(), Some("1GiB"));
-    sqlx::query("UPDATE storage_profiles SET min_free_space=NULL WHERE storage_id=?")
-        .bind(local.id)
-        .execute(db)
-        .await?;
-    StorageProfileStore::initialize(&backend, "64MiB").await?;
-    let migrated = backend.load(local.id).await?;
-    assert_eq!(migrated.min_free_space.as_deref(), Some("64MiB"));
-    StorageProfileStore::initialize(&backend, "2GiB").await?;
-    assert_eq!(backend.load(local.id).await?.revision, migrated.revision);
-    let mut invalid = migrated.clone();
+    let mut invalid = profile.clone();
     invalid.multipart_idle_timeout = "18446744073709551615d".into();
     assert!(crate::storage::profile::validate(&invalid, "local").is_err());
-    invalid = migrated.clone();
+    invalid = profile.clone();
     invalid.min_free_space = None;
     assert!(crate::storage::profile::validate(&invalid, "local").is_err());
-    let mut restore = migrated;
-    restore.min_free_space = profile.min_free_space;
-    backend.update("local".into(), restore).await?;
-    let profile = backend.load(local.id).await?;
     assert_eq!(profile.min_storage_seconds()?, 0);
     let mut changed = profile.clone();
     changed.min_storage_duration = "30d".into();

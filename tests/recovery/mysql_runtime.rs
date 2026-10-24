@@ -1,8 +1,7 @@
 use super::{Backend, connection, queries};
 use crate::config::Config;
-use anyhow::{Context, Result};
-use sqlx::{Connection, MySqlConnection, migrate::Migrate, mysql::MySqlConnectOptions};
-use std::time::Duration;
+use anyhow::Result;
+use sqlx::{Connection, MySqlConnection, mysql::MySqlConnectOptions};
 
 async fn close(backend: Backend) -> Result<()> {
     backend.pool.close().await;
@@ -19,16 +18,8 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
     );
     let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
     let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
-    let latest = 25;
-    let interrupt_version: i64 = std::env::var("MOKYU_TEST_MYSQL_INTERRUPT_MIGRATION")
-        .ok()
-        .map(|value| value.parse())
-        .transpose()?
-        .unwrap_or(latest);
-    anyhow::ensure!(
-        (2..=latest).contains(&interrupt_version),
-        "invalid migration interruption point"
-    );
+    let migrations = sqlx::migrate!("./migrations/mysql");
+    let latest = migrations.iter().last().unwrap().version;
     let admin_path = std::env::var("MOKYU_TEST_MYSQL_ADMIN_CONFIG")?;
     let (admin_config, admin_secrets, _) = Config::load(std::path::Path::new(&admin_path))?;
     let options = MySqlConnectOptions::new()
@@ -47,79 +38,16 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
         );
     }
     assert!(queries::tables().fetch_all(&mut admin).await?.is_empty());
-    admin.ensure_migrations_table("_sqlx_migrations").await?;
-    let migrations = sqlx::migrate!("./migrations/mysql");
-    for migration in migrations.iter().take((interrupt_version - 1) as usize) {
-        admin.apply("_sqlx_migrations", migration).await?;
-    }
-    let _: i64 = sqlx::query_scalar("SELECT GET_LOCK('mokyu-test-migration-history',0)")
-        .fetch_one(&mut admin)
-        .await?;
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE TRIGGER test_mysql_migration BEFORE UPDATE ON _sqlx_migrations FOR EACH ROW BEGIN IF NEW.success AND NEW.version={interrupt_version} THEN SET @test_wait=GET_LOCK('mokyu-test-migration-history',60); SET @test_release=RELEASE_LOCK('mokyu-test-migration-history'); END IF; END")))
-        .execute(&mut admin).await?;
-    let interrupt = async {
-        let owner: u64 = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let owner: Option<u64> = sqlx::query_scalar("SELECT CAST(IS_USED_LOCK(SHA2(CONCAT('mokyu:runtime:',DATABASE()),256)) AS UNSIGNED)")
-                .fetch_one(&mut admin).await?;
-            if let Some(owner) = owner {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM information_schema.PROCESSLIST WHERE ID=? AND STATE='User lock')")
-                    .bind(owner).fetch_one(&mut admin).await?;
-                if waiting { break Ok::<_, anyhow::Error>(owner); }
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }).await.context("migration did not reach its history update")??;
-        let deployment: uuid::Uuid =
-            sqlx::query_scalar("SELECT deployment_id FROM mokyu_meta WHERE id=1")
-                .fetch_one(&mut admin)
-                .await?;
-        let kill = sqlx::AssertSqlSafe(format!("KILL CONNECTION {owner}"));
-        sqlx::raw_sql(kill).execute(&mut admin).await?;
-        Ok::<_, anyhow::Error>(deployment)
-    };
-    let (opening, interrupted) = tokio::time::timeout(Duration::from_secs(40), async {
-        tokio::join!(
-            connection::open(&config, &secrets, &budget, "single"),
-            interrupt
-        )
-    })
-    .await?;
-    let deployment = match interrupted {
-        Ok(deployment) => {
-            assert!(opening.is_err());
-            deployment
-        }
-        Err(interrupted) => {
-            return Err(match opening {
-                Err(opening) => opening.context("migration failed before interruption"),
-                Ok(_) => interrupted,
-            });
-        }
-    };
-    let applied = queries::migrations().fetch_all(&mut admin).await?;
-    assert_eq!(applied.len(), interrupt_version as usize);
-    assert!(applied[..applied.len() - 1].iter().all(|row| row.1));
-    assert!(!applied.last().unwrap().1);
-    sqlx::raw_sql("DROP TRIGGER test_mysql_migration")
-        .execute(&mut admin)
-        .await?;
-    sqlx::query("SELECT RELEASE_LOCK('mokyu-test-migration-history')")
-        .execute(&mut admin)
-        .await?;
-
     let backend = connection::open(&config, &secrets, &budget, "single").await?;
     backend.check_owner().await?;
     assert_eq!(
         i64::from(queries::schema_version().fetch_one(&backend.pool).await?),
         latest
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, uuid::Uuid>("SELECT deployment_id FROM mokyu_meta WHERE id=1")
+    let deployment: uuid::Uuid =
+        sqlx::query_scalar("SELECT deployment_id FROM mokyu_meta WHERE id=1")
             .fetch_one(&backend.pool)
-            .await?,
-        deployment
-    );
+            .await?;
     assert!(
         queries::migrations()
             .fetch_all(&backend.pool)
@@ -159,6 +87,12 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
     assert_eq!(
         queries::migrations().fetch_all(&backend.pool).await?,
         history
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, uuid::Uuid>("SELECT deployment_id FROM mokyu_meta WHERE id=1")
+            .fetch_one(&backend.pool)
+            .await?,
+        deployment
     );
     assert_eq!(
         sqlx::query_scalar::<_, serde_json::Value>(

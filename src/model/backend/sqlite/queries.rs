@@ -17,6 +17,29 @@ pub(super) fn flush_time() -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)")
 }
 
+pub(super) fn upgrade_tables() -> Scalar<'static, String> {
+    sqlx::query_scalar(
+        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' AND name NOT IN ('_sqlx_migrations','mokyu_meta','key_fingerprints','runtime_settings','maintenance_controls','access_state') ORDER BY name",
+    )
+}
+
+pub(super) fn upgrade_has_data(table: &str) -> Scalar<'static, bool> {
+    // Initialization rows and configuration are not stored objects or user-created records.
+    let predicate = match table {
+        "projects" => "id<>X'00000000000000000000000000000001'",
+        "quota_scopes" => {
+            "scope<>'project' OR scope_id<>X'00000000000000000000000000000001' OR used_bytes<>0 OR reserved_bytes<>0 OR inflight_bytes<>0 OR object_count<>0 OR bucket_count<>0"
+        }
+        "catalog_build" => "scanned<>0 OR cursor_bucket IS NOT NULL OR cursor_key IS NOT NULL",
+        "usage_summary" => "id<>'global' OR as_of IS NOT NULL OR data IS NOT NULL",
+        _ => "TRUE",
+    };
+    let table = format!("\"{}\"", table.replace('"', "\"\""));
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM {table} WHERE {predicate})"
+    )))
+}
+
 pub(super) fn schema_empty() -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*')",
@@ -971,11 +994,6 @@ impl StorageRecordStore for Backend {
 
 #[async_trait::async_trait]
 impl StorageProfileStore for Backend {
-    async fn initialize(&self, min_free_space: &str) -> Result<()> {
-        crate::config::bytes(min_free_space)?;
-        sqlx::query("UPDATE storage_profiles SET min_free_space=?,revision=revision+1,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE min_free_space IS NULL AND storage_id IN (SELECT id FROM storages WHERE type='local')").bind(min_free_space).execute(&self.write).await?;
-        Ok(())
-    }
     async fn update(
         &self,
         name: String,
@@ -8758,25 +8776,6 @@ pub(super) fn initialize_nonce_counters(key: Uuid) -> Statement<'static> {
     )
     .bind(key)
     .bind(key)
-}
-
-pub(super) fn incompatible_payload(version: i64) -> Scalar<'static, bool> {
-    if version < 6 {
-        return sqlx::query_scalar("SELECT FALSE");
-    }
-    if version == 6 {
-        return sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM packs) OR EXISTS(SELECT 1 FROM streams)",
-        );
-    }
-    if version >= 22 {
-        return sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM packs) OR EXISTS(SELECT 1 FROM fragments) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM uploads) OR EXISTS(SELECT 1 FROM raw_sources) OR EXISTS(SELECT 1 FROM multipart_files)",
-        );
-    }
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM packs) OR EXISTS(SELECT 1 FROM fragments) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM uploads)",
-    )
 }
 
 use crate::model::key_replacement::{

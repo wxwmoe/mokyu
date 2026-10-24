@@ -8,8 +8,6 @@
 
 PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采用 `UUID` 主键，默认由 `uuidv7()` 生成，所有关联列使用同类型；自然键、复合键、偏移和计数保持原意。MySQL/MariaDB 和 SQLite 的对应主键、外键继续使用整数，仅 `chunks` 增加非空的 16 字节 `uuid`；物理编码和区块包复用既有 `location_id`，streams、raw_sources、fragments、quota_reservations 及其引用也使用原生整数；raw_sources.location_id 和 fragments.location_id 保存非空唯一的文件 UUID。multipart_files 与 Multipart UploadId 保留稳定 UUID，用于暂存文件和协议身份。PostgreSQL 的物理编码和区块包直接以主键作为文件 UUID，无单独 `location_id` 列。API 将身份作为不透明字符串，不要求各数据库部署的 ID 形态相同。
 
-旧文件身份格式的升级只允许没有对象或来源数据的数据库；存在旧数据时在结构修改前终止，须通过 S3 逻辑迁移。新装结构与空库迁移得到相同结构。
-
 容量分摊在 SQLite 中使用浮点比例并按接口精度输出；配额与实际对象字节账本始终使用整数。数据库空间来自本后端原生统计：SQLite 汇总表和索引页，无法提供的 PG 专属行估算与 vacuum 时间返回 null。
 
 `stream_leases` 只用于群集的跨节点读取与写入保护。单容器通过进程内活动引用协调读写和 GC，不创建或续期 stream lease；请求取消释放引用，重启后按持久状态恢复未完成写入。`storage_permits` 也只供群集协调 storage 并发；单容器使用按 storage 和方向共享的进程内队列。

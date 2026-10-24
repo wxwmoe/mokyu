@@ -132,7 +132,7 @@ async fn postgres_claim_pool_progress() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires a fresh isolated PostgreSQL database"]
 async fn postgres_storage_policy_expiration() -> Result<()> {
-    use crate::model::{MultipartStore, StorageProfileStore};
+    use crate::model::MultipartStore;
     assert_eq!(
         std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
         "isolated-only"
@@ -151,15 +151,10 @@ async fn postgres_storage_policy_expiration() -> Result<()> {
     .bind(storage)
     .execute(&pool)
     .await?;
-    sqlx::query("INSERT INTO storage_profiles(storage_id,multipart_idle_timeout) VALUES($1,'1s')")
+    sqlx::query("INSERT INTO storage_profiles(storage_id,multipart_idle_timeout,min_free_space) VALUES($1,'1s','64MiB')")
         .bind(storage)
         .execute(&pool)
         .await?;
-    StorageProfileStore::initialize(&backend, "64MiB").await?;
-    let profile = backend.load(storage).await?;
-    StorageProfileStore::initialize(&backend, "2GiB").await?;
-    assert_eq!(backend.load(storage).await?.revision, profile.revision);
-    assert_eq!(profile.min_free_space.as_deref(), Some("64MiB"));
     sqlx::query("INSERT INTO buckets(id,name,storage_id) VALUES($1,'policy',$2)")
         .bind(bucket)
         .bind(storage)

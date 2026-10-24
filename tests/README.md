@@ -36,15 +36,15 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `python -m tests.recovery.cluster_shutdown` 使用双 data 的 `cluster_cache` 环境，编排器额外处理 `stop-peer`、`start-peer` 与 `.done` 标记。验证退出期间继续心跳、只排空当前节点的 raw/chunks/原生 Multipart、其他节点仍可读最终来源，以及只有 CDC 尾块可写共享暂存。
 
-数据库改动需在 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3 的最低版本和当前维护版本验证。MariaDB 复用全部 MySQL 契约和 `MOKYU_TEST_MYSQL_CONFIG`；`mysql_dialect_and_lock_scope_contract` 额外检查 JSON 类型、大小写/尾空格比较和任务领取的锁范围。`migrations.py` 在 PostgreSQL 17 空库验证低版本拒绝且不写入表，在支持版本验证新装、旧版本升级与恢复。
+数据库改动需在 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3 的最低版本和当前维护版本验证。MariaDB 复用全部 MySQL 契约和 `MOKYU_TEST_MYSQL_CONFIG`；`mysql_dialect_and_lock_scope_contract` 额外检查 JSON 类型、大小写/尾空格比较和任务领取的锁范围。`migrations.py` 在 PostgreSQL 17 空库验证低版本拒绝且不写入表，在支持版本验证新装、当前库重启和迁移前检查。
 
-`postgres_schema_bootstrap_contract`、`mysql_schema_bootstrap_contract` 对照当前快照与完整编号迁移的结构、初值和校验和，并检查升级、重启、未知版本、历史损坏、新装失败与真实连接中断。PostgreSQL 同时验证并发初始化。两者除上述连接配置外，测试用户还需有创建数据库的权限；会在同一隔离服务器创建 `mokyu_bootstrap_*` 测试库，验证后随专用测试实例一并清理。`sqlite_schema_bootstrap_contract` 使用捆绑 SQLite 内存库，属于普通 Rust 测试；磁盘/WAL/进程恢复由 `sqlite_runtime_and_migration_recovery` 覆盖。
+`postgres_schema_bootstrap_contract`、`mysql_schema_bootstrap_contract` 对照当前快照与完整编号迁移的结构、初值和校验和，并验证迁移检查、重启、未知版本、历史损坏、新装失败与真实连接中断；拒绝前后结构、完整行数据和迁移历史保持一致。PostgreSQL 同时验证并发初始化。两者除上述连接配置外，测试用户还需有创建数据库的权限；会在同一隔离服务器创建 `mokyu_bootstrap_*` 测试库，验证后随专用测试实例一并清理。`sqlite_schema_bootstrap_contract` 使用捆绑 SQLite 内存库，属于普通 Rust 测试；磁盘/WAL/进程恢复由 `sqlite_runtime_and_migration_recovery` 覆盖。
 
 增加编号迁移时同步更新对应 `migrations/schema/*.sql` 与迁移入口的快照版本。快照包含最终结构和必需初值，版本行及 `_sqlx_migrations` 由初始化器最后登记。保留原迁移内容与校验和；结构对照包含列、默认值、约束、索引、视图，以及 PostgreSQL 函数、触发器和序列。
 
 `nonce_database_contract` 使用 `MOKYU_TEST_NONCE_CONFIG` 指向全新的隔离数据库，并要求 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`。通过 `cargo test --features fault-injection nonce_database_contract -- --ignored --nocapture` 验证密钥创建回滚、分域计数、并发分配、重启舍弃余号和密钥材料唯一性；四种数据库分别运行。
 
-`python -m tests.recovery.nonce_ranges` 接管已初始化但停止的专用服务，沿用来源隔离 fixture 的配置、管理员密码、故障目录和 S3 后端环境。覆盖加密区块和 pack、直接去重不分配、提交前后强杀、缺失计数、耗尽、换 key 及未加密/raw 零分配。旧格式由数据库迁移拒绝测试覆盖，不提供旧密文读取兼容。
+`python -m tests.recovery.nonce_ranges` 接管已初始化但停止的专用服务，沿用来源隔离 fixture 的配置、管理员密码、故障目录和 S3 后端环境。覆盖加密区块和 pack、直接去重不分配、提交前后强杀、缺失计数、耗尽、换 key 及未加密/raw 零分配。
 
 `key_replacement_contract` 使用 `MOKYU_TEST_CONFIG` 指向全新隔离数据库，以 `--ignored` 运行，覆盖停用存储、关联范围及修订冲突、审计失败回滚、并发重复确认、目标校验、关闭重连和旧操作重试；四种数据库分别运行。
 
@@ -82,7 +82,7 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `recovery/raw_crashes.py`：独占启动/停止隔离服务，验证 raw 发布前后强杀、响应丢失、fsync EIO 和孤儿回收，使用与 `local_durability.py` 相同的 fsync 注入环境。
 - `recovery/file_permissions.py`：接管已初始化但停止的隔离 SQLite 服务，验证严格/宽松继承 umask、普通载荷和暂存0644、目录0755、SQLite伴随文件0600、Multipart发布及重启；需Linux隔离容器内root以切换到UID65534验证实际读权限，环境沿用 `source_quarantine`，不设置 `MOKYU_TEST_BACKEND`。
 - `recovery/local_multipart.py`：独占已初始化但停止的隔离服务，验证本地候选文件按需扩展、连续布局 inode 复用、乱序/替换/所选清单、上传和 Complete 强杀、两批积压上限、确认/映射/回收强杀、Abort、最后一批异步回收及 GC 后全部成功对象的长度/SHA-256 校验；环境沿用 `source_quarantine` fixture；加 `--s3-cache` 或 `MOKYU_TEST_MULTIPART_CACHE=1` 并提供 `MOKYU_TEST_BACKEND` 时覆盖 S3 raw 写缓存文件复用，缓存建议至少 256MiB、上传缓存 128MiB。配合 `recovery/fsync.c` 和 `LD_PRELOAD`，设置 `MOKYU_TEST_FSYNC_FAULT` / `MOKYU_TEST_FSYNC_TRACE` 覆盖文件与目录确认失败；S3 写缓存故障根目录设为 `<data_path>/raw`。另设 `MOKYU_TEST_SPACE_FAULT` 注入目标盘低空间，验证保留来源和重试。`--cross-filesystem` 要求 `MOKYU_TEST_FSYNC_ROOT` 与实例 Multipart 目录位于不同文件系统，用于验证复制回退。Rust 普通测试覆盖启动探测不阻塞、共享结果、探测失败不重复、未探测直接复制及匿名临时文件回收；专项 `real_reflink_preserves_sources_and_copy_on_write` 需独立且支持 reflink 的 `MOKYU_TEST_REFLINK_DIR`，显式 `--ignored` 运行并断言实际克隆及 COW 隔离。
-- `recovery/storage_policy.py`：旧运行参数物化到各后端、监听前中断恢复、不同后端的 Multipart 空闲期限、查询不续期、写入续期、目标盘余量隔离，以及内存预算准入和重启生效。先用上一结构的程序初始化隔离实例后停止，由测试持有服务进程；使用 `source_quarantine.py` 的环境参数。原生 `*_storage_contract`、`*_maintenance_contract` 与 `postgres_storage_policy_expiration` 补测事务内重新判断和活跃分片租约。
+- `recovery/storage_policy.py`：重启保留后端策略与修订、不同后端的 Multipart 空闲期限、查询不续期、写入续期、目标盘余量隔离，以及内存预算准入和重启生效。先用当前程序初始化隔离实例后停止，由测试持有服务进程；使用 `source_quarantine.py` 的环境参数。原生 `*_storage_contract`、`*_maintenance_contract` 与 `postgres_storage_policy_expiration` 补测事务内重新判断和活跃分片租约。
 - `recovery/cluster_policy.py`：真实双 data 节点共享 S3 的后端独立 Multipart 期限、跨节点写入续期和较长期限上传继续完成；环境沿用 `raw_cluster.py`，通过维护入口触发回收。
 - `recovery/multipart_completion.py`：四库及双 data 的 Complete 5 秒保活、HTTP 200 内 XML 错误、断线继续、相同清单加入、持久结果重放、进程重启及租约 fencing。服务以 fault-injection 构建，快速回归设置 `MOKYU_TEST_COMPLETE_TIMEOUT_SECONDS=12`，真实截止回归使用 `300`；群集服务与测试使用相同值；群集另验发布清理竞态及等待本地队列远端确认，使用原有节点 kill/start 标记。测试超时变量不属于运行配置。
 - `s3/multipart_admission.py`：完成工作独立额度及满额 503、前台读写可用、校验失败释放额度、断线继续；需要独立 PostgreSQL 夹具与现有 integration 环境。
@@ -178,7 +178,7 @@ Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专�
 
 ## 来源重传恢复回归
 
-`source_recovery_contract` 使用全新 `MOKYU_TEST_CONFIG`，验证候选所有权、元数据、并发胜者、ABA、写代次、旧引用及未知候选回收。PostgreSQL 额外验证同 ID 节点重新注册后的凭据隔离、排空和写租约失效。MySQL bootstrap 契约覆盖恢复迁移的中断续跑及触发器结构对比。
+`source_recovery_contract` 使用全新 `MOKYU_TEST_CONFIG`，验证候选所有权、元数据、并发胜者、ABA、写代次、旧引用及未知候选回收。PostgreSQL 额外验证同 ID 节点重新注册后的凭据隔离、排空和写租约失效。MySQL bootstrap 契约覆盖新装中断后的拒绝、失败历史不续跑及触发器结构对比。
 
 以下 Python 入口沿用来源隔离 fixture，自行创建测试 storage 和桶。需要访问同一隔离主库；PostgreSQL 安装 psycopg，MySQL/MariaDB 安装 PyMySQL，数据库连接读取 `MOKYU_TEST_CONFIG`。local 与模拟 S3 应分别运行。
 

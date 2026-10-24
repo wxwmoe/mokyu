@@ -7,7 +7,9 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator.locking = false;
     migrator
 };
-const SCHEMA_VERSION: i64 = 41;
+const SCHEMA_VERSION: i64 = 42;
+// Only the 0.0.6 format boundary requires an empty store.
+const EMPTY_UPGRADE_VERSION: i64 = 42;
 
 pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
     ensure!(
@@ -23,21 +25,10 @@ pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
         version <= SCHEMA_VERSION,
         "database schema is newer than this binary; downgrade is unsupported"
     );
-    if i64::from(version) < 25 {
-        ensure!(
-            !queries::incompatible_payload(version)
-                .fetch_one(&mut *owner)
-                .await?,
-            "file identity format requires an empty store; migrate logical objects through S3"
-        );
-    }
     ensure!(version >= 1, "unsupported database schema version");
     let applied = queries::migrations().fetch_all(&mut *owner).await?;
-    let last = applied
-        .last()
-        .context("MySQL migration history is missing")?;
     ensure!(
-        version == last.0 || (!last.1 && version + 1 == last.0),
+        applied.last().map(|m| m.0) == Some(version),
         "schema version does not match the MySQL migration history"
     );
     for (index, (version, success, checksum)) in applied.iter().enumerate() {
@@ -53,28 +44,31 @@ pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
             *checksum == migration.checksum.as_ref(),
             "MySQL migration checksum changed"
         );
-        if !success {
-            // Only explicitly idempotent migrations may resume after MySQL's implicit DDL commits.
-            ensure!(
-                matches!(*version, 1..=20 | 24..=29 | 34..=40) && index + 1 == applied.len(),
-                "MySQL migration requires manual recovery"
-            );
+        ensure!(
+            *success,
+            "MySQL migration history contains a failed transaction"
+        );
+    }
+    if version < SCHEMA_VERSION {
+        if version < EMPTY_UPGRADE_VERSION {
+            for table in queries::upgrade_tables().fetch_all(&mut *owner).await? {
+                ensure!(
+                    !queries::upgrade_has_data(&table)
+                        .fetch_one(&mut *owner)
+                        .await?,
+                    "database upgrade requires an empty store (table {table})"
+                );
+            }
         }
+        MIGRATIONS
+            .run(&mut *owner)
+            .await
+            .context("apply database migrations")?;
+        ensure!(
+            i64::from(queries::schema_version().fetch_one(&mut *owner).await?) == SCHEMA_VERSION,
+            "schema version does not match the migration history"
+        );
     }
-    if !last.1 {
-        queries::forget_failed_migration(last.0)
-            .execute(&mut *owner)
-            .await?;
-    }
-    // The dedicated connection already owns the database for this single runtime.
-    MIGRATIONS
-        .run(&mut *owner)
-        .await
-        .context("apply MySQL migrations")?;
-    ensure!(
-        i64::from(queries::schema_version().fetch_one(&mut *owner).await?) == SCHEMA_VERSION,
-        "schema version does not match the MySQL migration history"
-    );
     Ok(())
 }
 

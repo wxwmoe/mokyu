@@ -279,12 +279,6 @@ impl App {
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("another gateway owns this data directory")?;
         let (stores, owner) = crate::model::connect(&config, &mut secrets, &budget, role).await?;
-        stores
-            .storage_profiles
-            .initialize(&config.instance.min_free_space)
-            .await?;
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("storage-profiles-initialized").await;
         let defaults = crate::model::runtime_defaults(&config);
         stores.runtime_settings.ensure(&defaults).await?;
         let runtime_defaults = defaults

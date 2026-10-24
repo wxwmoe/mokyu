@@ -35,6 +35,29 @@ pub(super) fn flush_time() -> Scalar<'static, DateTime<Utc>> {
     sqlx::query_scalar("SELECT CURRENT_TIMESTAMP(6)")
 }
 
+pub(super) fn upgrade_tables() -> Scalar<'static, String> {
+    sqlx::query_scalar(
+        "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE' AND TABLE_NAME NOT IN ('_sqlx_migrations','mokyu_meta','key_fingerprints','runtime_settings','maintenance_controls','access_state') ORDER BY TABLE_NAME",
+    )
+}
+
+pub(super) fn upgrade_has_data(table: &str) -> Scalar<'static, bool> {
+    // Initialization rows and configuration are not stored objects or user-created records.
+    let predicate = match table {
+        "projects" => "id<>X'00000000000000000000000000000001'",
+        "quota_scopes" => {
+            "scope<>'project' OR scope_id<>X'00000000000000000000000000000001' OR used_bytes<>0 OR reserved_bytes<>0 OR inflight_bytes<>0 OR object_count<>0 OR bucket_count<>0"
+        }
+        "catalog_build" => "scanned<>0 OR cursor_bucket IS NOT NULL OR cursor_key IS NOT NULL",
+        "usage_summary" => "id<>'global' OR as_of IS NOT NULL OR data IS NOT NULL",
+        _ => "TRUE",
+    };
+    let table = format!("`{}`", table.replace('`', "``"));
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM {table} WHERE {predicate})"
+    )))
+}
+
 pub(super) fn schema_empty() -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT NOT EXISTS(SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()) AND NOT EXISTS(SELECT 1 FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE()) AND NOT EXISTS(SELECT 1 FROM information_schema.EVENTS WHERE EVENT_SCHEMA=DATABASE())",
@@ -6522,10 +6545,6 @@ pub(super) fn migrations()
     sqlx::query_as("SELECT version,success,checksum FROM _sqlx_migrations ORDER BY version")
 }
 
-pub(super) fn forget_failed_migration(version: i64) -> Statement<'static> {
-    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=? AND success=FALSE").bind(version)
-}
-
 pub(super) fn schema_version() -> Scalar<'static, i32> {
     sqlx::query_scalar("SELECT schema_version FROM mokyu_meta WHERE id=1")
 }
@@ -7502,11 +7521,6 @@ impl StorageRecordStore for Backend {
 
 #[async_trait::async_trait]
 impl StorageProfileStore for Backend {
-    async fn initialize(&self, min_free_space: &str) -> Result<()> {
-        crate::config::bytes(min_free_space)?;
-        sqlx::query("UPDATE storage_profiles p JOIN storages s ON s.id=p.storage_id SET p.min_free_space=?,p.revision=p.revision+1,p.updated_at=UTC_TIMESTAMP(6) WHERE s.type='local' AND p.min_free_space IS NULL").bind(min_free_space).execute(&self.pool).await?;
-        Ok(())
-    }
     async fn update(
         &self,
         name: String,
@@ -8642,25 +8656,6 @@ pub(super) fn initialize_nonce_counters(key: Uuid) -> Statement<'static> {
     )
     .bind(key)
     .bind(key)
-}
-
-pub(super) fn incompatible_payload(version: i64) -> Scalar<'static, bool> {
-    if version < 5 {
-        return sqlx::query_scalar("SELECT FALSE");
-    }
-    if version == 5 {
-        return sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM packs) OR EXISTS(SELECT 1 FROM streams)",
-        );
-    }
-    if version >= 21 {
-        return sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM packs) OR EXISTS(SELECT 1 FROM fragments) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM uploads) OR EXISTS(SELECT 1 FROM raw_sources) OR EXISTS(SELECT 1 FROM multipart_files)",
-        );
-    }
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM chunks) OR EXISTS(SELECT 1 FROM packs) OR EXISTS(SELECT 1 FROM fragments) OR EXISTS(SELECT 1 FROM streams) OR EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM uploads)",
-    )
 }
 
 use crate::model::key_replacement::{
