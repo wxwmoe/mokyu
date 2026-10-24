@@ -3296,11 +3296,11 @@ pub(super) type ManagedKeyViewRow = (
 );
 pub(super) fn managed_key_views() -> Rows<'static, ManagedKeyViewRow> {
     sqlx::query_as(
-        "SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,EXISTS(SELECT 1 FROM storages s WHERE s.block_key_id=k.id) OR EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state<>'deleted') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),k.fingerprint,k.created_at,k.revoked_at FROM managed_keys k ORDER BY k.name",
+        "SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,EXISTS(SELECT 1 FROM storages s WHERE s.block_key_id=k.id) OR EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state<>'deleted') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.block_key_id=k.id AND w.state='active' AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),k.fingerprint,k.created_at,k.revoked_at FROM managed_keys k ORDER BY k.name",
     )
 }
 pub(super) fn managed_key_in_use(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE block_key_id=$1) OR EXISTS(SELECT 1 FROM chunk_encodings WHERE block_key_id=$1 AND state<>'deleted') OR EXISTS(SELECT 1 FROM packs WHERE block_key_id=$1 AND state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=$1) OR EXISTS(SELECT 1 FROM tasks WHERE detail->>'target_key_id'=$1::text AND state IN ('queued','running','paused','failed')) FROM managed_keys WHERE id=$1").bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE block_key_id=$1) OR EXISTS(SELECT 1 FROM chunk_encodings WHERE block_key_id=$1 AND state<>'deleted') OR EXISTS(SELECT 1 FROM packs WHERE block_key_id=$1 AND state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=$1) OR EXISTS(SELECT 1 FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.block_key_id=$1 AND w.state='active' AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM tasks WHERE detail->>'target_key_id'=$1::text AND state IN ('queued','running','paused','failed')) FROM managed_keys WHERE id=$1").bind(id)
 }
 pub(super) fn lock_managed_key(id: Uuid) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT true FROM managed_keys WHERE id=$1 FOR UPDATE").bind(id)
@@ -7505,6 +7505,27 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn begin_write(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_write::Begin,
+    ) -> Result<crate::model::node_write::Reply> {
+        transactions::begin_node_write(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn write_status(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_write::Lookup,
+        abort: bool,
+    ) -> Result<crate::model::node_write::Reply> {
+        transactions::node_write_status(&self.pool, node, key, input, abort)
+            .await
+            .map_err(normalize_error)
+    }
     async fn report_observations(
         &self,
         node: &crate::cluster::NodeState,
@@ -10409,6 +10430,9 @@ pub(super) fn node_read_renew<'q>(
         GrantType::Window => {
             "SELECT w.id,GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) FROM node_read_windows w JOIN node_reads r ON r.read_id=w.read_id JOIN stream_leases l ON l.id=r.read_id WHERE r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND w.id=ANY($5) AND l.expires_at>clock_timestamp()"
         }
+        GrantType::Write => {
+            "UPDATE stream_leases l SET expires_at=clock_timestamp()+interval '90 seconds' FROM node_writes w,streams s,objects o WHERE l.id=w.lease_id AND s.id=w.stream_id AND o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id AND s.state='writing' AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND l.id=ANY($5) AND l.expires_at>clock_timestamp() RETURNING l.id,90000::bigint"
+        }
     };
     sqlx::query_as(query)
         .bind(state.node_id)
@@ -10490,4 +10514,72 @@ pub(super) fn node_session_status(node: Uuid) -> Rows<'static, (Uuid, Uuid, i64,
 
 pub(super) fn node_settings() -> Rows<'static, (String, Value, i64)> {
     sqlx::query_as("SELECT section,value,revision FROM runtime_settings WHERE section=ANY($1) ORDER BY section").bind(crate::model::session::SECTIONS)
+}
+
+#[derive(sqlx::FromRow)]
+pub(super) struct NodeWrite {
+    pub operation_id: Uuid,
+    pub credential_generation: i64,
+    pub boot_id: Uuid,
+    pub fence: Uuid,
+    pub request_hash: Vec<u8>,
+    pub stream_id: Option<Uuid>,
+    pub lease_id: Option<Uuid>,
+    pub storage_id: Option<Uuid>,
+    pub profile: sqlx::types::Json<crate::storage::profile::StorageProfile>,
+    pub state: String,
+    pub valid_for_ms: i64,
+}
+
+pub(super) fn node_write(node: Uuid, operation: Uuid) -> Rows<'static, NodeWrite> {
+    sqlx::query_as("SELECT w.*,CASE WHEN w.state='active' AND s.state='writing' AND o.write_token=s.id THEN GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) ELSE 0 END AS valid_for_ms FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id LEFT JOIN streams s ON s.id=w.stream_id LEFT JOIN objects o ON o.bucket_id=s.bucket_id AND o.object_key=s.object_key WHERE w.node_id=$1 AND w.operation_id=$2 FOR UPDATE OF w")
+        .bind(node).bind(operation)
+}
+
+pub(super) fn node_write_count(node: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT count(*) FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND w.state='active' AND l.expires_at>clock_timestamp()").bind(node)
+}
+
+pub(super) fn node_write_credential(access: &str) -> Scalar<'_, i64> {
+    sqlx::query_scalar("SELECT authorization_revision FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>clock_timestamp()) FOR SHARE").bind(access)
+}
+
+pub(super) fn node_write_storage(id: Uuid) -> Rows<'static, (String, Option<Uuid>)> {
+    sqlx::query_as("SELECT type,block_key_id FROM storages WHERE id=$1 AND enabled FOR SHARE")
+        .bind(id)
+}
+
+pub(super) fn node_write_cleanup(node: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM node_writes WHERE node_id=$1 AND operation_id IN (SELECT w.operation_id FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND COALESCE(w.completed_at,w.created_at)<clock_timestamp()-interval '1 day' AND (l.id IS NULL OR l.expires_at<=clock_timestamp()) ORDER BY w.created_at LIMIT 64)").bind(node)
+}
+
+pub(super) fn insert_node_write<'q>(
+    state: &'q crate::cluster::NodeState,
+    input: &'q crate::model::node_write::Begin,
+    hash: &'q [u8],
+    stream: Id,
+    profile: &'q crate::storage::profile::StorageProfile,
+    block_key: Option<Uuid>,
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO node_writes(node_id,operation_id,credential_generation,boot_id,fence,request_hash,stream_id,lease_id,storage_id,block_key_id,profile) SELECT $1,$2,$3,$4,$5,$6,$7,l.id,$8,$9,$10 FROM stream_leases l WHERE l.stream_id=$7 AND l.lease_type='write'")
+        .bind(state.node_id).bind(input.operation).bind(state.credential_generation).bind(input.run.boot).bind(input.run.fence)
+        .bind(hash).bind(stream).bind(profile.storage_id).bind(block_key).bind(sqlx::types::Json(profile))
+}
+
+pub(super) fn abort_node_writes<'q>(
+    state: &'q crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    operations: &'q [Uuid],
+    leases: &'q [Uuid],
+) -> Rows<'q, (Option<Uuid>, Option<Uuid>)> {
+    sqlx::query_as("UPDATE node_writes SET state='aborted',completed_at=clock_timestamp() WHERE node_id=$1 AND credential_generation=$2 AND boot_id=$3 AND fence=$4 AND state='active' AND (operation_id=ANY($5) OR lease_id=ANY($6)) RETURNING stream_id,lease_id")
+        .bind(state.node_id).bind(state.credential_generation).bind(run.boot).bind(run.fence).bind(operations).bind(leases)
+}
+
+pub(super) fn abandon_node_streams(ids: &[Uuid]) -> Statement<'_> {
+    sqlx::query("UPDATE streams SET state='abandoned',touched_at=clock_timestamp() WHERE id=ANY($1) AND state='writing'").bind(ids)
+}
+
+pub(super) fn release_node_write_leases(ids: &[Uuid]) -> Statement<'_> {
+    sqlx::query("DELETE FROM stream_leases WHERE id=ANY($1) AND lease_type='write'").bind(ids)
 }

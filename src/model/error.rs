@@ -23,6 +23,10 @@ pub(crate) enum Error {
     NodeLimit,
     NodeReadLimit,
     NodeReadBusy,
+    NodeWriteLimit,
+    NodeOperationExpired,
+    NodeOperationConflict,
+    NodeOperationMissing,
 }
 
 impl fmt::Display for Error {
@@ -51,6 +55,10 @@ impl fmt::Display for Error {
             Self::NodeLimit => "node boot history is full; rotate its credential",
             Self::NodeReadLimit => "node read exceeds its resource or message budget",
             Self::NodeReadBusy => "node read capacity is busy",
+            Self::NodeWriteLimit => "node write capacity is full",
+            Self::NodeOperationExpired => "write operation is outside its admission window",
+            Self::NodeOperationConflict => "write operation parameters changed",
+            Self::NodeOperationMissing => "write operation was not found",
         })
     }
 }
@@ -86,6 +94,10 @@ mod tests {
             Error::NodeLimit,
             Error::NodeReadLimit,
             Error::NodeReadBusy,
+            Error::NodeWriteLimit,
+            Error::NodeOperationExpired,
+            Error::NodeOperationConflict,
+            Error::NodeOperationMissing,
         ] {
             let source = std::io::Error::other("original database failure");
             let error = anyhow::Error::from(source)

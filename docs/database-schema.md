@@ -14,6 +14,8 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 
 节点读取通过 `node_reads` 将读取保护绑定到节点、凭据代次、boot 和 fence，并保存操作身份以重放响应；`replica_allowed` 为非空 boolean，默认 false，记录本次匿名公共区块读取是否允许从库分页。`node_read_windows` 保存有界映射，`node_read_sources` 保护窗口实际选择的物理来源，避免对象映射重写后提前回收。`node_read_permits` 关联读取与存储许可；释放读取或保护到期后的清理会级联释放关联记录，续期不能恢复已过期资源。
 
+`node_writes` 以 `(node_id, operation_id)` 为主键，保存凭据代次、boot/fence、32 字节请求摘要、stream/写租约、存储策略与块密钥。stream 和租约具有唯一约束，删除时将回执中的引用置空；操作回执继续保留以支持重试。状态为 active 或 aborted，过期状态由有效租约、对象写令牌和运行权判断；取消通过既有 stream 状态触发器释放配额。活动写入所引用的块密钥计入使用检查，不能提前撤销。
+
 ## 部署、运行设置与身份
 
 | 表 | 关键字段 | 用途 |

@@ -271,6 +271,33 @@ impl Client {
             .await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn begin_write(
+        &self,
+        input: wire::BeginWriteRequest,
+    ) -> Result<wire::WriteReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/BeginWrite")
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn write_status(
+        &self,
+        input: wire::WriteRequest,
+    ) -> Result<wire::WriteReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/WriteStatus")
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn abort_write(
+        &self,
+        input: wire::WriteRequest,
+    ) -> Result<wire::WriteReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/AbortWrite")
+            .await
+    }
+
     async fn unary<I, O>(&self, input: I, path: &'static str) -> Result<O, Status>
     where
         I: prost::Message + Default + Clone + 'static,

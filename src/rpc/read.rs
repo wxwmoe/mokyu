@@ -50,6 +50,7 @@ pub(super) fn keep_alive(
                     Ok(wire::GrantType::ReadProtection) => read::GrantType::Read,
                     Ok(wire::GrantType::StorageRead) => read::GrantType::StorageRead,
                     Ok(wire::GrantType::ReadWindow) => read::GrantType::Window,
+                    Ok(wire::GrantType::WriteProtection) => read::GrantType::Write,
                     _ => return Err(invalid()),
                 };
                 Ok(read::GrantRef { r#type, id })
@@ -69,6 +70,7 @@ pub(super) fn grant_result(result: read::GrantResult) -> wire::GrantResult {
                 read::GrantType::Read => wire::GrantType::ReadProtection,
                 read::GrantType::StorageRead => wire::GrantType::StorageRead,
                 read::GrantType::Window => wire::GrantType::ReadWindow,
+                read::GrantType::Write => wire::GrantType::WriteProtection,
             } as i32,
             id: result.grant.id.to_string(),
         }),
@@ -94,7 +96,7 @@ fn limits(items: u32, bytes: u32) -> Result<(usize, usize), Status> {
     Ok((items, bytes))
 }
 
-fn run(input: Option<wire::Run>) -> Result<session::Run, Status> {
+pub(super) fn run(input: Option<wire::Run>) -> Result<session::Run, Status> {
     let input = input.ok_or_else(invalid)?;
     Ok(session::Run {
         boot: super::uuid(&input.boot_id)?,
@@ -404,36 +406,13 @@ pub(crate) fn reply(input: read::Reply) -> wire::ReadReply {
     };
     wire::ReadReply {
         outcome: outcome as i32,
-        materials: input
-            .materials
-            .into_iter()
-            .map(|material| wire::Material {
-                version: Some(version(material.version)),
-                value: Some(match material.json {
-                    Some(json) => wire::material::Value::Json(json),
-                    None => wire::material::Value::Reuse(true),
-                }),
-            })
-            .collect(),
+        materials: input.materials.into_iter().map(material).collect(),
         bucket: input.bucket.map(version),
         object: input.object.map(version),
         mapping: input.mapping.map(version),
         credential: input.credential.map(version),
         policy: input.policy.map(version),
-        grants: input
-            .grants
-            .into_iter()
-            .map(|grant| wire::Grant {
-                r#type: match grant.r#type {
-                    read::GrantType::Read => wire::GrantType::ReadProtection,
-                    read::GrantType::StorageRead => wire::GrantType::StorageRead,
-                    read::GrantType::Window => wire::GrantType::ReadWindow,
-                } as i32,
-                id: grant.id.to_string(),
-                valid_for_ms: grant.valid_for_ms,
-                storage_id: grant.storage.map_or_else(String::new, |id| id.to_string()),
-            })
-            .collect(),
+        grants: input.grants.into_iter().map(grant).collect(),
         next: input.next.map(|cursor| wire::ReadCursor {
             lease_id: cursor.lease.to_string(),
             stream_id: cursor.stream.to_string(),
@@ -447,6 +426,30 @@ pub(crate) fn reply(input: read::Reply) -> wire::ReadReply {
         representation: input.representation,
         etag: input.etag,
         body_reused: input.body_reused,
+    }
+}
+
+pub(super) fn material(value: read::Material) -> wire::Material {
+    wire::Material {
+        version: Some(version(value.version)),
+        value: Some(match value.json {
+            Some(json) => wire::material::Value::Json(json),
+            None => wire::material::Value::Reuse(true),
+        }),
+    }
+}
+
+pub(super) fn grant(value: read::Grant) -> wire::Grant {
+    wire::Grant {
+        r#type: match value.r#type {
+            read::GrantType::Read => wire::GrantType::ReadProtection,
+            read::GrantType::StorageRead => wire::GrantType::StorageRead,
+            read::GrantType::Window => wire::GrantType::ReadWindow,
+            read::GrantType::Write => wire::GrantType::WriteProtection,
+        } as i32,
+        id: value.id.to_string(),
+        valid_for_ms: value.valid_for_ms,
+        storage_id: value.storage.map_or_else(String::new, |id| id.to_string()),
     }
 }
 
@@ -639,11 +642,21 @@ mod tests {
             id: Uuid::new_v4().to_string(),
         };
         assert!(keep_alive(vec![grant.clone()], Vec::new()).is_ok());
+        assert!(
+            keep_alive(
+                vec![wire::GrantRef {
+                    r#type: wire::GrantType::WriteProtection as i32,
+                    id: grant.id.clone()
+                }],
+                Vec::new()
+            )
+            .is_ok()
+        );
         assert!(keep_alive(vec![grant.clone()], vec![grant.clone()]).is_err());
         assert!(keep_alive(vec![grant.clone(); 257], Vec::new()).is_err());
         for (r#type, id) in [
             (0, grant.id.clone()),
-            (4, grant.id.clone()),
+            (5, grant.id.clone()),
             (1, Uuid::nil().to_string()),
         ] {
             assert!(keep_alive(vec![wire::GrantRef { r#type, id }], Vec::new()).is_err());

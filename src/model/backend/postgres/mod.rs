@@ -122,6 +122,10 @@ mod node_session_tests;
 mod node_read_tests;
 
 #[cfg(test)]
+#[path = "../../../../tests/recovery/node_writes.rs"]
+mod node_write_tests;
+
+#[cfg(test)]
 #[path = "../../../../tests/recovery/node_runtime.rs"]
 mod node_runtime_tests;
 

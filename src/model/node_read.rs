@@ -251,6 +251,7 @@ pub(crate) enum GrantType {
     Read,
     StorageRead,
     Window,
+    Write,
 }
 
 #[derive(Clone)]
@@ -326,19 +327,7 @@ impl Reply {
         value: &impl Serialize,
         cached: &[Version],
     ) -> Result<Version> {
-        let json = serde_json::to_vec(value)?;
-        let version = Version::new(deployment, r#type, id, &json);
-        if !self
-            .materials
-            .iter()
-            .any(|material| material.version == version)
-        {
-            self.materials.push(Material {
-                json: (!cached.contains(&version)).then_some(json),
-                version: version.clone(),
-            });
-        }
-        Ok(version)
+        material(&mut self.materials, deployment, r#type, id, value, cached)
     }
 
     pub(crate) fn bytes(&self) -> usize {
@@ -352,6 +341,25 @@ impl Reply {
                 })
                 .sum::<usize>()
     }
+}
+
+pub(crate) fn material(
+    materials: &mut Vec<Material>,
+    deployment: Uuid,
+    r#type: MaterialType,
+    id: String,
+    value: &impl Serialize,
+    cached: &[Version],
+) -> Result<Version> {
+    let json = serde_json::to_vec(value)?;
+    let version = Version::new(deployment, r#type, id, &json);
+    if !materials.iter().any(|material| material.version == version) {
+        materials.push(Material {
+            json: (!cached.contains(&version)).then_some(json),
+            version: version.clone(),
+        });
+    }
+    Ok(version)
 }
 
 #[derive(Clone, Serialize, Deserialize)]

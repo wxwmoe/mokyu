@@ -1,6 +1,7 @@
 pub(crate) mod client;
 pub(crate) mod read;
 pub(crate) mod server;
+mod write;
 
 pub(crate) mod wire {
     tonic::include_proto!("mokyu.node.v1");

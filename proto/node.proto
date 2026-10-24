@@ -34,6 +34,45 @@ service NodeReads {
   rpc ReportRead(ReadReportRequest) returns (ReadReportReply);
 }
 
+service NodeWrites {
+  rpc BeginWrite(BeginWriteRequest) returns (WriteReply);
+  rpc WriteStatus(WriteRequest) returns (WriteReply);
+  rpc AbortWrite(WriteRequest) returns (WriteReply);
+}
+
+message BeginWriteRequest {
+  Run run = 1;
+  string operation_id = 2;
+  string access_key = 3;
+  string bucket = 4;
+  string key = 5;
+  bytes metadata_json = 6;
+  bool public_read = 7;
+  optional uint64 size = 8;
+  repeated Cached cached = 9;
+}
+
+message WriteRequest {
+  Run run = 1;
+  string operation_id = 2;
+}
+
+enum WritePhase {
+  WRITE_PHASE_UNSPECIFIED = 0;
+  WRITE_ACTIVE = 1;
+  WRITE_ABORTED = 2;
+  WRITE_EXPIRED = 3;
+}
+
+message WriteReply {
+  string operation_id = 1;
+  string stream_id = 2;
+  WritePhase phase = 3;
+  repeated Material materials = 4;
+  Cached storage = 5;
+  repeated Grant grants = 6;
+}
+
 // Suspicions request durable backend verification; they never prove corruption.
 message ReadReportRequest {
   Run run = 1;
@@ -259,6 +298,7 @@ enum GrantType {
   READ_PROTECTION = 1;
   STORAGE_READ = 2;
   READ_WINDOW = 3;
+  WRITE_PROTECTION = 4;
 }
 
 message Grant {

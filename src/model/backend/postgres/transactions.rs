@@ -1088,13 +1088,23 @@ pub(super) async fn current_stream(
 
 pub(super) async fn create_stream(
     pool: &PgPool,
-    mut input: StreamCreate,
+    input: StreamCreate,
     ttl_seconds: Option<i64>,
 ) -> Result<Id> {
     let mut tx = pool.begin().await?;
+    let id = create_stream_in(&mut tx, input, ttl_seconds).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+async fn create_stream_in(
+    tx: &mut Transaction<'_, Postgres>,
+    mut input: StreamCreate,
+    ttl_seconds: Option<i64>,
+) -> Result<Id> {
     if let Some((task, token)) = input.owner.as_ref() {
         let owned: Option<Uuid> = queries::lock_owned_task(task, token)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
         anyhow::ensure!(owned.is_some(), "storage migration lease lost");
     }
@@ -1106,9 +1116,9 @@ pub(super) async fn create_stream(
             .authority
             .add(input.bucket, crate::authorization::Action::Acl);
     }
-    input.authority.lock(&mut tx).await?;
+    input.authority.lock(tx).await?;
     let (state, paused): (String, bool) = queries::lock_bucket_uploads(input.bucket)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     if state != "active" {
         return Err(s3s::s3_error!(OperationAborted).into());
@@ -1116,7 +1126,7 @@ pub(super) async fn create_stream(
     if paused && input.stream_type == "object" {
         let finishing: bool =
             queries::completing_upload(input.completion, input.bucket, &input.key)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?;
         if !finishing {
             return Err(
@@ -1124,16 +1134,15 @@ pub(super) async fn create_stream(
             );
         }
     }
-    let id = queries::insert_stream(&input).fetch_one(&mut *tx).await?;
+    let id = queries::insert_stream(&input).fetch_one(&mut **tx).await?;
     if let Some(ttl) = ttl_seconds {
-        create_write_lease(&mut tx, id, ttl).await?;
+        create_write_lease(tx, id, ttl).await?;
     }
     if input.claim_object {
         queries::claim_object(input.bucket, &input.key, id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
-    tx.commit().await?;
     Ok(id)
 }
 
@@ -9543,6 +9552,258 @@ pub(super) async fn node_read_window(
     Ok(reply)
 }
 
+pub(super) async fn begin_node_write(
+    pool: &PgPool,
+    state: &crate::cluster::NodeState,
+    key: &crate::content::codec::Key,
+    input: crate::model::node_write::Begin,
+) -> Result<crate::model::node_write::Reply> {
+    use crate::model::{Error, node_write as write};
+    input.intent.validate()?;
+    let issued = write::operation_time(input.operation)?;
+    let hash = input.intent.hash()?;
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, state, key, false).await?;
+    ensure!(state.role == "data", Error::NodeAuthentication);
+    let session = require_node_run(&mut tx, state, input.run, true).await?;
+    if let Some(owned) = queries::node_write(state.node_id, input.operation)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        ensure!(owned.request_hash == hash, Error::NodeOperationConflict);
+        ensure!(
+            owned.credential_generation == state.credential_generation
+                && owned.boot_id == input.run.boot
+                && owned.fence == input.run.fence,
+            Error::NodeExpired
+        );
+        if owned.state == "active" && owned.valid_for_ms > 0 {
+            let authority: sqlx::types::Json<Permit> =
+                queries::write_authorization(owned.stream_id.ok_or(Error::NodeExpired)?.into())
+                    .fetch_one(&mut *tx)
+                    .await?;
+            authority.lock(&mut tx).await?;
+        }
+        let reply =
+            node_write_reply(&mut tx, state, key, input.run, owned, Some(&input.cached)).await?;
+        tx.commit().await?;
+        return Ok(reply);
+    }
+    let now = queries::node_clock().fetch_one(&mut *tx).await?;
+    ensure!(
+        issued <= now + chrono::Duration::seconds(30)
+            && issued >= now - chrono::Duration::minutes(15),
+        Error::NodeOperationExpired
+    );
+    ensure!(
+        !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
+        Error::NodeInactive
+    );
+    queries::node_write_cleanup(state.node_id)
+        .execute(&mut *tx)
+        .await?;
+    ensure!(
+        queries::node_write_count(state.node_id)
+            .fetch_one(&mut *tx)
+            .await?
+            < write::MAX_ACTIVE,
+        Error::NodeWriteLimit
+    );
+    let revision = queries::node_write_credential(&input.intent.access)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(AccessDenied))?;
+    let route = crate::model::ReadRoute::Bucket {
+        name: input.intent.bucket.clone(),
+        key: input.intent.key.clone(),
+        alias: None,
+    };
+    let bucket = queries::node_read_bucket(&route)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    let stream = create_stream_in(
+        &mut tx,
+        StreamCreate {
+            authority: Permit::for_action(
+                Principal::Service {
+                    access_key: input.intent.access.clone(),
+                    revision,
+                },
+                bucket.id,
+                Action::Write,
+            ),
+            bucket: bucket.id,
+            key: input.intent.key.clone(),
+            stream_type: "object".into(),
+            metadata: input.intent.metadata.clone(),
+            public: input.intent.public,
+            claim_object: true,
+            completion: None,
+            owner: None,
+        },
+        Some(write::LEASE_SECONDS),
+    )
+    .await?;
+    let storage = queries::storage_for_stream(stream)
+        .fetch_one(&mut *tx)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(InvalidBucketState))?;
+    let (r#type, block_key) = queries::node_write_storage(storage)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::SourceUnavailable)?;
+    ensure!(r#type == "s3", Error::SourceUnavailable);
+    if let Some(id) = block_key {
+        queries::lock_managed_key(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::SourceUnavailable)?;
+        ensure!(
+            queries::valid_storage_key(id).fetch_one(&mut *tx).await?,
+            Error::SourceUnavailable
+        );
+    }
+    let mut profile = queries::storage_profile(storage)
+        .fetch_one(&mut *tx)
+        .await?;
+    profile.write_durability = None;
+    queries::reserve_quota(stream, input.intent.size.unwrap_or(0), false, None, None)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(
+        queries::insert_node_write(state, &input, &hash, stream, &profile, block_key)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        Error::OperationAborted
+    );
+    let owned = queries::node_write(state.node_id, input.operation)
+        .fetch_one(&mut *tx)
+        .await?;
+    let reply =
+        node_write_reply(&mut tx, state, key, input.run, owned, Some(&input.cached)).await?;
+    tx.commit().await?;
+    Ok(reply)
+}
+
+async fn node_write_reply(
+    db: &mut PgConnection,
+    state: &crate::cluster::NodeState,
+    key: &crate::content::codec::Key,
+    run: crate::model::session::Run,
+    owned: queries::NodeWrite,
+    cached: Option<&[crate::model::node_read::Version]>,
+) -> Result<crate::model::node_write::Reply> {
+    use crate::model::{Error, node_read as read, node_write as write};
+    let phase = if owned.state == "aborted" {
+        write::Phase::Aborted
+    } else if owned.valid_for_ms > 0
+        && owned.credential_generation == state.credential_generation
+        && owned.boot_id == run.boot
+        && owned.fence == run.fence
+    {
+        write::Phase::Active
+    } else {
+        write::Phase::Expired
+    };
+    let mut reply = write::Reply {
+        operation: owned.operation_id,
+        stream: owned.stream_id,
+        phase,
+        materials: Vec::new(),
+        storage: None,
+        grants: Vec::new(),
+    };
+    if phase == write::Phase::Active
+        && let Some(cached) = cached
+    {
+        let storage_id = owned.storage_id.ok_or(Error::SourceUnavailable)?;
+        let record = queries::node_read_storages(&[storage_id])
+            .fetch_optional(&mut *db)
+            .await?
+            .ok_or(Error::SourceUnavailable)?;
+        let storage = read::Storage {
+            connection: crate::storage::model::Connection::unprotect(&record, key)?,
+            revision: owned.profile.revision,
+            profile: owned.profile.0,
+        };
+        reply.storage = Some(read::material(
+            &mut reply.materials,
+            state.deployment_id,
+            read::MaterialType::Storage,
+            storage_id.to_string(),
+            &storage,
+            cached,
+        )?);
+        reply.grants.push(read::Grant {
+            r#type: read::GrantType::Write,
+            id: owned.lease_id.ok_or(Error::NodeExpired)?,
+            valid_for_ms: owned.valid_for_ms as u64,
+            storage: None,
+        });
+    }
+    Ok(reply)
+}
+
+async fn abort_node_writes(
+    db: &mut PgConnection,
+    state: &crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    operations: &[Uuid],
+    leases: &[Uuid],
+) -> Result<()> {
+    if operations.is_empty() && leases.is_empty() {
+        return Ok(());
+    }
+    let rows = queries::abort_node_writes(state, run, operations, leases)
+        .fetch_all(&mut *db)
+        .await?;
+    let streams: Vec<_> = rows.iter().filter_map(|row| row.0).collect();
+    let leases: Vec<_> = rows.iter().filter_map(|row| row.1).collect();
+    queries::abandon_node_streams(&streams)
+        .execute(&mut *db)
+        .await?;
+    queries::release_node_write_leases(&leases)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn node_write_status(
+    pool: &PgPool,
+    state: &crate::cluster::NodeState,
+    key: &crate::content::codec::Key,
+    input: crate::model::node_write::Lookup,
+    abort: bool,
+) -> Result<crate::model::node_write::Reply> {
+    use crate::model::Error;
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, state, key, false).await?;
+    ensure!(state.role == "data", Error::NodeAuthentication);
+    require_node_run(&mut tx, state, input.run, true).await?;
+    let mut owned = queries::node_write(state.node_id, input.operation)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NodeOperationMissing)?;
+    if abort {
+        ensure!(
+            owned.credential_generation == state.credential_generation
+                && owned.boot_id == input.run.boot
+                && owned.fence == input.run.fence,
+            Error::NodeExpired
+        );
+        abort_node_writes(&mut tx, state, input.run, &[input.operation], &[]).await?;
+        owned = queries::node_write(state.node_id, input.operation)
+            .fetch_one(&mut *tx)
+            .await?;
+    }
+    let reply = node_write_reply(&mut tx, state, key, input.run, owned, None).await?;
+    tx.commit().await?;
+    Ok(reply)
+}
+
 async fn maintain_node_reads(
     db: &mut PgConnection,
     state: &crate::cluster::NodeState,
@@ -9585,8 +9846,14 @@ async fn maintain_node_reads(
     queries::node_read_release(state, run, &reads)
         .execute(&mut *db)
         .await?;
+    abort_node_writes(db, state, run, &[], &ids(GrantType::Write)).await?;
     let mut renewed = HashMap::new();
-    for r#type in [GrantType::Read, GrantType::StorageRead, GrantType::Window] {
+    for r#type in [
+        GrantType::Read,
+        GrantType::StorageRead,
+        GrantType::Window,
+        GrantType::Write,
+    ] {
         let ids = resources
             .renew
             .iter()

@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0074.
+-- Generated from the complete postgres migration chain through 0075.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -926,6 +926,28 @@ CREATE TABLE public.node_sessions (
     CONSTRAINT node_sessions_sequence_check CHECK ((sequence >= 0))
 );
 
+CREATE TABLE public.node_writes (
+    node_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    credential_generation bigint NOT NULL,
+    boot_id uuid NOT NULL,
+    fence uuid NOT NULL,
+    request_hash bytea NOT NULL,
+    stream_id uuid,
+    lease_id uuid,
+    storage_id uuid,
+    block_key_id uuid,
+    profile jsonb NOT NULL,
+    state text DEFAULT 'active'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT node_writes_check CHECK (((state = 'active'::text) = (completed_at IS NULL))),
+    CONSTRAINT node_writes_credential_generation_check CHECK ((credential_generation > 0)),
+    CONSTRAINT node_writes_profile_check CHECK (((jsonb_typeof(profile) = 'object'::text) AND (octet_length((profile)::text) <= 32768))),
+    CONSTRAINT node_writes_request_hash_check CHECK ((octet_length(request_hash) = 32)),
+    CONSTRAINT node_writes_state_check CHECK ((state = ANY (ARRAY['active'::text, 'aborted'::text])))
+);
+
 CREATE TABLE public.nodes (
     id uuid DEFAULT uuidv7() NOT NULL,
     name text NOT NULL,
@@ -1800,6 +1822,15 @@ ALTER TABLE ONLY public.node_runtime_samples
 ALTER TABLE ONLY public.node_sessions
     ADD CONSTRAINT node_sessions_pkey PRIMARY KEY (node_id);
 
+ALTER TABLE ONLY public.node_writes
+    ADD CONSTRAINT node_writes_lease_id_key UNIQUE (lease_id);
+
+ALTER TABLE ONLY public.node_writes
+    ADD CONSTRAINT node_writes_pkey PRIMARY KEY (node_id, operation_id);
+
+ALTER TABLE ONLY public.node_writes
+    ADD CONSTRAINT node_writes_stream_id_key UNIQUE (stream_id);
+
 ALTER TABLE ONLY public.nodes
     ADD CONSTRAINT nodes_name_key UNIQUE (name);
 
@@ -2046,6 +2077,10 @@ CREATE INDEX node_read_sources_location ON public.node_read_sources USING btree 
 CREATE INDEX node_runtime_expire ON public.node_runtime_samples USING btree (received_at);
 
 CREATE INDEX node_runtime_time ON public.node_runtime_samples USING btree (node_id, received_at DESC);
+
+CREATE INDEX node_writes_cleanup ON public.node_writes USING btree (node_id, created_at);
+
+CREATE INDEX node_writes_key ON public.node_writes USING btree (block_key_id) WHERE ((state = 'active'::text) AND (block_key_id IS NOT NULL));
 
 CREATE INDEX nodes_role_enabled ON public.nodes USING btree (role, enabled);
 
@@ -2398,6 +2433,21 @@ ALTER TABLE ONLY public.node_sessions
 
 ALTER TABLE ONLY public.node_sessions
     ADD CONSTRAINT node_sessions_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_writes
+    ADD CONSTRAINT node_writes_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);
+
+ALTER TABLE ONLY public.node_writes
+    ADD CONSTRAINT node_writes_lease_id_fkey FOREIGN KEY (lease_id) REFERENCES public.stream_leases(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.node_writes
+    ADD CONSTRAINT node_writes_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id);
+
+ALTER TABLE ONLY public.node_writes
+    ADD CONSTRAINT node_writes_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.node_writes
+    ADD CONSTRAINT node_writes_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id) ON DELETE SET NULL;
 
 ALTER TABLE ONLY public.nonce_counters
     ADD CONSTRAINT nonce_counters_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);

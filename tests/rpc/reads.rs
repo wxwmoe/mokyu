@@ -16,6 +16,8 @@ mod http;
 mod replica;
 #[path = "snapshots.rs"]
 mod snapshots;
+#[path = "writes.rs"]
+mod writes;
 
 #[derive(serde::Deserialize)]
 struct Fixture {

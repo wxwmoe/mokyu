@@ -11,6 +11,7 @@ use wire::{
     node_control_server::{NodeControl, NodeControlServer},
     node_reads_server::{NodeReads, NodeReadsServer},
     node_sessions_server::{NodeSessions, NodeSessionsServer},
+    node_writes_server::{NodeWrites, NodeWritesServer},
 };
 
 #[derive(Clone)]
@@ -57,8 +58,13 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
             .max_encoding_message_size(SESSION_LIMIT),
     )
     .add_service(
-        NodeReadsServer::new(service)
+        NodeReadsServer::new(service.clone())
             .max_decoding_message_size(super::read::REQUEST_LIMIT)
+            .max_encoding_message_size(MESSAGE_LIMIT),
+    )
+    .add_service(
+        NodeWritesServer::new(service)
+            .max_decoding_message_size(model::node_write::REQUEST_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .into_axum_router()
@@ -161,7 +167,7 @@ fn identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
 
 fn failure(error: anyhow::Error) -> Status {
     use model::Error;
-    match model::error(&error) {
+    let mut status = match model::error(&error) {
         Some(Error::NodeAuthentication) => {
             Status::unauthenticated("invalid node identity or credential")
         }
@@ -177,6 +183,16 @@ fn failure(error: anyhow::Error) -> Status {
         Some(Error::NodeReadLimit) => {
             Status::resource_exhausted("node read exceeds its resource or message budget")
         }
+        Some(Error::NodeWriteLimit) => Status::resource_exhausted("node write capacity is full"),
+        Some(Error::NodeOperationExpired) => {
+            Status::failed_precondition("write operation is outside its admission window")
+        }
+        Some(Error::NodeOperationConflict) => {
+            Status::already_exists("write operation parameters changed")
+        }
+        Some(Error::NodeOperationMissing) => Status::not_found("write operation was not found"),
+        Some(Error::QuotaExceeded) => Status::resource_exhausted("storage quota exceeded"),
+        Some(Error::OperationAborted) => Status::aborted("operation was aborted"),
         Some(Error::NodeReadBusy) => {
             let mut status = Status::resource_exhausted("node read capacity is busy");
             status
@@ -184,16 +200,113 @@ fn failure(error: anyhow::Error) -> Status {
                 .insert("mokyu-retryable", "read-capacity".parse().unwrap());
             status
         }
-        _ if error
-            .downcast_ref::<s3s::S3Error>()
-            .is_some_and(|error| error.code() == &s3s::S3ErrorCode::InvalidArgument) =>
-        {
-            Status::invalid_argument("invalid node request")
+        _ if error.downcast_ref::<s3s::S3Error>().is_some() => {
+            let code = error.downcast_ref::<s3s::S3Error>().unwrap().code();
+            match code {
+                s3s::S3ErrorCode::AccessDenied => Status::permission_denied("access denied"),
+                s3s::S3ErrorCode::NoSuchBucket => Status::not_found("bucket was not found"),
+                s3s::S3ErrorCode::InvalidBucketState => {
+                    Status::failed_precondition("bucket cannot accept writes")
+                }
+                s3s::S3ErrorCode::OperationAborted => Status::aborted("operation was aborted"),
+                s3s::S3ErrorCode::InvalidArgument | s3s::S3ErrorCode::InvalidRequest => {
+                    Status::invalid_argument("invalid node request")
+                }
+                _ => Status::unavailable("control operation is unavailable"),
+            }
         }
         _ => {
             tracing::warn!("node RPC database operation failed");
             Status::unavailable("control operation is unavailable")
         }
+    };
+    let business = match model::error(&error) {
+        Some(Error::QuotaExceeded) => Some("QuotaExceeded"),
+        Some(Error::OperationAborted) => Some("OperationAborted"),
+        _ => error
+            .downcast_ref::<s3s::S3Error>()
+            .and_then(|error| match error.code() {
+                s3s::S3ErrorCode::AccessDenied => Some("AccessDenied"),
+                s3s::S3ErrorCode::NoSuchBucket => Some("NoSuchBucket"),
+                s3s::S3ErrorCode::InvalidBucketState => Some("InvalidBucketState"),
+                s3s::S3ErrorCode::OperationAborted => Some("OperationAborted"),
+                s3s::S3ErrorCode::InvalidArgument => Some("InvalidArgument"),
+                s3s::S3ErrorCode::InvalidRequest => Some("InvalidRequest"),
+                _ => None,
+            }),
+    };
+    if let Some(code) = business {
+        status
+            .metadata_mut()
+            .insert("mokyu-s3-code", code.parse().unwrap());
+    }
+    status
+}
+
+#[tonic::async_trait]
+impl NodeWrites for Service {
+    async fn begin_write(
+        &self,
+        request: Request<wire::BeginWriteRequest>,
+    ) -> Result<Response<wire::WriteReply>, Status> {
+        let node = write_identity(&request)?;
+        let input = super::write::begin(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.begin_write(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-write-opened").await;
+        Ok(Response::new(super::write::reply(reply)?))
+    }
+
+    async fn write_status(
+        &self,
+        request: Request<wire::WriteRequest>,
+    ) -> Result<Response<wire::WriteReply>, Status> {
+        self.write_lookup(request, false).await
+    }
+
+    async fn abort_write(
+        &self,
+        request: Request<wire::WriteRequest>,
+    ) -> Result<Response<wire::WriteReply>, Status> {
+        self.write_lookup(request, true).await
+    }
+}
+
+fn write_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
+    let node = request
+        .extensions()
+        .get::<NodeState>()
+        .cloned()
+        .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
+    if node.role != "data" {
+        return Err(Status::permission_denied(
+            "object writes require a data node",
+        ));
+    }
+    Ok(node)
+}
+
+impl Service {
+    async fn write_lookup(
+        &self,
+        request: Request<wire::WriteRequest>,
+        abort: bool,
+    ) -> Result<Response<wire::WriteReply>, Status> {
+        let node = write_identity(&request)?;
+        let input = super::write::lookup(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.write_status(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+            abort,
+        ))
+        .await?;
+        Ok(Response::new(super::write::reply(reply)?))
     }
 }
 
@@ -479,5 +592,43 @@ impl NodeSessions for Service {
             }
         };
         Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn business_failures_preserve_codes_without_marking_control_unavailable() {
+        for (error, code, business) in [
+            (
+                model::Error::QuotaExceeded.into(),
+                tonic::Code::ResourceExhausted,
+                "QuotaExceeded",
+            ),
+            (
+                model::Error::OperationAborted.into(),
+                tonic::Code::Aborted,
+                "OperationAborted",
+            ),
+            (
+                s3s::s3_error!(AccessDenied).into(),
+                tonic::Code::PermissionDenied,
+                "AccessDenied",
+            ),
+            (
+                s3s::s3_error!(NoSuchBucket).into(),
+                tonic::Code::NotFound,
+                "NoSuchBucket",
+            ),
+        ] {
+            let status = failure(error);
+            assert_eq!(status.code(), code);
+            assert_eq!(status.metadata().get("mokyu-s3-code").unwrap(), business);
+        }
+        let status = failure(model::Error::NodeWriteLimit.into());
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert!(status.metadata().get("mokyu-s3-code").is_none());
     }
 }

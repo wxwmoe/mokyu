@@ -127,11 +127,11 @@ impl Resources {
                     }
                     Some(id)
                 }
-                Ok(wire::GrantType::ReadProtection | wire::GrantType::ReadWindow)
-                    if grant.storage_id.is_empty() =>
-                {
-                    None
-                }
+                Ok(
+                    wire::GrantType::ReadProtection
+                    | wire::GrantType::ReadWindow
+                    | wire::GrantType::WriteProtection,
+                ) if grant.storage_id.is_empty() => None,
                 _ => return Err(invalid()),
             };
             parsed.push((

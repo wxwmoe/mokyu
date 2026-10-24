@@ -26,6 +26,9 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeReads/ReadWindow` | Unary；沿当前读取游标取下一窗口，校验运行权、读取保护和载荷修订 |
 | `NodeReads/ReportRead` | Unary；报告当前读取窗口内最多 16 个来源段，请求持久后端复核，仅允许 data |
 | `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，收到 Welcome 后发送 Pulse 并等待匹配序号的确认 |
+| `NodeWrites/BeginWrite` | Unary；校验权限、创建写入上下文与租约并预留配额，返回存储材料；仅允许 data |
+| `NodeWrites/WriteStatus` | Unary；按节点与操作身份查询写入状态，不返回存储凭据 |
+| `NodeWrites/AbortWrite` | Unary；取消当前运行权持有的写入，同事务释放写租约和预留配额 |
 
 配置分区为 `requests`、`uploads`、`metrics`、`maintenance`、`io`，不含管理 `web` 设置。`cached` 只表示已持有的配置修订，不替代任何身份或租约检查；缺失或修订不符时，在同一 SyncNode 响应内补全。Settings 的 JSON 字节使用对应运行设置的现有结构。
 
@@ -81,6 +84,14 @@ ReportRead 绑定当前运行权、有效读取与窗口，下标只引用该窗
 
 重连保留同一有效运行权句柄，已到期的句柄不能被后来的确认复活。新的 fence、凭据拒绝、停止或驱动取消会使旧句柄失效。排空立即停止本地新工作准入，同时保留心跳和恢复连接；维护状态不撤销仍有效的运行权。仅 Session 中断时，持有有效运行权的调用仍可使用独立 Unary 连接，由相应业务 RPC 检查当前权限。
 
+## 写入准入
+
+BeginWrite 请求最多 64 KiB；包含桶、对象键、服务凭据身份、对象元数据、公开标志和可选的已知长度。调用方先验证入站签名，再发起准入。control 在同一事务内校验写入权限及公开对象所需的 ACL 权限、桶状态、维护状态和配额，绑定对象写令牌、存储策略与块密钥。返回存储材料支持 `cached`，不重复发送匹配修订的连接配置。
+
+写入 `operation_id` 使用 UUIDv7。首次准入接受过去 15 分钟至未来 30 秒内的时间戳；节点应同步系统时钟。相同操作与相同参数重放原上下文，参数变化返回 `AlreadyExists`。活动写入重放会重验原授权；同一节点的其他 boot 或凭据代次不能继续该写入。WriteStatus 可查询该节点的历史回执，返回 `WRITE_ACTIVE`、`WRITE_ABORTED` 或 `WRITE_EXPIRED`。
+
+每节点最多 4096 个有效写入。`WRITE_PROTECTION` 为 90 秒租约，复用 NodeSession 的批量续期与释放，不能恢复已经过期的租约；释放会取消未发布的写入。取消可重复执行，回执不随 stream 回收丢失；准入时分批清理超过一天且无有效租约的回执。清理后的操作时间已超出首次准入窗口，不能重新执行。
+
 ## 地址选择
 
 客户端要求 HTTPS 域名 origin，不接受 IP、用户信息、路径或 query。解析完整 A 集合（最多 32 个），按 TTL 刷新，刷新间隔限制在 1～300 秒；DNS 失败时仅在上一次集合到期后的 300 秒内继续使用已知地址。
@@ -92,12 +103,14 @@ Unary 在可用地址间轮询，每个地址复用自己的 Channel；失败地
 | gRPC 状态 | 处理 |
 | --- | --- |
 | `Unauthenticated` | 身份或凭据无效，停止使用并由管理员恢复 |
-| `PermissionDenied` | 节点被禁用、角色不适用或部署不在群集模式 |
+| `PermissionDenied` | 节点被禁用、角色不适用、部署不在群集模式或业务权限不足 |
 | `Aborted` | 其他 boot/会话已接管，或心跳序号过旧 |
 | `FailedPrecondition` | 协议不支持、运行租约到期、boot 已退役，或读取来源/载荷修订已失效；不惩罚 control 地址健康状态 |
-| `ResourceExhausted` | 元数据、并发或 boot 历史超限 |
+| `ResourceExhausted` | 元数据、并发、写入数量、存储配额或 boot 历史超限 |
+| `AlreadyExists` | 同一写操作的参数发生变化 |
+| `NotFound` | 指定写操作或桶不存在 |
 | `Unavailable` / `DeadlineExceeded` | 在有限期限和退避内尝试其他地址 |
 
-消息长度超限也可能由 gRPC 解码器返回 `OutOfRange`。业务身份和状态错误不应触发地址轮换重试。
+消息长度超限也可能由 gRPC 解码器返回 `OutOfRange`。写入准入的权限、桶、配额及请求错误通过 `mokyu-s3-code` 响应 metadata 保留 S3 业务码，调用方不依赖错误文案区分配额不足和节点容量不足。业务身份和状态错误不应触发地址轮换重试。
 
 代理返回的 HTTP 429、502、503、504 转为 `Unavailable`，在解码正文前丢弃 HTML 错误页；HTTP 401/403 保留认证/权限失败语义，不轮换重试。
