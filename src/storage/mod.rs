@@ -33,6 +33,10 @@ mod memory_tests;
 #[path = "../../tests/storage/diagnostics.rs"]
 mod diagnostic_tests;
 
+#[cfg(all(test, feature = "fault-injection"))]
+#[path = "../../tests/recovery/raw_permits.rs"]
+mod raw_permit_tests;
+
 use self::model::{Record as StoreRecord, Store as VerifiedStore};
 use self::profile::StorageProfile;
 pub(crate) use self::{

@@ -139,8 +139,8 @@ async fn process(app: &App, work: &RawUpload) -> Result<()> {
                 .context("invalid pending raw content hash")?,
         )
     } else if work.deduplicate {
-        let _cpu = app.storage.cpu.acquire().await?;
         let mut reader = app.storage.raw_reader_uncached(&work.source, false).await?;
+        let _cpu = app.storage.cpu.acquire().await?;
         crate::storage::raw_upload::hash_file(
             &mut reader.file,
             work.source.size as u64,

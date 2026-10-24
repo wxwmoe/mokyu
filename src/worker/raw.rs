@@ -121,11 +121,11 @@ async fn process(app: &App, work: &RawProcessing) -> Result<bool> {
                 .try_into()
                 .map_err(|_| IntegrityError::RawMetadata)?
         } else {
-            let Ok(_cpu) = app.storage.cpu.try_acquire() else {
+            let mut reader = app.storage.raw_reader_uncached(source, false).await?;
+            let Ok(cpu) = app.storage.cpu.try_acquire() else {
                 return Ok(false);
             };
-            let hash = async {
-                let mut reader = app.storage.raw_reader_uncached(source, false).await?;
+            let hash = async move {
                 let mut hash = blake3::Hasher::new();
                 let mut digest = Md5::new();
                 let mut buffer = vec![0; 256 * 1024];
@@ -152,6 +152,7 @@ async fn process(app: &App, work: &RawProcessing) -> Result<bool> {
                 Ok::<_, anyhow::Error>(*hash.finalize().as_bytes())
             }
             .await?;
+            drop(cpu);
             app.raw
                 .save_processing_hash(work, source.revision, &hash)
                 .await?;

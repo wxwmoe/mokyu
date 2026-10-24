@@ -375,8 +375,8 @@ impl Storage {
                     .await?,
             ));
         }
-        let permit = target.writes.acquire().await?;
         let global = self.writes.acquire().await?;
+        let permit = target.writes.acquire().await?;
         let hash =
             (cache && target.deduplication_enabled && target.profile.write_processing == "inline")
                 .then(blake3::Hasher::new);
@@ -633,6 +633,8 @@ impl Storage {
             })
         };
         if verify {
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-verify-before-cpu").await;
             let _cpu = self.cpu.acquire().await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("raw-before-verify").await;
