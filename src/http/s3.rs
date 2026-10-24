@@ -46,6 +46,7 @@ pub async fn s3_http(
     let mut cors = HeaderMap::new();
     let mut public_alias = false;
     let result: Result<s3s::HttpResponse> = async {
+        super::transport::authority(&mut request)?;
         if app.mode_mismatch().await? {
             return Err(s3s::s3_error!(ServiceUnavailable).into());
         }
@@ -306,10 +307,7 @@ pub async fn s3_http(
             "Accept-Encoding, Authorization, X-Amz-Checksum-Mode",
         );
     }
-    if head
-        && response.headers().contains_key("content-encoding")
-        && !response.headers().contains_key("content-length")
-    {
+    if head {
         *response.body_mut() =
             s3s::Body::from(super::object::blob(Box::pin(futures_util::stream::empty())));
     }

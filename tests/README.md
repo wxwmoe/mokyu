@@ -66,7 +66,8 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 
 - `integration.py`：S3 普通上传、条件请求、校验、Range 和分片协议。
 - `s3/publication.py`：保留 boto3 默认 checksum 行为，验证文件流、transfer-manager multipart、同 key 普通 PUT/If-None-Match 竞争，以及正文、ETag、长度、类型和 writer 元数据属于同一代。默认 20 轮 × 8 写者；`MOKYU_TEST_ENDPOINTS` 可指定多 data 地址 JSON 数组，否则使用单个 `MOKYU_TEST_ENDPOINT`。记录预算拒绝 SlowDown，不把它算作成功。
-- `s3/connections.py`：Expect 未发送正文、部分正文、完整正文遭拒后的 HTTP/1.1 连接边界；前两种关闭，完整正文可复用，且后续响应正文完整。仅直连隔离 HTTP 端口运行，每种 20 轮。
+- `s3/connections.py`：Expect 未发送正文、部分正文、完整正文遭拒后的 HTTP/1.1 连接边界；前两种关闭，完整正文允许安全关闭或复用；无正文请求复用，复用后的响应正文必须完整。仅直连隔离 HTTP 端口运行，每种 20 轮。
+- `s3/protocols.py`：三个监听器的 HTTP/1.1 + h2c、特殊路径签名、HEAD/Range、大于流窗口的读写、并发、取消、早期拒绝和慢 preface。另需 Python `h2`；在普通 S3 凭据 fixture 上设置 `MOKYU_TEST_PUBLIC`、已绑定该桶的 `MOKYU_TEST_PUBLIC_HOST` 和管理入口 `MOKYU_TEST_WEB`，用 `python -m tests.s3.protocols` 执行。
 - `recovery/truncated_stream.py`：PostgreSQL 专用数据库构造 513 个有 source offset 的 extent，删除最后完整 extent 后，已读过和绕过缓存的完整/尾部 Range 均不得静默成功；恢复后字节正确。使用 `MOKYU_TEST_DATABASE_FILE` 和与发布测试相同的 endpoint 设置。
 - `s3/empty_ranges.py`：签名/匿名 S3、公共 Web 与面板下载的空对象、单字节、suffix/open/closed Range、HEAD 和条件请求。空对象无 Range 正常返回，合法但不可满足的 Range 返回 416 和 `Content-Range: bytes */0`；使用默认 SDK 校验配置，另验证空对象复制。面板验证读取 `MOKYU_TEST_PASSWORD_FILE`，公共 Web 使用 `MOKYU_TEST_PUBLIC_WEB`/`MOKYU_TEST_PUBLIC_HOST`。
 - `control/database_capabilities.py`：管理 API/CLI、配置字段和群集能力边界。

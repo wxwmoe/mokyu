@@ -4,6 +4,7 @@ pub(crate) mod errors;
 pub(crate) mod gateway;
 pub(crate) mod public;
 pub(crate) mod s3;
+pub(crate) mod transport;
 
 pub(crate) use cors::{CorsRule, cors_headers, validate_cors};
 pub(crate) use errors::{ErrorCode, HttpError, problem, unauthorized};

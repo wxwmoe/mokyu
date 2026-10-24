@@ -1,8 +1,11 @@
 use crate::{app, config, http, status::stats};
 use anyhow::Result;
-use hyper_util::rt::{TokioIo, TokioTimer};
-use std::{sync::Arc, time::Duration};
-use tokio::{net::TcpListener, sync::Semaphore};
+use hyper_util::rt::TokioIo;
+use std::sync::Arc;
+use tokio::{
+    net::TcpListener,
+    sync::{Notify, Semaphore},
+};
 use tracing::Instrument;
 
 pub(super) fn build_s3(app: Arc<app::App>) -> Result<s3s::service::S3Service> {
@@ -44,8 +47,12 @@ pub(super) async fn serve_s3(
         let app = app.clone();
         let controls = controls.clone();
         let mut stopping = app.stop_connections.subscribe();
+        let streams = app.budget.data_slots;
+        let first = Arc::new(Notify::new());
+        let started = first.clone();
         let service = hyper::service::service_fn(
             move |mut request: hyper::Request<hyper::body::Incoming>| {
+                started.notify_one();
                 let app = app.clone();
                 let s3 = s3.clone();
                 let controls = controls.clone();
@@ -66,11 +73,8 @@ pub(super) async fn serve_s3(
         );
         tokio::spawn(async move {
             let _permit = permit;
-            let connection = hyper::server::conn::http1::Builder::new()
-                .timer(TokioTimer::new())
-                .header_read_timeout(Duration::from_secs(15))
-                .max_buf_size(32 * 1024)
-                .serve_connection(TokioIo::new(socket), service);
+            let builder = http::transport::builder(streams);
+            let connection = builder.serve_connection(TokioIo::new(socket), service);
             tokio::pin!(connection);
             let stopping_now = *stopping.borrow_and_update();
             let result = if stopping_now {
@@ -79,6 +83,7 @@ pub(super) async fn serve_s3(
             } else {
                 tokio::select! {
                     result = &mut connection => result,
+                    _ = http::transport::first_request_timeout(first) => return,
                     _ = stopping.changed() => {
                         connection.as_mut().graceful_shutdown();
                         connection.await
@@ -97,6 +102,7 @@ pub(super) async fn serve_router(
     connections: Arc<Semaphore>,
     app: Arc<app::App>,
 ) -> Result<()> {
+    let router = router.layer(axum::middleware::from_fn(http::transport::router_request));
     loop {
         let (socket, _) = listener.accept().await?;
         socket.set_nodelay(true)?;
@@ -105,14 +111,18 @@ pub(super) async fn serve_router(
             Err(_) => continue,
         };
         let service = hyper_util::service::TowerToHyperService::new(router.clone());
+        let first = Arc::new(Notify::new());
+        let started = first.clone();
+        let service = hyper::service::service_fn(move |request| {
+            started.notify_one();
+            hyper::service::Service::call(&service, request)
+        });
+        let streams = app.budget.data_slots;
         let mut stopping = app.stop_connections.subscribe();
         tokio::spawn(async move {
             let _permit = permit;
-            let connection = hyper::server::conn::http1::Builder::new()
-                .timer(TokioTimer::new())
-                .header_read_timeout(Duration::from_secs(15))
-                .max_buf_size(32 * 1024)
-                .serve_connection(TokioIo::new(socket), service);
+            let builder = http::transport::builder(streams);
+            let connection = builder.serve_connection(TokioIo::new(socket), service);
             tokio::pin!(connection);
             let stopping_now = *stopping.borrow_and_update();
             let result = if stopping_now {
@@ -121,6 +131,7 @@ pub(super) async fn serve_router(
             } else {
                 tokio::select! {
                     result = &mut connection => result,
+                    _ = http::transport::first_request_timeout(first) => return,
                     _ = stopping.changed() => {
                         connection.as_mut().graceful_shutdown();
                         connection.await
