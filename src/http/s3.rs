@@ -18,6 +18,84 @@ use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
+pub(crate) fn configure(
+    builder: &mut s3s::service::S3ServiceBuilder,
+    requests: &config::RequestSettings,
+) -> Result<()> {
+    if let Some(domain) = &requests.s3_domain {
+        builder.set_host(s3s::host::SingleDomain::new(domain)?.with_cname_fallback(false));
+    }
+    let mut cfg = s3s::config::S3Config::default();
+    cfg.xml_max_body_size = 2 * 1024 * 1024;
+    cfg.aws_chunked_stream_max_chunk_size = config::bytes(&requests.s3_chunk_limit)? as usize;
+    cfg.enable_sig_v2 = false;
+    cfg.sig_v4_allowed_services = vec!["s3".into()];
+    cfg.expected_region = Some(requests.s3_region.parse()?);
+    builder.set_config(Arc::new(s3s::config::StaticConfigProvider::new(Arc::new(
+        cfg,
+    ))));
+    Ok(())
+}
+
+pub(super) struct Target {
+    pub(super) query: Vec<String>,
+    pub(super) signed: bool,
+    pub(super) virtual_bucket: Option<String>,
+    pub(super) alias: Option<String>,
+}
+
+impl Target {
+    pub(super) fn new<B>(
+        request: &hyper::Request<B>,
+        requests: &config::RequestSettings,
+    ) -> Result<Self> {
+        let query = request
+            .uri()
+            .query()
+            .unwrap_or("")
+            .split('&')
+            .map(|part| decode_path(part.split('=').next().unwrap_or("")))
+            .collect::<Result<Vec<_>>>()?;
+        let host = request
+            .headers()
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+            .map(|value| value.host().to_ascii_lowercase())
+            .unwrap_or_default();
+        let domain = requests
+            .s3_domain
+            .as_deref()
+            .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+            .map(|value| value.host().to_ascii_lowercase());
+        let virtual_bucket = domain
+            .as_ref()
+            .and_then(|domain| host.strip_suffix(&format!(".{domain}")))
+            .map(str::to_owned);
+        let signed = request.headers().contains_key("authorization")
+            || query.iter().any(|name| {
+                let name = name.to_ascii_lowercase();
+                name.starts_with("x-amz-")
+                    || matches!(name.as_str(), "awsaccesskeyid" | "signature" | "expires")
+            });
+        let alias = (!signed
+            && matches!(
+                *request.method(),
+                Method::GET | Method::HEAD | Method::OPTIONS
+            )
+            && virtual_bucket.is_none()
+            && domain.as_ref() != Some(&host)
+            && s3s::path::check_bucket_name(&host))
+        .then_some(host);
+        Ok(Self {
+            query,
+            signed,
+            virtual_bucket,
+            alias,
+        })
+    }
+}
+
 pub async fn s3_http(
     app: Arc<App>,
     service: s3s::service::S3Service,
@@ -50,45 +128,11 @@ pub async fn s3_http(
         if app.mode_mismatch().await? {
             return Err(s3s::s3_error!(ServiceUnavailable).into());
         }
-        let query: Vec<String> = request
-            .uri()
-            .query()
-            .unwrap_or("")
-            .split('&')
-            .map(|p| decode_path(p.split('=').next().unwrap_or("")))
-            .collect::<Result<_>>()?;
-        let host = request
-            .headers()
-            .get("host")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.parse::<axum::http::uri::Authority>().ok())
-            .map(|h| h.host().to_ascii_lowercase())
-            .unwrap_or_default();
-        let domain = app
-            .config
-            .requests
-            .s3_domain
-            .as_deref()
-            .and_then(|h| h.parse::<axum::http::uri::Authority>().ok())
-            .map(|h| h.host().to_ascii_lowercase());
-        let virtual_bucket = domain
-            .as_ref()
-            .and_then(|d| host.strip_suffix(&format!(".{d}")));
-        let signed = request.headers().contains_key("authorization")
-            || query.iter().any(|q| {
-                let q = q.to_ascii_lowercase();
-                q.starts_with("x-amz-")
-                    || matches!(q.as_str(), "awsaccesskeyid" | "signature" | "expires")
-            });
-        let alias = (!signed
-            && matches!(
-                *request.method(),
-                Method::GET | Method::HEAD | Method::OPTIONS
-            )
-            && virtual_bucket.is_none()
-            && domain.as_ref() != Some(&host)
-            && s3s::path::check_bucket_name(&host))
-        .then_some(host.as_str());
+        let target = Target::new(&request, &app.config.requests)?;
+        let query = &target.query;
+        let signed = target.signed;
+        let virtual_bucket = target.virtual_bucket.as_deref();
+        let alias = target.alias.as_deref();
         // Conditional GETs keep the second authority check after metadata evaluation.
         let route = (read
             && (head || !super::object::conditional(request.headers()))
@@ -314,7 +358,7 @@ pub async fn s3_http(
     response
 }
 
-fn read_route(
+pub(super) fn read_route(
     path: &str,
     virtual_bucket: Option<&str>,
     alias: Option<&str>,
@@ -338,7 +382,7 @@ fn read_route(
     })
 }
 
-fn access_key(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
+pub(super) fn access_key(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
     // This is a query hint only; s3s still validates the complete signature and requested key.
     let credential = if let Some(header) = headers.get(hyper::header::AUTHORIZATION) {
         let header = header.to_str().ok()?.strip_prefix("AWS4-HMAC-SHA256 ")?;
@@ -561,15 +605,7 @@ pub(crate) async fn respond(
             false,
         )
         .await?;
-        let mut response = Response::new(match read.body {
-            Some(body) => Body::new(s3s::Body::from(body)),
-            None => {
-                Body::from_stream(futures_util::stream::empty::<std::io::Result<bytes::Bytes>>())
-            }
-        });
-        *response.status_mut() = read.status;
-        *response.headers_mut() = read.headers;
-        return Ok(response);
+        return Ok(read.response());
     }
     let etag = |name: &str| {
         headers

@@ -1,4 +1,4 @@
-use crate::{app, config, http, status::stats};
+use crate::{app, http, status::stats};
 use anyhow::Result;
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
@@ -12,19 +12,7 @@ pub(super) fn build_s3(app: Arc<app::App>) -> Result<s3s::service::S3Service> {
     let mut builder = s3s::service::S3ServiceBuilder::new(http::gateway::Gateway(app.clone()));
     builder.set_auth(http::gateway::Gateway(app.clone()));
     builder.set_access(http::gateway::Gateway(app.clone()));
-    if let Some(domain) = &app.config.requests.s3_domain {
-        builder.set_host(s3s::host::SingleDomain::new(domain)?.with_cname_fallback(false));
-    }
-    let mut cfg = s3s::config::S3Config::default();
-    cfg.xml_max_body_size = 2 * 1024 * 1024;
-    cfg.aws_chunked_stream_max_chunk_size =
-        config::bytes(&app.config.requests.s3_chunk_limit)? as usize;
-    cfg.enable_sig_v2 = false;
-    cfg.sig_v4_allowed_services = vec!["s3".into()];
-    cfg.expected_region = Some(app.config.requests.s3_region.parse()?);
-    builder.set_config(Arc::new(s3s::config::StaticConfigProvider::new(Arc::new(
-        cfg,
-    ))));
+    http::s3::configure(&mut builder, &app.config.requests)?;
     Ok(builder.build())
 }
 

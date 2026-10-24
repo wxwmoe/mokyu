@@ -54,6 +54,13 @@ impl serde::Serialize for Policy {
         self.0.value.serialize(serializer)
     }
 }
+impl<'de> serde::Deserialize<'de> for Policy {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Ok(Self::from(Value::deserialize(deserializer)?))
+    }
+}
 impl Policy {
     pub(crate) fn bytes(&self) -> usize {
         // Include JSON, parsed strings, header owners and tree/Arc allocations before admission.

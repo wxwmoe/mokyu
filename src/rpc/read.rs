@@ -5,6 +5,26 @@ use std::collections::HashSet;
 use tonic::Status;
 
 pub(super) const REQUEST_LIMIT: usize = 128 * 1024;
+pub(crate) const HEADERS: &[&str] = &[
+    "range",
+    "if-range",
+    "if-match",
+    "if-none-match",
+    "if-modified-since",
+    "if-unmodified-since",
+    "accept-encoding",
+    "cache-control",
+    "pragma",
+    "x-amz-checksum-mode",
+];
+pub(crate) const OVERRIDES: &[&str] = &[
+    "content-type",
+    "content-disposition",
+    "content-encoding",
+    "content-language",
+    "cache-control",
+    "expires",
+];
 
 fn invalid() -> Status {
     Status::invalid_argument("invalid read request")
@@ -96,29 +116,9 @@ fn headers(input: Vec<wire::ReadHeader>, overrides: bool) -> Result<HeaderMap, S
     for field in input {
         let name = HeaderName::from_bytes(field.name.as_bytes()).map_err(|_| invalid())?;
         let allowed = if overrides {
-            matches!(
-                name.as_str(),
-                "content-type"
-                    | "content-disposition"
-                    | "content-encoding"
-                    | "content-language"
-                    | "cache-control"
-                    | "expires"
-            )
+            OVERRIDES.contains(&name.as_str())
         } else {
-            matches!(
-                name.as_str(),
-                "range"
-                    | "if-range"
-                    | "if-match"
-                    | "if-none-match"
-                    | "if-modified-since"
-                    | "if-unmodified-since"
-                    | "accept-encoding"
-                    | "cache-control"
-                    | "pragma"
-                    | "x-amz-checksum-mode"
-            )
+            HEADERS.contains(&name.as_str())
         };
         if !allowed
             || (headers.contains_key(&name)
@@ -212,7 +212,7 @@ pub(super) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
         .ok_or_else(invalid)?
     {
         wire::read_route::Route::Bucket(route) => {
-            if route.name.is_empty()
+            if (route.name.is_empty() && route.alias_name.is_empty())
                 || !text(&route.name, 255)
                 || !text(&route.key, 1024)
                 || !text(&route.alias_name, 255)
@@ -233,18 +233,8 @@ pub(super) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
             if !web || route.host.is_empty() || !text(&route.host, 255) || !text(&route.key, 1024) {
                 return Err(invalid());
             }
-            let authority = route
-                .host
-                .parse::<axum::http::uri::Authority>()
-                .map_err(|_| invalid())?;
-            if authority.port_u16().is_some()
-                || authority.host().is_empty()
-                || route.host.contains('@')
-            {
-                return Err(invalid());
-            }
             ReadRoute::Host {
-                host: route.host.to_ascii_lowercase(),
+                host: crate::control::buckets::host(&route.host).map_err(|_| invalid())?,
                 key: route.key,
             }
         }
@@ -473,6 +463,57 @@ mod tests {
         let mut changed = input;
         changed.run = None;
         assert!(query(changed).is_err());
+    }
+
+    #[test]
+    fn public_routes_use_the_configured_domain_rules_including_ports() {
+        let mut input = request();
+        input.surface = wire::ReadSurface::Web as i32;
+        for (host, valid) in [
+            ("WEB.example:8443", true),
+            ("web.example", true),
+            ("web.example:", false),
+            ("user@web.example", false),
+            ("web.example.", false),
+        ] {
+            input.route = Some(wire::ReadRoute {
+                route: Some(wire::read_route::Route::Host(wire::HostRoute {
+                    host: host.into(),
+                    key: "object".into(),
+                })),
+            });
+            let parsed = query(input.clone());
+            assert_eq!(parsed.is_ok(), valid, "{host}");
+            if let Ok(parsed) = parsed {
+                assert!(
+                    matches!(parsed.route, ReadRoute::Host { host: normalized, .. } if normalized == host.to_ascii_lowercase())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn alias_only_routes_do_not_accept_signed_or_empty_bucket_targets() {
+        let mut input = request();
+        input.route = Some(wire::ReadRoute {
+            route: Some(wire::read_route::Route::Bucket(wire::BucketRoute {
+                name: String::new(),
+                key: String::new(),
+                alias_name: "public-bucket".into(),
+                alias_key: "object".into(),
+            })),
+        });
+        assert!(query(input.clone()).is_ok());
+        input.access_key = "signed".into();
+        assert!(query(input.clone()).is_err());
+        input.access_key.clear();
+        let Some(wire::read_route::Route::Bucket(route)) =
+            input.route.as_mut().and_then(|route| route.route.as_mut())
+        else {
+            unreachable!()
+        };
+        route.alias_name.clear();
+        assert!(query(input).is_err());
     }
 
     #[test]

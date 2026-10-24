@@ -376,6 +376,11 @@ impl Reads {
     ) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes>> {
         super::body::stream(self.clone(), prepared)
     }
+
+    #[cfg(test)]
+    pub(crate) fn backend_gets(&self) -> u64 {
+        self.reader.backend_gets()
+    }
 }
 
 #[cfg(test)]

@@ -184,7 +184,27 @@ async fn public(
     .await;
     let result = match result {
         Err(e) if bucket.website_enabled && e.has_code(s3s::S3ErrorCode::NoSuchKey) => {
-            website_response(app, &bucket, &key, request.into_parts().0).await
+            website_response(
+                &bucket,
+                &key,
+                request.into_parts().0,
+                |key, headers, method| {
+                    let app = app.clone();
+                    let bucket = &bucket;
+                    async move {
+                        respond(
+                            app,
+                            bucket.id,
+                            &key,
+                            headers,
+                            method,
+                            ReadOptions::public(bucket),
+                        )
+                        .await
+                    }
+                },
+            )
+            .await
         }
         other => other,
     };
@@ -193,12 +213,16 @@ async fn public(
     super::compression::vary(response.headers_mut(), "Accept-Encoding");
     Ok(response)
 }
-async fn website_response(
-    app: Arc<App>,
+pub(super) async fn website_response<F, Fut>(
     bucket: &Bucket,
     key: &str,
     request: axum::http::request::Parts,
-) -> Result<Response, HttpError> {
+    mut read: F,
+) -> Result<Response, HttpError>
+where
+    F: FnMut(String, HeaderMap, Method) -> Fut,
+    Fut: std::future::Future<Output = Result<Response, HttpError>>,
+{
     let directory = key.is_empty() || key.ends_with('/');
     let index = format!(
         "{key}{}{}",
@@ -206,10 +230,8 @@ async fn website_response(
         bucket.index_document
     );
     // Only a missing original object reaches this resolver; private objects never fall back.
-    let result = respond(
-        app.clone(),
-        bucket.id,
-        &index,
+    let result = read(
+        index,
         if directory {
             request.headers.clone()
         } else {
@@ -220,7 +242,6 @@ async fn website_response(
         } else {
             Method::HEAD
         },
-        ReadOptions::public(bucket),
     )
     .await;
     match result {
@@ -249,13 +270,10 @@ async fn website_response(
         // The missing resource's Range/If-* headers do not apply to the error document.
         let mut error_headers = HeaderMap::new();
         error_headers.insert("cache-control", HeaderValue::from_static("no-store"));
-        match respond(
-            app,
-            bucket.id,
-            &bucket.error_document,
+        match read(
+            bucket.error_document.clone(),
             error_headers,
             request.method.clone(),
-            ReadOptions::public(bucket),
         )
         .await
         {

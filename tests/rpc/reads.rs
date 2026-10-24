@@ -8,6 +8,9 @@ use futures_util::StreamExt;
 use object_store::{ObjectStoreExt, path::Path};
 use std::collections::{BTreeMap, HashMap};
 
+#[path = "http.rs"]
+mod http;
+
 #[derive(serde::Deserialize)]
 struct Fixture {
     bucket: String,

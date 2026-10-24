@@ -2,6 +2,7 @@ pub(crate) mod cors;
 pub(crate) mod delivery;
 pub(crate) mod errors;
 pub(crate) mod gateway;
+pub(crate) mod node;
 pub(crate) mod public;
 pub(crate) mod s3;
 pub(crate) mod transport;

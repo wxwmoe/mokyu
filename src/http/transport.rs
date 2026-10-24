@@ -85,12 +85,16 @@ pub(crate) async fn router_request(
         next.run(request).await
     };
     if head {
-        // An unknown size preserves HEAD metadata without inventing Content-Length: 0.
-        *response.body_mut() = axum::body::Body::from_stream(futures_util::stream::empty::<
-            Result<bytes::Bytes, std::convert::Infallible>,
-        >());
+        finish_head(&mut response);
     }
     response
+}
+
+pub(super) fn finish_head(response: &mut axum::response::Response) {
+    // An unknown size preserves HEAD metadata without inventing Content-Length: 0.
+    *response.body_mut() = axum::body::Body::from_stream(futures_util::stream::empty::<
+        Result<bytes::Bytes, std::convert::Infallible>,
+    >());
 }
 
 #[cfg(test)]

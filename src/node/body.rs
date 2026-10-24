@@ -55,8 +55,9 @@ impl Backend {
 
 pub(super) struct Reader {
     io: Arc<Semaphore>,
-    cpu: Arc<Semaphore>,
+    pub(super) cpu: Arc<Semaphore>,
     packs: Arc<Semaphore>,
+    http: Arc<Semaphore>,
     pack_units: u32,
     workspace: u64,
     pool: Arc<compression::Pool>,
@@ -75,6 +76,8 @@ impl Reader {
             io: Arc::new(Semaphore::new(budget.storage_read_slots)),
             cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
             packs: Arc::new(Semaphore::new(budget.pack_memory_units as usize)),
+            // Use the other half of the remaining budget; encoders must not block their pack decoder.
+            http: Arc::new(Semaphore::new(budget.pack_memory_units as usize)),
             pack_units: budget.pack_memory_units,
             workspace: budget.compression_workspace,
             pool: Arc::new(compression::Pool::new(config, budget.cpu_jobs)?),
@@ -85,6 +88,15 @@ impl Reader {
 
     pub(super) async fn maintain(&self) -> Result<()> {
         self.pool.run().await
+    }
+
+    pub(super) fn http_work(&self) -> Option<OwnedSemaphorePermit> {
+        self.http.clone().try_acquire_many_owned(32).ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn backend_gets(&self) -> u64 {
+        self.gets.load(Ordering::Relaxed)
     }
 
     async fn io(&self, prepared: &Prepared, storage: Option<Uuid>) -> Result<Io> {

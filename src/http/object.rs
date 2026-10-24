@@ -26,6 +26,20 @@ pub(crate) struct Read {
     pub partial: bool,
 }
 
+impl Read {
+    pub(super) fn response(self) -> axum::response::Response {
+        let mut response = axum::response::Response::new(match self.body {
+            Some(body) => axum::body::Body::new(s3s::Body::from(body)),
+            None => axum::body::Body::from_stream(futures_util::stream::empty::<
+                std::io::Result<bytes::Bytes>,
+            >()),
+        });
+        *response.status_mut() = self.status;
+        *response.headers_mut() = self.headers;
+        response
+    }
+}
+
 pub(crate) fn conditional(request: &HeaderMap) -> bool {
     [
         header::IF_MATCH,

@@ -35,7 +35,7 @@ pub(crate) mod reads;
 pub(crate) mod responses;
 pub(crate) mod streams;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Bucket {
     pub id: Uuid,
     pub project_id: Uuid,

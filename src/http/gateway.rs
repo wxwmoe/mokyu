@@ -157,6 +157,57 @@ macro_rules! checksums {
     }};
 }
 pub(crate) use checksums;
+
+pub(super) fn get_read(
+    read: super::object::Read,
+    checksum_mode: bool,
+) -> S3Result<S3Response<GetObjectOutput>> {
+    if read.status == hyper::StatusCode::NOT_MODIFIED {
+        let mut error = s3_error!(NotModified);
+        error.set_headers(read.headers);
+        return Err(error);
+    }
+    let mut out = GetObjectOutput {
+        body: read.body,
+        metadata: read.metadata.user,
+        content_range: read
+            .headers
+            .get("content-range")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        ..Default::default()
+    };
+    if checksum_mode && !read.partial {
+        checksums!(out, &read.checksums);
+        out.checksum_type = checksum(&read.checksums, "type").map(ChecksumType::from);
+    }
+    let mut response = S3Response::new(out);
+    response.headers = read.headers;
+    Ok(response)
+}
+
+pub(super) fn head_read(
+    read: super::object::Read,
+    checksum_mode: bool,
+) -> S3Result<S3Response<HeadObjectOutput>> {
+    if read.status == hyper::StatusCode::NOT_MODIFIED {
+        let mut error = s3_error!(NotModified);
+        error.set_headers(read.headers);
+        return Err(error);
+    }
+    let mut out = HeadObjectOutput {
+        metadata: read.metadata.user,
+        ..Default::default()
+    };
+    if checksum_mode && !read.partial {
+        checksums!(out, &read.checksums);
+        out.checksum_type = checksum(&read.checksums, "type").map(ChecksumType::from);
+    }
+    let mut response = S3Response::new(out);
+    response.headers = read.headers;
+    Ok(response)
+}
+
 pub fn conditions(
     s: &StoredStream,
     im: Option<&ETagCondition>,
@@ -527,31 +578,7 @@ impl S3 for Gateway {
                     i.checksum_mode.is_some(),
                 )
                 .await?;
-                if read.status == hyper::StatusCode::NOT_MODIFIED {
-                    let mut error = s3_error!(NotModified);
-                    error.set_headers(read.headers);
-                    return Err(error.into());
-                }
-                let mut out = GetObjectOutput {
-                    body: read.body,
-                    metadata: read.metadata.user,
-                    content_range: read
-                        .headers
-                        .get("content-range")
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_owned),
-                    ..Default::default()
-                };
-                if i.checksum_mode.is_some()
-                    && !read.partial
-                    && read.status != hyper::StatusCode::NOT_MODIFIED
-                {
-                    checksums!(out, &read.checksums);
-                    out.checksum_type = checksum(&read.checksums, "type").map(ChecksumType::from);
-                }
-                let mut response = S3Response::new(out);
-                response.headers = read.headers;
-                return Ok(response);
+                return Ok(get_read(read, i.checksum_mode.is_some())?);
             }
             let light = i.if_match.is_some()
                 || i.if_none_match.is_some()
@@ -673,25 +700,7 @@ impl S3 for Gateway {
                     i.checksum_mode.is_some(),
                 )
                 .await?;
-                if read.status == hyper::StatusCode::NOT_MODIFIED {
-                    let mut error = s3_error!(NotModified);
-                    error.set_headers(read.headers);
-                    return Err(error.into());
-                }
-                let mut out = HeadObjectOutput {
-                    metadata: read.metadata.user,
-                    ..Default::default()
-                };
-                if i.checksum_mode.is_some()
-                    && !read.partial
-                    && read.status != hyper::StatusCode::NOT_MODIFIED
-                {
-                    checksums!(out, &read.checksums);
-                    out.checksum_type = checksum(&read.checksums, "type").map(ChecksumType::from);
-                }
-                let mut response = S3Response::new(out);
-                response.headers = read.headers;
-                return Ok(response);
+                return Ok(head_read(read, i.checksum_mode.is_some())?);
             }
             let s = self.0.metadata(b.id, &i.key).await?;
             if req.credentials.is_some() || !s.public_read {
