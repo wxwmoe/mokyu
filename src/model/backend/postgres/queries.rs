@@ -164,6 +164,58 @@ pub(super) async fn replica_page(
     Ok(Some(page))
 }
 
+pub(super) async fn node_replica_page(
+    connection: &mut sqlx::PgConnection,
+    identity: &ReplicaIdentity,
+    cursor: &crate::model::node_read::Cursor,
+    limit: usize,
+) -> Result<Option<Vec<Extent>>> {
+    use sqlx::{FromRow, Row};
+    // A replicated read marker binds this page to the primary's leased payload revision.
+    let rows = sqlx::query("WITH checked AS MATERIALIZED (SELECT pg_is_in_recovery() AND EXISTS(SELECT 1 FROM mokyu_meta WHERE singleton AND deployment_id=$1 AND schema_version=$2 AND deployment_key_fingerprint=$3 AND deployment_mode='cluster') AS valid,EXISTS(SELECT 1 FROM node_reads n JOIN stream_leases l ON l.id=n.read_id JOIN streams s ON s.id=l.stream_id WHERE n.read_id=$4 AND n.replica_allowed AND l.stream_id=$5 AND l.lease_type='read' AND n.payload_revision=$6 AND s.payload_revision=$6 AND s.payload_type='chunks' AND n.offset_bytes<=$7 AND n.end_bytes=$8) AS visible) SELECT checked.valid,checked.visible,e.* FROM checked LEFT JOIN LATERAL (SELECT * FROM extents WHERE checked.valid AND checked.visible AND stream_id=$5 AND offset_bytes>=$7-4194304 AND offset_bytes+length>$7 AND offset_bytes<$8 ORDER BY offset_bytes LIMIT $9) e ON true ORDER BY e.offset_bytes")
+        .bind(identity.deployment_id).bind(identity.schema_version).bind(&identity.deployment_key_fingerprint)
+        .bind(cursor.lease).bind(cursor.stream).bind(cursor.revision).bind(cursor.offset).bind(cursor.end).bind(limit as i64)
+        .fetch_all(connection).await?;
+    let first = rows.first().context("replica validation returned no row")?;
+    ensure!(
+        first.try_get::<bool, _>("valid")?,
+        "replica identity or role changed"
+    );
+    if !first.try_get::<bool, _>("visible")? {
+        return Ok(None);
+    }
+    let mut page = Vec::with_capacity(rows.len());
+    let mut position = cursor.offset;
+    for row in &rows {
+        let extent = Extent::from_row(row)?;
+        if extent.fragment_id.is_some() {
+            return Ok(None);
+        }
+        let end = extent
+            .offset_bytes
+            .checked_add(i64::from(extent.length))
+            .context("replica mapping overflow")?;
+        ensure!(
+            extent.stream_id == Id::Uuid(cursor.stream)
+                && extent.chunk_id.is_some()
+                && extent.offset_bytes <= position
+                && end > position
+                && extent.length > 0
+                && extent.source_offset >= 0
+                && i64::from(extent.source_offset) + i64::from(extent.length)
+                    <= crate::content::codec::MAX as i64,
+            "invalid replica mapping"
+        );
+        position = end.min(cursor.end);
+        page.push(extent);
+    }
+    ensure!(
+        page.len() == limit || position == cursor.end,
+        "replica mapping is incomplete"
+    );
+    Ok(Some(page))
+}
+
 fn read_start(stream: Id, position: i64) -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT offset_bytes FROM extents WHERE stream_id=$1 AND offset_bytes<=$2 ORDER BY offset_bytes DESC LIMIT 1")
         .bind(stream)
@@ -7483,7 +7535,7 @@ impl ClusterStore for Backend {
         key: &crate::content::codec::Key,
         input: crate::model::node_read::Window,
     ) -> Result<crate::model::node_read::Reply> {
-        transactions::node_read_window(&self.pool, node, key, input).await
+        transactions::node_read_window(&self.pool, self.replica.as_ref(), node, key, input).await
     }
     async fn provision_node(
         &self,
@@ -10229,6 +10281,7 @@ pub(super) struct NodeReadLease {
     pub offset_bytes: i64,
     pub end_bytes: i64,
     pub request_hash: Vec<u8>,
+    pub replica_allowed: bool,
     pub valid_for_ms: i64,
 }
 
@@ -10263,8 +10316,9 @@ pub(super) fn node_read_insert<'q>(
     end: i64,
     hash: &'q [u8],
 ) -> Statement<'q> {
-    sqlx::query("INSERT INTO node_reads(read_id,node_id,credential_generation,boot_id,fence,operation_id,request_hash,payload_revision,offset_bytes,end_bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
+    sqlx::query("INSERT INTO node_reads(read_id,node_id,credential_generation,boot_id,fence,operation_id,request_hash,payload_revision,offset_bytes,end_bytes,replica_allowed) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
         .bind(id).bind(state.node_id).bind(state.credential_generation).bind(input.run.boot).bind(input.run.fence).bind(input.operation).bind(hash).bind(stream.payload_revision).bind(start).bind(end)
+        .bind(input.access.is_none() && stream.public_read && stream.payload_type == "chunks")
 }
 
 pub(super) fn node_read_stream(id: Id) -> Rows<'static, crate::app::StoredStream> {

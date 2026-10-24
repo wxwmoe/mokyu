@@ -8634,6 +8634,7 @@ async fn node_read_mapping(
     start: i64,
     end: i64,
     limit: usize,
+    extents: Option<Vec<crate::app::Extent>>,
 ) -> Result<crate::model::node_read::Mapping> {
     use crate::model::{
         Error,
@@ -8663,9 +8664,14 @@ async fn node_read_mapping(
         }
     } else {
         ensure!(stream.payload_type == "chunks", Error::SourceUnavailable);
-        let rows = queries::node_read_extents(stream.id, start, end, limit as i64)
-            .fetch_all(&mut *db)
-            .await?;
+        let rows = match extents {
+            Some(rows) => rows,
+            None => {
+                queries::node_read_extents(stream.id, start, end, limit as i64)
+                    .fetch_all(&mut *db)
+                    .await?
+            }
+        };
         let ids: Vec<_> = rows.iter().filter_map(|row| row.chunk_id).collect();
         let chunks: HashMap<_, _> = queries::node_read_chunks(&ids)
             .fetch_all(&mut *db)
@@ -8904,8 +8910,16 @@ async fn node_read_body_matches(
     body: &crate::model::node_read::CachedBody,
 ) -> Result<bool> {
     use crate::model::node_read::{self as read, MaterialType, Outcome, Reply};
-    let mapping =
-        node_read_mapping(db, node.node_id, stream, 0, stream.size, read::MAX_ITEMS).await?;
+    let mapping = node_read_mapping(
+        db,
+        node.node_id,
+        stream,
+        0,
+        stream.size,
+        read::MAX_ITEMS,
+        None,
+    )
+    .await?;
     if mapping.end != stream.size {
         return Ok(false);
     }
@@ -9197,7 +9211,16 @@ pub(super) async fn open_node_read(
     let mut mapping = if let Some((_, mapping)) = &existing {
         mapping.0.clone()
     } else {
-        match node_read_mapping(&mut tx, state.node_id, &stream, start, end, input.max_items).await
+        match node_read_mapping(
+            &mut tx,
+            state.node_id,
+            &stream,
+            start,
+            end,
+            input.max_items,
+            None,
+        )
+        .await
         {
             Ok(mapping) => mapping,
             Err(error) if crate::model::error(&error) == Some(Error::SourceUnavailable) => {
@@ -9391,6 +9414,7 @@ pub(super) async fn report_node_read(
 
 pub(super) async fn node_read_window(
     pool: &PgPool,
+    replica: Option<&super::connection::Replica>,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
     input: crate::model::node_read::Window,
@@ -9440,6 +9464,13 @@ pub(super) async fn node_read_window(
     let mut mapping = if let Some((_, mapping)) = &existing {
         mapping.0.clone()
     } else {
+        let extents = if let Some(replica) =
+            replica.filter(|_| owned.replica_allowed && stream.payload_type == "chunks")
+        {
+            replica.node_extents(&input.cursor, input.max_items).await
+        } else {
+            None
+        };
         node_read_mapping(
             &mut tx,
             state.node_id,
@@ -9447,6 +9478,7 @@ pub(super) async fn node_read_window(
             input.cursor.offset,
             input.cursor.end,
             input.max_items,
+            extents,
         )
         .await?
     };

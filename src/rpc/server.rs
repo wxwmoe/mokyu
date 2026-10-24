@@ -168,6 +168,9 @@ fn failure(error: anyhow::Error) -> Status {
         Some(Error::NodeInactive) => Status::permission_denied("node or deployment is inactive"),
         Some(Error::NodeConflict) => Status::aborted("node is owned by another boot or session"),
         Some(Error::NodeExpired) => Status::failed_precondition("node run is expired or retired"),
+        Some(Error::SourceUnavailable) => {
+            Status::failed_precondition("read source or payload revision is unavailable")
+        }
         Some(Error::NodeLimit) => {
             Status::resource_exhausted("node boot history is full; rotate its credential")
         }

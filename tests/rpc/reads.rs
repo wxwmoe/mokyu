@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, HashMap};
 mod checks;
 #[path = "http.rs"]
 mod http;
+#[path = "replica.rs"]
+mod replica;
 
 #[derive(serde::Deserialize)]
 struct Fixture {

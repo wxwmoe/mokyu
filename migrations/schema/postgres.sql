@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0073.
+-- Generated from the complete postgres migration chain through 0074.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -877,6 +877,7 @@ CREATE TABLE public.node_reads (
     payload_revision bigint NOT NULL,
     offset_bytes bigint NOT NULL,
     end_bytes bigint NOT NULL,
+    replica_allowed boolean DEFAULT false NOT NULL,
     CONSTRAINT node_reads_check CHECK ((end_bytes > offset_bytes)),
     CONSTRAINT node_reads_credential_generation_check CHECK ((credential_generation > 0)),
     CONSTRAINT node_reads_offset_bytes_check CHECK ((offset_bytes >= 0)),

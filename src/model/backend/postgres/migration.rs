@@ -7,7 +7,7 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator.locking = false;
     migrator
 };
-const SCHEMA_VERSION: i64 = 73;
+const SCHEMA_VERSION: i64 = 74;
 // Only the 0.0.6 format boundary requires an empty store.
 const EMPTY_UPGRADE_VERSION: i64 = 71;
 

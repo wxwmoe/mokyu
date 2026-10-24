@@ -292,7 +292,7 @@ impl App {
         for profile in &profiles {
             profile.validate_budget(&config, &budget)?;
         }
-        if role != "data" {
+        if !matches!(role, "control" | "data") {
             budget.database_read_connections = 0;
         }
         if !matches!(role, "single" | "data") {

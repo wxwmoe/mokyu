@@ -115,20 +115,49 @@ impl Replica {
         from: i64,
         until: i64,
     ) -> Option<Vec<crate::model::ReadExtent>> {
-        let result = self.try_read(stream, lease, from, until).await;
+        self.query(move |connection, identity| {
+            Box::pin(queries::replica_page(
+                connection, identity, stream, lease, from, until,
+            ))
+        })
+        .await
+    }
+
+    pub(super) async fn node_extents(
+        &self,
+        cursor: &crate::model::node_read::Cursor,
+        limit: usize,
+    ) -> Option<Vec<crate::app::Extent>> {
+        let cursor = cursor.clone();
+        self.query(move |connection, identity| {
+            Box::pin(async move {
+                queries::node_replica_page(connection, identity, &cursor, limit).await
+            })
+        })
+        .await
+    }
+
+    async fn query<T>(
+        &self,
+        query: impl for<'a> FnOnce(
+            &'a mut PgConnection,
+            &'a queries::ReplicaIdentity,
+        ) -> futures_util::future::BoxFuture<'a, Result<Option<T>>>,
+    ) -> Option<T> {
+        let result = self.try_query(query).await;
         if result.is_none() {
             self.counters.fallbacks.fetch_add(1, Relaxed);
         }
         result
     }
 
-    async fn try_read(
+    async fn try_query<T>(
         &self,
-        stream: Id,
-        lease: uuid::Uuid,
-        from: i64,
-        until: i64,
-    ) -> Option<Vec<crate::model::ReadExtent>> {
+        query: impl for<'a> FnOnce(
+            &'a mut PgConnection,
+            &'a queries::ReplicaIdentity,
+        ) -> futures_util::future::BoxFuture<'a, Result<Option<T>>>,
+    ) -> Option<T> {
         let probe = {
             let health = self.health.lock().unwrap();
             if Instant::now() < health.next {
@@ -157,8 +186,7 @@ impl Replica {
             let result = tokio::time::timeout(Duration::from_millis(100), async {
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("read-replica-query").await;
-                queries::replica_page(&mut connection, &self.identity, stream, lease, from, until)
-                    .await
+                query(&mut connection, &self.identity).await
             })
             .await;
             if !matches!(result, Ok(Ok(_))) {
@@ -379,7 +407,7 @@ pub async fn connect(
     );
     let mut backend = Backend::new(pool, owner, role == "single");
     backend.database_info = Some(database_info);
-    if role == "data"
+    if matches!(role, "control" | "data")
         && let Some(replica) = &c.replica_database
     {
         let identity = queries::replica_identity().fetch_one(&backend.pool).await?;

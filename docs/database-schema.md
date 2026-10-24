@@ -12,7 +12,7 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 
 `stream_leases` 只用于群集的跨节点读取与写入保护。单容器通过进程内活动引用协调读写和 GC，不创建或续期 stream lease；请求取消释放引用，重启后按持久状态恢复未完成写入。`storage_permits` 也只供群集协调 storage 并发；单容器使用按 storage 和方向共享的进程内队列。
 
-节点读取通过 `node_reads` 将读取保护绑定到节点、凭据代次、boot 和 fence，并保存操作身份以重放响应。`node_read_windows` 保存有界映射，`node_read_sources` 保护窗口实际选择的物理来源，避免对象映射重写后提前回收。`node_read_permits` 关联读取与存储许可；释放读取或保护到期后的清理会级联释放关联记录，续期不能恢复已过期资源。
+节点读取通过 `node_reads` 将读取保护绑定到节点、凭据代次、boot 和 fence，并保存操作身份以重放响应；`replica_allowed` 为非空 boolean，默认 false，记录本次匿名公共区块读取是否允许从库分页。`node_read_windows` 保存有界映射，`node_read_sources` 保护窗口实际选择的物理来源，避免对象映射重写后提前回收。`node_read_permits` 关联读取与存储许可；释放读取或保护到期后的清理会级联释放关联记录，续期不能恢复已过期资源。
 
 ## 部署、运行设置与身份
 

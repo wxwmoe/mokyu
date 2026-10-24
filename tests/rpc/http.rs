@@ -30,12 +30,49 @@ async fn node_http_observations_are_batched_and_recover() -> Result<()> {
     node_http_reads(HttpCase::Observations).await
 }
 
+#[tokio::test]
+#[ignore = "requires isolated controls, TLS origins and unique local and staged sources"]
+async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
+    node_http_reads(HttpCase::Sources).await
+}
+
 enum HttpCase {
     Reads,
     Memory,
     Files,
     Public,
     Observations,
+    Sources,
+}
+
+async fn unique_source_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
+    fixture("sources-setup").await?;
+    let before = reads.backend_gets();
+    for action in [
+        "sources-local",
+        "sources-compressed",
+        "sources-local-corrupt",
+        "sources-foreign",
+        "sources-restored",
+    ] {
+        fixture(action).await?;
+    }
+    assert_eq!(
+        reads.backend_gets(),
+        before,
+        "local sources used backend I/O"
+    );
+    fixture("sources-staged").await?;
+    assert_eq!(
+        reads.backend_gets() - before,
+        12,
+        "staged reads fetched unexpected bodies"
+    );
+    fixture("sources-staged-corrupt").await?;
+    fixture("assert-no-reads").await?;
+    assert_eq!(reads.body_cache()["entries"], 0);
+    assert_eq!(reads.file_cache().await["entries"], 0);
+    Ok(())
 }
 
 async fn observation_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
@@ -186,6 +223,7 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
     let disk = matches!(case, HttpCase::Files);
     let public = matches!(case, HttpCase::Public);
     let observations = matches!(case, HttpCase::Observations);
+    let sources = matches!(case, HttpCase::Sources);
     use crate::{
         config::node::NodeConfig,
         node::{NodeContext, Phase},
@@ -292,7 +330,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if observations {
+    if sources {
+        unique_source_reads(&reads).await?;
+    } else if observations {
         observation_reads(&reads).await?;
     } else if public {
         public_cache_reads(&reads).await?;
@@ -354,7 +394,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if observations {
+    if sources {
+        fixture("sources-reconnected").await?;
+    } else if observations {
         fixture("observations-reconnected").await?;
     } else if public {
         let before = reads.backend_gets();

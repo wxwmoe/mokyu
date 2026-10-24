@@ -37,7 +37,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 
 ## replica_database
 
-可选的 PostgreSQL 物理从库，只用于群集 data 的公共读取后续分页。省略整节时不创建从库池或探测；single、MySQL、MariaDB、SQLite 拒绝此配置。control/worker 可以使用包含该节的共享配置，但不连接从库。
+可选的 PostgreSQL 物理从库，用于 control 的节点公共读取后续分页，以及 data 的公共读取分页。省略整节时不创建从库池或探测；single、MySQL、MariaDB、SQLite 拒绝此配置。worker 可以使用包含该节的共享配置，但不连接从库。
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -48,7 +48,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 | `replica_database.password` / `replica_database.password_file` | 主库凭据 | 二选一；显式设置 user 时必须同时提供其中一项；可以只覆盖密码 |
 | `replica_database.ssl_mode` | 主库 SSL 模式 | 沿用所选 TLS 模式；verify-full 验证从库主机名 |
 
-此节不接受 `type`、`path` 或未知字段。密码文件相对于配置文件所在目录解析。只读账户需要连接数据库、使用 schema 和读取 `mokyu_meta`、`stream_leases`、`extents`、`chunks`、`chunk_encodings`；应用不需要复制管理或超级用户权限。主从初始化、复制和故障切换由部署环境管理。
+此节不接受 `type`、`path` 或未知字段。密码文件相对于配置文件所在目录解析。只读账户需要连接数据库、使用 schema 和读取 `mokyu_meta`、`stream_leases`、`node_reads`、`streams`、`extents`、`chunks`、`chunk_encodings`；应用不需要复制管理或超级用户权限。主从初始化、复制和故障切换由部署环境管理。
 
 最小配置为 `[replica_database]` 下设置 `host = "postgres-replica"`。从库故障或身份校验失败不阻断健康主库，读取自动回退；具体一致性边界见[群集部署](cluster-deployment.md#可选-postgresql-从库)。配置重启生效。
 
@@ -74,7 +74,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 | `instance.thumbnail_cache_size` | `256MiB` | 缩略图缓存上限 |
 | `instance.request_connections` | 自动 | 本节点 HTTP/S3 请求连接池上限 |
 | `instance.database_connections` | 自动 | 本节点数据库连接池上限；群集 control 至少 5，data/worker 至少 4；高并发需增加预算 |
-| `instance.database_read_connections` | 启用从库时 `min(4, max(1, database_connections / 4))` | data 从库池的独立上限；正整数，需同时配置 replica_database；不扣减主库预算 |
+| `instance.database_read_connections` | 启用从库时 `min(4, max(1, database_connections / 4))` | control/data 从库池的独立上限；正整数，需同时配置 replica_database；不扣减主库预算 |
 | `instance.cpu_jobs` | 自动 | 本节点压缩、哈希和加解密等阻塞计算预算 |
 | `instance.stream_memory_budget` | 自动 | 数据流临时内存预算，不是 RSS 硬限制 |
 | `instance.storage_read_slots` | 自动 | 本节点所有 storage 共享的读槽位 |
