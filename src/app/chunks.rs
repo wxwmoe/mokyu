@@ -104,11 +104,6 @@ impl App {
         } else {
             self.store_encoding(storage_id).await?
         };
-        let _claim = if self.role == "single" {
-            None
-        } else {
-            Some(self.cluster()?.claim_chunk(storage_id, &hash).await?)
-        };
         let input = ChunkCreate {
             storage: storage_id,
             stream,
@@ -117,7 +112,7 @@ impl App {
             algorithm,
             key: key_id,
         };
-        let (c, reused) = match self.chunks.allocate(input.clone()).await {
+        let (c, reused) = match self.allocate_chunk(input.clone()).await {
             Ok(value) => value,
             Err(error)
                 if retransmitted
@@ -173,8 +168,7 @@ impl App {
             .storage
             .encode(c, raw, true, None, accepted.map(|p| &p.compression))
             .await?;
-        self.chunks.mark_uploading(&c).await?;
-        self.storage.register_location(&c).await?;
+        self.chunks.start_upload(stream, &c).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-uploading").await;
         let buffered = accepted.is_none()
@@ -189,6 +183,33 @@ impl App {
         crate::faults::point("chunk-stored").await;
         self.chunks.complete(stream, offset, &c).await?;
         Ok(c)
+    }
+
+    pub(crate) async fn allocate_chunk(&self, input: ChunkCreate) -> Result<(Chunk, bool)> {
+        let wait = async {
+            let mut delay = std::time::Duration::from_millis(25);
+            loop {
+                match self.chunks.allocate(input.clone()).await {
+                    Err(error)
+                        if crate::model::error(&error) == Some(crate::model::Error::ChunkBusy) =>
+                    {
+                        // Ownership survives cancellation; waiting never retains a database connection.
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(std::time::Duration::from_millis(500));
+                        self.renew_write_lease(input.stream).await?;
+                    }
+                    result => return result,
+                }
+            }
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(config::seconds(
+                &self.config.requests.upload_idle_timeout,
+            )?),
+            wait,
+        )
+        .await
+        .map_err(|_| s3_error!(RequestTimeout, "chunk allocation made no progress"))?
     }
 
     async fn repair_chunk(

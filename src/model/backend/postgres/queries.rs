@@ -176,11 +176,17 @@ pub(super) fn claim_chunk_hash(storage: Uuid, hash: &[u8]) -> Statement<'_> {
         .bind(hash)
 }
 
-pub(super) fn fail_chunk_allocations(input: &ChunkCreate) -> Statement<'_> {
-    sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE storage_id=$1 AND hash=$2 AND raw_size=$3 AND state IN ('preparing','uploading') AND NOT EXISTS (SELECT 1 FROM streams s JOIN tasks t ON t.id=s.owner_task_id WHERE s.id=chunks.owner_stream AND s.state='writing' AND t.state='running' AND t.lease_token=s.owner_lease_token AND (t.lease_expires_at IS NULL OR t.lease_expires_at>clock_timestamp()))")
+pub(super) fn try_claim_chunk_hash(storage: Uuid, hash: &[u8]) -> Scalar<'_, bool> {
+    sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || encode($2,'hex'), 734922709851001))")
+        .bind(storage).bind(hash)
+}
+
+pub(super) fn fail_chunk_allocations(input: &ChunkCreate, single: bool) -> Statement<'_> {
+    sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE storage_id=$1 AND hash=$2 AND raw_size=$3 AND state IN ('preparing','uploading') AND NOT EXISTS (SELECT 1 FROM streams s LEFT JOIN tasks t ON t.id=s.owner_task_id WHERE s.id=chunks.owner_stream AND s.state='writing' AND ((s.owner_task_id IS NULL AND NOT $4) OR (t.state='running' AND t.lease_token=s.owner_lease_token AND (t.lease_expires_at IS NULL OR t.lease_expires_at>clock_timestamp()))) AND ($4 OR EXISTS(SELECT 1 FROM stream_leases l WHERE l.stream_id=s.id AND l.lease_type='write' AND l.expires_at>clock_timestamp())))")
         .bind(input.storage)
         .bind(input.hash.as_slice())
         .bind(input.raw_size)
+        .bind(single)
 }
 
 pub(super) fn reusable_chunk(input: &ChunkCreate) -> Rows<'_, Chunk> {
@@ -205,12 +211,25 @@ pub(super) fn can_stage_chunk_reuse(id: Id) -> Scalar<'static, bool> {
         .bind(id)
 }
 
-pub(super) fn mark_chunk_uploading(chunk: &Chunk) -> Statement<'_> {
-    sqlx::query("UPDATE chunks SET standalone_size=$2,standalone_compressed=$3,nonce=$4,state='uploading' WHERE id=$1 AND state='preparing'")
+pub(super) fn mark_chunk_uploading(stream: Id, chunk: &Chunk) -> Statement<'_> {
+    sqlx::query("UPDATE chunks SET standalone_size=$2,standalone_compressed=$3,nonce=$4,state='uploading' WHERE id=$1 AND state='preparing' AND owner_stream=$5 AND current_encoding_id=$6 AND current_encoding_id=$7 AND storage_id=$8")
         .bind(chunk.id)
         .bind(chunk.stored_size)
         .bind(chunk.compressed)
         .bind(&chunk.nonce)
+        .bind(stream)
+        .bind(chunk.encoding_id)
+        .bind(chunk.location_id)
+        .bind(chunk.storage_id)
+}
+
+pub(super) fn owned_chunk(stream: Id, chunk: &Chunk) -> Scalar<'_, bool> {
+    sqlx::query_scalar("SELECT owner_stream=$2 AND current_encoding_id=$3 AND current_encoding_id=$4 AND storage_id=$5 FROM chunks WHERE id=$1")
+        .bind(chunk.id).bind(stream).bind(chunk.encoding_id).bind(chunk.location_id).bind(chunk.storage_id)
+}
+
+pub(super) fn register_encoding(chunk: &Chunk, owner: Option<Id>) -> Statement<'_> {
+    sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,standalone_size,standalone_compressed,nonce,nonce_id,state,created_at,unreferenced_at,encryption_algorithm,block_key_id,owner_stream,recovery_pending) VALUES($1,$2,$3,$4,$5,$6,$10,'uploading',$7,now(),$8,$9,$11,$11::uuid IS NOT NULL)").bind(chunk.encoding_id).bind(chunk.id).bind(chunk.storage_id).bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(chunk.created_at).bind(&chunk.algorithm).bind(chunk.block_key_id).bind(crate::content::nonce::id(chunk.nonce.as_deref())).bind(owner)
 }
 
 pub(super) fn lock_chunk(id: Id) -> Scalar<'static, String> {
@@ -262,7 +281,7 @@ pub(super) fn complete_chunk(id: Id) -> Statement<'static> {
 }
 
 pub(super) fn complete_encoding(id: Id) -> Statement<'static> {
-    sqlx::query("UPDATE chunk_encodings SET sync_pending=CASE WHEN boot_id IS NOT NULL THEN FALSE ELSE sync_pending END,boot_id=NULL,state='ready',unreferenced_at=NULL,stored_at=clock_timestamp() WHERE encoding_id=$1 AND state='uploading'")
+    sqlx::query("UPDATE chunk_encodings SET sync_pending=CASE WHEN boot_id IS NOT NULL THEN FALSE ELSE sync_pending END,boot_id=NULL,state='ready',owner_stream=NULL,recovery_pending=FALSE,unreferenced_at=NULL,stored_at=clock_timestamp() WHERE encoding_id=$1 AND state='uploading'")
         .bind(id)
 }
 
@@ -1092,21 +1111,21 @@ impl ChunkStore for Backend {
         Ok(can_stage_chunk_reuse(id).fetch_one(&self.pool).await?)
     }
 
-    async fn mark_uploading(&self, chunk: &Chunk) -> Result<()> {
-        mark_chunk_uploading(chunk).execute(&self.pool).await?;
-        Ok(())
+    async fn start_upload(&self, stream: Id, chunk: &Chunk) -> Result<()> {
+        transactions::start_chunk_upload(&self.pool, stream, chunk, self.single).await
     }
 
     async fn allocate(&self, input: ChunkCreate) -> Result<(Chunk, bool)> {
-        transactions::allocate_chunk(&self.pool, input).await
+        transactions::allocate_chunk(&self.pool, input, self.single).await
     }
 
     async fn reference(&self, stream: Id, offset: i64, chunk_id: Id, raw_size: i32) -> Result<()> {
-        transactions::reference_chunk(&self.pool, stream, offset, chunk_id, raw_size).await
+        transactions::reference_chunk(&self.pool, stream, offset, chunk_id, raw_size, self.single)
+            .await
     }
 
     async fn complete(&self, stream: Id, offset: i64, chunk: &Chunk) -> Result<()> {
-        transactions::complete_chunk_write(&self.pool, stream, offset, chunk).await
+        transactions::complete_chunk_write(&self.pool, stream, offset, chunk, self.single).await
     }
 
     async fn copy_references(
@@ -3996,7 +4015,7 @@ impl UploadCacheStore for Backend {
             .await?)
     }
     async fn stage(&self, input: CacheStage<'_>) -> Result<bool> {
-        transactions::cache_stage(&self.pool, input).await
+        transactions::cache_stage(&self.pool, input, self.single).await
     }
     async fn seal(&self, stream: Id, eof: bool) -> Result<bool> {
         transactions::cache_seal(&self.pool, stream, eof).await
@@ -4156,7 +4175,7 @@ impl PhysicalStore for Backend {
         Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE chunk_id=$1 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'))").bind(chunk).fetch_one(&self.pool).await?)
     }
     async fn register_encoding(&self, chunk: &Chunk) -> Result<()> {
-        sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,standalone_size,standalone_compressed,nonce,nonce_id,state,created_at,unreferenced_at,encryption_algorithm,block_key_id) VALUES($1,$2,$3,$4,$5,$6,$10,'uploading',$7,now(),$8,$9)").bind(chunk.encoding_id).bind(chunk.id).bind(chunk.storage_id).bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(chunk.created_at).bind(&chunk.algorithm).bind(chunk.block_key_id).bind(crate::content::nonce::id(chunk.nonce.as_deref())).execute(&self.pool).await?;
+        register_encoding(chunk, None).execute(&self.pool).await?;
         Ok(())
     }
     async fn pack_chunks(&self, pack: Id) -> Result<Vec<Chunk>> {
@@ -7635,14 +7654,6 @@ impl ClusterStore for Backend {
     async fn expire_stream_leases(&self) -> Result<()> {
         expire_stream_leases().execute(&self.pool).await?;
         Ok(())
-    }
-    async fn claim_chunk(&self, storage: Uuid, hash: &[u8; 32]) -> Result<Box<dyn Send>> {
-        ensure!(
-            self.pool.options().get_max_connections() >= 4,
-            "cluster chunk claims require at least four database connections"
-        );
-        let permit = self.chunk_claims.clone().acquire_owned().await?;
-        transactions::claim_chunk(&self.pool, storage, hash, permit).await
     }
     async fn profile_changes(&self) -> Result<Box<dyn crate::model::cluster::ProfileChanges>> {
         connection::profile_changes(&self.pool).await

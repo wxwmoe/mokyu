@@ -3,9 +3,7 @@ use crate::authorization::{Action, DEFAULT_PROJECT, Permit, Principal};
 use crate::config::Config;
 use crate::model::Id;
 use crate::model::quota::Limits;
-use crate::model::{
-    ChunkCreate, ChunkStore, PhysicalStore, PublishStore, QuotaStore, StreamCreate, StreamStore,
-};
+use crate::model::{ChunkCreate, ChunkStore, PublishStore, QuotaStore, StreamCreate, StreamStore};
 use anyhow::Result;
 use serde_json::json;
 use uuid::Uuid;
@@ -187,8 +185,7 @@ async fn sqlite_quota_and_publication_contract() -> Result<()> {
         .await?;
     physical.stored_size = Some(32);
     physical.location_id = Uuid::new_v4();
-    backend.mark_uploading(&physical).await?;
-    backend.register_encoding(&physical).await?;
+    backend.start_upload(first, &physical).await?;
     ChunkStore::complete(&backend, first, 0, &physical).await?;
     backend.finish(first, 32, "one", json!({})).await?;
     assert!(

@@ -31,10 +31,8 @@ def main():
             candidate = database.candidates(fixture)[-1]
             fixture.finished(fixture.cli('maintenance','run','gc'))
             assert database.query('SELECT state,owner_stream FROM chunk_encodings WHERE encoding_id=%s',candidate['encoding_id'])[0]['owner_stream'] is not None
-            # Lose only the first writer's advisory-lock connection, keeping its verified I/O alive.
             claims = database.query("SELECT DISTINCT a.pid FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid WHERE a.datname=current_database() AND l.locktype='advisory' AND a.query LIKE %s", 'SELECT pg_advisory_xact_lock(%734922709851001%')
-            assert len(claims)==1, 'fixture must have exactly one held chunk claim'
-            database.query('SELECT pg_terminate_backend(%s)',claims[0]['pid'])
+            assert not claims, 'repair I/O retained a database claim'
             second = pool.submit(other.put_object,Bucket=fixture.name,Key='second',Body=raw)
             second.result(timeout=45)
             current = database.chunks(fixture)[0]
@@ -49,7 +47,7 @@ def main():
         fixture.read(key,raw)
         with other.get_object(Bucket=fixture.name,Key=key)['Body'] as body:
             assert body.read()==raw
-    print('PASS two data candidates after lost coordination publish one source and reuse the winner',flush=True)
+    print('PASS concurrent data candidates publish one source and reuse the winner',flush=True)
 
     for reason in ('credential','lease','draining'):
         fixture = Fixture()

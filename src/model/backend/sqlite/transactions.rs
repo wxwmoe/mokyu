@@ -2042,6 +2042,34 @@ pub(super) async fn copy_chunk_references(
     Ok(())
 }
 
+pub(super) async fn start_chunk_upload(
+    pool: &sqlx::SqlitePool,
+    stream: Id,
+    chunk: &Chunk,
+) -> Result<()> {
+    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    writing_stream(&mut tx, stream).await?;
+    ensure!(
+        queries::mark_chunk_uploading(stream, chunk)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        queries::register_encoding(chunk)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    queries::refresh_encoding_fingerprint(&mut tx, chunk.encoding_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub(super) async fn register_encoding(pool: &sqlx::SqlitePool, chunk: &Chunk) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     ensure!(

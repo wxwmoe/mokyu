@@ -122,7 +122,6 @@ pub(crate) trait ClusterStore: Send + Sync {
     async fn release_read(&self, id: Uuid) -> Result<()>;
     async fn renew_write(&self, stream: Id, ttl_seconds: i64) -> Result<()>;
     async fn expire_stream_leases(&self) -> Result<()>;
-    async fn claim_chunk(&self, storage: Uuid, hash: &[u8; 32]) -> Result<Box<dyn Send>>;
     async fn profile_changes(&self) -> Result<Box<dyn ProfileChanges>>;
     async fn listen_tasks(&self, wake: std::sync::Arc<tokio::sync::Notify>) -> Result<()>;
     async fn mode(&self) -> Result<String>;

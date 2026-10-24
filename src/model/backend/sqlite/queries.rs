@@ -2563,10 +2563,8 @@ impl ChunkStore for Backend {
     async fn can_stage_reuse(&self, id: Id) -> Result<bool> {
         Ok(sqlx::query_scalar("SELECT pack_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=?) FROM chunks WHERE id=?").bind(id).bind(id).fetch_one(&self.read).await?)
     }
-    async fn mark_uploading(&self, chunk: &Chunk) -> Result<()> {
-        let changed=sqlx::query("UPDATE chunks SET standalone_size=?,standalone_compressed=?,nonce=?,state='uploading' WHERE id=? AND current_encoding_id=? AND state='preparing'").bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(chunk.id).bind(chunk.encoding_id).execute(&self.write).await?.rows_affected();
-        ensure!(changed == 1, crate::model::Error::OperationAborted);
-        Ok(())
+    async fn start_upload(&self, stream: Id, chunk: &Chunk) -> Result<()> {
+        transactions::start_chunk_upload(&self.write, stream, chunk).await
     }
     async fn reference(&self, stream: Id, offset: i64, chunk: Id, size: i32) -> Result<()> {
         transactions::reference_chunk(&self.write, stream, offset, chunk, size).await
@@ -2589,6 +2587,10 @@ impl ChunkStore for Backend {
 
 pub(super) fn register_encoding(chunk: &Chunk) -> Statement<'_> {
     sqlx::query("UPDATE chunk_encodings SET location_id=?,standalone_size=?,standalone_compressed=?,nonce=?,nonce_id=? WHERE encoding_id=? AND chunk_id=? AND storage_id=? AND encryption_algorithm=? AND block_key_id IS ? AND state='uploading'").bind(chunk.location_id).bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(crate::content::nonce::id(chunk.nonce.as_deref())).bind(chunk.encoding_id).bind(chunk.id).bind(chunk.storage_id).bind(&chunk.algorithm).bind(chunk.block_key_id)
+}
+
+pub(super) fn mark_chunk_uploading(stream: Id, chunk: &Chunk) -> Statement<'_> {
+    sqlx::query("UPDATE chunks SET standalone_size=?,standalone_compressed=?,nonce=?,state='uploading' WHERE id=? AND current_encoding_id=? AND owner_stream=? AND state='preparing'").bind(chunk.stored_size).bind(chunk.compressed).bind(&chunk.nonce).bind(chunk.id).bind(chunk.encoding_id).bind(stream)
 }
 
 // Scan pending sources before looking up the much larger durable inventory.

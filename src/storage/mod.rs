@@ -2147,10 +2147,6 @@ impl Storage {
             }
         }
     }
-    pub async fn register_location(&self, c: &Chunk) -> Result<()> {
-        self.physical.register_encoding(c).await?;
-        Ok(())
-    }
     pub(crate) fn physical_pin(&self, id: Uuid) -> CachePin {
         let mut pins = self.physical_pins.lock().unwrap();
         pins.retain(|_, p| p.strong_count() > 0);

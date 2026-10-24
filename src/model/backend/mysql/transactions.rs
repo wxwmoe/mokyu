@@ -3545,6 +3545,7 @@ pub(super) async fn commit_upload_part(
         info.state == "writing",
         crate::model::Error::OperationAborted
     );
+    let mut accounts = lock_quota(&mut tx, bucket).await?;
     if info.payload_type == "raw" {
         validate_raw(&mut tx, stream, info.size).await?;
     } else {
@@ -3557,7 +3558,6 @@ pub(super) async fn commit_upload_part(
         );
         require_sources(&mut tx, Some(stream), &[]).await?;
     }
-    let mut accounts = lock_quota(&mut tx, bucket).await?;
     let mut row = queries::owned_quota_reservation(Id::default(), Some(upload))
         .fetch_one(&mut *tx)
         .await?;
@@ -4461,6 +4461,7 @@ pub(super) async fn publish(
         if_match.as_ref(),
         if_none.as_ref(),
     )?;
+    let mut accounts = lock_quota(&mut tx, stream.bucket_id).await?;
     if stream.payload_type == "raw" {
         validate_raw(&mut tx, id, stream.size).await?;
     } else {
@@ -4475,7 +4476,6 @@ pub(super) async fn publish(
         );
         require_sources(&mut tx, Some(id), &[]).await?;
     }
-    let mut accounts = lock_quota(&mut tx, stream.bucket_id).await?;
     replace_object_quota(
         &mut tx,
         &mut accounts,
@@ -4761,6 +4761,34 @@ pub(super) async fn copy_chunk_references(
     queries::resize_writing_stream(destination, end)
         .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn start_chunk_upload(
+    pool: &sqlx::MySqlPool,
+    stream: Id,
+    chunk: &Chunk,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    writing_stream(&mut tx, stream).await?;
+    ensure!(
+        queries::mark_chunk_uploading(stream, chunk)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        queries::register_encoding(chunk)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    queries::refresh_encoding_fingerprint(&mut tx, chunk.encoding_id).await?;
     tx.commit().await?;
     Ok(())
 }

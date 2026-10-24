@@ -9,8 +9,7 @@ use crate::model::object::{
 };
 use crate::model::quota::Limits;
 use crate::model::{
-    AccountStore, BucketStore, ChunkStore, ObjectStore, PhysicalStore, PublishStore, QuotaStore,
-    StreamStore,
+    AccountStore, BucketStore, ChunkStore, ObjectStore, PublishStore, QuotaStore, StreamStore,
 };
 use anyhow::Result;
 use serde_json::json;
@@ -129,8 +128,7 @@ async fn sqlite_object_contract() -> Result<()> {
         })
         .await?;
     chunk.stored_size = Some(64);
-    backend.mark_uploading(&chunk).await?;
-    backend.register_encoding(&chunk).await?;
+    backend.start_upload(bootstrap, &chunk).await?;
     ChunkStore::complete(&backend, bootstrap, 0, &chunk).await?;
     let data = [
         ("folder/cute%_heart.png", 11, "image/png"),
@@ -720,8 +718,7 @@ async fn sqlite_object_contract() -> Result<()> {
         })
         .await?;
     migrated.stored_size = Some(22);
-    backend.mark_uploading(&migrated).await?;
-    backend.register_encoding(&migrated).await?;
+    backend.start_upload(destination, &migrated).await?;
     ChunkStore::complete(&backend, destination, 0, &migrated).await?;
     backend.finish(destination, 22, "etag", json!({})).await?;
     assert!(

@@ -419,46 +419,22 @@ pub(super) async fn setup_account(
     Ok(())
 }
 
-struct ChunkClaim(
-    Option<(
-        Transaction<'static, Postgres>,
-        tokio::sync::OwnedSemaphorePermit,
-    )>,
-);
-
-impl Drop for ChunkClaim {
-    fn drop(&mut self) {
-        if let Some((transaction, permit)) = self.0.take()
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
-            // A cancelled advisory wait still occupies its connection until rollback completes.
-            runtime.spawn(async move {
-                if let Err(error) = transaction.rollback().await {
-                    tracing::warn!(%error, "chunk claim release failed");
-                }
-                drop(permit);
-            });
-        }
-    }
-}
-
-pub(super) async fn claim_chunk(
+pub(super) async fn allocate_chunk(
     pool: &PgPool,
-    storage: Uuid,
-    hash: &[u8; 32],
-    permit: tokio::sync::OwnedSemaphorePermit,
-) -> Result<Box<dyn Send>> {
-    let mut claim = ChunkClaim(Some((pool.begin().await?, permit)));
-    queries::claim_chunk_hash(storage, hash)
-        .execute(&mut *claim.0.as_mut().unwrap().0)
-        .await?;
-    Ok(Box::new(claim))
-}
-
-pub(super) async fn allocate_chunk(pool: &PgPool, input: ChunkCreate) -> Result<(Chunk, bool)> {
+    input: ChunkCreate,
+    single: bool,
+) -> Result<(Chunk, bool)> {
     let mut tx = pool.begin().await?;
-    require_writing_stream(&mut tx, input.stream).await?;
-    queries::fail_chunk_allocations(&input)
+    require_chunk_writer(&mut tx, input.stream, single).await?;
+    if !single
+        && !queries::try_claim_chunk_hash(input.storage, &input.hash)
+            .fetch_one(&mut *tx)
+            .await?
+    {
+        tx.rollback().await?;
+        return Err(crate::model::Error::ChunkBusy.into());
+    }
+    queries::fail_chunk_allocations(&input, single)
         .execute(&mut *tx)
         .await?;
     let old = queries::reusable_chunk(&input)
@@ -473,14 +449,72 @@ pub(super) async fn allocate_chunk(pool: &PgPool, input: ChunkCreate) -> Result<
                 .await?
         }
     };
-    let chunk = chunk.ok_or_else(|| {
-        s3s::s3_error!(OperationAborted, "chunk allocation is already in progress")
-    })?;
+    let Some(chunk) = chunk else {
+        tx.rollback().await?;
+        return Err(crate::model::Error::ChunkBusy.into());
+    };
     if reused {
         require_sources(&mut tx, None, &[chunk.id]).await?;
     }
     tx.commit().await?;
     Ok((chunk, reused))
+}
+
+async fn require_chunk_writer(db: &mut PgConnection, stream: Id, single: bool) -> Result<()> {
+    let observed = queries::repair_owner(stream)
+        .fetch_optional(&mut *db)
+        .await?
+        .ok_or(crate::model::Error::OperationAborted)?;
+    if let Some(task) = observed.2 {
+        let token = observed.3.ok_or(crate::model::Error::OperationAborted)?;
+        ensure!(
+            queries::lock_owned_task(&task, &token)
+                .fetch_optional(&mut *db)
+                .await?
+                .is_some(),
+            crate::model::Error::OperationAborted
+        );
+    }
+    ensure!(
+        queries::repair_stream(stream)
+            .fetch_optional(&mut *db)
+            .await?
+            == Some(observed),
+        crate::model::Error::OperationAborted
+    );
+    if !single {
+        ensure!(
+            queries::repair_lease(stream)
+                .fetch_optional(&mut *db)
+                .await?
+                .is_some(),
+            crate::model::Error::OperationAborted
+        );
+    }
+    Ok(())
+}
+
+pub(super) async fn start_chunk_upload(
+    pool: &PgPool,
+    stream: Id,
+    chunk: &Chunk,
+    single: bool,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    require_chunk_writer(&mut tx, stream, single).await?;
+    ensure!(
+        queries::mark_chunk_uploading(stream, chunk)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    queries::register_encoding(chunk, (!single).then_some(stream))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub(super) async fn reference_chunk(
@@ -489,9 +523,10 @@ pub(super) async fn reference_chunk(
     offset: i64,
     chunk_id: Id,
     raw_size: i32,
+    single: bool,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    require_writing_stream(&mut tx, stream).await?;
+    require_chunk_writer(&mut tx, stream, single).await?;
     let state: String = queries::lock_chunk(chunk_id).fetch_one(&mut *tx).await?;
     if state != "ready" {
         return Err(s3s::s3_error!(OperationAborted, "chunk is being reclaimed").into());
@@ -519,9 +554,10 @@ pub(super) async fn complete_chunk_write(
     stream: Id,
     offset: i64,
     chunk: &Chunk,
+    single: bool,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    require_writing_stream(&mut tx, stream).await?;
+    require_chunk_writer(&mut tx, stream, single).await?;
     ensure!(
         queries::allocated_source(stream, chunk)
             .build_query_scalar::<Id>()
@@ -2910,10 +2946,14 @@ async fn insert_upload_extent(
 
 use crate::model::cache::{CacheBatch, CacheRelease, CacheStage};
 
-pub(super) async fn cache_stage(pool: &PgPool, input: CacheStage<'_>) -> Result<bool> {
+pub(super) async fn cache_stage(
+    pool: &PgPool,
+    input: CacheStage<'_>,
+    single: bool,
+) -> Result<bool> {
     let mut tx = pool.begin().await?;
     raw_upload_processor(&mut tx, input.node).await?;
-    require_writing_stream(&mut tx, input.stream).await?;
+    require_chunk_writer(&mut tx, input.stream, single).await?;
     let (state, source) = queries::lock_cache_source(input.chunk.id)
         .fetch_one(&mut *tx)
         .await?;
@@ -2927,6 +2967,14 @@ pub(super) async fn cache_stage(pool: &PgPool, input: CacheStage<'_>) -> Result<
     );
     if !input.new && source.is_none() {
         return Ok(false);
+    }
+    if input.new {
+        ensure!(
+            queries::owned_chunk(input.stream, input.chunk)
+                .fetch_one(&mut *tx)
+                .await?,
+            crate::model::Error::OperationAborted
+        );
     }
     if !input.new {
         require_sources(&mut tx, None, &[input.chunk.id]).await?;

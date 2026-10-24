@@ -45,7 +45,7 @@ pub(super) async fn chunk(backend: &Backend, storage: Uuid, stream: Id, hash: u8
     assert!(!reused);
     chunk.location_id = Uuid::new_v4();
     chunk.stored_size = Some(32);
-    backend.mark_uploading(&chunk).await?;
+    backend.start_upload(stream, &chunk).await?;
     Ok(chunk)
 }
 pub(super) async fn stage(

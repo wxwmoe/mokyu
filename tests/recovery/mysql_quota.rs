@@ -3,9 +3,7 @@ use crate::authorization::{Action, DEFAULT_PROJECT, Permit, Principal};
 use crate::config::Config;
 use crate::model::Id;
 use crate::model::quota::Limits;
-use crate::model::{
-    ChunkCreate, ChunkStore, PhysicalStore, PublishStore, QuotaStore, StreamCreate, StreamStore,
-};
+use crate::model::{ChunkCreate, ChunkStore, PublishStore, QuotaStore, StreamCreate, StreamStore};
 use anyhow::Result;
 use serde_json::json;
 use uuid::Uuid;
@@ -73,6 +71,33 @@ async fn abandon(backend: &Backend, bucket: Uuid, stream: Id) -> Result<()> {
         .await?;
     tx.commit().await?;
     Ok(())
+}
+
+async fn with_quota_contention<T>(
+    backend: &Backend,
+    bucket: Uuid,
+    chunk: Id,
+    operation: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let mut cleanup = backend.pool.begin().await?;
+    transactions::lock_quota(&mut cleanup, bucket).await?;
+    let progress = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM information_schema.PROCESSLIST WHERE DB=DATABASE() AND ID<>CONNECTION_ID() AND INFO LIKE 'SELECT * FROM quota_scopes%')")
+                    .fetch_one(&backend.pool).await?;
+                if waiting { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            // Cleanup must acquire its content locks while publication waits for quota.
+            queries::changed_references(&mut cleanup, &[chunk], false).await?;
+            cleanup.commit().await?;
+            Ok::<_, anyhow::Error>(())
+        }).await?
+    };
+    let (published, cleaned) = tokio::join!(operation, progress);
+    cleaned?;
+    published
 }
 
 #[tokio::test]
@@ -180,14 +205,17 @@ async fn mysql_quota_and_publication_contract() -> Result<()> {
         .await?;
     physical.stored_size = Some(32);
     physical.location_id = Uuid::new_v4();
-    backend.mark_uploading(&physical).await?;
-    backend.register_encoding(&physical).await?;
+    backend.start_upload(first, &physical).await?;
     ChunkStore::complete(&backend, first, 0, &physical).await?;
     backend.finish(first, 32, "one", json!({})).await?;
     assert!(
-        backend
-            .publish(first, None, Some(s3s::dto::ETagCondition::Any), None)
-            .await?
+        with_quota_contention(
+            &backend,
+            bucket,
+            physical.id,
+            backend.publish(first, None, Some(s3s::dto::ETagCondition::Any), None),
+        )
+        .await?
     );
     usage(&backend, bucket, 32, 0, 0, 1).await?;
     assert_eq!(backend.current(bucket, "object.png").await?.id, first);
@@ -318,13 +346,18 @@ async fn mysql_quota_and_publication_contract() -> Result<()> {
         part_ids.push(part);
     }
     usage(&backend, bucket, 64, 64, 64, 2).await?;
-    crate::model::MultipartStore::commit_part(
+    with_quota_contention(
         &backend,
-        &Permit::for_action(Principal::Local, bucket, Action::Write),
         bucket,
-        upload,
-        1,
-        part_ids[0],
+        physical.id,
+        crate::model::MultipartStore::commit_part(
+            &backend,
+            &Permit::for_action(Principal::Local, bucket, Action::Write),
+            bucket,
+            upload,
+            1,
+            part_ids[0],
+        ),
     )
     .await?;
     let completion_token = Uuid::new_v4();

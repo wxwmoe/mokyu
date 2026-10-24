@@ -63,7 +63,7 @@ try:
                 wait(lambda: marker.with_suffix('.hit').exists() or upload.done(), point + ' not reached')
                 assert not upload.done(), point + ' did not block'
                 row = claimed(first)
-                assert available(row) is single, point + ' used the wrong coordination mode'
+                assert available(row), point + ' retained a database claim during storage I/O'
                 duplicate = pool.submit(s3.put_object, Bucket=bucket, Key=second, Body=raw)
                 time.sleep(.15)
                 assert not duplicate.done(), 'concurrent reuse bypassed the in-flight writer'
@@ -79,7 +79,7 @@ try:
         assert refs == [(row[0],), (row[0],)], refs
         assert db.execute("SELECT count(*) FROM chunks WHERE storage_id=%s AND hash=%s AND state='ready'",
                           (row[1], row[2])).fetchone() == (1,)
-        print('PASS ' + point + ' retains exclusive allocation and uses database claims only in cluster mode', flush=True)
+        print('PASS ' + point + ' retains allocation ownership without a database transaction', flush=True)
 
     if single:
         config = tomllib.loads(Path(os.environ['MOKYU_TEST_CONFIG']).read_text())
@@ -155,7 +155,7 @@ try:
         try:
             wait(marker.with_suffix('.hit').exists, 'timeout allocation checkpoint not reached')
             row = claimed(key)
-            assert available(row) is single
+            assert available(row), 'storage I/O retained a database transaction'
             try:
                 upload.result(timeout=20)
             except ClientError as exc:

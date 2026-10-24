@@ -135,25 +135,15 @@ impl App {
                     let mutex = self.content_lock(source.storage_id, hash);
                     let (chunk, reused) = {
                         let _hash = mutex.lock().await;
-                        let _claim = if self.role == "single" {
-                            None
-                        } else {
-                            Some(
-                                self.cluster()?
-                                    .claim_chunk(source.storage_id, &hash)
-                                    .await?,
-                            )
-                        };
-                        self.chunks
-                            .allocate(ChunkCreate {
-                                storage: source.storage_id,
-                                stream: candidate,
-                                hash,
-                                raw_size: length as i32,
-                                algorithm: job.encoding.algorithm.clone(),
-                                key: job.encoding.block_key_id,
-                            })
-                            .await?
+                        self.allocate_chunk(ChunkCreate {
+                            storage: source.storage_id,
+                            stream: candidate,
+                            hash,
+                            raw_size: length as i32,
+                            algorithm: job.encoding.algorithm.clone(),
+                            key: job.encoding.block_key_id,
+                        })
+                        .await?
                     };
                     if reused {
                         self.convert_batch(

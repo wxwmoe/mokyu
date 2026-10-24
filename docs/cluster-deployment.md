@@ -133,7 +133,7 @@ docker exec mokyu-control mokyu cli cluster mode single
 
 池忙直接回主库；新连接获取最多等待 200ms，页面查询最多 100ms，超时连接关闭。未追平后短暂退避 250ms，故障按 1–30 秒退避，并限制恢复探测。每页至多回主库一次，沿用原 stream 和尚未发送的起点；不重播已发字节、不拼接不同对象版本。主库也无法提供数据时中止响应流。
 
-`instance.database_connections` 保留主库预算，`instance.database_read_connections` 独立限制从库池。主库池包括通知监听：control 至少 5 个连接，容纳通知、统计与维护协调、管理权限保护和查询；data/worker 至少 4 个，chunk claim 在取连接前排队，为两条通知监听和一个推进查询保留容量。这些是启动下限，高并发需增加预算。owner 连接在池外，仍需单独计入数据库总连接预算以及主从数据库的 CPU/内存。不要仅因配置了从库就缩减主库可靠写和故障回退容量。`status.read_replica` 返回 `disabled`、`not_applicable`、`idle`、`available`、`lagging` 或 `backoff`，并提供池大小、尝试、成功页、未追平、错误、忙碌、回退次数和下次尝试时间；可用状态只反映最近结果，每页仍需检查本次租约。
+`instance.database_connections` 保留主库预算，`instance.database_read_connections` 独立限制从库池。主库池包括通知监听：control 至少 5 个连接，容纳通知、统计与维护协调、管理权限保护和查询；data/worker 至少 4 个，容纳两条通知监听及业务查询。区块领取在短事务内完成，编码和 S3 I/O 不持有数据库连接；同内容竞争释放连接后有界退避，领取锁忙时也不在数据库中等待。这些是启动下限，高并发需增加预算。owner 连接在池外，仍需单独计入数据库总连接预算以及主从数据库的 CPU/内存。不要仅因配置了从库就缩减主库可靠写和故障回退容量。`status.read_replica` 返回 `disabled`、`not_applicable`、`idle`、`available`、`lagging` 或 `backoff`，并提供池大小、尝试、成功页、未追平、错误、忙碌、回退次数和下次尝试时间；可用状态只反映最近结果，每页仍需检查本次租约。
 
 PostgreSQL 故障切换和旧主库隔离由部署环境负责。主库运行权连接丢失时 Mokyu 退出，切换后重启并为新请求创建新租约；旧时间线的从库无法提供这些标记，因此回退新主库。被提升的从库因不再处于 recovery 状态停止接受分流。此功能不把从库变成可脱离主库运行的数据面。
 

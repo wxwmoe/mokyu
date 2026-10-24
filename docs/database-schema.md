@@ -126,7 +126,7 @@ PostgreSQL 群集的 `node_reports` 按 node_id 保存一份最新报告，boot_
 
 PostgreSQL 的逻辑区块资格检查使用 `FOR KEY SHARE`，新增引用及 extent 维护触发器使用 `FOR NO KEY UPDATE`，避免最终发布与普通引用互相串行等待。GC、pack/rewrite、缓存来源切换与恢复等改变区块状态或来源映射的入口仍先取 `FOR UPDATE`；物理来源资格检查使用 `FOR SHARE` 阻止同时隔离。引用已经有效时不重复写入相同的 `unreferenced_at=NULL`。
 
-重传恢复在 `chunk_encodings.owner_stream` 登记 writing stream；它与 `owner_task` 互斥，外键禁止在释放候选前删除流。PostgreSQL/SQLite 用 CHECK，MySQL/MariaDB 用写入触发器保证互斥。`recovery_pending` 标记尚未确认发布结果的恢复候选，不赋予读取或引用资格。
+群集区块上传和重传恢复在 `chunk_encodings.owner_stream` 登记 writing stream；它与 `owner_task` 互斥，外键禁止在释放候选前删除流。PostgreSQL/SQLite 用 CHECK，MySQL/MariaDB 用写入触发器保证互斥。`recovery_pending` 标记尚未确认外部写入结果的物理来源，不赋予读取或引用资格。群集领取使用 `chunks.owner_stream`、有效写租约和任务 token；准备上传、缓存 staging、建立引用和完成均在短事务中重验写者。领取过期后使用新的 chunk/encoding 身份，迟到写入不能发布到新领取；未知结果沿原物理身份保留回收记录。单容器使用本机同内容锁，不创建群集写租约。
 
 候选登记与最终切换是两个短事务，中间的编码、写入和完整回读不持有新增来源行锁。最终事务比较来源快照并重新验证授权、写代次、模式、节点和存储策略，退休旧独立来源，发布新编码并建立当前写入的引用；pack 成员只解除逻辑 chunk 的当前 pack 绑定，不删除物理成员布局。并发胜者已提供合格来源时，退役本次候选并复用胜者。
 

@@ -40,7 +40,7 @@ pub(crate) trait ChunkStore: Send + Sync {
     async fn extents(&self, stream: Id, from: i64, until: i64) -> Result<Vec<Extent>>;
     async fn read_extents(&self, stream: Id, from: i64, until: i64) -> Result<Vec<ReadExtent>>;
     async fn read_start(&self, stream: Id, position: i64) -> Result<Option<i64>>;
-    /// The caller serializes this storage/hash until its write or staging finishes.
+    /// Single mode serializes locally; cluster allocations retain their stream ownership.
     async fn allocate(&self, input: ChunkCreate) -> Result<(Chunk, bool)>;
     async fn prepare_repair(
         &self,
@@ -50,7 +50,7 @@ pub(crate) trait ChunkStore: Send + Sync {
     async fn repair_metadata(&self, repair: &super::recovery::Repair) -> Result<()>;
     async fn finish_repair(&self, repair: &super::recovery::Repair, offset: i64) -> Result<Chunk>;
     async fn can_stage_reuse(&self, id: Id) -> Result<bool>;
-    async fn mark_uploading(&self, chunk: &Chunk) -> Result<()>;
+    async fn start_upload(&self, stream: Id, chunk: &Chunk) -> Result<()>;
     async fn reference(&self, stream: Id, offset: i64, chunk_id: Id, raw_size: i32) -> Result<()>;
     async fn complete(&self, stream: Id, offset: i64, chunk: &Chunk) -> Result<()>;
     async fn copy_references(

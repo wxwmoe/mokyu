@@ -170,8 +170,7 @@ async fn source_recovery_contract() -> Result<()> {
         assert_eq!(chunk.encoding_id, Id::Uuid(chunk.location_id));
     }
     chunk.stored_size = Some(32);
-    stores.chunks.mark_uploading(&chunk).await?;
-    stores.physical.register_encoding(&chunk).await?;
+    stores.chunks.start_upload(original, &chunk).await?;
     stores.chunks.complete(original, 0, &chunk).await?;
     stores
         .streams

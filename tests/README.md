@@ -184,7 +184,7 @@ Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专�
 
 - `tests.recovery.source_repair`：三种编码、坏候选完整回读、覆盖/profile 竞争、旧对象恢复、UploadPart/Web、条件请求、部分正文和错误校验和；恢复审计持久化、审计失败时同事务回滚
 - `tests.recovery.pack_repair`：模拟 S3 上逐成员恢复、旧包布局保留、最后成员解除后回收
-- `tests.recovery.repair_cluster`：两个真实 data 节点，另设 `MOKYU_TEST_SECOND_DATA` 和第一个 data 的 `MOKYU_TEST_NODE_STATE`；故意终止唯一持有 chunk advisory lock 的数据库连接，验证双候选 CAS、独立 GC、撤权、租约过期和排空；只允许专用 PostgreSQL 测试库
+- `tests.recovery.repair_cluster`：两个真实 data 节点，另设 `MOKYU_TEST_SECOND_DATA` 和第一个 data 的 `MOKYU_TEST_NODE_STATE`；验证没有跨 I/O 的数据库 claim、双候选 CAS、独立 GC、撤权、租约过期和排空；只允许专用 PostgreSQL 测试库
 - `tests.recovery.repair_node`：在第一个 data 的进程命名空间内运行，强杀并重启该节点，验证重启保留未过期候选、另一 data 恢复及失效候选清理。另设 `MOKYU_TEST_NODE_CONFIG`、`MOKYU_TEST_DATA`、`MOKYU_TEST_GATEWAY_PID_FILE`；fixture 的 CLI 须通过独立转发端口访问 control，不能把管理命令发给本机 data。排空用例之后先重启 data，再运行此项
 - `tests.recovery.repair_lifecycle`：仅单容器，使用 `MOKYU_TEST_DATA` 和 `MOKYU_TEST_GATEWAY_PID_FILE` 强杀并重启服务，覆盖各恢复检查点与第一次删除后的有限迟到 PUT
 - `tests.recovery.repair_fsync`：沿用 `local_durability.py` 的 LD_PRELOAD 与 fsync fixture，验证恢复不能确认文件或目录同步失败
@@ -193,7 +193,7 @@ Web 回归 `web/tests/source-quarantine.spec.ts` 使用真实管理 API 和专�
 
 ### 锁与连接池
 
-`postgres_claim_pool_progress` 使用新隔离 PostgreSQL 库，以 `--ignored` 运行，覆盖两条 LISTEN、claim 配额等待、数据库锁等待取消及回滚完成后配额恢复。`python -m tests.recovery.claim_pool` 沿用双 data 来源恢复 fixture，设置 `MOKYU_TEST_SECOND_DATA`，两 data 的连接池均为 4；验证暂停上传时查询能推进、同内容互斥、跨节点独立写和完整读回。`MOKYU_TEST_EXPECT_CLAIM_BLOCKED=1` 仅用于旧版负对照，确认池饥饿及失败后安全重试。连接丢失、旧候选与撤权继续由 `tests.recovery.repair_cluster` 覆盖。
+`postgres_chunk_claims_release_connections_and_fence_stale_writers` 使用新隔离 PostgreSQL 库，以 `--ignored` 运行，覆盖小池与 LISTEN、短领取锁竞争、租约和任务 token 失效、原子准备失败回滚、未知来源记录及 SQL 等待取消。`python -m tests.recovery.claim_pool` 沿用双 data 来源恢复 fixture，设置 `MOKYU_TEST_SECOND_DATA`，两 data 的连接池均为 4；验证两个暂停上传不占住查询容量、同内容互斥、跨节点独立写、完整读回，以及分配/上传/完成前租约过期后拒绝旧写者。来源修复竞争和撤权由 `tests.recovery.repair_cluster` 覆盖；该夹具要求 GC 未暂停。
 
 `python -m tests.recovery.cluster_scheduler` 还需要独立 worker，三个执行节点均配置 `instance.cpu_jobs = 1`，使用非零磁盘读缓存和上传缓存预算。沿用上述双 data fixture 的 `MOKYU_TEST_SECOND_DATA` 和 `MOKYU_TEST_SOURCE_FAULT_DIRS`，暂停本节点上传期间验证另一节点推进，主动断开当前隔离数据库的任务 LISTEN 会话，核对重连、暂停后的旧执行不能发布、恢复后跨节点完整读回，以及六秒空闲事务数量有界。
 

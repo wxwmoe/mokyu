@@ -141,13 +141,16 @@ async fn sqlite_content_contract() -> Result<()> {
             .fetch_one(db)
             .await?;
     assert_eq!(old_state, "retired");
-    assert!(backend.mark_uploading(&failed).await.is_err());
+    assert!(backend.start_upload(first, &failed).await.is_err());
     physical.location_id = Uuid::new_v4();
     physical.stored_size = Some(32);
-    backend.mark_uploading(&physical).await?;
-    assert!(backend.ready_chunk(physical.id).await?.is_none());
     assert!(backend.complete(first, 0, &physical).await.is_err());
-    backend.register_encoding(&physical).await?;
+    let mut invalid = physical.clone();
+    invalid.stored_size = Some(-1);
+    assert!(backend.start_upload(first, &invalid).await.is_err());
+    assert!(backend.complete(first, 0, &physical).await.is_err());
+    backend.start_upload(first, &physical).await?;
+    assert!(backend.ready_chunk(physical.id).await?.is_none());
     assert!(backend.indexed(physical.location_id).await?);
     backend.complete(first, 0, &physical).await?;
     assert!(backend.complete(first, 0, &physical).await.is_err());

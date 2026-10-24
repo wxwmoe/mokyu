@@ -117,8 +117,7 @@ async fn source_quarantine_contract() -> Result<()> {
     let (mut chunk, reused) = stores.chunks.allocate(allocation(storage, first)).await?;
     assert!(!reused);
     chunk.stored_size = Some(32);
-    stores.chunks.mark_uploading(&chunk).await?;
-    stores.physical.register_encoding(&chunk).await?;
+    stores.chunks.start_upload(first, &chunk).await?;
     stores.chunks.complete(first, 0, &chunk).await?;
     stores.streams.finish(first, 32, "etag", json!({})).await?;
     assert!(stores.publish.publish(first, None, None, None).await?);

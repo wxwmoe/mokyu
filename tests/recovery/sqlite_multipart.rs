@@ -6,8 +6,8 @@ use crate::model::multipart::{
     MultipartCreate, PartStitch, SeedConsumption, TransferFilter, WebUpload,
 };
 use crate::model::{
-    AccountStore, ChunkCreate, ChunkStore, MultipartStore, PhysicalStore, PublishStore, QuotaStore,
-    StreamCreate, StreamStore, StreamTail,
+    AccountStore, ChunkCreate, ChunkStore, MultipartStore, PublishStore, QuotaStore, StreamCreate,
+    StreamStore, StreamTail,
 };
 use anyhow::Result;
 use serde_json::json;
@@ -175,8 +175,7 @@ async fn sqlite_multipart_contract() -> Result<()> {
         .await?;
     chunk.stored_size = Some(32);
     chunk.location_id = Uuid::new_v4();
-    backend.mark_uploading(&chunk).await?;
-    backend.register_encoding(&chunk).await?;
+    backend.start_upload(original, &chunk).await?;
     ChunkStore::complete(&backend, original, 0, &chunk).await?;
     backend
         .finish(original, 32, "part", json!({"sha256":"checksum"}))

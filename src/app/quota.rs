@@ -18,6 +18,7 @@ pub(crate) fn database_error(error: &anyhow::Error) -> Option<s3s::S3Error> {
             Some(error)
         }
         Error::OperationAborted => Some(s3s::s3_error!(OperationAborted)),
+        Error::ChunkBusy => Some(s3s::s3_error!(SlowDown)),
         Error::SourceUnavailable => Some(s3s::s3_error!(InternalError)),
         reason @ (Error::LastAdministrator
         | Error::BucketAlreadyExists

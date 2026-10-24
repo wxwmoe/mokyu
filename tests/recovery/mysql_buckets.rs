@@ -2,7 +2,6 @@ use super::{Backend, connection};
 use crate::app::Bucket;
 use crate::authorization::{Action, DEFAULT_PROJECT, Permit, Principal};
 use crate::config::Config;
-use crate::model::PhysicalStore;
 use crate::model::administration::ProjectInput;
 use crate::model::bucket::{BucketUpdate, CreateBucket, TransferInput, Website, fingerprint};
 use crate::model::quota::Limits;
@@ -295,8 +294,7 @@ async fn mysql_bucket_contract() -> Result<()> {
         })
         .await?;
     chunk.stored_size = Some(32);
-    backend.mark_uploading(&chunk).await?;
-    backend.register_encoding(&chunk).await?;
+    backend.start_upload(stream, &chunk).await?;
     ChunkStore::complete(&backend, stream, 0, &chunk).await?;
     backend.finish(stream, 32, "etag", json!({})).await?;
     assert!(backend.publish(stream, None, None, None).await?);

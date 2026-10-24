@@ -4,6 +4,7 @@ use std::fmt;
 pub(crate) enum Error {
     QuotaExceeded,
     OperationAborted,
+    ChunkBusy,
     QueryCancelled,
     StorageProfileConflict,
     StorageNotDrained,
@@ -22,6 +23,7 @@ impl fmt::Display for Error {
         f.write_str(match self {
             Self::QuotaExceeded => "storage quota exceeded",
             Self::OperationAborted => "operation was aborted",
+            Self::ChunkBusy => "chunk allocation is still owned by another writer",
             Self::QueryCancelled => "database query was cancelled",
             Self::StorageProfileConflict => "storage profile changed",
             Self::StorageNotDrained => {
@@ -51,6 +53,7 @@ mod tests {
         for classification in [
             Error::QuotaExceeded,
             Error::OperationAborted,
+            Error::ChunkBusy,
             Error::QueryCancelled,
             Error::StorageProfileConflict,
             Error::StorageNotDrained,
