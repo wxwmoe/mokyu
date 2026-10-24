@@ -32,6 +32,7 @@ pub(crate) enum MaterialType {
     Storage,
     Key,
     Credential,
+    Policy,
 }
 
 impl MaterialType {
@@ -43,6 +44,7 @@ impl MaterialType {
             Self::Storage => "storage",
             Self::Key => "block-key",
             Self::Credential => "s3-credential",
+            Self::Policy => "read-policy",
         }
     }
 }
@@ -87,6 +89,7 @@ pub(crate) struct Query {
     pub(crate) head: bool,
     pub(crate) web: bool,
     pub(crate) mapping: bool,
+    pub(crate) policy: bool,
     pub(crate) headers: HeaderMap,
     pub(crate) overrides: HeaderMap,
     pub(crate) cached: Vec<Version>,
@@ -127,6 +130,7 @@ impl Query {
             self.head,
             self.web,
             self.mapping,
+            self.policy,
             headers(&self.headers),
             headers(&self.overrides),
         ))?;
@@ -282,6 +286,7 @@ pub(crate) struct Reply {
     pub(crate) object: Option<Version>,
     pub(crate) mapping: Option<Version>,
     pub(crate) credential: Option<Version>,
+    pub(crate) policy: Option<Version>,
     pub(crate) grants: Vec<Grant>,
     pub(crate) next: Option<Cursor>,
     pub(crate) offset: u64,
@@ -301,6 +306,7 @@ impl Reply {
             object: None,
             mapping: None,
             credential: None,
+            policy: None,
             grants: Vec::new(),
             next: None,
             offset: 0,
@@ -345,6 +351,25 @@ impl Reply {
                     material.version.id.len() * 2 + 128 + material.json.as_ref().map_or(0, Vec::len)
                 })
                 .sum::<usize>()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Policy {
+    pub(crate) storage_id: Uuid,
+    pub(crate) revision: i64,
+    pub(crate) cors_cache_enabled: bool,
+}
+
+impl From<&StorageProfile> for Policy {
+    fn from(profile: &StorageProfile) -> Self {
+        Self {
+            storage_id: profile.storage_id,
+            revision: profile.revision,
+            cors_cache_enabled: profile.cors_cache_enabled
+                || profile.public_cache_validation == "background",
+        }
     }
 }
 

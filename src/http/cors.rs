@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::OwnedSemaphorePermit;
 mod cache;
-pub(crate) use cache::{Cache, Policy, Validation, run};
+pub(crate) use cache::{Cache, Policy, Validation, run, run_current};
 
 struct Rule {
     rule: CorsRule,

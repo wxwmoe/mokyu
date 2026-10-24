@@ -195,7 +195,7 @@ pub(crate) struct Cache {
     sender: mpsc::Sender<Work>,
     pressure: AtomicUsize,
     generation: AtomicU64,
-    wake: Notify,
+    wake: Arc<Notify>,
     clock: AtomicU64,
     hits: AtomicU64,
     parses: AtomicU64,
@@ -218,7 +218,7 @@ impl Cache {
                 sender,
                 pressure: 0.into(),
                 generation: 0.into(),
-                wake: Notify::new(),
+                wake: Arc::new(Notify::new()),
                 clock: 0.into(),
                 hits: 0.into(),
                 parses: 0.into(),
@@ -489,6 +489,30 @@ impl Cache {
         (index.changing == 0 && entry.revision == bucket.settings_revision)
             .then(|| entry.policy.clone())
     }
+    pub(crate) fn current(&self, bucket: &mut Bucket) {
+        let Ok(index) = self.index.try_lock() else {
+            return;
+        };
+        if index.changing != 0 {
+            return;
+        }
+        if let Some(entry) = index.buckets.get(&bucket.id)
+            && entry.revision == bucket.settings_revision
+        {
+            let used = self.clock.fetch_add(1, Relaxed);
+            entry.used.store(used, Relaxed);
+            if let Some(policy) = index.policies.get(&entry.key) {
+                policy.used.store(used, Relaxed);
+            }
+            self.hits.fetch_add(1, Relaxed);
+            bucket.cors = entry.policy.clone();
+            return;
+        }
+        let generation = index.generation;
+        drop(index);
+        // The RPC confirmed this revision; only policy parsing and storage are reused.
+        self.offer(bucket, None, Instant::now(), generation);
+    }
     pub(crate) fn snapshot(&self) -> Value {
         let index = self.index.lock().unwrap();
         serde_json::json!({"limit_bytes":self.limit,"index_limit_bytes":CONTROL_BYTES.min(self.limit),
@@ -497,6 +521,43 @@ impl Cache {
             "hits":self.hits.load(Relaxed),"parses":self.parses.load(Relaxed),"evicted":self.evicted.load(Relaxed),
             "bucket_evicted":self.bucket_evicted.load(Relaxed),"invalidated":self.invalidated.load(Relaxed),
             "bypassed":self.bypassed.load(Relaxed),"refreshed":self.refreshed.load(Relaxed),"failed":self.failed.load(Relaxed)})
+    }
+}
+
+pub(crate) async fn run_current(cache: Weak<Cache>, mut receiver: mpsc::Receiver<Work>) {
+    let Some(wake) = cache.upgrade().map(|cache| cache.wake.clone()) else {
+        return;
+    };
+    loop {
+        let work = tokio::select! {
+            work = receiver.recv() => match work { Some(work) => Some(work), None => return },
+            _ = wake.notified() => None,
+        };
+        let Some(cache) = cache.upgrade() else { return };
+        match work {
+            Some(Work::Fill(fill)) => {
+                let key = (fill.id, fill.generation);
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("cors-cache-work").await;
+                cache.fill(fill);
+                cache.index.lock().unwrap().pending.remove(&key);
+            }
+            Some(Work::Refresh(entry)) => {
+                cache
+                    .index
+                    .lock()
+                    .unwrap()
+                    .pending
+                    .remove(&(entry.id, entry.generation));
+            }
+            None => {
+                let bytes = cache.pressure.swap(0, Relaxed);
+                let mut index = cache.index.lock().unwrap();
+                while cache.memory.available_permits() * UNIT < bytes
+                    && cache.evict(&mut index, None)
+                {}
+            }
+        }
     }
 }
 
@@ -629,6 +690,40 @@ mod tests {
             cache.generation(),
         )
         .unwrap()
+    }
+    #[tokio::test]
+    async fn authoritative_bindings_share_rules_and_ignore_late_versions() {
+        let (cache, mut receiver) = Cache::new(1024 * 1024, 256);
+        let original = bucket();
+        let mut first = original.clone();
+        cache.current(&mut first);
+        drain(&cache, &mut receiver);
+        cache.current(&mut first);
+        let shared = first.cors.clone();
+        for _ in 0..100 {
+            let mut other = bucket();
+            cache.current(&mut other);
+            drain(&cache, &mut receiver);
+            cache.current(&mut other);
+            assert!(Arc::ptr_eq(&shared.0, &other.cors.0));
+        }
+        assert_eq!(cache.snapshot()["entries"], 1);
+        let mut changed = original.clone();
+        changed.settings_revision += 1;
+        changed.cors = json!([]).into();
+        cache.current(&mut changed);
+        drain(&cache, &mut receiver);
+        let mut late = original;
+        cache.current(&mut late);
+        drain(&cache, &mut receiver);
+        assert_eq!(*cache.shared(&changed).unwrap(), json!([]));
+        assert!(cache.shared(&late).is_none());
+        let worker = tokio::spawn(run_current(Arc::downgrade(&cache), receiver));
+        drop(cache);
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap();
     }
     #[test]
     fn shared_json_rules_and_headers_survive_bucket_eviction() {

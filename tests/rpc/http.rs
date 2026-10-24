@@ -49,6 +49,7 @@ async fn node_http_reads(cache: bool, disk: bool) -> Result<()> {
     node_state(&mut states, |state| state.phase == Phase::Ready).await?;
     let reads = Arc::new(crate::node::reads::Reads::new(context.clone())?);
     let gateway = crate::http::node::Gateway::new(reads.clone())?;
+    let observed = gateway.clone();
     let service = gateway.service()?;
     let s3_listener = tokio::net::TcpListener::bind("127.0.0.1:19100").await?;
     let web_listener = tokio::net::TcpListener::bind("127.0.0.1:19101").await?;
@@ -132,6 +133,14 @@ async fn node_http_reads(cache: bool, disk: bool) -> Result<()> {
         fixture("http-signed").await?;
         fixture("http-sources").await?;
         fixture("http-public").await?;
+        let cors = observed.cors_cache();
+        assert!(cors["hits"].as_u64().unwrap() > 0);
+        assert_eq!(cors["entries"], 1);
+        fixture("http-cors-disabled").await?;
+        assert_eq!(observed.cors_cache()["hits"], cors["hits"]);
+        fixture("http-cors-update").await?;
+        let cors = observed.cors_cache();
+        assert!(cors["live_bytes"].as_u64().unwrap() <= cors["limit_bytes"].as_u64().unwrap());
         let before: Vec<_> = versions
             .iter()
             .map(|count| count.load(std::sync::atomic::Ordering::Relaxed))

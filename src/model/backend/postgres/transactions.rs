@@ -9041,6 +9041,22 @@ pub(super) async fn open_node_read(
         &bucket,
         &input.cached,
     )?);
+    if input.policy
+        && let Some(storage) = bucket.storage_id
+    {
+        let profile = queries::storage_profile(storage)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if let Some(profile) = profile {
+            reply.policy = Some(reply.material(
+                state.deployment_id,
+                MaterialType::Policy,
+                storage.to_string(),
+                &read::Policy::from(&profile),
+                &input.cached,
+            )?);
+        }
+    }
     if bucket.state != "active"
         || if let Some(access) = &input.access {
             !queries::node_read_allowed(access, bucket.project_id, bucket.id)

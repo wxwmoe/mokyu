@@ -127,6 +127,7 @@ enum ReadInclude {
   READ_INCLUDE_UNSPECIFIED = 0;
   OBJECT = 1;
   MAPPING = 2;
+  POLICY = 3;
 }
 
 message BucketRoute {
@@ -161,6 +162,7 @@ enum MaterialType {
   STORAGE = 4;
   BLOCK_KEY = 5;
   S3_CREDENTIAL = 6;
+  READ_POLICY = 7;
 }
 
 // Revisions bind deployment, purpose, identity and material; never authorization.
@@ -274,4 +276,5 @@ message ReadReply {
   string representation = 12;
   string etag = 13;
   bool body_reused = 14;
+  Cached policy = 15;
 }

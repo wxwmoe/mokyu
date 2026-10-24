@@ -27,6 +27,7 @@ fn request(run: Run) -> read::Query {
         head: false,
         web: false,
         mapping: true,
+        policy: false,
         headers: HeaderMap::new(),
         overrides: HeaderMap::new(),
         cached: Vec::new(),
@@ -155,12 +156,28 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
     let mut head = request(session.run);
     head.head = true;
     head.mapping = false;
+    head.policy = true;
     let header = backend.open_read(&node, &key, head).await?;
     assert!(
         header.outcome == read::Outcome::Ready
             && header.grants.is_empty()
             && header.mapping.is_none()
     );
+    assert_eq!(
+        material::<read::Policy>(&header, read::MaterialType::Policy)?.storage_id,
+        storage
+    );
+    let mut cached = request(session.run);
+    cached.head = true;
+    cached.mapping = false;
+    cached.policy = true;
+    cached.cached = header
+        .materials
+        .iter()
+        .map(|item| item.version.clone())
+        .collect();
+    let cached = backend.open_read(&node, &key, cached).await?;
+    assert!(cached.materials.iter().all(|item| item.json.is_none()));
     assert!(!header.materials.iter().any(|item| matches!(
         item.version.r#type,
         read::MaterialType::Storage | read::MaterialType::Key

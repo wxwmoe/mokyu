@@ -181,6 +181,7 @@ pub(crate) fn cached(values: Vec<wire::Cached>) -> Result<Vec<read::Version>, St
                 Ok(wire::MaterialType::Storage) => read::MaterialType::Storage,
                 Ok(wire::MaterialType::BlockKey) => read::MaterialType::Key,
                 Ok(wire::MaterialType::S3Credential) => read::MaterialType::Credential,
+                Ok(wire::MaterialType::ReadPolicy) => read::MaterialType::Policy,
                 _ => return Err(invalid()),
             };
             if value.id.is_empty()
@@ -212,7 +213,7 @@ pub(super) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
         _ => return Err(invalid()),
     };
     if input.include.is_empty()
-        || input.include.len() > 2
+        || input.include.len() > 3
         || !text(&input.access_key, 128)
         || (web && !input.access_key.is_empty())
     {
@@ -220,6 +221,7 @@ pub(super) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
     }
     let mut seen = HashSet::new();
     let mut mapping = false;
+    let mut policy = false;
     for include in input.include {
         if !seen.insert(include) {
             return Err(invalid());
@@ -227,6 +229,7 @@ pub(super) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
         match wire::ReadInclude::try_from(include) {
             Ok(wire::ReadInclude::Object) => {}
             Ok(wire::ReadInclude::Mapping) if !head => mapping = true,
+            Ok(wire::ReadInclude::Policy) => policy = true,
             _ => return Err(invalid()),
         }
     }
@@ -302,6 +305,7 @@ pub(super) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
         head,
         web,
         mapping,
+        policy,
         headers: headers(input.headers, false)?,
         overrides: headers(input.overrides, true)?,
         cached: cached(input.cached)?,
@@ -344,6 +348,7 @@ pub(crate) fn version(value: read::Version) -> wire::Cached {
         read::MaterialType::Storage => wire::MaterialType::Storage,
         read::MaterialType::Key => wire::MaterialType::BlockKey,
         read::MaterialType::Credential => wire::MaterialType::S3Credential,
+        read::MaterialType::Policy => wire::MaterialType::ReadPolicy,
     };
     wire::Cached {
         r#type: r#type as i32,
@@ -381,6 +386,7 @@ pub(super) fn reply(input: read::Reply) -> wire::ReadReply {
         object: input.object.map(version),
         mapping: input.mapping.map(version),
         credential: input.credential.map(version),
+        policy: input.policy.map(version),
         grants: input
             .grants
             .into_iter()
@@ -451,8 +457,10 @@ mod tests {
         head.method = wire::ReadMethod::Head as i32;
         assert!(query(head.clone()).is_err());
         head.include = vec![wire::ReadInclude::Object as i32];
-        assert!(!query(head).unwrap().mapping);
-        for include in [vec![], vec![0], vec![1, 1], vec![1, 2, 3]] {
+        assert!(!query(head.clone()).unwrap().mapping);
+        head.include.push(wire::ReadInclude::Policy as i32);
+        assert!(query(head).unwrap().policy);
+        for include in [vec![], vec![0], vec![1, 1], vec![1, 2, 4]] {
             let mut changed = input.clone();
             changed.include = include;
             assert!(query(changed).is_err());

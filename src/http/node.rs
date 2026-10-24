@@ -44,10 +44,11 @@ pub(crate) struct Gateway {
 impl Gateway {
     pub(crate) fn new(reads: Arc<Reads>) -> Result<Self> {
         let settings = reads.node.snapshot()?.runtime().requests.clone();
-        let (cors, _) = cors::Cache::new(
+        let (cors, receiver) = cors::Cache::new(
             crate::config::cache_bytes(&settings.cors_cache_size)? as usize,
             settings.cors_cache_entries,
         );
+        tokio::spawn(cors::run_current(Arc::downgrade(&cors), receiver));
         Ok(Self {
             reads,
             cors,
@@ -61,6 +62,11 @@ impl Gateway {
         builder.set_access(self.clone());
         s3::configure(&mut builder, &self.settings)?;
         Ok(builder.build())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cors_cache(&self) -> serde_json::Value {
+        self.cors.snapshot()
     }
 
     async fn prepare(
@@ -128,11 +134,15 @@ impl Gateway {
                 wire::ReadSurface::S3
             } as i32,
             include: if head {
-                vec![wire::ReadInclude::Object as i32]
+                vec![
+                    wire::ReadInclude::Object as i32,
+                    wire::ReadInclude::Policy as i32,
+                ]
             } else {
                 vec![
                     wire::ReadInclude::Object as i32,
                     wire::ReadInclude::Mapping as i32,
+                    wire::ReadInclude::Policy as i32,
                 ]
             },
             headers: fields(&headers, crate::rpc::read::HEADERS),
@@ -178,9 +188,19 @@ impl Gateway {
     }
 
     fn cors(&self, prepared: &Prepared, headers: &HeaderMap, method: &Method) -> Result<HeaderMap> {
-        let Some(bucket) = delivery::bucket(prepared)? else {
+        let Some(mut bucket) = delivery::bucket(prepared)? else {
             return Ok(HeaderMap::new());
         };
+        if let Some(version) = &prepared.reply.policy {
+            let policy: crate::model::node_read::Policy = prepared.material(version)?;
+            anyhow::ensure!(
+                Some(policy.storage_id) == bucket.storage_id && policy.revision > 0,
+                "read policy does not match the bucket"
+            );
+            if policy.cors_cache_enabled {
+                self.cors.current(&mut bucket);
+            }
+        }
         super::cors_headers(
             &self.cors,
             &bucket,

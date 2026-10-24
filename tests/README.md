@@ -32,6 +32,8 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `rpc::client::transport_tests::reads::http::node_http_reads_use_one_rpc_and_verify_signatures` 使用同一读取夹具，在隔离网络的 19100/19101 端口提供节点 S3/Web 入口，并写入 `http-ports.json`。编排器响应 `http-signed`、`http-sources`、`http-public`、`http-proxy`、`http-compression-busy`、`http-rejected`、`http-pending`、`http-reconnected` 和 `http-fenced` 动作，分别发出真实 SDK、HTTP/1.1、h2c 及 TLS 代理请求。代理保持 Host 和签名路径，以 h2c 回源；用例检查实际入站协议、一次 OpenRead、签名错误优先级、无正文 I/O 的 HEAD/条件响应、压缩退让、来源释放及 control 恢复。`http-compression-finish` 故障点验证已开始压缩的响应在运行权失效时中断。夹具须包含空对象、Pack、raw、路径编码、公开域名（含端口）、CORS、目录页和错误页；pending 用例临时把该隔离 raw 来源设为其他节点尚未上传的来源，验证等待、就绪和桶修订变动后恢复。本用例验证读取适配层，不替代完整角色启动或实际 CDN 验收。
 
+HTTP 读取夹具启用 CORS 缓存；`http-cors-disabled` 与 `http-cors-update` 检查开关、规则修订和三种 HTTP 链路的 HEAD/OPTIONS，同次 OpenRead 返回所需策略。Rust 断言共享策略命中与预算；普通 CORS 测试覆盖跨桶共享、迟到修订和后台队列结束。
+
 `rpc::client::transport_tests::reads::http::node_http_cache_validates_versions_and_recovers` 复用 HTTP 夹具并启用 16MiB 正文缓存。编排器的 `l1-*` 动作使用独立公开对象，检查三种 HTTP 链路的缓存命中、Range、identity 派生压缩、编码器繁忙时复用压缩体、ACL 拒绝、策略切换、对象替换和 control 恢复。Rust 断言后端 GET、命中计数与预算；`http-compression-finish` 暂停验证取消后不发布候选，`response-cache-body` 暂停验证无读取租约的缓存响应仍受运行权约束。对象和策略改动只作用于隔离夹具。
 
 `rpc::client::transport_tests::reads::http::node_http_file_cache_recovers_and_falls_back` 关闭正文 L1 并限制文件缓存为 16MiB / 128 项。`l2-*` 夹具动作检查 HTTP/1.1、h2c、TLS 代理热读和 Range，损坏本机缓存后的回源与重建、Pack 成员复用、关闭/重新启用缓存、重建读取器后的目录恢复以及 control 退出。`l2-raw-*` 覆盖并发冷读共用一次后端下载、raw 热 Range、损坏回源和目录恢复；`node-raw-before-verify` 暂停校验，检查取消不发布文件并归还磁盘预约。`node-cache-decode` 暂停阻塞解码，验证运行权失效时响应及时中断。共享文件缓存普通测试另覆盖 pin、删除失败与实际磁盘计费。
