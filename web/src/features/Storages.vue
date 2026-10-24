@@ -217,7 +217,7 @@ async function toggle(row: Storage) {
 }
 </script>
 <template>
-  <div class="page-heading"><div><p class="eyebrow">{{ t('storesEyebrow') }}</p><h1>{{ t('storages') }}</h1><p>{{ t('storesHint') }}</p></div><div class="heading-actions"><button class="primary" @click="edit()"><Plus :size="17" />{{ t('createStore') }}</button><button class="icon-button" :aria-label="t('refresh')" @click="storages.refetch()"><RefreshCw :size="17" /></button></div></div>
+  <div class="page-heading"><div><p class="eyebrow">{{ t('storesEyebrow') }}</p><h1>{{ t('storages') }}</h1><p>{{ t('storesHint') }}</p></div><div class="heading-actions"><button class="primary" @click="edit()"><Plus :size="17" />{{ t('addStore') }}</button><button class="icon-button" :aria-label="t('refresh')" @click="storages.refetch()"><RefreshCw :size="17" /></button></div></div>
   <ErrorNotice v-if="storages.error.value" :error="storages.error.value" />
   <div v-if="storages.isPending.value" class="skeleton-row" />
   <div v-else-if="storages.data.value?.length" class="store-grid">

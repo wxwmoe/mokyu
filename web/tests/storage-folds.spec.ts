@@ -25,7 +25,7 @@ test('storage presets stay visible while advanced groups preserve folded drafts'
     for (const theme of ['light', 'dark']) {
       expect((await request.put('/api/v1/account', { headers, data: { display_name: '', locale, theme, avatar_email: '', avatar_enabled: false } })).ok()).toBe(true)
       await page.goto('/storages')
-      await page.getByRole('button', { name: text.createStore, exact: true }).click()
+      await page.getByRole('button', { name: text.addStore, exact: true }).click()
       const editor = page.getByRole('dialog', { name: text.createStore, exact: true })
       await expect(editor.getByRole('combobox', { name: text.storeIoPreset, exact: true })).toBeVisible()
       await expect(editor.getByRole('textbox', { name: text.storeEndpoint, exact: true })).toBeVisible()

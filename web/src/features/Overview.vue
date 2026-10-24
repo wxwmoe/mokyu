@@ -31,7 +31,6 @@ async function refresh() { const result = await statistics.refetch(); if (admin.
 <template>
   <div class="page-heading overview-heading"><div><p class="eyebrow">{{ t('overviewEyebrow') }}</p><h1>{{ t('welcomeHome', { name: session?.display_name || session?.username || 'Mokyu' }) }} <Heart class="heading-heart" :size="24" /></h1><p>{{ t('overviewHint') }}</p></div><div class="heading-actions"><ScopePicker /><button class="icon-button" :aria-label="t('refresh')" :disabled="statistics.isFetching.value" @click="refresh"><RefreshCw :size="17" /></button></div></div>
   <ErrorNotice v-if="statistics.error.value || runtime.error.value" :error="statistics.error.value || runtime.error.value" />
-  <RuntimeCoverage v-if="cluster" :runtime="runtime.data.value?.cluster" />
   <div v-if="statistics.data.value?.stale && usage" class="snapshot-note"><Clock3 :size="14" />{{ t('snapshotStale') }}</div>
   <div v-if="runtime.data.value && Number(runtime.data.value.failed_uploads) > 0" class="info-callout"><CloudUpload :size="20" /><p>{{ t('uploadNeedsAttention', { count: runtime.data.value.failed_uploads }) }}</p><RouterLink class="button" to="/transfers">{{ t('transfers') }}<ArrowUpRight :size="15" /></RouterLink></div>
   <div class="overview-ribbon" aria-hidden="true"><img src="/assets/mokyu-mochi.svg" alt="" width="138" height="132"><span>{{ t('overviewRibbon') }}</span><Heart :size="20" /><i /><Sparkles :size="21" /></div><div class="insight-cards">
@@ -47,4 +46,5 @@ async function refresh() { const result = await statistics.refetch(); if (admin.
     <section class="surface overview-panel lilac-panel"><div class="section-heading"><h2><Heart :size="19" />{{ t('growingCollection') }}</h2></div><TrendChart :points="capacity" :label="t('logicalMedia')" unit="bytes" /></section>
     <section class="surface overview-panel sky-panel"><template v-if="admin"><div class="section-heading"><h2><Activity :size="19" />{{ t('requestsOverTime') }}</h2><span class="field-help">{{ t('deploymentOnly') }}</span></div><TrendChart :points="requests" :label="t('requestsPerSecond')" unit="rate" /></template><template v-else><div class="section-heading"><h2><Package :size="19" />{{ t('storageMadeGentle') }}</h2></div><p class="insight-note">{{ t('memberStorageHint') }}</p><RouterLink class="button" :to="{ path: '/storage', query: scope }">{{ t('exploreStorage') }}<ArrowUpRight :size="16" /></RouterLink></template></section>
   </div>
+  <RuntimeCoverage v-if="cluster" :runtime="runtime.data.value?.cluster" />
 </template>
