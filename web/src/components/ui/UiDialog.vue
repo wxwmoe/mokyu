@@ -3,18 +3,18 @@ import { watch } from 'vue'
 import { DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, DialogDescription, DialogClose } from 'reka-ui'
 import { X } from 'lucide-vue-next'
 import { t } from '../../app/i18n'
-withDefaults(defineProps<{ title: string; description?: string; drawer?: boolean; wide?: boolean; busy?: boolean }>(), { description: '' })
+const props = withDefaults(defineProps<{ title: string; description?: string; drawer?: boolean; wide?: boolean; medium?: boolean; busy?: boolean; trigger?: HTMLElement }>(), { description: '' })
 const open = defineModel<boolean>('open', { required: true })
 let returnFocus: HTMLElement | null = null
-watch(open, value => { if (value) returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null }, { flush: 'sync', immediate: true })
+watch(open, value => { if (value) returnFocus = props.trigger || (document.activeElement instanceof HTMLElement ? document.activeElement : null) }, { flush: 'sync', immediate: true })
 function restoreFocus(event: Event) { event.preventDefault(); if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true }) }
 </script>
 <template>
-  <DialogRoot v-model:open="open"><DialogPortal><DialogOverlay class="dialog-overlay" />
-    <DialogContent class="dialog-panel" :class="{ drawer, wide, 'dialog-compact': !$slots.default }" @close-auto-focus="restoreFocus" @escape-key-down="busy && $event.preventDefault()" @pointer-down-outside="busy && $event.preventDefault()">
+  <DialogRoot v-model:open="open"><DialogPortal v-if="open"><div class="dialog-layer"><DialogOverlay class="dialog-overlay" />
+    <DialogContent class="dialog-panel" :class="{ drawer, wide, medium, 'dialog-compact': !$slots.default }" @close-auto-focus="restoreFocus" @escape-key-down="busy && $event.preventDefault()" @pointer-down-outside="busy && $event.preventDefault()">
       <header class="dialog-header"><div><DialogTitle class="dialog-title">{{ title }}</DialogTitle><DialogDescription :class="{ 'sr-only': !description }">{{ description || title }}</DialogDescription></div><DialogClose class="icon-button" :aria-label="t('close')" :disabled="busy"><X :size="18" /></DialogClose></header>
       <div v-if="$slots.default" class="dialog-body"><slot /></div>
       <footer v-if="$slots.footer" class="dialog-footer"><slot name="footer" /></footer>
     </DialogContent>
-  </DialogPortal></DialogRoot>
+  </div></DialogPortal></DialogRoot>
 </template>

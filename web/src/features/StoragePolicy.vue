@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { api, write } from '../api/client'
+import { api, byteSize, write } from '../api/client'
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
 import { report } from '../app/feedback'
@@ -22,6 +22,7 @@ const templates = useQuery({
     : `/api/v1/storage-profile-presets?type=${encodeURIComponent(props.storageType)}`, { signal }),
 })
 const chosen = ref('reliable'), open = ref(false), busy = ref(false)
+const trigger = ref<HTMLButtonElement>()
 const proposed = ref<Draft | null>(null), verified = ref<Preview | null>(null)
 const changes = ref<{ field: Field; before: Draft[Field]; after: Draft[Field] }[]>([])
 const matched = computed(() => templates.data.value?.presets.find(preset => Object.entries(preset.values).every(([key, value]) => draft.value[key as Field] === value))?.name || 'custom')
@@ -31,6 +32,10 @@ watch(() => props.storageType, () => { open.value = false; chosen.value = 'relia
 function display(field: Field, value: Draft[Field]) {
   if (value === null) return t('storeOptionUnused')
   if (typeof value === 'boolean') return t(value ? 'enabled' : 'disabled')
+  if (field.endsWith('_percent')) return `${value}%`
+  if (field === 'compression_min_savings_bytes') return byteSize(value)
+  if (field === 'integrity_bandwidth') return `${value}/s`
+  if (field === 'integrity_rps') return `${value} ${t('unitRequestsPerSecond')}`
   const prefix: Partial<Record<Field, string>> = {
     public_cache_validation: 'storeReadValidation_', read_source_validation: 'storeReadValidation_', read_integrity: 'storeReadIntegrity_',
     write_processing: 'storeProcessing_', write_durability: 'storeDurability_', upload_cache_overflow: 'storeOverflow_', background_scheduling: 'storeScheduling_',
@@ -67,17 +72,17 @@ const warningCodes = computed(() => verified.value?.effects.warnings || [
 <template>
   <section class="store-form-wide storage-policy" :aria-label="t('storeIoPolicy')">
     <div class="section-heading"><div><h3>{{ t('storeIoPolicy') }}</h3><p class="field-help">{{ t('storeIoPolicyHint') }}</p></div><span class="badge node-state" :data-tone="matched === 'reliable' ? 'mint' : matched === 'throughput' ? 'cream' : matched === 'cached' ? 'sky' : 'gray'">{{ t('ioPreset_' + matched) }}</span></div>
-    <div class="policy-picker"><label><span>{{ t('storeIoPreset') }}</span><UiSelect v-model="chosen" :options="options" :label="t('storeIoPreset')" :disabled="disabled || busy || templates.isPending.value" /></label><button type="button" :disabled="disabled || busy || !templates.data.value" @click="preview">{{ t('storeIoPreview') }}</button></div>
+    <div class="policy-picker"><label><span>{{ t('storeIoPreset') }}</span><UiSelect v-model="chosen" :options="options" :label="t('storeIoPreset')" :disabled="disabled || busy || templates.isPending.value" /></label><button ref="trigger" type="button" :disabled="disabled || busy || !templates.data.value" @click="preview">{{ t('storeIoPreview') }}</button></div>
     <p v-if="templates.isError.value" class="field-help danger">{{ t('storeIoLoadFailed') }} <button type="button" @click="templates.refetch()">{{ t('refresh') }}</button></p>
   </section>
-  <UiDialog v-model:open="open" :title="t('storeIoPreview')" :description="t('storeIoDraftHint')" wide>
+  <UiDialog v-model:open="open" :title="t('storeIoPreview')" :description="t('storeIoDraftHint')" :trigger="trigger" medium>
     <div class="policy-effects">
       <p>{{ t('storeIoAck_' + acknowledgement) }}</p>
       <p>{{ publicWindow ? t('storeIoPublicWindow', { duration: publicWindow }) : t('storeIoPublicStrict') }}</p>
       <p>{{ sourceWindow ? t('storeIoSourceWindow', { duration: sourceWindow }) : t('storeIoSourceStrict') }}</p>
       <p>{{ t('profile_read_integrity') }} · {{ t('storeReadIntegrity_' + proposed?.read_integrity) }}</p>
       <p v-if="constraints?.sqlite_synchronous">SQLite · {{ t('storeIoDatabaseMode') }} {{ constraints.sqlite_synchronous.toUpperCase() }}</p>
-      <p v-if="constraints?.write_memory_bytes !== null && constraints?.write_memory_bytes !== undefined">{{ t('storeIoMemoryBudget', { value: constraints.write_memory_bytes >= 1048576 ? (constraints.write_memory_bytes / 1048576).toFixed(1) + ' MiB' : constraints.write_memory_bytes + ' B' }) }}</p>
+      <p v-if="constraints?.write_memory_bytes !== null && constraints?.write_memory_bytes !== undefined">{{ t('storeIoMemoryBudget', { value: byteSize(constraints.write_memory_bytes) }) }}</p>
       <p v-for="warning in warningCodes" :key="warning" class="policy-warning">{{ t('storeIoWarning_' + warning) }}</p>
     </div>
     <p v-if="!changes.length" class="field-help">{{ t('storeIoNoChanges') }}</p>

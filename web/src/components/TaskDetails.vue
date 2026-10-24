@@ -3,7 +3,7 @@ import ErrorNotice from './ErrorNotice.vue'
 import { computed, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { Play, Pause, Download, ArrowUpRight, Copy } from 'lucide-vue-next'
-import { api, write, params, queries } from '../api/client'
+import { api, byteSize, write, params, queries } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
 import { report, copy, errorText } from '../app/feedback'
@@ -31,7 +31,7 @@ function sourceScope(issue: { code: string; detail: unknown }) {
   return id && storage && ['remote_missing', 'length_mismatch', 'authentication_failed', 'decompression_failed', 'hash_mismatch'].includes(issue.code) ? { storage_id: storage, source: source.source, id: String(id) } : null
 }
 function quarantineIssue(issue: { code: string; detail: unknown }) { const scope = sourceScope(issue); if (scope) { quarantineInput.value = scope; quarantine.value = true } }
-const summary = computed(() => ['mode', 'phase', 'chunks_checked', 'objects_checked', 'issues', 'candidates', 'bytes', 'unrecognized'].filter(key => detail.value[key] != null).map(key => ({ key, value: String(detail.value[key]) })))
+const summary = computed(() => ['mode', 'phase', 'chunks_checked', 'objects_checked', 'issues', 'candidates', 'bytes', 'unrecognized'].filter(key => detail.value[key] != null).map(key => ({ key, value: key === 'bytes' && /^\d+$/.test(String(detail.value[key])) ? byteSize(String(detail.value[key])) : String(detail.value[key]) })))
 async function change(action: string) { busy.value = true; try { await write(`/api/v1/tasks/${props.id}/actions`, { action }); await job.refetch(); await queries.invalidateQueries({ queryKey: ['maintenance'] }); await queries.invalidateQueries({ queryKey: ['jobs'] }) } catch (e) { report(e) } finally { busy.value = false } }
 </script>
 <template><UiDialog v-model:open="open" :title="t('taskDetails')" :description="t('taskDetailHint')" drawer><ErrorNotice v-if="job.error.value" :error="job.error.value" /><template v-if="job.data.value"><div class="task-hero"><span class="policy-icon" :class="taskTone(job.data.value.task_type)"><component :is="jobIcon(job.data.value.task_type)" :size="30" /></span><div><h2>{{ t('task_' + job.data.value.policy) }}</h2><span class="badge">{{ t(job.data.value.status) }}</span></div><button class="icon-button" :aria-label="t('copyTaskId')" @click="copy(id)"><Copy :size="16" /></button></div><div class="task-count"><strong>{{ job.data.value.processed }}</strong><span>{{ t('itemsProcessed') }}</span></div><p v-if="job.data.value.blocked" class="info-callout">{{ t('blocked_' + job.data.value.blocked) }}</p><p v-if="job.data.value.error" class="error task-error" role="alert">{{ job.data.value.error }}</p><dl class="facts"><dt>{{ t('taskActor') }}</dt><dd>{{ job.data.value.created_by }} · {{ t('source_' + job.data.value.source) }}</dd><dt>{{ t('created') }}</dt><dd>{{ date(job.data.value.created_at) }}</dd><dt>{{ t('startedAt') }}</dt><dd>{{ job.data.value.started_at ? date(job.data.value.started_at) : '—' }}</dd><dt>{{ t('updated') }}</dt><dd>{{ date(job.data.value.updated_at) }}</dd><template v-if="job.data.value.bucket_id"><dt>{{ t('buckets') }}</dt><dd>{{ job.data.value.bucket_name || job.data.value.bucket_id }}</dd></template><template v-for="row in summary" :key="row.key"><dt>{{ t('job_' + row.key) }}</dt><dd>{{ row.value }}</dd></template></dl>

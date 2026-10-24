@@ -257,3 +257,21 @@ export function parseBytes(value: string, factor = '1'): string | null {
   if (n % scale || n / scale > 9223372036854775807n) throw new Error('Invalid size')
   return String(n / scale)
 }
+
+export function byteSize(value: number | string) {
+  const size = BigInt(value)
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']
+  let unit = 0, factor = 1n
+  while (size > 0n && unit < units.length - 1 && size % (factor * 1024n) === 0n) { unit++; factor *= 1024n }
+  return `${size / factor}${units[unit]}`
+}
+
+export function parseByteSize(value: string): number {
+  const match = /^(\d+(?:\.\d{1,3})?)\s*(B|KiB|MiB|GiB|TiB|PiB|KB|MB|GB|TB)?$/i.exec(value.trim())
+  if (!match) throw new Error('Invalid size')
+  const unit = (match[2] || 'B').toUpperCase(), power = ['B', 'K', 'M', 'G', 'T', 'P'].indexOf(unit[0]!)
+  const factor = (unit.includes('I') ? 1024n : 1000n) ** BigInt(power)
+  const bytes = BigInt(parseBytes(match[1]!, String(factor))!)
+  if (bytes > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Invalid size')
+  return Number(bytes)
+}

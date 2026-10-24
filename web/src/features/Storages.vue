@@ -14,6 +14,7 @@ import { useDeployment } from '../app/cluster'
 import UiSwitch from '../components/ui/UiSwitch.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
+import UiByteInput from '../components/ui/UiByteInput.vue'
 import StoragePolicy from './StoragePolicy.vue'
 
 type Storage = components['schemas']['StorageView']
@@ -87,6 +88,7 @@ async function revealChangedFields() {
   first?.scrollIntoView({ block: 'nearest' })
 }
 const profileLabel = (key: string) => t('profile_' + key)
+const profileUnit = (key: string) => key.endsWith('_percent') ? '%' : key === 'integrity_bandwidth' ? '/s' : key === 'integrity_rps' ? t('unitRequestsPerSecond') : ''
 const hasBlockKeys = computed(() => (keys.data.value || []).some(row => row.purpose === 'block' && !row.revoked_at))
 
 function profileDefaults(type: string): Record<ProfileKey, string | number | boolean | null> {
@@ -108,13 +110,6 @@ function profileDefaults(type: string): Record<ProfileKey, string | number | boo
     control_concurrency: null, pack_byte_budget: null, integrity_byte_budget: null, maintenance_concurrency: null,
     maintenance_byte_budget: null, migration_concurrency: null, migration_byte_budget: null,
   } as Record<ProfileKey, string | number | boolean | null>
-}
-function resetConnection() {
-  if (draft.type === 'local') {
-    Object.assign(draft, { path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '' })
-  } else {
-    Object.assign(draft, { endpoint: 'https://s3.amazonaws.com', bucket: '', region: 'us-east-1', prefix: '', access_key: '', secret_key: '' })
-  }
 }
 async function edit(row?: Storage) {
   editing.value = row || null
@@ -238,16 +233,15 @@ async function toggle(row: Storage) {
         <label v-if="!editing">{{ t('storeName') }}<input v-model="draft.name" required maxlength="128" autocomplete="off" :disabled="busy"></label>
         <label class="store-type-field">{{ t('storeType') }}<UiSelect v-model="draft.type" :options="types" :label="t('storeType')" :disabled="busy" /></label>
         <p v-if="editing && editing.type !== draft.type" class="store-form-wide field-help">{{ t('storeRelocationHint') }}</p>
-        <div class="store-form-wide preset-actions"><span class="field-help">{{ t('storeConnectionDefaultsHint') }}</span><button type="button" :disabled="busy" @click="resetConnection">{{ t('storeConnectionDefaults') }}</button></div>
-        <label v-if="draft.type === 'local'" class="store-form-wide">{{ t('storePath') }}<input v-model="draft.path" required maxlength="4096" autocomplete="off" :disabled="busy"></label>
+        <label v-if="draft.type === 'local'" class="store-form-wide">{{ t('storePath') }}<input v-model="draft.path" required maxlength="4096" placeholder="/data/storage" autocomplete="off" :disabled="busy"></label>
         <template v-else>
           <label>{{ t('storeEndpoint') }}<input v-model="draft.endpoint" required type="url" placeholder="https://s3.example.com" autocomplete="url" :disabled="busy"></label>
-          <label>{{ t('storeBucket') }}<input v-model="draft.bucket" required autocomplete="off" :disabled="busy"></label>
-          <label>{{ t('storeRegion') }}<input v-model="draft.region" required autocomplete="off" :disabled="busy"></label>
+          <label>{{ t('storeBucket') }}<input v-model="draft.bucket" required placeholder="mokyu" autocomplete="off" :disabled="busy"></label>
+          <label>{{ t('storeRegion') }}<input v-model="draft.region" required placeholder="us-east-1" autocomplete="off" :disabled="busy"></label>
           <label>{{ t('storeAccessKey') }}<input v-model="draft.access_key" autocomplete="off" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label>
           <label>{{ t('storeSecretKey') }}<input v-model="draft.secret_key" type="password" autocomplete="new-password" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label>
         </template>
-        <label class="store-form-wide">{{ t('storePrefix') }}<input v-model="draft.prefix" autocomplete="off" :disabled="busy"></label>
+        <label class="store-form-wide">{{ t('storePrefix') }}<input v-model="draft.prefix" placeholder="mokyu/" autocomplete="off" :disabled="busy"></label>
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeChunkPolicy') }}</h3><p class="field-help">{{ t('storeChunkPolicyHint') }}</p></div></div>
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled)" :label="t('profile_cdc_enabled')" :disabled="busy" @update:model-value="setProfileBoolean('cdc_enabled', $event)" /><p class="field-help">{{ t('storeCdcHint') }}</p></div>
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled || profileDraft.deduplication_enabled)" :label="t('profile_deduplication_enabled')" :disabled="busy || Boolean(profileDraft.cdc_enabled)" @update:model-value="setProfileBoolean('deduplication_enabled', $event)" /><p class="field-help">{{ t(profileDraft.cdc_enabled ? 'storeChunkDedupHint' : 'storeRawDedupHint') }}</p></div>
@@ -270,7 +264,8 @@ async function toggle(row: Storage) {
                 <label v-else-if="field.key === 'read_integrity'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft[field.key])" :options="['inline', 'background', 'off'].map(value => ({ value, label: t('storeReadIntegrity_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft[field.key] = $event" /><small class="field-help">{{ t('profileHelp_read_integrity') }}</small></label>
                 <label v-else-if="['public_cache_validation', 'read_source_validation'].includes(field.key)"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft[field.key])" :options="['strict', 'background'].map(value => ({ value, label: t('storeReadValidation_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft[field.key] = $event" /><small v-if="field.key === 'read_source_validation'" class="field-help">{{ t(single ? 'profileHelp_read_source_validationSingle' : 'profileHelp_read_source_validation') }}</small></label>
                 <label v-else-if="field.key === 'background_scheduling'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.background_scheduling)" :options="['balanced', 'foreground'].map(value => ({ value, label: t('storeScheduling_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" aria-describedby="storage-scheduling-hint" @update:model-value="profileDraft.background_scheduling = $event" /><small id="storage-scheduling-hint" class="field-help">{{ t('storeSchedulingHint') }}</small></label>
-                <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><input :aria-label="profileLabel(field.key)" :aria-describedby="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key) ? 'storage-profile-' + field.key + '-hint' : undefined" :type="field.valueType === 'number' ? 'number' : 'text'" :min="field.key.endsWith('_concurrency') ? 1 : undefined" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"><small v-if="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key)" :id="'storage-profile-' + field.key + '-hint'" class="field-help">{{ t('profileHelp_' + field.key) }}</small></label>
+                <label v-else-if="field.key === 'compression_min_savings_bytes'"><span>{{ profileLabel(field.key) }}</span><UiByteInput :model-value="profileDraft.compression_min_savings_bytes as number | null" :aria-label="profileLabel(field.key)" aria-describedby="storage-compression-savings-hint" :disabled="busy || profileDisabled(field.key)" required @update:model-value="profileDraft.compression_min_savings_bytes = $event" /><small id="storage-compression-savings-hint" class="field-help">{{ t('byteSizeHint') }}</small></label>
+                <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><span :class="{ 'input-unit': profileUnit(field.key) }"><input :aria-label="profileLabel(field.key)" :aria-describedby="profileUnit(field.key) ? 'storage-unit-' + field.key : ['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key) ? 'storage-profile-' + field.key + '-hint' : undefined" :type="field.valueType === 'number' ? 'number' : 'text'" :min="field.key.endsWith('_concurrency') || field.key === 'pack_range_min_savings_percent' ? 1 : field.key === 'compression_min_savings_percent' ? 0 : undefined" :max="field.key.endsWith('_percent') ? 100 : undefined" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"><span v-if="profileUnit(field.key)" :id="'storage-unit-' + field.key">{{ profileUnit(field.key) }}</span></span><small v-if="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key)" :id="'storage-profile-' + field.key + '-hint'" class="field-help">{{ t('profileHelp_' + field.key) }}</small></label>
               </div>
             </div>
           </details>

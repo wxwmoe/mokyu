@@ -30,7 +30,7 @@ test('I/O presets preview changes, load only the draft and preserve conflicts', 
     for (const theme of ['light', 'dark']) {
       await request.put('/api/v1/account', { headers, data: { display_name: '', locale, theme, avatar_email: '', avatar_enabled: false } })
       await page.goto('/storages?edit=' + name)
-      const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
+      const editor = page.getByRole('dialog', { name: text.editStore, exact: true, includeHidden: true })
       await expect(editor.locator('.storage-policy .badge')).toHaveText(text.ioPreset_reliable)
       expect(await editor.innerText()).not.toMatch(/cluster|群集|クラスター/i)
       await expect(editor.locator('details[open]')).toHaveCount(0)
@@ -58,9 +58,23 @@ test('I/O presets preview changes, load only the draft and preserve conflicts', 
         for (const width of [1440, 1024, 768, 640, 390, 320]) {
           await page.setViewportSize({ width, height: 900 })
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+          const bounds = await preview.boundingBox()
+          expect(bounds!.width).toBeLessThanOrEqual(760)
+          if (width >= 1024) {
+            const parent = await editor.boundingBox()
+            expect(bounds!.x).toBeGreaterThan(parent!.x + 32)
+            expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.classList.contains('dialog-overlay'), { x: parent!.x + 12, y: parent!.y + 12 })).toBe(true)
+          }
+          await page.keyboard.press('Tab')
+          expect(await preview.evaluate(element => element.contains(document.activeElement))).toBe(true)
+          if (preset === 'cached' && (width === 1440 || width === 320)) await page.screenshot({ path: info.outputPath(`preview-${locale}-${theme}-${width}.png`) })
         }
         if (preset === 'throughput') await preview.screenshot({ path: info.outputPath('preview-' + locale + '-' + theme + '-320.png') })
-        await preview.getByRole('button', { name: text.cancel, exact: true }).click()
+        const scroll = await editor.locator('.dialog-body').evaluate(element => element.scrollTop)
+        await page.keyboard.press('Escape')
+        await expect(preview).toHaveCount(0)
+        await expect(editor.getByRole('button', { name: text.storeIoPreview, exact: true })).toBeFocused()
+        expect(await editor.locator('.dialog-body').evaluate(element => element.scrollTop)).toBe(scroll)
         await expect(editor.locator('.storage-policy .badge')).toHaveText(text.ioPreset_reliable)
       }
       await editor.getByRole('combobox', { name: text.storeIoPreset, exact: true }).click()

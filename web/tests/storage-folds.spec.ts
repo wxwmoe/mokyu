@@ -29,6 +29,11 @@ test('storage presets stay visible while advanced groups preserve folded drafts'
       const editor = page.getByRole('dialog', { name: text.createStore, exact: true })
       await expect(editor.getByRole('combobox', { name: text.storeIoPreset, exact: true })).toBeVisible()
       await expect(editor.getByRole('textbox', { name: text.storeEndpoint, exact: true })).toBeVisible()
+      for (const [label, placeholder] of [[text.storeEndpoint, 'https://s3.example.com'], [text.storeBucket, 'mokyu'], [text.storeRegion, 'us-east-1'], [text.storePrefix, 'mokyu/']]) {
+        const field = editor.getByRole('textbox', { name: label, exact: true })
+        await expect(field).toHaveAttribute('placeholder', placeholder!)
+        await expect(field).toHaveValue('')
+      }
       await expect(editor.locator('details.profile-group')).toHaveCount(5)
       await expect(editor.locator('details.profile-group[open]')).toHaveCount(0)
       await expect(editor.locator('.profile-changes')).toHaveCount(0)
@@ -36,6 +41,13 @@ test('storage presets stay visible while advanced groups preserve folded drafts'
         await page.setViewportSize({ width, height: 1000 })
         await editor.locator('.storage-policy').scrollIntoViewIfNeeded()
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+        const picker = await editor.getByRole('combobox', { name: text.storeIoPreset, exact: true }).boundingBox()
+        const preview = await editor.getByRole('button', { name: text.storeIoPreview, exact: true }).boundingBox()
+        expect(picker).not.toBeNull(); expect(preview).not.toBeNull()
+        if (width > 480) {
+          expect(Math.abs(picker!.y - preview!.y)).toBeLessThanOrEqual(1)
+          expect(Math.abs(picker!.height - preview!.height)).toBeLessThanOrEqual(1)
+        } else expect(preview!.y).toBeGreaterThanOrEqual(picker!.y + picker!.height + 8)
         if (width === 1440 || width === 320) await editor.screenshot({ path: info.outputPath(`folds-${locale}-${theme}-${width}.png`) })
       }
       const lifecycle = editor.locator('[data-profile-group="storeGroupLifecycle"]')
@@ -56,6 +68,7 @@ test('storage presets stay visible while advanced groups preserve folded drafts'
       await editor.getByRole('combobox', { name: text.storeType, exact: true }).click()
       await page.getByRole('option', { name: text.storeType_local, exact: true }).click()
       await expect(editor.getByRole('textbox', { name: text.storePath, exact: true })).toBeVisible()
+      await expect(editor.getByRole('textbox', { name: text.storePath, exact: true })).toHaveAttribute('placeholder', '/data/storage')
       await expect(editor.getByRole('combobox', { name: text.storeIoPreset, exact: true })).toBeVisible()
       await expect(editor.locator('details.profile-group[open]')).toHaveCount(0)
       await expect(editor.locator('.profile-changes')).toHaveCount(0)
