@@ -8931,7 +8931,7 @@ async fn node_read_permits(
                     .fetch_one(&mut *db)
                     .await?
                     < i64::from(limit),
-                Error::NodeReadLimit
+                Error::NodeReadBusy
             );
             let token = Uuid::new_v4();
             queries::insert_storage_permit(token, id, "read", node)
@@ -9121,7 +9121,7 @@ pub(super) async fn open_node_read(
                 .fetch_one(&mut *tx)
                 .await?
                 < read::READ_LIMIT,
-            Error::NodeReadLimit
+            Error::NodeReadBusy
         );
     }
     let existing = if let Some(previous) = &previous {
@@ -9269,7 +9269,7 @@ pub(super) async fn node_read_window(
                 .fetch_one(&mut *tx)
                 .await?
                 < 2,
-            Error::NodeReadLimit
+            Error::NodeReadBusy
         );
     }
     let mut mapping = if let Some((_, mapping)) = &existing {

@@ -24,6 +24,7 @@ struct Material {
     json: Vec<u8>,
     referenced: AtomicBool,
     _memory: Option<OwnedSemaphorePermit>,
+    backend: Mutex<Option<Arc<super::body::Backend>>>,
 }
 
 #[derive(Default)]
@@ -92,6 +93,7 @@ impl Cache {
             json,
             referenced: AtomicBool::new(true),
             _memory: memory,
+            backend: Mutex::new(None),
         });
         if entry._memory.is_some() {
             if !index.values.contains_key(&key) {
@@ -169,17 +171,77 @@ pub(crate) struct Reads {
     pub(crate) node: Arc<NodeContext>,
     cache: Cache,
     slots: Arc<Semaphore>,
+    pub(super) reader: super::body::Reader,
 }
 
 pub(crate) struct Prepared {
     pub(crate) reply: wire::ReadReply,
     pub(crate) run: Arc<RunLease>,
     materials: Held,
-    grants: Vec<Arc<Grant>>,
-    _memory: Arc<OwnedSemaphorePermit>,
+    pub(super) grants: Vec<Arc<Grant>>,
+    pub(super) memory: Arc<OwnedSemaphorePermit>,
+    pub(super) buffers: Arc<Semaphore>,
+    limits: (u32, u32),
 }
 
 impl Prepared {
+    pub(super) fn backend(&self, id: Uuid) -> Result<Arc<super::body::Backend>> {
+        let material = self
+            .materials
+            .get(&(wire::MaterialType::Storage as i32, id.to_string()))
+            .context("read storage missing")?;
+        let mut backend = material.backend.lock().unwrap();
+        if backend.is_none() {
+            let value: read::Storage = serde_json::from_slice(&material.json)?;
+            ensure!(
+                value.connection.id == id && value.profile.storage_id == id,
+                "storage identity mismatch"
+            );
+            *backend = Some(Arc::new(super::body::Backend::new(value)?));
+        }
+        Ok(backend.as_ref().unwrap().clone())
+    }
+
+    pub(super) fn keys(
+        &self,
+    ) -> Result<std::collections::BTreeMap<Uuid, crate::content::codec::Key>> {
+        self.materials
+            .iter()
+            .filter(|((r#type, _), _)| *r#type == wire::MaterialType::BlockKey as i32)
+            .map(|((_, id), material)| {
+                let key: read::BlockKey = serde_json::from_slice(&material.json)?;
+                ensure!(id == &key.id.to_string(), "block key identity mismatch");
+                Ok((
+                    key.id,
+                    crate::content::codec::Key::new(&key.algorithm, key.material)?,
+                ))
+            })
+            .collect()
+    }
+
+    pub(super) async fn guard<T>(
+        &self,
+        node: &NodeContext,
+        future: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let mut events = node.subscribe();
+        tokio::pin!(future);
+        loop {
+            self.check()?;
+            let deadline = self
+                .grants
+                .iter()
+                .map(|grant| grant.deadline())
+                .fold(self.run.deadline(), std::cmp::min);
+            tokio::select! {
+                biased;
+                _ = events.changed() => {},
+                _ = tokio::time::sleep_until(deadline) => {},
+                result = &mut future => { self.check()?; return result; }
+            }
+        }
+    }
+
     pub(crate) fn material<T: serde::de::DeserializeOwned>(
         &self,
         version: &wire::Cached,
@@ -203,10 +265,12 @@ impl Reads {
             .get()
             .context("node has not synchronized its budget")?;
         let slots = Arc::new(Semaphore::new(budget.read_concurrency));
+        let reader = super::body::Reader::new(&node)?;
         Ok(Self {
             node,
             cache: Cache::default(),
             slots,
+            reader,
         })
     }
 
@@ -223,6 +287,7 @@ impl Reads {
             input.operation_id = Uuid::new_v4().to_string();
         }
         input.cached = cached(&declared);
+        let limits = (input.max_items, input.max_bytes);
         let started = Instant::now();
         let mut reply = self.node.client.read(input).await?;
         let grants = self
@@ -239,10 +304,77 @@ impl Reads {
             run: snapshot.lease.clone(),
             materials,
             grants,
-            _memory: memory,
+            memory,
+            buffers: Arc::new(Semaphore::new(super::body::BUFFER_UNITS)),
+            limits,
         };
         prepared.check()?;
         Ok(prepared)
+    }
+
+    pub(super) async fn window(
+        &self,
+        previous: Arc<Prepared>,
+        cursor: wire::ReadCursor,
+        retired: Option<Uuid>,
+    ) -> Result<Prepared> {
+        previous
+            .guard(&self.node, async {
+                let mut events = self.node.subscribe();
+                while retired.is_some_and(|id| !self.node.resources.released(id)) {
+                    events.changed().await?;
+                }
+                let declared = self.cache.snapshot();
+                let started = Instant::now();
+                let mut reply = self
+                    .node
+                    .client
+                    .read_window(wire::ReadWindowRequest {
+                        run: Some(previous.run.run.clone()),
+                        cursor: Some(cursor),
+                        cached: cached(&declared),
+                        max_items: previous.limits.0,
+                        max_bytes: previous.limits.1,
+                    })
+                    .await?;
+                let mut grants =
+                    self.node
+                        .resources
+                        .adopt(&previous.run, &reply.grants, started)?;
+                grants.extend(
+                    previous
+                        .grants
+                        .iter()
+                        .filter(|grant| {
+                            grant.reference.r#type == wire::GrantType::ReadProtection as i32
+                        })
+                        .cloned(),
+                );
+                let materials = self.cache.apply(
+                    self.node.client.identity.deployment_id,
+                    declared,
+                    std::mem::take(&mut reply.materials),
+                )?;
+                let prepared = Prepared {
+                    reply,
+                    run: previous.run.clone(),
+                    materials,
+                    grants,
+                    memory: previous.memory.clone(),
+                    buffers: previous.buffers.clone(),
+                    limits: previous.limits,
+                };
+                prepared.check()?;
+                Ok(prepared)
+            })
+            .await
+    }
+
+    pub(crate) fn body(
+        self: &Arc<Self>,
+        prepared: Prepared,
+    ) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes>> {
+        super::body::stream(self.clone(), prepared)
     }
 }
 

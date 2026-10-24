@@ -271,7 +271,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             .err()
             .as_ref()
             .and_then(model::error),
-        Some(model::Error::NodeReadLimit)
+        Some(model::Error::NodeReadBusy)
     ));
     let pulse = backend
         .pulse_session(
@@ -322,7 +322,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             .err()
             .as_ref()
             .and_then(model::error),
-        Some(model::Error::NodeReadLimit)
+        Some(model::Error::NodeReadBusy)
     ));
     assert_eq!(active(&pool).await?, (2, 3, 2));
     let owned = reference(&tail, read::GrantType::Read);

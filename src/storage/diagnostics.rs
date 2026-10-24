@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 #[derive(Default)]
-pub(super) struct Diagnostics {
+pub(crate) struct Diagnostics {
     backend: [AtomicU64; 4],
     content: [AtomicU64; 6],
     pub cache_missing: AtomicU64,

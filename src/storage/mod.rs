@@ -6,7 +6,7 @@ use crate::{
 pub(crate) mod assembly;
 mod backlog;
 pub(crate) mod cache;
-mod diagnostics;
+pub(crate) mod diagnostics;
 pub(crate) mod local;
 pub(crate) mod location;
 mod memory;

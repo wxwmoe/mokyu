@@ -4,6 +4,7 @@ use crate::{
     model::node_read as read,
     storage::model::{Options, Store},
 };
+use futures_util::StreamExt;
 use object_store::{ObjectStoreExt, path::Path};
 use std::collections::{BTreeMap, HashMap};
 
@@ -15,6 +16,17 @@ struct Fixture {
     body_path: PathBuf,
     other_path: PathBuf,
     worker_path: PathBuf,
+    #[serde(default)]
+    body_cases: Vec<BodyCase>,
+}
+
+#[derive(serde::Deserialize)]
+struct BodyCase {
+    bucket: String,
+    key: String,
+    access_key: String,
+    body_path: PathBuf,
+    source: String,
 }
 
 type Held = HashMap<(i32, String), (wire::Cached, Vec<u8>)>;
@@ -179,7 +191,7 @@ async fn node_read_resources_renew_reconnect_and_release_automatically() -> Resu
     let driver = tokio::spawn(context.clone().run());
     let initial = node_state(&mut states, |state| state.phase == Phase::Ready).await?;
     let snapshot = context.snapshot()?;
-    let reads = crate::node::reads::Reads::new(context.clone())?;
+    let reads = Arc::new(crate::node::reads::Reads::new(context.clone())?);
     let mut head = request(&snapshot.lease.run, &source, "object", &Held::new());
     head.method = wire::ReadMethod::Head as i32;
     head.include = vec![wire::ReadInclude::Object as i32];
@@ -193,6 +205,107 @@ async fn node_read_resources_renew_reconnect_and_release_automatically() -> Resu
         tokio::fs::metadata(&source.body_path).await?.len() as i64
     );
     drop((first, second));
+    let expected = tokio::fs::read(&source.body_path).await?;
+    for range in [None, Some((128usize, expected.len() - 129))] {
+        let mut input = request(&snapshot.lease.run, &source, "object", &Held::new());
+        input.max_items = 1;
+        if let Some((start, end)) = range {
+            input.headers.push(wire::ReadHeader {
+                name: "range".into(),
+                value: format!("bytes={start}-{}", end - 1).into_bytes(),
+            });
+        }
+        let prepared = reads.open(input).await?;
+        let mut body = reads.body(prepared);
+        let mut received = Vec::new();
+        while let Some(bytes) = body.next().await {
+            received.extend_from_slice(&bytes?);
+        }
+        let (start, end) = range.unwrap_or((0, expected.len()));
+        assert_eq!(received, expected[start..end]);
+    }
+    fixture("assert-no-reads").await?;
+    for case in &source.body_cases {
+        let expected = tokio::fs::read(&case.body_path).await?;
+        let spans = if expected.is_empty() {
+            vec![None]
+        } else {
+            vec![None, Some((13, expected.len() - 17))]
+        };
+        for range in spans {
+            let mut input = request(&snapshot.lease.run, &source, &case.key, &Held::new());
+            let Some(wire::read_route::Route::Bucket(route)) =
+                input.route.as_mut().and_then(|route| route.route.as_mut())
+            else {
+                unreachable!()
+            };
+            route.name = case.bucket.clone();
+            input.access_key = case.access_key.clone();
+            input.max_items = if case.source == "pack" { 0 } else { 1 };
+            if let Some((start, end)) = range {
+                input.headers.push(wire::ReadHeader {
+                    name: "range".into(),
+                    value: format!("bytes={start}-{}", end - 1).into_bytes(),
+                });
+            }
+            let prepared = reads.open(input).await?;
+            if expected.is_empty() {
+                assert!(prepared.reply.mapping.is_none() && prepared.reply.grants.is_empty());
+            } else {
+                let plan: read::Mapping =
+                    prepared.material(prepared.reply.mapping.as_ref().unwrap())?;
+                assert!(
+                    match case.source.as_str() {
+                        "pack" => plan
+                            .segments
+                            .iter()
+                            .any(|segment| matches!(&segment.source, read::Source::Pack { .. })),
+                        "raw" => matches!(&plan.segments[0].source, read::Source::Raw { .. }),
+                        _ => false,
+                    },
+                    "fixture did not produce {}",
+                    case.source
+                );
+            }
+            let mut body = reads.body(prepared);
+            let mut received = Vec::new();
+            while let Some(bytes) = body.next().await {
+                received.extend_from_slice(&bytes?);
+            }
+            let (start, end) = range.unwrap_or((0, expected.len()));
+            assert_eq!(
+                received,
+                expected[start..end],
+                "{} body mismatch",
+                case.source
+            );
+        }
+        fixture("assert-no-reads").await?;
+    }
+    let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
+    let fault = faults.join("node-read-decode");
+    tokio::fs::write(&fault, b"pause").await?;
+    let prepared = reads
+        .open(request(
+            &snapshot.lease.run,
+            &source,
+            "object",
+            &Held::new(),
+        ))
+        .await?;
+    let mut body = reads.body(prepared);
+    let waiting = tokio::spawn(async move { body.next().await });
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !faults.join("node-read-decode.hit").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    fixture("assert-live-read").await?;
+    tokio::fs::remove_file(fault).await?;
+    fixture("assert-no-reads").await?;
     *dns.answers.write().unwrap() = Some(vec![
         Ipv4Addr::new(127, 0, 0, 2),
         Ipv4Addr::new(127, 0, 0, 3),

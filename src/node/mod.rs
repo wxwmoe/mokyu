@@ -1,3 +1,4 @@
+mod body;
 pub(crate) mod reads;
 pub(crate) mod resources;
 mod session;
@@ -40,6 +41,9 @@ pub(crate) struct RunLease {
 }
 
 impl RunLease {
+    pub(crate) fn deadline(&self) -> Instant {
+        *self.expires.lock().unwrap()
+    }
     pub(crate) fn check(&self) -> Result<(), Status> {
         if self.invalidated.load(Ordering::Acquire)
             || Instant::now() >= *self.expires.lock().unwrap()

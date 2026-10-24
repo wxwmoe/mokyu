@@ -5,7 +5,10 @@ use std::{
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
-use tokio::{sync::Notify, time::Instant};
+use tokio::{
+    sync::{Notify, Semaphore},
+    time::Instant,
+};
 use tonic::Status;
 use uuid::Uuid;
 
@@ -19,9 +22,13 @@ pub(crate) struct Grant {
     run: Arc<RunLease>,
     expires: Mutex<Instant>,
     resources: Weak<Resources>,
+    pub(crate) io: Arc<Semaphore>,
 }
 
 impl Grant {
+    pub(crate) fn deadline(&self) -> Instant {
+        *self.expires.lock().unwrap()
+    }
     pub(crate) fn check(&self) -> Result<(), Status> {
         self.run.check()?;
         if Instant::now() >= *self.expires.lock().unwrap() {
@@ -87,6 +94,13 @@ fn prune(entries: &mut HashMap<Uuid, Entry>) {
 }
 
 impl Resources {
+    pub(crate) fn released(&self, id: Uuid) -> bool {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_none_or(|entry| entry.released || entry.expires <= Instant::now())
+    }
     pub(crate) fn adopt(
         self: &Arc<Self>,
         run: &Arc<RunLease>,
@@ -171,6 +185,7 @@ impl Resources {
                     run: run.clone(),
                     expires: Mutex::new(deadline),
                     resources: Arc::downgrade(self),
+                    io: Arc::new(Semaphore::new(1)),
                 });
                 entries.insert(
                     id,

@@ -28,7 +28,7 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `rpc::client::transport_tests::reads::node_read_plans_reuse_materials_fetch_s3_and_survive_lost_replies` 使用下述双 control/TLS 夹具及独立 S3 存储。`MOKYU_TEST_READ_FIXTURE` 指向包含桶、读取凭据、预期正文路径和 worker 身份路径的 JSON；编排器增加 `change-read-profile`、`lose-read`、`resume-read`、`assert-no-reads` 动作，丢响应使用 `node-read-opened` 故障点。验证一次 RPC 后直接解密读取、材料和正文复用、分窗口读取与失去响应后的跨 control 重放。
 
-`rpc::client::transport_tests::reads::node_read_resources_renew_reconnect_and_release_automatically` 复用读取夹具，增加 `record-read-expiry` 和 `assert-read-renewed` 动作，比较数据库中的实际到期时间。验证读取调用方冷/热 HEAD、节点自动续期、control 退出后保留有效句柄继续读 S3，以及最后一个使用者退出后的释放。普通资源测试覆盖多于单批的登记、续期与释放、非法输入和迟到确认；材料测试覆盖请求持有、淘汰、容量不足、修订和部署校验。
+`rpc::client::transport_tests::reads::node_read_resources_renew_reconnect_and_release_automatically` 复用读取夹具，增加 `record-read-expiry`、`assert-read-renewed` 和 `assert-live-read` 动作，比较实际到期时间与存续资源。验证冷/热 HEAD、正文多窗口预取、连续完整/Range 读取、自动续期、control 退出后的恢复及最后使用者退出后的释放。夹具可包含 `body_cases`（bucket、key、access_key、body_path、source），覆盖空对象、混合独立区块/Pack 和 raw；取消测试使用 `MOKYU_TEST_FAULT_DIR` 下的 `node-read-decode`，确认阻塞工作结束前保护不会提前释放。普通资源/材料/正文测试覆盖批量上限、迟到确认、缓存持有、容量/修订/部署校验、映射边界、返回切片计费，以及 raw 的摘要、长度和远端 ETag。
 
 `rpc::client::transport_tests::node_rpc_balances_tls_origins_and_recovers_sessions` 需两个真实 control、各自 TLS 源站和受限夹具编排器；设置 `MOKYU_TEST_NODE_STATE`、`MOKYU_TEST_CONTROL_URL`、`MOKYU_TEST_RPC_ACTIONS` 及测试 CA 的 `SSL_CERT_FILE`。测试在本机临时 UDP 端口提供可变 A 记录，两个地址为 `127.0.0.2/3`，`127.0.0.4` 提供错误域名证书。编排器按 actions 目录的 `change-settings`、`stop-first`、`start-first`、`lose-welcome`、`resume-welcome`、`rotate-node`、`disable-node` 文件执行动作，成功后写同名 `.done` 内容 `ok`；丢 Welcome 使用 `node-session-opened` 故障点。DNS 宽限到期用受控单调时钟推进，其他行为通过真实 DNS/TLS/gRPC 路径验证；不能作为实际 CDN 或跨洲验收结果。
 

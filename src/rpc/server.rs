@@ -172,7 +172,14 @@ fn failure(error: anyhow::Error) -> Status {
             Status::resource_exhausted("node boot history is full; rotate its credential")
         }
         Some(Error::NodeReadLimit) => {
-            Status::resource_exhausted("node read capacity or message budget is full")
+            Status::resource_exhausted("node read exceeds its resource or message budget")
+        }
+        Some(Error::NodeReadBusy) => {
+            let mut status = Status::resource_exhausted("node read capacity is busy");
+            status
+                .metadata_mut()
+                .insert("mokyu-retryable", "read-capacity".parse().unwrap());
+            status
         }
         _ => {
             tracing::warn!("node RPC database operation failed");

@@ -22,6 +22,7 @@ pub(crate) enum Error {
     NodeExpired,
     NodeLimit,
     NodeReadLimit,
+    NodeReadBusy,
 }
 
 impl fmt::Display for Error {
@@ -48,7 +49,8 @@ impl fmt::Display for Error {
             Self::NodeConflict => "node is owned by another boot or session",
             Self::NodeExpired => "node run is expired or retired",
             Self::NodeLimit => "node boot history is full; rotate its credential",
-            Self::NodeReadLimit => "node read capacity or message budget is full",
+            Self::NodeReadLimit => "node read exceeds its resource or message budget",
+            Self::NodeReadBusy => "node read capacity is busy",
         })
     }
 }
@@ -83,6 +85,7 @@ mod tests {
             Error::NodeExpired,
             Error::NodeLimit,
             Error::NodeReadLimit,
+            Error::NodeReadBusy,
         ] {
             let source = std::io::Error::other("original database failure");
             let error = anyhow::Error::from(source)

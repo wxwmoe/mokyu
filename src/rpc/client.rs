@@ -272,8 +272,8 @@ impl Client {
         let deadline = Instant::now() + DEADLINE;
         tokio::time::timeout_at(deadline, async {
             let mut excluded = HashSet::new();
-            let mut last = Status::unavailable("control is unavailable");
-            for _ in 0..3 {
+            let mut failures = 0;
+            loop {
                 let peer = match self.select(&excluded).await {
                     Ok(peer) => peer,
                     Err(error) => return Err(error),
@@ -318,14 +318,22 @@ impl Client {
                         peer.succeeded();
                         return Ok(reply);
                     }
+                    Err(error) if read_busy(&error) => {
+                        peer.succeeded();
+                        excluded.remove(&peer.address);
+                        let jitter = u64::from(Uuid::new_v4().as_bytes()[0]);
+                        tokio::time::sleep(Duration::from_millis(100 + jitter)).await;
+                    }
                     Err(error) if retryable(&error) => {
                         peer.failed();
-                        last = error;
+                        failures += 1;
+                        if failures == 3 {
+                            return Err(error);
+                        }
                     }
                     Err(error) => return Err(error),
                 }
             }
-            Err(last)
         })
         .await
         .unwrap_or_else(|_| Err(Status::deadline_exceeded("control deadline exceeded")))
@@ -469,6 +477,14 @@ impl Session {
     }
 }
 
+fn read_busy(status: &Status) -> bool {
+    status.code() == tonic::Code::ResourceExhausted
+        && status
+            .metadata()
+            .get("mokyu-retryable")
+            .is_some_and(|value| value == "read-capacity")
+}
+
 fn retryable(status: &Status) -> bool {
     matches!(
         status.code(),
@@ -538,6 +554,21 @@ pub(crate) fn control_uri(value: &str) -> Result<hyper::Uri> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_explicit_read_capacity_errors_wait_for_resources() {
+        let mut busy = Status::resource_exhausted("node read capacity is busy");
+        assert!(!read_busy(&busy));
+        busy.metadata_mut()
+            .insert("mokyu-retryable", "read-capacity".parse().unwrap());
+        assert!(read_busy(&busy));
+        assert!(!retryable(&busy));
+        let mut denied = Status::permission_denied("revoked");
+        denied
+            .metadata_mut()
+            .insert("mokyu-retryable", "read-capacity".parse().unwrap());
+        assert!(!read_busy(&denied));
+    }
 
     #[test]
     fn transport_deadlines_retry_but_server_cancellation_does_not() {

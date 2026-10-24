@@ -616,21 +616,13 @@ impl Storage {
             RawFile::Local(file)
         } else {
             ensure!(source.medium == "shared_s3", "raw source medium changed");
-            let key = remote_path(source.location_id);
-            let meta = target.backend.head(&key).await.map_err(remote_error)?;
-            self.backend_gets.fetch_add(1, Ordering::Relaxed);
-            ensure!(meta.size == source.size as u64, IntegrityError::Length);
-            RawFile::Remote(RemoteReader {
-                target,
-                key,
-                size: meta.size,
-                etag: meta.e_tag,
-                offset: 0,
-                body: None,
-                buffered: Bytes::new(),
-                gets: self.backend_gets.clone(),
-                diagnostics: self.diagnostics.clone(),
-            })
+            RawFile::remote(
+                target.backend.clone(),
+                source,
+                self.backend_gets.clone(),
+                self.diagnostics.clone(),
+            )
+            .await?
         };
         if verify {
             #[cfg(feature = "fault-injection")]
@@ -1206,7 +1198,7 @@ pub(crate) enum RawFile {
 }
 
 pub(crate) struct RemoteReader {
-    target: Arc<StoreBackend>,
+    backend: Arc<dyn object_store::ObjectStore>,
     key: ObjectPath,
     size: u64,
     etag: Option<String>,
@@ -1218,6 +1210,34 @@ pub(crate) struct RemoteReader {
 }
 
 impl RawFile {
+    pub(crate) async fn verify(&mut self, source: &RawSource) -> Result<u64> {
+        verify_file(self, source, None).await
+    }
+
+    pub(crate) async fn remote(
+        backend: Arc<dyn object_store::ObjectStore>,
+        source: &RawSource,
+        gets: Arc<std::sync::atomic::AtomicU64>,
+        diagnostics: Arc<super::diagnostics::Diagnostics>,
+    ) -> Result<Self> {
+        source.validate()?;
+        let key = remote_path(source.location_id);
+        let meta = backend.head(&key).await.map_err(remote_error)?;
+        gets.fetch_add(1, Ordering::Relaxed);
+        ensure!(meta.size == source.size as u64, IntegrityError::Length);
+        Ok(Self::Remote(RemoteReader {
+            backend,
+            key,
+            size: meta.size,
+            etag: meta.e_tag,
+            offset: 0,
+            body: None,
+            buffered: Bytes::new(),
+            gets,
+            diagnostics,
+        }))
+    }
+
     pub(crate) fn account_read(&self, storage: &Storage, size: u64) {
         let counter = if matches!(self, Self::Cached { .. } | Self::Memory { .. }) {
             &storage.cache_hit_bytes
@@ -1270,7 +1290,6 @@ impl RawFile {
         if reader.body.is_none() {
             let span = reader.offset..reader.size;
             let result = reader
-                .target
                 .backend
                 .get_opts(
                     &reader.key,
