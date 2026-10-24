@@ -1,3 +1,4 @@
+pub(crate) mod resources;
 mod session;
 mod settings;
 
@@ -91,6 +92,7 @@ pub(crate) struct NodeContext {
     pub(crate) config: NodeConfig,
     pub(crate) budget: OnceLock<Budget>,
     pub(crate) client: Client,
+    pub(crate) resources: Arc<resources::Resources>,
     boot: Uuid,
     current: watch::Sender<State>,
     mode: watch::Sender<Mode>,
@@ -121,6 +123,7 @@ impl NodeContext {
             config,
             budget: OnceLock::new(),
             client,
+            resources: Arc::new(resources::Resources::default()),
             boot: Uuid::new_v4(),
             current: watch::channel(State {
                 phase: Phase::Connecting,

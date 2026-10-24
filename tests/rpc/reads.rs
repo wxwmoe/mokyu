@@ -149,6 +149,91 @@ async fn payload(reply: &wire::ReadReply, held: &Held) -> Result<Vec<u8>> {
 
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and encrypted S3 objects"]
+async fn node_read_resources_renew_reconnect_and_release_automatically() -> Result<()> {
+    use crate::{
+        config::node::NodeConfig,
+        node::{NodeContext, Phase},
+    };
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let path = PathBuf::from(std::env::var("MOKYU_TEST_NODE_STATE")?);
+    let identity: NodeState = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+    let source: Fixture =
+        serde_json::from_slice(&tokio::fs::read(std::env::var("MOKYU_TEST_READ_FIXTURE")?).await?)?;
+    let url = std::env::var("MOKYU_TEST_CONTROL_URL")?;
+    let directory = path.parent().unwrap().join("resource-runtime");
+    tokio::fs::create_dir(&directory).await?;
+    crate::cluster::identity::write_state(&directory.join("node.json"), &identity).await?;
+    let config = format!(
+        "[instance]\ncontrol_url='{url}'\ndata_path='{}'\n",
+        directory.display()
+    );
+    let mut context = NodeContext::new(NodeConfig::parse(&config, "data")?, "data").await?;
+    let dns = Dns::new().await?;
+    *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 2)]);
+    Arc::get_mut(&mut context).unwrap().client = dns.client(&url, identity)?;
+    let mut states = context.subscribe();
+    let driver = tokio::spawn(context.clone().run());
+    let initial = node_state(&mut states, |state| state.phase == Phase::Ready).await?;
+    let snapshot = context.snapshot()?;
+    *dns.answers.write().unwrap() = Some(vec![
+        Ipv4Addr::new(127, 0, 0, 2),
+        Ipv4Addr::new(127, 0, 0, 3),
+    ]);
+    dns.resolver.clear_cache();
+    context.client.addresses.lock().await.refresh_at = Instant::now();
+    let started = Instant::now();
+    let reply = context
+        .client
+        .read(request(
+            &snapshot.lease.run,
+            &source,
+            "object",
+            &Held::new(),
+        ))
+        .await?;
+    let grants = context
+        .resources
+        .adopt(&snapshot.lease, &reply.grants, started)?;
+    assert_eq!(grants.len(), 3);
+    let mut held = Held::new();
+    apply(&reply, &mut held)?;
+    fixture("record-read-expiry").await?;
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    fixture("assert-read-renewed").await?;
+    for grant in &grants {
+        grant.check()?;
+    }
+    fixture("stop-first").await?;
+    node_state(&mut states, |state| {
+        state.phase == Phase::Ready
+            && state.epoch > initial.epoch
+            && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
+    })
+    .await?;
+    assert!(Arc::ptr_eq(&context.snapshot()?.lease, &snapshot.lease));
+    for grant in &grants {
+        grant.check()?;
+    }
+    assert_eq!(
+        payload(&reply, &held).await?,
+        tokio::fs::read(&source.body_path).await?
+    );
+    drop(grants);
+    fixture("assert-no-reads").await?;
+    context.stop();
+    driver.await??;
+    println!(
+        "PASS automatic resource renewal, same-run origin recovery, protected S3 read and last-owner release without database configuration"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, TLS origins and encrypted S3 objects"]
 async fn node_read_plans_reuse_materials_fetch_s3_and_survive_lost_replies() -> Result<()> {
     assert_eq!(
         std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,

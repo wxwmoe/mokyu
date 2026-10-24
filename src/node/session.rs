@@ -141,20 +141,41 @@ impl NodeContext {
             tokio::select! {
                 _ = timer.tick() => {},
                 _ = mode.changed() => {},
+                _ = self.resources.changed.notified() => {},
             }
             if *mode.borrow() == Mode::Stopped {
                 return Ok(());
             }
             lease.check()?;
-            sequence = sequence
-                .checked_add(1)
-                .ok_or_else(|| Status::internal("heartbeat sequence exhausted"))?;
             let draining = *mode.borrow() == Mode::Draining;
-            let state = session.pulse(sequence, draining).await?;
-            lease.renew(session.valid_until)?;
-            self.publish(&lease, &settings, &state);
-            if !settings.matches(&state).map_err(invalid_settings)? {
-                self.synchronize(&lease, &mut settings).await?;
+            // Drain bounded batches promptly; one batch per heartbeat cannot cover all live reads.
+            for index in 0..32 {
+                let batch = self.resources.batch(&lease);
+                if index > 0 && batch.renew.is_empty() && batch.release.is_empty() {
+                    break;
+                }
+                sequence = sequence
+                    .checked_add(1)
+                    .ok_or_else(|| Status::internal("heartbeat sequence exhausted"))?;
+                let started = Instant::now();
+                let reply = session
+                    .pulse_resources(
+                        sequence,
+                        draining,
+                        batch.renew.clone(),
+                        batch.release.clone(),
+                    )
+                    .await?;
+                lease.renew(session.valid_until)?;
+                self.resources
+                    .acknowledge(&lease, &batch, started, &reply.grants)?;
+                let state = reply
+                    .state
+                    .ok_or_else(|| Status::internal("control omitted node state"))?;
+                self.publish(&lease, &settings, &state);
+                if !settings.matches(&state).map_err(invalid_settings)? {
+                    self.synchronize(&lease, &mut settings).await?;
+                }
             }
             if !self.client.contains(session.peer).await {
                 return Err(Status::unavailable("session origin left control DNS"));
