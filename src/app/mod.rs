@@ -269,15 +269,7 @@ impl App {
         use_storage: bool,
         role: &str,
     ) -> Result<(Arc<Self>, Box<dyn crate::model::runtime::Owner>)> {
-        tokio::fs::create_dir_all(&config.instance.data_path).await?;
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(config.instance.data_path.join("gateway.lock"))?;
-        fs2::FileExt::try_lock_exclusive(&lock)
-            .context("another gateway owns this data directory")?;
+        let lock = crate::runtime::lock_directory(&config.instance.data_path)?;
         let (stores, owner) = crate::model::connect(&config, &mut secrets, &budget, role).await?;
         let defaults = crate::model::runtime_defaults(&config);
         stores.runtime_settings.ensure(&defaults).await?;

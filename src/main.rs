@@ -9,6 +9,7 @@ mod control;
 mod faults;
 mod http;
 mod model;
+mod node;
 mod rpc;
 mod runtime;
 mod status;

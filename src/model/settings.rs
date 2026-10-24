@@ -2,7 +2,7 @@ use crate::authorization::Principal;
 use crate::config::{Config, WebSettings};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use utoipa::ToSchema;
@@ -48,23 +48,6 @@ pub(crate) async fn load_runtime_settings(
     }
     config.validate()?;
     Ok(revisions)
-}
-
-fn overlay<T>(current: &T, patch: &Value) -> Result<T>
-where
-    T: Serialize + DeserializeOwned,
-{
-    let mut value = serde_json::to_value(current)?;
-    let object = value
-        .as_object_mut()
-        .context("runtime settings target must be an object")?;
-    let patch = patch
-        .as_object()
-        .context("runtime settings value must be an object")?;
-    for (key, value) in patch {
-        object.insert(key.clone(), value.clone());
-    }
-    Ok(serde_json::from_value(value)?)
 }
 
 pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
@@ -162,16 +145,7 @@ pub(crate) fn apply_runtime_section(
     {
         return Err(s3s::s3_error!(InvalidArgument, "shared staging requires PostgreSQL").into());
     }
-    match section {
-        "web" => config.web = overlay(&config.web, &value)?,
-        "requests" => config.requests = overlay(&config.requests, &value)?,
-        "uploads" => config.uploads = overlay(&config.uploads, &value)?,
-        "metrics" => config.metrics = overlay(&config.metrics, &value)?,
-        "maintenance" => config.maintenance = overlay(&config.maintenance, &value)?,
-        "io" => config.io = overlay(&config.io, &value)?,
-        _ => anyhow::bail!("unknown runtime settings section {section}"),
-    }
-    Ok(())
+    config.runtime.apply_section(section, value)
 }
 
 #[derive(Deserialize, ToSchema)]

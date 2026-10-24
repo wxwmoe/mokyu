@@ -98,3 +98,16 @@ pub(crate) fn run() -> Result<()> {
         Ok(())
     })
 }
+
+pub(crate) fn lock_directory(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    use anyhow::Context;
+    std::fs::create_dir_all(path)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path.join("gateway.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lock).context("another gateway owns this data directory")?;
+    Ok(lock)
+}

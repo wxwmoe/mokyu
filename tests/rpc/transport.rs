@@ -82,6 +82,183 @@ impl Drop for Dns {
     }
 }
 
+async fn node_state(
+    states: &mut tokio::sync::watch::Receiver<crate::node::State>,
+    predicate: impl Fn(&crate::node::State) -> bool,
+) -> Result<crate::node::State> {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let state = states.borrow_and_update().clone();
+            if predicate(&state) {
+                return Ok(state);
+            }
+            states.changed().await?;
+        }
+    })
+    .await
+    .context("node runtime did not reach expected state")?
+}
+
+#[tokio::test]
+#[ignore = "requires two isolated controls and TLS origins; see tests/README.md"]
+async fn node_runtime_recovers_without_database_or_resurrecting_old_work() -> Result<()> {
+    use crate::{
+        config::node::NodeConfig,
+        node::{NodeContext, Phase},
+    };
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let path = PathBuf::from(std::env::var("MOKYU_TEST_NODE_STATE")?);
+    let identity: NodeState = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+    let url = std::env::var("MOKYU_TEST_CONTROL_URL")?;
+    let directory = path.parent().unwrap().join("node-runtime");
+    tokio::fs::create_dir(&directory).await?;
+    crate::cluster::identity::write_state(&directory.join("node.json"), &identity).await?;
+    let configuration = format!(
+        "[instance]\ncontrol_url='{url}'\ndata_path='{}'\n",
+        directory.display()
+    );
+    assert!(
+        NodeContext::new(NodeConfig::parse(&configuration, "worker")?, "worker")
+            .await
+            .is_err()
+    );
+    let mut context = NodeContext::new(NodeConfig::parse(&configuration, "data")?, "data").await?;
+    assert!(
+        NodeContext::new(NodeConfig::parse(&configuration, "data")?, "data")
+            .await
+            .is_err()
+    );
+    let dns = Dns::new().await?;
+    Arc::get_mut(&mut context).unwrap().client = dns.client(&url, identity.clone())?;
+    let mut states = context.subscribe();
+    assert!(context.snapshot().is_err());
+
+    // Lose the first committed Welcome; the driver's retry must retain its connection ID.
+    fixture("lose-welcome").await?;
+    let driver = tokio::spawn(context.clone().run());
+    let initial = node_state(&mut states, |state| state.phase == Phase::Ready).await?;
+    assert_eq!(initial.epoch, 2);
+    assert_eq!(initial.peer, Some(Ipv4Addr::new(127, 0, 0, 3)));
+    let held = context.snapshot()?.lease.clone();
+    assert_eq!(context.budget.get().unwrap().database_connections, 0);
+    fixture("resume-welcome").await?;
+
+    *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 2)]);
+    dns.resolver.clear_cache();
+    context.client.addresses.lock().await.refresh_at = Instant::now();
+    let moved = node_state(&mut states, |state| {
+        state.phase == Phase::Ready
+            && state.epoch > initial.epoch
+            && state.peer == Some(Ipv4Addr::new(127, 0, 0, 2))
+    })
+    .await?;
+    assert!(Arc::ptr_eq(&context.snapshot()?.lease, &held));
+
+    *dns.answers.write().unwrap() = Some(vec![
+        Ipv4Addr::new(127, 0, 0, 2),
+        Ipv4Addr::new(127, 0, 0, 3),
+    ]);
+    dns.resolver.clear_cache();
+    context.client.addresses.lock().await.refresh_at = Instant::now();
+    fixture("stop-first").await?;
+    // Unary is still usable while the separate session connection recovers.
+    assert_eq!(
+        context
+            .client
+            .sync(held.run.clone(), vec![])
+            .await?
+            .settings
+            .len(),
+        5
+    );
+    node_state(&mut states, |state| {
+        state.phase == Phase::Ready
+            && state.epoch > moved.epoch
+            && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
+    })
+    .await?;
+    assert!(Arc::ptr_eq(&context.snapshot()?.lease, &held));
+
+    fixture("change-settings").await?;
+    node_state(&mut states, |state| {
+        state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.runtime().requests.read_idle_timeout == "31s")
+    })
+    .await?;
+    fixture("enable-maintenance").await?;
+    node_state(&mut states, |state| state.maintenance).await?;
+    assert!(context.snapshot().is_err());
+    held.check()?;
+    fixture("disable-maintenance").await?;
+    node_state(&mut states, |state| !state.maintenance).await?;
+    context.snapshot()?;
+
+    fixture("expire-run").await?;
+    let replacement = node_state(&mut states, |state| {
+        state.phase == Phase::Ready
+            && state
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.lease.run.fence != held.run.fence)
+    })
+    .await?;
+    assert!(held.check().is_err());
+    let fresh = replacement.snapshot.unwrap().lease.clone();
+    assert_eq!(fresh.run.boot_id, held.run.boot_id);
+    fresh.check()?;
+
+    context.drain();
+    assert!(context.snapshot().is_err());
+    let draining = node_state(&mut states, |state| {
+        state.phase == Phase::Draining && state.draining
+    })
+    .await?;
+    fresh.check()?;
+    fixture("start-first").await?;
+    *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 2)]);
+    dns.resolver.clear_cache();
+    context.client.addresses.lock().await.refresh_at = Instant::now();
+    node_state(&mut states, |state| {
+        state.phase == Phase::Draining
+            && state.epoch > draining.epoch
+            && state.peer == Some(Ipv4Addr::new(127, 0, 0, 2))
+    })
+    .await?;
+    fresh.check()?;
+
+    fixture("rotate-node").await?;
+    node_state(&mut states, |state| state.phase == Phase::Fenced).await?;
+    assert!(fresh.check().is_err());
+    assert!(driver.await?.is_err());
+    assert!(context.snapshot().is_err());
+    context.stop();
+    drop(context);
+
+    let rotated: NodeState = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+    crate::cluster::identity::write_state(&directory.join("node.json"), &rotated).await?;
+    let mut context = NodeContext::new(NodeConfig::parse(&configuration, "data")?, "data").await?;
+    Arc::get_mut(&mut context).unwrap().client = dns.client(&url, rotated)?;
+    let mut states = context.subscribe();
+    let driver = tokio::spawn(context.clone().run());
+    node_state(&mut states, |state| state.phase == Phase::Ready).await?;
+    let held = context.snapshot()?.lease.clone();
+    driver.abort();
+    assert!(driver.await.unwrap_err().is_cancelled());
+    assert_eq!(states.borrow().phase, Phase::Stopped);
+    assert!(held.check().is_err());
+    assert!(context.snapshot().is_err());
+    println!(
+        "PASS automatic Welcome recovery, DNS migration, origin loss, settings, maintenance, expiry fencing, drain recovery, rotation, cancellation and directory ownership without database configuration"
+    );
+    Ok(())
+}
+
 async fn fixture(action: &str) -> Result<()> {
     let directory = PathBuf::from(std::env::var("MOKYU_TEST_RPC_ACTIONS")?);
     let request = directory.join(action);

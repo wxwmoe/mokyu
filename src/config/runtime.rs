@@ -12,6 +12,7 @@ use uuid::Uuid;
 #[serde(default, deny_unknown_fields)]
 pub struct Instance {
     pub deployment_key: Option<String>,
+    pub control_url: Option<String>,
     pub name: Option<String>,
     pub listen_control: String,
     pub listen_web: String,
@@ -40,6 +41,7 @@ impl Default for Instance {
     fn default() -> Self {
         Self {
             deployment_key: None,
+            control_url: None,
             name: None,
             listen_s3: "0.0.0.0:9000".into(),
             listen_web: "0.0.0.0:9001".into(),

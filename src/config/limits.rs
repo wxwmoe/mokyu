@@ -1,4 +1,4 @@
-use super::Config;
+use super::{Config, Instance, RuntimeSettings};
 use anyhow::{Context, Result, bail, ensure};
 use std::{fs, path::PathBuf};
 
@@ -76,67 +76,151 @@ pub fn seconds(s: &str) -> Result<u64> {
     ensure!(seconds <= i64::MAX as u64 / 1000, "duration too large");
     Ok(seconds)
 }
+pub(crate) fn validate_runtime(instance: &Instance, runtime: &RuntimeSettings) -> Result<()> {
+    runtime.io.validate()?;
+    runtime.web.validate()?;
+    cache_bytes(&instance.thumbnail_cache_size)?;
+    seconds(&instance.compression_idle_timeout)?;
+    bytes(&runtime.requests.s3_chunk_limit)?;
+    ensure!(
+        bytes(&runtime.requests.cors_cache_size)? >= 32 * 1024,
+        "cors_cache_size must be at least 32KiB"
+    );
+    ensure!(
+        (1..=1_000_000).contains(&runtime.requests.cors_cache_entries),
+        "cors_cache_entries must be 1..1000000"
+    );
+    ensure!(
+        !runtime.requests.s3_region.trim().is_empty(),
+        "s3.signature_region must not be empty"
+    );
+    if let Some(domain) = &runtime.requests.s3_domain {
+        s3s::host::SingleDomain::new(domain)?;
+    }
+    seconds(&runtime.requests.read_idle_timeout)?;
+    seconds(&runtime.requests.upload_idle_timeout)?;
+    seconds(&runtime.metrics.access_flush_interval)?;
+    ensure!(
+        seconds(&runtime.metrics.access_retention)? >= 7 * 24 * 3600,
+        "statistics.access_retention must cover seven days and the configured Range windows"
+    );
+    for value in [
+        instance.request_connections,
+        instance.database_connections.map(|v| v as usize),
+        instance.database_read_connections.map(|v| v as usize),
+        instance.storage_read_slots,
+        instance.storage_upload_slots,
+        instance.storage_control_slots,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        ensure!(
+            value > 0,
+            "connection and storage slot budgets must be positive"
+        );
+    }
+    for listen in [
+        &instance.listen_s3,
+        &instance.listen_web,
+        &instance.listen_control,
+    ] {
+        listen
+            .parse::<std::net::SocketAddr>()
+            .context("invalid listen address")?;
+    }
+    ensure!(
+        instance.listen_s3 != instance.listen_web
+            && instance.listen_s3 != instance.listen_control
+            && instance.listen_web != instance.listen_control,
+        "listeners must be distinct"
+    );
+    for value in [
+        &runtime.uploads.sweep_interval,
+        &runtime.uploads.client_idle_timeout,
+        &runtime.maintenance.interval,
+        &runtime.maintenance.max_duration,
+        &runtime.maintenance.task_retention,
+        &runtime.maintenance.audit_retention,
+        &runtime.metrics.refresh_interval,
+        &runtime.metrics.query_timeout,
+    ] {
+        ensure!(
+            seconds(value)? <= i64::MAX as u64 / 1000,
+            "duration too large"
+        );
+    }
+    bytes(&instance.min_free_space)?;
+    if let Some(name) = &instance.name {
+        ensure!(
+            (1..=128).contains(&name.trim().len())
+                && !name.chars().any(char::is_control)
+                && !name.contains('/'),
+            "instance.name must contain 1..128 safe bytes"
+        );
+    }
+    ensure!(
+        seconds(&runtime.metrics.query_timeout)? <= i32::MAX as u64 / 1000,
+        "statistics.query_timeout exceeds PostgreSQL's statement timeout limit"
+    );
+    ensure!(
+        (1..=256).contains(&runtime.metrics.scope_limit),
+        "statistics.scope_limit must be 1..256"
+    );
+    for (interval, retention) in [
+        (
+            &runtime.metrics.storage_interval,
+            &runtime.metrics.storage_retention,
+        ),
+        (
+            &runtime.metrics.runtime_interval,
+            &runtime.metrics.runtime_retention,
+        ),
+    ] {
+        let interval = seconds(interval)?;
+        let retention = seconds(retention)?;
+        ensure!(
+            interval >= 60 && retention >= interval && retention <= 90 * 86400,
+            "statistics sampling requires an interval of at least one minute and retention between one interval and 90 days"
+        );
+    }
+    if let Some(v) = &instance.multipart_limit {
+        ensure!(
+            bytes(v)? >= 4 * 1024 * 1024,
+            "multipart.local_limit must allow a CDC window"
+        );
+    }
+    if let Some(v) = &instance.cache_size {
+        cache_bytes(v)?;
+    }
+    if let Some(v) = &instance.upload_cache_size {
+        cache_bytes(v)?;
+    }
+    if let Some(v) = &instance.write_memory_size {
+        cache_bytes(v)?;
+    }
+    if let Some(v) = &instance.response_cache_size {
+        cache_bytes(v)?;
+    }
+    ensure!(
+        runtime.maintenance.batch_size > 0 && runtime.maintenance.batch_size <= 10_000,
+        "cleanup.batch_size must be 1..10000"
+    );
+    ensure!(
+        seconds(&runtime.maintenance.max_duration)? <= 30,
+        "cleanup.max_duration must be 1s..30s"
+    );
+    ensure!(
+        runtime.uploads.max_active_uploads.is_none_or(|n| n > 0),
+        "max_active_uploads must be positive"
+    );
+    Ok(())
+}
+
 impl Config {
     pub fn validate(&self) -> Result<()> {
         let c = self;
-        c.io.validate()?;
-        c.web.validate()?;
-        cache_bytes(&c.instance.thumbnail_cache_size)?;
-        seconds(&c.instance.compression_idle_timeout)?;
-        bytes(&c.requests.s3_chunk_limit)?;
-        ensure!(
-            bytes(&c.requests.cors_cache_size)? >= 32 * 1024,
-            "cors_cache_size must be at least 32KiB"
-        );
-        ensure!(
-            (1..=1_000_000).contains(&c.requests.cors_cache_entries),
-            "cors_cache_entries must be 1..1000000"
-        );
-        ensure!(
-            !c.requests.s3_region.trim().is_empty(),
-            "s3.signature_region must not be empty"
-        );
-        if let Some(domain) = &c.requests.s3_domain {
-            s3s::host::SingleDomain::new(domain)?;
-        }
-        seconds(&c.requests.read_idle_timeout)?;
-        seconds(&c.requests.upload_idle_timeout)?;
-        seconds(&c.metrics.access_flush_interval)?;
-        ensure!(
-            seconds(&c.metrics.access_retention)? >= 7 * 24 * 3600,
-            "statistics.access_retention must cover seven days and the configured Range windows"
-        );
-        for value in [
-            c.instance.request_connections,
-            c.instance.database_connections.map(|v| v as usize),
-            c.instance.database_read_connections.map(|v| v as usize),
-            c.instance.storage_read_slots,
-            c.instance.storage_upload_slots,
-            c.instance.storage_control_slots,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            ensure!(
-                value > 0,
-                "connection and storage slot budgets must be positive"
-            );
-        }
-        for listen in [
-            &c.instance.listen_s3,
-            &c.instance.listen_web,
-            &c.instance.listen_control,
-        ] {
-            listen
-                .parse::<std::net::SocketAddr>()
-                .context("invalid listen address")?;
-        }
-        ensure!(
-            c.instance.listen_s3 != c.instance.listen_web
-                && c.instance.listen_s3 != c.instance.listen_control
-                && c.instance.listen_web != c.instance.listen_control,
-            "listeners must be distinct"
-        );
+        validate_runtime(&c.instance, &c.runtime)?;
         if let Some(replica) = &c.replica_database {
             replica.resolve(&c.database)?;
         }
@@ -175,78 +259,9 @@ impl Config {
                     && c.uploads.staging_bytes_limit.is_none()),
             "shared staging requires PostgreSQL"
         );
-        for value in [
-            &c.uploads.sweep_interval,
-            &c.uploads.client_idle_timeout,
-            &c.maintenance.interval,
-            &c.maintenance.max_duration,
-            &c.maintenance.task_retention,
-            &c.maintenance.audit_retention,
-            &c.metrics.refresh_interval,
-            &c.metrics.query_timeout,
-        ] {
-            ensure!(
-                seconds(value)? <= i64::MAX as u64 / 1000,
-                "duration too large"
-            );
-        }
-        bytes(&c.instance.min_free_space)?;
-        if let Some(name) = &c.instance.name {
-            ensure!(
-                (1..=128).contains(&name.trim().len())
-                    && !name.chars().any(char::is_control)
-                    && !name.contains('/'),
-                "instance.name must contain 1..128 safe bytes"
-            );
-        }
         ensure!(
-            seconds(&c.metrics.query_timeout)? <= i32::MAX as u64 / 1000,
-            "statistics.query_timeout exceeds PostgreSQL's statement timeout limit"
-        );
-        ensure!(
-            (1..=256).contains(&c.metrics.scope_limit),
-            "statistics.scope_limit must be 1..256"
-        );
-        for (interval, retention) in [
-            (&c.metrics.storage_interval, &c.metrics.storage_retention),
-            (&c.metrics.runtime_interval, &c.metrics.runtime_retention),
-        ] {
-            let interval = seconds(interval)?;
-            let retention = seconds(retention)?;
-            ensure!(
-                interval >= 60 && retention >= interval && retention <= 90 * 86400,
-                "statistics sampling requires an interval of at least one minute and retention between one interval and 90 days"
-            );
-        }
-        if let Some(v) = &c.instance.multipart_limit {
-            ensure!(
-                bytes(v)? >= 4 * 1024 * 1024,
-                "multipart.local_limit must allow a CDC window"
-            );
-        }
-        if let Some(v) = &c.instance.cache_size {
-            cache_bytes(v)?;
-        }
-        if let Some(v) = &c.instance.upload_cache_size {
-            cache_bytes(v)?;
-        }
-        if let Some(v) = &c.instance.write_memory_size {
-            cache_bytes(v)?;
-        }
-        if let Some(v) = &c.instance.response_cache_size {
-            cache_bytes(v)?;
-        }
-        ensure!(
-            c.maintenance.batch_size > 0 && c.maintenance.batch_size <= 10_000,
-            "cleanup.batch_size must be 1..10000"
-        );
-        ensure!(
-            seconds(&c.maintenance.max_duration)? <= 30,
-            "cleanup.max_duration must be 1s..30s"
-        );
-        ensure!(
-            c.uploads.max_active_uploads.is_none_or(|n| n > 0),
-            "max_active_uploads must be positive"
+            c.instance.control_url.is_none(),
+            "control_url is only valid for data or worker configuration"
         );
         Ok(())
     }
@@ -259,6 +274,32 @@ impl Config {
         &self,
         profiles: &[crate::storage::profile::StorageProfile],
     ) -> Result<Budget> {
+        let mut budget = Budget::for_runtime(&self.instance, &self.runtime, profiles)?;
+        budget.database_connections = self
+            .instance
+            .database_connections
+            .unwrap_or((budget.available_cpus * 2 + 4).min(64) as u32);
+        ensure!(
+            budget.database_connections > 0,
+            "resource limits must be positive"
+        );
+        budget.database_read_connections = if self.replica_database.is_some() {
+            self.instance
+                .database_read_connections
+                .unwrap_or((budget.database_connections / 4).clamp(1, 4))
+        } else {
+            0
+        };
+        Ok(budget)
+    }
+}
+
+impl Budget {
+    pub(crate) fn for_runtime(
+        instance: &Instance,
+        runtime: &RuntimeSettings,
+        profiles: &[crate::storage::profile::StorageProfile],
+    ) -> Result<Self> {
         let mut environment = Environment {
             available_cpus: std::thread::available_parallelism().ok().map(usize::from),
             ..Environment::default()
@@ -334,21 +375,20 @@ impl Config {
         if environment.available_cpus.is_some() {
             environment.available_cpus = Some(cpus);
         }
-        let inflight = self
-            .instance
+        let inflight = instance
             .stream_memory_budget
             .as_deref()
             .map(bytes)
             .transpose()?
             .unwrap_or(memory / 4);
-        let aws_chunk = bytes(&self.requests.s3_chunk_limit)?;
+        let aws_chunk = bytes(&runtime.requests.s3_chunk_limit)?;
         // Reserve room for a newly created default backend as well as existing profiles.
         let mut workspace = crate::content::compression::Config::default().workspace_bytes()?;
         let mut maximum = 32 * 1024 * 1024;
         for profile in profiles {
             workspace = workspace.max(
                 profile
-                    .compression_config(&self.instance.compression_idle_timeout)
+                    .compression_config(&instance.compression_idle_timeout)
                     .workspace_bytes()?,
             );
             if profile.pack_enabled {
@@ -371,7 +411,7 @@ impl Config {
             slot_bytes
         );
         ensure!(
-            cache_bytes(&self.requests.cors_cache_size)? <= memory / 16,
+            cache_bytes(&runtime.requests.cors_cache_size)? <= memory / 16,
             "cors_cache_size must fit within one sixteenth of instance memory"
         );
         let slots = (inflight / slot_bytes) as usize;
@@ -385,8 +425,7 @@ impl Config {
                     * (maximum / crate::content::codec::MIN as u64 + 1);
             (payload * 4 + workspace).div_ceil(1024 * 1024) * 1024 * 1024
         };
-        let write_memory_bytes = self
-            .instance
+        let write_memory_bytes = instance
             .write_memory_size
             .as_deref()
             .map(cache_bytes)
@@ -408,7 +447,7 @@ impl Config {
             .saturating_sub(pack_required.saturating_mul(2))
             .min(memory / 4)
             .min(u64::from(u32::MAX) * 4096);
-        let response_cache_bytes = match self.instance.response_cache_size.as_deref() {
+        let response_cache_bytes = match instance.response_cache_size.as_deref() {
             Some(value) => {
                 let size = cache_bytes(value)?;
                 ensure!(
@@ -433,34 +472,21 @@ impl Config {
                 "pack.max_size exceeds effective memory; lower the pack size or increase the container memory limit"
             );
         }
-        let cpu_jobs = self.instance.cpu_jobs.unwrap_or(cpus.min(slots));
+        let cpu_jobs = instance.cpu_jobs.unwrap_or(cpus.min(slots));
         let uploads = cpus.min(slots / 2).max(1);
         let reads = (cpus * 2).min(slots).max(1);
-        let storage_read_slots = self
-            .instance
+        let storage_read_slots = instance
             .storage_read_slots
             .unwrap_or((cpus * 4).min(slots * 2));
-        let storage_upload_slots = self
-            .instance
+        let storage_upload_slots = instance
             .storage_upload_slots
             .unwrap_or((cpus * 4).min(slots * 2));
-        let storage_control_slots = self
-            .instance
-            .storage_control_slots
-            .unwrap_or(cpus.clamp(1, 8));
+        let storage_control_slots = instance.storage_control_slots.unwrap_or(cpus.clamp(1, 8));
         let backend = storage_read_slots;
-        let connections = self
-            .instance
-            .request_connections
-            .unwrap_or((slots * 16).max(32));
-        let entries = self
-            .instance
+        let connections = instance.request_connections.unwrap_or((slots * 16).max(32));
+        let entries = instance
             .cache_entries
             .unwrap_or((memory / 64 / 256).min(usize::MAX as u64) as usize);
-        let db = self
-            .instance
-            .database_connections
-            .unwrap_or((cpus * 2 + 4).min(64) as u32);
         ensure!(
             [
                 cpu_jobs,
@@ -470,8 +496,7 @@ impl Config {
                 storage_upload_slots,
                 storage_control_slots,
                 connections,
-                entries,
-                db as usize
+                entries
             ]
             .into_iter()
             .all(|n| n > 0),
@@ -499,14 +524,8 @@ impl Config {
             storage_upload_slots,
             storage_control_slots,
             request_connections: connections,
-            database_connections: db,
-            database_read_connections: if self.replica_database.is_some() {
-                self.instance
-                    .database_read_connections
-                    .unwrap_or((db / 4).clamp(1, 4))
-            } else {
-                0
-            },
+            database_connections: 0,
+            database_read_connections: 0,
             cache_entries: entries,
             pack_memory_units,
             response_cache_bytes,

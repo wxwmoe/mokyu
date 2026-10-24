@@ -26,6 +26,8 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `rpc::client::transport_tests::node_rpc_balances_tls_origins_and_recovers_sessions` 需两个真实 control、各自 TLS 源站和受限夹具编排器；设置 `MOKYU_TEST_NODE_STATE`、`MOKYU_TEST_CONTROL_URL`、`MOKYU_TEST_RPC_ACTIONS` 及测试 CA 的 `SSL_CERT_FILE`。测试在本机临时 UDP 端口提供可变 A 记录，两个地址为 `127.0.0.2/3`，`127.0.0.4` 提供错误域名证书。编排器按 actions 目录的 `change-settings`、`stop-first`、`start-first`、`lose-welcome`、`resume-welcome`、`rotate-node`、`disable-node` 文件执行动作，成功后写同名 `.done` 内容 `ok`；丢 Welcome 使用 `node-session-opened` 故障点。DNS 宽限到期用受控单调时钟推进，其他行为通过真实 DNS/TLS/gRPC 路径验证；不能作为实际 CDN 或跨洲验收结果。
 
+`rpc::client::transport_tests::node_runtime_recovers_without_database_or_resurrecting_old_work` 使用同一隔离夹具，驱动不含数据库配置的节点上下文自动恢复；另需 `enable-maintenance`、`disable-maintenance`、`expire-run` 动作，最后一项仅把该测试节点的运行权设为已过期。覆盖 Welcome 丢失、DNS 迁移、源站退出、配置变更、维护、过期 fencing、排空重连、凭据轮换和取消后旧句柄失效。该契约验证节点上下文，不替代完整 data/worker 业务进程验收。
+
 `sqlite_synchronous_contract` 验证默认 FULL、保存后重启生效、FULL/NORMAL/OFF 的写池与所有读连接、连接重建、事务回滚、单连接模式和错误设置拒绝。初始化/迁移在测试构建中断言 FULL。`sqlite_nonce_durability_contract` 检查 NORMAL 预留强制 FULL 后连接恢复、取消/提交边界、并发号段不重叠、OFF 保存与首个预留互斥、已有预留禁止 OFF 和启动校验；模拟进程退出不能代替断电持久性验证。
 
 `python -m tests.recovery.sqlite_sync` 接管已初始化且停止的隔离应用，沿用恢复测试的配置、管理员密码、故障目录和本地存储根目录环境。SQLite 验证 API/CLI 保存、实际同步值、重启和 SIGKILL 读回；其他数据库验证仅提供公共 I/O 设置、不提供 SQLite 字段。四库都检查修订冲突返回 409。`web/tests/sqlite-sync.spec.ts` 使用实际应用检查三语同步/退出期限表单、取消不保存、键盘操作和重启提示。

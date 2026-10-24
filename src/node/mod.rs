@@ -1,0 +1,181 @@
+mod session;
+mod settings;
+
+use crate::{
+    config::{Budget, RuntimeSettings, node::NodeConfig},
+    rpc::{client::Client, wire},
+};
+use anyhow::{Context, Result, ensure};
+use std::sync::{
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
+use tokio::{sync::watch, time::Instant};
+use tonic::Status;
+use uuid::Uuid;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Connecting,
+    Ready,
+    Recovering,
+    Draining,
+    Fenced,
+    Stopped,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Running,
+    Draining,
+    Stopped,
+}
+
+pub(crate) struct RunLease {
+    pub(crate) run: wire::Run,
+    expires: Mutex<Instant>,
+    invalidated: AtomicBool,
+}
+
+impl RunLease {
+    pub(crate) fn check(&self) -> Result<(), Status> {
+        if self.invalidated.load(Ordering::Acquire)
+            || Instant::now() >= *self.expires.lock().unwrap()
+        {
+            Err(Status::failed_precondition(
+                "node run has expired or stopped",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn invalidate(&self) {
+        self.invalidated.store(true, Ordering::Release);
+    }
+
+    fn renew(&self, deadline: Instant) -> Result<(), Status> {
+        let mut expires = self.expires.lock().unwrap();
+        if self.invalidated.load(Ordering::Acquire) || Instant::now() >= *expires {
+            return Err(Status::failed_precondition(
+                "node run cannot be renewed after local expiry",
+            ));
+        }
+        *expires = deadline;
+        Ok(())
+    }
+}
+
+pub(crate) struct Snapshot {
+    pub(crate) lease: Arc<RunLease>,
+    settings: settings::Settings,
+}
+
+impl Snapshot {
+    pub(crate) fn runtime(&self) -> &RuntimeSettings {
+        &self.settings.runtime
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct State {
+    pub(crate) phase: Phase,
+    pub(crate) epoch: u64,
+    pub(crate) peer: Option<std::net::Ipv4Addr>,
+    pub(crate) snapshot: Option<Arc<Snapshot>>,
+    pub(crate) maintenance: bool,
+    pub(crate) draining: bool,
+}
+
+pub(crate) struct NodeContext {
+    pub(crate) config: NodeConfig,
+    pub(crate) budget: OnceLock<Budget>,
+    pub(crate) client: Client,
+    boot: Uuid,
+    current: watch::Sender<State>,
+    mode: watch::Sender<Mode>,
+    started: AtomicBool,
+    _file_lock: std::fs::File,
+}
+
+impl NodeContext {
+    pub(crate) async fn new(config: NodeConfig, role: &str) -> Result<Arc<Self>> {
+        let lock = crate::runtime::lock_directory(&config.instance.data_path)?;
+        let identity =
+            crate::cluster::identity::read_state(&config.instance.data_path.join("node.json"))
+                .await?
+                .context("node.json is required; provision this node on control first")?;
+        ensure!(
+            identity.role == role && matches!(role, "data" | "worker"),
+            "node identity does not match process role"
+        );
+        let client = Client::new(
+            config
+                .instance
+                .control_url
+                .as_deref()
+                .context("control_url is required")?,
+            identity,
+        )?;
+        Ok(Arc::new(Self {
+            config,
+            budget: OnceLock::new(),
+            client,
+            boot: Uuid::new_v4(),
+            current: watch::channel(State {
+                phase: Phase::Connecting,
+                epoch: 0,
+                peer: None,
+                snapshot: None,
+                maintenance: false,
+                draining: false,
+            })
+            .0,
+            mode: watch::channel(Mode::Running).0,
+            started: AtomicBool::new(false),
+            _file_lock: lock,
+        }))
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<State> {
+        self.current.subscribe()
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<Arc<Snapshot>, Status> {
+        let state = self.current.borrow();
+        if *self.mode.borrow() != Mode::Running || state.draining || state.maintenance {
+            return Err(Status::unavailable("node is draining or in maintenance"));
+        }
+        let snapshot = state
+            .snapshot
+            .clone()
+            .ok_or_else(|| Status::unavailable("node is synchronizing"))?;
+        snapshot.lease.check()?;
+        Ok(snapshot)
+    }
+
+    pub(crate) fn drain(&self) {
+        self.mode.send_if_modified(|mode| {
+            if *mode == Mode::Running {
+                *mode = Mode::Draining;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    pub(crate) fn stop(&self) {
+        self.mode.send_replace(Mode::Stopped);
+        self.invalidate(Phase::Stopped);
+    }
+
+    fn invalidate(&self, phase: Phase) {
+        self.current.send_modify(|state| {
+            if let Some(snapshot) = &state.snapshot {
+                snapshot.lease.invalidate();
+            }
+            state.phase = phase;
+        });
+    }
+}
