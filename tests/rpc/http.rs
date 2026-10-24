@@ -266,31 +266,95 @@ async fn file_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> 
     fixture("l2-enabled").await?;
     assert_eq!(reads.backend_gets(), before);
     settled(reads).await?;
+
+    let initial = reads.file_cache().await;
+    let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
+    tokio::fs::write(faults.join("node-raw-before-verify"), b"pause").await?;
+    let cancelled = tokio::spawn(fixture("l2-raw-cancel"));
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !faults.join("node-raw-before-verify.hit").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    assert!(
+        reads.file_cache().await["bytes"].as_u64().unwrap() > initial["bytes"].as_u64().unwrap()
+    );
+    cancelled.await??;
+    tokio::fs::remove_file(faults.join("node-raw-before-verify")).await?;
+    settled(reads).await?;
+    assert_eq!(
+        reads.file_cache().await["bytes"],
+        initial["bytes"],
+        "cancelled raw fill retained disk capacity"
+    );
+    assert_eq!(reads.file_cache().await["entries"], initial["entries"]);
+    let before = reads.backend_gets();
+    fixture("l2-raw-warm").await?;
+    assert_eq!(
+        reads.backend_gets() - before,
+        2,
+        "concurrent raw miss downloaded more than one HEAD and body"
+    );
+    let before = reads.backend_gets();
+    fixture("l2-raw-hot").await?;
+    assert_eq!(reads.backend_gets(), before);
+    fixture("l2-raw-corrupt").await?;
+    assert_eq!(
+        reads.backend_gets() - before,
+        2,
+        "bad raw cache did not recover in one download"
+    );
+    let before = reads.backend_gets();
+    fixture("l2-raw-repaired").await?;
+    assert_eq!(reads.backend_gets(), before);
+    fixture("l2-raw-disabled").await?;
+    assert!(reads.backend_gets() > before);
+    let before = reads.backend_gets();
+    fixture("l2-raw-enabled").await?;
+    assert_eq!(reads.backend_gets(), before);
+    settled(reads).await?;
     let reopened = Arc::new(crate::node::reads::Reads::new(reads.node.clone())?);
-    let prepared = reopened
-        .open(wire::ReadRequest {
-            route: Some(wire::ReadRoute {
-                route: Some(wire::read_route::Route::Bucket(wire::BucketRoute {
-                    name: "read-objects".into(),
-                    key: "l1-hot".into(),
-                    ..Default::default()
-                })),
-            }),
-            method: wire::ReadMethod::Get as i32,
-            surface: wire::ReadSurface::S3 as i32,
-            include: vec![
-                wire::ReadInclude::Object as i32,
-                wire::ReadInclude::Mapping as i32,
-            ],
-            ..Default::default()
-        })
-        .await?;
-    let mut stream = reopened.body(prepared);
-    let mut body = Vec::new();
-    while let Some(bytes) = stream.next().await {
-        body.extend_from_slice(&bytes?);
+    let raw = tokio::fs::read(
+        PathBuf::from(std::env::var("MOKYU_TEST_NODE_STATE")?)
+            .parent()
+            .unwrap()
+            .join("raw.bin"),
+    )
+    .await?;
+    for (bucket, key, expected) in [
+        (
+            "read-objects",
+            "l1-hot",
+            b"node cache source\n".repeat(4096),
+        ),
+        ("read-raw", "raw", raw),
+    ] {
+        let prepared = reopened
+            .open(wire::ReadRequest {
+                route: Some(wire::ReadRoute {
+                    route: Some(wire::read_route::Route::Bucket(wire::BucketRoute {
+                        name: bucket.into(),
+                        key: key.into(),
+                        ..Default::default()
+                    })),
+                }),
+                method: wire::ReadMethod::Get as i32,
+                surface: wire::ReadSurface::S3 as i32,
+                include: vec![
+                    wire::ReadInclude::Object as i32,
+                    wire::ReadInclude::Mapping as i32,
+                ],
+                ..Default::default()
+            })
+            .await?;
+        let mut stream = reopened.body(prepared);
+        let mut body = Vec::new();
+        while let Some(bytes) = stream.next().await {
+            body.extend_from_slice(&bytes?);
+        }
+        assert_eq!(body, expected);
     }
-    assert_eq!(body, b"node cache source\n".repeat(4096));
     assert_eq!(
         reopened.backend_gets(),
         0,

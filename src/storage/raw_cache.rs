@@ -1,5 +1,6 @@
 use super::{
-    Area, CacheFile, CachePin, CacheWork, Reservation, Storage, StoreBackend,
+    Area, CacheFile, CachePin, CachePolicy, CacheWork, Reservation, Storage, StoreBackend,
+    file_cache::Files,
     raw::{RawFile, verify_file},
 };
 use crate::model::raw::RawSource;
@@ -11,7 +12,7 @@ use std::{
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
-pub(super) struct Write {
+pub(crate) struct Write {
     pub file: Option<tokio::fs::File>,
     path: PathBuf,
     ticket: Option<Reservation>,
@@ -120,6 +121,42 @@ impl Storage {
         let Some(work) = self.cache_work(id, 1) else {
             return Ok(None);
         };
+        self.file_cache().begin_raw(id, size, policy, work).await
+    }
+
+    pub(super) async fn finish_raw_cache(
+        self: &Arc<Self>,
+        write: Write,
+        source: &RawSource,
+        target: &Arc<StoreBackend>,
+    ) -> Result<Option<RawFile>> {
+        let storage = self.clone();
+        let source = source.clone();
+        let target = target.clone();
+        // Publication finishes even if the requesting client disconnects.
+        tokio::spawn(async move {
+            let _write = storage.cache_writes.lock().await;
+            if !Arc::ptr_eq(&storage.store_backend(source.storage_id)?, &target) {
+                return Ok(None);
+            }
+            storage
+                .file_cache()
+                .publish_raw(write, source.location_id, source.size as u64)
+                .await
+                .map(Some)
+        })
+        .await?
+    }
+}
+
+impl Files<'_> {
+    pub(crate) async fn begin_raw(
+        &self,
+        id: Uuid,
+        size: u64,
+        policy: CachePolicy,
+        work: CacheWork,
+    ) -> Result<Option<Write>> {
         let invalid = self
             .fifo
             .lock()
@@ -129,18 +166,16 @@ impl Storage {
             .filter(|entry| !entry.valid)
             .map(|entry| entry.pins.clone());
         if let Some(pins) = invalid {
-            self.invalidate_entry(id, Some(&pins)).await?;
+            self.invalidate(id, Some(&pins)).await?;
         }
         let _write = self.cache_writes.lock().await;
         if self.fifo.lock().await.entries.contains_key(&id) {
             return Ok(None);
         }
-        let Some(ticket) = self.reserve_cache(size, policy).await? else {
+        let Some(ticket) = self.reserve(size, policy, false).await? else {
             return Ok(None);
         };
-        let path = CacheFile::Raw
-            .path(&self.disk.root, id)
-            .with_extension("tmp");
+        let path = CacheFile::Raw.path(self.root, id).with_extension("tmp");
         let mut write = Write {
             file: None,
             path,
@@ -160,41 +195,30 @@ impl Storage {
         Ok(Some(write))
     }
 
-    pub(super) async fn finish_raw_cache(
-        self: &Arc<Self>,
+    // The owner holds cache_writes through its authority check and this publication.
+    pub(crate) async fn publish_raw(
+        &self,
         mut write: Write,
-        source: &RawSource,
-        target: &Arc<StoreBackend>,
-    ) -> Result<Option<RawFile>> {
-        let storage = self.clone();
-        let source = source.clone();
-        let target = target.clone();
-        // Publication finishes even if the requesting client disconnects.
-        tokio::spawn(async move {
-            let id = source.location_id;
-            let _write = storage.cache_writes.lock().await;
-            if !Arc::ptr_eq(&storage.store_backend(source.storage_id)?, &target) {
-                return Ok(None);
-            }
-            let file = write.file.as_mut().unwrap();
-            file.flush().await?;
-            file.rewind().await?;
-            #[cfg(feature = "fault-injection")]
-            crate::faults::point("raw-cache-written").await;
-            let path = CacheFile::Raw.path(&storage.disk.root, id);
-            tokio::fs::rename(&write.path, &path).await?;
-            write.path = path;
-            let mut fifo = storage.fifo.lock().await;
-            fifo.insert(id, source.size as u64, CacheFile::Raw);
-            let pin = fifo.entries[&id].pins.clone();
-            pin.fetch_add(1, Ordering::Relaxed);
-            write.ticket.take().unwrap().commit();
-            Ok::<_, anyhow::Error>(Some(RawFile::Cached {
-                file: write.file.take().unwrap(),
-                _pin: CachePin(pin),
-            }))
+        id: Uuid,
+        size: u64,
+    ) -> Result<RawFile> {
+        let file = write.file.as_mut().unwrap();
+        file.flush().await?;
+        file.rewind().await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("raw-cache-written").await;
+        let path = CacheFile::Raw.path(self.root, id);
+        tokio::fs::rename(&write.path, &path).await?;
+        write.path = path;
+        let mut fifo = self.fifo.lock().await;
+        fifo.insert(id, size, CacheFile::Raw);
+        let pin = fifo.entries[&id].pins.clone();
+        pin.fetch_add(1, Ordering::Relaxed);
+        write.ticket.take().unwrap().commit();
+        Ok(RawFile::Cached {
+            file: write.file.take().unwrap(),
+            _pin: CachePin(pin),
         })
-        .await?
     }
 }
 

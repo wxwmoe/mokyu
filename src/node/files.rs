@@ -6,6 +6,8 @@ use crate::{
         file_cache::Files,
         local::{Area, Disk, Usage},
         profile::StorageProfile,
+        raw::RawFile,
+        raw_cache::Write,
         target::CachePolicy,
     },
 };
@@ -32,6 +34,7 @@ pub(super) struct Cache {
     slots: Arc<Semaphore>,
     memory: Arc<Semaphore>,
     pending: Arc<Mutex<HashSet<Uuid>>>,
+    raw_misses: crate::runtime::locks::Locks<Uuid>,
     hits: AtomicU64,
 }
 
@@ -68,6 +71,7 @@ impl Cache {
             slots: Arc::new(Semaphore::new(budget.cpu_jobs)),
             memory,
             pending: Arc::new(Mutex::new(HashSet::new())),
+            raw_misses: Default::default(),
             hits: 0.into(),
         }))
     }
@@ -103,50 +107,59 @@ impl Cache {
     async fn initialize(&self) -> Result<()> {
         self.ready
             .get_or_try_init(|| async {
-                let root = self.root.join("chunks");
-                tokio::fs::create_dir_all(&root).await?;
-                ensure!(
-                    tokio::fs::symlink_metadata(&self.root).await?.is_dir(),
-                    "read cache directory was replaced"
-                );
-                let mut directories = tokio::fs::read_dir(root).await?;
-                while let Some(directory) = directories.next_entry().await? {
-                    if !directory.file_type().await?.is_dir() {
-                        continue;
-                    }
-                    let mut files = tokio::fs::read_dir(directory.path()).await?;
-                    while let Some(file) = files.next_entry().await? {
-                        if !file.file_type().await?.is_file() {
+                for area in ["chunks", "raw"] {
+                    let root = self.root.join(area);
+                    tokio::fs::create_dir_all(&root).await?;
+                    ensure!(
+                        tokio::fs::symlink_metadata(&self.root).await?.is_dir(),
+                        "read cache directory was replaced"
+                    );
+                    let mut directories = tokio::fs::read_dir(root).await?;
+                    while let Some(directory) = directories.next_entry().await? {
+                        if !directory.file_type().await?.is_dir() {
                             continue;
                         }
-                        let size = file.metadata().await?.len();
-                        let name = format!(
-                            "{}/{}",
-                            directory.file_name().to_string_lossy(),
-                            file.file_name().to_string_lossy()
-                        );
-                        let parsed = crate::storage::parse_cache_name(&name);
-                        let mut fifo = self.fifo.lock().await;
-                        if parsed.is_some_and(|(id, compressed)| {
-                            fifo.entries
-                                .get(&id)
-                                .is_some_and(|entry| entry.file == CacheFile::Chunk(compressed))
-                        }) {
-                            continue;
-                        }
-                        if let Some((id, compressed)) = parsed.filter(|(id, _)| {
-                            (1..=codec::MAX as u64).contains(&size)
-                                && !fifo.entries.contains_key(id)
-                                && fifo.entries.len() < self.entries
-                                && self.disk.limits[1].is_none_or(|limit| {
-                                    self.disk.used()[1].saturating_add(size) <= limit
-                                })
-                        }) {
-                            fifo.insert(id, size, compressed);
-                            self.disk.account_existing(Area::Cache, size);
-                        } else {
-                            drop(fifo);
-                            tokio::fs::remove_file(file.path()).await?;
+                        let mut files = tokio::fs::read_dir(directory.path()).await?;
+                        while let Some(file) = files.next_entry().await? {
+                            if !file.file_type().await?.is_file() {
+                                continue;
+                            }
+                            let size = file.metadata().await?.len();
+                            let name = format!(
+                                "{}/{}",
+                                directory.file_name().to_string_lossy(),
+                                file.file_name().to_string_lossy()
+                            );
+                            let parsed = if area == "raw" {
+                                crate::storage::parse_chunk_name(&name)
+                                    .map(|id| (id, CacheFile::Raw))
+                            } else {
+                                crate::storage::parse_cache_name(&name)
+                                    .map(|(id, compressed)| (id, CacheFile::Chunk(compressed)))
+                            };
+                            let mut fifo = self.fifo.lock().await;
+                            if parsed.is_some_and(|(id, format)| {
+                                fifo.entries
+                                    .get(&id)
+                                    .is_some_and(|entry| entry.file == format)
+                            }) {
+                                continue;
+                            }
+                            if let Some((id, format)) = parsed.filter(|(id, format)| {
+                                (*format == CacheFile::Raw
+                                    || (1..=codec::MAX as u64).contains(&size))
+                                    && !fifo.entries.contains_key(id)
+                                    && fifo.entries.len() < self.entries
+                                    && self.disk.limits[1].is_none_or(|limit| {
+                                        self.disk.used()[1].saturating_add(size) <= limit
+                                    })
+                            }) {
+                                fifo.insert(id, size, format);
+                                self.disk.account_existing(Area::Cache, size);
+                            } else {
+                                drop(fifo);
+                                tokio::fs::remove_file(file.path()).await?;
+                            }
                         }
                     }
                 }
@@ -186,6 +199,104 @@ impl Cache {
         self.files().reject(id).await;
     }
 
+    pub(super) fn raw_lock(
+        &self,
+        source: &crate::model::raw::RawSource,
+        profile: &StorageProfile,
+    ) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        let policy = self.policy(profile).ok()?;
+        (policy.enabled
+            && policy
+                .capacity
+                .is_none_or(|limit| source.size as u64 <= limit))
+        .then(|| self.raw_misses.get(source.location_id))
+    }
+
+    pub(super) async fn raw(&self, source: &crate::model::raw::RawSource) -> Option<RawFile> {
+        if self.initialize().await.is_err() {
+            return None;
+        }
+        let id = source.location_id;
+        let (pin, format) = self.files().pin(id).await?;
+        if format != CacheFile::Raw {
+            return None;
+        }
+        let result = async {
+            let path = format.path(&self.root, id);
+            ensure!(
+                tokio::fs::symlink_metadata(&path).await?.is_file(),
+                "raw cache was replaced"
+            );
+            let file = tokio::fs::File::open(path).await?;
+            ensure!(
+                file.metadata().await?.len() == source.size as u64,
+                codec::IntegrityError::Length
+            );
+            Ok::<_, anyhow::Error>(file)
+        }
+        .await;
+        match result {
+            Ok(file) => Some(RawFile::Cached { file, _pin: pin }),
+            Err(_) => {
+                drop(pin);
+                self.reject(id).await;
+                None
+            }
+        }
+    }
+
+    pub(super) async fn begin_raw(
+        &self,
+        source: &crate::model::raw::RawSource,
+        profile: &StorageProfile,
+    ) -> Result<Option<Write>> {
+        let policy = self.policy(profile)?;
+        let size = source.size as u64;
+        if !policy.enabled
+            || policy.capacity.is_some_and(|limit| size > limit)
+            || self.ready.get().is_none()
+        {
+            return Ok(None);
+        }
+        let Some(work) = self.work(source.location_id, 1) else {
+            return Ok(None);
+        };
+        self.files()
+            .begin_raw(source.location_id, size, policy, work)
+            .await
+    }
+
+    pub(super) async fn finish_raw(
+        self: &Arc<Self>,
+        write: Write,
+        source: &crate::model::raw::RawSource,
+        prepared: Arc<super::reads::Prepared>,
+    ) -> Result<RawFile> {
+        let cache = self.clone();
+        let (id, size) = (source.location_id, source.size as u64);
+        // Keep the read protection and disk reservation through detached publication.
+        tokio::spawn(async move {
+            let _write = cache.writes.lock().await;
+            prepared.check()?;
+            cache.files().publish_raw(write, id, size).await
+        })
+        .await?
+    }
+
+    fn work(&self, id: Uuid, units: u32) -> Option<CacheWork> {
+        let slot = self.slots.clone().try_acquire_owned().ok()?;
+        let memory = self.memory.clone().try_acquire_many_owned(units).ok()?;
+        if !self.pending.lock().unwrap().insert(id) {
+            return None;
+        }
+        Some(CacheWork {
+            id,
+            pending: self.pending.clone(),
+            _slot: slot,
+            _memory: memory,
+        })
+    }
+
     pub(super) fn fill(self: &Arc<Self>, id: Uuid, data: Bytes, profile: &StorageProfile) {
         let Ok(policy) = self.policy(profile) else {
             return;
@@ -198,22 +309,10 @@ impl Cache {
         {
             return;
         }
-        let Ok(slot) = self.slots.clone().try_acquire_owned() else {
-            return;
-        };
         // A returned Bytes may retain a complete decoder allocation, not just this slice.
         let units = (codec::MAX as u64 * 4).div_ceil(1024 * 1024) as u32;
-        let Ok(memory) = self.memory.clone().try_acquire_many_owned(units) else {
+        let Some(work) = self.work(id, units) else {
             return;
-        };
-        if !self.pending.lock().unwrap().insert(id) {
-            return;
-        }
-        let work = CacheWork {
-            id,
-            pending: self.pending.clone(),
-            _slot: slot,
-            _memory: memory,
         };
         let cache = self.clone();
         tokio::spawn(async move {

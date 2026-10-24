@@ -692,7 +692,7 @@ impl Storage {
     }
 }
 
-pub(super) async fn verify_file(
+pub(crate) async fn verify_file(
     file: &mut RawFile,
     source: &RawSource,
     mut cache: Option<&mut Option<super::raw_cache::Write>>,

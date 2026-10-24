@@ -64,11 +64,13 @@ impl Reads {
             "background" if complete => {
                 let reads = self.clone();
                 let request = prepared.clone();
+                let cache_id = source.location_id;
                 let audit = self.checks.raw(
                     source.size as u64,
                     source.digest.clone(),
                     move |valid| async move {
                         if !valid {
+                            reads.reader.files.reject(cache_id).await;
                             reads.report(request, index).await;
                         }
                     },

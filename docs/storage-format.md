@@ -121,13 +121,14 @@ S3 写缓存接收新块时先持久保存已校验的原始字节，不提前�
 <data_path>/chunks/<后两位>/<UUID>.raw
 <data_path>/raw/<后两位>/<UUID>
 <data_path>/read-cache/chunks/<后两位>/<UUID>.raw
+<data_path>/read-cache/raw/<后两位>/<UUID>
 <data_path>/multipart/<fragment or candidate UUID>
 <data_path>/node.json
 ```
 
 Multipart 暂存配额按文件实际分配的磁盘块计量，稀疏空洞和已回收区间不继续占用配额；不支持物理块查询的平台保守按文件长度计量。同一文件系统上的暂存、缓存和目标后端写入共享进行中的空间预留，已落盘的部分由文件系统可用空间反映。
 
-API 节点的可丢弃区块读缓存位于 `read-cache/chunks`，与唯一待上传来源分开。独立区块使用物理来源 UUID，Pack 解包成员使用逻辑区块 UUID；写入已核验的明文 `.raw`，也能读取 `.zst` 缓存。重新加载时恢复合格文件并清理该缓存目录中的未完成填充，不扫描或回收唯一来源目录。
+API 节点的可丢弃区块和 raw 读缓存分别位于 `read-cache/chunks` 和 `read-cache/raw`，与唯一待上传来源分开。独立区块和 raw 使用物理来源 UUID，Pack 解包成员使用逻辑区块 UUID；区块写入已核验的明文 `.raw`，也能读取 `.zst` 缓存。重新加载时恢复合格文件并清理该缓存目录中的未完成填充，不扫描或回收唯一来源目录。
 
 本地 storage 的载荷直接从本地后端读取，不进入磁盘读写缓存；为性能可关闭本地 storage 的压缩和加密。S3 storage 才使用 profile cache，损坏缓存可回源重建。待上传的唯一副本受 pin 保护，不能按普通缓存淘汰。
 

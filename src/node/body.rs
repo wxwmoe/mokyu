@@ -105,6 +105,18 @@ impl Reader {
 
     async fn io(&self, prepared: &Prepared, storage: Option<Uuid>) -> Result<Io> {
         let global = self.io.clone().acquire_owned().await?;
+        let local = self.storage_io(prepared, storage).await?;
+        Ok(Io {
+            _global: global,
+            _local: local,
+        })
+    }
+
+    async fn storage_io(
+        &self,
+        prepared: &Prepared,
+        storage: Option<Uuid>,
+    ) -> Result<Option<OwnedSemaphorePermit>> {
         let local = if let Some(id) = storage {
             let backend = prepared.backend(id)?;
             if backend.profile.read_concurrency.is_some() {
@@ -123,10 +135,7 @@ impl Reader {
             None
         };
         prepared.check()?;
-        Ok(Io {
-            _global: global,
-            _local: local,
-        })
+        Ok(local)
     }
 
     async fn get(
@@ -445,17 +454,12 @@ impl Reader {
     async fn raw(
         &self,
         node: &NodeContext,
-        prepared: &Prepared,
+        prepared: &Arc<Prepared>,
         source: &crate::model::raw::RawSource,
     ) -> Result<(RawFile, Io)> {
         source.validate()?;
-        let io = self
-            .io(
-                prepared,
-                (!source.pending_upload).then_some(source.storage_id),
-            )
-            .await?;
-        let (mut file, verify) = if source.pending_upload {
+        let mut io = self.io(prepared, None).await?;
+        if source.pending_upload {
             let path = CacheFile::Raw.path(&node.config.instance.data_path, source.location_id);
             ensure!(
                 tokio::fs::symlink_metadata(&path).await?.is_file(),
@@ -466,25 +470,71 @@ impl Reader {
                 file.metadata().await?.len() == source.size as u64,
                 codec::IntegrityError::Length
             );
-            (RawFile::Local(file), true)
-        } else {
-            ensure!(source.medium == "shared_s3", "invalid node raw medium");
-            let backend = prepared.backend(source.storage_id)?;
-            backend.store.ensure_verified().await?;
-            (
-                RawFile::remote(
-                    backend.store.backend.clone(),
-                    source,
-                    self.gets.clone(),
-                    self.diagnostics.clone(),
-                )
-                .await?,
-                backend.profile.read_integrity == "inline",
-            )
-        };
-        if verify {
+            let mut file = RawFile::Local(file);
             let _cpu = self.cpu.clone().acquire_owned().await?;
             file.verify(source).await?;
+            file.rewind().await?;
+            return Ok((file, io));
+        }
+        ensure!(source.medium == "shared_s3", "invalid node raw medium");
+        let backend = prepared.backend(source.storage_id)?;
+        let verify = backend.profile.read_integrity == "inline";
+        let lock = self.files.raw_lock(source, &backend.profile);
+        let _miss = match &lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        if lock.is_some()
+            && let Some(mut file) = self.files.raw(source).await
+        {
+            let checked = if verify {
+                let _cpu = self.cpu.clone().acquire_owned().await?;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("node-raw-cache-verify").await;
+                file.verify(source).await
+            } else {
+                Ok(source.size as u64)
+            };
+            if checked.is_ok() && file.rewind().await.is_ok() {
+                self.files.hit();
+                return Ok((file, io));
+            }
+            drop(file);
+            self.files.reject(source.location_id).await;
+        }
+        io._local = self.storage_io(prepared, Some(source.storage_id)).await?;
+        backend.store.ensure_verified().await?;
+        let mut file = RawFile::remote(
+            backend.store.backend.clone(),
+            source,
+            self.gets.clone(),
+            self.diagnostics.clone(),
+        )
+        .await?;
+        if verify {
+            let mut cache = match self.files.begin_raw(source, &backend.profile).await {
+                Ok(cache) => cache,
+                Err(error) => {
+                    tracing::debug!(%error, "node raw cache unavailable; reading backend");
+                    None
+                }
+            };
+            let _cpu = self.cpu.clone().acquire_owned().await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("node-raw-before-verify").await;
+            crate::storage::raw::verify_file(&mut file, source, Some(&mut cache)).await?;
+            drop(_cpu);
+            if let Some(cache) = cache {
+                match self.files.finish_raw(cache, source, prepared.clone()).await {
+                    Ok(cached) => {
+                        file = cached;
+                        io._local = None;
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "node raw cache publication failed; reading backend")
+                    }
+                }
+            }
             file.rewind().await?;
         }
         Ok((file, io))
