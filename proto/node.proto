@@ -13,6 +13,19 @@ service NodeSessions {
 service NodeReads {
   rpc OpenRead(ReadRequest) returns (ReadReply);
   rpc ReadWindow(ReadWindowRequest) returns (ReadReply);
+  rpc ReportRead(ReadReportRequest) returns (ReadReportReply);
+}
+
+// Suspicions request durable backend verification; they never prove corruption.
+message ReadReportRequest {
+  Run run = 1;
+  string read_id = 2;
+  string window_id = 3;
+  repeated uint32 segments = 4;
+}
+
+message ReadReportReply {
+  repeated string task_ids = 1;
 }
 
 message Run {

@@ -1,262 +1,84 @@
 use super::App;
-use crate::{content::codec::Chunk, model::raw::RawSource, storage::Storage};
+use crate::{
+    content::{
+        checks::{self, FAILED, SKIPPED, VERIFIED},
+        codec::Chunk,
+    },
+    model::raw::RawSource,
+    storage::Storage,
+};
 use anyhow::Context;
 use bytes::Bytes;
-use md5::{Digest, Md5};
-use std::sync::{
-    Arc, OnceLock, Weak,
-    atomic::{AtomicU8, AtomicU64, Ordering},
-};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-
-const PENDING: u8 = 0;
-const VERIFIED: u8 = 1;
-const SKIPPED: u8 = 2;
-const FAILED: u8 = 3;
-const UNCHECKED: u8 = 4;
-const UNIT: usize = 4096;
-const MEMORY: usize = 8 * 1024 * 1024;
-const JOBS: usize = 4;
-
-pub(crate) struct Evidence(AtomicU8);
-impl Evidence {
-    pub fn verified(&self) -> bool {
-        self.0.load(Ordering::Acquire) == VERIFIED
-    }
-    pub fn cacheable(&self) -> bool {
-        !matches!(self.0.load(Ordering::Acquire), SKIPPED | FAILED)
-    }
-    fn pending(&self) -> bool {
-        self.0.load(Ordering::Acquire) == PENDING
-    }
-}
+pub(crate) use checks::{Evidence, RawCheck};
+use std::sync::{Arc, OnceLock, Weak};
 
 pub(crate) struct Checks {
     storage: Arc<Storage>,
     app: OnceLock<Weak<App>>,
-    memory: Arc<Semaphore>,
-    jobs: Arc<Semaphore>,
-    verified: AtomicU64,
-    failed: AtomicU64,
-    skipped: AtomicU64,
-    unchecked: AtomicU64,
-    off: Arc<Evidence>,
+    work: Arc<checks::Checks>,
 }
-
 enum Target {
     Chunk(Chunk),
     Raw(RawSource),
 }
-struct Payload {
-    bytes: Bytes,
-    _memory: OwnedSemaphorePermit,
-}
-
-pub(crate) struct RawCheck {
-    pub evidence: Arc<Evidence>,
-    checks: Arc<Checks>,
-    sender: Option<mpsc::Sender<Payload>>,
-}
-
-impl RawCheck {
-    pub fn feed(&mut self, bytes: Bytes, retained: usize) {
-        let Some(sender) = &self.sender else {
-            return;
-        };
-        let Some(memory) = self.checks.reserve(retained) else {
-            self.checks.finish(&self.evidence, SKIPPED);
-            self.sender = None;
-            return;
-        };
-        if sender
-            .try_send(Payload {
-                bytes,
-                _memory: memory,
-            })
-            .is_err()
-        {
-            self.checks.finish(&self.evidence, SKIPPED);
-            self.sender = None;
-        }
-    }
-}
-
 impl Checks {
     pub fn new(storage: Arc<Storage>) -> Arc<Self> {
         Arc::new(Self {
+            work: checks::Checks::new(storage.cpu.clone()),
             storage,
             app: OnceLock::new(),
-            memory: Arc::new(Semaphore::new(MEMORY / UNIT)),
-            jobs: Arc::new(Semaphore::new(JOBS)),
-            verified: 0.into(),
-            failed: 0.into(),
-            skipped: 0.into(),
-            unchecked: 0.into(),
-            off: Arc::new(Evidence(UNCHECKED.into())),
         })
     }
     pub fn bind(&self, app: Weak<App>) {
         let _ = self.app.set(app);
     }
-    fn reserve(&self, size: usize) -> Option<OwnedSemaphorePermit> {
-        self.memory
-            .clone()
-            .try_acquire_many_owned(size.max(1).div_ceil(UNIT).try_into().ok()?)
-            .ok()
-    }
-    fn evidence() -> Arc<Evidence> {
-        Arc::new(Evidence(PENDING.into()))
+    pub fn snapshot(&self) -> serde_json::Value {
+        self.work.snapshot()
     }
     pub fn unchecked(&self) -> Arc<Evidence> {
-        self.unchecked.fetch_add(1, Ordering::Relaxed);
-        self.off.clone()
-    }
-    fn finish(&self, evidence: &Evidence, state: u8) {
-        if evidence
-            .0
-            .compare_exchange(PENDING, state, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-        let counter = match state {
-            VERIFIED => &self.verified,
-            FAILED => &self.failed,
-            _ => &self.skipped,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
-    }
-    pub fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({"limit_bytes": MEMORY,"used_bytes":(MEMORY / UNIT-self.memory.available_permits())*UNIT,
-            "active":JOBS-self.jobs.available_permits(),"verified":self.verified.load(Ordering::Relaxed),
-            "failed":self.failed.load(Ordering::Relaxed),"skipped":self.skipped.load(Ordering::Relaxed),
-            "unchecked":self.unchecked.load(Ordering::Relaxed)})
+        self.work.unchecked()
     }
     pub fn chunk(self: &Arc<Self>, chunk: &Chunk, bytes: Bytes, retained: usize) -> Arc<Evidence> {
-        let evidence = Self::evidence();
-        let Some(memory) = self.reserve(retained) else {
-            self.finish(&evidence, SKIPPED);
-            return evidence;
-        };
-        let Ok(job) = self.jobs.clone().try_acquire_owned() else {
-            self.finish(&evidence, SKIPPED);
-            return evidence;
-        };
         let checks = self.clone();
-        let result = evidence.clone();
         let chunk = chunk.clone();
-        tokio::spawn(async move {
-            let _job = job;
-            #[cfg(feature = "fault-injection")]
-            crate::faults::point("read-integrity-check").await;
-            let Ok(cpu) = checks.storage.cpu.clone().try_acquire_owned() else {
-                checks.finish(&result, SKIPPED);
-                return;
-            };
-            let expected = chunk.hash.clone();
-            let verified = tokio::task::spawn_blocking(move || {
-                let _cpu = cpu;
-                let valid = blake3::hash(&bytes).as_bytes().as_slice() == expected;
-                (valid, bytes, memory)
-            })
-            .await;
-            match verified {
-                Ok((true, bytes, _memory)) => {
-                    checks.finish(&result, VERIFIED);
+        self.work.chunk(
+            chunk.hash.clone(),
+            bytes,
+            retained,
+            move |valid, bytes| async move {
+                if valid {
                     checks.storage.fill_read(&chunk, bytes, None);
-                }
-                Ok((false, _, _)) => {
-                    checks.finish(&result, FAILED);
+                } else {
                     checks.failure(Target::Chunk(chunk)).await;
                 }
-                Err(_) => checks.finish(&result, SKIPPED),
-            }
-        });
-        evidence
+            },
+        )
     }
     pub fn raw(self: &Arc<Self>, source: &RawSource) -> RawCheck {
-        let evidence = Self::evidence();
-        let mut audit = RawCheck {
-            evidence: evidence.clone(),
-            checks: self.clone(),
-            sender: None,
-        };
-        let Ok(job) = self.jobs.clone().try_acquire_owned() else {
-            self.finish(&evidence, SKIPPED);
-            return audit;
-        };
-        let (sender, mut receiver) = mpsc::channel::<Payload>(32);
-        audit.sender = Some(sender);
         let checks = self.clone();
         let source = source.clone();
-        tokio::spawn(async move {
-            let _job = job;
-            #[cfg(feature = "fault-injection")]
-            crate::faults::point("read-integrity-check").await;
-            let mut digest = Md5::new();
-            let mut size = 0u64;
-            loop {
-                let payload =
-                    match tokio::time::timeout(std::time::Duration::from_secs(30), receiver.recv())
-                        .await
-                    {
-                        Ok(Some(payload)) => payload,
-                        Ok(None) => break,
-                        Err(_) => {
-                            checks.finish(&evidence, SKIPPED);
-                            return;
-                        }
-                    };
-                if !evidence.pending() {
-                    return;
+        self.work.raw(
+            source.size as u64,
+            source.digest.clone(),
+            move |valid| async move {
+                if !valid {
+                    checks.failure(Target::Raw(source)).await;
                 }
-                let Ok(cpu) = checks.storage.cpu.clone().try_acquire_owned() else {
-                    checks.finish(&evidence, SKIPPED);
-                    return;
-                };
-                size = size.saturating_add(payload.bytes.len() as u64);
-                let result = tokio::task::spawn_blocking(move || {
-                    let _cpu = cpu;
-                    let _memory = payload._memory;
-                    digest.update(&payload.bytes);
-                    digest
-                })
-                .await;
-                let Ok(current) = result else {
-                    checks.finish(&evidence, SKIPPED);
-                    return;
-                };
-                digest = current;
-            }
-            if !evidence.pending() {
-                return;
-            }
-            if size != source.size as u64 {
-                checks.finish(&evidence, SKIPPED);
-                return;
-            }
-            if source.digest.as_deref() == Some(digest.finalize().as_slice()) {
-                checks.finish(&evidence, VERIFIED);
-            } else {
-                checks.finish(&evidence, FAILED);
-                checks.failure(Target::Raw(source)).await;
-            }
-        });
-        audit
+            },
+        )
     }
     pub fn raw_source(self: &Arc<Self>, source: RawSource) {
-        let evidence = Self::evidence();
-        let Ok(job) = self.jobs.clone().try_acquire_owned() else {
-            self.finish(&evidence, SKIPPED);
+        let (evidence, job) = self.work.begin();
+        let Some(job) = job else {
             return;
         };
         let Some(app) = self.app.get().and_then(Weak::upgrade) else {
-            self.finish(&evidence, SKIPPED);
+            self.work.finish(&evidence, SKIPPED);
             return;
         };
         // Leave a request slot free instead of waiting behind foreground readers.
         let Ok(mut slots) = app.slots.clone().try_acquire_many_owned(2) else {
-            self.finish(&evidence, SKIPPED);
+            self.work.finish(&evidence, SKIPPED);
             return;
         };
         let slot = slots.split(1).unwrap();
@@ -286,16 +108,16 @@ impl Checks {
                 .await;
                 drop(_slot);
                 match result {
-                    Ok(Ok(())) => checks.finish(&evidence, VERIFIED),
+                    Ok(Ok(())) => checks.work.finish(&evidence, VERIFIED),
                     Ok(Err(error))
                         if error
                             .downcast_ref::<crate::content::codec::IntegrityError>()
                             .is_some() =>
                     {
-                        checks.finish(&evidence, FAILED);
+                        checks.work.finish(&evidence, FAILED);
                         checks.failure(Target::Raw(source)).await;
                     }
-                    _ => checks.finish(&evidence, SKIPPED),
+                    _ => checks.work.finish(&evidence, SKIPPED),
                 }
             },
         ));

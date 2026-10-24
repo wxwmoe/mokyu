@@ -172,6 +172,7 @@ pub(crate) struct Reads {
     cache: Cache,
     slots: Arc<Semaphore>,
     pub(super) reader: super::body::Reader,
+    pub(super) checks: Arc<crate::content::checks::Checks>,
 }
 
 pub(crate) struct Prepared {
@@ -266,11 +267,13 @@ impl Reads {
             .context("node has not synchronized its budget")?;
         let slots = Arc::new(Semaphore::new(budget.read_concurrency));
         let reader = super::body::Reader::new(&node)?;
+        let checks = crate::content::checks::Checks::new(reader.cpu.clone());
         Ok(Self {
             node,
             cache: Cache::default(),
             slots,
             reader,
+            checks,
         })
     }
 
@@ -380,6 +383,11 @@ impl Reads {
     #[cfg(test)]
     pub(crate) fn backend_gets(&self) -> u64 {
         self.reader.backend_gets()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_checks(&self) -> serde_json::Value {
+        self.checks.snapshot()
     }
 }
 

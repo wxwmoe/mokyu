@@ -102,6 +102,30 @@ fn run(input: Option<wire::Run>) -> Result<session::Run, Status> {
     })
 }
 
+pub(super) fn report(input: wire::ReadReportRequest) -> Result<read::Report, Status> {
+    if input.segments.is_empty() || input.segments.len() > 16 {
+        return Err(invalid());
+    }
+    let mut seen = HashSet::new();
+    if input
+        .segments
+        .iter()
+        .any(|value| *value as usize >= read::MAX_ITEMS || !seen.insert(*value))
+    {
+        return Err(invalid());
+    }
+    Ok(read::Report {
+        run: run(input.run)?,
+        read: super::uuid(&input.read_id)?,
+        window: super::uuid(&input.window_id)?,
+        segments: input
+            .segments
+            .into_iter()
+            .map(|value| value as usize)
+            .collect(),
+    })
+}
+
 fn headers(input: Vec<wire::ReadHeader>, overrides: bool) -> Result<HeaderMap, Status> {
     if input.len() > 32
         || input

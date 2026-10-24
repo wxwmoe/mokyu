@@ -247,6 +247,14 @@ impl Client {
         self.unary(input, "/mokyu.node.v1.NodeReads/OpenRead").await
     }
 
+    pub(crate) async fn report_read(
+        &self,
+        input: wire::ReadReportRequest,
+    ) -> Result<wire::ReadReportReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeReads/ReportRead")
+            .await
+    }
+
     pub(crate) async fn read_window(
         &self,
         input: wire::ReadWindowRequest,

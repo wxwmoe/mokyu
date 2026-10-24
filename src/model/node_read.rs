@@ -17,6 +17,13 @@ pub(crate) const TARGET_BYTES: usize = 1024 * 1024;
 pub(crate) const READ_SECONDS: i64 = 90;
 pub(crate) const READ_LIMIT: i64 = 256;
 
+pub(crate) struct Report {
+    pub(crate) run: Run,
+    pub(crate) read: Uuid,
+    pub(crate) window: Uuid,
+    pub(crate) segments: Vec<usize>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum MaterialType {
     Bucket,

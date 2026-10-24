@@ -181,6 +181,12 @@ fn failure(error: anyhow::Error) -> Status {
                 .insert("mokyu-retryable", "read-capacity".parse().unwrap());
             status
         }
+        _ if error
+            .downcast_ref::<s3s::S3Error>()
+            .is_some_and(|error| error.code() == &s3s::S3ErrorCode::InvalidArgument) =>
+        {
+            Status::invalid_argument("invalid node request")
+        }
         _ => {
             tracing::warn!("node RPC database operation failed");
             Status::unavailable("control operation is unavailable")
@@ -190,6 +196,31 @@ fn failure(error: anyhow::Error) -> Status {
 
 #[tonic::async_trait]
 impl NodeReads for Service {
+    async fn report_read(
+        &self,
+        request: Request<wire::ReadReportRequest>,
+    ) -> Result<Response<wire::ReadReportReply>, Status> {
+        let node = request
+            .extensions()
+            .get::<NodeState>()
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
+        if node.role != "data" {
+            return Err(Status::permission_denied(
+                "read reports require a data node",
+            ));
+        }
+        let input = super::read::report(request.into_inner())?;
+        let tasks = bounded(self.app.cluster().map_err(failure)?.report_read(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(wire::ReadReportReply {
+            task_ids: tasks.into_iter().map(|id| id.to_string()).collect(),
+        }))
+    }
     async fn open_read(
         &self,
         request: Request<wire::ReadRequest>,

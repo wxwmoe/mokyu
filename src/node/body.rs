@@ -36,7 +36,7 @@ const RAW_BUFFER: usize = 256 * 1024;
 
 pub(super) struct Backend {
     store: Store,
-    profile: crate::storage::profile::StorageProfile,
+    pub(super) profile: crate::storage::profile::StorageProfile,
 }
 
 impl Backend {
@@ -586,31 +586,41 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                 let reads = reads.clone(); let current = current.clone();
                 Prefetch(tokio::spawn(async move { reads.window(current, cursor, retired).await }))
             });
-            for segment in value.segments {
+            for (index, segment) in value.segments.into_iter().enumerate() {
                 if let read::Source::Raw { source } = &segment.source {
                     loaded = None;
-                    let (mut file, _io) = current.guard(&reads.node, reads.reader.raw(&reads.node, &current, source)).await?;
+                    let result = current.guard(&reads.node, reads.reader.raw(&reads.node, &current, source)).await;
+                    if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
+                    let (mut file, _io) = result?;
                     current.guard(&reads.node, async { file.seek(std::io::SeekFrom::Start(segment.source_offset as u64)).await?; Ok(()) }).await?;
+                    let mut audit = reads.check_raw(current.clone(), index, source,
+                        segment.source_offset == 0 && segment.length == source.size)?;
                     let mut remaining = segment.length as usize;
                     while remaining > 0 {
-                        let bytes = current.guard(&reads.node, async {
+                        let result = current.guard(&reads.node, async {
                             let memory = current.buffers.clone().acquire_many_owned((RAW_BUFFER * 2 / UNIT) as u32).await?;
                             let mut bytes = vec![0; remaining.min(RAW_BUFFER)];
                             let count = file.read(&mut bytes).await?;
                             ensure!(count > 0, codec::IntegrityError::Length);
                             bytes.truncate(count);
                             Ok(owned(Bytes::from(bytes), memory, &current))
-                        }).await?;
+                        }).await;
+                        if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
+                        let bytes = result?;
                         remaining -= bytes.len();
+                        if let Some(audit) = &mut audit { audit.feed(bytes.clone(), RAW_BUFFER * 2); }
                         yield bytes;
                     }
                 } else {
-                    let bytes = current.guard(&reads.node, async {
+                    let result = current.guard(&reads.node, async {
                         match &segment.source {
                             read::Source::Chunk { .. } | read::Source::Pack { .. } | read::Source::Local { .. } => reads.reader.chunk(&reads.node, current.clone(), &segment.source, keys.clone(), &mut loaded).await,
                             _ => { loaded = None; reads.reader.fragment(&reads.node, current.clone(), &segment.source).await }
                         }
-                    }).await?;
+                    }).await;
+                    if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
+                    let bytes = result?;
+                    reads.check_chunk(current.clone(), index, &segment.source, bytes.clone())?;
                     yield bytes.slice(segment.source_offset as usize..(segment.source_offset + segment.length) as usize);
                 }
                 position += segment.length as u64;

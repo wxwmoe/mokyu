@@ -169,8 +169,9 @@ impl App {
     }
 
     pub(crate) async fn source_batch(&self, execution: Execution, detail: Value) -> Result<bool> {
-        let operation: SourceOperation =
+        let mut operation: SourceOperation =
             serde_json::from_value(detail["source_operation"].clone())?;
+        let verify = detail["operation"] == "verify";
         {
             let _coord = self.coord.lock().await;
             self.source_writable()?;
@@ -182,7 +183,7 @@ impl App {
                 })
                 .await?;
         }
-        if operation.code.is_none() {
+        if operation.code.is_none() || verify {
             let snapshot = &operation.snapshot;
             let profile = self
                 .storage_profiles
@@ -207,7 +208,33 @@ impl App {
             self.storage
                 .verify_source_namespace(&operation.snapshot)
                 .await?;
-            self.storage.inspect_exact(&operation.snapshot).await?;
+            let result = self.storage.inspect_exact(&operation.snapshot).await;
+            if verify {
+                match result {
+                    Ok(_) => {
+                        self.task_control.complete(execution).await?;
+                        return Ok(false);
+                    }
+                    Err(error) => {
+                        let code = error
+                            .downcast_ref::<crate::content::codec::IntegrityError>()
+                            .map(|error| error.code())
+                            .or_else(|| {
+                                matches!(
+                                    error.downcast_ref::<object_store::Error>(),
+                                    Some(object_store::Error::NotFound { .. })
+                                )
+                                .then_some("remote_missing")
+                            });
+                        match code.filter(|code| crate::model::source::quarantine_code(code)) {
+                            Some(code) => operation.code = Some(code.into()),
+                            None => return Err(error),
+                        }
+                    }
+                }
+            } else {
+                result?;
+            }
         }
         #[cfg(feature = "fault-injection")]
         crate::faults::point("source-before-commit").await;

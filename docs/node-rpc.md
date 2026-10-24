@@ -23,6 +23,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeControl/SyncNode` | Unary；提交当前 `run` 和最多五个 `cached` 配置修订，返回运行状态、全部当前修订及未命中配置 |
 | `NodeReads/OpenRead` | Unary；按路由、身份、条件、`include` 与 `cached` 返回对象结果及首个读取窗口，仅允许 data |
 | `NodeReads/ReadWindow` | Unary；沿当前读取游标取下一窗口，校验运行权、读取保护和载荷修订 |
+| `NodeReads/ReportRead` | Unary；报告当前读取窗口内最多 16 个来源段，请求持久后端复核，仅允许 data |
 | `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，收到 Welcome 后发送 Pulse 并等待匹配序号的确认 |
 
 配置分区为 `requests`、`uploads`、`metrics`、`maintenance`、`io`，不含管理 `web` 设置。`cached` 只表示已持有的配置修订，不替代任何身份或租约检查；缺失或修订不符时，在同一 SyncNode 响应内补全。Settings 的 JSON 字节使用对应运行设置的现有结构。
@@ -48,6 +49,10 @@ OpenRead 使用稳定 `operation_id`；同一运行权下重放同一请求会�
 节点读取器保留当前与预取窗口，已消费窗口确认释放后才推进下一次预取。存储连接随对应材料复用，全局读取额度先于单许可额度取得。区块解码复用共享解压池，Pack 使用独立内存预算；正文切片继续持有其内存额度。取消请求会停止预取，已经开始的阻塞解码保留 CPU、内存与读取保护，直至实际工作结束。
 
 HTTP 压缩与 Pack 解码分别使用剩余内存预算的一半，避免编码器占用上游解码所需的额度。压缩繁忙且请求允许 identity 时，在 OpenRead 前选择 identity；请求禁止 identity 时不改变其接受范围。正文流直到压缩结束仍检查运行权和读取空闲期限，运行权失效后不能继续完成响应。
+
+普通读取按存储策略执行 inline、background 或 off 摘要检查；解密认证与本机唯一来源校验仍必须完成。后台摘要与单机共用执行器，最多 4 个任务、8 MiB 保留数据；CPU、队列或内存繁忙时记录为未验证，不将跳过当作成功。完整 raw 响应检查实际返回的全部字节，部分 raw 响应由 worker 复核完整后端来源。
+
+ReportRead 绑定当前运行权、有效读取与窗口，下标只引用该窗口的独立区块、Pack 或已上传 raw。重复报告同一窗口来源复用任务身份；control 只排入持久复核，不凭报告直接隔离。复核任务最多保留 64 个待运行、运行中或暂停项，繁忙时按读取容量退避。worker 先检查后端命名空间和完整内容；健康来源完成检查，确认损坏时才按来源快照隔离。网络错误、命名空间不符和过期快照不能成为隔离证据。
 
 ## 会话和重连
 

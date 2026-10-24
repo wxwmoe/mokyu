@@ -8,6 +8,8 @@ use futures_util::StreamExt;
 use object_store::{ObjectStoreExt, path::Path};
 use std::collections::{BTreeMap, HashMap};
 
+#[path = "checks.rs"]
+mod checks;
 #[path = "http.rs"]
 mod http;
 
