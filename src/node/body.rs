@@ -63,6 +63,7 @@ pub(super) struct Reader {
     pool: Arc<compression::Pool>,
     gets: Arc<AtomicU64>,
     diagnostics: Arc<Diagnostics>,
+    pub(super) files: Arc<super::files::Cache>,
 }
 
 impl Reader {
@@ -72,10 +73,12 @@ impl Reader {
             context_idle_timeout: node.config.instance.compression_idle_timeout.clone(),
             ..Default::default()
         };
+        let packs = Arc::new(Semaphore::new(budget.pack_memory_units as usize));
+        let files = super::files::Cache::new(node, packs.clone())?;
         Ok(Self {
             io: Arc::new(Semaphore::new(budget.storage_read_slots)),
             cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
-            packs: Arc::new(Semaphore::new(budget.pack_memory_units as usize)),
+            packs,
             // Use the other half of the remaining budget; encoders must not block their pack decoder.
             http: Arc::new(Semaphore::new(budget.pack_memory_units as usize)),
             pack_units: budget.pack_memory_units,
@@ -83,6 +86,7 @@ impl Reader {
             pool: Arc::new(compression::Pool::new(config, budget.cpu_jobs)?),
             gets: Arc::new(AtomicU64::new(0)),
             diagnostics: Arc::new(Diagnostics::default()),
+            files,
         })
     }
 
@@ -162,11 +166,13 @@ impl Reader {
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         loaded: &mut Option<Loaded>,
     ) -> Result<Bytes> {
-        let memory = prepared
-            .buffers
-            .clone()
-            .acquire_many_owned((3 * codec::MAX + 16).div_ceil(UNIT) as u32)
-            .await?;
+        let mut memory = Some(
+            prepared
+                .buffers
+                .clone()
+                .acquire_many_owned((3 * codec::MAX + 16).div_ceil(UNIT) as u32)
+                .await?,
+        );
         let (chunk, local) = match source {
             read::Source::Chunk { chunk } | read::Source::Pack { chunk, .. } => (chunk, false),
             read::Source::Local { node: owner, chunk } => {
@@ -183,8 +189,56 @@ impl Reader {
         } else {
             true
         };
+        if !local {
+            match source {
+                read::Source::Pack { pack, .. } => pack.validate(keys.as_ref())?,
+                _ => codec::validate_metadata(chunk, keys.as_ref())?,
+            }
+            let id = super::files::id(source).context("cache identity missing")?;
+            let backend = prepared.backend(source.storage()?.context("source storage missing")?)?;
+            let cached = {
+                let _io = self.io(&prepared, None).await?;
+                self.files.read(id, &backend.profile).await
+            };
+            if let Some((bytes, compressed, pin)) = cached {
+                let cpu = self.cpu.clone().acquire_owned().await?;
+                let pool = self.pool.clone();
+                let chunk = chunk.clone();
+                let held = prepared.clone();
+                let memory = memory.take().unwrap();
+                let decoded = tokio::task::spawn_blocking(move || {
+                    let (_cpu, _pin) = (cpu, pin);
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::blocking("node-cache-decode");
+                    let bytes = codec::decode_cache_read(
+                        &chunk,
+                        Bytes::from(bytes),
+                        compressed,
+                        &pool,
+                        verify,
+                    )?;
+                    Ok::<_, anyhow::Error>(owned(bytes, memory, &held))
+                })
+                .await?;
+                if let Ok(bytes) = decoded {
+                    self.files.hit();
+                    return Ok(bytes);
+                }
+                // Local cache damage must fall back before considering the authoritative source suspect.
+                self.files.reject(id).await;
+            }
+        }
+        let memory = match memory {
+            Some(memory) => memory,
+            None => {
+                prepared
+                    .buffers
+                    .clone()
+                    .acquire_many_owned((3 * codec::MAX + 16).div_ceil(UNIT) as u32)
+                    .await?
+            }
+        };
         if let read::Source::Pack { pack, .. } = source {
-            pack.validate(keys.as_ref())?;
             let current = loaded.as_ref().is_some_and(|value| {
                 value.location == pack.location_id
                     && value.digest == pack.digest

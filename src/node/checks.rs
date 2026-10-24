@@ -21,6 +21,7 @@ impl Reads {
             _ => return Ok(()),
         };
         let backend = prepared.backend(source.storage()?.context("source storage missing")?)?;
+        let cache_id = super::files::id(source).context("cache identity missing")?;
         match backend.profile.read_integrity.as_str() {
             "background" => {
                 let reads = self.clone();
@@ -29,9 +30,12 @@ impl Reads {
                     chunk.hash.clone(),
                     bytes,
                     chunk.raw_size as usize + 16,
-                    move |valid, _| async move {
+                    move |valid, bytes| async move {
                         if !valid {
+                            reads.reader.files.reject(cache_id).await;
                             reads.report(request, index).await;
+                        } else {
+                            reads.reader.files.fill(cache_id, bytes, &backend.profile);
                         }
                     },
                 );
@@ -40,7 +44,7 @@ impl Reads {
             "off" => {
                 prepared.record_check(self.checks.unchecked());
             }
-            _ => {}
+            _ => self.reader.files.fill(cache_id, bytes, &backend.profile),
         }
         Ok(())
     }

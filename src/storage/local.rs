@@ -62,7 +62,7 @@ mod tests {
     fn storage_namespaces_cannot_alias_disposable_cache_files() -> Result<()> {
         let root = std::env::temp_dir().join(format!("mokyu-paths-{}", Uuid::new_v4()));
         std::fs::create_dir_all(root.join("raw"))?;
-        for name in ["raw", "chunks", "multipart", "thumbnails"] {
+        for name in ["raw", "chunks", "read-cache", "multipart", "thumbnails"] {
             assert!(validate_storage_path(&root, &root.join(name)).is_err());
             assert!(validate_storage_path(&root, &root.join(name).join("backend")).is_err());
         }
@@ -230,7 +230,7 @@ pub(crate) fn validate_storage_path(
         Ok(path)
     }
     let storage = resolve(storage)?;
-    for name in ["chunks", "raw", "multipart", "thumbnails"] {
+    for name in ["chunks", "raw", "read-cache", "multipart", "thumbnails"] {
         let reserved = resolve(&data.join(name))?;
         ensure!(
             !storage.starts_with(&reserved) && !reserved.starts_with(&storage),

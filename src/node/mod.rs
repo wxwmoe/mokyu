@@ -2,6 +2,7 @@ mod body;
 mod cache;
 mod checks;
 pub(crate) mod delivery;
+mod files;
 pub(crate) mod reads;
 pub(crate) mod resources;
 mod session;

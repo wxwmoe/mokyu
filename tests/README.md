@@ -34,6 +34,8 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `rpc::client::transport_tests::reads::http::node_http_cache_validates_versions_and_recovers` 复用 HTTP 夹具并启用 16MiB 正文缓存。编排器的 `l1-*` 动作使用独立公开对象，检查三种 HTTP 链路的缓存命中、Range、identity 派生压缩、编码器繁忙时复用压缩体、ACL 拒绝、策略切换、对象替换和 control 恢复。Rust 断言后端 GET、命中计数与预算；`http-compression-finish` 暂停验证取消后不发布候选，`response-cache-body` 暂停验证无读取租约的缓存响应仍受运行权约束。对象和策略改动只作用于隔离夹具。
 
+`rpc::client::transport_tests::reads::http::node_http_file_cache_recovers_and_falls_back` 关闭正文 L1 并限制文件缓存为 16MiB / 128 项。`l2-*` 夹具动作检查 HTTP/1.1、h2c、TLS 代理热读和 Range，损坏本机缓存后的回源与重建、Pack 成员复用、关闭/重新启用缓存、重建读取器后的目录恢复以及 control 退出。`node-cache-decode` 暂停阻塞解码，验证运行权失效时响应及时中断。共享文件缓存普通测试另覆盖 pin、删除失败与实际磁盘计费。
+
 `rpc::client::transport_tests::reads::checks::node_checks_verify_bodies_and_report_owned_sources` 使用读取夹具及专用 worker，编排器处理 `checks-queued`、`checks-run-healthy`、`checks-background`、`checks-range-verified`、`checks-corrupt-raw`、`checks-quarantined-raw`、`checks-corrupt-chunk` 和 `checks-quarantined-chunk`。验证批量报告去重、读取/窗口/角色 fencing、重连重放、健康来源不隔离、后台 raw 摘要、Range 后端复核和加密区块损坏后的持久复核。`check-tasks.json` 提供待核对任务 ID；故障只能修改该夹具的后端对象。
 
 `rpc::client::transport_tests::node_rpc_balances_tls_origins_and_recovers_sessions` 需两个真实 control、各自 TLS 源站和受限夹具编排器；设置 `MOKYU_TEST_NODE_STATE`、`MOKYU_TEST_CONTROL_URL`、`MOKYU_TEST_RPC_ACTIONS` 及测试 CA 的 `SSL_CERT_FILE`。测试在本机临时 UDP 端口提供可变 A 记录，两个地址为 `127.0.0.2/3`，`127.0.0.4` 提供错误域名证书。编排器按 actions 目录的 `change-settings`、`stop-first`、`start-first`、`lose-welcome`、`resume-welcome`、`rotate-node`、`disable-node` 文件执行动作，成功后写同名 `.done` 内容 `ok`；丢 Welcome 使用 `node-session-opened` 故障点。DNS 宽限到期用受控单调时钟推进，其他行为通过真实 DNS/TLS/gRPC 路径验证；不能作为实际 CDN 或跨洲验收结果。

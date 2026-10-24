@@ -47,19 +47,10 @@ impl Storage {
 
     pub(super) async fn cached_raw(&self, source: &RawSource, verify: bool) -> Option<RawFile> {
         let id = source.location_id;
-        let pin = {
-            let mut fifo = self.fifo.lock().await;
-            let entry = fifo.entries.get_mut(&id)?;
-            if entry.file != CacheFile::Raw
-                || !entry.valid
-                || entry.pins.load(Ordering::Relaxed) == usize::MAX
-            {
-                return None;
-            }
-            entry.pins.fetch_add(1, Ordering::Relaxed);
-            entry.frequency = entry.frequency.saturating_add(1).min(3);
-            CachePin(entry.pins.clone())
-        };
+        let (pin, file) = self.file_cache().pin(id).await?;
+        if file != CacheFile::Raw {
+            return None;
+        }
         let result = async {
             let path = CacheFile::Raw.path(&self.disk.root, id);
             ensure!(

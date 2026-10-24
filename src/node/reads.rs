@@ -441,6 +441,11 @@ impl Reads {
     pub(crate) fn body_cache(&self) -> serde_json::Value {
         self.bodies.snapshot()
     }
+
+    #[cfg(test)]
+    pub(crate) async fn file_cache(&self) -> serde_json::Value {
+        self.reader.files.snapshot().await
+    }
 }
 
 #[cfg(test)]

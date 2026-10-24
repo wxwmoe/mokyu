@@ -3,16 +3,22 @@ use super::*;
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and real signed HTTP requests"]
 async fn node_http_reads_use_one_rpc_and_verify_signatures() -> Result<()> {
-    node_http_reads(false).await
+    node_http_reads(false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and real cached HTTP reads"]
 async fn node_http_cache_validates_versions_and_recovers() -> Result<()> {
-    node_http_reads(true).await
+    node_http_reads(true, false).await
 }
 
-async fn node_http_reads(cache: bool) -> Result<()> {
+#[tokio::test]
+#[ignore = "requires isolated controls, TLS origins and disposable node cache files"]
+async fn node_http_file_cache_recovers_and_falls_back() -> Result<()> {
+    node_http_reads(false, true).await
+}
+
+async fn node_http_reads(cache: bool, disk: bool) -> Result<()> {
     use crate::{
         config::node::NodeConfig,
         node::{NodeContext, Phase},
@@ -30,7 +36,7 @@ async fn node_http_reads(cache: bool) -> Result<()> {
     tokio::fs::create_dir(&directory).await?;
     crate::cluster::identity::write_state(&directory.join("node.json"), &identity).await?;
     let config = format!(
-        "[instance]\ncontrol_url='{url}'\ndata_path='{}'\nresponse_cache_size='{}'\n",
+        "[instance]\ncontrol_url='{url}'\ndata_path='{}'\nresponse_cache_size='{}'\ncache_size='16MiB'\ncache_entries=128\n",
         directory.display(),
         if cache { "16MiB" } else { "0B" }
     );
@@ -118,7 +124,9 @@ async fn node_http_reads(cache: bool) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if cache {
+    if disk {
+        file_cache_reads(&reads).await?;
+    } else if cache {
         cache_reads(&reads).await?;
     } else {
         fixture("http-signed").await?;
@@ -166,7 +174,11 @@ async fn node_http_reads(cache: bool) -> Result<()> {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if cache {
+    if disk {
+        let before = reads.backend_gets();
+        fixture("l2-reconnected").await?;
+        assert_eq!(reads.backend_gets(), before);
+    } else if cache {
         let before = reads.backend_gets();
         fixture("l1-reconnected").await?;
         assert_eq!(
@@ -179,7 +191,9 @@ async fn node_http_reads(cache: bool) -> Result<()> {
     }
     fixture("assert-no-reads").await?;
     let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
-    let point = if cache {
+    let point = if disk {
+        "node-cache-decode"
+    } else if cache {
         "response-cache-body"
     } else {
         "http-compression-finish"
@@ -188,7 +202,13 @@ async fn node_http_reads(cache: bool) -> Result<()> {
         .await
         .ok();
     tokio::fs::write(faults.join(point), b"pause").await?;
-    let fenced = tokio::spawn(fixture(if cache { "l1-fenced" } else { "http-fenced" }));
+    let fenced = tokio::spawn(fixture(if disk {
+        "l2-fenced"
+    } else if cache {
+        "l1-fenced"
+    } else {
+        "http-fenced"
+    }));
     tokio::time::timeout(Duration::from_secs(15), async {
         while !faults.join(format!("{point}.hit")).exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -203,6 +223,81 @@ async fn node_http_reads(cache: bool) -> Result<()> {
     web_server.abort();
     let _ = s3_server.await;
     let _ = web_server.await;
+    Ok(())
+}
+
+async fn file_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
+    async fn settled(reads: &crate::node::reads::Reads) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while reads.file_cache().await["fills"].as_u64().unwrap() != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+    fixture("l2-warm").await?;
+    settled(reads).await?;
+    assert!(reads.file_cache().await["entries"].as_u64().unwrap() > 0);
+    let before = reads.backend_gets();
+    fixture("l2-hot").await?;
+    assert_eq!(reads.backend_gets(), before);
+    fixture("l2-corrupt").await?;
+    assert!(
+        reads.backend_gets() > before,
+        "bad disk cache did not fall back to storage"
+    );
+    settled(reads).await?;
+    let before = reads.backend_gets();
+    fixture("l2-repaired").await?;
+    assert_eq!(reads.backend_gets(), before);
+    fixture("l2-pack-warm").await?;
+    settled(reads).await?;
+    let before = reads.backend_gets();
+    fixture("l2-pack-hot").await?;
+    assert_eq!(
+        reads.backend_gets(),
+        before,
+        "cached pack members downloaded the pack again"
+    );
+    fixture("l2-disabled").await?;
+    assert!(reads.backend_gets() > before);
+    let before = reads.backend_gets();
+    fixture("l2-enabled").await?;
+    assert_eq!(reads.backend_gets(), before);
+    settled(reads).await?;
+    let reopened = Arc::new(crate::node::reads::Reads::new(reads.node.clone())?);
+    let prepared = reopened
+        .open(wire::ReadRequest {
+            route: Some(wire::ReadRoute {
+                route: Some(wire::read_route::Route::Bucket(wire::BucketRoute {
+                    name: "read-objects".into(),
+                    key: "l1-hot".into(),
+                    ..Default::default()
+                })),
+            }),
+            method: wire::ReadMethod::Get as i32,
+            surface: wire::ReadSurface::S3 as i32,
+            include: vec![
+                wire::ReadInclude::Object as i32,
+                wire::ReadInclude::Mapping as i32,
+            ],
+            ..Default::default()
+        })
+        .await?;
+    let mut stream = reopened.body(prepared);
+    let mut body = Vec::new();
+    while let Some(bytes) = stream.next().await {
+        body.extend_from_slice(&bytes?);
+    }
+    assert_eq!(body, b"node cache source\n".repeat(4096));
+    assert_eq!(
+        reopened.backend_gets(),
+        0,
+        "reopened cache lost its physical identities"
+    );
+    assert!(reads.file_cache().await["bytes"].as_u64().unwrap() <= 16 * 1024 * 1024);
+    fixture("assert-no-reads").await?;
     Ok(())
 }
 
