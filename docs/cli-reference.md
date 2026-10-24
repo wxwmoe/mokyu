@@ -178,11 +178,15 @@ runtime settings 由所有角色共享。保存成功后响应会标记需要重
 | `cluster status` | 返回 deployment mode、enabled 节点数和 local storage 数 |
 | `cluster mode single/cluster` | 在维护模式且工作已排空时切换数据库部署模式，随后必须重启；准备步骤见[模式切换](cluster-deployment.md#模式切换和恢复) |
 | `cluster nodes` | 列出节点 id、名称、角色、启用状态和最近 heartbeat |
+| `cluster create NAME data/worker` | 在群集模式预创建节点；仅本次返回完整 `node.json`，同名节点拒绝重复创建 |
+| `cluster rotate NAME --confirm` | 保留节点 UUID，递增凭据代次并返回新 `node.json`；旧凭据与会话立即失效，原任务租约被撤销 |
 | `cluster release NAME --confirm` | 禁用节点并将其持有的任务重新排队 |
 
 单容器 CLI 使用部署密钥认证，不依赖 `node.json`。control、worker 和 data 首次启动时直接向 PostgreSQL 注册，凭据保存到 `instance.data_path/node.json`。节点文件丢失时进入 `recovery_required`，管理员先释放旧节点，再重启角色完成注册。控制节点不使用远程 URL 或主备转发；DNS 和角色安排见[群集部署](cluster-deployment.md)。
 
 群集模式下，data/worker 容器的本地 CLI 只支持 `status`；其他管理命令在单容器模式或 control 容器执行。
+
+创建与轮换只支持 data/worker，在 control 执行。将返回 JSON 保存为对应节点的 `instance.data_path/node.json`，限制为仅节点用户可读写；不要复制给其他节点。文件包含 `format=1`、`deployment_id`、`node_id`、`role`、`credential_generation` 和 `credential`；凭据不会在后续列表中返回。文件损坏、旧格式、未知字段或超过 4 KiB 时拒绝加载，需恢复正确文件或由管理员轮换凭据。
 
 ## 后台任务
 

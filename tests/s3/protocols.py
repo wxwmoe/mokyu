@@ -79,6 +79,12 @@ def run():
             reply = control.request('GET', '/api/v1/info')
             check(reply, 200)
             assert json.loads(reply['body'])['product'] == 'Mokyu'
+        with Client(web, host_only=True) as control:
+            check(control.request('GET', '/api/v1/info'), 200)
+        with Client(public, host, host_only=True) as reader:
+            check(reader.request('GET', '/' + quote(key, safe='/'), [('accept-encoding', 'identity')]), 200, data)
+        with Client(endpoint, host_only=True) as reader:
+            check(reader.request('GET', path, signed('GET')), 200, data)
         with Client(public, host) as reader:
             check(reader.request('GET', '/' + quote(key, safe='/'), [('accept-encoding', 'identity')]), 200, data)
             check(reader.request('HEAD', '/' + quote(key, safe='/')), 200, b'')

@@ -1,0 +1,91 @@
+syntax = "proto3";
+package mokyu.node.v1;
+
+service NodeControl {
+  rpc SyncNode(SyncRequest) returns (SyncReply);
+}
+
+// A separate service enforces the smaller stream message limit before decoding.
+service NodeSessions {
+  rpc NodeSession(stream SessionRequest) returns (stream SessionReply);
+}
+
+message Run {
+  string boot_id = 1;
+  string fence = 2;
+}
+
+message Hello {
+  uint32 protocol = 1;
+  string boot_id = 2;
+  string connection_id = 3;
+  uint64 previous_epoch = 4;
+}
+
+message Pulse {
+  uint64 sequence = 1;
+  bool draining = 2;
+}
+
+message SessionRequest {
+  oneof message {
+    Hello hello = 1;
+    Pulse pulse = 2;
+  }
+}
+
+enum Section {
+  SECTION_UNSPECIFIED = 0;
+  REQUESTS = 1;
+  UPLOADS = 2;
+  METRICS = 3;
+  MAINTENANCE = 4;
+  IO = 5;
+}
+
+message Revision {
+  Section section = 1;
+  uint64 revision = 2;
+}
+
+message NodeState {
+  bool maintenance = 1;
+  bool draining = 2;
+  repeated Revision revisions = 3;
+}
+
+message Welcome {
+  Run run = 1;
+  uint64 epoch = 2;
+  uint64 valid_for_ms = 3;
+  NodeState state = 4;
+}
+
+message PulseReply {
+  uint64 sequence = 1;
+  uint64 valid_for_ms = 2;
+  NodeState state = 3;
+}
+
+message SessionReply {
+  oneof message {
+    Welcome welcome = 1;
+    PulseReply pulse = 2;
+  }
+}
+
+message SyncRequest {
+  Run run = 1;
+  repeated Revision cached = 2;
+}
+
+message Settings {
+  Revision version = 1;
+  bytes json = 2;
+}
+
+message SyncReply {
+  uint64 valid_for_ms = 1;
+  NodeState state = 2;
+  repeated Settings settings = 3;
+}

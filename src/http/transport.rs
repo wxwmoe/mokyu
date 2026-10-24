@@ -40,11 +40,22 @@ pub(crate) fn authority<B>(request: &mut Request<B>) -> Result<(), s3s::S3Error>
     if request.version() != Version::HTTP_2 {
         return Ok(());
     }
-    let authority = request
-        .uri()
-        .authority()
-        .ok_or_else(|| s3s::s3_error!(InvalidRequest, "HTTP/2 authority is required"))?;
-    if let Some(host) = request.headers().get(HOST) {
+    let mut hosts = request.headers().get_all(HOST).iter();
+    let host = hosts.next();
+    if hosts.next().is_some() {
+        return Err(s3s::s3_error!(InvalidRequest, "multiple Host fields"));
+    }
+    let Some(authority) = request.uri().authority() else {
+        // A proxy can preserve an origin-form target and carry authority in Host.
+        let host = host
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+            .filter(|value| !value.host().is_empty() && !value.as_str().contains('@'));
+        return host
+            .map(|_| ())
+            .ok_or_else(|| s3s::s3_error!(InvalidRequest, "HTTP authority is required"));
+    };
+    if let Some(host) = host {
         if !host
             .as_bytes()
             .eq_ignore_ascii_case(authority.as_str().as_bytes())
@@ -112,6 +123,16 @@ mod tests {
             .body(())
             .unwrap();
         assert!(authority(&mut missing).is_err());
+        missing
+            .headers_mut()
+            .insert(HOST, "bucket.example:9000".parse().unwrap());
+        authority(&mut missing).unwrap();
+        assert_eq!(missing.uri().to_string(), "/");
+        missing
+            .headers_mut()
+            .append(HOST, "other.example".parse().unwrap());
+        assert!(authority(&mut missing).is_err());
+        missing.headers_mut().remove(HOST);
         missing.version_mut().clone_from(&Version::HTTP_11);
         authority(&mut missing).unwrap();
     }

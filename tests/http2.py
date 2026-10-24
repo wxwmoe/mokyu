@@ -8,10 +8,11 @@ import h2.events
 
 
 class Client:
-    def __init__(self, endpoint, authority=None):
+    def __init__(self, endpoint, authority=None, host_only=False):
         target = urlsplit(endpoint)
         assert target.scheme == 'http' and target.path in ('', '/')
         self.authority = authority or target.netloc
+        self.host_only = host_only
         self.socket = socket.create_connection((target.hostname, target.port or 80), timeout=20)
         self.connection = h2.connection.H2Connection(config=h2.config.H2Configuration(
             client_side=True, header_encoding='utf-8', validate_outbound_headers=False))
@@ -49,7 +50,8 @@ class Client:
     def start(self, method, path, headers=(), end=True):
         stream = self.connection.get_next_available_stream_id()
         self.responses[stream] = dict(headers={}, body=bytearray(), trailers={}, ended=False)
-        values = [(':method', method), (':scheme', 'http'), (':authority', self.authority), (':path', path)]
+        values = [(':method', method), (':scheme', 'http'), (':path', path)]
+        values.append(('host' if self.host_only else ':authority', self.authority))
         values.extend((name.lower(), str(value)) for name, value in headers)
         self.connection.send_headers(stream, values, end_stream=end)
         self.flush()

@@ -39,12 +39,21 @@ async fn postgres_task_claim_recovery() -> Result<()> {
     let first = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let second = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
     let key = codec::Key::new("aes-256-gcm", [7; 32])?;
+    let deployment = super::queries::node_deployment().fetch_one(&pool).await?.0;
     let nodes = [
         NodeState {
+            format: 1,
+            deployment_id: deployment,
+            role: "worker".into(),
+            credential_generation: 1,
             node_id: Uuid::new_v4(),
             credential: "first".into(),
         },
         NodeState {
+            format: 1,
+            deployment_id: deployment,
+            role: "worker".into(),
+            credential_generation: 1,
             node_id: Uuid::new_v4(),
             credential: "second".into(),
         },
@@ -157,6 +166,7 @@ async fn postgres_task_claim_recovery() -> Result<()> {
     let invalid = NodeState {
         node_id: nodes[0].node_id,
         credential: "invalid".into(),
+        ..nodes[0].clone()
     };
     assert!(
         first

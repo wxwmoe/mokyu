@@ -9,10 +9,11 @@ RUN if [ "$WEB_UI" = true ]; then npm run build; else mkdir -p dist; fi
 
 FROM rust:1.96.0-alpine3.23 AS build
 ARG WEB_UI=true
-RUN apk add --no-cache build-base cmake
+RUN apk add --no-cache build-base cmake protobuf-dev
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY migrations ./migrations
+COPY proto ./proto
 COPY src ./src
 COPY --from=web /web/dist ./web/dist
 RUN --mount=type=cache,id=mokyu-alpine-registry,target=/usr/local/cargo/registry \

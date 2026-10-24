@@ -24,7 +24,9 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 | `key_replacements` | `id`、`actor`、`plan`、`result`、`expires_at` | 关联存储换 key 的预览和幂等结果；预览十分钟、完成结果七天，过期由现有清理流程分批回收；不保存密钥材料 |
 | `setup_tokens` | `token_hash`、`created_at`、`expires_at` | Web 首次管理员设置的一次性 token；CLI 初始化不依赖它 |
 | `web_users`、`sessions`、`api_tokens` | 用户、会话和个人 API token 字段 | Web 认证、CSRF、授权修订和会话撤销 |
-| `nodes` | `id`、`name`、`role`、`credential_encrypted`、`enabled`、`status`、`recovery_required`、`lease_expires_at` | control/worker/data 节点注册、凭据和状态；节点直接连接 PostgreSQL |
+| `nodes` | `id`、`name`、`role`、`credential_encrypted`、`credential_generation`、`enabled`、`status`、`recovery_required`、`lease_expires_at` | control/worker/data 身份和状态；凭据代次为非空正 BIGINT，默认 1，轮换递增 |
+| `node_boots` | `node_id`、`credential_generation`、`boot_id`、`created_at`、`retired_at` | `(node_id,boot_id)` 主键，节点级联外键；代次为非空正 BIGINT，两个 ID 为 UUID；创建时间默认数据库时钟，退役时间可空；每代最多 4096 个 boot，轮换后清理旧代历史 |
+| `node_sessions` | `node_id`、`credential_generation`、`boot_id`、`fence`、`epoch`、`connection_id`、`expires_at`、`sequence`、`draining` | 每节点一行，主键/级联节点外键及 `(node_id,boot_id)` 外键；ID 为 UUID，代次与 epoch 为正 BIGINT；sequence 非负默认 0，draining 默认 false；其余均非空且无默认值；到期时间为数据库时钟的 90 秒租约 |
 
 单容器不创建 `nodes` 记录或 `node.json`。群集节点凭据只写入本节点 `node.json`。释放节点时会清除其凭据、回收任务 lease 并允许同名节点重新注册；部署密钥丢失或改变不能作为普通升级处理。
 

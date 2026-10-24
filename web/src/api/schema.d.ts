@@ -585,7 +585,7 @@ export interface paths {
         };
         get: operations["cluster_nodes"];
         put?: never;
-        post?: never;
+        post: operations["cluster_create_node"];
         delete?: never;
         options?: never;
         head?: never;
@@ -634,6 +634,22 @@ export interface paths {
         get: operations["cluster_node_status"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/cluster/nodes/{name}/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cluster_rotate_node"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1975,6 +1991,11 @@ export interface components {
             /** Format: uuid */
             storage_id?: string | null;
         };
+        CreateNodeInput: {
+            name: string;
+            /** @example data */
+            role: string;
+        };
         CreateUser: {
             must_change_password?: boolean;
             password: string;
@@ -2364,6 +2385,18 @@ export interface components {
             sequence: number;
             /** Format: int64 */
             uptime_seconds: number;
+        };
+        NodeState: {
+            credential: string;
+            /** Format: int64 */
+            credential_generation: number;
+            /** Format: uuid */
+            deployment_id: string;
+            /** Format: int32 */
+            format: number;
+            /** Format: uuid */
+            node_id: string;
+            role: string;
         };
         NodeStatus: {
             /** Format: uuid */
@@ -4344,6 +4377,29 @@ export interface operations {
             };
         };
     };
+    cluster_create_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateNodeInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeState"];
+                };
+            };
+        };
+    };
     cluster_node_config: {
         parameters: {
             query?: never;
@@ -4406,6 +4462,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NodeStatus"];
+                };
+            };
+        };
+    };
+    cluster_rotate_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReleaseInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeState"];
                 };
             };
         };

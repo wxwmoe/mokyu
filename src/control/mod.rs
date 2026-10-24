@@ -58,7 +58,7 @@ pub fn router(app: Arc<App>) -> Router {
         .expect("validated content security policy");
     let (api, schema) = contract::routes();
     let schema = serde_json::to_value(schema).expect("serializable API schema");
-    Router::new()
+    let admin = Router::new()
         .merge(api)
         .fallback(assets::serve)
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -80,5 +80,17 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             (app.clone(), 2usize),
             observe,
-        ))
+        ));
+    if app.role != "control" {
+        return admin;
+    }
+    let rpc = crate::rpc::server::router(app);
+    Router::new().fallback_service(tower::service_fn(move |request: axum::extract::Request| {
+        let is_rpc = request.uri().path().starts_with("/mokyu.node.")
+            || request
+                .headers()
+                .get("content-type")
+                .is_some_and(|value| value.as_bytes().starts_with(b"application/grpc"));
+        tower::ServiceExt::oneshot(if is_rpc { rpc.clone() } else { admin.clone() }, request)
+    }))
 }

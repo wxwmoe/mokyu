@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0071.
+-- Generated from the complete postgres migration chain through 0072.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -834,6 +834,15 @@ CREATE TABLE public.multipart_files (
     CONSTRAINT multipart_files_state_check CHECK ((state = ANY (ARRAY['open'::text, 'sealed'::text, 'deleting'::text])))
 );
 
+CREATE TABLE public.node_boots (
+    node_id uuid NOT NULL,
+    credential_generation bigint NOT NULL,
+    boot_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    retired_at timestamp with time zone,
+    CONSTRAINT node_boots_credential_generation_check CHECK ((credential_generation > 0))
+);
+
 CREATE TABLE public.node_reports (
     node_id uuid NOT NULL,
     boot_id uuid NOT NULL,
@@ -860,6 +869,21 @@ CREATE TABLE public.node_runtime_samples (
     CONSTRAINT node_runtime_samples_uptime_seconds_check CHECK ((uptime_seconds >= 0))
 );
 
+CREATE TABLE public.node_sessions (
+    node_id uuid NOT NULL,
+    credential_generation bigint NOT NULL,
+    boot_id uuid NOT NULL,
+    fence uuid NOT NULL,
+    epoch bigint NOT NULL,
+    connection_id uuid NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    sequence bigint DEFAULT 0 NOT NULL,
+    draining boolean DEFAULT false NOT NULL,
+    CONSTRAINT node_sessions_credential_generation_check CHECK ((credential_generation > 0)),
+    CONSTRAINT node_sessions_epoch_check CHECK ((epoch > 0)),
+    CONSTRAINT node_sessions_sequence_check CHECK ((sequence >= 0))
+);
+
 CREATE TABLE public.nodes (
     id uuid DEFAULT uuidv7() NOT NULL,
     name text NOT NULL,
@@ -872,6 +896,8 @@ CREATE TABLE public.nodes (
     status text DEFAULT 'registered'::text NOT NULL,
     recovery_required boolean DEFAULT false NOT NULL,
     lease_expires_at timestamp with time zone,
+    credential_generation bigint DEFAULT 1 NOT NULL,
+    CONSTRAINT nodes_credential_generation_check CHECK ((credential_generation > 0)),
     CONSTRAINT nodes_name_check CHECK (((octet_length(name) >= 1) AND (octet_length(name) <= 128))),
     CONSTRAINT nodes_role_check CHECK ((role = ANY (ARRAY['control'::text, 'worker'::text, 'data'::text])))
 );
@@ -1702,11 +1728,17 @@ ALTER TABLE ONLY public.multipart_files
 ALTER TABLE ONLY public.multipart_files
     ADD CONSTRAINT multipart_files_source_id_key UNIQUE (source_id);
 
+ALTER TABLE ONLY public.node_boots
+    ADD CONSTRAINT node_boots_pkey PRIMARY KEY (node_id, boot_id);
+
 ALTER TABLE ONLY public.node_reports
     ADD CONSTRAINT node_reports_pkey PRIMARY KEY (node_id);
 
 ALTER TABLE ONLY public.node_runtime_samples
     ADD CONSTRAINT node_runtime_samples_pkey PRIMARY KEY (node_id, boot_id, sequence);
+
+ALTER TABLE ONLY public.node_sessions
+    ADD CONSTRAINT node_sessions_pkey PRIMARY KEY (node_id);
 
 ALTER TABLE ONLY public.nodes
     ADD CONSTRAINT nodes_name_key UNIQUE (name);
@@ -2270,11 +2302,20 @@ ALTER TABLE ONLY public.multipart_files
 ALTER TABLE ONLY public.multipart_files
     ADD CONSTRAINT multipart_files_upload_id_fkey FOREIGN KEY (upload_id) REFERENCES public.uploads(id) ON DELETE SET NULL;
 
+ALTER TABLE ONLY public.node_boots
+    ADD CONSTRAINT node_boots_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY public.node_reports
     ADD CONSTRAINT node_reports_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_runtime_samples
     ADD CONSTRAINT node_runtime_samples_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_sessions
+    ADD CONSTRAINT node_sessions_node_id_boot_id_fkey FOREIGN KEY (node_id, boot_id) REFERENCES public.node_boots(node_id, boot_id);
+
+ALTER TABLE ONLY public.node_sessions
+    ADD CONSTRAINT node_sessions_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.nonce_counters
     ADD CONSTRAINT nonce_counters_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);

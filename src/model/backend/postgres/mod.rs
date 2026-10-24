@@ -114,6 +114,10 @@ mod bootstrap_tests;
 mod node_report_tests;
 
 #[cfg(test)]
+#[path = "../../../../tests/recovery/node_sessions.rs"]
+mod node_session_tests;
+
+#[cfg(test)]
 #[path = "../../../../tests/recovery/node_runtime.rs"]
 mod node_runtime_tests;
 

@@ -10,11 +10,12 @@ RUN if [ "$WEB_UI" = true ]; then npm run build; else mkdir -p dist; fi
 FROM rust:1.96.0-bookworm AS build
 ARG WEB_UI=true
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update && apt-get install -y --no-install-recommends cmake \
+    && apt-get update && apt-get install -y --no-install-recommends cmake protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY migrations ./migrations
+COPY proto ./proto
 COPY src ./src
 COPY --from=web /web/dist ./web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

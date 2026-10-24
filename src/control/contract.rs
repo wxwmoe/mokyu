@@ -104,7 +104,8 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
             super::managed_keys::replacement_apply
         ))
         .routes(routes!(super::cluster::status, super::cluster::mode))
-        .routes(routes!(super::cluster::nodes))
+        .routes(routes!(super::cluster::nodes, super::cluster::create_node))
+        .routes(routes!(super::cluster::rotate_node))
         .routes(routes!(super::cluster::settings))
         .routes(routes!(super::cluster::node_status))
         .routes(routes!(super::cluster::node_config))

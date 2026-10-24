@@ -454,6 +454,16 @@ pub enum Keys {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Cluster {
     Status,
+    Create {
+        name: String,
+        #[arg(value_parser = ["data", "worker"])]
+        role: String,
+    },
+    Rotate {
+        name: String,
+        #[arg(long)]
+        confirm: bool,
+    },
     Mode {
         #[arg(value_parser = ["single", "cluster"])]
         mode: String,

@@ -27,6 +27,7 @@ pub(crate) mod quota;
 pub(crate) mod raw;
 pub(crate) mod recovery;
 pub(crate) mod runtime;
+pub(crate) mod session;
 pub(crate) mod settings;
 pub(crate) mod source;
 pub(crate) mod storage;

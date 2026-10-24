@@ -235,3 +235,52 @@ pub(crate) async fn recover(
     crate::cluster::recover(&app).await?;
     Ok(Json(app.cluster()?.status().await?))
 }
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateNodeInput {
+    name: String,
+    #[schema(example = "data", pattern = "^(data|worker)$")]
+    role: String,
+}
+
+#[utoipa::path(post, operation_id = "cluster_create_node", path = "/api/v1/cluster/nodes", request_body = CreateNodeInput, responses((status = 200, body = crate::cluster::NodeState)))]
+pub(crate) async fn create_node(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Json(input): Json<CreateNodeInput>,
+) -> Result<Json<crate::cluster::NodeState>, HttpError> {
+    admin(&actor, &app).await?;
+    Ok(Json(
+        app.cluster()?
+            .provision_node(
+                &actor.principal,
+                &input.name,
+                &input.role,
+                &app.secrets.credential_key,
+            )
+            .await?,
+    ))
+}
+
+#[utoipa::path(post, operation_id = "cluster_rotate_node", path = "/api/v1/cluster/nodes/{name}/credentials", params(("name" = String, Path)), request_body = ReleaseInput, responses((status = 200, body = crate::cluster::NodeState)))]
+pub(crate) async fn rotate_node(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(name): Path<String>,
+    Json(input): Json<ReleaseInput>,
+) -> Result<Json<crate::cluster::NodeState>, HttpError> {
+    admin(&actor, &app).await?;
+    if !input.confirm {
+        return Err(s3s::s3_error!(
+            InvalidArgument,
+            "node credential rotation requires confirm=true"
+        )
+        .into());
+    }
+    Ok(Json(
+        app.cluster()?
+            .rotate_node(&actor.principal, &name, &app.secrets.credential_key)
+            .await?,
+    ))
+}

@@ -14,6 +14,8 @@
 
 构建会安装并编译 Vue 静态资源，再嵌入 Rust 二进制；运行不需要 Node.js。`--api-only` 省略内嵌前端，标签为 `:api` / 版本号加 `-api`；与 `--alpine` 组合使用 `:alpine-api` / 版本号加 `-alpine-api`。仓库不包含构建后的镜像。
 
+Rust 构建还需要 `protoc`，由 `proto/node.proto` 生成 gRPC 类型。两个 Dockerfile 均在构建层安装；运行镜像不需要 Protocol Buffers 编译器。
+
 可压缩的内嵌资源同时保存 gzip、Brotli 和 Zstandard 构建产物，按 `Accept-Encoding` 的 q 值选择，同权重时依次优先 zstd、br、gzip、identity。未提供或为空时返回原始表示；原始 ETag 为强标签，压缩变体使用同值弱标签，并发送 `Vary: Accept-Encoding`。公开 OpenAPI JSON 使用有界流式压缩，其余管理 API 保持原有响应与缓存策略。
 
 公共 Web 和匿名 S3 对象也可流式协商这三种编码，签名请求保持原始表示；收益、ETag、Range 和条件请求规则见 [S3 兼容性](s3-compatibility.md#公共响应压缩)。编码与普通磁盘缓存填充共用现有工作内存预算，额度不足时优先保证原始读写。压缩收益通过有界内存队列回写，重启或停机可丢弃待学习统计；`cli status` 的 `http_compression` 展示 pending/written/dropped/failed 计数。

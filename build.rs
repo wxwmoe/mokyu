@@ -5,6 +5,10 @@ use std::{
 };
 
 fn main() {
+    println!("cargo:rerun-if-changed=proto");
+    tonic_prost_build::configure()
+        .compile_protos(&["proto/node.proto"], &["proto"])
+        .expect("compile node protocol");
     println!("cargo:rerun-if-changed=migrations");
     println!("cargo:rerun-if-env-changed=MOKYU_WEB_DIR");
     if env::var_os("CARGO_FEATURE_WEB_UI").is_none() {

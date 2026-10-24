@@ -197,6 +197,19 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             Ok(status)
         }
         Command::Cluster(command) => match command {
+            Cluster::Create { name, role } => Ok(serde_json::to_value(
+                app.cluster()?
+                    .provision_node(principal, &name, &role, &app.secrets.credential_key)
+                    .await?,
+            )?),
+            Cluster::Rotate { name, confirm } => {
+                ensure!(confirm, "node credential rotation requires --confirm");
+                Ok(serde_json::to_value(
+                    app.cluster()?
+                        .rotate_node(principal, &name, &app.secrets.credential_key)
+                        .await?,
+                )?)
+            }
             Cluster::Status => Ok(serde_json::to_value(
                 crate::control::cluster::overview(app).await?,
             )?),

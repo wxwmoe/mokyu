@@ -484,11 +484,6 @@ pub(super) fn defer_pack_maintenance(id: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE pack_maintenance SET next_check_at=(SELECT now()+(left(sp.pack_reuse_interval,-1)::bigint*CASE right(sp.pack_reuse_interval,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*interval '1 second' FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storage_profiles sp ON sp.storage_id=b.storage_id WHERE s.id=pack_maintenance.stream_id) WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=$1)").bind(id)
 }
 
-pub(super) fn lock_node(id: Uuid) -> Rows<'static, (String, bool, Option<Vec<u8>>)> {
-    sqlx::query_as("SELECT role,enabled,credential_encrypted FROM nodes WHERE id=$1 FOR UPDATE")
-        .bind(id)
-}
-
 pub(super) fn lock_stale_tasks() -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
         "SELECT id FROM tasks WHERE state='running' AND lease_node_id IS NOT NULL AND (lease_expires_at IS NULL OR lease_expires_at<now()) FOR UPDATE",
@@ -7433,6 +7428,52 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn provision_node(
+        &self,
+        principal: &Principal,
+        name: &str,
+        role: &str,
+        key: &crate::content::codec::Key,
+    ) -> Result<crate::cluster::NodeState> {
+        transactions::provision_node(&self.pool, principal, name, Some(role), key).await
+    }
+    async fn rotate_node(
+        &self,
+        principal: &Principal,
+        name: &str,
+        key: &crate::content::codec::Key,
+    ) -> Result<crate::cluster::NodeState> {
+        transactions::provision_node(&self.pool, principal, name, None, key).await
+    }
+    async fn open_session(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::session::Open,
+    ) -> Result<crate::model::session::Snapshot> {
+        transactions::open_node_session(&self.pool, node, key, input).await
+    }
+    async fn sync_node(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+    ) -> Result<crate::model::session::Snapshot> {
+        transactions::sync_node(&self.pool, node, key, run).await
+    }
+    async fn pulse_session(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+        epoch: i64,
+        sequence: i64,
+        draining: bool,
+    ) -> Result<crate::model::session::Snapshot> {
+        transactions::pulse_node_session(&self.pool, node, key, run, epoch, sequence, draining)
+            .await
+    }
+
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
         Ok(remote_upload(upload).fetch_optional(&self.pool).await?)
     }
@@ -7848,51 +7889,7 @@ impl ClusterStore for Backend {
         credential: String,
         key: &crate::content::codec::Key,
     ) -> Result<Option<crate::cluster::NodeState>> {
-        let existing: Option<(Uuid, bool, String)> =
-            sqlx::query_as("SELECT id,enabled,role FROM nodes WHERE name=$1")
-                .bind(&name)
-                .fetch_optional(&self.pool)
-                .await?;
-        let node_id = if let Some((node_id, enabled, registered_role)) = existing {
-            if enabled || registered_role != role {
-                sqlx::query("UPDATE nodes SET status='recovery_required',recovery_required=true,updated_at=now() WHERE id=$1")
-                    .bind(node_id)
-                    .execute(&self.pool)
-                    .await?;
-                return Ok(None);
-            }
-            let encrypted = crate::content::codec::protect(
-                credential.as_bytes(),
-                key,
-                crate::cluster::credential_binding(node_id).as_bytes(),
-            )?;
-            sqlx::query("UPDATE nodes SET credential_encrypted=$2,enabled=true,status='registered',recovery_required=false,last_seen_at=now(),updated_at=now() WHERE id=$1")
-                .bind(node_id)
-                .bind(encrypted)
-                .execute(&self.pool)
-                .await?;
-            node_id
-        } else {
-            let node_id = Uuid::new_v4();
-            let encrypted = crate::content::codec::protect(
-                credential.as_bytes(),
-                key,
-                crate::cluster::credential_binding(node_id).as_bytes(),
-            )?;
-            sqlx::query("INSERT INTO nodes(id,name,role,credential_encrypted,last_seen_at) VALUES($1,$2,$3,$4,now())")
-                .bind(node_id)
-                .bind(name)
-                .bind(role)
-                .bind(encrypted)
-                .execute(&self.pool)
-                .await?;
-            node_id
-        };
-        let state = crate::cluster::NodeState {
-            node_id,
-            credential,
-        };
-        Ok(Some(state))
+        transactions::register_node(&self.pool, name, role, credential, key).await
     }
 }
 pub(super) fn deployment_mode() -> Scalar<'static, String> {
@@ -9983,4 +9980,125 @@ pub(super) fn release_memory_processing(boot: Uuid) -> Statement<'static> {
 
 pub(super) fn quarantine_memory_raw(boot: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE raw_sources SET pending_upload=FALSE,quarantine_code='remote_missing',quarantined_at=clock_timestamp(),revision=revision+1 WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL AND medium='memory' AND boot_id<>$1 AND quarantine_code IS NULL").bind(boot)
+}
+
+#[derive(sqlx::FromRow)]
+pub(super) struct RegisteredNode {
+    pub role: String,
+    pub enabled: bool,
+    pub credential_encrypted: Option<Vec<u8>>,
+    pub credential_generation: i64,
+    pub deployment_id: Uuid,
+    pub deployment_mode: String,
+}
+
+pub(super) fn registered_node(id: Uuid, exclusive: bool) -> Rows<'static, RegisteredNode> {
+    let sql = if exclusive {
+        "SELECT n.role,n.enabled,n.credential_encrypted,n.credential_generation,m.deployment_id,m.deployment_mode FROM nodes n CROSS JOIN mokyu_meta m WHERE n.id=$1 AND m.singleton FOR UPDATE OF n"
+    } else {
+        "SELECT n.role,n.enabled,n.credential_encrypted,n.credential_generation,m.deployment_id,m.deployment_mode FROM nodes n CROSS JOIN mokyu_meta m WHERE n.id=$1 AND m.singleton FOR SHARE OF n"
+    };
+    sqlx::query_as(sql).bind(id)
+}
+
+pub(super) fn node_registration_lock(name: &str) -> Statement<'_> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,724))").bind(name)
+}
+
+pub(super) fn node_registration(name: &str) -> Rows<'_, (Uuid, String, bool, i64)> {
+    sqlx::query_as(
+        "SELECT id,role,enabled,credential_generation FROM nodes WHERE name=$1 FOR UPDATE",
+    )
+    .bind(name)
+}
+
+pub(super) fn node_deployment() -> Rows<'static, (Uuid, String)> {
+    sqlx::query_as("SELECT deployment_id,deployment_mode FROM mokyu_meta WHERE singleton")
+}
+
+pub(super) fn new_node_id() -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT uuidv7()")
+}
+
+pub(super) fn save_node_identity<'q>(
+    state: &'q crate::cluster::NodeState,
+    name: &'q str,
+    encrypted: &'q [u8],
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO nodes(id,name,role,credential_encrypted,credential_generation) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET credential_encrypted=EXCLUDED.credential_encrypted,credential_generation=EXCLUDED.credential_generation,enabled=true,status='registered',recovery_required=false,last_seen_at=NULL,updated_at=now()")
+        .bind(state.node_id).bind(name).bind(&state.role).bind(encrypted).bind(state.credential_generation)
+}
+
+pub(super) fn node_registration_conflict(node: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE nodes SET status='recovery_required',recovery_required=true,updated_at=now() WHERE id=$1").bind(node)
+}
+
+pub(super) fn clear_node_session(node: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM node_sessions WHERE node_id=$1").bind(node)
+}
+
+pub(super) fn clear_node_boots(node: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM node_boots WHERE node_id=$1").bind(node)
+}
+
+pub(super) fn node_session(
+    node: Uuid,
+    exclusive: bool,
+) -> Rows<'static, crate::model::session::Session> {
+    let sql = if exclusive {
+        "SELECT credential_generation,boot_id,fence,epoch,connection_id,expires_at,sequence,draining FROM node_sessions WHERE node_id=$1 FOR UPDATE"
+    } else {
+        "SELECT credential_generation,boot_id,fence,epoch,connection_id,expires_at,sequence,draining FROM node_sessions WHERE node_id=$1 FOR SHARE"
+    };
+    sqlx::query_as(sql).bind(node)
+}
+
+pub(super) fn node_clock() -> Scalar<'static, DateTime<Utc>> {
+    sqlx::query_scalar("SELECT clock_timestamp()")
+}
+
+pub(super) fn node_boot_known(node: Uuid, boot: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_boots WHERE node_id=$1 AND boot_id=$2)")
+        .bind(node)
+        .bind(boot)
+}
+
+pub(super) fn node_boot_count(node: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT count(*) FROM node_boots WHERE node_id=$1").bind(node)
+}
+
+pub(super) fn retire_node_boots(node: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE node_boots SET retired_at=clock_timestamp() WHERE node_id=$1 AND retired_at IS NULL").bind(node)
+}
+
+pub(super) fn insert_node_boot(node: Uuid, generation: i64, boot: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO node_boots(node_id,credential_generation,boot_id) VALUES($1,$2,$3)")
+        .bind(node)
+        .bind(generation)
+        .bind(boot)
+}
+
+pub(super) fn save_node_session(
+    node: Uuid,
+    generation: i64,
+    run: crate::model::session::Run,
+    epoch: i64,
+    connection: Uuid,
+    draining: bool,
+) -> Statement<'static> {
+    sqlx::query("INSERT INTO node_sessions(node_id,credential_generation,boot_id,fence,epoch,connection_id,expires_at,draining) VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()+$7*interval '1 second',$8) ON CONFLICT(node_id) DO UPDATE SET credential_generation=EXCLUDED.credential_generation,boot_id=EXCLUDED.boot_id,fence=EXCLUDED.fence,epoch=EXCLUDED.epoch,connection_id=EXCLUDED.connection_id,expires_at=EXCLUDED.expires_at,sequence=0,draining=EXCLUDED.draining")
+        .bind(node).bind(generation).bind(run.boot).bind(run.fence).bind(epoch).bind(connection).bind(crate::model::session::LEASE_SECONDS).bind(draining)
+}
+
+pub(super) fn pulse_node_session(node: Uuid, sequence: i64, draining: bool) -> Statement<'static> {
+    sqlx::query("UPDATE node_sessions SET sequence=$2,draining=draining OR $3,expires_at=clock_timestamp()+$4*interval '1 second' WHERE node_id=$1")
+        .bind(node).bind(sequence).bind(draining).bind(crate::model::session::LEASE_SECONDS)
+}
+
+pub(super) fn node_session_status(node: Uuid) -> Rows<'static, (Uuid, Uuid, i64, i64, bool, bool)> {
+    sqlx::query_as("SELECT s.boot_id,s.fence,s.epoch,GREATEST(0,(extract(epoch FROM (s.expires_at-clock_timestamp()))*1000)::bigint),m.maintenance,s.draining FROM node_sessions s CROSS JOIN mokyu_meta m WHERE s.node_id=$1 AND m.singleton AND m.deployment_mode='cluster'").bind(node)
+}
+
+pub(super) fn node_settings() -> Rows<'static, (String, Value, i64)> {
+    sqlx::query_as("SELECT section,value,revision FROM runtime_settings WHERE section=ANY($1) ORDER BY section").bind(crate::model::session::SECTIONS)
 }

@@ -4,7 +4,7 @@
 
 ## Rust 检查
 
-在构建容器的源码目录运行：
+构建容器须安装 `protoc`，在源码目录运行：
 
 ```sh
 cargo fmt --all -- --check
@@ -21,6 +21,10 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 ```
 
 每个原生契约覆盖对应接口、事务和故障恢复；原生 SQL 仅用于构造或检查本后端状态。不要用同一配置批量并发执行所有 ignored 测试，也不要把过滤后执行零个测试视为通过。曾经执行并写入数据的契约，应更换空库后重跑。
+
+`postgres_node_sessions_recover_across_controls_and_fence_old_runs` 使用两个独立连接池检查身份代次、会话接管、并发同步与心跳、过期 fencing、退役 boot、历史上限、轮换和禁用。
+
+`rpc::client::transport_tests::node_rpc_balances_tls_origins_and_recovers_sessions` 需两个真实 control、各自 TLS 源站和受限夹具编排器；设置 `MOKYU_TEST_NODE_STATE`、`MOKYU_TEST_CONTROL_URL`、`MOKYU_TEST_RPC_ACTIONS` 及测试 CA 的 `SSL_CERT_FILE`。测试在本机临时 UDP 端口提供可变 A 记录，两个地址为 `127.0.0.2/3`，`127.0.0.4` 提供错误域名证书。编排器按 actions 目录的 `change-settings`、`stop-first`、`start-first`、`lose-welcome`、`resume-welcome`、`rotate-node`、`disable-node` 文件执行动作，成功后写同名 `.done` 内容 `ok`；丢 Welcome 使用 `node-session-opened` 故障点。DNS 宽限到期用受控单调时钟推进，其他行为通过真实 DNS/TLS/gRPC 路径验证；不能作为实际 CDN 或跨洲验收结果。
 
 `sqlite_synchronous_contract` 验证默认 FULL、保存后重启生效、FULL/NORMAL/OFF 的写池与所有读连接、连接重建、事务回滚、单连接模式和错误设置拒绝。初始化/迁移在测试构建中断言 FULL。`sqlite_nonce_durability_contract` 检查 NORMAL 预留强制 FULL 后连接恢复、取消/提交边界、并发号段不重叠、OFF 保存与首个预留互斥、已有预留禁止 OFF 和启动校验；模拟进程退出不能代替断电持久性验证。
 

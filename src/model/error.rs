@@ -16,6 +16,11 @@ pub(crate) enum Error {
     BucketNotDrained,
     ObjectAlreadyExists,
     SourceUnavailable,
+    NodeAuthentication,
+    NodeInactive,
+    NodeConflict,
+    NodeExpired,
+    NodeLimit,
 }
 
 impl fmt::Display for Error {
@@ -37,6 +42,11 @@ impl fmt::Display for Error {
             Self::BucketNotDrained => "bucket must be paused and drained before transfer",
             Self::ObjectAlreadyExists => "object already exists",
             Self::SourceUnavailable => "no eligible durable source is available",
+            Self::NodeAuthentication => "invalid node identity or credential",
+            Self::NodeInactive => "node is disabled or deployment is not in cluster mode",
+            Self::NodeConflict => "node is owned by another boot or session",
+            Self::NodeExpired => "node run is expired or retired",
+            Self::NodeLimit => "node boot history is full; rotate its credential",
         })
     }
 }
@@ -65,6 +75,11 @@ mod tests {
             Error::BucketNotDrained,
             Error::ObjectAlreadyExists,
             Error::SourceUnavailable,
+            Error::NodeAuthentication,
+            Error::NodeInactive,
+            Error::NodeConflict,
+            Error::NodeExpired,
+            Error::NodeLimit,
         ] {
             let source = std::io::Error::other("original database failure");
             let error = anyhow::Error::from(source)
