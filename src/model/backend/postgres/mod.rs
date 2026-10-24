@@ -118,6 +118,10 @@ mod node_report_tests;
 mod node_session_tests;
 
 #[cfg(test)]
+#[path = "../../../../tests/recovery/node_reads.rs"]
+mod node_read_tests;
+
+#[cfg(test)]
 #[path = "../../../../tests/recovery/node_runtime.rs"]
 mod node_runtime_tests;
 

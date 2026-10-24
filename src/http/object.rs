@@ -100,7 +100,7 @@ fn available(stream: &StoredStream, metadata: &Metadata, encoding: Encoding) -> 
             || mime.ends_with("+xml"))
 }
 
-fn conditions(stream: &StoredStream, request: &HeaderMap, etag: &str) -> Result<bool> {
+pub(crate) fn conditions(stream: &StoredStream, request: &HeaderMap, etag: &str) -> Result<bool> {
     let date = |name: header::HeaderName| {
         request
             .get(name)
@@ -120,6 +120,33 @@ fn conditions(stream: &StoredStream, request: &HeaderMap, etag: &str) -> Result<
     } else {
         date(header::IF_MODIFIED_SINCE)
             .is_some_and(|date| gateway::stamp(stream.touched_at) <= date)
+    })
+}
+
+pub(crate) fn representation(
+    stream: &StoredStream,
+    metadata: &Metadata,
+    request: &HeaderMap,
+    headers: &HeaderMap,
+    checksum: bool,
+    force_identity: bool,
+) -> Option<Encoding> {
+    let accept = AcceptEncoding::new(request);
+    let transform = !checksum
+        && !compression::no_transform(request)
+        && !compression::no_transform(headers)
+        && !compression::no_transform(&metadata_headers(metadata).ok()?)
+        && !headers.contains_key(header::CONTENT_ENCODING)
+        && metadata.content_encoding.is_none();
+    let prefer_identity = accept.identity()
+        && (request.contains_key(header::IF_MATCH)
+            || (request.contains_key(header::RANGE) && gateway::if_range_matches(stream, request)));
+    accept.select(|encoding| {
+        encoding == Encoding::Identity
+            || (!force_identity
+                && !prefer_identity
+                && transform
+                && available(stream, metadata, encoding))
     })
 }
 
@@ -273,26 +300,18 @@ pub(crate) async fn read(
         let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
         let mut headers = metadata_headers(&metadata)?;
         let original_cacheable = cacheable(&headers);
-        let original_transform = !compression::no_transform(&headers);
         headers.extend(overrides.clone());
         compression::vary(&mut headers, "Accept-Encoding");
-        let transform = original_transform
-            && !checksum
-            && !compression::no_transform(request)
-            && !compression::no_transform(&headers)
-            && !headers.contains_key(header::CONTENT_ENCODING)
-            && metadata.content_encoding.is_none();
         let range_requested =
             request.contains_key(header::RANGE) && gateway::if_range_matches(&stream, request);
-        let prefer_identity =
-            accept.identity() && (request.contains_key(header::IF_MATCH) || range_requested);
-        let Some(encoding) = accept.select(|encoding| {
-            encoding == Encoding::Identity
-                || (!force_identity
-                    && !prefer_identity
-                    && transform
-                    && available(&stream, &metadata, encoding))
-        }) else {
+        let Some(encoding) = representation(
+            &stream,
+            &metadata,
+            request,
+            &headers,
+            checksum,
+            force_identity,
+        ) else {
             return Err(super::problem(StatusCode::NOT_ACCEPTABLE, "NotAcceptable").0);
         };
         let original_tag = format!("\"{}\"", stream.etag);

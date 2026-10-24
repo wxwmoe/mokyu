@@ -233,6 +233,38 @@ impl Client {
         run: wire::Run,
         cached: Vec<wire::Revision>,
     ) -> Result<wire::SyncReply, Status> {
+        self.unary(
+            wire::SyncRequest {
+                run: Some(run),
+                cached,
+            },
+            "/mokyu.node.v1.NodeControl/SyncNode",
+        )
+        .await
+    }
+
+    pub(crate) async fn read(&self, input: wire::ReadRequest) -> Result<wire::ReadReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeReads/OpenRead").await
+    }
+
+    pub(crate) async fn read_window(
+        &self,
+        input: wire::ReadWindowRequest,
+    ) -> Result<wire::ReadReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeReads/ReadWindow")
+            .await
+    }
+
+    async fn unary<I, O>(&self, input: I, path: &'static str) -> Result<O, Status>
+    where
+        I: prost::Message + Default + Clone + 'static,
+        O: prost::Message + Default + 'static,
+    {
+        if input.encoded_len() > super::read::REQUEST_LIMIT {
+            return Err(Status::resource_exhausted(
+                "node request exceeds message limit",
+            ));
+        }
         let _permit = self
             .requests
             .try_acquire()
@@ -261,16 +293,21 @@ impl Client {
                     let transport = tower::ServiceBuilder::new()
                         .map_response(proxy_response)
                         .service(channel.clone());
-                    let mut client = wire::node_control_client::NodeControlClient::new(transport)
+                    let mut client = tonic::client::Grpc::new(transport)
                         .max_decoding_message_size(MESSAGE_LIMIT)
                         .max_encoding_message_size(MESSAGE_LIMIT);
-                    let mut request = self.request(wire::SyncRequest {
-                        run: Some(run.clone()),
-                        cached: cached.clone(),
-                    });
+                    client
+                        .ready()
+                        .await
+                        .map_err(|_| Status::unavailable("control channel is unavailable"))?;
+                    let mut request = self.request(input.clone());
                     request.set_timeout(attempt.saturating_duration_since(Instant::now()));
                     client
-                        .sync_node(request)
+                        .unary(
+                            request,
+                            hyper::http::uri::PathAndQuery::from_static(path),
+                            tonic_prost::ProstCodec::<I, O>::default(),
+                        )
                         .await
                         .map(|response| response.into_inner())
                 })
@@ -362,6 +399,22 @@ impl Session {
         sequence: u64,
         draining: bool,
     ) -> Result<wire::NodeState, Status> {
+        self.pulse_resources(sequence, draining, Vec::new(), Vec::new())
+            .await?
+            .state
+            .ok_or_else(|| Status::internal("control omitted node state"))
+    }
+
+    pub(crate) async fn pulse_resources(
+        &mut self,
+        sequence: u64,
+        draining: bool,
+        renew: Vec<wire::GrantRef>,
+        release: Vec<wire::GrantRef>,
+    ) -> Result<wire::PulseReply, Status> {
+        super::read::keep_alive(renew.clone(), release.clone())?;
+        let expected: Vec<_> = renew.iter().chain(&release).cloned().collect();
+        let renew_count = renew.len();
         let started = Instant::now();
         let deadline = self.valid_until.min(started + Duration::from_secs(30));
         let reply = tokio::time::timeout_at(deadline, async {
@@ -370,6 +423,8 @@ impl Session {
                     message: Some(wire::session_request::Message::Pulse(wire::Pulse {
                         sequence,
                         draining,
+                        renew,
+                        release,
                     })),
                 })
                 .await
@@ -390,9 +445,27 @@ impl Session {
             return Err(Status::internal("node heartbeat sequence does not match"));
         }
         self.valid_until = lease_deadline(started, reply.valid_for_ms)?;
-        reply
-            .state
-            .ok_or_else(|| Status::internal("control omitted node state"))
+        if reply.state.is_none()
+            || reply.grants.len() != expected.len()
+            || reply
+                .grants
+                .iter()
+                .zip(&expected)
+                .enumerate()
+                .any(|(index, (result, expected))| {
+                    result.grant.as_ref() != Some(expected)
+                        || if index >= renew_count {
+                            !result.accepted || result.valid_for_ms != 0
+                        } else if result.accepted {
+                            result.valid_for_ms == 0 || result.valid_for_ms > 90_000
+                        } else {
+                            result.valid_for_ms != 0
+                        }
+                })
+        {
+            return Err(Status::data_loss("invalid resource acknowledgement"));
+        }
+        Ok(reply)
     }
 }
 
@@ -400,7 +473,10 @@ fn retryable(status: &Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
-    )
+    ) || (status.code() == tonic::Code::Cancelled
+        // Tonic reports its own transport deadline as Cancelled, including behind a proxy.
+        && std::iter::successors(std::error::Error::source(status), |error| error.source())
+            .any(|error| error.is::<tonic::TimeoutExpired>()))
 }
 
 fn proxy_response(
@@ -462,6 +538,15 @@ pub(crate) fn control_uri(value: &str) -> Result<hyper::Uri> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_deadlines_retry_but_server_cancellation_does_not() {
+        let timeout = Status::from_error(Box::new(tonic::TimeoutExpired(())));
+        assert_eq!(timeout.code(), tonic::Code::Cancelled);
+        assert!(retryable(&timeout));
+        assert!(!retryable(&Status::cancelled("Timeout expired")));
+        assert!(!retryable(&Status::permission_denied("revoked")));
+    }
 
     #[test]
     fn proxy_errors_preserve_auth_failures_and_allow_bounded_failover() {

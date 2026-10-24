@@ -1,4 +1,3 @@
-use crate::config::Secrets;
 use crate::model::Id;
 use anyhow::{Context, Result, bail, ensure};
 use aws_lc_rs::aead::{AES_256_GCM, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
@@ -61,7 +60,7 @@ impl std::fmt::Display for IntegrityError {
 }
 impl std::error::Error for IntegrityError {}
 
-pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
+pub fn validate_metadata(c: &Chunk, keys: &dyn KeySource) -> Result<()> {
     aad(c).context(IntegrityError::Metadata)?;
     let tag = if c.algorithm == "none" { 0 } else { 16 };
     ensure!(
@@ -82,7 +81,7 @@ pub fn validate_metadata(c: &Chunk, secrets: &Secrets) -> Result<()> {
             IntegrityError::Metadata
         );
     } else {
-        let key = secrets
+        let key = keys
             .key_for_id(c.block_key_id)
             .context(IntegrityError::MissingKey)?;
         ensure!(
@@ -133,6 +132,22 @@ pub fn typed_nonce(date: DateTime<Utc>, id: i64, type_tag: u8) -> Result<[u8; 12
     result[4..].copy_from_slice(&(id as u64).to_be_bytes());
     Ok(result)
 }
+pub trait KeySource: Send + Sync {
+    fn key_for_id(&self, id: Option<Uuid>) -> Option<Key>;
+}
+
+impl<T: KeySource + ?Sized> KeySource for Arc<T> {
+    fn key_for_id(&self, id: Option<Uuid>) -> Option<Key> {
+        (**self).key_for_id(id)
+    }
+}
+
+impl KeySource for std::collections::BTreeMap<Uuid, Key> {
+    fn key_for_id(&self, id: Option<Uuid>) -> Option<Key> {
+        self.get(&id?).cloned()
+    }
+}
+
 pub struct Key {
     pub algorithm: String,
     pub material: [u8; 32],
@@ -219,7 +234,7 @@ pub fn cache_compressed(c: &Chunk, min_savings_percent: u8) -> bool {
 pub fn encode(
     mut c: Chunk,
     input: Vec<u8>,
-    secrets: &Secrets,
+    keys: &dyn KeySource,
     min_savings_percent: u8,
     compression: &crate::content::compression::Pool,
     should_compress: bool,
@@ -248,7 +263,7 @@ pub fn encode(
         Bytes::from(input)
     };
     if c.algorithm != "none" {
-        let key = secrets
+        let key = keys
             .key_for_id(c.block_key_id)
             .context("missing chunk key")?;
         ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
@@ -277,16 +292,16 @@ pub fn encode(
 pub fn decode(
     c: &Chunk,
     encoded: Vec<u8>,
-    secrets: &Secrets,
+    keys: &dyn KeySource,
     min_savings_percent: u8,
     compression: &crate::content::compression::Pool,
 ) -> Result<(Bytes, Bytes)> {
-    decode_read(c, encoded, secrets, min_savings_percent, compression, true)
+    decode_read(c, encoded, keys, min_savings_percent, compression, true)
 }
 pub fn decode_read(
     c: &Chunk,
     mut encoded: Vec<u8>,
-    secrets: &Secrets,
+    keys: &dyn KeySource,
     min_savings_percent: u8,
     compression: &crate::content::compression::Pool,
     verify: bool,
@@ -303,7 +318,7 @@ pub fn decode_read(
         );
         encoded.len()
     } else {
-        let key = secrets
+        let key = keys
             .key_for_id(c.block_key_id)
             .context(IntegrityError::MissingKey)?;
         ensure!(key.algorithm == c.algorithm, "chunk key algorithm mismatch");
@@ -422,6 +437,7 @@ pub fn unprotect(data: &[u8], key: &Key, binding: &[u8]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Secrets;
     use std::collections::BTreeMap;
 
     fn secrets_for(algorithm: &str) -> Secrets {
@@ -530,6 +546,31 @@ mod tests {
             };
             assert_eq!(&aad(&c).unwrap()[..8], b"MOKYU\x00\x00\x03");
             assert_eq!(hex::encode(&encoded), expected);
+            let keys = c
+                .block_key_id
+                .into_iter()
+                .map(|id| (id, secrets.key_for_id(Some(id)).unwrap()))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                decode(&c, encoded.clone(), &keys, 20, &compression)
+                    .unwrap()
+                    .0
+                    .as_ref(),
+                input
+            );
+            if algorithm != "none" {
+                assert!(
+                    decode(
+                        &c,
+                        encoded.clone(),
+                        &BTreeMap::<Uuid, Key>::new(),
+                        20,
+                        &compression
+                    )
+                    .is_err()
+                );
+            }
+
             assert_eq!(
                 decode(&c, encoded, &secrets, 20, &compression)
                     .unwrap()

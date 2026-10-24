@@ -1,4 +1,5 @@
 pub(crate) mod client;
+pub(crate) mod read;
 pub(crate) mod server;
 
 pub(crate) mod wire {

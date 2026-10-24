@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0072.
+-- Generated from the complete postgres migration chain through 0073.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -841,6 +841,47 @@ CREATE TABLE public.node_boots (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     retired_at timestamp with time zone,
     CONSTRAINT node_boots_credential_generation_check CHECK ((credential_generation > 0))
+);
+
+CREATE TABLE public.node_read_permits (
+    token uuid NOT NULL,
+    read_id uuid NOT NULL
+);
+
+CREATE TABLE public.node_read_sources (
+    window_id uuid NOT NULL,
+    kind text NOT NULL,
+    location_id uuid NOT NULL,
+    CONSTRAINT node_read_sources_kind_check CHECK ((kind = ANY (ARRAY['chunk'::text, 'pack'::text, 'raw'::text, 'fragment'::text])))
+);
+
+CREATE TABLE public.node_read_windows (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    read_id uuid NOT NULL,
+    offset_bytes bigint NOT NULL,
+    end_bytes bigint NOT NULL,
+    mapping jsonb NOT NULL,
+    CONSTRAINT node_read_windows_check CHECK ((end_bytes > offset_bytes)),
+    CONSTRAINT node_read_windows_mapping_check CHECK ((octet_length((mapping)::text) <= 4194304)),
+    CONSTRAINT node_read_windows_offset_bytes_check CHECK ((offset_bytes >= 0))
+);
+
+CREATE TABLE public.node_reads (
+    read_id uuid NOT NULL,
+    node_id uuid NOT NULL,
+    credential_generation bigint NOT NULL,
+    boot_id uuid NOT NULL,
+    fence uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    request_hash bytea NOT NULL,
+    payload_revision bigint NOT NULL,
+    offset_bytes bigint NOT NULL,
+    end_bytes bigint NOT NULL,
+    CONSTRAINT node_reads_check CHECK ((end_bytes > offset_bytes)),
+    CONSTRAINT node_reads_credential_generation_check CHECK ((credential_generation > 0)),
+    CONSTRAINT node_reads_offset_bytes_check CHECK ((offset_bytes >= 0)),
+    CONSTRAINT node_reads_payload_revision_check CHECK ((payload_revision > 0)),
+    CONSTRAINT node_reads_request_hash_check CHECK ((octet_length(request_hash) = 32))
 );
 
 CREATE TABLE public.node_reports (
@@ -1731,6 +1772,24 @@ ALTER TABLE ONLY public.multipart_files
 ALTER TABLE ONLY public.node_boots
     ADD CONSTRAINT node_boots_pkey PRIMARY KEY (node_id, boot_id);
 
+ALTER TABLE ONLY public.node_read_permits
+    ADD CONSTRAINT node_read_permits_pkey PRIMARY KEY (token);
+
+ALTER TABLE ONLY public.node_read_sources
+    ADD CONSTRAINT node_read_sources_pkey PRIMARY KEY (window_id, kind, location_id);
+
+ALTER TABLE ONLY public.node_read_windows
+    ADD CONSTRAINT node_read_windows_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.node_read_windows
+    ADD CONSTRAINT node_read_windows_read_id_offset_bytes_key UNIQUE (read_id, offset_bytes);
+
+ALTER TABLE ONLY public.node_reads
+    ADD CONSTRAINT node_reads_node_id_fence_operation_id_key UNIQUE (node_id, fence, operation_id);
+
+ALTER TABLE ONLY public.node_reads
+    ADD CONSTRAINT node_reads_pkey PRIMARY KEY (read_id);
+
 ALTER TABLE ONLY public.node_reports
     ADD CONSTRAINT node_reports_pkey PRIMARY KEY (node_id);
 
@@ -1978,6 +2037,10 @@ CREATE INDEX multipart_files_node ON public.multipart_files USING btree (node_id
 CREATE INDEX multipart_files_reclaim ON public.multipart_files USING btree (storage_id, id) WHERE reclaim_pending;
 
 CREATE INDEX multipart_files_upload ON public.multipart_files USING btree (upload_id, state);
+
+CREATE INDEX node_read_permits_read ON public.node_read_permits USING btree (read_id);
+
+CREATE INDEX node_read_sources_location ON public.node_read_sources USING btree (kind, location_id);
 
 CREATE INDEX node_runtime_expire ON public.node_runtime_samples USING btree (received_at);
 
@@ -2304,6 +2367,24 @@ ALTER TABLE ONLY public.multipart_files
 
 ALTER TABLE ONLY public.node_boots
     ADD CONSTRAINT node_boots_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_read_permits
+    ADD CONSTRAINT node_read_permits_read_id_fkey FOREIGN KEY (read_id) REFERENCES public.node_reads(read_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_read_permits
+    ADD CONSTRAINT node_read_permits_token_fkey FOREIGN KEY (token) REFERENCES public.storage_permits(token) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_read_sources
+    ADD CONSTRAINT node_read_sources_window_id_fkey FOREIGN KEY (window_id) REFERENCES public.node_read_windows(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_read_windows
+    ADD CONSTRAINT node_read_windows_read_id_fkey FOREIGN KEY (read_id) REFERENCES public.node_reads(read_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_reads
+    ADD CONSTRAINT node_reads_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id);
+
+ALTER TABLE ONLY public.node_reads
+    ADD CONSTRAINT node_reads_read_id_fkey FOREIGN KEY (read_id) REFERENCES public.stream_leases(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_reports
     ADD CONSTRAINT node_reports_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;

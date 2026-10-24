@@ -128,17 +128,41 @@ async fn postgres_node_sessions_recover_across_controls_and_fence_old_runs() -> 
     assert!(first.open_session(&node, &key, hello).await.is_err());
     assert!(
         first
-            .pulse_session(&node, &key, initial.run, initial.epoch, 1, false)
+            .pulse_session(
+                &node,
+                &key,
+                initial.run,
+                initial.epoch,
+                1,
+                false,
+                Default::default()
+            )
             .await
             .is_err()
     );
     let pulse = first
-        .pulse_session(&node, &key, connected.run, connected.epoch, 1, false)
+        .pulse_session(
+            &node,
+            &key,
+            connected.run,
+            connected.epoch,
+            1,
+            false,
+            Default::default(),
+        )
         .await?;
     assert_eq!(pulse.run.fence, initial.run.fence);
     assert!(
         second
-            .pulse_session(&node, &key, connected.run, connected.epoch, 1, false)
+            .pulse_session(
+                &node,
+                &key,
+                connected.run,
+                connected.epoch,
+                1,
+                false,
+                Default::default()
+            )
             .await
             .is_err()
     );
@@ -185,7 +209,15 @@ async fn postgres_node_sessions_recover_across_controls_and_fence_old_runs() -> 
         );
         let (reads, pulse) = tokio::join!(
             reads,
-            first.pulse_session(&node, &key, connected.run, connected.epoch, 2, false)
+            first.pulse_session(
+                &node,
+                &key,
+                connected.run,
+                connected.epoch,
+                2,
+                false,
+                Default::default()
+            )
         );
         for read in reads {
             read?;
@@ -198,7 +230,15 @@ async fn postgres_node_sessions_recover_across_controls_and_fence_old_runs() -> 
     assert!(first.sync_node(&node, &key, connected.run).await.is_err());
     assert!(
         first
-            .pulse_session(&node, &key, connected.run, connected.epoch, 3, false)
+            .pulse_session(
+                &node,
+                &key,
+                connected.run,
+                connected.epoch,
+                3,
+                false,
+                Default::default()
+            )
             .await
             .is_err()
     );
@@ -260,12 +300,28 @@ async fn postgres_node_sessions_recover_across_controls_and_fence_old_runs() -> 
     assert!(second.open_session(&node, &key, competing).await.is_err());
     let final_run = second.open_session(&rotated, &key, hello).await?;
     let draining = first
-        .pulse_session(&rotated, &key, final_run.run, final_run.epoch, 1, true)
+        .pulse_session(
+            &rotated,
+            &key,
+            final_run.run,
+            final_run.epoch,
+            1,
+            true,
+            Default::default(),
+        )
         .await?;
     assert!(draining.draining);
     assert!(
         second
-            .pulse_session(&rotated, &key, final_run.run, final_run.epoch, 2, false)
+            .pulse_session(
+                &rotated,
+                &key,
+                final_run.run,
+                final_run.epoch,
+                2,
+                false,
+                Default::default()
+            )
             .await?
             .draining
     );

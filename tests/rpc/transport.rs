@@ -10,6 +10,9 @@ use hickory_resolver::{
 use std::{path::PathBuf, sync::RwLock};
 use tonic::Code;
 
+#[path = "reads.rs"]
+mod reads;
+
 struct Dns {
     answers: Arc<RwLock<Option<Vec<Ipv4Addr>>>>,
     resolver: TokioResolver,

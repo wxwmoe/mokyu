@@ -10,6 +10,11 @@ service NodeSessions {
   rpc NodeSession(stream SessionRequest) returns (stream SessionReply);
 }
 
+service NodeReads {
+  rpc OpenRead(ReadRequest) returns (ReadReply);
+  rpc ReadWindow(ReadWindowRequest) returns (ReadReply);
+}
+
 message Run {
   string boot_id = 1;
   string fence = 2;
@@ -25,6 +30,8 @@ message Hello {
 message Pulse {
   uint64 sequence = 1;
   bool draining = 2;
+  repeated GrantRef renew = 3;
+  repeated GrantRef release = 4;
 }
 
 message SessionRequest {
@@ -65,6 +72,7 @@ message PulseReply {
   uint64 sequence = 1;
   uint64 valid_for_ms = 2;
   NodeState state = 3;
+  repeated GrantResult grants = 4;
 }
 
 message SessionReply {
@@ -88,4 +96,169 @@ message SyncReply {
   uint64 valid_for_ms = 1;
   NodeState state = 2;
   repeated Settings settings = 3;
+}
+
+enum ReadMethod {
+  READ_METHOD_UNSPECIFIED = 0;
+  GET = 1;
+  HEAD = 2;
+}
+
+enum ReadSurface {
+  READ_SURFACE_UNSPECIFIED = 0;
+  S3 = 1;
+  WEB = 2;
+}
+
+enum ReadInclude {
+  READ_INCLUDE_UNSPECIFIED = 0;
+  OBJECT = 1;
+  MAPPING = 2;
+}
+
+message BucketRoute {
+  string name = 1;
+  string key = 2;
+  string alias_name = 3;
+  string alias_key = 4;
+}
+
+message HostRoute {
+  string host = 1;
+  string key = 2;
+}
+
+message ReadRoute {
+  oneof route {
+    BucketRoute bucket = 1;
+    HostRoute host = 2;
+  }
+}
+
+message ReadHeader {
+  string name = 1;
+  bytes value = 2;
+}
+
+enum MaterialType {
+  MATERIAL_TYPE_UNSPECIFIED = 0;
+  BUCKET = 1;
+  OBJECT_METADATA = 2;
+  OBJECT_MAPPING = 3;
+  STORAGE = 4;
+  BLOCK_KEY = 5;
+  S3_CREDENTIAL = 6;
+}
+
+// Revisions bind deployment, purpose, identity and material; never authorization.
+message Cached {
+  MaterialType type = 1;
+  string id = 2;
+  bytes revision = 3;
+}
+
+message Material {
+  Cached version = 1;
+  oneof value {
+    bytes json = 2;
+    bool reuse = 3;
+  }
+}
+
+message ReadRequest {
+  Run run = 1;
+  string operation_id = 2;
+  ReadRoute route = 3;
+  string access_key = 4;
+  ReadMethod method = 5;
+  ReadSurface surface = 6;
+  repeated ReadInclude include = 7;
+  repeated ReadHeader headers = 8;
+  repeated Cached cached = 9;
+  uint32 max_items = 10;
+  uint32 max_bytes = 11;
+  repeated ReadHeader overrides = 12;
+  CachedBody body = 13;
+}
+
+// The client pins these verified bytes until the request finishes.
+message CachedBody {
+  Cached object = 1;
+  string representation = 2;
+  uint32 policy = 3;
+  Cached mapping = 4;
+  repeated Cached storages = 5;
+  bool verified = 6;
+}
+
+message ReadCursor {
+  string lease_id = 1;
+  string stream_id = 2;
+  uint64 payload_revision = 3;
+  uint64 offset = 4;
+  uint64 end = 5;
+}
+
+message ReadWindowRequest {
+  Run run = 1;
+  reserved 2;
+  ReadCursor cursor = 3;
+  repeated Cached cached = 4;
+  uint32 max_items = 5;
+  uint32 max_bytes = 6;
+}
+
+enum ReadOutcome {
+  READ_OUTCOME_UNSPECIFIED = 0;
+  READY = 1;
+  NO_SUCH_BUCKET = 2;
+  NO_SUCH_KEY = 3;
+  ACCESS_DENIED = 4;
+  NOT_MODIFIED = 5;
+  PRECONDITION_FAILED = 6;
+  INVALID_RANGE = 7;
+  PENDING = 8;
+  NOT_ACCEPTABLE = 9;
+}
+
+enum GrantType {
+  GRANT_TYPE_UNSPECIFIED = 0;
+  READ_PROTECTION = 1;
+  STORAGE_READ = 2;
+  READ_WINDOW = 3;
+}
+
+message Grant {
+  GrantType type = 1;
+  string id = 2;
+  uint64 valid_for_ms = 3;
+  string storage_id = 4;
+}
+
+message GrantRef {
+  GrantType type = 1;
+  string id = 2;
+}
+
+message GrantResult {
+  GrantRef grant = 1;
+  bool accepted = 2;
+  uint64 valid_for_ms = 3;
+}
+
+message ReadReply {
+  ReadOutcome outcome = 1;
+  repeated Material materials = 2;
+  Cached bucket = 3;
+  Cached object = 4;
+  Cached mapping = 5;
+  Cached credential = 6;
+  repeated Grant grants = 7;
+  ReadCursor next = 8;
+  uint64 offset = 9;
+  uint64 length = 10;
+  uint32 http_status = 11;
+  string representation = 12;
+  string etag = 13;
+  bool body_reused = 14;
 }

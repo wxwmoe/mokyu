@@ -37,4 +37,5 @@ pub(crate) struct Snapshot {
     pub maintenance: bool,
     pub draining: bool,
     pub settings: Vec<(String, serde_json::Value, i64)>,
+    pub grants: Vec<super::node_read::GrantResult>,
 }

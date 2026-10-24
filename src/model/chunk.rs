@@ -19,6 +19,7 @@ pub(crate) struct ReadExtent {
     pub(crate) chunk: Chunk,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FragmentSource {
     pub(crate) location_id: Uuid,
     pub(crate) size: i32,

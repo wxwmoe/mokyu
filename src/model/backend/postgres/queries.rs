@@ -5216,7 +5216,7 @@ pub(super) fn lock_cleanup_fragment(
         Option<Uuid>,
     ),
 > {
-    sqlx::query_as("SELECT id,sealed,owner_stream,staging_storage_id,staging_object_key,file_id FROM fragments f WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) FOR UPDATE SKIP LOCKED").bind(id)
+    sqlx::query_as("SELECT id,sealed,owner_stream,staging_storage_id,staging_object_key,file_id FROM fragments f WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='fragment' AND n.location_id=f.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) FOR UPDATE SKIP LOCKED").bind(id)
 }
 pub(super) fn remove_fragment_row(id: Id) -> Statement<'static> {
     sqlx::query("DELETE FROM fragments WHERE id=$1").bind(id)
@@ -5347,6 +5347,11 @@ fn physical_table(packed: bool) -> (&'static str, &'static str, &'static str) {
         )
     }
 }
+fn node_read_source_guard(kind: &str, location: &str) -> String {
+    format!(
+        "NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='{kind}' AND n.location_id={location} AND l.expires_at>clock_timestamp())"
+    )
+}
 pub(super) fn physical_gc_candidates(
     packed: bool,
     grace: f64,
@@ -5366,7 +5371,14 @@ pub(super) fn physical_gc_candidates(
     } else {
         "r.stored_at IS NULL OR r.recovery_pending"
     };
-    let lease_guard = if single { "true" } else { lease_guard };
+    let lease_guard = format!(
+        "({}) AND ({})",
+        if single { "true" } else { lease_guard },
+        node_read_source_guard(
+            if packed { "pack" } else { "chunk" },
+            &format!("r.{id_column}")
+        )
+    );
     sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT r.{id_column},r.{id_column},({unknown}) FROM {table} r WHERE {state_guard} AND r.unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR r.stored_at IS NULL OR r.stored_at<=now()-$3*interval '1 second') AND r.storage_id=$4 AND {lease_guard} AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation'='recheck' AND t.detail->>'source_location'=r.{id_column}::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) ORDER BY r.unreferenced_at,r.{id_column} LIMIT $2"))).bind(grace).bind(batch).bind(minimum).bind(storage)
 }
 pub(super) fn physical_gc_age(packed: bool, id: Id, stored: DateTime<Utc>) -> Statement<'static> {
@@ -5386,13 +5398,20 @@ pub(super) fn claim_physical_gc(
     grace: f64,
     minimum: f64,
 ) -> Statement<'static> {
-    let (table, id_column, _lease_guard) = physical_table(packed);
+    let (table, id_column, lease_guard) = physical_table(packed);
+    let lease_guard = format!(
+        "({lease_guard}) AND ({})",
+        node_read_source_guard(
+            if packed { "pack" } else { "chunk" },
+            &format!("r.{id_column}")
+        )
+    );
     let state_guard = if packed {
         "state IN ('retired','deleting')"
     } else {
         "(state IN ('retired','deleting') OR (state='deleted' AND recovery_pending)) AND owner_stream IS NULL"
     };
-    sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} r SET state='deleting' WHERE NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation'='recheck' AND t.detail->>'source_location'=r.{id_column}::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND {id_column}=$1 AND {state_guard} AND unreferenced_at<now()-$2*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second')"))).bind(id).bind(grace).bind(minimum)
+    sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} r SET state='deleting' WHERE {lease_guard} AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation'='recheck' AND t.detail->>'source_location'=r.{id_column}::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND {id_column}=$1 AND {state_guard} AND unreferenced_at<now()-$2*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second')"))).bind(id).bind(grace).bind(minimum)
 }
 pub(super) fn finish_physical_gc(packed: bool, id: Id, retention: f64) -> Statement<'static> {
     if !packed {
@@ -6457,7 +6476,7 @@ pub(super) fn inventory_unreferenced() -> Scalar<'static, Value> {
 
 pub(super) fn inventory_reclaimable() -> Scalar<'static, Value> {
     sqlx::query_scalar(
-        "SELECT jsonb_build_object('bytes',COALESCE(sum(bytes),0),'eligible',COALESCE(sum(bytes) FILTER(WHERE since<now()-((SELECT (left(sp.unreferenced_grace,-1)::bigint*CASE right(sp.unreferenced_grace,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=p.storage_id))*interval '1 second'),0)) FROM (SELECT l.standalone_size bytes,COALESCE(l.unreferenced_at,c.unreferenced_at) since,l.storage_id FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('retired','deleting') OR (l.state='ready' AND c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) UNION ALL SELECT stored_size,unreferenced_at,storage_id FROM packs WHERE state IN ('retired','deleting') UNION ALL SELECT size,unreferenced_at,storage_id FROM raw_sources r WHERE r.owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=r.id)) p",
+        "SELECT jsonb_build_object('bytes',COALESCE(sum(bytes),0),'eligible',COALESCE(sum(bytes) FILTER(WHERE since<now()-((SELECT (left(sp.unreferenced_grace,-1)::bigint*CASE right(sp.unreferenced_grace,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=p.storage_id))*interval '1 second'),0)) FROM (SELECT l.standalone_size bytes,COALESCE(l.unreferenced_at,c.unreferenced_at) since,l.storage_id FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.state IN ('retired','deleting') OR (l.state='ready' AND c.unreferenced_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id)) UNION ALL SELECT stored_size,unreferenced_at,storage_id FROM packs WHERE state IN ('retired','deleting') UNION ALL SELECT size,unreferenced_at,storage_id FROM raw_sources r WHERE r.owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=r.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=r.id)) p",
     )
 }
 
@@ -7428,6 +7447,22 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn open_read(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_read::Query,
+    ) -> Result<crate::model::node_read::Reply> {
+        transactions::open_node_read(&self.pool, node, key, input).await
+    }
+    async fn read_window(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_read::Window,
+    ) -> Result<crate::model::node_read::Reply> {
+        transactions::node_read_window(&self.pool, node, key, input).await
+    }
     async fn provision_node(
         &self,
         principal: &Principal,
@@ -7469,9 +7504,12 @@ impl ClusterStore for Backend {
         epoch: i64,
         sequence: i64,
         draining: bool,
+        resources: crate::model::node_read::KeepAlive,
     ) -> Result<crate::model::session::Snapshot> {
-        transactions::pulse_node_session(&self.pool, node, key, run, epoch, sequence, draining)
-            .await
+        transactions::pulse_node_session(
+            &self.pool, node, key, run, epoch, sequence, draining, resources,
+        )
+        .await
     }
 
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
@@ -9438,15 +9476,15 @@ impl RawStore for Backend {
             (1..=128).contains(&limit) && grace >= 0 && minimum >= 0,
             "invalid raw cleanup bounds"
         );
-        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=$1 AND r.owner_stream IS NULL AND r.unreferenced_at<now()-$2*interval '1 second' AND r.created_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=r.id) ORDER BY r.unreferenced_at,r.id LIMIT $4")
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=$1 AND r.owner_stream IS NULL AND r.unreferenced_at<now()-$2*interval '1 second' AND r.created_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=r.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=r.id) ORDER BY r.unreferenced_at,r.id LIMIT $4")
             .bind(storage).bind(grace).bind(minimum).bind(limit).fetch_all(&self.pool).await?)
     }
     async fn claim(&self, source: Id, revision: i64, grace: i64, minimum: i64) -> Result<bool> {
-        Ok(sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND revision=$2 AND owner_stream IS NULL AND unreferenced_at<now()-$3*interval '1 second' AND created_at<now()-$4*interval '1 second' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)")
+        Ok(sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND revision=$2 AND owner_stream IS NULL AND unreferenced_at<now()-$3*interval '1 second' AND created_at<now()-$4*interval '1 second' AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=raw_sources.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)")
             .bind(source).bind(revision).bind(grace).bind(minimum).execute(&self.pool).await?.rows_affected()==1)
     }
     async fn removed(&self, source: Id) -> Result<()> {
-        sqlx::query("DELETE FROM raw_sources WHERE id=$1 AND state='deleting' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)")
+        sqlx::query("DELETE FROM raw_sources WHERE id=$1 AND state='deleting' AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=raw_sources.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)")
             .bind(source).execute(&self.pool).await?;
         Ok(())
     }
@@ -9626,7 +9664,7 @@ pub(super) fn raw_receiving(source: Id, stream: Id) -> Scalar<'static, Uuid> {
     sqlx::query_scalar("SELECT storage_id FROM raw_sources WHERE id=$1 AND owner_stream=$2 AND state='writing' AND medium='shared_s3' AND upload_id IS NULL FOR UPDATE").bind(source).bind(stream)
 }
 pub(super) fn raw_discard(source: Id, stream: Id) -> Statement<'static> {
-    sqlx::query("DELETE FROM raw_sources WHERE id=$1 AND owner_stream=$2 AND state='writing' AND upload_id IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)").bind(source).bind(stream)
+    sqlx::query("DELETE FROM raw_sources WHERE id=$1 AND owner_stream=$2 AND state='writing' AND upload_id IS NULL AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=raw_sources.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)").bind(source).bind(stream)
 }
 
 pub(super) fn raw_reusable<'a>(
@@ -9733,7 +9771,7 @@ pub(super) fn raw_upload_mode(cluster: bool) -> Scalar<'static, bool> {
     })
 }
 pub(super) fn raw_upload_abandon(source: Id) -> Statement<'static> {
-    sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)").bind(source)
+    sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=raw_sources.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)").bind(source)
 }
 
 pub(super) fn raw_upload_owned(work: &RawUpload, node: Option<Uuid>) -> Scalar<'static, bool> {
@@ -10055,6 +10093,262 @@ pub(super) fn node_session(
 
 pub(super) fn node_clock() -> Scalar<'static, DateTime<Utc>> {
     sqlx::query_scalar("SELECT clock_timestamp()")
+}
+
+pub(super) fn node_read_admission() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT NOT maintenance AND deployment_mode='cluster' FROM mokyu_meta WHERE singleton FOR SHARE",
+    )
+}
+
+pub(super) fn node_read_credential(access: &str) -> Rows<'_, (Uuid, Vec<u8>)> {
+    sqlx::query_as("SELECT project_id,secret_encrypted FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>clock_timestamp()) FOR SHARE").bind(access)
+}
+
+pub(super) fn node_read_bucket(route: &crate::model::ReadRoute) -> Rows<'_, Bucket> {
+    match route {
+        crate::model::ReadRoute::Bucket { name, alias, .. } => sqlx::query_as("SELECT * FROM buckets WHERE id=(SELECT id FROM buckets WHERE name IN ($1,$2) ORDER BY CASE WHEN name=$2 THEN 0 ELSE 1 END LIMIT 1) FOR SHARE")
+            .bind(name).bind(alias.as_ref().map(|(name, _)| name)),
+        crate::model::ReadRoute::Host { host, .. } => sqlx::query_as("SELECT b.* FROM buckets b JOIN bucket_domains d ON d.bucket_id=b.id WHERE d.host=$1 FOR SHARE OF b,d").bind(host),
+    }
+}
+
+pub(super) fn node_read_allowed(access: &str, project: Uuid, bucket: Uuid) -> Scalar<'_, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM s3_credential_grants g JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=$1 AND c.project_id=$2 AND g.bucket_id=$3 AND 'object.read'=ANY(g.actions))")
+        .bind(access).bind(project).bind(bucket)
+}
+
+pub(super) fn node_read_extents(
+    stream: Id,
+    start: i64,
+    end: i64,
+    limit: i64,
+) -> Rows<'static, Extent> {
+    sqlx::query_as("SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2-4194304 AND offset_bytes+length>$2 AND offset_bytes<$3 ORDER BY offset_bytes LIMIT $4 FOR SHARE")
+        .bind(stream).bind(start).bind(end).bind(limit)
+}
+
+#[derive(sqlx::FromRow)]
+pub(super) struct NodeReadChunk {
+    #[sqlx(flatten)]
+    pub chunk: Chunk,
+    pub pack_id: Option<Id>,
+}
+
+pub(super) fn node_read_chunks(ids: &[Id]) -> Rows<'_, NodeReadChunk> {
+    sqlx::query_as("SELECT *, '00000000-0000-0000-0000-000000000000'::uuid AS location_id FROM chunks WHERE id=ANY($1) AND state='ready' ORDER BY id FOR SHARE")
+        .bind(ids)
+}
+
+pub(super) fn node_read_encodings(ids: &[Id]) -> Rows<'_, Chunk> {
+    sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,l.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunks c JOIN LATERAL (SELECT * FROM chunk_encodings e WHERE e.chunk_id=c.id AND e.state='ready' AND e.quarantined_at IS NULL ORDER BY e.encoding_id LIMIT 1 FOR SHARE) l ON true WHERE c.id=ANY($1) ORDER BY c.id")
+        .bind(ids)
+}
+
+pub(super) fn node_read_packs(ids: &[Id]) -> Rows<'_, crate::content::pack::Pack> {
+    sqlx::query_as("SELECT * FROM packs WHERE id=ANY($1) AND state='ready' AND quarantined_at IS NULL ORDER BY id FOR SHARE").bind(ids)
+}
+
+pub(super) fn node_read_pending(ids: &[Id]) -> Rows<'_, (Id, Option<Uuid>)> {
+    sqlx::query_as("SELECT chunk_id,node_id FROM pending_uploads WHERE chunk_id=ANY($1) AND staging_storage_id IS NULL AND source_pack_id IS NULL ORDER BY chunk_id FOR SHARE").bind(ids)
+}
+
+#[derive(sqlx::FromRow)]
+pub(super) struct NodeReadFragment {
+    #[sqlx(flatten)]
+    pub source: FragmentSource,
+    pub node_id: Option<Uuid>,
+}
+
+pub(super) fn node_read_fragments(ids: &[Id]) -> Rows<'_, NodeReadFragment> {
+    sqlx::query_as("SELECT f.id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source,m.node_id FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id=ANY($1) ORDER BY f.id FOR SHARE OF f")
+        .bind(ids)
+}
+
+#[derive(sqlx::FromRow)]
+pub(super) struct NodeReadRaw {
+    #[sqlx(flatten)]
+    pub range: crate::model::raw::RawRange,
+    pub node_id: Option<Uuid>,
+}
+
+pub(super) fn node_read_raw(
+    stream: Id,
+    start: i64,
+    end: i64,
+    limit: i64,
+) -> Rows<'static, NodeReadRaw> {
+    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset,u.node_id FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id LEFT JOIN raw_uploads u ON u.source_id=r.id WHERE e.stream_id=$1 AND e.offset_bytes>=COALESCE((SELECT offset_bytes FROM raw_ranges WHERE stream_id=$1 AND offset_bytes<=$2 ORDER BY offset_bytes DESC LIMIT 1),$2) AND e.offset_bytes+e.length>$2 AND e.offset_bytes<$3 ORDER BY e.offset_bytes LIMIT $4 FOR SHARE OF e,r")
+        .bind(stream).bind(start).bind(end).bind(limit)
+}
+
+pub(super) fn node_read_storages(ids: &[Uuid]) -> Rows<'_, crate::storage::model::Record> {
+    sqlx::query_as("SELECT s.* FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=ANY($1) AND s.enabled AND s.type='s3' ORDER BY s.id FOR SHARE OF s,p").bind(ids)
+}
+
+pub(super) fn node_read_profiles(
+    ids: &[Uuid],
+) -> Rows<'_, crate::storage::profile::StorageProfile> {
+    sqlx::query_as(
+        "SELECT * FROM storage_profiles WHERE storage_id=ANY($1) ORDER BY storage_id FOR SHARE",
+    )
+    .bind(ids)
+}
+
+pub(super) fn node_read_keys(ids: &[Uuid]) -> Rows<'_, ManagedKeyMaterial> {
+    sqlx::query_as("SELECT id,name,purpose,key_algorithm,secret_encrypted,fingerprint FROM managed_keys WHERE id=ANY($1) AND purpose='block' AND secret_encrypted IS NOT NULL ORDER BY id FOR SHARE").bind(ids)
+}
+
+#[derive(sqlx::FromRow)]
+pub(super) struct NodeReadLease {
+    pub read_id: Uuid,
+    pub stream_id: Id,
+    pub payload_revision: i64,
+    pub offset_bytes: i64,
+    pub end_bytes: i64,
+    pub request_hash: Vec<u8>,
+    pub valid_for_ms: i64,
+}
+
+pub(super) fn node_read_existing<'q>(
+    state: &'q crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    operation: Uuid,
+) -> Rows<'q, NodeReadLease> {
+    sqlx::query_as("SELECT r.*,l.stream_id,GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) AS valid_for_ms FROM node_reads r JOIN stream_leases l ON l.id=r.read_id WHERE r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND r.operation_id=$5 FOR SHARE OF r,l")
+        .bind(state.node_id).bind(state.credential_generation).bind(run.boot).bind(run.fence).bind(operation)
+}
+
+pub(super) fn node_read_owned(
+    state: &crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    id: Uuid,
+) -> Rows<'_, NodeReadLease> {
+    sqlx::query_as("SELECT r.*,l.stream_id,GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) AS valid_for_ms FROM node_reads r JOIN stream_leases l ON l.id=r.read_id WHERE r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND r.read_id=$5 AND l.expires_at>clock_timestamp() FOR SHARE OF r,l")
+        .bind(state.node_id).bind(state.credential_generation).bind(run.boot).bind(run.fence).bind(id)
+}
+
+pub(super) fn node_read_count(node: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT count(*) FROM node_reads r JOIN stream_leases l ON l.id=r.read_id WHERE r.node_id=$1 AND l.expires_at>clock_timestamp()").bind(node)
+}
+
+pub(super) fn node_read_insert<'q>(
+    state: &'q crate::cluster::NodeState,
+    input: &'q crate::model::node_read::Query,
+    id: Uuid,
+    stream: &crate::app::StoredStream,
+    start: i64,
+    end: i64,
+    hash: &'q [u8],
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO node_reads(read_id,node_id,credential_generation,boot_id,fence,operation_id,request_hash,payload_revision,offset_bytes,end_bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
+        .bind(id).bind(state.node_id).bind(state.credential_generation).bind(input.run.boot).bind(input.run.fence).bind(input.operation).bind(hash).bind(stream.payload_revision).bind(start).bind(end)
+}
+
+pub(super) fn node_read_stream(id: Id) -> Rows<'static, crate::app::StoredStream> {
+    sqlx::query_as("SELECT * FROM streams WHERE id=$1 AND state IN ('ready','retired') FOR SHARE")
+        .bind(id)
+}
+
+pub(super) fn node_read_window(
+    read: Uuid,
+    start: i64,
+) -> Rows<'static, (Uuid, sqlx::types::Json<crate::model::node_read::Mapping>)> {
+    sqlx::query_as(
+        "SELECT id,mapping FROM node_read_windows WHERE read_id=$1 AND offset_bytes=$2 FOR SHARE",
+    )
+    .bind(read)
+    .bind(start)
+}
+
+pub(super) fn node_read_window_count(read: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT count(*) FROM node_read_windows WHERE read_id=$1").bind(read)
+}
+
+pub(super) fn node_read_insert_window(
+    read: Uuid,
+    mapping: &crate::model::node_read::Mapping,
+) -> Scalar<'_, Uuid> {
+    sqlx::query_scalar("INSERT INTO node_read_windows(read_id,offset_bytes,end_bytes,mapping) VALUES($1,$2,$3,$4) RETURNING id")
+        .bind(read).bind(mapping.start).bind(mapping.end).bind(sqlx::types::Json(mapping))
+}
+
+pub(super) fn node_read_pin<'q>(
+    window: Uuid,
+    kinds: &'q [String],
+    ids: &'q [Uuid],
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO node_read_sources(window_id,kind,location_id) SELECT $1,unnest($2::text[]),unnest($3::uuid[]) ON CONFLICT DO NOTHING")
+        .bind(window).bind(kinds).bind(ids)
+}
+
+pub(super) fn node_read_permit(read: Uuid, storage: Uuid) -> Rows<'static, (Uuid, i64)> {
+    sqlx::query_as("SELECT p.token,GREATEST(0,(extract(epoch FROM (p.expires_at-clock_timestamp()))*1000)::bigint) FROM node_read_permits n JOIN storage_permits p ON p.token=n.token WHERE n.read_id=$1 AND p.storage_id=$2 AND p.direction='read' AND p.expires_at>clock_timestamp() FOR SHARE OF p")
+        .bind(read).bind(storage)
+}
+
+pub(super) fn node_read_own_permit(read: Uuid, token: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO node_read_permits(token,read_id) VALUES($1,$2)")
+        .bind(token)
+        .bind(read)
+}
+
+pub(super) fn node_read_permit_count(read: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT count(*) FROM node_read_permits n JOIN storage_permits p ON p.token=n.token WHERE n.read_id=$1 AND p.expires_at>clock_timestamp()").bind(read)
+}
+
+pub(super) fn node_read_renew<'q>(
+    state: &'q crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    r#type: crate::model::node_read::GrantType,
+    ids: &'q [Uuid],
+) -> Rows<'q, (Uuid, i64)> {
+    use crate::model::node_read::GrantType;
+    let query = match r#type {
+        GrantType::Read => {
+            "UPDATE stream_leases l SET expires_at=clock_timestamp()+interval '90 seconds' FROM node_reads r WHERE l.id=r.read_id AND r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND l.id=ANY($5) AND l.expires_at>clock_timestamp() RETURNING l.id,90000::bigint"
+        }
+        GrantType::StorageRead => {
+            "UPDATE storage_permits p SET expires_at=clock_timestamp()+interval '1 minute' FROM node_read_permits n,node_reads r,stream_leases l WHERE p.token=n.token AND r.read_id=n.read_id AND l.id=r.read_id AND r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND p.token=ANY($5) AND p.expires_at>clock_timestamp() AND l.expires_at>clock_timestamp() RETURNING p.token,60000::bigint"
+        }
+        GrantType::Window => {
+            "SELECT w.id,GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) FROM node_read_windows w JOIN node_reads r ON r.read_id=w.read_id JOIN stream_leases l ON l.id=r.read_id WHERE r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND w.id=ANY($5) AND l.expires_at>clock_timestamp()"
+        }
+    };
+    sqlx::query_as(query)
+        .bind(state.node_id)
+        .bind(state.credential_generation)
+        .bind(run.boot)
+        .bind(run.fence)
+        .bind(ids)
+}
+
+pub(super) fn node_read_release_permits<'q>(
+    state: &'q crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    reads: &'q [Uuid],
+    permits: &'q [Uuid],
+) -> Statement<'q> {
+    sqlx::query("DELETE FROM storage_permits p USING node_read_permits n,node_reads r WHERE p.token=n.token AND r.read_id=n.read_id AND r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND (r.read_id=ANY($5) OR p.token=ANY($6))")
+        .bind(state.node_id).bind(state.credential_generation).bind(run.boot).bind(run.fence).bind(reads).bind(permits)
+}
+
+pub(super) fn node_read_release_windows<'q>(
+    state: &'q crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    ids: &'q [Uuid],
+) -> Statement<'q> {
+    sqlx::query("DELETE FROM node_read_windows w USING node_reads r WHERE w.read_id=r.read_id AND r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND w.id=ANY($5)")
+        .bind(state.node_id).bind(state.credential_generation).bind(run.boot).bind(run.fence).bind(ids)
+}
+
+pub(super) fn node_read_release<'q>(
+    state: &'q crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    ids: &'q [Uuid],
+) -> Statement<'q> {
+    sqlx::query("DELETE FROM stream_leases l USING node_reads r WHERE l.id=r.read_id AND r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND l.id=ANY($5)")
+        .bind(state.node_id).bind(state.credential_generation).bind(run.boot).bind(run.fence).bind(ids)
 }
 
 pub(super) fn node_boot_known(node: Uuid, boot: Uuid) -> Scalar<'static, bool> {

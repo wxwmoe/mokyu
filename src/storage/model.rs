@@ -75,6 +75,61 @@ impl Options {
     }
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Connection {
+    pub id: Uuid,
+    pub r#type: String,
+    pub path: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub remote_bucket_name: Option<String>,
+    pub region: Option<String>,
+    pub prefix: String,
+    pub access: Option<String>,
+    pub secret: Option<String>,
+    pub identity_marker: Value,
+}
+
+impl Connection {
+    pub(crate) fn unprotect(row: &Record, key: &codec::Key) -> Result<Self> {
+        let credentials = if row.r#type == "s3" {
+            Some((
+                codec::unprotect(
+                    row.access_key_encrypted
+                        .as_deref()
+                        .context("S3 access key is missing")?,
+                    key,
+                    format!("storage-{}-access", row.id).as_bytes(),
+                )?,
+                codec::unprotect(
+                    row.secret_key_encrypted
+                        .as_deref()
+                        .context("S3 secret key is missing")?,
+                    key,
+                    format!("storage-{}-secret", row.id).as_bytes(),
+                )?,
+            ))
+        } else {
+            None
+        };
+        let (access, secret) = credentials.map_or((None, None), |(access, secret)| {
+            (Some(access), Some(secret))
+        });
+        Ok(Self {
+            id: row.id,
+            r#type: row.r#type.clone(),
+            path: row.path.clone(),
+            endpoint_url: row.endpoint_url.clone(),
+            remote_bucket_name: row.remote_bucket_name.clone(),
+            region: row.region.clone(),
+            prefix: row.prefix.clone(),
+            access,
+            secret,
+            identity_marker: row.identity_marker.clone(),
+        })
+    }
+}
+
 pub(crate) struct Store {
     pub backend: Arc<dyn ObjectStore>,
     pub multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
@@ -85,6 +140,13 @@ pub(crate) struct Store {
 
 impl Store {
     pub fn build(row: &Record, options: Options, secrets: &Secrets) -> Result<Self> {
+        Self::connect(
+            &Connection::unprotect(row, &secrets.credential_key)?,
+            options,
+        )
+    }
+
+    pub(crate) fn connect(row: &Connection, options: Options) -> Result<Self> {
         let meta: IdentityMarker = serde_json::from_value(row.identity_marker.clone())
             .context("storage identity marker is missing or invalid")?;
         ensure!(
@@ -108,20 +170,8 @@ impl Store {
                 prefix.clone(),
             )),
             "s3" => {
-                let access = codec::unprotect(
-                    row.access_key_encrypted
-                        .as_deref()
-                        .context("S3 access key is missing")?,
-                    &secrets.credential_key,
-                    format!("storage-{}-access", row.id).as_bytes(),
-                )?;
-                let secret = codec::unprotect(
-                    row.secret_key_encrypted
-                        .as_deref()
-                        .context("S3 secret key is missing")?,
-                    &secrets.credential_key,
-                    format!("storage-{}-secret", row.id).as_bytes(),
-                )?;
+                let access = row.access.as_deref().context("S3 access key is missing")?;
+                let secret = row.secret.as_deref().context("S3 secret key is missing")?;
                 let client = reqwest::Client::builder()
                     .connect_timeout(options.connect_timeout)
                     .timeout(options.request_timeout)

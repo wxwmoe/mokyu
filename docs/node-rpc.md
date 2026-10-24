@@ -14,16 +14,32 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `x-mokyu-credential-generation` | 正整数凭据代次 |
 | `authorization` | `Bearer <credential>` |
 
-拒绝重复身份字段；全部 metadata 键和值合计最多 4 KiB。Unary 响应最多 4 MiB，SyncNode 请求最多 1 KiB，NodeSession 消息最多 64 KiB；在解码之前检查身份格式和独立并发额度，额度持续到响应结束或取消。开始请求的服务端期限为 15 秒。节点凭据不授予管理 API 权限。
+拒绝重复身份字段；全部 metadata 键和值合计最多 4 KiB。Unary 响应最多 4 MiB，SyncNode 请求最多 1 KiB，读取请求最多 128 KiB，NodeSession 消息最多 64 KiB；在解码之前检查身份格式和独立并发额度，额度持续到响应结束或取消。开始请求的服务端期限为 15 秒。节点凭据不授予管理 API 权限。
 
 ## 方法
 
 | 方法 | 请求与响应 |
 | --- | --- |
 | `NodeControl/SyncNode` | Unary；提交当前 `run` 和最多五个 `cached` 配置修订，返回运行状态、全部当前修订及未命中配置 |
+| `NodeReads/OpenRead` | Unary；按路由、身份、条件、`include` 与 `cached` 返回对象结果及首个读取窗口，仅允许 data |
+| `NodeReads/ReadWindow` | Unary；沿当前读取游标取下一窗口，校验运行权、读取保护和载荷修订 |
 | `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，收到 Welcome 后发送 Pulse 并等待匹配序号的确认 |
 
 配置分区为 `requests`、`uploads`、`metrics`、`maintenance`、`io`，不含管理 `web` 设置。`cached` 只表示已持有的配置修订，不替代任何身份或租约检查；缺失或修订不符时，在同一 SyncNode 响应内补全。Settings 的 JSON 字节使用对应运行设置的现有结构。
+
+## 读取计划与缓存
+
+`include` 必须明确指定：`OBJECT` 请求对象信息，`MAPPING` 请求正文读取计划及其必要依赖；HEAD 只接受 `OBJECT`。control 在同一事务内检查权限、条件和 Range，选择物理来源并登记保护，再返回有界结果。节点完成初始化后，首次 OpenRead 即可取得访问远端 S3 所需的对象映射、存储连接及所需块密钥；DNS、TLS 和会话建立另计。
+
+`cached` 最多 256 项，每项包含材料类型、ID 和 32 字节修订。修订绑定部署、用途、身份与具体内容；响应明确给出 JSON 材料或 `reuse`。节点须在请求期间持有声明的材料，收到 `reuse` 时只能使用对应修订。桶已缓存而对象未缓存时，只补齐对象及未持有的依赖；配置、权限和来源有效性仍按当前状态检查。
+
+完整正文缓存使用 `body` 提示，绑定已校验正文、对象、映射、存储修订、表示和压缩策略。命中时不申请 S3 I/O 额度；任一必要修订变化时，同次响应提供读取计划。超过单次映射范围的对象按窗口读取。请求中的 access key 只用于内部准备；data 必须使用返回的用户密钥完成原请求签名校验后，才向外呈现结果或开始正文 I/O。worker 无权调用此接口。
+
+窗口默认最多 1024 段、目标响应 1 MiB；调用方可降低 `max_items` 和 `max_bytes`。每个节点最多 256 个有效读取，每个读取最多保留两个窗口，可在处理当前窗口时预取下一窗口。来源包括独立区块、区块包、raw 和共享暂存；本机唯一来源仅交给所属节点，其他节点得到待就绪结果。
+
+OpenRead 使用稳定 `operation_id`；同一运行权下重放同一请求会复用已提交的保护和窗口，参数变化则拒绝。ReadWindow 以读取身份和偏移重放已保存窗口。响应丢失不会分配第二份同操作读取；HEAD、条件未满足、空对象、权限拒绝及正文缓存命中均不获取正文 I/O 许可。
+
+读取保护有效期为 90 秒，受限存储的读许可为 60 秒。一个许可只允许串行执行该存储上的读取；同时读取需分别取得许可。Pulse 的 `renew` / `release` 合计最多 256 项，确认逐项返回结果；已过期的资源不能续期复活。释放窗口解除其精确来源保护，释放读取同时释放窗口及关联存储许可。业务调用方须管理这些资源的持有、续期和释放。
 
 ## 会话和重连
 
@@ -43,7 +59,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 
 客户端要求 HTTPS 域名 origin，不接受 IP、用户信息、路径或 query。解析完整 A 集合（最多 32 个），按 TTL 刷新，刷新间隔限制在 1～300 秒；DNS 失败时仅在上一次集合到期后的 300 秒内继续使用已知地址。
 
-Unary 在可用地址间轮询，每个地址复用自己的 Channel；失败地址按退避暂停选择。NodeSession 使用独立 TCP/TLS 连接。连接实际 IP 时，仍使用原域名做 TLS SNI、证书验证与 HTTP authority。连接期限 3 秒，每次尝试最多 5 秒，整个操作最多 15 秒和 3 个地址尝试；只有 `Unavailable` / `DeadlineExceeded` 进入传输重试。
+Unary 在可用地址间轮询，每个地址复用自己的 Channel；失败地址按退避暂停选择。NodeSession 使用独立 TCP/TLS 连接。连接实际 IP 时，仍使用原域名做 TLS SNI、证书验证与 HTTP authority。连接期限 3 秒，每次尝试最多 5 秒，整个操作最多 15 秒和 3 个地址尝试；`Unavailable`、`DeadlineExceeded` 和可识别的客户端传输超时进入有限重试，服务端主动取消不重试。
 
 | gRPC 状态 | 处理 |
 | --- | --- |

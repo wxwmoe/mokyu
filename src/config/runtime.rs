@@ -500,3 +500,9 @@ impl Secrets {
         Ok(())
     }
 }
+
+impl crate::content::codec::KeySource for Secrets {
+    fn key_for_id(&self, id: Option<Uuid>) -> Option<crate::content::codec::Key> {
+        Secrets::key_for_id(self, id)
+    }
+}

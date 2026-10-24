@@ -9,6 +9,7 @@ use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status, Streaming};
 use wire::{
     node_control_server::{NodeControl, NodeControlServer},
+    node_reads_server::{NodeReads, NodeReadsServer},
     node_sessions_server::{NodeSessions, NodeSessionsServer},
 };
 
@@ -51,9 +52,14 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
-        NodeSessionsServer::new(service)
+        NodeSessionsServer::new(service.clone())
             .max_decoding_message_size(SESSION_LIMIT)
             .max_encoding_message_size(SESSION_LIMIT),
+    )
+    .add_service(
+        NodeReadsServer::new(service)
+            .max_decoding_message_size(super::read::REQUEST_LIMIT)
+            .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .into_axum_router()
     .layer(axum::middleware::from_fn(
@@ -165,10 +171,80 @@ fn failure(error: anyhow::Error) -> Status {
         Some(Error::NodeLimit) => {
             Status::resource_exhausted("node boot history is full; rotate its credential")
         }
+        Some(Error::NodeReadLimit) => {
+            Status::resource_exhausted("node read capacity or message budget is full")
+        }
         _ => {
             tracing::warn!("node RPC database operation failed");
             Status::unavailable("control operation is unavailable")
         }
+    }
+}
+
+#[tonic::async_trait]
+impl NodeReads for Service {
+    async fn open_read(
+        &self,
+        request: Request<wire::ReadRequest>,
+    ) -> Result<Response<wire::ReadReply>, Status> {
+        let node = request
+            .extensions()
+            .get::<NodeState>()
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
+        if node.role != "data" {
+            return Err(Status::permission_denied(
+                "object reads require a data node",
+            ));
+        }
+        let input = super::read::query(request.into_inner())?;
+        let limit = input.max_bytes;
+        let reply = bounded(self.app.cluster().map_err(failure)?.open_read(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-read-opened").await;
+        let reply = super::read::reply(reply);
+        if prost::Message::encoded_len(&reply) > limit {
+            return Err(Status::resource_exhausted(
+                "read reply exceeds message budget",
+            ));
+        }
+        Ok(Response::new(reply))
+    }
+
+    async fn read_window(
+        &self,
+        request: Request<wire::ReadWindowRequest>,
+    ) -> Result<Response<wire::ReadReply>, Status> {
+        let node = request
+            .extensions()
+            .get::<NodeState>()
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
+        if node.role != "data" {
+            return Err(Status::permission_denied(
+                "object reads require a data node",
+            ));
+        }
+        let input = super::read::window(request.into_inner())?;
+        let limit = input.max_bytes;
+        let reply = bounded(self.app.cluster().map_err(failure)?.read_window(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        let reply = super::read::reply(reply);
+        if prost::Message::encoded_len(&reply) > limit {
+            return Err(Status::resource_exhausted(
+                "read reply exceeds message budget",
+            ));
+        }
+        Ok(Response::new(reply))
     }
 }
 
@@ -321,9 +397,11 @@ impl NodeSessions for Service {
                 if pulse.sequence == 0 || pulse.sequence > i64::MAX as u64 {
                     Err(Status::invalid_argument("invalid heartbeat sequence"))?;
                 }
-                let snapshot = bounded(app.cluster().map_err(failure)?.pulse_session(&node, &app.secrets.credential_key, run, epoch, pulse.sequence as i64, pulse.draining)).await?;
+                let resources = super::read::keep_alive(pulse.renew, pulse.release)?;
+                let snapshot = bounded(app.cluster().map_err(failure)?.pulse_session(&node, &app.secrets.credential_key, run, epoch, pulse.sequence as i64, pulse.draining, resources)).await?;
                 yield wire::SessionReply { message: Some(wire::session_reply::Message::Pulse(wire::PulseReply {
                     sequence: pulse.sequence, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)),
+                    grants: snapshot.grants.into_iter().map(super::read::grant_result).collect(),
                 })) };
             }
         };

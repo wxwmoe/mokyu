@@ -9,6 +9,18 @@ use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait ClusterStore: Send + Sync {
+    async fn open_read(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_read::Query,
+    ) -> Result<super::node_read::Reply>;
+    async fn read_window(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_read::Window,
+    ) -> Result<super::node_read::Reply>;
     async fn provision_node(
         &self,
         principal: &Principal,
@@ -37,6 +49,7 @@ pub(crate) trait ClusterStore: Send + Sync {
         epoch: i64,
         sequence: i64,
         draining: bool,
+        resources: super::node_read::KeepAlive,
     ) -> Result<super::session::Snapshot>;
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
     async fn begin_remote(

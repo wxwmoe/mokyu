@@ -8459,6 +8459,7 @@ async fn node_snapshot(
         maintenance,
         draining,
         settings,
+        grants: Vec::new(),
     })
 }
 
@@ -8590,6 +8591,835 @@ pub(super) async fn sync_node(
     Ok(snapshot)
 }
 
+async fn node_read_mapping(
+    db: &mut PgConnection,
+    node: Uuid,
+    stream: &crate::app::StoredStream,
+    start: i64,
+    end: i64,
+    limit: usize,
+) -> Result<crate::model::node_read::Mapping> {
+    use crate::model::{
+        Error,
+        node_read::{Mapping, Segment, Source},
+    };
+    use std::collections::HashMap;
+    let mut segments = Vec::new();
+    if stream.payload_type == "raw" {
+        for row in queries::node_read_raw(stream.id, start, end, limit as i64)
+            .fetch_all(&mut *db)
+            .await?
+        {
+            row.range.validate()?;
+            ensure!(
+                (!row.range.source.pending_upload && row.range.source.medium == "shared_s3")
+                    || (row.range.source.pending_upload && row.node_id == Some(node)),
+                Error::SourceUnavailable
+            );
+            segments.push(Segment {
+                offset: row.range.offset_bytes,
+                length: row.range.length,
+                source_offset: row.range.source_offset,
+                source: Source::Raw {
+                    source: row.range.source,
+                },
+            });
+        }
+    } else {
+        ensure!(stream.payload_type == "chunks", Error::SourceUnavailable);
+        let rows = queries::node_read_extents(stream.id, start, end, limit as i64)
+            .fetch_all(&mut *db)
+            .await?;
+        let ids: Vec<_> = rows.iter().filter_map(|row| row.chunk_id).collect();
+        let chunks: HashMap<_, _> = queries::node_read_chunks(&ids)
+            .fetch_all(&mut *db)
+            .await?
+            .into_iter()
+            .map(|row| (row.chunk.id, row))
+            .collect();
+        let encodings: HashMap<_, _> = queries::node_read_encodings(&ids)
+            .fetch_all(&mut *db)
+            .await?
+            .into_iter()
+            .map(|chunk| (chunk.id, chunk))
+            .collect();
+        let pack_ids: Vec<_> = chunks
+            .values()
+            .filter(|row| !encodings.contains_key(&row.chunk.id))
+            .filter_map(|row| row.pack_id)
+            .collect();
+        let packs: HashMap<_, _> = queries::node_read_packs(&pack_ids)
+            .fetch_all(&mut *db)
+            .await?
+            .into_iter()
+            .map(|pack| (pack.id, pack))
+            .collect();
+        let pending: HashMap<_, _> = queries::node_read_pending(&ids)
+            .fetch_all(&mut *db)
+            .await?
+            .into_iter()
+            .collect();
+        let fragment_ids: Vec<_> = rows.iter().filter_map(|row| row.fragment_id).collect();
+        let fragments: HashMap<_, _> = queries::node_read_fragments(&fragment_ids)
+            .fetch_all(&mut *db)
+            .await?
+            .into_iter()
+            .map(|row| (row.source.location_id, row))
+            .collect();
+        for row in rows {
+            let source = if let Some(id) = row.chunk_id {
+                let chunk = chunks.get(&id).ok_or(Error::SourceUnavailable)?;
+                ensure!(
+                    i64::from(row.source_offset) + i64::from(row.length)
+                        <= i64::from(chunk.chunk.raw_size),
+                    Error::SourceUnavailable
+                );
+                if let Some(chunk) = encodings.get(&id) {
+                    Source::Chunk {
+                        chunk: chunk.clone(),
+                    }
+                } else if let Some(pack) = chunk.pack_id.and_then(|id| packs.get(&id)) {
+                    Source::Pack {
+                        pack: pack.clone(),
+                        chunk: chunk.chunk.clone(),
+                    }
+                } else if pending.get(&id) == Some(&Some(node)) {
+                    Source::Local {
+                        node,
+                        chunk: chunk.chunk.clone(),
+                    }
+                } else {
+                    return Err(Error::SourceUnavailable.into());
+                }
+            } else {
+                let Some(Id::Uuid(id)) = row.fragment_id else {
+                    return Err(Error::SourceUnavailable.into());
+                };
+                let fragment = fragments.get(&id).ok_or(Error::SourceUnavailable)?;
+                ensure!(
+                    row.source_offset >= 0
+                        && row.source_offset + row.length <= fragment.source.size,
+                    Error::SourceUnavailable
+                );
+                if let (Some(storage), Some(key)) = (
+                    fragment.source.staging_storage_id,
+                    &fragment.source.staging_object_key,
+                ) {
+                    Source::Staged {
+                        fragment: id,
+                        storage,
+                        key: key.clone(),
+                        size: i64::from(fragment.source.size),
+                        hash: fragment.source.hash.clone(),
+                    }
+                } else {
+                    ensure!(fragment.node_id == Some(node), Error::SourceUnavailable);
+                    Source::Fragment {
+                        node,
+                        source: fragment.source.clone(),
+                    }
+                }
+            };
+            segments.push(Segment {
+                offset: row.offset_bytes,
+                length: i64::from(row.length),
+                source_offset: i64::from(row.source_offset),
+                source,
+            });
+        }
+    }
+    let mut position = start;
+    for segment in &mut segments {
+        let source_end = segment
+            .offset
+            .checked_add(segment.length)
+            .context("read extent overflow")?;
+        ensure!(
+            segment.offset <= position && source_end > position,
+            Error::SourceUnavailable
+        );
+        segment.source_offset += position - segment.offset;
+        segment.offset = position;
+        segment.length = source_end.min(end) - position;
+        position += segment.length;
+    }
+    ensure!(
+        position > start && position <= end,
+        Error::SourceUnavailable
+    );
+    let Id::Uuid(id) = stream.id else {
+        anyhow::bail!("node reads require UUID stream identities");
+    };
+    Ok(Mapping {
+        stream: id,
+        revision: stream.payload_revision,
+        start,
+        end: position,
+        segments,
+    })
+}
+
+async fn node_read_materials(
+    db: &mut PgConnection,
+    deployment: Uuid,
+    key: &crate::content::codec::Key,
+    mapping: &crate::model::node_read::Mapping,
+    cached: &[crate::model::node_read::Version],
+    reply: &mut crate::model::node_read::Reply,
+) -> Result<Vec<crate::model::node_read::Storage>> {
+    use crate::model::{
+        Error,
+        node_read::{BlockKey, MaterialType, Storage},
+    };
+    use std::collections::{BTreeSet, HashMap};
+    let storages: Vec<_> = mapping
+        .segments
+        .iter()
+        .map(|segment| segment.source.storage())
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let keys: Vec<_> = mapping
+        .segments
+        .iter()
+        .filter_map(|segment| segment.source.key())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let records = queries::node_read_storages(&storages)
+        .fetch_all(&mut *db)
+        .await?;
+    let mut profiles: HashMap<_, _> = queries::node_read_profiles(&storages)
+        .fetch_all(&mut *db)
+        .await?
+        .into_iter()
+        .map(|row| (row.storage_id, row))
+        .collect();
+    ensure!(records.len() == storages.len(), Error::SourceUnavailable);
+    let mut materials = Vec::new();
+    for record in records {
+        let mut profile = profiles
+            .remove(&record.id)
+            .context("read storage profile is missing")?;
+        profile.write_durability = None;
+        let storage = Storage {
+            connection: crate::storage::model::Connection::unprotect(&record, key)?,
+            revision: profile.revision,
+            profile,
+        };
+        reply.material(
+            deployment,
+            MaterialType::Storage,
+            record.id.to_string(),
+            &storage,
+            cached,
+        )?;
+        materials.push(storage);
+    }
+    let records = queries::node_read_keys(&keys).fetch_all(&mut *db).await?;
+    ensure!(records.len() == keys.len(), Error::SourceUnavailable);
+    for record in records {
+        let material = crate::content::codec::unprotect_bytes(
+            &record.encrypted,
+            key,
+            format!("managed-key-{}", record.id).as_bytes(),
+        )?;
+        ensure!(
+            record.fingerprint == blake3::hash(&material).as_bytes(),
+            "managed key fingerprint mismatch"
+        );
+        let material: [u8; 32] = material
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid block key material"))?;
+        let block = BlockKey {
+            id: record.id,
+            algorithm: record.algorithm,
+            material,
+        };
+        reply.material(
+            deployment,
+            MaterialType::Key,
+            block.id.to_string(),
+            &block,
+            cached,
+        )?;
+    }
+    reply.mapping = Some(reply.material(
+        deployment,
+        MaterialType::Mapping,
+        format!(
+            "{}:{}:{}:{}",
+            mapping.stream, mapping.revision, mapping.start, mapping.end
+        ),
+        mapping,
+        cached,
+    )?);
+    Ok(materials)
+}
+
+async fn node_read_body_matches(
+    db: &mut PgConnection,
+    node: &crate::cluster::NodeState,
+    key: &crate::content::codec::Key,
+    stream: &crate::app::StoredStream,
+    body: &crate::model::node_read::CachedBody,
+) -> Result<bool> {
+    use crate::model::node_read::{self as read, MaterialType, Outcome, Reply};
+    if !body.verified {
+        return Ok(false);
+    }
+    let mapping =
+        node_read_mapping(db, node.node_id, stream, 0, stream.size, read::MAX_ITEMS).await?;
+    if mapping.end != stream.size {
+        return Ok(false);
+    }
+    let mut probe = Reply::new(Outcome::Ready);
+    node_read_materials(db, node.deployment_id, key, &mapping, &[], &mut probe).await?;
+    let policies: Vec<_> = probe
+        .materials
+        .iter()
+        .filter(|material| material.version.r#type == MaterialType::Storage)
+        .map(|material| &material.version)
+        .collect();
+    Ok(probe.mapping.as_ref() == Some(&body.mapping)
+        && policies.len() == body.storages.len()
+        && policies
+            .iter()
+            .all(|version| body.storages.contains(version)))
+}
+
+async fn node_read_permits(
+    db: &mut PgConnection,
+    node: Uuid,
+    read: Uuid,
+    storages: &[crate::model::node_read::Storage],
+) -> Result<Vec<crate::model::node_read::Grant>> {
+    use crate::model::{
+        Error,
+        node_read::{Grant, GrantType},
+    };
+    let mut grants = Vec::new();
+    for storage in storages {
+        let Some(limit) = storage.profile.read_concurrency else {
+            continue;
+        };
+        let id = storage.connection.id;
+        queries::lock_storage_permits(format!("mokyu:store:{id}:read"))
+            .execute(&mut *db)
+            .await?;
+        let (token, remaining) = if let Some(permit) = queries::node_read_permit(read, id)
+            .fetch_optional(&mut *db)
+            .await?
+        {
+            permit
+        } else {
+            queries::expire_storage_permits(id, "read")
+                .execute(&mut *db)
+                .await?;
+            ensure!(
+                queries::node_read_permit_count(read)
+                    .fetch_one(&mut *db)
+                    .await?
+                    < 16,
+                Error::NodeReadLimit
+            );
+            ensure!(
+                queries::storage_permit_count(id, "read")
+                    .fetch_one(&mut *db)
+                    .await?
+                    < i64::from(limit),
+                Error::NodeReadLimit
+            );
+            let token = Uuid::new_v4();
+            queries::insert_storage_permit(token, id, "read", node)
+                .execute(&mut *db)
+                .await?;
+            queries::node_read_own_permit(read, token)
+                .execute(&mut *db)
+                .await?;
+            (token, 60_000)
+        };
+        grants.push(Grant {
+            r#type: GrantType::StorageRead,
+            id: token,
+            valid_for_ms: remaining as u64,
+            storage: Some(id),
+        });
+    }
+    Ok(grants)
+}
+
+async fn node_read_save_window(
+    db: &mut PgConnection,
+    read: Uuid,
+    mapping: &crate::model::node_read::Mapping,
+) -> Result<Uuid> {
+    let id = queries::node_read_insert_window(read, mapping)
+        .fetch_one(&mut *db)
+        .await?;
+    let pins = mapping
+        .segments
+        .iter()
+        .map(|segment| segment.source.pin())
+        .collect::<Result<Vec<_>>>()?;
+    let kinds = pins
+        .iter()
+        .map(|(r#type, _)| (*r#type).to_owned())
+        .collect::<Vec<_>>();
+    let ids = pins.iter().map(|(_, id)| *id).collect::<Vec<_>>();
+    ensure!(
+        ids.iter().all(|id| !id.is_nil()),
+        "invalid read source identity"
+    );
+    queries::node_read_pin(id, &kinds, &ids).execute(db).await?;
+    Ok(id)
+}
+
+pub(super) async fn open_node_read(
+    pool: &PgPool,
+    state: &crate::cluster::NodeState,
+    key: &crate::content::codec::Key,
+    input: crate::model::node_read::Query,
+) -> Result<crate::model::node_read::Reply> {
+    use crate::model::{
+        Error,
+        node_read::{self as read, Grant, GrantType, MaterialType, Outcome, Reply},
+    };
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, state, key, false).await?;
+    ensure!(state.role == "data", Error::NodeAuthentication);
+    let session = require_node_run(&mut tx, state, input.run, false).await?;
+    ensure!(
+        !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
+        Error::NodeInactive
+    );
+    let mut reply = Reply::new(Outcome::Ready);
+    if let Some(access) = &input.access {
+        let Some((_, encrypted)) = queries::node_read_credential(access)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            reply.outcome = Outcome::AccessDenied;
+            return Ok(reply);
+        };
+        let credential = read::Credential {
+            access: access.clone(),
+            secret: crate::content::codec::unprotect(&encrypted, key, access.as_bytes())?,
+        };
+        reply.credential = Some(reply.material(
+            state.deployment_id,
+            MaterialType::Credential,
+            access.clone(),
+            &credential,
+            &input.cached,
+        )?);
+    }
+    let Some(bucket) = queries::node_read_bucket(&input.route)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        reply.outcome = Outcome::NoSuchBucket;
+        return Ok(reply);
+    };
+    reply.bucket = Some(reply.material(
+        state.deployment_id,
+        MaterialType::Bucket,
+        bucket.id.to_string(),
+        &bucket,
+        &input.cached,
+    )?);
+    if bucket.state != "active"
+        || if let Some(access) = &input.access {
+            !queries::node_read_allowed(access, bucket.project_id, bucket.id)
+                .fetch_one(&mut *tx)
+                .await?
+        } else {
+            false
+        }
+    {
+        reply.outcome = Outcome::AccessDenied;
+        return Ok(reply);
+    }
+    let object_key = match &input.route {
+        crate::model::ReadRoute::Bucket { key, alias, .. } => alias
+            .as_ref()
+            .filter(|(name, _)| *name == bucket.name)
+            .map_or(key, |(_, key)| key),
+        crate::model::ReadRoute::Host { key, .. } => key,
+    };
+    let Some(stream) = queries::current_stream(bucket.id, object_key, true)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        reply.outcome = Outcome::NoSuchKey;
+        return Ok(reply);
+    };
+    if input.access.is_none() && !stream.public_read {
+        reply.outcome = Outcome::AccessDenied;
+        return Ok(reply);
+    }
+    let object = read::Object::from_stream(&stream)?;
+    reply.object = Some(reply.material(
+        state.deployment_id,
+        MaterialType::Object,
+        object.id.to_string(),
+        &object,
+        &input.cached,
+    )?);
+    input.select(&stream, &mut reply)?;
+    if reply.body_reused {
+        reply.body_reused = match node_read_body_matches(
+            &mut tx,
+            state,
+            key,
+            &stream,
+            input.body.as_ref().unwrap(),
+        )
+        .await
+        {
+            Ok(accepted) => accepted,
+            Err(error) if crate::model::error(&error) == Some(Error::SourceUnavailable) => false,
+            Err(error) => return Err(error),
+        };
+    }
+    if reply.outcome != Outcome::Ready
+        || input.head
+        || !input.mapping
+        || reply.length == 0
+        || reply.body_reused
+    {
+        ensure!(reply.bytes() <= input.max_bytes, Error::NodeReadLimit);
+        require_node_run(&mut tx, state, input.run, false).await?;
+        tx.commit().await?;
+        return Ok(reply);
+    }
+    queries::lock_staging(format!("mokyu:node-read:{}", state.node_id))
+        .execute(&mut *tx)
+        .await?;
+    let hash = input.digest()?;
+    let previous = queries::node_read_existing(state, input.run, input.operation)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let start = reply.offset as i64;
+    let end = (reply.offset + reply.length) as i64;
+    if let Some(previous) = &previous {
+        ensure!(previous.valid_for_ms > 0, Error::NodeExpired);
+        ensure!(
+            previous.request_hash == hash
+                && previous.stream_id == stream.id
+                && previous.payload_revision == stream.payload_revision
+                && previous.offset_bytes == start
+                && previous.end_bytes == end,
+            Error::NodeConflict
+        );
+    } else {
+        ensure!(
+            queries::node_read_count(state.node_id)
+                .fetch_one(&mut *tx)
+                .await?
+                < read::READ_LIMIT,
+            Error::NodeReadLimit
+        );
+    }
+    let existing = if let Some(previous) = &previous {
+        queries::node_read_window(previous.read_id, start)
+            .fetch_optional(&mut *tx)
+            .await?
+    } else {
+        None
+    };
+    ensure!(previous.is_none() || existing.is_some(), Error::NodeExpired);
+    let mut mapping = if let Some((_, mapping)) = &existing {
+        mapping.0.clone()
+    } else {
+        match node_read_mapping(&mut tx, state.node_id, &stream, start, end, input.max_items).await
+        {
+            Ok(mapping) => mapping,
+            Err(error) if crate::model::error(&error) == Some(Error::SourceUnavailable) => {
+                reply.outcome = Outcome::Pending;
+                return Ok(reply);
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    ensure!(
+        mapping.segments.len() <= input.max_items,
+        Error::NodeReadLimit
+    );
+    let base = reply.materials.len();
+    let storages = loop {
+        reply.materials.truncate(base);
+        let storages = node_read_materials(
+            &mut tx,
+            state.deployment_id,
+            key,
+            &mapping,
+            &input.cached,
+            &mut reply,
+        )
+        .await?;
+        if reply.bytes() + 1024 + storages.len() * 128 <= input.max_bytes {
+            break storages;
+        }
+        ensure!(
+            existing.is_none() && mapping.segments.len() > 1,
+            Error::NodeReadLimit
+        );
+        mapping
+            .segments
+            .truncate(mapping.segments.len().div_ceil(2));
+        let last = mapping.segments.last().unwrap();
+        mapping.end = last.offset + last.length;
+    };
+    let (id, remaining) = if let Some(previous) = previous {
+        (previous.read_id, previous.valid_for_ms)
+    } else {
+        let id = create_read_lease(&mut tx, stream.id, read::READ_SECONDS).await?;
+        queries::node_read_insert(state, &input, id, &stream, start, end, &hash)
+            .execute(&mut *tx)
+            .await?;
+        (id, read::READ_SECONDS * 1000)
+    };
+    let window = if let Some((id, _)) = existing {
+        id
+    } else {
+        node_read_save_window(&mut tx, id, &mapping).await?
+    };
+    reply.grants = node_read_permits(&mut tx, state.node_id, id, &storages).await?;
+    reply.grants.extend([
+        Grant {
+            r#type: GrantType::Read,
+            id,
+            valid_for_ms: remaining as u64,
+            storage: None,
+        },
+        Grant {
+            r#type: GrantType::Window,
+            id: window,
+            valid_for_ms: remaining as u64,
+            storage: None,
+        },
+    ]);
+    if mapping.end < end {
+        reply.next = Some(read::Cursor {
+            lease: id,
+            stream: mapping.stream,
+            revision: mapping.revision,
+            offset: mapping.end,
+            end,
+        });
+    }
+    require_node_run(&mut tx, state, input.run, false).await?;
+    ensure!(
+        queries::node_read_owned(state, input.run, id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some(),
+        Error::NodeExpired
+    );
+    tx.commit().await?;
+    Ok(reply)
+}
+
+pub(super) async fn node_read_window(
+    pool: &PgPool,
+    state: &crate::cluster::NodeState,
+    key: &crate::content::codec::Key,
+    input: crate::model::node_read::Window,
+) -> Result<crate::model::node_read::Reply> {
+    use crate::model::{
+        Error,
+        node_read::{self as read, Grant, GrantType, Outcome, Reply},
+    };
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, state, key, false).await?;
+    ensure!(state.role == "data", Error::NodeAuthentication);
+    require_node_run(&mut tx, state, input.run, false).await?;
+    queries::lock_staging(format!("mokyu:node-read:{}", state.node_id))
+        .execute(&mut *tx)
+        .await?;
+    let owned = queries::node_read_owned(state, input.run, input.cursor.lease)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NodeExpired)?;
+    ensure!(
+        owned.stream_id == Id::Uuid(input.cursor.stream)
+            && owned.payload_revision == input.cursor.revision
+            && input.cursor.end == owned.end_bytes
+            && input.cursor.offset >= owned.offset_bytes
+            && input.cursor.offset < owned.end_bytes,
+        Error::NodeExpired
+    );
+    let stream = queries::node_read_stream(owned.stream_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(
+        stream.payload_revision == owned.payload_revision,
+        Error::SourceUnavailable
+    );
+    let existing = queries::node_read_window(owned.read_id, input.cursor.offset)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if existing.is_none() {
+        ensure!(
+            queries::node_read_window_count(owned.read_id)
+                .fetch_one(&mut *tx)
+                .await?
+                < 2,
+            Error::NodeReadLimit
+        );
+    }
+    let mut mapping = if let Some((_, mapping)) = &existing {
+        mapping.0.clone()
+    } else {
+        node_read_mapping(
+            &mut tx,
+            state.node_id,
+            &stream,
+            input.cursor.offset,
+            input.cursor.end,
+            input.max_items,
+        )
+        .await?
+    };
+    ensure!(
+        mapping.segments.len() <= input.max_items,
+        Error::NodeReadLimit
+    );
+    let mut reply = Reply::new(Outcome::Ready);
+    let storages = loop {
+        reply.materials.clear();
+        let storages = node_read_materials(
+            &mut tx,
+            state.deployment_id,
+            key,
+            &mapping,
+            &input.cached,
+            &mut reply,
+        )
+        .await?;
+        if reply.bytes() + 1024 + storages.len() * 128 <= input.max_bytes {
+            break storages;
+        }
+        ensure!(
+            existing.is_none() && mapping.segments.len() > 1,
+            Error::NodeReadLimit
+        );
+        mapping
+            .segments
+            .truncate(mapping.segments.len().div_ceil(2));
+        let last = mapping.segments.last().unwrap();
+        mapping.end = last.offset + last.length;
+    };
+    let window = if let Some((id, _)) = existing {
+        id
+    } else {
+        node_read_save_window(&mut tx, owned.read_id, &mapping).await?
+    };
+    reply.grants = node_read_permits(&mut tx, state.node_id, owned.read_id, &storages).await?;
+    reply.grants.push(Grant {
+        r#type: GrantType::Window,
+        id: window,
+        valid_for_ms: owned.valid_for_ms as u64,
+        storage: None,
+    });
+    reply.offset = mapping.start as u64;
+    reply.length = (mapping.end - mapping.start) as u64;
+    if mapping.end < input.cursor.end {
+        reply.next = Some(read::Cursor {
+            offset: mapping.end,
+            ..input.cursor
+        });
+    }
+    require_node_run(&mut tx, state, input.run, false).await?;
+    ensure!(
+        queries::node_read_owned(state, input.run, owned.read_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some(),
+        Error::NodeExpired
+    );
+    tx.commit().await?;
+    Ok(reply)
+}
+
+async fn maintain_node_reads(
+    db: &mut PgConnection,
+    state: &crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    resources: crate::model::node_read::KeepAlive,
+) -> Result<Vec<crate::model::node_read::GrantResult>> {
+    use crate::model::node_read::{GrantResult, GrantType};
+    use std::collections::{HashMap, HashSet};
+    ensure!(
+        resources.renew.len() + resources.release.len() <= 256,
+        crate::model::Error::NodeReadLimit
+    );
+    let mut seen = HashSet::new();
+    ensure!(
+        resources
+            .renew
+            .iter()
+            .chain(&resources.release)
+            .all(|grant| !grant.id.is_nil() && seen.insert(grant.id)),
+        crate::model::Error::OperationAborted
+    );
+    if seen.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids = |r#type| {
+        resources
+            .release
+            .iter()
+            .filter(|grant| grant.r#type == r#type)
+            .map(|grant| grant.id)
+            .collect::<Vec<_>>()
+    };
+    let reads = ids(GrantType::Read);
+    queries::node_read_release_permits(state, run, &reads, &ids(GrantType::StorageRead))
+        .execute(&mut *db)
+        .await?;
+    queries::node_read_release_windows(state, run, &ids(GrantType::Window))
+        .execute(&mut *db)
+        .await?;
+    queries::node_read_release(state, run, &reads)
+        .execute(&mut *db)
+        .await?;
+    let mut renewed = HashMap::new();
+    for r#type in [GrantType::Read, GrantType::StorageRead, GrantType::Window] {
+        let ids = resources
+            .renew
+            .iter()
+            .filter(|grant| grant.r#type == r#type)
+            .map(|grant| grant.id)
+            .collect::<Vec<_>>();
+        if !ids.is_empty() {
+            renewed.extend(
+                queries::node_read_renew(state, run, r#type, &ids)
+                    .fetch_all(&mut *db)
+                    .await?,
+            );
+        }
+    }
+    Ok(resources
+        .renew
+        .into_iter()
+        .map(|grant| GrantResult {
+            accepted: renewed.contains_key(&grant.id),
+            valid_for_ms: renewed.get(&grant.id).copied().unwrap_or(0) as u64,
+            grant,
+        })
+        .chain(resources.release.into_iter().map(|grant| GrantResult {
+            grant,
+            accepted: true,
+            valid_for_ms: 0,
+        }))
+        .collect())
+}
+
 pub(super) async fn pulse_node_session(
     pool: &PgPool,
     state: &crate::cluster::NodeState,
@@ -8598,6 +9428,7 @@ pub(super) async fn pulse_node_session(
     epoch: i64,
     sequence: i64,
     draining: bool,
+    resources: crate::model::node_read::KeepAlive,
 ) -> Result<crate::model::session::Snapshot> {
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, true).await?;
@@ -8610,7 +9441,8 @@ pub(super) async fn pulse_node_session(
         .execute(&mut *tx)
         .await?;
     queries::node_seen(state.node_id).execute(&mut *tx).await?;
-    let snapshot = node_snapshot(&mut tx, state.node_id).await?;
+    let mut snapshot = node_snapshot(&mut tx, state.node_id).await?;
+    snapshot.grants = maintain_node_reads(&mut tx, state, run, resources).await?;
     tx.commit().await?;
     Ok(snapshot)
 }

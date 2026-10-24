@@ -1,6 +1,6 @@
 use crate::model::Id;
 use crate::{
-    config::{self, Secrets},
+    config,
     content::codec::{self, Chunk},
     content::compression::{Pool, Strategy},
 };
@@ -127,7 +127,7 @@ pub struct Pack {
     pub created_at: DateTime<Utc>,
 }
 impl Pack {
-    pub fn validate(&self, secrets: &Secrets) -> Result<()> {
+    pub fn validate(&self, keys: &dyn codec::KeySource) -> Result<()> {
         self.aad().context(codec::IntegrityError::Metadata)?;
         let tag = if self.algorithm == "none" { 0 } else { 16 };
         ensure!(
@@ -145,7 +145,7 @@ impl Pack {
                 codec::IntegrityError::Metadata
             );
         } else {
-            let key = secrets
+            let key = keys
                 .key_for_id(self.block_key_id)
                 .context(codec::IntegrityError::MissingKey)?;
             ensure!(
@@ -230,7 +230,7 @@ impl Decoded {
 pub fn encode(
     mut p: Pack,
     members: &[(Chunk, Bytes)],
-    secrets: &Secrets,
+    keys: &dyn codec::KeySource,
     pool: &Pool,
     strategy: Strategy,
     should_try: bool,
@@ -271,7 +271,7 @@ pub fn encode(
     let mut encoded = compressed.unwrap_or(raw);
     p.stored_size = Some(encoded.len() as i64 + if p.algorithm == "none" { 0 } else { 16 });
     if p.algorithm != "none" {
-        let key = secrets
+        let key = keys
             .key_for_id(p.block_key_id)
             .context("missing pack key")?;
         ensure!(key.algorithm == p.algorithm, "pack key algorithm mismatch");
@@ -295,13 +295,18 @@ pub fn encode(
     Ok((p, encoded))
 }
 
-pub fn decode(p: &Pack, data: Vec<u8>, secrets: &Secrets, pool: &Pool) -> Result<Decoded> {
-    decode_read(p, data, secrets, pool, true)
+pub fn decode(
+    p: &Pack,
+    data: Vec<u8>,
+    keys: &dyn codec::KeySource,
+    pool: &Pool,
+) -> Result<Decoded> {
+    decode_read(p, data, keys, pool, true)
 }
 pub fn decode_read(
     p: &Pack,
     mut data: Vec<u8>,
-    secrets: &Secrets,
+    keys: &dyn codec::KeySource,
     pool: &Pool,
     verify: bool,
 ) -> Result<Decoded> {
@@ -312,7 +317,7 @@ pub fn decode_read(
     );
     let aad = p.aad().context(codec::IntegrityError::Metadata)?;
     if p.algorithm != "none" {
-        let key = secrets
+        let key = keys
             .key_for_id(p.block_key_id)
             .context(codec::IntegrityError::MissingKey)?;
         ensure!(
@@ -386,6 +391,7 @@ pub fn decode_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Secrets;
     #[test]
     fn pack_authenticates_index_members_and_opaque_nonce() {
         for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
