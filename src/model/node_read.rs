@@ -360,16 +360,27 @@ pub(crate) struct Policy {
     pub(crate) storage_id: Uuid,
     pub(crate) revision: i64,
     pub(crate) cors_cache_enabled: bool,
+    pub(crate) public_cache_enabled: bool,
+    pub(crate) refresh_seconds: u64,
+    pub(crate) max_age_seconds: u64,
+    pub(crate) read_integrity: String,
 }
 
-impl From<&StorageProfile> for Policy {
-    fn from(profile: &StorageProfile) -> Self {
-        Self {
+impl TryFrom<&StorageProfile> for Policy {
+    type Error = anyhow::Error;
+
+    fn try_from(profile: &StorageProfile) -> Result<Self> {
+        let (refresh, age) = profile.public_cache_times()?;
+        Ok(Self {
             storage_id: profile.storage_id,
             revision: profile.revision,
             cors_cache_enabled: profile.cors_cache_enabled
                 || profile.public_cache_validation == "background",
-        }
+            public_cache_enabled: profile.public_cache_validation == "background",
+            refresh_seconds: refresh,
+            max_age_seconds: age,
+            read_integrity: profile.read_integrity.clone(),
+        })
     }
 }
 

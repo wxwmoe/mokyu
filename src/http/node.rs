@@ -30,6 +30,11 @@ struct RequestRead {
     compression: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
+enum ReadAccess {
+    Anonymous,
+    Signed(Option<String>),
+}
+
 tokio::task_local! {
     static CURRENT: RefCell<Option<RequestRead>>;
 }
@@ -44,11 +49,8 @@ pub(crate) struct Gateway {
 impl Gateway {
     pub(crate) fn new(reads: Arc<Reads>) -> Result<Self> {
         let settings = reads.node.snapshot()?.runtime().requests.clone();
-        let (cors, receiver) = cors::Cache::new(
-            crate::config::cache_bytes(&settings.cors_cache_size)? as usize,
-            settings.cors_cache_entries,
-        );
-        tokio::spawn(cors::run_current(Arc::downgrade(&cors), receiver));
+        let cors = reads.cors.clone();
+        reads.start_public();
         Ok(Self {
             reads,
             cors,
@@ -72,12 +74,21 @@ impl Gateway {
     async fn prepare(
         &self,
         route: ReadRoute,
-        access: Option<String>,
-        head: bool,
+        access: ReadAccess,
+        method: &Method,
         web: bool,
         headers: &HeaderMap,
         overrides: &HeaderMap,
     ) -> Result<RequestRead> {
+        let (access, anonymous) = match access {
+            ReadAccess::Anonymous => (None, true),
+            ReadAccess::Signed(key) => (key, false),
+        };
+        let head = method != Method::GET;
+        let reuse = anonymous
+            && access.is_none()
+            && matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+            && object::reuse_public(headers);
         let accept = compression::AcceptEncoding::new(headers);
         let wants_compression = !head
             && access.is_none()
@@ -150,7 +161,13 @@ impl Gateway {
             ..Default::default()
         };
         let deadline = crate::app::readiness::deadline();
-        let prepared = self.reads.open(input.clone()).await?;
+        let prepared = if reuse {
+            self.reads
+                .open_public(input.clone(), method == Method::OPTIONS)
+                .await?
+        } else {
+            self.reads.open(input.clone()).await?
+        };
         Ok(RequestRead {
             input,
             prepared,
@@ -221,8 +238,8 @@ impl Gateway {
         let prepared = self
             .prepare(
                 ReadRoute::Host { host, key },
-                None,
-                method == Method::HEAD,
+                ReadAccess::Anonymous,
+                &method,
                 true,
                 &headers,
                 &HeaderMap::new(),
@@ -282,8 +299,8 @@ impl Gateway {
                         host: host.clone(),
                         key: key.clone(),
                     },
-                    None,
-                    request.method() != Method::GET,
+                    ReadAccess::Anonymous,
+                    request.method(),
                     true,
                     request.headers(),
                     &HeaderMap::new(),
@@ -386,8 +403,12 @@ impl Gateway {
             let prepared = self
                 .prepare(
                     route,
-                    s3::access_key(request.headers(), request.uri().query()),
-                    !read || head,
+                    if target.signed {
+                        ReadAccess::Signed(s3::access_key(request.headers(), request.uri().query()))
+                    } else {
+                        ReadAccess::Anonymous
+                    },
+                    request.method(),
                     false,
                     request.headers(),
                     &overrides,

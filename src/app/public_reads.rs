@@ -25,7 +25,7 @@ pub(super) fn extra_budget(response_bytes: u64) -> usize {
 pub(crate) struct Entry {
     pub snapshot: Arc<ReadSnapshot>,
     pub mapping: Option<Key>,
-    route: ReadRoute,
+    pub(crate) route: ReadRoute,
     profiles: Vec<(Uuid, i64)>,
     verified: Instant,
     refresh: Duration,
@@ -77,9 +77,15 @@ pub(crate) struct Cache {
     sender: mpsc::Sender<Work>,
     cors: Arc<crate::http::cors::Cache>,
     hits: AtomicU64,
-    refreshed: AtomicU64,
-    failed: AtomicU64,
-    skipped: AtomicU64,
+    pub(crate) refreshed: AtomicU64,
+    pub(crate) failed: AtomicU64,
+    pub(crate) skipped: AtomicU64,
+}
+
+pub(crate) struct Confirmation {
+    pub(crate) mapping: Option<Key>,
+    pub(crate) profiles: Vec<(Uuid, i64)>,
+    pub(crate) times: (u64, u64),
 }
 
 pub(crate) enum Work {
@@ -89,6 +95,7 @@ pub(crate) enum Work {
         snapshot: Arc<ReadSnapshot>,
         started: Instant,
         generation: u64,
+        confirmed: Option<Box<Confirmation>>,
         _memory: Memory,
     },
 }
@@ -289,6 +296,10 @@ impl Cache {
         self.index.lock().unwrap().generation
     }
 
+    pub(crate) fn entry(&self, route: &ReadRoute) -> Option<Arc<Entry>> {
+        self.index.lock().unwrap().entries.get(&key(route)).cloned()
+    }
+
     pub fn raw_current(&self, entry: &Arc<Entry>, storage: &crate::storage::Storage) -> bool {
         let index = self.index.lock().unwrap();
         if !current(&index, entry)
@@ -313,19 +324,27 @@ impl Cache {
     }
 
     pub fn get(&self, route: &ReadRoute, storage: &crate::storage::Storage) -> Option<Arc<Entry>> {
+        self.get_with(route, |profiles| {
+            profiles.iter().all(|(id, revision)| {
+                storage.profile(*id).is_ok_and(|profile| {
+                    profile.revision == *revision && profile.public_cache_validation == "background"
+                })
+            })
+        })
+    }
+
+    pub(crate) fn get_with(
+        &self,
+        route: &ReadRoute,
+        valid: impl FnOnce(&[(Uuid, i64)]) -> bool,
+    ) -> Option<Arc<Entry>> {
         let index = self.index.lock().unwrap();
         if index.changing != 0 {
             return None;
         }
         let entry = index.entries.get(&key(route))?.clone();
         drop(index);
-        if entry.verified.elapsed() >= entry.age
-            || entry.profiles.iter().any(|(id, revision)| {
-                storage.profile(*id).map_or(true, |profile| {
-                    profile.revision != *revision || profile.public_cache_validation != "background"
-                })
-            })
-        {
+        if entry.verified.elapsed() >= entry.age || !valid(&entry.profiles) {
             return None;
         }
         self.hits.fetch_add(1, Relaxed);
@@ -348,23 +367,35 @@ impl Cache {
         route: &ReadRoute,
         storage: &crate::storage::Storage,
     ) -> Option<super::Bucket> {
+        self.bucket_with(route, |profiles| {
+            profiles.iter().all(|(id, revision)| {
+                storage.profile(*id).is_ok_and(|profile| {
+                    profile.revision == *revision && profile.public_cache_validation == "background"
+                })
+            })
+        })
+        .map(|entry| entry.snapshot.bucket.clone())
+    }
+
+    pub(crate) fn bucket_with(
+        &self,
+        route: &ReadRoute,
+        valid: impl FnOnce(&[(Uuid, i64)]) -> bool,
+    ) -> Option<Arc<Entry>> {
         let index = self.index.lock().unwrap();
         if index.changing != 0 {
             return None;
         }
         let entry = index.buckets.get(&bucket_key(route))?.upgrade()?;
+        if !current(&index, &entry) {
+            return None;
+        }
         drop(index);
-        if entry.verified.elapsed() >= entry.age
-            || entry.profiles.iter().any(|(id, revision)| {
-                storage.profile(*id).map_or(true, |profile| {
-                    profile.revision != *revision || profile.public_cache_validation != "background"
-                })
-            })
-        {
+        if entry.verified.elapsed() >= entry.age || !valid(&entry.profiles) {
             return None;
         }
         self.hits.fetch_add(1, Relaxed);
-        Some(entry.snapshot.bucket.clone())
+        Some(entry)
     }
 
     pub(crate) fn queue(
@@ -373,6 +404,17 @@ impl Cache {
         snapshot: Arc<ReadSnapshot>,
         started: Instant,
         generation: u64,
+    ) {
+        self.queue_with(route, snapshot, started, generation, None);
+    }
+
+    pub(crate) fn queue_with(
+        &self,
+        route: &ReadRoute,
+        snapshot: Arc<ReadSnapshot>,
+        started: Instant,
+        generation: u64,
+        confirmed: Option<Confirmation>,
     ) {
         let route_bytes = match route {
             ReadRoute::Host { host, key } => host.len() + key.len(),
@@ -414,6 +456,7 @@ impl Cache {
                 snapshot,
                 started,
                 generation,
+                confirmed: confirmed.map(Box::new),
                 _memory: memory,
             })
             .is_err()
@@ -423,7 +466,7 @@ impl Cache {
         }
     }
 
-    fn put(
+    pub(crate) fn put(
         &self,
         route: &ReadRoute,
         snapshot: Arc<ReadSnapshot>,
@@ -480,7 +523,13 @@ impl Cache {
             return;
         }
         let mut index = self.index.lock().unwrap();
-        if index.changing != 0 || index.generation != generation {
+        if index.changing != 0
+            || index.generation != generation
+            || index
+                .entries
+                .get(&key(route))
+                .is_some_and(|entry| entry.verified > verified)
+        {
             return;
         }
         let key = key(route);
@@ -521,7 +570,7 @@ impl Cache {
         }
     }
 
-    fn remove(&self, entry: &Arc<Entry>) {
+    pub(crate) fn remove(&self, entry: &Arc<Entry>) {
         let mut index = self.index.lock().unwrap();
         let key = key(&entry.route);
         if index
@@ -532,6 +581,49 @@ impl Cache {
             index.remove(key);
             index.order.retain(|current| *current != key);
         }
+    }
+
+    pub(crate) fn refresh_generation(&self, entry: &Arc<Entry>) -> Option<u64> {
+        let index = self.index.lock().unwrap();
+        current(&index, entry).then_some(index.generation)
+    }
+
+    pub(crate) fn reusable(
+        &self,
+        entry: &Arc<Entry>,
+        valid: impl FnOnce(&[(Uuid, i64)]) -> bool,
+    ) -> bool {
+        self.refresh_generation(entry).is_some()
+            && entry.verified.elapsed() < entry.age
+            && valid(&entry.profiles)
+    }
+
+    pub(crate) fn finished(&self, route: &ReadRoute) {
+        self.index.lock().unwrap().pending.remove(&key(route));
+    }
+
+    pub(crate) fn fence_pending(&self, route: &ReadRoute) {
+        let mut index = self.index.lock().unwrap();
+        if index.pending.contains(&key(route)) {
+            index.generation = index.generation.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn profile_changed(&self, storage: Uuid) {
+        let mut index = self.index.lock().unwrap();
+        let index = &mut *index;
+        index.generation = index.generation.wrapping_add(1);
+        let removed: Vec<_> = index
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.profiles.iter().any(|(id, _)| *id == storage))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in removed {
+            index.remove(key);
+        }
+        index.order.retain(|key| index.entries.contains_key(key));
+        index.buckets.retain(|_, entry| entry.strong_count() > 0);
     }
 
     pub fn snapshot(&self) -> serde_json::Value {
@@ -636,6 +728,7 @@ pub(crate) async fn run(app: Weak<App>, mut receiver: mpsc::Receiver<Work>) {
             snapshot,
             started,
             generation,
+            confirmed: _,
             _memory,
         } = work
         {
@@ -948,6 +1041,61 @@ mod tests {
         assert!(cache.index.lock().unwrap().entries.is_empty());
         drop(entry);
         assert_eq!(cache.memory.available_permits(), available);
+    }
+
+    #[test]
+    fn public_profiles_expiry_and_bucket_aliases_reject_late_snapshots() {
+        let (cors, _cors_receiver) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let (cache, _receiver) = Cache::new(cors, &super::super::responses::Cache::new(0));
+        let (route, snapshot) = fixture();
+        let storage = Uuid::new_v4();
+        let now = Instant::now();
+        let generation = cache.generation();
+        cache.put(
+            &route,
+            snapshot.clone(),
+            None,
+            vec![(storage, 1)],
+            (1, 5),
+            (now, generation),
+        );
+        let held = cache.get_with(&route, |_| true).unwrap();
+        cache.put(
+            &route,
+            snapshot.clone(),
+            Some([1; 32]),
+            vec![(storage, 1)],
+            (1, 5),
+            (now - Duration::from_secs(1), generation),
+        );
+        assert!(Arc::ptr_eq(
+            &held,
+            &cache.get_with(&route, |_| true).unwrap()
+        ));
+        cache.profile_changed(Uuid::new_v4());
+        assert!(cache.reusable(&held, |_| true));
+        cache.profile_changed(storage);
+        assert!(!cache.reusable(&held, |_| true));
+        assert!(cache.bucket_with(&route, |_| true).is_none());
+        cache.put(
+            &route,
+            snapshot.clone(),
+            None,
+            vec![(storage, 1)],
+            (1, 5),
+            (now, generation),
+        );
+        assert!(cache.get_with(&route, |_| true).is_none());
+        cache.put(
+            &route,
+            snapshot,
+            None,
+            vec![(storage, 2)],
+            (1, 5),
+            (now - Duration::from_secs(6), cache.generation()),
+        );
+        assert!(cache.get_with(&route, |_| true).is_none());
+        assert!(cache.bucket_with(&route, |_| true).is_none());
     }
 
     #[test]

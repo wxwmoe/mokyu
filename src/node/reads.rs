@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -13,6 +13,9 @@ use tokio::{
     time::Instant,
 };
 use uuid::Uuid;
+
+#[path = "public.rs"]
+mod public;
 
 const UNIT: usize = 4096;
 const MATERIAL_BYTES: usize = 1024 * 1024;
@@ -25,6 +28,7 @@ struct Material {
     referenced: AtomicBool,
     _memory: Option<OwnedSemaphorePermit>,
     backend: Mutex<Option<Arc<super::body::Backend>>>,
+    policy: Option<read::Policy>,
 }
 
 #[derive(Default)]
@@ -36,6 +40,7 @@ struct Index {
 struct Cache {
     index: Mutex<Index>,
     memory: Arc<Semaphore>,
+    public: Weak<crate::app::public_reads::Cache>,
 }
 
 impl Default for Cache {
@@ -43,6 +48,7 @@ impl Default for Cache {
         Self {
             index: Mutex::new(Index::default()),
             memory: Arc::new(Semaphore::new(MATERIAL_BYTES / UNIT)),
+            public: Weak::new(),
         }
     }
 }
@@ -52,7 +58,17 @@ impl Cache {
         self.index.lock().unwrap().values.clone()
     }
 
-    fn admit(&self, version: wire::Cached, json: Vec<u8>) -> Arc<Material> {
+    fn policy(&self, id: Uuid) -> Option<read::Policy> {
+        let index = self.index.lock().unwrap();
+        [wire::MaterialType::Storage, wire::MaterialType::ReadPolicy]
+            .iter()
+            .filter_map(|r#type| index.values.get(&(*r#type as i32, id.to_string())))
+            .filter_map(|value| value.policy.as_ref())
+            .max_by_key(|policy| policy.revision)
+            .cloned()
+    }
+
+    fn admit(&self, version: wire::Cached, json: Vec<u8>) -> Result<Arc<Material>> {
         let key = (version.r#type, version.id.clone());
         let units = (json.capacity() + version.id.capacity() + 2048).div_ceil(UNIT);
         let mut index = self.index.lock().unwrap();
@@ -62,10 +78,47 @@ impl Cache {
             .filter(|value| value.version == version)
         {
             value.referenced.store(true, Ordering::Relaxed);
-            return value.clone();
+            return Ok(value.clone());
+        }
+        let policy = match wire::MaterialType::try_from(version.r#type) {
+            Ok(wire::MaterialType::ReadPolicy) => {
+                Some(serde_json::from_slice::<read::Policy>(&json)?)
+            }
+            Ok(wire::MaterialType::Storage) => Some(read::Policy::try_from(
+                &serde_json::from_slice::<read::Storage>(&json)?.profile,
+            )?),
+            _ => None,
+        };
+        let mut stale = false;
+        if let Some(policy) = &policy {
+            ensure!(
+                policy.storage_id.to_string() == version.id
+                    && policy.revision > 0
+                    && (1..=60).contains(&policy.refresh_seconds)
+                    && (policy.refresh_seconds..=300).contains(&policy.max_age_seconds)
+                    && matches!(
+                        policy.read_integrity.as_str(),
+                        "off" | "background" | "inline"
+                    ),
+                "invalid read policy"
+            );
+            let previous = index
+                .values
+                .values()
+                .filter_map(|value| value.policy.as_ref())
+                .filter(|value| value.storage_id == policy.storage_id)
+                .map(|value| value.revision)
+                .max();
+            stale = previous.is_some_and(|revision| revision > policy.revision);
+            if !stale
+                && previous != Some(policy.revision)
+                && let Some(public) = self.public.upgrade()
+            {
+                public.profile_changed(policy.storage_id);
+            }
         }
         let mut memory = None;
-        if units <= MATERIAL_BYTES / UNIT {
+        if !stale && units <= MATERIAL_BYTES / UNIT {
             // Bound optional eviction work even when every entry is hot or held by a request.
             for _ in 0..16 {
                 if index.values.len() < read::MAX_CACHED {
@@ -94,6 +147,7 @@ impl Cache {
             referenced: AtomicBool::new(true),
             _memory: memory,
             backend: Mutex::new(None),
+            policy,
         });
         if entry._memory.is_some() {
             if !index.values.contains_key(&key) {
@@ -101,7 +155,7 @@ impl Cache {
             }
             index.values.insert(key, entry.clone());
         }
-        entry
+        Ok(entry)
     }
 
     fn apply(&self, deployment: Uuid, declared: Held, values: Vec<wire::Material>) -> Result<Held> {
@@ -141,15 +195,18 @@ impl Cache {
                 _ => anyhow::bail!("invalid read material reuse marker"),
             }
         }
-        Ok(parsed
+        parsed
             .into_iter()
             .map(|(key, version, json, held)| {
-                (
+                Ok((
                     key,
-                    held.unwrap_or_else(|| self.admit(version, json.unwrap())),
-                )
+                    match held {
+                        Some(value) => value,
+                        None => self.admit(version, json.unwrap())?,
+                    },
+                ))
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -174,6 +231,11 @@ pub(crate) struct Reads {
     pub(super) reader: super::body::Reader,
     pub(super) checks: Arc<crate::content::checks::Checks>,
     pub(super) bodies: Arc<crate::app::responses::Cache>,
+    pub(crate) cors: Arc<crate::http::cors::Cache>,
+    pub(super) public: Arc<crate::app::public_reads::Cache>,
+    public_epoch: Mutex<u64>,
+    pub(super) public_receiver:
+        Mutex<Option<tokio::sync::mpsc::Receiver<crate::app::public_reads::Work>>>,
 }
 
 pub(crate) struct Prepared {
@@ -187,6 +249,8 @@ pub(crate) struct Prepared {
     pub(super) cached_body: Option<Arc<crate::app::responses::Entry>>,
     pub(super) route: [u8; 32],
     pub(super) capture: Option<Arc<Mutex<crate::app::responses::Mapping>>>,
+    pub(super) public_generation: Option<u64>,
+    pub(super) started: std::time::Instant,
 }
 
 impl Prepared {
@@ -293,19 +357,37 @@ impl Reads {
         let reader = super::body::Reader::new(&node)?;
         let checks = crate::content::checks::Checks::new(reader.cpu.clone());
         let bodies = crate::app::responses::Cache::new(budget.response_cache_bytes);
+        let settings = node.snapshot()?.runtime().requests.clone();
+        let (cors, receiver) = crate::http::cors::Cache::new(
+            crate::config::cache_bytes(&settings.cors_cache_size)? as usize,
+            settings.cors_cache_entries,
+        );
+        tokio::spawn(crate::http::cors::run_current(
+            Arc::downgrade(&cors),
+            receiver,
+        ));
+        let (public, receiver) = crate::app::public_reads::Cache::new(cors.clone(), &bodies);
         Ok(Self {
             node,
-            cache: Cache::default(),
+            cache: Cache {
+                public: Arc::downgrade(&public),
+                ..Cache::default()
+            },
             slots,
             reader,
             checks,
             bodies,
+            cors,
+            public,
+            public_epoch: Mutex::new(0),
+            public_receiver: Mutex::new(Some(receiver)),
         })
     }
 
     pub(crate) async fn open(&self, mut input: wire::ReadRequest) -> Result<Prepared> {
         let memory = Arc::new(self.slots.clone().acquire_owned().await?);
         let snapshot = self.node.snapshot()?;
+        let generation = self.public_generation();
         ensure!(
             input.cached.is_empty() && input.body.is_none(),
             "read material claims must be pinned by the caller"
@@ -321,6 +403,7 @@ impl Reads {
             input.operation_id = Uuid::new_v4().to_string();
         }
         input.cached = cached(&declared);
+        let public_route = crate::rpc::read::query(input.clone())?.route;
         let limits = (input.max_items, input.max_bytes);
         let started = Instant::now();
         let mut reply = self.node.client.read(input).await?;
@@ -328,11 +411,17 @@ impl Reads {
             .node
             .resources
             .adopt(&snapshot.lease, &reply.grants, started)?;
-        let materials = self.cache.apply(
-            self.node.client.identity.deployment_id,
-            declared,
-            std::mem::take(&mut reply.materials),
-        )?;
+        let (materials, public_generation) = {
+            let _epoch = self.public_epoch.lock().unwrap();
+            let current = self.public.generation() == generation;
+            let materials = self.cache.apply(
+                self.node.client.identity.deployment_id,
+                declared,
+                std::mem::take(&mut reply.materials),
+            )?;
+            self.observe_public(&public_route, &reply)?;
+            (materials, current.then(|| self.public.generation()))
+        };
         let cached_body = if reply.body_reused {
             Some(candidate.context("control reused an undeclared body")?.1)
         } else {
@@ -354,6 +443,8 @@ impl Reads {
             cached_body,
             route,
             capture: None,
+            public_generation,
+            started: started.into_std(),
         };
         prepared.check()?;
         Ok(prepared)
@@ -397,11 +488,14 @@ impl Reads {
                         })
                         .cloned(),
                 );
-                let materials = self.cache.apply(
-                    self.node.client.identity.deployment_id,
-                    declared,
-                    std::mem::take(&mut reply.materials),
-                )?;
+                let materials = {
+                    let _epoch = self.public_epoch.lock().unwrap();
+                    self.cache.apply(
+                        self.node.client.identity.deployment_id,
+                        declared,
+                        std::mem::take(&mut reply.materials),
+                    )?
+                };
                 let prepared = Prepared {
                     reply,
                     run: previous.run.clone(),
@@ -413,6 +507,8 @@ impl Reads {
                     cached_body: None,
                     route: previous.route,
                     capture: previous.capture.clone(),
+                    public_generation: None,
+                    started: started.into_std(),
                 };
                 prepared.check()?;
                 Ok(prepared)

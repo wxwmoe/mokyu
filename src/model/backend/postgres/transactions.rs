@@ -9052,7 +9052,7 @@ pub(super) async fn open_node_read(
                 state.deployment_id,
                 MaterialType::Policy,
                 storage.to_string(),
-                &read::Policy::from(&profile),
+                &read::Policy::try_from(&profile)?,
                 &input.cached,
             )?);
         }

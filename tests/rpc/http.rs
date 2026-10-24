@@ -3,22 +3,111 @@ use super::*;
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and real signed HTTP requests"]
 async fn node_http_reads_use_one_rpc_and_verify_signatures() -> Result<()> {
-    node_http_reads(false, false).await
+    node_http_reads(false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and real cached HTTP reads"]
 async fn node_http_cache_validates_versions_and_recovers() -> Result<()> {
-    node_http_reads(true, false).await
+    node_http_reads(true, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and disposable node cache files"]
 async fn node_http_file_cache_recovers_and_falls_back() -> Result<()> {
-    node_http_reads(false, true).await
+    node_http_reads(false, true, false).await
 }
 
-async fn node_http_reads(cache: bool, disk: bool) -> Result<()> {
+#[tokio::test]
+#[ignore = "requires isolated controls, TLS origins and public cache mutations"]
+async fn node_http_public_cache_expires_and_recovers() -> Result<()> {
+    node_http_reads(true, false, true).await
+}
+
+async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
+    async fn populated(reads: &crate::node::reads::Reads, body: bool) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while reads.public_cache()["entries"].as_u64().unwrap() == 0
+                || (body && reads.body_cache()["entries"].as_u64().unwrap() == 0)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+    let before = reads.backend_gets();
+    fixture("public-head-warm").await?;
+    populated(reads, false).await?;
+    fixture("public-head-hot").await?;
+    assert_eq!(
+        reads.backend_gets(),
+        before,
+        "cached HEAD read object bytes"
+    );
+    fixture("public-body-cold").await?;
+    populated(reads, true).await?;
+    assert!(
+        reads.backend_gets() > before,
+        "HEAD snapshot authorized a missing body"
+    );
+    let before = reads.backend_gets();
+    fixture("public-body-hot").await?;
+    fixture("public-strong").await?;
+    assert_eq!(reads.backend_gets(), before);
+    fixture("public-strict").await?;
+    assert!(
+        reads.backend_gets() > before,
+        "changed storage policy reused an obsolete body proof"
+    );
+    fixture("public-refresh-warm").await?;
+    populated(reads, true).await?;
+    let refreshed = reads.public_cache()["refreshed"].as_u64().unwrap();
+    fixture("public-refresh-trigger").await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reads.public_cache()["refreshed"].as_u64().unwrap() == refreshed {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    fixture("public-refreshed").await?;
+    fixture("public-expiry-warm").await?;
+    populated(reads, true).await?;
+    let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
+    tokio::fs::write(faults.join("node-public-refresh"), b"pause").await?;
+    fixture("public-refresh-stale").await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !faults.join("node-public-refresh.hit").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    fixture("public-expired").await?;
+    tokio::fs::remove_file(faults.join("node-public-refresh")).await?;
+    fixture("public-restore").await?;
+    populated(reads, true).await?;
+    fixture("public-clear").await?;
+    tokio::fs::write(faults.join("node-public-fill"), b"pause").await?;
+    fixture("public-late-start").await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !faults.join("node-public-fill.hit").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    fixture("public-late-revoke").await?;
+    tokio::fs::remove_file(faults.join("node-public-fill")).await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fixture("public-late-denied").await?;
+    fixture("public-restore").await?;
+    populated(reads, true).await?;
+    let state = reads.public_cache();
+    assert!(state["used_bytes"].as_u64().unwrap() <= state["limit_bytes"].as_u64().unwrap());
+    assert!(state["hits"].as_u64().unwrap() > 0);
+    Ok(())
+}
+
+async fn node_http_reads(cache: bool, disk: bool, public: bool) -> Result<()> {
     use crate::{
         config::node::NodeConfig,
         node::{NodeContext, Phase},
@@ -125,7 +214,9 @@ async fn node_http_reads(cache: bool, disk: bool) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if disk {
+    if public {
+        public_cache_reads(&reads).await?;
+    } else if disk {
         file_cache_reads(&reads).await?;
     } else if cache {
         cache_reads(&reads).await?;
@@ -183,7 +274,11 @@ async fn node_http_reads(cache: bool, disk: bool) -> Result<()> {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if disk {
+    if public {
+        let before = reads.backend_gets();
+        fixture("public-reconnected").await?;
+        assert_eq!(reads.backend_gets(), before);
+    } else if disk {
         let before = reads.backend_gets();
         fixture("l2-reconnected").await?;
         assert_eq!(reads.backend_gets(), before);

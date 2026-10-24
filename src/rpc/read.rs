@@ -199,7 +199,7 @@ pub(crate) fn cached(values: Vec<wire::Cached>) -> Result<Vec<read::Version>, St
         .collect()
 }
 
-pub(super) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
+pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
     let run = run(input.run)?;
     let operation = super::uuid(&input.operation_id)?;
     let head = match wire::ReadMethod::try_from(input.method) {
@@ -357,7 +357,7 @@ pub(crate) fn version(value: read::Version) -> wire::Cached {
     }
 }
 
-pub(super) fn reply(input: read::Reply) -> wire::ReadReply {
+pub(crate) fn reply(input: read::Reply) -> wire::ReadReply {
     let outcome = match input.outcome {
         read::Outcome::Ready => wire::ReadOutcome::Ready,
         read::Outcome::NoSuchBucket => wire::ReadOutcome::NoSuchBucket,
