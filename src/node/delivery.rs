@@ -40,7 +40,7 @@ pub(crate) fn error(error: anyhow::Error) -> s3s::S3Error {
 
 pub(crate) async fn response(
     reads: &Arc<Reads>,
-    prepared: Prepared,
+    mut prepared: Prepared,
     head: bool,
     overrides: &HeaderMap,
     memory: Option<OwnedSemaphorePermit>,
@@ -158,7 +158,12 @@ pub(crate) async fn response(
         None
     } else {
         let size = prepared.reply.length;
-        let memory = if encoding == Encoding::Identity {
+        let direct = prepared
+            .cached_body
+            .as_ref()
+            .and_then(|entry| entry.node_body())
+            .is_some_and(|proof| proof.representation == encoding.name());
+        let memory = if encoding == Encoding::Identity || direct {
             None
         } else {
             Some(memory.ok_or_else(|| s3s::s3_error!(ServiceUnavailable))?)
@@ -168,11 +173,51 @@ pub(crate) async fn response(
         )?);
         let lease = prepared.run.clone();
         let mut events = reads.node.subscribe();
-        let source = Box::pin(
-            reads
-                .body(prepared)
-                .map(|result| result.map_err(io::Error::other)),
-        );
+        let builder = if direct {
+            None
+        } else {
+            reads.cache_body(&prepared, &object, encoding, &headers)?
+        };
+        let source: compression::ByteStream = if let Some(entry) = prepared.cached_body.take() {
+            ensure!(entry.usable(0), "cached body verification failed");
+            let proof = entry.node_body().context("cached body proof missing")?;
+            ensure!(
+                direct || proof.representation == "identity",
+                "invalid cached representation"
+            );
+            let bytes = if proof.representation == "identity" {
+                ensure!(
+                    entry.bytes.len() as u64 == object.size as u64,
+                    "cached body length mismatch"
+                );
+                entry
+                    .bytes
+                    .slice(prepared.reply.offset as usize..end as usize)
+            } else {
+                ensure!(!partial, "encoded cache cannot serve a range");
+                headers.insert(
+                    header::CONTENT_LENGTH,
+                    entry.bytes.len().to_string().parse()?,
+                );
+                entry.bytes.clone()
+            };
+            reads.bodies.hit();
+            reads.bodies.validated();
+            Box::pin(async_stream::try_stream! {
+                let _request = prepared;
+                let _entry = entry;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("response-cache-body").await;
+                yield bytes;
+            })
+        } else {
+            prepared.capture = builder.as_ref().map(|builder| builder.capture.clone());
+            Box::pin(
+                reads
+                    .body(prepared)
+                    .map(|result| result.map_err(io::Error::other)),
+            )
+        };
         let body = if let Some(memory) = memory {
             compression::encode(
                 source,
@@ -184,6 +229,11 @@ pub(crate) async fn response(
             )
         } else {
             source
+        };
+        let body = if let Some(builder) = builder {
+            object::collect(body, builder, size, encoding)
+        } else {
+            body
         };
         Some(object::blob(Box::pin(async_stream::try_stream! {
             let mut body = body;

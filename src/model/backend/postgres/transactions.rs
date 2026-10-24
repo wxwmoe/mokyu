@@ -8868,9 +8868,6 @@ async fn node_read_body_matches(
     body: &crate::model::node_read::CachedBody,
 ) -> Result<bool> {
     use crate::model::node_read::{self as read, MaterialType, Outcome, Reply};
-    if !body.verified {
-        return Ok(false);
-    }
     let mapping =
         node_read_mapping(db, node.node_id, stream, 0, stream.size, read::MAX_ITEMS).await?;
     if mapping.end != stream.size {
@@ -8878,6 +8875,19 @@ async fn node_read_body_matches(
     }
     let mut probe = Reply::new(Outcome::Ready);
     node_read_materials(db, node.deployment_id, key, &mapping, &[], &mut probe).await?;
+    if !body.verified {
+        for material in &probe.materials {
+            if material.version.r#type == MaterialType::Storage {
+                let Some(json) = &material.json else {
+                    return Ok(false);
+                };
+                let storage: read::Storage = serde_json::from_slice(json)?;
+                if storage.profile.read_integrity == "inline" {
+                    return Ok(false);
+                }
+            }
+        }
+    }
     let policies: Vec<_> = probe
         .materials
         .iter()

@@ -173,6 +173,7 @@ pub(crate) struct Reads {
     slots: Arc<Semaphore>,
     pub(super) reader: super::body::Reader,
     pub(super) checks: Arc<crate::content::checks::Checks>,
+    pub(super) bodies: Arc<crate::app::responses::Cache>,
 }
 
 pub(crate) struct Prepared {
@@ -183,9 +184,32 @@ pub(crate) struct Prepared {
     pub(super) memory: Arc<OwnedSemaphorePermit>,
     pub(super) buffers: Arc<Semaphore>,
     limits: (u32, u32),
+    pub(super) cached_body: Option<Arc<crate::app::responses::Entry>>,
+    pub(super) route: [u8; 32],
+    pub(super) capture: Option<Arc<Mutex<crate::app::responses::Mapping>>>,
 }
 
 impl Prepared {
+    pub(super) fn storage_versions(&self) -> Vec<wire::Cached> {
+        self.materials
+            .values()
+            .filter(|value| value.version.r#type == wire::MaterialType::Storage as i32)
+            .map(|value| value.version.clone())
+            .collect()
+    }
+
+    pub(super) fn record_check(&self, evidence: Arc<crate::content::checks::Evidence>) {
+        if let Some(capture) = &self.capture {
+            capture.lock().unwrap().record_check(evidence);
+        }
+    }
+
+    pub(super) fn finish_source(&self) {
+        if let Some(capture) = &self.capture {
+            capture.lock().unwrap().finish_source();
+        }
+    }
+
     pub(super) fn backend(&self, id: Uuid) -> Result<Arc<super::body::Backend>> {
         let material = self
             .materials
@@ -268,12 +292,14 @@ impl Reads {
         let slots = Arc::new(Semaphore::new(budget.read_concurrency));
         let reader = super::body::Reader::new(&node)?;
         let checks = crate::content::checks::Checks::new(reader.cpu.clone());
+        let bodies = crate::app::responses::Cache::new(budget.response_cache_bytes);
         Ok(Self {
             node,
             cache: Cache::default(),
             slots,
             reader,
             checks,
+            bodies,
         })
     }
 
@@ -281,10 +307,15 @@ impl Reads {
         let memory = Arc::new(self.slots.clone().acquire_owned().await?);
         let snapshot = self.node.snapshot()?;
         ensure!(
-            input.cached.is_empty(),
+            input.cached.is_empty() && input.body.is_none(),
             "read material claims must be pinned by the caller"
         );
         let declared = self.cache.snapshot();
+        let route = super::cache::route(&input);
+        let candidate = self.candidate(&input);
+        input.body = candidate
+            .as_ref()
+            .and_then(|(_, entry)| super::cache::claim(entry));
         input.run = Some(snapshot.lease.run.clone());
         if input.operation_id.is_empty() {
             input.operation_id = Uuid::new_v4().to_string();
@@ -302,6 +333,16 @@ impl Reads {
             declared,
             std::mem::take(&mut reply.materials),
         )?;
+        let cached_body = if reply.body_reused {
+            Some(candidate.context("control reused an undeclared body")?.1)
+        } else {
+            if reply.outcome == wire::ReadOutcome::Ready as i32
+                && let Some((key, entry)) = candidate
+            {
+                self.bodies.remove(key, &entry);
+            }
+            None
+        };
         let prepared = Prepared {
             reply,
             run: snapshot.lease.clone(),
@@ -310,6 +351,9 @@ impl Reads {
             memory,
             buffers: Arc::new(Semaphore::new(super::body::BUFFER_UNITS)),
             limits,
+            cached_body,
+            route,
+            capture: None,
         };
         prepared.check()?;
         Ok(prepared)
@@ -366,6 +410,9 @@ impl Reads {
                     memory: previous.memory.clone(),
                     buffers: previous.buffers.clone(),
                     limits: previous.limits,
+                    cached_body: None,
+                    route: previous.route,
+                    capture: previous.capture.clone(),
                 };
                 prepared.check()?;
                 Ok(prepared)
@@ -388,6 +435,11 @@ impl Reads {
     #[cfg(test)]
     pub(crate) fn read_checks(&self) -> serde_json::Value {
         self.checks.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn body_cache(&self) -> serde_json::Value {
+        self.bodies.snapshot()
     }
 }
 

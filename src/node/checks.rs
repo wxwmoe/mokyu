@@ -24,19 +24,21 @@ impl Reads {
         match backend.profile.read_integrity.as_str() {
             "background" => {
                 let reads = self.clone();
-                self.checks.chunk(
+                let request = prepared.clone();
+                let evidence = self.checks.chunk(
                     chunk.hash.clone(),
                     bytes,
                     chunk.raw_size as usize + 16,
                     move |valid, _| async move {
                         if !valid {
-                            reads.report(prepared, index).await;
+                            reads.report(request, index).await;
                         }
                     },
                 );
+                prepared.record_check(evidence);
             }
             "off" => {
-                self.checks.unchecked();
+                prepared.record_check(self.checks.unchecked());
             }
             _ => {}
         }
@@ -57,19 +59,23 @@ impl Reads {
         match backend.profile.read_integrity.as_str() {
             "background" if complete => {
                 let reads = self.clone();
-                Ok(Some(self.checks.raw(
+                let request = prepared.clone();
+                let audit = self.checks.raw(
                     source.size as u64,
                     source.digest.clone(),
                     move |valid| async move {
                         if !valid {
-                            reads.report(prepared, index).await;
+                            reads.report(request, index).await;
                         }
                     },
-                )))
+                );
+                prepared.record_check(audit.evidence.clone());
+                Ok(Some(audit))
             }
             "background" => {
                 let (evidence, job) = self.checks.begin();
                 self.checks.finish(&evidence, SKIPPED);
+                prepared.record_check(evidence);
                 if let Some(job) = job {
                     let reads = self.clone();
                     tokio::spawn(async move {
@@ -81,7 +87,7 @@ impl Reads {
                 Ok(None)
             }
             "off" => {
-                self.checks.unchecked();
+                prepared.record_check(self.checks.unchecked());
                 Ok(None)
             }
             _ => Ok(None),

@@ -115,6 +115,7 @@ pub(crate) struct Entry {
     checks: Vec<Arc<super::checks::Evidence>>,
     read_epoch: u64,
     referenced: AtomicBool,
+    node: Option<NodeBody>,
 }
 
 impl Entry {
@@ -122,6 +123,18 @@ impl Entry {
         self.checks.iter().all(|check| check.cacheable())
             && (self.checks.iter().all(|check| check.verified()) || self.read_epoch == epoch)
     }
+
+    pub(crate) fn node_body(&self) -> Option<crate::model::node_read::CachedBody> {
+        let mut body = self.node.as_ref()?.proof.clone();
+        body.verified = self.checks.iter().all(|check| check.verified());
+        Some(body)
+    }
+}
+
+struct NodeBody {
+    proof: crate::model::node_read::CachedBody,
+    route: [u8; 32],
+    _memory: OwnedSemaphorePermit,
 }
 
 struct Ownership {
@@ -169,12 +182,19 @@ struct Index {
     history: VecDeque<Key>,
     builders: HashMap<Key, Arc<Notify>>,
     paths: HashMap<[u8; 32], usize>,
+    node_routes: HashMap<([u8; 32], &'static str), Key>,
 }
 
 impl Index {
     fn remove(&mut self, key: Key) {
         if let Some(entry) = self.ready.remove(&key) {
             entry.ownership.retire();
+            if let Some(body) = &entry.node {
+                let route = (body.route, key.encoding);
+                if self.node_routes.get(&route) == Some(&key) {
+                    self.node_routes.remove(&route);
+                }
+            }
             if let Some(count) = self.paths.get_mut(&entry.path) {
                 *count -= 1;
                 if *count == 0 {
@@ -292,6 +312,67 @@ impl Cache {
         let entry = index.ready.get(&key)?;
         entry.referenced.store(true, Relaxed);
         Some(entry.clone())
+    }
+
+    pub(crate) fn node_candidate(
+        &self,
+        route: [u8; 32],
+        encoding: &'static str,
+    ) -> Option<(Key, Arc<Entry>)> {
+        let mut index = self.index.lock().unwrap();
+        let key = *index.node_routes.get(&(route, encoding))?;
+        let entry = index.ready.get(&key)?.clone();
+        if !entry.usable(0) {
+            index.remove(key);
+            index.order.retain(|old| *old != key);
+            return None;
+        }
+        entry.referenced.store(true, Relaxed);
+        Some((key, entry))
+    }
+
+    pub(crate) fn begin_node(
+        self: &Arc<Self>,
+        key: Key,
+        stream: &StoredStream,
+        route: [u8; 32],
+        proof: crate::model::node_read::CachedBody,
+    ) -> Option<Builder> {
+        if proof.storages.len() > 16 {
+            return None;
+        }
+        if let Some(entry) = self.get(key) {
+            if entry.node.as_ref().is_some_and(|old| old.proof == proof) && entry.usable(0) {
+                return None;
+            }
+            self.remove(key, &entry);
+        }
+        let mut builder = self.begin(key, stream, &stream.object_key)?;
+        let bytes = 512
+            + proof.representation.capacity()
+            + proof.object.id.capacity()
+            + proof.mapping.id.capacity()
+            + proof.storages.capacity() * std::mem::size_of::<crate::model::node_read::Version>()
+            + proof
+                .storages
+                .iter()
+                .map(|version| version.id.capacity())
+                .sum::<usize>();
+        let (memory, building) = self.reserve(bytes)?;
+        drop(building);
+        builder.mapping = Some(proof.mapping.revision);
+        builder.capture.lock().unwrap().storages = proof
+            .storages
+            .iter()
+            .map(|version| Uuid::parse_str(&version.id))
+            .collect::<Result<_, _>>()
+            .ok()?;
+        builder.node = Some(NodeBody {
+            proof,
+            route,
+            _memory: memory,
+        });
+        Some(builder)
     }
 
     pub fn candidate(&self, bucket: Uuid, key: &str) -> bool {
@@ -452,6 +533,7 @@ impl Cache {
             signal,
             buffer: None,
             published: false,
+            node: None,
         })
     }
 
@@ -561,6 +643,7 @@ impl Received {
                 checks: Vec::new(),
                 read_epoch: 0,
                 referenced: false.into(),
+                node: None,
             }),
         );
         index.order.push_back(key);
@@ -579,6 +662,7 @@ pub(crate) struct Builder {
     signal: Arc<Notify>,
     buffer: Option<Buffer>,
     published: bool,
+    node: Option<NodeBody>,
 }
 
 impl Builder {
@@ -712,6 +796,7 @@ impl Builder {
             path: self.path,
             ownership,
             referenced: false.into(),
+            node: self.node.take(),
         });
         let needed = index.ready.len() + 1;
         cache.grow_index(&mut index, needed);
@@ -725,6 +810,11 @@ impl Builder {
             index.order.retain(|key| *key != self.key);
         }
         *index.paths.entry(self.path).or_default() += 1;
+        if let Some(body) = &entry.node {
+            index
+                .node_routes
+                .insert((body.route, self.key.encoding), self.key);
+        }
         index.ready.insert(self.key, entry);
         index.order.push_back(self.key);
         self.published = true;
@@ -903,6 +993,68 @@ mod tests {
     use super::*;
     use crate::{app::Extent, content::codec::Chunk};
     use serde_json::json;
+
+    #[test]
+    fn node_candidates_retain_proofs_and_reject_failed_checks() {
+        use crate::model::node_read::{CachedBody, MaterialType, Version};
+        let cache = Cache::new(4 * 1024 * 1024);
+        let (stream, key, _) = fixture(8192);
+        let deployment = Uuid::new_v4();
+        let route = [7; 32];
+        let proof = CachedBody {
+            object: Version::new(
+                deployment,
+                MaterialType::Object,
+                Uuid::new_v4().to_string(),
+                b"object",
+            ),
+            representation: "identity".into(),
+            policy: 1,
+            mapping: Version::new(
+                deployment,
+                MaterialType::Mapping,
+                "mapping".into(),
+                b"mapping",
+            ),
+            storages: vec![Version::new(
+                deployment,
+                MaterialType::Storage,
+                Uuid::new_v4().to_string(),
+                b"storage",
+            )],
+            verified: false,
+        };
+        let before = cache.memory.available_permits();
+        assert!(
+            cache
+                .begin_node(key, &stream, route, proof.clone())
+                .is_none()
+        );
+        let mut builder = cache.begin_node(key, &stream, route, proof).unwrap();
+        let checks = crate::content::checks::Checks::new(Arc::new(Semaphore::new(1)));
+        let (evidence, _job) = checks.begin();
+        builder
+            .capture
+            .lock()
+            .unwrap()
+            .record_check(evidence.clone());
+        builder.capture.lock().unwrap().finish_source();
+        assert!(builder.append(&[1; 8192]));
+        builder.finish();
+        let (_, entry) = cache.node_candidate(route, "identity").unwrap();
+        assert!(!entry.node_body().unwrap().verified);
+        let charged = cache.memory.available_permits();
+        let body = entry.bytes.clone();
+        checks.finish(&evidence, crate::content::checks::FAILED);
+        assert!(cache.node_candidate(route, "identity").is_none());
+        assert_eq!(cache.memory.available_permits(), charged);
+        assert!(cache.index.lock().unwrap().node_routes.is_empty());
+        drop(entry);
+        assert!(cache.memory.available_permits() > charged);
+        assert!(cache.memory.available_permits() < before);
+        drop(body);
+        assert_eq!(cache.memory.available_permits(), before);
+    }
 
     #[test]
     fn reencoded_entries_keep_the_source_mapping_and_storage_fence() {

@@ -3,6 +3,16 @@ use super::*;
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and real signed HTTP requests"]
 async fn node_http_reads_use_one_rpc_and_verify_signatures() -> Result<()> {
+    node_http_reads(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, TLS origins and real cached HTTP reads"]
+async fn node_http_cache_validates_versions_and_recovers() -> Result<()> {
+    node_http_reads(true).await
+}
+
+async fn node_http_reads(cache: bool) -> Result<()> {
     use crate::{
         config::node::NodeConfig,
         node::{NodeContext, Phase},
@@ -20,8 +30,9 @@ async fn node_http_reads_use_one_rpc_and_verify_signatures() -> Result<()> {
     tokio::fs::create_dir(&directory).await?;
     crate::cluster::identity::write_state(&directory.join("node.json"), &identity).await?;
     let config = format!(
-        "[instance]\ncontrol_url='{url}'\ndata_path='{}'\n",
-        directory.display()
+        "[instance]\ncontrol_url='{url}'\ndata_path='{}'\nresponse_cache_size='{}'\n",
+        directory.display(),
+        if cache { "16MiB" } else { "0B" }
     );
     let mut context = NodeContext::new(NodeConfig::parse(&config, "data")?, "data").await?;
     let dns = Dns::new().await?;
@@ -107,39 +118,43 @@ async fn node_http_reads_use_one_rpc_and_verify_signatures() -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    fixture("http-signed").await?;
-    fixture("http-sources").await?;
-    fixture("http-public").await?;
-    let before: Vec<_> = versions
-        .iter()
-        .map(|count| count.load(std::sync::atomic::Ordering::Relaxed))
-        .collect();
-    fixture("http-proxy").await?;
-    assert_eq!(
-        versions[0].load(std::sync::atomic::Ordering::Relaxed),
-        before[0],
-        "proxy used an HTTP/1 upstream"
-    );
-    assert!(
-        versions[1].load(std::sync::atomic::Ordering::Relaxed) >= before[1] + 8,
-        "proxy did not exercise h2c upstreams"
-    );
-    let mut compression = Vec::new();
-    while let Some(memory) = crate::node::delivery::compression_work(&reads) {
-        compression.push(memory);
+    if cache {
+        cache_reads(&reads).await?;
+    } else {
+        fixture("http-signed").await?;
+        fixture("http-sources").await?;
+        fixture("http-public").await?;
+        let before: Vec<_> = versions
+            .iter()
+            .map(|count| count.load(std::sync::atomic::Ordering::Relaxed))
+            .collect();
+        fixture("http-proxy").await?;
+        assert_eq!(
+            versions[0].load(std::sync::atomic::Ordering::Relaxed),
+            before[0],
+            "proxy used an HTTP/1 upstream"
+        );
+        assert!(
+            versions[1].load(std::sync::atomic::Ordering::Relaxed) >= before[1] + 8,
+            "proxy did not exercise h2c upstreams"
+        );
+        let mut compression = Vec::new();
+        while let Some(memory) = crate::node::delivery::compression_work(&reads) {
+            compression.push(memory);
+        }
+        assert!(!compression.is_empty());
+        fixture("http-compression-busy").await?;
+        drop(compression);
+        let before = reads.backend_gets();
+        fixture("http-rejected").await?;
+        assert_eq!(
+            reads.backend_gets(),
+            before,
+            "rejected signatures or metadata-only responses read object bytes"
+        );
+        fixture("http-pending").await?;
+        fixture("assert-no-reads").await?;
     }
-    assert!(!compression.is_empty());
-    fixture("http-compression-busy").await?;
-    drop(compression);
-    let before = reads.backend_gets();
-    fixture("http-rejected").await?;
-    assert_eq!(
-        reads.backend_gets(),
-        before,
-        "rejected signatures or metadata-only responses read object bytes"
-    );
-    fixture("http-pending").await?;
-    fixture("assert-no-reads").await?;
     *dns.answers.write().unwrap() = Some(vec![
         Ipv4Addr::new(127, 0, 0, 2),
         Ipv4Addr::new(127, 0, 0, 3),
@@ -151,27 +166,122 @@ async fn node_http_reads_use_one_rpc_and_verify_signatures() -> Result<()> {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    fixture("http-reconnected").await?;
+    if cache {
+        let before = reads.backend_gets();
+        fixture("l1-reconnected").await?;
+        assert_eq!(
+            reads.backend_gets(),
+            before,
+            "control recovery lost the reusable body"
+        );
+    } else {
+        fixture("http-reconnected").await?;
+    }
     fixture("assert-no-reads").await?;
     let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
-    tokio::fs::remove_file(faults.join("http-compression-finish.hit"))
+    let point = if cache {
+        "response-cache-body"
+    } else {
+        "http-compression-finish"
+    };
+    tokio::fs::remove_file(faults.join(format!("{point}.hit")))
         .await
         .ok();
-    tokio::fs::write(faults.join("http-compression-finish"), b"pause").await?;
-    let fenced = tokio::spawn(fixture("http-fenced"));
+    tokio::fs::write(faults.join(point), b"pause").await?;
+    let fenced = tokio::spawn(fixture(if cache { "l1-fenced" } else { "http-fenced" }));
     tokio::time::timeout(Duration::from_secs(15), async {
-        while !faults.join("http-compression-finish.hit").exists() {
+        while !faults.join(format!("{point}.hit")).exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await?;
     context.stop();
     fenced.await??;
-    tokio::fs::remove_file(faults.join("http-compression-finish")).await?;
+    tokio::fs::remove_file(faults.join(point)).await?;
     driver.await??;
     s3_server.abort();
     web_server.abort();
     let _ = s3_server.await;
     let _ = web_server.await;
+    Ok(())
+}
+
+async fn cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
+    fixture("l1-warm").await?;
+    assert!(reads.body_cache()["entries"].as_u64().unwrap() > 0);
+    let before = reads.backend_gets();
+    fixture("l1-hot").await?;
+    fixture("l1-derived").await?;
+    let mut encoders = Vec::new();
+    while let Some(memory) = crate::node::delivery::compression_work(reads) {
+        encoders.push(memory);
+    }
+    assert!(!encoders.is_empty());
+    fixture("l1-encoded-busy").await?;
+    drop(encoders);
+    fixture("l1-denied").await?;
+    assert_eq!(
+        reads.backend_gets(),
+        before,
+        "cached or rejected reads reached storage"
+    );
+    assert!(reads.body_cache()["hits"].as_u64().unwrap() >= 12);
+    fixture("l1-cancel-first").await?;
+    let entries = reads.body_cache()["entries"].as_u64().unwrap();
+    let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
+    tokio::fs::write(faults.join("http-compression-finish"), b"pause").await?;
+    let cancelled = tokio::spawn(fixture("l1-cancelled"));
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !faults.join("http-compression-finish.hit").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    cancelled.await??;
+    tokio::fs::remove_file(faults.join("http-compression-finish")).await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while reads.body_cache()["building"].as_u64().unwrap() != 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    assert_eq!(
+        reads.body_cache()["entries"].as_u64().unwrap(),
+        entries,
+        "cancelled encoder published a cache entry"
+    );
+    fixture("l1-off").await?;
+    assert!(
+        reads.backend_gets() > before,
+        "changed policy reused a stale cache proof"
+    );
+    let before = reads.backend_gets();
+    fixture("l1-off-hot").await?;
+    assert_eq!(
+        reads.backend_gets(),
+        before,
+        "unchanged off policy bypassed the cache"
+    );
+    fixture("l1-inline").await?;
+    assert!(
+        reads.backend_gets() > before,
+        "inline accepted unchecked cached bytes"
+    );
+    let before = reads.backend_gets();
+    fixture("l1-replace").await?;
+    assert!(
+        reads.backend_gets() > before,
+        "object replacement reused stale bytes"
+    );
+    fixture("l1-warm-replaced").await?;
+    let before = reads.backend_gets();
+    fixture("l1-hot-replaced").await?;
+    assert_eq!(reads.backend_gets(), before);
+    let cache = reads.body_cache();
+    assert!(
+        cache["live_bytes"].as_u64().unwrap() + cache["metadata_bytes"].as_u64().unwrap()
+            <= cache["limit_bytes"].as_u64().unwrap()
+    );
+    fixture("assert-no-reads").await?;
     Ok(())
 }

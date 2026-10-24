@@ -609,6 +609,7 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                         let bytes = result?;
                         remaining -= bytes.len();
                         if let Some(audit) = &mut audit { audit.feed(bytes.clone(), RAW_BUFFER * 2); }
+                        if remaining == 0 && position + segment.length as u64 == end { current.finish_source(); }
                         yield bytes;
                     }
                 } else {
@@ -621,6 +622,7 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                     if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
                     let bytes = result?;
                     reads.check_chunk(current.clone(), index, &segment.source, bytes.clone())?;
+                    if position + segment.length as u64 == end { current.finish_source(); }
                     yield bytes.slice(segment.source_offset as usize..(segment.source_offset + segment.length) as usize);
                 }
                 position += segment.length as u64;

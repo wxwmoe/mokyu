@@ -95,6 +95,7 @@ pub(crate) struct Query {
     pub(crate) body: Option<CachedBody>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct CachedBody {
     pub(crate) object: Version,
     pub(crate) representation: String,
@@ -203,7 +204,8 @@ impl Query {
         reply.body_reused = !self.head
             && self.body.as_ref().is_some_and(|body| {
                 reply.object.as_ref() == Some(&body.object)
-                    && body.representation == reply.representation
+                    && (body.representation == reply.representation
+                        || body.representation == "identity")
                     && body.policy == crate::http::object::POLICY as u32
             });
         Ok(())

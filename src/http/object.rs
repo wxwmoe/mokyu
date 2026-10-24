@@ -670,7 +670,7 @@ pub(crate) async fn identity_body(
     })
 }
 
-fn collect(
+pub(crate) fn collect(
     mut source: compression::ByteStream,
     builder: responses::Builder,
     raw_size: u64,

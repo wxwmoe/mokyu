@@ -336,7 +336,7 @@ pub(super) fn window(input: wire::ReadWindowRequest) -> Result<read::Window, Sta
     })
 }
 
-pub(super) fn version(value: read::Version) -> wire::Cached {
+pub(crate) fn version(value: read::Version) -> wire::Cached {
     let r#type = match value.r#type {
         read::MaterialType::Bucket => wire::MaterialType::Bucket,
         read::MaterialType::Object => wire::MaterialType::ObjectMetadata,
