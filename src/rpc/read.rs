@@ -102,6 +102,39 @@ fn run(input: Option<wire::Run>) -> Result<session::Run, Status> {
     })
 }
 
+pub(super) fn observations(
+    input: wire::ObservationRequest,
+) -> Result<crate::model::node_observation::Batch, Status> {
+    if prost::Message::encoded_len(&input) > super::OBSERVATION_LIMIT {
+        return Err(Status::resource_exhausted(
+            "observation batch exceeds message budget",
+        ));
+    }
+    let batch = crate::model::node_observation::Batch {
+        run: run(input.run)?,
+        compression: input
+            .compression
+            .into_iter()
+            .map(|value| {
+                Ok(crate::model::CompressionObservation {
+                    stream: super::uuid(&value.stream_id)?.into(),
+                    version: value.version.try_into().map_err(|_| invalid())?,
+                    size: value.size.try_into().map_err(|_| invalid())?,
+                    encoding: match value.encoding.as_str() {
+                        "gzip" => "gzip",
+                        "br" => "br",
+                        "zstd" => "zstd",
+                        _ => return Err(invalid()),
+                    },
+                })
+            })
+            .collect::<Result<_, Status>>()?,
+        credentials: input.credentials,
+    };
+    batch.validate().map_err(|_| invalid())?;
+    Ok(batch)
+}
+
 pub(super) fn report(input: wire::ReadReportRequest) -> Result<read::Report, Status> {
     if input.segments.is_empty() || input.segments.len() > 16 {
         return Err(invalid());
@@ -421,6 +454,57 @@ pub(crate) fn reply(input: read::Reply) -> wire::ReadReply {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn observation_batches_bound_values_and_reject_duplicates() {
+        let batch = wire::ObservationRequest {
+            run: Some(wire::Run {
+                boot_id: Uuid::new_v4().to_string(),
+                fence: Uuid::new_v4().to_string(),
+            }),
+            compression: vec![wire::CompressionObservation {
+                stream_id: Uuid::new_v4().to_string(),
+                version: 1,
+                encoding: "gzip".into(),
+                size: 300,
+            }],
+            credentials: vec!["reader".into()],
+        };
+        assert!(observations(batch.clone()).is_ok());
+        let mut duplicate = batch.clone();
+        duplicate.compression.push(duplicate.compression[0].clone());
+        assert!(observations(duplicate).is_err());
+        let mut duplicate = batch.clone();
+        duplicate.credentials.push("reader".into());
+        assert!(observations(duplicate).is_err());
+        let mut oversized = batch.clone();
+        oversized.credentials = (0..64).map(|index| index.to_string()).collect();
+        assert!(observations(oversized).is_err());
+        for field in ["version", "size", "encoding", "stream"] {
+            let mut invalid = batch.clone();
+            let entry = &mut invalid.compression[0];
+            match field {
+                "version" => entry.version = u32::MAX,
+                "size" => entry.size = u64::MAX,
+                "encoding" => entry.encoding = "identity".into(),
+                _ => entry.stream_id = Uuid::nil().to_string(),
+            }
+            assert!(observations(invalid).is_err());
+        }
+        assert!(
+            observations(wire::ObservationRequest {
+                run: batch.run.clone(),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        let mut oversized = batch;
+        oversized.credentials = vec!["x".repeat(super::super::OBSERVATION_LIMIT)];
+        assert_eq!(
+            observations(oversized).err().unwrap().code(),
+            tonic::Code::ResourceExhausted
+        );
+    }
 
     fn request() -> wire::ReadRequest {
         wire::ReadRequest {

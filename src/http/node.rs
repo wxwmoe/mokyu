@@ -22,6 +22,7 @@ use s3s::{
     dto::*,
 };
 use std::{cell::RefCell, sync::Arc};
+use tracing::Instrument;
 
 struct RequestRead {
     input: wire::ReadRequest,
@@ -254,6 +255,12 @@ impl Gateway {
     }
 
     pub(crate) async fn public(&self, mut request: hyper::Request<Body>) -> Response {
+        let observation = crate::status::stats::Request::new(
+            &self.reads.node.statistics.http[1],
+            "web",
+            request.method().clone(),
+        );
+        request.extensions_mut().insert(observation.context.clone());
         let head = request.method() == Method::HEAD;
         let result: Result<Response, super::HttpError> = async {
             super::transport::authority(&mut request)?;
@@ -349,19 +356,26 @@ impl Gateway {
             compression::vary(response.headers_mut(), "Accept-Encoding");
             Ok(response)
         }
+        .instrument(observation.span.clone())
         .await;
         let mut response = result.unwrap_or_else(IntoResponse::into_response);
         if head {
             super::transport::finish_head(&mut response);
         }
-        response
+        observation.response(response, false).map(Body::new)
     }
 
     pub(crate) async fn s3(
         &self,
         service: &s3s::service::S3Service,
         mut request: hyper::Request<s3s::Body>,
-    ) -> s3s::HttpResponse {
+    ) -> hyper::Response<crate::status::stats::ObservedBody<s3s::Body>> {
+        let observation = crate::status::stats::Request::new(
+            &self.reads.node.statistics.http[0],
+            "s3",
+            request.method().clone(),
+        );
+        request.extensions_mut().insert(observation.context.clone());
         let head = request.method() == Method::HEAD;
         let read = head || request.method() == Method::GET;
         let close = matches!(
@@ -457,6 +471,7 @@ impl Gateway {
                 .await
                 .map_err(|error| anyhow::anyhow!("S3 HTTP failure: {error:?}"))?)
         }
+        .instrument(observation.span.clone())
         .await;
         let mut response = result.unwrap_or_else(|error| {
             delivery::error(error)
@@ -488,7 +503,8 @@ impl Gateway {
             *response.body_mut() =
                 s3s::Body::from(object::blob(Box::pin(futures_util::stream::empty())));
         }
-        response
+        crate::status::stats::s3_request_id(&mut response, &observation.context.id);
+        observation.response(response, true)
     }
 }
 
@@ -589,6 +605,13 @@ impl S3Access for Gateway {
                     ));
                 }
             }
+        }
+        if let Some(credential) = context.credentials() {
+            self.reads
+                .node
+                .observations
+                .activity
+                .record(&credential.access_key);
         }
         Ok(())
     }

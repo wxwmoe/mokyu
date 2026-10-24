@@ -143,6 +143,109 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         .execute(&pool)
         .await?;
     sqlx::query("INSERT INTO s3_credential_grants(access_key,bucket_id,actions) VALUES('reader',$1,ARRAY['object.read'])").bind(bucket).execute(&pool).await?;
+    let observed: Uuid = sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,etag) VALUES($1,'observed','object','ready',4096,'observed') RETURNING id")
+        .bind(bucket).fetch_one(&pool).await?;
+    let observations = || model::node_observation::Batch {
+        run: session.run,
+        compression: vec![
+            model::CompressionObservation {
+                stream: observed.into(),
+                version: 1,
+                encoding: "gzip",
+                size: 100,
+            },
+            model::CompressionObservation {
+                stream: observed.into(),
+                version: 1,
+                encoding: "br",
+                size: 90,
+            },
+        ],
+        credentials: vec!["reader".into()],
+    };
+    let mut forbidden = observations();
+    forbidden.run = worker_run.run;
+    assert!(
+        backend
+            .report_observations(&worker, &key, forbidden)
+            .await
+            .is_err()
+    );
+    let mut expired = observations();
+    expired.run.fence = Uuid::new_v4();
+    assert!(
+        backend
+            .report_observations(&node, &key, expired)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE mokyu_meta SET maintenance=true")
+        .execute(&pool)
+        .await?;
+    assert!(
+        backend
+            .report_observations(&node, &key, observations())
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE mokyu_meta SET maintenance=false")
+        .execute(&pool)
+        .await?;
+    let mut invalid = observations();
+    invalid.compression[1].size = -1;
+    assert!(
+        backend
+            .report_observations(&node, &key, invalid)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT last_used_at IS NULL FROM s3_credentials WHERE access_key_id='reader'"
+        )
+        .fetch_one(&pool)
+        .await?
+    );
+    assert_eq!(
+        backend
+            .report_observations(&node, &key, observations())
+            .await?,
+        [true, true]
+    );
+    let learned: serde_json::Value =
+        sqlx::query_scalar("SELECT http_compression FROM streams WHERE id=$1")
+            .bind(observed)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(learned, serde_json::json!({"version":1,"gzip":100,"br":90}));
+    let used: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT last_used_at FROM s3_credentials WHERE access_key_id='reader'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        backend
+            .report_observations(&node, &key, observations())
+            .await?,
+        [false, false]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+            "SELECT last_used_at FROM s3_credentials WHERE access_key_id='reader'"
+        )
+        .fetch_one(&pool)
+        .await?,
+        used
+    );
+    sqlx::query("UPDATE streams SET state='retired' WHERE id=$1")
+        .bind(observed)
+        .execute(&pool)
+        .await?;
+    let mut retired = observations();
+    retired.compression[0].version = 2;
+    assert_eq!(
+        backend.report_observations(&node, &key, retired).await?,
+        [false, false]
+    );
     sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,standalone_size,encryption_algorithm,state) SELECT $1,decode(md5(n::text)||md5(n::text),'hex'),4096,4096,'none','ready' FROM generate_series(1,1025) n").bind(storage).execute(&pool).await?;
     sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,standalone_size,standalone_compressed,state,created_at,encryption_algorithm,storage_id,encoding_fingerprint) SELECT current_encoding_id,id,4096,false,'ready',clock_timestamp(),'none',storage_id,hash FROM chunks").execute(&pool).await?;
     sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id) SELECT $1,(row_number() OVER(ORDER BY id)-1)*4096,4096,id FROM chunks").bind(stream).execute(&pool).await?;

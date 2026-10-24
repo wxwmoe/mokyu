@@ -3,25 +3,99 @@ use super::*;
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and real signed HTTP requests"]
 async fn node_http_reads_use_one_rpc_and_verify_signatures() -> Result<()> {
-    node_http_reads(false, false, false).await
+    node_http_reads(HttpCase::Reads).await
 }
 
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and real cached HTTP reads"]
 async fn node_http_cache_validates_versions_and_recovers() -> Result<()> {
-    node_http_reads(true, false, false).await
+    node_http_reads(HttpCase::Memory).await
 }
 
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and disposable node cache files"]
 async fn node_http_file_cache_recovers_and_falls_back() -> Result<()> {
-    node_http_reads(false, true, false).await
+    node_http_reads(HttpCase::Files).await
 }
 
 #[tokio::test]
 #[ignore = "requires isolated controls, TLS origins and public cache mutations"]
 async fn node_http_public_cache_expires_and_recovers() -> Result<()> {
-    node_http_reads(true, false, true).await
+    node_http_reads(HttpCase::Public).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, TLS origins and observation queries"]
+async fn node_http_observations_are_batched_and_recover() -> Result<()> {
+    node_http_reads(HttpCase::Observations).await
+}
+
+enum HttpCase {
+    Reads,
+    Memory,
+    Files,
+    Public,
+    Observations,
+}
+
+async fn observation_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
+    let reports = &reads.node.observations;
+    fixture("observations-invalid").await?;
+    assert_eq!(reports.activity.snapshot()["completed"], 0);
+    let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
+    tokio::fs::write(faults.join("node-observations-before-batch"), b"pause").await?;
+    fixture("observations-batch").await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !faults.join("node-observations-before-batch.hit").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    assert_eq!(reports.compression.snapshot()["pending"], 3);
+    assert_eq!(reports.activity.snapshot()["pending"], 1);
+    fixture("observations-before").await?;
+    tokio::fs::remove_file(faults.join("node-observations-before-batch")).await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reports.compression.snapshot()["written"].as_u64().unwrap() != 3
+            || reports.activity.snapshot()["completed"].as_u64().unwrap() != 1
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    fixture("observations-written").await?;
+    fixture("observations-repeat").await?;
+    let written = reports.compression.snapshot()["written"].as_u64().unwrap();
+    tokio::fs::write(faults.join("http-compression-finish"), b"pause").await?;
+    let cancelled = tokio::spawn(fixture("observations-cancel"));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !faults.join("http-compression-finish.hit").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    cancelled.await??;
+    tokio::fs::remove_file(faults.join("http-compression-finish")).await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reports.compression.snapshot()["written"], written);
+    fixture("observations-cancelled").await?;
+    let failed = reports.compression.snapshot()["failed"].as_u64().unwrap();
+    tokio::fs::write(faults.join("node-observations-before-report"), b"pause").await?;
+    fixture("observations-timeout").await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reports.compression.snapshot()["failed"].as_u64().unwrap() == failed {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    tokio::fs::remove_file(faults.join("node-observations-before-report")).await?;
+    fixture("observations-failed").await?;
+    fixture("observations-retry").await?;
+    let runtime = reads.node.statistics.runtime();
+    assert!(runtime["http"]["s3"]["completed"].as_u64().unwrap() > 0);
+    assert!(runtime["http"]["web"]["completed"].as_u64().unwrap() > 0);
+    assert!(runtime["http"]["web"]["bytes"].as_u64().unwrap() > 0);
+    Ok(())
 }
 
 async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
@@ -107,7 +181,11 @@ async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()
     Ok(())
 }
 
-async fn node_http_reads(cache: bool, disk: bool, public: bool) -> Result<()> {
+async fn node_http_reads(case: HttpCase) -> Result<()> {
+    let cache = matches!(case, HttpCase::Memory | HttpCase::Public);
+    let disk = matches!(case, HttpCase::Files);
+    let public = matches!(case, HttpCase::Public);
+    let observations = matches!(case, HttpCase::Observations);
     use crate::{
         config::node::NodeConfig,
         node::{NodeContext, Phase},
@@ -214,7 +292,9 @@ async fn node_http_reads(cache: bool, disk: bool, public: bool) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if public {
+    if observations {
+        observation_reads(&reads).await?;
+    } else if public {
         public_cache_reads(&reads).await?;
     } else if disk {
         file_cache_reads(&reads).await?;
@@ -274,7 +354,9 @@ async fn node_http_reads(cache: bool, disk: bool, public: bool) -> Result<()> {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if public {
+    if observations {
+        fixture("observations-reconnected").await?;
+    } else if public {
         let before = reads.backend_gets();
         fixture("public-reconnected").await?;
         assert_eq!(reads.backend_gets(), before);
@@ -474,7 +556,25 @@ async fn cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
     assert!(reads.body_cache()["entries"].as_u64().unwrap() > 0);
     let before = reads.backend_gets();
     fixture("l1-hot").await?;
+    let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
+    tokio::fs::write(faults.join("node-observations-before-batch"), b"pause").await?;
     fixture("l1-derived").await?;
+    assert_eq!(reads.backend_gets(), before);
+    tokio::fs::remove_file(faults.join("node-observations-before-batch")).await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reads.node.observations.compression.snapshot()["written"] == 0
+            || reads.node.observations.compression.snapshot()["pending"] != 0
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    fixture("l1-learned").await?;
+    assert!(
+        reads.backend_gets() > before,
+        "learning reused an obsolete object proof"
+    );
+    let before = reads.backend_gets();
     let mut encoders = Vec::new();
     while let Some(memory) = crate::node::delivery::compression_work(reads) {
         encoders.push(memory);
@@ -491,7 +591,6 @@ async fn cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
     assert!(reads.body_cache()["hits"].as_u64().unwrap() >= 12);
     fixture("l1-cancel-first").await?;
     let entries = reads.body_cache()["entries"].as_u64().unwrap();
-    let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
     tokio::fs::write(faults.join("http-compression-finish"), b"pause").await?;
     let cancelled = tokio::spawn(fixture("l1-cancelled"));
     tokio::time::timeout(Duration::from_secs(15), async {

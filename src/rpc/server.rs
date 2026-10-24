@@ -48,7 +48,7 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     let service = Service { app };
     tonic::service::Routes::new(
         NodeControlServer::new(service.clone())
-            .max_decoding_message_size(1024)
+            .max_decoding_message_size(super::OBSERVATION_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
@@ -314,10 +314,42 @@ fn state(snapshot: &session::Snapshot) -> wire::NodeState {
 
 #[tonic::async_trait]
 impl NodeControl for Service {
+    async fn report_observations(
+        &self,
+        request: Request<wire::ObservationRequest>,
+    ) -> Result<Response<wire::ObservationReply>, Status> {
+        let node = request
+            .extensions()
+            .get::<NodeState>()
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
+        if node.role != "data" {
+            return Err(Status::permission_denied(
+                "read observations require a data node",
+            ));
+        }
+        let input = super::read::observations(request.into_inner())?;
+        let compression_written =
+            bounded(self.app.cluster().map_err(failure)?.report_observations(
+                &node,
+                &self.app.secrets.credential_key,
+                input,
+            ))
+            .await?;
+        Ok(Response::new(wire::ObservationReply {
+            compression_written,
+        }))
+    }
+
     async fn sync_node(
         &self,
         request: Request<wire::SyncRequest>,
     ) -> Result<Response<wire::SyncReply>, Status> {
+        if prost::Message::encoded_len(request.get_ref()) > 1024 {
+            return Err(Status::resource_exhausted(
+                "settings request exceeds message budget",
+            ));
+        }
         let node = request
             .extensions()
             .get::<NodeState>()

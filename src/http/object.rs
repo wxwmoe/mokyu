@@ -212,8 +212,8 @@ pub(crate) fn cache_control(value: &str) -> bool {
     })
 }
 
-fn observation(
-    app: &App,
+pub(crate) fn observation(
+    queue: &Arc<crate::app::compression::Observations>,
     stream: &StoredStream,
     encoding: Encoding,
 ) -> Option<compression::Complete> {
@@ -222,7 +222,7 @@ fn observation(
         && (stream.http_compression["version"].as_i64() != Some(i64::from(POLICY))
             || stream.http_compression.get(encoding.name()).is_none()))
     .then(|| {
-        let queue = Arc::downgrade(&app.compression_observations);
+        let queue = Arc::downgrade(queue);
         let id = stream.id;
         Box::new(move |raw, encoded| {
             if let Some(queue) = queue.upgrade()
@@ -472,7 +472,9 @@ pub(crate) async fn read(
                             if cached_mapping.is_some() || crate::app::reads::is_raw(bucket, key) {
                                 app.response_cache.validated();
                             }
-                            if let Some(observe) = observation(app, &stream, encoding) {
+                            if let Some(observe) =
+                                observation(&app.compression_observations, &stream, encoding)
+                            {
                                 observe(stream.size as u64, entry.bytes.len() as u64);
                             }
                         }
@@ -540,7 +542,7 @@ pub(crate) async fn read(
             } else {
                 None
             };
-            let observation = observation(app, &stream, encoding);
+            let observation = observation(&app.compression_observations, &stream, encoding);
             let body = if let Some(entry) = input {
                 if let Some(builder) = &mut builder {
                     builder.reuse(&entry);

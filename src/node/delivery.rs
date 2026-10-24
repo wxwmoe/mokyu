@@ -203,6 +203,15 @@ pub(crate) async fn response(
             };
             reads.bodies.hit();
             reads.bodies.validated();
+            if direct
+                && let Some(observe) = object::observation(
+                    &reads.node.observations.compression,
+                    &object.stream(),
+                    encoding,
+                )
+            {
+                observe(object.size as u64, entry.bytes.len() as u64);
+            }
             Box::pin(async_stream::try_stream! {
                 let _request = prepared;
                 let _entry = entry;
@@ -225,7 +234,11 @@ pub(crate) async fn response(
                 Some(size),
                 reads.reader.cpu.clone(),
                 memory,
-                None,
+                object::observation(
+                    &reads.node.observations.compression,
+                    &object.stream(),
+                    encoding,
+                ),
             )
         } else {
             source

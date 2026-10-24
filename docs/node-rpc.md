@@ -22,6 +22,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | --- | --- |
 | `NodeControl/SyncNode` | Unary；提交当前 `run` 和最多五个 `cached` 配置修订，返回运行状态、全部当前修订及未命中配置 |
 | `NodeReads/OpenRead` | Unary；按路由、身份、条件、`include` 与 `cached` 返回对象结果及首个读取窗口，仅允许 data |
+| `NodeControl/ReportObservations` | Unary；批量上报 HTTP 压缩收益和已通过签名校验的凭据活动，仅允许 data |
 | `NodeReads/ReadWindow` | Unary；沿当前读取游标取下一窗口，校验运行权、读取保护和载荷修订 |
 | `NodeReads/ReportRead` | Unary；报告当前读取窗口内最多 16 个来源段，请求持久后端复核，仅允许 data |
 | `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，收到 Welcome 后发送 Pulse 并等待匹配序号的确认 |
@@ -45,6 +46,8 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 桶路由允许匿名别名直接提供桶名与完整对象路径；签名请求不能使用该改写。公开 Web 路由使用已登记域名，支持其明确登记的端口。HTTP 调用方保留原始签名路径和查询参数，由 s3s 验证完整请求；错误签名优先于对象存在性、条件和 Range 结果。
 
 节点 CORS 缓存按 `requests.cors_cache_size` 和 `cors_cache_entries` 计费，相同规则共享解析结果。桶修订和读取策略来自同次 OpenRead 或有效公共快照；规则变化立即使用返回的新规则，关闭缓存后直接解析当前规则。队列或预算不足时跳过填充，不等待缓存容量。
+
+压缩收益和凭据活动复用有界后台队列，每类最多 256 项；重复项合并后以最多 64 项、16 KiB 的批次上报，HTTP 响应不等待上报。压缩结果只在编码完整结束后产生，使用固定策略版本；凭据最近使用时间按五分钟合并。control 在事务内校验 data 身份、运行权及维护状态，再写入当前可用对象的观测；重复上报不重复覆盖已有压缩结果。队列满、超时或失联可丢弃观测，后续访问可重新提交，不影响对象读取和发布。节点 HTTP 请求沿用统一请求 ID、完成/失败/取消及实际输出字节计数。
 
 窗口默认最多 1024 段、目标响应 1 MiB；调用方可降低 `max_items` 和 `max_bytes`。每个节点最多 256 个有效读取，每个读取最多保留两个窗口，可在处理当前窗口时预取下一窗口。来源包括独立区块、区块包、raw 和共享暂存；本机唯一来源仅交给所属节点，其他节点得到待就绪结果。
 

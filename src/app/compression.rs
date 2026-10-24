@@ -98,8 +98,10 @@ impl Observations {
             while let Some(observation) = receiver.recv().await {
                 let Some(app) = app.upgrade() else { break };
                 let queue = &app.compression_observations;
-                if app.maintenance.load(Relaxed) || app.restart_required.load(Relaxed) {
+                let result = if app.maintenance.load(Relaxed) || app.restart_required.load(Relaxed)
+                {
                     queue.dropped.fetch_add(1, Relaxed);
+                    Ok(false)
                 } else {
                     // Native database barriers serialize this with maintenance and owner loss, without holding coord.
                     match tokio::time::timeout(
@@ -111,22 +113,30 @@ impl Observations {
                     )
                     .await
                     {
-                        Ok(Ok(true)) => {
-                            queue.written.fetch_add(1, Relaxed);
-                        }
-                        Ok(Ok(false)) => {}
-                        _ => {
-                            queue.failed.fetch_add(1, Relaxed);
-                        }
+                        Ok(Ok(written)) => Ok(written),
+                        _ => Err(()),
                     }
-                }
-                queue.pending.lock().unwrap().remove(&(
-                    observation.stream,
-                    observation.version,
-                    observation.encoding,
-                ));
+                };
+                queue.complete(observation, result);
             }
         });
+    }
+
+    pub(crate) fn complete(&self, observation: CompressionObservation, result: Result<bool, ()>) {
+        match result {
+            Ok(true) => {
+                self.written.fetch_add(1, Relaxed);
+            }
+            Ok(false) => {}
+            Err(()) => {
+                self.failed.fetch_add(1, Relaxed);
+            }
+        }
+        self.pending.lock().unwrap().remove(&(
+            observation.stream,
+            observation.version,
+            observation.encoding,
+        ));
     }
 
     pub fn snapshot(&self) -> serde_json::Value {

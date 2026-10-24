@@ -645,6 +645,10 @@ pub(super) fn learn_compression(
         .bind(observation.stream).bind(i64::from(observation.version)).bind(observation.encoding).bind(observation.size).bind(node)
 }
 
+pub(super) fn touch_credentials(accesses: &[String]) -> Statement<'_> {
+    sqlx::query("UPDATE s3_credentials SET last_used_at=now() WHERE access_key_id=ANY($1) AND (last_used_at IS NULL OR last_used_at<now()-interval '5 minutes')").bind(accesses)
+}
+
 pub(super) fn retire_stream(id: Id) -> Statement<'static> {
     sqlx::query("UPDATE streams SET state='retired',touched_at=now() WHERE id=$1").bind(id)
 }
@@ -2678,7 +2682,9 @@ impl CredentialStore for Backend {
         Ok(sqlx::query_scalar("SELECT secret_encrypted FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>now())").bind(access).fetch_optional(&self.pool).await?)
     }
     async fn touch_credential(&self, access: &str) -> Result<()> {
-        sqlx::query("UPDATE s3_credentials SET last_used_at=now() WHERE access_key_id=$1 AND (last_used_at IS NULL OR last_used_at<now()-interval '5 minutes')").bind(access).execute(&self.pool).await?;
+        touch_credentials(&[access.to_owned()])
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
     async fn buckets(
@@ -7447,6 +7453,14 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn report_observations(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_observation::Batch,
+    ) -> Result<Vec<bool>> {
+        transactions::report_node_observations(&self.pool, node, key, input).await
+    }
     async fn report_read(
         &self,
         node: &crate::cluster::NodeState,

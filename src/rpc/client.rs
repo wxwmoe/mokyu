@@ -255,6 +255,14 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn report_observations(
+        &self,
+        input: wire::ObservationRequest,
+    ) -> Result<wire::ObservationReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeControl/ReportObservations")
+            .await
+    }
+
     pub(crate) async fn read_window(
         &self,
         input: wire::ReadWindowRequest,

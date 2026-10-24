@@ -9,6 +9,12 @@ use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait ClusterStore: Send + Sync {
+    async fn report_observations(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_observation::Batch,
+    ) -> Result<Vec<bool>>;
     async fn report_read(
         &self,
         node: &NodeState,

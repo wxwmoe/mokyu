@@ -74,6 +74,15 @@ impl Activity {
         }
     }
 
+    pub(crate) fn complete(&self, access: &str, success: bool) {
+        if success {
+            self.completed.fetch_add(1, Relaxed);
+        } else {
+            self.failed.fetch_add(1, Relaxed);
+        }
+        self.finish(access, success);
+    }
+
     pub fn start(app: Weak<App>, mut receiver: mpsc::Receiver<String>) {
         tokio::spawn(async move {
             while let Some(access) = receiver.recv().await {
@@ -94,12 +103,7 @@ impl Activity {
                 })
                 .await;
                 let success = matches!(result, Ok(Ok(())));
-                if success {
-                    queue.completed.fetch_add(1, Relaxed);
-                } else {
-                    queue.failed.fetch_add(1, Relaxed);
-                }
-                queue.finish(&access, success);
+                queue.complete(&access, success);
             }
         });
     }

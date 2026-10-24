@@ -3,6 +3,24 @@ package mokyu.node.v1;
 
 service NodeControl {
   rpc SyncNode(SyncRequest) returns (SyncReply);
+  rpc ReportObservations(ObservationRequest) returns (ObservationReply);
+}
+
+message CompressionObservation {
+  string stream_id = 1;
+  uint32 version = 2;
+  string encoding = 3;
+  uint64 size = 4;
+}
+
+message ObservationRequest {
+  Run run = 1;
+  repeated CompressionObservation compression = 2;
+  repeated string credentials = 3;
+}
+
+message ObservationReply {
+  repeated bool compression_written = 1;
 }
 
 // A separate service enforces the smaller stream message limit before decoding.

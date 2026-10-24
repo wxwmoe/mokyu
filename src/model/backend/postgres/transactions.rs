@@ -8591,6 +8591,42 @@ pub(super) async fn sync_node(
     Ok(snapshot)
 }
 
+pub(super) async fn report_node_observations(
+    pool: &PgPool,
+    state: &crate::cluster::NodeState,
+    key: &crate::content::codec::Key,
+    input: crate::model::node_observation::Batch,
+) -> Result<Vec<bool>> {
+    use crate::model::Error;
+    input.validate()?;
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, state, key, false).await?;
+    ensure!(state.role == "data", Error::NodeAuthentication);
+    let session = require_node_run(&mut tx, state, input.run, false).await?;
+    ensure!(
+        !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
+        Error::NodeInactive
+    );
+    let mut written = Vec::with_capacity(input.compression.len());
+    for observation in input.compression {
+        written.push(
+            queries::learn_compression(observation, Some(state.node_id))
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                > 0,
+        );
+    }
+    if !input.credentials.is_empty() {
+        queries::touch_credentials(&input.credentials)
+            .execute(&mut *tx)
+            .await?;
+    }
+    require_node_run(&mut tx, state, input.run, false).await?;
+    tx.commit().await?;
+    Ok(written)
+}
+
 async fn node_read_mapping(
     db: &mut PgConnection,
     node: Uuid,

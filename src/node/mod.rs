@@ -3,6 +3,7 @@ mod cache;
 mod checks;
 pub(crate) mod delivery;
 mod files;
+mod observations;
 pub(crate) mod reads;
 pub(crate) mod resources;
 mod session;
@@ -102,6 +103,8 @@ pub(crate) struct NodeContext {
     pub(crate) budget: OnceLock<Budget>,
     pub(crate) client: Client,
     pub(crate) resources: Arc<resources::Resources>,
+    pub(crate) observations: observations::Reports,
+    pub(crate) statistics: crate::status::stats::Statistics,
     boot: Uuid,
     current: watch::Sender<State>,
     mode: watch::Sender<Mode>,
@@ -133,6 +136,8 @@ impl NodeContext {
             budget: OnceLock::new(),
             client,
             resources: Arc::new(resources::Resources::default()),
+            observations: observations::Reports::new(),
+            statistics: crate::status::stats::Statistics::default(),
             boot: Uuid::new_v4(),
             current: watch::channel(State {
                 phase: Phase::Connecting,

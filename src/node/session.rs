@@ -37,6 +37,7 @@ impl NodeContext {
             "node session is already running"
         );
         let _running = Running(self.clone());
+        self.observations.start(&self);
         let mut mode = self.mode.subscribe();
         let mut connection = Uuid::new_v4();
         let mut epoch = 0;
