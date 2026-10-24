@@ -47,6 +47,26 @@ pub(crate) struct Version {
     pub(crate) revision: [u8; 32],
 }
 
+impl Version {
+    pub(crate) fn new(deployment: Uuid, r#type: MaterialType, id: String, json: &[u8]) -> Self {
+        let mut digest = blake3::Hasher::new_derive_key("mokyu node read material v1");
+        for bytes in [
+            deployment.as_bytes().as_slice(),
+            r#type.name().as_bytes(),
+            id.as_bytes(),
+            json,
+        ] {
+            digest.update(&(bytes.len() as u64).to_be_bytes());
+            digest.update(bytes);
+        }
+        Self {
+            r#type,
+            id,
+            revision: *digest.finalize().as_bytes(),
+        }
+    }
+}
+
 pub(crate) struct Material {
     pub(crate) version: Version,
     pub(crate) json: Option<Vec<u8>>,
@@ -292,21 +312,7 @@ impl Reply {
         cached: &[Version],
     ) -> Result<Version> {
         let json = serde_json::to_vec(value)?;
-        let mut digest = blake3::Hasher::new_derive_key("mokyu node read material v1");
-        for bytes in [
-            deployment.as_bytes().as_slice(),
-            r#type.name().as_bytes(),
-            id.as_bytes(),
-            json.as_slice(),
-        ] {
-            digest.update(&(bytes.len() as u64).to_be_bytes());
-            digest.update(bytes);
-        }
-        let version = Version {
-            r#type,
-            id,
-            revision: *digest.finalize().as_bytes(),
-        };
+        let version = Version::new(deployment, r#type, id, &json);
         if !self
             .materials
             .iter()

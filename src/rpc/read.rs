@@ -142,7 +142,7 @@ fn text(value: &str, maximum: usize) -> bool {
     value.len() <= maximum && !value.contains('\0')
 }
 
-pub(super) fn cached(values: Vec<wire::Cached>) -> Result<Vec<read::Version>, Status> {
+pub(crate) fn cached(values: Vec<wire::Cached>) -> Result<Vec<read::Version>, Status> {
     if values.len() > read::MAX_CACHED {
         return Err(invalid());
     }

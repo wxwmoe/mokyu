@@ -179,6 +179,20 @@ async fn node_read_resources_renew_reconnect_and_release_automatically() -> Resu
     let driver = tokio::spawn(context.clone().run());
     let initial = node_state(&mut states, |state| state.phase == Phase::Ready).await?;
     let snapshot = context.snapshot()?;
+    let reads = crate::node::reads::Reads::new(context.clone())?;
+    let mut head = request(&snapshot.lease.run, &source, "object", &Held::new());
+    head.method = wire::ReadMethod::Head as i32;
+    head.include = vec![wire::ReadInclude::Object as i32];
+    let first = reads.open(head.clone()).await?;
+    let first_object: read::Object = first.material(first.reply.object.as_ref().unwrap())?;
+    let second = reads.open(head).await?;
+    let second_object: read::Object = second.material(second.reply.object.as_ref().unwrap())?;
+    assert_eq!(first_object.id, second_object.id);
+    assert_eq!(
+        first_object.size,
+        tokio::fs::metadata(&source.body_path).await?.len() as i64
+    );
+    drop((first, second));
     *dns.answers.write().unwrap() = Some(vec![
         Ipv4Addr::new(127, 0, 0, 2),
         Ipv4Addr::new(127, 0, 0, 3),

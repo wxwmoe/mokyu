@@ -65,7 +65,7 @@ struct Addresses {
 }
 
 pub(crate) struct Client {
-    identity: NodeState,
+    pub(crate) identity: NodeState,
     origin: hyper::Uri,
     domain: String,
     port: u16,

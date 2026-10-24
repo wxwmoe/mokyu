@@ -1,3 +1,4 @@
+pub(crate) mod reads;
 pub(crate) mod resources;
 mod session;
 mod settings;
