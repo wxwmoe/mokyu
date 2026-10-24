@@ -150,7 +150,7 @@ test('service state notices appear across workspace routes', async ({ page }) =>
   await page.route('**/api/v1/system/status', route => route.fulfill({
     contentType: 'application/json',
     body: JSON.stringify({
-      version: '0.0.5', started_at: '2026-10-12T00:00:00Z', maintenance: false,
+      version: '0.0.6', started_at: '2026-10-12T00:00:00Z', maintenance: false,
       mode_mismatch: true, recovery_required: false, restart_required: true,
       counters: [], backend_queues: {}, backend_operations: {}, catalog: {},
       inventory_as_of: null, inventory_error: null, inventory_stale: false,
@@ -173,7 +173,7 @@ test('maintenance notice stays off its workspace and opens the maintenance page'
   await page.route('**/api/v1/system/status', route => route.fulfill({
     contentType: 'application/json',
     body: JSON.stringify({
-      version: '0.0.5', started_at: '2026-10-12T00:00:00Z', maintenance: true,
+      version: '0.0.6', started_at: '2026-10-12T00:00:00Z', maintenance: true,
       mode_mismatch: false, recovery_required: false, restart_required: false,
       counters: [], backend_queues: {}, backend_operations: {}, catalog: {},
       inventory_as_of: null, inventory_error: null, inventory_stale: false,
