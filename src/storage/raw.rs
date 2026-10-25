@@ -774,7 +774,7 @@ fn replay_part_size(size: u64, parts: &[i64]) -> Result<u64> {
     Ok(planned)
 }
 
-pub(super) fn remote_path(id: Uuid) -> ObjectPath {
+pub(crate) fn remote_path(id: Uuid) -> ObjectPath {
     ObjectPath::from(format!("raw/{}", super::chunk_name(id)))
 }
 

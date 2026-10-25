@@ -18,7 +18,7 @@ pub(crate) mod profile;
 mod rate;
 pub(crate) mod raw;
 pub(crate) mod raw_cache;
-mod raw_request;
+pub(crate) mod raw_request;
 pub(crate) mod raw_upload;
 pub(crate) mod resource_gate;
 mod s3;

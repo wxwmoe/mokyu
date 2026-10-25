@@ -12,6 +12,45 @@ fn operation(value: &str) -> Result<uuid::Uuid, Status> {
     Ok(id)
 }
 
+pub(super) fn prepare_raw(
+    input: wire::PrepareRawRequest,
+) -> Result<crate::model::node_raw::Prepare, Status> {
+    let value = crate::model::node_raw::Input {
+        size: input.size.try_into().map_err(|_| invalid())?,
+        digest: input.digest.try_into().map_err(|_| invalid())?,
+        hash: if input.content_hash.is_empty() {
+            None
+        } else {
+            Some(input.content_hash.try_into().map_err(|_| invalid())?)
+        },
+    };
+    value.validate().map_err(|_| invalid())?;
+    Ok(crate::model::node_raw::Prepare {
+        run: read::run(input.run)?,
+        operation: operation(&input.operation_id)?,
+        input: value,
+    })
+}
+
+pub(super) fn commit_raw(
+    input: wire::CommitRawRequest,
+) -> Result<crate::model::node_raw::Commit, Status> {
+    Ok(crate::model::node_raw::Commit {
+        run: read::run(input.run)?,
+        operation: operation(&input.operation_id)?,
+        source: super::uuid(&input.source_id)?,
+    })
+}
+
+pub(super) fn raw(value: crate::model::node_raw::Prepared) -> wire::PreparedRaw {
+    wire::PreparedRaw {
+        source_id: value.source.to_string(),
+        size: value.size as u64,
+        committed: value.committed,
+        grants: value.grants.into_iter().map(read::grant).collect(),
+    }
+}
+
 pub(super) fn begin(input: wire::BeginWriteRequest) -> Result<write::Begin, Status> {
     if prost::Message::encoded_len(&input) > write::REQUEST_LIMIT {
         return Err(Status::resource_exhausted(
@@ -183,6 +222,30 @@ pub(super) fn reply(value: write::Reply) -> Result<wire::WriteReply, Status> {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn raw_input_requires_bounded_length_and_exact_digests() {
+        let mut input = wire::PrepareRawRequest {
+            run: Some(wire::Run {
+                boot_id: Uuid::new_v4().to_string(),
+                fence: Uuid::new_v4().to_string(),
+            }),
+            operation_id: Uuid::now_v7().to_string(),
+            size: 0,
+            digest: vec![0; 16],
+            content_hash: vec![1; 32],
+        };
+        assert!(prepare_raw(input.clone()).is_ok());
+        input.size = 5 * 1024 * 1024 * 1024 + 1;
+        assert!(prepare_raw(input.clone()).is_err());
+        input.size = 0;
+        input.content_hash.pop();
+        assert!(prepare_raw(input.clone()).is_err());
+        input.content_hash.clear();
+        assert!(prepare_raw(input.clone()).is_ok());
+        input.digest.pop();
+        assert!(prepare_raw(input).is_err());
+    }
 
     #[test]
     fn write_admission_distinguishes_missing_and_zero_credential_revisions() {

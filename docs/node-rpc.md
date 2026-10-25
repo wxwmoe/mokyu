@@ -30,6 +30,8 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeWrites/BeginWrite` | Unary；校验权限、创建写入上下文与租约并预留配额，返回存储材料；仅允许 data |
 | `NodeWrites/PrepareChunks` | Unary；批量领取或复用区块，保存上传目标与编码参数，返回所需存储、密钥及上传许可 |
 | `NodeWrites/CommitChunks` | Unary；确认整批上传完成并建立引用，可按批次乱序完成 |
+| `NodeWrites/PrepareRaw` | Unary；校验完整文件身份、预留配额、查询去重并分配最终上传目标与许可 |
+| `NodeWrites/CommitRaw` | Unary；确认 raw 上传完成并建立引用，重复确认返回相同回执 |
 | `NodeWrites/PublishWrite` | Unary；核对完整性、条件和配额，原子发布对象并保存终态回执 |
 | `NodeWrites/WriteStatus` | Unary；按节点与操作身份查询写入状态，不返回存储凭据 |
 | `NodeWrites/AbortWrite` | Unary；取消当前运行权持有的写入，同事务释放写租约和预留配额 |
@@ -101,6 +103,8 @@ PrepareChunks 每批最多 128 个区块、32 MiB 原始数据；批次编号从
 CommitChunks 携带本批新增物理编码的 ID 和密文字节摘要，省略复用区块；同批重复引用只确认一次物理上传。成功后建立完整引用、释放该批上传许可，并压缩为幂等回执；批次可以乱序完成，重复确认不得改变摘要。PublishWrite 包含总长度、ETag、校验和与条件，核对所有批次完成、连续映射及可读来源后原子发布。重试返回同一终态结果；WriteStatus 可查询该结果，AbortWrite 不撤销已经发布的对象。
 
 HTTP PUT 的可靠 chunks 接收按 CDC 边界流式形成最多 8 MiB 的批次，同时保留两个批次；上传受节点额度和实际返回的存储许可共同限制。完整正文、流式签名尾块和校验和通过后才调用 PublishWrite；零字节对象不调用区块接口。发布使本节点对应对象及其别名的公共快照失效。已经确认的发布回执不因写租约随后结束而改判失败。
+
+inline raw 普通 PUT 先使用节点本地请求暂存空间接收并校验完整文件，上限 5 GiB。PrepareRaw 包含长度、16 字节 MD5，以及开启整文件去重时的 32 字节 BLAKE3；同一操作必须重放相同输入。去重命中直接建立引用并返回已确认状态，不上传对象、不占存储上传许可。未命中时，control 先持久化最终 raw 身份，再返回上传许可；节点流式 PUT 到最终 S3 key，成功后调用 CommitRaw，最后 PublishWrite。该流式 PUT 将存储的 `request_timeout` 用作无传输进展或等待响应的超时，持续传输不受整文件总时长限制；失败重试从本地文件重新发送，仍受重试次数和期限限制。PrepareRaw 与 CommitRaw 都可重试，上传许可同样通过 NodeSession 续期；取消或过期不会抹去外部上传的清理记录。请求暂存与本地缓存共享磁盘容量和最低剩余空间约束，暂存空间不足返回可重试错误。
 
 写入 `operation_id` 使用 UUIDv7。首次准入接受过去 15 分钟至未来 30 秒内的时间戳；节点应同步系统时钟。相同操作与相同参数重放原上下文，参数变化返回 `AlreadyExists`。活动写入重放会重验原授权；同一节点的其他 boot 或凭据代次不能继续该写入。WriteStatus 可查询该节点的历史回执，返回 `WRITE_ACTIVE`、`WRITE_ABORTED`、`WRITE_EXPIRED` 或 `WRITE_PUBLISHED`；stream 被回收后仍保留终态回执，桶和 stream 身份可能为空。
 

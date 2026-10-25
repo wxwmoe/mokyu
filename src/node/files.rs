@@ -85,6 +85,27 @@ impl Cache {
         }
     }
 
+    pub(super) async fn raw_request(
+        &self,
+        profile: &StorageProfile,
+    ) -> Result<crate::storage::raw_request::File> {
+        self.initialize().await?;
+        crate::storage::raw_request::File::create_in(
+            &self.files(),
+            Uuid::new_v4(),
+            self.policy(profile)?,
+        )
+        .await
+    }
+
+    pub(super) async fn append_request(
+        &self,
+        file: &mut crate::storage::raw_request::File,
+        data: &[u8],
+    ) -> Result<()> {
+        file.append_in(&self.files(), data).await
+    }
+
     fn policy(&self, profile: &StorageProfile) -> Result<CachePolicy> {
         Ok(CachePolicy {
             enabled: profile.cache_enabled,

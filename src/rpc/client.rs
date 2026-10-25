@@ -312,6 +312,22 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn prepare_raw(
+        &self,
+        input: wire::PrepareRawRequest,
+    ) -> Result<wire::PreparedRaw, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/PrepareRaw")
+            .await
+    }
+
+    pub(crate) async fn commit_raw(
+        &self,
+        input: wire::CommitRawRequest,
+    ) -> Result<wire::PreparedRaw, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/CommitRaw")
+            .await
+    }
+
     pub(crate) async fn commit_chunks(
         &self,
         input: wire::CommitChunksRequest,

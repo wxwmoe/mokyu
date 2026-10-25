@@ -9934,7 +9934,7 @@ pub(super) async fn pulse_node_session(
     Ok(snapshot)
 }
 
-async fn node_chunk_owned(
+async fn node_write_owned(
     db: &mut PgConnection,
     node: &NodeState,
     key: &Key,
@@ -9990,6 +9990,16 @@ async fn node_chunk_permits(
         .map(|item| item.chunk.uuid)
         .collect();
     let wanted = unique.len().min(input.parallelism as usize);
+    node_write_permits(db, node, row, Some(input.batch), wanted).await
+}
+
+async fn node_write_permits(
+    db: &mut PgConnection,
+    node: Uuid,
+    row: &queries::NodeWrite,
+    batch: Option<i64>,
+    wanted: usize,
+) -> Result<Vec<read::Grant>> {
     if wanted == 0 {
         return Ok(Vec::new());
     }
@@ -10010,7 +10020,7 @@ async fn node_chunk_permits(
     queries::expire_storage_permits(storage, "upload")
         .execute(&mut *db)
         .await?;
-    let mut held = queries::node_write_permits(node, input.operation, input.batch)
+    let mut held = queries::node_write_permits(node, row.operation_id, batch)
         .fetch_all(&mut *db)
         .await?;
     let mut active = queries::storage_permit_count(storage, "upload")
@@ -10021,7 +10031,7 @@ async fn node_chunk_permits(
         queries::insert_storage_permit(token, storage, "upload", node)
             .execute(&mut *db)
             .await?;
-        queries::node_write_own_permit(node, input.operation, input.batch, token)
+        queries::node_write_own_permit(node, row.operation_id, batch, token)
             .execute(&mut *db)
             .await?;
         held.push((token, 60_000));
@@ -10048,7 +10058,7 @@ pub(super) async fn prepare_node_chunks(
     let end = input.end()?;
     let hash = input.hash()?;
     let mut tx = pool.begin().await?;
-    let row = node_chunk_owned(&mut tx, node, key, input.run, input.operation).await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     if let Some(batch) = queries::node_write_batch(node.node_id, input.operation, input.batch)
         .fetch_optional(&mut *tx)
         .await?
@@ -10067,6 +10077,10 @@ pub(super) async fn prepare_node_chunks(
         });
     }
     let stream = require_node_write(&mut tx, &row).await?;
+    ensure!(
+        row.profile.cdc_enabled,
+        s3s::s3_error!(InvalidRequest, "write does not accept chunks")
+    );
     ensure!(
         row.next_batch == input.batch && row.next_offset == input.offset && input.batch < i64::MAX,
         s3s::s3_error!(InvalidArgument, "chunk batch is out of order")
@@ -10160,7 +10174,7 @@ pub(super) async fn activate_node_chunks(
 ) -> Result<chunk::Prepared> {
     let hash = input.hash()?;
     let mut tx = pool.begin().await?;
-    let row = node_chunk_owned(&mut tx, node, key, input.run, input.operation).await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     let mut batch = queries::node_write_batch(node.node_id, input.operation, input.batch)
         .fetch_optional(&mut *tx)
         .await?
@@ -10277,7 +10291,7 @@ pub(super) async fn commit_node_chunks(
 ) -> Result<i64> {
     let hash = input.hash()?;
     let mut tx = pool.begin().await?;
-    let row = node_chunk_owned(&mut tx, node, key, input.run, input.operation).await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     let batch = queries::node_write_batch(node.node_id, input.operation, input.batch)
         .fetch_optional(&mut *tx)
         .await?
@@ -10332,7 +10346,7 @@ pub(super) async fn commit_node_chunks(
             == 1,
         Error::OperationAborted
     );
-    queries::release_node_write_batch(node.node_id, input.operation, input.batch)
+    queries::release_write_upload_permits(node.node_id, input.operation, Some(input.batch))
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -10347,7 +10361,7 @@ pub(super) async fn publish_node_write(
 ) -> Result<write::Reply> {
     let hash = input.hash()?;
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
-    let row = node_chunk_owned(&mut tx, node, key, input.run, input.operation).await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     if let Some(previous) = &row.publish_hash {
         ensure!(previous == &hash, Error::NodeOperationConflict);
         let reply = node_write_reply(&mut tx, node, key, input.run, row, None).await?;
@@ -10355,6 +10369,15 @@ pub(super) async fn publish_node_write(
         return Ok(reply);
     }
     let stream = require_node_write(&mut tx, &row).await?;
+    if let Some(raw) = queries::node_raw_write(node.node_id, input.operation)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        ensure!(
+            raw.committed && raw.size == input.size && hex::encode(&raw.digest) == input.etag,
+            s3s::s3_error!(IncompleteBody)
+        );
+    }
     ensure!(
         input.size == row.next_offset
             && row.expected_size.is_none_or(|size| size == input.size)
@@ -10421,6 +10444,170 @@ pub(super) async fn publish_node_write(
     let reply = node_write_reply(&mut tx, node, key, input.run, row, None).await?;
     tx.commit().await?;
     Ok(reply)
+}
+
+pub(super) async fn prepare_node_raw(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_raw::Prepare,
+) -> Result<crate::model::node_raw::Prepared> {
+    input.input.validate()?;
+    let hash = chunk::hash(&input.input)?;
+    let mut tx = pool.begin().await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
+    if let Some(raw) = queries::node_raw_write(node.node_id, input.operation)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        ensure!(raw.request_hash == hash, Error::NodeOperationConflict);
+        let grants = if raw.committed {
+            Vec::new()
+        } else {
+            require_node_write(&mut tx, &row).await?;
+            node_write_permits(&mut tx, node.node_id, &row, None, 1).await?
+        };
+        tx.commit().await?;
+        return Ok(crate::model::node_raw::Prepared {
+            source: raw.source_id,
+            size: raw.size,
+            committed: raw.committed,
+            grants,
+        });
+    }
+    let stream = require_node_write(&mut tx, &row).await?;
+    ensure!(
+        !row.profile.cdc_enabled
+            && !row.profile.compression_enabled
+            && !row.profile.pack_enabled
+            && row.block_key_id.is_none()
+            && !row.profile.upload_cache
+            && row.profile.write_processing == "inline"
+            && row.profile.deduplication_enabled == input.input.hash.is_some()
+            && row.next_batch == 1
+            && row.next_offset == 0,
+        s3s::s3_error!(InvalidRequest, "write does not accept inline raw data")
+    );
+    let size = input.input.size;
+    ensure!(
+        row.expected_size.is_none_or(|expected| expected == size),
+        s3s::s3_error!(IncompleteBody)
+    );
+    let storage = row.storage_id.ok_or(Error::SourceUnavailable)?;
+    queries::reserve_quota(stream, size, false, None, None)
+        .fetch_one(&mut *tx)
+        .await?;
+    let candidate = if let Some(hash) = &input.input.hash {
+        queries::claim_chunk_hash(storage, hash)
+            .execute(&mut *tx)
+            .await?;
+        queries::raw_duplicate(storage, hash, size)
+            .fetch_optional(&mut *tx)
+            .await?
+            .filter(|source| {
+                source.validate().is_ok()
+                    && !source.pending_upload
+                    && source.medium == "shared_s3"
+                    && source.digest.as_deref() == Some(input.input.digest.as_slice())
+            })
+    } else {
+        None
+    };
+    ensure!(
+        queries::raw_prepare(stream)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        Error::OperationAborted
+    );
+    let committed = candidate.is_some();
+    let source = if let Some(candidate) = candidate {
+        queries::raw_attach(stream, candidate.id, size)
+            .execute(&mut *tx)
+            .await?;
+        queries::raw_reference(candidate.id)
+            .execute(&mut *tx)
+            .await?;
+        queries::extend_writing_stream(stream, size)
+            .execute(&mut *tx)
+            .await?;
+        candidate.location_id
+    } else {
+        queries::raw_insert(stream, storage, row.profile.revision, "shared_s3", false)
+            .fetch_one(&mut *tx)
+            .await?
+    };
+    queries::insert_node_raw_write(node.node_id, &input, &hash, source, committed)
+        .execute(&mut *tx)
+        .await?;
+    queries::advance_node_write(node.node_id, input.operation, size)
+        .execute(&mut *tx)
+        .await?;
+    let grants =
+        node_write_permits(&mut tx, node.node_id, &row, None, usize::from(!committed)).await?;
+    tx.commit().await?;
+    Ok(crate::model::node_raw::Prepared {
+        source,
+        size,
+        committed,
+        grants,
+    })
+}
+
+pub(super) async fn commit_node_raw(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_raw::Commit,
+) -> Result<crate::model::node_raw::Prepared> {
+    let mut tx = pool.begin().await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
+    let raw = queries::node_raw_write(node.node_id, input.operation)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NodeOperationMissing)?;
+    ensure!(raw.source_id == input.source, Error::NodeOperationConflict);
+    if !raw.committed {
+        let stream = require_node_write(&mut tx, &row).await?;
+        if let Some(hash) = &raw.content_hash {
+            queries::claim_chunk_hash(row.storage_id.ok_or(Error::SourceUnavailable)?, hash)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let source = raw.source_id.into();
+        ensure!(
+            queries::raw_finish(stream, source, raw.size, &raw.digest, true)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            Error::OperationAborted
+        );
+        queries::raw_attach(stream, source, raw.size)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(hash) = &raw.content_hash {
+            let current = queries::raw_source(source).fetch_one(&mut *tx).await?;
+            share_raw(&mut tx, stream, &current, hash).await?;
+        }
+        queries::extend_writing_stream(stream, raw.size)
+            .execute(&mut *tx)
+            .await?;
+        queries::commit_node_raw_write(node.node_id, input.operation)
+            .execute(&mut *tx)
+            .await?;
+        queries::release_write_upload_permits(node.node_id, input.operation, None)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(crate::model::node_raw::Prepared {
+        source: raw.source_id,
+        size: raw.size,
+        committed: true,
+        grants: Vec::new(),
+    })
 }
 
 async fn node_request_materials(

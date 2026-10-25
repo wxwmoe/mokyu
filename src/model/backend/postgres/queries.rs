@@ -7505,6 +7505,26 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn prepare_raw(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_raw::Prepare,
+    ) -> Result<crate::model::node_raw::Prepared> {
+        transactions::prepare_node_raw(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn commit_raw(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_raw::Commit,
+    ) -> Result<crate::model::node_raw::Prepared> {
+        transactions::commit_node_raw(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
     async fn prepare_request(
         &self,
         node: &crate::cluster::NodeState,
@@ -10485,7 +10505,7 @@ pub(super) fn node_read_renew<'q>(
             "UPDATE stream_leases l SET expires_at=clock_timestamp()+interval '90 seconds' FROM node_writes w,streams s,objects o WHERE l.id=w.lease_id AND s.id=w.stream_id AND o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id AND s.state='writing' AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND l.id=ANY($5) AND l.expires_at>clock_timestamp() RETURNING l.id,90000::bigint"
         }
         GrantType::StorageWrite => {
-            "UPDATE storage_permits p SET expires_at=clock_timestamp()+interval '1 minute' FROM node_write_permits n,node_writes w,node_write_batches b,stream_leases l,streams s,objects o WHERE p.token=n.token AND w.node_id=n.node_id AND w.operation_id=n.operation_id AND b.node_id=n.node_id AND b.operation_id=n.operation_id AND b.batch_id=n.batch_id AND b.commit_hash IS NULL AND l.id=w.lease_id AND s.id=w.stream_id AND s.state='writing' AND o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND p.token=ANY($5) AND p.expires_at>clock_timestamp() AND l.expires_at>clock_timestamp() RETURNING p.token,60000::bigint"
+            "UPDATE storage_permits p SET expires_at=clock_timestamp()+interval '1 minute' FROM node_write_permits n,node_writes w,stream_leases l,streams s,objects o WHERE p.token=n.token AND w.node_id=n.node_id AND w.operation_id=n.operation_id AND ((n.batch_id IS NOT NULL AND EXISTS(SELECT 1 FROM node_write_batches b WHERE b.node_id=n.node_id AND b.operation_id=n.operation_id AND b.batch_id=n.batch_id AND b.commit_hash IS NULL)) OR (n.batch_id IS NULL AND EXISTS(SELECT 1 FROM node_write_raw r WHERE r.node_id=n.node_id AND r.operation_id=n.operation_id AND NOT r.committed))) AND l.id=w.lease_id AND s.id=w.stream_id AND s.state='writing' AND o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND p.token=ANY($5) AND p.expires_at>clock_timestamp() AND l.expires_at>clock_timestamp() RETURNING p.token,60000::bigint"
         }
     };
     sqlx::query_as(query)
@@ -10661,6 +10681,36 @@ pub(super) struct NodeWriteBatch {
     pub commit_hash: Option<Vec<u8>>,
 }
 
+#[derive(sqlx::FromRow)]
+pub(super) struct NodeRawWrite {
+    pub request_hash: Vec<u8>,
+    pub source_id: Uuid,
+    pub size: i64,
+    pub digest: Vec<u8>,
+    pub content_hash: Option<Vec<u8>>,
+    pub committed: bool,
+}
+
+pub(super) fn node_raw_write(node: Uuid, operation: Uuid) -> Rows<'static, NodeRawWrite> {
+    sqlx::query_as("SELECT request_hash,source_id,size,digest,content_hash,committed FROM node_write_raw WHERE node_id=$1 AND operation_id=$2 FOR UPDATE").bind(node).bind(operation)
+}
+
+pub(super) fn insert_node_raw_write<'q>(
+    node: Uuid,
+    input: &'q crate::model::node_raw::Prepare,
+    hash: &'q [u8],
+    source: Uuid,
+    committed: bool,
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO node_write_raw(node_id,operation_id,request_hash,source_id,size,digest,content_hash,committed) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(node).bind(input.operation).bind(hash).bind(source).bind(input.input.size)
+        .bind(input.input.digest.as_slice()).bind(input.input.hash.as_ref().map(|hash| hash.as_slice())).bind(committed)
+}
+
+pub(super) fn commit_node_raw_write(node: Uuid, operation: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE node_write_raw SET committed=true WHERE node_id=$1 AND operation_id=$2 AND NOT committed").bind(node).bind(operation)
+}
+
 pub(super) fn node_write_batch(
     node: Uuid,
     operation: Uuid,
@@ -10671,7 +10721,7 @@ pub(super) fn node_write_batch(
 }
 
 pub(super) fn node_write_pending(node: Uuid, operation: Uuid) -> Scalar<'static, i64> {
-    sqlx::query_scalar("SELECT count(*) FROM node_write_batches WHERE node_id=$1 AND operation_id=$2 AND commit_hash IS NULL").bind(node).bind(operation)
+    sqlx::query_scalar("SELECT (SELECT count(*) FROM node_write_batches WHERE node_id=$1 AND operation_id=$2 AND commit_hash IS NULL)+(SELECT count(*) FROM node_write_raw WHERE node_id=$1 AND operation_id=$2 AND NOT committed)").bind(node).bind(operation)
 }
 
 pub(super) fn insert_node_write_batch<'q>(
@@ -10724,16 +10774,16 @@ pub(super) fn publish_node_write<'q>(
 pub(super) fn node_write_permits(
     node: Uuid,
     operation: Uuid,
-    batch: i64,
+    batch: Option<i64>,
 ) -> Rows<'static, (Uuid, i64)> {
-    sqlx::query_as("SELECT p.token,GREATEST(0,(extract(epoch FROM (p.expires_at-clock_timestamp()))*1000)::bigint) FROM storage_permits p JOIN node_write_permits w ON w.token=p.token WHERE w.node_id=$1 AND w.operation_id=$2 AND w.batch_id=$3 AND p.expires_at>clock_timestamp() ORDER BY p.token")
+    sqlx::query_as("SELECT p.token,GREATEST(0,(extract(epoch FROM (p.expires_at-clock_timestamp()))*1000)::bigint) FROM storage_permits p JOIN node_write_permits w ON w.token=p.token WHERE w.node_id=$1 AND w.operation_id=$2 AND w.batch_id IS NOT DISTINCT FROM $3 AND p.expires_at>clock_timestamp() ORDER BY p.token")
         .bind(node).bind(operation).bind(batch)
 }
 
 pub(super) fn node_write_own_permit(
     node: Uuid,
     operation: Uuid,
-    batch: i64,
+    batch: Option<i64>,
     token: Uuid,
 ) -> Statement<'static> {
     sqlx::query(
@@ -10745,12 +10795,12 @@ pub(super) fn node_write_own_permit(
     .bind(token)
 }
 
-pub(super) fn release_node_write_batch(
+pub(super) fn release_write_upload_permits(
     node: Uuid,
     operation: Uuid,
-    batch: i64,
+    batch: Option<i64>,
 ) -> Statement<'static> {
-    sqlx::query("DELETE FROM storage_permits p USING node_write_permits n WHERE p.token=n.token AND n.node_id=$1 AND n.operation_id=$2 AND n.batch_id=$3").bind(node).bind(operation).bind(batch)
+    sqlx::query("DELETE FROM storage_permits p USING node_write_permits n WHERE p.token=n.token AND n.node_id=$1 AND n.operation_id=$2 AND n.batch_id IS NOT DISTINCT FROM $3").bind(node).bind(operation).bind(batch)
 }
 
 pub(super) fn node_write_release_permits<'q>(

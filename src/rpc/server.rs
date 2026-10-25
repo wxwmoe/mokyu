@@ -260,6 +260,39 @@ fn failure(error: anyhow::Error) -> Status {
 
 #[tonic::async_trait]
 impl NodeWrites for Service {
+    async fn prepare_raw(
+        &self,
+        request: Request<wire::PrepareRawRequest>,
+    ) -> Result<Response<wire::PreparedRaw>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::write::prepare_raw(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.prepare_raw(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-raw-prepared").await;
+        Ok(Response::new(super::write::raw(reply)))
+    }
+
+    async fn commit_raw(
+        &self,
+        request: Request<wire::CommitRawRequest>,
+    ) -> Result<Response<wire::PreparedRaw>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::write::commit_raw(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.commit_raw(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-raw-committed").await;
+        Ok(Response::new(super::write::raw(reply)))
+    }
     async fn prepare_chunks(
         &self,
         request: Request<wire::PrepareChunksRequest>,

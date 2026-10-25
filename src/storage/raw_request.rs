@@ -18,8 +18,16 @@ pub(crate) struct File {
 
 impl File {
     pub async fn create(storage: &Storage, id: Uuid, policy: CachePolicy) -> Result<Self> {
+        Self::create_in(&storage.file_cache(), id, policy).await
+    }
+
+    pub(crate) async fn create_in(
+        files: &super::file_cache::Files<'_>,
+        id: Uuid,
+        policy: CachePolicy,
+    ) -> Result<Self> {
         let path = CacheFile::Raw
-            .path(&storage.disk.root, id)
+            .path(files.root, id)
             .with_extension("partial");
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
@@ -32,7 +40,7 @@ impl File {
         Ok(Self {
             file: Some(file),
             path,
-            disk: storage.disk.clone(),
+            disk: files.disk.clone(),
             policy,
             bytes: 0,
             pending: None,
@@ -103,6 +111,14 @@ impl File {
     }
 
     pub async fn append(&mut self, storage: &Storage, data: &[u8]) -> Result<()> {
+        self.append_in(&storage.file_cache(), data).await
+    }
+
+    pub(crate) async fn append_in(
+        &mut self,
+        files: &super::file_cache::Files<'_>,
+        data: &[u8],
+    ) -> Result<()> {
         let size = data.len() as u64;
         ensure!(
             self.policy
@@ -111,10 +127,10 @@ impl File {
             s3s::s3_error!(SlowDown, "raw request workspace is full")
         );
         {
-            let _write = storage.cache_writes.lock().await;
+            let _write = files.cache_writes.lock().await;
             self.pending = Some(
-                storage
-                    .reserve_cache(size, self.policy)
+                files
+                    .reserve(size, self.policy, false)
                     .await?
                     .ok_or_else(|| s3s::s3_error!(SlowDown, "raw request workspace is full"))?,
             );
@@ -125,6 +141,20 @@ impl File {
         self.pending.take().unwrap().commit();
         self.bytes += size;
         Ok(())
+    }
+
+    pub(crate) fn replay(&self) -> futures_util::stream::BoxStream<'_, Result<bytes::Bytes>> {
+        use tokio::io::AsyncReadExt;
+        Box::pin(async_stream::try_stream! {
+            let mut file = tokio::fs::File::open(&self.path).await?;
+            loop {
+                let mut bytes = vec![0; 256 * 1024];
+                let count = file.read(&mut bytes).await?;
+                if count == 0 { break; }
+                bytes.truncate(count);
+                yield bytes::Bytes::from(bytes);
+            }
+        })
     }
 
     pub async fn publish(

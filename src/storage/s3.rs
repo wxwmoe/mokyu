@@ -28,6 +28,25 @@ mod tests {
 
     #[tokio::test]
     async fn uploads_before_source_finishes_and_replays_retryable_parts() {
+        replay_upload(true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn raw_put_streams_and_replays_after_an_early_error() {
+        replay_upload(false, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn raw_put_stops_when_the_source_makes_no_progress() {
+        replay_upload(false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn early_success_does_not_hide_an_incomplete_or_stalled_upload() {
+        replay_upload(false, true, true).await;
+    }
+
+    async fn replay_upload(multipart: bool, stalled: bool, reply_early: bool) {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let first_bytes = Arc::new(tokio::sync::Notify::new());
         let requests = Arc::new(AtomicUsize::new(0));
@@ -46,7 +65,8 @@ mod tests {
                 async move {
                     assert_eq!(request.headers()["content-md5"], STANDARD.encode(digest));
                     let query = request.uri().query().unwrap();
-                    assert!(query.contains("partNumber=1") && query.contains("X-Amz-Signature="));
+                    assert_eq!(query.contains("partNumber=1"), multipart);
+                    assert!(query.contains("X-Amz-Signature="));
                     let count = requests.fetch_add(1, Ordering::Relaxed);
                     if count == 0 {
                         return axum::response::Response::builder()
@@ -54,11 +74,24 @@ mod tests {
                             .body(axum::body::Body::empty())
                             .unwrap();
                     }
+                    if reply_early {
+                        return axum::response::Response::builder()
+                            .status(200)
+                            .header("etag", "\"early\"")
+                            .body(axum::body::Body::empty())
+                            .unwrap();
+                    }
                     let mut body = request.into_body().into_data_stream();
                     let mut length = 0;
                     let mut hash = Md5::new();
                     while let Some(bytes) = body.next().await {
-                        let bytes = bytes.unwrap();
+                        let Ok(bytes) = bytes else {
+                            assert!(stalled);
+                            return axum::response::Response::builder()
+                                .status(500)
+                                .body(axum::body::Body::empty())
+                                .unwrap();
+                        };
                         length += bytes.len();
                         hash.update(&bytes);
                         first_bytes.notify_one();
@@ -95,38 +128,60 @@ mod tests {
         let streaming = Streaming {
             signer: Arc::new(signer),
             client,
+            raw_client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
             options: Options {
                 connect_timeout: Duration::from_secs(1),
-                request_timeout: Duration::from_secs(5),
+                request_timeout: if multipart {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_millis(500)
+                },
                 retry_timeout: Duration::from_secs(10),
                 max_retries: 1,
             },
         };
         let opened = AtomicUsize::new(0);
-        let result = tokio::time::timeout(
-            Duration::from_secs(15),
-            streaming.part(
-                &Path::from("raw/test"),
-                "upload /+",
-                0,
-                8 * 1024 * 1024,
-                &digest,
-                || {
-                    opened.fetch_add(1, Ordering::Relaxed);
-                    let bytes = bytes.clone();
-                    let first_bytes = first_bytes.clone();
-                    Box::pin(async_stream::try_stream! {
-                        yield bytes.clone();
-                        first_bytes.notified().await;
-                        for _ in 1..32 { yield bytes.clone(); }
-                    })
-                },
-            ),
-        )
+        let input = || {
+            opened.fetch_add(1, Ordering::Relaxed);
+            let bytes = bytes.clone();
+            let first_bytes = first_bytes.clone();
+            Box::pin(async_stream::try_stream! {
+                yield bytes.clone();
+                first_bytes.notified().await;
+                for _ in 1..32 {
+                    if !multipart { tokio::time::sleep(Duration::from_millis(if stalled { 1500 } else { 40 })).await; }
+                    yield bytes.clone();
+                }
+            }) as BoxStream<'_, Result<Bytes>>
+        };
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            let path = Path::from("raw/test");
+            if multipart {
+                let reply = streaming
+                    .part(&path, "upload /+", 0, 8 * 1024 * 1024, &digest, input)
+                    .await?;
+                assert_eq!(reply.content_id, "\"stored\"");
+            } else {
+                streaming
+                    .put(&path, 8 * 1024 * 1024, &digest, input)
+                    .await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
         .await
-        .unwrap()
         .unwrap();
-        assert_eq!(result.content_id, "\"stored\"");
+        if stalled {
+            assert!(result.is_err());
+        } else {
+            result.unwrap();
+        }
+        if !multipart && !stalled {
+            assert!(started.elapsed() > streaming.options.request_timeout);
+        }
         assert_eq!(opened.load(Ordering::Relaxed), 2);
         assert_eq!(requests.load(Ordering::Relaxed), 2);
         server.abort();
@@ -136,6 +191,7 @@ mod tests {
 pub(crate) struct Streaming {
     pub signer: Arc<dyn Signer>,
     pub client: reqwest::Client,
+    pub raw_client: reqwest::Client,
     pub options: Options,
 }
 
@@ -147,19 +203,50 @@ impl Streaming {
         number: usize,
         length: u64,
         digest: &[u8; 16],
+        input: impl FnMut() -> BoxStream<'a, Result<Bytes>>,
+    ) -> Result<PartId> {
+        let options = SignedUrlOptions::default().with_query([
+            ("partNumber", (number + 1).to_string()),
+            ("uploadId", upload.to_owned()),
+        ]);
+        self.upload(&self.client, key, length, digest, input, options)
+            .await
+    }
+
+    pub(crate) async fn put<'a>(
+        &self,
+        key: &Path,
+        length: u64,
+        digest: &[u8; 16],
+        input: impl FnMut() -> BoxStream<'a, Result<Bytes>>,
+    ) -> Result<()> {
+        self.upload(
+            &self.raw_client,
+            key,
+            length,
+            digest,
+            input,
+            SignedUrlOptions::default(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn upload<'a>(
+        &self,
+        client: &reqwest::Client,
+        key: &Path,
+        length: u64,
+        digest: &[u8; 16],
         mut input: impl FnMut() -> BoxStream<'a, Result<Bytes>>,
+        options: SignedUrlOptions,
     ) -> Result<PartId> {
         let started = tokio::time::Instant::now();
         let checksum = STANDARD.encode(digest);
-        let options = SignedUrlOptions::default()
-            .with_query([
-                ("partNumber", (number + 1).to_string()),
-                ("uploadId", upload.to_owned()),
-            ])
-            .with_signed_header(
-                reqwest::header::HeaderName::from_static("content-md5"),
-                checksum.parse()?,
-            );
+        let options = options.with_signed_header(
+            reqwest::header::HeaderName::from_static("content-md5"),
+            checksum.parse()?,
+        );
         let mut attempt = 0;
         loop {
             let url = self
@@ -172,12 +259,15 @@ impl Streaming {
                 )
                 .await?;
             let (sender, receiver) = tokio::sync::mpsc::channel::<Bytes>(2);
-            let body = futures_util::stream::unfold(receiver, |mut receiver| async {
-                receiver
-                    .recv()
-                    .await
-                    .map(|bytes| (Ok::<_, std::io::Error>(bytes), receiver))
-            });
+            let (progress, mut activity) = tokio::sync::watch::channel(tokio::time::Instant::now());
+            let body = futures_util::stream::unfold(
+                (receiver, progress),
+                |(mut receiver, progress)| async {
+                    let bytes = receiver.recv().await?;
+                    progress.send_replace(tokio::time::Instant::now());
+                    Some((Ok::<_, std::io::Error>(bytes), (receiver, progress)))
+                },
+            );
             let mut source = input();
             let feed = async move {
                 let mut sent = 0u64;
@@ -186,8 +276,8 @@ impl Streaming {
                     let bytes = bytes?;
                     sent = sent
                         .checked_add(bytes.len() as u64)
-                        .context("S3 part length overflow")?;
-                    ensure!(sent <= length, "S3 part source exceeded its length");
+                        .context("S3 upload length overflow")?;
+                    ensure!(sent <= length, "S3 upload source exceeded its length");
                     actual.update(&bytes);
                     for start in (0..bytes.len()).step_by(256 * 1024) {
                         if sender
@@ -200,22 +290,31 @@ impl Streaming {
                         }
                     }
                 }
-                ensure!(sent == length, "S3 part source was truncated");
+                ensure!(sent == length, "S3 upload source was truncated");
                 ensure!(
                     actual.finalize().as_slice() == digest,
-                    "S3 part replay checksum mismatch"
+                    "S3 upload replay checksum mismatch"
                 );
                 drop(sender);
                 Ok(true)
             };
             let send = async {
-                self.client
+                let request = client
                     .put(url)
                     .header(reqwest::header::CONTENT_LENGTH, length)
                     .header("content-md5", &checksum)
                     .body(reqwest::Body::wrap_stream(body))
-                    .send()
-                    .await
+                    .send();
+                tokio::pin!(request);
+                let mut ended = false;
+                loop {
+                    let deadline = *activity.borrow() + self.options.request_timeout;
+                    tokio::select! {
+                        response = &mut request => return response.map_err(|error| anyhow::Error::from(error.without_url())),
+                        changed = activity.changed(), if !ended => { ended = changed.is_err(); },
+                        _ = tokio::time::sleep_until(deadline) => return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "S3 upload made no progress").into()),
+                    }
+                }
             };
             let (complete, response) = {
                 tokio::pin!(feed, send);
@@ -224,7 +323,7 @@ impl Streaming {
                     fed = &mut feed => (fed?, send.await),
                     response = &mut send => {
                         let complete = if response.as_ref().is_ok_and(|reply| reply.status().is_success()) {
-                            feed.await?
+                            tokio::time::timeout(self.options.request_timeout, feed).await??
                         } else {
                             false
                         };
@@ -238,21 +337,25 @@ impl Streaming {
                         || matches!(response.status().as_u16(), 408 | 429)
                 }
                 Err(error) => {
-                    error.is_timeout()
-                        || error.is_connect()
-                        || error.is_request()
-                        || error.is_body()
+                    error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+                        error.is_timeout()
+                            || error.is_connect()
+                            || error.is_request()
+                            || error.is_body()
+                    }) || error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
                 }
             };
             if let Ok(response) = &response
                 && response.status().is_success()
             {
-                ensure!(complete, "S3 accepted an incomplete part request");
+                ensure!(complete, "S3 accepted an incomplete upload request");
                 return Ok(PartId {
                     content_id: response
                         .headers()
                         .get(reqwest::header::ETAG)
-                        .context("S3 UploadPart returned no ETag")?
+                        .context("S3 upload returned no ETag")?
                         .to_str()?
                         .to_owned(),
                 });
@@ -264,9 +367,9 @@ impl Streaming {
             {
                 return match response {
                     Ok(response) => {
-                        anyhow::bail!("S3 UploadPart failed with HTTP {}", response.status())
+                        anyhow::bail!("S3 upload failed with HTTP {}", response.status())
                     }
-                    Err(error) => Err(error.without_url().into()),
+                    Err(error) => Err(error),
                 };
             }
             attempt += 1;

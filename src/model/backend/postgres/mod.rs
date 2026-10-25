@@ -130,6 +130,10 @@ mod node_write_tests;
 mod node_chunk_tests;
 
 #[cfg(test)]
+#[path = "../../../../tests/recovery/node_raw.rs"]
+mod node_raw_tests;
+
+#[cfg(test)]
 #[path = "../../../../tests/recovery/node_runtime.rs"]
 mod node_runtime_tests;
 

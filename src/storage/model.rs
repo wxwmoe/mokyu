@@ -214,6 +214,11 @@ impl Store {
                 streaming = Some(super::s3::Streaming {
                     signer: store.clone(),
                     client,
+                    raw_client: reqwest::Client::builder()
+                        .connect_timeout(options.connect_timeout)
+                        .http1_only()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()?,
                     options,
                 });
                 store

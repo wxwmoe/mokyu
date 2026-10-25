@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Raw,
     Writes,
     Reads,
     Memory,
@@ -50,6 +51,12 @@ enum HttpCase {
 #[ignore = "requires isolated controls, encrypted object storage and signed HTTP writes"]
 async fn node_http_writes_stream_batches_and_publish_after_validation() -> Result<()> {
     node_http_reads(HttpCase::Writes).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, raw object storage and signed HTTP writes"]
+async fn node_http_raw_writes_deduplicate_and_recover() -> Result<()> {
+    node_http_reads(HttpCase::Raw).await
 }
 
 async fn unique_source_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
@@ -227,6 +234,7 @@ async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()
 
 async fn node_http_reads(case: HttpCase) -> Result<()> {
     let writes = matches!(case, HttpCase::Writes);
+    let raw = matches!(case, HttpCase::Raw);
     let cache = matches!(case, HttpCase::Memory | HttpCase::Public | HttpCase::Writes);
     let disk = matches!(case, HttpCase::Files);
     let public = matches!(case, HttpCase::Public);
@@ -338,7 +346,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if writes {
+    if raw {
+        fixture("http-raw").await?;
+    } else if writes {
         fixture("http-writes").await?;
     } else if sources {
         unique_source_reads(&reads).await?;
@@ -393,13 +403,23 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-pending").await?;
         fixture("assert-no-reads").await?;
     }
-    let publishing = if writes {
-        fixture("chunks-lose-publish").await?;
-        let publishing = tokio::spawn(fixture("http-writes-publish-replay"));
-        let point = path
-            .parent()
-            .unwrap()
-            .join("faults-a/node-write-published.hit");
+    let publishing = if writes || raw {
+        fixture(if raw {
+            "http-raw-lose-commit"
+        } else {
+            "chunks-lose-publish"
+        })
+        .await?;
+        let publishing = tokio::spawn(fixture(if raw {
+            "http-raw-replay"
+        } else {
+            "http-writes-publish-replay"
+        }));
+        let point = path.parent().unwrap().join(if raw {
+            "faults-a/node-raw-committed.hit"
+        } else {
+            "faults-a/node-write-published.hit"
+        });
         tokio::time::timeout(Duration::from_secs(15), async {
             while !point.exists() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -418,14 +438,21 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
     context.client.addresses.lock().await.refresh_at = Instant::now();
     if let Some(publishing) = publishing {
         publishing.await??;
-        fixture("chunks-resume-publish").await?;
+        fixture(if raw {
+            "http-raw-resume-commit"
+        } else {
+            "chunks-resume-publish"
+        })
+        .await?;
     }
     fixture("stop-first").await?;
     node_state(&mut states, |state| {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if writes {
+    if raw {
+        fixture("http-raw-reconnected").await?;
+    } else if writes {
         fixture("http-writes-reconnected").await?;
     } else if sources {
         fixture("sources-reconnected").await?;
@@ -451,12 +478,20 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-reconnected").await?;
     }
     fixture("assert-no-reads").await?;
-    if writes {
+    if writes || raw {
         let before = observed.write_resources();
         let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
-        let point = faults.join("node-write-seal");
+        let point = faults.join(if raw {
+            "node-raw-uploaded"
+        } else {
+            "node-write-seal"
+        });
         tokio::fs::write(&point, b"pause").await?;
-        let fenced = tokio::spawn(fixture("http-writes-fenced"));
+        let fenced = tokio::spawn(fixture(if raw {
+            "http-raw-fenced"
+        } else {
+            "http-writes-fenced"
+        }));
         tokio::time::timeout(Duration::from_secs(15), async {
             while !point.with_extension("hit").exists() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -465,16 +500,22 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         .await?;
         let held = observed.write_resources();
         assert!(
-            held.iter().zip(before).all(|(held, before)| *held < before),
-            "writer did not hold memory, CPU and IO"
+            if raw {
+                held[0] < before[0] && held[1] == before[1] && held[2] < before[2]
+            } else {
+                held.iter().zip(before).all(|(held, before)| *held < before)
+            },
+            "writer did not hold its resources"
         );
         context.stop();
         fenced.await??;
-        assert_eq!(
-            observed.write_resources(),
-            held,
-            "cancelled blocking work released its resources early"
-        );
+        if !raw {
+            assert_eq!(
+                observed.write_resources(),
+                held,
+                "cancelled blocking work released its resources early"
+            );
+        }
         tokio::fs::remove_file(&point).await?;
         tokio::time::timeout(Duration::from_secs(10), async {
             while observed.write_resources() != before {

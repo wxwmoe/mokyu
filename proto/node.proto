@@ -41,7 +41,30 @@ service NodeWrites {
   rpc AbortWrite(WriteRequest) returns (WriteReply);
   rpc PrepareChunks(PrepareChunksRequest) returns (PreparedChunks);
   rpc CommitChunks(CommitChunksRequest) returns (ChunkCommitReply);
+  rpc PrepareRaw(PrepareRawRequest) returns (PreparedRaw);
+  rpc CommitRaw(CommitRawRequest) returns (PreparedRaw);
   rpc PublishWrite(PublishWriteRequest) returns (WriteReply);
+}
+
+message PrepareRawRequest {
+  Run run = 1;
+  string operation_id = 2;
+  uint64 size = 3;
+  bytes digest = 4;
+  bytes content_hash = 5;
+}
+
+message CommitRawRequest {
+  Run run = 1;
+  string operation_id = 2;
+  string source_id = 3;
+}
+
+message PreparedRaw {
+  string source_id = 1;
+  uint64 size = 2;
+  bool committed = 3;
+  repeated Grant grants = 4;
 }
 
 message ChunkInput {

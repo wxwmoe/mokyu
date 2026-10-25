@@ -112,7 +112,7 @@ struct Batch {
 }
 
 struct Upload {
-    bytes: Vec<u8>,
+    bytes: Bytes,
     _memory: Arc<OwnedSemaphorePermit>,
     _io: Arc<OwnedSemaphorePermit>,
     _grants: Vec<Arc<Grant>>,
@@ -278,29 +278,38 @@ impl Writes {
         let result = async {
             let profile = &operation.backend.profile;
             ensure!(
-                profile.cdc_enabled
-                    && profile.write_processing == "inline"
-                    && !profile.upload_cache,
+                profile.write_processing == "inline" && !profile.upload_cache,
                 s3s::s3_error!(
                     NotImplemented,
-                    "this node write path requires inline chunks without upload cache"
+                    "this node write path requires inline processing without upload cache"
                 )
             );
-            let config = profile
-                .compression_config(&self.reads.node.config.instance.compression_idle_timeout);
-            ensure!(
-                config.workspace_bytes()? <= self.reads.reader.workspace,
-                "compression workspace exceeds node budget"
-            );
-            let (tx, rx) = mpsc::channel(1);
-            let ((size, etag, sums), ()) = operation
-                .guard(&self.reads.node, &[], async {
-                    tokio::try_join!(
-                        self.receive(&operation, body, check, trailers, length, config, tx),
-                        self.batches(&operation, rx)
+            let (size, etag, sums) = if profile.cdc_enabled {
+                let config = profile
+                    .compression_config(&self.reads.node.config.instance.compression_idle_timeout);
+                ensure!(
+                    config.workspace_bytes()? <= self.reads.reader.workspace,
+                    "compression workspace exceeds node budget"
+                );
+                let (tx, rx) = mpsc::channel(1);
+                let (received, ()) = operation
+                    .guard(&self.reads.node, &[], async {
+                        tokio::try_join!(
+                            self.receive(&operation, body, check, trailers, length, config, tx),
+                            self.batches(&operation, rx)
+                        )
+                    })
+                    .await?;
+                received
+            } else {
+                operation
+                    .guard(
+                        &self.reads.node,
+                        &[],
+                        self.raw(&operation, body, check, trailers, length),
                     )
-                })
-                .await?;
+                    .await?
+            };
             operation.check()?;
             let reply = self
                 .reads
@@ -333,6 +342,129 @@ impl Writes {
             let _ = self.reads.node.client.abort_write(operation.lookup()).await;
         }
         result
+    }
+
+    async fn raw(
+        &self,
+        operation: &Operation,
+        mut body: s3s::dto::StreamingBlob,
+        mut check: Integrity,
+        trailers: Option<s3s::TrailingHeaders>,
+        length: Option<u64>,
+    ) -> Result<(u64, String, serde_json::Value)> {
+        let node = &self.reads.node;
+        let files = &self.reads.reader.files;
+        let mut file = files.raw_request(&operation.backend.profile).await?;
+        let idle = Duration::from_secs(crate::config::seconds(
+            &node.snapshot()?.runtime().uploads.client_idle_timeout,
+        )?);
+        let mut hash = operation
+            .backend
+            .profile
+            .deduplication_enabled
+            .then(blake3::Hasher::new);
+        let mut size = 0u64;
+        while let Some(data) = tokio::time::timeout(idle, body.next())
+            .await
+            .map_err(|_| s3s::s3_error!(RequestTimeout))?
+        {
+            let data = data.map_err(|_| s3s::s3_error!(IncompleteBody))?;
+            size = size
+                .checked_add(data.len() as u64)
+                .context("object length overflow")?;
+            ensure!(
+                size <= MAX_OBJECT as u64 && length.is_none_or(|length| size <= length),
+                s3s::s3_error!(EntityTooLarge)
+            );
+            for bytes in data.chunks(256 * 1024) {
+                check.update(bytes);
+                if let Some(hash) = &mut hash {
+                    hash.update(bytes);
+                }
+                files.append_request(&mut file, bytes).await?;
+            }
+        }
+        ensure!(
+            length.is_none_or(|length| size == length),
+            s3s::s3_error!(IncompleteBody)
+        );
+        let (etag, sums) = check.finish(trailers)?;
+        let digest: [u8; 16] = hex::decode(&etag)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid raw digest"))?;
+        // Acquire local IO before reserving shared storage capacity.
+        let io = Arc::new(self.io.clone().acquire_owned().await?);
+        let started = Instant::now();
+        let plan = node
+            .client
+            .prepare_raw(wire::PrepareRawRequest {
+                run: Some(operation.request.run.run.clone()),
+                operation_id: operation.id.clone(),
+                size,
+                digest: digest.to_vec(),
+                content_hash: hash
+                    .map(|hash| hash.finalize().as_bytes().to_vec())
+                    .unwrap_or_default(),
+            })
+            .await?;
+        let source = Uuid::parse_str(&plan.source_id)?;
+        ensure!(
+            !source.is_nil() && plan.size == size,
+            "invalid raw write plan"
+        );
+        let grants = node
+            .resources
+            .adopt(&operation.request.run, &plan.grants, started)?;
+        if !plan.committed {
+            ensure!(operation.backend.profile.upload_concurrency.is_none() || grants.iter().any(|grant|
+                grant.reference.r#type == wire::GrantType::StorageWrite as i32), "raw upload permit missing");
+            let upload = operation
+                .backend
+                .store
+                .streaming
+                .as_ref()
+                .context("S3 streaming upload missing")?;
+            let held: Vec<_> = operation.grants.iter().chain(&grants).cloned().collect();
+            operation
+                .guard(
+                    node,
+                    &grants,
+                    upload.put(
+                        &crate::storage::raw::remote_path(source),
+                        size,
+                        &digest,
+                        || {
+                            file.replay()
+                                .map_ok(|bytes| {
+                                    Bytes::from_owner(Upload {
+                                        bytes,
+                                        _memory: operation.request.memory.clone(),
+                                        _io: io.clone(),
+                                        _grants: held.clone(),
+                                    })
+                                })
+                                .boxed()
+                        },
+                    ),
+                )
+                .await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("node-raw-uploaded").await;
+            operation.check()?;
+            let reply = node
+                .client
+                .commit_raw(wire::CommitRawRequest {
+                    run: Some(operation.request.run.run.clone()),
+                    operation_id: operation.id.clone(),
+                    source_id: plan.source_id.clone(),
+                })
+                .await?;
+            ensure!(
+                reply.committed && reply.source_id == plan.source_id && reply.size == size,
+                "invalid raw commit receipt"
+            );
+        }
+        Ok((size, etag, sums))
     }
 
     async fn payload(
@@ -575,7 +707,7 @@ impl Writes {
                                         let digest = blake3::hash(&bytes).as_bytes().to_vec();
                                         Ok((
                                             Upload {
-                                                bytes,
+                                                bytes: bytes.into(),
                                                 _memory: memory,
                                                 _io: io,
                                                 _grants: grants,

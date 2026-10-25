@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0076.
+-- Generated from the complete postgres migration chain through 0077.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -948,7 +948,22 @@ CREATE TABLE public.node_write_permits (
     token uuid NOT NULL,
     node_id uuid NOT NULL,
     operation_id uuid NOT NULL,
-    batch_id bigint NOT NULL
+    batch_id bigint
+);
+
+CREATE TABLE public.node_write_raw (
+    node_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    request_hash bytea NOT NULL,
+    source_id uuid NOT NULL,
+    size bigint NOT NULL,
+    digest bytea NOT NULL,
+    content_hash bytea,
+    committed boolean NOT NULL,
+    CONSTRAINT node_write_raw_content_hash_check CHECK ((octet_length(content_hash) = 32)),
+    CONSTRAINT node_write_raw_digest_check CHECK ((octet_length(digest) = 16)),
+    CONSTRAINT node_write_raw_request_hash_check CHECK ((octet_length(request_hash) = 32)),
+    CONSTRAINT node_write_raw_size_check CHECK (((size >= 0) AND (size <= '5368709120'::bigint)))
 );
 
 CREATE TABLE public.node_writes (
@@ -1865,6 +1880,9 @@ ALTER TABLE ONLY public.node_write_batches
 ALTER TABLE ONLY public.node_write_permits
     ADD CONSTRAINT node_write_permits_pkey PRIMARY KEY (token);
 
+ALTER TABLE ONLY public.node_write_raw
+    ADD CONSTRAINT node_write_raw_pkey PRIMARY KEY (node_id, operation_id);
+
 ALTER TABLE ONLY public.node_writes
     ADD CONSTRAINT node_writes_lease_id_key UNIQUE (lease_id);
 
@@ -2488,7 +2506,13 @@ ALTER TABLE ONLY public.node_write_permits
     ADD CONSTRAINT node_write_permits_node_id_operation_id_batch_id_fkey FOREIGN KEY (node_id, operation_id, batch_id) REFERENCES public.node_write_batches(node_id, operation_id, batch_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_write_permits
+    ADD CONSTRAINT node_write_permits_node_id_operation_id_fkey FOREIGN KEY (node_id, operation_id) REFERENCES public.node_writes(node_id, operation_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_write_permits
     ADD CONSTRAINT node_write_permits_token_fkey FOREIGN KEY (token) REFERENCES public.storage_permits(token) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_write_raw
+    ADD CONSTRAINT node_write_raw_node_id_operation_id_fkey FOREIGN KEY (node_id, operation_id) REFERENCES public.node_writes(node_id, operation_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_writes
     ADD CONSTRAINT node_writes_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);
