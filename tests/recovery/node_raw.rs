@@ -20,6 +20,7 @@ fn begin(run: Run, name: &str) -> write::Begin {
         intent: write::Intent {
             access: "writer".into(),
             credential_revision: 1,
+            copy_read: None,
             bucket: "batches".into(),
             key: name.into(),
             metadata: serde_json::json!({}),

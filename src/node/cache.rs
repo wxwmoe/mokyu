@@ -40,7 +40,11 @@ pub(super) fn claim(entry: &Entry) -> Option<wire::CachedBody> {
 
 impl Reads {
     pub(super) fn candidate(&self, input: &wire::ReadRequest) -> Option<(Key, Arc<Entry>)> {
-        if input.method != wire::ReadMethod::Get as i32 {
+        if input.method != wire::ReadMethod::Get as i32
+            || input
+                .include
+                .contains(&(wire::ReadInclude::Protection as i32))
+        {
             return None;
         }
         let route = route(input);

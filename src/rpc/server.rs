@@ -390,6 +390,27 @@ impl NodeWrites for Service {
         }))
     }
 
+    async fn copy_chunks(
+        &self,
+        request: Request<wire::CopyChunksRequest>,
+    ) -> Result<Response<wire::ChunkCommitReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::write::copy(request.into_inner())?;
+        let batch_id = input.batch as u64;
+        let end = bounded(self.app.cluster().map_err(failure)?.copy_chunks(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-chunks-copied").await;
+        Ok(Response::new(wire::ChunkCommitReply {
+            batch_id,
+            end: end as u64,
+        }))
+    }
+
     async fn publish_write(
         &self,
         request: Request<wire::PublishWriteRequest>,

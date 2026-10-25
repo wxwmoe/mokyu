@@ -34,6 +34,7 @@ struct Operation {
     request: Request,
     grants: Vec<Arc<Grant>>,
     backend: Arc<super::body::Backend>,
+    copy_references: bool,
 }
 
 impl Operation {
@@ -175,6 +176,7 @@ impl Writes {
         let value: read::Storage = request.material(storage)?;
         let backend = reads::backend(&request.materials, value.connection.id)?;
         Ok(Operation {
+            copy_references: reply.copy_references,
             bucket: Uuid::parse_str(&reply.bucket_id)?,
             id,
             stream: reply.stream_id,
@@ -199,66 +201,186 @@ impl Writes {
         let operation = self.begin(request, input).await?;
         let _cache = self.reads.public.changing_object(operation.bucket, &key);
         let result = async {
-            let profile = &operation.backend.profile;
+            let (size, etag, sums) = self
+                .write_body(&operation, body, check, trailers, length)
+                .await?;
+            self.publish(&operation, size, &etag, &sums, if_match, if_none)
+                .await?;
+            Ok((etag, sums))
+        }
+        .await;
+        if result.is_err() {
+            let _ = self.reads.node.client.abort_write(operation.lookup()).await;
+        }
+        result
+    }
+
+    async fn write_body(
+        &self,
+        operation: &Operation,
+        body: s3s::dto::StreamingBlob,
+        check: Integrity,
+        trailers: Option<s3s::TrailingHeaders>,
+        length: Option<u64>,
+    ) -> Result<(u64, String, serde_json::Value)> {
+        let profile = &operation.backend.profile;
+        ensure!(
+            profile.write_processing == "inline" && !profile.upload_cache,
+            s3s::s3_error!(
+                NotImplemented,
+                "this node write path requires inline processing without upload cache"
+            )
+        );
+        if profile.cdc_enabled {
+            let config = profile
+                .compression_config(&self.reads.node.config.instance.compression_idle_timeout);
             ensure!(
-                profile.write_processing == "inline" && !profile.upload_cache,
-                s3s::s3_error!(
-                    NotImplemented,
-                    "this node write path requires inline processing without upload cache"
-                )
+                config.workspace_bytes()? <= self.reads.reader.workspace,
+                "compression workspace exceeds node budget"
             );
-            let (size, etag, sums) = if profile.cdc_enabled {
-                let config = profile
-                    .compression_config(&self.reads.node.config.instance.compression_idle_timeout);
-                ensure!(
-                    config.workspace_bytes()? <= self.reads.reader.workspace,
-                    "compression workspace exceeds node budget"
-                );
-                let (tx, rx) = mpsc::channel(1);
-                let (received, ()) = operation
-                    .guard(&self.reads.node, &[], async {
-                        tokio::try_join!(
-                            self.receive(&operation, body, check, trailers, length, config, tx),
-                            self.batches(&operation, rx)
-                        )
-                    })
-                    .await?;
-                received
-            } else {
-                operation
-                    .guard(
-                        &self.reads.node,
-                        &[],
-                        self.raw(&operation, body, check, trailers, length),
+            let (tx, rx) = mpsc::channel(1);
+            let (received, ()) = operation
+                .guard(&self.reads.node, &[], async {
+                    tokio::try_join!(
+                        self.receive(operation, body, check, trailers, length, config, tx),
+                        self.batches(operation, rx)
                     )
-                    .await?
-            };
-            operation.check()?;
-            let reply = self
-                .reads
-                .node
-                .client
-                .publish_write(wire::PublishWriteRequest {
-                    run: Some(operation.request.run.run.clone()),
-                    operation_id: operation.id.clone(),
-                    size,
-                    etag: etag.clone(),
-                    checksums_json: serde_json::to_vec(&sums)?,
-                    if_match,
-                    if_none,
                 })
                 .await?;
-            // Publication retires the lease; a confirmed terminal receipt wins over late renewals.
-            ensure!(
-                reply.operation_id == operation.id
-                    && reply.stream_id == operation.stream
-                    && reply.phase == wire::WritePhase::WritePublished as i32
-                    && reply
-                        .published
-                        .is_some_and(|value| value.size == size && value.etag == etag),
-                "invalid publication receipt"
-            );
-            Ok((etag, sums))
+            Ok(received)
+        } else {
+            operation
+                .guard(
+                    &self.reads.node,
+                    &[],
+                    self.raw(operation, body, check, trailers, length),
+                )
+                .await
+        }
+    }
+
+    async fn publish(
+        &self,
+        operation: &Operation,
+        size: u64,
+        etag: &str,
+        sums: &serde_json::Value,
+        if_match: Option<String>,
+        if_none: Option<String>,
+    ) -> Result<()> {
+        operation.check()?;
+        let reply = self
+            .reads
+            .node
+            .client
+            .publish_write(wire::PublishWriteRequest {
+                run: Some(operation.request.run.run.clone()),
+                operation_id: operation.id.clone(),
+                size,
+                etag: etag.to_owned(),
+                checksums_json: serde_json::to_vec(sums)?,
+                if_match,
+                if_none,
+            })
+            .await?;
+        // Publication retires the lease; a confirmed terminal receipt wins over late renewals.
+        ensure!(
+            reply.operation_id == operation.id
+                && reply.stream_id == operation.stream
+                && reply.phase == wire::WritePhase::WritePublished as i32
+                && reply
+                    .published
+                    .is_some_and(|value| value.size == size && value.etag == etag),
+            "invalid publication receipt"
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn copy(
+        &self,
+        request: Request,
+        mut input: wire::BeginWriteRequest,
+        source: reads::Prepared,
+        if_match: Option<String>,
+        if_none: Option<String>,
+    ) -> Result<()> {
+        let object: read::Object = source.material(
+            source
+                .reply
+                .object
+                .as_ref()
+                .context("copy object missing")?,
+        )?;
+        ensure!(
+            object.size >= 0 && source.run.run == request.run.run,
+            "invalid copy source"
+        );
+        let protection = source
+            .grants
+            .iter()
+            .find(|grant| grant.reference.r#type == wire::GrantType::ReadProtection as i32)
+            .context("copy protection missing")?
+            .clone();
+        input.copy_read_id = Some(protection.reference.id.clone());
+        input.size = Some(object.size as u64);
+        let key = input.key.clone();
+        let mut operation = self.begin(request, input).await?;
+        operation.grants.push(protection);
+        let _cache = self.reads.public.changing_object(operation.bucket, &key);
+        let result = async {
+            if operation.copy_references {
+                let mut offset = 0;
+                let mut batch_id = 1;
+                while offset < object.size as u64 {
+                    let reply = operation
+                        .guard(&self.reads.node, &[], async {
+                            Ok(self
+                                .reads
+                                .node
+                                .client
+                                .copy_chunks(wire::CopyChunksRequest {
+                                    run: Some(operation.request.run.run.clone()),
+                                    operation_id: operation.id.clone(),
+                                    batch_id,
+                                    offset,
+                                })
+                                .await?)
+                        })
+                        .await?;
+                    ensure!(
+                        reply.batch_id == batch_id
+                            && reply.end > offset
+                            && reply.end <= object.size as u64,
+                        "invalid copy batch receipt"
+                    );
+                    offset = reply.end;
+                    batch_id += 1;
+                }
+            } else {
+                let body = self.reads.copy_body(source).await?;
+                let body = crate::http::object::blob(body.map_err(std::io::Error::other).boxed());
+                let check = Integrity::new(&hyper::HeaderMap::new(), None)?;
+                let (size, _, _) = self
+                    .write_body(&operation, body, check, None, Some(object.size as u64))
+                    .await?;
+                ensure!(size == object.size as u64, s3s::s3_error!(IncompleteBody));
+            }
+            #[cfg(feature = "fault-injection")]
+            operation
+                .guard(&self.reads.node, &[], async {
+                    crate::faults::point("node-copy-before-publish").await;
+                    Ok(())
+                })
+                .await?;
+            self.publish(
+                &operation,
+                object.size as u64,
+                &object.etag,
+                &object.checksums,
+                if_match,
+                if_none,
+            )
+            .await
         }
         .await;
         if result.is_err() {

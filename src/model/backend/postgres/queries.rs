@@ -60,7 +60,7 @@ pub(super) fn storage_for_stream(stream: Id) -> Scalar<'static, Option<Uuid>> {
     .bind(stream)
 }
 
-fn extents_for_copy(stream: Id, from: i64) -> Rows<'static, Extent> {
+pub(super) fn extents_for_copy(stream: Id, from: i64) -> Rows<'static, Extent> {
     sqlx::query_as("SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2 ORDER BY offset_bytes LIMIT 500")
         .bind(stream)
         .bind(from)
@@ -7595,6 +7595,16 @@ impl ClusterStore for Backend {
             .await
             .map_err(normalize_error)
     }
+    async fn copy_chunks(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_write::CopyBatch,
+    ) -> Result<i64> {
+        transactions::copy_node_chunks(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
     async fn begin_write(
         &self,
         node: &crate::cluster::NodeState,
@@ -10680,6 +10690,7 @@ pub(super) struct NodeWrite {
     pub publish_hash: Option<Vec<u8>>,
     pub result: Option<sqlx::types::Json<crate::model::node_write::Published>>,
     pub profile: sqlx::types::Json<crate::storage::profile::StorageProfile>,
+    pub copy_source: Option<sqlx::types::Json<crate::model::node_write::CopySource>>,
     pub state: String,
     pub valid_for_ms: i64,
 }
@@ -10749,10 +10760,28 @@ pub(super) fn insert_node_write<'q>(
     stream: Id,
     profile: &'q crate::storage::profile::StorageProfile,
     block_key: Option<Uuid>,
+    source: Option<&'q crate::model::node_write::CopySource>,
 ) -> Statement<'q> {
-    sqlx::query("INSERT INTO node_writes(node_id,operation_id,credential_generation,boot_id,fence,request_hash,stream_id,lease_id,storage_id,block_key_id,profile,expected_size) SELECT $1,$2,$3,$4,$5,$6,$7,l.id,$8,$9,$10,$11 FROM stream_leases l WHERE l.stream_id=$7 AND l.lease_type='write'")
+    sqlx::query("INSERT INTO node_writes(node_id,operation_id,credential_generation,boot_id,fence,request_hash,stream_id,lease_id,storage_id,block_key_id,profile,expected_size,copy_source) SELECT $1,$2,$3,$4,$5,$6,$7,l.id,$8,$9,$10,$11,$12 FROM stream_leases l WHERE l.stream_id=$7 AND l.lease_type='write'")
         .bind(state.node_id).bind(input.operation).bind(state.credential_generation).bind(input.run.boot).bind(input.run.fence)
-        .bind(hash).bind(stream).bind(profile.storage_id).bind(block_key).bind(sqlx::types::Json(profile)).bind(input.intent.size)
+        .bind(hash).bind(stream).bind(profile.storage_id).bind(block_key).bind(sqlx::types::Json(profile)).bind(input.intent.size).bind(source.map(sqlx::types::Json))
+}
+
+pub(super) fn node_copy_source(
+    source: &crate::model::node_write::CopySource,
+) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT l.id FROM stream_leases l JOIN streams s ON s.id=l.stream_id WHERE l.id=$1 AND l.stream_id=$2 AND l.lease_type='read' AND l.expires_at>clock_timestamp() AND s.payload_revision=$3 AND s.state IN ('ready','retired') FOR SHARE OF l,s")
+        .bind(source.read).bind(source.stream).bind(source.revision)
+}
+
+pub(super) fn save_node_copy_batch<'q>(
+    node: Uuid,
+    input: &crate::model::node_write::CopyBatch,
+    hash: &'q [u8],
+    end: i64,
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO node_write_batches(node_id,operation_id,batch_id,request_hash,end_bytes,plan,ready,commit_hash) VALUES($1,$2,$3,$4,$5,'[]'::jsonb,true,$4)")
+        .bind(node).bind(input.operation).bind(input.batch).bind(hash).bind(end)
 }
 
 pub(super) fn abort_node_writes<'q>(

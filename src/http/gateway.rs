@@ -925,31 +925,8 @@ impl S3 for Gateway {
             let i = req.input;
             let b = self.0.bucket(&i.bucket, true).await?;
             let access = req.credentials.as_ref().map(|c| c.access_key.as_str());
-            if i.checksum_algorithm.is_some() {
-                return Err(s3_error!(
-                    NotImplemented,
-                    "changing checksum algorithm during copy is unsupported"
-                )
-                .into());
-            }
-            if i.metadata_directive
-                .as_ref()
-                .is_some_and(|v| !matches!(v.as_str(), "COPY" | "REPLACE"))
-                || i.tagging_directive
-                    .as_ref()
-                    .is_some_and(|v| v.as_str() != "COPY")
-            {
-                return Err(s3_error!(NotImplemented, "unsupported copy directive").into());
-            }
             let mut authority = self.0.authorize(access, b.id, Action::Write).await?;
-            let CopySource::Bucket {
-                bucket,
-                key,
-                version_id: None,
-            } = &i.copy_source
-            else {
-                return Err(s3_error!(NotImplemented).into());
-            };
+            let (bucket, key) = copy_source(&i)?;
             let source_bucket = self.0.bucket(bucket, false).await?;
             self.0
                 .authorize(access, source_bucket.id, Action::Read)
@@ -1014,6 +991,36 @@ impl S3 for Gateway {
         .await
         .map_err(internal)
     }
+}
+
+pub(super) fn copy_source(input: &CopyObjectInput) -> Result<(&str, &str)> {
+    if input.checksum_algorithm.is_some() {
+        return Err(s3_error!(
+            NotImplemented,
+            "changing checksum algorithm during copy is unsupported"
+        )
+        .into());
+    }
+    if input
+        .metadata_directive
+        .as_ref()
+        .is_some_and(|v| !matches!(v.as_str(), "COPY" | "REPLACE"))
+        || input
+            .tagging_directive
+            .as_ref()
+            .is_some_and(|v| v.as_str() != "COPY")
+    {
+        return Err(s3_error!(NotImplemented, "unsupported copy directive").into());
+    }
+    let CopySource::Bucket {
+        bucket,
+        key,
+        version_id: None,
+    } = &input.copy_source
+    else {
+        return Err(s3_error!(NotImplemented).into());
+    };
+    Ok((bucket, key))
 }
 
 #[cfg(test)]

@@ -641,23 +641,35 @@ pub(super) async fn copy_chunk_references(
     chunks: &[Id],
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    require_writing_stream(&mut tx, destination).await?;
+    copy_chunk_references_in(&mut tx, destination, source, offset, end, chunks).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn copy_chunk_references_in(
+    db: &mut PgConnection,
+    destination: Id,
+    source: Id,
+    offset: i64,
+    end: i64,
+    chunks: &[Id],
+) -> Result<()> {
+    require_writing_stream(db, destination).await?;
     let locked: Vec<Id> = queries::lock_ready_chunks(chunks)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *db)
         .await?;
     ensure!(locked.len() == chunks.len(), "copy source is not ready");
-    require_sources(&mut tx, None, chunks).await?;
+    require_sources(db, None, chunks).await?;
     queries::copy_extents(destination, source, offset, end)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
-    queries::reference_chunks(chunks).execute(&mut *tx).await?;
+    queries::reference_chunks(chunks).execute(&mut *db).await?;
     queries::pin_chunks(chunks, destination)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
     queries::resize_writing_stream(destination, end)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -9299,9 +9311,9 @@ pub(super) async fn open_node_read(
     }
     if reply.outcome != Outcome::Ready
         || input.head
-        || !input.mapping
-        || reply.length == 0
-        || reply.body_reused
+        || (!input.mapping && !input.protection)
+        || (reply.length == 0 && !input.protection)
+        || (reply.body_reused && !input.protection)
     {
         ensure!(reply.bytes() <= input.max_bytes, Error::NodeReadLimit);
         require_node_run(&mut tx, state, input.run, false).await?;
@@ -9335,6 +9347,28 @@ pub(super) async fn open_node_read(
                 < read::READ_LIMIT,
             Error::NodeReadBusy
         );
+    }
+    if !input.mapping || reply.length == 0 {
+        let (id, remaining) = if let Some(previous) = previous {
+            (previous.read_id, previous.valid_for_ms)
+        } else {
+            let id = create_read_lease(&mut tx, stream.id, read::READ_SECONDS).await?;
+            queries::node_read_insert(state, &input, id, &stream, start, end, &hash)
+                .execute(&mut *tx)
+                .await?;
+            (id, read::READ_SECONDS * 1000)
+        };
+        reply.body_reused = false;
+        reply.grants.push(Grant {
+            r#type: GrantType::Read,
+            id,
+            valid_for_ms: remaining as u64,
+            storage: None,
+        });
+        require_node_run(&mut tx, state, input.run, false).await?;
+        ensure!(reply.bytes() <= input.max_bytes, Error::NodeReadLimit);
+        tx.commit().await?;
+        return Ok(reply);
     }
     let existing = if let Some(previous) = &previous {
         queries::node_read_window(previous.read_id, start)
@@ -9753,17 +9787,52 @@ pub(super) async fn begin_node_write(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    let mut authority = Permit::for_action(
+        Principal::Service {
+            access_key: input.intent.access.clone(),
+            revision,
+        },
+        bucket.id,
+        Action::Write,
+    );
+    let copy_source = if let Some(id) = input.intent.copy_read {
+        let lease = queries::node_read_owned(state, input.run, id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::NodeExpired)?;
+        let source = queries::node_read_stream(lease.stream_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::NodeExpired)?;
+        ensure!(
+            lease.offset_bytes == 0
+                && lease.end_bytes == source.size
+                && lease.payload_revision == source.payload_revision
+                && input.intent.size == Some(source.size),
+            Error::NodeOperationConflict
+        );
+        authority.add(source.bucket_id, Action::Read);
+        let storage = queries::storage_for_stream(source.id)
+            .fetch_one(&mut *tx)
+            .await?
+            .ok_or(Error::SourceUnavailable)?;
+        Some(write::CopySource {
+            read: id,
+            stream: source.id,
+            revision: source.payload_revision,
+            size: source.size,
+            etag: source.etag,
+            checksums: source.checksums,
+            payload: source.payload_type,
+            storage,
+        })
+    } else {
+        None
+    };
     let stream = create_stream_in(
         &mut tx,
         StreamCreate {
-            authority: Permit::for_action(
-                Principal::Service {
-                    access_key: input.intent.access.clone(),
-                    revision,
-                },
-                bucket.id,
-                Action::Write,
-            ),
+            authority,
             bucket: bucket.id,
             key: input.intent.key.clone(),
             stream_type: "object".into(),
@@ -9803,10 +9872,18 @@ pub(super) async fn begin_node_write(
         .fetch_one(&mut *tx)
         .await?;
     ensure!(
-        queries::insert_node_write(state, &input, &hash, stream, &profile, block_key)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
+        queries::insert_node_write(
+            state,
+            &input,
+            &hash,
+            stream,
+            &profile,
+            block_key,
+            copy_source.as_ref()
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
             == 1,
         Error::OperationAborted
     );
@@ -9846,6 +9923,10 @@ pub(super) async fn node_write_reply(
         bucket: owned.bucket_id,
         stream: owned.stream_id,
         phase,
+        copy_references: owned
+            .copy_source
+            .as_ref()
+            .is_some_and(|source| source.references(&owned.profile)),
         materials: Vec::new(),
         storage: None,
         grants: Vec::new(),
@@ -10093,6 +10174,12 @@ async fn require_node_write(
         .fetch_one(&mut **db)
         .await?;
     authority.lock(db).await?;
+    if let Some(source) = &row.copy_source {
+        queries::node_copy_source(source)
+            .fetch_optional(&mut **db)
+            .await?
+            .ok_or(Error::NodeExpired)?;
+    }
     Ok(stream)
 }
 
@@ -10472,6 +10559,71 @@ pub(super) async fn commit_node_chunks(
     Ok(batch.end_bytes)
 }
 
+pub(super) async fn copy_node_chunks(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: write::CopyBatch,
+) -> Result<i64> {
+    let hash = input.hash()?;
+    let mut tx = pool.begin().await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
+    if let Some(batch) = queries::node_write_batch(node.node_id, input.operation, input.batch)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        ensure!(
+            batch.request_hash == hash && batch.commit_hash.as_ref() == Some(&hash),
+            Error::NodeOperationConflict
+        );
+        tx.commit().await?;
+        return Ok(batch.end_bytes);
+    }
+    let stream = require_node_write(&mut tx, &row).await?;
+    let source = row
+        .copy_source
+        .as_ref()
+        .ok_or_else(|| s3s::s3_error!(InvalidRequest))?;
+    ensure!(
+        source.references(&row.profile),
+        s3s::s3_error!(InvalidRequest, "write cannot copy chunk references")
+    );
+    ensure!(
+        row.next_batch == input.batch
+            && row.next_offset == input.offset
+            && input.offset < source.size,
+        s3s::s3_error!(InvalidArgument, "copy batch is out of order")
+    );
+    let extents = queries::extents_for_copy(source.stream, input.offset)
+        .fetch_all(&mut *tx)
+        .await?;
+    ensure!(!extents.is_empty(), Error::SourceUnavailable);
+    let mut end = input.offset;
+    let mut chunks = Vec::with_capacity(extents.len());
+    for extent in extents {
+        ensure!(
+            extent.offset_bytes == end && extent.fragment_id.is_none() && extent.length > 0,
+            Error::SourceUnavailable
+        );
+        end = end
+            .checked_add(i64::from(extent.length))
+            .ok_or(Error::SourceUnavailable)?;
+        chunks.push(extent.chunk_id.ok_or(Error::SourceUnavailable)?);
+    }
+    ensure!(end <= source.size, Error::SourceUnavailable);
+    chunks.sort_unstable();
+    chunks.dedup();
+    copy_chunk_references_in(&mut tx, stream, source.stream, input.offset, end, &chunks).await?;
+    queries::save_node_copy_batch(node.node_id, &input, &hash, end)
+        .execute(&mut *tx)
+        .await?;
+    queries::advance_node_write(node.node_id, input.operation, end)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(end)
+}
+
 pub(super) async fn publish_node_write(
     pool: &PgPool,
     node: &NodeState,
@@ -10488,12 +10640,22 @@ pub(super) async fn publish_node_write(
         return Ok(reply);
     }
     let stream = require_node_write(&mut tx, &row).await?;
+    if let Some(source) = &row.copy_source {
+        ensure!(
+            input.size == source.size
+                && input.etag == source.etag
+                && serde_json::to_value(&input.checksums)? == source.checksums,
+            s3s::s3_error!(InvalidRequest, "copy result differs from its source")
+        );
+    }
     if let Some(raw) = queries::node_raw_write(node.node_id, input.operation)
         .fetch_optional(&mut *tx)
         .await?
     {
         ensure!(
-            raw.committed && raw.size == input.size && hex::encode(&raw.digest) == input.etag,
+            raw.committed
+                && raw.size == input.size
+                && (row.copy_source.is_some() || hex::encode(&raw.digest) == input.etag),
             s3s::s3_error!(IncompleteBody)
         );
     }

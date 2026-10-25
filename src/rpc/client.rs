@@ -344,6 +344,14 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn copy_chunks(
+        &self,
+        input: wire::CopyChunksRequest,
+    ) -> Result<wire::ChunkCommitReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/CopyChunks")
+            .await
+    }
+
     pub(crate) async fn publish_write(
         &self,
         input: wire::PublishWriteRequest,

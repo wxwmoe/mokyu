@@ -250,7 +250,7 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
         _ => return Err(invalid()),
     };
     if input.include.is_empty()
-        || input.include.len() > 3
+        || input.include.len() > 4
         || !text(&input.access_key, 128)
         || (web && !input.access_key.is_empty())
     {
@@ -258,6 +258,7 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
     }
     let mut seen = HashSet::new();
     let mut mapping = false;
+    let mut protection = false;
     let mut policy = false;
     for include in input.include {
         if !seen.insert(include) {
@@ -267,6 +268,9 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
             Ok(wire::ReadInclude::Object) => {}
             Ok(wire::ReadInclude::Mapping) if !head => mapping = true,
             Ok(wire::ReadInclude::Policy) => policy = true,
+            Ok(wire::ReadInclude::Protection) if !head && !web && !input.access_key.is_empty() => {
+                protection = true
+            }
             _ => return Err(invalid()),
         }
     }
@@ -342,6 +346,7 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
         head,
         web,
         mapping,
+        protection,
         policy,
         headers: headers(input.headers, false)?,
         overrides: headers(input.overrides, true)?,
@@ -612,6 +617,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn protected_metadata_requires_a_signed_object_read() {
+        let mut input = request();
+        input.include = vec![
+            wire::ReadInclude::Object as i32,
+            wire::ReadInclude::Protection as i32,
+        ];
+        assert!(query(input.clone()).is_err());
+        input.access_key = "copy-reader".into();
+        let parsed = query(input.clone()).unwrap();
+        assert!(parsed.protection && !parsed.mapping);
+        input.method = wire::ReadMethod::Head as i32;
+        assert!(query(input.clone()).is_err());
+        input.method = wire::ReadMethod::Get as i32;
+        input.include.push(5);
+        assert!(query(input).is_err());
     }
 
     #[test]

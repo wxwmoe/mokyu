@@ -14,6 +14,9 @@ use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
+#[path = "node_copy.rs"]
+mod copy;
+
 fn begin(run: Run, name: &str) -> write::Begin {
     write::Begin {
         run,
@@ -21,6 +24,7 @@ fn begin(run: Run, name: &str) -> write::Begin {
         intent: write::Intent {
             access: "writer".into(),
             credential_revision: 1,
+            copy_read: None,
             bucket: "batches".into(),
             key: name.into(),
             metadata: serde_json::json!({}),
@@ -502,5 +506,6 @@ async fn postgres_node_chunks_replay_claims_nonces_and_publication() -> Result<(
             .phase,
         write::Phase::Published
     );
+    copy::exercise(&backend, &pool, &node, &key, session.run).await?;
     Ok(())
 }

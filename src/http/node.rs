@@ -26,6 +26,7 @@ use std::{cell::RefCell, sync::Arc};
 use tracing::Instrument;
 
 mod catalog;
+mod copy;
 mod objects;
 
 enum PreparedRequest {
@@ -788,6 +789,12 @@ impl S3Access for Gateway {
 
 #[async_trait::async_trait]
 impl S3 for Gateway {
+    async fn copy_object(
+        &self,
+        request: S3Request<CopyObjectInput>,
+    ) -> S3Result<S3Response<CopyObjectOutput>> {
+        self.copy(request).await.map_err(delivery::error)
+    }
     async fn delete_object(
         &self,
         request: S3Request<DeleteObjectInput>,

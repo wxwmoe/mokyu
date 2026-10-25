@@ -17,6 +17,7 @@ pub(crate) struct Intent {
     pub metadata: serde_json::Value,
     pub public: bool,
     pub size: Option<i64>,
+    pub copy_read: Option<Uuid>,
 }
 
 impl Intent {
@@ -33,6 +34,7 @@ impl Intent {
                     .into_iter()
                     .all(|value| !value.contains('\0'))
                 && self.size.is_none_or(|size| size >= 0)
+                && self.copy_read.is_none_or(|id| !id.is_nil())
                 && self.metadata.is_object()
                 && serde_json::to_vec(&self.metadata)?.len() <= 16 * 1024,
             "invalid write intent"
@@ -93,6 +95,41 @@ pub(crate) struct Begin {
     pub cached: Vec<node_read::Version>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct CopySource {
+    pub read: Uuid,
+    pub stream: super::Id,
+    pub revision: i64,
+    pub size: i64,
+    pub etag: String,
+    pub checksums: serde_json::Value,
+    pub payload: String,
+    pub storage: Uuid,
+}
+
+impl CopySource {
+    pub(crate) fn references(&self, profile: &crate::storage::profile::StorageProfile) -> bool {
+        self.payload == "chunks" && profile.cdc_enabled && self.storage == profile.storage_id
+    }
+}
+
+pub(crate) struct CopyBatch {
+    pub run: Run,
+    pub operation: Uuid,
+    pub batch: i64,
+    pub offset: i64,
+}
+
+impl CopyBatch {
+    pub(crate) fn hash(&self) -> Result<Vec<u8>> {
+        ensure!(
+            self.batch > 0 && self.batch < i64::MAX && self.offset >= 0,
+            "invalid copy batch"
+        );
+        super::node_chunk::hash(&serde_json::json!(["copy", self.batch, self.offset]))
+    }
+}
+
 pub(crate) struct Lookup {
     pub run: Run,
     pub operation: Uuid,
@@ -115,6 +152,7 @@ pub(crate) struct Reply {
     pub storage: Option<node_read::Version>,
     pub grants: Vec<node_read::Grant>,
     pub published: Option<Published>,
+    pub copy_references: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -234,6 +272,7 @@ mod tests {
         let intent = Intent {
             access: "writer".into(),
             credential_revision: 1,
+            copy_read: None,
             bucket: "bucket".into(),
             key: "object".into(),
             metadata: serde_json::json!({"content_type":"text/plain","user":{"b":"2","a":"1"}}),

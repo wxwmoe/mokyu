@@ -41,6 +41,7 @@ service NodeWrites {
   rpc AbortWrite(WriteRequest) returns (WriteReply);
   rpc PrepareChunks(PrepareChunksRequest) returns (PreparedChunks);
   rpc CommitChunks(CommitChunksRequest) returns (ChunkCommitReply);
+  rpc CopyChunks(CopyChunksRequest) returns (ChunkCommitReply);
   rpc PrepareRaw(PrepareRawRequest) returns (PreparedRaw);
   rpc CommitRaw(CommitRawRequest) returns (PreparedRaw);
   rpc PublishWrite(PublishWriteRequest) returns (WriteReply);
@@ -144,6 +145,13 @@ message ChunkCommitReply {
   uint64 end = 2;
 }
 
+message CopyChunksRequest {
+  Run run = 1;
+  string operation_id = 2;
+  uint64 batch_id = 3;
+  uint64 offset = 4;
+}
+
 message PublishWriteRequest {
   Run run = 1;
   string operation_id = 2;
@@ -171,6 +179,7 @@ message BeginWriteRequest {
   optional uint64 size = 8;
   repeated Cached cached = 9;
   optional uint64 credential_revision = 10;
+  optional string copy_read_id = 11;
 }
 
 message PrepareRequestInput {
@@ -237,6 +246,7 @@ message WriteReply {
   repeated Grant grants = 6;
   PublishedWrite published = 7;
   string bucket_id = 8;
+  bool copy_references = 9;
 }
 
 // Suspicions request durable backend verification; they never prove corruption.
@@ -351,6 +361,7 @@ enum ReadInclude {
   OBJECT = 1;
   MAPPING = 2;
   POLICY = 3;
+  PROTECTION = 4;
 }
 
 message BucketRoute {

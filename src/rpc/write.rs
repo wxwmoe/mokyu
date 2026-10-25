@@ -73,6 +73,10 @@ pub(super) fn begin(input: wire::BeginWriteRequest) -> Result<write::Begin, Stat
             .map(i64::try_from)
             .transpose()
             .map_err(|_| invalid())?,
+        copy_read: input
+            .copy_read_id
+            .map(|value| super::uuid(&value))
+            .transpose()?,
     };
     intent.validate().map_err(|_| invalid())?;
     Ok(write::Begin {
@@ -88,6 +92,17 @@ pub(super) fn lookup(input: wire::WriteRequest) -> Result<write::Lookup, Status>
         run: read::run(input.run)?,
         operation: operation(&input.operation_id)?,
     })
+}
+
+pub(super) fn copy(input: wire::CopyChunksRequest) -> Result<write::CopyBatch, Status> {
+    let value = write::CopyBatch {
+        run: read::run(input.run)?,
+        operation: operation(&input.operation_id)?,
+        batch: input.batch_id.try_into().map_err(|_| invalid())?,
+        offset: input.offset.try_into().map_err(|_| invalid())?,
+    };
+    value.hash().map_err(|_| invalid())?;
+    Ok(value)
 }
 
 pub(super) fn prepare(
@@ -201,6 +216,7 @@ pub(super) fn reply(value: write::Reply) -> Result<wire::WriteReply, Status> {
             write::Phase::Expired => wire::WritePhase::WriteExpired,
             write::Phase::Published => wire::WritePhase::WritePublished,
         } as i32,
+        copy_references: value.copy_references,
         materials: value.materials.into_iter().map(read::material).collect(),
         storage: value.storage.map(read::version),
         grants: value.grants.into_iter().map(read::grant).collect(),

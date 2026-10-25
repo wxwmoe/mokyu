@@ -338,6 +338,7 @@ impl Reads {
             capture: None,
             public_generation: None,
             started: std::time::Instant::now(),
+            verify: false,
         };
         prepared.check()?;
         Ok(Some(prepared))

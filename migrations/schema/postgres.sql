@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0078.
+-- Generated from the complete postgres migration chain through 0079.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -889,7 +889,7 @@ CREATE TABLE public.node_reads (
     offset_bytes bigint NOT NULL,
     end_bytes bigint NOT NULL,
     replica_allowed boolean DEFAULT false NOT NULL,
-    CONSTRAINT node_reads_check CHECK ((end_bytes > offset_bytes)),
+    CONSTRAINT node_reads_check CHECK ((end_bytes >= offset_bytes)),
     CONSTRAINT node_reads_credential_generation_check CHECK ((credential_generation > 0)),
     CONSTRAINT node_reads_offset_bytes_check CHECK ((offset_bytes >= 0)),
     CONSTRAINT node_reads_payload_revision_check CHECK ((payload_revision > 0)),
@@ -997,9 +997,11 @@ CREATE TABLE public.node_writes (
     next_offset bigint DEFAULT 0 NOT NULL,
     publish_hash bytea,
     result jsonb,
+    copy_source jsonb,
     CONSTRAINT node_writes_check CHECK (((state = 'active'::text) = (completed_at IS NULL))),
     CONSTRAINT node_writes_check1 CHECK (((publish_hash IS NULL) = (result IS NULL))),
     CONSTRAINT node_writes_check2 CHECK (((state = 'published'::text) = (result IS NOT NULL))),
+    CONSTRAINT node_writes_copy_source_check CHECK (((copy_source IS NULL) OR (jsonb_typeof(copy_source) = 'object'::text))),
     CONSTRAINT node_writes_credential_generation_check CHECK ((credential_generation > 0)),
     CONSTRAINT node_writes_expected_size_check CHECK ((expected_size >= 0)),
     CONSTRAINT node_writes_next_batch_check CHECK ((next_batch > 0)),

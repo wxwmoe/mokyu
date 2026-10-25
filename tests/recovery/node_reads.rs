@@ -27,6 +27,7 @@ fn request(run: Run) -> read::Query {
         head: false,
         web: false,
         mapping: true,
+        protection: false,
         policy: false,
         headers: HeaderMap::new(),
         overrides: HeaderMap::new(),

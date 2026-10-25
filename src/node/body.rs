@@ -193,11 +193,12 @@ impl Reader {
             }
             _ => anyhow::bail!("invalid chunk source"),
         };
-        let verify = if let Some(id) = source.storage()? {
-            prepared.backend(id)?.profile.read_integrity == "inline"
-        } else {
-            true
-        };
+        let verify = prepared.verify
+            || if let Some(id) = source.storage()? {
+                prepared.backend(id)?.profile.read_integrity == "inline"
+            } else {
+                true
+            };
         if !local {
             match source {
                 read::Source::Pack { pack, .. } => pack.validate(keys.as_ref())?,
@@ -478,7 +479,7 @@ impl Reader {
         }
         ensure!(source.medium == "shared_s3", "invalid node raw medium");
         let backend = prepared.backend(source.storage_id)?;
-        let verify = backend.profile.read_integrity == "inline";
+        let verify = prepared.verify || backend.profile.read_integrity == "inline";
         let lock = self.files.raw_lock(source, &backend.profile);
         let _miss = match &lock {
             Some(lock) => Some(lock.lock().await),

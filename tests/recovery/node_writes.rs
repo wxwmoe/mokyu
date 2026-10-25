@@ -20,6 +20,7 @@ fn request(run: Run, operation: Uuid) -> write::Begin {
         intent: write::Intent {
             access: "writer".into(),
             credential_revision: 1,
+            copy_read: None,
             bucket: "writes".into(),
             key: "object".into(),
             metadata: serde_json::json!({"content_type":"text/plain"}),

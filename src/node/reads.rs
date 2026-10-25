@@ -259,6 +259,7 @@ pub(crate) struct Prepared {
     pub(super) capture: Option<Arc<Mutex<crate::app::responses::Mapping>>>,
     pub(super) public_generation: Option<u64>,
     pub(super) started: std::time::Instant,
+    pub(super) verify: bool,
 }
 
 impl Prepared {
@@ -429,6 +430,7 @@ impl Reads {
             capture: None,
             public_generation,
             started: started.into_std(),
+            verify: false,
         };
         prepared.check()?;
         Ok(prepared)
@@ -472,7 +474,7 @@ impl Reads {
                         })
                         .cloned(),
                 );
-                let materials = {
+                let mut materials = {
                     let _epoch = self.public_epoch.lock().unwrap();
                     self.cache.apply(
                         self.node.client.identity.deployment_id,
@@ -480,6 +482,18 @@ impl Reads {
                         std::mem::take(&mut reply.materials),
                     )?
                 };
+                if let Some(version) = &previous.reply.object {
+                    let key = (version.r#type, version.id.clone());
+                    materials.insert(
+                        key.clone(),
+                        previous
+                            .materials
+                            .get(&key)
+                            .context("read object missing")?
+                            .clone(),
+                    );
+                    reply.object = Some(version.clone());
+                }
                 let prepared = Prepared {
                     reply,
                     run: previous.run.clone(),
@@ -493,6 +507,7 @@ impl Reads {
                     capture: previous.capture.clone(),
                     public_generation: None,
                     started: started.into_std(),
+                    verify: previous.verify,
                 };
                 prepared.check()?;
                 Ok(prepared)
@@ -505,6 +520,47 @@ impl Reads {
         prepared: Prepared,
     ) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes>> {
         super::body::stream(self.clone(), prepared)
+    }
+
+    pub(super) async fn copy_body(
+        self: &Arc<Self>,
+        mut source: Prepared,
+    ) -> Result<futures_util::stream::BoxStream<'static, Result<bytes::Bytes>>> {
+        let object: read::Object = source.material(
+            source
+                .reply
+                .object
+                .as_ref()
+                .context("copy object missing")?,
+        )?;
+        ensure!(object.size >= 0, "invalid copy size");
+        if object.size == 0 {
+            return Ok(Box::pin(futures_util::stream::empty()));
+        }
+        let lease = source
+            .grants
+            .iter()
+            .find(|grant| grant.reference.r#type == wire::GrantType::ReadProtection as i32)
+            .context("copy protection missing")?
+            .reference
+            .id
+            .clone();
+        source.verify = true;
+        let mut window = self
+            .window(
+                Arc::new(source),
+                wire::ReadCursor {
+                    lease_id: lease,
+                    stream_id: object.id.to_string(),
+                    payload_revision: object.revision as u64,
+                    offset: 0,
+                    end: object.size as u64,
+                },
+                None,
+            )
+            .await?;
+        window.reply.length = object.size as u64;
+        Ok(self.body(window))
     }
 
     #[cfg(test)]

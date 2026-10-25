@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Copy,
     Objects,
     Catalog,
     Raw,
@@ -47,6 +48,12 @@ enum HttpCase {
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, object storage and signed copy requests"]
+async fn node_http_copy_preserves_sources_and_recovers_batches() -> Result<()> {
+    node_http_reads(HttpCase::Copy).await
 }
 
 #[tokio::test]
@@ -247,6 +254,7 @@ async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()
 }
 
 async fn node_http_reads(case: HttpCase) -> Result<()> {
+    let copy = matches!(case, HttpCase::Copy);
     let objects = matches!(case, HttpCase::Objects);
     let catalog = matches!(case, HttpCase::Catalog);
     let writes = matches!(case, HttpCase::Writes);
@@ -362,7 +370,16 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if objects {
+    if copy {
+        let before = reads.backend_gets();
+        fixture("http-copy-references").await?;
+        assert_eq!(
+            reads.backend_gets(),
+            before,
+            "reference copy read backend bytes"
+        );
+        fixture("http-copy").await?;
+    } else if objects {
         let before = observed.write_resources();
         fixture("http-objects").await?;
         assert_eq!(observed.write_resources(), before);
@@ -438,7 +455,18 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-pending").await?;
         fixture("assert-no-reads").await?;
     }
-    let publishing = if objects {
+    let publishing = if copy {
+        fixture("http-copy-lose-reply").await?;
+        let publishing = tokio::spawn(fixture("http-copy-replay"));
+        let replaced = path.parent().unwrap().join("copy-source-replaced");
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !replaced.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        Some(publishing)
+    } else if objects {
         fixture("http-objects-lose-reply").await?;
         let publishing = tokio::spawn(fixture("http-objects-replay"));
         let replaced = path.parent().unwrap().join("objects-replaced");
@@ -484,7 +512,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
     context.client.addresses.lock().await.refresh_at = Instant::now();
     if let Some(publishing) = publishing {
         publishing.await??;
-        fixture(if objects {
+        fixture(if copy {
+            "http-copy-resume-reply"
+        } else if objects {
             "http-objects-resume-reply"
         } else if raw {
             "http-raw-resume-commit"
@@ -498,7 +528,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if objects {
+    if copy {
+        fixture("http-copy-reconnected").await?;
+    } else if objects {
         fixture("http-objects-reconnected").await?;
         assert_eq!(reads.backend_gets(), 0);
     } else if catalog {
@@ -532,6 +564,27 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-reconnected").await?;
     }
     fixture("assert-no-reads").await?;
+    if copy {
+        let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
+        let point = faults.join("node-copy-before-publish");
+        tokio::fs::write(&point, b"pause").await?;
+        let fenced = tokio::spawn(fixture("http-copy-fenced"));
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !point.with_extension("hit").exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        context.stop();
+        fenced.await??;
+        tokio::fs::remove_file(&point).await?;
+        driver.await??;
+        s3_server.abort();
+        web_server.abort();
+        let _ = s3_server.await;
+        let _ = web_server.await;
+        return Ok(());
+    }
     if catalog || objects {
         let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
         let point = faults.join("node-catalog-prepared");
