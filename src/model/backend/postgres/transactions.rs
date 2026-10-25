@@ -7384,47 +7384,58 @@ pub(super) async fn finish_raw_processing(
     ensure!(hash.len() == 32, "invalid raw content hash");
     let mut tx = pool.begin().await?;
     raw_processor(&mut tx, node).await?;
+    let result = finish_raw_processing_in(&mut tx, work, source, hash, lease).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+async fn finish_raw_processing_in(
+    tx: &mut Transaction<'_, Postgres>,
+    work: &crate::model::raw::RawProcessing,
+    source: &crate::model::raw::RawSource,
+    hash: &[u8],
+    lease: Option<Uuid>,
+) -> Result<bool> {
+    ensure!(hash.len() == 32, "invalid raw content hash");
     queries::claim_chunk_hash(source.storage_id, hash)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     let current_stream = queries::raw_processing_stream(work)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     ensure!(
         queries::raw_processing_owned(work)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             == Some(source.id),
         crate::model::Error::OperationAborted
     );
     if current_stream.is_none() {
         queries::raw_processing_delete(work)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        tx.commit().await?;
         return Ok(true);
     }
     if let Some(lease) = lease {
         if queries::raw_processing_readers(work.stream, lease)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?
         {
             return Ok(false);
         }
     }
-    let current = queries::raw_source(source.id).fetch_one(&mut *tx).await?;
+    let current = queries::raw_source(source.id).fetch_one(&mut **tx).await?;
     ensure!(current == *source, crate::model::Error::SourceUnavailable);
     current.validate()?;
-    validate_raw(&mut tx, work.stream, current.size).await?;
-    if share_raw(&mut tx, work.stream, &current, hash).await? {
+    validate_raw(tx, work.stream, current.size).await?;
+    if share_raw(tx, work.stream, &current, hash).await? {
         queries::raw_processing_changed(work.stream)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
     queries::raw_processing_delete(work)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(true)
 }
 

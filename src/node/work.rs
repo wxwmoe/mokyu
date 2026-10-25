@@ -83,6 +83,37 @@ impl Worker {
             let backend = reads::backend(&materials, plan.storage())?;
             let future = async {
                 let outcomes = match plan {
+                    work::Plan::HashRaw { storage, items } => {
+                        ensure!(items.len() <= work::MAX_ITEMS, "invalid raw hash batch");
+                        let count = items.len();
+                        let timeout = Duration::from_secs(crate::config::seconds(
+                            &snapshot.runtime().maintenance.max_duration,
+                        )?);
+                        let hashing = async {
+                            let mut outcomes = Vec::with_capacity(count);
+                            for item in items {
+                                ensure!(item.source.storage_id == storage, "raw storage differs");
+                                snapshot.lease.check()?;
+                                for grant in &grants {
+                                    grant.check()?;
+                                }
+                                outcomes.push(
+                                    self.reader
+                                        .hash_raw(&backend, item)
+                                        .await
+                                        .unwrap_or(work::Outcome::Retry),
+                                );
+                            }
+                            #[cfg(feature = "fault-injection")]
+                            crate::faults::point("node-raw-hashed").await;
+                            Ok::<_, anyhow::Error>(outcomes)
+                        };
+                        tokio::time::timeout(timeout, hashing)
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .unwrap_or_else(|| vec![work::Outcome::Retry; count])
+                    }
                     work::Plan::Collect {
                         items,
                         delete_before,

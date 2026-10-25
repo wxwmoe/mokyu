@@ -17,6 +17,9 @@ mod rewrite;
 #[path = "work_packing.rs"]
 mod packing;
 
+#[path = "work_raw.rs"]
+mod raw;
+
 fn owned(node: &NodeState, run: Run, batch: &q::Batch) -> Result<()> {
     ensure!(
         batch.credential_generation == node.credential_generation
@@ -120,6 +123,20 @@ async fn finish(
     let mut error = None;
     let mut complete = false;
     match row.plan.context("work plan is missing")?.0 {
+        work::Plan::HashRaw { items, .. } => {
+            ensure!(!maintenance, Error::OperationAborted);
+            (deleted, complete, error) = raw::finish(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                &detail,
+                items,
+                &completion.outcomes,
+            )
+            .await?;
+        }
         work::Plan::Collect {
             items,
             delete_before,
@@ -595,6 +612,9 @@ pub(crate) async fn exchange(
         q::active(node.node_id).fetch_one(&mut *tx).await? < 64,
         Error::NodeWorkLimit
     );
+    if input.class == 2 && !sweep_barrier && !maintenance_enabled && !session.draining {
+        raw::schedule(&mut tx, input.max_items).await?;
+    }
     let token = Uuid::new_v4();
     let maintenance = Uuid::new_v4();
     let allowed = if sweep_barrier {
@@ -608,6 +628,7 @@ pub(crate) async fn exchange(
             "rewrite".to_owned(),
             "pack".to_owned(),
             "unpack".to_owned(),
+            "upload".to_owned(),
         ]
     };
     let mut plan = None;
@@ -669,6 +690,8 @@ pub(crate) async fn exchange(
                     )
                     .await?
                     .map(|plan| (plan, vec![]))
+                } else if policy == "upload" && detail["operation"] == "deduplicate" {
+                    raw::prepare(&mut tx, Execution { id: task, token }, &detail, storage).await?
                 } else if matches!(policy.as_str(), "pack" | "unpack") {
                     packing::prepare(
                         &mut tx,

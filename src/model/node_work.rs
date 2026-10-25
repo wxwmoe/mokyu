@@ -88,8 +88,19 @@ pub(crate) enum Rewrite {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawHash {
+    pub source: super::raw::RawSource,
+    pub hash: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
+    HashRaw {
+        storage: Uuid,
+        items: Vec<RawHash>,
+    },
     Collect {
         storage: Uuid,
         delete_before: DateTime<Utc>,
@@ -133,7 +144,8 @@ pub(crate) enum Plan {
 impl Plan {
     pub(crate) fn storage(&self) -> Uuid {
         match self {
-            Self::Collect { storage, .. }
+            Self::HashRaw { storage, .. }
+            | Self::Collect { storage, .. }
             | Self::Audit { storage, .. }
             | Self::SweepScan { storage, .. }
             | Self::SweepDelete { storage, .. }
@@ -147,6 +159,9 @@ impl Plan {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Outcome {
+    Hashed {
+        hash: Vec<u8>,
+    },
     Deleted {
         stored_at: Option<DateTime<Utc>>,
     },

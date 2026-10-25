@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Processing,
     Packing,
     Rewrite,
     Native,
@@ -54,6 +55,12 @@ enum HttpCase {
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, raw S3 sources and interrupted work results"]
+async fn node_http_raw_processing_recovers_and_preserves_bytes() -> Result<()> {
+    node_http_reads(HttpCase::Processing).await
 }
 
 #[tokio::test]
@@ -422,6 +429,38 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
+    if matches!(case, HttpCase::Processing) {
+        let mut worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
+        fixture("processing-seed").await?;
+        fixture("processing-hashed").await?;
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        fixture("processing-restart").await?;
+        worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
+        fixture("processing-shared").await?;
+        fixture("processing-replay-seed").await?;
+        fixture("processing-committed").await?;
+        *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 3)]);
+        dns.resolver.clear_cache();
+        context.client.addresses.lock().await.refresh_at = Instant::now();
+        fixture("stop-first").await?;
+        node_state(&mut states, |state| {
+            state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
+        })
+        .await?;
+        fixture("processing-replayed").await?;
+        fixture("processing-corrupt").await?;
+        fixture("processing-restored").await?;
+        fixture("processing-namespace").await?;
+        fixture("processing-namespace-restored").await?;
+        context.stop();
+        tokio::time::timeout(Duration::from_secs(10), driver).await???;
+        tokio::time::timeout(Duration::from_secs(10), worker).await???;
+        s3_server.abort();
+        web_server.abort();
+        println!("PASS node raw hashes, interrupted work, committed reply loss and HTTP bytes");
+        return Ok(());
+    }
     if matches!(case, HttpCase::Packing) {
         let mut worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
         fixture("packing-seed").await?;

@@ -30,6 +30,9 @@ pub(super) fn exchange(input: wire::WorkRequest) -> Result<work::Exchange, Statu
     }
     if let Some(completion) = &value.completion {
         for outcome in &completion.outcomes {
+            if matches!(outcome, work::Outcome::Hashed { hash } if hash.len()!=32) {
+                return Err(invalid());
+            }
             if let work::Outcome::Packed(result) = outcome {
                 if result.chunks.len() > crate::content::pack::MAX_MEMBERS
                     || result.packs.len() > crate::content::pack::MAX_MEMBERS / 2
@@ -91,6 +94,8 @@ mod tests {
             chunks: vec![u32::MAX; 4096],
             packs: (0..2048).map(|i| (i, u32::MAX, "x".repeat(44))).collect(),
         });
+        assert!(exchange(request(vec![work::Outcome::Hashed { hash: vec![0; 31] }])).is_err());
+        assert!(exchange(request(vec![work::Outcome::Hashed { hash: vec![0; 32] }])).is_ok());
         let input = request(vec![outcome.clone()]);
         assert!(prost::Message::encoded_len(&input) > read::REQUEST_LIMIT);
         assert!(exchange(input).is_ok());
