@@ -120,7 +120,11 @@ impl Resources {
                 return Err(invalid());
             }
             let storage = match wire::GrantType::try_from(grant.r#type) {
-                Ok(wire::GrantType::StorageRead | wire::GrantType::StorageWrite) => {
+                Ok(
+                    wire::GrantType::StorageRead
+                    | wire::GrantType::StorageWrite
+                    | wire::GrantType::NativeWork,
+                ) => {
                     let id = Uuid::parse_str(&grant.storage_id).map_err(|_| invalid())?;
                     if id.is_nil() || grant.storage_id.len() != 36 {
                         return Err(invalid());

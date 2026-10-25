@@ -16,6 +16,8 @@ use uuid::Uuid;
 
 #[path = "node_completion.rs"]
 mod completion;
+#[path = "node_native.rs"]
+mod native;
 #[path = "node_parts.rs"]
 mod parts;
 
@@ -128,6 +130,7 @@ async fn postgres_node_multipart_replays_admission_and_cancellation() -> Result<
     .await?;
 
     completion::check(&backend, &peer, &node, &key, &session, bucket, revision).await?;
+    native::check(&backend, &peer, &node, &key, &session, storage, revision).await?;
 
     let intent = Intent {
         access: "writer".into(),

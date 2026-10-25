@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0082.
+-- Generated from the complete postgres migration chain through 0083.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -873,6 +873,23 @@ CREATE TABLE public.node_multipart_operations (
     CONSTRAINT node_multipart_operations_request_hash_check CHECK ((octet_length(request_hash) = 32))
 );
 
+CREATE TABLE public.node_native_work (
+    node_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    credential_generation bigint NOT NULL,
+    boot_id uuid NOT NULL,
+    fence uuid NOT NULL,
+    target_stream uuid,
+    token uuid NOT NULL,
+    storage_id uuid NOT NULL,
+    read_lease uuid,
+    work jsonb NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    result_hash bytea,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT node_native_work_result_hash_check CHECK (((result_hash IS NULL) OR (octet_length(result_hash) = 32)))
+);
+
 CREATE TABLE public.node_object_changes (
     node_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -985,6 +1002,15 @@ CREATE TABLE public.node_write_batches (
     CONSTRAINT node_write_batches_request_hash_check CHECK ((octet_length(request_hash) = 32))
 );
 
+CREATE TABLE public.node_write_local (
+    node_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    request_hash bytea NOT NULL,
+    size bigint NOT NULL,
+    CONSTRAINT node_write_local_request_hash_check CHECK ((octet_length(request_hash) = 32)),
+    CONSTRAINT node_write_local_size_check CHECK (((size >= 0) AND (size <= '5368709120'::bigint)))
+);
+
 CREATE TABLE public.node_write_permits (
     token uuid NOT NULL,
     node_id uuid NOT NULL,
@@ -1004,7 +1030,7 @@ CREATE TABLE public.node_write_raw (
     CONSTRAINT node_write_raw_content_hash_check CHECK ((octet_length(content_hash) = 32)),
     CONSTRAINT node_write_raw_digest_check CHECK ((octet_length(digest) = 16)),
     CONSTRAINT node_write_raw_request_hash_check CHECK ((octet_length(request_hash) = 32)),
-    CONSTRAINT node_write_raw_size_check CHECK (((size >= 0) AND (size <= '5368709120'::bigint)))
+    CONSTRAINT node_write_raw_size_check CHECK ((size >= 0))
 );
 
 CREATE TABLE public.node_write_tails (
@@ -1925,6 +1951,12 @@ ALTER TABLE ONLY public.node_completions
 ALTER TABLE ONLY public.node_multipart_operations
     ADD CONSTRAINT node_multipart_operations_pkey PRIMARY KEY (node_id, operation_id);
 
+ALTER TABLE ONLY public.node_native_work
+    ADD CONSTRAINT node_native_work_pkey PRIMARY KEY (node_id, operation_id);
+
+ALTER TABLE ONLY public.node_native_work
+    ADD CONSTRAINT node_native_work_token_key UNIQUE (token);
+
 ALTER TABLE ONLY public.node_object_changes
     ADD CONSTRAINT node_object_changes_pkey PRIMARY KEY (node_id, operation_id);
 
@@ -1957,6 +1989,9 @@ ALTER TABLE ONLY public.node_sessions
 
 ALTER TABLE ONLY public.node_write_batches
     ADD CONSTRAINT node_write_batches_pkey PRIMARY KEY (node_id, operation_id, batch_id);
+
+ALTER TABLE ONLY public.node_write_local
+    ADD CONSTRAINT node_write_local_pkey PRIMARY KEY (node_id, operation_id);
 
 ALTER TABLE ONLY public.node_write_permits
     ADD CONSTRAINT node_write_permits_pkey PRIMARY KEY (token);
@@ -2216,6 +2251,8 @@ CREATE INDEX multipart_files_reclaim ON public.multipart_files USING btree (stor
 CREATE INDEX multipart_files_upload ON public.multipart_files USING btree (upload_id, state);
 
 CREATE INDEX node_multipart_operations_expiry ON public.node_multipart_operations USING btree (node_id, created_at);
+
+CREATE INDEX node_native_work_expiry ON public.node_native_work USING btree (expires_at) WHERE (result_hash IS NULL);
 
 CREATE INDEX node_object_changes_expiry ON public.node_object_changes USING btree (node_id, created_at);
 
@@ -2566,6 +2603,15 @@ ALTER TABLE ONLY public.node_completions
 ALTER TABLE ONLY public.node_multipart_operations
     ADD CONSTRAINT node_multipart_operations_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.node_native_work
+    ADD CONSTRAINT node_native_work_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_native_work
+    ADD CONSTRAINT node_native_work_read_lease_fkey FOREIGN KEY (read_lease) REFERENCES public.stream_leases(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.node_native_work
+    ADD CONSTRAINT node_native_work_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
+
 ALTER TABLE ONLY public.node_object_changes
     ADD CONSTRAINT node_object_changes_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
@@ -2601,6 +2647,9 @@ ALTER TABLE ONLY public.node_sessions
 
 ALTER TABLE ONLY public.node_write_batches
     ADD CONSTRAINT node_write_batches_node_id_operation_id_fkey FOREIGN KEY (node_id, operation_id) REFERENCES public.node_writes(node_id, operation_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_write_local
+    ADD CONSTRAINT node_write_local_node_id_operation_id_fkey FOREIGN KEY (node_id, operation_id) REFERENCES public.node_writes(node_id, operation_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_write_permits
     ADD CONSTRAINT node_write_permits_node_id_operation_id_batch_id_fkey FOREIGN KEY (node_id, operation_id, batch_id) REFERENCES public.node_write_batches(node_id, operation_id, batch_id) ON DELETE CASCADE;

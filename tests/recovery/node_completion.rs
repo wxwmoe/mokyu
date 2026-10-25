@@ -456,5 +456,37 @@ pub(super) async fn check(
     );
     assert_eq!(sqlx::query_scalar::<_, i64>("SELECT coalesce(sum(logical_bytes),0)::bigint FROM quota_reservations WHERE bucket_id=$1").bind(bucket).fetch_one(pool).await?, 0);
     assert_eq!(queries::active_upload_count().fetch_one(pool).await?, 0);
+    let sequence: i64 = sqlx::query_scalar("SELECT sequence FROM node_sessions WHERE node_id=$1")
+        .bind(node.node_id)
+        .fetch_one(pool)
+        .await?;
+    backend
+        .pulse_session(
+            node,
+            key,
+            run,
+            session.epoch,
+            sequence + 1,
+            false,
+            read::KeepAlive {
+                renew: vec![],
+                release: second.parts[0]
+                    .grants
+                    .iter()
+                    .map(|grant| read::GrantRef {
+                        r#type: grant.r#type,
+                        id: grant.id,
+                    })
+                    .collect(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM storage_permits WHERE token=$1")
+            .bind(permit)
+            .fetch_one(pool)
+            .await?,
+        0
+    );
     Ok(())
 }

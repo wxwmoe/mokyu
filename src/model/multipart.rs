@@ -265,7 +265,7 @@ pub(crate) trait MultipartStore: Send + Sync {
     async fn web_parts(&self, upload: Uuid, after: i32) -> Result<Vec<ReceivedPart>>;
 }
 
-#[derive(Clone, sqlx::FromRow)]
+#[derive(Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub(crate) struct RemoteUpload {
     #[sqlx(rename = "remote_upload")]
     pub upload: Uuid,

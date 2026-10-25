@@ -21,6 +21,7 @@ pub(crate) mod node;
 pub(crate) mod node_chunk;
 pub(crate) mod node_complete;
 pub(crate) mod node_multipart;
+pub(crate) mod node_native;
 pub(crate) mod node_object;
 pub(crate) mod node_observation;
 pub(crate) mod node_raw;

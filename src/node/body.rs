@@ -54,7 +54,7 @@ impl Backend {
 }
 
 pub(super) struct Reader {
-    io: Arc<Semaphore>,
+    pub(super) io: Arc<Semaphore>,
     pub(super) cpu: Arc<Semaphore>,
     packs: Arc<Semaphore>,
     http: Arc<Semaphore>,

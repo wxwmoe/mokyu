@@ -44,6 +44,9 @@ use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+#[path = "native.rs"]
+pub(super) mod native;
+
 fn denied() -> anyhow::Error {
     s3s::s3_error!(AccessDenied).into()
 }
@@ -8688,6 +8691,7 @@ async fn node_snapshot(
     node: Uuid,
 ) -> Result<crate::model::session::Snapshot> {
     let settings = queries::node_settings().fetch_all(&mut *db).await?;
+    let native_pending = queries::native::pending(node).fetch_one(&mut *db).await?;
     let (boot, fence, epoch, valid_for_ms, maintenance, draining) =
         queries::node_session_status(node)
             .fetch_optional(db)
@@ -8701,6 +8705,7 @@ async fn node_snapshot(
         draining,
         settings,
         grants: Vec::new(),
+        native_pending,
     })
 }
 
@@ -10303,6 +10308,15 @@ pub(super) async fn begin_node_write(
         .fetch_one(&mut *tx)
         .await?;
     profile.write_durability = None;
+    if let Some(upload) = input
+        .intent
+        .part
+        .as_ref()
+        .map(|part| part.upload)
+        .or_else(|| completion.as_ref().map(|value| value.upload))
+    {
+        native::validate(&mut tx, upload, &profile, block_key, completion.is_some()).await?;
+    }
     if let Some(completion) = &completion {
         queries::lock_quota(bucket.id).execute(&mut *tx).await?;
         ensure!(
@@ -10349,6 +10363,19 @@ pub(super) async fn begin_node_write(
             completion.size,
         )
         .execute(&mut *tx)
+        .await?;
+    }
+    if let Some(part) = &input.intent.part
+        && !profile.cdc_enabled
+    {
+        native::begin(
+            &mut tx,
+            state.node_id,
+            stream,
+            part.upload,
+            &profile,
+            block_key,
+        )
         .await?;
     }
     let owned = queries::node_write(state.node_id, input.operation)
@@ -10549,6 +10576,12 @@ async fn maintain_node_reads(
     queries::node_write_release_permits(state, run, &[], &ids(GrantType::StorageWrite))
         .execute(&mut *db)
         .await?;
+    queries::native::release_reads(state, run, &ids(GrantType::StorageRead))
+        .execute(&mut *db)
+        .await?;
+    queries::native::renew(state, run, &ids(GrantType::Native), true)
+        .fetch_all(&mut *db)
+        .await?;
     let mut renewed = HashMap::new();
     for r#type in [
         GrantType::Read,
@@ -10556,6 +10589,7 @@ async fn maintain_node_reads(
         GrantType::Window,
         GrantType::Write,
         GrantType::StorageWrite,
+        GrantType::Native,
     ] {
         let ids = resources
             .renew
@@ -11183,6 +11217,15 @@ pub(super) async fn publish_node_write(
                 == 0,
         s3s::s3_error!(IncompleteBody)
     );
+    if row.upload_id.is_some() && !row.profile.cdc_enabled {
+        ensure!(
+            queries::native::local_part(node.node_id, input.operation)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some_and(|(_, size)| size == input.size),
+            s3s::s3_error!(IncompleteBody)
+        );
+    }
     let mut sums = serde_json::to_value(&input.checksums)?;
     let completion = if let Some(upload) = row.completion_upload {
         let record = queries::node_completion(upload).fetch_one(&mut *tx).await?;
@@ -11250,6 +11293,22 @@ pub(super) async fn publish_node_write(
             None,
         )
         .await?;
+        if !row.profile.cdc_enabled {
+            ensure!(
+                queries::native::queue_part(
+                    upload,
+                    number,
+                    stream,
+                    node.node_id,
+                    row.profile.upload_cache
+                )
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                    == 1,
+                Error::OperationAborted
+            );
+        }
     } else {
         let condition = |value: Option<String>| {
             value

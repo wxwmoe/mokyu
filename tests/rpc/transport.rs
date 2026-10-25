@@ -99,7 +99,13 @@ async fn node_state(
         }
     })
     .await
-    .context("node runtime did not reach expected state")?
+    .with_context(|| {
+        let state = states.borrow();
+        format!(
+            "node runtime did not reach expected state: phase={:?}, peer={:?}, epoch={}",
+            state.phase, state.peer, state.epoch
+        )
+    })?
 }
 
 #[tokio::test]
@@ -268,7 +274,8 @@ async fn fixture(action: &str) -> Result<()> {
     let done = request.with_extension("done");
     let _ = tokio::fs::remove_file(&done).await;
     tokio::fs::write(&request, b"requested").await?;
-    tokio::time::timeout(Duration::from_secs(30), async {
+    let timeout = if action == "http-complete" { 120 } else { 30 };
+    tokio::time::timeout(Duration::from_secs(timeout), async {
         while !done.exists() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

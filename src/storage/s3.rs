@@ -125,8 +125,11 @@ mod tests {
             .with_http_connector(Connector(client.clone()))
             .build()
             .unwrap();
+        let signer = Arc::new(signer);
         let streaming = Streaming {
-            signer: Arc::new(signer),
+            signer: signer.clone(),
+            bucket_signer: signer,
+            prefix: Path::from(""),
             client,
             raw_client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(1))
@@ -190,12 +193,67 @@ mod tests {
 
 pub(crate) struct Streaming {
     pub signer: Arc<dyn Signer>,
+    pub bucket_signer: Arc<dyn Signer>,
+    pub prefix: Path,
     pub client: reqwest::Client,
     pub raw_client: reqwest::Client,
     pub options: Options,
 }
 
 impl Streaming {
+    pub(crate) async fn pending_multipart(&self, key: &Path) -> Result<(Vec<String>, bool)> {
+        let key = if self.prefix.as_ref().is_empty() {
+            key.to_string()
+        } else {
+            format!("{}/{key}", self.prefix)
+        };
+        let options = SignedUrlOptions::default().with_query([
+            ("uploads", String::new()),
+            ("prefix", key.clone()),
+            ("max-uploads", "128".into()),
+        ]);
+        let url = self
+            .bucket_signer
+            .signed_url_opts(
+                reqwest::Method::GET,
+                &Path::from(""),
+                Duration::from_secs(3600),
+                &options,
+            )
+            .await?;
+        let reply = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
+        ensure!(
+            reply.status().is_success(),
+            "S3 multipart listing failed: {}",
+            reply.status()
+        );
+        let mut stream = reply.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(part) = stream.next().await {
+            let part = part.map_err(reqwest::Error::without_url)?;
+            ensure!(
+                bytes.len() + part.len() <= 1024 * 1024,
+                "S3 multipart listing is too large"
+            );
+            bytes.extend_from_slice(&part);
+        }
+        let (uploads, more) = multipart_listing(&bytes)?;
+        let ids: Vec<_> = uploads
+            .into_iter()
+            .filter_map(|(name, id)| (name == key).then_some(id))
+            .collect();
+        ensure!(
+            !more || !ids.is_empty(),
+            "S3 multipart listing cannot advance"
+        );
+        Ok((ids, more))
+    }
+
     pub async fn part<'a>(
         &self,
         key: &Path,
@@ -378,6 +436,61 @@ impl Streaming {
     }
 }
 
+fn multipart_listing(bytes: &[u8]) -> Result<(Vec<(String, String)>, bool)> {
+    let mut xml = s3s::xml::Deserializer::new(bytes);
+    let mut uploads = Vec::new();
+    let mut more = String::new();
+    xml.named_element("ListMultipartUploadsResult", |xml| {
+        xml.for_each_element(|xml, name| {
+            if name == b"Upload" {
+                if uploads.len() >= 128 {
+                    return Err(s3s::xml::DeError::UnexpectedTagName);
+                }
+                let mut key = String::new();
+                let mut id = String::new();
+                xml.for_each_element(|xml, name| {
+                    if matches!(name, b"Owner" | b"Initiator") {
+                        xml.for_each_element(|xml, _| {
+                            let _: String = xml.content()?;
+                            Ok(())
+                        })
+                    } else {
+                        let value: String = xml.content()?;
+                        if name == b"Key" {
+                            key = value;
+                        } else if name == b"UploadId" {
+                            id = value;
+                        }
+                        Ok(())
+                    }
+                })?;
+                uploads.push((key, id));
+            } else if name == b"CommonPrefixes" {
+                xml.for_each_element(|xml, _| {
+                    let _: String = xml.content()?;
+                    Ok(())
+                })?;
+            } else {
+                let value: String = xml.content()?;
+                if name == b"IsTruncated" {
+                    more = value;
+                }
+            }
+            Ok(())
+        })
+    })?;
+    xml.expect_eof()?;
+    ensure!(
+        matches!(more.as_str(), "" | "false" | "true")
+            && uploads.iter().all(|(key, id)| !key.is_empty()
+                && !id.is_empty()
+                && id.len() <= 4096
+                && !id.contains('\0')),
+        "invalid S3 multipart listing"
+    );
+    Ok((uploads, more == "true"))
+}
+
 impl Streaming {
     pub(crate) async fn complete(
         &self,
@@ -461,6 +574,20 @@ fn complete_response(success: bool, bytes: &[u8]) -> Result<bool> {
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+    #[test]
+    fn parses_bounded_native_upload_listings() {
+        let (uploads,more)=multipart_listing(b"<ListMultipartUploadsResult><IsTruncated>true</IsTruncated><Upload><Key>raw/a</Key><UploadId>first&amp;one</UploadId><Owner><ID>owner</ID></Owner><Initiator><ID>writer</ID><DisplayName>name</DisplayName></Initiator></Upload></ListMultipartUploadsResult>").unwrap();
+        assert!(more);
+        assert_eq!(uploads, vec![("raw/a".into(), "first&one".into())]);
+        assert!(multipart_listing(b"<Error><Code>AccessDenied</Code></Error>").is_err());
+        assert!(multipart_listing(b"<ListMultipartUploadsResult><Upload><Key>a</Key></Upload></ListMultipartUploadsResult>").is_err());
+        assert!(multipart_listing(b"<ListMultipartUploadsResult><IsTruncated>unknown</IsTruncated></ListMultipartUploadsResult>").is_err());
+        let many = format!(
+            "<ListMultipartUploadsResult>{}</ListMultipartUploadsResult>",
+            "<Upload><Key>a</Key><UploadId>b</UploadId></Upload>".repeat(129)
+        );
+        assert!(multipart_listing(many.as_bytes()).is_err());
+    }
     #[test]
     fn recognizes_late_errors_and_rejects_invalid_results() {
         assert!(complete_response(true,b"  <CompleteMultipartUploadResult><ETag>&quot;done&quot;</ETag></CompleteMultipartUploadResult>").unwrap());

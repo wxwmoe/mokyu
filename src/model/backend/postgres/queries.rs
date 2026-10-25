@@ -1,4 +1,5 @@
 //! PostgreSQL statements, row decoding, and nontransactional operations.
+use crate::cluster::NodeState;
 use crate::model::Id;
 use crate::model::multipart::{RemoteCommit, RemoteOutput, RemotePart, RemoteUpload};
 use crate::model::task::{Execution, TaskFinish};
@@ -45,6 +46,9 @@ use sqlx::{
     query::{Query, QueryAs, QueryScalar},
 };
 use uuid::Uuid;
+
+#[path = "native_queries.rs"]
+pub(super) mod native;
 
 type Statement<'q> = Query<'q, Postgres, PgArguments>;
 type Rows<'q, T> = QueryAs<'q, Postgres, T, PgArguments>;
@@ -7514,6 +7518,66 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn prepare_local_part(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::LocalPart,
+    ) -> Result<crate::model::node_write::Reply> {
+        transactions::native::prepare_local_part(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn claim_native(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Claim,
+    ) -> Result<crate::model::node_native::Reply> {
+        transactions::native::claim(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn finish_native(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Finish,
+    ) -> Result<()> {
+        transactions::native::finish(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn check_local_files(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Inventory,
+    ) -> Result<Vec<Uuid>> {
+        transactions::native::inventory(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn prepare_native_complete(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Complete,
+    ) -> Result<crate::model::node_native::PreparedCompletion> {
+        transactions::native::complete(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn adopt_native_complete(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Adopt,
+    ) -> Result<crate::model::node_write::Reply> {
+        transactions::native::adopt(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
     async fn completion_status(
         &self,
         node: &crate::cluster::NodeState,
@@ -10636,11 +10700,12 @@ pub(super) fn node_read_renew<'q>(
 ) -> Rows<'q, (Uuid, i64)> {
     use crate::model::node_read::GrantType;
     let query = match r#type {
+        GrantType::Native => return native::renew(state, run, ids, false),
         GrantType::Read => {
             "UPDATE stream_leases l SET expires_at=clock_timestamp()+interval '90 seconds' FROM node_reads r WHERE l.id=r.read_id AND r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND l.id=ANY($5) AND l.expires_at>clock_timestamp() RETURNING l.id,90000::bigint"
         }
         GrantType::StorageRead => {
-            "UPDATE storage_permits p SET expires_at=clock_timestamp()+interval '1 minute' FROM node_read_permits n,node_reads r,stream_leases l WHERE p.token=n.token AND r.read_id=n.read_id AND l.id=r.read_id AND r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND p.token=ANY($5) AND p.expires_at>clock_timestamp() AND l.expires_at>clock_timestamp() RETURNING p.token,60000::bigint"
+            "UPDATE storage_permits p SET expires_at=clock_timestamp()+interval '1 minute' WHERE p.token=ANY($5) AND p.direction='read' AND p.expires_at>clock_timestamp() AND (EXISTS(SELECT 1 FROM node_read_permits n JOIN node_reads r ON r.read_id=n.read_id JOIN stream_leases l ON l.id=r.read_id WHERE n.token=p.token AND r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM node_write_permits n JOIN node_writes w ON w.node_id=n.node_id AND w.operation_id=n.operation_id JOIN stream_leases l ON l.id=w.lease_id JOIN uploads u ON u.id=w.completion_upload WHERE n.token=p.token AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND w.state='active' AND l.expires_at>clock_timestamp() AND u.state='completing' AND u.completion_token=w.operation_id AND u.completion_expires_at>clock_timestamp())) RETURNING p.token,60000::bigint"
         }
         GrantType::Window => {
             "SELECT w.id,GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) FROM node_read_windows w JOIN node_reads r ON r.read_id=w.read_id JOIN stream_leases l ON l.id=r.read_id WHERE r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND w.id=ANY($5) AND l.expires_at>clock_timestamp()"
@@ -10649,7 +10714,7 @@ pub(super) fn node_read_renew<'q>(
             "UPDATE stream_leases l SET expires_at=clock_timestamp()+interval '90 seconds' FROM node_writes w,streams s WHERE l.id=w.lease_id AND s.id=w.stream_id AND ((w.upload_id IS NULL AND (w.completion_upload IS NULL OR EXISTS(SELECT 1 FROM uploads c WHERE c.id=w.completion_upload AND c.state='completing' AND c.completion_token=w.operation_id AND c.completion_expires_at>clock_timestamp())) AND EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id)) OR (w.upload_id IS NOT NULL AND EXISTS(SELECT 1 FROM parts a JOIN uploads u ON u.id=a.upload_id WHERE a.upload_id=w.upload_id AND a.part_number=w.part_number AND a.write_token=s.id AND u.state='active' AND u.remote_manifest_hash IS NULL))) AND s.state='writing' AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND l.id=ANY($5) AND l.expires_at>clock_timestamp() RETURNING l.id,90000::bigint"
         }
         GrantType::StorageWrite => {
-            "UPDATE storage_permits p SET expires_at=clock_timestamp()+interval '1 minute' FROM node_write_permits n,node_writes w,stream_leases l,streams s WHERE p.token=n.token AND w.node_id=n.node_id AND w.operation_id=n.operation_id AND ((n.batch_id IS NOT NULL AND EXISTS(SELECT 1 FROM node_write_batches b WHERE b.node_id=n.node_id AND b.operation_id=n.operation_id AND b.batch_id=n.batch_id AND b.commit_hash IS NULL)) OR (n.batch_id IS NULL AND EXISTS(SELECT 1 FROM node_write_raw r WHERE r.node_id=n.node_id AND r.operation_id=n.operation_id AND NOT r.committed)) OR (n.batch_id IS NULL AND EXISTS(SELECT 1 FROM node_write_tails t WHERE t.node_id=n.node_id AND t.operation_id=n.operation_id AND NOT t.committed))) AND l.id=w.lease_id AND s.id=w.stream_id AND s.state='writing' AND ((w.upload_id IS NULL AND (w.completion_upload IS NULL OR EXISTS(SELECT 1 FROM uploads c WHERE c.id=w.completion_upload AND c.state='completing' AND c.completion_token=w.operation_id AND c.completion_expires_at>clock_timestamp())) AND EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id)) OR (w.upload_id IS NOT NULL AND EXISTS(SELECT 1 FROM parts a JOIN uploads u ON u.id=a.upload_id WHERE a.upload_id=w.upload_id AND a.part_number=w.part_number AND a.write_token=s.id AND u.state='active' AND u.remote_manifest_hash IS NULL))) AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND p.token=ANY($5) AND p.expires_at>clock_timestamp() AND l.expires_at>clock_timestamp() RETURNING p.token,60000::bigint"
+            "UPDATE storage_permits p SET expires_at=clock_timestamp()+interval '1 minute' FROM node_write_permits n,node_writes w,stream_leases l,streams s WHERE p.token=n.token AND w.node_id=n.node_id AND w.operation_id=n.operation_id AND ((n.batch_id IS NOT NULL AND EXISTS(SELECT 1 FROM node_write_batches b WHERE b.node_id=n.node_id AND b.operation_id=n.operation_id AND b.batch_id=n.batch_id AND b.commit_hash IS NULL)) OR (n.batch_id IS NULL AND EXISTS(SELECT 1 FROM node_write_raw r WHERE r.node_id=n.node_id AND r.operation_id=n.operation_id AND NOT r.committed)) OR (n.batch_id IS NULL AND EXISTS(SELECT 1 FROM node_write_tails t WHERE t.node_id=n.node_id AND t.operation_id=n.operation_id AND NOT t.committed)) OR (n.batch_id IS NULL AND w.completion_upload IS NOT NULL AND EXISTS(SELECT 1 FROM uploads u WHERE u.id=w.completion_upload AND u.raw_source_id IS NOT NULL))) AND l.id=w.lease_id AND s.id=w.stream_id AND s.state='writing' AND ((w.upload_id IS NULL AND (w.completion_upload IS NULL OR EXISTS(SELECT 1 FROM uploads c WHERE c.id=w.completion_upload AND c.state='completing' AND c.completion_token=w.operation_id AND c.completion_expires_at>clock_timestamp())) AND EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id)) OR (w.upload_id IS NOT NULL AND EXISTS(SELECT 1 FROM parts a JOIN uploads u ON u.id=a.upload_id WHERE a.upload_id=w.upload_id AND a.part_number=w.part_number AND a.write_token=s.id AND u.state='active' AND u.remote_manifest_hash IS NULL))) AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND p.token=ANY($5) AND p.expires_at>clock_timestamp() AND l.expires_at>clock_timestamp() RETURNING p.token,60000::bigint"
         }
     };
     sqlx::query_as(query)
@@ -11035,7 +11100,7 @@ pub(super) fn node_write_permits(
     operation: Uuid,
     batch: Option<i64>,
 ) -> Rows<'static, (Uuid, i64)> {
-    sqlx::query_as("SELECT p.token,GREATEST(0,(extract(epoch FROM (p.expires_at-clock_timestamp()))*1000)::bigint) FROM storage_permits p JOIN node_write_permits w ON w.token=p.token WHERE w.node_id=$1 AND w.operation_id=$2 AND w.batch_id IS NOT DISTINCT FROM $3 AND p.expires_at>clock_timestamp() ORDER BY p.token")
+    sqlx::query_as("SELECT p.token,GREATEST(0,(extract(epoch FROM (p.expires_at-clock_timestamp()))*1000)::bigint) FROM storage_permits p JOIN node_write_permits w ON w.token=p.token WHERE w.node_id=$1 AND w.operation_id=$2 AND w.batch_id IS NOT DISTINCT FROM $3 AND p.direction='upload' AND p.expires_at>clock_timestamp() ORDER BY p.token")
         .bind(node).bind(operation).bind(batch)
 }
 

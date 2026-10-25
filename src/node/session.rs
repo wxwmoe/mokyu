@@ -224,6 +224,9 @@ impl NodeContext {
     }
 
     fn publish(&self, lease: &Arc<RunLease>, settings: &Settings, state: &wire::NodeState) {
+        if state.native_pending {
+            self.native_work.notify_one();
+        }
         self.current.send_modify(|current| {
             current.maintenance = state.maintenance;
             current.draining = state.draining || *self.mode.borrow() != Mode::Running;

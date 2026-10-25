@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Native,
     Complete,
     Parts,
     Multipart,
@@ -274,8 +275,14 @@ async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires isolated controls, durable part files and native S3 uploads"]
+async fn node_http_native_parts_replay_and_complete() -> Result<()> {
+    node_http_reads(HttpCase::Native).await
+}
+
 async fn node_http_reads(case: HttpCase) -> Result<()> {
-    let complete = matches!(case, HttpCase::Complete);
+    let complete = matches!(case, HttpCase::Complete | HttpCase::Native);
     let parts = matches!(case, HttpCase::Parts);
     let multipart = matches!(case, HttpCase::Multipart);
     let copy = matches!(case, HttpCase::Copy);
@@ -314,7 +321,14 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
     *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 2)]);
     Arc::get_mut(&mut context).unwrap().client = dns.client(&url, identity)?;
     let mut states = context.subscribe();
-    let driver = tokio::spawn(context.clone().run());
+    let running = context.clone();
+    let driver = tokio::spawn(async move {
+        let result = running.run().await;
+        if let Err(error) = &result {
+            eprintln!("node runtime failed: {error:#}");
+        }
+        result
+    });
     node_state(&mut states, |state| state.phase == Phase::Ready).await?;
     let reads = Arc::new(crate::node::reads::Reads::new(context.clone())?);
     let gateway = crate::http::node::Gateway::new(reads.clone())?;

@@ -255,6 +255,7 @@ pub(crate) enum GrantType {
     Window,
     Write,
     StorageWrite,
+    Native,
 }
 
 #[derive(Clone)]

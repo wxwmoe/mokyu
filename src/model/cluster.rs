@@ -9,6 +9,42 @@ use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait ClusterStore: Send + Sync {
+    async fn prepare_local_part(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::LocalPart,
+    ) -> Result<super::node_write::Reply>;
+    async fn claim_native(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Claim,
+    ) -> Result<super::node_native::Reply>;
+    async fn finish_native(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Finish,
+    ) -> Result<()>;
+    async fn check_local_files(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Inventory,
+    ) -> Result<Vec<Uuid>>;
+    async fn prepare_native_complete(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Complete,
+    ) -> Result<super::node_native::PreparedCompletion>;
+    async fn adopt_native_complete(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Adopt,
+    ) -> Result<super::node_write::Reply>;
     async fn completion_status(
         &self,
         node: &NodeState,

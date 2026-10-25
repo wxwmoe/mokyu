@@ -30,6 +30,8 @@ pub(super) struct Cache {
     fifo: tokio::sync::Mutex<Fifo>,
     writes: tokio::sync::Mutex<()>,
     ready: OnceCell<()>,
+    multipart_ready: OnceCell<()>,
+    local_locks: crate::runtime::locks::Locks<Uuid>,
     entries: usize,
     slots: Arc<Semaphore>,
     memory: Arc<Semaphore>,
@@ -49,10 +51,22 @@ impl Cache {
             .transpose()?;
         let disk = Arc::new(Disk {
             root: instance.data_path.clone(),
-            limits: [None, capacity, None],
+            limits: [
+                instance
+                    .multipart_limit
+                    .as_deref()
+                    .map(crate::config::bytes)
+                    .transpose()?,
+                capacity,
+                None,
+            ],
             floor: crate::config::bytes(&instance.min_free_space)?,
             spaces: Mutex::default(),
-            upload_limit: None,
+            upload_limit: instance
+                .upload_cache_size
+                .as_deref()
+                .map(crate::config::cache_bytes)
+                .transpose()?,
             usage: Mutex::new(Usage {
                 used: [0; 3],
                 upload: 0,
@@ -67,6 +81,8 @@ impl Cache {
             fifo: Default::default(),
             writes: Default::default(),
             ready: OnceCell::new(),
+            multipart_ready: OnceCell::new(),
+            local_locks: Default::default(),
             entries: instance.cache_entries.unwrap_or(budget.cache_entries),
             slots: Arc::new(Semaphore::new(budget.cpu_jobs)),
             memory,
@@ -83,6 +99,91 @@ impl Cache {
             fifo: &self.fifo,
             cache_writes: &self.writes,
         }
+    }
+
+    pub(super) async fn multipart(&self) -> Result<Arc<Disk>> {
+        self.multipart_ready
+            .get_or_try_init(|| async {
+                let root = self.disk.root.join("multipart");
+                tokio::fs::create_dir_all(&root).await?;
+                ensure!(
+                    tokio::fs::symlink_metadata(&root).await?.is_dir(),
+                    "multipart path is not a directory"
+                );
+                tokio::fs::File::open(&self.disk.root)
+                    .await?
+                    .sync_all()
+                    .await?;
+                let mut entries = tokio::fs::read_dir(&root).await?;
+                let mut size = 0u64;
+                while let Some(entry) = entries.next_entry().await? {
+                    let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
+                    ensure!(
+                        metadata.is_file(),
+                        "multipart directory contains a non-file entry"
+                    );
+                    size = size
+                        .checked_add(crate::storage::local::allocated(&metadata))
+                        .context("multipart accounting overflow")?;
+                }
+                self.disk.account_existing(Area::Multipart, size);
+                Ok::<_, anyhow::Error>(())
+            })
+            .await?;
+        Ok(self.disk.clone())
+    }
+
+    pub(super) async fn local_lock(&self, id: Uuid) -> tokio::sync::OwnedMutexGuard<()> {
+        self.local_locks.get(id).lock_owned().await
+    }
+
+    pub(super) async fn reclaim_local(&self, node: &NodeContext, recover: bool) -> Result<()> {
+        let disk = self.multipart().await?;
+        let snapshot = node.background_snapshot()?;
+        let mut entries = tokio::fs::read_dir(disk.root.join("multipart")).await?;
+        let mut ids = Vec::with_capacity(128);
+        loop {
+            let entry = entries.next_entry().await?;
+            if let Some(entry) = &entry {
+                if let Some(id) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| Uuid::parse_str(name).ok())
+                {
+                    if !disk.pending(id) {
+                        ids.push(id);
+                    }
+                }
+            }
+            if !ids.is_empty() && (ids.len() == 128 || entry.is_none()) {
+                snapshot.lease.check()?;
+                let reply = node
+                    .client
+                    .check_local_files(crate::rpc::wire::LocalFilesRequest {
+                        run: Some(snapshot.lease.run.clone()),
+                        files: ids.iter().map(ToString::to_string).collect(),
+                        recover,
+                    })
+                    .await?;
+                for value in reply.removable {
+                    let id = Uuid::parse_str(&value)?;
+                    ensure!(
+                        ids.contains(&id),
+                        "control returned an unexpected local file"
+                    );
+                    let _guard = self.local_lock(id).await;
+                    snapshot.lease.check()?;
+                    if !disk.pending(id) {
+                        disk.remove_fragment(id).await?;
+                    }
+                }
+                ids.clear();
+            }
+            if entry.is_none() {
+                break;
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn raw_request(

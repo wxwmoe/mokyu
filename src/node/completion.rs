@@ -109,6 +109,9 @@ impl Writes {
                                     Ok(())
                                 })
                                 .await?;
+                            if !operation.backend.profile.cdc_enabled {
+                                return summary(&writes.native_complete(&operation, &value).await?);
+                            }
                             let body = writes.completion_body(&operation, &value);
                             let source_error = Arc::new(std::sync::Mutex::new(None));
                             let failed = source_error.clone();

@@ -17,6 +17,8 @@ use uuid::Uuid;
 
 #[path = "completion.rs"]
 mod completion;
+#[path = "native.rs"]
+mod native;
 
 const BATCH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OBJECT: i64 = 5 * 1024 * 1024 * 1024;
@@ -264,6 +266,10 @@ impl Writes {
                 .await?;
             self.publish(&operation, size, &etag, &sums, None, None)
                 .await?;
+            if !operation.backend.profile.cdc_enabled {
+                self.reads.node.native_work.notify_one();
+                self.wait_native(&operation.stream).await?;
+            }
             Ok((etag, sums))
         }
         .await;
@@ -289,6 +295,15 @@ impl Writes {
                 "this node write path requires inline processing without upload cache"
             )
         );
+        if operation.part && !profile.cdc_enabled {
+            return operation
+                .guard(
+                    &self.reads.node,
+                    &[],
+                    self.local_part(operation, body, check, trailers, length),
+                )
+                .await;
+        }
         if profile.cdc_enabled {
             let config = profile
                 .compression_config(&self.reads.node.config.instance.compression_idle_timeout);

@@ -116,6 +116,7 @@ mod tests {
         wire::SyncReply {
             valid_for_ms: 90_000,
             state: Some(wire::NodeState {
+                native_pending: false,
                 maintenance: false,
                 draining: false,
                 revisions: revisions.clone(),

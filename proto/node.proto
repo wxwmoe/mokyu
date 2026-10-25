@@ -43,6 +43,7 @@ service NodeWrites {
   rpc CommitChunks(CommitChunksRequest) returns (ChunkCommitReply);
   rpc CopyChunks(CopyChunksRequest) returns (ChunkCommitReply);
   rpc PrepareRaw(PrepareRawRequest) returns (PreparedRaw);
+  rpc PrepareLocalPart(PrepareLocalPartRequest) returns (WriteReply);
   rpc CommitRaw(CommitRawRequest) returns (PreparedRaw);
   rpc PrepareTail(PrepareTailRequest) returns (PreparedTail);
   rpc CommitTail(WriteRequest) returns (PreparedTail);
@@ -59,6 +60,78 @@ service NodeMultipart {
   rpc BeginComplete(BeginCompleteRequest) returns (WriteReply);
   rpc ReadComplete(ReadCompleteRequest) returns (CompleteSources);
   rpc CompleteStatus(CompleteStatusRequest) returns (CompleteState);
+  rpc ClaimNative(NativeClaimRequest) returns (NativeWorkReply);
+  rpc FinishNative(NativeFinishRequest) returns (NativeFinishReply);
+  rpc CheckLocalFiles(LocalFilesRequest) returns (LocalFilesReply);
+  rpc PrepareNativeComplete(NativeCompleteRequest) returns (NativeCompleteReply);
+  rpc AdoptNativeComplete(AdoptNativeRequest) returns (WriteReply);
+}
+
+message PrepareLocalPartRequest {
+  Run run = 1;
+  string operation_id = 2;
+  uint64 size = 3;
+  repeated bytes hashes = 4;
+}
+
+message NativeClaimRequest {
+  Run run = 1;
+  string operation_id = 2;
+  optional string stream_id = 3;
+  repeated Cached cached = 4;
+}
+
+message NativeWorkReply {
+  string operation_id = 1;
+  optional bytes work_json = 2;
+  bool ready = 3;
+  repeated Material materials = 4;
+  Cached storage = 5;
+  repeated Grant grants = 6;
+}
+
+message NativeFinishRequest {
+  Run run = 1;
+  string operation_id = 2;
+  optional string value = 3;
+  bool retry = 4;
+  optional LocalSourceError source_error = 5;
+}
+
+enum LocalSourceError {
+  LOCAL_SOURCE_ERROR_UNSPECIFIED = 0;
+  LOCAL_SOURCE_MISSING = 1;
+  LOCAL_SOURCE_CORRUPT = 2;
+}
+
+message NativeFinishReply {}
+
+message LocalFilesRequest {
+  Run run = 1;
+  repeated string files = 2;
+  bool recover = 3;
+}
+
+message LocalFilesReply {
+  repeated string removable = 1;
+}
+
+message NativeCompleteRequest {
+  Run run = 1;
+  string operation_id = 2;
+  bool resend = 3;
+}
+
+message NativeCompleteReply {
+  bytes completion_json = 1;
+  repeated Grant grants = 2;
+}
+
+message AdoptNativeRequest {
+  Run run = 1;
+  string operation_id = 2;
+  bytes digest = 3;
+  bytes content_hash = 4;
 }
 
 message CompleteStatusRequest {
@@ -430,6 +503,7 @@ message NodeState {
   bool maintenance = 1;
   bool draining = 2;
   repeated Revision revisions = 3;
+  bool native_pending = 4;
 }
 
 message Welcome {
@@ -602,6 +676,7 @@ enum GrantType {
   READ_WINDOW = 3;
   WRITE_PROTECTION = 4;
   STORAGE_WRITE = 5;
+  NATIVE_WORK = 6;
 }
 
 message Grant {

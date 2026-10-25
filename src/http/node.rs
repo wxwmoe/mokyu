@@ -112,8 +112,10 @@ impl Gateway {
                 .context("node budget missing")?
                 .data_slots,
         ));
+        let writes = Arc::new(writes::Writes::new(reads.clone())?);
+        writes.start_native();
         Ok(Self {
-            writes: Arc::new(writes::Writes::new(reads.clone())?),
+            writes,
             reads,
             cors,
             settings,

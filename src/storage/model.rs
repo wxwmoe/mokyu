@@ -178,7 +178,7 @@ impl Store {
                     .http1_only()
                     .redirect(reqwest::redirect::Policy::none())
                     .build()?;
-                let store = Arc::new(PrefixStore::new(
+                let remote = Arc::new(
                     AmazonS3Builder::new()
                         .with_endpoint(
                             row.endpoint_url
@@ -208,11 +208,13 @@ impl Store {
                         })
                         .with_http_connector(super::s3::Connector(client.clone()))
                         .build()?,
-                    prefix.clone(),
-                ));
+                );
+                let store = Arc::new(PrefixStore::new(remote.as_ref().clone(), prefix.clone()));
                 multipart = Some(store.clone());
                 streaming = Some(super::s3::Streaming {
                     signer: store.clone(),
+                    bucket_signer: remote,
+                    prefix: prefix.clone(),
                     client,
                     raw_client: reqwest::Client::builder()
                         .connect_timeout(options.connect_timeout)

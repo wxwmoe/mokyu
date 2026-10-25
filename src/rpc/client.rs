@@ -271,6 +271,54 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn prepare_local_part(
+        &self,
+        input: wire::PrepareLocalPartRequest,
+    ) -> Result<wire::WriteReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/PrepareLocalPart")
+            .await
+    }
+
+    pub(crate) async fn claim_native(
+        &self,
+        input: wire::NativeClaimRequest,
+    ) -> Result<wire::NativeWorkReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/ClaimNative")
+            .await
+    }
+
+    pub(crate) async fn finish_native(
+        &self,
+        input: wire::NativeFinishRequest,
+    ) -> Result<wire::NativeFinishReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/FinishNative")
+            .await
+    }
+
+    pub(crate) async fn check_local_files(
+        &self,
+        input: wire::LocalFilesRequest,
+    ) -> Result<wire::LocalFilesReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/CheckLocalFiles")
+            .await
+    }
+
+    pub(crate) async fn prepare_native_complete(
+        &self,
+        input: wire::NativeCompleteRequest,
+    ) -> Result<wire::NativeCompleteReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/PrepareNativeComplete")
+            .await
+    }
+
+    pub(crate) async fn adopt_native_complete(
+        &self,
+        input: wire::AdoptNativeRequest,
+    ) -> Result<wire::WriteReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/AdoptNativeComplete")
+            .await
+    }
+
     pub(crate) async fn begin_complete(
         &self,
         input: wire::BeginCompleteRequest,

@@ -106,6 +106,7 @@ pub(crate) struct NodeContext {
     pub(crate) client: Client,
     pub(crate) resources: Arc<resources::Resources>,
     pub(crate) observations: observations::Reports,
+    pub(crate) native_work: tokio::sync::Notify,
     pub(crate) statistics: crate::status::stats::Statistics,
     boot: Uuid,
     current: watch::Sender<State>,
@@ -139,6 +140,7 @@ impl NodeContext {
             client,
             resources: Arc::new(resources::Resources::default()),
             observations: observations::Reports::new(),
+            native_work: tokio::sync::Notify::new(),
             statistics: crate::status::stats::Statistics::default(),
             boot: Uuid::new_v4(),
             current: watch::channel(State {
@@ -166,6 +168,20 @@ impl NodeContext {
             return Err(Status::unavailable("node is draining or in maintenance"));
         }
         let snapshot = state
+            .snapshot
+            .clone()
+            .ok_or_else(|| Status::unavailable("node is synchronizing"))?;
+        snapshot.lease.check()?;
+        Ok(snapshot)
+    }
+
+    pub(crate) fn background_snapshot(&self) -> Result<Arc<Snapshot>, Status> {
+        if *self.mode.borrow() == Mode::Stopped {
+            return Err(Status::unavailable("node is stopped"));
+        }
+        let snapshot = self
+            .current
+            .borrow()
             .snapshot
             .clone()
             .ok_or_else(|| Status::unavailable("node is synchronizing"))?;

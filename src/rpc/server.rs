@@ -308,6 +308,20 @@ impl NodeObjects for Service {
 
 #[tonic::async_trait]
 impl NodeWrites for Service {
+    async fn prepare_local_part(
+        &self,
+        request: Request<wire::PrepareLocalPartRequest>,
+    ) -> Result<Response<wire::WriteReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::native::local(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.prepare_local_part(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(super::write::reply(reply)?))
+    }
     async fn prepare_tail(
         &self,
         request: Request<wire::PrepareTailRequest>,
@@ -651,6 +665,7 @@ async fn bounded<T>(
 fn state(snapshot: &session::Snapshot) -> wire::NodeState {
     wire::NodeState {
         maintenance: snapshot.maintenance,
+        native_pending: snapshot.native_pending,
         draining: snapshot.draining,
         revisions: snapshot
             .settings
@@ -849,6 +864,79 @@ impl NodeSessions for Service {
 
 #[tonic::async_trait]
 impl NodeMultipart for Service {
+    async fn adopt_native_complete(
+        &self,
+        request: Request<wire::AdoptNativeRequest>,
+    ) -> Result<Response<wire::WriteReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::native::adopt(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.adopt_native_complete(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(super::write::reply(reply)?))
+    }
+    async fn prepare_native_complete(
+        &self,
+        request: Request<wire::NativeCompleteRequest>,
+    ) -> Result<Response<wire::NativeCompleteReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::native::complete(request.into_inner())?;
+        let reply = bounded(
+            self.app
+                .cluster()
+                .map_err(failure)?
+                .prepare_native_complete(&node, &self.app.secrets.credential_key, input),
+        )
+        .await?;
+        Ok(Response::new(super::native::prepared(reply)?))
+    }
+    async fn check_local_files(
+        &self,
+        request: Request<wire::LocalFilesRequest>,
+    ) -> Result<Response<wire::LocalFilesReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::native::inventory(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.check_local_files(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(wire::LocalFilesReply {
+            removable: reply.into_iter().map(|id| id.to_string()).collect(),
+        }))
+    }
+    async fn finish_native(
+        &self,
+        request: Request<wire::NativeFinishRequest>,
+    ) -> Result<Response<wire::NativeFinishReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::native::finish(request.into_inner())?;
+        bounded(self.app.cluster().map_err(failure)?.finish_native(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(wire::NativeFinishReply {}))
+    }
+    async fn claim_native(
+        &self,
+        request: Request<wire::NativeClaimRequest>,
+    ) -> Result<Response<wire::NativeWorkReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::native::claim(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.claim_native(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(super::native::reply(reply)?))
+    }
     async fn complete_status(
         &self,
         request: Request<wire::CompleteStatusRequest>,
