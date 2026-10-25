@@ -439,6 +439,7 @@ pub(crate) async fn exchange(
         token,
         session.draining,
         &allowed,
+        Some(false),
     )
     .fetch_optional(&mut *tx)
     .await?;

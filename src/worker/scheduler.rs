@@ -28,6 +28,14 @@ pub async fn run(app: Arc<App>) -> Result<()> {
     if app.role == "single" {
         return run_single(app).await;
     }
+    if app.role == "control" {
+        return worker(
+            app,
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            0,
+        )
+        .await;
+    }
     if app.role != "single" {
         let listener_app = app.clone();
         tokio::spawn(async move {
@@ -194,23 +202,21 @@ async fn dispatch_single(
     }
 }
 
-fn renew_lease(app: Arc<App>, id: Uuid, token: Uuid) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            let result = async { app.cluster()?.renew_task(id, token).await }.await;
-            match result {
-                Ok(true) => {}
-                Ok(_) => {
-                    tracing::warn!(task_id=%id, "task lease was lost; result will be discarded");
-                    break;
-                }
-                Err(error) => {
-                    tracing::warn!(task_id=%id, %error, "task lease renewal failed");
-                }
+async fn renew_lease(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let result = async { app.cluster()?.renew_task(id, token).await }.await;
+        match result {
+            Ok(true) => {}
+            Ok(_) => {
+                tracing::warn!(task_id=%id, "task lease was lost; result will be discarded");
+                return Ok(false);
+            }
+            Err(error) => {
+                tracing::warn!(task_id=%id, %error, "task lease renewal failed");
             }
         }
-    })
+    }
 }
 
 async fn worker(
@@ -259,6 +265,10 @@ async fn worker(
             tokio::select! {_=app.wake_tasks.notified()=>{},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
             continue;
         };
+        #[cfg(feature = "fault-injection")]
+        if app.role == "control" {
+            crate::faults::point("control-task-claimed").await;
+        }
         let ready = execute(app.clone(), id, token).await?;
         active.lock().await.remove(&id);
         if ready {
@@ -291,101 +301,107 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
     let upload =
         matches!(task_type.as_str(), "upload" | "cache_flush") && detail["operation"] != "cdc";
     let execution = Execution { id, token };
-    let renewal = (app.role != "single").then(|| renew_lease(app.clone(), id, token));
-    let result = if matches!(task_type.as_str(), "gc" | "cleanup") {
-        app.lifecycle_batch(execution, &task_type, &detail).await
-    } else if task_type == "usage" {
-        app.usage_batch(execution, detail.clone()).await
-    } else if task_type == "purge" {
-        app.purge_batch(
-            execution,
-            bucket.context("purge bucket disappeared")?,
-            cursor.as_deref(),
-        )
-        .await
-        .map(|_| false)
-    } else if task_type == "sweep" {
-        app.sweep_batch(execution, cursor.as_deref(), detail)
+    let work = async {
+        if matches!(task_type.as_str(), "gc" | "cleanup") {
+            app.lifecycle_batch(execution, &task_type, &detail).await
+        } else if task_type == "usage" {
+            app.usage_batch(execution, detail.clone()).await
+        } else if task_type == "purge" {
+            app.purge_batch(
+                execution,
+                bucket.context("purge bucket disappeared")?,
+                cursor.as_deref(),
+            )
             .await
             .map(|_| false)
-    } else if task_type == "integrity" {
-        let timeout = if let Some(storage_id) = detail["storage_id"]
-            .as_str()
-            .and_then(|value| value.parse::<Uuid>().ok())
-        {
-            app.storage_profiles
-                .load(storage_id)
+        } else if task_type == "sweep" {
+            app.sweep_batch(execution, cursor.as_deref(), detail)
                 .await
-                .map(|profile| config::seconds(&profile.integrity_batch_timeout))??
-        } else {
-            config::seconds(&app.config.maintenance.max_duration)?
-        };
-        match tokio::time::timeout(
-            Duration::from_secs(timeout),
-            crate::storage::resource_gate::PRIORITY.scope(
-                crate::storage::resource_gate::MAINTENANCE,
-                async {
-                    if detail.get("source_operation").is_some() {
-                        app.source_batch(execution, detail).await
-                    } else {
-                        app.integrity_batch(execution, cursor.as_deref(), detail)
-                            .await
-                    }
-                },
-            ),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(anyhow::anyhow!(
-                "integrity batch timed out waiting for database, resources or backend; resume to retry"
-            )),
-        }
-    } else if task_type == "pack" || task_type == "unpack" {
-        crate::storage::resource_gate::PRIORITY
-            .scope(
-                crate::storage::resource_gate::MAINTENANCE,
-                app.pack_batch(execution, cursor.as_deref(), detail, task_type == "unpack"),
-            )
-            .await
-    } else if detail["operation"] == "cdc" {
-        crate::storage::resource_gate::PRIORITY
-            .scope(
-                crate::storage::resource_gate::MAINTENANCE,
-                app.convert_raw(execution, detail),
-            )
-            .await
-    } else if task_type == "upload" || task_type == "cache_flush" {
-        crate::storage::resource_gate::PRIORITY
-            .scope(
-                crate::storage::resource_gate::UPLOAD,
-                crate::upload::cache::FLUSH.scope(
-                    task_type == "cache_flush",
-                    app.upload_batch(execution, detail, task_type == "cache_flush"),
+                .map(|_| false)
+        } else if task_type == "integrity" {
+            let timeout = if let Some(storage_id) = detail["storage_id"]
+                .as_str()
+                .and_then(|value| value.parse::<Uuid>().ok())
+            {
+                app.storage_profiles
+                    .load(storage_id)
+                    .await
+                    .map(|profile| config::seconds(&profile.integrity_batch_timeout))??
+            } else {
+                config::seconds(&app.config.maintenance.max_duration)?
+            };
+            match tokio::time::timeout(
+                Duration::from_secs(timeout),
+                crate::storage::resource_gate::PRIORITY.scope(
+                    crate::storage::resource_gate::MAINTENANCE,
+                    async {
+                        if detail.get("source_operation").is_some() {
+                            app.source_batch(execution, detail).await
+                        } else {
+                            app.integrity_batch(execution, cursor.as_deref(), detail)
+                                .await
+                        }
+                    },
                 ),
             )
             .await
-    } else if task_type == "storage_migration" {
-        crate::storage::resource_gate::PRIORITY
-            .scope(
-                crate::storage::resource_gate::UPLOAD,
-                app.storage_migration_batch(id, token, detail),
-            )
-            .await
-    } else if task_type == "rewrite" {
-        let result = crate::storage::resource_gate::PRIORITY
-            .scope(
-                crate::storage::resource_gate::MAINTENANCE,
-                app.rewrite_batch(id, token, cursor.as_deref(), detail),
-            )
-            .await;
-        result
-    } else {
-        Err(anyhow::anyhow!("unknown maintenance task type"))
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!(
+                    "integrity batch timed out waiting for database, resources or backend; resume to retry"
+                )),
+            }
+        } else if task_type == "pack" || task_type == "unpack" {
+            crate::storage::resource_gate::PRIORITY
+                .scope(
+                    crate::storage::resource_gate::MAINTENANCE,
+                    app.pack_batch(execution, cursor.as_deref(), detail, task_type == "unpack"),
+                )
+                .await
+        } else if detail["operation"] == "cdc" {
+            crate::storage::resource_gate::PRIORITY
+                .scope(
+                    crate::storage::resource_gate::MAINTENANCE,
+                    app.convert_raw(execution, detail),
+                )
+                .await
+        } else if task_type == "upload" || task_type == "cache_flush" {
+            crate::storage::resource_gate::PRIORITY
+                .scope(
+                    crate::storage::resource_gate::UPLOAD,
+                    crate::upload::cache::FLUSH.scope(
+                        task_type == "cache_flush",
+                        app.upload_batch(execution, detail, task_type == "cache_flush"),
+                    ),
+                )
+                .await
+        } else if task_type == "storage_migration" {
+            crate::storage::resource_gate::PRIORITY
+                .scope(
+                    crate::storage::resource_gate::UPLOAD,
+                    app.storage_migration_batch(id, token, detail),
+                )
+                .await
+        } else if task_type == "rewrite" {
+            let result = crate::storage::resource_gate::PRIORITY
+                .scope(
+                    crate::storage::resource_gate::MAINTENANCE,
+                    app.rewrite_batch(id, token, cursor.as_deref(), detail),
+                )
+                .await;
+            result
+        } else {
+            Err(anyhow::anyhow!("unknown maintenance task type"))
+        }
     };
-    if let Some(renewal) = renewal {
-        renewal.abort();
-    }
+    let result = if app.role == "single" {
+        work.await
+    } else {
+        tokio::select! {
+            result = work => result,
+            result = renew_lease(app.clone(), id, token) => result,
+        }
+    };
     app.task_execution
         .finish(crate::model::TaskFinish {
             execution,

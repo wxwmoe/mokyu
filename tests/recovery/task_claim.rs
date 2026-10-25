@@ -73,6 +73,7 @@ async fn postgres_task_claim_recovery() -> Result<()> {
         .execute(&pool)
         .await?;
     }
+    control_claims(&pool, &first, &second, &nodes[0], &key).await?;
     let upload = Uuid::new_v4();
     sqlx::query("INSERT INTO tasks(id,task_type,state,detail) VALUES($1,'upload','queued',$2)")
         .bind(upload)
@@ -317,5 +318,146 @@ async fn postgres_task_claim_recovery() -> Result<()> {
             2
         );
     }
+    Ok(())
+}
+
+async fn control_claims(
+    pool: &PgPool,
+    first: &Backend,
+    second: &Backend,
+    worker: &NodeState,
+    key: &codec::Key,
+) -> Result<()> {
+    let mut controls = Vec::new();
+    for _ in 0..2 {
+        let node = NodeState {
+            node_id: Uuid::new_v4(),
+            role: "control".into(),
+            ..worker.clone()
+        };
+        let encrypted = codec::protect(
+            node.credential.as_bytes(),
+            key,
+            crate::cluster::credential_binding(node.node_id).as_bytes(),
+        )?;
+        sqlx::query(
+            "INSERT INTO nodes(id,name,role,credential_encrypted) VALUES($1,$2,'control',$3)",
+        )
+        .bind(node.node_id)
+        .bind(node.node_id.to_string())
+        .bind(encrypted)
+        .execute(pool)
+        .await?;
+        controls.push(node);
+    }
+    let metadata = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let io = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    for (id, task_type, detail) in [
+        (metadata[0], "usage", serde_json::json!({})),
+        (metadata[1], "purge", serde_json::json!({})),
+        (
+            metadata[2],
+            "cleanup",
+            serde_json::json!({"phase":"history"}),
+        ),
+        (
+            io[0],
+            "cleanup",
+            serde_json::json!({"storage_id":Uuid::new_v4()}),
+        ),
+        (
+            io[1],
+            "gc",
+            serde_json::json!({"storage_id":Uuid::new_v4()}),
+        ),
+        (io[2], "integrity", serde_json::json!({})),
+    ] {
+        sqlx::query("INSERT INTO tasks(id,task_type,state,detail) VALUES($1,$2,'queued',$3)")
+            .bind(id)
+            .bind(task_type)
+            .bind(detail)
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query("UPDATE tasks SET updated_at=now()-interval '1 day' WHERE id=ANY($1)")
+        .bind(metadata.as_slice())
+        .execute(pool)
+        .await?;
+    for _ in 0..3 {
+        let id = first
+            .claim_task(claimant(Uuid::new_v4()), worker, "worker", key)
+            .await?
+            .unwrap();
+        assert!(io.contains(&id));
+    }
+    assert_eq!(
+        first
+            .claim_task(claimant(Uuid::new_v4()), worker, "worker", key)
+            .await?,
+        None
+    );
+    sqlx::query("UPDATE tasks SET state='queued',lease_token=NULL,lease_node_id=NULL,lease_expires_at=NULL WHERE id=ANY($1)")
+        .bind(io.as_slice()).execute(pool).await?;
+    let mut claimed = std::collections::HashSet::new();
+    for _ in 0..3 {
+        let id = first
+            .claim_task(claimant(Uuid::new_v4()), &controls[0], "control", key)
+            .await?
+            .unwrap();
+        assert!(metadata.contains(&id));
+        assert!(claimed.insert(id));
+    }
+    assert_eq!(
+        first
+            .claim_task(claimant(Uuid::new_v4()), &controls[0], "control", key)
+            .await?,
+        None
+    );
+    for _ in 0..3 {
+        let id = first
+            .claim_task(claimant(Uuid::new_v4()), worker, "worker", key)
+            .await?
+            .unwrap();
+        assert!(io.contains(&id));
+    }
+    let old = first.load(metadata[0]).await?.execution_token.unwrap();
+    sqlx::query("UPDATE tasks SET lease_expires_at=now()-interval '1 second' WHERE id=$1")
+        .bind(metadata[0])
+        .execute(pool)
+        .await?;
+    assert_eq!(
+        first
+            .claim_task(claimant(Uuid::new_v4()), worker, "worker", key)
+            .await?,
+        None
+    );
+    let token = Uuid::new_v4();
+    assert_eq!(
+        second
+            .claim_task(claimant(token), &controls[1], "control", key)
+            .await?,
+        Some(metadata[0])
+    );
+    assert!(
+        !first
+            .complete_usage(Execution {
+                id: metadata[0],
+                token: old
+            })
+            .await?
+    );
+    assert!(
+        second
+            .complete_usage(Execution {
+                id: metadata[0],
+                token
+            })
+            .await?
+    );
+    let all: Vec<_> = metadata.into_iter().chain(io).collect();
+    sqlx::query("DELETE FROM tasks WHERE id=ANY($1)")
+        .bind(all)
+        .execute(pool)
+        .await?;
     Ok(())
 }
