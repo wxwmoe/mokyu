@@ -234,6 +234,7 @@ pub fn encode(
     pool: &Pool,
     strategy: Strategy,
     should_try: bool,
+    accepted: Option<&crate::content::compression::Config>,
 ) -> Result<(Pack, Vec<u8>)> {
     let size = p.payload_size()?;
     ensure!(
@@ -266,7 +267,11 @@ pub fn encode(
     }
     ensure!(raw.len() == size, "pack raw length mismatch");
     p.digest = Some(blake3::hash(&raw).as_bytes().to_vec());
-    let compressed = pool.compress_with(&raw, should_try, strategy)?;
+    let compressed = if let Some(config) = accepted {
+        pool.compress_for(&raw, should_try, config)?
+    } else {
+        pool.compress_with(&raw, should_try, strategy)?
+    };
     p.compressed = compressed.is_some();
     let mut encoded = compressed.unwrap_or(raw);
     p.stored_size = Some(encoded.len() as i64 + if p.algorithm == "none" { 0 } else { 16 });
@@ -464,7 +469,7 @@ mod tests {
                 created_at: date,
             };
             let (p, encoded) =
-                encode(p, &members, &secrets, &pool, Strategy::Always, true).unwrap();
+                encode(p, &members, &secrets, &pool, Strategy::Always, true, None).unwrap();
             let decoded = decode(&p, encoded.clone(), &secrets, &pool).unwrap();
             assert!(p.compressed);
             assert_eq!(&p.aad().unwrap()[..8], b"MOKYU\x00\x00\x04");
@@ -479,9 +484,25 @@ mod tests {
                 &pool,
                 Strategy::Always,
                 false,
+                None,
             )
             .unwrap();
             assert!(!uncompressed.compressed);
+            let disabled = crate::content::compression::Config {
+                enabled: false,
+                ..Default::default()
+            };
+            let (configured, _) = encode(
+                p.clone(),
+                &members,
+                &secrets,
+                &pool,
+                Strategy::Always,
+                true,
+                Some(&disabled),
+            )
+            .unwrap();
+            assert!(!configured.compressed);
             assert_eq!(
                 decode(&uncompressed, encoded_raw.clone(), &secrets, &pool)
                     .unwrap()

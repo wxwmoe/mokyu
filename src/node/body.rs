@@ -33,6 +33,9 @@ use uuid::Uuid;
 #[path = "inspection.rs"]
 mod inspection;
 
+#[path = "encoding.rs"]
+mod encoding;
+
 const UNIT: usize = 64 * 1024;
 pub(super) const BUFFER_UNITS: usize = 16 * 1024 * 1024 / UNIT;
 const RAW_BUFFER: usize = 256 * 1024;

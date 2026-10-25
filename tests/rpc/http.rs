@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Rewrite,
     Native,
     Complete,
     Parts,
@@ -52,6 +53,12 @@ enum HttpCase {
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, encrypted S3 sources and rewrite fault boundaries"]
+async fn node_http_rewrites_recover_and_preserve_bytes() -> Result<()> {
+    node_http_reads(HttpCase::Rewrite).await
 }
 
 #[tokio::test]
@@ -408,6 +415,41 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
+    if matches!(case, HttpCase::Rewrite) {
+        let mut worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
+        fixture("rewrite-seed").await?;
+        fixture("rewrite-uploaded").await?;
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        fixture("rewrite-restart").await?;
+        worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
+        fixture("rewrite-chunks-check").await?;
+        fixture("rewrite-pack-seed").await?;
+        fixture("rewrite-pack-committed").await?;
+        *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 3)]);
+        dns.resolver.clear_cache();
+        context.client.addresses.lock().await.refresh_at = Instant::now();
+        fixture("stop-first").await?;
+        node_state(&mut states, |state| {
+            state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
+        })
+        .await?;
+        fixture("rewrite-pack-check").await?;
+        fixture("rewrite-compression").await?;
+        fixture("rewrite-corrupt").await?;
+        fixture("rewrite-restored").await?;
+        fixture("rewrite-namespace").await?;
+        fixture("rewrite-namespace-restored").await?;
+        context.stop();
+        tokio::time::timeout(Duration::from_secs(10), driver).await???;
+        tokio::time::timeout(Duration::from_secs(10), worker).await???;
+        s3_server.abort();
+        web_server.abort();
+        println!(
+            "PASS bounded node rewrite, fresh output nonces, interrupted upload, committed reply loss, profile compression, source failure and HTTP bytes"
+        );
+        return Ok(());
+    }
     if complete {
         fixture("http-complete").await?;
     } else if parts {

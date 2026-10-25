@@ -4110,27 +4110,38 @@ pub(super) async fn commit_rewrite_chunk(
     physical: &Chunk,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    rewrite_lease(&mut tx, task, token).await?;
+    commit_rewrite_chunk_in(&mut tx, task, token, source, physical).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn commit_rewrite_chunk_in(
+    tx: &mut Transaction<'_, Postgres>,
+    task: Uuid,
+    token: Uuid,
+    source: &Chunk,
+    physical: &Chunk,
+) -> Result<()> {
+    rewrite_lease(tx, task, token).await?;
     let current = queries::lock_rewrite_chunk(source.id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     ensure!(current == Some(None), "chunk source changed during rewrite");
-    check_source_inputs(&mut tx, task, &[source.id]).await?;
+    check_source_inputs(tx, task, &[source.id]).await?;
     let changed = queries::retire_rewrite_encoding(source.encoding_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
     ensure!(changed == 1, "source encoding changed during rewrite");
     queries::publish_rewrite_encoding(physical)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::publish_rewrite_chunk(physical)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::advance_rewrite(task, source.id.to_string())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -4145,32 +4156,48 @@ pub(super) async fn commit_rewrite_pack(
     first: Id,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    rewrite_lease(&mut tx, task, token).await?;
+    let mut offset = 0;
+    let members = members
+        .iter()
+        .map(|member| {
+            let row = (member.id, offset);
+            offset += i64::from(member.raw_size);
+            row
+        })
+        .collect::<Vec<_>>();
+    commit_rewrite_pack_in(&mut tx, task, token, old, new, current, &members, first).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn commit_rewrite_pack_in(
+    tx: &mut Transaction<'_, Postgres>,
+    task: Uuid,
+    token: Uuid,
+    old: &Pack,
+    new: &Pack,
+    current: &[Id],
+    members: &[(Id, i64)],
+    first: Id,
+) -> Result<()> {
+    rewrite_lease(tx, task, token).await?;
     let locked = queries::lock_rewrite_members(old.id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
     ensure!(locked == current, "pack membership changed during rewrite");
-    check_source_inputs(&mut tx, task, current).await?;
+    check_source_inputs(tx, task, current).await?;
     let updated = queries::publish_rewrite_pack(new)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
     ensure!(updated == 1, "new pack was changed during rewrite");
-    for (ordinal, member) in members.iter().enumerate() {
-        queries::insert_pack_member(
-            new.id,
-            ordinal as i32,
-            member.id,
-            members[..ordinal]
-                .iter()
-                .map(|c| i64::from(c.raw_size))
-                .sum::<i64>(),
-        )
-        .execute(&mut *tx)
-        .await?;
+    for (ordinal, (member, offset)) in members.iter().enumerate() {
+        queries::insert_pack_member(new.id, ordinal as i32, *member, *offset)
+            .execute(&mut **tx)
+            .await?;
     }
     let changed = queries::replace_rewrite_pack(old.id, new.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
     ensure!(
@@ -4178,15 +4205,14 @@ pub(super) async fn commit_rewrite_pack(
         "pack membership changed during rewrite"
     );
     let retired = queries::retire_rewrite_pack(old.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
     ensure!(retired == 1, "source pack changed during rewrite");
     // Packs can interleave chunk IDs; advance only past this pack's scan key.
     queries::advance_rewrite(task, first.to_string())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -7467,26 +7493,36 @@ pub(super) async fn reserve_nonce(
     type_tag: u8,
     units: u32,
 ) -> Result<(i64, i64)> {
-    ensure!(matches!(type_tag, 0 | 1), "invalid nonce type");
     let mut tx = pool.begin().await?;
-    let previous = queries::nonce_counter(key, type_tag)
-        .fetch_optional(&mut *tx)
-        .await?
-        .context("active encryption key nonce counter is missing")?;
-    let range = crate::model::key::nonce_reservation(previous, units)?;
-    ensure!(
-        queries::advance_nonce(key, type_tag, previous, range.1)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
-            == 1,
-        "nonce reservation changed"
-    );
+    let range = reserve_nonce_in(&mut tx, key, type_tag, units).await?;
     #[cfg(feature = "fault-injection")]
     crate::faults::point("nonce-before-commit").await;
     tx.commit().await?;
     #[cfg(feature = "fault-injection")]
     crate::faults::point("nonce-after-commit").await;
+    Ok(range)
+}
+
+async fn reserve_nonce_in(
+    db: &mut PgConnection,
+    key: Uuid,
+    type_tag: u8,
+    units: u32,
+) -> Result<(i64, i64)> {
+    ensure!(matches!(type_tag, 0 | 1), "invalid nonce type");
+    let previous = queries::nonce_counter(key, type_tag)
+        .fetch_optional(&mut *db)
+        .await?
+        .context("active encryption key nonce counter is missing")?;
+    let range = crate::model::key::nonce_reservation(previous, units)?;
+    ensure!(
+        queries::advance_nonce(key, type_tag, previous, range.1)
+            .execute(&mut *db)
+            .await?
+            .rows_affected()
+            == 1,
+        "nonce reservation changed"
+    );
     Ok(range)
 }
 

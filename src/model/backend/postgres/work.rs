@@ -11,6 +11,9 @@ mod audit;
 #[path = "work_sweep.rs"]
 mod sweep;
 
+#[path = "work_rewrite.rs"]
+mod rewrite;
+
 fn owned(node: &NodeState, run: Run, batch: &q::Batch) -> Result<()> {
     ensure!(
         batch.credential_generation == node.credential_generation
@@ -86,6 +89,7 @@ async fn finish(
     run: Run,
     completion: &work::Completion,
     maintenance: bool,
+    key: &Key,
 ) -> Result<()> {
     let row = q::batch(node.node_id, completion.operation)
         .fetch_optional(&mut **db)
@@ -209,6 +213,22 @@ async fn finish(
                 &completion.outcomes,
             )
             .await?;
+        }
+        work::Plan::Rewrite { items, .. } => {
+            ensure!(!maintenance, Error::OperationAborted);
+            error = rewrite::finish(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                &detail,
+                items,
+                &completion.outcomes,
+                key,
+            )
+            .await?;
+            release_task_inputs(db, task).await?;
         }
         work::Plan::SweepScan {
             after,
@@ -540,7 +560,15 @@ pub(crate) async fn exchange(
         Error::NodeOperationExpired
     );
     if let Some(completion) = &input.completion {
-        finish(&mut tx, node, input.run, completion, maintenance_enabled).await?;
+        finish(
+            &mut tx,
+            node,
+            input.run,
+            completion,
+            maintenance_enabled,
+            key,
+        )
+        .await?;
     }
     q::cleanup(node.node_id).execute(&mut *tx).await?;
     ensure!(
@@ -557,147 +585,179 @@ pub(crate) async fn exchange(
             "cleanup".to_owned(),
             "integrity".to_owned(),
             "sweep".to_owned(),
+            "rewrite".to_owned(),
         ]
     };
-    let task = queries::claim_task(
-        input.class as i32,
-        &[],
-        Some(node.node_id),
-        token,
-        session.draining,
-        &allowed,
-        Some(false),
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
     let mut plan = None;
     let mut encrypted = None;
     let mut assigned = None;
-    if let Some(task) = task {
-        let (policy, detail, parent) = q::task(task, token, node.node_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let storage: Uuid = detail["storage_id"]
-            .as_str()
-            .context("work storage is missing")?
-            .parse()?;
-        let profile = queries::storage_profile(storage)
-            .fetch_one(&mut *tx)
-            .await?;
-        let record = queries::node_read_storages(&[storage])
-            .fetch_one(&mut *tx)
-            .await?;
-        ensure!(record.r#type == "s3", Error::SourceUnavailable);
-        if permits(
-            &mut tx,
-            node.node_id,
+    for _ in 0..work::MAX_ITEMS {
+        let task = queries::claim_task(
+            input.class as i32,
+            &[],
+            Some(node.node_id),
             token,
-            maintenance,
-            &profile,
-            policy == "integrity",
+            session.draining,
+            &allowed,
+            Some(false),
         )
-        .await?
-        {
-            let selected = if policy == "sweep" && detail["dry_run"] == false && !sweep_barrier {
-                // A sweep queued after the shared mode lock needs a new exclusive admission.
-                None
-            } else if policy == "sweep" {
-                sweep::prepare(
-                    &mut tx,
-                    Execution { id: task, token },
-                    detail,
-                    &profile,
-                    &record.prefix,
-                    input.max_items,
-                    maintenance_enabled,
-                )
-                .await?
-                .map(|plan| (plan, vec![]))
-            } else if policy == "integrity" && detail.get("source_operation").is_none() {
-                audit::prepare(
-                    &mut tx,
-                    Execution { id: task, token },
-                    &detail,
-                    &profile,
-                    input.max_items,
-                    key,
-                )
-                .await?
-            } else if policy == "integrity" {
-                sources::prepare(
-                    &mut tx,
-                    node,
-                    Execution { id: task, token },
-                    &detail,
-                    &profile,
-                    key,
-                )
-                .await?
-            } else {
-                Some((
-                    collect(&mut tx, storage, input.max_items, &profile, policy == "gc").await?,
-                    vec![],
-                ))
-            };
-            if let Some((value, keys)) = selected {
-                let mut idle = false;
-                if let work::Plan::Collect {
-                    items,
-                    metadata_count,
-                    ..
-                } = &value
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(task) = task {
+            if input.class != 0 {
+                release_task_inputs(&mut tx, task).await?;
+            }
+            let (policy, detail, parent) = q::task(task, token, node.node_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            let storage: Uuid = detail["storage_id"]
+                .as_str()
+                .context("work storage is missing")?
+                .parse()?;
+            let profile = queries::storage_profile(storage)
+                .fetch_one(&mut *tx)
+                .await?;
+            let record = queries::node_read_storages(&[storage])
+                .fetch_one(&mut *tx)
+                .await?;
+            ensure!(record.r#type == "s3", Error::SourceUnavailable);
+            if permits(
+                &mut tx,
+                node.node_id,
+                token,
+                maintenance,
+                &profile,
+                policy == "integrity",
+            )
+            .await?
+            {
+                let selected = if policy == "sweep" && detail["dry_run"] == false && !sweep_barrier
                 {
-                    if *metadata_count > 0 {
-                        q::metadata_progress(task, token, *metadata_count as i64)
+                    // A sweep queued after the shared mode lock needs a new exclusive admission.
+                    None
+                } else if policy == "sweep" {
+                    sweep::prepare(
+                        &mut tx,
+                        Execution { id: task, token },
+                        detail,
+                        &profile,
+                        &record.prefix,
+                        input.max_items,
+                        maintenance_enabled,
+                    )
+                    .await?
+                    .map(|plan| (plan, vec![]))
+                } else if policy == "rewrite" {
+                    rewrite::prepare(
+                        &mut tx,
+                        Execution { id: task, token },
+                        &detail,
+                        &profile,
+                        input.max_items,
+                        key,
+                    )
+                    .await?
+                } else if policy == "integrity" && detail.get("source_operation").is_none() {
+                    audit::prepare(
+                        &mut tx,
+                        Execution { id: task, token },
+                        &detail,
+                        &profile,
+                        input.max_items,
+                        key,
+                    )
+                    .await?
+                } else if policy == "integrity" {
+                    sources::prepare(
+                        &mut tx,
+                        node,
+                        Execution { id: task, token },
+                        &detail,
+                        &profile,
+                        key,
+                    )
+                    .await?
+                } else {
+                    Some((
+                        collect(&mut tx, storage, input.max_items, &profile, policy == "gc")
+                            .await?,
+                        vec![],
+                    ))
+                };
+                if let Some((value, keys)) = selected {
+                    let mut idle = false;
+                    if let work::Plan::Collect {
+                        items,
+                        metadata_count,
+                        ..
+                    } = &value
+                    {
+                        if *metadata_count > 0 {
+                            q::metadata_progress(task, token, *metadata_count as i64)
+                                .execute(&mut *tx)
+                                .await?;
+                        }
+                        idle = items.is_empty() && *metadata_count == 0;
+                    }
+                    if idle {
+                        q::finish(task, token, 0, true, None)
+                            .execute(&mut *tx)
+                            .await?;
+                    } else {
+                        let material = work::Materials {
+                            storage: read::Storage {
+                                connection: crate::storage::model::Connection::unprotect(
+                                    &record, key,
+                                )?,
+                                revision: profile.revision,
+                                profile,
+                            },
+                            keys,
+                        };
+                        encrypted = Some(codec::protect(
+                            &serde_json::to_vec(&material)?,
+                            key,
+                            token.as_bytes(),
+                        )?);
+                        q::task_lease(task, token).execute(&mut *tx).await?;
+                        assigned = Some(task);
+                        plan = Some(value);
+                    }
+                } else {
+                    queries::requeue_owned_task(task, token)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                if assigned.is_none() {
+                    queries::release_storage_permit(token)
+                        .execute(&mut *tx)
+                        .await?;
+                    queries::release_storage_permit(maintenance)
+                        .execute(&mut *tx)
+                        .await?;
+                    if let Some(parent) = parent {
+                        queries::update_parent_progress(parent)
                             .execute(&mut *tx)
                             .await?;
                     }
-                    idle = items.is_empty() && *metadata_count == 0;
-                }
-                if idle {
-                    q::finish(task, token, 0, true, None)
-                        .execute(&mut *tx)
-                        .await?;
-                } else {
-                    let material = work::Materials {
-                        storage: read::Storage {
-                            connection: crate::storage::model::Connection::unprotect(&record, key)?,
-                            revision: profile.revision,
-                            profile,
-                        },
-                        keys,
-                    };
-                    encrypted = Some(codec::protect(
-                        &serde_json::to_vec(&material)?,
-                        key,
-                        token.as_bytes(),
-                    )?);
-                    q::task_lease(task, token).execute(&mut *tx).await?;
-                    assigned = Some(task);
-                    plan = Some(value);
                 }
             } else {
                 queries::requeue_owned_task(task, token)
                     .execute(&mut *tx)
                     .await?;
             }
-            if assigned.is_none() {
-                queries::release_storage_permit(token)
-                    .execute(&mut *tx)
-                    .await?;
-                queries::release_storage_permit(maintenance)
-                    .execute(&mut *tx)
-                    .await?;
-                if let Some(parent) = parent {
-                    queries::update_parent_progress(parent)
-                        .execute(&mut *tx)
-                        .await?;
-                }
-            }
-        } else {
-            queries::requeue_owned_task(task, token)
-                .execute(&mut *tx)
+        }
+
+        if assigned.is_some() || task.is_none() {
+            break;
+        }
+        let terminal: bool =
+            sqlx::query_scalar("SELECT state IN ('completed','failed') FROM tasks WHERE id=$1")
+                .bind(task.unwrap())
+                .fetch_one(&mut *tx)
                 .await?;
+        if !terminal {
+            break;
         }
     }
 

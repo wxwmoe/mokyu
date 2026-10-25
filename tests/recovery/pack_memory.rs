@@ -112,6 +112,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
         &storage.compression,
         Strategy::Never,
         false,
+        None,
     )?;
     sqlx::query("INSERT INTO packs(id,location_id,storage_id,encryption_algorithm,raw_size,stored_size,digest,member_count,state,pack_fingerprint) VALUES(?,?,?,'none',?,?,?,2,'ready','{}')")
         .bind(pack.id).bind(pack.location_id).bind(store_id).bind(pack.raw_size)

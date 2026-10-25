@@ -2126,6 +2126,7 @@ impl Storage {
                 &pool,
                 strategy,
                 should_try && compression_enabled,
+                None,
             )
         })
         .await?

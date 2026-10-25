@@ -70,6 +70,24 @@ pub(crate) struct ListedObject {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "payload", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Rewrite {
+    Chunk {
+        location: Uuid,
+        source: crate::content::codec::Chunk,
+        target: crate::content::codec::Chunk,
+    },
+    Pack {
+        location: Uuid,
+        source: crate::content::pack::Pack,
+        target: crate::content::pack::Pack,
+        members: Vec<Member>,
+        current: Vec<super::Id>,
+        cursor: super::Id,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
     Collect {
@@ -102,6 +120,10 @@ pub(crate) enum Plan {
         before: DateTime<Utc>,
         items: Vec<ListedObject>,
     },
+    Rewrite {
+        storage: Uuid,
+        items: Vec<Rewrite>,
+    },
 }
 
 impl Plan {
@@ -110,7 +132,8 @@ impl Plan {
             Self::Collect { storage, .. }
             | Self::Audit { storage, .. }
             | Self::SweepScan { storage, .. }
-            | Self::SweepDelete { storage, .. } => *storage,
+            | Self::SweepDelete { storage, .. }
+            | Self::Rewrite { storage, .. } => *storage,
             Self::Inspect { snapshot, .. } => snapshot.scope.storage_id,
         }
     }
@@ -119,11 +142,24 @@ impl Plan {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Outcome {
-    Deleted { stored_at: Option<DateTime<Utc>> },
-    Retained { stored_at: DateTime<Utc> },
+    Deleted {
+        stored_at: Option<DateTime<Utc>>,
+    },
+    Retained {
+        stored_at: DateTime<Utc>,
+    },
     Retry,
-    Inspected { code: Option<String> },
-    Listed { items: Vec<ListedObject> },
+    Inspected {
+        code: Option<String>,
+    },
+    Listed {
+        items: Vec<ListedObject>,
+    },
+    Encoded {
+        size: i64,
+        compressed: bool,
+        digest: Option<Vec<u8>>,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -4953,7 +4953,7 @@ pub(super) fn active_block_key(id: Uuid) -> Rows<'static, (String, String)> {
     sqlx::query_as("SELECT name,key_algorithm FROM managed_keys WHERE id=$1 AND purpose='block' AND revoked_at IS NULL").bind(id)
 }
 pub(super) async fn rewrite_loose_candidate(
-    pool: &PgPool,
+    db: impl sqlx::PgExecutor<'_>,
     after: Id,
     job: &RewriteTask,
 ) -> Result<Option<Chunk>> {
@@ -4975,10 +4975,10 @@ pub(super) async fn rewrite_loose_candidate(
             .push_bind(job.shard);
     }
     query.push(" ORDER BY c.id LIMIT 1");
-    Ok(query.build_query_as().fetch_optional(pool).await?)
+    Ok(query.build_query_as().fetch_optional(db).await?)
 }
 pub(super) async fn rewrite_pack_candidate(
-    pool: &PgPool,
+    db: impl sqlx::PgExecutor<'_>,
     after: Id,
     job: &RewriteTask,
 ) -> Result<Option<(Id, Id)>> {
@@ -5000,7 +5000,7 @@ pub(super) async fn rewrite_pack_candidate(
             .push_bind(job.shard);
     }
     query.push(" ORDER BY c.id LIMIT 1");
-    Ok(query.build_query_as().fetch_optional(pool).await?)
+    Ok(query.build_query_as().fetch_optional(db).await?)
 }
 pub(super) fn lock_rewrite_chunk(id: Id) -> Scalar<'static, Option<Id>> {
     sqlx::query_scalar("SELECT pack_id FROM chunks WHERE id=$1 AND state='ready' FOR UPDATE")

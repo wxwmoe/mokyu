@@ -24,7 +24,7 @@ impl Worker {
         })
     }
 
-    pub(crate) async fn drain(&self) -> Result<()> {
+    async fn drain(&self, class: u32) -> Result<()> {
         let snapshot = self.node.background_snapshot()?;
         let mut completion = None;
         let mut previous = Vec::<Arc<Grant>>::new();
@@ -38,7 +38,7 @@ impl Worker {
                     .take()
                     .map(|value: work::Completion| serde_json::to_vec(&value))
                     .transpose()?,
-                class: 0,
+                class,
                 max_items: work::MAX_ITEMS as u32,
                 cached: reads::cached(&held),
             };
@@ -247,6 +247,36 @@ impl Worker {
                             Err(_) => vec![work::Outcome::Retry; count],
                         }
                     }
+                    work::Plan::Rewrite { items, .. } => {
+                        ensure!(items.len() <= work::MAX_ITEMS, "invalid rewrite size");
+                        let keys = Arc::new(reads::keys(&materials)?);
+                        let count = items.len();
+                        let timeout = Duration::from_secs(crate::config::seconds(
+                            &snapshot.runtime().maintenance.max_duration,
+                        )?);
+                        let encoding = async {
+                            let mut outcomes = Vec::with_capacity(count);
+                            for item in items {
+                                snapshot.lease.check()?;
+                                for grant in &grants {
+                                    grant.check()?;
+                                }
+                                outcomes.push(
+                                    self.reader
+                                        .rewrite(backend.clone(), keys.clone(), item)
+                                        .await?,
+                                );
+                            }
+                            #[cfg(feature = "fault-injection")]
+                            crate::faults::point("node-rewrite-stored").await;
+                            Ok::<_, anyhow::Error>(outcomes)
+                        };
+                        tokio::time::timeout(timeout, encoding)
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .unwrap_or_else(|| vec![work::Outcome::Retry; count])
+                    }
                     work::Plan::SweepScan {
                         after,
                         limit,
@@ -304,18 +334,25 @@ impl Worker {
     }
 
     pub(crate) async fn run(self) -> Result<()> {
+        tokio::try_join!(self.run_class(0), self.run_class(1), self.run_class(2))?;
+        Ok(())
+    }
+
+    async fn run_class(&self, class: u32) -> Result<()> {
         let mut events = self.node.subscribe();
         loop {
-            tokio::select! {
-                _=self.node.work.notified()=>{},
-                result=events.changed()=>{
-                    if result.is_err() || events.borrow().phase==super::Phase::Stopped {return Ok(());}
-                    continue;
-                }
+            let state = events.borrow_and_update().clone();
+            if state.phase == super::Phase::Stopped {
+                return Ok(());
             }
-            if let Err(error) = self.drain().await {
-                tracing::debug!(%error,"background work postponed");
+            if state.work_pending
+                && let Err(error) = self.drain(class).await
+            {
+                tracing::debug!(%error,class,"background work postponed");
                 tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            if events.changed().await.is_err() {
+                return Ok(());
             }
         }
     }

@@ -7,6 +7,8 @@ mod audit;
 mod cleanup;
 #[path = "node_inspection.rs"]
 mod inspection;
+#[path = "node_rewrite.rs"]
+mod rewrite;
 #[path = "node_sweep.rs"]
 mod sweep;
 
@@ -509,5 +511,6 @@ pub(super) async fn check(
         bucket,
     )
     .await?;
+    rewrite::check(backend, peer, &other, key, other_session.run, admin).await?;
     Ok(())
 }

@@ -99,6 +99,7 @@ pub(crate) struct State {
     pub(crate) snapshot: Option<Arc<Snapshot>>,
     pub(crate) maintenance: bool,
     pub(crate) draining: bool,
+    pub(crate) work_pending: bool,
 }
 
 pub(crate) struct NodeContext {
@@ -109,7 +110,6 @@ pub(crate) struct NodeContext {
     pub(crate) resources: Arc<resources::Resources>,
     pub(crate) observations: observations::Reports,
     pub(crate) native_work: tokio::sync::Notify,
-    pub(crate) work: tokio::sync::Notify,
     pub(crate) statistics: crate::status::stats::Statistics,
     boot: Uuid,
     current: watch::Sender<State>,
@@ -145,7 +145,6 @@ impl NodeContext {
             resources: Arc::new(resources::Resources::default()),
             observations: observations::Reports::new(),
             native_work: tokio::sync::Notify::new(),
-            work: tokio::sync::Notify::new(),
             statistics: crate::status::stats::Statistics::default(),
             boot: Uuid::new_v4(),
             current: watch::channel(State {
@@ -155,6 +154,7 @@ impl NodeContext {
                 snapshot: None,
                 maintenance: false,
                 draining: false,
+                work_pending: false,
             })
             .0,
             mode: watch::channel(Mode::Running).0,
