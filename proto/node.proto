@@ -56,6 +56,50 @@ service NodeObjects {
 service NodeMultipart {
   rpc CreateMultipart(CreateMultipartRequest) returns (MultipartReply);
   rpc AbortMultipart(AbortMultipartRequest) returns (MultipartReply);
+  rpc BeginComplete(BeginCompleteRequest) returns (WriteReply);
+  rpc ReadComplete(ReadCompleteRequest) returns (CompleteSources);
+  rpc CompleteStatus(CompleteStatusRequest) returns (CompleteState);
+}
+
+message CompleteStatusRequest {
+  Run run = 1;
+  string access_key = 2;
+  optional uint64 credential_revision = 3;
+  string bucket = 4;
+  string key = 5;
+  string upload_id = 6;
+  string manifest_hash = 7;
+}
+
+message CompleteState {
+  WritePhase phase = 1;
+  bytes summary_json = 2;
+}
+
+message BeginCompleteRequest {
+  Run run = 1;
+  string operation_id = 2;
+  string access_key = 3;
+  optional uint64 credential_revision = 4;
+  string bucket = 5;
+  string key = 6;
+  bytes manifest_json = 7;
+  repeated Cached cached = 8;
+}
+
+message ReadCompleteRequest {
+  Run run = 1;
+  string operation_id = 2;
+  uint32 first = 3;
+  repeated string read_operations = 4;
+  repeated Cached cached = 5;
+  repeated string shared_permits = 6;
+}
+
+message CompleteSources {
+  uint32 first = 1;
+  optional uint32 next = 2;
+  repeated ReadReply parts = 3;
 }
 
 message CreateMultipartRequest {
@@ -313,6 +357,7 @@ enum WritePhase {
   WRITE_ABORTED = 2;
   WRITE_EXPIRED = 3;
   WRITE_PUBLISHED = 4;
+  WRITE_BUSY = 5;
 }
 
 message WriteReply {
@@ -326,6 +371,7 @@ message WriteReply {
   string bucket_id = 8;
   bool copy_references = 9;
   optional string checksum_algorithm = 10;
+  optional bytes completion_json = 11;
 }
 
 // Suspicions request durable backend verification; they never prove corruption.

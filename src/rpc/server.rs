@@ -71,7 +71,7 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     )
     .add_service(
         NodeMultipartServer::new(service.clone())
-            .max_decoding_message_size(super::read::REQUEST_LIMIT)
+            .max_decoding_message_size(model::node_complete::REQUEST_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
@@ -177,7 +177,7 @@ fn identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
     Ok(node)
 }
 
-fn failure(error: anyhow::Error) -> Status {
+pub(super) fn failure(error: anyhow::Error) -> Status {
     use model::Error;
     let mut status = match model::error(&error) {
         Some(Error::NodeAuthentication) => {
@@ -240,9 +240,11 @@ fn failure(error: anyhow::Error) -> Status {
                 }
                 s3s::S3ErrorCode::InvalidArgument
                 | s3s::S3ErrorCode::InvalidRequest
-                | s3s::S3ErrorCode::EntityTooLarge => {
-                    Status::invalid_argument("invalid node request")
-                }
+                | s3s::S3ErrorCode::EntityTooLarge
+                | s3s::S3ErrorCode::EntityTooSmall
+                | s3s::S3ErrorCode::InvalidPart
+                | s3s::S3ErrorCode::InvalidPartOrder
+                | s3s::S3ErrorCode::BadDigest => Status::invalid_argument("invalid node request"),
                 _ => Status::unavailable("control operation is unavailable"),
             }
         }
@@ -268,6 +270,10 @@ fn failure(error: anyhow::Error) -> Status {
                 s3s::S3ErrorCode::InvalidArgument => Some("InvalidArgument"),
                 s3s::S3ErrorCode::InvalidRequest => Some("InvalidRequest"),
                 s3s::S3ErrorCode::EntityTooLarge => Some("EntityTooLarge"),
+                s3s::S3ErrorCode::EntityTooSmall => Some("EntityTooSmall"),
+                s3s::S3ErrorCode::InvalidPart => Some("InvalidPart"),
+                s3s::S3ErrorCode::InvalidPartOrder => Some("InvalidPartOrder"),
+                s3s::S3ErrorCode::BadDigest => Some("BadDigest"),
                 _ => None,
             }),
     };
@@ -843,6 +849,61 @@ impl NodeSessions for Service {
 
 #[tonic::async_trait]
 impl NodeMultipart for Service {
+    async fn complete_status(
+        &self,
+        request: Request<wire::CompleteStatusRequest>,
+    ) -> Result<Response<wire::CompleteState>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::multipart::status(request.into_inner())?;
+        let (phase, summary) = bounded(self.app.cluster().map_err(failure)?.completion_status(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        let phase = match phase {
+            model::node_write::Phase::Published => wire::WritePhase::WritePublished,
+            model::node_write::Phase::Busy => wire::WritePhase::WriteBusy,
+            _ => wire::WritePhase::WriteExpired,
+        } as i32;
+        Ok(Response::new(wire::CompleteState {
+            phase,
+            summary_json: serde_json::to_vec(&summary)
+                .map_err(|_| Status::internal("invalid completion result"))?,
+        }))
+    }
+    async fn begin_complete(
+        &self,
+        request: Request<wire::BeginCompleteRequest>,
+    ) -> Result<Response<wire::WriteReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::multipart::begin_complete(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.begin_write(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-completion-started").await;
+        Ok(Response::new(super::write::reply(reply)?))
+    }
+
+    async fn read_complete(
+        &self,
+        request: Request<wire::ReadCompleteRequest>,
+    ) -> Result<Response<wire::CompleteSources>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::multipart::sources(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.complete_sources(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(super::multipart::source_batch(reply)?))
+    }
+
     async fn create_multipart(
         &self,
         request: Request<wire::CreateMultipartRequest>,

@@ -14,6 +14,8 @@ use anyhow::Result;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
+#[path = "node_completion.rs"]
+mod completion;
 #[path = "node_parts.rs"]
 mod parts;
 
@@ -124,6 +126,8 @@ async fn postgres_node_multipart_replays_admission_and_cancellation() -> Result<
         revision,
     )
     .await?;
+
+    completion::check(&backend, &peer, &node, &key, &session, bucket, revision).await?;
 
     let intent = Intent {
         access: "writer".into(),

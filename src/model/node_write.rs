@@ -20,6 +20,7 @@ pub(crate) struct Intent {
     pub size: Option<i64>,
     pub copy_read: Option<Uuid>,
     pub part: Option<Part>,
+    pub completion: Option<super::node_complete::Manifest>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -54,12 +55,24 @@ impl Intent {
                 !part.upload.is_nil()
                     && (1..=10000).contains(&part.number)
                     && self.copy_read.is_none()
+                    && self.completion.is_none()
                     && !self.public
                     && self.metadata.as_object().unwrap().is_empty()
                     && self.size.is_none_or(|size| size <= MAX_PART_BYTES),
                 "invalid multipart write"
             );
             crate::upload::multipart::checksum_type(part.algorithm.as_deref(), None)?;
+        }
+        if let Some(completion) = &self.completion {
+            ensure!(
+                self.part.is_none()
+                    && self.copy_read.is_none()
+                    && !self.public
+                    && self.metadata.as_object().unwrap().is_empty()
+                    && self.size.is_none(),
+                "invalid completion write"
+            );
+            completion.validate()?;
         }
         let metadata: crate::app::Metadata = serde_json::from_value(self.metadata.clone())?;
         ensure!(
@@ -160,6 +173,7 @@ pub(crate) struct Lookup {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
     Active,
+    Busy,
     Aborted,
     Expired,
     Published,
@@ -176,6 +190,7 @@ pub(crate) struct Reply {
     pub published: Option<Published>,
     pub copy_references: bool,
     pub checksum_algorithm: Option<String>,
+    pub completion: Option<super::node_complete::Summary>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -297,6 +312,7 @@ mod tests {
             credential_revision: 1,
             copy_read: None,
             part: None,
+            completion: None,
             bucket: "bucket".into(),
             key: "object".into(),
             metadata: serde_json::json!({"content_type":"text/plain","user":{"b":"2","a":"1"}}),

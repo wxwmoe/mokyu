@@ -436,6 +436,44 @@ impl Reads {
         Ok(prepared)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn internal(
+        &self,
+        run: Arc<RunLease>,
+        memory: Arc<OwnedSemaphorePermit>,
+        mut reply: wire::ReadReply,
+        declared: Held,
+        started: Instant,
+        buffers: Arc<Semaphore>,
+    ) -> Result<Prepared> {
+        let grants = self.node.resources.adopt(&run, &reply.grants, started)?;
+        let materials = {
+            let _epoch = self.public_epoch.lock().unwrap();
+            self.cache.apply(
+                self.node.client.identity.deployment_id,
+                declared,
+                std::mem::take(&mut reply.materials),
+            )?
+        };
+        let prepared = Prepared {
+            reply,
+            run,
+            materials,
+            grants,
+            memory,
+            buffers,
+            limits: (256, read::TARGET_BYTES as u32),
+            cached_body: None,
+            route: [0; 32],
+            capture: None,
+            public_generation: None,
+            started: started.into_std(),
+            verify: true,
+        };
+        prepared.check()?;
+        Ok(prepared)
+    }
+
     pub(super) async fn window(
         &self,
         previous: Arc<Prepared>,

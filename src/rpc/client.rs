@@ -271,6 +271,30 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn begin_complete(
+        &self,
+        input: wire::BeginCompleteRequest,
+    ) -> Result<wire::WriteReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/BeginComplete")
+            .await
+    }
+
+    pub(crate) async fn read_complete(
+        &self,
+        input: wire::ReadCompleteRequest,
+    ) -> Result<wire::CompleteSources, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/ReadComplete")
+            .await
+    }
+
+    pub(crate) async fn complete_status(
+        &self,
+        input: wire::CompleteStatusRequest,
+    ) -> Result<wire::CompleteState, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/CompleteStatus")
+            .await
+    }
+
     pub(crate) async fn abort_multipart(
         &self,
         input: wire::AbortMultipartRequest,
@@ -397,7 +421,9 @@ impl Client {
         I: prost::Message + Default + Clone + 'static,
         O: prost::Message + Default + 'static,
     {
-        let limit = if path == "/mokyu.node.v1.NodeObjects/ChangeObjects" {
+        let limit = if path == "/mokyu.node.v1.NodeMultipart/BeginComplete" {
+            crate::model::node_complete::REQUEST_LIMIT
+        } else if path == "/mokyu.node.v1.NodeObjects/ChangeObjects" {
             crate::model::node_object::REQUEST_LIMIT
         } else {
             super::read::REQUEST_LIMIT

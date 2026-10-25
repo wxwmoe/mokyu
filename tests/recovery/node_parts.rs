@@ -45,6 +45,7 @@ pub(super) async fn check(
         operation,
         cached: vec![],
         intent: write::Intent {
+            completion: None,
             access: intent.access.clone(),
             credential_revision: revision,
             bucket: intent.bucket.clone(),

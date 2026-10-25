@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0081.
+-- Generated from the complete postgres migration chain through 0082.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -843,6 +843,26 @@ CREATE TABLE public.node_boots (
     CONSTRAINT node_boots_credential_generation_check CHECK ((credential_generation > 0))
 );
 
+CREATE TABLE public.node_completion_parts (
+    upload_id uuid NOT NULL,
+    ordinal integer NOT NULL,
+    part_number integer NOT NULL,
+    stream_id uuid NOT NULL,
+    size bigint NOT NULL,
+    etag text NOT NULL,
+    checksums jsonb NOT NULL,
+    CONSTRAINT node_completion_parts_ordinal_check CHECK (((ordinal >= 0) AND (ordinal <= 9999))),
+    CONSTRAINT node_completion_parts_part_number_check CHECK (((part_number >= 1) AND (part_number <= 10000))),
+    CONSTRAINT node_completion_parts_size_check CHECK ((size >= 0))
+);
+
+CREATE TABLE public.node_completions (
+    upload_id uuid NOT NULL,
+    manifest_hash text NOT NULL,
+    conditions jsonb NOT NULL,
+    summary jsonb NOT NULL
+);
+
 CREATE TABLE public.node_multipart_operations (
     node_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -1026,11 +1046,13 @@ CREATE TABLE public.node_writes (
     upload_id uuid,
     part_number integer,
     checksum_algorithm text,
+    completion_upload uuid,
     CONSTRAINT node_writes_check CHECK (((state = 'active'::text) = (completed_at IS NULL))),
     CONSTRAINT node_writes_check1 CHECK (((publish_hash IS NULL) = (result IS NULL))),
     CONSTRAINT node_writes_check2 CHECK (((state = 'published'::text) = (result IS NOT NULL))),
     CONSTRAINT node_writes_check3 CHECK (((upload_id IS NULL) = (part_number IS NULL))),
     CONSTRAINT node_writes_check4 CHECK (((upload_id IS NULL) OR (copy_source IS NULL))),
+    CONSTRAINT node_writes_check5 CHECK (((completion_upload IS NULL) OR ((upload_id IS NULL) AND (copy_source IS NULL)))),
     CONSTRAINT node_writes_copy_source_check CHECK (((copy_source IS NULL) OR (jsonb_typeof(copy_source) = 'object'::text))),
     CONSTRAINT node_writes_credential_generation_check CHECK ((credential_generation > 0)),
     CONSTRAINT node_writes_expected_size_check CHECK ((expected_size >= 0)),
@@ -1891,6 +1913,15 @@ ALTER TABLE ONLY public.multipart_files
 ALTER TABLE ONLY public.node_boots
     ADD CONSTRAINT node_boots_pkey PRIMARY KEY (node_id, boot_id);
 
+ALTER TABLE ONLY public.node_completion_parts
+    ADD CONSTRAINT node_completion_parts_pkey PRIMARY KEY (upload_id, ordinal);
+
+ALTER TABLE ONLY public.node_completion_parts
+    ADD CONSTRAINT node_completion_parts_upload_id_part_number_key UNIQUE (upload_id, part_number);
+
+ALTER TABLE ONLY public.node_completions
+    ADD CONSTRAINT node_completions_pkey PRIMARY KEY (upload_id);
+
 ALTER TABLE ONLY public.node_multipart_operations
     ADD CONSTRAINT node_multipart_operations_pkey PRIMARY KEY (node_id, operation_id);
 
@@ -1898,7 +1929,7 @@ ALTER TABLE ONLY public.node_object_changes
     ADD CONSTRAINT node_object_changes_pkey PRIMARY KEY (node_id, operation_id);
 
 ALTER TABLE ONLY public.node_read_permits
-    ADD CONSTRAINT node_read_permits_pkey PRIMARY KEY (token);
+    ADD CONSTRAINT node_read_permits_pkey PRIMARY KEY (token, read_id);
 
 ALTER TABLE ONLY public.node_read_sources
     ADD CONSTRAINT node_read_sources_pkey PRIMARY KEY (window_id, kind, location_id);
@@ -2525,6 +2556,12 @@ ALTER TABLE ONLY public.multipart_files
 
 ALTER TABLE ONLY public.node_boots
     ADD CONSTRAINT node_boots_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_completion_parts
+    ADD CONSTRAINT node_completion_parts_upload_id_fkey FOREIGN KEY (upload_id) REFERENCES public.node_completions(upload_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_completions
+    ADD CONSTRAINT node_completions_upload_id_fkey FOREIGN KEY (upload_id) REFERENCES public.uploads(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_multipart_operations
     ADD CONSTRAINT node_multipart_operations_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;

@@ -9181,6 +9181,7 @@ async fn node_read_permits(
     node: Uuid,
     read: Uuid,
     storages: &[crate::model::node_read::Storage],
+    shared: &mut std::collections::BTreeMap<Uuid, read::Grant>,
 ) -> Result<Vec<crate::model::node_read::Grant>> {
     use crate::model::{
         Error,
@@ -9200,6 +9201,11 @@ async fn node_read_permits(
             .await?
         {
             permit
+        } else if let Some(grant) = shared.get(&id) {
+            queries::node_read_own_permit(read, grant.id)
+                .execute(&mut *db)
+                .await?;
+            (grant.id, grant.valid_for_ms as i64)
         } else {
             queries::expire_storage_permits(id, "read")
                 .execute(&mut *db)
@@ -9227,12 +9233,14 @@ async fn node_read_permits(
                 .await?;
             (token, 60_000)
         };
-        grants.push(Grant {
+        let grant = Grant {
             r#type: GrantType::StorageRead,
             id: token,
             valid_for_ms: remaining as u64,
             storage: Some(id),
-        });
+        };
+        shared.entry(id).or_insert_with(|| grant.clone());
+        grants.push(grant);
     }
     Ok(grants)
 }
@@ -9271,7 +9279,7 @@ pub(super) async fn open_node_read(
 ) -> Result<crate::model::node_read::Reply> {
     use crate::model::{
         Error,
-        node_read::{self as read, Grant, GrantType, MaterialType, Outcome},
+        node_read::{self as read, MaterialType, Outcome},
     };
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
@@ -9363,12 +9371,37 @@ pub(super) async fn open_node_read(
         tx.commit().await?;
         return Ok(reply);
     }
+    let reply = protect_node_read(
+        &mut tx,
+        state,
+        key,
+        &input,
+        &stream,
+        reply,
+        &mut Default::default(),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(reply)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn protect_node_read(
+    tx: &mut Transaction<'_, Postgres>,
+    state: &NodeState,
+    key: &Key,
+    input: &read::Query,
+    stream: &crate::app::StoredStream,
+    mut reply: read::Reply,
+    shared: &mut std::collections::BTreeMap<Uuid, read::Grant>,
+) -> Result<read::Reply> {
+    use read::{Grant, GrantType, Outcome};
     queries::lock_staging(format!("mokyu:node-read:{}", state.node_id))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     let hash = input.digest()?;
     let previous = queries::node_read_existing(state, input.run, input.operation)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     let start = reply.offset as i64;
     let end = (reply.offset + reply.length) as i64;
@@ -9385,7 +9418,7 @@ pub(super) async fn open_node_read(
     } else {
         ensure!(
             queries::node_read_count(state.node_id)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?
                 < read::READ_LIMIT,
             Error::NodeReadBusy
@@ -9395,9 +9428,9 @@ pub(super) async fn open_node_read(
         let (id, remaining) = if let Some(previous) = previous {
             (previous.read_id, previous.valid_for_ms)
         } else {
-            let id = create_read_lease(&mut tx, stream.id, read::READ_SECONDS).await?;
-            queries::node_read_insert(state, &input, id, &stream, start, end, &hash)
-                .execute(&mut *tx)
+            let id = create_read_lease(tx, stream.id, read::READ_SECONDS).await?;
+            queries::node_read_insert(state, input, id, stream, start, end, &hash)
+                .execute(&mut **tx)
                 .await?;
             (id, read::READ_SECONDS * 1000)
         };
@@ -9408,14 +9441,13 @@ pub(super) async fn open_node_read(
             valid_for_ms: remaining as u64,
             storage: None,
         });
-        require_node_run(&mut tx, state, input.run, false).await?;
+        require_node_run(tx, state, input.run, false).await?;
         ensure!(reply.bytes() <= input.max_bytes, Error::NodeReadLimit);
-        tx.commit().await?;
         return Ok(reply);
     }
     let existing = if let Some(previous) = &previous {
         queries::node_read_window(previous.read_id, start)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
     } else {
         None
@@ -9424,16 +9456,7 @@ pub(super) async fn open_node_read(
     let mut mapping = if let Some((_, mapping)) = &existing {
         mapping.0.clone()
     } else {
-        match node_read_mapping(
-            &mut tx,
-            state.node_id,
-            &stream,
-            start,
-            end,
-            input.max_items,
-            None,
-        )
-        .await
+        match node_read_mapping(tx, state.node_id, stream, start, end, input.max_items, None).await
         {
             Ok(mapping) => mapping,
             Err(error) if crate::model::error(&error) == Some(Error::SourceUnavailable) => {
@@ -9451,7 +9474,7 @@ pub(super) async fn open_node_read(
     let storages = loop {
         reply.materials.truncate(base);
         let storages = node_read_materials(
-            &mut tx,
+            tx,
             state.deployment_id,
             key,
             &mapping,
@@ -9475,18 +9498,18 @@ pub(super) async fn open_node_read(
     let (id, remaining) = if let Some(previous) = previous {
         (previous.read_id, previous.valid_for_ms)
     } else {
-        let id = create_read_lease(&mut tx, stream.id, read::READ_SECONDS).await?;
-        queries::node_read_insert(state, &input, id, &stream, start, end, &hash)
-            .execute(&mut *tx)
+        let id = create_read_lease(tx, stream.id, read::READ_SECONDS).await?;
+        queries::node_read_insert(state, input, id, stream, start, end, &hash)
+            .execute(&mut **tx)
             .await?;
         (id, read::READ_SECONDS * 1000)
     };
     let window = if let Some((id, _)) = existing {
         id
     } else {
-        node_read_save_window(&mut tx, id, &mapping).await?
+        node_read_save_window(tx, id, &mapping).await?
     };
-    reply.grants = node_read_permits(&mut tx, state.node_id, id, &storages).await?;
+    reply.grants = node_read_permits(tx, state.node_id, id, &storages, shared).await?;
     reply.grants.extend([
         Grant {
             r#type: GrantType::Read,
@@ -9510,15 +9533,14 @@ pub(super) async fn open_node_read(
             end,
         });
     }
-    require_node_run(&mut tx, state, input.run, false).await?;
+    require_node_run(tx, state, input.run, false).await?;
     ensure!(
         queries::node_read_owned(state, input.run, id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .is_some(),
         Error::NodeExpired
     );
-    tx.commit().await?;
     Ok(reply)
 }
 
@@ -9729,7 +9751,14 @@ pub(super) async fn node_read_window(
     } else {
         node_read_save_window(&mut tx, owned.read_id, &mapping).await?
     };
-    reply.grants = node_read_permits(&mut tx, state.node_id, owned.read_id, &storages).await?;
+    reply.grants = node_read_permits(
+        &mut tx,
+        state.node_id,
+        owned.read_id,
+        &storages,
+        &mut Default::default(),
+    )
+    .await?;
     reply.grants.push(Grant {
         r#type: GrantType::Window,
         id: window,
@@ -9754,6 +9783,282 @@ pub(super) async fn node_read_window(
     );
     tx.commit().await?;
     Ok(reply)
+}
+
+pub(super) async fn node_completion_status(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_complete::Lookup,
+) -> Result<(write::Phase, crate::model::node_complete::Summary)> {
+    input.validate()?;
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, node, key, false).await?;
+    ensure!(node.role == "data", Error::NodeAuthentication);
+    require_node_run(&mut tx, node, input.run, false).await?;
+    let bucket = queries::node_read_bucket(&crate::model::ReadRoute::Bucket {
+        name: input.bucket,
+        key: input.key.clone(),
+        alias: None,
+    })
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    let authority = Permit::for_action(
+        Principal::Service {
+            access_key: input.access.clone(),
+            revision: input.revision,
+        },
+        bucket.id,
+        Action::Write,
+    );
+    authority.lock(&mut tx).await?;
+    let upload = queries::multipart_upload(input.upload, bucket.id, &input.key, &input.access)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(NoSuchUpload))?;
+    let (state, _, live) = queries::completion_state(upload.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(
+        matches!(state.as_str(), "completing" | "completed"),
+        s3s::s3_error!(NoSuchUpload)
+    );
+    let record = queries::node_completion(upload.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(
+        record.manifest_hash == input.hash,
+        s3s::s3_error!(InvalidRequest, "upload has another completion manifest")
+    );
+    let (mut summary, result) = queries::node_completion_summary(upload.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    summary.result = result;
+    tx.commit().await?;
+    Ok((
+        if state == "completed" {
+            write::Phase::Published
+        } else if live {
+            write::Phase::Busy
+        } else {
+            write::Phase::Expired
+        },
+        summary.0,
+    ))
+}
+
+pub(super) async fn node_complete_sources(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_complete::Sources,
+) -> Result<crate::model::node_complete::SourceBatch> {
+    use crate::model::node_complete::{SOURCES, SourceBatch};
+    ensure!(
+        (0..10000).contains(&input.first)
+            && !input.reads.is_empty()
+            && input.reads.len() <= SOURCES,
+        s3s::s3_error!(InvalidArgument)
+    );
+    let unique: HashSet<_> = input.reads.iter().collect();
+    ensure!(
+        unique.len() == input.reads.len() && input.reads.iter().all(|id| !id.is_nil()),
+        s3s::s3_error!(InvalidArgument)
+    );
+    let mut tx = pool.begin().await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
+    require_node_write(&mut tx, &row).await?;
+    let upload = row
+        .completion_upload
+        .ok_or_else(|| s3s::s3_error!(InvalidRequest))?;
+    let record = queries::node_completion(upload).fetch_one(&mut *tx).await?;
+    ensure!(
+        (input.first as usize) < record.summary.parts,
+        s3s::s3_error!(InvalidArgument)
+    );
+    let count = input
+        .reads
+        .len()
+        .min(record.summary.parts - input.first as usize);
+    let streams = queries::node_completion_sources(upload, input.first, count as i64)
+        .fetch_all(&mut *tx)
+        .await?;
+    ensure!(streams.len() == count, Error::SourceUnavailable);
+    ensure!(
+        input.shared_permits.len() <= 16
+            && input.shared_permits.iter().collect::<HashSet<_>>().len()
+                == input.shared_permits.len(),
+        s3s::s3_error!(InvalidArgument)
+    );
+    let shared = queries::node_read_shared_permits(node, input.run, &input.shared_permits)
+        .fetch_all(&mut *tx)
+        .await?;
+    ensure!(
+        shared.len() == input.shared_permits.len(),
+        Error::NodeExpired
+    );
+    let mut shared: std::collections::BTreeMap<_, _> = shared
+        .into_iter()
+        .map(|(id, storage, remaining)| {
+            (
+                storage,
+                read::Grant {
+                    r#type: read::GrantType::StorageRead,
+                    id,
+                    storage: Some(storage),
+                    valid_for_ms: remaining as u64,
+                },
+            )
+        })
+        .collect();
+    ensure!(
+        shared.len() == input.shared_permits.len(),
+        s3s::s3_error!(InvalidArgument)
+    );
+    let mut parts = Vec::with_capacity(count);
+    for (operation, stream) in input.reads.into_iter().zip(streams) {
+        let query = read::Query {
+            run: input.run,
+            operation,
+            route: crate::model::ReadRoute::Bucket {
+                name: format!("completion:{}", input.operation),
+                key: stream.id.to_string(),
+                alias: None,
+            },
+            access: None,
+            head: false,
+            web: false,
+            mapping: true,
+            protection: true,
+            policy: false,
+            headers: Default::default(),
+            overrides: Default::default(),
+            cached: input.cached.clone(),
+            max_items: 16,
+            max_bytes: 128 * 1024,
+            body: None,
+        };
+        let mut reply = read::Reply::new(read::Outcome::Ready);
+        let object = read::Object::from_stream(&stream)?;
+        reply.object = Some(reply.material(
+            node.deployment_id,
+            read::MaterialType::Object,
+            object.id.to_string(),
+            &object,
+            &query.cached,
+        )?);
+        reply.length = stream.size as u64;
+        reply.etag = stream.etag.clone();
+        let reply =
+            protect_node_read(&mut tx, node, key, &query, &stream, reply, &mut shared).await?;
+        ensure!(
+            reply.outcome == read::Outcome::Ready,
+            Error::SourceUnavailable
+        );
+        parts.push(reply);
+    }
+    require_node_write(&mut tx, &row).await?;
+    tx.commit().await?;
+    let next = input.first + count as i32;
+    Ok(SourceBatch {
+        first: input.first,
+        next: ((next as usize) < record.summary.parts).then_some(next),
+        parts,
+    })
+}
+
+async fn prepare_node_completion(
+    tx: &mut Transaction<'_, Postgres>,
+    input: &write::Begin,
+    bucket: Uuid,
+    authority: &Permit,
+    manifest: &crate::model::node_complete::Manifest,
+) -> Result<(
+    crate::model::multipart::Upload,
+    crate::model::node_complete::Summary,
+    bool,
+)> {
+    use crate::model::node_complete::Conditions;
+    let hash = manifest.hash()?;
+    let upload = queries::multipart_upload(
+        manifest.upload,
+        bucket,
+        &input.intent.key,
+        &input.intent.access,
+    )
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| s3s::s3_error!(NoSuchUpload))?;
+    queries::lock_bucket_uploads(bucket)
+        .fetch_one(&mut **tx)
+        .await?;
+    let (state, previous, live) = queries::completion_state(upload.id)
+        .fetch_one(&mut **tx)
+        .await?;
+    ensure!(
+        matches!(state.as_str(), "active" | "completing" | "completed"),
+        s3s::s3_error!(NoSuchUpload)
+    );
+    let upload = queries::multipart_upload(
+        manifest.upload,
+        bucket,
+        &input.intent.key,
+        &input.intent.access,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    let mut summary = if let Some(record) = queries::node_completion(upload.id)
+        .fetch_optional(&mut **tx)
+        .await?
+    {
+        ensure!(
+            record.manifest_hash == hash,
+            s3s::s3_error!(InvalidRequest, "upload has another completion manifest")
+        );
+        record.summary.0
+    } else {
+        ensure!(
+            state == "active" && previous.is_none(),
+            s3s::s3_error!(InvalidRequest, "upload has another completion manifest")
+        );
+        let numbers: Vec<_> = manifest.parts.iter().map(|part| part.number).collect();
+        let selected = queries::node_selected_parts(upload.id, &numbers)
+            .fetch_all(&mut **tx)
+            .await?;
+        let summary = manifest.select(&upload, &selected)?;
+        let conditions = Conditions {
+            if_match: manifest.if_match.clone(),
+            if_none: manifest.if_none.clone(),
+            checksums: manifest.checksums.clone(),
+        };
+        queries::save_node_completion(upload.id, &hash, &conditions, &summary)
+            .execute(&mut **tx)
+            .await?;
+        ensure!(
+            queries::freeze_node_completion(upload.id, &numbers)
+                .execute(&mut **tx)
+                .await?
+                .rows_affected()
+                == selected.len() as u64,
+            Error::OperationAborted
+        );
+        summary
+    };
+    summary.result = upload.result.clone();
+    if !live && state != "completed" {
+        queries::begin_upload_completion(&crate::model::multipart::Completion {
+            authority,
+            upload: upload.id,
+            hash: &hash,
+            token: input.operation,
+            parts: &[],
+            node: None,
+        })
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok((upload, summary, live))
 }
 
 pub(super) async fn begin_node_write(
@@ -9873,7 +10178,34 @@ pub(super) async fn begin_node_write(
         None
     };
     authority.lock(&mut tx).await?;
-    let upload = if let Some(part) = &input.intent.part {
+    let mut completion = None;
+    let upload = if let Some(manifest) = &input.intent.completion {
+        let (upload, summary, live) =
+            prepare_node_completion(&mut tx, &input, bucket.id, &authority, manifest).await?;
+        if live || upload.state == "completed" {
+            let reply = write::Reply {
+                operation: input.operation,
+                bucket: Some(bucket.id),
+                stream: None,
+                phase: if upload.state == "completed" {
+                    write::Phase::Published
+                } else {
+                    write::Phase::Busy
+                },
+                materials: vec![],
+                storage: None,
+                grants: vec![],
+                published: None,
+                copy_references: false,
+                checksum_algorithm: upload.checksum_algorithm.clone(),
+                completion: Some(summary),
+            };
+            tx.commit().await?;
+            return Ok(reply);
+        }
+        completion = Some(summary);
+        Some(upload)
+    } else if let Some(part) = &input.intent.part {
         let upload = queries::multipart_upload(
             part.upload,
             bucket.id,
@@ -9914,14 +10246,22 @@ pub(super) async fn begin_node_write(
             authority,
             bucket: bucket.id,
             key: input.intent.key.clone(),
-            stream_type: if upload.is_some() { "part" } else { "object" }.into(),
+            stream_type: if input.intent.part.is_some() {
+                "part"
+            } else {
+                "object"
+            }
+            .into(),
             metadata: upload.as_ref().map_or_else(
                 || input.intent.metadata.clone(),
                 |upload| upload.metadata.clone(),
             ),
-            public: input.intent.public,
-            claim_object: upload.is_none(),
-            completion: None,
+            public: completion
+                .as_ref()
+                .is_some_and(|_| upload.as_ref().unwrap().public_read)
+                || input.intent.public,
+            claim_object: input.intent.part.is_none(),
+            completion: completion.as_ref().map(|value| value.upload),
             owner: None,
         },
         Some(write::LEASE_SECONDS),
@@ -9963,15 +10303,27 @@ pub(super) async fn begin_node_write(
         .fetch_one(&mut *tx)
         .await?;
     profile.write_durability = None;
-    queries::reserve_quota(
-        stream,
-        input.intent.size.unwrap_or(0),
-        false,
-        input.intent.part.as_ref().map(|part| part.upload),
-        input.intent.part.as_ref().map(|part| part.number),
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    if let Some(completion) = &completion {
+        queries::lock_quota(bucket.id).execute(&mut *tx).await?;
+        ensure!(
+            queries::complete_quota(completion.upload, stream, completion.size)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            "multipart quota reservation is missing"
+        );
+    } else {
+        queries::reserve_quota(
+            stream,
+            input.intent.size.unwrap_or(0),
+            false,
+            input.intent.part.as_ref().map(|part| part.upload),
+            input.intent.part.as_ref().map(|part| part.number),
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+    }
     ensure!(
         queries::insert_node_write(
             state,
@@ -9989,6 +10341,16 @@ pub(super) async fn begin_node_write(
             == 1,
         Error::OperationAborted
     );
+    if let Some(completion) = completion {
+        queries::bind_node_completion(
+            state.node_id,
+            input.operation,
+            completion.upload,
+            completion.size,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
     let owned = queries::node_write(state.node_id, input.operation)
         .fetch_one(&mut *tx)
         .await?;
@@ -10020,6 +10382,17 @@ pub(super) async fn node_write_reply(
     } else {
         write::Phase::Expired
     };
+    let completion = if let Some(upload) = owned.completion_upload {
+        queries::node_completion_summary(upload)
+            .fetch_optional(&mut *db)
+            .await?
+            .map(|(mut summary, result)| {
+                summary.result = result;
+                summary.0
+            })
+    } else {
+        None
+    };
     let mut reply = write::Reply {
         operation: owned.operation_id,
         bucket: owned.bucket_id,
@@ -10030,6 +10403,7 @@ pub(super) async fn node_write_reply(
             .as_ref()
             .is_some_and(|source| source.references(&owned.profile)),
         checksum_algorithm: owned.checksum_algorithm,
+        completion,
         materials: Vec::new(),
         storage: None,
         grants: Vec::new(),
@@ -10081,6 +10455,9 @@ async fn abort_node_writes(
         .await?;
     let streams: Vec<_> = rows.iter().filter_map(|row| row.0).collect();
     let leases: Vec<_> = rows.iter().filter_map(|row| row.1).collect();
+    queries::release_node_completions(&streams)
+        .execute(&mut *db)
+        .await?;
     queries::node_write_release_permits(state, run, &streams, &[])
         .execute(&mut *db)
         .await?;
@@ -10192,6 +10569,15 @@ async fn maintain_node_reads(
                     .fetch_all(&mut *db)
                     .await?,
             );
+            if r#type == GrantType::Write {
+                let accepted: Vec<_> = ids
+                    .into_iter()
+                    .filter(|id| renewed.contains_key(id))
+                    .collect();
+                queries::renew_node_completions(state, run, &accepted)
+                    .execute(&mut *db)
+                    .await?;
+            }
         }
     }
     Ok(resources
@@ -10433,9 +10819,11 @@ pub(super) async fn prepare_node_chunks(
     } else {
         "none".into()
     };
-    queries::reserve_quota(stream, end, false, row.upload_id, row.part_number)
-        .fetch_one(&mut *tx)
-        .await?;
+    if row.completion_upload.is_none() {
+        queries::reserve_quota(stream, end, false, row.upload_id, row.part_number)
+            .fetch_one(&mut *tx)
+            .await?;
+    }
     let unique: BTreeMap<_, _> = input
         .items
         .iter()
@@ -10749,7 +11137,7 @@ pub(super) async fn publish_node_write(
     pool: &PgPool,
     node: &NodeState,
     key: &Key,
-    input: write::Publish,
+    mut input: write::Publish,
 ) -> Result<write::Reply> {
     let hash = input.hash()?;
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
@@ -10776,7 +11164,9 @@ pub(super) async fn publish_node_write(
         ensure!(
             raw.committed
                 && raw.size == input.size
-                && (row.copy_source.is_some() || hex::encode(&raw.digest) == input.etag),
+                && (row.copy_source.is_some()
+                    || row.completion_upload.is_some()
+                    || hex::encode(&raw.digest) == input.etag),
             s3s::s3_error!(IncompleteBody)
         );
     }
@@ -10793,16 +11183,45 @@ pub(super) async fn publish_node_write(
                 == 0,
         s3s::s3_error!(IncompleteBody)
     );
+    let mut sums = serde_json::to_value(&input.checksums)?;
+    let completion = if let Some(upload) = row.completion_upload {
+        let record = queries::node_completion(upload).fetch_one(&mut *tx).await?;
+        ensure!(
+            input.size == record.summary.size
+                && input.etag == record.summary.etag
+                && input.if_match.is_none()
+                && input.if_none.is_none(),
+            s3s::s3_error!(
+                InvalidRequest,
+                "completion result differs from its manifest"
+            )
+        );
+        let parts = queries::node_completion_checksums(upload)
+            .fetch_all(&mut *tx)
+            .await?;
+        sums = crate::model::node_complete::checksums(
+            sums,
+            record.summary.algorithm.as_deref(),
+            record.summary.checksum_type.as_deref(),
+            &parts,
+            &record.conditions.checksums,
+        )?;
+        input.if_match = record.conditions.if_match.clone();
+        input.if_none = record.conditions.if_none.clone();
+        Some((
+            upload,
+            record.manifest_hash,
+            json!({"etag": input.etag, "checksums": sums}),
+            input.operation,
+        ))
+    } else {
+        None
+    };
     ensure!(
-        queries::finish_stream(
-            stream,
-            input.size,
-            &input.etag,
-            serde_json::to_value(&input.checksums)?
-        )
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
+        queries::finish_stream(stream, input.size, &input.etag, sums)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
             == 1,
         Error::OperationAborted
     );
@@ -10843,7 +11262,7 @@ pub(super) async fn publish_node_write(
                 stream,
                 condition(input.if_match)?,
                 condition(input.if_none)?,
-                None
+                completion
             )
             .await?,
             Error::OperationAborted

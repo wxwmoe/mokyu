@@ -9,6 +9,18 @@ use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait ClusterStore: Send + Sync {
+    async fn completion_status(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_complete::Lookup,
+    ) -> Result<(super::node_write::Phase, super::node_complete::Summary)>;
+    async fn complete_sources(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_complete::Sources,
+    ) -> Result<super::node_complete::SourceBatch>;
     async fn prepare_tail(
         &self,
         node: &NodeState,

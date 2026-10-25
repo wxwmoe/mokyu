@@ -15,12 +15,16 @@ use tokio::{
 };
 use uuid::Uuid;
 
+#[path = "completion.rs"]
+mod completion;
+
 const BATCH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OBJECT: i64 = 5 * 1024 * 1024 * 1024;
 
 pub(crate) struct Writes {
     reads: Arc<Reads>,
     slots: Arc<Semaphore>,
+    completions: Arc<Semaphore>,
     io: Arc<Semaphore>,
     parallelism: u32,
 }
@@ -36,6 +40,7 @@ struct Operation {
     backend: Arc<super::body::Backend>,
     copy_references: bool,
     part: bool,
+    limit: u64,
     checksum_algorithm: Option<String>,
 }
 
@@ -133,6 +138,7 @@ impl Writes {
         let budget = reads.node.budget.get().context("node budget missing")?;
         Ok(Self {
             slots: Arc::new(Semaphore::new(budget.upload_concurrency)),
+            completions: Arc::new(Semaphore::new(budget.upload_concurrency)),
             io: Arc::new(Semaphore::new(budget.storage_upload_slots)),
             parallelism: budget.storage_upload_slots.min(2) as u32,
             reads,
@@ -146,7 +152,7 @@ impl Writes {
 
     async fn begin(
         &self,
-        mut request: Request,
+        request: Request,
         mut input: wire::BeginWriteRequest,
     ) -> Result<Operation> {
         let credential = request.authorize(&input.access_key, &input.bucket)?;
@@ -157,9 +163,29 @@ impl Writes {
         input.cached = reads::cached(&held);
         let id = input.operation_id.clone();
         let part = input.part.is_some();
+        let limit = if input.copy_read_id.is_some() {
+            input.size.context("copy size missing")?
+        } else {
+            MAX_OBJECT as u64
+        };
         let node = &self.reads.node;
         let started = Instant::now();
-        let mut reply = node.client.begin_write(input).await?;
+        let reply = node.client.begin_write(input).await?;
+        ensure!(reply.operation_id == id, "invalid write identity");
+        self.accept(request, reply, held, started, part, limit)
+    }
+
+    fn accept(
+        &self,
+        mut request: Request,
+        mut reply: wire::WriteReply,
+        held: reads::Held,
+        started: Instant,
+        part: bool,
+        limit: u64,
+    ) -> Result<Operation> {
+        let node = &self.reads.node;
+        let id = reply.operation_id.clone();
         let grants = node.resources.adopt(&request.run, &reply.grants, started)?;
         ensure!(
             reply.operation_id == id
@@ -181,6 +207,7 @@ impl Writes {
         Ok(Operation {
             copy_references: reply.copy_references,
             part,
+            limit,
             checksum_algorithm: reply.checksum_algorithm,
             bucket: Uuid::parse_str(&reply.bucket_id)?,
             id,
@@ -308,7 +335,7 @@ impl Writes {
         sums: &serde_json::Value,
         if_match: Option<String>,
         if_none: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<wire::WriteReply> {
         operation.check()?;
         let reply = self
             .reads
@@ -331,10 +358,11 @@ impl Writes {
                 && reply.phase == wire::WritePhase::WritePublished as i32
                 && reply
                     .published
+                    .as_ref()
                     .is_some_and(|value| value.size == size && value.etag == etag),
             "invalid publication receipt"
         );
-        Ok(())
+        Ok(reply)
     }
 
     pub(crate) async fn copy(
@@ -422,6 +450,7 @@ impl Writes {
                 if_none,
             )
             .await
+            .map(|_| ())
         }
         .await;
         if result.is_err() {
@@ -543,7 +572,7 @@ impl Writes {
                 .checked_add(data.len() as u64)
                 .context("object length overflow")?;
             ensure!(
-                size <= MAX_OBJECT as u64 && length.is_none_or(|length| size <= length),
+                size <= operation.limit && length.is_none_or(|length| size <= length),
                 s3s::s3_error!(EntityTooLarge)
             );
             for bytes in data.chunks(256 * 1024) {
@@ -708,7 +737,7 @@ impl Writes {
                 .checked_add(data.len() as u64)
                 .context("object length overflow")?;
             ensure!(
-                size <= MAX_OBJECT as u64 && length.is_none_or(|length| size <= length),
+                size <= operation.limit && length.is_none_or(|length| size <= length),
                 s3s::s3_error!(EntityTooLarge)
             );
             check.update(&data);

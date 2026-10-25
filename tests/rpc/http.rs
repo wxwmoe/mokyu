@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Complete,
     Parts,
     Multipart,
     Copy,
@@ -50,6 +51,12 @@ enum HttpCase {
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, frozen multipart sources and real object storage"]
+async fn node_http_complete_freezes_sources_and_recovers_results() -> Result<()> {
+    node_http_reads(HttpCase::Complete).await
 }
 
 #[tokio::test]
@@ -268,6 +275,7 @@ async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()
 }
 
 async fn node_http_reads(case: HttpCase) -> Result<()> {
+    let complete = matches!(case, HttpCase::Complete);
     let parts = matches!(case, HttpCase::Parts);
     let multipart = matches!(case, HttpCase::Multipart);
     let copy = matches!(case, HttpCase::Copy);
@@ -386,7 +394,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if parts {
+    if complete {
+        fixture("http-complete").await?;
+    } else if parts {
         fixture("http-parts").await?;
     } else if multipart {
         fixture("http-multipart").await?;
@@ -476,7 +486,21 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-pending").await?;
         fixture("assert-no-reads").await?;
     }
-    let publishing = if multipart {
+    let publishing = if complete {
+        fixture("http-complete-lose-reply").await?;
+        let publishing = tokio::spawn(fixture("http-complete-replay"));
+        let point = path
+            .parent()
+            .unwrap()
+            .join("faults-a/node-write-published.hit");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !point.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        Some(publishing)
+    } else if multipart {
         fixture("http-multipart-lose-reply").await?;
         let publishing = tokio::spawn(fixture("http-multipart-replay"));
         let point = path
@@ -553,7 +577,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
     context.client.addresses.lock().await.refresh_at = Instant::now();
     if let Some(publishing) = publishing {
         publishing.await??;
-        fixture(if parts {
+        fixture(if complete {
+            "http-complete-resume-reply"
+        } else if parts {
             "http-parts-resume-reply"
         } else if multipart {
             "http-multipart-resume-reply"
@@ -573,7 +599,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if parts {
+    if complete {
+        fixture("http-complete-reconnected").await?;
+    } else if parts {
         fixture("http-parts-reconnected").await?;
     } else if multipart {
         fixture("http-multipart-reconnected").await?;
@@ -614,6 +642,30 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-reconnected").await?;
     }
     fixture("assert-no-reads").await?;
+    if complete {
+        let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
+        let point = faults.join("node-completion-assembling");
+        tokio::fs::remove_file(point.with_extension("hit"))
+            .await
+            .ok();
+        tokio::fs::write(&point, b"pause").await?;
+        let fenced = tokio::spawn(fixture("http-complete-fenced"));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !point.with_extension("hit").exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        context.stop();
+        fenced.await??;
+        tokio::fs::remove_file(&point).await?;
+        driver.await??;
+        s3_server.abort();
+        web_server.abort();
+        let _ = s3_server.await;
+        let _ = web_server.await;
+        return Ok(());
+    }
     if copy {
         let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
         let point = faults.join("node-copy-before-publish");

@@ -513,6 +513,8 @@ impl Gateway {
                 };
                 if read
                     || request.method() == Method::DELETE
+                    || (request.method() == Method::POST
+                        && target.query.iter().any(|value| value == "uploadId"))
                     || target
                         .query
                         .iter()
@@ -790,6 +792,14 @@ impl S3Access for Gateway {
 
 #[async_trait::async_trait]
 impl S3 for Gateway {
+    async fn complete_multipart_upload(
+        &self,
+        request: S3Request<CompleteMultipartUploadInput>,
+    ) -> S3Result<S3Response<CompleteMultipartUploadOutput>> {
+        self.complete_multipart(request)
+            .await
+            .map_err(delivery::error)
+    }
     async fn upload_part(
         &self,
         request: S3Request<UploadPartInput>,

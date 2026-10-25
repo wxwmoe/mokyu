@@ -7,7 +7,6 @@ use crate::{
     upload::{Integrity, checksum},
 };
 use anyhow::{Context, Result, ensure};
-use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use md5::{Digest, Md5};
@@ -468,53 +467,9 @@ impl App {
         let lock = self.operation_lock(u.id);
         let guard = lock.lock_owned().await;
         let u = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
-        let manifest = i
-            .multipart_upload
-            .as_ref()
-            .and_then(|m| m.parts.as_ref())
-            .ok_or_else(|| s3_error!(InvalidPart))?;
-        if manifest.is_empty() || manifest.len() > 10000 {
-            return Err(s3_error!(InvalidPart).into());
-        }
-        let mut digest = blake3::Hasher::new();
-        let mut previous = 0;
-        for part in manifest {
-            let n = part.part_number.ok_or_else(|| s3_error!(InvalidPart))?;
-            if n <= previous
-                || n > 10000
-                || (u.checksum_type.as_deref() == Some("COMPOSITE") && n != previous + 1)
-            {
-                return Err(s3_error!(InvalidPartOrder).into());
-            }
-            previous = n;
-            digest.update(&n.to_be_bytes());
-            digest.update(
-                part.e_tag
-                    .as_ref()
-                    .and_then(ETag::as_strong)
-                    .ok_or_else(|| s3_error!(InvalidPart))?
-                    .as_bytes(),
-            );
-        }
-        // Include checksum fields and conditional headers in retry identity without storing credentials.
-        for part in manifest {
-            let values = part_sums(part);
-            digest.update(serde_json::to_string(&values)?.as_bytes());
-        }
-        digest.update(
-            format!(
-                "{:?}|{:?}|{:?}|{:?}",
-                i.if_match, i.if_none_match, i.checksum_type, i.mpu_object_size
-            )
-            .as_bytes(),
-        );
-        for (name, value) in &req.headers {
-            if name.as_str().starts_with("x-amz-checksum-") {
-                digest.update(name.as_str().as_bytes());
-                digest.update(value.as_bytes());
-            }
-        }
-        let hash = digest.finalize().to_hex().to_string();
+        let specification = manifest(i, &req.headers)?;
+        let manifest = &specification.parts;
+        let hash = specification.hash()?;
         if u.state == "completed" {
             if u.manifest_hash.as_deref() != Some(&hash) {
                 return Err(s3_error!(
@@ -544,19 +499,10 @@ impl App {
         let mut selected = Vec::with_capacity(manifest.len());
         let mut parts = Vec::with_capacity(manifest.len());
         let mut pins = Vec::with_capacity(manifest.len());
-        let mut total = 0i64;
-        let mut etag_hash = Md5::new();
         #[cfg(feature = "fault-injection")]
         crate::faults::point("multipart-before-selection").await;
-        for (idx, part) in manifest.iter().enumerate() {
-            let Some(s) = self
-                .multipart
-                .part(
-                    u.id,
-                    part.part_number.ok_or_else(|| s3_error!(InvalidPart))?,
-                )
-                .await?
-            else {
+        for part in manifest {
+            let Some(s) = self.multipart.part(u.id, part.number).await? else {
                 let current = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
                 if current.state == "completed" && current.manifest_hash.as_deref() == Some(&hash) {
                     return Ok(S3Response::new(completion_output(
@@ -570,40 +516,23 @@ impl App {
                 }
                 return Err(s3_error!(InvalidPart).into());
             };
-            if !part
-                .e_tag
-                .as_ref()
-                .is_some_and(|e| e.strong_cmp(&ETag::Strong(s.etag.clone())))
-            {
-                return Err(s3_error!(InvalidPart).into());
-            }
-            if idx + 1 < manifest.len() && s.size < 5 * 1024 * 1024 {
-                return Err(s3_error!(EntityTooSmall).into());
-            }
-            let supplied = part_sums(part);
-            for (name, value) in supplied.as_object().unwrap() {
-                if s.checksums.get(name) != Some(value) {
-                    return Err(s3_error!(BadDigest).into());
-                }
-            }
-            if let Some(alg) = &u.checksum_algorithm {
-                let name = alg.to_ascii_lowercase();
-                if supplied.get(&name).is_none() {
-                    return Err(s3_error!(InvalidPart, "part checksum required by upload").into());
-                }
-            }
-            total = total
-                .checked_add(s.size)
-                .context("multipart length overflow")?;
-            etag_hash.update(hex::decode(&s.etag)?);
-            selected.push((part.part_number.unwrap(), s.id));
+            selected.push((part.number, s.id));
             pins.push(self.pin(s.id));
             parts.push(s);
         }
-        if i.mpu_object_size.is_some_and(|n| n != total) {
-            return Err(s3_error!(InvalidRequest, "multipart size mismatch").into());
-        }
-        let etag = format!("{}-{}", hex::encode(etag_hash.finalize()), parts.len());
+        let selected_metadata: Vec<_> = manifest
+            .iter()
+            .zip(&parts)
+            .map(|(part, stream)| crate::model::node_complete::Selected {
+                number: part.number,
+                size: stream.size,
+                etag: stream.etag.clone(),
+                checksums: stream.checksums.clone(),
+            })
+            .collect();
+        let summary = specification.select(&u, &selected_metadata)?;
+        let total = summary.size;
+        let etag = summary.etag;
         self.multipart.seal_files(u.id).await?;
         let input_bucket = i.bucket.clone();
         let input_key = i.key.clone();
@@ -1136,6 +1065,69 @@ impl App {
     }
 }
 
+pub(crate) fn manifest(
+    input: &CompleteMultipartUploadInput,
+    headers: &hyper::HeaderMap,
+) -> Result<crate::model::node_complete::Manifest> {
+    use crate::model::node_complete::{Manifest, Part};
+    let condition = |value: &Option<ETagCondition>| -> Result<Option<String>> {
+        value
+            .as_ref()
+            .map(|value| Ok(value.to_http_header()?.to_str()?.to_owned()))
+            .transpose()
+    };
+    let parts = input
+        .multipart_upload
+        .as_ref()
+        .and_then(|value| value.parts.as_ref())
+        .ok_or_else(|| s3_error!(InvalidPart))?;
+    let value = Manifest {
+        upload: Uuid::parse_str(&input.upload_id).map_err(|_| s3_error!(NoSuchUpload))?,
+        parts: parts
+            .iter()
+            .map(|part| -> Result<Part> {
+                Ok(Part {
+                    number: part.part_number.ok_or_else(|| s3_error!(InvalidPart))?,
+                    etag: part
+                        .e_tag
+                        .as_ref()
+                        .and_then(ETag::as_strong)
+                        .ok_or_else(|| s3_error!(InvalidPart))?
+                        .to_owned(),
+                    checksums: serde_json::from_value(part_sums(part))?,
+                })
+            })
+            .collect::<Result<_>>()?,
+        if_match: condition(&input.if_match)?,
+        if_none: condition(&input.if_none_match)?,
+        checksum_type: input
+            .checksum_type
+            .as_ref()
+            .map(|value| value.as_str().to_owned()),
+        size: input.mpu_object_size,
+        checksums: checksum_headers(headers)?,
+    };
+    value.validate()?;
+    Ok(value)
+}
+
+fn checksum_headers(
+    headers: &hyper::HeaderMap,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut sums = std::collections::BTreeMap::new();
+    for (name, value) in headers {
+        if let Some(name) = name.as_str().strip_prefix("x-amz-checksum-")
+            && name != "type"
+        {
+            let value = value.to_str()?;
+            if let Some(previous) = sums.insert(name.to_owned(), value.to_owned()) {
+                ensure!(previous == value, s3_error!(BadDigest));
+            }
+        }
+    }
+    Ok(sums)
+}
+
 fn part_sums(p: &CompletedPart) -> Value {
     let mut map = serde_json::Map::new();
     for (n, v) in [
@@ -1156,7 +1148,11 @@ fn part_sums(p: &CompletedPart) -> Value {
     }
     Value::Object(map)
 }
-fn completion_output(bucket: &str, key: &str, result: &Value) -> CompleteMultipartUploadOutput {
+pub(crate) fn completion_output(
+    bucket: &str,
+    key: &str,
+    result: &Value,
+) -> CompleteMultipartUploadOutput {
     let sums = &result["checksums"];
     let mut out = CompleteMultipartUploadOutput {
         bucket: Some(bucket.into()),
@@ -1169,7 +1165,7 @@ fn completion_output(bucket: &str, key: &str, result: &Value) -> CompleteMultipa
     out
 }
 
-fn completion_timeout() -> std::time::Duration {
+pub(crate) fn completion_timeout() -> std::time::Duration {
     #[cfg(feature = "fault-injection")]
     if let Ok(value) = std::env::var("MOKYU_TEST_COMPLETE_TIMEOUT_SECONDS") {
         if let Ok(seconds) = value.parse::<u64>() {
@@ -1179,14 +1175,14 @@ fn completion_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(300)
 }
 
-fn completion_retry() -> s3s::S3Error {
+pub(crate) fn completion_retry() -> s3s::S3Error {
     s3_error!(
         InternalError,
         "Multipart completion is still in progress. Please retry the same request."
     )
 }
 
-fn completion_busy() -> s3s::S3Error {
+pub(crate) fn completion_busy() -> s3s::S3Error {
     let mut error = s3_error!(
         SlowDown,
         "multipart completion capacity is full; retry later"
@@ -1210,35 +1206,14 @@ pub(super) fn completion_checksums(
     parts: &[StoredStream],
     headers: &hyper::HeaderMap,
 ) -> Result<(String, Value)> {
-    let (payload_digest, mut sums) = full.finish(None)?;
-    if let Some(alg) = &u.checksum_algorithm {
-        let name = alg.to_ascii_lowercase();
-        if u.checksum_type.as_deref() == Some("COMPOSITE") {
-            let mut check = Integrity::new(&hyper::HeaderMap::new(), Some(alg))?;
-            for part in parts {
-                check.update(
-                    &STANDARD.decode(
-                        checksum(&part.checksums, &name).context("part checksum missing")?,
-                    )?,
-                );
-            }
-            let (_, composite) = check.finish(None)?;
-            sums[&name] = json!(format!(
-                "{}-{}",
-                checksum(&composite, &name).context("composite missing")?,
-                parts.len()
-            ));
-        }
-        sums["type"] = json!(u.checksum_type);
-    }
-    for (name, value) in headers {
-        if let Some(name) = name.as_str().strip_prefix("x-amz-checksum-")
-            && name != "type"
-            && sums.get(name).and_then(Value::as_str) != Some(value.to_str()?)
-        {
-            return Err(s3_error!(BadDigest).into());
-        }
-    }
+    let (payload_digest, sums) = full.finish(None)?;
+    let sums = crate::model::node_complete::checksums(
+        sums,
+        u.checksum_algorithm.as_deref(),
+        u.checksum_type.as_deref(),
+        parts.iter().map(|part| &part.checksums),
+        &checksum_headers(headers)?,
+    )?;
     Ok((payload_digest, sums))
 }
 
@@ -1282,4 +1257,25 @@ pub(crate) fn listed_parts(
         checksum_type: checksum_type.map(ChecksumType::from),
         ..Default::default()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn completion_rejects_conflicting_checksum_headers() -> anyhow::Result<()> {
+        let mut headers = hyper::HeaderMap::new();
+        headers.append("x-amz-checksum-sha256", "first".parse()?);
+        headers.append("x-amz-checksum-sha256", "first".parse()?);
+        assert_eq!(super::checksum_headers(&headers)?["sha256"], "first");
+        headers.append("x-amz-checksum-sha256", "different".parse()?);
+        assert_eq!(
+            super::checksum_headers(&headers)
+                .unwrap_err()
+                .downcast_ref::<s3s::S3Error>()
+                .unwrap()
+                .code(),
+            &s3s::S3ErrorCode::BadDigest
+        );
+        Ok(())
+    }
 }

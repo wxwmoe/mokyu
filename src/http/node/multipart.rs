@@ -2,6 +2,44 @@ use super::*;
 use crate::model::node_request::Catalog;
 
 impl Gateway {
+    pub(super) async fn complete_multipart(
+        &self,
+        request: S3Request<CompleteMultipartUploadInput>,
+    ) -> Result<S3Response<CompleteMultipartUploadOutput>> {
+        gateway::reject_features(&request.headers)?;
+        let access = &request
+            .credentials
+            .as_ref()
+            .ok_or_else(|| s3s::s3_error!(AccessDenied))?
+            .access_key;
+        let prepared = objects::prepared()?;
+        prepared.authorize(access, &request.input.bucket)?;
+        let manifest = crate::upload::multipart::manifest(&request.input, &request.headers)?;
+        let context = request
+            .extensions
+            .get::<crate::status::stats::RequestContext>()
+            .cloned();
+        let mut output = self
+            .writes
+            .complete(prepared, request.input.bucket, request.input.key, manifest)
+            .await?;
+        if let Some(future) = output.future.take() {
+            output.future = Some(Box::pin(async move {
+                future.await.map_err(|mut error| {
+                    tracing::warn!(code=?error.code(), "multipart completion response failed");
+                    if let Some(context) = context {
+                        context
+                            .failed
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        error.set_request_id(context.id);
+                    }
+                    error
+                })
+            }));
+        }
+        Ok(S3Response::new(output))
+    }
+
     pub(super) async fn part(
         &self,
         mut request: S3Request<UploadPartInput>,

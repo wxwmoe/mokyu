@@ -26,6 +26,7 @@ fn begin(run: Run, name: &str) -> write::Begin {
             credential_revision: 1,
             copy_read: None,
             part: None,
+            completion: None,
             bucket: "batches".into(),
             key: name.into(),
             metadata: serde_json::json!({}),

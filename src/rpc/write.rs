@@ -85,6 +85,7 @@ pub(super) fn begin(input: wire::BeginWriteRequest) -> Result<write::Begin, Stat
         ));
     }
     let intent = write::Intent {
+        completion: None,
         access: input.access_key,
         credential_revision: input
             .credential_revision
@@ -249,12 +250,18 @@ pub(super) fn reply(value: write::Reply) -> Result<wire::WriteReply, Status> {
         stream_id: value.stream.map_or_else(String::new, |id| id.to_string()),
         phase: match value.phase {
             write::Phase::Active => wire::WritePhase::WriteActive,
+            write::Phase::Busy => wire::WritePhase::WriteBusy,
             write::Phase::Aborted => wire::WritePhase::WriteAborted,
             write::Phase::Expired => wire::WritePhase::WriteExpired,
             write::Phase::Published => wire::WritePhase::WritePublished,
         } as i32,
         copy_references: value.copy_references,
         checksum_algorithm: value.checksum_algorithm,
+        completion_json: value
+            .completion
+            .map(|value| serde_json::to_vec(&value))
+            .transpose()
+            .map_err(|_| Status::internal("invalid completion reply"))?,
         materials: value.materials.into_iter().map(read::material).collect(),
         storage: value.storage.map(read::version),
         grants: value.grants.into_iter().map(read::grant).collect(),
