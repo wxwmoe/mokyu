@@ -92,7 +92,10 @@ pub(super) async fn check(
         items,
         metadata_count,
         ..
-    } = plan;
+    } = plan
+    else {
+        panic!("expected collection plan")
+    };
     assert_eq!(metadata_count, 2);
     assert_eq!(items.len(), 1);
     assert!(matches!(&items[0].source,work::Physical::Staging{key} if key=="staging/removed"));
@@ -183,7 +186,9 @@ pub(super) async fn check(
             finished = true;
             break;
         };
-        let work::Plan::Collect { items, .. } = plan;
+        let work::Plan::Collect { items, .. } = plan else {
+            panic!("expected collection plan")
+        };
         let mut outcomes = Vec::new();
         for item in items {
             let work::Physical::Staging { key } = item.source else {

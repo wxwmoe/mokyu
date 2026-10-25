@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub(crate) const MAX_ITEMS: usize = 64;
+pub(crate) type Member = (super::Id, i64, i32, Vec<u8>);
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Materials {
+    pub storage: node_read::Storage,
+    pub keys: Vec<node_read::BlockKey>,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,12 +46,19 @@ pub(crate) enum Plan {
         metadata_count: usize,
         items: Vec<Deletion>,
     },
+    Inspect {
+        snapshot: Box<super::source::SourceSnapshot>,
+        location: Uuid,
+        members: Vec<Member>,
+        inspect: bool,
+    },
 }
 
 impl Plan {
     pub(crate) fn storage(&self) -> Uuid {
         match self {
             Self::Collect { storage, .. } => *storage,
+            Self::Inspect { snapshot, .. } => snapshot.scope.storage_id,
         }
     }
 }
@@ -55,6 +69,7 @@ pub(crate) enum Outcome {
     Deleted { stored_at: Option<DateTime<Utc>> },
     Retained { stored_at: DateTime<Utc> },
     Retry,
+    Inspected { code: Option<String> },
 }
 
 #[derive(Clone, Serialize, Deserialize)]

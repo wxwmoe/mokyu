@@ -104,6 +104,7 @@ pub(crate) struct State {
 pub(crate) struct NodeContext {
     pub(crate) config: NodeConfig,
     pub(crate) budget: OnceLock<Budget>,
+    body: Mutex<Option<body::Limits>>,
     pub(crate) client: Client,
     pub(crate) resources: Arc<resources::Resources>,
     pub(crate) observations: observations::Reports,
@@ -139,6 +140,7 @@ impl NodeContext {
         Ok(Arc::new(Self {
             config,
             budget: OnceLock::new(),
+            body: Mutex::new(None),
             client,
             resources: Arc::new(resources::Resources::default()),
             observations: observations::Reports::new(),

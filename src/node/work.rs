@@ -9,14 +9,16 @@ use uuid::Uuid;
 pub(crate) struct Worker {
     node: Arc<NodeContext>,
     cache: reads::Cache,
+    reader: super::body::Reader,
 }
 
 impl Worker {
-    pub(crate) fn new(node: Arc<NodeContext>) -> Self {
-        Self {
+    pub(crate) fn new(node: Arc<NodeContext>) -> Result<Self> {
+        Ok(Self {
+            reader: super::body::Reader::new(&node)?,
             node,
             cache: reads::Cache::default(),
-        }
+        })
     }
 
     pub(crate) async fn drain(&self) -> Result<()> {
@@ -84,6 +86,7 @@ impl Worker {
                         ..
                     } => {
                         ensure!(items.len() <= work::MAX_ITEMS, "invalid work size");
+                        let _io = self.reader.io.clone().acquire_owned().await?;
                         if !items.is_empty() {
                             backend.store.ensure_verified().await?;
                         }
@@ -148,6 +151,29 @@ impl Worker {
                             outcomes.push(result.unwrap_or(work::Outcome::Retry));
                         }
                         outcomes
+                    }
+                    work::Plan::Inspect {
+                        snapshot,
+                        members,
+                        inspect,
+                        location,
+                    } => {
+                        ensure!(
+                            location == snapshot.location(),
+                            "inspection identity differs"
+                        );
+                        vec![if inspect {
+                            self.reader
+                                .inspect(
+                                    backend,
+                                    Arc::new(reads::keys(&materials)?),
+                                    *snapshot,
+                                    members,
+                                )
+                                .await?
+                        } else {
+                            work::Outcome::Inspected { code: None }
+                        }]
                     }
                 };
                 Ok::<_, anyhow::Error>(work::Completion {

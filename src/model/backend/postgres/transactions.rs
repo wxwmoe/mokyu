@@ -4485,29 +4485,39 @@ pub(super) async fn acquire_integrity_rate(
     rates: &[(&str, f64, f64)],
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    let accepted = integrity_rate_in(&mut tx, storage_id, rates).await?;
+    tx.commit().await?;
+    Ok(accepted)
+}
+
+async fn integrity_rate_in(
+    tx: &mut Transaction<'_, Postgres>,
+    storage_id: Uuid,
+    rates: &[(&str, f64, f64)],
+) -> Result<bool> {
+    let mut remaining = Vec::new();
     for &(metric, rate, amount) in rates {
-        // A single integrity request/chunk may be larger than one second's
-        // configured rate.  Grow the burst capacity for that request so a
-        // byte budget can make progress instead of waiting forever.
+        // Allow one request larger than the per-second rate to make progress.
         let capacity = rate.max(amount).max(1.0);
         queries::initialize_integrity_rate(storage_id, metric, format!("{capacity:.6}"))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         let (tokens, replenished): (f64, chrono::DateTime<chrono::Utc>) =
             queries::lock_integrity_rate(storage_id, metric)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?;
         let elapsed = (chrono::Utc::now() - replenished).num_milliseconds().max(0) as f64 / 1000.0;
         let available = (tokens + elapsed * rate).min(capacity);
         if available < amount {
             return Ok(false);
         }
-        let remaining = available - amount;
-        queries::update_integrity_rate(storage_id, metric, format!("{remaining:.6}"))
-            .execute(&mut *tx)
+        remaining.push((metric, available - amount));
+    }
+    for (metric, value) in remaining {
+        queries::update_integrity_rate(storage_id, metric, format!("{value:.6}"))
+            .execute(&mut **tx)
             .await?;
     }
-    tx.commit().await?;
     Ok(true)
 }
 pub(super) async fn start_integrity(
@@ -6519,23 +6529,32 @@ pub(super) async fn source_update(
     update: crate::model::source::SourceUpdate<'_>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    source_update_in(&mut tx, update).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn source_update_in(
+    tx: &mut Transaction<'_, Postgres>,
+    update: crate::model::source::SourceUpdate<'_>,
+) -> Result<()> {
     let operation = update.operation;
-    operation.principal.lock_admin(&mut tx).await?;
+    operation.principal.lock_admin(tx).await?;
     ensure!(
         queries::source_mode(&operation.mode)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?,
         crate::model::Error::OperationAborted
     );
     ensure!(
         queries::source_executor(update.execution.id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .unwrap_or(operation.mode == "single"),
         crate::model::Error::OperationAborted
     );
-    lock_execution(&mut tx, update.execution).await?;
-    let snapshot = queries::source_snapshot(&mut tx, &operation.snapshot.scope, true).await?;
+    lock_execution(tx, update.execution).await?;
+    let snapshot = queries::source_snapshot(tx, &operation.snapshot.scope, true).await?;
     ensure!(
         snapshot.state == "ready" && snapshot.fingerprint()? == operation.snapshot.fingerprint()?,
         crate::model::Error::OperationAborted
@@ -6554,7 +6573,7 @@ pub(super) async fn source_update(
     if update.apply {
         ensure!(
             queries::change_source(&snapshot, operation.code.as_deref())?
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?
                 .rows_affected()
                 == 1,
@@ -6567,10 +6586,10 @@ pub(super) async fn source_update(
         };
         let detail = serde_json::json!({"source":snapshot.summary()?,"revision":(snapshot.revision+1).to_string(),"code":operation.code,"requested_by":operation.principal.user_id(),"token_id":operation.principal.token_id(),"task_id":update.execution.id});
         queries::source_result(update.execution.id, serde_json::json!({"result":detail}))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         queries::complete_task(update.execution.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         queries::source_audit(
             &operation.principal,
@@ -6578,10 +6597,9 @@ pub(super) async fn source_update(
             &snapshot.location().to_string(),
             detail,
         )?
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 

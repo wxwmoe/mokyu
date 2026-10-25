@@ -2,6 +2,9 @@ use super::*;
 use crate::model::node_work as work;
 use queries::work as q;
 
+#[path = "work_sources.rs"]
+mod sources;
+
 fn owned(node: &NodeState, run: Run, batch: &q::Batch) -> Result<()> {
     ensure!(
         batch.credential_generation == node.credential_generation
@@ -31,7 +34,7 @@ fn reply(
             row.valid_for_ms > 0 && row.result_hash.is_none(),
             Error::NodeExpired
         );
-        let storage: read::Storage = serde_json::from_str(&codec::unprotect(
+        let values: work::Materials = serde_json::from_str(&codec::unprotect(
             row.storage_encrypted
                 .as_deref()
                 .context("work storage is missing")?,
@@ -43,9 +46,19 @@ fn reply(
             node.deployment_id,
             read::MaterialType::Storage,
             plan.storage().to_string(),
-            &storage,
+            &values.storage,
             &input.cached,
         )?;
+        for block in values.keys {
+            read::material(
+                &mut materials,
+                node.deployment_id,
+                read::MaterialType::Key,
+                block.id.to_string(),
+                &block,
+                &input.cached,
+            )?;
+        }
         grants.push(read::Grant {
             r#type: read::GrantType::Work,
             id: row.token,
@@ -62,13 +75,13 @@ fn reply(
 }
 
 async fn finish(
-    db: &mut PgConnection,
+    db: &mut Transaction<'_, Postgres>,
     node: &NodeState,
     run: Run,
     completion: &work::Completion,
 ) -> Result<()> {
     let row = q::batch(node.node_id, completion.operation)
-        .fetch_optional(&mut *db)
+        .fetch_optional(&mut **db)
         .await?
         .ok_or(Error::NodeOperationMissing)?;
     owned(node, run, &row)?;
@@ -80,17 +93,18 @@ async fn finish(
     ensure!(row.valid_for_ms > 0, Error::NodeExpired);
     ensure!(
         q::live_permits(row.token, row.maintenance_token)
-            .fetch_one(&mut *db)
+            .fetch_one(&mut **db)
             .await?,
         Error::NodeExpired
     );
     let task = row.task_id.ok_or(Error::NodeExpired)?;
-    let (_, _, parent) = q::task(task, row.token, node.node_id)
-        .fetch_optional(&mut *db)
+    let (_, detail, parent) = q::task(task, row.token, node.node_id)
+        .fetch_optional(&mut **db)
         .await?
         .ok_or(Error::NodeExpired)?;
     let mut deleted = 0;
-    let mut failed = false;
+    let mut error = None;
+    let mut complete = false;
     match row.plan.context("work plan is missing")?.0 {
         work::Plan::Collect {
             items,
@@ -120,9 +134,10 @@ async fn finish(
                         Some(*stored_at)
                     }
                     work::Outcome::Retry => {
-                        failed = true;
+                        error = Some("backend_io_failed");
                         None
                     }
+                    _ => return Err(Error::NodeOperationConflict.into()),
                 };
                 if let Some(stored) = stored {
                     ensure!(
@@ -130,7 +145,7 @@ async fn finish(
                         Error::NodeOperationConflict
                     );
                     queries::physical_gc_age(item.source.packed(), item.location.into(), stored)
-                        .execute(&mut *db)
+                        .execute(&mut **db)
                         .await?;
                 }
                 if matches!(outcome, work::Outcome::Deleted { .. }) {
@@ -141,38 +156,55 @@ async fn finish(
                                 item.location.into(),
                                 retention as f64,
                             )
-                            .execute(&mut *db)
+                            .execute(&mut **db)
                             .await?;
                         }
                         work::Physical::Raw { .. } => {
                             queries::raw_gc_finish(item.location.into())
-                                .execute(&mut *db)
+                                .execute(&mut **db)
                                 .await?;
                         }
                         work::Physical::Staging { key } => {
-                            q::remove_staging(storage, key).execute(&mut *db).await?;
+                            q::remove_staging(storage, key).execute(&mut **db).await?;
                         }
                     }
                     deleted += 1;
                 }
             }
         }
+        work::Plan::Inspect {
+            snapshot, inspect, ..
+        } => {
+            error = sources::finish(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                detail,
+                *snapshot,
+                inspect,
+                &completion.outcomes,
+            )
+            .await?;
+            complete = true;
+        }
     }
     q::result(node.node_id, completion.operation, &hash)
-        .execute(&mut *db)
+        .execute(&mut **db)
         .await?;
     queries::release_storage_permit(row.token)
-        .execute(&mut *db)
+        .execute(&mut **db)
         .await?;
     queries::release_storage_permit(row.maintenance_token)
-        .execute(&mut *db)
+        .execute(&mut **db)
         .await?;
-    q::finish(task, row.token, deleted, false, failed)
-        .execute(&mut *db)
+    q::finish(task, row.token, deleted, complete, error)
+        .execute(&mut **db)
         .await?;
     if let Some(parent) = parent {
         queries::update_parent_progress(parent)
-            .execute(&mut *db)
+            .execute(&mut **db)
             .await?;
     }
     Ok(())
@@ -184,10 +216,18 @@ async fn permits(
     token: Uuid,
     maintenance: Uuid,
     profile: &crate::storage::profile::StorageProfile,
+    inspect: bool,
 ) -> Result<bool> {
     for (direction, limit) in [
         ("control", profile.control_concurrency),
-        ("maintenance", profile.maintenance_concurrency),
+        (
+            if inspect { "integrity" } else { "maintenance" },
+            if inspect {
+                Some(profile.integrity_concurrency)
+            } else {
+                profile.maintenance_concurrency
+            },
+        ),
     ] {
         queries::lock_storage_permits(format!("mokyu:store:{}:{direction}", profile.storage_id))
             .execute(&mut *db)
@@ -207,9 +247,14 @@ async fn permits(
     queries::insert_storage_permit(token, profile.storage_id, "control", node)
         .execute(&mut *db)
         .await?;
-    queries::insert_storage_permit(maintenance, profile.storage_id, "maintenance", node)
-        .execute(&mut *db)
-        .await?;
+    queries::insert_storage_permit(
+        maintenance,
+        profile.storage_id,
+        if inspect { "integrity" } else { "maintenance" },
+        node,
+    )
+    .execute(&mut *db)
+    .await?;
     Ok(true)
 }
 
@@ -439,7 +484,11 @@ pub(crate) async fn exchange(
     );
     let token = Uuid::new_v4();
     let maintenance = Uuid::new_v4();
-    let allowed = vec!["gc".to_owned(), "cleanup".to_owned()];
+    let allowed = vec![
+        "gc".to_owned(),
+        "cleanup".to_owned(),
+        "integrity".to_owned(),
+    ];
     let task = queries::claim_task(
         input.class as i32,
         &[],
@@ -469,23 +518,75 @@ pub(crate) async fn exchange(
             .fetch_one(&mut *tx)
             .await?;
         ensure!(record.r#type == "s3", Error::SourceUnavailable);
-        if permits(&mut tx, node.node_id, token, maintenance, &profile).await? {
-            let value =
-                collect(&mut tx, storage, input.max_items, &profile, policy == "gc").await?;
-            let work::Plan::Collect {
-                items,
-                metadata_count,
-                ..
-            } = &value;
-            if *metadata_count > 0 {
-                q::metadata_progress(task, token, *metadata_count as i64)
+        if permits(
+            &mut tx,
+            node.node_id,
+            token,
+            maintenance,
+            &profile,
+            policy == "integrity",
+        )
+        .await?
+        {
+            let selected = if policy == "integrity" {
+                sources::prepare(
+                    &mut tx,
+                    node,
+                    Execution { id: task, token },
+                    &detail,
+                    &profile,
+                    key,
+                )
+                .await?
+            } else {
+                Some((
+                    collect(&mut tx, storage, input.max_items, &profile, policy == "gc").await?,
+                    vec![],
+                ))
+            };
+            if let Some((value, keys)) = selected {
+                let mut idle = false;
+                if let work::Plan::Collect {
+                    items,
+                    metadata_count,
+                    ..
+                } = &value
+                {
+                    if *metadata_count > 0 {
+                        q::metadata_progress(task, token, *metadata_count as i64)
+                            .execute(&mut *tx)
+                            .await?;
+                    }
+                    idle = items.is_empty() && *metadata_count == 0;
+                }
+                if idle {
+                    q::finish(task, token, 0, true, None)
+                        .execute(&mut *tx)
+                        .await?;
+                } else {
+                    let material = work::Materials {
+                        storage: read::Storage {
+                            connection: crate::storage::model::Connection::unprotect(&record, key)?,
+                            revision: profile.revision,
+                            profile,
+                        },
+                        keys,
+                    };
+                    encrypted = Some(codec::protect(
+                        &serde_json::to_vec(&material)?,
+                        key,
+                        token.as_bytes(),
+                    )?);
+                    q::task_lease(task, token).execute(&mut *tx).await?;
+                    assigned = Some(task);
+                    plan = Some(value);
+                }
+            } else {
+                queries::requeue_owned_task(task, token)
                     .execute(&mut *tx)
                     .await?;
             }
-            if items.is_empty() && *metadata_count == 0 {
-                q::finish(task, token, 0, true, false)
-                    .execute(&mut *tx)
-                    .await?;
+            if assigned.is_none() {
                 queries::release_storage_permit(token)
                     .execute(&mut *tx)
                     .await?;
@@ -497,20 +598,6 @@ pub(crate) async fn exchange(
                         .execute(&mut *tx)
                         .await?;
                 }
-            } else {
-                let material = read::Storage {
-                    connection: crate::storage::model::Connection::unprotect(&record, key)?,
-                    revision: profile.revision,
-                    profile,
-                };
-                encrypted = Some(codec::protect(
-                    &serde_json::to_vec(&material)?,
-                    key,
-                    token.as_bytes(),
-                )?);
-                q::task_lease(task, token).execute(&mut *tx).await?;
-                assigned = Some(task);
-                plan = Some(value);
             }
         } else {
             queries::requeue_owned_task(task, token)
@@ -518,6 +605,7 @@ pub(crate) async fn exchange(
                 .await?;
         }
     }
+
     q::insert(
         node,
         &input,

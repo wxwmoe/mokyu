@@ -617,7 +617,7 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-complete-reconnected").await?;
         if matches!(case, HttpCase::Native) {
             fixture("http-cleanup-seed").await?;
-            let worker = tokio::spawn(crate::node::work::Worker::new(context.clone()).run());
+            let worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
             let result = fixture("http-cleanup").await;
             worker.abort();
             let _ = worker.await;

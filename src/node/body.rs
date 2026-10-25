@@ -30,6 +30,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
+#[path = "inspection.rs"]
+mod inspection;
+
 const UNIT: usize = 64 * 1024;
 pub(super) const BUFFER_UNITS: usize = 16 * 1024 * 1024 / UNIT;
 const RAW_BUFFER: usize = 256 * 1024;
@@ -53,6 +56,15 @@ impl Backend {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct Limits {
+    io: Arc<Semaphore>,
+    cpu: Arc<Semaphore>,
+    packs: Arc<Semaphore>,
+    http: Arc<Semaphore>,
+    pool: Arc<compression::Pool>,
+}
+
 pub(super) struct Reader {
     pub(super) io: Arc<Semaphore>,
     pub(super) cpu: Arc<Semaphore>,
@@ -69,21 +81,33 @@ pub(super) struct Reader {
 impl Reader {
     pub(super) fn new(node: &NodeContext) -> Result<Self> {
         let budget = node.budget.get().context("node budget missing")?;
-        let config = compression::Config {
-            context_idle_timeout: node.config.instance.compression_idle_timeout.clone(),
-            ..Default::default()
+        let limits = {
+            let mut shared = node.body.lock().unwrap();
+            if shared.is_none() {
+                let config = compression::Config {
+                    context_idle_timeout: node.config.instance.compression_idle_timeout.clone(),
+                    ..Default::default()
+                };
+                *shared = Some(Limits {
+                    io: Arc::new(Semaphore::new(budget.storage_read_slots)),
+                    cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
+                    packs: Arc::new(Semaphore::new(budget.pack_memory_units as usize)),
+                    http: Arc::new(Semaphore::new(budget.pack_memory_units as usize)),
+                    pool: Arc::new(compression::Pool::new(config, budget.cpu_jobs)?),
+                });
+            }
+            shared.as_ref().unwrap().clone()
         };
-        let packs = Arc::new(Semaphore::new(budget.pack_memory_units as usize));
-        let files = super::files::Cache::new(node, packs.clone())?;
+        let files = super::files::Cache::new(node, limits.packs.clone())?;
         Ok(Self {
-            io: Arc::new(Semaphore::new(budget.storage_read_slots)),
-            cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
-            packs,
-            // Use the other half of the remaining budget; encoders must not block their pack decoder.
-            http: Arc::new(Semaphore::new(budget.pack_memory_units as usize)),
+            io: limits.io,
+            cpu: limits.cpu,
+            packs: limits.packs,
+            // Encoders must not consume their decoder's memory budget.
+            http: limits.http,
             pack_units: budget.pack_memory_units,
             workspace: budget.compression_workspace,
-            pool: Arc::new(compression::Pool::new(config, budget.cpu_jobs)?),
+            pool: limits.pool,
             gets: Arc::new(AtomicU64::new(0)),
             diagnostics: Arc::new(Diagnostics::default()),
             files,
@@ -149,22 +173,7 @@ impl Reader {
         let backend = prepared.backend(storage)?;
         backend.store.ensure_verified().await?;
         self.gets.fetch_add(1, Ordering::Relaxed);
-        let result = backend.store.backend.get(&path).await?;
-        ensure!(
-            result.meta.size <= bound as u64,
-            codec::IntegrityError::Length
-        );
-        let mut bytes = Vec::with_capacity(result.meta.size as usize);
-        let mut stream = result.into_stream();
-        while let Some(part) = stream.next().await {
-            let part = part?;
-            ensure!(
-                bytes.len() + part.len() <= bound,
-                codec::IntegrityError::Length
-            );
-            bytes.extend_from_slice(&part);
-        }
-        Ok(bytes)
+        read_bounded(backend.store.backend.as_ref(), &path, bound).await
     }
 
     async fn chunk(
@@ -745,3 +754,26 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
 #[cfg(test)]
 #[path = "../../tests/rpc/body.rs"]
 mod tests;
+
+async fn read_bounded(
+    backend: &dyn object_store::ObjectStore,
+    path: &Path,
+    bound: usize,
+) -> Result<Vec<u8>> {
+    let result = backend.get(&path).await?;
+    ensure!(
+        result.meta.size <= bound as u64,
+        codec::IntegrityError::Length
+    );
+    let mut bytes = Vec::with_capacity(result.meta.size as usize);
+    let mut stream = result.into_stream();
+    while let Some(part) = stream.next().await {
+        let part = part?;
+        ensure!(
+            bytes.len() + part.len() <= bound,
+            codec::IntegrityError::Length
+        );
+        bytes.extend_from_slice(&part);
+    }
+    Ok(bytes)
+}

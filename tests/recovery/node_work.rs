@@ -3,6 +3,8 @@ use crate::model::{node_read as read, node_work as work};
 
 #[path = "node_cleanup.rs"]
 mod cleanup;
+#[path = "node_inspection.rs"]
+mod inspection;
 
 pub(super) async fn check(
     backend: &Backend,
@@ -110,7 +112,9 @@ pub(super) async fn check(
     let plan = backend
         .exchange_work(&node, key, request(first, None))
         .await?;
-    let work::Plan::Collect { items, .. } = plan.plan.as_ref().unwrap();
+    let work::Plan::Collect { items, .. } = plan.plan.as_ref().unwrap() else {
+        panic!("expected collection plan")
+    };
     assert_eq!(items.len(), 64);
     assert!(items.iter().all(|item| item.location != packs[0]));
     let mut cached = request(first, None);
@@ -159,7 +163,9 @@ pub(super) async fn check(
     let next = peer
         .exchange_work(&node, key, request(second, Some(completion.clone())))
         .await?;
-    let work::Plan::Collect { items, .. } = next.plan.as_ref().unwrap();
+    let work::Plan::Collect { items, .. } = next.plan.as_ref().unwrap() else {
+        panic!("expected collection plan")
+    };
     assert_eq!(items.len(), 7);
     assert!(items.iter().any(|item| matches!(&item.source,work::Physical::Raw{upload:Some(upload)} if upload=="unfinished-upload")));
     assert!(
@@ -236,7 +242,9 @@ pub(super) async fn check(
     let plan = backend
         .exchange_work(&node, key, request(fourth, None))
         .await?;
-    let work::Plan::Collect { items, .. } = plan.plan.unwrap();
+    let work::Plan::Collect { items, .. } = plan.plan.unwrap() else {
+        panic!("expected collection plan")
+    };
     assert_eq!(items.len(), 1);
     assert!(items[0].inspect_age);
     let retained = work::Completion {
@@ -350,7 +358,10 @@ pub(super) async fn check(
         items,
         metadata_count,
         ..
-    } = plan.plan.unwrap();
+    } = plan.plan.unwrap()
+    else {
+        panic!("expected collection plan")
+    };
     assert!(items.is_empty());
     assert_eq!(metadata_count, 1);
     assert_eq!(
@@ -395,7 +406,9 @@ pub(super) async fn check(
     let plan = backend
         .exchange_work(&node, key, request(partial, None))
         .await?;
-    let work::Plan::Collect { items, .. } = plan.plan.unwrap();
+    let work::Plan::Collect { items, .. } = plan.plan.unwrap() else {
+        panic!("expected collection plan")
+    };
     assert_eq!(items.len(), 2);
     assert!(items.iter().all(|item| failures.contains(&item.location)));
     let result = work::Completion {
@@ -445,7 +458,9 @@ pub(super) async fn check(
     let mut input = request(id, None);
     input.run = other_session.run;
     let plan = peer.exchange_work(&other, key, input).await?;
-    let work::Plan::Collect { items, .. } = plan.plan.unwrap();
+    let work::Plan::Collect { items, .. } = plan.plan.unwrap() else {
+        panic!("expected collection plan")
+    };
     assert_eq!(items.len(), 1);
     let mut input = request(
         Uuid::now_v7(),
@@ -478,5 +493,6 @@ pub(super) async fn check(
         node.node_id,
     )
     .await?;
+    inspection::check(backend, peer, &other, key, other_session.run, storage).await?;
     Ok(())
 }

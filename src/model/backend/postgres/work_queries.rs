@@ -68,13 +68,13 @@ pub(crate) fn finish(
     token: Uuid,
     count: i64,
     complete: bool,
-    failed: bool,
-) -> Statement<'static> {
-    sqlx::query("WITH changed AS (UPDATE tasks SET processed=processed+$3,state=CASE WHEN $5 THEN 'failed' WHEN $4 THEN 'completed' ELSE 'queued' END,error=CASE WHEN $5 THEN 'backend_io_failed' ELSE NULL END,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1 AND lease_token=$2 AND state='running' RETURNING parent_task_id) UPDATE tasks SET state='failed',error='backend_io_failed',updated_at=clock_timestamp() WHERE $5 AND id=(SELECT parent_task_id FROM changed) AND state IN ('queued','running')").bind(task).bind(token).bind(count).bind(complete).bind(failed)
+    error: Option<&str>,
+) -> Statement<'_> {
+    sqlx::query("WITH changed AS (UPDATE tasks SET processed=processed+$3,state=CASE WHEN $5::text IS NOT NULL THEN 'failed' WHEN $4 THEN 'completed' ELSE 'queued' END,error=$5,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1 AND lease_token=$2 AND state IN ('running','completed') RETURNING parent_task_id) UPDATE tasks SET state='failed',error=$5,updated_at=clock_timestamp() WHERE $5::text IS NOT NULL AND id=(SELECT parent_task_id FROM changed) AND state IN ('queued','running')").bind(task).bind(token).bind(count).bind(complete).bind(error)
 }
 
 pub(crate) fn physical_active(location: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_work w,jsonb_array_elements(w.plan->'items') i WHERE w.result_hash IS NULL AND w.expires_at>clock_timestamp() AND i->>'location'=$1::uuid::text)").bind(location)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_work w WHERE w.result_hash IS NULL AND w.expires_at>clock_timestamp() AND (w.plan->>'location'=$1::uuid::text OR EXISTS(SELECT 1 FROM jsonb_array_elements(w.plan->'items') i WHERE i->>'location'=$1::uuid::text)))").bind(location)
 }
 
 pub(crate) fn live_permits(token: Uuid, maintenance: Uuid) -> Scalar<'static, bool> {
@@ -92,7 +92,7 @@ pub(crate) fn renew<'a>(
 }
 
 pub(crate) fn pending(node: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.task_type='gc' AND NOT m.maintenance AND NOT m.gc_paused OR t.task_type='cleanup' AND t.detail->>'storage_id' IS NOT NULL AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy='cleanup' AND c.paused)) AND (t.state='queued' OR (t.state='running' AND t.lease_expires_at<clock_timestamp())) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND (t.execution_scope<>'node' OR t.target_node_id IS NULL OR t.target_node_id=$1))").bind(node)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.task_type='gc' AND NOT m.maintenance AND NOT m.gc_paused OR t.task_type='cleanup' AND t.detail->>'storage_id' IS NOT NULL AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy='cleanup' AND c.paused) OR t.task_type='integrity' AND t.detail ? 'source_operation' AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy='integrity' AND c.paused)) AND (t.state='queued' OR (t.state='running' AND t.lease_expires_at<clock_timestamp())) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND (t.execution_scope<>'node' OR t.target_node_id IS NULL OR t.target_node_id=$1))").bind(node)
 }
 
 pub(crate) fn upload(source: Id) -> Scalar<'static, Option<String>> {
@@ -105,4 +105,8 @@ pub(crate) fn staging(storage: Uuid, maximum: i64) -> Rows<'static, (String,)> {
 
 pub(crate) fn remove_staging(storage: Uuid, key: &str) -> Statement<'_> {
     sqlx::query("DELETE FROM staging_objects s WHERE s.storage_id=$1 AND s.object_key=$2 AND NOT EXISTS(SELECT 1 FROM pending_uploads p WHERE p.staging_storage_id=s.storage_id AND p.staging_object_key=s.object_key) AND NOT EXISTS(SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS(SELECT 1 FROM uploads u WHERE u.staging_storage_id=s.storage_id AND u.staging_object_key=s.object_key)").bind(storage).bind(key)
+}
+
+pub(crate) fn members(pack: Id) -> Rows<'static, work::Member> {
+    sqlx::query_as("SELECT m.chunk_id,m.offset_bytes,c.raw_size,c.hash FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 ORDER BY m.ordinal LIMIT 4097").bind(pack)
 }
