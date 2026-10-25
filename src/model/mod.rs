@@ -25,6 +25,7 @@ pub(crate) mod node_observation;
 pub(crate) mod node_raw;
 pub(crate) mod node_read;
 pub(crate) mod node_request;
+pub(crate) mod node_tail;
 pub(crate) mod node_write;
 pub(crate) mod object;
 pub(crate) mod packing;

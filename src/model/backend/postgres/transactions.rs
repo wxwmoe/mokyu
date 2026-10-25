@@ -2796,43 +2796,57 @@ pub(super) async fn commit_upload_part(
     remote: Option<&RemoteCommit<'_>>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    authority.lock(&mut tx).await?;
+    commit_upload_part_in(&mut tx, authority, bucket, upload, number, stream, remote).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn commit_upload_part_in(
+    tx: &mut Transaction<'_, Postgres>,
+    authority: &Permit,
+    bucket: Uuid,
+    upload: Uuid,
+    number: i32,
+    stream: Id,
+    remote: Option<&RemoteCommit<'_>>,
+) -> Result<()> {
+    authority.lock(tx).await?;
     if let Some(input) = remote {
-        raw_upload_processor(&mut tx, input.node).await?;
+        raw_upload_processor(tx, input.node).await?;
     }
     if queries::multipart_bucket_state(bucket)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?
         != "active"
     {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
     if queries::lock_upload_state(upload)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?
         != "active"
     {
         return Err(s3s::s3_error!(NoSuchUpload).into());
     }
     let (old, epoch) = queries::lock_upload_part(upload, number)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     if epoch != stream {
         return Err(s3s::s3_error!(OperationAborted, "part was superseded").into());
     }
-    require_writing_stream(&mut tx, stream).await?;
+    require_writing_stream(tx, stream).await?;
     let (_, _, _, size, payload) = queries::lock_writing_stream(stream)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     if payload == "raw" {
-        validate_raw(&mut tx, stream, size).await?;
+        validate_raw(tx, stream, size).await?;
     } else {
-        require_sources(&mut tx, Some(stream), &[]).await?;
+        require_sources(tx, Some(stream), &[]).await?;
     }
     if let Some(input) = remote {
         ensure!(
             queries::remote_part_queue(input)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?
                 .rows_affected()
                 == 1,
@@ -2840,23 +2854,24 @@ pub(super) async fn commit_upload_part(
         );
     }
     queries::publish_upload_part(upload, number, stream)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::ready_upload_stream(stream)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if let Some(old) = old {
-        queries::retire_upload_stream(old).execute(&mut *tx).await?;
+        queries::retire_upload_stream(old)
+            .execute(&mut **tx)
+            .await?;
     }
-    queries::touch_upload(upload).execute(&mut *tx).await?;
+    queries::touch_upload(upload).execute(&mut **tx).await?;
     checkpoint_event(
-        &mut tx,
+        tx,
         "upload.part",
         &upload.to_string(),
         json!({"bucket_id":bucket,"part":number}),
     )
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -3554,29 +3569,39 @@ pub(super) async fn claim_staging(
     limit: u64,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    claim_staging_in(&mut tx, storage, key, bytes, limit).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn claim_staging_in(
+    db: &mut PgConnection,
+    storage: Uuid,
+    key: &str,
+    bytes: u64,
+    limit: u64,
+) -> Result<()> {
     queries::lock_staging(format!("mokyu:staging:{storage}"))
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
     if let Some(existing) = queries::staged_size(storage, key)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *db)
         .await?
     {
         ensure!(
             existing == i64::try_from(bytes)?,
             "staging object size changed"
         );
-        tx.commit().await?;
         return Ok(());
     }
-    let used = queries::staged_usage(storage).fetch_one(&mut *tx).await?;
+    let used = queries::staged_usage(storage).fetch_one(&mut *db).await?;
     ensure!(
         used >= 0 && (used as u64).saturating_add(bytes) <= limit,
-        "shared staging quota exhausted"
+        s3s::s3_error!(SlowDown, "shared staging quota exhausted")
     );
     queries::insert_staged_object(storage, key, i64::try_from(bytes)?)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -9847,22 +9872,74 @@ pub(super) async fn begin_node_write(
     } else {
         None
     };
+    authority.lock(&mut tx).await?;
+    let upload = if let Some(part) = &input.intent.part {
+        let upload = queries::multipart_upload(
+            part.upload,
+            bucket.id,
+            &input.intent.key,
+            &input.intent.access,
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(NoSuchUpload))?;
+        ensure!(upload.state == "active", s3s::s3_error!(NoSuchUpload));
+        ensure!(
+            part.algorithm.as_ref().is_none_or(|algorithm| upload
+                .checksum_algorithm
+                .as_ref()
+                .is_none_or(|expected| expected == algorithm)),
+            s3s::s3_error!(
+                InvalidRequest,
+                "part checksum algorithm differs from upload"
+            )
+        );
+        Some(upload)
+    } else {
+        None
+    };
+    let checksum_algorithm = upload
+        .as_ref()
+        .and_then(|upload| upload.checksum_algorithm.clone())
+        .or_else(|| {
+            input
+                .intent
+                .part
+                .as_ref()
+                .and_then(|part| part.algorithm.clone())
+        });
     let stream = create_stream_in(
         &mut tx,
         StreamCreate {
             authority,
             bucket: bucket.id,
             key: input.intent.key.clone(),
-            stream_type: "object".into(),
-            metadata: input.intent.metadata.clone(),
+            stream_type: if upload.is_some() { "part" } else { "object" }.into(),
+            metadata: upload.as_ref().map_or_else(
+                || input.intent.metadata.clone(),
+                |upload| upload.metadata.clone(),
+            ),
             public: input.intent.public,
-            claim_object: true,
+            claim_object: upload.is_none(),
             completion: None,
             owner: None,
         },
         Some(write::LEASE_SECONDS),
     )
     .await?;
+    if let Some(part) = &input.intent.part {
+        ensure!(
+            queries::lock_upload_state(part.upload)
+                .fetch_optional(&mut *tx)
+                .await?
+                .as_deref()
+                == Some("active"),
+            s3s::s3_error!(NoSuchUpload)
+        );
+        queries::begin_upload_part(part.upload, part.number, stream)
+            .execute(&mut *tx)
+            .await?;
+    }
     let storage = queries::storage_for_stream(stream)
         .fetch_one(&mut *tx)
         .await?
@@ -9886,9 +9963,15 @@ pub(super) async fn begin_node_write(
         .fetch_one(&mut *tx)
         .await?;
     profile.write_durability = None;
-    queries::reserve_quota(stream, input.intent.size.unwrap_or(0), false, None, None)
-        .fetch_one(&mut *tx)
-        .await?;
+    queries::reserve_quota(
+        stream,
+        input.intent.size.unwrap_or(0),
+        false,
+        input.intent.part.as_ref().map(|part| part.upload),
+        input.intent.part.as_ref().map(|part| part.number),
+    )
+    .fetch_one(&mut *tx)
+    .await?;
     ensure!(
         queries::insert_node_write(
             state,
@@ -9897,7 +9980,8 @@ pub(super) async fn begin_node_write(
             stream,
             &profile,
             block_key,
-            copy_source.as_ref()
+            copy_source.as_ref(),
+            checksum_algorithm.as_deref()
         )
         .execute(&mut *tx)
         .await?
@@ -9945,6 +10029,7 @@ pub(super) async fn node_write_reply(
             .copy_source
             .as_ref()
             .is_some_and(|source| source.references(&owned.profile)),
+        checksum_algorithm: owned.checksum_algorithm,
         materials: Vec::new(),
         storage: None,
         grants: Vec::new(),
@@ -10214,7 +10299,16 @@ async fn node_chunk_permits(
         .map(|item| item.chunk.uuid)
         .collect();
     let wanted = unique.len().min(input.parallelism as usize);
-    node_write_permits(db, node, row, Some(input.batch), wanted).await
+    node_write_permits(
+        db,
+        node,
+        row,
+        Some(input.batch),
+        wanted,
+        row.storage_id.ok_or(Error::SourceUnavailable)?,
+        row.profile.upload_concurrency,
+    )
+    .await
 }
 
 async fn node_write_permits(
@@ -10223,15 +10317,16 @@ async fn node_write_permits(
     row: &queries::NodeWrite,
     batch: Option<i64>,
     wanted: usize,
+    storage: Uuid,
+    admitted: Option<i32>,
 ) -> Result<Vec<read::Grant>> {
     if wanted == 0 {
         return Ok(Vec::new());
     }
-    let storage = row.storage_id.ok_or(Error::SourceUnavailable)?;
     let current = queries::node_write_limit(storage)
         .fetch_one(&mut *db)
         .await?;
-    let limit = match (row.profile.upload_concurrency, current) {
+    let limit = match (admitted, current) {
         (Some(admitted), Some(current)) => Some(admitted.min(current)),
         (admitted, current) => admitted.or(current),
     };
@@ -10302,8 +10397,16 @@ pub(super) async fn prepare_node_chunks(
     }
     let stream = require_node_write(&mut tx, &row).await?;
     ensure!(
-        row.profile.cdc_enabled,
+        row.profile.cdc_enabled
+            && queries::node_write_tail(node.node_id, input.operation)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_none(),
         s3s::s3_error!(InvalidRequest, "write does not accept chunks")
+    );
+    ensure!(
+        row.upload_id.is_none() || end <= write::MAX_PART_BYTES,
+        s3s::s3_error!(EntityTooLarge)
     );
     ensure!(
         row.next_batch == input.batch && row.next_offset == input.offset && input.batch < i64::MAX,
@@ -10330,7 +10433,7 @@ pub(super) async fn prepare_node_chunks(
     } else {
         "none".into()
     };
-    queries::reserve_quota(stream, end, false, None, None)
+    queries::reserve_quota(stream, end, false, row.upload_id, row.part_number)
         .fetch_one(&mut *tx)
         .await?;
     let unique: BTreeMap<_, _> = input
@@ -10678,7 +10781,11 @@ pub(super) async fn publish_node_write(
         );
     }
     ensure!(
-        input.size == row.next_offset
+        queries::node_write_tail(node.node_id, input.operation)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_none_or(|tail| tail.committed)
+            && input.size == row.next_offset
             && row.expected_size.is_none_or(|size| size == input.size)
             && queries::node_write_pending(node.node_id, input.operation)
                 .fetch_one(&mut *tx)
@@ -10699,22 +10806,49 @@ pub(super) async fn publish_node_write(
             == 1,
         Error::OperationAborted
     );
-    let condition = |value: Option<String>| {
-        value
-            .map(|value| s3s::dto::ETagCondition::parse_http_header(value.as_bytes()))
-            .transpose()
-    };
-    ensure!(
-        publish_in(
+    if let (Some(upload), Some(number)) = (row.upload_id, row.part_number) {
+        ensure!(
+            input.etag.len() == 32 && input.if_match.is_none() && input.if_none.is_none(),
+            s3s::s3_error!(InvalidRequest)
+        );
+        if let Some(algorithm) = &row.checksum_algorithm {
+            let name = algorithm.to_ascii_lowercase();
+            ensure!(
+                input.checksums.contains_key(&name),
+                s3s::s3_error!(InvalidRequest, "part checksum missing")
+            );
+        }
+        let authority: sqlx::types::Json<Permit> = queries::write_authorization(stream)
+            .fetch_one(&mut *tx)
+            .await?;
+        commit_upload_part_in(
             &mut tx,
+            &authority,
+            row.bucket_id.ok_or(Error::NodeExpired)?,
+            upload,
+            number,
             stream,
-            condition(input.if_match)?,
-            condition(input.if_none)?,
-            None
+            None,
         )
-        .await?,
-        Error::OperationAborted
-    );
+        .await?;
+    } else {
+        let condition = |value: Option<String>| {
+            value
+                .map(|value| s3s::dto::ETagCondition::parse_http_header(value.as_bytes()))
+                .transpose()
+        };
+        ensure!(
+            publish_in(
+                &mut tx,
+                stream,
+                condition(input.if_match)?,
+                condition(input.if_none)?,
+                None
+            )
+            .await?,
+            Error::OperationAborted
+        );
+    }
     let (_, modified) = queries::node_write_size(stream).fetch_one(&mut *tx).await?;
     queries::seal_stream_uploads(stream)
         .execute(&mut *tx)
@@ -10745,6 +10879,175 @@ pub(super) async fn publish_node_write(
     Ok(reply)
 }
 
+pub(super) async fn prepare_node_tail(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_tail::Prepare,
+) -> Result<crate::model::node_tail::Prepared> {
+    let end = input.end()?;
+    let hash = input.hash()?;
+    let mut tx = pool.begin().await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
+    let tail = if let Some(tail) = queries::node_write_tail(node.node_id, input.operation)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        ensure!(tail.request_hash == hash, Error::NodeOperationConflict);
+        tail
+    } else {
+        let stream = require_node_write(&mut tx, &row).await?;
+        ensure!(
+            row.upload_id.is_some() && row.profile.cdc_enabled && row.copy_source.is_none(),
+            s3s::s3_error!(InvalidRequest, "write does not accept a multipart tail")
+        );
+        ensure!(
+            row.next_offset == input.offset
+                && row.expected_size.is_none_or(|size| size == end)
+                && queries::node_write_pending(node.node_id, input.operation)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    == 0,
+            s3s::s3_error!(InvalidArgument, "tail is out of order")
+        );
+        queries::reserve_quota(stream, end, false, row.upload_id, row.part_number)
+            .fetch_one(&mut *tx)
+            .await?;
+        let settings = queries::node_staging_settings().fetch_one(&mut *tx).await?;
+        let storage = settings
+            .staging_storage_id
+            .ok_or(Error::SourceUnavailable)?;
+        ensure!(
+            queries::cluster_staging_valid(Some(storage))
+                .fetch_one(&mut *tx)
+                .await?,
+            Error::SourceUnavailable
+        );
+        let limit = settings
+            .staging_bytes_limit
+            .as_deref()
+            .map(crate::config::bytes)
+            .transpose()?
+            .unwrap_or(crate::storage::DEFAULT_STAGING_LIMIT);
+        let fragment = Uuid::now_v7();
+        let path = format!(
+            "{}fragment/{}",
+            crate::storage::STAGING_PREFIX,
+            fragment.simple()
+        );
+        claim_staging_in(&mut tx, storage, &path, input.size as u64, limit).await?;
+        queries::insert_fragment(&StreamTail {
+            fragment,
+            stream,
+            offset: input.offset,
+            size: input.size,
+            hash: input.hash,
+            staging_storage: Some(storage),
+            staging_key: Some(path.clone()),
+            file: None,
+            file_offset: None,
+        })
+        .execute(&mut *tx)
+        .await?;
+        queries::insert_node_tail(node.node_id, &input, &hash, fragment, storage, &path)
+            .execute(&mut *tx)
+            .await?;
+        queries::node_write_tail(node.node_id, input.operation)
+            .fetch_one(&mut *tx)
+            .await?
+    };
+    let mut reply = tail.reply();
+    if !tail.committed {
+        require_node_write(&mut tx, &row).await?;
+        let record = queries::node_read_storages(&[tail.storage_id])
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::SourceUnavailable)?;
+        let profile = queries::storage_profile(tail.storage_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        reply.grants = node_write_permits(
+            &mut tx,
+            node.node_id,
+            &row,
+            None,
+            1,
+            tail.storage_id,
+            profile.upload_concurrency,
+        )
+        .await?;
+        let storage = read::Storage {
+            connection: crate::storage::model::Connection::unprotect(&record, key)?,
+            revision: profile.revision,
+            profile,
+        };
+        reply.storage = Some(read::material(
+            &mut reply.materials,
+            node.deployment_id,
+            read::MaterialType::Storage,
+            tail.storage_id.to_string(),
+            &storage,
+            &input.cached,
+        )?);
+    }
+    tx.commit().await?;
+    Ok(reply)
+}
+
+pub(super) async fn commit_node_tail(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: write::Lookup,
+) -> Result<crate::model::node_tail::Prepared> {
+    let mut tx = pool.begin().await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
+    let tail = queries::node_write_tail(node.node_id, input.operation)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NodeOperationMissing)?;
+    if !tail.committed {
+        let stream = require_node_write(&mut tx, &row).await?;
+        ensure!(
+            row.next_offset == tail.offset_bytes,
+            Error::NodeOperationConflict
+        );
+        ensure!(
+            queries::seal_fragment(tail.fragment_id.into())
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            Error::SourceUnavailable
+        );
+        queries::insert_fragment_extent(
+            stream,
+            tail.offset_bytes,
+            tail.size,
+            tail.fragment_id.into(),
+        )
+        .execute(&mut *tx)
+        .await?;
+        let end = tail.offset_bytes + i64::from(tail.size);
+        queries::resize_stream(stream, end)
+            .execute(&mut *tx)
+            .await?;
+        queries::finish_node_tail(node.node_id, input.operation, end)
+            .execute(&mut *tx)
+            .await?;
+        queries::commit_node_tail(node.node_id, input.operation)
+            .execute(&mut *tx)
+            .await?;
+        queries::release_write_upload_permits(node.node_id, input.operation, None)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let mut reply = tail.reply();
+    reply.committed = true;
+    tx.commit().await?;
+    Ok(reply)
+}
+
 pub(super) async fn prepare_node_raw(
     pool: &PgPool,
     node: &NodeState,
@@ -10764,7 +11067,16 @@ pub(super) async fn prepare_node_raw(
             Vec::new()
         } else {
             require_node_write(&mut tx, &row).await?;
-            node_write_permits(&mut tx, node.node_id, &row, None, 1).await?
+            node_write_permits(
+                &mut tx,
+                node.node_id,
+                &row,
+                None,
+                1,
+                row.storage_id.ok_or(Error::SourceUnavailable)?,
+                row.profile.upload_concurrency,
+            )
+            .await?
         };
         tx.commit().await?;
         return Ok(crate::model::node_raw::Prepared {
@@ -10776,7 +11088,8 @@ pub(super) async fn prepare_node_raw(
     }
     let stream = require_node_write(&mut tx, &row).await?;
     ensure!(
-        !row.profile.cdc_enabled
+        row.upload_id.is_none()
+            && !row.profile.cdc_enabled
             && !row.profile.compression_enabled
             && !row.profile.pack_enabled
             && row.block_key_id.is_none()
@@ -10843,8 +11156,16 @@ pub(super) async fn prepare_node_raw(
     queries::advance_node_write(node.node_id, input.operation, size)
         .execute(&mut *tx)
         .await?;
-    let grants =
-        node_write_permits(&mut tx, node.node_id, &row, None, usize::from(!committed)).await?;
+    let grants = node_write_permits(
+        &mut tx,
+        node.node_id,
+        &row,
+        None,
+        usize::from(!committed),
+        row.storage_id.ok_or(Error::SourceUnavailable)?,
+        row.profile.upload_concurrency,
+    )
+    .await?;
     tx.commit().await?;
     Ok(crate::model::node_raw::Prepared {
         source,

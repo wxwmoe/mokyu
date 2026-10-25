@@ -175,6 +175,7 @@ async fn node_chunk_batches_upload_once_replay_and_publish_over_rpc() -> Result<
         access_key: source.access_key.clone(),
         credential_revision: Some(credential.revision as u64),
         copy_read_id: None,
+        part: None,
         bucket: source.bucket.clone(),
         key: "rpc-chunks".into(),
         metadata_json: br#"{"content_type":"application/octet-stream"}"#.to_vec(),

@@ -44,6 +44,8 @@ service NodeWrites {
   rpc CopyChunks(CopyChunksRequest) returns (ChunkCommitReply);
   rpc PrepareRaw(PrepareRawRequest) returns (PreparedRaw);
   rpc CommitRaw(CommitRawRequest) returns (PreparedRaw);
+  rpc PrepareTail(PrepareTailRequest) returns (PreparedTail);
+  rpc CommitTail(WriteRequest) returns (PreparedTail);
   rpc PublishWrite(PublishWriteRequest) returns (WriteReply);
 }
 
@@ -213,6 +215,32 @@ message BeginWriteRequest {
   repeated Cached cached = 9;
   optional uint64 credential_revision = 10;
   optional string copy_read_id = 11;
+  WritePart part = 12;
+}
+
+message WritePart {
+  string upload_id = 1;
+  int32 number = 2;
+  optional string algorithm = 3;
+}
+
+message PrepareTailRequest {
+  Run run = 1;
+  string operation_id = 2;
+  uint64 offset = 3;
+  uint32 size = 4;
+  bytes hash = 5;
+  repeated Cached cached = 6;
+}
+
+message PreparedTail {
+  string fragment_id = 1;
+  string object_key = 2;
+  uint64 end = 3;
+  bool committed = 4;
+  repeated Material materials = 5;
+  Cached storage = 6;
+  repeated Grant grants = 7;
 }
 
 message PrepareRequestInput {
@@ -297,6 +325,7 @@ message WriteReply {
   PublishedWrite published = 7;
   string bucket_id = 8;
   bool copy_references = 9;
+  optional string checksum_algorithm = 10;
 }
 
 // Suspicions request durable backend verification; they never prove corruption.

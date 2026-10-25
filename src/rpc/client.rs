@@ -336,6 +336,22 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn prepare_tail(
+        &self,
+        input: wire::PrepareTailRequest,
+    ) -> Result<wire::PreparedTail, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/PrepareTail")
+            .await
+    }
+
+    pub(crate) async fn commit_tail(
+        &self,
+        input: wire::WriteRequest,
+    ) -> Result<wire::PreparedTail, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/CommitTail")
+            .await
+    }
+
     pub(crate) async fn prepare_raw(
         &self,
         input: wire::PrepareRawRequest,

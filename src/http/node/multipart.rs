@@ -2,6 +2,70 @@ use super::*;
 use crate::model::node_request::Catalog;
 
 impl Gateway {
+    pub(super) async fn part(
+        &self,
+        mut request: S3Request<UploadPartInput>,
+    ) -> Result<S3Response<UploadPartOutput>> {
+        gateway::reject_features(&request.headers)?;
+        let prepared = CURRENT
+            .try_with(|value| value.borrow_mut().take())?
+            .context("write request missing")?;
+        let PreparedRequest::Write(prepared) = prepared else {
+            anyhow::bail!(s3s::s3_error!(InvalidRequest));
+        };
+        let i = &request.input;
+        ensure!(
+            (1..=10000).contains(&i.part_number),
+            s3s::s3_error!(InvalidArgument)
+        );
+        let upload =
+            uuid::Uuid::parse_str(&i.upload_id).map_err(|_| s3s::s3_error!(NoSuchUpload))?;
+        ensure!(!upload.is_nil(), s3s::s3_error!(NoSuchUpload));
+        let access = &request
+            .credentials
+            .as_ref()
+            .ok_or_else(|| s3s::s3_error!(AccessDenied))?
+            .access_key;
+        let length = writes::declared(&request.headers, i.content_length)?;
+        let input = wire::BeginWriteRequest {
+            access_key: access.clone(),
+            bucket: i.bucket.clone(),
+            key: i.key.clone(),
+            metadata_json: b"{}".to_vec(),
+            size: length.map(|value| value as u64),
+            part: Some(wire::WritePart {
+                upload_id: upload.to_string(),
+                number: i.part_number,
+                algorithm: i
+                    .checksum_algorithm
+                    .as_ref()
+                    .map(|value| value.as_str().to_owned()),
+            }),
+            ..Default::default()
+        };
+        let body = request
+            .input
+            .body
+            .take()
+            .unwrap_or_else(|| StreamingBlob::from_bytes(bytes::Bytes::new()));
+        let (etag, sums) = self
+            .writes
+            .part(
+                prepared,
+                input,
+                body,
+                &request.headers,
+                request.trailing_headers,
+            )
+            .await?;
+        let mut output = UploadPartOutput {
+            e_tag: Some(ETag::Strong(etag)),
+            ..Default::default()
+        };
+        gateway::checksums!(output, &sums);
+        Ok(S3Response::new(output))
+    }
+
     pub(super) async fn create_multipart(
         &self,
         request: S3Request<CreateMultipartUploadInput>,

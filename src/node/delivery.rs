@@ -51,6 +51,7 @@ pub(crate) fn error(error: anyhow::Error) -> s3s::S3Error {
                 "IncompleteBody" => s3s::S3ErrorCode::IncompleteBody,
                 "InvalidArgument" => s3s::S3ErrorCode::InvalidArgument,
                 "InvalidRequest" => s3s::S3ErrorCode::InvalidRequest,
+                "EntityTooLarge" => s3s::S3ErrorCode::EntityTooLarge,
                 _ => s3s::S3ErrorCode::ServiceUnavailable,
             };
             return s3s::S3Error::new(code);

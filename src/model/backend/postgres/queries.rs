@@ -7514,6 +7514,26 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn prepare_tail(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_tail::Prepare,
+    ) -> Result<crate::model::node_tail::Prepared> {
+        transactions::prepare_node_tail(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn commit_tail(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_write::Lookup,
+    ) -> Result<crate::model::node_tail::Prepared> {
+        transactions::commit_node_tail(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
     async fn multipart_operation(
         &self,
         node: &crate::cluster::NodeState,
@@ -10594,10 +10614,10 @@ pub(super) fn node_read_renew<'q>(
             "SELECT w.id,GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) FROM node_read_windows w JOIN node_reads r ON r.read_id=w.read_id JOIN stream_leases l ON l.id=r.read_id WHERE r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND w.id=ANY($5) AND l.expires_at>clock_timestamp()"
         }
         GrantType::Write => {
-            "UPDATE stream_leases l SET expires_at=clock_timestamp()+interval '90 seconds' FROM node_writes w,streams s,objects o WHERE l.id=w.lease_id AND s.id=w.stream_id AND o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id AND s.state='writing' AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND l.id=ANY($5) AND l.expires_at>clock_timestamp() RETURNING l.id,90000::bigint"
+            "UPDATE stream_leases l SET expires_at=clock_timestamp()+interval '90 seconds' FROM node_writes w,streams s WHERE l.id=w.lease_id AND s.id=w.stream_id AND ((w.upload_id IS NULL AND EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id)) OR (w.upload_id IS NOT NULL AND EXISTS(SELECT 1 FROM parts a JOIN uploads u ON u.id=a.upload_id WHERE a.upload_id=w.upload_id AND a.part_number=w.part_number AND a.write_token=s.id AND u.state='active' AND u.remote_manifest_hash IS NULL))) AND s.state='writing' AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND l.id=ANY($5) AND l.expires_at>clock_timestamp() RETURNING l.id,90000::bigint"
         }
         GrantType::StorageWrite => {
-            "UPDATE storage_permits p SET expires_at=clock_timestamp()+interval '1 minute' FROM node_write_permits n,node_writes w,stream_leases l,streams s,objects o WHERE p.token=n.token AND w.node_id=n.node_id AND w.operation_id=n.operation_id AND ((n.batch_id IS NOT NULL AND EXISTS(SELECT 1 FROM node_write_batches b WHERE b.node_id=n.node_id AND b.operation_id=n.operation_id AND b.batch_id=n.batch_id AND b.commit_hash IS NULL)) OR (n.batch_id IS NULL AND EXISTS(SELECT 1 FROM node_write_raw r WHERE r.node_id=n.node_id AND r.operation_id=n.operation_id AND NOT r.committed))) AND l.id=w.lease_id AND s.id=w.stream_id AND s.state='writing' AND o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND p.token=ANY($5) AND p.expires_at>clock_timestamp() AND l.expires_at>clock_timestamp() RETURNING p.token,60000::bigint"
+            "UPDATE storage_permits p SET expires_at=clock_timestamp()+interval '1 minute' FROM node_write_permits n,node_writes w,stream_leases l,streams s WHERE p.token=n.token AND w.node_id=n.node_id AND w.operation_id=n.operation_id AND ((n.batch_id IS NOT NULL AND EXISTS(SELECT 1 FROM node_write_batches b WHERE b.node_id=n.node_id AND b.operation_id=n.operation_id AND b.batch_id=n.batch_id AND b.commit_hash IS NULL)) OR (n.batch_id IS NULL AND EXISTS(SELECT 1 FROM node_write_raw r WHERE r.node_id=n.node_id AND r.operation_id=n.operation_id AND NOT r.committed)) OR (n.batch_id IS NULL AND EXISTS(SELECT 1 FROM node_write_tails t WHERE t.node_id=n.node_id AND t.operation_id=n.operation_id AND NOT t.committed))) AND l.id=w.lease_id AND s.id=w.stream_id AND s.state='writing' AND ((w.upload_id IS NULL AND EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id)) OR (w.upload_id IS NOT NULL AND EXISTS(SELECT 1 FROM parts a JOIN uploads u ON u.id=a.upload_id WHERE a.upload_id=w.upload_id AND a.part_number=w.part_number AND a.write_token=s.id AND u.state='active' AND u.remote_manifest_hash IS NULL))) AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND p.token=ANY($5) AND p.expires_at>clock_timestamp() AND l.expires_at>clock_timestamp() RETURNING p.token,60000::bigint"
         }
     };
     sqlx::query_as(query)
@@ -10701,17 +10721,80 @@ pub(super) struct NodeWrite {
     pub result: Option<sqlx::types::Json<crate::model::node_write::Published>>,
     pub profile: sqlx::types::Json<crate::storage::profile::StorageProfile>,
     pub copy_source: Option<sqlx::types::Json<crate::model::node_write::CopySource>>,
+    pub upload_id: Option<Uuid>,
+    pub part_number: Option<i32>,
+    pub checksum_algorithm: Option<String>,
     pub state: String,
     pub valid_for_ms: i64,
 }
 
 pub(super) fn node_write(node: Uuid, operation: Uuid) -> Rows<'static, NodeWrite> {
-    sqlx::query_as("SELECT w.*,s.bucket_id AS bucket_id,CASE WHEN w.state='active' AND s.state='writing' AND o.write_token=s.id THEN GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) ELSE 0 END AS valid_for_ms FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id LEFT JOIN streams s ON s.id=w.stream_id LEFT JOIN objects o ON o.bucket_id=s.bucket_id AND o.object_key=s.object_key WHERE w.node_id=$1 AND w.operation_id=$2 FOR UPDATE OF w")
+    sqlx::query_as("SELECT w.*,s.bucket_id AS bucket_id,CASE WHEN w.state='active' AND s.state='writing' AND ((w.upload_id IS NULL AND EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id)) OR (w.upload_id IS NOT NULL AND EXISTS(SELECT 1 FROM parts a JOIN uploads u ON u.id=a.upload_id WHERE a.upload_id=w.upload_id AND a.part_number=w.part_number AND a.write_token=s.id AND u.state='active' AND u.remote_manifest_hash IS NULL))) THEN GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) ELSE 0 END AS valid_for_ms FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id LEFT JOIN streams s ON s.id=w.stream_id WHERE w.node_id=$1 AND w.operation_id=$2 FOR UPDATE OF w")
         .bind(node).bind(operation)
 }
 
 pub(super) fn node_write_count(node: Uuid) -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT count(*) FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND w.state='active' AND l.expires_at>clock_timestamp()").bind(node)
+}
+
+#[derive(sqlx::FromRow)]
+pub(super) struct NodeTail {
+    pub request_hash: Vec<u8>,
+    pub fragment_id: Uuid,
+    pub storage_id: Uuid,
+    pub object_key: String,
+    pub offset_bytes: i64,
+    pub size: i32,
+    pub committed: bool,
+}
+
+impl NodeTail {
+    pub(super) fn reply(&self) -> crate::model::node_tail::Prepared {
+        crate::model::node_tail::Prepared {
+            fragment: self.fragment_id,
+            object_key: self.object_key.clone(),
+            end: self.offset_bytes + i64::from(self.size),
+            committed: self.committed,
+            materials: Vec::new(),
+            storage: None,
+            grants: Vec::new(),
+        }
+    }
+}
+
+pub(super) fn node_write_tail(node: Uuid, operation: Uuid) -> Rows<'static, NodeTail> {
+    sqlx::query_as("SELECT * FROM node_write_tails WHERE node_id=$1 AND operation_id=$2")
+        .bind(node)
+        .bind(operation)
+}
+
+pub(super) fn node_staging_settings()
+-> Scalar<'static, sqlx::types::Json<crate::config::UploadSettings>> {
+    sqlx::query_scalar("SELECT value FROM runtime_settings WHERE section='uploads' FOR SHARE")
+}
+
+pub(super) fn insert_node_tail<'q>(
+    node: Uuid,
+    input: &crate::model::node_tail::Prepare,
+    hash: &'q [u8],
+    fragment: Uuid,
+    storage: Uuid,
+    path: &'q str,
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO node_write_tails(node_id,operation_id,request_hash,fragment_id,storage_id,object_key,offset_bytes,size) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(node).bind(input.operation).bind(hash).bind(fragment).bind(storage).bind(path).bind(input.offset).bind(input.size)
+}
+
+pub(super) fn commit_node_tail(node: Uuid, operation: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE node_write_tails SET committed=true WHERE node_id=$1 AND operation_id=$2 AND NOT committed")
+        .bind(node).bind(operation)
+}
+
+pub(super) fn finish_node_tail(node: Uuid, operation: Uuid, end: i64) -> Statement<'static> {
+    sqlx::query("UPDATE node_writes SET next_offset=$3 WHERE node_id=$1 AND operation_id=$2")
+        .bind(node)
+        .bind(operation)
+        .bind(end)
 }
 
 pub(super) fn node_object_change(
@@ -10763,6 +10846,7 @@ pub(super) fn node_write_cleanup(node: Uuid) -> Statement<'static> {
     sqlx::query("DELETE FROM node_writes WHERE node_id=$1 AND operation_id IN (SELECT w.operation_id FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND COALESCE(w.completed_at,w.created_at)<clock_timestamp()-interval '1 day' AND (l.id IS NULL OR l.expires_at<=clock_timestamp()) ORDER BY w.created_at LIMIT 64)").bind(node)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn insert_node_write<'q>(
     state: &'q crate::cluster::NodeState,
     input: &'q crate::model::node_write::Begin,
@@ -10771,10 +10855,12 @@ pub(super) fn insert_node_write<'q>(
     profile: &'q crate::storage::profile::StorageProfile,
     block_key: Option<Uuid>,
     source: Option<&'q crate::model::node_write::CopySource>,
+    algorithm: Option<&'q str>,
 ) -> Statement<'q> {
-    sqlx::query("INSERT INTO node_writes(node_id,operation_id,credential_generation,boot_id,fence,request_hash,stream_id,lease_id,storage_id,block_key_id,profile,expected_size,copy_source) SELECT $1,$2,$3,$4,$5,$6,$7,l.id,$8,$9,$10,$11,$12 FROM stream_leases l WHERE l.stream_id=$7 AND l.lease_type='write'")
+    sqlx::query("INSERT INTO node_writes(node_id,operation_id,credential_generation,boot_id,fence,request_hash,stream_id,lease_id,storage_id,block_key_id,profile,expected_size,copy_source,upload_id,part_number,checksum_algorithm) SELECT $1,$2,$3,$4,$5,$6,$7,l.id,$8,$9,$10,$11,$12,$13,$14,$15 FROM stream_leases l WHERE l.stream_id=$7 AND l.lease_type='write'")
         .bind(state.node_id).bind(input.operation).bind(state.credential_generation).bind(input.run.boot).bind(input.run.fence)
         .bind(hash).bind(stream).bind(profile.storage_id).bind(block_key).bind(sqlx::types::Json(profile)).bind(input.intent.size).bind(source.map(sqlx::types::Json))
+        .bind(input.intent.part.as_ref().map(|part| part.upload)).bind(input.intent.part.as_ref().map(|part| part.number)).bind(algorithm)
 }
 
 pub(super) fn node_copy_source(

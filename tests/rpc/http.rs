@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Parts,
     Multipart,
     Copy,
     Objects,
@@ -49,6 +50,12 @@ enum HttpCase {
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, shared tails and signed multipart data"]
+async fn node_http_parts_preserve_generations_and_recover_tails() -> Result<()> {
+    node_http_reads(HttpCase::Parts).await
 }
 
 #[tokio::test]
@@ -261,6 +268,7 @@ async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()
 }
 
 async fn node_http_reads(case: HttpCase) -> Result<()> {
+    let parts = matches!(case, HttpCase::Parts);
     let multipart = matches!(case, HttpCase::Multipart);
     let copy = matches!(case, HttpCase::Copy);
     let objects = matches!(case, HttpCase::Objects);
@@ -378,7 +386,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if multipart {
+    if parts {
+        fixture("http-parts").await?;
+    } else if multipart {
         fixture("http-multipart").await?;
         assert_eq!(reads.backend_gets(), 0);
     } else if copy {
@@ -502,19 +512,25 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         })
         .await?;
         Some(publishing)
-    } else if writes || raw {
-        fixture(if raw {
+    } else if writes || raw || parts {
+        fixture(if parts {
+            "http-parts-lose-reply"
+        } else if raw {
             "http-raw-lose-commit"
         } else {
             "chunks-lose-publish"
         })
         .await?;
-        let publishing = tokio::spawn(fixture(if raw {
+        let publishing = tokio::spawn(fixture(if parts {
+            "http-parts-replay"
+        } else if raw {
             "http-raw-replay"
         } else {
             "http-writes-publish-replay"
         }));
-        let point = path.parent().unwrap().join(if raw {
+        let point = path.parent().unwrap().join(if parts {
+            "faults-a/node-tail-committed.hit"
+        } else if raw {
             "faults-a/node-raw-committed.hit"
         } else {
             "faults-a/node-write-published.hit"
@@ -537,7 +553,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
     context.client.addresses.lock().await.refresh_at = Instant::now();
     if let Some(publishing) = publishing {
         publishing.await??;
-        fixture(if multipart {
+        fixture(if parts {
+            "http-parts-resume-reply"
+        } else if multipart {
             "http-multipart-resume-reply"
         } else if copy {
             "http-copy-resume-reply"
@@ -555,7 +573,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if multipart {
+    if parts {
+        fixture("http-parts-reconnected").await?;
+    } else if multipart {
         fixture("http-multipart-reconnected").await?;
         assert_eq!(reads.backend_gets(), 0);
     } else if copy {
@@ -642,16 +662,20 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         let _ = web_server.await;
         return Ok(());
     }
-    if writes || raw {
+    if writes || raw || parts {
         let before = observed.write_resources();
         let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
-        let point = faults.join(if raw {
+        let point = faults.join(if parts {
+            "node-tail-uploaded"
+        } else if raw {
             "node-raw-uploaded"
         } else {
             "node-write-seal"
         });
         tokio::fs::write(&point, b"pause").await?;
-        let fenced = tokio::spawn(fixture(if raw {
+        let fenced = tokio::spawn(fixture(if parts {
+            "http-parts-fenced"
+        } else if raw {
             "http-raw-fenced"
         } else {
             "http-writes-fenced"
@@ -664,7 +688,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         .await?;
         let held = observed.write_resources();
         assert!(
-            if raw {
+            if parts {
+                held[0] < before[0] && held[1..] == before[1..]
+            } else if raw {
                 held[0] < before[0] && held[1] == before[1] && held[2] < before[2]
             } else {
                 held.iter().zip(before).all(|(held, before)| *held < before)
@@ -673,7 +699,7 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         );
         context.stop();
         fenced.await??;
-        if !raw {
+        if !raw && !parts {
             assert_eq!(
                 observed.write_resources(),
                 held,

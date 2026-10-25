@@ -35,6 +35,8 @@ struct Operation {
     grants: Vec<Arc<Grant>>,
     backend: Arc<super::body::Backend>,
     copy_references: bool,
+    part: bool,
+    checksum_algorithm: Option<String>,
 }
 
 impl Operation {
@@ -154,6 +156,7 @@ impl Writes {
         let held = self.reads.cache.snapshot();
         input.cached = reads::cached(&held);
         let id = input.operation_id.clone();
+        let part = input.part.is_some();
         let node = &self.reads.node;
         let started = Instant::now();
         let mut reply = node.client.begin_write(input).await?;
@@ -177,6 +180,8 @@ impl Writes {
         let backend = reads::backend(&request.materials, value.connection.id)?;
         Ok(Operation {
             copy_references: reply.copy_references,
+            part,
+            checksum_algorithm: reply.checksum_algorithm,
             bucket: Uuid::parse_str(&reply.bucket_id)?,
             id,
             stream: reply.stream_id,
@@ -205,6 +210,32 @@ impl Writes {
                 .write_body(&operation, body, check, trailers, length)
                 .await?;
             self.publish(&operation, size, &etag, &sums, if_match, if_none)
+                .await?;
+            Ok((etag, sums))
+        }
+        .await;
+        if result.is_err() {
+            let _ = self.reads.node.client.abort_write(operation.lookup()).await;
+        }
+        result
+    }
+
+    pub(crate) async fn part(
+        &self,
+        request: Request,
+        input: wire::BeginWriteRequest,
+        body: s3s::dto::StreamingBlob,
+        headers: &hyper::HeaderMap,
+        trailers: Option<s3s::TrailingHeaders>,
+    ) -> Result<(String, serde_json::Value)> {
+        let length = input.size;
+        let operation = self.begin(request, input).await?;
+        let result = async {
+            let check = Integrity::new(headers, operation.checksum_algorithm.as_deref())?;
+            let (size, etag, sums) = self
+                .write_body(&operation, body, check, trailers, length)
+                .await?;
+            self.publish(&operation, size, &etag, &sums, None, None)
                 .await?;
             Ok((etag, sums))
         }
@@ -247,7 +278,17 @@ impl Writes {
                     )
                 })
                 .await?;
-            Ok(received)
+            let (size, etag, sums, tail) = received;
+            if !tail.is_empty() {
+                operation
+                    .guard(
+                        &self.reads.node,
+                        &[],
+                        self.tail(operation, size - tail.len() as u64, tail),
+                    )
+                    .await?;
+            }
+            Ok((size, etag, sums))
         } else {
             operation
                 .guard(
@@ -387,6 +428,90 @@ impl Writes {
             let _ = self.reads.node.client.abort_write(operation.lookup()).await;
         }
         result
+    }
+
+    async fn tail(&self, operation: &Operation, offset: u64, bytes: Vec<u8>) -> Result<()> {
+        let node = &self.reads.node;
+        let io = Arc::new(self.io.clone().acquire_owned().await?);
+        let held = self.reads.cache.snapshot();
+        let size = bytes.len() as u32;
+        let started = Instant::now();
+        let mut reply = node
+            .client
+            .prepare_tail(wire::PrepareTailRequest {
+                run: Some(operation.request.run.run.clone()),
+                operation_id: operation.id.clone(),
+                offset,
+                size,
+                hash: blake3::hash(&bytes).as_bytes().to_vec(),
+                cached: reads::cached(&held),
+            })
+            .await?;
+        let fragment = Uuid::parse_str(&reply.fragment_id)?;
+        ensure!(
+            !fragment.is_nil()
+                && reply.end == offset + u64::from(size)
+                && reply.object_key
+                    == format!(
+                        "{}fragment/{}",
+                        crate::storage::STAGING_PREFIX,
+                        fragment.simple()
+                    ),
+            "invalid tail plan"
+        );
+        if !reply.committed {
+            let grants = node
+                .resources
+                .adopt(&operation.request.run, &reply.grants, started)?;
+            let materials = self.reads.cache.apply(
+                node.client.identity.deployment_id,
+                held,
+                std::mem::take(&mut reply.materials),
+            )?;
+            let value: read::Storage = reads::material(
+                &materials,
+                reply.storage.as_ref().context("tail storage missing")?,
+            )?;
+            let backend = reads::backend(&materials, value.connection.id)?;
+            ensure!(
+                backend.profile.upload_concurrency.is_none()
+                    || grants.iter().any(|grant| grant.reference.r#type
+                        == wire::GrantType::StorageWrite as i32
+                        && grant.storage == Some(value.connection.id)),
+                "tail upload permit missing"
+            );
+            operation
+                .guard(node, &grants, async {
+                    backend.store.ensure_verified().await?;
+                    backend
+                        .store
+                        .backend
+                        .put(
+                            &Path::from(reply.object_key.clone()),
+                            Bytes::from_owner(Upload {
+                                bytes: bytes.into(),
+                                _memory: operation.request.memory.clone(),
+                                _io: io,
+                                _grants: grants.clone(),
+                            })
+                            .into(),
+                        )
+                        .await?;
+                    Ok(())
+                })
+                .await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("node-tail-uploaded").await;
+            operation.check()?;
+            let committed = node.client.commit_tail(operation.lookup()).await?;
+            ensure!(
+                committed.committed
+                    && committed.fragment_id == reply.fragment_id
+                    && committed.end == reply.end,
+                "invalid tail receipt"
+            );
+        }
+        Ok(())
     }
 
     async fn raw(
@@ -554,7 +679,7 @@ impl Writes {
         length: Option<u64>,
         config: crate::content::compression::Config,
         tx: mpsc::Sender<Batch>,
-    ) -> Result<(u64, String, serde_json::Value)> {
+    ) -> Result<(u64, String, serde_json::Value, Vec<u8>)> {
         let slots = Arc::new(Semaphore::new(2));
         let mut slot = Some(slots.clone().acquire_owned().await?);
         let mut items = Vec::new();
@@ -592,7 +717,7 @@ impl Writes {
                 let take = (codec::MAX - window.len()).min(rest.len());
                 window.extend_from_slice(&rest[..take]);
                 rest = &rest[take..];
-                if window.len() == codec::MAX || (eof && !window.is_empty()) {
+                if window.len() == codec::MAX || (eof && !operation.part && !window.is_empty()) {
                     let take = codec::cut(&window);
                     let payload = self
                         .payload(operation, window[..take].to_vec(), config.clone())
@@ -633,7 +758,7 @@ impl Writes {
             .await
             .map_err(|_| anyhow::anyhow!("write pipeline stopped"))?;
         }
-        Ok((size, etag, sums))
+        Ok((size, etag, sums, window))
     }
 
     async fn batches(&self, operation: &Operation, mut rx: mpsc::Receiver<Batch>) -> Result<()> {

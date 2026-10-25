@@ -33,6 +33,8 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeWrites/CommitChunks` | Unary；确认整批上传完成并建立引用，可按批次乱序完成 |
 | `NodeWrites/PrepareRaw` | Unary；校验完整文件身份、预留配额、查询去重并分配最终上传目标与许可 |
 | `NodeWrites/CommitRaw` | Unary；确认 raw 上传完成并建立引用，重复确认返回相同回执 |
+| `NodeWrites/PrepareTail` | Unary；为 chunks 分片的未闭合尾部预留共享 staging、配额和上传许可 |
+| `NodeWrites/CommitTail` | Unary；确认尾部持久化并建立片段映射，重复确认复用同一结果 |
 | `NodeWrites/PublishWrite` | Unary；核对完整性、条件和配额，原子发布对象并保存终态回执 |
 | `NodeWrites/WriteStatus` | Unary；按节点与操作身份查询写入状态，不返回存储凭据 |
 | `NodeWrites/AbortWrite` | Unary；取消当前运行权持有的写入，同事务释放写租约和预留配额 |
@@ -108,6 +110,10 @@ ChangeObjects 在入站签名验证后执行，携带相同凭据修订、桶、
 CreateMultipart 与 AbortMultipart 在 control 完成准入或取消，并在同一事务保存节点、凭据代次、操作参数和结果。重试复用 UploadId 或取消回执，不重复占用活动上传名额；参数变化被拒绝。首次操作接受过去 15 分钟至未来 30 秒，回执至少保留一天。创建重验当前写权限、公开对象所需 ACL 权限、桶暂停状态和上传数量上限；取消校验上传所属凭据、桶、对象键和可选的发起时间。
 
 ListMultipartUploads 和 ListParts 与当前凭据、桶材料合并为一次 PrepareRequest，按原 S3 marker/prefix/delimiter 规则返回有界列表。列表不延长上传期限；分片信息通过 JOIN 一次取得，不在节点逐分片查询。创建和列表沿用现有 checksum 算法及 FULL_OBJECT/COMPOSITE 规则。
+
+UploadPart 通过 BeginWrite 的 `part={upload_id,number,algorithm}` 绑定上传所有者及分片代次，使用上传的元数据和 checksum 算法；每片最多 5 GiB。分片配额归属上传，替换中的分片保留原先成功的版本。写租约和上传许可续期同时检查当前分片代次与上传状态；被替换、取消或已开始完成的写入不能继续提交。
+
+inline chunks 分片复用批量 PrepareChunks/CommitChunks，只有小于 4 MiB 的未闭合 CDC 尾部进入共享 staging。PrepareTail 绑定偏移、长度和 BLAKE3，先保存唯一位置及空间预留，再返回存储材料与许可；CommitTail 原子建立映射并保存确认状态。节点校验完整正文后才发布分片，PublishWrite 将分片引用与回执一起提交；失败的替换不撤销原分片，重放不会重复引用或扣配额。
 
 BeginWrite 请求最多 64 KiB；包含桶、对象键、服务凭据身份、必填的 `credential_revision`、对象元数据、公开标志和可选的已知长度。调用方先使用准备的凭据验证入站签名，再携带同一修订发起准入；修订为 0 与漏传不同。control 在创建写入前确认当前修订，并在同一事务内校验写入权限及公开对象所需的 ACL 权限、桶状态、维护状态和配额，绑定对象写令牌、存储策略与块密钥。准入返回实际桶和 stream 身份；存储材料支持 `cached`，不重复发送匹配修订的连接配置。
 

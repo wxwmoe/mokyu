@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0080.
+-- Generated from the complete postgres migration chain through 0081.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -987,6 +987,21 @@ CREATE TABLE public.node_write_raw (
     CONSTRAINT node_write_raw_size_check CHECK (((size >= 0) AND (size <= '5368709120'::bigint)))
 );
 
+CREATE TABLE public.node_write_tails (
+    node_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    request_hash bytea NOT NULL,
+    fragment_id uuid NOT NULL,
+    storage_id uuid NOT NULL,
+    object_key text NOT NULL,
+    offset_bytes bigint NOT NULL,
+    size integer NOT NULL,
+    committed boolean DEFAULT false NOT NULL,
+    CONSTRAINT node_write_tails_offset_bytes_check CHECK ((offset_bytes >= 0)),
+    CONSTRAINT node_write_tails_request_hash_check CHECK ((octet_length(request_hash) = 32)),
+    CONSTRAINT node_write_tails_size_check CHECK ((size > 0))
+);
+
 CREATE TABLE public.node_writes (
     node_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -1008,14 +1023,20 @@ CREATE TABLE public.node_writes (
     publish_hash bytea,
     result jsonb,
     copy_source jsonb,
+    upload_id uuid,
+    part_number integer,
+    checksum_algorithm text,
     CONSTRAINT node_writes_check CHECK (((state = 'active'::text) = (completed_at IS NULL))),
     CONSTRAINT node_writes_check1 CHECK (((publish_hash IS NULL) = (result IS NULL))),
     CONSTRAINT node_writes_check2 CHECK (((state = 'published'::text) = (result IS NOT NULL))),
+    CONSTRAINT node_writes_check3 CHECK (((upload_id IS NULL) = (part_number IS NULL))),
+    CONSTRAINT node_writes_check4 CHECK (((upload_id IS NULL) OR (copy_source IS NULL))),
     CONSTRAINT node_writes_copy_source_check CHECK (((copy_source IS NULL) OR (jsonb_typeof(copy_source) = 'object'::text))),
     CONSTRAINT node_writes_credential_generation_check CHECK ((credential_generation > 0)),
     CONSTRAINT node_writes_expected_size_check CHECK ((expected_size >= 0)),
     CONSTRAINT node_writes_next_batch_check CHECK ((next_batch > 0)),
     CONSTRAINT node_writes_next_offset_check CHECK ((next_offset >= 0)),
+    CONSTRAINT node_writes_part_number_check CHECK (((part_number >= 1) AND (part_number <= 10000))),
     CONSTRAINT node_writes_profile_check CHECK (((jsonb_typeof(profile) = 'object'::text) AND (octet_length((profile)::text) <= 32768))),
     CONSTRAINT node_writes_publish_hash_check CHECK ((octet_length(publish_hash) = 32)),
     CONSTRAINT node_writes_request_hash_check CHECK ((octet_length(request_hash) = 32)),
@@ -1912,6 +1933,9 @@ ALTER TABLE ONLY public.node_write_permits
 ALTER TABLE ONLY public.node_write_raw
     ADD CONSTRAINT node_write_raw_pkey PRIMARY KEY (node_id, operation_id);
 
+ALTER TABLE ONLY public.node_write_tails
+    ADD CONSTRAINT node_write_tails_pkey PRIMARY KEY (node_id, operation_id);
+
 ALTER TABLE ONLY public.node_writes
     ADD CONSTRAINT node_writes_lease_id_key UNIQUE (lease_id);
 
@@ -2552,6 +2576,9 @@ ALTER TABLE ONLY public.node_write_permits
 
 ALTER TABLE ONLY public.node_write_raw
     ADD CONSTRAINT node_write_raw_node_id_operation_id_fkey FOREIGN KEY (node_id, operation_id) REFERENCES public.node_writes(node_id, operation_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_write_tails
+    ADD CONSTRAINT node_write_tails_node_id_operation_id_fkey FOREIGN KEY (node_id, operation_id) REFERENCES public.node_writes(node_id, operation_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_writes
     ADD CONSTRAINT node_writes_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);

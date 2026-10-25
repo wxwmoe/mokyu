@@ -238,7 +238,9 @@ fn failure(error: anyhow::Error) -> Status {
                 s3s::S3ErrorCode::IncompleteBody => {
                     Status::failed_precondition("write body is incomplete")
                 }
-                s3s::S3ErrorCode::InvalidArgument | s3s::S3ErrorCode::InvalidRequest => {
+                s3s::S3ErrorCode::InvalidArgument
+                | s3s::S3ErrorCode::InvalidRequest
+                | s3s::S3ErrorCode::EntityTooLarge => {
                     Status::invalid_argument("invalid node request")
                 }
                 _ => Status::unavailable("control operation is unavailable"),
@@ -265,6 +267,7 @@ fn failure(error: anyhow::Error) -> Status {
                 s3s::S3ErrorCode::SlowDown => Some("SlowDown"),
                 s3s::S3ErrorCode::InvalidArgument => Some("InvalidArgument"),
                 s3s::S3ErrorCode::InvalidRequest => Some("InvalidRequest"),
+                s3s::S3ErrorCode::EntityTooLarge => Some("EntityTooLarge"),
                 _ => None,
             }),
     };
@@ -299,6 +302,38 @@ impl NodeObjects for Service {
 
 #[tonic::async_trait]
 impl NodeWrites for Service {
+    async fn prepare_tail(
+        &self,
+        request: Request<wire::PrepareTailRequest>,
+    ) -> Result<Response<wire::PreparedTail>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::write::prepare_tail(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.prepare_tail(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-tail-prepared").await;
+        Ok(Response::new(super::write::tail(reply)))
+    }
+    async fn commit_tail(
+        &self,
+        request: Request<wire::WriteRequest>,
+    ) -> Result<Response<wire::PreparedTail>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::write::lookup(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.commit_tail(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-tail-committed").await;
+        Ok(Response::new(super::write::tail(reply)))
+    }
     async fn prepare_raw(
         &self,
         request: Request<wire::PrepareRawRequest>,
@@ -853,6 +888,11 @@ mod tests {
     #[test]
     fn business_failures_preserve_codes_without_marking_control_unavailable() {
         for (error, code, business) in [
+            (
+                s3s::s3_error!(EntityTooLarge).into(),
+                tonic::Code::InvalidArgument,
+                "EntityTooLarge",
+            ),
             (
                 model::Error::QuotaExceeded.into(),
                 tonic::Code::ResourceExhausted,

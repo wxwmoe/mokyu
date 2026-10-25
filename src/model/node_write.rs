@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub(crate) const LEASE_SECONDS: i64 = 90;
 pub(crate) const MAX_ACTIVE: i64 = 4096;
 pub(crate) const REQUEST_LIMIT: usize = 64 * 1024;
+pub(crate) const MAX_PART_BYTES: i64 = 5 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,6 +19,15 @@ pub(crate) struct Intent {
     pub public: bool,
     pub size: Option<i64>,
     pub copy_read: Option<Uuid>,
+    pub part: Option<Part>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Part {
+    pub upload: Uuid,
+    pub number: i32,
+    pub algorithm: Option<String>,
 }
 
 impl Intent {
@@ -39,6 +49,18 @@ impl Intent {
                 && serde_json::to_vec(&self.metadata)?.len() <= 16 * 1024,
             "invalid write intent"
         );
+        if let Some(part) = &self.part {
+            ensure!(
+                !part.upload.is_nil()
+                    && (1..=10000).contains(&part.number)
+                    && self.copy_read.is_none()
+                    && !self.public
+                    && self.metadata.as_object().unwrap().is_empty()
+                    && self.size.is_none_or(|size| size <= MAX_PART_BYTES),
+                "invalid multipart write"
+            );
+            crate::upload::multipart::checksum_type(part.algorithm.as_deref(), None)?;
+        }
         let metadata: crate::app::Metadata = serde_json::from_value(self.metadata.clone())?;
         ensure!(
             self.metadata
@@ -153,6 +175,7 @@ pub(crate) struct Reply {
     pub grants: Vec<node_read::Grant>,
     pub published: Option<Published>,
     pub copy_references: bool,
+    pub checksum_algorithm: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -273,6 +296,7 @@ mod tests {
             access: "writer".into(),
             credential_revision: 1,
             copy_read: None,
+            part: None,
             bucket: "bucket".into(),
             key: "object".into(),
             metadata: serde_json::json!({"content_type":"text/plain","user":{"b":"2","a":"1"}}),

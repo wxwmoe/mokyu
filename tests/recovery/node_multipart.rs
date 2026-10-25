@@ -14,6 +14,9 @@ use anyhow::Result;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
+#[path = "node_parts.rs"]
+mod parts;
+
 fn denied(error: anyhow::Error, code: s3s::S3ErrorCode) {
     assert_eq!(
         error
@@ -110,6 +113,17 @@ async fn postgres_node_multipart_replays_admission_and_cancellation() -> Result<
         peer_pool.acquire().await?.detach(),
         false,
     );
+
+    parts::check(
+        &backend,
+        &peer,
+        &node,
+        &key,
+        &session,
+        (bucket, storage),
+        revision,
+    )
+    .await?;
 
     let intent = Intent {
         access: "writer".into(),

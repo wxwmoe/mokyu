@@ -46,6 +46,7 @@ async fn node_write_admission_recovers_replies_and_renews_over_sessions() -> Res
         access_key: source.access_key.clone(),
         credential_revision: Some(1),
         copy_read_id: None,
+        part: None,
         bucket: source.bucket,
         key: "rpc-write".into(),
         metadata_json: br#"{"content_type":"text/plain"}"#.to_vec(),

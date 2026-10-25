@@ -12,6 +12,33 @@ fn operation(value: &str) -> Result<uuid::Uuid, Status> {
     Ok(id)
 }
 
+pub(super) fn prepare_tail(
+    input: wire::PrepareTailRequest,
+) -> Result<crate::model::node_tail::Prepare, Status> {
+    let value = crate::model::node_tail::Prepare {
+        run: read::run(input.run)?,
+        operation: operation(&input.operation_id)?,
+        offset: input.offset.try_into().map_err(|_| invalid())?,
+        size: input.size.try_into().map_err(|_| invalid())?,
+        hash: input.hash.try_into().map_err(|_| invalid())?,
+        cached: read::cached(input.cached)?,
+    };
+    value.hash().map_err(|_| invalid())?;
+    Ok(value)
+}
+
+pub(super) fn tail(value: crate::model::node_tail::Prepared) -> wire::PreparedTail {
+    wire::PreparedTail {
+        fragment_id: value.fragment.to_string(),
+        object_key: value.object_key,
+        end: value.end as u64,
+        committed: value.committed,
+        materials: value.materials.into_iter().map(read::material).collect(),
+        storage: value.storage.map(read::version),
+        grants: value.grants.into_iter().map(read::grant).collect(),
+    }
+}
+
 pub(super) fn prepare_raw(
     input: wire::PrepareRawRequest,
 ) -> Result<crate::model::node_raw::Prepare, Status> {
@@ -76,6 +103,16 @@ pub(super) fn begin(input: wire::BeginWriteRequest) -> Result<write::Begin, Stat
         copy_read: input
             .copy_read_id
             .map(|value| super::uuid(&value))
+            .transpose()?,
+        part: input
+            .part
+            .map(|part| -> Result<_, Status> {
+                Ok(write::Part {
+                    upload: super::uuid(&part.upload_id)?,
+                    number: part.number,
+                    algorithm: part.algorithm,
+                })
+            })
             .transpose()?,
     };
     intent.validate().map_err(|_| invalid())?;
@@ -217,6 +254,7 @@ pub(super) fn reply(value: write::Reply) -> Result<wire::WriteReply, Status> {
             write::Phase::Published => wire::WritePhase::WritePublished,
         } as i32,
         copy_references: value.copy_references,
+        checksum_algorithm: value.checksum_algorithm,
         materials: value.materials.into_iter().map(read::material).collect(),
         storage: value.storage.map(read::version),
         grants: value.grants.into_iter().map(read::grant).collect(),

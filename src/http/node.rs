@@ -790,6 +790,12 @@ impl S3Access for Gateway {
 
 #[async_trait::async_trait]
 impl S3 for Gateway {
+    async fn upload_part(
+        &self,
+        request: S3Request<UploadPartInput>,
+    ) -> S3Result<S3Response<UploadPartOutput>> {
+        self.part(request).await.map_err(delivery::error)
+    }
     async fn create_multipart_upload(
         &self,
         request: S3Request<CreateMultipartUploadInput>,

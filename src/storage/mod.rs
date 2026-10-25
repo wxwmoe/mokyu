@@ -62,7 +62,7 @@ use tokio::{io::AsyncWriteExt, sync::Semaphore};
 use uuid::Uuid;
 
 pub(crate) const STAGING_PREFIX: &str = "__mokyu/multipart/";
-const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
+pub(crate) const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 
 pub struct Storage {
     write_backlog: Mutex<backlog::Backlog>,
