@@ -57,6 +57,19 @@ async fn node_work_batches_recover_results_and_preserve_read_pins() -> Result<()
     fixture("inspection-cleared").await?;
     fixture("inspection-namespace").await?;
     fixture("inspection-namespace-restored").await?;
+    for action in [
+        "audit-metadata",
+        "audit-head",
+        "audit-full",
+        "audit-clean",
+        "audit-missing",
+        "audit-restored",
+    ] {
+        for bucket in ["objects", "packed", "raw"] {
+            fixture(&format!("{action}-{bucket}")).await?;
+        }
+    }
+    fixture("audit-namespace").await?;
     context.stop();
     tokio::time::timeout(Duration::from_secs(10), driver).await???;
     tokio::time::timeout(Duration::from_secs(10), worker).await???;

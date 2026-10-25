@@ -12,6 +12,7 @@ impl Reader {
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         snapshot: SourceSnapshot,
         members: Vec<Member>,
+        mode: crate::worker::integrity::Mode,
     ) -> Result<Outcome> {
         let _io = self.io.clone().acquire_owned().await?;
         let timeout = crate::config::seconds(&backend.profile.integrity_batch_timeout)?;
@@ -39,7 +40,9 @@ impl Reader {
                     self.diagnostics.clone(),
                 )
                 .await?;
-                file.verify(&raw).await?;
+                if mode == crate::worker::integrity::Mode::Full {
+                    file.verify(&raw).await?;
+                }
                 return Ok::<_, anyhow::Error>(());
             }
             let (bound, path) = match &snapshot.physical {
@@ -67,6 +70,20 @@ impl Reader {
                 }
                 PhysicalSource::Raw(_) => unreachable!(),
             };
+            if mode == crate::worker::integrity::Mode::Head {
+                self.gets.fetch_add(1, Ordering::Relaxed);
+                let meta = backend.store.backend.head(&path).await?;
+                let expected = match &snapshot.physical {
+                    PhysicalSource::Chunk(chunk) => chunk.stored_size.map(i64::from),
+                    PhysicalSource::Pack(pack) => pack.stored_size,
+                    PhysicalSource::Raw(_) => unreachable!(),
+                };
+                ensure!(
+                    expected == Some(i64::try_from(meta.size)?),
+                    codec::IntegrityError::Length
+                );
+                return Ok(());
+            }
             let units = (bound as u64 * 4 + self.workspace).div_ceil(1024 * 1024);
             ensure!(
                 units <= u64::from(self.pack_units),
@@ -124,7 +141,7 @@ impl Reader {
                         )
                         .then_some("remote_missing")
                     });
-                match code.filter(|code| crate::model::source::quarantine_code(code)) {
+                match code {
                     Some(code) => Outcome::Inspected {
                         code: Some(code.into()),
                     },

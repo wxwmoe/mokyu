@@ -601,7 +601,7 @@ pub(super) fn claim_task<'q>(
     allowed: &'q [String],
     metadata_only: Option<bool>,
 ) -> Scalar<'q, Uuid> {
-    sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=CASE WHEN $3::uuid IS NOT NULL THEN now()+interval '5 minutes' END,updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='failed' AND t.detail->>'operation'='cdc' AND t.updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND t.state='running' AND t.lease_expires_at<now())) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=$1 AND (NOT $5 OR (t.task_type IN ('upload','cache_flush') AND t.detail->>'operation' IS DISTINCT FROM 'cdc')) AND NOT(t.id=ANY($2)) AND (t.execution_scope <> 'node' OR t.target_node_id IS NULL OR t.target_node_id=$3) AND (cardinality($6::text[])=0 OR (t.task_type=ANY($6) AND (t.task_type<>'integrity' OR t.detail ? 'source_operation'))) AND ($7::bool IS NULL OR $7=(t.task_type IN ('usage','purge') OR (t.task_type='cleanup' AND t.detail->>'storage_id' IS NULL))) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND NOT (m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','storage_migration','rewrite','usage')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END AND CASE WHEN c.policy='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.task_type='pack' AND t.detail->>'policy' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='failed' AND detail->>'operation'='cdc' AND updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND state='running' AND lease_expires_at<now())) RETURNING id")
+    sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=CASE WHEN $3::uuid IS NOT NULL THEN now()+interval '5 minutes' END,updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='failed' AND t.detail->>'operation'='cdc' AND t.updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND t.state='running' AND t.lease_expires_at<now())) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=$1 AND (NOT $5 OR (t.task_type IN ('upload','cache_flush') AND t.detail->>'operation' IS DISTINCT FROM 'cdc')) AND NOT(t.id=ANY($2)) AND (t.execution_scope <> 'node' OR t.target_node_id IS NULL OR t.target_node_id=$3) AND (cardinality($6::text[])=0 OR (t.task_type=ANY($6) AND (t.task_type<>'integrity' OR t.detail ? 'source_operation' OR (t.detail->>'mode' IN ('head','full') AND t.detail->>'phase' IN ('raw','chunks'))))) AND ($7::bool IS NULL OR $7=(t.task_type IN ('usage','purge') OR (t.task_type='cleanup' AND t.detail->>'storage_id' IS NULL) OR coalesce(t.task_type='integrity' AND NOT t.detail ? 'source_operation' AND (t.detail->>'mode'='metadata' OR t.detail->>'phase'='metadata'),false))) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND NOT (m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','storage_migration','rewrite','usage')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END AND CASE WHEN c.policy='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.task_type='pack' AND t.detail->>'policy' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='failed' AND detail->>'operation'='cdc' AND updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND state='running' AND lease_expires_at<now())) RETURNING id")
         .bind(class)
         .bind(active)
         .bind(node)
@@ -4279,9 +4279,7 @@ impl PhysicalStore for Backend {
         Ok(())
     }
     async fn source(&self, chunk: Id, inspection: bool) -> Result<PhysicalSource> {
-        if let Some(physical) = sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size AS standalone_size,l.encryption_algorithm AS encryption_algorithm,l.block_key_id,l.standalone_compressed AS standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready' AND ($2 OR l.quarantined_at IS NULL)").bind(chunk).bind(inspection).fetch_optional(&self.pool).await? { return Ok(PhysicalSource::Chunk(physical)); }
-        let pack = sqlx::query_as("SELECT p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=$1 AND c.state='ready' AND p.state='ready' AND ($2 OR p.quarantined_at IS NULL)").bind(chunk).bind(inspection).fetch_optional(&self.pool).await?.context(crate::model::Error::SourceUnavailable)?;
-        Ok(PhysicalSource::Pack(pack))
+        physical_source(&mut *self.pool.acquire().await?, chunk, inspection).await
     }
 }
 
@@ -5835,7 +5833,41 @@ pub(super) async fn integrity_upper_object(
     query.push(" ORDER BY o.bucket_id DESC,o.object_key DESC LIMIT 1");
     Ok(query.build_query_as().fetch_optional(db).await?)
 }
-fn integrity_scope(query: &mut sqlx::QueryBuilder<sqlx::Postgres>, d: &Detail) {
+pub(super) fn integrity_chunks(
+    d: &Detail,
+    after: Id,
+    limit: i64,
+) -> Result<sqlx::QueryBuilder<sqlx::Postgres>> {
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE c.state='ready' AND c.id>",
+    );
+    query.push_bind(after).push(" AND c.id<=").push_bind(d.upper_chunk_id.parse::<Id>()?).push(" AND EXISTS(SELECT 1 FROM extents e JOIN objects o ON o.stream_id=e.stream_id WHERE e.chunk_id=c.id");
+    integrity_scope(&mut query, d);
+    query.push(") ORDER BY c.id LIMIT ").push_bind(limit);
+    Ok(query)
+}
+
+pub(super) fn integrity_chunk_stream(chunk: Id, d: &Detail) -> sqlx::QueryBuilder<sqlx::Postgres> {
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT o.stream_id FROM extents e JOIN objects o ON o.stream_id=e.stream_id JOIN chunks c ON c.id=e.chunk_id WHERE c.state='ready' AND c.id=",
+    );
+    query.push_bind(chunk);
+    integrity_scope(&mut query, d);
+    query.push(" LIMIT 1");
+    query
+}
+
+pub(super) async fn physical_source(
+    db: &mut sqlx::PgConnection,
+    chunk: Id,
+    inspection: bool,
+) -> Result<PhysicalSource> {
+    if let Some(physical) = sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size AS standalone_size,l.encryption_algorithm AS encryption_algorithm,l.block_key_id,l.standalone_compressed AS standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready' AND ($2 OR l.quarantined_at IS NULL)").bind(chunk).bind(inspection).fetch_optional(&mut *db).await? { return Ok(PhysicalSource::Chunk(physical)); }
+    let pack = sqlx::query_as("SELECT p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=$1 AND c.state='ready' AND p.state='ready' AND ($2 OR p.quarantined_at IS NULL)").bind(chunk).bind(inspection).fetch_optional(&mut *db).await?.context(crate::model::Error::SourceUnavailable)?;
+    Ok(PhysicalSource::Pack(pack))
+}
+
+pub(super) fn integrity_scope(query: &mut sqlx::QueryBuilder<sqlx::Postgres>, d: &Detail) {
     if let Some(storage_id) = d.storage_id {
         query
             .push(
@@ -5885,13 +5917,10 @@ impl IntegrityStore for Backend {
         transactions::start_integrity(&self.pool, self.single, input, bucket, node).await
     }
     async fn chunks(&self, d: &Detail, after: Id, limit: i64) -> Result<Vec<Chunk>> {
-        let mut query = sqlx::QueryBuilder::new(
-            "SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE c.state='ready' AND c.id>",
-        );
-        query.push_bind(after).push(" AND c.id<=").push_bind(d.upper_chunk_id.parse::<Id>()?).push(" AND EXISTS(SELECT 1 FROM extents e JOIN objects o ON o.stream_id=e.stream_id WHERE e.chunk_id=c.id");
-        integrity_scope(&mut query, d);
-        query.push(") ORDER BY c.id LIMIT ").push_bind(limit);
-        Ok(query.build_query_as().fetch_all(&self.pool).await?)
+        Ok(integrity_chunks(d, after, limit)?
+            .build_query_as()
+            .fetch_all(&self.pool)
+            .await?)
     }
     async fn mapping(
         &self,
@@ -5945,17 +5974,10 @@ impl IntegrityStore for Backend {
             .await?)
     }
     async fn chunk_stream(&self, chunk: Id, d: &Detail) -> Result<Option<Id>> {
-        let mut query = sqlx::QueryBuilder::new(
-            "SELECT o.stream_id FROM extents e JOIN objects o ON o.stream_id=e.stream_id JOIN chunks c ON c.id=e.chunk_id WHERE c.state='ready' AND c.id=",
-        );
-        query.push_bind(chunk);
-        integrity_scope(&mut query, d);
-        query.push(" LIMIT 1");
-        let id: Option<Id> = query
+        Ok(integrity_chunk_stream(chunk, d)
             .build_query_scalar()
             .fetch_optional(&self.pool)
-            .await?;
-        Ok(id)
+            .await?)
     }
     async fn checkpoint(
         &self,

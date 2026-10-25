@@ -163,17 +163,86 @@ impl Worker {
                             "inspection identity differs"
                         );
                         vec![if inspect {
-                            self.reader
+                            let result = self
+                                .reader
                                 .inspect(
                                     backend,
                                     Arc::new(reads::keys(&materials)?),
                                     *snapshot,
                                     members,
+                                    crate::worker::integrity::Mode::Full,
                                 )
-                                .await?
+                                .await?;
+                            match &result {
+                                work::Outcome::Inspected { code: Some(code) }
+                                    if !crate::model::source::quarantine_code(code) =>
+                                {
+                                    work::Outcome::Retry
+                                }
+                                _ => result,
+                            }
                         } else {
                             work::Outcome::Inspected { code: None }
                         }]
+                    }
+                    work::Plan::Audit { mode, items, .. } => {
+                        ensure!(
+                            items.len() <= work::MAX_ITEMS
+                                && mode != crate::worker::integrity::Mode::Metadata,
+                            "invalid inspection plan"
+                        );
+                        let keys = Arc::new(reads::keys(&materials)?);
+                        let count = items.len();
+                        let timeout = Duration::from_secs(crate::config::seconds(
+                            &backend.profile.integrity_batch_timeout,
+                        )?);
+                        let checking = async {
+                            let mut outcomes = Vec::with_capacity(items.len());
+                            for item in items {
+                                snapshot.lease.check()?;
+                                for grant in &grants {
+                                    grant.check()?;
+                                }
+                                let outcome = if let Some(previous) = item.previous {
+                                    previous
+                                } else {
+                                    let source =
+                                        item.snapshot.context("inspection source is missing")?;
+                                    ensure!(
+                                        source.location() == item.location,
+                                        "inspection identity differs"
+                                    );
+                                    if matches!(&source.physical, crate::model::PhysicalSource::Raw(r) if r.quarantine_code.is_some())
+                                    {
+                                        work::Outcome::Inspected {
+                                            code: Some("source_unavailable".into()),
+                                        }
+                                    } else {
+                                        self.reader
+                                            .inspect(
+                                                backend.clone(),
+                                                keys.clone(),
+                                                *source,
+                                                item.members,
+                                                mode,
+                                            )
+                                            .await?
+                                    }
+                                };
+                                if matches!(outcome, work::Outcome::Retry) {
+                                    return Ok::<_, anyhow::Error>(vec![
+                                        work::Outcome::Retry;
+                                        count
+                                    ]);
+                                }
+                                outcomes.push(outcome);
+                            }
+                            Ok(outcomes)
+                        };
+                        match tokio::time::timeout(timeout, checking).await {
+                            Ok(result) => result?,
+                            Err(_) => vec![work::Outcome::Retry; count],
+                        }
                     }
                 };
                 Ok::<_, anyhow::Error>(work::Completion {

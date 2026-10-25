@@ -167,8 +167,18 @@ impl App {
             None
         };
         if d.phase == "metadata" {
+            let mode = d.mode;
+            if self.role == "control" {
+                d.mode = Mode::Metadata;
+            }
             self.inspect_mapping(&mut d, &mut cursor, &mut issues)
                 .await?;
+            d.mode = mode;
+            if self.role == "control" && mode != Mode::Metadata && d.phase == "chunks" {
+                d.phase = "raw".into();
+                cursor = Cursor::default();
+                cursor.after_extent = -1;
+            }
         } else if d.phase == "chunks" {
             let count = profile
                 .as_ref()

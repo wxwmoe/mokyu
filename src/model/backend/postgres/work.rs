@@ -5,6 +5,9 @@ use queries::work as q;
 #[path = "work_sources.rs"]
 mod sources;
 
+#[path = "work_audit.rs"]
+mod audit;
+
 fn owned(node: &NodeState, run: Run, batch: &q::Batch) -> Result<()> {
     ensure!(
         batch.credential_generation == node.credential_generation
@@ -188,6 +191,20 @@ async fn finish(
             )
             .await?;
             complete = true;
+        }
+        work::Plan::Audit { cursor, items, .. } => {
+            error = audit::finish(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                detail,
+                cursor,
+                items,
+                &completion.outcomes,
+            )
+            .await?;
         }
     }
     q::result(node.node_id, completion.operation, &hash)
@@ -528,7 +545,17 @@ pub(crate) async fn exchange(
         )
         .await?
         {
-            let selected = if policy == "integrity" {
+            let selected = if policy == "integrity" && detail.get("source_operation").is_none() {
+                audit::prepare(
+                    &mut tx,
+                    Execution { id: task, token },
+                    &detail,
+                    &profile,
+                    input.max_items,
+                    key,
+                )
+                .await?
+            } else if policy == "integrity" {
                 sources::prepare(
                     &mut tx,
                     node,

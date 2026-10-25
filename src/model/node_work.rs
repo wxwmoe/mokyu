@@ -37,6 +37,30 @@ pub(crate) struct Deletion {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum AuditTarget {
+    Chunk {
+        id: super::Id,
+    },
+    Raw {
+        bucket: Uuid,
+        key: String,
+        stream: super::Id,
+        offset: i64,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Inspection {
+    pub location: Uuid,
+    pub snapshot: Option<Box<super::source::SourceSnapshot>>,
+    pub members: Vec<Member>,
+    pub targets: Vec<AuditTarget>,
+    pub previous: Option<Outcome>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
     Collect {
@@ -52,12 +76,18 @@ pub(crate) enum Plan {
         members: Vec<Member>,
         inspect: bool,
     },
+    Audit {
+        storage: Uuid,
+        mode: crate::worker::integrity::Mode,
+        cursor: String,
+        items: Vec<Inspection>,
+    },
 }
 
 impl Plan {
     pub(crate) fn storage(&self) -> Uuid {
         match self {
-            Self::Collect { storage, .. } => *storage,
+            Self::Collect { storage, .. } | Self::Audit { storage, .. } => *storage,
             Self::Inspect { snapshot, .. } => snapshot.scope.storage_id,
         }
     }

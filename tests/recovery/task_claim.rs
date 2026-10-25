@@ -350,8 +350,20 @@ async fn control_claims(
         .await?;
         controls.push(node);
     }
-    let metadata = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
-    let io = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let metadata = [
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
+    let io = [
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
     for (id, task_type, detail) in [
         (metadata[0], "usage", serde_json::json!({})),
         (metadata[1], "purge", serde_json::json!({})),
@@ -371,6 +383,26 @@ async fn control_claims(
             serde_json::json!({"storage_id":Uuid::new_v4()}),
         ),
         (io[2], "integrity", serde_json::json!({})),
+        (
+            metadata[3],
+            "integrity",
+            serde_json::json!({"mode":"metadata","phase":"chunks"}),
+        ),
+        (
+            metadata[4],
+            "integrity",
+            serde_json::json!({"mode":"full","phase":"metadata"}),
+        ),
+        (
+            io[3],
+            "integrity",
+            serde_json::json!({"mode":"head","phase":"raw"}),
+        ),
+        (
+            io[4],
+            "integrity",
+            serde_json::json!({"mode":"full","phase":"chunks"}),
+        ),
     ] {
         sqlx::query("INSERT INTO tasks(id,task_type,state,detail) VALUES($1,$2,'queued',$3)")
             .bind(id)
@@ -383,7 +415,7 @@ async fn control_claims(
         .bind(metadata.as_slice())
         .execute(pool)
         .await?;
-    for _ in 0..3 {
+    for _ in 0..5 {
         let id = first
             .claim_task(claimant(Uuid::new_v4()), worker, "worker", key)
             .await?
@@ -399,7 +431,7 @@ async fn control_claims(
     sqlx::query("UPDATE tasks SET state='queued',lease_token=NULL,lease_node_id=NULL,lease_expires_at=NULL WHERE id=ANY($1)")
         .bind(io.as_slice()).execute(pool).await?;
     let mut claimed = std::collections::HashSet::new();
-    for _ in 0..3 {
+    for _ in 0..5 {
         let id = first
             .claim_task(claimant(Uuid::new_v4()), &controls[0], "control", key)
             .await?
@@ -413,7 +445,7 @@ async fn control_claims(
             .await?,
         None
     );
-    for _ in 0..3 {
+    for _ in 0..5 {
         let id = first
             .claim_task(claimant(Uuid::new_v4()), worker, "worker", key)
             .await?

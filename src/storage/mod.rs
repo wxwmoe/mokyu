@@ -2425,6 +2425,9 @@ impl Storage {
         let pending: bool = self.physical.pending_only(c.id).await?;
         if pending {
             *physical_detail = serde_json::json!({"source":"pending","storage_id":c.storage_id});
+            if mode == crate::worker::integrity::Mode::Metadata {
+                return Ok(0);
+            }
             ensure!(
                 self.cached(c).await?.is_some(),
                 "pending upload source is missing"

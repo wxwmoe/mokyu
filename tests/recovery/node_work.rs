@@ -1,6 +1,8 @@
 use super::*;
 use crate::model::{node_read as read, node_work as work};
 
+#[path = "node_audit.rs"]
+mod audit;
 #[path = "node_cleanup.rs"]
 mod cleanup;
 #[path = "node_inspection.rs"]
@@ -494,5 +496,6 @@ pub(super) async fn check(
     )
     .await?;
     inspection::check(backend, peer, &other, key, other_session.run, storage).await?;
+    audit::check(backend, peer, &other, key, other_session.run, storage).await?;
     Ok(())
 }
