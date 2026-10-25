@@ -1,6 +1,9 @@
 use super::*;
 use crate::model::{node_read as read, node_work as work};
 
+#[path = "node_cleanup.rs"]
+mod cleanup;
+
 pub(super) async fn check(
     backend: &Backend,
     peer: &Backend,
@@ -466,5 +469,14 @@ pub(super) async fn check(
             .await?,
         ("completed".into(), 2)
     );
+    cleanup::check(
+        backend,
+        &other,
+        key,
+        other_session.run,
+        storage,
+        node.node_id,
+    )
+    .await?;
     Ok(())
 }

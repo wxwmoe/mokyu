@@ -276,7 +276,11 @@ async fn fixture(action: &str) -> Result<()> {
     let done = request.with_extension("done");
     let _ = tokio::fs::remove_file(&done).await;
     tokio::fs::write(&request, b"requested").await?;
-    let timeout = if action == "http-complete" { 120 } else { 30 };
+    let timeout = if matches!(action, "http-complete" | "http-cleanup") {
+        120
+    } else {
+        30
+    };
     tokio::time::timeout(Duration::from_secs(timeout), async {
         while !done.exists() {
             tokio::time::sleep(Duration::from_millis(50)).await;

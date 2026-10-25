@@ -85,6 +85,11 @@ impl Writes {
         tokio::spawn(async move {
             let mut state = node.subscribe();
             let mut recover = true;
+            let mut inventory = tokio::time::interval_at(
+                Instant::now() + Duration::from_secs(60),
+                Duration::from_secs(60),
+            );
+            inventory.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 if recover {
                     let Some(current) = writes.upgrade() else {
@@ -100,7 +105,7 @@ impl Writes {
                 }
                 tokio::select! {
                     _=node.native_work.notified()=>{},
-                    _=tokio::time::sleep(Duration::from_secs(60))=>{
+                    _=inventory.tick()=>{
                         let Some(current)=writes.upgrade() else {return;};
                         if let Err(error)=current.reads.reader.files.reclaim_local(&node, false).await {tracing::debug!(%error,"local upload inventory postponed");}
                         continue;

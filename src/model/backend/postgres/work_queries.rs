@@ -43,8 +43,12 @@ pub(crate) fn active(node: Uuid) -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT count(*) FROM node_work WHERE node_id=$1 AND plan IS NOT NULL AND result_hash IS NULL AND expires_at>clock_timestamp()").bind(node)
 }
 
-pub(crate) fn task(id: Uuid, token: Uuid, node: Uuid) -> Rows<'static, (Value, Option<Uuid>)> {
-    sqlx::query_as("SELECT detail,parent_task_id FROM tasks WHERE id=$1 AND lease_token=$2 AND lease_node_id=$3 AND state='running' AND lease_expires_at>clock_timestamp() FOR UPDATE").bind(id).bind(token).bind(node)
+pub(crate) fn task(
+    id: Uuid,
+    token: Uuid,
+    node: Uuid,
+) -> Rows<'static, (String, Value, Option<Uuid>)> {
+    sqlx::query_as("SELECT task_type,detail,parent_task_id FROM tasks WHERE id=$1 AND lease_token=$2 AND lease_node_id=$3 AND state='running' AND lease_expires_at>clock_timestamp() FOR UPDATE").bind(id).bind(token).bind(node)
 }
 
 pub(crate) fn task_lease(id: Uuid, token: Uuid) -> Statement<'static> {
@@ -88,7 +92,7 @@ pub(crate) fn renew<'a>(
 }
 
 pub(crate) fn pending(node: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t CROSS JOIN mokyu_meta m WHERE t.task_type='gc' AND (t.state='queued' OR (t.state='running' AND t.lease_expires_at<clock_timestamp())) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND (t.execution_scope<>'node' OR t.target_node_id=$1) AND NOT m.maintenance AND NOT m.gc_paused)").bind(node)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.task_type='gc' AND NOT m.maintenance AND NOT m.gc_paused OR t.task_type='cleanup' AND t.detail->>'storage_id' IS NOT NULL AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy='cleanup' AND c.paused)) AND (t.state='queued' OR (t.state='running' AND t.lease_expires_at<clock_timestamp())) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND (t.execution_scope<>'node' OR t.target_node_id IS NULL OR t.target_node_id=$1))").bind(node)
 }
 
 pub(crate) fn upload(source: Id) -> Scalar<'static, Option<String>> {

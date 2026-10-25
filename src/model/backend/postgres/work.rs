@@ -85,7 +85,7 @@ async fn finish(
         Error::NodeExpired
     );
     let task = row.task_id.ok_or(Error::NodeExpired)?;
-    let (_, parent) = q::task(task, row.token, node.node_id)
+    let (_, _, parent) = q::task(task, row.token, node.node_id)
         .fetch_optional(&mut *db)
         .await?
         .ok_or(Error::NodeExpired)?;
@@ -217,7 +217,7 @@ async fn cleanup(
     db: &mut Transaction<'_, Postgres>,
     storage: Uuid,
     maximum: usize,
-    profile: &crate::storage::profile::StorageProfile,
+    retention: u64,
 ) -> Result<usize> {
     let mut count = 0;
     queries::expire_stream_leases().execute(&mut **db).await?;
@@ -227,7 +227,7 @@ async fn cleanup(
     {
         count += usize::from(abort_multipart_in(db, &Permit::system(), upload, true).await?);
     }
-    let retention = Some(crate::config::seconds(&profile.upload_retention)? as f64);
+    let retention = Some(retention as f64);
     let streams: Vec<Id> = queries::stale_streams(&[], 1, Some(storage), retention, false)
         .build_query_scalar()
         .fetch_all(&mut **db)
@@ -270,95 +270,103 @@ async fn collect(
     storage: Uuid,
     maximum: usize,
     profile: &crate::storage::profile::StorageProfile,
+    reclaim: bool,
 ) -> Result<work::Plan> {
-    let mut metadata_count = cleanup(db, storage, maximum, profile).await?;
+    let retention = crate::config::seconds(if reclaim {
+        &profile.upload_retention
+    } else {
+        &profile.deleted_chunk_retention
+    })?;
+    let mut metadata_count = cleanup(db, storage, maximum, retention).await?;
     let grace = crate::config::seconds(&profile.unreferenced_grace)? as f64;
     let minimum = profile.min_storage_seconds()?;
-    for (id, _) in queries::gc_candidates(storage, grace, maximum as i64)
-        .fetch_all(&mut **db)
-        .await?
-    {
-        if queries::lock_reclaim_chunk(id, storage, grace)
-            .fetch_optional(&mut **db)
-            .await?
-            .is_some()
-        {
-            queries::claim_reclaim_chunk(id, storage)
-                .execute(&mut **db)
-                .await?;
-            queries::retire_chunk_encodings(id)
-                .execute(&mut **db)
-                .await?;
-            queries::finish_reclaim_chunk(id, storage)
-                .execute(&mut **db)
-                .await?;
-            metadata_count += 1;
-        }
-    }
-    queries::retire_empty_packs(storage)
-        .execute(&mut **db)
-        .await?;
     let mut items = vec![];
-    for source in [work::Physical::Chunk, work::Physical::Pack] {
-        let remaining = maximum - items.len();
-        if remaining == 0 {
-            break;
-        }
-        for (id, location, unknown) in queries::physical_gc_candidates(
-            source.packed(),
-            grace,
-            remaining as i64,
-            minimum as f64,
-            storage,
-            false,
-        )
-        .fetch_all(&mut **db)
-        .await?
+    if reclaim {
+        for (id, _) in queries::gc_candidates(storage, grace, maximum as i64)
+            .fetch_all(&mut **db)
+            .await?
         {
-            if q::physical_active(location).fetch_one(&mut **db).await? {
-                continue;
-            }
-            if queries::claim_physical_gc(source.packed(), id, grace, minimum as f64)
-                .execute(&mut **db)
+            if queries::lock_reclaim_chunk(id, storage, grace)
+                .fetch_optional(&mut **db)
                 .await?
-                .rows_affected()
-                == 1
+                .is_some()
             {
-                items.push(work::Deletion {
-                    source: source.clone(),
-                    location,
-                    inspect_age: minimum > 0 && unknown,
-                });
+                queries::claim_reclaim_chunk(id, storage)
+                    .execute(&mut **db)
+                    .await?;
+                queries::retire_chunk_encodings(id)
+                    .execute(&mut **db)
+                    .await?;
+                queries::finish_reclaim_chunk(id, storage)
+                    .execute(&mut **db)
+                    .await?;
+                metadata_count += 1;
             }
         }
-    }
-    let remaining = maximum - items.len();
-    if remaining > 0 {
-        for source in
-            queries::raw_gc_candidates(storage, grace as i64, minimum as i64, remaining as i64)
-                .fetch_all(&mut **db)
-                .await?
-        {
-            if source.medium != "shared_s3"
-                || q::physical_active(source.location_id)
-                    .fetch_one(&mut **db)
+        queries::retire_empty_packs(storage)
+            .execute(&mut **db)
+            .await?;
+        for source in [work::Physical::Chunk, work::Physical::Pack] {
+            let remaining = maximum - items.len();
+            if remaining == 0 {
+                break;
+            }
+            for (id, location, unknown) in queries::physical_gc_candidates(
+                source.packed(),
+                grace,
+                remaining as i64,
+                minimum as f64,
+                storage,
+                false,
+            )
+            .fetch_all(&mut **db)
+            .await?
+            {
+                if q::physical_active(location).fetch_one(&mut **db).await? {
+                    continue;
+                }
+                if queries::claim_physical_gc(source.packed(), id, grace, minimum as f64)
+                    .execute(&mut **db)
+                    .await?
+                    .rows_affected()
+                    == 1
+                {
+                    items.push(work::Deletion {
+                        source: source.clone(),
+                        location,
+                        inspect_age: minimum > 0 && unknown,
+                    });
+                }
+            }
+        }
+        let remaining = maximum - items.len();
+        if remaining > 0 {
+            for source in
+                queries::raw_gc_candidates(storage, grace as i64, minimum as i64, remaining as i64)
+                    .fetch_all(&mut **db)
                     .await?
             {
-                continue;
-            }
-            if queries::raw_gc_claim(source.id, source.revision, grace as i64, minimum as i64)
-                .execute(&mut **db)
-                .await?
-                .rows_affected()
-                == 1
-            {
-                items.push(work::Deletion {
-                    source: work::Physical::Raw {
-                        upload: q::upload(source.id).fetch_one(&mut **db).await?,
-                    },
-                    location: source.location_id,
-                    inspect_age: false,
-                });
+                if source.medium != "shared_s3"
+                    || q::physical_active(source.location_id)
+                        .fetch_one(&mut **db)
+                        .await?
+                {
+                    continue;
+                }
+                if queries::raw_gc_claim(source.id, source.revision, grace as i64, minimum as i64)
+                    .execute(&mut **db)
+                    .await?
+                    .rows_affected()
+                    == 1
+                {
+                    items.push(work::Deletion {
+                        source: work::Physical::Raw {
+                            upload: q::upload(source.id).fetch_one(&mut **db).await?,
+                        },
+                        location: source.location_id,
+                        inspect_age: false,
+                    });
+                }
             }
         }
     }
@@ -431,7 +439,7 @@ pub(crate) async fn exchange(
     );
     let token = Uuid::new_v4();
     let maintenance = Uuid::new_v4();
-    let allowed = vec!["gc".to_owned()];
+    let allowed = vec!["gc".to_owned(), "cleanup".to_owned()];
     let task = queries::claim_task(
         input.class as i32,
         &[],
@@ -447,7 +455,7 @@ pub(crate) async fn exchange(
     let mut encrypted = None;
     let mut assigned = None;
     if let Some(task) = task {
-        let (detail, parent) = q::task(task, token, node.node_id)
+        let (policy, detail, parent) = q::task(task, token, node.node_id)
             .fetch_one(&mut *tx)
             .await?;
         let storage: Uuid = detail["storage_id"]
@@ -462,7 +470,8 @@ pub(crate) async fn exchange(
             .await?;
         ensure!(record.r#type == "s3", Error::SourceUnavailable);
         if permits(&mut tx, node.node_id, token, maintenance, &profile).await? {
-            let value = collect(&mut tx, storage, input.max_items, &profile).await?;
+            let value =
+                collect(&mut tx, storage, input.max_items, &profile, policy == "gc").await?;
             let work::Plan::Collect {
                 items,
                 metadata_count,
