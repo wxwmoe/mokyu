@@ -64,7 +64,7 @@ pub(crate) trait ChunkStore: Send + Sync {
     ) -> Result<()>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Mapping {
     pub(crate) chunk: Chunk,
     pub(crate) offset_bytes: i64,

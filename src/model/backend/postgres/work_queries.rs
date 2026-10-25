@@ -74,7 +74,7 @@ pub(crate) fn finish(
 }
 
 pub(crate) fn physical_active(location: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_work w WHERE w.result_hash IS NULL AND w.expires_at>clock_timestamp() AND (w.plan->>'location'=$1::uuid::text OR EXISTS(SELECT 1 FROM jsonb_array_elements(w.plan->'items') i WHERE i->>'location'=$1::uuid::text)))").bind(location)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_work w WHERE w.result_hash IS NULL AND w.expires_at>clock_timestamp() AND (w.plan->>'location'=$1::uuid::text OR EXISTS(SELECT 1 FROM jsonb_array_elements(w.plan->'items') i WHERE i->>'location'=$1::uuid::text) OR EXISTS(SELECT 1 FROM jsonb_array_elements(w.plan->'batch'->'sources') s WHERE s->'chunk'->>'location_id'=$1::uuid::text OR s->'pack'->>'location_id'=$1::uuid::text) OR EXISTS(SELECT 1 FROM jsonb_array_elements(w.plan->'batch'->'chunks') c WHERE c->>'location'=$1::uuid::text) OR EXISTS(SELECT 1 FROM jsonb_array_elements(w.plan->'batch'->'packs') p WHERE p->>'location'=$1::uuid::text)))").bind(location)
 }
 
 pub(crate) fn sweep_pending() -> Scalar<'static, bool> {
@@ -103,7 +103,7 @@ pub(crate) fn renew<'a>(
 }
 
 pub(crate) fn pending(node: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.task_type='sweep' OR t.task_type='rewrite' AND NOT m.maintenance AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy='rewrite' AND c.paused) OR t.task_type='gc' AND NOT m.maintenance AND NOT m.gc_paused OR t.task_type='cleanup' AND t.detail->>'storage_id' IS NOT NULL AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy='cleanup' AND c.paused) OR t.task_type='integrity' AND (t.detail ? 'source_operation' OR (t.detail->>'mode' IN ('head','full') AND t.detail->>'phase' IN ('raw','chunks'))) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy='integrity' AND c.paused)) AND (t.state='queued' OR (t.state='running' AND t.lease_expires_at<clock_timestamp())) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND (t.execution_scope<>'node' OR t.target_node_id IS NULL OR t.target_node_id=$1))").bind(node)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.task_type='sweep' OR t.task_type IN ('rewrite','pack','unpack') AND NOT m.maintenance AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END AND c.paused) OR t.task_type='gc' AND NOT m.maintenance AND NOT m.gc_paused OR t.task_type='cleanup' AND t.detail->>'storage_id' IS NOT NULL AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy='cleanup' AND c.paused) OR t.task_type='integrity' AND (t.detail ? 'source_operation' OR (t.detail->>'mode' IN ('head','full') AND t.detail->>'phase' IN ('raw','chunks'))) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy='integrity' AND c.paused)) AND (t.state='queued' OR (t.state='running' AND t.lease_expires_at<clock_timestamp())) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND (t.execution_scope<>'node' OR t.target_node_id IS NULL OR t.target_node_id=$1))").bind(node)
 }
 
 pub(crate) fn upload(source: Id) -> Scalar<'static, Option<String>> {

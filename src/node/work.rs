@@ -247,6 +247,25 @@ impl Worker {
                             Err(_) => vec![work::Outcome::Retry; count],
                         }
                     }
+                    work::Plan::Pack { batch, .. } => {
+                        let keys = Arc::new(reads::keys(&materials)?);
+                        let timeout = Duration::from_secs(crate::config::seconds(
+                            &snapshot.runtime().maintenance.max_duration,
+                        )?);
+                        let encoding = async {
+                            let result = self.reader.pack(backend, keys, *batch).await?;
+                            #[cfg(feature = "fault-injection")]
+                            crate::faults::point("node-pack-stored").await;
+                            Ok::<_, anyhow::Error>(work::Outcome::Packed(result))
+                        };
+                        vec![
+                            tokio::time::timeout(timeout, encoding)
+                                .await
+                                .ok()
+                                .and_then(Result::ok)
+                                .unwrap_or(work::Outcome::Retry),
+                        ]
+                    }
                     work::Plan::Rewrite { items, .. } => {
                         ensure!(items.len() <= work::MAX_ITEMS, "invalid rewrite size");
                         let keys = Arc::new(reads::keys(&materials)?);

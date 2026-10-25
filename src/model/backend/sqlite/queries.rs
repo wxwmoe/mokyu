@@ -6300,7 +6300,7 @@ pub(super) fn unpack_storage(pack: Id) -> Rows<'static, (Uuid, i64)> {
     sqlx::query_as("SELECT s.id,p.revision FROM packs k JOIN storages s ON s.id=k.storage_id JOIN storage_profiles p ON p.storage_id=s.id WHERE k.id=?").bind(pack)
 }
 pub(super) fn active_unpack_task(all: bool, pack: Option<Id>) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT id FROM tasks WHERE task_type='unpack' AND state IN ('queued','running','paused','failed') AND json_extract(detail,'$.all')=? AND json_extract(detail,'$.pack_id') IS ? LIMIT 1").bind(all).bind(pack)
+    sqlx::query_scalar("SELECT id FROM tasks WHERE task_type='unpack' AND state IN ('queued','running','paused','failed') AND json_extract(detail,'$.all')=? AND json_extract(detail,'$.pack_id') IS ? LIMIT 1").bind(all).bind(pack.map(|id| id.to_string()))
 }
 
 pub(super) fn lock_task_detail(task: Execution) -> Scalar<'static, Value> {

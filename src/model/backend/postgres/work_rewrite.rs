@@ -25,7 +25,7 @@ async fn validate(
     Ok(None)
 }
 
-async fn nonce(
+pub(super) async fn nonce(
     db: &mut PgConnection,
     key: Option<Uuid>,
     created: chrono::DateTime<chrono::Utc>,
@@ -38,7 +38,11 @@ async fn nonce(
     Ok(Some(codec::typed_nonce(created, id, tag)?.to_vec()))
 }
 
-async fn keys(db: &mut PgConnection, ids: &[Uuid], key: &Key) -> Result<Vec<read::BlockKey>> {
+pub(super) async fn keys(
+    db: &mut PgConnection,
+    ids: &[Uuid],
+    key: &Key,
+) -> Result<Vec<read::BlockKey>> {
     queries::node_read_keys(ids)
         .fetch_all(db)
         .await?

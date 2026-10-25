@@ -42,6 +42,7 @@ fn job(mut value: Value) -> Result<Job> {
         detail.remove("source_operation");
         detail.remove("source_inputs");
         detail.remove("sweep_page");
+        detail.remove("node_pack");
     }
     let task_type = value["task_type"].as_str().unwrap_or("unknown").to_owned();
     value["task_type"] = json!(task_type);

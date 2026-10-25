@@ -124,6 +124,10 @@ pub(crate) enum Plan {
         storage: Uuid,
         items: Vec<Rewrite>,
     },
+    Pack {
+        storage: Uuid,
+        batch: Box<super::node_pack::Batch>,
+    },
 }
 
 impl Plan {
@@ -133,7 +137,8 @@ impl Plan {
             | Self::Audit { storage, .. }
             | Self::SweepScan { storage, .. }
             | Self::SweepDelete { storage, .. }
-            | Self::Rewrite { storage, .. } => *storage,
+            | Self::Rewrite { storage, .. }
+            | Self::Pack { storage, .. } => *storage,
             Self::Inspect { snapshot, .. } => snapshot.scope.storage_id,
         }
     }
@@ -155,6 +160,7 @@ pub(crate) enum Outcome {
     Listed {
         items: Vec<ListedObject>,
     },
+    Packed(super::node_pack::Encoded),
     Encoded {
         size: i64,
         compressed: bool,

@@ -24,6 +24,7 @@ pub(crate) mod node_multipart;
 pub(crate) mod node_native;
 pub(crate) mod node_object;
 pub(crate) mod node_observation;
+pub(crate) mod node_pack;
 pub(crate) mod node_raw;
 pub(crate) mod node_read;
 pub(crate) mod node_request;

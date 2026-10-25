@@ -14,6 +14,9 @@ mod sweep;
 #[path = "work_rewrite.rs"]
 mod rewrite;
 
+#[path = "work_packing.rs"]
+mod packing;
+
 fn owned(node: &NodeState, run: Run, batch: &q::Batch) -> Result<()> {
     ensure!(
         batch.credential_generation == node.credential_generation
@@ -213,6 +216,23 @@ async fn finish(
                 &completion.outcomes,
             )
             .await?;
+        }
+        work::Plan::Pack { storage, batch } => {
+            ensure!(!maintenance, Error::OperationAborted);
+            error = packing::finish(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                storage,
+                *batch,
+                &detail,
+                &completion.outcomes,
+                key,
+            )
+            .await?;
+            release_task_inputs(db, task).await?;
         }
         work::Plan::Rewrite { items, .. } => {
             ensure!(!maintenance, Error::OperationAborted);
@@ -586,6 +606,8 @@ pub(crate) async fn exchange(
             "integrity".to_owned(),
             "sweep".to_owned(),
             "rewrite".to_owned(),
+            "pack".to_owned(),
+            "unpack".to_owned(),
         ]
     };
     let mut plan = None;
@@ -647,6 +669,15 @@ pub(crate) async fn exchange(
                     )
                     .await?
                     .map(|plan| (plan, vec![]))
+                } else if matches!(policy.as_str(), "pack" | "unpack") {
+                    packing::prepare(
+                        &mut tx,
+                        Execution { id: task, token },
+                        &detail,
+                        &profile,
+                        key,
+                    )
+                    .await?
                 } else if policy == "rewrite" {
                     rewrite::prepare(
                         &mut tx,

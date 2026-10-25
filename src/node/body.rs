@@ -36,6 +36,9 @@ mod inspection;
 #[path = "encoding.rs"]
 mod encoding;
 
+#[path = "packing.rs"]
+mod packing;
+
 const UNIT: usize = 64 * 1024;
 pub(super) const BUFFER_UNITS: usize = 16 * 1024 * 1024 / UNIT;
 const RAW_BUFFER: usize = 256 * 1024;

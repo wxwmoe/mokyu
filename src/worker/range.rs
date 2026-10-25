@@ -15,7 +15,7 @@ use uuid::Uuid;
 const EXTRA_GET_BYTES: i64 = 64 * 1024;
 
 #[derive(serde::Serialize)]
-struct Benefit {
+pub(crate) struct Benefit {
     observed_bytes: i64,
     projected_bytes: i64,
     rewrite_bytes: i64,
@@ -38,12 +38,42 @@ impl Benefit {
                 .saturating_sub(penalty),
         }
     }
-    fn worthwhile(&self, c: &crate::content::pack::Config) -> Result<bool> {
+    pub(crate) fn worthwhile(&self, c: &crate::content::pack::Config) -> Result<bool> {
         Ok(self.net_savings_bytes > 0
             && self.net_savings_bytes as u64 >= config::bytes(&c.range_min_savings_bytes)?
             && i128::from(self.net_savings_bytes) * 100
                 >= i128::from(self.observed_bytes) * i128::from(c.range_min_savings_percent))
     }
+}
+
+pub(crate) fn benefit(
+    partial: i64,
+    observed: i64,
+    full: i64,
+    old: i64,
+    hits: &std::collections::BTreeMap<Id, i64>,
+    sources: &[(Vec<Id>, i64)],
+) -> Benefit {
+    let mut traffic = 0i64;
+    let mut requests = 0i64;
+    let mut bytes = 0i64;
+    for (ids, size) in sources {
+        // Sum is an upper bound on the union of member requests; never assume co-access from equal counts.
+        let downloads = ids
+            .iter()
+            .map(|id| hits.get(id).copied().unwrap_or(0))
+            .sum::<i64>()
+            .min(partial);
+        traffic = traffic.saturating_add(downloads.saturating_mul(*size));
+        requests = requests.saturating_add(downloads);
+        bytes = bytes.saturating_add(*size);
+    }
+    traffic = traffic.saturating_add(full.saturating_mul(bytes.saturating_sub(old).max(0)));
+    let extra = requests
+        .saturating_sub(partial)
+        .saturating_add(full.saturating_mul(sources.len().saturating_sub(1) as i64))
+        .max(0);
+    Benefit::new(observed, traffic, old.saturating_add(bytes), extra)
 }
 
 impl App {
@@ -153,28 +183,9 @@ impl App {
             report["reason"] = json!("no_smaller_contiguous_layout");
             return Ok((0, report));
         }
-        let evaluate = |sources: Vec<(Vec<Id>, i64)>| {
-            let mut traffic = 0i64;
-            let mut requests = 0i64;
-            let mut bytes = 0i64;
-            for (ids, size) in &sources {
-                // Sum is an upper bound on the union of member requests; never assume co-access from equal counts.
-                let downloads = ids
-                    .iter()
-                    .map(|id| hits.get(id).copied().unwrap_or(0))
-                    .sum::<i64>()
-                    .min(partial);
-                traffic = traffic.saturating_add(downloads.saturating_mul(*size));
-                requests = requests.saturating_add(downloads);
-                bytes = bytes.saturating_add(*size);
-            }
-            traffic = traffic.saturating_add(full.saturating_mul(bytes.saturating_sub(old).max(0)));
-            let extra = requests
-                .saturating_sub(partial)
-                .saturating_add(full.saturating_mul(sources.len().saturating_sub(1) as i64))
-                .max(0);
-            Benefit::new(observed, traffic, old.saturating_add(bytes), extra)
-        };
+        let hits = hits.into_iter().collect();
+        let evaluate =
+            |sources: Vec<(Vec<Id>, i64)>| benefit(partial, observed, full, old, &hits, &sources);
         let predicted = evaluate(
             groups
                 .iter()

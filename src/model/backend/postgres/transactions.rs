@@ -3856,12 +3856,25 @@ pub(super) async fn commit_pack_outputs(
     settings: &crate::content::pack::Config,
     flush_seconds: f64,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    commit_pack_outputs_in(&mut tx, task, rows, outputs, split, settings, flush_seconds).await?;
+    tx.commit().await?;
+    Ok(())
+}
+async fn commit_pack_outputs_in(
+    tx: &mut Transaction<'_, Postgres>,
+    task: Execution,
+    rows: &[Mapping],
+    outputs: &[PackOutput],
+    split: bool,
+    settings: &crate::content::pack::Config,
+    flush_seconds: f64,
+) -> Result<()> {
     let mut ids: Vec<Id> = rows.iter().map(|r| r.chunk.id).collect();
     ids.sort_unstable();
-    let mut tx = pool.begin().await?;
-    lock_execution(&mut tx, task).await?;
+    lock_execution(tx, task).await?;
     let current: Vec<(Id, Option<Id>)> =
-        queries::lock_pack_layout(&ids).fetch_all(&mut *tx).await?;
+        queries::lock_pack_layout(&ids).fetch_all(&mut **tx).await?;
     ensure!(
         current.len() == rows.len()
             && rows.iter().all(|r| current
@@ -3869,10 +3882,12 @@ pub(super) async fn commit_pack_outputs(
                 .any(|(id, p)| *id == r.chunk.id && *p == r.pack_id)),
         "pack layout changed; retry maintenance"
     );
-    check_source_inputs(&mut tx, task.id, &ids).await?;
-    let before: i64 = queries::pack_layout_bytes(&ids).fetch_one(&mut *tx).await?;
+    check_source_inputs(tx, task.id, &ids).await?;
+    let before: i64 = queries::pack_layout_bytes(&ids)
+        .fetch_one(&mut **tx)
+        .await?;
     let added: i64 = queries::pack_added_bytes(task.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     let after: i64 = outputs
         .iter()
@@ -3888,8 +3903,10 @@ pub(super) async fn commit_pack_outputs(
                 .unwrap_or(0)
         })
         .sum();
-    let upload: bool = queries::pack_is_upload(task.id).fetch_one(&mut *tx).await?;
-    let range: bool = queries::pack_is_range(task.id).fetch_one(&mut *tx).await?;
+    let upload: bool = queries::pack_is_upload(task.id)
+        .fetch_one(&mut **tx)
+        .await?;
+    let range: bool = queries::pack_is_range(task.id).fetch_one(&mut **tx).await?;
     if !split && !upload {
         let exclusive: bool = queries::pack_exclusive(
             &ids,
@@ -3897,56 +3914,23 @@ pub(super) async fn commit_pack_outputs(
             config::seconds(&settings.range_repack_window)? as f64,
             flush_seconds,
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         ensure!(exclusive, "pack references changed; retry maintenance");
     }
-    for output in outputs.iter().filter(|o| o.pack.is_some()) {
-        for pair in output.chunks.windows(2) {
-            let a = rows
-                .iter()
-                .find(|r| r.chunk.id == pair[0])
-                .context("missing pack source")?;
-            let b = rows
-                .iter()
-                .find(|r| r.chunk.id == pair[1])
-                .context("missing pack source")?;
-            ensure!(
-                queries::same_references(pair[0], pair[1], b.offset_bytes - a.offset_bytes)
-                    .fetch_one(&mut *tx)
-                    .await?,
-                "pack reference boundaries changed; retry maintenance"
-            );
-        }
-    }
-    for output in outputs {
-        if let Some(p) = &output.pack {
-            queries::publish_prepared_pack(p.id)
-                .execute(&mut *tx)
-                .await?;
-            queries::retire_pack_encodings(&output.chunks)
-                .execute(&mut *tx)
-                .await?;
-        } else if let Some(c) = &output.independent {
-            queries::publish_prepared_encoding(c.encoding_id)
-                .execute(&mut *tx)
-                .await?;
-            queries::publish_chunk_encoding(c).execute(&mut *tx).await?;
-        }
-        queries::publish_pack_layout(
-            &output.chunks,
-            output.pack.as_ref().map(|p| p.id),
-            split,
-            config::seconds(if range {
-                &settings.range_repack_after
-            } else {
-                &settings.repack_cooldown
-            })? as f64,
-            range,
-        )
-        .execute(&mut *tx)
-        .await?;
-    }
+    queries::pack_work::publish_outputs(
+        tx,
+        rows,
+        outputs,
+        split,
+        range,
+        config::seconds(if range {
+            &settings.range_repack_after
+        } else {
+            &settings.repack_cooldown
+        })? as f64,
+    )
+    .await?;
     let retained: Vec<Id> = outputs
         .iter()
         .flat_map(|o| o.chunks.iter().copied())
@@ -3959,12 +3943,12 @@ pub(super) async fn commit_pack_outputs(
     if !dead.is_empty() {
         ensure!(
             !queries::pack_has_references(&dead)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?,
             "pack acquired a new reference; retry maintenance"
         );
         queries::fail_dead_pack_chunks(&dead)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
     if split {
@@ -3972,15 +3956,14 @@ pub(super) async fn commit_pack_outputs(
             &retained,
             config::seconds(&settings.repack_cooldown)? as f64,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
     let old: Vec<Id> = rows.iter().filter_map(|r| r.pack_id).collect();
     queries::retire_replaced_packs(old)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    queries::record_pack_rewrite(task.id, json!({"before_bytes":before,"output_bytes":after,"temporary_added_bytes":added,"transition_bytes":before+added})).execute(&mut *tx).await?;
-    tx.commit().await?;
+    queries::record_pack_rewrite(task.id, json!({"before_bytes":before,"output_bytes":after,"temporary_added_bytes":added,"transition_bytes":before+added})).execute(&mut **tx).await?;
     Ok(())
 }
 pub(super) async fn record_range(
