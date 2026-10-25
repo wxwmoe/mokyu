@@ -20,6 +20,11 @@ pub(super) fn begin(input: wire::BeginWriteRequest) -> Result<write::Begin, Stat
     }
     let intent = write::Intent {
         access: input.access_key,
+        credential_revision: input
+            .credential_revision
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
         bucket: input.bucket,
         key: input.key,
         metadata: serde_json::from_slice(&input.metadata_json).map_err(|_| invalid())?,
@@ -149,6 +154,7 @@ pub(super) fn prepared(
 pub(super) fn reply(value: write::Reply) -> Result<wire::WriteReply, Status> {
     let reply = wire::WriteReply {
         operation_id: value.operation.to_string(),
+        bucket_id: value.bucket.map_or_else(String::new, |id| id.to_string()),
         stream_id: value.stream.map_or_else(String::new, |id| id.to_string()),
         phase: match value.phase {
             write::Phase::Active => wire::WritePhase::WriteActive,
@@ -171,4 +177,32 @@ pub(super) fn reply(value: write::Reply) -> Result<wire::WriteReply, Status> {
         ));
     }
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn write_admission_distinguishes_missing_and_zero_credential_revisions() {
+        let mut input = wire::BeginWriteRequest {
+            run: Some(wire::Run {
+                boot_id: Uuid::new_v4().to_string(),
+                fence: Uuid::new_v4().to_string(),
+            }),
+            operation_id: Uuid::now_v7().to_string(),
+            access_key: "writer".into(),
+            bucket: "bucket".into(),
+            key: "object".into(),
+            metadata_json: b"{}".to_vec(),
+            credential_revision: None,
+            ..Default::default()
+        };
+        assert!(begin(input.clone()).is_err());
+        input.credential_revision = Some(0);
+        assert_eq!(begin(input.clone()).unwrap().intent.credential_revision, 0);
+        input.credential_revision = Some(u64::MAX);
+        assert!(begin(input).is_err());
+    }
 }

@@ -124,6 +124,8 @@ impl Config {
 }
 
 struct Workspace {
+    level: i32,
+    sample_level: Option<i32>,
     compressor: zstd::bulk::Compressor<'static>,
     sampler: Option<zstd::bulk::Compressor<'static>>,
     output: Vec<u8>,
@@ -131,6 +133,8 @@ struct Workspace {
 impl Workspace {
     fn new(level: i32) -> Result<Self> {
         Ok(Self {
+            level,
+            sample_level: None,
             compressor: zstd::bulk::Compressor::new(level)?,
             sampler: None,
             output: Vec::new(),
@@ -143,8 +147,9 @@ impl Workspace {
             .try_reserve_exact(zstd::zstd_safe::compress_bound(input.len()) + 16)?;
         let compressor = match sample_level {
             Some(level) => {
-                if self.sampler.is_none() {
+                if self.sample_level != Some(level) {
                     self.sampler = Some(zstd::bulk::Compressor::new(level)?);
+                    self.sample_level = Some(level);
                 }
                 self.sampler.as_mut().unwrap()
             }
@@ -215,22 +220,42 @@ impl Pool {
         should_try: bool,
         strategy: Strategy,
     ) -> Result<Option<Vec<u8>>> {
+        let mut config = self.config.clone();
+        config.strategy = strategy;
+        self.compress_for(input, should_try, &config)
+    }
+    pub(crate) fn compress_for(
+        &self,
+        input: &[u8],
+        should_try: bool,
+        config: &Config,
+    ) -> Result<Option<Vec<u8>>> {
         ensure!(
             !input.is_empty() && input.len() <= crate::content::pack::MAX_PAYLOAD,
             "pack compression exceeds bound"
         );
-        if !self.config.enabled || !should_try || strategy == Strategy::Never {
+        if !config.enabled || !should_try || config.strategy == Strategy::Never {
             return Ok(None);
         }
-        let cached = self.idle.lock().unwrap().pop();
+        let cached = {
+            let mut idle = self.idle.lock().unwrap();
+            let matching = idle.iter().position(|(time, work)| {
+                time.elapsed() < self.idle_timeout && work.level == config.level
+            });
+            matching
+                .map(|index| idle.swap_remove(index))
+                .or_else(|| idle.pop())
+        };
         let mut work = match cached {
-            Some((time, work)) if time.elapsed() < self.idle_timeout => work,
-            _ => Workspace::new(self.config.level)?,
+            Some((time, work))
+                if time.elapsed() < self.idle_timeout && work.level == config.level =>
+            {
+                work
+            }
+            _ => Workspace::new(config.level)?,
         };
         // Error or panic drops the workspace instead of returning an uncertain context.
-        let mut config = self.config.clone();
-        config.strategy = strategy;
-        let result = work.encode(input, &config)?;
+        let result = work.encode(input, config)?;
         if work.output.capacity() > zstd::zstd_safe::compress_bound(MAX) + 16 {
             work.output = Vec::new();
         }
@@ -290,6 +315,34 @@ impl Pool {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn shared_encoder_pool_respects_each_profile_and_bounds_retained_contexts() -> Result<()> {
+        let pool = Pool::new(Config::default(), 1)?;
+        let input: Vec<_> = (0..MAX).map(|index| (index % 113) as u8).collect();
+        for (level, sample_level, strategy) in [
+            (1, 1, Strategy::Always),
+            (6, 3, Strategy::Sample),
+            (3, 1, Strategy::Sample),
+            (1, 1, Strategy::Always),
+        ] {
+            let config = Config {
+                level,
+                sample_level,
+                strategy,
+                ..Default::default()
+            };
+            let expected = Pool::new(config.clone(), 1)?.compress(&input, true)?;
+            let actual = pool.compress_for(&input, true, &config)?;
+            assert_eq!(actual, expected);
+            assert!(pool.idle.lock().unwrap().len() <= 1);
+            assert_eq!(
+                pool.decompress(actual.as_ref().unwrap(), input.len())?,
+                input
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn configuration_gates_and_type_fallback() {

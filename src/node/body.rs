@@ -35,7 +35,7 @@ pub(super) const BUFFER_UNITS: usize = 16 * 1024 * 1024 / UNIT;
 const RAW_BUFFER: usize = 256 * 1024;
 
 pub(super) struct Backend {
-    store: Store,
+    pub(super) store: Store,
     pub(super) profile: crate::storage::profile::StorageProfile,
 }
 
@@ -59,8 +59,8 @@ pub(super) struct Reader {
     packs: Arc<Semaphore>,
     http: Arc<Semaphore>,
     pack_units: u32,
-    workspace: u64,
-    pool: Arc<compression::Pool>,
+    pub(super) workspace: u64,
+    pub(super) pool: Arc<compression::Pool>,
     gets: Arc<AtomicU64>,
     diagnostics: Arc<Diagnostics>,
     pub(super) files: Arc<super::files::Cache>,

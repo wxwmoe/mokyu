@@ -20,9 +20,9 @@ mod public;
 const UNIT: usize = 4096;
 const MATERIAL_BYTES: usize = 1024 * 1024;
 type Key = (i32, String);
-type Held = HashMap<Key, Arc<Material>>;
+pub(super) type Held = HashMap<Key, Arc<Material>>;
 
-struct Material {
+pub(super) struct Material {
     version: wire::Cached,
     json: Vec<u8>,
     referenced: AtomicBool,
@@ -37,7 +37,7 @@ struct Index {
     order: VecDeque<Key>,
 }
 
-struct Cache {
+pub(super) struct Cache {
     index: Mutex<Index>,
     memory: Arc<Semaphore>,
     public: Weak<crate::app::public_reads::Cache>,
@@ -54,7 +54,7 @@ impl Default for Cache {
 }
 
 impl Cache {
-    fn snapshot(&self) -> Held {
+    pub(super) fn snapshot(&self) -> Held {
         self.index.lock().unwrap().values.clone()
     }
 
@@ -158,7 +158,12 @@ impl Cache {
         Ok(entry)
     }
 
-    fn apply(&self, deployment: Uuid, declared: Held, values: Vec<wire::Material>) -> Result<Held> {
+    pub(super) fn apply(
+        &self,
+        deployment: Uuid,
+        declared: Held,
+        values: Vec<wire::Material>,
+    ) -> Result<Held> {
         ensure!(
             values.len() <= read::MAX_ITEMS + 32,
             "too many read materials"
@@ -210,13 +215,16 @@ impl Cache {
     }
 }
 
-fn cached(held: &Held) -> Vec<wire::Cached> {
+pub(super) fn cached(held: &Held) -> Vec<wire::Cached> {
     held.values()
         .map(|material| material.version.clone())
         .collect()
 }
 
-fn material<T: serde::de::DeserializeOwned>(held: &Held, version: &wire::Cached) -> Result<T> {
+pub(super) fn material<T: serde::de::DeserializeOwned>(
+    held: &Held,
+    version: &wire::Cached,
+) -> Result<T> {
     let value = held
         .get(&(version.r#type, version.id.clone()))
         .filter(|value| value.version == *version)
@@ -226,7 +234,7 @@ fn material<T: serde::de::DeserializeOwned>(held: &Held, version: &wire::Cached)
 
 pub(crate) struct Reads {
     pub(crate) node: Arc<NodeContext>,
-    cache: Cache,
+    pub(super) cache: Cache,
     slots: Arc<Semaphore>,
     pub(super) reader: super::body::Reader,
     pub(super) checks: Arc<crate::content::checks::Checks>,
@@ -275,37 +283,13 @@ impl Prepared {
     }
 
     pub(super) fn backend(&self, id: Uuid) -> Result<Arc<super::body::Backend>> {
-        let material = self
-            .materials
-            .get(&(wire::MaterialType::Storage as i32, id.to_string()))
-            .context("read storage missing")?;
-        let mut backend = material.backend.lock().unwrap();
-        if backend.is_none() {
-            let value: read::Storage = serde_json::from_slice(&material.json)?;
-            ensure!(
-                value.connection.id == id && value.profile.storage_id == id,
-                "storage identity mismatch"
-            );
-            *backend = Some(Arc::new(super::body::Backend::new(value)?));
-        }
-        Ok(backend.as_ref().unwrap().clone())
+        backend(&self.materials, id)
     }
 
     pub(super) fn keys(
         &self,
     ) -> Result<std::collections::BTreeMap<Uuid, crate::content::codec::Key>> {
-        self.materials
-            .iter()
-            .filter(|((r#type, _), _)| *r#type == wire::MaterialType::BlockKey as i32)
-            .map(|((_, id), material)| {
-                let key: read::BlockKey = serde_json::from_slice(&material.json)?;
-                ensure!(id == &key.id.to_string(), "block key identity mismatch");
-                Ok((
-                    key.id,
-                    crate::content::codec::Key::new(&key.algorithm, key.material)?,
-                ))
-            })
-            .collect()
+        keys(&self.materials)
     }
 
     pub(super) async fn guard<T>(
@@ -547,3 +531,35 @@ impl Reads {
 #[cfg(test)]
 #[path = "../../tests/rpc/materials.rs"]
 mod tests;
+
+pub(super) fn backend(held: &Held, id: Uuid) -> Result<Arc<super::body::Backend>> {
+    let material = held
+        .get(&(wire::MaterialType::Storage as i32, id.to_string()))
+        .context("read storage missing")?;
+    let mut backend = material.backend.lock().unwrap();
+    if backend.is_none() {
+        let value: read::Storage = serde_json::from_slice(&material.json)?;
+        ensure!(
+            value.connection.id == id && value.profile.storage_id == id,
+            "storage identity mismatch"
+        );
+        *backend = Some(Arc::new(super::body::Backend::new(value)?));
+    }
+    Ok(backend.as_ref().unwrap().clone())
+}
+
+pub(super) fn keys(
+    held: &Held,
+) -> Result<std::collections::BTreeMap<Uuid, crate::content::codec::Key>> {
+    held.iter()
+        .filter(|((r#type, _), _)| *r#type == wire::MaterialType::BlockKey as i32)
+        .map(|((_, id), material)| {
+            let key: read::BlockKey = serde_json::from_slice(&material.json)?;
+            ensure!(id == &key.id.to_string(), "block key identity mismatch");
+            Ok((
+                key.id,
+                crate::content::codec::Key::new(&key.algorithm, key.material)?,
+            ))
+        })
+        .collect()
+}

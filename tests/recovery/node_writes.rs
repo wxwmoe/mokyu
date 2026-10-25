@@ -19,6 +19,7 @@ fn request(run: Run, operation: Uuid) -> write::Begin {
         operation,
         intent: write::Intent {
             access: "writer".into(),
+            credential_revision: 1,
             bucket: "writes".into(),
             key: "object".into(),
             metadata: serde_json::json!({"content_type":"text/plain"}),
@@ -114,6 +115,83 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
         .await?;
     sqlx::query("INSERT INTO s3_credential_grants(access_key,bucket_id,actions) VALUES('writer',$1,ARRAY['object.write'])").bind(bucket).execute(&pool).await?;
     sqlx::query("UPDATE quota_scopes SET logical_bytes_limit=100,inflight_bytes_limit=100 WHERE scope='bucket' AND scope_id=$1").bind(bucket).execute(&pool).await?;
+    let prepare = |access: &str, cached| model::node_request::Prepare {
+        run: session.run,
+        access: Some(access.into()),
+        route: Some(model::ReadRoute::Bucket {
+            name: "writes".into(),
+            key: String::new(),
+            alias: None,
+        }),
+        include: vec![
+            read::MaterialType::Credential,
+            read::MaterialType::Bucket,
+            read::MaterialType::Policy,
+        ],
+        cached,
+    };
+    let preflight = backend
+        .prepare_request(&node, &key, prepare("writer", vec![]))
+        .await?;
+    assert!(preflight.outcome == read::Outcome::Ready && preflight.grants.is_empty());
+    assert_eq!(preflight.materials.len(), 3);
+    assert!(preflight.mapping.is_none() && preflight.object.is_none());
+    let cached = preflight
+        .materials
+        .iter()
+        .map(|value| value.version.clone())
+        .collect();
+    let repeated = backend
+        .prepare_request(&node, &key, prepare("writer", cached))
+        .await?;
+    assert!(repeated.materials.iter().all(|value| value.json.is_none()));
+    sqlx::query(
+        "INSERT INTO s3_credentials(access_key_id,secret_encrypted) VALUES('rotating-writer',$1)",
+    )
+    .bind(codec::protect(b"first-secret", &key, b"rotating-writer")?)
+    .execute(&pool)
+    .await?;
+    sqlx::query("INSERT INTO s3_credential_grants(access_key,bucket_id,actions) VALUES('rotating-writer',$1,ARRAY['object.write'])").bind(bucket).execute(&pool).await?;
+    let original = backend
+        .prepare_request(&node, &key, prepare("rotating-writer", vec![]))
+        .await?;
+    sqlx::query("UPDATE s3_credentials SET secret_encrypted=$1,authorization_revision=authorization_revision+1 WHERE access_key_id='rotating-writer'")
+        .bind(codec::protect(b"second-secret", &key, b"rotating-writer")?).execute(&pool).await?;
+    let refreshed = backend
+        .prepare_request(
+            &node,
+            &key,
+            prepare(
+                "rotating-writer",
+                original
+                    .materials
+                    .iter()
+                    .map(|value| value.version.clone())
+                    .collect(),
+            ),
+        )
+        .await?;
+    let credential: read::Credential = serde_json::from_slice(
+        refreshed
+            .materials
+            .iter()
+            .find(|value| value.version.r#type == read::MaterialType::Credential)
+            .unwrap()
+            .json
+            .as_deref()
+            .unwrap(),
+    )?;
+    assert_eq!(credential.revision, 2);
+    assert_eq!(credential.secret, "second-secret");
+    let mut stale = request(session.run, Uuid::now_v7());
+    stale.intent.access = "rotating-writer".into();
+    let error = backend.begin_write(&node, &key, stale).await.err().unwrap();
+    assert_eq!(
+        error.downcast_ref::<s3s::S3Error>().unwrap().code(),
+        &s3s::S3ErrorCode::AccessDenied
+    );
+    let unchanged: (i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM streams),(SELECT count(*) FROM objects),(SELECT count(*) FROM stream_leases),(SELECT count(*) FROM quota_reservations)").fetch_one(&pool).await?;
+    assert_eq!(unchanged, (0, 0, 0, 0));
     let operation = Uuid::now_v7();
     let mut invalid = request(session.run, operation);
     invalid.intent.public = true;
@@ -331,6 +409,14 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
 
     let stale = dated(chrono::Utc::now().timestamp_millis() - 2 * 86_400_000);
     sqlx::query("UPDATE node_writes SET operation_id=$2,created_at=clock_timestamp()-interval '2 days',completed_at=clock_timestamp()-interval '2 days' WHERE operation_id=$1").bind(operation).bind(stale).execute(&pool).await?;
+    let revision = queries::node_write_credential("writer")
+        .fetch_one(&pool)
+        .await?;
+    let request = |run, operation| {
+        let mut input = request(run, operation);
+        input.intent.credential_revision = revision;
+        input
+    };
     let second_id = Uuid::now_v7();
     let second = backend
         .begin_write(&node, &key, request(session.run, second_id))

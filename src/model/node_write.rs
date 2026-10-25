@@ -11,6 +11,7 @@ pub(crate) const REQUEST_LIMIT: usize = 64 * 1024;
 #[serde(deny_unknown_fields)]
 pub(crate) struct Intent {
     pub access: String,
+    pub credential_revision: i64,
     pub bucket: String,
     pub key: String,
     pub metadata: serde_json::Value,
@@ -22,6 +23,7 @@ impl Intent {
     pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             !self.access.is_empty()
+                && self.credential_revision >= 0
                 && self.access.len() <= 256
                 && !self.bucket.is_empty()
                 && self.bucket.len() <= 255
@@ -106,6 +108,7 @@ pub(crate) enum Phase {
 
 pub(crate) struct Reply {
     pub operation: Uuid,
+    pub bucket: Option<Uuid>,
     pub stream: Option<Uuid>,
     pub phase: Phase,
     pub materials: Vec<node_read::Material>,
@@ -230,6 +233,7 @@ mod tests {
     fn write_operations_bind_canonical_intent_and_timestamp() -> Result<()> {
         let intent = Intent {
             access: "writer".into(),
+            credential_revision: 1,
             bucket: "bucket".into(),
             key: "object".into(),
             metadata: serde_json::json!({"content_type":"text/plain","user":{"b":"2","a":"1"}}),

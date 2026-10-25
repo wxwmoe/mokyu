@@ -9097,7 +9097,7 @@ pub(super) async fn open_node_read(
 ) -> Result<crate::model::node_read::Reply> {
     use crate::model::{
         Error,
-        node_read::{self as read, Grant, GrantType, MaterialType, Outcome, Reply},
+        node_read::{self as read, Grant, GrantType, MaterialType, Outcome},
     };
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
@@ -9107,57 +9107,23 @@ pub(super) async fn open_node_read(
         !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
         Error::NodeInactive
     );
-    let mut reply = Reply::new(Outcome::Ready);
-    if let Some(access) = &input.access {
-        let Some((_, encrypted)) = queries::node_read_credential(access)
-            .fetch_optional(&mut *tx)
-            .await?
-        else {
-            reply.outcome = Outcome::AccessDenied;
-            return Ok(reply);
-        };
-        let credential = read::Credential {
-            access: access.clone(),
-            secret: crate::content::codec::unprotect(&encrypted, key, access.as_bytes())?,
-        };
-        reply.credential = Some(reply.material(
-            state.deployment_id,
-            MaterialType::Credential,
-            access.clone(),
-            &credential,
-            &input.cached,
-        )?);
+    let mut include = vec![MaterialType::Credential, MaterialType::Bucket];
+    if input.policy {
+        include.push(MaterialType::Policy);
     }
-    let Some(bucket) = queries::node_read_bucket(&input.route)
-        .fetch_optional(&mut *tx)
-        .await?
-    else {
-        reply.outcome = Outcome::NoSuchBucket;
+    let (mut reply, bucket) = node_request_materials(
+        &mut tx,
+        state,
+        key,
+        input.access.as_deref(),
+        Some(&input.route),
+        &include,
+        &input.cached,
+    )
+    .await?;
+    let Some(bucket) = bucket else {
         return Ok(reply);
     };
-    reply.bucket = Some(reply.material(
-        state.deployment_id,
-        MaterialType::Bucket,
-        bucket.id.to_string(),
-        &bucket,
-        &input.cached,
-    )?);
-    if input.policy
-        && let Some(storage) = bucket.storage_id
-    {
-        let profile = queries::storage_profile(storage)
-            .fetch_optional(&mut *tx)
-            .await?;
-        if let Some(profile) = profile {
-            reply.policy = Some(reply.material(
-                state.deployment_id,
-                MaterialType::Policy,
-                storage.to_string(),
-                &read::Policy::try_from(&profile)?,
-                &input.cached,
-            )?);
-        }
-    }
     if bucket.state != "active"
         || if let Some(access) = &input.access {
             !queries::node_read_allowed(access, bucket.project_id, bucket.id)
@@ -9655,6 +9621,10 @@ pub(super) async fn begin_node_write(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| s3s::s3_error!(AccessDenied))?;
+    ensure!(
+        revision == input.intent.credential_revision,
+        s3s::s3_error!(AccessDenied)
+    );
     let route = crate::model::ReadRoute::Bucket {
         name: input.intent.bucket.clone(),
         key: input.intent.key.clone(),
@@ -9754,6 +9724,7 @@ pub(super) async fn node_write_reply(
     };
     let mut reply = write::Reply {
         operation: owned.operation_id,
+        bucket: owned.bucket_id,
         stream: owned.stream_id,
         phase,
         materials: Vec::new(),
@@ -10013,9 +9984,6 @@ async fn node_chunk_permits(
     input: &chunk::Prepare,
     plan: &[chunk::Item],
 ) -> Result<Vec<read::Grant>> {
-    let Some(limit) = row.profile.upload_concurrency else {
-        return Ok(Vec::new());
-    };
     let unique: HashSet<_> = plan
         .iter()
         .filter(|item| !item.reused)
@@ -10026,6 +9994,16 @@ async fn node_chunk_permits(
         return Ok(Vec::new());
     }
     let storage = row.storage_id.ok_or(Error::SourceUnavailable)?;
+    let current = queries::node_write_limit(storage)
+        .fetch_one(&mut *db)
+        .await?;
+    let limit = match (row.profile.upload_concurrency, current) {
+        (Some(admitted), Some(current)) => Some(admitted.min(current)),
+        (admitted, current) => admitted.or(current),
+    };
+    let Some(limit) = limit else {
+        return Ok(Vec::new());
+    };
     queries::lock_storage_permits(format!("mokyu:store:{storage}:upload"))
         .execute(&mut *db)
         .await?;
@@ -10441,6 +10419,107 @@ pub(super) async fn publish_node_write(
         .fetch_one(&mut *tx)
         .await?;
     let reply = node_write_reply(&mut tx, node, key, input.run, row, None).await?;
+    tx.commit().await?;
+    Ok(reply)
+}
+
+async fn node_request_materials(
+    db: &mut PgConnection,
+    node: &NodeState,
+    key: &Key,
+    access: Option<&str>,
+    route: Option<&crate::model::ReadRoute>,
+    include: &[read::MaterialType],
+    cached: &[read::Version],
+) -> Result<(read::Reply, Option<Bucket>)> {
+    let mut reply = read::Reply::new(read::Outcome::Ready);
+    if include.contains(&read::MaterialType::Credential)
+        && let Some(access) = access
+    {
+        let Some((revision, encrypted)) = queries::node_read_credential(access)
+            .fetch_optional(&mut *db)
+            .await?
+        else {
+            reply.outcome = read::Outcome::AccessDenied;
+            return Ok((reply, None));
+        };
+        let credential = read::Credential {
+            access: access.to_owned(),
+            revision,
+            secret: codec::unprotect(&encrypted, key, access.as_bytes())?,
+        };
+        reply.credential = Some(reply.material(
+            node.deployment_id,
+            read::MaterialType::Credential,
+            access.to_owned(),
+            &credential,
+            cached,
+        )?);
+    }
+    let Some(route) = route.filter(|_| {
+        include.contains(&read::MaterialType::Bucket)
+            || include.contains(&read::MaterialType::Policy)
+    }) else {
+        return Ok((reply, None));
+    };
+    let Some(bucket) = queries::node_read_bucket(route)
+        .fetch_optional(&mut *db)
+        .await?
+    else {
+        reply.outcome = read::Outcome::NoSuchBucket;
+        return Ok((reply, None));
+    };
+    if include.contains(&read::MaterialType::Bucket) {
+        reply.bucket = Some(reply.material(
+            node.deployment_id,
+            read::MaterialType::Bucket,
+            bucket.id.to_string(),
+            &bucket,
+            cached,
+        )?);
+    }
+    if include.contains(&read::MaterialType::Policy)
+        && let Some(storage) = bucket.storage_id
+        && let Some(profile) = queries::storage_profile(storage)
+            .fetch_optional(&mut *db)
+            .await?
+    {
+        reply.policy = Some(reply.material(
+            node.deployment_id,
+            read::MaterialType::Policy,
+            storage.to_string(),
+            &read::Policy::try_from(&profile)?,
+            cached,
+        )?);
+    }
+    Ok((reply, Some(bucket)))
+}
+
+pub(super) async fn prepare_node_request(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_request::Prepare,
+) -> Result<read::Reply> {
+    input.validate()?;
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, node, key, false).await?;
+    ensure!(node.role == "data", Error::NodeAuthentication);
+    let session = require_node_run(&mut tx, node, input.run, false).await?;
+    ensure!(
+        !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
+        Error::NodeInactive
+    );
+    let (reply, _) = node_request_materials(
+        &mut tx,
+        node,
+        key,
+        input.access.as_deref(),
+        input.route.as_ref(),
+        &input.include,
+        &input.cached,
+    )
+    .await?;
     tx.commit().await?;
     Ok(reply)
 }

@@ -37,12 +37,19 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Writes,
     Reads,
     Memory,
     Files,
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, encrypted object storage and signed HTTP writes"]
+async fn node_http_writes_stream_batches_and_publish_after_validation() -> Result<()> {
+    node_http_reads(HttpCase::Writes).await
 }
 
 async fn unique_source_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()> {
@@ -219,7 +226,8 @@ async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()
 }
 
 async fn node_http_reads(case: HttpCase) -> Result<()> {
-    let cache = matches!(case, HttpCase::Memory | HttpCase::Public);
+    let writes = matches!(case, HttpCase::Writes);
+    let cache = matches!(case, HttpCase::Memory | HttpCase::Public | HttpCase::Writes);
     let disk = matches!(case, HttpCase::Files);
     let public = matches!(case, HttpCase::Public);
     let observations = matches!(case, HttpCase::Observations);
@@ -330,7 +338,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if sources {
+    if writes {
+        fixture("http-writes").await?;
+    } else if sources {
         unique_source_reads(&reads).await?;
     } else if observations {
         observation_reads(&reads).await?;
@@ -383,18 +393,41 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-pending").await?;
         fixture("assert-no-reads").await?;
     }
+    let publishing = if writes {
+        fixture("chunks-lose-publish").await?;
+        let publishing = tokio::spawn(fixture("http-writes-publish-replay"));
+        let point = path
+            .parent()
+            .unwrap()
+            .join("faults-a/node-write-published.hit");
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !point.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        Some(publishing)
+    } else {
+        None
+    };
     *dns.answers.write().unwrap() = Some(vec![
         Ipv4Addr::new(127, 0, 0, 2),
         Ipv4Addr::new(127, 0, 0, 3),
     ]);
     dns.resolver.clear_cache();
     context.client.addresses.lock().await.refresh_at = Instant::now();
+    if let Some(publishing) = publishing {
+        publishing.await??;
+        fixture("chunks-resume-publish").await?;
+    }
     fixture("stop-first").await?;
     node_state(&mut states, |state| {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if sources {
+    if writes {
+        fixture("http-writes-reconnected").await?;
+    } else if sources {
         fixture("sources-reconnected").await?;
     } else if observations {
         fixture("observations-reconnected").await?;
@@ -418,6 +451,44 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-reconnected").await?;
     }
     fixture("assert-no-reads").await?;
+    if writes {
+        let before = observed.write_resources();
+        let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
+        let point = faults.join("node-write-seal");
+        tokio::fs::write(&point, b"pause").await?;
+        let fenced = tokio::spawn(fixture("http-writes-fenced"));
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !point.with_extension("hit").exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        let held = observed.write_resources();
+        assert!(
+            held.iter().zip(before).all(|(held, before)| *held < before),
+            "writer did not hold memory, CPU and IO"
+        );
+        context.stop();
+        fenced.await??;
+        assert_eq!(
+            observed.write_resources(),
+            held,
+            "cancelled blocking work released its resources early"
+        );
+        tokio::fs::remove_file(&point).await?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while observed.write_resources() != before {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        driver.await??;
+        s3_server.abort();
+        web_server.abort();
+        let _ = s3_server.await;
+        let _ = web_server.await;
+        return Ok(());
+    }
     let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
     let point = if disk {
         "node-cache-decode"

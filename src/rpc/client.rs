@@ -247,6 +247,14 @@ impl Client {
         self.unary(input, "/mokyu.node.v1.NodeReads/OpenRead").await
     }
 
+    pub(crate) async fn prepare_request(
+        &self,
+        input: wire::PrepareRequestInput,
+    ) -> Result<wire::RequestReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeControl/PrepareRequest")
+            .await
+    }
+
     pub(crate) async fn report_read(
         &self,
         input: wire::ReadReportRequest,
@@ -271,7 +279,6 @@ impl Client {
             .await
     }
 
-    #[cfg(test)]
     pub(crate) async fn begin_write(
         &self,
         input: wire::BeginWriteRequest,
@@ -289,7 +296,6 @@ impl Client {
             .await
     }
 
-    #[cfg(test)]
     pub(crate) async fn abort_write(
         &self,
         input: wire::WriteRequest,
@@ -298,7 +304,6 @@ impl Client {
             .await
     }
 
-    #[cfg(test)]
     pub(crate) async fn prepare_chunks(
         &self,
         input: wire::PrepareChunksRequest,
@@ -307,7 +312,6 @@ impl Client {
             .await
     }
 
-    #[cfg(test)]
     pub(crate) async fn commit_chunks(
         &self,
         input: wire::CommitChunksRequest,
@@ -316,7 +320,6 @@ impl Client {
             .await
     }
 
-    #[cfg(test)]
     pub(crate) async fn publish_write(
         &self,
         input: wire::PublishWriteRequest,

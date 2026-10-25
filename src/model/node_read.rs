@@ -587,6 +587,7 @@ impl BlockKey {
 pub(crate) struct Credential {
     pub(crate) access: String,
     pub(crate) secret: String,
+    pub(crate) revision: i64,
 }
 
 #[cfg(test)]

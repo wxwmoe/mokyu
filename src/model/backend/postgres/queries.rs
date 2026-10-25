@@ -7505,6 +7505,16 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn prepare_request(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_request::Prepare,
+    ) -> Result<crate::model::node_read::Reply> {
+        super::transactions::prepare_node_request(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
     async fn prepare_chunks(
         &self,
         node: &crate::cluster::NodeState,
@@ -10237,8 +10247,8 @@ pub(super) fn node_read_admission() -> Scalar<'static, bool> {
     )
 }
 
-pub(super) fn node_read_credential(access: &str) -> Rows<'_, (Uuid, Vec<u8>)> {
-    sqlx::query_as("SELECT project_id,secret_encrypted FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>clock_timestamp()) FOR SHARE").bind(access)
+pub(super) fn node_read_credential(access: &str) -> Rows<'_, (i64, Vec<u8>)> {
+    sqlx::query_as("SELECT authorization_revision,secret_encrypted FROM s3_credentials WHERE access_key_id=$1 AND enabled AND (expires_at IS NULL OR expires_at>clock_timestamp()) FOR SHARE").bind(access)
 }
 
 pub(super) fn node_read_bucket(route: &crate::model::ReadRoute) -> Rows<'_, Bucket> {
@@ -10563,6 +10573,7 @@ pub(super) fn node_settings() -> Rows<'static, (String, Value, i64)> {
 #[derive(Clone, sqlx::FromRow)]
 pub(super) struct NodeWrite {
     pub operation_id: Uuid,
+    pub bucket_id: Option<Uuid>,
     pub credential_generation: i64,
     pub boot_id: Uuid,
     pub fence: Uuid,
@@ -10582,7 +10593,7 @@ pub(super) struct NodeWrite {
 }
 
 pub(super) fn node_write(node: Uuid, operation: Uuid) -> Rows<'static, NodeWrite> {
-    sqlx::query_as("SELECT w.*,CASE WHEN w.state='active' AND s.state='writing' AND o.write_token=s.id THEN GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) ELSE 0 END AS valid_for_ms FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id LEFT JOIN streams s ON s.id=w.stream_id LEFT JOIN objects o ON o.bucket_id=s.bucket_id AND o.object_key=s.object_key WHERE w.node_id=$1 AND w.operation_id=$2 FOR UPDATE OF w")
+    sqlx::query_as("SELECT w.*,s.bucket_id AS bucket_id,CASE WHEN w.state='active' AND s.state='writing' AND o.write_token=s.id THEN GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) ELSE 0 END AS valid_for_ms FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id LEFT JOIN streams s ON s.id=w.stream_id LEFT JOIN objects o ON o.bucket_id=s.bucket_id AND o.object_key=s.object_key WHERE w.node_id=$1 AND w.operation_id=$2 FOR UPDATE OF w")
         .bind(node).bind(operation)
 }
 
@@ -10597,6 +10608,13 @@ pub(super) fn node_write_credential(access: &str) -> Scalar<'_, i64> {
 pub(super) fn node_write_storage(id: Uuid) -> Rows<'static, (String, Option<Uuid>)> {
     sqlx::query_as("SELECT type,block_key_id FROM storages WHERE id=$1 AND enabled FOR SHARE")
         .bind(id)
+}
+
+pub(super) fn node_write_limit(id: Uuid) -> Scalar<'static, Option<i32>> {
+    sqlx::query_scalar(
+        "SELECT upload_concurrency FROM storage_profiles WHERE storage_id=$1 FOR SHARE",
+    )
+    .bind(id)
 }
 
 pub(super) fn node_write_cleanup(node: Uuid) -> Statement<'static> {

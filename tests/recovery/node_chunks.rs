@@ -20,6 +20,7 @@ fn begin(run: Run, name: &str) -> write::Begin {
         operation: Uuid::now_v7(),
         intent: write::Intent {
             access: "writer".into(),
+            credential_revision: 1,
             bucket: "batches".into(),
             key: name.into(),
             metadata: serde_json::json!({}),
@@ -431,6 +432,62 @@ async fn postgres_node_chunks_replay_claims_nonces_and_publication() -> Result<(
         .fetch_one(&pool)
         .await?;
     assert_eq!(permits, 0);
+
+    for admitted in [Some(4), None] {
+        sqlx::query("UPDATE storage_profiles SET upload_concurrency=$2,revision=revision+1 WHERE storage_id=$1")
+            .bind(storage)
+            .bind(admitted)
+            .execute(&pool)
+            .await?;
+        let input = begin(session.run, &format!("current-limit-{admitted:?}"));
+        let operation = input.operation;
+        backend.begin_write(&node, &key, input).await?;
+        sqlx::query("UPDATE storage_profiles SET upload_concurrency=1,revision=revision+1 WHERE storage_id=$1")
+            .bind(storage)
+            .execute(&pool)
+            .await?;
+        backend
+            .prepare_chunks(
+                &node,
+                &key,
+                chunk::Prepare {
+                    run: session.run,
+                    operation,
+                    batch: 1,
+                    offset: 0,
+                    items: (0..2)
+                        .map(|index| item(format!("current-limit-{admitted:?}-{index}").as_bytes()))
+                        .collect(),
+                    parallelism: 2,
+                    cached: vec![],
+                },
+            )
+            .await?;
+        let count = || {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM node_write_permits WHERE node_id=$1 AND operation_id=$2",
+            )
+            .bind(node.node_id)
+            .bind(operation)
+        };
+        assert_eq!(
+            count().fetch_one(&pool).await?,
+            1,
+            "new batches exceeded the current storage limit"
+        );
+        backend
+            .write_status(
+                &node,
+                &key,
+                write::Lookup {
+                    run: session.run,
+                    operation,
+                },
+                true,
+            )
+            .await?;
+        assert_eq!(count().fetch_one(&pool).await?, 0);
+    }
 
     let empty = begin(session.run, "empty");
     let empty_id = empty.operation;

@@ -8,6 +8,7 @@ use crate::{
     },
     rpc::wire,
 };
+use crate::{node::writes, upload::checksum};
 use anyhow::{Context, Result, ensure};
 use axum::{
     body::Body,
@@ -24,6 +25,49 @@ use s3s::{
 use std::{cell::RefCell, sync::Arc};
 use tracing::Instrument;
 
+enum PreparedRequest {
+    Read(RequestRead),
+    Write(writes::Request),
+}
+
+impl PreparedRequest {
+    fn check(&self) -> Result<()> {
+        match self {
+            Self::Read(read) => read.prepared.check(),
+            Self::Write(write) => write.check(),
+        }
+    }
+    fn access(&self) -> &str {
+        match self {
+            Self::Read(read) => &read.input.access_key,
+            Self::Write(write) => &write.access,
+        }
+    }
+    fn credential(&self) -> Option<&wire::Cached> {
+        match self {
+            Self::Read(read) => read.prepared.reply.credential.as_ref(),
+            Self::Write(write) => write.reply.credential.as_ref(),
+        }
+    }
+    fn material<T: serde::de::DeserializeOwned>(&self, version: &wire::Cached) -> Result<T> {
+        match self {
+            Self::Read(read) => read.prepared.material(version),
+            Self::Write(write) => write.material(version),
+        }
+    }
+    fn bucket(&self) -> Result<Option<crate::app::Bucket>> {
+        match self {
+            Self::Read(read) => delivery::bucket(&read.prepared),
+            Self::Write(write) => write
+                .reply
+                .bucket
+                .as_ref()
+                .map(|version| write.material(version))
+                .transpose(),
+        }
+    }
+}
+
 struct RequestRead {
     input: wire::ReadRequest,
     prepared: Prepared,
@@ -37,12 +81,13 @@ enum ReadAccess {
 }
 
 tokio::task_local! {
-    static CURRENT: RefCell<Option<RequestRead>>;
+    static CURRENT: RefCell<Option<PreparedRequest>>;
 }
 
 #[derive(Clone)]
 pub(crate) struct Gateway {
     reads: Arc<Reads>,
+    writes: Arc<writes::Writes>,
     cors: Arc<cors::Cache>,
     settings: RequestSettings,
 }
@@ -53,6 +98,7 @@ impl Gateway {
         let cors = reads.cors.clone();
         reads.start_public();
         Ok(Self {
+            writes: Arc::new(writes::Writes::new(reads.clone())?),
             reads,
             cors,
             settings,
@@ -70,6 +116,11 @@ impl Gateway {
     #[cfg(test)]
     pub(crate) fn cors_cache(&self) -> serde_json::Value {
         self.cors.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_resources(&self) -> [usize; 3] {
+        self.writes.available()
     }
 
     async fn prepare(
@@ -414,22 +465,70 @@ impl Gateway {
             } else {
                 HeaderMap::new()
             };
-            let prepared = self
-                .prepare(
-                    route,
-                    if target.signed {
-                        ReadAccess::Signed(s3::access_key(request.headers(), request.uri().query()))
-                    } else {
-                        ReadAccess::Anonymous
-                    },
-                    request.method(),
-                    false,
-                    request.headers(),
-                    &overrides,
+            let prepared = if read || request.method() == Method::OPTIONS {
+                PreparedRequest::Read(
+                    self.prepare(
+                        route,
+                        if target.signed {
+                            ReadAccess::Signed(s3::access_key(
+                                request.headers(),
+                                request.uri().query(),
+                            ))
+                        } else {
+                            ReadAccess::Anonymous
+                        },
+                        request.method(),
+                        false,
+                        request.headers(),
+                        &overrides,
+                    )
+                    .await?,
                 )
-                .await?;
-            cors = self.cors(&prepared.prepared, request.headers(), request.method())?;
-            if let Some(bucket) = delivery::bucket(&prepared.prepared)?
+            } else {
+                let bucket = match route {
+                    ReadRoute::Bucket { name, .. } => name,
+                    _ => String::new(),
+                };
+                PreparedRequest::Write(
+                    self.writes
+                        .prepare(
+                            s3::access_key(request.headers(), request.uri().query())
+                                .unwrap_or_default(),
+                            bucket,
+                        )
+                        .await?,
+                )
+            };
+            cors = match &prepared {
+                PreparedRequest::Read(read) => {
+                    self.cors(&read.prepared, request.headers(), request.method())?
+                }
+                PreparedRequest::Write(write) => {
+                    if let Some(mut bucket) = prepared.bucket()? {
+                        if let Some(version) = &write.reply.policy {
+                            let policy: read::Policy = write.material(version)?;
+                            ensure!(
+                                Some(policy.storage_id) == bucket.storage_id,
+                                "write policy does not match bucket"
+                            );
+                            if policy.cors_cache_enabled {
+                                self.cors.current(&mut bucket);
+                            }
+                        }
+                        super::cors_headers(
+                            &self.cors,
+                            &bucket,
+                            request.headers(),
+                            request.method().as_str(),
+                            None,
+                            self.cors.generation(),
+                        )?
+                    } else {
+                        HeaderMap::new()
+                    }
+                }
+            };
+            if let Some(bucket) = prepared.bucket()?
                 && target.alias.as_deref() == Some(&bucket.name)
             {
                 alias = true;
@@ -465,6 +564,13 @@ impl Gateway {
                     StatusCode::FORBIDDEN
                 };
                 return Ok(response);
+            }
+            if request
+                .headers()
+                .get("x-amz-content-sha256")
+                .is_some_and(|value| value.as_bytes().starts_with(b"STREAMING-"))
+            {
+                request = request.map(crate::upload::guard_aws_end);
             }
             Ok(CURRENT
                 .scope(RefCell::new(Some(prepared)), service.call(request))
@@ -529,6 +635,9 @@ fn take(bucket: &str, key: &str, access: Option<&str>) -> Result<RequestRead> {
     let read = CURRENT
         .try_with(|value| value.borrow_mut().take())?
         .context("read request missing")?;
+    let PreparedRequest::Read(read) = read else {
+        anyhow::bail!(s3s::s3_error!(InvalidRequest));
+    };
     ensure!(
         access.unwrap_or("") == read.input.access_key,
         s3s::s3_error!(AccessDenied)
@@ -566,16 +675,13 @@ impl S3Auth for Gateway {
             CURRENT.try_with(|current| -> Result<SecretKey> {
                 let current = current.borrow();
                 let read = current.as_ref().context("read authentication missing")?;
-                read.prepared.check()?;
+                read.check()?;
                 let version = read
-                    .prepared
-                    .reply
-                    .credential
-                    .as_ref()
+                    .credential()
                     .ok_or_else(|| s3s::s3_error!(InvalidAccessKeyId))?;
-                let credential: read::Credential = read.prepared.material(version)?;
+                let credential: read::Credential = read.material(version)?;
                 ensure!(
-                    credential.access == key && key == read.input.access_key,
+                    credential.access == key && key == read.access(),
                     s3s::s3_error!(InvalidAccessKeyId)
                 );
                 Ok(SecretKey::from(credential.secret))
@@ -619,6 +725,77 @@ impl S3Access for Gateway {
 
 #[async_trait::async_trait]
 impl S3 for Gateway {
+    async fn put_object(
+        &self,
+        mut request: S3Request<PutObjectInput>,
+    ) -> S3Result<S3Response<PutObjectOutput>> {
+        async {
+            gateway::reject_features(&request.headers)?;
+            let prepared = CURRENT
+                .try_with(|value| value.borrow_mut().take())?
+                .context("write request missing")?;
+            let PreparedRequest::Write(prepared) = prepared else {
+                anyhow::bail!(s3s::s3_error!(InvalidRequest));
+            };
+            let input = &request.input;
+            let access = request
+                .credentials
+                .as_ref()
+                .ok_or_else(|| s3s::s3_error!(AccessDenied))?;
+            let length = writes::declared(&request.headers, input.content_length)?;
+            let check = crate::upload::Integrity::new(
+                &request.headers,
+                input
+                    .checksum_algorithm
+                    .as_ref()
+                    .map(|value| value.as_str()),
+            )?;
+            let begin = wire::BeginWriteRequest {
+                access_key: access.access_key.clone(),
+                bucket: input.bucket.clone(),
+                key: input.key.clone(),
+                metadata_json: serde_json::to_vec(&gateway::metadata!(input))?,
+                public_read: gateway::canned(input.acl.as_ref())?,
+                size: length.map(|value| value as u64),
+                ..Default::default()
+            };
+            let condition = |name| -> Result<Option<String>> {
+                request
+                    .headers
+                    .get(name)
+                    .map(|value| Ok(value.to_str()?.to_owned()))
+                    .transpose()
+            };
+            let if_match = condition("if-match")?;
+            let if_none = condition("if-none-match")?;
+            let body = request
+                .input
+                .body
+                .take()
+                .unwrap_or_else(|| StreamingBlob::from_bytes(bytes::Bytes::new()));
+            let (etag, sums) = self
+                .writes
+                .put(
+                    prepared,
+                    begin,
+                    body,
+                    check,
+                    request.trailing_headers,
+                    if_match,
+                    if_none,
+                )
+                .await?;
+            let mut output = PutObjectOutput {
+                e_tag: Some(ETag::Strong(etag)),
+                ..Default::default()
+            };
+            gateway::checksums!(output, &sums);
+            Ok(S3Response::new(output))
+        }
+        .await
+        .map_err(delivery::error)
+    }
+
     async fn get_object(
         &self,
         request: S3Request<GetObjectInput>,

@@ -49,7 +49,7 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     let service = Service { app };
     tonic::service::Routes::new(
         NodeControlServer::new(service.clone())
-            .max_decoding_message_size(super::OBSERVATION_LIMIT)
+            .max_decoding_message_size(super::read::REQUEST_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
@@ -264,7 +264,7 @@ impl NodeWrites for Service {
         &self,
         request: Request<wire::PrepareChunksRequest>,
     ) -> Result<Response<wire::PreparedChunks>, Status> {
-        let node = write_identity(&request)?;
+        let node = data_identity(&request)?;
         let input = super::write::prepare(request.into_inner())?;
         let cluster = self.app.cluster().map_err(failure)?;
         let assembly =
@@ -313,7 +313,7 @@ impl NodeWrites for Service {
         &self,
         request: Request<wire::CommitChunksRequest>,
     ) -> Result<Response<wire::ChunkCommitReply>, Status> {
-        let node = write_identity(&request)?;
+        let node = data_identity(&request)?;
         let input = super::write::commit(request.into_inner())?;
         let batch_id = input.batch as u64;
         let end = bounded(self.app.cluster().map_err(failure)?.commit_chunks(
@@ -334,7 +334,7 @@ impl NodeWrites for Service {
         &self,
         request: Request<wire::PublishWriteRequest>,
     ) -> Result<Response<wire::WriteReply>, Status> {
-        let node = write_identity(&request)?;
+        let node = data_identity(&request)?;
         let input = super::write::publish(request.into_inner())?;
         let reply = bounded(self.app.cluster().map_err(failure)?.publish_write(
             &node,
@@ -354,7 +354,7 @@ impl NodeWrites for Service {
         &self,
         request: Request<wire::BeginWriteRequest>,
     ) -> Result<Response<wire::WriteReply>, Status> {
-        let node = write_identity(&request)?;
+        let node = data_identity(&request)?;
         let input = super::write::begin(request.into_inner())?;
         let reply = bounded(self.app.cluster().map_err(failure)?.begin_write(
             &node,
@@ -382,16 +382,14 @@ impl NodeWrites for Service {
     }
 }
 
-fn write_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
+fn data_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
     let node = request
         .extensions()
         .get::<NodeState>()
         .cloned()
         .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
     if node.role != "data" {
-        return Err(Status::permission_denied(
-            "object writes require a data node",
-        ));
+        return Err(Status::permission_denied("request requires a data node"));
     }
     Ok(node)
 }
@@ -402,7 +400,7 @@ impl Service {
         request: Request<wire::WriteRequest>,
         abort: bool,
     ) -> Result<Response<wire::WriteReply>, Status> {
-        let node = write_identity(&request)?;
+        let node = data_identity(&request)?;
         let input = super::write::lookup(request.into_inner())?;
         let reply = bounded(self.app.cluster().map_err(failure)?.write_status(
             &node,
@@ -535,6 +533,20 @@ fn state(snapshot: &session::Snapshot) -> wire::NodeState {
 
 #[tonic::async_trait]
 impl NodeControl for Service {
+    async fn prepare_request(
+        &self,
+        request: Request<wire::PrepareRequestInput>,
+    ) -> Result<Response<wire::RequestReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::request::prepare(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.prepare_request(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(super::request::reply(reply)?))
+    }
     async fn report_observations(
         &self,
         request: Request<wire::ObservationRequest>,

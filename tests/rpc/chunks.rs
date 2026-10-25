@@ -145,10 +145,34 @@ async fn node_chunk_batches_upload_once_replay_and_publish_over_rpc() -> Result<
     .flatten()
     .copied()
     .collect::<Vec<_>>();
+    let preflight = context
+        .client
+        .prepare_request(wire::PrepareRequestInput {
+            run: Some(run.clone()),
+            access_key: source.access_key.clone(),
+            bucket: source.bucket.clone(),
+            include: vec![
+                wire::MaterialType::S3Credential as i32,
+                wire::MaterialType::Bucket as i32,
+                wire::MaterialType::ReadPolicy as i32,
+            ],
+            cached: vec![],
+        })
+        .await?;
+    assert_eq!(preflight.outcome, wire::ReadOutcome::Ready as i32);
+    let mut authentication = Held::new();
+    materials(&preflight.materials, &mut authentication)?;
+    let credential: read::Credential = get(
+        &authentication,
+        wire::MaterialType::S3Credential,
+        &source.access_key,
+    )?;
+    assert_eq!(credential.secret, source.secret_key);
     let begin = wire::BeginWriteRequest {
         run: Some(run.clone()),
         operation_id: operation.clone(),
         access_key: source.access_key.clone(),
+        credential_revision: Some(credential.revision as u64),
         bucket: source.bucket.clone(),
         key: "rpc-chunks".into(),
         metadata_json: br#"{"content_type":"application/octet-stream"}"#.to_vec(),

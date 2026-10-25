@@ -2,6 +2,7 @@ syntax = "proto3";
 package mokyu.node.v1;
 
 service NodeControl {
+  rpc PrepareRequest(PrepareRequestInput) returns (RequestReply);
   rpc SyncNode(SyncRequest) returns (SyncReply);
   rpc ReportObservations(ObservationRequest) returns (ObservationReply);
 }
@@ -121,6 +122,23 @@ message BeginWriteRequest {
   bool public_read = 7;
   optional uint64 size = 8;
   repeated Cached cached = 9;
+  optional uint64 credential_revision = 10;
+}
+
+message PrepareRequestInput {
+  Run run = 1;
+  string access_key = 2;
+  string bucket = 3;
+  repeated MaterialType include = 4;
+  repeated Cached cached = 5;
+}
+
+message RequestReply {
+  ReadOutcome outcome = 1;
+  repeated Material materials = 2;
+  Cached credential = 3;
+  Cached bucket = 4;
+  Cached policy = 5;
 }
 
 message WriteRequest {
@@ -144,6 +162,7 @@ message WriteReply {
   Cached storage = 5;
   repeated Grant grants = 6;
   PublishedWrite published = 7;
+  string bucket_id = 8;
 }
 
 // Suspicions request durable backend verification; they never prove corruption.

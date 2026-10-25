@@ -29,6 +29,30 @@ pub(crate) fn bucket(prepared: &Prepared) -> Result<Option<Bucket>> {
 
 pub(crate) fn error(error: anyhow::Error) -> s3s::S3Error {
     if let Some(status) = error.downcast_ref::<tonic::Status>() {
+        if let Some(code) = status
+            .metadata()
+            .get("mokyu-s3-code")
+            .and_then(|value| value.to_str().ok())
+        {
+            let code = match code {
+                "QuotaExceeded" => {
+                    return crate::app::quota::database_error(
+                        &crate::model::Error::QuotaExceeded.into(),
+                    )
+                    .unwrap();
+                }
+                "AccessDenied" => s3s::S3ErrorCode::AccessDenied,
+                "NoSuchBucket" => s3s::S3ErrorCode::NoSuchBucket,
+                "InvalidBucketState" => s3s::S3ErrorCode::InvalidBucketState,
+                "OperationAborted" => s3s::S3ErrorCode::OperationAborted,
+                "PreconditionFailed" => s3s::S3ErrorCode::PreconditionFailed,
+                "IncompleteBody" => s3s::S3ErrorCode::IncompleteBody,
+                "InvalidArgument" => s3s::S3ErrorCode::InvalidArgument,
+                "InvalidRequest" => s3s::S3ErrorCode::InvalidRequest,
+                _ => s3s::S3ErrorCode::ServiceUnavailable,
+            };
+            return s3s::S3Error::new(code);
+        }
         return match status.code() {
             tonic::Code::ResourceExhausted => s3s::s3_error!(SlowDown),
             tonic::Code::InvalidArgument => s3s::s3_error!(InvalidRequest),
