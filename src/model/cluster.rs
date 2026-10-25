@@ -9,6 +9,31 @@ use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait ClusterStore: Send + Sync {
+    async fn prepare_chunks(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_chunk::Prepare,
+    ) -> Result<super::node_chunk::Assembly>;
+    async fn activate_chunks(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_chunk::Prepare,
+        nonces: Vec<super::node_chunk::Nonce>,
+    ) -> Result<super::node_chunk::Prepared>;
+    async fn commit_chunks(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_chunk::Commit,
+    ) -> Result<i64>;
+    async fn publish_write(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_write::Publish,
+    ) -> Result<super::node_write::Reply>;
     async fn begin_write(
         &self,
         node: &NodeState,

@@ -298,6 +298,33 @@ impl Client {
             .await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn prepare_chunks(
+        &self,
+        input: wire::PrepareChunksRequest,
+    ) -> Result<wire::PreparedChunks, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/PrepareChunks")
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn commit_chunks(
+        &self,
+        input: wire::CommitChunksRequest,
+    ) -> Result<wire::ChunkCommitReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/CommitChunks")
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn publish_write(
+        &self,
+        input: wire::PublishWriteRequest,
+    ) -> Result<wire::WriteReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/PublishWrite")
+            .await
+    }
+
     async fn unary<I, O>(&self, input: I, path: &'static str) -> Result<O, Status>
     where
         I: prost::Message + Default + Clone + 'static,
@@ -361,7 +388,7 @@ impl Client {
                         peer.succeeded();
                         return Ok(reply);
                     }
-                    Err(error) if read_busy(&error) => {
+                    Err(error) if capacity_busy(&error) => {
                         peer.succeeded();
                         excluded.remove(&peer.address);
                         let jitter = u64::from(Uuid::new_v4().as_bytes()[0]);
@@ -520,12 +547,12 @@ impl Session {
     }
 }
 
-fn read_busy(status: &Status) -> bool {
+fn capacity_busy(status: &Status) -> bool {
     status.code() == tonic::Code::ResourceExhausted
         && status
             .metadata()
             .get("mokyu-retryable")
-            .is_some_and(|value| value == "read-capacity")
+            .is_some_and(|value| value == "read-capacity" || value == "write-capacity")
 }
 
 fn retryable(status: &Status) -> bool {
@@ -601,16 +628,19 @@ mod tests {
     #[test]
     fn only_explicit_read_capacity_errors_wait_for_resources() {
         let mut busy = Status::resource_exhausted("node read capacity is busy");
-        assert!(!read_busy(&busy));
+        assert!(!capacity_busy(&busy));
         busy.metadata_mut()
             .insert("mokyu-retryable", "read-capacity".parse().unwrap());
-        assert!(read_busy(&busy));
+        assert!(capacity_busy(&busy));
+        busy.metadata_mut()
+            .insert("mokyu-retryable", "write-capacity".parse().unwrap());
+        assert!(capacity_busy(&busy));
         assert!(!retryable(&busy));
         let mut denied = Status::permission_denied("revoked");
         denied
             .metadata_mut()
             .insert("mokyu-retryable", "read-capacity".parse().unwrap());
-        assert!(!read_busy(&denied));
+        assert!(!capacity_busy(&denied));
     }
 
     #[test]

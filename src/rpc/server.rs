@@ -184,6 +184,13 @@ fn failure(error: anyhow::Error) -> Status {
             Status::resource_exhausted("node read exceeds its resource or message budget")
         }
         Some(Error::NodeWriteLimit) => Status::resource_exhausted("node write capacity is full"),
+        Some(Error::NodeWriteBusy | Error::ChunkBusy) => {
+            let mut status = Status::resource_exhausted("node write capacity is busy");
+            status
+                .metadata_mut()
+                .insert("mokyu-retryable", "write-capacity".parse().unwrap());
+            status
+        }
         Some(Error::NodeOperationExpired) => {
             Status::failed_precondition("write operation is outside its admission window")
         }
@@ -209,6 +216,12 @@ fn failure(error: anyhow::Error) -> Status {
                     Status::failed_precondition("bucket cannot accept writes")
                 }
                 s3s::S3ErrorCode::OperationAborted => Status::aborted("operation was aborted"),
+                s3s::S3ErrorCode::PreconditionFailed => {
+                    Status::failed_precondition("write condition failed")
+                }
+                s3s::S3ErrorCode::IncompleteBody => {
+                    Status::failed_precondition("write body is incomplete")
+                }
                 s3s::S3ErrorCode::InvalidArgument | s3s::S3ErrorCode::InvalidRequest => {
                     Status::invalid_argument("invalid node request")
                 }
@@ -230,6 +243,8 @@ fn failure(error: anyhow::Error) -> Status {
                 s3s::S3ErrorCode::NoSuchBucket => Some("NoSuchBucket"),
                 s3s::S3ErrorCode::InvalidBucketState => Some("InvalidBucketState"),
                 s3s::S3ErrorCode::OperationAborted => Some("OperationAborted"),
+                s3s::S3ErrorCode::PreconditionFailed => Some("PreconditionFailed"),
+                s3s::S3ErrorCode::IncompleteBody => Some("IncompleteBody"),
                 s3s::S3ErrorCode::InvalidArgument => Some("InvalidArgument"),
                 s3s::S3ErrorCode::InvalidRequest => Some("InvalidRequest"),
                 _ => None,
@@ -245,6 +260,96 @@ fn failure(error: anyhow::Error) -> Status {
 
 #[tonic::async_trait]
 impl NodeWrites for Service {
+    async fn prepare_chunks(
+        &self,
+        request: Request<wire::PrepareChunksRequest>,
+    ) -> Result<Response<wire::PreparedChunks>, Status> {
+        let node = write_identity(&request)?;
+        let input = super::write::prepare(request.into_inner())?;
+        let cluster = self.app.cluster().map_err(failure)?;
+        let assembly =
+            bounded(cluster.prepare_chunks(&node, &self.app.secrets.credential_key, input.clone()))
+                .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-chunks-allocated").await;
+        let mut nonces = Vec::new();
+        if !assembly.ready && !assembly.committed {
+            let mut seen = std::collections::HashSet::new();
+            for item in assembly.items.iter().filter(|item| !item.reused) {
+                let chunk = &item.chunk;
+                if chunk.algorithm != "none" && seen.insert(chunk.uuid) {
+                    let value = self
+                        .app
+                        .storage
+                        .encoding_nonce(
+                            &chunk.algorithm,
+                            chunk.block_key_id,
+                            chunk.created_at,
+                            crate::content::nonce::CHUNK,
+                        )
+                        .await
+                        .map_err(failure)?
+                        .ok_or_else(|| Status::internal("missing reserved nonce"))?;
+                    nonces.push(model::node_chunk::Nonce {
+                        chunk: chunk.uuid,
+                        value,
+                    });
+                }
+            }
+        }
+        let reply = bounded(cluster.activate_chunks(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+            nonces,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-chunks-prepared").await;
+        Ok(Response::new(super::write::prepared(reply)?))
+    }
+
+    async fn commit_chunks(
+        &self,
+        request: Request<wire::CommitChunksRequest>,
+    ) -> Result<Response<wire::ChunkCommitReply>, Status> {
+        let node = write_identity(&request)?;
+        let input = super::write::commit(request.into_inner())?;
+        let batch_id = input.batch as u64;
+        let end = bounded(self.app.cluster().map_err(failure)?.commit_chunks(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-chunks-committed").await;
+        Ok(Response::new(wire::ChunkCommitReply {
+            batch_id,
+            end: end as u64,
+        }))
+    }
+
+    async fn publish_write(
+        &self,
+        request: Request<wire::PublishWriteRequest>,
+    ) -> Result<Response<wire::WriteReply>, Status> {
+        let node = write_identity(&request)?;
+        let input = super::write::publish(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.publish_write(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        self.app.wake_gc.notify_one();
+        self.app.wake_raw_uploads.notify_one();
+        self.app.wake_tasks.notify_one();
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-write-published").await;
+        Ok(Response::new(super::write::reply(reply)?))
+    }
+
     async fn begin_write(
         &self,
         request: Request<wire::BeginWriteRequest>,

@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, HashMap};
 
 #[path = "checks.rs"]
 mod checks;
+#[path = "chunks.rs"]
+mod chunks;
 #[path = "http.rs"]
 mod http;
 #[path = "replica.rs"]

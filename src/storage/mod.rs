@@ -2130,7 +2130,7 @@ impl Storage {
         })
         .await?
     }
-    async fn encoding_nonce(
+    pub(crate) async fn encoding_nonce(
         &self,
         algorithm: &str,
         key: Option<Uuid>,

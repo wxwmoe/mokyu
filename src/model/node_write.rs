@@ -101,6 +101,7 @@ pub(crate) enum Phase {
     Active,
     Aborted,
     Expired,
+    Published,
 }
 
 pub(crate) struct Reply {
@@ -110,6 +111,76 @@ pub(crate) struct Reply {
     pub materials: Vec<node_read::Material>,
     pub storage: Option<node_read::Version>,
     pub grants: Vec<node_read::Grant>,
+    pub published: Option<Published>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Published {
+    pub size: i64,
+    pub etag: String,
+    pub modified: chrono::DateTime<chrono::Utc>,
+}
+
+pub(crate) struct Publish {
+    pub run: Run,
+    pub operation: Uuid,
+    pub size: i64,
+    pub etag: String,
+    pub checksums: std::collections::BTreeMap<String, String>,
+    pub if_match: Option<String>,
+    pub if_none: Option<String>,
+}
+
+impl Publish {
+    pub(crate) fn validate(&self) -> Result<()> {
+        let mut etag = self.etag.split('-');
+        let digest = etag.next().unwrap_or_default();
+        ensure!(
+            self.size >= 0
+                && digest.len() == 32
+                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && etag.next().is_none_or(|parts| parts
+                    .parse::<u32>()
+                    .is_ok_and(|parts| (1..=10000).contains(&parts)))
+                && etag.next().is_none()
+                && self.checksums.len() <= 11,
+            "invalid publication"
+        );
+        for (name, value) in &self.checksums {
+            ensure!(
+                matches!(
+                    name.as_str(),
+                    "crc32"
+                        | "crc32c"
+                        | "crc64nvme"
+                        | "sha1"
+                        | "sha256"
+                        | "sha512"
+                        | "md5"
+                        | "xxhash64"
+                        | "xxhash3"
+                        | "xxhash128"
+                        | "type"
+                ) && !value.is_empty()
+                    && value.len() <= 128,
+                "invalid checksum metadata"
+            );
+            axum::http::HeaderValue::from_str(value)?;
+        }
+        for value in [&self.if_match, &self.if_none].into_iter().flatten() {
+            ensure!(value.len() <= 256, "write condition too long");
+            axum::http::HeaderValue::from_str(value)?;
+            s3s::dto::ETagCondition::parse_http_header(value.as_bytes())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hash(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        super::node_chunk::hash(
+            &serde_json::json!({"size":self.size,"etag":self.etag,"checksums":self.checksums,"if_match":self.if_match,"if_none":self.if_none}),
+        )
+    }
 }
 
 pub(crate) fn operation_time(id: Uuid) -> Result<chrono::DateTime<chrono::Utc>> {
@@ -125,6 +196,35 @@ pub(crate) fn operation_time(id: Uuid) -> Result<chrono::DateTime<chrono::Utc>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_binds_conditions_and_validates_headers() -> Result<()> {
+        let mut input = Publish {
+            run: Run {
+                boot: Uuid::new_v4(),
+                fence: Uuid::new_v4(),
+            },
+            operation: Uuid::now_v7(),
+            size: 0,
+            etag: "d41d8cd98f00b204e9800998ecf8427e".into(),
+            checksums: Default::default(),
+            if_match: None,
+            if_none: None,
+        };
+        let original = input.hash()?;
+        input.if_none = Some("*".into());
+        assert_ne!(input.hash()?, original);
+        input.if_match = Some("invalid\r\ncondition".into());
+        assert!(input.validate().is_err());
+        input.if_match = None;
+        input.etag.push_str("-0");
+        assert!(input.validate().is_err());
+        input.etag = "d41d8cd98f00b204e9800998ecf8427e-2".into();
+        input.validate()?;
+        input.checksums.insert("sha256".into(), "x\ny".into());
+        assert!(input.validate().is_err());
+        Ok(())
+    }
 
     #[test]
     fn write_operations_bind_canonical_intent_and_timestamp() -> Result<()> {

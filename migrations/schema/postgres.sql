@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0075.
+-- Generated from the complete postgres migration chain through 0076.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -926,6 +926,31 @@ CREATE TABLE public.node_sessions (
     CONSTRAINT node_sessions_sequence_check CHECK ((sequence >= 0))
 );
 
+CREATE TABLE public.node_write_batches (
+    node_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    batch_id bigint NOT NULL,
+    request_hash bytea NOT NULL,
+    end_bytes bigint NOT NULL,
+    plan jsonb NOT NULL,
+    ready boolean DEFAULT false NOT NULL,
+    commit_hash bytea,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT node_write_batches_batch_id_check CHECK ((batch_id > 0)),
+    CONSTRAINT node_write_batches_check CHECK (((commit_hash IS NULL) OR ready)),
+    CONSTRAINT node_write_batches_commit_hash_check CHECK ((octet_length(commit_hash) = 32)),
+    CONSTRAINT node_write_batches_end_bytes_check CHECK ((end_bytes > 0)),
+    CONSTRAINT node_write_batches_plan_check CHECK (((jsonb_typeof(plan) = 'array'::text) AND (octet_length((plan)::text) <= 262144))),
+    CONSTRAINT node_write_batches_request_hash_check CHECK ((octet_length(request_hash) = 32))
+);
+
+CREATE TABLE public.node_write_permits (
+    token uuid NOT NULL,
+    node_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    batch_id bigint NOT NULL
+);
+
 CREATE TABLE public.node_writes (
     node_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -941,11 +966,23 @@ CREATE TABLE public.node_writes (
     state text DEFAULT 'active'::text NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     completed_at timestamp with time zone,
+    expected_size bigint,
+    next_batch bigint DEFAULT 1 NOT NULL,
+    next_offset bigint DEFAULT 0 NOT NULL,
+    publish_hash bytea,
+    result jsonb,
     CONSTRAINT node_writes_check CHECK (((state = 'active'::text) = (completed_at IS NULL))),
+    CONSTRAINT node_writes_check1 CHECK (((publish_hash IS NULL) = (result IS NULL))),
+    CONSTRAINT node_writes_check2 CHECK (((state = 'published'::text) = (result IS NOT NULL))),
     CONSTRAINT node_writes_credential_generation_check CHECK ((credential_generation > 0)),
+    CONSTRAINT node_writes_expected_size_check CHECK ((expected_size >= 0)),
+    CONSTRAINT node_writes_next_batch_check CHECK ((next_batch > 0)),
+    CONSTRAINT node_writes_next_offset_check CHECK ((next_offset >= 0)),
     CONSTRAINT node_writes_profile_check CHECK (((jsonb_typeof(profile) = 'object'::text) AND (octet_length((profile)::text) <= 32768))),
+    CONSTRAINT node_writes_publish_hash_check CHECK ((octet_length(publish_hash) = 32)),
     CONSTRAINT node_writes_request_hash_check CHECK ((octet_length(request_hash) = 32)),
-    CONSTRAINT node_writes_state_check CHECK ((state = ANY (ARRAY['active'::text, 'aborted'::text])))
+    CONSTRAINT node_writes_result_check CHECK (((jsonb_typeof(result) = 'object'::text) AND (octet_length((result)::text) <= 4096))),
+    CONSTRAINT node_writes_state_check CHECK ((state = ANY (ARRAY['active'::text, 'aborted'::text, 'published'::text])))
 );
 
 CREATE TABLE public.nodes (
@@ -1822,6 +1859,12 @@ ALTER TABLE ONLY public.node_runtime_samples
 ALTER TABLE ONLY public.node_sessions
     ADD CONSTRAINT node_sessions_pkey PRIMARY KEY (node_id);
 
+ALTER TABLE ONLY public.node_write_batches
+    ADD CONSTRAINT node_write_batches_pkey PRIMARY KEY (node_id, operation_id, batch_id);
+
+ALTER TABLE ONLY public.node_write_permits
+    ADD CONSTRAINT node_write_permits_pkey PRIMARY KEY (token);
+
 ALTER TABLE ONLY public.node_writes
     ADD CONSTRAINT node_writes_lease_id_key UNIQUE (lease_id);
 
@@ -2077,6 +2120,10 @@ CREATE INDEX node_read_sources_location ON public.node_read_sources USING btree 
 CREATE INDEX node_runtime_expire ON public.node_runtime_samples USING btree (received_at);
 
 CREATE INDEX node_runtime_time ON public.node_runtime_samples USING btree (node_id, received_at DESC);
+
+CREATE INDEX node_write_batches_pending ON public.node_write_batches USING btree (node_id, operation_id) WHERE (commit_hash IS NULL);
+
+CREATE INDEX node_write_permits_batch ON public.node_write_permits USING btree (node_id, operation_id, batch_id);
 
 CREATE INDEX node_writes_cleanup ON public.node_writes USING btree (node_id, created_at);
 
@@ -2433,6 +2480,15 @@ ALTER TABLE ONLY public.node_sessions
 
 ALTER TABLE ONLY public.node_sessions
     ADD CONSTRAINT node_sessions_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_write_batches
+    ADD CONSTRAINT node_write_batches_node_id_operation_id_fkey FOREIGN KEY (node_id, operation_id) REFERENCES public.node_writes(node_id, operation_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_write_permits
+    ADD CONSTRAINT node_write_permits_node_id_operation_id_batch_id_fkey FOREIGN KEY (node_id, operation_id, batch_id) REFERENCES public.node_write_batches(node_id, operation_id, batch_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_write_permits
+    ADD CONSTRAINT node_write_permits_token_fkey FOREIGN KEY (token) REFERENCES public.storage_permits(token) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_writes
     ADD CONSTRAINT node_writes_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);

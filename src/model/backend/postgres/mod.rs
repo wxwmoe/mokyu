@@ -126,6 +126,10 @@ mod node_read_tests;
 mod node_write_tests;
 
 #[cfg(test)]
+#[path = "../../../../tests/recovery/node_chunks.rs"]
+mod node_chunk_tests;
+
+#[cfg(test)]
 #[path = "../../../../tests/recovery/node_runtime.rs"]
 mod node_runtime_tests;
 

@@ -252,6 +252,7 @@ pub(crate) enum GrantType {
     StorageRead,
     Window,
     Write,
+    StorageWrite,
 }
 
 #[derive(Clone)]
@@ -555,6 +556,30 @@ pub(crate) struct BlockKey {
     pub(crate) id: Uuid,
     pub(crate) algorithm: String,
     pub(crate) material: [u8; 32],
+}
+
+impl BlockKey {
+    pub(crate) fn unprotect(
+        record: crate::model::key::ManagedKeyMaterial,
+        key: &crate::content::codec::Key,
+    ) -> anyhow::Result<Self> {
+        let material = crate::content::codec::unprotect_bytes(
+            &record.encrypted,
+            key,
+            format!("managed-key-{}", record.id).as_bytes(),
+        )?;
+        anyhow::ensure!(
+            record.fingerprint == blake3::hash(&material).as_bytes(),
+            "managed key fingerprint mismatch"
+        );
+        Ok(Self {
+            id: record.id,
+            algorithm: record.algorithm,
+            material: material
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid block key material"))?,
+        })
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -38,6 +38,77 @@ service NodeWrites {
   rpc BeginWrite(BeginWriteRequest) returns (WriteReply);
   rpc WriteStatus(WriteRequest) returns (WriteReply);
   rpc AbortWrite(WriteRequest) returns (WriteReply);
+  rpc PrepareChunks(PrepareChunksRequest) returns (PreparedChunks);
+  rpc CommitChunks(CommitChunksRequest) returns (ChunkCommitReply);
+  rpc PublishWrite(PublishWriteRequest) returns (WriteReply);
+}
+
+message ChunkInput {
+  bytes hash = 1;
+  uint32 raw_size = 2;
+  bytes payload_hash = 3;
+  uint32 payload_size = 4;
+  bool compressed = 5;
+}
+
+message PrepareChunksRequest {
+  Run run = 1;
+  string operation_id = 2;
+  uint64 batch_id = 3;
+  uint64 offset = 4;
+  repeated ChunkInput chunks = 5;
+  uint32 parallelism = 6;
+  repeated Cached cached = 7;
+}
+
+message PreparedChunk {
+  uint64 offset = 1;
+  bytes chunk_json = 2;
+  bool reused = 3;
+  bytes payload_hash = 4;
+}
+
+message PreparedChunks {
+  uint64 batch_id = 1;
+  uint64 end = 2;
+  bool committed = 3;
+  repeated PreparedChunk chunks = 4;
+  repeated Material materials = 5;
+  Cached storage = 6;
+  repeated Grant grants = 7;
+}
+
+message EncodedChunk {
+  string chunk_id = 1;
+  bytes digest = 2;
+}
+
+message CommitChunksRequest {
+  Run run = 1;
+  string operation_id = 2;
+  uint64 batch_id = 3;
+  repeated EncodedChunk chunks = 4;
+}
+
+message ChunkCommitReply {
+  uint64 batch_id = 1;
+  uint64 end = 2;
+}
+
+message PublishWriteRequest {
+  Run run = 1;
+  string operation_id = 2;
+  uint64 size = 3;
+  string etag = 4;
+  bytes checksums_json = 5;
+  optional string if_match = 6;
+  optional string if_none = 7;
+}
+
+message PublishedWrite {
+  uint64 size = 1;
+  string etag = 2;
+  string last_modified = 3;
 }
 
 message BeginWriteRequest {
@@ -62,6 +133,7 @@ enum WritePhase {
   WRITE_ACTIVE = 1;
   WRITE_ABORTED = 2;
   WRITE_EXPIRED = 3;
+  WRITE_PUBLISHED = 4;
 }
 
 message WriteReply {
@@ -71,6 +143,7 @@ message WriteReply {
   repeated Material materials = 4;
   Cached storage = 5;
   repeated Grant grants = 6;
+  PublishedWrite published = 7;
 }
 
 // Suspicions request durable backend verification; they never prove corruption.
@@ -299,6 +372,7 @@ enum GrantType {
   STORAGE_READ = 2;
   READ_WINDOW = 3;
   WRITE_PROTECTION = 4;
+  STORAGE_WRITE = 5;
 }
 
 message Grant {

@@ -1,7 +1,13 @@
 //! PostgreSQL transaction boundaries and lock ordering.
+use crate::cluster::NodeState;
+use crate::content::codec::{self, Key};
 use crate::model::Id;
 use crate::model::multipart::{RemoteCommit, RemoteOutput, RemotePart, RemoteUpload};
 use crate::model::task::Execution;
+use crate::model::{
+    Error, node_chunk as chunk, node_read as read, node_write as write, session::Run,
+};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{Backend, normalize_error, queries};
 use crate::app::{Bucket, Extent};
@@ -425,38 +431,45 @@ pub(super) async fn allocate_chunk(
     single: bool,
 ) -> Result<(Chunk, bool)> {
     let mut tx = pool.begin().await?;
-    require_chunk_writer(&mut tx, input.stream, single).await?;
+    let result = allocate_chunk_in(&mut tx, input, single).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(super) async fn allocate_chunk_in(
+    db: &mut PgConnection,
+    input: ChunkCreate,
+    single: bool,
+) -> Result<(Chunk, bool)> {
+    require_chunk_writer(db, input.stream, single).await?;
     if !single
         && !queries::try_claim_chunk_hash(input.storage, &input.hash)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *db)
             .await?
     {
-        tx.rollback().await?;
         return Err(crate::model::Error::ChunkBusy.into());
     }
     queries::fail_chunk_allocations(&input, single)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
     let old = queries::reusable_chunk(&input)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *db)
         .await?;
     let reused = old.is_some();
     let chunk = match old {
         Some(chunk) => Some(chunk),
         None => {
             queries::insert_chunk(&input)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut *db)
                 .await?
         }
     };
     let Some(chunk) = chunk else {
-        tx.rollback().await?;
         return Err(crate::model::Error::ChunkBusy.into());
     };
     if reused {
-        require_sources(&mut tx, None, &[chunk.id]).await?;
+        require_sources(db, None, &[chunk.id]).await?;
     }
-    tx.commit().await?;
     Ok((chunk, reused))
 }
 
@@ -501,19 +514,29 @@ pub(super) async fn start_chunk_upload(
     single: bool,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    require_chunk_writer(&mut tx, stream, single).await?;
+    start_chunk_upload_in(&mut tx, stream, chunk, single).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn start_chunk_upload_in(
+    db: &mut PgConnection,
+    stream: Id,
+    chunk: &Chunk,
+    single: bool,
+) -> Result<()> {
+    require_chunk_writer(db, stream, single).await?;
     ensure!(
         queries::mark_chunk_uploading(stream, chunk)
-            .execute(&mut *tx)
+            .execute(&mut *db)
             .await?
             .rows_affected()
             == 1,
         crate::model::Error::OperationAborted
     );
     queries::register_encoding(chunk, (!single).then_some(stream))
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -526,26 +549,38 @@ pub(super) async fn reference_chunk(
     single: bool,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    require_chunk_writer(&mut tx, stream, single).await?;
-    let state: String = queries::lock_chunk(chunk_id).fetch_one(&mut *tx).await?;
+    reference_chunk_in(&mut tx, stream, offset, chunk_id, raw_size, single).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn reference_chunk_in(
+    db: &mut PgConnection,
+    stream: Id,
+    offset: i64,
+    chunk_id: Id,
+    raw_size: i32,
+    single: bool,
+) -> Result<()> {
+    require_chunk_writer(db, stream, single).await?;
+    let state: String = queries::lock_chunk(chunk_id).fetch_one(&mut *db).await?;
     if state != "ready" {
         return Err(s3s::s3_error!(OperationAborted, "chunk is being reclaimed").into());
     }
-    require_sources(&mut tx, None, &[chunk_id]).await?;
+    require_sources(db, None, &[chunk_id]).await?;
     queries::insert_chunk_extent(stream, offset, raw_size, chunk_id)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
-    queries::reference_chunk(chunk_id).execute(&mut *tx).await?;
+    queries::reference_chunk(chunk_id).execute(&mut *db).await?;
     queries::pin_chunk(chunk_id, stream)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
     queries::attach_pending_upload(chunk_id, stream, offset)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
     queries::extend_writing_stream(stream, offset + raw_size as i64)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -557,32 +592,43 @@ pub(super) async fn complete_chunk_write(
     single: bool,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    require_chunk_writer(&mut tx, stream, single).await?;
+    complete_chunk_write_in(&mut tx, stream, offset, chunk, single).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn complete_chunk_write_in(
+    db: &mut PgConnection,
+    stream: Id,
+    offset: i64,
+    chunk: &Chunk,
+    single: bool,
+) -> Result<()> {
+    require_chunk_writer(db, stream, single).await?;
     ensure!(
         queries::allocated_source(stream, chunk)
             .build_query_scalar::<Id>()
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *db)
             .await?
             .is_some(),
         crate::model::Error::OperationAborted
     );
     let changed = queries::complete_chunk(chunk.id)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?
         .rows_affected();
     queries::complete_encoding(chunk.encoding_id)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
     if changed != 1 {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
     queries::insert_chunk_extent(stream, offset, chunk.raw_size, chunk.id)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
     queries::resize_writing_stream(stream, offset + chunk.raw_size as i64)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -699,79 +745,91 @@ impl PublishStore for Backend {
         completion: Option<(uuid::Uuid, String, Value, Uuid)>,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        let authority: sqlx::types::Json<crate::authorization::Permit> =
-            queries::write_authorization(id).fetch_one(&mut *tx).await?;
-        authority.lock(&mut tx).await?;
-        let (bucket, object_key, state, size, payload_type): (
-            uuid::Uuid,
-            String,
-            String,
-            i64,
-            String,
-        ) = queries::lock_writing_stream(id).fetch_one(&mut *tx).await?;
-        let bucket_state: String = queries::lock_bucket_state(bucket)
-            .fetch_one(&mut *tx)
-            .await?;
-        if bucket_state != "active" {
-            return Err(s3s::s3_error!(OperationAborted).into());
+        let result = publish_in(&mut tx, id, if_match, if_none, completion).await?;
+        if result {
+            tx.commit().await?;
         }
-        let (old, epoch): (Option<Id>, Id) = queries::lock_object_version(bucket, &object_key)
-            .fetch_one(&mut *tx)
+        Ok(result)
+    }
+}
+
+pub(super) async fn publish_in(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Id,
+    if_match: Option<s3s::dto::ETagCondition>,
+    if_none: Option<s3s::dto::ETagCondition>,
+    completion: Option<(uuid::Uuid, String, Value, Uuid)>,
+) -> Result<bool> {
+    let authority: sqlx::types::Json<crate::authorization::Permit> =
+        queries::write_authorization(id)
+            .fetch_one(&mut **tx)
             .await?;
-        if epoch != id || state != "writing" {
-            return Err(s3s::s3_error!(OperationAborted, "write was superseded").into());
-        }
-        if let Some((upload, _, _, _)) = &completion {
-            let expected: Option<(Option<Id>, i64)> = queries::web_upload_expectation(upload)
-                .fetch_optional(&mut *tx)
-                .await?;
-            if let Some((version, expected_size)) = expected {
-                if old != version {
-                    return Err(s3s::s3_error!(
-                        PreconditionFailed,
-                        "object changed since upload started"
-                    )
-                    .into());
-                }
-                if size != expected_size {
-                    return Err(s3s::s3_error!(IncompleteBody).into());
-                }
+    authority.lock(tx).await?;
+    let (bucket, object_key, state, size, payload_type): (uuid::Uuid, String, String, i64, String) =
+        queries::lock_writing_stream(id)
+            .fetch_one(&mut **tx)
+            .await?;
+    let bucket_state: String = queries::lock_bucket_state(bucket)
+        .fetch_one(&mut **tx)
+        .await?;
+    if bucket_state != "active" {
+        return Err(s3s::s3_error!(OperationAborted).into());
+    }
+    let (old, epoch): (Option<Id>, Id) = queries::lock_object_version(bucket, &object_key)
+        .fetch_one(&mut **tx)
+        .await?;
+    if epoch != id || state != "writing" {
+        return Err(s3s::s3_error!(OperationAborted, "write was superseded").into());
+    }
+    if let Some((upload, _, _, _)) = &completion {
+        let expected: Option<(Option<Id>, i64)> = queries::web_upload_expectation(upload)
+            .fetch_optional(&mut **tx)
+            .await?;
+        if let Some((version, expected_size)) = expected {
+            if old != version {
+                return Err(s3s::s3_error!(
+                    PreconditionFailed,
+                    "object changed since upload started"
+                )
+                .into());
+            }
+            if size != expected_size {
+                return Err(s3s::s3_error!(IncompleteBody).into());
             }
         }
-        let previous: Option<String> = if let Some(old) = old {
-            Some(queries::stream_etag(old).fetch_one(&mut *tx).await?)
-        } else {
-            None
-        };
-        check_write_conditions(previous.as_deref(), if_match.as_ref(), if_none.as_ref())?;
-        if payload_type == "raw" {
-            validate_raw(&mut tx, id, size).await?;
-        } else {
-            let invalid: bool = queries::incomplete_extents(id).fetch_one(&mut *tx).await?;
-            anyhow::ensure!(!invalid, "cannot publish an incomplete generation");
-            let (end, contiguous): (i64, bool) =
-                queries::extent_continuity(id).fetch_one(&mut *tx).await?;
-            anyhow::ensure!(
-                end == size && contiguous,
-                "cannot publish a mapping with gaps or overlaps"
-            );
-            require_sources(&mut tx, Some(id), &[]).await?;
-        }
-        if !apply_publish(&mut tx, id, bucket, &object_key, old, completion.as_ref()).await? {
-            return Ok(false);
-        }
-        if let Some((upload, _, _, _)) = &completion {
-            checkpoint_event(
-                &mut tx,
-                "upload.complete",
-                &upload.to_string(),
-                serde_json::json!({"bucket_id":bucket,"key":object_key,"size":size}),
-            )
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(true)
     }
+    let previous: Option<String> = if let Some(old) = old {
+        Some(queries::stream_etag(old).fetch_one(&mut **tx).await?)
+    } else {
+        None
+    };
+    check_write_conditions(previous.as_deref(), if_match.as_ref(), if_none.as_ref())?;
+    if payload_type == "raw" {
+        validate_raw(tx, id, size).await?;
+    } else {
+        let invalid: bool = queries::incomplete_extents(id).fetch_one(&mut **tx).await?;
+        anyhow::ensure!(!invalid, "cannot publish an incomplete generation");
+        let (end, contiguous): (i64, bool) =
+            queries::extent_continuity(id).fetch_one(&mut **tx).await?;
+        anyhow::ensure!(
+            end == size && contiguous,
+            "cannot publish a mapping with gaps or overlaps"
+        );
+        require_sources(tx, Some(id), &[]).await?;
+    }
+    if !apply_publish(tx, id, bucket, &object_key, old, completion.as_ref()).await? {
+        return Ok(false);
+    }
+    if let Some((upload, _, _, _)) = &completion {
+        checkpoint_event(
+            tx,
+            "upload.complete",
+            &upload.to_string(),
+            serde_json::json!({"bucket_id":bucket,"key":object_key,"size":size}),
+        )
+        .await?;
+    }
+    Ok(true)
 }
 
 pub(super) async fn recover_stale(pool: &PgPool) -> Result<u64> {
@@ -8429,7 +8487,7 @@ pub(super) async fn provision_node(
     Ok(state)
 }
 
-async fn authenticate_rpc_node(
+pub(super) async fn authenticate_rpc_node(
     db: &mut PgConnection,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
@@ -8564,7 +8622,7 @@ pub(super) async fn open_node_session(
     Ok(snapshot)
 }
 
-async fn require_node_run(
+pub(super) async fn require_node_run(
     db: &mut PgConnection,
     state: &crate::cluster::NodeState,
     run: crate::model::session::Run,
@@ -8873,23 +8931,7 @@ async fn node_read_materials(
     let records = queries::node_read_keys(&keys).fetch_all(&mut *db).await?;
     ensure!(records.len() == keys.len(), Error::SourceUnavailable);
     for record in records {
-        let material = crate::content::codec::unprotect_bytes(
-            &record.encrypted,
-            key,
-            format!("managed-key-{}", record.id).as_bytes(),
-        )?;
-        ensure!(
-            record.fingerprint == blake3::hash(&material).as_bytes(),
-            "managed key fingerprint mismatch"
-        );
-        let material: [u8; 32] = material
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid block key material"))?;
-        let block = BlockKey {
-            id: record.id,
-            algorithm: record.algorithm,
-            material,
-        };
+        let block = BlockKey::unprotect(record, key)?;
         reply.material(
             deployment,
             MaterialType::Key,
@@ -9688,7 +9730,7 @@ pub(super) async fn begin_node_write(
     Ok(reply)
 }
 
-async fn node_write_reply(
+pub(super) async fn node_write_reply(
     db: &mut PgConnection,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
@@ -9697,7 +9739,9 @@ async fn node_write_reply(
     cached: Option<&[crate::model::node_read::Version]>,
 ) -> Result<crate::model::node_write::Reply> {
     use crate::model::{Error, node_read as read, node_write as write};
-    let phase = if owned.state == "aborted" {
+    let phase = if owned.state == "published" {
+        write::Phase::Published
+    } else if owned.state == "aborted" {
         write::Phase::Aborted
     } else if owned.valid_for_ms > 0
         && owned.credential_generation == state.credential_generation
@@ -9715,6 +9759,7 @@ async fn node_write_reply(
         materials: Vec::new(),
         storage: None,
         grants: Vec::new(),
+        published: owned.result.map(|value| value.0),
     };
     if phase == write::Phase::Active
         && let Some(cached) = cached
@@ -9762,6 +9807,9 @@ async fn abort_node_writes(
         .await?;
     let streams: Vec<_> = rows.iter().filter_map(|row| row.0).collect();
     let leases: Vec<_> = rows.iter().filter_map(|row| row.1).collect();
+    queries::node_write_release_permits(state, run, &streams, &[])
+        .execute(&mut *db)
+        .await?;
     queries::abandon_node_streams(&streams)
         .execute(&mut *db)
         .await?;
@@ -9847,12 +9895,16 @@ async fn maintain_node_reads(
         .execute(&mut *db)
         .await?;
     abort_node_writes(db, state, run, &[], &ids(GrantType::Write)).await?;
+    queries::node_write_release_permits(state, run, &[], &ids(GrantType::StorageWrite))
+        .execute(&mut *db)
+        .await?;
     let mut renewed = HashMap::new();
     for r#type in [
         GrantType::Read,
         GrantType::StorageRead,
         GrantType::Window,
         GrantType::Write,
+        GrantType::StorageWrite,
     ] {
         let ids = resources
             .renew
@@ -9909,4 +9961,486 @@ pub(super) async fn pulse_node_session(
     snapshot.grants = maintain_node_reads(&mut tx, state, run, resources).await?;
     tx.commit().await?;
     Ok(snapshot)
+}
+
+async fn node_chunk_owned(
+    db: &mut PgConnection,
+    node: &NodeState,
+    key: &Key,
+    run: Run,
+    operation: Uuid,
+) -> Result<queries::NodeWrite> {
+    authenticate_rpc_node(db, node, key, false).await?;
+    ensure!(node.role == "data", Error::NodeAuthentication);
+    require_node_run(db, node, run, true).await?;
+    let row = queries::node_write(node.node_id, operation)
+        .fetch_optional(db)
+        .await?
+        .ok_or(Error::NodeOperationMissing)?;
+    ensure!(
+        row.credential_generation == node.credential_generation
+            && row.boot_id == run.boot
+            && row.fence == run.fence,
+        Error::NodeExpired
+    );
+    Ok(row)
+}
+
+async fn require_node_write(
+    db: &mut Transaction<'_, Postgres>,
+    row: &queries::NodeWrite,
+) -> Result<Id> {
+    ensure!(
+        row.state == "active" && row.valid_for_ms > 0,
+        Error::NodeExpired
+    );
+    ensure!(
+        queries::node_read_admission().fetch_one(&mut **db).await?,
+        Error::NodeInactive
+    );
+    let stream = row.stream_id.ok_or(Error::NodeExpired)?.into();
+    let authority: sqlx::types::Json<Permit> = queries::write_authorization(stream)
+        .fetch_one(&mut **db)
+        .await?;
+    authority.lock(db).await?;
+    Ok(stream)
+}
+
+async fn node_chunk_permits(
+    db: &mut PgConnection,
+    node: Uuid,
+    row: &queries::NodeWrite,
+    input: &chunk::Prepare,
+    plan: &[chunk::Item],
+) -> Result<Vec<read::Grant>> {
+    let Some(limit) = row.profile.upload_concurrency else {
+        return Ok(Vec::new());
+    };
+    let unique: HashSet<_> = plan
+        .iter()
+        .filter(|item| !item.reused)
+        .map(|item| item.chunk.uuid)
+        .collect();
+    let wanted = unique.len().min(input.parallelism as usize);
+    if wanted == 0 {
+        return Ok(Vec::new());
+    }
+    let storage = row.storage_id.ok_or(Error::SourceUnavailable)?;
+    queries::lock_storage_permits(format!("mokyu:store:{storage}:upload"))
+        .execute(&mut *db)
+        .await?;
+    queries::expire_storage_permits(storage, "upload")
+        .execute(&mut *db)
+        .await?;
+    let mut held = queries::node_write_permits(node, input.operation, input.batch)
+        .fetch_all(&mut *db)
+        .await?;
+    let mut active = queries::storage_permit_count(storage, "upload")
+        .fetch_one(&mut *db)
+        .await?;
+    while held.len() < wanted && active < i64::from(limit) {
+        let token = Uuid::new_v4();
+        queries::insert_storage_permit(token, storage, "upload", node)
+            .execute(&mut *db)
+            .await?;
+        queries::node_write_own_permit(node, input.operation, input.batch, token)
+            .execute(&mut *db)
+            .await?;
+        held.push((token, 60_000));
+        active += 1;
+    }
+    ensure!(!held.is_empty(), Error::NodeWriteBusy);
+    Ok(held
+        .into_iter()
+        .map(|(id, remaining)| read::Grant {
+            r#type: read::GrantType::StorageWrite,
+            id,
+            valid_for_ms: remaining as u64,
+            storage: Some(storage),
+        })
+        .collect())
+}
+
+pub(super) async fn prepare_node_chunks(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: chunk::Prepare,
+) -> Result<chunk::Assembly> {
+    let end = input.end()?;
+    let hash = input.hash()?;
+    let mut tx = pool.begin().await?;
+    let row = node_chunk_owned(&mut tx, node, key, input.run, input.operation).await?;
+    if let Some(batch) = queries::node_write_batch(node.node_id, input.operation, input.batch)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        ensure!(batch.request_hash == hash, Error::NodeOperationConflict);
+        let committed = batch.commit_hash.is_some();
+        if !committed {
+            require_node_write(&mut tx, &row).await?;
+            node_chunk_permits(&mut tx, node.node_id, &row, &input, &batch.plan).await?;
+        }
+        tx.commit().await?;
+        return Ok(chunk::Assembly {
+            items: batch.plan.0,
+            ready: batch.ready,
+            committed,
+        });
+    }
+    let stream = require_node_write(&mut tx, &row).await?;
+    ensure!(
+        row.next_batch == input.batch && row.next_offset == input.offset && input.batch < i64::MAX,
+        s3s::s3_error!(InvalidArgument, "chunk batch is out of order")
+    );
+    ensure!(
+        row.expected_size.is_none_or(|size| end <= size),
+        s3s::s3_error!(InvalidArgument, "write exceeds its declared length")
+    );
+    ensure!(
+        queries::node_write_pending(node.node_id, input.operation)
+            .fetch_one(&mut *tx)
+            .await?
+            < chunk::MAX_PENDING,
+        Error::NodeWriteBusy
+    );
+    let storage = row.storage_id.ok_or(Error::SourceUnavailable)?;
+    let algorithm = if let Some(id) = row.block_key_id {
+        queries::node_read_keys(&[id])
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::SourceUnavailable)?
+            .algorithm
+    } else {
+        "none".into()
+    };
+    queries::reserve_quota(stream, end, false, None, None)
+        .fetch_one(&mut *tx)
+        .await?;
+    let unique: BTreeMap<_, _> = input
+        .items
+        .iter()
+        .map(|item| ((item.hash, item.raw_size), item))
+        .collect();
+    let mut allocated = HashMap::new();
+    for (identity, item) in unique {
+        let (mut value, reused) = allocate_chunk_in(
+            &mut tx,
+            crate::model::ChunkCreate {
+                storage,
+                stream,
+                hash: item.hash,
+                raw_size: item.raw_size,
+                algorithm: algorithm.clone(),
+                key: row.block_key_id,
+            },
+            false,
+        )
+        .await?;
+        if !reused {
+            value.compressed = item.compressed;
+            value.stored_size = Some(item.payload_size + if algorithm == "none" { 0 } else { 16 });
+        }
+        allocated.insert(identity, (value, reused));
+    }
+    let mut offset = input.offset;
+    let mut plan = Vec::with_capacity(input.items.len());
+    for item in &input.items {
+        let (value, reused) = &allocated[&(item.hash, item.raw_size)];
+        if *reused {
+            reference_chunk_in(&mut tx, stream, offset, value.id, value.raw_size, false).await?;
+        }
+        plan.push(chunk::Item {
+            offset,
+            chunk: value.clone(),
+            reused: *reused,
+            payload_hash: item.payload_hash,
+        });
+        offset += i64::from(item.raw_size);
+    }
+    queries::insert_node_write_batch(node.node_id, &input, &hash, end, &plan)
+        .execute(&mut *tx)
+        .await?;
+    node_chunk_permits(&mut tx, node.node_id, &row, &input, &plan).await?;
+    queries::advance_node_write(node.node_id, input.operation, end)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(chunk::Assembly {
+        items: plan,
+        ready: false,
+        committed: false,
+    })
+}
+
+pub(super) async fn activate_node_chunks(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: chunk::Prepare,
+    nonces: Vec<chunk::Nonce>,
+) -> Result<chunk::Prepared> {
+    let hash = input.hash()?;
+    let mut tx = pool.begin().await?;
+    let row = node_chunk_owned(&mut tx, node, key, input.run, input.operation).await?;
+    let mut batch = queries::node_write_batch(node.node_id, input.operation, input.batch)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NodeOperationMissing)?;
+    ensure!(batch.request_hash == hash, Error::NodeOperationConflict);
+    if batch.commit_hash.is_some() {
+        tx.commit().await?;
+        return Ok(chunk::Prepared {
+            batch: input.batch,
+            end: batch.end_bytes,
+            committed: true,
+            items: vec![],
+            materials: vec![],
+            storage: None,
+            grants: vec![],
+        });
+    }
+    let stream = require_node_write(&mut tx, &row).await?;
+    let mut grants = node_chunk_permits(&mut tx, node.node_id, &row, &input, &batch.plan).await?;
+    if !batch.ready {
+        let count = nonces.len();
+        let nonces: HashMap<_, _> = nonces
+            .into_iter()
+            .map(|value| (value.chunk, value.value))
+            .collect();
+        let needed: HashSet<_> = batch
+            .plan
+            .iter()
+            .filter(|item| !item.reused && item.chunk.algorithm != "none")
+            .map(|item| item.chunk.uuid)
+            .collect();
+        ensure!(
+            count == needed.len()
+                && nonces.len() == needed.len()
+                && needed.iter().all(|id| nonces.contains_key(id)),
+            Error::OperationAborted
+        );
+        let mut registered = HashSet::new();
+        for item in batch.plan.iter_mut().filter(|item| !item.reused) {
+            if let Some(value) = nonces.get(&item.chunk.uuid) {
+                let id = crate::content::nonce::id(Some(value)).ok_or(Error::OperationAborted)?;
+                ensure!(
+                    value.as_slice()
+                        == codec::typed_nonce(
+                            item.chunk.created_at,
+                            id,
+                            crate::content::nonce::CHUNK
+                        )?,
+                    Error::OperationAborted
+                );
+                item.chunk.nonce = Some(value.clone());
+            }
+            if registered.insert(item.chunk.uuid) {
+                start_chunk_upload_in(&mut tx, stream, &item.chunk, false).await?;
+            }
+            item.chunk.state = "uploading".into();
+        }
+        ensure!(
+            queries::activate_node_write_batch(
+                node.node_id,
+                input.operation,
+                input.batch,
+                &batch.plan
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                == 1,
+            Error::OperationAborted
+        );
+    }
+    let material =
+        node_write_reply(&mut tx, node, key, input.run, row, Some(&input.cached)).await?;
+    let mut materials = material.materials;
+    grants.extend(material.grants);
+    let keys: Vec<_> = batch
+        .plan
+        .iter()
+        .filter(|item| !item.reused)
+        .filter_map(|item| item.chunk.block_key_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let records = queries::node_read_keys(&keys).fetch_all(&mut *tx).await?;
+    ensure!(records.len() == keys.len(), Error::SourceUnavailable);
+    for record in records {
+        let block = read::BlockKey::unprotect(record, key)?;
+        read::material(
+            &mut materials,
+            node.deployment_id,
+            read::MaterialType::Key,
+            block.id.to_string(),
+            &block,
+            &input.cached,
+        )?;
+    }
+    tx.commit().await?;
+    Ok(chunk::Prepared {
+        batch: input.batch,
+        end: batch.end_bytes,
+        committed: false,
+        items: batch.plan.0,
+        materials,
+        storage: material.storage,
+        grants,
+    })
+}
+
+pub(super) async fn commit_node_chunks(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    mut input: chunk::Commit,
+) -> Result<i64> {
+    let hash = input.hash()?;
+    let mut tx = pool.begin().await?;
+    let row = node_chunk_owned(&mut tx, node, key, input.run, input.operation).await?;
+    let batch = queries::node_write_batch(node.node_id, input.operation, input.batch)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NodeOperationMissing)?;
+    if let Some(previous) = batch.commit_hash {
+        ensure!(previous == hash, Error::NodeOperationConflict);
+        tx.commit().await?;
+        return Ok(batch.end_bytes);
+    }
+    let stream = require_node_write(&mut tx, &row).await?;
+    ensure!(batch.ready, Error::OperationAborted);
+    let expected: HashSet<_> = batch
+        .plan
+        .iter()
+        .filter(|item| !item.reused)
+        .map(|item| item.chunk.uuid)
+        .collect();
+    ensure!(
+        expected.len() == input.encoded.len()
+            && input
+                .encoded
+                .iter()
+                .all(|value| expected.contains(&value.chunk)),
+        Error::OperationAborted
+    );
+    let (size, _) = queries::node_write_size(stream).fetch_one(&mut *tx).await?;
+    let mut completed = HashSet::new();
+    for item in batch.plan.iter().filter(|item| !item.reused) {
+        if completed.insert(item.chunk.uuid) {
+            complete_chunk_write_in(&mut tx, stream, item.offset, &item.chunk, false).await?;
+        } else {
+            reference_chunk_in(
+                &mut tx,
+                stream,
+                item.offset,
+                item.chunk.id,
+                item.chunk.raw_size,
+                false,
+            )
+            .await?;
+        }
+    }
+    require_sources(&mut tx, Some(stream), &[]).await?;
+    queries::extend_writing_stream(stream, size.max(batch.end_bytes))
+        .execute(&mut *tx)
+        .await?;
+    ensure!(
+        queries::commit_node_write_batch(node.node_id, input.operation, input.batch, &hash)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        Error::OperationAborted
+    );
+    queries::release_node_write_batch(node.node_id, input.operation, input.batch)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(batch.end_bytes)
+}
+
+pub(super) async fn publish_node_write(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: write::Publish,
+) -> Result<write::Reply> {
+    let hash = input.hash()?;
+    let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
+    let row = node_chunk_owned(&mut tx, node, key, input.run, input.operation).await?;
+    if let Some(previous) = &row.publish_hash {
+        ensure!(previous == &hash, Error::NodeOperationConflict);
+        let reply = node_write_reply(&mut tx, node, key, input.run, row, None).await?;
+        tx.commit().await?;
+        return Ok(reply);
+    }
+    let stream = require_node_write(&mut tx, &row).await?;
+    ensure!(
+        input.size == row.next_offset
+            && row.expected_size.is_none_or(|size| size == input.size)
+            && queries::node_write_pending(node.node_id, input.operation)
+                .fetch_one(&mut *tx)
+                .await?
+                == 0,
+        s3s::s3_error!(IncompleteBody)
+    );
+    ensure!(
+        queries::finish_stream(
+            stream,
+            input.size,
+            &input.etag,
+            serde_json::to_value(&input.checksums)?
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1,
+        Error::OperationAborted
+    );
+    let condition = |value: Option<String>| {
+        value
+            .map(|value| s3s::dto::ETagCondition::parse_http_header(value.as_bytes()))
+            .transpose()
+    };
+    ensure!(
+        publish_in(
+            &mut tx,
+            stream,
+            condition(input.if_match)?,
+            condition(input.if_none)?,
+            None
+        )
+        .await?,
+        Error::OperationAborted
+    );
+    let (_, modified) = queries::node_write_size(stream).fetch_one(&mut *tx).await?;
+    queries::seal_stream_uploads(stream)
+        .execute(&mut *tx)
+        .await?;
+    let result = write::Published {
+        size: input.size,
+        etag: input.etag,
+        modified,
+    };
+    ensure!(
+        queries::publish_node_write(node.node_id, input.operation, &hash, &result)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        Error::OperationAborted
+    );
+    if let Some(lease) = row.lease_id {
+        queries::release_node_write_leases(&[lease])
+            .execute(&mut *tx)
+            .await?;
+    }
+    let row = queries::node_write(node.node_id, input.operation)
+        .fetch_one(&mut *tx)
+        .await?;
+    let reply = node_write_reply(&mut tx, node, key, input.run, row, None).await?;
+    tx.commit().await?;
+    Ok(reply)
 }

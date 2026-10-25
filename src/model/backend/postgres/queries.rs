@@ -7505,6 +7505,47 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn prepare_chunks(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_chunk::Prepare,
+    ) -> Result<crate::model::node_chunk::Assembly> {
+        super::transactions::prepare_node_chunks(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn activate_chunks(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_chunk::Prepare,
+        nonces: Vec<crate::model::node_chunk::Nonce>,
+    ) -> Result<crate::model::node_chunk::Prepared> {
+        super::transactions::activate_node_chunks(&self.pool, node, key, input, nonces)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn commit_chunks(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_chunk::Commit,
+    ) -> Result<i64> {
+        super::transactions::commit_node_chunks(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn publish_write(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_write::Publish,
+    ) -> Result<crate::model::node_write::Reply> {
+        super::transactions::publish_node_write(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
     async fn begin_write(
         &self,
         node: &crate::cluster::NodeState,
@@ -10433,6 +10474,9 @@ pub(super) fn node_read_renew<'q>(
         GrantType::Write => {
             "UPDATE stream_leases l SET expires_at=clock_timestamp()+interval '90 seconds' FROM node_writes w,streams s,objects o WHERE l.id=w.lease_id AND s.id=w.stream_id AND o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id AND s.state='writing' AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND l.id=ANY($5) AND l.expires_at>clock_timestamp() RETURNING l.id,90000::bigint"
         }
+        GrantType::StorageWrite => {
+            "UPDATE storage_permits p SET expires_at=clock_timestamp()+interval '1 minute' FROM node_write_permits n,node_writes w,node_write_batches b,stream_leases l,streams s,objects o WHERE p.token=n.token AND w.node_id=n.node_id AND w.operation_id=n.operation_id AND b.node_id=n.node_id AND b.operation_id=n.operation_id AND b.batch_id=n.batch_id AND b.commit_hash IS NULL AND l.id=w.lease_id AND s.id=w.stream_id AND s.state='writing' AND o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id AND w.state='active' AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND p.token=ANY($5) AND p.expires_at>clock_timestamp() AND l.expires_at>clock_timestamp() RETURNING p.token,60000::bigint"
+        }
     };
     sqlx::query_as(query)
         .bind(state.node_id)
@@ -10516,7 +10560,7 @@ pub(super) fn node_settings() -> Rows<'static, (String, Value, i64)> {
     sqlx::query_as("SELECT section,value,revision FROM runtime_settings WHERE section=ANY($1) ORDER BY section").bind(crate::model::session::SECTIONS)
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub(super) struct NodeWrite {
     pub operation_id: Uuid,
     pub credential_generation: i64,
@@ -10526,6 +10570,12 @@ pub(super) struct NodeWrite {
     pub stream_id: Option<Uuid>,
     pub lease_id: Option<Uuid>,
     pub storage_id: Option<Uuid>,
+    pub block_key_id: Option<Uuid>,
+    pub expected_size: Option<i64>,
+    pub next_batch: i64,
+    pub next_offset: i64,
+    pub publish_hash: Option<Vec<u8>>,
+    pub result: Option<sqlx::types::Json<crate::model::node_write::Published>>,
     pub profile: sqlx::types::Json<crate::storage::profile::StorageProfile>,
     pub state: String,
     pub valid_for_ms: i64,
@@ -10561,9 +10611,9 @@ pub(super) fn insert_node_write<'q>(
     profile: &'q crate::storage::profile::StorageProfile,
     block_key: Option<Uuid>,
 ) -> Statement<'q> {
-    sqlx::query("INSERT INTO node_writes(node_id,operation_id,credential_generation,boot_id,fence,request_hash,stream_id,lease_id,storage_id,block_key_id,profile) SELECT $1,$2,$3,$4,$5,$6,$7,l.id,$8,$9,$10 FROM stream_leases l WHERE l.stream_id=$7 AND l.lease_type='write'")
+    sqlx::query("INSERT INTO node_writes(node_id,operation_id,credential_generation,boot_id,fence,request_hash,stream_id,lease_id,storage_id,block_key_id,profile,expected_size) SELECT $1,$2,$3,$4,$5,$6,$7,l.id,$8,$9,$10,$11 FROM stream_leases l WHERE l.stream_id=$7 AND l.lease_type='write'")
         .bind(state.node_id).bind(input.operation).bind(state.credential_generation).bind(input.run.boot).bind(input.run.fence)
-        .bind(hash).bind(stream).bind(profile.storage_id).bind(block_key).bind(sqlx::types::Json(profile))
+        .bind(hash).bind(stream).bind(profile.storage_id).bind(block_key).bind(sqlx::types::Json(profile)).bind(input.intent.size)
 }
 
 pub(super) fn abort_node_writes<'q>(
@@ -10582,4 +10632,115 @@ pub(super) fn abandon_node_streams(ids: &[Uuid]) -> Statement<'_> {
 
 pub(super) fn release_node_write_leases(ids: &[Uuid]) -> Statement<'_> {
     sqlx::query("DELETE FROM stream_leases WHERE id=ANY($1) AND lease_type='write'").bind(ids)
+}
+
+#[derive(sqlx::FromRow)]
+pub(super) struct NodeWriteBatch {
+    pub request_hash: Vec<u8>,
+    pub end_bytes: i64,
+    pub plan: sqlx::types::Json<Vec<crate::model::node_chunk::Item>>,
+    pub ready: bool,
+    pub commit_hash: Option<Vec<u8>>,
+}
+
+pub(super) fn node_write_batch(
+    node: Uuid,
+    operation: Uuid,
+    batch: i64,
+) -> Rows<'static, NodeWriteBatch> {
+    sqlx::query_as("SELECT request_hash,end_bytes,plan,ready,commit_hash FROM node_write_batches WHERE node_id=$1 AND operation_id=$2 AND batch_id=$3 FOR UPDATE")
+        .bind(node).bind(operation).bind(batch)
+}
+
+pub(super) fn node_write_pending(node: Uuid, operation: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT count(*) FROM node_write_batches WHERE node_id=$1 AND operation_id=$2 AND commit_hash IS NULL").bind(node).bind(operation)
+}
+
+pub(super) fn insert_node_write_batch<'q>(
+    node: Uuid,
+    input: &'q crate::model::node_chunk::Prepare,
+    hash: &'q [u8],
+    end: i64,
+    plan: &'q [crate::model::node_chunk::Item],
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO node_write_batches(node_id,operation_id,batch_id,request_hash,end_bytes,plan) VALUES($1,$2,$3,$4,$5,$6)")
+        .bind(node).bind(input.operation).bind(input.batch).bind(hash).bind(end).bind(sqlx::types::Json(plan))
+}
+
+pub(super) fn advance_node_write(node: Uuid, operation: Uuid, end: i64) -> Statement<'static> {
+    sqlx::query("UPDATE node_writes SET next_batch=next_batch+1,next_offset=$3 WHERE node_id=$1 AND operation_id=$2 AND state='active'").bind(node).bind(operation).bind(end)
+}
+
+pub(super) fn activate_node_write_batch<'q>(
+    node: Uuid,
+    operation: Uuid,
+    batch: i64,
+    plan: &'q [crate::model::node_chunk::Item],
+) -> Statement<'q> {
+    sqlx::query("UPDATE node_write_batches SET ready=true,plan=$4 WHERE node_id=$1 AND operation_id=$2 AND batch_id=$3 AND NOT ready").bind(node).bind(operation).bind(batch).bind(sqlx::types::Json(plan))
+}
+
+pub(super) fn commit_node_write_batch<'q>(
+    node: Uuid,
+    operation: Uuid,
+    batch: i64,
+    hash: &'q [u8],
+) -> Statement<'q> {
+    sqlx::query("UPDATE node_write_batches SET commit_hash=$4,plan='[]'::jsonb WHERE node_id=$1 AND operation_id=$2 AND batch_id=$3 AND ready AND commit_hash IS NULL").bind(node).bind(operation).bind(batch).bind(hash)
+}
+
+pub(super) fn node_write_size(stream: Id) -> Rows<'static, (i64, DateTime<Utc>)> {
+    sqlx::query_as("SELECT size,touched_at FROM streams WHERE id=$1 FOR UPDATE").bind(stream)
+}
+
+pub(super) fn publish_node_write<'q>(
+    node: Uuid,
+    operation: Uuid,
+    hash: &'q [u8],
+    result: &'q crate::model::node_write::Published,
+) -> Statement<'q> {
+    sqlx::query("UPDATE node_writes SET state='published',completed_at=clock_timestamp(),publish_hash=$3,result=$4 WHERE node_id=$1 AND operation_id=$2 AND state='active'")
+        .bind(node).bind(operation).bind(hash).bind(sqlx::types::Json(result))
+}
+
+pub(super) fn node_write_permits(
+    node: Uuid,
+    operation: Uuid,
+    batch: i64,
+) -> Rows<'static, (Uuid, i64)> {
+    sqlx::query_as("SELECT p.token,GREATEST(0,(extract(epoch FROM (p.expires_at-clock_timestamp()))*1000)::bigint) FROM storage_permits p JOIN node_write_permits w ON w.token=p.token WHERE w.node_id=$1 AND w.operation_id=$2 AND w.batch_id=$3 AND p.expires_at>clock_timestamp() ORDER BY p.token")
+        .bind(node).bind(operation).bind(batch)
+}
+
+pub(super) fn node_write_own_permit(
+    node: Uuid,
+    operation: Uuid,
+    batch: i64,
+    token: Uuid,
+) -> Statement<'static> {
+    sqlx::query(
+        "INSERT INTO node_write_permits(token,node_id,operation_id,batch_id) VALUES($4,$1,$2,$3)",
+    )
+    .bind(node)
+    .bind(operation)
+    .bind(batch)
+    .bind(token)
+}
+
+pub(super) fn release_node_write_batch(
+    node: Uuid,
+    operation: Uuid,
+    batch: i64,
+) -> Statement<'static> {
+    sqlx::query("DELETE FROM storage_permits p USING node_write_permits n WHERE p.token=n.token AND n.node_id=$1 AND n.operation_id=$2 AND n.batch_id=$3").bind(node).bind(operation).bind(batch)
+}
+
+pub(super) fn node_write_release_permits<'q>(
+    state: &'q crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    streams: &'q [Uuid],
+    permits: &'q [Uuid],
+) -> Statement<'q> {
+    sqlx::query("DELETE FROM storage_permits p USING node_write_permits n,node_writes w WHERE p.token=n.token AND w.node_id=n.node_id AND w.operation_id=n.operation_id AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND (w.stream_id=ANY($5) OR p.token=ANY($6))")
+        .bind(state.node_id).bind(state.credential_generation).bind(run.boot).bind(run.fence).bind(streams).bind(permits)
 }

@@ -251,7 +251,7 @@ pub fn encode(
     let compressed = compression.compress(&input, should_compress)?;
     c.compressed = compressed.is_some();
     let tag_len = if c.algorithm == "none" { 0 } else { 16 };
-    let mut encoded = compressed.unwrap_or_else(|| {
+    let encoded = compressed.unwrap_or_else(|| {
         let mut encoded = Vec::with_capacity(input.len() + tag_len);
         encoded.extend_from_slice(&input);
         encoded
@@ -262,6 +262,25 @@ pub fn encode(
     } else {
         Bytes::from(input)
     };
+    let encoded = seal(&c, encoded, keys)?;
+    Ok((c, encoded, cache))
+}
+
+pub(crate) fn seal(c: &Chunk, mut encoded: Vec<u8>, keys: &dyn KeySource) -> Result<Vec<u8>> {
+    let tag_len = if c.algorithm == "none" { 0 } else { 16 };
+    ensure!(
+        encoded.len() <= MAX && c.stored_size == Some(i32::try_from(encoded.len() + tag_len)?),
+        "chunk payload length mismatch"
+    );
+    ensure!(
+        (c.algorithm != "none") == c.block_key_id.is_some()
+            && (c.algorithm != "none") == c.nonce.is_some(),
+        "invalid encryption metadata"
+    );
+    ensure!(
+        c.compressed || encoded.len() == c.raw_size as usize,
+        "chunk payload length mismatch"
+    );
     if c.algorithm != "none" {
         let key = keys
             .key_for_id(c.block_key_id)
@@ -282,12 +301,12 @@ pub fn encode(
         key.cipher
             .seal_in_place_append_tag(
                 Nonce::assume_unique_for_key(n),
-                Aad::from(aad(&c)?),
+                Aad::from(aad(c)?),
                 &mut encoded,
             )
             .map_err(|_| anyhow::anyhow!("chunk encryption failed"))?;
     }
-    Ok((c, encoded, cache))
+    Ok(encoded)
 }
 pub fn decode(
     c: &Chunk,

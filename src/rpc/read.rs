@@ -51,6 +51,7 @@ pub(super) fn keep_alive(
                     Ok(wire::GrantType::StorageRead) => read::GrantType::StorageRead,
                     Ok(wire::GrantType::ReadWindow) => read::GrantType::Window,
                     Ok(wire::GrantType::WriteProtection) => read::GrantType::Write,
+                    Ok(wire::GrantType::StorageWrite) => read::GrantType::StorageWrite,
                     _ => return Err(invalid()),
                 };
                 Ok(read::GrantRef { r#type, id })
@@ -71,6 +72,7 @@ pub(super) fn grant_result(result: read::GrantResult) -> wire::GrantResult {
                 read::GrantType::StorageRead => wire::GrantType::StorageRead,
                 read::GrantType::Window => wire::GrantType::ReadWindow,
                 read::GrantType::Write => wire::GrantType::WriteProtection,
+                read::GrantType::StorageWrite => wire::GrantType::StorageWrite,
             } as i32,
             id: result.grant.id.to_string(),
         }),
@@ -446,6 +448,7 @@ pub(super) fn grant(value: read::Grant) -> wire::Grant {
             read::GrantType::StorageRead => wire::GrantType::StorageRead,
             read::GrantType::Window => wire::GrantType::ReadWindow,
             read::GrantType::Write => wire::GrantType::WriteProtection,
+            read::GrantType::StorageWrite => wire::GrantType::StorageWrite,
         } as i32,
         id: value.id.to_string(),
         valid_for_ms: value.valid_for_ms,
@@ -656,7 +659,7 @@ mod tests {
         assert!(keep_alive(vec![grant.clone(); 257], Vec::new()).is_err());
         for (r#type, id) in [
             (0, grant.id.clone()),
-            (5, grant.id.clone()),
+            (i32::MAX, grant.id.clone()),
             (1, Uuid::nil().to_string()),
         ] {
             assert!(keep_alive(vec![wire::GrantRef { r#type, id }], Vec::new()).is_err());

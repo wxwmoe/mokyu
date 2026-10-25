@@ -27,6 +27,9 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeReads/ReportRead` | Unary；报告当前读取窗口内最多 16 个来源段，请求持久后端复核，仅允许 data |
 | `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，收到 Welcome 后发送 Pulse 并等待匹配序号的确认 |
 | `NodeWrites/BeginWrite` | Unary；校验权限、创建写入上下文与租约并预留配额，返回存储材料；仅允许 data |
+| `NodeWrites/PrepareChunks` | Unary；批量领取或复用区块，保存上传目标与编码参数，返回所需存储、密钥及上传许可 |
+| `NodeWrites/CommitChunks` | Unary；确认整批上传完成并建立引用，可按批次乱序完成 |
+| `NodeWrites/PublishWrite` | Unary；核对完整性、条件和配额，原子发布对象并保存终态回执 |
 | `NodeWrites/WriteStatus` | Unary；按节点与操作身份查询写入状态，不返回存储凭据 |
 | `NodeWrites/AbortWrite` | Unary；取消当前运行权持有的写入，同事务释放写租约和预留配额 |
 
@@ -84,9 +87,15 @@ ReportRead 绑定当前运行权、有效读取与窗口，下标只引用该窗
 
 重连保留同一有效运行权句柄，已到期的句柄不能被后来的确认复活。新的 fence、凭据拒绝、停止或驱动取消会使旧句柄失效。排空立即停止本地新工作准入，同时保留心跳和恢复连接；维护状态不撤销仍有效的运行权。仅 Session 中断时，持有有效运行权的调用仍可使用独立 Unary 连接，由相应业务 RPC 检查当前权限。
 
-## 写入准入
+## 写入
 
 BeginWrite 请求最多 64 KiB；包含桶、对象键、服务凭据身份、对象元数据、公开标志和可选的已知长度。调用方先验证入站签名，再发起准入。control 在同一事务内校验写入权限及公开对象所需的 ACL 权限、桶状态、维护状态和配额，绑定对象写令牌、存储策略与块密钥。返回存储材料支持 `cached`，不重复发送匹配修订的连接配置。
+
+PrepareChunks 每批最多 128 个区块、32 MiB 原始数据；批次编号从 1 开始，偏移连续，最多保留 4 个未完成批次。节点先计算原始摘要及压缩后明文的摘要、长度和压缩标志，再请求计划。control 在 S3 PUT 前保存物理身份、完整编码参数及 nonce；同批重复内容只分配一个物理编码。任一内容被其他未完成写入占用时整批回滚并返回可重试容量繁忙。重放要求描述符完全匹配；已经完成的批次只返回完成回执。
+
+上传目标所需的存储和块密钥沿用 `cached`。`parallelism` 默认为 1，上限 16；配置存储上传并发限制时，计划批量返回实际可用的 `STORAGE_WRITE` 许可，可能少于请求数。节点不得超出许可数量同时上传，许可通过 NodeSession 续期，过期或释放后必须重新取得；纯复用不占上传许可、不分配 nonce。等待下一批容量时，节点应继续完成已经准备的批次。
+
+CommitChunks 携带本批新增物理编码的 ID 和密文字节摘要，省略复用区块；同批重复引用只确认一次物理上传。成功后建立完整引用、释放该批上传许可，并压缩为幂等回执；批次可以乱序完成，重复确认不得改变摘要。PublishWrite 包含总长度、ETag、校验和与条件，核对所有批次完成、连续映射及可读来源后原子发布。重试返回同一终态结果；WriteStatus 可查询该结果，AbortWrite 不撤销已经发布的对象。
 
 写入 `operation_id` 使用 UUIDv7。首次准入接受过去 15 分钟至未来 30 秒内的时间戳；节点应同步系统时钟。相同操作与相同参数重放原上下文，参数变化返回 `AlreadyExists`。活动写入重放会重验原授权；同一节点的其他 boot 或凭据代次不能继续该写入。WriteStatus 可查询该节点的历史回执，返回 `WRITE_ACTIVE`、`WRITE_ABORTED` 或 `WRITE_EXPIRED`。
 
@@ -98,7 +107,7 @@ BeginWrite 请求最多 64 KiB；包含桶、对象键、服务凭据身份、�
 
 Unary 在可用地址间轮询，每个地址复用自己的 Channel；失败地址按退避暂停选择。NodeSession 使用独立 TCP/TLS 连接。连接实际 IP 时，仍使用原域名做 TLS SNI、证书验证与 HTTP authority。连接期限 3 秒，每次尝试最多 5 秒，整个操作最多 15 秒，传输失败最多尝试 3 个地址；`Unavailable`、`DeadlineExceeded` 和可识别的客户端传输超时进入有限重试，服务端主动取消不重试。
 
-暂时没有读取、窗口或存储并发额度时，control 返回带 `mokyu-retryable: read-capacity` 的 `ResourceExhausted`。客户端保持操作身份，在原 15 秒总期限内退避重试，不把业务繁忙记为源站故障。消息大小和单次读取资源数量超限不带该标记，直接返回错误。
+暂时没有读取、窗口或存储并发额度时，control 返回带 `mokyu-retryable: read-capacity` 的 `ResourceExhausted`；区块领取、未完成批次窗口或上传额度繁忙使用 `write-capacity`。客户端保持操作身份，在原 15 秒总期限内退避重试，不把业务繁忙记为源站故障。消息大小或单次资源数量超限不带该标记，直接返回错误。
 
 | gRPC 状态 | 处理 |
 | --- | --- |
