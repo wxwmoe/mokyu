@@ -279,6 +279,13 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn exchange_work(
+        &self,
+        input: wire::WorkRequest,
+    ) -> Result<wire::WorkReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWork/Exchange").await
+    }
+
     pub(crate) async fn claim_native(
         &self,
         input: wire::NativeClaimRequest,
@@ -701,7 +708,7 @@ fn capacity_busy(status: &Status) -> bool {
             .is_some_and(|value| value == "read-capacity" || value == "write-capacity")
 }
 
-fn retryable(status: &Status) -> bool {
+pub(crate) fn retryable(status: &Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded

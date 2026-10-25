@@ -224,6 +224,9 @@ impl NodeContext {
     }
 
     fn publish(&self, lease: &Arc<RunLease>, settings: &Settings, state: &wire::NodeState) {
+        if state.work_pending {
+            self.work.notify_one();
+        }
         if state.native_pending {
             self.native_work.notify_one();
         }

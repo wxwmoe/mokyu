@@ -12,6 +12,8 @@ use tonic::Code;
 
 #[path = "reads.rs"]
 mod reads;
+#[path = "work.rs"]
+mod work;
 
 struct Dns {
     answers: Arc<RwLock<Option<Vec<Ipv4Addr>>>>,

@@ -25,6 +25,7 @@ pub(crate) enum Error {
     NodeReadBusy,
     NodeWriteLimit,
     NodeWriteBusy,
+    NodeWorkLimit,
     NodeOperationExpired,
     NodeOperationConflict,
     NodeOperationMissing,
@@ -58,9 +59,10 @@ impl fmt::Display for Error {
             Self::NodeReadBusy => "node read capacity is busy",
             Self::NodeWriteLimit => "node write capacity is full",
             Self::NodeWriteBusy => "node write capacity is busy",
-            Self::NodeOperationExpired => "write operation is outside its admission window",
-            Self::NodeOperationConflict => "write operation parameters changed",
-            Self::NodeOperationMissing => "write operation was not found",
+            Self::NodeWorkLimit => "node work exceeds its resource or message budget",
+            Self::NodeOperationExpired => "node operation is outside its admission window",
+            Self::NodeOperationConflict => "node operation parameters changed",
+            Self::NodeOperationMissing => "node operation was not found",
         })
     }
 }
@@ -98,6 +100,7 @@ mod tests {
             Error::NodeReadBusy,
             Error::NodeWriteLimit,
             Error::NodeWriteBusy,
+            Error::NodeWorkLimit,
             Error::NodeOperationExpired,
             Error::NodeOperationConflict,
             Error::NodeOperationMissing,

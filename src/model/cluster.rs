@@ -9,6 +9,12 @@ use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait ClusterStore: Send + Sync {
+    async fn exchange_work(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_work::Exchange,
+    ) -> Result<super::node_work::Reply>;
     async fn prepare_local_part(
         &self,
         node: &NodeState,

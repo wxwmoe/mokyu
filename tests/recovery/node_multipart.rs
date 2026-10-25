@@ -20,6 +20,8 @@ mod completion;
 mod native;
 #[path = "node_parts.rs"]
 mod parts;
+#[path = "node_work.rs"]
+mod work;
 
 fn denied(error: anyhow::Error, code: s3s::S3ErrorCode) {
     assert_eq!(
@@ -131,6 +133,7 @@ async fn postgres_node_multipart_replays_admission_and_cancellation() -> Result<
 
     completion::check(&backend, &peer, &node, &key, &session, bucket, revision).await?;
     native::check(&backend, &peer, &node, &key, &session, storage, revision).await?;
+    work::check(&backend, &peer, &admin, &key, bucket).await?;
 
     let intent = Intent {
         access: "writer".into(),

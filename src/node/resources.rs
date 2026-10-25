@@ -123,7 +123,8 @@ impl Resources {
                 Ok(
                     wire::GrantType::StorageRead
                     | wire::GrantType::StorageWrite
-                    | wire::GrantType::NativeWork,
+                    | wire::GrantType::NativeWork
+                    | wire::GrantType::TaskWork,
                 ) => {
                     let id = Uuid::parse_str(&grant.storage_id).map_err(|_| invalid())?;
                     if id.is_nil() || grant.storage_id.len() != 36 {

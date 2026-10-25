@@ -46,6 +46,8 @@ use uuid::Uuid;
 
 #[path = "native.rs"]
 pub(super) mod native;
+#[path = "work.rs"]
+pub(super) mod work;
 
 fn denied() -> anyhow::Error {
     s3s::s3_error!(AccessDenied).into()
@@ -883,6 +885,7 @@ pub(super) async fn claim_task(
         node.map(|(state, _, _)| state.node_id),
         input.token,
         input.draining,
+        &[],
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -4342,40 +4345,49 @@ pub(super) async fn claim_stale_stream(
 pub(super) async fn cleanup_stream(pool: &PgPool, id: Id, batch: i64) -> Result<usize> {
     let mut tx = pool.begin().await?;
     queries::cleanup_limits(&mut tx).await?;
+    let count = cleanup_stream_in(&mut tx, id, batch).await?;
+    tx.commit().await?;
+    Ok(count)
+}
+
+async fn cleanup_stream_in(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Id,
+    batch: i64,
+) -> Result<usize> {
     let raw = queries::raw_cleanup_ranges(id, batch.clamp(1, 128))
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
     if let Some((last, _)) = raw.last() {
         let mut sources: Vec<_> = raw.iter().map(|(_, source)| *source).collect();
         sources.sort_unstable();
         sources.dedup();
         for source in sources {
-            queries::raw_source(source).fetch_one(&mut *tx).await?;
+            queries::raw_source(source).fetch_one(&mut **tx).await?;
             queries::raw_touch_unreferenced(source)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
-        queries::raw_detach(id, *last).execute(&mut *tx).await?;
+        queries::raw_detach(id, *last).execute(&mut **tx).await?;
     }
     let candidates = queries::retire_stream_encodings(id, batch)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
     let detached = queries::detach_stream_chunks(id, batch)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
     let chunks = queries::remove_stream_extents(id, batch)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
     let count = chunks.len();
     let chunks = chunks.into_iter().flatten().collect::<Vec<_>>();
-    mark_unreferenced(&mut tx, &chunks).await?;
+    mark_unreferenced(tx, &chunks).await?;
     let streams = queries::remove_empty_stream(id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
-    tx.commit().await?;
     Ok(raw.len() + count + (candidates + detached + streams) as usize)
 }
 
@@ -8692,6 +8704,7 @@ async fn node_snapshot(
 ) -> Result<crate::model::session::Snapshot> {
     let settings = queries::node_settings().fetch_all(&mut *db).await?;
     let native_pending = queries::native::pending(node).fetch_one(&mut *db).await?;
+    let work_pending = queries::work::pending(node).fetch_one(&mut *db).await?;
     let (boot, fence, epoch, valid_for_ms, maintenance, draining) =
         queries::node_session_status(node)
             .fetch_optional(db)
@@ -8706,6 +8719,7 @@ async fn node_snapshot(
         settings,
         grants: Vec::new(),
         native_pending,
+        work_pending,
     })
 }
 
@@ -10582,6 +10596,9 @@ async fn maintain_node_reads(
     queries::native::renew(state, run, &ids(GrantType::Native), true)
         .fetch_all(&mut *db)
         .await?;
+    queries::work::renew(state, run, &ids(GrantType::Work), true)
+        .fetch_all(&mut *db)
+        .await?;
     let mut renewed = HashMap::new();
     for r#type in [
         GrantType::Read,
@@ -10590,6 +10607,7 @@ async fn maintain_node_reads(
         GrantType::Write,
         GrantType::StorageWrite,
         GrantType::Native,
+        GrantType::Work,
     ] {
         let ids = resources
             .renew

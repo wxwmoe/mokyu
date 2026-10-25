@@ -29,6 +29,26 @@ service NodeSessions {
   rpc NodeSession(stream SessionRequest) returns (stream SessionReply);
 }
 
+service NodeWork {
+  rpc Exchange(WorkRequest) returns (WorkReply);
+}
+
+message WorkRequest {
+  Run run = 1;
+  string operation_id = 2;
+  optional bytes completion_json = 3;
+  uint32 class = 4;
+  uint32 max_items = 5;
+  repeated Cached cached = 6;
+}
+
+message WorkReply {
+  string operation_id = 1;
+  optional bytes plan_json = 2;
+  repeated Material materials = 3;
+  repeated Grant grants = 4;
+}
+
 service NodeReads {
   rpc OpenRead(ReadRequest) returns (ReadReply);
   rpc ReadWindow(ReadWindowRequest) returns (ReadReply);
@@ -504,6 +524,7 @@ message NodeState {
   bool draining = 2;
   repeated Revision revisions = 3;
   bool native_pending = 4;
+  bool work_pending = 5;
 }
 
 message Welcome {
@@ -677,6 +698,7 @@ enum GrantType {
   WRITE_PROTECTION = 4;
   STORAGE_WRITE = 5;
   NATIVE_WORK = 6;
+  TASK_WORK = 7;
 }
 
 message Grant {

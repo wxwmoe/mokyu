@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0083.
+-- Generated from the complete postgres migration chain through 0084.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -982,6 +982,26 @@ CREATE TABLE public.node_sessions (
     CONSTRAINT node_sessions_credential_generation_check CHECK ((credential_generation > 0)),
     CONSTRAINT node_sessions_epoch_check CHECK ((epoch > 0)),
     CONSTRAINT node_sessions_sequence_check CHECK ((sequence >= 0))
+);
+
+CREATE TABLE public.node_work (
+    node_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    credential_generation bigint NOT NULL,
+    boot_id uuid NOT NULL,
+    fence uuid NOT NULL,
+    request_hash bytea NOT NULL,
+    task_id uuid,
+    token uuid NOT NULL,
+    maintenance_token uuid NOT NULL,
+    plan jsonb,
+    storage_encrypted bytea,
+    expires_at timestamp with time zone NOT NULL,
+    result_hash bytea,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT node_work_check CHECK (((plan IS NULL) = (storage_encrypted IS NULL))),
+    CONSTRAINT node_work_request_hash_check CHECK ((octet_length(request_hash) = 32)),
+    CONSTRAINT node_work_result_hash_check CHECK (((result_hash IS NULL) OR (octet_length(result_hash) = 32)))
 );
 
 CREATE TABLE public.node_write_batches (
@@ -1987,6 +2007,15 @@ ALTER TABLE ONLY public.node_runtime_samples
 ALTER TABLE ONLY public.node_sessions
     ADD CONSTRAINT node_sessions_pkey PRIMARY KEY (node_id);
 
+ALTER TABLE ONLY public.node_work
+    ADD CONSTRAINT node_work_maintenance_token_key UNIQUE (maintenance_token);
+
+ALTER TABLE ONLY public.node_work
+    ADD CONSTRAINT node_work_pkey PRIMARY KEY (node_id, operation_id);
+
+ALTER TABLE ONLY public.node_work
+    ADD CONSTRAINT node_work_token_key UNIQUE (token);
+
 ALTER TABLE ONLY public.node_write_batches
     ADD CONSTRAINT node_write_batches_pkey PRIMARY KEY (node_id, operation_id, batch_id);
 
@@ -2263,6 +2292,10 @@ CREATE INDEX node_read_sources_location ON public.node_read_sources USING btree 
 CREATE INDEX node_runtime_expire ON public.node_runtime_samples USING btree (received_at);
 
 CREATE INDEX node_runtime_time ON public.node_runtime_samples USING btree (node_id, received_at DESC);
+
+CREATE INDEX node_work_expiry ON public.node_work USING btree (expires_at) WHERE (result_hash IS NULL);
+
+CREATE INDEX node_work_task ON public.node_work USING btree (task_id);
 
 CREATE INDEX node_write_batches_pending ON public.node_write_batches USING btree (node_id, operation_id) WHERE (commit_hash IS NULL);
 
@@ -2644,6 +2677,12 @@ ALTER TABLE ONLY public.node_sessions
 
 ALTER TABLE ONLY public.node_sessions
     ADD CONSTRAINT node_sessions_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_work
+    ADD CONSTRAINT node_work_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_work
+    ADD CONSTRAINT node_work_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE SET NULL;
 
 ALTER TABLE ONLY public.node_write_batches
     ADD CONSTRAINT node_write_batches_node_id_operation_id_fkey FOREIGN KEY (node_id, operation_id) REFERENCES public.node_writes(node_id, operation_id) ON DELETE CASCADE;

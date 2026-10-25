@@ -53,6 +53,7 @@ pub(super) fn keep_alive(
                     Ok(wire::GrantType::WriteProtection) => read::GrantType::Write,
                     Ok(wire::GrantType::StorageWrite) => read::GrantType::StorageWrite,
                     Ok(wire::GrantType::NativeWork) => read::GrantType::Native,
+                    Ok(wire::GrantType::TaskWork) => read::GrantType::Work,
                     _ => return Err(invalid()),
                 };
                 Ok(read::GrantRef { r#type, id })
@@ -75,6 +76,7 @@ pub(super) fn grant_result(result: read::GrantResult) -> wire::GrantResult {
                 read::GrantType::Write => wire::GrantType::WriteProtection,
                 read::GrantType::StorageWrite => wire::GrantType::StorageWrite,
                 read::GrantType::Native => wire::GrantType::NativeWork,
+                read::GrantType::Work => wire::GrantType::TaskWork,
             } as i32,
             id: result.grant.id.to_string(),
         }),
@@ -457,6 +459,7 @@ pub(super) fn grant(value: read::Grant) -> wire::Grant {
             read::GrantType::Write => wire::GrantType::WriteProtection,
             read::GrantType::StorageWrite => wire::GrantType::StorageWrite,
             read::GrantType::Native => wire::GrantType::NativeWork,
+            read::GrantType::Work => wire::GrantType::TaskWork,
         } as i32,
         id: value.id.to_string(),
         valid_for_ms: value.valid_for_ms,

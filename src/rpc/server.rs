@@ -13,6 +13,7 @@ use wire::{
     node_objects_server::{NodeObjects, NodeObjectsServer},
     node_reads_server::{NodeReads, NodeReadsServer},
     node_sessions_server::{NodeSessions, NodeSessionsServer},
+    node_work_server::{NodeWork, NodeWorkServer},
     node_writes_server::{NodeWrites, NodeWritesServer},
 };
 
@@ -75,8 +76,13 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
-        NodeWritesServer::new(service)
+        NodeWritesServer::new(service.clone())
             .max_decoding_message_size(model::node_write::REQUEST_LIMIT)
+            .max_encoding_message_size(MESSAGE_LIMIT),
+    )
+    .add_service(
+        NodeWorkServer::new(service)
+            .max_decoding_message_size(super::read::REQUEST_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .into_axum_router()
@@ -196,6 +202,9 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
             Status::resource_exhausted("node read exceeds its resource or message budget")
         }
         Some(Error::NodeWriteLimit) => Status::resource_exhausted("node write capacity is full"),
+        Some(Error::NodeWorkLimit) => {
+            Status::resource_exhausted("node work exceeds its resource or message budget")
+        }
         Some(Error::NodeWriteBusy | Error::ChunkBusy) => {
             let mut status = Status::resource_exhausted("node write capacity is busy");
             status
@@ -204,12 +213,12 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
             status
         }
         Some(Error::NodeOperationExpired) => {
-            Status::failed_precondition("write operation is outside its admission window")
+            Status::failed_precondition("node operation is outside its admission window")
         }
         Some(Error::NodeOperationConflict) => {
-            Status::already_exists("write operation parameters changed")
+            Status::already_exists("node operation parameters changed")
         }
-        Some(Error::NodeOperationMissing) => Status::not_found("write operation was not found"),
+        Some(Error::NodeOperationMissing) => Status::not_found("node operation was not found"),
         Some(Error::QuotaExceeded) => Status::resource_exhausted("storage quota exceeded"),
         Some(Error::OperationAborted) => Status::aborted("operation was aborted"),
         Some(Error::NodeReadBusy) => {
@@ -666,6 +675,7 @@ fn state(snapshot: &session::Snapshot) -> wire::NodeState {
     wire::NodeState {
         maintenance: snapshot.maintenance,
         native_pending: snapshot.native_pending,
+        work_pending: snapshot.work_pending,
         draining: snapshot.draining,
         revisions: snapshot
             .settings
@@ -1070,5 +1080,25 @@ mod tests {
         let status = failure(model::Error::NodeWriteLimit.into());
         assert_eq!(status.code(), tonic::Code::ResourceExhausted);
         assert!(status.metadata().get("mokyu-s3-code").is_none());
+    }
+}
+
+#[tonic::async_trait]
+impl NodeWork for Service {
+    async fn exchange(
+        &self,
+        request: Request<wire::WorkRequest>,
+    ) -> Result<Response<wire::WorkReply>, Status> {
+        let node = identity(&request)?;
+        let input = super::work::exchange(request.into_inner())?;
+        let value = bounded(self.app.cluster().map_err(failure)?.exchange_work(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-work-exchanged").await;
+        Ok(Response::new(super::work::reply(value)?))
     }
 }

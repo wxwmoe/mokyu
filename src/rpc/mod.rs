@@ -5,6 +5,7 @@ mod object;
 pub(crate) mod read;
 mod request;
 pub(crate) mod server;
+mod work;
 mod write;
 
 pub(crate) mod wire {

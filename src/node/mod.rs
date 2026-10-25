@@ -9,6 +9,7 @@ pub(crate) mod request;
 pub(crate) mod resources;
 mod session;
 mod settings;
+pub(crate) mod work;
 pub(crate) mod writes;
 
 use crate::{
@@ -107,6 +108,7 @@ pub(crate) struct NodeContext {
     pub(crate) resources: Arc<resources::Resources>,
     pub(crate) observations: observations::Reports,
     pub(crate) native_work: tokio::sync::Notify,
+    pub(crate) work: tokio::sync::Notify,
     pub(crate) statistics: crate::status::stats::Statistics,
     boot: Uuid,
     current: watch::Sender<State>,
@@ -141,6 +143,7 @@ impl NodeContext {
             resources: Arc::new(resources::Resources::default()),
             observations: observations::Reports::new(),
             native_work: tokio::sync::Notify::new(),
+            work: tokio::sync::Notify::new(),
             statistics: crate::status::stats::Statistics::default(),
             boot: Uuid::new_v4(),
             current: watch::channel(State {
