@@ -1037,35 +1037,154 @@ pub(super) async fn change_object(pool: &PgPool, input: ObjectChange) -> Result<
     )
     .lock(&mut tx)
     .await?;
-    let state: Option<String> = queries::lock_bucket_state(input.bucket)
-        .fetch_optional(&mut *tx)
+    lock_object_bucket(&mut tx, input.bucket).await?;
+    let changed = change_object_in(
+        &mut tx,
+        input.bucket,
+        &input.key,
+        input.expected,
+        input.public,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+async fn lock_object_bucket(tx: &mut Transaction<'_, Postgres>, bucket: Uuid) -> Result<()> {
+    let state: Option<String> = queries::lock_bucket_state(bucket)
+        .fetch_optional(&mut **tx)
         .await?;
     let state = state.ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
     if state != "active" {
         return Err(s3s::s3_error!(OperationAborted, "bucket is being purged").into());
     }
-    let old: Option<Id> = queries::lock_object_stream(input.bucket, &input.key)
-        .fetch_optional(&mut *tx)
+    Ok(())
+}
+
+async fn change_object_in(
+    tx: &mut Transaction<'_, Postgres>,
+    bucket: Uuid,
+    object_key: &str,
+    expected: Option<Id>,
+    public: Option<bool>,
+) -> Result<bool> {
+    // Lock an absent key too, then read again after any concurrent insertion commits.
+    queries::ensure_object(bucket, object_key)
+        .execute(&mut **tx)
+        .await?;
+    let old: Option<Id> = queries::lock_object_stream(bucket, object_key)
+        .fetch_optional(&mut **tx)
         .await?
         .flatten();
-    if input.expected.is_some() && input.expected != old {
+    if expected.is_some() && expected != old {
         return Err(s3s::s3_error!(
             PreconditionFailed,
             "object changed; refresh before retrying"
         )
         .into());
     }
-    if let Some(public) = input.public {
+    if let Some(public) = public {
         let id = old.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
-        apply_object_change(&mut tx, input.bucket, &input.key, old, Some(public)).await?;
-        complete_media_operation(&mut tx, Some(id)).await?;
-        tx.commit().await?;
+        apply_object_change(tx, bucket, object_key, old, Some(public)).await?;
+        complete_media_operation(tx, Some(id)).await?;
         return Ok(false);
     }
-    apply_object_change(&mut tx, input.bucket, &input.key, old, None).await?;
-    complete_media_operation(&mut tx, None).await?;
-    tx.commit().await?;
+    apply_object_change(tx, bucket, object_key, old, None).await?;
+    complete_media_operation(tx, None).await?;
     Ok(true)
+}
+
+pub(super) async fn change_node_objects(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_object::Request,
+) -> Result<crate::model::node_object::Outcome> {
+    use crate::model::node_object::Outcome;
+    let hash = input.validate()?;
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, node, key, false).await?;
+    ensure!(node.role == "data", Error::NodeAuthentication);
+    let session = require_node_run(&mut tx, node, input.run, true).await?;
+    queries::lock_staging(format!(
+        "mokyu:node-object:{}:{}",
+        node.node_id, input.operation
+    ))
+    .execute(&mut *tx)
+    .await?;
+    if let Some((previous, generation, outcome)) =
+        queries::node_object_change(node.node_id, input.operation)
+            .fetch_optional(&mut *tx)
+            .await?
+    {
+        ensure!(previous == hash, Error::NodeOperationConflict);
+        ensure!(generation == node.credential_generation, Error::NodeExpired);
+        tx.commit().await?;
+        return Ok(outcome.0);
+    }
+    let issued = write::operation_time(input.operation)?;
+    let now = queries::node_clock().fetch_one(&mut *tx).await?;
+    ensure!(
+        issued <= now + chrono::Duration::seconds(30)
+            && issued >= now - chrono::Duration::minutes(15),
+        Error::NodeOperationExpired
+    );
+    ensure!(
+        !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
+        Error::NodeInactive
+    );
+    let change = &input.change;
+    let route = crate::model::ReadRoute::Bucket {
+        name: change.bucket.clone(),
+        key: String::new(),
+        alias: None,
+    };
+    let bucket = queries::node_read_bucket(&route)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    Permit::for_action(
+        Principal::Service {
+            access_key: change.access.clone(),
+            revision: change.credential_revision,
+        },
+        bucket.id,
+        if change.public.is_some() {
+            Action::Acl
+        } else {
+            Action::Delete
+        },
+    )
+    .lock(&mut tx)
+    .await?;
+    lock_object_bucket(&mut tx, bucket.id).await?;
+    // All batches acquire object locks in the same order, including duplicate keys.
+    let mut keys = change.keys.clone();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut outcome = Outcome::Applied;
+    for object_key in keys {
+        match change_object_in(&mut tx, bucket.id, &object_key, None, change.public).await {
+            Ok(_) => {}
+            Err(error)
+                if error
+                    .downcast_ref::<s3s::S3Error>()
+                    .is_some_and(|error| error.code() == &s3s::S3ErrorCode::NoSuchKey) =>
+            {
+                outcome = Outcome::NoSuchKey;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    queries::save_node_object_change(node, input.operation, &hash, outcome)
+        .execute(&mut *tx)
+        .await?;
+    queries::expire_node_object_changes(node.node_id)
+        .execute(&mut *tx)
+        .await?;
+    require_node_run(&mut tx, node, input.run, true).await?;
+    tx.commit().await?;
+    Ok(outcome)
 }
 
 #[async_trait::async_trait]
@@ -10717,8 +10836,13 @@ pub(super) async fn prepare_node_request(
             .access
             .as_deref()
             .context("catalog credential missing")?;
+        let action = if matches!(&query, Query::Acl { .. }) {
+            "object.read"
+        } else {
+            "bucket.list"
+        };
         if let Some(bucket) = &bucket
-            && !queries::node_request_allowed(access, bucket.project_id, bucket.id, "bucket.list")
+            && !queries::node_request_allowed(access, bucket.project_id, bucket.id, action)
                 .fetch_one(&mut *tx)
                 .await?
         {
@@ -10727,6 +10851,14 @@ pub(super) async fn prepare_node_request(
             let result: Result<Catalog> = async {
                 Ok(match query {
                     Query::Bucket => Catalog::Bucket,
+                    Query::Acl { key } => Catalog::Acl {
+                        public: queries::node_object_acl(
+                            bucket.as_ref().context("catalog bucket missing")?.id,
+                            &key,
+                        )
+                        .fetch_optional(&mut *tx)
+                        .await?,
+                    },
                     Query::Buckets {
                         prefix,
                         region,

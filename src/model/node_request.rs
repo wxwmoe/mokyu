@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) enum Query {
     Bucket,
+    Acl {
+        key: String,
+    },
     Buckets {
         prefix: String,
         region: Option<String>,
@@ -25,6 +28,9 @@ pub(crate) enum Query {
 pub(crate) enum Catalog {
     InvalidArgument,
     Bucket,
+    Acl {
+        public: Option<bool>,
+    },
     Buckets {
         rows: Vec<Bucket>,
         next: Option<String>,
@@ -122,6 +128,8 @@ impl Prepare {
             ensure!(
                 match query {
                     Query::Bucket => bucket(),
+                    Query::Acl { key } =>
+                        bucket() && !key.is_empty() && text(key) && !key.contains('\0'),
                     Query::Buckets {
                         prefix,
                         region,

@@ -9,6 +9,7 @@ use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status, Streaming};
 use wire::{
     node_control_server::{NodeControl, NodeControlServer},
+    node_objects_server::{NodeObjects, NodeObjectsServer},
     node_reads_server::{NodeReads, NodeReadsServer},
     node_sessions_server::{NodeSessions, NodeSessionsServer},
     node_writes_server::{NodeWrites, NodeWritesServer},
@@ -60,6 +61,11 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     .add_service(
         NodeReadsServer::new(service.clone())
             .max_decoding_message_size(super::read::REQUEST_LIMIT)
+            .max_encoding_message_size(MESSAGE_LIMIT),
+    )
+    .add_service(
+        NodeObjectsServer::new(service.clone())
+            .max_decoding_message_size(model::node_object::REQUEST_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
@@ -256,6 +262,27 @@ fn failure(error: anyhow::Error) -> Status {
             .insert("mokyu-s3-code", code.parse().unwrap());
     }
     status
+}
+
+#[tonic::async_trait]
+impl NodeObjects for Service {
+    async fn change_objects(
+        &self,
+        request: Request<wire::ChangeObjectsRequest>,
+    ) -> Result<Response<wire::ChangeObjectsReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::object::change(request.into_inner())?;
+        let outcome = bounded(self.app.cluster().map_err(failure)?.change_objects(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        self.app.wake_gc.notify_one();
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-objects-changed").await;
+        Ok(Response::new(super::object::reply(outcome)))
+    }
 }
 
 #[tonic::async_trait]

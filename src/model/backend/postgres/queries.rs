@@ -778,6 +778,11 @@ pub(super) fn lock_object_stream<'q>(bucket: Uuid, key: &'q str) -> Scalar<'q, O
     .bind(key)
 }
 
+pub(super) fn ensure_object(bucket: Uuid, key: &str) -> Statement<'_> {
+    sqlx::query("INSERT INTO objects(bucket_id,object_key,write_token) VALUES($1,$2,$3) ON CONFLICT(bucket_id,object_key) DO NOTHING")
+        .bind(bucket).bind(key).bind(Id::default())
+}
+
 pub(super) fn extend_read_lease(id: Uuid, ttl: i64) -> Statement<'static> {
     sqlx::query("UPDATE stream_leases SET expires_at=now()+$2*interval '1 second' WHERE id=$1 AND lease_type='read' AND expires_at>now()")
         .bind(id)
@@ -7509,6 +7514,16 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn change_objects(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_object::Request,
+    ) -> Result<crate::model::node_object::Outcome> {
+        transactions::change_node_objects(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
     async fn prepare_raw(
         &self,
         node: &crate::cluster::NodeState,
@@ -10325,6 +10340,10 @@ pub(super) fn node_catalog_objects<'q>(
     sqlx::query_as("SELECT o.object_key AS key,s.size,s.etag,s.touched_at AS modified_at FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=$1 AND o.object_key LIKE $2 AND (o.object_key>$3 OR ($4 AND o.object_key=$3)) ORDER BY o.object_key LIMIT 64").bind(bucket).bind(pattern).bind(key).bind(inclusive)
 }
 
+pub(super) fn node_object_acl(bucket: Uuid, key: &str) -> Scalar<'_, bool> {
+    sqlx::query_scalar("SELECT s.public_read FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=$1 AND o.object_key=$2 AND s.state='ready'").bind(bucket).bind(key)
+}
+
 pub(super) fn node_catalog_buckets<'q>(
     access: &'q str,
     prefix: &'q str,
@@ -10672,6 +10691,35 @@ pub(super) fn node_write(node: Uuid, operation: Uuid) -> Rows<'static, NodeWrite
 
 pub(super) fn node_write_count(node: Uuid) -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT count(*) FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND w.state='active' AND l.expires_at>clock_timestamp()").bind(node)
+}
+
+pub(super) fn node_object_change(
+    node: Uuid,
+    operation: Uuid,
+) -> Rows<
+    'static,
+    (
+        Vec<u8>,
+        i64,
+        sqlx::types::Json<crate::model::node_object::Outcome>,
+    ),
+> {
+    sqlx::query_as("SELECT request_hash,credential_generation,outcome FROM node_object_changes WHERE node_id=$1 AND operation_id=$2")
+        .bind(node).bind(operation)
+}
+
+pub(super) fn save_node_object_change<'q>(
+    node: &crate::cluster::NodeState,
+    operation: Uuid,
+    hash: &'q [u8],
+    outcome: crate::model::node_object::Outcome,
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO node_object_changes(node_id,operation_id,credential_generation,request_hash,outcome) VALUES($1,$2,$3,$4,$5)")
+        .bind(node.node_id).bind(operation).bind(node.credential_generation).bind(hash).bind(sqlx::types::Json(outcome))
+}
+
+pub(super) fn expire_node_object_changes(node: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM node_object_changes WHERE node_id=$1 AND operation_id IN (SELECT operation_id FROM node_object_changes WHERE node_id=$1 AND created_at<clock_timestamp()-interval '1 day' ORDER BY created_at LIMIT 64)").bind(node)
 }
 
 pub(super) fn node_write_credential(access: &str) -> Scalar<'_, i64> {

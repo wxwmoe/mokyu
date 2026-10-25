@@ -230,15 +230,6 @@ pub async fn s3_http(
                 };
             return Ok(response);
         }
-        if request.method() == Method::POST
-            && request
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.starts_with("multipart/form-data"))
-        {
-            return Err(s3s::s3_error!(NotImplemented, "use PutObject or multipart API").into());
-        }
         let delete = request.method() == Method::POST && query.iter().any(|n| n == "delete");
         let complete = request.method() == Method::POST && query.iter().any(|n| n == "uploadId");
         let _control = if delete || complete {
@@ -251,55 +242,13 @@ pub async fn s3_http(
         } else {
             None
         };
-        if delete || complete {
-            if request
-                .headers()
-                .get("content-encoding")
-                .is_some_and(|v| v == "aws-chunked")
-            {
-                return Err(
-                    s3s::s3_error!(NotImplemented, "aws-chunked XML is unsupported").into(),
-                );
-            }
-            let bytes = tokio::time::timeout(
-                Duration::from_secs(config::seconds(&app.config.uploads.client_idle_timeout)?),
-                request.body_mut().store_all_limited(2 * 1024 * 1024),
-            )
-            .await
-            .map_err(|_| s3s::s3_error!(RequestTimeout))?
-            .map_err(|_| s3s::s3_error!(MaxMessageLengthExceeded))?;
-            let mut headers = request.headers().clone();
-            if complete {
-                let names: Vec<_> = headers
-                    .keys()
-                    .filter(|n| n.as_str().starts_with("x-amz-checksum-"))
-                    .cloned()
-                    .collect();
-                for name in names {
-                    headers.remove(name);
-                }
-            }
-            if delete
-                && !headers.contains_key("content-md5")
-                && !headers
-                    .keys()
-                    .any(|n| n.as_str().starts_with("x-amz-checksum-"))
-            {
-                return Err(s3s::s3_error!(
-                    InvalidRequest,
-                    "multi-delete requires a body checksum"
-                )
-                .into());
-            }
-            let mut integrity = crate::upload::Integrity::new(&headers, None)?;
-            integrity.update(&bytes);
-            integrity.finish(None)?;
-            if let Some(n) = headers.get("content-length")
-                && n.to_str()?.parse::<usize>()? != bytes.len()
-            {
-                return Err(s3s::s3_error!(IncompleteBody).into());
-            }
-        }
+        check_control_body(
+            &mut request,
+            delete,
+            complete,
+            Duration::from_secs(config::seconds(&app.config.uploads.client_idle_timeout)?),
+        )
+        .await?;
         let mut response = crate::app::reads::scope(prepared, service.call(request))
             .await
             .map_err(|e| anyhow::anyhow!("S3 HTTP failure: {e:?}"))?;
@@ -380,6 +329,65 @@ pub(super) fn read_route(
             )
         }),
     })
+}
+
+pub(super) async fn check_control_body(
+    request: &mut hyper::Request<s3s::Body>,
+    delete: bool,
+    complete: bool,
+    idle: Duration,
+) -> Result<()> {
+    if request.method() == Method::POST
+        && request
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("multipart/form-data"))
+    {
+        return Err(s3s::s3_error!(NotImplemented, "use PutObject or multipart API").into());
+    }
+    if !delete && !complete {
+        return Ok(());
+    }
+    if request
+        .headers()
+        .get("content-encoding")
+        .is_some_and(|value| value == "aws-chunked")
+    {
+        return Err(s3s::s3_error!(NotImplemented, "aws-chunked XML is unsupported").into());
+    }
+    let bytes = tokio::time::timeout(idle, request.body_mut().store_all_limited(2 * 1024 * 1024))
+        .await
+        .map_err(|_| s3s::s3_error!(RequestTimeout))?
+        .map_err(|_| s3s::s3_error!(MaxMessageLengthExceeded))?;
+    let mut headers = request.headers().clone();
+    if complete {
+        let names: Vec<_> = headers
+            .keys()
+            .filter(|name| name.as_str().starts_with("x-amz-checksum-"))
+            .cloned()
+            .collect();
+        for name in names {
+            headers.remove(name);
+        }
+    }
+    if delete
+        && !headers.contains_key("content-md5")
+        && !headers
+            .keys()
+            .any(|name| name.as_str().starts_with("x-amz-checksum-"))
+    {
+        return Err(s3s::s3_error!(InvalidRequest, "multi-delete requires a body checksum").into());
+    }
+    let mut integrity = crate::upload::Integrity::new(&headers, None)?;
+    integrity.update(&bytes);
+    integrity.finish(None)?;
+    if let Some(length) = headers.get("content-length")
+        && length.to_str()?.parse::<usize>()? != bytes.len()
+    {
+        return Err(s3s::s3_error!(IncompleteBody).into());
+    }
+    Ok(())
 }
 
 pub(super) fn access_key(headers: &HeaderMap, query: Option<&str>) -> Option<String> {

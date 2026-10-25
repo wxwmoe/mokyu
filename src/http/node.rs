@@ -26,42 +26,43 @@ use std::{cell::RefCell, sync::Arc};
 use tracing::Instrument;
 
 mod catalog;
+mod objects;
 
 enum PreparedRequest {
     Read(RequestRead),
     Write(writes::Request),
-    Catalog(crate::node::request::Request),
+    Control(crate::node::request::Request),
 }
 
 impl PreparedRequest {
     fn check(&self) -> Result<()> {
         match self {
             Self::Read(read) => read.prepared.check(),
-            Self::Write(write) | Self::Catalog(write) => write.check(),
+            Self::Write(write) | Self::Control(write) => write.check(),
         }
     }
     fn access(&self) -> &str {
         match self {
             Self::Read(read) => &read.input.access_key,
-            Self::Write(write) | Self::Catalog(write) => &write.access,
+            Self::Write(write) | Self::Control(write) => &write.access,
         }
     }
     fn credential(&self) -> Option<&wire::Cached> {
         match self {
             Self::Read(read) => read.prepared.reply.credential.as_ref(),
-            Self::Write(write) | Self::Catalog(write) => write.reply.credential.as_ref(),
+            Self::Write(write) | Self::Control(write) => write.reply.credential.as_ref(),
         }
     }
     fn material<T: serde::de::DeserializeOwned>(&self, version: &wire::Cached) -> Result<T> {
         match self {
             Self::Read(read) => read.prepared.material(version),
-            Self::Write(write) | Self::Catalog(write) => write.material(version),
+            Self::Write(write) | Self::Control(write) => write.material(version),
         }
     }
     fn bucket(&self) -> Result<Option<crate::app::Bucket>> {
         match self {
             Self::Read(read) => delivery::bucket(&read.prepared),
-            Self::Write(write) | Self::Catalog(write) => write
+            Self::Write(write) | Self::Control(write) => write
                 .reply
                 .bucket
                 .as_ref()
@@ -508,7 +509,13 @@ impl Gateway {
                     ReadRoute::Bucket { name, key, .. } => (name, key),
                     _ => (String::new(), String::new()),
                 };
-                if read {
+                if read
+                    || request.method() == Method::DELETE
+                    || target
+                        .query
+                        .iter()
+                        .any(|value| matches!(value.as_str(), "acl" | "delete"))
+                {
                     let query = catalog::query(request.method(), request.uri(), &bucket, &key)?;
                     let memory = Arc::new(
                         self.controls
@@ -516,7 +523,7 @@ impl Gateway {
                             .try_acquire_owned()
                             .map_err(|_| s3s::s3_error!(SlowDown))?,
                     );
-                    PreparedRequest::Catalog(
+                    PreparedRequest::Control(
                         crate::node::request::prepare(
                             &self.reads,
                             memory,
@@ -543,7 +550,7 @@ impl Gateway {
                 PreparedRequest::Read(read) => {
                     self.cors(&read.prepared, request.headers(), request.method())?
                 }
-                PreparedRequest::Write(write) | PreparedRequest::Catalog(write) => {
+                PreparedRequest::Write(write) | PreparedRequest::Control(write) => {
                     if let Some(mut bucket) = prepared.bucket()? {
                         if let Some(version) = &write.reply.policy {
                             let policy: read::Policy = write.material(version)?;
@@ -605,6 +612,22 @@ impl Gateway {
                 };
                 return Ok(response);
             }
+            let post = request.method() == Method::POST;
+            s3::check_control_body(
+                &mut request,
+                post && target.query.iter().any(|name| name == "delete"),
+                post && target.query.iter().any(|name| name == "uploadId"),
+                std::time::Duration::from_secs(crate::config::seconds(
+                    &self
+                        .reads
+                        .node
+                        .snapshot()?
+                        .runtime()
+                        .uploads
+                        .client_idle_timeout,
+                )?),
+            )
+            .await?;
             if request
                 .headers()
                 .get("x-amz-content-sha256")
@@ -765,6 +788,30 @@ impl S3Access for Gateway {
 
 #[async_trait::async_trait]
 impl S3 for Gateway {
+    async fn delete_object(
+        &self,
+        request: S3Request<DeleteObjectInput>,
+    ) -> S3Result<S3Response<DeleteObjectOutput>> {
+        self.delete(request).await.map_err(delivery::error)
+    }
+    async fn delete_objects(
+        &self,
+        request: S3Request<DeleteObjectsInput>,
+    ) -> S3Result<S3Response<DeleteObjectsOutput>> {
+        self.delete_batch(request).await.map_err(delivery::error)
+    }
+    async fn get_object_acl(
+        &self,
+        request: S3Request<GetObjectAclInput>,
+    ) -> S3Result<S3Response<GetObjectAclOutput>> {
+        catalog::acl(request).map_err(delivery::error)
+    }
+    async fn put_object_acl(
+        &self,
+        request: S3Request<PutObjectAclInput>,
+    ) -> S3Result<S3Response<PutObjectAclOutput>> {
+        self.set_acl(request).await.map_err(delivery::error)
+    }
     async fn head_bucket(
         &self,
         request: S3Request<HeadBucketInput>,

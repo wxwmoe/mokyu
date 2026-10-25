@@ -146,27 +146,7 @@ impl Writes {
         mut request: Request,
         mut input: wire::BeginWriteRequest,
     ) -> Result<Operation> {
-        request.check()?;
-        ensure!(
-            request.access == input.access_key && request.bucket == input.bucket,
-            s3s::s3_error!(AccessDenied)
-        );
-        match wire::ReadOutcome::try_from(request.reply.outcome)? {
-            wire::ReadOutcome::Ready => {}
-            wire::ReadOutcome::NoSuchBucket => anyhow::bail!(s3s::s3_error!(NoSuchBucket)),
-            _ => anyhow::bail!(s3s::s3_error!(AccessDenied)),
-        }
-        let credential: read::Credential = request.material(
-            request
-                .reply
-                .credential
-                .as_ref()
-                .context("write credential missing")?,
-        )?;
-        ensure!(
-            credential.access == request.access && credential.revision >= 0,
-            s3s::s3_error!(AccessDenied)
-        );
+        let credential = request.authorize(&input.access_key, &input.bucket)?;
         input.run = Some(request.run.run.clone());
         input.operation_id = Uuid::now_v7().to_string();
         input.credential_revision = Some(credential.revision as u64);

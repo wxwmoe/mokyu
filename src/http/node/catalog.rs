@@ -34,7 +34,15 @@ pub(super) fn query(
     key: &str,
 ) -> Result<Option<Query>> {
     if !key.is_empty() {
-        return Ok(None);
+        let axum::extract::Query(values) =
+            axum::extract::Query::<Vec<(String, String)>>::try_from_uri(uri)?;
+        return Ok(
+            (method == Method::GET && values.iter().any(|(name, _)| name == "acl")).then(|| {
+                Query::ObjectAcl(wire::ObjectAclQuery {
+                    key: key.to_owned(),
+                })
+            }),
+        );
     }
     if method == Method::HEAD {
         return Ok(
@@ -89,7 +97,7 @@ pub(super) fn query(
 fn result(bucket: &str, access: Option<&str>, query: Query) -> Result<Catalog> {
     CURRENT.try_with(|current| -> Result<Catalog> {
         let current = current.borrow();
-        let Some(PreparedRequest::Catalog(prepared)) = current.as_ref() else {
+        let Some(PreparedRequest::Control(prepared)) = current.as_ref() else {
             anyhow::bail!(s3s::s3_error!(InvalidRequest));
         };
         prepared.check()?;
@@ -128,6 +136,31 @@ pub(super) fn describe(bucket: &str, access: Option<&str>) -> Result<()> {
         "invalid bucket reply"
     );
     Ok(())
+}
+
+pub(super) fn acl(request: S3Request<GetObjectAclInput>) -> Result<S3Response<GetObjectAclOutput>> {
+    let i = request.input;
+    let Catalog::Acl { public } = result(
+        &i.bucket,
+        request
+            .credentials
+            .as_ref()
+            .map(|value| value.access_key.as_str()),
+        Query::ObjectAcl(wire::ObjectAclQuery { key: i.key }),
+    )?
+    else {
+        anyhow::bail!("invalid object ACL reply")
+    };
+    let public = public.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+    let bucket = CURRENT.try_with(|current| -> Result<_> {
+        current
+            .borrow()
+            .as_ref()
+            .context("ACL request missing")?
+            .bucket()?
+            .context("ACL bucket missing")
+    })??;
+    Ok(S3Response::new(gateway::object_acl(&bucket, public)))
 }
 
 pub(super) fn buckets(
@@ -228,7 +261,10 @@ mod tests {
         ));
         assert!(object_read(&route, &["unrecognized".into()]));
         assert!(!object_read(&route, &["acl".into()]));
-        assert!(query(&Method::GET, &"/bucket/key?acl".parse()?, "bucket", "key")?.is_none());
+        assert!(matches!(
+            query(&Method::GET, &"/bucket/key?acl".parse()?, "bucket", "key")?,
+            Some(Query::ObjectAcl(_))
+        ));
         assert!(matches!(
             query(&Method::HEAD, &"/bucket".parse()?, "bucket", "")?,
             Some(Query::DescribeBucket(_))

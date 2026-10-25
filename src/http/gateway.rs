@@ -880,36 +880,7 @@ impl S3 for Gateway {
                 )
                 .await?;
             let s = self.0.metadata(b.id, &i.key).await?;
-            let mut grants = vec![Grant {
-                grantee: Some(Grantee {
-                    type_: Type::from_static("CanonicalUser"),
-                    id: Some(b.id.to_string()),
-                    uri: None,
-                    display_name: None,
-                    email_address: None,
-                }),
-                permission: Some(Permission::from_static("FULL_CONTROL")),
-            }];
-            if s.public_read {
-                grants.push(Grant {
-                    grantee: Some(Grantee {
-                        type_: Type::from_static("Group"),
-                        uri: Some("http://acs.amazonaws.com/groups/global/AllUsers".into()),
-                        id: None,
-                        display_name: None,
-                        email_address: None,
-                    }),
-                    permission: Some(Permission::from_static("READ")),
-                });
-            }
-            Ok(S3Response::new(GetObjectAclOutput {
-                owner: Some(Owner {
-                    id: Some(b.id.to_string()),
-                    display_name: Some(b.name),
-                }),
-                grants: Some(grants),
-                ..Default::default()
-            }))
+            Ok(S3Response::new(object_acl(&b, s.public_read)))
         }
         .await
         .map_err(internal)
@@ -1125,4 +1096,37 @@ pub(super) fn listed_objects(
         ),
         ..Default::default()
     }))
+}
+
+pub(super) fn object_acl(b: &crate::app::Bucket, public: bool) -> GetObjectAclOutput {
+    let mut grants = vec![Grant {
+        grantee: Some(Grantee {
+            type_: Type::from_static("CanonicalUser"),
+            id: Some(b.id.to_string()),
+            uri: None,
+            display_name: None,
+            email_address: None,
+        }),
+        permission: Some(Permission::from_static("FULL_CONTROL")),
+    }];
+    if public {
+        grants.push(Grant {
+            grantee: Some(Grantee {
+                type_: Type::from_static("Group"),
+                uri: Some("http://acs.amazonaws.com/groups/global/AllUsers".into()),
+                id: None,
+                display_name: None,
+                email_address: None,
+            }),
+            permission: Some(Permission::from_static("READ")),
+        });
+    }
+    GetObjectAclOutput {
+        owner: Some(Owner {
+            id: Some(b.id.to_string()),
+            display_name: Some(b.name.clone()),
+        }),
+        grants: Some(grants),
+        ..Default::default()
+    }
 }

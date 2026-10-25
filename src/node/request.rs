@@ -28,6 +28,76 @@ impl Request {
     ) -> Result<T> {
         reads::material(&self.materials, version)
     }
+
+    pub(crate) fn authorize(
+        &self,
+        access: &str,
+        bucket: &str,
+    ) -> Result<crate::model::node_read::Credential> {
+        self.check()?;
+        ensure!(
+            self.access == access && self.bucket == bucket,
+            s3s::s3_error!(AccessDenied)
+        );
+        match wire::ReadOutcome::try_from(self.reply.outcome)? {
+            wire::ReadOutcome::Ready => {}
+            wire::ReadOutcome::NoSuchBucket => anyhow::bail!(s3s::s3_error!(NoSuchBucket)),
+            _ => anyhow::bail!(s3s::s3_error!(AccessDenied)),
+        }
+        let credential: crate::model::node_read::Credential = self.material(
+            self.reply
+                .credential
+                .as_ref()
+                .ok_or_else(|| s3s::s3_error!(AccessDenied))?,
+        )?;
+        ensure!(
+            credential.access == self.access && credential.revision >= 0,
+            s3s::s3_error!(AccessDenied)
+        );
+        Ok(credential)
+    }
+
+    pub(crate) async fn change(
+        &self,
+        reads: &Reads,
+        access: &str,
+        bucket: &str,
+        keys: Vec<String>,
+        public: Option<bool>,
+    ) -> Result<()> {
+        let credential = self.authorize(access, bucket)?;
+        let resolved: crate::app::Bucket = self.material(
+            self.reply
+                .bucket
+                .as_ref()
+                .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?,
+        )?;
+        let _cache: Vec<_> = keys
+            .iter()
+            .map(|key| reads.public.changing_object(resolved.id, key))
+            .collect();
+        let reply = reads
+            .node
+            .client
+            .change_objects(wire::ChangeObjectsRequest {
+                run: Some(self.run.run.clone()),
+                operation_id: uuid::Uuid::now_v7().to_string(),
+                access_key: access.to_owned(),
+                credential_revision: Some(credential.revision as u64),
+                bucket: bucket.to_owned(),
+                keys: keys.clone(),
+                public_read: public,
+            })
+            .await?;
+        self.check()?;
+        match wire::ObjectChangeOutcome::try_from(reply.outcome)? {
+            wire::ObjectChangeOutcome::Applied => Ok(()),
+            wire::ObjectChangeOutcome::ObjectChangeNoSuchKey => {
+                Err(s3s::s3_error!(NoSuchKey).into())
+            }
+            _ => anyhow::bail!("invalid object change reply"),
+        }
+    }
 }
 
 pub(crate) async fn prepare(

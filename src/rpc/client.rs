@@ -255,6 +255,14 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn change_objects(
+        &self,
+        input: wire::ChangeObjectsRequest,
+    ) -> Result<wire::ChangeObjectsReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeObjects/ChangeObjects")
+            .await
+    }
+
     pub(crate) async fn report_read(
         &self,
         input: wire::ReadReportRequest,
@@ -349,7 +357,12 @@ impl Client {
         I: prost::Message + Default + Clone + 'static,
         O: prost::Message + Default + 'static,
     {
-        if input.encoded_len() > super::read::REQUEST_LIMIT {
+        let limit = if path == "/mokyu.node.v1.NodeObjects/ChangeObjects" {
+            crate::model::node_object::REQUEST_LIMIT
+        } else {
+            super::read::REQUEST_LIMIT
+        };
+        if input.encoded_len() > limit {
             return Err(Status::resource_exhausted(
                 "node request exceeds message limit",
             ));

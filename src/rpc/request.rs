@@ -37,6 +37,7 @@ pub(super) fn prepare(
                 use wire::prepare_request_input::Query;
                 Ok(match query {
                     Query::DescribeBucket(_) => node_request::Query::Bucket,
+                    Query::ObjectAcl(value) => node_request::Query::Acl { key: value.key },
                     Query::ListBuckets(value) => node_request::Query::Buckets {
                         prefix: value.prefix.unwrap_or_default(),
                         region: value.region,

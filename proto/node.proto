@@ -46,6 +46,31 @@ service NodeWrites {
   rpc PublishWrite(PublishWriteRequest) returns (WriteReply);
 }
 
+service NodeObjects {
+  rpc ChangeObjects(ChangeObjectsRequest) returns (ChangeObjectsReply);
+}
+
+message ChangeObjectsRequest {
+  Run run = 1;
+  string operation_id = 2;
+  string access_key = 3;
+  optional uint64 credential_revision = 4;
+  string bucket = 5;
+  repeated string keys = 6;
+  // Absent deletes the selected keys; present changes one object's canned ACL.
+  optional bool public_read = 7;
+}
+
+message ChangeObjectsReply {
+  ObjectChangeOutcome outcome = 1;
+}
+
+enum ObjectChangeOutcome {
+  OBJECT_CHANGE_OUTCOME_UNSPECIFIED = 0;
+  APPLIED = 1;
+  OBJECT_CHANGE_NO_SUCH_KEY = 2;
+}
+
 message PrepareRawRequest {
   Run run = 1;
   string operation_id = 2;
@@ -156,12 +181,15 @@ message PrepareRequestInput {
   repeated Cached cached = 5;
   oneof query {
     DescribeBucketQuery describe_bucket = 6;
+    ObjectAclQuery object_acl = 9;
     ListBucketsQuery list_buckets = 7;
     ListObjectsQuery list_objects = 8;
   }
 }
 
 message DescribeBucketQuery {}
+
+message ObjectAclQuery { string key = 1; }
 
 message ListBucketsQuery {
   optional string prefix = 1;

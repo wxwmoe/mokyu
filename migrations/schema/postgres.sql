@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0077.
+-- Generated from the complete postgres migration chain through 0078.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -841,6 +841,17 @@ CREATE TABLE public.node_boots (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     retired_at timestamp with time zone,
     CONSTRAINT node_boots_credential_generation_check CHECK ((credential_generation > 0))
+);
+
+CREATE TABLE public.node_object_changes (
+    node_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    credential_generation bigint NOT NULL,
+    request_hash bytea NOT NULL,
+    outcome jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT node_object_changes_outcome_check CHECK ((outcome = ANY (ARRAY['"applied"'::jsonb, '"no_such_key"'::jsonb]))),
+    CONSTRAINT node_object_changes_request_hash_check CHECK ((octet_length(request_hash) = 32))
 );
 
 CREATE TABLE public.node_read_permits (
@@ -1847,6 +1858,9 @@ ALTER TABLE ONLY public.multipart_files
 ALTER TABLE ONLY public.node_boots
     ADD CONSTRAINT node_boots_pkey PRIMARY KEY (node_id, boot_id);
 
+ALTER TABLE ONLY public.node_object_changes
+    ADD CONSTRAINT node_object_changes_pkey PRIMARY KEY (node_id, operation_id);
+
 ALTER TABLE ONLY public.node_read_permits
     ADD CONSTRAINT node_read_permits_pkey PRIMARY KEY (token);
 
@@ -2130,6 +2144,8 @@ CREATE INDEX multipart_files_node ON public.multipart_files USING btree (node_id
 CREATE INDEX multipart_files_reclaim ON public.multipart_files USING btree (storage_id, id) WHERE reclaim_pending;
 
 CREATE INDEX multipart_files_upload ON public.multipart_files USING btree (upload_id, state);
+
+CREATE INDEX node_object_changes_expiry ON public.node_object_changes USING btree (node_id, created_at);
 
 CREATE INDEX node_read_permits_read ON public.node_read_permits USING btree (read_id);
 
@@ -2468,6 +2484,9 @@ ALTER TABLE ONLY public.multipart_files
 
 ALTER TABLE ONLY public.node_boots
     ADD CONSTRAINT node_boots_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_object_changes
+    ADD CONSTRAINT node_object_changes_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_read_permits
     ADD CONSTRAINT node_read_permits_read_id_fkey FOREIGN KEY (read_id) REFERENCES public.node_reads(read_id) ON DELETE CASCADE;

@@ -28,6 +28,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeReads/ReportRead` | Unary；报告当前读取窗口内最多 16 个来源段，请求持久后端复核，仅允许 data |
 | `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，收到 Welcome 后发送 Pulse 并等待匹配序号的确认 |
 | `NodeWrites/BeginWrite` | Unary；校验权限、创建写入上下文与租约并预留配额，返回存储材料；仅允许 data |
+| `NodeObjects/ChangeObjects` | Unary；批量删除对象或修改单个对象的 canned ACL，持久保存操作结果；仅允许 data |
 | `NodeWrites/PrepareChunks` | Unary；批量领取或复用区块，保存上传目标与编码参数，返回所需存储、密钥及上传许可 |
 | `NodeWrites/CommitChunks` | Unary；确认整批上传完成并建立引用，可按批次乱序完成 |
 | `NodeWrites/PrepareRaw` | Unary；校验完整文件身份、预留配额、查询去重并分配最终上传目标与许可 |
@@ -97,6 +98,12 @@ PrepareRequest 请求最多 128 KiB；`include` 从 `S3_CREDENTIAL`、`BUCKET`�
 `query` 可选择 `describe_bucket`、`list_buckets` 或 `list_objects`，与本次签名材料在同一 RPC 返回；节点校验完整 S3 签名和请求参数后才输出 `catalog_json`，游标校验错误同样等待签名确认。查询要求当前凭据和 `bucket.list` 权限，使用独立于上传的有界控制请求额度；缓存材料不替代本次授权。HeadBucket、GetBucketLocation、ListBuckets 和 ListObjectsV2 正常请求只需一次 PrepareRequest，不申请正文读取保护或访问对象存储。
 
 对象列表每页 0–1000 项，桶列表每页 1–10000 项，均默认 1000；响应受 4 MiB 消息上限约束。对象列表游标绑定桶、前缀和分隔符；桶列表游标绑定凭据、前缀和地区。前缀、分隔符和起始键最多 1024 字节，游标最多 16 KiB。权限、凭据或节点运行权失效后不能凭缓存继续列出结果；断线可重试查询，分页不提供跨请求的固定快照。
+
+`query.object_acl` 使用 `object.read` 权限，随签名材料一次返回对象的公开标志，不获取正文映射或存储凭据。GetObjectAcl 在签名验证后输出所有者与 canned ACL，缺失对象也等签名验证后报告。
+
+ChangeObjects 在入站签名验证后执行，携带相同凭据修订、桶、操作 ID、最多 1000 个对象键和可选的 `public_read`。省略 `public_read` 表示删除；设置时必须只有一个键，要求 `object.acl` 权限。删除要求 `object.delete` 权限，键最多 1024 字节，请求最多 2 MiB。control 在一个短事务内重新校验授权、桶状态、维护状态和运行权，按键排序获取锁并提交全部有效删除；S3 DeleteObjects 的不支持字段仍逐项报告，Quiet 只省略成功项。删除只退役引用，物理回收继续遵守读租约和其他引用保护。
+
+对象变更回执绑定节点、凭据代次、UUIDv7 操作 ID 和完整参数哈希，包括 ACL 的缺失对象结果。响应丢失后重试原操作只返回已保存结果，不影响随后覆盖的对象；参数变化被拒绝。首次调用的时间窗口为过去 15 分钟至未来 30 秒，回执至少保留一天；清理后旧操作不会重新执行。节点变更期间使对应对象及别名的本地公共快照失效，其他节点继续遵守已有缓存有效期。
 
 BeginWrite 请求最多 64 KiB；包含桶、对象键、服务凭据身份、必填的 `credential_revision`、对象元数据、公开标志和可选的已知长度。调用方先使用准备的凭据验证入站签名，再携带同一修订发起准入；修订为 0 与漏传不同。control 在创建写入前确认当前修订，并在同一事务内校验写入权限及公开对象所需的 ACL 权限、桶状态、维护状态和配额，绑定对象写令牌、存储策略与块密钥。准入返回实际桶和 stream 身份；存储材料支持 `cached`，不重复发送匹配修订的连接配置。
 

@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Objects,
     Catalog,
     Raw,
     Writes,
@@ -46,6 +47,12 @@ enum HttpCase {
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, TLS origins and signed object mutations"]
+async fn node_http_objects_batch_authorization_and_recover_lost_results() -> Result<()> {
+    node_http_reads(HttpCase::Objects).await
 }
 
 #[tokio::test]
@@ -240,6 +247,7 @@ async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()
 }
 
 async fn node_http_reads(case: HttpCase) -> Result<()> {
+    let objects = matches!(case, HttpCase::Objects);
     let catalog = matches!(case, HttpCase::Catalog);
     let writes = matches!(case, HttpCase::Writes);
     let raw = matches!(case, HttpCase::Raw);
@@ -354,7 +362,12 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if catalog {
+    if objects {
+        let before = observed.write_resources();
+        fixture("http-objects").await?;
+        assert_eq!(observed.write_resources(), before);
+        assert_eq!(reads.backend_gets(), 0);
+    } else if catalog {
         let before = observed.write_resources();
         let controls = observed.control_slots();
         let available = controls.available_permits();
@@ -425,7 +438,18 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-pending").await?;
         fixture("assert-no-reads").await?;
     }
-    let publishing = if writes || raw {
+    let publishing = if objects {
+        fixture("http-objects-lose-reply").await?;
+        let publishing = tokio::spawn(fixture("http-objects-replay"));
+        let replaced = path.parent().unwrap().join("objects-replaced");
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !replaced.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        Some(publishing)
+    } else if writes || raw {
         fixture(if raw {
             "http-raw-lose-commit"
         } else {
@@ -460,7 +484,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
     context.client.addresses.lock().await.refresh_at = Instant::now();
     if let Some(publishing) = publishing {
         publishing.await??;
-        fixture(if raw {
+        fixture(if objects {
+            "http-objects-resume-reply"
+        } else if raw {
             "http-raw-resume-commit"
         } else {
             "chunks-resume-publish"
@@ -472,7 +498,10 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if catalog {
+    if objects {
+        fixture("http-objects-reconnected").await?;
+        assert_eq!(reads.backend_gets(), 0);
+    } else if catalog {
         fixture("http-catalog-reconnected").await?;
         assert_eq!(reads.backend_gets(), 0);
     } else if raw {
@@ -503,11 +532,15 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-reconnected").await?;
     }
     fixture("assert-no-reads").await?;
-    if catalog {
+    if catalog || objects {
         let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
         let point = faults.join("node-catalog-prepared");
         tokio::fs::write(&point, b"pause").await?;
-        let fenced = tokio::spawn(fixture("http-catalog-fenced"));
+        let fenced = tokio::spawn(fixture(if objects {
+            "http-objects-fenced"
+        } else {
+            "http-catalog-fenced"
+        }));
         tokio::time::timeout(Duration::from_secs(15), async {
             while !point.with_extension("hit").exists() {
                 tokio::time::sleep(Duration::from_millis(20)).await;

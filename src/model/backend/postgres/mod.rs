@@ -138,6 +138,10 @@ mod node_raw_tests;
 mod node_catalog_tests;
 
 #[cfg(test)]
+#[path = "../../../../tests/recovery/node_objects.rs"]
+mod node_object_tests;
+
+#[cfg(test)]
 #[path = "../../../../tests/recovery/node_runtime.rs"]
 mod node_runtime_tests;
 
