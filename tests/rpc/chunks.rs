@@ -157,6 +157,7 @@ async fn node_chunk_batches_upload_once_replay_and_publish_over_rpc() -> Result<
                 wire::MaterialType::ReadPolicy as i32,
             ],
             cached: vec![],
+            query: None,
         })
         .await?;
     assert_eq!(preflight.outcome, wire::ReadOutcome::Ready as i32);

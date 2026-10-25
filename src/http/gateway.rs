@@ -398,7 +398,6 @@ impl S3 for Gateway {
         req: S3Request<ListBucketsInput>,
     ) -> S3Result<S3Response<ListBucketsOutput>> {
         async {
-            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
             let key = req
                 .credentials
                 .as_ref()
@@ -407,27 +406,14 @@ impl S3 for Gateway {
                 .as_str();
             let i = req.input;
             let limit = i.max_buckets.unwrap_or(1000);
-            if !(1..=10000).contains(&limit) {
-                return Err(s3_error!(InvalidArgument).into());
-            }
             let prefix = i.prefix.as_deref().unwrap_or("");
-            let after = if let Some(token) = i.continuation_token {
-                let bytes = URL_SAFE_NO_PAD
-                    .decode(token)
-                    .map_err(|_| s3_error!(InvalidArgument))?;
-                let (access, p, r, last): (String, String, Option<String>, String) =
-                    serde_json::from_slice(&bytes).map_err(|_| s3_error!(InvalidArgument))?;
-                if access != key || p != prefix || r != i.bucket_region {
-                    return Err(s3_error!(
-                        InvalidArgument,
-                        "continuation token belongs to another listing"
-                    )
-                    .into());
-                }
-                last
-            } else {
-                String::new()
-            };
+            let after = crate::app::listing::bucket_cursor(
+                key,
+                prefix,
+                i.bucket_region.as_deref(),
+                i.continuation_token.as_deref(),
+                limit,
+            )?;
             let mut rows = self
                 .0
                 .credentials
@@ -443,12 +429,12 @@ impl S3 for Gateway {
             let truncated = rows.len() > limit as usize;
             rows.truncate(limit as usize);
             let token = if truncated {
-                Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&(
+                Some(crate::app::listing::bucket_token(
                     key,
                     prefix,
-                    &i.bucket_region,
+                    i.bucket_region.as_deref(),
                     &rows.last().unwrap().name,
-                ))?))
+                )?)
             } else {
                 None
             };
@@ -867,49 +853,14 @@ impl S3 for Gateway {
                     n as usize,
                 )
                 .await?;
-            if i.encoding_type
-                .as_ref()
-                .is_some_and(|v| v.as_str() != "url")
-            {
-                return Err(s3_error!(InvalidArgument, "encoding-type must be url").into());
-            }
-            let encoded = i.encoding_type.is_some();
-            let encode = |s: String| if encoded { encode_key(&s) } else { s };
-            let count = list.objects.len() + list.prefixes.len();
-            let contents = list
-                .objects
-                .into_iter()
-                .map(|s| Object {
-                    key: Some(encode(s.object_key)),
-                    size: Some(s.size),
-                    e_tag: Some(ETag::Strong(s.etag)),
-                    last_modified: Some(stamp(s.touched_at)),
-                    storage_class: Some(ObjectStorageClass::from_static("STANDARD")),
-                    ..Default::default()
-                })
-                .collect();
-            Ok(S3Response::new(ListObjectsV2Output {
-                name: Some(i.bucket),
-                prefix: i.prefix.map(encode),
-                delimiter: i.delimiter.map(encode),
-                encoding_type: i.encoding_type,
-                max_keys: Some(n),
-                key_count: Some(count as i32),
-                is_truncated: Some(list.next.is_some()),
-                next_continuation_token: list.next,
-                continuation_token: i.continuation_token,
-                start_after: i.start_after.map(encode),
-                contents: Some(contents),
-                common_prefixes: Some(
-                    list.prefixes
-                        .into_iter()
-                        .map(|p| CommonPrefix {
-                            prefix: Some(encode(p)),
-                        })
-                        .collect(),
-                ),
-                ..Default::default()
-            }))
+            listed_objects(
+                i,
+                list.objects
+                    .into_iter()
+                    .map(|s| (s.object_key, s.size, s.etag, s.touched_at)),
+                list.prefixes,
+                list.next,
+            )
         }
         .await
         .map_err(internal)
@@ -1121,4 +1072,57 @@ mod range_tests {
             }
         }
     }
+}
+
+pub(super) fn listed_objects(
+    i: ListObjectsV2Input,
+    objects: impl ExactSizeIterator<Item = (String, i64, String, DateTime<Utc>)>,
+    prefixes: Vec<String>,
+    next: Option<String>,
+) -> Result<S3Response<ListObjectsV2Output>> {
+    let n = i.max_keys.unwrap_or(1000);
+    if !(0..=1000).contains(&n) {
+        return Err(s3_error!(InvalidArgument).into());
+    }
+    if i.encoding_type
+        .as_ref()
+        .is_some_and(|v| v.as_str() != "url")
+    {
+        return Err(s3_error!(InvalidArgument, "encoding-type must be url").into());
+    }
+    let encoded = i.encoding_type.is_some();
+    let encode = |s: String| if encoded { encode_key(&s) } else { s };
+    let count = objects.len() + prefixes.len();
+    let contents = objects
+        .map(|(key, size, etag, modified_at)| Object {
+            key: Some(encode(key)),
+            size: Some(size),
+            e_tag: Some(ETag::Strong(etag)),
+            last_modified: Some(stamp(modified_at)),
+            storage_class: Some(ObjectStorageClass::from_static("STANDARD")),
+            ..Default::default()
+        })
+        .collect();
+    Ok(S3Response::new(ListObjectsV2Output {
+        name: Some(i.bucket),
+        prefix: i.prefix.map(encode),
+        delimiter: i.delimiter.map(encode),
+        encoding_type: i.encoding_type,
+        max_keys: Some(n),
+        key_count: Some(count as i32),
+        is_truncated: Some(next.is_some()),
+        next_continuation_token: next,
+        continuation_token: i.continuation_token,
+        start_after: i.start_after.map(encode),
+        contents: Some(contents),
+        common_prefixes: Some(
+            prefixes
+                .into_iter()
+                .map(|p| CommonPrefix {
+                    prefix: Some(encode(p)),
+                })
+                .collect(),
+        ),
+        ..Default::default()
+    }))
 }

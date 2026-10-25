@@ -5,6 +5,7 @@ pub(crate) mod delivery;
 mod files;
 mod observations;
 pub(crate) mod reads;
+pub(crate) mod request;
 pub(crate) mod resources;
 mod session;
 mod settings;

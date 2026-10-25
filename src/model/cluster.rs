@@ -26,7 +26,7 @@ pub(crate) trait ClusterStore: Send + Sync {
         node: &NodeState,
         key: &Key,
         input: super::node_request::Prepare,
-    ) -> Result<super::node_read::Reply>;
+    ) -> Result<super::node_request::Reply>;
     async fn prepare_chunks(
         &self,
         node: &NodeState,

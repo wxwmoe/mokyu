@@ -25,40 +25,43 @@ use s3s::{
 use std::{cell::RefCell, sync::Arc};
 use tracing::Instrument;
 
+mod catalog;
+
 enum PreparedRequest {
     Read(RequestRead),
     Write(writes::Request),
+    Catalog(crate::node::request::Request),
 }
 
 impl PreparedRequest {
     fn check(&self) -> Result<()> {
         match self {
             Self::Read(read) => read.prepared.check(),
-            Self::Write(write) => write.check(),
+            Self::Write(write) | Self::Catalog(write) => write.check(),
         }
     }
     fn access(&self) -> &str {
         match self {
             Self::Read(read) => &read.input.access_key,
-            Self::Write(write) => &write.access,
+            Self::Write(write) | Self::Catalog(write) => &write.access,
         }
     }
     fn credential(&self) -> Option<&wire::Cached> {
         match self {
             Self::Read(read) => read.prepared.reply.credential.as_ref(),
-            Self::Write(write) => write.reply.credential.as_ref(),
+            Self::Write(write) | Self::Catalog(write) => write.reply.credential.as_ref(),
         }
     }
     fn material<T: serde::de::DeserializeOwned>(&self, version: &wire::Cached) -> Result<T> {
         match self {
             Self::Read(read) => read.prepared.material(version),
-            Self::Write(write) => write.material(version),
+            Self::Write(write) | Self::Catalog(write) => write.material(version),
         }
     }
     fn bucket(&self) -> Result<Option<crate::app::Bucket>> {
         match self {
             Self::Read(read) => delivery::bucket(&read.prepared),
-            Self::Write(write) => write
+            Self::Write(write) | Self::Catalog(write) => write
                 .reply
                 .bucket
                 .as_ref()
@@ -90,6 +93,7 @@ pub(crate) struct Gateway {
     writes: Arc<writes::Writes>,
     cors: Arc<cors::Cache>,
     settings: RequestSettings,
+    controls: Arc<tokio::sync::Semaphore>,
 }
 
 impl Gateway {
@@ -97,11 +101,20 @@ impl Gateway {
         let settings = reads.node.snapshot()?.runtime().requests.clone();
         let cors = reads.cors.clone();
         reads.start_public();
+        let controls = Arc::new(tokio::sync::Semaphore::new(
+            reads
+                .node
+                .budget
+                .get()
+                .context("node budget missing")?
+                .data_slots,
+        ));
         Ok(Self {
             writes: Arc::new(writes::Writes::new(reads.clone())?),
             reads,
             cors,
             settings,
+            controls,
         })
     }
 
@@ -121,6 +134,11 @@ impl Gateway {
     #[cfg(test)]
     pub(crate) fn write_resources(&self) -> [usize; 3] {
         self.writes.available()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn control_slots(&self) -> Arc<tokio::sync::Semaphore> {
+        self.controls.clone()
     }
 
     async fn prepare(
@@ -465,7 +483,8 @@ impl Gateway {
             } else {
                 HeaderMap::new()
             };
-            let prepared = if read || request.method() == Method::OPTIONS {
+            let object_read = read && catalog::object_read(&route, &target.query);
+            let prepared = if object_read || request.method() == Method::OPTIONS {
                 PreparedRequest::Read(
                     self.prepare(
                         route,
@@ -485,25 +504,46 @@ impl Gateway {
                     .await?,
                 )
             } else {
-                let bucket = match route {
-                    ReadRoute::Bucket { name, .. } => name,
-                    _ => String::new(),
+                let (bucket, key) = match route {
+                    ReadRoute::Bucket { name, key, .. } => (name, key),
+                    _ => (String::new(), String::new()),
                 };
-                PreparedRequest::Write(
-                    self.writes
-                        .prepare(
+                if read {
+                    let query = catalog::query(request.method(), request.uri(), &bucket, &key)?;
+                    let memory = Arc::new(
+                        self.controls
+                            .clone()
+                            .try_acquire_owned()
+                            .map_err(|_| s3s::s3_error!(SlowDown))?,
+                    );
+                    PreparedRequest::Catalog(
+                        crate::node::request::prepare(
+                            &self.reads,
+                            memory,
                             s3::access_key(request.headers(), request.uri().query())
                                 .unwrap_or_default(),
                             bucket,
+                            query,
                         )
                         .await?,
-                )
+                    )
+                } else {
+                    PreparedRequest::Write(
+                        self.writes
+                            .prepare(
+                                s3::access_key(request.headers(), request.uri().query())
+                                    .unwrap_or_default(),
+                                bucket,
+                            )
+                            .await?,
+                    )
+                }
             };
             cors = match &prepared {
                 PreparedRequest::Read(read) => {
                     self.cors(&read.prepared, request.headers(), request.method())?
                 }
-                PreparedRequest::Write(write) => {
+                PreparedRequest::Write(write) | PreparedRequest::Catalog(write) => {
                     if let Some(mut bucket) = prepared.bucket()? {
                         if let Some(version) = &write.reply.policy {
                             let policy: read::Policy = write.material(version)?;
@@ -725,6 +765,56 @@ impl S3Access for Gateway {
 
 #[async_trait::async_trait]
 impl S3 for Gateway {
+    async fn head_bucket(
+        &self,
+        request: S3Request<HeadBucketInput>,
+    ) -> S3Result<S3Response<HeadBucketOutput>> {
+        catalog::describe(
+            &request.input.bucket,
+            request
+                .credentials
+                .as_ref()
+                .map(|value| value.access_key.as_str()),
+        )
+        .map_err(delivery::error)?;
+        Ok(S3Response::new(HeadBucketOutput {
+            bucket_region: Some(self.settings.s3_region.clone()),
+            ..Default::default()
+        }))
+    }
+
+    async fn get_bucket_location(
+        &self,
+        request: S3Request<GetBucketLocationInput>,
+    ) -> S3Result<S3Response<GetBucketLocationOutput>> {
+        catalog::describe(
+            &request.input.bucket,
+            request
+                .credentials
+                .as_ref()
+                .map(|value| value.access_key.as_str()),
+        )
+        .map_err(delivery::error)?;
+        Ok(S3Response::new(GetBucketLocationOutput {
+            location_constraint: (self.settings.s3_region != "us-east-1")
+                .then(|| BucketLocationConstraint::from(self.settings.s3_region.clone())),
+        }))
+    }
+
+    async fn list_buckets(
+        &self,
+        request: S3Request<ListBucketsInput>,
+    ) -> S3Result<S3Response<ListBucketsOutput>> {
+        catalog::buckets(request, &self.settings.s3_region).map_err(delivery::error)
+    }
+
+    async fn list_objects_v2(
+        &self,
+        request: S3Request<ListObjectsV2Input>,
+    ) -> S3Result<S3Response<ListObjectsV2Output>> {
+        catalog::objects(request).map_err(delivery::error)
+    }
+
     async fn put_object(
         &self,
         mut request: S3Request<PutObjectInput>,

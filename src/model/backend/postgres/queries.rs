@@ -2748,7 +2748,11 @@ impl CredentialStore for Backend {
         expected_region: &str,
         limit: i64,
     ) -> Result<Vec<crate::app::Bucket>> {
-        Ok(sqlx::query_as("SELECT b.* FROM buckets b JOIN s3_credential_grants g ON g.bucket_id=b.id JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=$1 AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>now()) AND c.project_id=b.project_id AND 'bucket.list'=ANY(g.actions) AND starts_with(b.name,$2) AND b.name>$3 AND ($4::text IS NULL OR $4=$5) ORDER BY b.name LIMIT $6").bind(access).bind(prefix).bind(after).bind(region).bind(expected_region).bind(limit).fetch_all(&self.pool).await?)
+        Ok(
+            credential_buckets(access, prefix, after, region, expected_region, limit)
+                .fetch_all(&self.pool)
+                .await?,
+        )
     }
 
     async fn credential(&self, access: &str) -> Result<Credential> {
@@ -7530,7 +7534,7 @@ impl ClusterStore for Backend {
         node: &crate::cluster::NodeState,
         key: &crate::content::codec::Key,
         input: crate::model::node_request::Prepare,
-    ) -> Result<crate::model::node_read::Reply> {
+    ) -> Result<crate::model::node_request::Reply> {
         super::transactions::prepare_node_request(&self.pool, node, key, input)
             .await
             .map_err(normalize_error)
@@ -10280,8 +10284,57 @@ pub(super) fn node_read_bucket(route: &crate::model::ReadRoute) -> Rows<'_, Buck
 }
 
 pub(super) fn node_read_allowed(access: &str, project: Uuid, bucket: Uuid) -> Scalar<'_, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM s3_credential_grants g JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=$1 AND c.project_id=$2 AND g.bucket_id=$3 AND 'object.read'=ANY(g.actions))")
-        .bind(access).bind(project).bind(bucket)
+    node_request_allowed(access, project, bucket, "object.read")
+}
+
+pub(super) fn node_request_allowed<'q>(
+    access: &'q str,
+    project: Uuid,
+    bucket: Uuid,
+    action: &'q str,
+) -> Scalar<'q, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM s3_credential_grants g JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=$1 AND c.project_id=$2 AND g.bucket_id=$3 AND $4=ANY(g.actions))")
+        .bind(access).bind(project).bind(bucket).bind(action)
+}
+
+pub(super) fn credential_buckets<'q>(
+    access: &'q str,
+    prefix: &'q str,
+    after: &'q str,
+    region: Option<&'q str>,
+    expected_region: &'q str,
+    limit: i64,
+) -> Rows<'q, Bucket> {
+    sqlx::query_as("SELECT b.* FROM buckets b JOIN s3_credential_grants g ON g.bucket_id=b.id JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=$1 AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>now()) AND c.project_id=b.project_id AND 'bucket.list'=ANY(g.actions) AND starts_with(b.name,$2) AND b.name>$3 AND ($4::text IS NULL OR $4=$5) ORDER BY b.name LIMIT $6")
+        .bind(access).bind(prefix).bind(after).bind(region).bind(expected_region).bind(limit)
+}
+
+pub(super) fn node_catalog_objects<'q>(
+    bucket: Uuid,
+    prefix: &'q str,
+    key: &'q str,
+    inclusive: bool,
+) -> Rows<'q, crate::model::node_request::Object> {
+    let pattern = format!(
+        "{}%",
+        prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
+    sqlx::query_as("SELECT o.object_key AS key,s.size,s.etag,s.touched_at AS modified_at FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=$1 AND o.object_key LIKE $2 AND (o.object_key>$3 OR ($4 AND o.object_key=$3)) ORDER BY o.object_key LIMIT 64").bind(bucket).bind(pattern).bind(key).bind(inclusive)
+}
+
+pub(super) fn node_catalog_buckets<'q>(
+    access: &'q str,
+    prefix: &'q str,
+    after: &'q str,
+    region: Option<&'q str>,
+    expected_region: &'q str,
+    limit: i64,
+) -> Rows<'q, crate::model::node_request::Bucket> {
+    sqlx::query_as("SELECT b.name,b.created_at FROM buckets b JOIN s3_credential_grants g ON g.bucket_id=b.id JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=$1 AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>now()) AND c.project_id=b.project_id AND 'bucket.list'=ANY(g.actions) AND starts_with(b.name,$2) AND b.name>$3 AND ($4::text IS NULL OR $4=$5) ORDER BY b.name LIMIT $6")
+        .bind(access).bind(prefix).bind(after).bind(region).bind(expected_region).bind(limit)
 }
 
 pub(super) fn node_read_extents(

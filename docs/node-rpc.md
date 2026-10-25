@@ -21,7 +21,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | 方法 | 请求与响应 |
 | --- | --- |
 | `NodeControl/SyncNode` | Unary；提交当前 `run` 和最多五个 `cached` 配置修订，返回运行状态、全部当前修订及未命中配置 |
-| `NodeControl/PrepareRequest` | Unary；按 `include` 和 `cached` 准备签名凭据、桶和策略材料，不创建对象或租约；仅允许 data |
+| `NodeControl/PrepareRequest` | Unary；按 `include` 和 `cached` 准备签名凭据、桶和策略，可同时查询桶信息、桶列表或对象列表；仅允许 data |
 | `NodeReads/OpenRead` | Unary；按路由、身份、条件、`include` 与 `cached` 返回对象结果及首个读取窗口，仅允许 data |
 | `NodeControl/ReportObservations` | Unary；批量上报 HTTP 压缩收益和已通过签名校验的凭据活动，仅允许 data |
 | `NodeReads/ReadWindow` | Unary；沿当前读取游标取下一窗口，校验运行权、读取保护和载荷修订 |
@@ -93,6 +93,10 @@ ReportRead 绑定当前运行权、有效读取与窗口，下标只引用该窗
 ## 写入
 
 PrepareRequest 请求最多 128 KiB；`include` 从 `S3_CREDENTIAL`、`BUCKET`、`READ_POLICY` 中选择，至少一项且不能重复，`cached` 沿用读取材料的修订和持有规则。每次准备都确认当前凭据状态；返回凭据包含非负的 `revision`。准备不要求对象读取权限，也不创建 stream、对象、租约或配额预留。
+
+`query` 可选择 `describe_bucket`、`list_buckets` 或 `list_objects`，与本次签名材料在同一 RPC 返回；节点校验完整 S3 签名和请求参数后才输出 `catalog_json`，游标校验错误同样等待签名确认。查询要求当前凭据和 `bucket.list` 权限，使用独立于上传的有界控制请求额度；缓存材料不替代本次授权。HeadBucket、GetBucketLocation、ListBuckets 和 ListObjectsV2 正常请求只需一次 PrepareRequest，不申请正文读取保护或访问对象存储。
+
+对象列表每页 0–1000 项，桶列表每页 1–10000 项，均默认 1000；响应受 4 MiB 消息上限约束。对象列表游标绑定桶、前缀和分隔符；桶列表游标绑定凭据、前缀和地区。前缀、分隔符和起始键最多 1024 字节，游标最多 16 KiB。权限、凭据或节点运行权失效后不能凭缓存继续列出结果；断线可重试查询，分页不提供跨请求的固定快照。
 
 BeginWrite 请求最多 64 KiB；包含桶、对象键、服务凭据身份、必填的 `credential_revision`、对象元数据、公开标志和可选的已知长度。调用方先使用准备的凭据验证入站签名，再携带同一修订发起准入；修订为 0 与漏传不同。control 在创建写入前确认当前修订，并在同一事务内校验写入权限及公开对象所需的 ACL 权限、桶状态、维护状态和配额，绑定对象写令牌、存储策略与块密钥。准入返回实际桶和 stream 身份；存储材料支持 `cached`，不重复发送匹配修订的连接配置。
 

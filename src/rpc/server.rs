@@ -571,7 +571,8 @@ impl NodeControl for Service {
         request: Request<wire::PrepareRequestInput>,
     ) -> Result<Response<wire::RequestReply>, Status> {
         let node = data_identity(&request)?;
-        let input = super::request::prepare(request.into_inner())?;
+        let input =
+            super::request::prepare(request.into_inner(), &self.app.config.requests.s3_region)?;
         let reply = bounded(self.app.cluster().map_err(failure)?.prepare_request(
             &node,
             &self.app.secrets.credential_key,

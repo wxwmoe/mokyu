@@ -1,6 +1,6 @@
 use super::{
-    NodeContext, RunLease,
-    reads::{self, Held, Reads},
+    NodeContext,
+    reads::{self, Reads},
     resources::Grant,
 };
 use crate::{content::codec, model::node_read as read, rpc::wire, upload::Integrity};
@@ -25,27 +25,7 @@ pub(crate) struct Writes {
     parallelism: u32,
 }
 
-pub(crate) struct Request {
-    pub(crate) reply: wire::RequestReply,
-    pub(crate) access: String,
-    pub(crate) bucket: String,
-    run: Arc<RunLease>,
-    materials: Held,
-    memory: Arc<OwnedSemaphorePermit>,
-}
-
-impl Request {
-    pub(crate) fn check(&self) -> Result<()> {
-        Ok(self.run.check()?)
-    }
-
-    pub(crate) fn material<T: serde::de::DeserializeOwned>(
-        &self,
-        version: &wire::Cached,
-    ) -> Result<T> {
-        reads::material(&self.materials, version)
-    }
-}
+pub(crate) use super::request::Request;
 
 struct Operation {
     id: String,
@@ -158,44 +138,7 @@ impl Writes {
 
     pub(crate) async fn prepare(&self, access: String, bucket: String) -> Result<Request> {
         let memory = Arc::new(self.slots.clone().acquire_owned().await?);
-        let node = &self.reads.node;
-        let snapshot = node.snapshot()?;
-        let held = self.reads.cache.snapshot();
-        let mut include = Vec::new();
-        if !access.is_empty() {
-            include.push(wire::MaterialType::S3Credential as i32);
-        }
-        if !bucket.is_empty() {
-            include.extend([
-                wire::MaterialType::Bucket as i32,
-                wire::MaterialType::ReadPolicy as i32,
-            ]);
-        }
-        ensure!(!include.is_empty(), s3s::s3_error!(AccessDenied));
-        let mut reply = node
-            .client
-            .prepare_request(wire::PrepareRequestInput {
-                run: Some(snapshot.lease.run.clone()),
-                access_key: access.clone(),
-                bucket: bucket.clone(),
-                include,
-                cached: reads::cached(&held),
-            })
-            .await?;
-        let materials = self.reads.cache.apply(
-            node.client.identity.deployment_id,
-            held,
-            std::mem::take(&mut reply.materials),
-        )?;
-        snapshot.lease.check()?;
-        Ok(Request {
-            reply,
-            access,
-            bucket,
-            run: snapshot.lease.clone(),
-            materials,
-            memory,
-        })
+        super::request::prepare(&self.reads, memory, access, bucket, None).await
     }
 
     async fn begin(

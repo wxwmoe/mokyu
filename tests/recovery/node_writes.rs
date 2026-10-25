@@ -129,10 +129,12 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
             read::MaterialType::Policy,
         ],
         cached,
+        query: None,
     };
     let preflight = backend
         .prepare_request(&node, &key, prepare("writer", vec![]))
-        .await?;
+        .await?
+        .context;
     assert!(preflight.outcome == read::Outcome::Ready && preflight.grants.is_empty());
     assert_eq!(preflight.materials.len(), 3);
     assert!(preflight.mapping.is_none() && preflight.object.is_none());
@@ -143,7 +145,8 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
         .collect();
     let repeated = backend
         .prepare_request(&node, &key, prepare("writer", cached))
-        .await?;
+        .await?
+        .context;
     assert!(repeated.materials.iter().all(|value| value.json.is_none()));
     sqlx::query(
         "INSERT INTO s3_credentials(access_key_id,secret_encrypted) VALUES('rotating-writer',$1)",
@@ -154,7 +157,8 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
     sqlx::query("INSERT INTO s3_credential_grants(access_key,bucket_id,actions) VALUES('rotating-writer',$1,ARRAY['object.write'])").bind(bucket).execute(&pool).await?;
     let original = backend
         .prepare_request(&node, &key, prepare("rotating-writer", vec![]))
-        .await?;
+        .await?
+        .context;
     sqlx::query("UPDATE s3_credentials SET secret_encrypted=$1,authorization_revision=authorization_revision+1 WHERE access_key_id='rotating-writer'")
         .bind(codec::protect(b"second-secret", &key, b"rotating-writer")?).execute(&pool).await?;
     let refreshed = backend
@@ -170,7 +174,8 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
                     .collect(),
             ),
         )
-        .await?;
+        .await?
+        .context;
     let credential: read::Credential = serde_json::from_slice(
         refreshed
             .materials

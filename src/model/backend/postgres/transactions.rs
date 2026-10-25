@@ -10687,7 +10687,8 @@ pub(super) async fn prepare_node_request(
     node: &NodeState,
     key: &Key,
     input: crate::model::node_request::Prepare,
-) -> Result<read::Reply> {
+) -> Result<crate::model::node_request::Reply> {
+    use crate::model::node_request::{self as request, Catalog, Query};
     input.validate()?;
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, node, key, false).await?;
@@ -10697,7 +10698,7 @@ pub(super) async fn prepare_node_request(
         !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
         Error::NodeInactive
     );
-    let (reply, _) = node_request_materials(
+    let (mut context, bucket) = node_request_materials(
         &mut tx,
         node,
         key,
@@ -10707,6 +10708,110 @@ pub(super) async fn prepare_node_request(
         &input.cached,
     )
     .await?;
+    let mut catalog = None;
+    if let Some(query) = input
+        .query
+        .filter(|_| context.outcome == read::Outcome::Ready)
+    {
+        let access = input
+            .access
+            .as_deref()
+            .context("catalog credential missing")?;
+        if let Some(bucket) = &bucket
+            && !queries::node_request_allowed(access, bucket.project_id, bucket.id, "bucket.list")
+                .fetch_one(&mut *tx)
+                .await?
+        {
+            context.outcome = read::Outcome::AccessDenied;
+        } else {
+            let result: Result<Catalog> = async {
+                Ok(match query {
+                    Query::Bucket => Catalog::Bucket,
+                    Query::Buckets {
+                        prefix,
+                        region,
+                        expected_region,
+                        token,
+                        limit,
+                    } => {
+                        let after = crate::app::listing::bucket_cursor(
+                            access,
+                            &prefix,
+                            region.as_deref(),
+                            token.as_deref(),
+                            limit as i32,
+                        )?;
+                        let mut rows = queries::node_catalog_buckets(
+                            access,
+                            &prefix,
+                            &after,
+                            region.as_deref(),
+                            &expected_region,
+                            limit as i64 + 1,
+                        )
+                        .fetch_all(&mut *tx)
+                        .await?;
+                        let truncated = rows.len() > limit;
+                        rows.truncate(limit);
+                        let next = if truncated {
+                            Some(crate::app::listing::bucket_token(
+                                access,
+                                &prefix,
+                                region.as_deref(),
+                                &rows.last().unwrap().name,
+                            )?)
+                        } else {
+                            None
+                        };
+                        Catalog::Buckets { rows, next }
+                    }
+                    Query::Objects {
+                        prefix,
+                        delimiter,
+                        after,
+                        token,
+                        limit,
+                    } => {
+                        let bucket = bucket.as_ref().context("catalog bucket missing")?;
+                        let mut page = crate::app::listing::Page::new(
+                            bucket.id,
+                            &prefix,
+                            &delimiter,
+                            after.as_deref(),
+                            token.as_deref(),
+                            limit,
+                        )?;
+                        while let Some((key, inclusive)) = page.position() {
+                            let rows =
+                                queries::node_catalog_objects(bucket.id, &prefix, key, inclusive)
+                                    .fetch_all(&mut *tx)
+                                    .await?;
+                            page.append(rows, |row| &row.key)?;
+                        }
+                        let list = page.finish();
+                        Catalog::Objects {
+                            rows: list.objects,
+                            prefixes: list.prefixes,
+                            next: list.next,
+                        }
+                    }
+                })
+            }
+            .await;
+            catalog = Some(match result {
+                Ok(value) => value,
+                Err(error)
+                    if error.downcast_ref::<s3s::S3Error>().is_some_and(|error| {
+                        error.code() == &s3s::S3ErrorCode::InvalidArgument
+                    }) =>
+                {
+                    Catalog::InvalidArgument
+                }
+                Err(error) => return Err(error),
+            });
+        }
+    }
+    require_node_run(&mut tx, node, input.run, false).await?;
     tx.commit().await?;
-    Ok(reply)
+    Ok(request::Reply { context, catalog })
 }

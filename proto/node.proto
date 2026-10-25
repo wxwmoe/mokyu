@@ -154,6 +154,28 @@ message PrepareRequestInput {
   string bucket = 3;
   repeated MaterialType include = 4;
   repeated Cached cached = 5;
+  oneof query {
+    DescribeBucketQuery describe_bucket = 6;
+    ListBucketsQuery list_buckets = 7;
+    ListObjectsQuery list_objects = 8;
+  }
+}
+
+message DescribeBucketQuery {}
+
+message ListBucketsQuery {
+  optional string prefix = 1;
+  optional string region = 2;
+  optional string token = 3;
+  int32 limit = 4;
+}
+
+message ListObjectsQuery {
+  optional string prefix = 1;
+  optional string delimiter = 2;
+  optional string after = 3;
+  optional string token = 4;
+  int32 limit = 5;
 }
 
 message RequestReply {
@@ -162,6 +184,7 @@ message RequestReply {
   Cached credential = 3;
   Cached bucket = 4;
   Cached policy = 5;
+  bytes catalog_json = 6;
 }
 
 message WriteRequest {
