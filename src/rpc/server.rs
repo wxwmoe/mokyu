@@ -400,7 +400,7 @@ impl NodeWrites for Service {
         &self,
         request: Request<wire::PrepareChunksRequest>,
     ) -> Result<Response<wire::PreparedChunks>, Status> {
-        let node = data_identity(&request)?;
+        let node = write_identity(&request)?;
         let input = super::write::prepare(request.into_inner())?;
         let cluster = self.app.cluster().map_err(failure)?;
         let assembly =
@@ -449,7 +449,7 @@ impl NodeWrites for Service {
         &self,
         request: Request<wire::CommitChunksRequest>,
     ) -> Result<Response<wire::ChunkCommitReply>, Status> {
-        let node = data_identity(&request)?;
+        let node = write_identity(&request)?;
         let input = super::write::commit(request.into_inner())?;
         let batch_id = input.batch as u64;
         let end = bounded(self.app.cluster().map_err(failure)?.commit_chunks(
@@ -491,7 +491,7 @@ impl NodeWrites for Service {
         &self,
         request: Request<wire::PublishWriteRequest>,
     ) -> Result<Response<wire::WriteReply>, Status> {
-        let node = data_identity(&request)?;
+        let node = write_identity(&request)?;
         let input = super::write::publish(request.into_inner())?;
         let reply = bounded(self.app.cluster().map_err(failure)?.publish_write(
             &node,
@@ -539,12 +539,22 @@ impl NodeWrites for Service {
     }
 }
 
-fn data_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
+fn write_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
     let node = request
         .extensions()
         .get::<NodeState>()
         .cloned()
         .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
+    if !matches!(node.role.as_str(), "data" | "worker") {
+        return Err(Status::permission_denied(
+            "request requires a data or worker node",
+        ));
+    }
+    Ok(node)
+}
+
+fn data_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
+    let node = write_identity(request)?;
     if node.role != "data" {
         return Err(Status::permission_denied("request requires a data node"));
     }
@@ -557,7 +567,7 @@ impl Service {
         request: Request<wire::WriteRequest>,
         abort: bool,
     ) -> Result<Response<wire::WriteReply>, Status> {
-        let node = data_identity(&request)?;
+        let node = write_identity(&request)?;
         let input = super::write::lookup(request.into_inner())?;
         let reply = bounded(self.app.cluster().map_err(failure)?.write_status(
             &node,

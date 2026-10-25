@@ -390,7 +390,6 @@ impl Client {
             .await
     }
 
-    #[cfg(test)]
     pub(crate) async fn write_status(
         &self,
         input: wire::WriteRequest,

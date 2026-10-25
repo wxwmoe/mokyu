@@ -7100,27 +7100,7 @@ pub(super) async fn begin_raw(
                 crate::model::Error::OperationAborted
             );
         }
-        let (bucket, object_key, payload_revision) = queries::conversion_stream(stream)
-            .fetch_one(&mut *tx)
-            .await?;
-        let job = crate::model::raw::Conversion {
-            stream,
-            source: id.into(),
-            bucket,
-            object_key,
-            payload_revision,
-            encoding: encoding.clone(),
-            target_key_id: encoding.block_key_id,
-        };
-        let mut detail = serde_json::to_value(job)?;
-        detail["operation"] = serde_json::json!("cdc");
-        let task = Uuid::new_v4();
-        queries::insert_task(task, "upload", Some(bucket), detail, None)
-            .execute(&mut *tx)
-            .await?;
-        queries::conversion_link(id.into(), task)
-            .execute(&mut *tx)
-            .await?;
+        enqueue_conversion(&mut tx, stream, id.into(), encoding).await?;
     } else if background {
         queries::raw_enqueue_processing(stream, id.into())
             .execute(&mut *tx)
@@ -7128,6 +7108,35 @@ pub(super) async fn begin_raw(
     }
     tx.commit().await?;
     Ok((id.into(), id))
+}
+
+async fn enqueue_conversion(
+    db: &mut PgConnection,
+    stream: Id,
+    source: Id,
+    encoding: &crate::model::cache::EncodingPolicy,
+) -> Result<()> {
+    encoding.validate()?;
+    let (bucket, object_key, payload_revision) = queries::conversion_stream(stream)
+        .fetch_one(&mut *db)
+        .await?;
+    let job = crate::model::raw::Conversion {
+        stream,
+        source,
+        bucket,
+        object_key,
+        payload_revision,
+        encoding: encoding.clone(),
+        target_key_id: encoding.block_key_id,
+    };
+    let mut detail = serde_json::to_value(job)?;
+    detail["operation"] = json!("cdc");
+    let task = Uuid::new_v4();
+    queries::insert_task(task, "upload", Some(bucket), detail, None)
+        .execute(&mut *db)
+        .await?;
+    queries::conversion_link(source, task).execute(db).await?;
+    Ok(())
 }
 
 pub(super) async fn finish_raw(
@@ -8384,78 +8393,89 @@ pub(super) async fn finish_conversion(
     lease: Option<Uuid>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    lock_execution(&mut tx, task).await?;
+    let done = finish_conversion_in(&mut tx, task, job, source, candidate, lease).await?;
+    tx.commit().await?;
+    Ok(done)
+}
+
+async fn finish_conversion_in(
+    tx: &mut Transaction<'_, Postgres>,
+    task: Execution,
+    job: &crate::model::raw::Conversion,
+    source: &crate::model::raw::RawSource,
+    candidate: Id,
+    lease: Option<Uuid>,
+) -> Result<bool> {
+    lock_execution(tx, task).await?;
     ensure!(
         queries::conversion_owned(candidate, task.id, task.token)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .is_some(),
         crate::model::Error::OperationAborted
     );
     if queries::conversion_current(job.stream, job.payload_revision)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .is_none()
     {
         queries::conversion_abandon(candidate)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        queries::complete_task(task.id).execute(&mut *tx).await?;
-        tx.commit().await?;
+        queries::complete_task(task.id).execute(&mut **tx).await?;
         return Ok(true);
     }
     if let Some(lease) = lease {
         if queries::raw_processing_readers(job.stream, lease)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?
         {
             return Ok(false);
         }
     }
 
-    validate_raw(&mut tx, job.stream, source.size).await?;
-    let current = queries::raw_source(source.id).fetch_one(&mut *tx).await?;
+    validate_raw(tx, job.stream, source.size).await?;
+    let current = queries::raw_source(source.id).fetch_one(&mut **tx).await?;
     ensure!(
         current == *source && source.id == job.source,
         crate::model::Error::SourceUnavailable
     );
     let (end, contiguous) = queries::extent_continuity(candidate)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         end == source.size && contiguous,
         "conversion candidate is incomplete"
     );
     if !queries::conversion_no_pending(candidate)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?
     {
         return Ok(false);
     }
-    require_sources(&mut tx, Some(candidate), &[]).await?;
+    require_sources(tx, Some(candidate), &[]).await?;
     queries::conversion_move(candidate, job.stream)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::conversion_detach(job.stream)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::conversion_changed(job.stream)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::conversion_unpin(candidate)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::conversion_abandon(candidate)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::raw_touch_unreferenced(source.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
-    queries::complete_task(task.id).execute(&mut *tx).await?;
+    queries::complete_task(task.id).execute(&mut **tx).await?;
     #[cfg(feature = "fault-injection")]
     crate::faults::point("cdc-switch-before-commit").await;
-    tx.commit().await?;
     Ok(true)
 }
 
@@ -10577,7 +10597,10 @@ pub(super) async fn node_write_status(
     use crate::model::Error;
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
-    ensure!(state.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(state.role.as_str(), "data" | "worker"),
+        Error::NodeAuthentication
+    );
     require_node_run(&mut tx, state, input.run, true).await?;
     let mut owned = queries::node_write(state.node_id, input.operation)
         .fetch_optional(&mut *tx)
@@ -10595,7 +10618,8 @@ pub(super) async fn node_write_status(
             .fetch_one(&mut *tx)
             .await?;
     }
-    let reply = node_write_reply(&mut tx, state, key, input.run, owned, None).await?;
+    let materials = (!abort && owned.owner_task_id.is_some()).then_some([].as_slice());
+    let reply = node_write_reply(&mut tx, state, key, input.run, owned, materials).await?;
     tx.commit().await?;
     Ok(reply)
 }
@@ -10739,7 +10763,10 @@ async fn node_write_owned(
     operation: Uuid,
 ) -> Result<queries::NodeWrite> {
     authenticate_rpc_node(db, node, key, false).await?;
-    ensure!(node.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(node.role.as_str(), "data" | "worker"),
+        Error::NodeAuthentication
+    );
     require_node_run(db, node, run, true).await?;
     let row = queries::node_write(node.node_id, operation)
         .fetch_optional(db)
@@ -10767,6 +10794,16 @@ async fn require_node_write(
         Error::NodeInactive
     );
     let stream = row.stream_id.ok_or(Error::NodeExpired)?.into();
+    if let Some(id) = row.owner_task_id {
+        lock_execution(
+            db,
+            Execution {
+                id,
+                token: row.owner_lease_token.ok_or(Error::NodeExpired)?,
+            },
+        )
+        .await?;
+    }
     let authority: sqlx::types::Json<Permit> = queries::write_authorization(stream)
         .fetch_one(&mut **db)
         .await?;
@@ -10927,7 +10964,7 @@ pub(super) async fn prepare_node_chunks(
     } else {
         "none".into()
     };
-    if row.completion_upload.is_none() {
+    if row.completion_upload.is_none() && row.owner_task_id.is_none() {
         queries::reserve_quota(stream, end, false, row.upload_id, row.part_number)
             .fetch_one(&mut *tx)
             .await?;
@@ -11342,7 +11379,9 @@ pub(super) async fn publish_node_write(
             == 1,
         Error::OperationAborted
     );
-    if let (Some(upload), Some(number)) = (row.upload_id, row.part_number) {
+    if row.owner_task_id.is_some() {
+        work::seal_conversion(&mut tx, &row, &input).await?;
+    } else if let (Some(upload), Some(number)) = (row.upload_id, row.part_number) {
         ensure!(
             input.etag.len() == 32 && input.if_match.is_none() && input.if_none.is_none(),
             s3s::s3_error!(InvalidRequest)
@@ -11641,16 +11680,17 @@ pub(super) async fn prepare_node_raw(
     let stream = require_node_write(&mut tx, &row).await?;
     ensure!(
         row.upload_id.is_none()
-            && !row.profile.cdc_enabled
-            && !row.profile.compression_enabled
-            && !row.profile.pack_enabled
-            && row.block_key_id.is_none()
             && !row.profile.upload_cache
-            && row.profile.write_processing == "inline"
-            && row.profile.deduplication_enabled == input.input.hash.is_some()
+            && ((row.profile.write_processing == "background" && row.profile.cdc_enabled)
+                || (!row.profile.cdc_enabled
+                    && !row.profile.compression_enabled
+                    && !row.profile.pack_enabled
+                    && row.block_key_id.is_none()))
+            && (row.profile.deduplication_enabled && row.profile.write_processing == "inline")
+                == input.input.hash.is_some()
             && row.next_batch == 1
             && row.next_offset == 0,
-        s3s::s3_error!(InvalidRequest, "write does not accept inline raw data")
+        s3s::s3_error!(InvalidRequest, "write does not accept raw data")
     );
     let size = input.input.size;
     ensure!(
@@ -11762,6 +11802,32 @@ pub(super) async fn commit_node_raw(
         if let Some(hash) = &raw.content_hash {
             let current = queries::raw_source(source).fetch_one(&mut *tx).await?;
             share_raw(&mut tx, stream, &current, hash).await?;
+        }
+        if row.profile.write_processing == "background" {
+            if row.profile.cdc_enabled {
+                let algorithm = if let Some(id) = row.block_key_id {
+                    queries::node_read_keys(&[id])
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .ok_or(Error::SourceUnavailable)?
+                        .algorithm
+                } else {
+                    "none".into()
+                };
+                let encoding = crate::model::cache::EncodingPolicy {
+                    compression: row.profile.compression_config("30s"),
+                    pack_enabled: row.profile.pack_enabled,
+                    pack_max_size: row.profile.pack_max_size.clone(),
+                    pack_flush_timeout: row.profile.pack_upload_flush_timeout.clone(),
+                    algorithm,
+                    block_key_id: row.block_key_id,
+                };
+                enqueue_conversion(&mut tx, stream, source, &encoding).await?;
+            } else if row.profile.deduplication_enabled {
+                queries::raw_enqueue_processing(stream, source)
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
         queries::extend_writing_stream(stream, raw.size)
             .execute(&mut *tx)

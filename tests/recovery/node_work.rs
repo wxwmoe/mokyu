@@ -5,6 +5,8 @@ use crate::model::{node_read as read, node_work as work};
 mod audit;
 #[path = "node_cleanup.rs"]
 mod cleanup;
+#[path = "node_conversion.rs"]
+mod conversion;
 #[path = "node_inspection.rs"]
 mod inspection;
 #[path = "node_packing.rs"]
@@ -518,5 +520,6 @@ pub(super) async fn check(
     rewrite::check(backend, peer, &other, key, other_session.run, admin).await?;
     packing::check(backend, peer, &other, key, other_session.run).await?;
     processing::check(backend, peer, &other, key, other_session.run).await?;
+    conversion::check(backend, peer, admin, key).await?;
     Ok(())
 }

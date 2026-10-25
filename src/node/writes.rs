@@ -20,8 +20,18 @@ mod completion;
 #[path = "native.rs"]
 mod native;
 
+#[path = "conversion.rs"]
+mod conversion;
+
 const BATCH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OBJECT: i64 = 5 * 1024 * 1024 * 1024;
+
+#[derive(Clone)]
+pub(super) struct Limits {
+    slots: Arc<Semaphore>,
+    completions: Arc<Semaphore>,
+    io: Arc<Semaphore>,
+}
 
 pub(crate) struct Writes {
     reads: Arc<Reads>,
@@ -138,10 +148,20 @@ impl Writes {
 
     pub(crate) fn new(reads: Arc<Reads>) -> Result<Self> {
         let budget = reads.node.budget.get().context("node budget missing")?;
+        let limits = {
+            let mut shared = reads.node.uploads.lock().unwrap();
+            shared
+                .get_or_insert_with(|| Limits {
+                    slots: Arc::new(Semaphore::new(budget.upload_concurrency)),
+                    completions: Arc::new(Semaphore::new(budget.upload_concurrency)),
+                    io: Arc::new(Semaphore::new(budget.storage_upload_slots)),
+                })
+                .clone()
+        };
         Ok(Self {
-            slots: Arc::new(Semaphore::new(budget.upload_concurrency)),
-            completions: Arc::new(Semaphore::new(budget.upload_concurrency)),
-            io: Arc::new(Semaphore::new(budget.storage_upload_slots)),
+            slots: limits.slots,
+            completions: limits.completions,
+            io: limits.io,
             parallelism: budget.storage_upload_slots.min(2) as u32,
             reads,
         })
@@ -289,12 +309,21 @@ impl Writes {
     ) -> Result<(u64, String, serde_json::Value)> {
         let profile = &operation.backend.profile;
         ensure!(
-            profile.write_processing == "inline" && !profile.upload_cache,
+            !profile.upload_cache && (profile.write_processing == "inline" || !operation.part),
             s3s::s3_error!(
                 NotImplemented,
-                "this node write path requires inline processing without upload cache"
+                "this node write path requires shared uploads and inline multipart parts"
             )
         );
+        if profile.write_processing == "background" && !operation.part {
+            return operation
+                .guard(
+                    &self.reads.node,
+                    &[],
+                    self.raw(operation, body, check, trailers, length),
+                )
+                .await;
+        }
         if operation.part && !profile.cdc_enabled {
             return operation
                 .guard(
@@ -572,10 +601,8 @@ impl Writes {
         let idle = Duration::from_secs(crate::config::seconds(
             &node.snapshot()?.runtime().uploads.client_idle_timeout,
         )?);
-        let mut hash = operation
-            .backend
-            .profile
-            .deduplication_enabled
+        let mut hash = (operation.backend.profile.deduplication_enabled
+            && operation.backend.profile.write_processing == "inline")
             .then(blake3::Hasher::new);
         let mut size = 0u64;
         while let Some(data) = tokio::time::timeout(idle, body.next())

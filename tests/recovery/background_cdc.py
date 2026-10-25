@@ -161,7 +161,7 @@ def main():
             fixture.put('contender', value)
             raise AssertionError('a foreground write reused an unpublished allocation')
         except ClientError as error:
-            assert error.response['Error']['Code'] == 'OperationAborted', error.response
+            assert error.response['Error']['Code'] == 'RequestTimeout', error.response
         assert {row['id'] for row in database.query(
             "SELECT id FROM chunks WHERE storage_id=%s AND state='preparing'", storage)} == active
         marker.unlink()

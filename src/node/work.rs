@@ -13,11 +13,13 @@ pub(crate) struct Worker {
     node: Arc<NodeContext>,
     cache: reads::Cache,
     reader: super::body::Reader,
+    writes: super::writes::Writes,
 }
 
 impl Worker {
     pub(crate) fn new(node: Arc<NodeContext>) -> Result<Self> {
         Ok(Self {
+            writes: super::writes::Writes::new(Arc::new(reads::Reads::new(node.clone())?))?,
             reader: super::body::Reader::new(&node)?,
             node,
             cache: reads::Cache::default(),
@@ -83,6 +85,34 @@ impl Worker {
             let backend = reads::backend(&materials, plan.storage())?;
             let future = async {
                 let outcomes = match plan {
+                    work::Plan::ConvertRaw {
+                        source,
+                        write,
+                        etag,
+                        checksums,
+                        sealed,
+                        ..
+                    } => {
+                        let timeout = Duration::from_secs(crate::config::seconds(
+                            &snapshot.runtime().maintenance.max_duration,
+                        )?);
+                        let result = if sealed {
+                            Ok(())
+                        } else {
+                            tokio::time::timeout(
+                                timeout,
+                                Box::pin(self.writes.convert(write, source, etag, checksums)),
+                            )
+                            .await
+                            .map_err(anyhow::Error::from)
+                            .and_then(|value| value)
+                        };
+                        vec![if result.is_ok() {
+                            work::Outcome::Converted
+                        } else {
+                            work::Outcome::Retry
+                        }]
+                    }
                     work::Plan::HashRaw { storage, items } => {
                         ensure!(items.len() <= work::MAX_ITEMS, "invalid raw hash batch");
                         let count = items.len();

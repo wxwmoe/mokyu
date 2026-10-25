@@ -20,6 +20,17 @@ mod packing;
 #[path = "work_raw.rs"]
 mod raw;
 
+#[path = "work_conversion.rs"]
+mod conversion;
+
+pub(super) async fn seal_conversion(
+    db: &mut Transaction<'_, Postgres>,
+    row: &queries::NodeWrite,
+    input: &write::Publish,
+) -> Result<()> {
+    conversion::seal(db, row, input).await
+}
+
 fn owned(node: &NodeState, run: Run, batch: &q::Batch) -> Result<()> {
     ensure!(
         batch.credential_generation == node.credential_generation
@@ -123,6 +134,19 @@ async fn finish(
     let mut error = None;
     let mut complete = false;
     match row.plan.context("work plan is missing")?.0 {
+        work::Plan::ConvertRaw { .. } => {
+            ensure!(!maintenance, Error::OperationAborted);
+            (complete, error) = conversion::finish(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                &detail,
+                &completion.outcomes,
+            )
+            .await?;
+        }
         work::Plan::HashRaw { items, .. } => {
             ensure!(!maintenance, Error::OperationAborted);
             (deleted, complete, error) = raw::finish(
@@ -653,13 +677,25 @@ pub(crate) async fn exchange(
             let (policy, detail, parent) = q::task(task, token, node.node_id)
                 .fetch_one(&mut *tx)
                 .await?;
-            let storage: Uuid = detail["storage_id"]
-                .as_str()
-                .context("work storage is missing")?
-                .parse()?;
-            let profile = queries::storage_profile(storage)
+            let storage: Uuid = if policy == "upload" && detail["operation"] == "cdc" {
+                let job: crate::model::raw::Conversion = serde_json::from_value(detail.clone())?;
+                queries::raw_source(job.source)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .storage_id
+            } else {
+                detail["storage_id"]
+                    .as_str()
+                    .context("work storage is missing")?
+                    .parse()?
+            };
+            let mut profile = queries::storage_profile(storage)
                 .fetch_one(&mut *tx)
                 .await?;
+            if policy == "upload" && detail["operation"] == "cdc" {
+                conversion::freeze(&detail, &mut profile)?;
+            }
+
             let record = queries::node_read_storages(&[storage])
                 .fetch_one(&mut *tx)
                 .await?;
@@ -692,6 +728,17 @@ pub(crate) async fn exchange(
                     .map(|plan| (plan, vec![]))
                 } else if policy == "upload" && detail["operation"] == "deduplicate" {
                     raw::prepare(&mut tx, Execution { id: task, token }, &detail, storage).await?
+                } else if policy == "upload" && detail["operation"] == "cdc" {
+                    conversion::prepare(
+                        &mut tx,
+                        node,
+                        input.run,
+                        Execution { id: task, token },
+                        &detail,
+                        profile.clone(),
+                        key,
+                    )
+                    .await?
                 } else if matches!(policy.as_str(), "pack" | "unpack") {
                     packing::prepare(
                         &mut tx,

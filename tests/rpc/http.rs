@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Conversion,
     Processing,
     Packing,
     Rewrite,
@@ -55,6 +56,12 @@ enum HttpCase {
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, raw S3 uploads and CDC publication faults"]
+async fn node_http_conversion_recovers_and_preserves_bytes() -> Result<()> {
+    node_http_reads(HttpCase::Conversion).await
 }
 
 #[tokio::test]
@@ -429,6 +436,72 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
+    if matches!(case, HttpCase::Conversion) {
+        let setup: Fixture = serde_json::from_slice(
+            &tokio::fs::read(std::env::var("MOKYU_TEST_READ_FIXTURE")?).await?,
+        )?;
+        let identity: NodeState =
+            serde_json::from_slice(&tokio::fs::read(setup.worker_path).await?)?;
+        let worker_directory = directory.join("worker");
+        tokio::fs::create_dir(&worker_directory).await?;
+        crate::cluster::identity::write_state(&worker_directory.join("node.json"), &identity)
+            .await?;
+        let config = format!(
+            "[instance]\ncontrol_url='{url}'\ndata_path='{}'\n",
+            worker_directory.display()
+        );
+        let mut background =
+            NodeContext::new(NodeConfig::parse(&config, "worker")?, "worker").await?;
+        Arc::get_mut(&mut background).unwrap().client = dns.client(&url, identity)?;
+        let mut background_states = background.subscribe();
+        let running = background.clone();
+        let background_driver = tokio::spawn(async move { running.run().await });
+        node_state(&mut background_states, |state| state.phase == Phase::Ready).await?;
+        assert_eq!(
+            background
+                .client
+                .begin_write(wire::BeginWriteRequest::default())
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        fixture("conversion-seed").await?;
+        let mut worker = tokio::spawn(crate::node::work::Worker::new(background.clone())?.run());
+        fixture("conversion-prepared").await?;
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        fixture("conversion-restart").await?;
+        worker = tokio::spawn(crate::node::work::Worker::new(background.clone())?.run());
+        fixture("conversion-switched").await?;
+        fixture("conversion-reply-seed").await?;
+        fixture("conversion-committed").await?;
+        *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 3)]);
+        dns.resolver.clear_cache();
+        context.client.addresses.lock().await.refresh_at = Instant::now();
+        fixture("stop-first").await?;
+        node_state(&mut states, |state| {
+            state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
+        })
+        .await?;
+        node_state(&mut background_states, |state| {
+            state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
+        })
+        .await?;
+        fixture("conversion-replayed").await?;
+        fixture("conversion-reader").await?;
+        fixture("conversion-corrupt").await?;
+        fixture("conversion-restored").await?;
+        background.stop();
+        context.stop();
+        tokio::time::timeout(Duration::from_secs(10), driver).await???;
+        tokio::time::timeout(Duration::from_secs(10), worker).await???;
+        tokio::time::timeout(Duration::from_secs(10), background_driver).await???;
+        s3_server.abort();
+        web_server.abort();
+        println!("PASS node CDC, candidate restart, reader deferral and committed reply loss");
+        return Ok(());
+    }
     if matches!(case, HttpCase::Processing) {
         let mut worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
         fixture("processing-seed").await?;

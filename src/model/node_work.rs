@@ -97,6 +97,14 @@ pub(crate) struct RawHash {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
+    ConvertRaw {
+        storage: Uuid,
+        source: super::raw::RawSource,
+        write: Uuid,
+        etag: String,
+        checksums: serde_json::Value,
+        sealed: bool,
+    },
     HashRaw {
         storage: Uuid,
         items: Vec<RawHash>,
@@ -144,7 +152,8 @@ pub(crate) enum Plan {
 impl Plan {
     pub(crate) fn storage(&self) -> Uuid {
         match self {
-            Self::HashRaw { storage, .. }
+            Self::ConvertRaw { storage, .. }
+            | Self::HashRaw { storage, .. }
             | Self::Collect { storage, .. }
             | Self::Audit { storage, .. }
             | Self::SweepScan { storage, .. }
@@ -159,6 +168,7 @@ impl Plan {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Outcome {
+    Converted,
     Hashed {
         hash: Vec<u8>,
     },
