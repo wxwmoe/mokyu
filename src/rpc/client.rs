@@ -585,15 +585,15 @@ impl Client {
                     let (sender, mut receiver) = mpsc::channel(1);
                     sender.try_send(wire::SessionRequest { message: Some(wire::session_request::Message::Hello(wire::Hello {
                         protocol: PROTOCOL, boot_id: boot.to_string(), connection_id: connection.to_string(), previous_epoch,
-                    })) }).map_err(|_| Status::internal("session hello could not be queued"))?;
+                    })) }).map_err(|_| Status::data_loss("session hello could not be queued"))?;
                     let outgoing = async_stream::stream! { while let Some(message) = receiver.recv().await { yield message; } };
                     let mut incoming = client.node_session(self.request(outgoing)).await?.into_inner();
                     let Some(wire::SessionReply { message: Some(wire::session_reply::Message::Welcome(welcome)) }) = incoming.message().await? else {
-                        return Err(Status::internal("control did not send Welcome"));
+                        return Err(Status::data_loss("control did not send Welcome"));
                     };
-                    let run = welcome.run.as_ref().ok_or_else(|| Status::internal("control omitted node run"))?;
+                    let run = welcome.run.as_ref().ok_or_else(|| Status::data_loss("control omitted node run"))?;
                     if super::uuid(&run.boot_id)? != boot || welcome.epoch == 0 {
-                        return Err(Status::internal("control returned a different node run"));
+                        return Err(Status::data_loss("control returned a different node run"));
                     }
                     super::uuid(&run.fence)?;
                     let valid_until = lease_deadline(started, welcome.valid_for_ms)?;
@@ -601,7 +601,7 @@ impl Client {
                 }).await.unwrap_or_else(|_| Err(Status::deadline_exceeded("session connection timed out")));
                 match result {
                     Ok(session) => { peer.succeeded(); return Ok(session); }
-                    Err(error) if retryable(&error) => { peer.failed(); last = error; }
+                    Err(error) if retryable(&error) || error.code() == tonic::Code::Internal => { peer.failed(); last = error; }
                     Err(error) => return Err(error),
                 }
             }
@@ -633,7 +633,7 @@ impl Session {
         self.pulse_resources(sequence, draining, Vec::new(), Vec::new())
             .await?
             .state
-            .ok_or_else(|| Status::internal("control omitted node state"))
+            .ok_or_else(|| Status::data_loss("control omitted node state"))
     }
 
     pub(crate) async fn pulse_resources(
@@ -673,7 +673,7 @@ impl Session {
             ));
         };
         if reply.sequence != sequence {
-            return Err(Status::internal("node heartbeat sequence does not match"));
+            return Err(Status::data_loss("node heartbeat sequence does not match"));
         }
         self.valid_until = lease_deadline(started, reply.valid_for_ms)?;
         if reply.state.is_none()
@@ -802,6 +802,7 @@ mod tests {
         assert_eq!(timeout.code(), tonic::Code::Cancelled);
         assert!(retryable(&timeout));
         assert!(!retryable(&Status::cancelled("Timeout expired")));
+        assert!(!retryable(&Status::internal("server failure")));
         assert!(!retryable(&Status::permission_denied("revoked")));
     }
 

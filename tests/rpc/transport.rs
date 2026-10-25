@@ -157,10 +157,16 @@ async fn node_runtime_recovers_without_database_or_resurrecting_old_work() -> Re
     let held = context.snapshot()?.lease.clone();
     assert_eq!(context.budget.get().unwrap().database_connections, 0);
     fixture("resume-welcome").await?;
+    fixture("session-internal").await?;
 
     *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 2)]);
     dns.resolver.clear_cache();
     context.client.addresses.lock().await.refresh_at = Instant::now();
+    fixture("session-internal-retried").await?;
+    assert!(!driver.is_finished());
+    assert_eq!(states.borrow().phase, Phase::Recovering);
+    held.check()?;
+    fixture("session-restore").await?;
     let moved = node_state(&mut states, |state| {
         state.phase == Phase::Ready
             && state.epoch > initial.epoch
@@ -265,7 +271,7 @@ async fn node_runtime_recovers_without_database_or_resurrecting_old_work() -> Re
     assert!(held.check().is_err());
     assert!(context.snapshot().is_err());
     println!(
-        "PASS automatic Welcome recovery, DNS migration, origin loss, settings, maintenance, expiry fencing, drain recovery, rotation, cancellation and directory ownership without database configuration"
+        "PASS automatic Welcome recovery, transient session errors, DNS migration, origin loss, settings, maintenance, expiry fencing, drain recovery, rotation, cancellation and directory ownership without database configuration"
     );
     Ok(())
 }
@@ -438,6 +444,27 @@ async fn node_rpc_balances_tls_origins_and_recovers_sessions() -> Result<()> {
         Code::OutOfRange | Code::ResourceExhausted
     ));
     let mut sessions = wire::node_sessions_client::NodeSessionsClient::new(raw.clone());
+    for (protocol, previous_epoch, code) in [
+        (PROTOCOL + 1, 0, Code::Unimplemented),
+        (PROTOCOL, u64::MAX, Code::InvalidArgument),
+    ] {
+        let hello = wire::SessionRequest {
+            message: Some(wire::session_request::Message::Hello(wire::Hello {
+                protocol,
+                boot_id: boot.to_string(),
+                connection_id: connection.to_string(),
+                previous_epoch,
+            })),
+        };
+        assert_eq!(
+            sessions
+                .node_session(client.request(futures_util::stream::iter([hello])))
+                .await
+                .unwrap_err()
+                .code(),
+            code,
+        );
+    }
     let too_large = wire::SessionRequest {
         message: Some(wire::session_request::Message::Hello(wire::Hello {
             protocol: PROTOCOL,

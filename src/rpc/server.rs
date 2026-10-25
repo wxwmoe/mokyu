@@ -826,10 +826,11 @@ impl NodeSessions for Service {
                 "first session message must be Hello",
             ));
         };
-        if hello.protocol != PROTOCOL || hello.previous_epoch > i64::MAX as u64 {
-            return Err(Status::failed_precondition(
-                "unsupported node protocol or epoch",
-            ));
+        if hello.protocol != PROTOCOL {
+            return Err(Status::unimplemented("unsupported node protocol"));
+        }
+        if hello.previous_epoch > i64::MAX as u64 {
+            return Err(Status::invalid_argument("invalid node epoch"));
         }
         let open = session::Open {
             boot: super::uuid(&hello.boot_id)?,

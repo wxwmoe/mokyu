@@ -73,7 +73,6 @@ impl NodeContext {
                     | Code::PermissionDenied
                     | Code::InvalidArgument
                     | Code::Unimplemented
-                    | Code::Internal
                     | Code::DataLoss
             ) {
                 self.invalidate(Phase::Fenced);
@@ -107,7 +106,7 @@ impl NodeContext {
             .welcome
             .run
             .clone()
-            .ok_or_else(|| Status::internal("control omitted run"))?;
+            .ok_or_else(|| Status::data_loss("control omitted run"))?;
         let previous = self.current.borrow().snapshot.clone();
         let lease = match previous.as_ref().map(|snapshot| snapshot.lease.clone()) {
             Some(lease) if lease.run == run && lease.check().is_ok() => {
@@ -157,7 +156,7 @@ impl NodeContext {
                 }
                 sequence = sequence
                     .checked_add(1)
-                    .ok_or_else(|| Status::internal("heartbeat sequence exhausted"))?;
+                    .ok_or_else(|| Status::data_loss("heartbeat sequence exhausted"))?;
                 let started = Instant::now();
                 let reply = session
                     .pulse_resources(
@@ -172,7 +171,7 @@ impl NodeContext {
                     .acknowledge(&lease, &batch, started, &reply.grants)?;
                 let state = reply
                     .state
-                    .ok_or_else(|| Status::internal("control omitted node state"))?;
+                    .ok_or_else(|| Status::data_loss("control omitted node state"))?;
                 self.publish(&lease, &settings, &state);
                 if !settings.matches(&state).map_err(invalid_settings)? {
                     self.synchronize(&lease, &mut settings).await?;
@@ -206,7 +205,7 @@ impl NodeContext {
             .get()
             .is_some_and(|current| budget.slot_bytes > current.slot_bytes)
         {
-            return Err(Status::internal(
+            return Err(Status::data_loss(
                 "runtime settings require a larger stream budget; restart required",
             ));
         }
@@ -217,7 +216,7 @@ impl NodeContext {
             reply
                 .state
                 .as_ref()
-                .ok_or_else(|| Status::internal("control omitted node state"))?,
+                .ok_or_else(|| Status::data_loss("control omitted node state"))?,
         );
         *settings = next;
         Ok(())
@@ -247,7 +246,7 @@ impl NodeContext {
 }
 
 fn invalid_settings(_: anyhow::Error) -> Status {
-    Status::internal("control returned invalid runtime settings")
+    Status::data_loss("control returned invalid runtime settings")
 }
 
 fn retry_delay(failures: u32) -> Duration {
