@@ -7,6 +7,8 @@ mod audit;
 mod cleanup;
 #[path = "node_inspection.rs"]
 mod inspection;
+#[path = "node_sweep.rs"]
+mod sweep;
 
 pub(super) async fn check(
     backend: &Backend,
@@ -497,5 +499,15 @@ pub(super) async fn check(
     .await?;
     inspection::check(backend, peer, &other, key, other_session.run, storage).await?;
     audit::check(backend, peer, &other, key, other_session.run, storage).await?;
+    sweep::check(
+        backend,
+        peer,
+        &other,
+        key,
+        other_session.run,
+        storage,
+        bucket,
+    )
+    .await?;
     Ok(())
 }

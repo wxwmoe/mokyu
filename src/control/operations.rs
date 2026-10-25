@@ -740,6 +740,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 if let Some(detail) = task["detail"].as_object_mut() {
                     detail.remove("source_operation");
                     detail.remove("source_inputs");
+                    detail.remove("sweep_page");
                 }
             }
             Ok(json!(tasks))
@@ -749,6 +750,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             if let Some(detail) = task["detail"].as_object_mut() {
                 detail.remove("source_operation");
                 detail.remove("source_inputs");
+                detail.remove("sweep_page");
             }
             Ok(task)
         }

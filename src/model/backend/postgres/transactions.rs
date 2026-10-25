@@ -5825,6 +5825,13 @@ pub(super) async fn task_view(pool: &PgPool, principal: &Principal, task: Uuid) 
 
 pub(super) async fn maintenance_mode(pool: &PgPool, enabled: bool) -> Result<()> {
     let mut tx = pool.begin().await?;
+    queries::storage_mode_lock().fetch_one(&mut *tx).await?;
+    if !enabled {
+        ensure!(
+            !queries::work::sweep_pending().fetch_one(&mut *tx).await?,
+            "pause or finish destructive sweep and wait for its active batch before disabling maintenance"
+        );
+    }
     queries::set_maintenance_mode(enabled)
         .execute(&mut *tx)
         .await?;

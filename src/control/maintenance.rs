@@ -41,6 +41,7 @@ fn job(mut value: Value) -> Result<Job> {
     if let Some(detail) = value["detail"].as_object_mut() {
         detail.remove("source_operation");
         detail.remove("source_inputs");
+        detail.remove("sweep_page");
     }
     let task_type = value["task_type"].as_str().unwrap_or("unknown").to_owned();
     value["task_type"] = json!(task_type);
@@ -116,7 +117,7 @@ mod tests {
             "bucket_id": null,
             "bucket_name": null,
             "error": null,
-            "detail": {"role": "child", "source_operation": {"principal":"private"}, "source_inputs": {"1":[1,0,null,null]}},
+            "detail": {"role": "child", "source_operation": {"principal":"private"}, "source_inputs": {"1":[1,0,null,null]}, "sweep_page": {"items":["private"]}},
             "blocked": null,
         }))
         .unwrap();

@@ -40,7 +40,7 @@ async fn node_work_batches_recover_results_and_preserve_read_pins() -> Result<()
     assert_eq!(context.budget.get().unwrap().database_connections, 0);
     fixture("lose-work").await?;
     fixture("work-seed").await?;
-    let worker = tokio::spawn(Worker::new(context.clone())?.run());
+    let mut worker = tokio::spawn(Worker::new(context.clone())?.run());
     fixture("work-wait-commit").await?;
     *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 3)]);
     dns.resolver.clear_cache();
@@ -70,6 +70,15 @@ async fn node_work_batches_recover_results_and_preserve_read_pins() -> Result<()
         }
     }
     fixture("audit-namespace").await?;
+    fixture("sweep-preview").await?;
+    fixture("sweep-start").await?;
+    fixture("sweep-deleted").await?;
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+    fixture("sweep-restart").await?;
+    worker = tokio::spawn(Worker::new(context.clone())?.run());
+    fixture("sweep-check").await?;
+    fixture("sweep-namespace").await?;
     context.stop();
     tokio::time::timeout(Duration::from_secs(10), driver).await???;
     tokio::time::timeout(Duration::from_secs(10), worker).await???;

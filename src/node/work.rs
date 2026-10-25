@@ -6,6 +6,9 @@ use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use uuid::Uuid;
 
+#[path = "sweep.rs"]
+mod sweep;
+
 pub(crate) struct Worker {
     node: Arc<NodeContext>,
     cache: reads::Cache,
@@ -243,6 +246,34 @@ impl Worker {
                             Ok(result) => result?,
                             Err(_) => vec![work::Outcome::Retry; count],
                         }
+                    }
+                    work::Plan::SweepScan {
+                        after,
+                        limit,
+                        bytes,
+                        ..
+                    } => {
+                        let timeout = Duration::from_secs(crate::config::seconds(
+                            &snapshot.runtime().maintenance.max_duration,
+                        )?);
+                        vec![
+                            tokio::time::timeout(timeout, self.scan(backend, after, limit, bytes))
+                                .await
+                                .ok()
+                                .and_then(Result::ok)
+                                .unwrap_or(work::Outcome::Retry),
+                        ]
+                    }
+                    work::Plan::SweepDelete { before, items, .. } => {
+                        let count = items.len();
+                        let timeout = Duration::from_secs(crate::config::seconds(
+                            &snapshot.runtime().maintenance.max_duration,
+                        )?);
+                        tokio::time::timeout(timeout, self.prune(backend, before, items))
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .unwrap_or_else(|| vec![work::Outcome::Retry; count])
                     }
                 };
                 Ok::<_, anyhow::Error>(work::Completion {

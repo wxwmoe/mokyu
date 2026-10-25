@@ -857,7 +857,7 @@ impl Storage {
     fn parse_path(path: &str) -> Option<Uuid> {
         parse_chunk_name(path).or_else(|| parse_chunk_name(path.strip_prefix("chunks/")?))
     }
-    fn parse_physical_path(path: &str) -> Option<Uuid> {
+    pub(crate) fn parse_physical_path(path: &str) -> Option<Uuid> {
         Self::parse_path(path).or_else(|| parse_chunk_name(path.strip_prefix("packs/")?))
     }
     pub fn parse_physical_path_for(&self, storage_id: Uuid, path: &str) -> Result<Option<Uuid>> {

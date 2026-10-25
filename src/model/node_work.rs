@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub(crate) const MAX_ITEMS: usize = 64;
+pub(crate) const SCAN_ITEMS: usize = 32;
 pub(crate) type Member = (super::Id, i64, i32, Vec<u8>);
 
 #[derive(Serialize, Deserialize)]
@@ -60,6 +61,14 @@ pub(crate) struct Inspection {
     pub previous: Option<Outcome>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListedObject {
+    pub path: String,
+    pub size: u64,
+    pub modified: DateTime<Utc>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
@@ -82,12 +91,26 @@ pub(crate) enum Plan {
         cursor: String,
         items: Vec<Inspection>,
     },
+    SweepScan {
+        storage: Uuid,
+        after: Option<String>,
+        limit: usize,
+        bytes: Option<u64>,
+    },
+    SweepDelete {
+        storage: Uuid,
+        before: DateTime<Utc>,
+        items: Vec<ListedObject>,
+    },
 }
 
 impl Plan {
     pub(crate) fn storage(&self) -> Uuid {
         match self {
-            Self::Collect { storage, .. } | Self::Audit { storage, .. } => *storage,
+            Self::Collect { storage, .. }
+            | Self::Audit { storage, .. }
+            | Self::SweepScan { storage, .. }
+            | Self::SweepDelete { storage, .. } => *storage,
             Self::Inspect { snapshot, .. } => snapshot.scope.storage_id,
         }
     }
@@ -100,6 +123,7 @@ pub(crate) enum Outcome {
     Retained { stored_at: DateTime<Utc> },
     Retry,
     Inspected { code: Option<String> },
+    Listed { items: Vec<ListedObject> },
 }
 
 #[derive(Clone, Serialize, Deserialize)]

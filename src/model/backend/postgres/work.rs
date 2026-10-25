@@ -8,6 +8,9 @@ mod sources;
 #[path = "work_audit.rs"]
 mod audit;
 
+#[path = "work_sweep.rs"]
+mod sweep;
+
 fn owned(node: &NodeState, run: Run, batch: &q::Batch) -> Result<()> {
     ensure!(
         batch.credential_generation == node.credential_generation
@@ -82,6 +85,7 @@ async fn finish(
     node: &NodeState,
     run: Run,
     completion: &work::Completion,
+    maintenance: bool,
 ) -> Result<()> {
     let row = q::batch(node.node_id, completion.operation)
         .fetch_optional(&mut **db)
@@ -203,6 +207,42 @@ async fn finish(
                 cursor,
                 items,
                 &completion.outcomes,
+            )
+            .await?;
+        }
+        work::Plan::SweepScan {
+            after,
+            limit,
+            bytes,
+            ..
+        } => {
+            (complete, error) = sweep::listed(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                detail,
+                after,
+                limit,
+                bytes,
+                &completion.outcomes,
+                maintenance,
+            )
+            .await?;
+        }
+        work::Plan::SweepDelete { before, items, .. } => {
+            error = sweep::deleted(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                detail,
+                before,
+                items,
+                &completion.outcomes,
+                maintenance,
             )
             .await?;
         }
@@ -475,6 +515,14 @@ pub(crate) async fn exchange(
     let hash = input.hash()?;
     let issued = write::operation_time(input.operation)?;
     let mut tx = pool.begin().await?;
+    let sweep_barrier = q::sweep_pending().fetch_one(&mut *tx).await?;
+    let maintenance_enabled: bool = sqlx::query_scalar(if sweep_barrier {
+        "SELECT maintenance FROM mokyu_meta WHERE singleton FOR UPDATE"
+    } else {
+        "SELECT maintenance FROM mokyu_meta WHERE singleton FOR SHARE"
+    })
+    .fetch_one(&mut *tx)
+    .await?;
     authenticate_rpc_node(&mut tx, node, key, false).await?;
     let session = require_node_run(&mut tx, node, input.run, true).await?;
     if let Some(row) = q::batch(node.node_id, input.operation)
@@ -492,7 +540,7 @@ pub(crate) async fn exchange(
         Error::NodeOperationExpired
     );
     if let Some(completion) = &input.completion {
-        finish(&mut tx, node, input.run, completion).await?;
+        finish(&mut tx, node, input.run, completion, maintenance_enabled).await?;
     }
     q::cleanup(node.node_id).execute(&mut *tx).await?;
     ensure!(
@@ -501,11 +549,16 @@ pub(crate) async fn exchange(
     );
     let token = Uuid::new_v4();
     let maintenance = Uuid::new_v4();
-    let allowed = vec![
-        "gc".to_owned(),
-        "cleanup".to_owned(),
-        "integrity".to_owned(),
-    ];
+    let allowed = if sweep_barrier {
+        vec!["sweep".to_owned()]
+    } else {
+        vec![
+            "gc".to_owned(),
+            "cleanup".to_owned(),
+            "integrity".to_owned(),
+            "sweep".to_owned(),
+        ]
+    };
     let task = queries::claim_task(
         input.class as i32,
         &[],
@@ -545,7 +598,22 @@ pub(crate) async fn exchange(
         )
         .await?
         {
-            let selected = if policy == "integrity" && detail.get("source_operation").is_none() {
+            let selected = if policy == "sweep" && detail["dry_run"] == false && !sweep_barrier {
+                // A sweep queued after the shared mode lock needs a new exclusive admission.
+                None
+            } else if policy == "sweep" {
+                sweep::prepare(
+                    &mut tx,
+                    Execution { id: task, token },
+                    detail,
+                    &profile,
+                    &record.prefix,
+                    input.max_items,
+                    maintenance_enabled,
+                )
+                .await?
+                .map(|plan| (plan, vec![]))
+            } else if policy == "integrity" && detail.get("source_operation").is_none() {
                 audit::prepare(
                     &mut tx,
                     Execution { id: task, token },
