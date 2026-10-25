@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Multipart,
     Copy,
     Objects,
     Catalog,
@@ -48,6 +49,12 @@ enum HttpCase {
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls and signed multipart management requests"]
+async fn node_http_multipart_manages_uploads_and_recovers_admission() -> Result<()> {
+    node_http_reads(HttpCase::Multipart).await
 }
 
 #[tokio::test]
@@ -254,6 +261,7 @@ async fn public_cache_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()
 }
 
 async fn node_http_reads(case: HttpCase) -> Result<()> {
+    let multipart = matches!(case, HttpCase::Multipart);
     let copy = matches!(case, HttpCase::Copy);
     let objects = matches!(case, HttpCase::Objects);
     let catalog = matches!(case, HttpCase::Catalog);
@@ -370,7 +378,10 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
-    if copy {
+    if multipart {
+        fixture("http-multipart").await?;
+        assert_eq!(reads.backend_gets(), 0);
+    } else if copy {
         let before = reads.backend_gets();
         fixture("http-copy-references").await?;
         assert_eq!(
@@ -455,7 +466,21 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("http-pending").await?;
         fixture("assert-no-reads").await?;
     }
-    let publishing = if copy {
+    let publishing = if multipart {
+        fixture("http-multipart-lose-reply").await?;
+        let publishing = tokio::spawn(fixture("http-multipart-replay"));
+        let point = path
+            .parent()
+            .unwrap()
+            .join("faults-a/node-multipart-changed.hit");
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !point.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        Some(publishing)
+    } else if copy {
         fixture("http-copy-lose-reply").await?;
         let publishing = tokio::spawn(fixture("http-copy-replay"));
         let replaced = path.parent().unwrap().join("copy-source-replaced");
@@ -512,7 +537,9 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
     context.client.addresses.lock().await.refresh_at = Instant::now();
     if let Some(publishing) = publishing {
         publishing.await??;
-        fixture(if copy {
+        fixture(if multipart {
+            "http-multipart-resume-reply"
+        } else if copy {
             "http-copy-resume-reply"
         } else if objects {
             "http-objects-resume-reply"
@@ -528,7 +555,10 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
     })
     .await?;
-    if copy {
+    if multipart {
+        fixture("http-multipart-reconnected").await?;
+        assert_eq!(reads.backend_gets(), 0);
+    } else if copy {
         fixture("http-copy-reconnected").await?;
     } else if objects {
         fixture("http-objects-reconnected").await?;
@@ -585,11 +615,13 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         let _ = web_server.await;
         return Ok(());
     }
-    if catalog || objects {
+    if catalog || objects || multipart {
         let faults = PathBuf::from(std::env::var("MOKYU_TEST_FAULT_DIR")?);
         let point = faults.join("node-catalog-prepared");
         tokio::fs::write(&point, b"pause").await?;
-        let fenced = tokio::spawn(fixture(if objects {
+        let fenced = tokio::spawn(fixture(if multipart {
+            "http-multipart-fenced"
+        } else if objects {
             "http-objects-fenced"
         } else {
             "http-catalog-fenced"

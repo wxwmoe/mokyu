@@ -18,6 +18,33 @@ pub(crate) struct Request {
 }
 
 impl Request {
+    pub(crate) async fn create_multipart(
+        &self,
+        reads: &Reads,
+        mut input: wire::CreateMultipartRequest,
+    ) -> Result<wire::MultipartReply> {
+        let credential = self.authorize(&input.access_key, &input.bucket)?;
+        input.run = Some(self.run.run.clone());
+        input.credential_revision = Some(credential.revision as u64);
+        input.operation_id = uuid::Uuid::now_v7().to_string();
+        let reply = reads.node.client.create_multipart(input).await?;
+        self.check()?;
+        Ok(reply)
+    }
+
+    pub(crate) async fn abort_multipart(
+        &self,
+        reads: &Reads,
+        mut input: wire::AbortMultipartRequest,
+    ) -> Result<wire::MultipartReply> {
+        let credential = self.authorize(&input.access_key, &input.bucket)?;
+        input.run = Some(self.run.run.clone());
+        input.credential_revision = Some(credential.revision as u64);
+        input.operation_id = uuid::Uuid::now_v7().to_string();
+        let reply = reads.node.client.abort_multipart(input).await?;
+        self.check()?;
+        Ok(reply)
+    }
     pub(crate) fn check(&self) -> Result<()> {
         Ok(self.run.check()?)
     }

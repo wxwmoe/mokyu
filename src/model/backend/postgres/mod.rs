@@ -176,3 +176,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         chunks: backend,
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/recovery/node_multipart.rs"]
+mod node_multipart_tests;

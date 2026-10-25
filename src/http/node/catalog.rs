@@ -33,25 +33,6 @@ pub(super) fn query(
     bucket: &str,
     key: &str,
 ) -> Result<Option<Query>> {
-    if !key.is_empty() {
-        let axum::extract::Query(values) =
-            axum::extract::Query::<Vec<(String, String)>>::try_from_uri(uri)?;
-        return Ok(
-            (method == Method::GET && values.iter().any(|(name, _)| name == "acl")).then(|| {
-                Query::ObjectAcl(wire::ObjectAclQuery {
-                    key: key.to_owned(),
-                })
-            }),
-        );
-    }
-    if method == Method::HEAD {
-        return Ok(
-            (!bucket.is_empty()).then_some(Query::DescribeBucket(wire::DescribeBucketQuery {}))
-        );
-    }
-    if method != Method::GET {
-        return Ok(None);
-    }
     let axum::extract::Query(values) =
         axum::extract::Query::<Vec<(String, String)>>::try_from_uri(uri)?;
     let field = |name: &str| -> Result<Option<String>> {
@@ -72,12 +53,55 @@ pub(super) fn query(
         );
         Ok(value)
     };
+    if !key.is_empty() {
+        return Ok(if method != Method::GET {
+            None
+        } else if let Some(upload_id) = field("uploadId")? {
+            let marker = field("part-number-marker")?
+                .map(|value| value.parse::<i32>())
+                .transpose()
+                .map_err(|_| s3s::s3_error!(InvalidArgument))?
+                .unwrap_or(0);
+            ensure!(
+                (0..=10000).contains(&marker),
+                s3s::s3_error!(InvalidArgument)
+            );
+            Some(Query::ListParts(wire::ListPartsQuery {
+                key: key.to_owned(),
+                upload_id,
+                marker,
+                limit: limit("max-parts", 1000, true)?,
+            }))
+        } else if field("acl")?.is_some() {
+            Some(Query::ObjectAcl(wire::ObjectAclQuery {
+                key: key.to_owned(),
+            }))
+        } else {
+            None
+        });
+    }
+    if method == Method::HEAD {
+        return Ok(
+            (!bucket.is_empty()).then_some(Query::DescribeBucket(wire::DescribeBucketQuery {}))
+        );
+    }
+    if method != Method::GET {
+        return Ok(None);
+    }
     Ok(if bucket.is_empty() {
         Some(Query::ListBuckets(wire::ListBucketsQuery {
             prefix: field("prefix")?,
             region: field("bucket-region")?,
             token: field("continuation-token")?,
             limit: limit("max-buckets", 10000, false)?,
+        }))
+    } else if field("uploads")?.is_some() {
+        Some(Query::ListUploads(wire::ListUploadsQuery {
+            prefix: field("prefix")?,
+            delimiter: field("delimiter")?,
+            key_marker: field("key-marker")?,
+            upload_marker: field("upload-id-marker")?,
+            limit: limit("max-uploads", 1000, true)?,
         }))
     } else if field("location")?.is_some() {
         Some(Query::DescribeBucket(wire::DescribeBucketQuery {}))
@@ -94,7 +118,7 @@ pub(super) fn query(
     })
 }
 
-fn result(bucket: &str, access: Option<&str>, query: Query) -> Result<Catalog> {
+pub(super) fn result(bucket: &str, access: Option<&str>, query: Query) -> Result<Catalog> {
     CURRENT.try_with(|current| -> Result<Catalog> {
         let current = current.borrow();
         let Some(PreparedRequest::Control(prepared)) = current.as_ref() else {
@@ -118,6 +142,10 @@ fn result(bucket: &str, access: Option<&str>, query: Query) -> Result<Catalog> {
         ensure!(
             !matches!(reply, Catalog::InvalidArgument),
             s3s::s3_error!(InvalidArgument)
+        );
+        ensure!(
+            !matches!(reply, Catalog::NoSuchUpload),
+            s3s::s3_error!(NoSuchUpload)
         );
         Ok(reply)
     })?
@@ -265,6 +293,20 @@ mod tests {
             query(&Method::GET, &"/bucket/key?acl".parse()?, "bucket", "key")?,
             Some(Query::ObjectAcl(_))
         ));
+        assert!(
+            matches!(query(&Method::GET, &"/bucket/key?uploadId=upload&part-number-marker=3&max-parts=0".parse()?, "bucket", "key")?,
+            Some(Query::ListParts(value)) if value.marker == 3 && value.limit == 0)
+        );
+        assert!(
+            matches!(query(&Method::GET, &"/bucket?uploads&delimiter=%2F&max-uploads=1".parse()?, "bucket", "")?,
+            Some(Query::ListUploads(value)) if value.limit == 1 && value.delimiter.as_deref() == Some("/"))
+        );
+        for uri in [
+            "/bucket/key?uploadId=a&uploadId=b",
+            "/bucket/key?uploadId=a&part-number-marker=10001",
+        ] {
+            assert!(query(&Method::GET, &uri.parse()?, "bucket", "key").is_err());
+        }
         assert!(matches!(
             query(&Method::HEAD, &"/bucket".parse()?, "bucket", "")?,
             Some(Query::DescribeBucket(_))

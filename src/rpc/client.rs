@@ -263,6 +263,22 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn create_multipart(
+        &self,
+        input: wire::CreateMultipartRequest,
+    ) -> Result<wire::MultipartReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/CreateMultipart")
+            .await
+    }
+
+    pub(crate) async fn abort_multipart(
+        &self,
+        input: wire::AbortMultipartRequest,
+    ) -> Result<wire::MultipartReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/AbortMultipart")
+            .await
+    }
+
     pub(crate) async fn report_read(
         &self,
         input: wire::ReadReportRequest,

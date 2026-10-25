@@ -23,6 +23,36 @@ pub struct Upload {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
+pub(crate) struct UploadSummary {
+    pub id: Uuid,
+    pub object_key: String,
+    pub created_at: DateTime<Utc>,
+    pub checksum_algorithm: Option<String>,
+    pub checksum_type: Option<String>,
+}
+
+impl From<Upload> for UploadSummary {
+    fn from(value: Upload) -> Self {
+        Self {
+            id: value.id,
+            object_key: value.object_key,
+            created_at: value.created_at,
+            checksum_algorithm: value.checksum_algorithm,
+            checksum_type: value.checksum_type,
+        }
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+pub(crate) struct UploadListing {
+    pub uploads: Vec<UploadSummary>,
+    pub prefixes: Vec<String>,
+    pub next_key: Option<String>,
+    pub next_id: Option<Uuid>,
+    pub truncated: bool,
+}
+
 pub(crate) struct WebUpload {
     pub user: Uuid,
     pub client_id: Uuid,

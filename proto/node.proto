@@ -51,6 +51,39 @@ service NodeObjects {
   rpc ChangeObjects(ChangeObjectsRequest) returns (ChangeObjectsReply);
 }
 
+service NodeMultipart {
+  rpc CreateMultipart(CreateMultipartRequest) returns (MultipartReply);
+  rpc AbortMultipart(AbortMultipartRequest) returns (MultipartReply);
+}
+
+message CreateMultipartRequest {
+  Run run = 1;
+  string operation_id = 2;
+  string access_key = 3;
+  optional uint64 credential_revision = 4;
+  string bucket = 5;
+  string key = 6;
+  bytes metadata_json = 7;
+  bool public_read = 8;
+  optional string algorithm = 9;
+  optional string checksum_type = 10;
+}
+
+message AbortMultipartRequest {
+  Run run = 1;
+  string operation_id = 2;
+  string access_key = 3;
+  optional uint64 credential_revision = 4;
+  string bucket = 5;
+  string key = 6;
+  string upload_id = 7;
+  optional string initiated = 8;
+}
+
+message MultipartReply {
+  optional string upload_id = 1;
+}
+
 message ChangeObjectsRequest {
   Run run = 1;
   string operation_id = 2;
@@ -193,12 +226,29 @@ message PrepareRequestInput {
     ObjectAclQuery object_acl = 9;
     ListBucketsQuery list_buckets = 7;
     ListObjectsQuery list_objects = 8;
+    ListUploadsQuery list_uploads = 10;
+    ListPartsQuery list_parts = 11;
   }
 }
 
 message DescribeBucketQuery {}
 
 message ObjectAclQuery { string key = 1; }
+
+message ListUploadsQuery {
+  optional string prefix = 1;
+  optional string delimiter = 2;
+  optional string key_marker = 3;
+  optional string upload_marker = 4;
+  int32 limit = 5;
+}
+
+message ListPartsQuery {
+  string key = 1;
+  string upload_id = 2;
+  int32 marker = 3;
+  int32 limit = 4;
+}
 
 message ListBucketsQuery {
   optional string prefix = 1;

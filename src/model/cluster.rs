@@ -9,6 +9,13 @@ use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait ClusterStore: Send + Sync {
+    async fn multipart_operation(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_multipart::Request,
+        max_active: Option<i64>,
+    ) -> Result<super::node_multipart::Outcome>;
     async fn change_objects(
         &self,
         node: &NodeState,

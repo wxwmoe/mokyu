@@ -52,6 +52,19 @@ pub(super) fn prepare(
                         token: value.token,
                         limit: value.limit.try_into().map_err(|_| invalid())?,
                     },
+                    Query::ListUploads(value) => node_request::Query::Uploads {
+                        prefix: value.prefix.unwrap_or_default(),
+                        delimiter: value.delimiter.unwrap_or_default(),
+                        key_marker: value.key_marker,
+                        upload_marker: value.upload_marker,
+                        limit: value.limit.try_into().map_err(|_| invalid())?,
+                    },
+                    Query::ListParts(value) => node_request::Query::Parts {
+                        key: value.key,
+                        upload: value.upload_id,
+                        marker: value.marker,
+                        limit: value.limit.try_into().map_err(|_| invalid())?,
+                    },
                 })
             })
             .transpose()?,

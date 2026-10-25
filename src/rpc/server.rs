@@ -9,6 +9,7 @@ use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status, Streaming};
 use wire::{
     node_control_server::{NodeControl, NodeControlServer},
+    node_multipart_server::{NodeMultipart, NodeMultipartServer},
     node_objects_server::{NodeObjects, NodeObjectsServer},
     node_reads_server::{NodeReads, NodeReadsServer},
     node_sessions_server::{NodeSessions, NodeSessionsServer},
@@ -66,6 +67,11 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     .add_service(
         NodeObjectsServer::new(service.clone())
             .max_decoding_message_size(model::node_object::REQUEST_LIMIT)
+            .max_encoding_message_size(MESSAGE_LIMIT),
+    )
+    .add_service(
+        NodeMultipartServer::new(service.clone())
+            .max_decoding_message_size(super::read::REQUEST_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
@@ -218,6 +224,10 @@ fn failure(error: anyhow::Error) -> Status {
             match code {
                 s3s::S3ErrorCode::AccessDenied => Status::permission_denied("access denied"),
                 s3s::S3ErrorCode::NoSuchBucket => Status::not_found("bucket was not found"),
+                s3s::S3ErrorCode::NoSuchUpload => Status::not_found("upload was not found"),
+                s3s::S3ErrorCode::SlowDown => {
+                    Status::resource_exhausted("multipart admission is busy")
+                }
                 s3s::S3ErrorCode::InvalidBucketState => {
                     Status::failed_precondition("bucket cannot accept writes")
                 }
@@ -251,6 +261,8 @@ fn failure(error: anyhow::Error) -> Status {
                 s3s::S3ErrorCode::OperationAborted => Some("OperationAborted"),
                 s3s::S3ErrorCode::PreconditionFailed => Some("PreconditionFailed"),
                 s3s::S3ErrorCode::IncompleteBody => Some("IncompleteBody"),
+                s3s::S3ErrorCode::NoSuchUpload => Some("NoSuchUpload"),
+                s3s::S3ErrorCode::SlowDown => Some("SlowDown"),
                 s3s::S3ErrorCode::InvalidArgument => Some("InvalidArgument"),
                 s3s::S3ErrorCode::InvalidRequest => Some("InvalidRequest"),
                 _ => None,
@@ -791,6 +803,46 @@ impl NodeSessions for Service {
             }
         };
         Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+#[tonic::async_trait]
+impl NodeMultipart for Service {
+    async fn create_multipart(
+        &self,
+        request: Request<wire::CreateMultipartRequest>,
+    ) -> Result<Response<wire::MultipartReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::multipart::create(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.multipart_operation(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+            self.app.config.uploads.max_active_uploads,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-multipart-changed").await;
+        Ok(Response::new(super::multipart::reply(reply)))
+    }
+
+    async fn abort_multipart(
+        &self,
+        request: Request<wire::AbortMultipartRequest>,
+    ) -> Result<Response<wire::MultipartReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::multipart::abort(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.multipart_operation(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+            None,
+        ))
+        .await?;
+        self.app.wake_gc.notify_one();
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-multipart-changed").await;
+        Ok(Response::new(super::multipart::reply(reply)))
     }
 }
 

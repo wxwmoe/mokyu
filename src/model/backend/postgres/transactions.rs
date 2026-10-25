@@ -2697,16 +2697,25 @@ pub(super) async fn create_multipart(
     input: MultipartCreate<'_>,
 ) -> Result<(Uuid, bool)> {
     let mut tx = pool.begin().await?;
-    input.authority.lock(&mut tx).await?;
+    let result = create_multipart_in(&mut tx, input).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+async fn create_multipart_in(
+    db: &mut Transaction<'_, Postgres>,
+    input: MultipartCreate<'_>,
+) -> Result<(Uuid, bool)> {
+    input.authority.lock(db).await?;
     let (state, paused) = queries::multipart_bucket(input.bucket)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **db)
         .await?;
     if state != "active" {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
     let expected = if let Some(web) = &input.web {
         if let Some((id, hash)) = queries::web_upload_identity(web.user, web.client_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **db)
             .await?
         {
             if hash != web.request_hash {
@@ -2717,7 +2726,7 @@ pub(super) async fn create_multipart(
             return Ok((id, true));
         }
         let expected = queries::web_upload_expected(input.bucket, input.key)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **db)
             .await?
             .flatten();
         if expected.is_some() && !web.overwrite {
@@ -2731,27 +2740,26 @@ pub(super) async fn create_multipart(
         return Err(s3s::s3_error!(OperationAborted).into());
     }
     if let Some(limit) = input.max_active {
-        queries::lock_upload_admission().execute(&mut *tx).await?;
-        if queries::active_upload_count().fetch_one(&mut *tx).await? >= limit {
+        queries::lock_upload_admission().execute(&mut **db).await?;
+        if queries::active_upload_count().fetch_one(&mut **db).await? >= limit {
             return Err(s3s::s3_error!(SlowDown).into());
         }
     }
     let id = queries::insert_multipart(&input)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **db)
         .await?;
     if let Some(web) = input.web {
         queries::insert_web_upload(id, &web, expected)
-            .execute(&mut *tx)
+            .execute(&mut **db)
             .await?;
         checkpoint_event(
-            &mut tx,
+            db,
             "upload.create",
             &id.to_string(),
             json!({"bucket_id":input.bucket,"key":input.key,"size":web.size}),
         )
         .await?;
     }
-    tx.commit().await?;
     Ok((id, false))
 }
 
@@ -2978,10 +2986,21 @@ pub(super) async fn abort_multipart(
     expired: bool,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    authority.lock(&mut tx).await?;
+    let result = abort_multipart_in(&mut tx, authority, upload, expired).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+async fn abort_multipart_in(
+    db: &mut Transaction<'_, Postgres>,
+    authority: &Permit,
+    upload: Uuid,
+    expired: bool,
+) -> Result<bool> {
+    authority.lock(db).await?;
     if expired
         && queries::lock_upload_state(upload)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **db)
             .await?
             .as_deref()
             != Some("active")
@@ -2989,7 +3008,7 @@ pub(super) async fn abort_multipart(
         return Ok(false);
     }
     if queries::abort_multipart(upload, expired)
-        .execute(&mut *tx)
+        .execute(&mut **db)
         .await?
         .rows_affected()
         == 0
@@ -3000,22 +3019,21 @@ pub(super) async fn abort_multipart(
         return Err(s3s::s3_error!(NoSuchUpload).into());
     }
     queries::retire_upload_parts(&upload)
-        .execute(&mut *tx)
+        .execute(&mut **db)
         .await?;
     queries::delete_upload_parts(&upload)
-        .execute(&mut *tx)
+        .execute(&mut **db)
         .await?;
     if authority.principal.user_id().is_some() && crate::model::audit::active() {
-        let bucket = queries::upload_bucket(upload).fetch_one(&mut *tx).await?;
+        let bucket = queries::upload_bucket(upload).fetch_one(&mut **db).await?;
         checkpoint_event(
-            &mut tx,
+            db,
             "upload.abort",
             &upload.to_string(),
             json!({"bucket_id":bucket}),
         )
         .await?;
     }
-    tx.commit().await?;
     Ok(true)
 }
 
@@ -11059,6 +11077,70 @@ pub(super) async fn prepare_node_request(
                         };
                         Catalog::Buckets { rows, next }
                     }
+                    Query::Uploads {
+                        prefix,
+                        delimiter,
+                        key_marker,
+                        upload_marker,
+                        limit,
+                    } => {
+                        let marker = if key_marker.is_some() {
+                            upload_marker
+                                .as_deref()
+                                .map(Uuid::parse_str)
+                                .transpose()
+                                .map_err(|_| s3s::s3_error!(InvalidArgument))?
+                        } else {
+                            None
+                        };
+                        let bucket = bucket.as_ref().context("catalog bucket missing")?;
+                        let mut page = crate::upload::listing::Page::new(
+                            prefix.clone(),
+                            delimiter,
+                            key_marker,
+                            marker,
+                            limit,
+                        )?;
+                        while let Some((after, inclusive, id)) = page.position() {
+                            let rows = queries::node_upload_page(
+                                bucket.id, access, &prefix, after, inclusive, id,
+                            )
+                            .fetch_all(&mut *tx)
+                            .await?;
+                            page.append(rows)?;
+                        }
+                        Catalog::Uploads(page.finish())
+                    }
+                    Query::Parts {
+                        key,
+                        upload,
+                        marker,
+                        limit,
+                    } => {
+                        let id =
+                            Uuid::parse_str(&upload).map_err(|_| s3s::s3_error!(NoSuchUpload))?;
+                        let upload = queries::multipart_upload(
+                            id,
+                            bucket.as_ref().context("catalog bucket missing")?.id,
+                            &key,
+                            access,
+                        )
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .ok_or_else(|| s3s::s3_error!(NoSuchUpload))?;
+                        ensure!(
+                            matches!(upload.state.as_str(), "active" | "completing"),
+                            s3s::s3_error!(NoSuchUpload)
+                        );
+                        let rows = queries::upload_parts_page(id, marker, limit as i64 + 1)
+                            .fetch_all(&mut *tx)
+                            .await?;
+                        Catalog::Parts {
+                            rows,
+                            algorithm: upload.checksum_algorithm,
+                            checksum_type: upload.checksum_type,
+                        }
+                    }
                     Query::Objects {
                         prefix,
                         delimiter,
@@ -11101,6 +11183,13 @@ pub(super) async fn prepare_node_request(
                 {
                     Catalog::InvalidArgument
                 }
+                Err(error)
+                    if error
+                        .downcast_ref::<s3s::S3Error>()
+                        .is_some_and(|error| error.code() == &s3s::S3ErrorCode::NoSuchUpload) =>
+                {
+                    Catalog::NoSuchUpload
+                }
                 Err(error) => return Err(error),
             });
         }
@@ -11108,4 +11197,118 @@ pub(super) async fn prepare_node_request(
     require_node_run(&mut tx, node, input.run, false).await?;
     tx.commit().await?;
     Ok(request::Reply { context, catalog })
+}
+
+pub(super) async fn node_multipart_operation(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_multipart::Request,
+    max_active: Option<i64>,
+) -> Result<crate::model::node_multipart::Outcome> {
+    use crate::model::node_multipart::{Operation, Outcome};
+    let hash = input.validate()?;
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, node, key, false).await?;
+    ensure!(node.role == "data", Error::NodeAuthentication);
+    let session = require_node_run(&mut tx, node, input.run, true).await?;
+    queries::lock_staging(format!(
+        "mokyu:node-multipart:{}:{}",
+        node.node_id, input.operation
+    ))
+    .execute(&mut *tx)
+    .await?;
+    if let Some((previous, generation, outcome)) =
+        queries::node_multipart_operation(node.node_id, input.operation)
+            .fetch_optional(&mut *tx)
+            .await?
+    {
+        ensure!(previous == hash, Error::NodeOperationConflict);
+        ensure!(generation == node.credential_generation, Error::NodeExpired);
+        tx.commit().await?;
+        return Ok(outcome.0);
+    }
+    let issued = write::operation_time(input.operation)?;
+    let now = queries::node_clock().fetch_one(&mut *tx).await?;
+    ensure!(
+        issued <= now + chrono::Duration::seconds(30)
+            && issued >= now - chrono::Duration::minutes(15),
+        Error::NodeOperationExpired
+    );
+    ensure!(
+        !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
+        Error::NodeInactive
+    );
+    let intent = input.intent;
+    let route = crate::model::ReadRoute::Bucket {
+        name: intent.bucket,
+        key: String::new(),
+        alias: None,
+    };
+    let bucket = queries::node_read_bucket(&route)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    let mut authority = Permit::for_action(
+        Principal::Service {
+            access_key: intent.access.clone(),
+            revision: intent.credential_revision,
+        },
+        bucket.id,
+        Action::Write,
+    );
+    let outcome = match intent.operation {
+        Operation::Create {
+            metadata,
+            public,
+            algorithm,
+            checksum_type,
+        } => {
+            if public {
+                authority.add(bucket.id, Action::Acl);
+            }
+            let (upload, _) = create_multipart_in(
+                &mut tx,
+                MultipartCreate {
+                    authority: &authority,
+                    bucket: bucket.id,
+                    key: &intent.key,
+                    access: &intent.access,
+                    metadata,
+                    public,
+                    algorithm,
+                    checksum_type,
+                    web: None,
+                    max_active,
+                },
+            )
+            .await?;
+            Outcome::Created { upload }
+        }
+        Operation::Abort { upload, initiated } => {
+            authority.lock(&mut tx).await?;
+            let owned = queries::multipart_upload(upload, bucket.id, &intent.key, &intent.access)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| s3s::s3_error!(NoSuchUpload))?;
+            if let Some(value) = initiated {
+                ensure!(
+                    s3s::dto::Timestamp::parse(s3s::dto::TimestampFormat::HttpDate, &value)?
+                        == crate::http::gateway::stamp(owned.created_at),
+                    s3s::s3_error!(PreconditionFailed)
+                );
+            }
+            abort_multipart_in(&mut tx, &authority, upload, false).await?;
+            Outcome::Aborted
+        }
+    };
+    queries::save_node_multipart_operation(node, input.operation, &hash, &outcome)
+        .execute(&mut *tx)
+        .await?;
+    queries::expire_node_multipart_operations(node.node_id)
+        .execute(&mut *tx)
+        .await?;
+    require_node_run(&mut tx, node, input.run, true).await?;
+    tx.commit().await?;
+    Ok(outcome)
 }

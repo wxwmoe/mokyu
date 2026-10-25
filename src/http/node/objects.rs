@@ -1,6 +1,6 @@
 use super::*;
 
-fn prepared() -> Result<crate::node::request::Request> {
+pub(super) fn prepared() -> Result<crate::node::request::Request> {
     let value = CURRENT
         .try_with(|value| value.borrow_mut().take())?
         .context("object request missing")?;

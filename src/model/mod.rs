@@ -19,6 +19,7 @@ pub(crate) mod metrics;
 pub(crate) mod multipart;
 pub(crate) mod node;
 pub(crate) mod node_chunk;
+pub(crate) mod node_multipart;
 pub(crate) mod node_object;
 pub(crate) mod node_observation;
 pub(crate) mod node_raw;

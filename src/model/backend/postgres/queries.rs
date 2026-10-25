@@ -7514,6 +7514,16 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn multipart_operation(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_multipart::Request,
+        max_active: Option<i64>,
+    ) -> Result<crate::model::node_multipart::Outcome> {
+        transactions::node_multipart_operation(&self.pool, node, key, input, max_active).await
+    }
+
     async fn change_objects(
         &self,
         node: &crate::cluster::NodeState,
@@ -10941,4 +10951,42 @@ pub(super) fn node_write_release_permits<'q>(
 ) -> Statement<'q> {
     sqlx::query("DELETE FROM storage_permits p USING node_write_permits n,node_writes w WHERE p.token=n.token AND w.node_id=n.node_id AND w.operation_id=n.operation_id AND w.node_id=$1 AND w.credential_generation=$2 AND w.boot_id=$3 AND w.fence=$4 AND (w.stream_id=ANY($5) OR p.token=ANY($6))")
         .bind(state.node_id).bind(state.credential_generation).bind(run.boot).bind(run.fence).bind(streams).bind(permits)
+}
+
+pub(super) fn node_multipart_operation(
+    node: Uuid,
+    operation: Uuid,
+) -> Rows<
+    'static,
+    (
+        Vec<u8>,
+        i64,
+        sqlx::types::Json<crate::model::node_multipart::Outcome>,
+    ),
+> {
+    sqlx::query_as("SELECT request_hash,credential_generation,outcome FROM node_multipart_operations WHERE node_id=$1 AND operation_id=$2").bind(node).bind(operation)
+}
+
+pub(super) fn save_node_multipart_operation<'q>(
+    node: &crate::cluster::NodeState,
+    operation: Uuid,
+    hash: &'q [u8],
+    outcome: &'q crate::model::node_multipart::Outcome,
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO node_multipart_operations(node_id,operation_id,credential_generation,request_hash,outcome) VALUES($1,$2,$3,$4,$5)").bind(node.node_id).bind(operation).bind(node.credential_generation).bind(hash).bind(sqlx::types::Json(outcome))
+}
+
+pub(super) fn expire_node_multipart_operations(node: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM node_multipart_operations WHERE node_id=$1 AND operation_id IN (SELECT operation_id FROM node_multipart_operations WHERE node_id=$1 AND created_at<clock_timestamp()-interval '1 day' ORDER BY created_at LIMIT 64)").bind(node)
+}
+
+pub(super) fn node_upload_page<'q>(
+    bucket: Uuid,
+    access: &'q str,
+    prefix: &'q str,
+    after: &'q str,
+    inclusive: bool,
+    id: Option<Uuid>,
+) -> Rows<'q, crate::model::multipart::UploadSummary> {
+    sqlx::query_as("SELECT id,object_key,created_at,checksum_algorithm,checksum_type FROM uploads WHERE bucket_id=$1 AND access_key=$2 AND state IN ('active','completing') AND starts_with(object_key,$3) AND (object_key>$4 OR (object_key=$4 AND ($5 OR id>$6))) ORDER BY object_key,id LIMIT 64").bind(bucket).bind(access).bind(prefix).bind(after).bind(inclusive).bind(id)
 }

@@ -43,6 +43,8 @@ pub(crate) fn error(error: anyhow::Error) -> s3s::S3Error {
                 }
                 "AccessDenied" => s3s::S3ErrorCode::AccessDenied,
                 "NoSuchBucket" => s3s::S3ErrorCode::NoSuchBucket,
+                "NoSuchUpload" => s3s::S3ErrorCode::NoSuchUpload,
+                "SlowDown" => s3s::S3ErrorCode::SlowDown,
                 "InvalidBucketState" => s3s::S3ErrorCode::InvalidBucketState,
                 "OperationAborted" => s3s::S3ErrorCode::OperationAborted,
                 "PreconditionFailed" => s3s::S3ErrorCode::PreconditionFailed,

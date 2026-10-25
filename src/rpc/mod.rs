@@ -1,4 +1,5 @@
 pub(crate) mod client;
+mod multipart;
 mod object;
 pub(crate) mod read;
 mod request;

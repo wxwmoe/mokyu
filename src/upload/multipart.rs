@@ -21,6 +21,34 @@ pub use crate::model::multipart::Upload;
 pub(crate) use crate::model::multipart::WebUpload;
 use crate::model::multipart::{MultipartCreate, PartStitch, SeedConsumption};
 
+pub(crate) fn checksum_type(
+    algorithm: Option<&str>,
+    requested: Option<&str>,
+) -> Result<Option<String>> {
+    let checksum_type = algorithm.map(|algorithm| {
+        requested
+            .unwrap_or(if algorithm == "CRC64NVME" {
+                "FULL_OBJECT"
+            } else {
+                "COMPOSITE"
+            })
+            .to_owned()
+    });
+    if let Some(algorithm) = algorithm {
+        Integrity::new(&hyper::HeaderMap::new(), Some(algorithm))?;
+        if !matches!(checksum_type.as_deref(), Some("FULL_OBJECT" | "COMPOSITE"))
+            || (checksum_type.as_deref() == Some("FULL_OBJECT")
+                && !matches!(algorithm, "CRC32" | "CRC32C" | "CRC64NVME"))
+            || (algorithm == "CRC64NVME" && checksum_type.as_deref() != Some("FULL_OBJECT"))
+        {
+            return Err(s3_error!(InvalidRequest, "invalid multipart checksum type").into());
+        }
+    } else if requested.is_some() {
+        return Err(s3_error!(InvalidRequest).into());
+    }
+    Ok(checksum_type)
+}
+
 pub struct Seed {
     pub upload: Uuid,
     pub spans: Vec<(Id, i64, usize)>,
@@ -103,34 +131,10 @@ impl App {
             return Err(s3_error!(InvalidArgument).into());
         }
         let algorithm = i.checksum_algorithm.as_ref().map(|a| a.as_str().to_owned());
-        let checksum_type = if algorithm.is_some() {
-            Some(
-                i.checksum_type
-                    .as_ref()
-                    .map(|t| t.as_str())
-                    .unwrap_or(if algorithm.as_deref() == Some("CRC64NVME") {
-                        "FULL_OBJECT"
-                    } else {
-                        "COMPOSITE"
-                    })
-                    .to_owned(),
-            )
-        } else {
-            None
-        };
-        if let Some(a) = &algorithm {
-            Integrity::new(&hyper::HeaderMap::new(), Some(a))?;
-            if !matches!(checksum_type.as_deref(), Some("FULL_OBJECT" | "COMPOSITE"))
-                || (checksum_type.as_deref() == Some("FULL_OBJECT")
-                    && !matches!(a.as_str(), "CRC32" | "CRC32C" | "CRC64NVME"))
-                || (a == "CRC64NVME" && checksum_type.as_deref() != Some("FULL_OBJECT"))
-            {
-                return Err(s3_error!(InvalidRequest, "invalid multipart checksum type").into());
-            }
-        }
-        if algorithm.is_none() && i.checksum_type.is_some() {
-            return Err(s3_error!(InvalidRequest).into());
-        }
+        let checksum_type = checksum_type(
+            algorithm.as_deref(),
+            i.checksum_type.as_ref().map(|value| value.as_str()),
+        )?;
         let _coord = self.coord.lock().await;
         self.writable()?;
         let (id, existing) = self
@@ -1078,34 +1082,7 @@ impl App {
             self.multipart.parts(u.id, marker, limit as i64 + 1).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("list-parts-read").await;
-        let truncated = rows.len() > limit as usize;
-        let mut parts = Vec::new();
-        let mut last = marker;
-        for (number, size, etag, touched_at, checksums) in rows.into_iter().take(limit as usize) {
-            let mut part = Part {
-                part_number: Some(number),
-                size: Some(size),
-                e_tag: Some(ETag::Strong(etag)),
-                last_modified: Some(stamp(touched_at)),
-                ..Default::default()
-            };
-            checksums!(part, &checksums);
-            parts.push(part);
-            last = number;
-        }
-        Ok(S3Response::new(ListPartsOutput {
-            bucket: Some(i.bucket),
-            key: Some(i.key),
-            upload_id: Some(i.upload_id),
-            max_parts: Some(limit),
-            part_number_marker: Some(marker),
-            next_part_number_marker: truncated.then_some(last),
-            is_truncated: Some(truncated),
-            parts: Some(parts),
-            checksum_algorithm: u.checksum_algorithm.map(ChecksumAlgorithm::from),
-            checksum_type: u.checksum_type.map(ChecksumType::from),
-            ..Default::default()
-        }))
+        listed_parts(i, rows, u.checksum_algorithm, u.checksum_type)
     }
     pub async fn list_uploads(
         &self,
@@ -1132,9 +1109,7 @@ impl App {
         }
         let prefix = i.prefix.as_deref().unwrap_or("");
         let delimiter = i.delimiter.as_deref().unwrap_or("");
-        let mut cursor = i.key_marker.clone().unwrap_or_else(|| prefix.to_string());
-        let mut inclusive = i.key_marker.is_none();
-        let mut cursor_id = if i.key_marker.is_some() {
+        let marker = if i.key_marker.is_some() {
             i.upload_id_marker
                 .as_deref()
                 .map(Uuid::parse_str)
@@ -1143,99 +1118,21 @@ impl App {
         } else {
             None
         };
-        let mut uploads = Vec::new();
-        let mut prefixes = Vec::new();
-        let mut next_key = None;
-        let mut next_id = None;
-        let mut truncated = false;
-        let encode = |s: String| {
-            if i.encoding_type.is_some() {
-                crate::app::listing::encode_key(&s)
-            } else {
-                s
-            }
-        };
-        if limit > 0 {
-            'pages: loop {
-                let rows: Vec<Upload> = self
-                    .multipart
-                    .uploads(b.id, access, prefix, &cursor, inclusive, cursor_id)
-                    .await?;
-                if rows.is_empty() {
-                    break;
-                }
-                for u in rows {
-                    if u.object_key < cursor
-                        || (u.object_key == cursor
-                            && !inclusive
-                            && cursor_id.is_none_or(|id| u.id <= id))
-                    {
-                        continue;
-                    }
-                    let group = if delimiter.is_empty() {
-                        None
-                    } else {
-                        u.object_key[prefix.len()..]
-                            .find(delimiter)
-                            .map(|n| u.object_key[..prefix.len() + n + delimiter.len()].to_string())
-                    };
-                    if let Some(group) = group {
-                        let after = crate::app::listing::successor(&group);
-                        cursor = after.clone().unwrap_or_default();
-                        inclusive = true;
-                        cursor_id = None;
-                        if i.key_marker.as_ref().is_none_or(|m| group > *m) {
-                            if uploads.len() + prefixes.len() == limit as usize {
-                                truncated = true;
-                                break 'pages;
-                            }
-                            next_key = Some(encode(group.clone()));
-                            next_id = None;
-                            prefixes.push(CommonPrefix {
-                                prefix: Some(encode(group)),
-                            });
-                        }
-                        if after.is_none() {
-                            break 'pages;
-                        }
-                    } else {
-                        if uploads.len() + prefixes.len() == limit as usize {
-                            truncated = true;
-                            break 'pages;
-                        }
-                        cursor = u.object_key.clone();
-                        inclusive = false;
-                        cursor_id = Some(u.id);
-                        next_key = Some(encode(u.object_key.clone()));
-                        next_id = Some(u.id.to_string());
-                        uploads.push(MultipartUpload {
-                            key: Some(encode(u.object_key)),
-                            upload_id: Some(u.id.to_string()),
-                            initiated: Some(stamp(u.created_at)),
-                            storage_class: Some(StorageClass::from_static("STANDARD")),
-                            checksum_algorithm: u.checksum_algorithm.map(ChecksumAlgorithm::from),
-                            checksum_type: u.checksum_type.map(ChecksumType::from),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
+        let mut page = super::listing::Page::new(
+            prefix.to_owned(),
+            delimiter.to_owned(),
+            i.key_marker.clone(),
+            marker,
+            limit as usize,
+        )?;
+        while let Some((key, inclusive, id)) = page.position() {
+            let rows = self
+                .multipart
+                .uploads(b.id, access, prefix, key, inclusive, id)
+                .await?;
+            page.append(rows.into_iter().map(Into::into).collect())?;
         }
-        Ok(S3Response::new(ListMultipartUploadsOutput {
-            bucket: Some(i.bucket),
-            uploads: Some(uploads),
-            common_prefixes: Some(prefixes),
-            delimiter: i.delimiter.map(encode),
-            is_truncated: Some(truncated),
-            max_uploads: Some(limit),
-            next_key_marker: if truncated { next_key } else { None },
-            next_upload_id_marker: if truncated { next_id } else { None },
-            key_marker: i.key_marker.map(encode),
-            upload_id_marker: i.upload_id_marker,
-            prefix: i.prefix.map(encode),
-            encoding_type: i.encoding_type,
-            ..Default::default()
-        }))
+        super::listing::output(i, page.finish())
     }
 }
 
@@ -1343,4 +1240,46 @@ pub(super) fn completion_checksums(
         }
     }
     Ok((payload_digest, sums))
+}
+
+pub(crate) fn listed_parts(
+    i: ListPartsInput,
+    rows: Vec<crate::model::multipart::UploadPart>,
+    algorithm: Option<String>,
+    checksum_type: Option<String>,
+) -> Result<S3Response<ListPartsOutput>> {
+    let limit = i.max_parts.unwrap_or(1000);
+    let marker = i.part_number_marker.unwrap_or(0);
+    ensure!(
+        (0..=1000).contains(&limit) && (0..=10000).contains(&marker),
+        s3_error!(InvalidArgument)
+    );
+    let truncated = rows.len() > limit as usize;
+    let mut parts = Vec::new();
+    let mut last = marker;
+    for (number, size, etag, touched_at, checksums) in rows.into_iter().take(limit as usize) {
+        let mut part = Part {
+            part_number: Some(number),
+            size: Some(size),
+            e_tag: Some(ETag::Strong(etag)),
+            last_modified: Some(stamp(touched_at)),
+            ..Default::default()
+        };
+        checksums!(part, &checksums);
+        parts.push(part);
+        last = number;
+    }
+    Ok(S3Response::new(ListPartsOutput {
+        bucket: Some(i.bucket),
+        key: Some(i.key),
+        upload_id: Some(i.upload_id),
+        max_parts: Some(limit),
+        part_number_marker: Some(marker),
+        next_part_number_marker: truncated.then_some(last),
+        is_truncated: Some(truncated),
+        parts: Some(parts),
+        checksum_algorithm: algorithm.map(ChecksumAlgorithm::from),
+        checksum_type: checksum_type.map(ChecksumType::from),
+        ..Default::default()
+    }))
 }

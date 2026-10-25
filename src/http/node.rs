@@ -27,6 +27,7 @@ use tracing::Instrument;
 
 mod catalog;
 mod copy;
+mod multipart;
 mod objects;
 
 enum PreparedRequest {
@@ -515,7 +516,7 @@ impl Gateway {
                     || target
                         .query
                         .iter()
-                        .any(|value| matches!(value.as_str(), "acl" | "delete"))
+                        .any(|value| matches!(value.as_str(), "acl" | "delete" | "uploads"))
                 {
                     let query = catalog::query(request.method(), request.uri(), &bucket, &key)?;
                     let memory = Arc::new(
@@ -789,6 +790,32 @@ impl S3Access for Gateway {
 
 #[async_trait::async_trait]
 impl S3 for Gateway {
+    async fn create_multipart_upload(
+        &self,
+        request: S3Request<CreateMultipartUploadInput>,
+    ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
+        self.create_multipart(request)
+            .await
+            .map_err(delivery::error)
+    }
+    async fn abort_multipart_upload(
+        &self,
+        request: S3Request<AbortMultipartUploadInput>,
+    ) -> S3Result<S3Response<AbortMultipartUploadOutput>> {
+        self.abort_multipart(request).await.map_err(delivery::error)
+    }
+    async fn list_multipart_uploads(
+        &self,
+        request: S3Request<ListMultipartUploadsInput>,
+    ) -> S3Result<S3Response<ListMultipartUploadsOutput>> {
+        multipart::uploads(request).map_err(delivery::error)
+    }
+    async fn list_parts(
+        &self,
+        request: S3Request<ListPartsInput>,
+    ) -> S3Result<S3Response<ListPartsOutput>> {
+        multipart::parts(request).map_err(delivery::error)
+    }
     async fn copy_object(
         &self,
         request: S3Request<CopyObjectInput>,

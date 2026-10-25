@@ -22,11 +22,25 @@ pub(crate) enum Query {
         token: Option<String>,
         limit: usize,
     },
+    Uploads {
+        prefix: String,
+        delimiter: String,
+        key_marker: Option<String>,
+        upload_marker: Option<String>,
+        limit: usize,
+    },
+    Parts {
+        key: String,
+        upload: String,
+        marker: i32,
+        limit: usize,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Catalog {
     InvalidArgument,
+    NoSuchUpload,
     Bucket,
     Acl {
         public: Option<bool>,
@@ -39,6 +53,12 @@ pub(crate) enum Catalog {
         rows: Vec<Object>,
         prefixes: Vec<String>,
         next: Option<String>,
+    },
+    Uploads(super::multipart::UploadListing),
+    Parts {
+        rows: Vec<super::multipart::UploadPart>,
+        algorithm: Option<String>,
+        checksum_type: Option<String>,
     },
 }
 
@@ -156,6 +176,32 @@ impl Prepare {
                             && text(delimiter)
                             && after.as_deref().is_none_or(text)
                             && cursor.as_deref().is_none_or(token),
+                    Query::Uploads {
+                        prefix,
+                        delimiter,
+                        key_marker,
+                        upload_marker,
+                        limit,
+                    } =>
+                        bucket()
+                            && *limit <= 1000
+                            && text(prefix)
+                            && text(delimiter)
+                            && key_marker.as_deref().is_none_or(text)
+                            && upload_marker.as_ref().is_none_or(|id| id.len() <= 128),
+                    Query::Parts {
+                        key,
+                        upload,
+                        marker,
+                        limit,
+                    } =>
+                        bucket()
+                            && !key.is_empty()
+                            && text(key)
+                            && !key.contains('\0')
+                            && upload.len() <= 128
+                            && (0..=10000).contains(marker)
+                            && *limit <= 1000,
                 },
                 "invalid catalog query"
             );
