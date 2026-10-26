@@ -23,6 +23,9 @@ mod raw;
 #[path = "work_conversion.rs"]
 mod conversion;
 
+#[path = "work_migration.rs"]
+pub(crate) mod migration;
+
 #[path = "work_write_packs.rs"]
 mod write_packs;
 
@@ -45,12 +48,21 @@ pub(super) async fn finish_chunk_packs(
     write_packs::finish(db, row, items, batch, result, key).await
 }
 
-pub(super) async fn seal_conversion(
+pub(super) async fn seal_task_write(
     db: &mut Transaction<'_, Postgres>,
     row: &queries::NodeWrite,
     input: &write::Publish,
 ) -> Result<()> {
-    conversion::seal(db, row, input).await
+    let migration: bool =
+        sqlx::query_scalar("SELECT task_type='storage_migration' FROM tasks WHERE id=$1")
+            .bind(row.owner_task_id.ok_or(Error::NodeOperationConflict)?)
+            .fetch_one(&mut **db)
+            .await?;
+    if migration {
+        self::migration::seal(db, row, input).await
+    } else {
+        conversion::seal(db, row, input).await
+    }
 }
 
 fn owned(node: &NodeState, run: Run, batch: &q::Batch) -> Result<()> {
@@ -175,6 +187,20 @@ async fn finish(
         work::Plan::ConvertRaw { .. } => {
             ensure!(!maintenance, Error::OperationAborted);
             (complete, error) = conversion::finish(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                &detail,
+                &completion.outcomes,
+            )
+            .await?;
+            release_task_inputs(db, task).await?;
+        }
+        work::Plan::Migrate { .. } => {
+            ensure!(!maintenance, Error::OperationAborted);
+            (complete, error) = migration::finish(
                 db,
                 Execution {
                     id: task,
@@ -393,28 +419,15 @@ async fn permits(
     token: Uuid,
     maintenance: Uuid,
     profile: &crate::storage::profile::StorageProfile,
-    inspect: bool,
-    upload: bool,
+    direction: &str,
 ) -> Result<bool> {
-    for (direction, limit) in [
-        ("control", profile.control_concurrency),
-        (
-            if upload {
-                "upload"
-            } else if inspect {
-                "integrity"
-            } else {
-                "maintenance"
-            },
-            if upload {
-                profile.upload_concurrency
-            } else if inspect {
-                Some(profile.integrity_concurrency)
-            } else {
-                profile.maintenance_concurrency
-            },
-        ),
-    ] {
+    let limit = match direction {
+        "upload" => profile.upload_concurrency,
+        "integrity" => Some(profile.integrity_concurrency),
+        "migration" => profile.migration_concurrency,
+        _ => profile.maintenance_concurrency,
+    };
+    for (direction, limit) in [("control", profile.control_concurrency), (direction, limit)] {
         queries::lock_storage_permits(format!("mokyu:store:{}:{direction}", profile.storage_id))
             .execute(&mut *db)
             .await?;
@@ -433,20 +446,9 @@ async fn permits(
     queries::insert_storage_permit(token, profile.storage_id, "control", node)
         .execute(&mut *db)
         .await?;
-    queries::insert_storage_permit(
-        maintenance,
-        profile.storage_id,
-        if upload {
-            "upload"
-        } else if inspect {
-            "integrity"
-        } else {
-            "maintenance"
-        },
-        node,
-    )
-    .execute(&mut *db)
-    .await?;
+    queries::insert_storage_permit(maintenance, profile.storage_id, direction, node)
+        .execute(&mut *db)
+        .await?;
     Ok(true)
 }
 
@@ -707,6 +709,7 @@ pub(crate) async fn exchange(
             "pack".to_owned(),
             "unpack".to_owned(),
             "upload".to_owned(),
+            "storage_migration".to_owned(),
         ]
     };
     let mut plan = None;
@@ -741,6 +744,8 @@ pub(crate) async fn exchange(
                     .fetch_one(&mut *tx)
                     .await?
                     .storage_id
+            } else if policy == "storage_migration" {
+                migration::storage(&mut tx, &detail).await?
             } else {
                 detail["storage_id"]
                     .as_str()
@@ -764,8 +769,15 @@ pub(crate) async fn exchange(
                 token,
                 maintenance,
                 &profile,
-                policy == "integrity",
-                policy == "upload" && detail["operation"] == "cache",
+                if policy == "integrity" {
+                    "integrity"
+                } else if policy == "storage_migration" {
+                    "migration"
+                } else if policy == "upload" && detail["operation"] == "cache" {
+                    "upload"
+                } else {
+                    "maintenance"
+                },
             )
             .await?
             {
@@ -797,6 +809,16 @@ pub(crate) async fn exchange(
                     raw::prepare(&mut tx, Execution { id: task, token }, &detail, storage).await?
                 } else if policy == "upload" && detail["operation"] == "cdc" {
                     conversion::prepare(
+                        &mut tx,
+                        node,
+                        input.run,
+                        Execution { id: task, token },
+                        &detail,
+                        profile.clone(),
+                    )
+                    .await?
+                } else if policy == "storage_migration" {
+                    migration::prepare(
                         &mut tx,
                         node,
                         input.run,

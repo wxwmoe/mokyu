@@ -286,6 +286,14 @@ impl Client {
         self.unary(input, "/mokyu.node.v1.NodeWork/Exchange").await
     }
 
+    pub(crate) async fn read_migration(
+        &self,
+        input: wire::ReadMigrationRequest,
+    ) -> Result<wire::ReadReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWork/ReadMigration")
+            .await
+    }
+
     pub(crate) async fn claim_native(
         &self,
         input: wire::NativeClaimRequest,

@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    Migration,
     PartCache,
     WriteCache,
     CacheOrder,
@@ -59,6 +60,16 @@ enum HttpCase {
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, a worker identity and storage migrations"]
+async fn node_http_migrations_recover_and_preserve_versions() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("mokyu::node=debug")
+        .with_test_writer()
+        .try_init();
+    node_http_reads(HttpCase::Migration).await
 }
 
 #[tokio::test]
@@ -601,7 +612,7 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         println!("PASS node write cache confirmation, raw/chunks drain, limits and reply replay");
         return Ok(());
     }
-    if matches!(case, HttpCase::Conversion) {
+    if matches!(case, HttpCase::Conversion | HttpCase::Migration) {
         let setup: Fixture = serde_json::from_slice(
             &tokio::fs::read(std::env::var("MOKYU_TEST_READ_FIXTURE")?).await?,
         )?;
@@ -631,6 +642,83 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
                 .code(),
             tonic::Code::PermissionDenied
         );
+        if matches!(case, HttpCase::Migration) {
+            assert_eq!(background.budget.get().unwrap().database_connections, 0);
+            assert_eq!(
+                background
+                    .client
+                    .read(wire::ReadRequest::default())
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+            fixture("migration-seed").await?;
+            let mut worker =
+                tokio::spawn(crate::node::work::Worker::new(background.clone())?.run());
+            fixture("migration-prepared").await?;
+            let saved: serde_json::Value = serde_json::from_slice(
+                &tokio::fs::read(path.parent().unwrap().join("migration-fixture.json")).await?,
+            )?;
+            let wrong_node = context
+                .client
+                .read_migration(wire::ReadMigrationRequest {
+                    run: Some(context.background_snapshot()?.lease.run.clone()),
+                    operation_id: saved["write"].as_str().unwrap().into(),
+                    cached: vec![],
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(wrong_node.code(), tonic::Code::NotFound);
+            worker.abort();
+            assert!(worker.await.unwrap_err().is_cancelled());
+            fixture("migration-restart").await?;
+            worker = tokio::spawn(crate::node::work::Worker::new(background.clone())?.run());
+            fixture("migration-switched").await?;
+            let stale = background
+                .client
+                .read_migration(wire::ReadMigrationRequest {
+                    run: Some(background.background_snapshot()?.lease.run.clone()),
+                    operation_id: saved["write"].as_str().unwrap().into(),
+                    cached: vec![],
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(stale.code(), tonic::Code::FailedPrecondition);
+            fixture("migration-matrix").await?;
+            let peer = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
+            fixture("migration-concurrency").await?;
+            peer.abort();
+            assert!(peer.await.unwrap_err().is_cancelled());
+            fixture("migration-conflicts").await?;
+            fixture("migration-reply-seed").await?;
+            fixture("migration-committed").await?;
+            *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 3)]);
+            dns.resolver.clear_cache();
+            context.client.addresses.lock().await.refresh_at = Instant::now();
+            background.client.addresses.lock().await.refresh_at = Instant::now();
+            fixture("stop-first").await?;
+            node_state(&mut states, |state| {
+                state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
+            })
+            .await?;
+            node_state(&mut background_states, |state| {
+                state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
+            })
+            .await?;
+            fixture("migration-replayed").await?;
+            background.stop();
+            context.stop();
+            tokio::time::timeout(Duration::from_secs(10), driver).await???;
+            tokio::time::timeout(Duration::from_secs(10), worker).await???;
+            tokio::time::timeout(Duration::from_secs(10), background_driver).await???;
+            s3_server.abort();
+            web_server.abort();
+            println!(
+                "PASS node migration bytes, candidate recovery, version conflicts and committed reply loss"
+            );
+            return Ok(());
+        }
         fixture("conversion-seed").await?;
         let mut worker = tokio::spawn(crate::node::work::Worker::new(background.clone())?.run());
         fixture("conversion-prepared").await?;

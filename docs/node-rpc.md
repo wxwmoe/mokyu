@@ -35,6 +35,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeWrites/CommitRaw` | Unary；确认 raw 来源已达到所选持久化条件并建立引用，重复确认返回相同回执 |
 | `NodeWrites/CheckRawFiles` | Unary；按当前运行权检查最多 128 个本地 raw 文件的保留和回收状态；仅允许 data |
 | `NodeWork/Exchange` | Unary；提交上一批任务结果并领取下一批工作，返回所需材料和任务保护 |
+| `NodeWork/ReadMigration` | Unary；取得任务绑定源版本的首个读取窗口，只允许候选所属节点和有效任务执行权 |
 | `NodeWrites/PrepareTail` | Unary；为 chunks 分片的未闭合尾部预留共享 staging、配额和上传许可 |
 | `NodeWrites/CommitTail` | Unary；确认尾部持久化并建立片段映射，重复确认复用同一结果 |
 | `NodeWrites/PublishWrite` | Unary；核对完整性、条件和配额，原子发布对象并保存终态回执 |
@@ -152,6 +153,10 @@ CheckLocalFiles 对 Multipart 文件返回同样的有界状态记录，所属�
 每节点最多 4096 个有效写入。`WRITE_PROTECTION` 为 90 秒租约，复用 NodeSession 的批量续期与释放，不能恢复已经过期的租约；释放会取消未发布的写入。取消可重复执行，回执不随 stream 回收丢失；准入时分批清理超过一天且无有效租约的回执。清理后的操作时间已超出首次准入窗口，不能重新执行。
 
 后台 CDC 候选沿用 PrepareChunks/CommitChunks。接受的策略启用 pack 时，`packing_json` 返回当前批次的最终 pack 与独立编码候选、nonce 和分组；节点直接用已验证的原始缓冲编码上传，不先上传临时独立区块。CommitChunks 用 `packed_json` 确认选中输出，不能同时提交普通区块回执；control 核对目标、覆盖范围和任务所有权后原子建立引用。已接受的压缩和打包策略保持不变，管理端暂停新建 pack 时禁止发布新的 pack；未选输出在批次任务完成后进入正常回收。
+
+存储迁移通过 Exchange 领取任务，ReadMigration 一次返回源对象、首窗口、缺少的存储和密钥材料以及读取保护。后续窗口复用 ReadWindow；worker 只能继续自己持有的读取，不能调用普通 OpenRead 或 BeginWrite。目标写入复用 PrepareChunks/CommitChunks 或 PrepareRaw/CommitRaw，保持源 ETag、校验和和元数据，并按目标策略执行分块、压缩和加密。
+
+迁移候选须取得共享存储确认；未封存候选在任务接管时废弃，已封存候选可在新执行权下继续发布。最终 Exchange 重新检查源和目标版本及配额，原子完成 copy/move 与任务进度并保存回执。暂停、过期或其他节点的旧结果不能发布；暂停后的任务保护拒绝续期，并释放存储额度。每个存储沿用 `migration_concurrency` 和 `migration_byte_budget`。迁移和 CDC 转换的整文件传输由进展超时和有效租约约束，不使用 `maintenance.max_duration` 作为整文件截止时间。
 
 ## 地址选择
 

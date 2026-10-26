@@ -5149,69 +5149,74 @@ pub(super) async fn complete_storage_migration(
     job: &StorageMigration,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    complete_storage_migration_in(&mut tx, id, lease_token, destination, job).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn complete_storage_migration_in(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    lease_token: Uuid,
+    destination: Id,
+    job: &StorageMigration,
+) -> Result<()> {
     let owned: Option<Uuid> = queries::lock_migration_task(id, lease_token)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     ensure!(
         owned.is_some(),
         "storage migration lease lost before publish"
     );
     let source_current = selected_object(
-        &mut tx,
+        tx,
         job.source_bucket,
         &job.source_key,
         Some(job.source_version),
     )
     .await?;
-    let old = selected_object(
-        &mut tx,
-        job.target_bucket,
-        &job.target_key,
-        job.target_version,
-    )
-    .await?;
+    let old = selected_object(tx, job.target_bucket, &job.target_key, job.target_version).await?;
     ensure!(
         source_current == Some(job.source_version),
         "source object changed during storage migration"
     );
-    require_writing_stream(&mut tx, destination).await?;
+    require_writing_stream(tx, destination).await?;
     let (_, _, _, size, payload) = queries::lock_writing_stream(destination)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     if payload == "raw" {
-        validate_raw(&mut tx, destination, size).await?;
+        validate_raw(tx, destination, size).await?;
     } else {
-        require_sources(&mut tx, Some(destination), &[]).await?;
+        require_sources(tx, Some(destination), &[]).await?;
     }
     let published = queries::publish_migration_stream(destination, id, lease_token)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     ensure!(
         published.rows_affected() == 1,
         "storage migration stream was reclaimed"
     );
     queries::upsert_object(job.target_bucket, &job.target_key, destination)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if job.action == "move" {
         queries::tombstone_object(job.source_bucket, &job.source_key, Uuid::new_v4())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         queries::retire_stream(job.source_version)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
     if let Some(old) = old {
-        queries::retire_stream(old).execute(&mut *tx).await?;
+        queries::retire_stream(old).execute(&mut **tx).await?;
     }
     let completed = queries::complete_migration_task(id, lease_token)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     ensure!(
         completed.rows_affected() == 1,
         "storage migration lease lost before publish"
     );
-    tx.commit().await?;
     Ok(())
 }
 
@@ -9697,7 +9702,10 @@ pub(super) async fn report_node_read(
     );
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
-    ensure!(state.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(state.role.as_str(), "data" | "worker"),
+        Error::NodeAuthentication
+    );
     require_node_run(&mut tx, state, input.run, false).await?;
     queries::lock_staging(format!("mokyu:node-read:{}", state.node_id))
         .execute(&mut *tx)
@@ -9796,7 +9804,10 @@ pub(super) async fn node_read_window(
     };
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
-    ensure!(state.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(state.role.as_str(), "data" | "worker"),
+        Error::NodeAuthentication
+    );
     require_node_run(&mut tx, state, input.run, false).await?;
     queries::lock_staging(format!("mokyu:node-read:{}", state.node_id))
         .execute(&mut *tx)
@@ -10746,6 +10757,16 @@ async fn maintain_node_reads(
                     .fetch_all(&mut *db)
                     .await?,
             );
+            if r#type == GrantType::Work {
+                let rejected: Vec<_> = ids
+                    .iter()
+                    .copied()
+                    .filter(|id| !renewed.contains_key(id))
+                    .collect();
+                queries::work::renew(state, run, &rejected, true)
+                    .fetch_all(&mut *db)
+                    .await?;
+            }
             if r#type == GrantType::Write {
                 let accepted: Vec<_> = ids
                     .into_iter()
@@ -11447,7 +11468,7 @@ pub(super) async fn publish_node_write(
         Error::OperationAborted
     );
     if row.owner_task_id.is_some() {
-        work::seal_conversion(&mut tx, &row, &input).await?;
+        work::seal_task_write(&mut tx, &row, &input).await?;
     } else if let (Some(upload), Some(number)) = (row.upload_id, row.part_number) {
         ensure!(
             input.etag.len() == 32 && input.if_match.is_none() && input.if_none.is_none(),
@@ -11782,9 +11803,11 @@ pub(super) async fn prepare_node_raw(
         s3s::s3_error!(IncompleteBody)
     );
     let storage = row.storage_id.ok_or(Error::SourceUnavailable)?;
-    queries::reserve_quota(stream, size, false, row.upload_id, row.part_number)
-        .fetch_one(&mut *tx)
-        .await?;
+    if row.owner_task_id.is_none() {
+        queries::reserve_quota(stream, size, false, row.upload_id, row.part_number)
+            .fetch_one(&mut *tx)
+            .await?;
+    }
     let candidate = if let Some(hash) = &input.input.hash {
         queries::claim_chunk_hash(storage, hash)
             .execute(&mut *tx)

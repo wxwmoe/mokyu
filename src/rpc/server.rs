@@ -391,7 +391,7 @@ impl NodeWrites for Service {
         &self,
         request: Request<wire::PrepareRawRequest>,
     ) -> Result<Response<wire::PreparedRaw>, Status> {
-        let node = data_identity(&request)?;
+        let node = write_identity(&request)?;
         let input = super::write::prepare_raw(request.into_inner())?;
         let reply = bounded(self.app.cluster().map_err(failure)?.prepare_raw(
             &node,
@@ -408,7 +408,7 @@ impl NodeWrites for Service {
         &self,
         request: Request<wire::CommitRawRequest>,
     ) -> Result<Response<wire::PreparedRaw>, Status> {
-        let node = data_identity(&request)?;
+        let node = write_identity(&request)?;
         let input = super::write::commit_raw(request.into_inner())?;
         let reply = bounded(self.app.cluster().map_err(failure)?.commit_raw(
             &node,
@@ -615,9 +615,9 @@ impl NodeReads for Service {
             .get::<NodeState>()
             .cloned()
             .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
-        if node.role != "data" {
+        if !matches!(node.role.as_str(), "data" | "worker") {
             return Err(Status::permission_denied(
-                "read reports require a data node",
+                "read reports require a node identity",
             ));
         }
         let input = super::read::report(request.into_inner())?;
@@ -673,9 +673,9 @@ impl NodeReads for Service {
             .get::<NodeState>()
             .cloned()
             .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
-        if node.role != "data" {
+        if !matches!(node.role.as_str(), "data" | "worker") {
             return Err(Status::permission_denied(
-                "object reads require a data node",
+                "protected reads require a node identity",
             ));
         }
         let input = super::read::window(request.into_inner())?;
@@ -1121,6 +1121,36 @@ mod tests {
 
 #[tonic::async_trait]
 impl NodeWork for Service {
+    async fn read_migration(
+        &self,
+        request: Request<wire::ReadMigrationRequest>,
+    ) -> Result<Response<wire::ReadReply>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        if prost::Message::encoded_len(&input) > super::read::REQUEST_LIMIT {
+            return Err(Status::resource_exhausted(
+                "migration read request exceeds message budget",
+            ));
+        }
+        let input = model::node_work::ReadMigration {
+            run: super::read::run(input.run)?,
+            operation: super::uuid(&input.operation_id)?,
+            cached: super::read::cached(input.cached)?,
+        };
+        let value = bounded(self.app.cluster().map_err(failure)?.read_migration(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        let reply = super::read::reply(value);
+        if prost::Message::encoded_len(&reply) > super::MESSAGE_LIMIT {
+            return Err(Status::resource_exhausted(
+                "migration read exceeds message budget",
+            ));
+        }
+        Ok(Response::new(reply))
+    }
     async fn exchange(
         &self,
         request: Request<wire::WorkRequest>,

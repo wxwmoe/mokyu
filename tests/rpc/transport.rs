@@ -289,6 +289,8 @@ async fn fixture(action: &str) -> Result<()> {
             | "write-cache-drained"
             | "part-cache-drain"
             | "part-cache-matrix"
+            | "migration-matrix"
+            | "migration-conflicts"
     ) {
         120
     } else {

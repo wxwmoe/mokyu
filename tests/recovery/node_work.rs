@@ -330,11 +330,52 @@ pub(super) async fn check(
         )
         .await?;
     assert!(!renewed.grants[0].accepted);
-    let recovery = Uuid::now_v7();
-    let replacement = peer
+    let mut recovery = Uuid::now_v7();
+    let mut replacement = peer
         .exchange_work(&node, key, request(recovery, None))
         .await?;
     assert_ne!(replacement.grants[0].id, old.grants[0].id);
+    // Paused work relinquishes its storage capacity on rejection or explicit release.
+    for (sequence, release) in [(3, false), (4, true)] {
+        sqlx::query("UPDATE tasks SET state='paused' WHERE id=$1")
+            .bind(task)
+            .execute(pool)
+            .await?;
+        let grants = replacement
+            .grants
+            .iter()
+            .map(|grant| read::GrantRef {
+                r#type: grant.r#type,
+                id: grant.id,
+            })
+            .collect();
+        let resources = if release {
+            read::KeepAlive {
+                renew: vec![],
+                release: grants,
+            }
+        } else {
+            read::KeepAlive {
+                renew: grants,
+                release: vec![],
+            }
+        };
+        let reply = backend
+            .pulse_session(&node, key, run, session.epoch, sequence, false, resources)
+            .await?;
+        assert_eq!(reply.grants[0].accepted, release);
+        assert_eq!(reply.grants[0].valid_for_ms, 0);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM storage_permits WHERE storage_id=$1 AND expires_at>clock_timestamp()").bind(storage).fetch_one(pool).await?, 0);
+        sqlx::query("UPDATE tasks SET state='queued' WHERE id=$1")
+            .bind(task)
+            .execute(pool)
+            .await?;
+        recovery = Uuid::now_v7();
+        replacement = peer
+            .exchange_work(&node, key, request(recovery, None))
+            .await?;
+        assert!(replacement.plan.is_some());
+    }
     let result = work::Completion {
         operation: recovery,
         outcomes: vec![work::Outcome::Deleted { stored_at: None }],

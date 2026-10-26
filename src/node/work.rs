@@ -132,25 +132,37 @@ impl Worker {
                         part,
                         ..
                     } => {
-                        let timeout = Duration::from_secs(crate::config::seconds(
-                            &snapshot.runtime().maintenance.max_duration,
-                        )?);
                         let result = if sealed {
                             Ok(())
                         } else {
-                            tokio::time::timeout(
-                                timeout,
-                                Box::pin(self.writes.convert(write, source, etag, checksums, part)),
-                            )
-                            .await
-                            .map_err(anyhow::Error::from)
-                            .and_then(|value| value)
+                            Box::pin(self.writes.convert(write, source, etag, checksums, part))
+                                .await
                         };
                         if let Err(error) = &result {
                             tracing::debug!(%error, "raw conversion postponed");
                         }
                         vec![if result.is_ok() {
                             work::Outcome::Converted
+                        } else {
+                            work::Outcome::Retry
+                        }]
+                    }
+                    work::Plan::Migrate {
+                        write,
+                        size,
+                        sealed,
+                        ..
+                    } => {
+                        let result = if sealed {
+                            Ok(())
+                        } else {
+                            Box::pin(self.writes.migrate(write, size)).await
+                        };
+                        if let Err(error) = &result {
+                            tracing::debug!(%error, "storage migration postponed");
+                        }
+                        vec![if result.is_ok() {
+                            work::Outcome::Migrated
                         } else {
                             work::Outcome::Retry
                         }]

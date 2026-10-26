@@ -97,6 +97,12 @@ pub(crate) struct RawHash {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
+    Migrate {
+        storage: Uuid,
+        write: Uuid,
+        size: u64,
+        sealed: bool,
+    },
     UploadRaw {
         storage: Uuid,
         source: super::raw::RawSource,
@@ -159,6 +165,7 @@ impl Plan {
     pub(crate) fn storage(&self) -> Uuid {
         match self {
             Self::ConvertRaw { storage, .. }
+            | Self::Migrate { storage, .. }
             | Self::UploadRaw { storage, .. }
             | Self::HashRaw { storage, .. }
             | Self::Collect { storage, .. }
@@ -177,6 +184,7 @@ impl Plan {
 pub(crate) enum Outcome {
     Uploaded,
     Converted,
+    Migrated,
     Hashed {
         hash: Vec<u8>,
     },
@@ -214,6 +222,12 @@ pub(crate) struct Exchange {
     pub completion: Option<Completion>,
     pub class: u32,
     pub max_items: usize,
+    pub cached: Vec<node_read::Version>,
+}
+
+pub(crate) struct ReadMigration {
+    pub run: Run,
+    pub operation: Uuid,
     pub cached: Vec<node_read::Version>,
 }
 
