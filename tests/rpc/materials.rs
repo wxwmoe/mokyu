@@ -19,6 +19,7 @@ fn declared_material_survives_eviction_until_last_request_releases_it() {
         index: Mutex::new(Index::default()),
         memory: Arc::new(Semaphore::new(1)),
         public: Weak::new(),
+        io: Arc::default(),
     };
     let supplied = value(deployment, "bucket", br#"{"revision":1}"#);
     let version = supplied.version.clone().unwrap();
@@ -92,6 +93,7 @@ fn cache_pressure_skips_admission_without_losing_held_materials() {
         index: Mutex::new(Index::default()),
         memory: Arc::new(Semaphore::new(4)),
         public: Weak::new(),
+        io: Arc::default(),
     };
     let values = (0..4)
         .map(|index| value(deployment, &index.to_string(), b"{}"))

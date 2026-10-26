@@ -42,6 +42,7 @@ pub(super) struct Cache {
     pending: Arc<Mutex<HashSet<Uuid>>>,
     raw_misses: crate::runtime::locks::Locks<Uuid>,
     hits: AtomicU64,
+    lookups: AtomicU64,
 }
 
 impl Cache {
@@ -95,6 +96,7 @@ impl Cache {
             pending: Arc::new(Mutex::new(HashSet::new())),
             raw_misses: Default::default(),
             hits: 0.into(),
+            lookups: 0.into(),
         }))
     }
 
@@ -341,6 +343,7 @@ impl Cache {
         id: Uuid,
         profile: &StorageProfile,
     ) -> Option<(Vec<u8>, bool, CachePin)> {
+        self.lookups.fetch_add(1, Ordering::Relaxed);
         if !profile.cache_enabled || self.initialize().await.is_err() {
             return None;
         }
@@ -380,6 +383,7 @@ impl Cache {
     }
 
     pub(super) async fn raw(&self, source: &crate::model::raw::RawSource) -> Option<RawFile> {
+        self.lookups.fetch_add(1, Ordering::Relaxed);
         if self.initialize().await.is_err() {
             return None;
         }
@@ -490,10 +494,13 @@ impl Cache {
         });
     }
 
-    #[cfg(test)]
     pub(super) async fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({ "hits": self.hits.load(Ordering::Relaxed), "entries": self.fifo.lock().await.entries.len(),
-            "bytes": self.disk.used()[1], "fills": self.pending.lock().unwrap().len() })
+        let capacity = self.disk.upload_capacity().ok();
+        let used = self.disk.used();
+        serde_json::json!({ "hits": self.hits.load(Ordering::Relaxed), "lookups": self.lookups.load(Ordering::Relaxed),
+            "entries": self.fifo.lock().await.entries.len(), "bytes": used[1], "multipart_bytes": used[0], "thumbnail_bytes": used[2],
+            "limit": capacity.map(|value| value.0), "upload_limit": capacity.map(|value| value.1), "upload_bytes": capacity.map(|value| value.2),
+            "fills": self.pending.lock().unwrap().len() })
     }
 }
 

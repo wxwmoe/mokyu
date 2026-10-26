@@ -14,6 +14,28 @@ impl NodeContext {
     pub(crate) async fn status(&self) -> Value {
         let state = self.current.borrow().clone();
         let runtime = self.statistics.runtime();
+        let body = self.body.lock().unwrap().clone();
+        let foreground = self.foreground.lock().unwrap().upgrade();
+        let backend = self.io.snapshot();
+        let mut cache = match &body {
+            Some(body) => body.files.snapshot().await,
+            None => Value::Null,
+        };
+        if cache.is_object() {
+            cache["backend_read_bytes"] = backend["read"]["bytes"].clone();
+            cache["backend_write_bytes"] = backend["write"]["bytes"].clone();
+        }
+        let work = if state.draining {
+            "restricted"
+        } else if state.maintenance {
+            "maintenance"
+        } else if state.phase == Phase::Recovering {
+            "recovery"
+        } else if self.ready() {
+            "normal"
+        } else {
+            "starting"
+        };
         json!({
             "version": env!("CARGO_PKG_VERSION"), "role": self.client.identity.role,
             "deployment_mode": "cluster", "ready": self.ready(), "phase": state.phase,
@@ -23,6 +45,12 @@ impl NodeContext {
             "process_memory": crate::status::stats::process_memory().await,
             "db_pool_size": 0, "db_pool_idle": 0, "active_grants": self.resources.active(),
             "pending_uploads": state.pending_uploads,
+            "work": work, "cache": cache,
+            "io": {"backend": backend, "cache_lookups": cache["lookups"],
+                "diagnostics": body.as_ref().map(|body| body.diagnostics.snapshot())},
+            "response_cache": foreground.as_ref().map(|reads| reads.bodies.snapshot()),
+            "compression": self.observations.compression.snapshot(),
+            "rpc": self.client.statistics(),
             "configuration": state.snapshot.as_ref().map(|snapshot| snapshot.settings.view()),
             "control": {"url": self.config.instance.control_url, "peer": state.peer,
                 "id": state.control_id, "epoch": state.epoch, "last_error": state.last_error}

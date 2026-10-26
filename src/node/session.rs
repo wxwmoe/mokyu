@@ -133,7 +133,6 @@ impl NodeContext {
             state.epoch = session.welcome.epoch;
             state.peer = Some(session.peer);
             state.control_id = Uuid::parse_str(&session.welcome.control_id).ok();
-            state.last_error = None;
         });
         self.synchronize(&lease, &mut settings).await?;
         *failures = 0;

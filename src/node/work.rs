@@ -25,8 +25,8 @@ impl Worker {
         Ok(Self {
             writes: super::writes::Writes::new(Arc::new(reads))?,
             reader,
+            cache: reads::Cache::for_node(&node),
             node,
-            cache: reads::Cache::default(),
         })
     }
 

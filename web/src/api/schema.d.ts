@@ -1976,6 +1976,15 @@ export interface components {
             confirm_name: string;
             confirmation: string;
         };
+        ControlConnection: {
+            /** Format: int64 */
+            epoch: number;
+            /** Format: uuid */
+            id?: string | null;
+            last_error?: string | null;
+            peer?: string | null;
+            url: string;
+        };
         CorsRule: {
             expose?: string[];
             headers?: string[];
@@ -2341,6 +2350,11 @@ export interface components {
             node: components["schemas"]["NodeView"];
             revisions: unknown;
         };
+        NodeConnection: {
+            control: components["schemas"]["ControlConnection"];
+            phase: string;
+            rpc: components["schemas"]["NodeRpc"];
+        };
         NodeContext: {
             /** Format: uuid */
             id?: string | null;
@@ -2357,6 +2371,24 @@ export interface components {
         NodePage: {
             items: components["schemas"]["NodeView"][];
             next_cursor?: string | null;
+        };
+        NodeRpc: {
+            /** Format: int64 */
+            attempts: number;
+            /** Format: int64 */
+            canceled: number;
+            /** Format: int64 */
+            failures: number;
+            /** Format: int64 */
+            p50_ms?: number | null;
+            /** Format: int64 */
+            p95_ms?: number | null;
+            /** Format: int64 */
+            p99_ms?: number | null;
+            /** Format: int64 */
+            requests: number;
+            /** Format: int64 */
+            retries: number;
         };
         NodeRuntime: {
             history: components["schemas"]["NodeRuntimePoint"][];
@@ -2378,9 +2410,9 @@ export interface components {
             interval_seconds: number;
             point: components["schemas"]["RuntimePoint"];
             /** Format: int64 */
-            queue_running: number;
+            queue_running?: number | null;
             /** Format: int64 */
-            queue_waiting: number;
+            queue_waiting?: number | null;
             /** Format: int64 */
             sequence: number;
             /** Format: int64 */
@@ -2401,6 +2433,7 @@ export interface components {
         NodeStatus: {
             /** Format: uuid */
             boot_id?: string | null;
+            connection?: components["schemas"]["NodeConnection"] | null;
             more_tasks: boolean;
             node: components["schemas"]["NodeView"];
             /** Format: date-time */
@@ -2716,8 +2749,8 @@ export interface components {
             db_pool_idle: string;
             db_pool_size: string;
             multipart_bytes: string;
-            queue_running: string;
-            queue_waiting: string;
+            queue_running?: string | null;
+            queue_waiting?: string | null;
             rss_bytes?: string | null;
             thumbnail_bytes: string;
             upload_bytes: string;

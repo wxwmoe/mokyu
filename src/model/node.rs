@@ -167,8 +167,37 @@ pub(crate) struct NodeStatus {
     pub boot_id: Option<Uuid>,
     pub started_at: Option<DateTime<Utc>>,
     pub status: Option<Value>,
+    pub connection: Option<NodeConnection>,
     pub tasks: Vec<super::metrics::WorkSummary>,
     pub more_tasks: bool,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub(crate) struct NodeRpc {
+    pub requests: u64,
+    pub attempts: u64,
+    pub failures: u64,
+    pub canceled: u64,
+    pub retries: u64,
+    pub p50_ms: Option<u64>,
+    pub p95_ms: Option<u64>,
+    pub p99_ms: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub(crate) struct NodeConnection {
+    pub phase: String,
+    pub control: ControlConnection,
+    pub rpc: NodeRpc,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub(crate) struct ControlConnection {
+    pub url: String,
+    pub peer: Option<String>,
+    pub id: Option<Uuid>,
+    pub epoch: u64,
+    pub last_error: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
 pub(crate) struct NodeConfig {
@@ -189,6 +218,9 @@ pub(crate) fn applicable(role: &str, section: &str, mut value: Value) -> Value {
         return json!({});
     }
     if let Some(fields) = value.as_object_mut() {
+        if section == "io" && role != "control" {
+            fields.remove("sqlite_synchronous");
+        }
         if section == "requests" && role != "data" {
             fields.remove("s3_domain");
             fields.remove("s3_region");

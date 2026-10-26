@@ -184,8 +184,8 @@ pub(crate) struct NodeSample {
     pub point: RuntimePoint,
     pub db_pool_size: u64,
     pub db_pool_idle: u64,
-    pub queue_running: u64,
-    pub queue_waiting: u64,
+    pub queue_running: Option<u64>,
+    pub queue_waiting: Option<u64>,
 }
 impl NodeSample {
     pub fn from_report(report: &super::node::NodeReport, interval_seconds: u64) -> Result<Self> {
@@ -226,18 +226,14 @@ impl NodeSample {
             },
             db_pool_size: number(&s["db_pool_size"]),
             db_pool_idle: number(&s["db_pool_idle"]),
-            queue_running: queues
-                .map(|q| q.values().map(|v| number(&v["running"])).sum())
-                .unwrap_or(0),
-            queue_waiting: queues
-                .map(|q| {
-                    q.values()
-                        .filter_map(|v| v["queued"].as_object())
-                        .flat_map(|v| v.values())
-                        .map(number)
-                        .sum()
-                })
-                .unwrap_or(0),
+            queue_running: queues.map(|q| q.values().map(|v| number(&v["running"])).sum()),
+            queue_waiting: queues.map(|q| {
+                q.values()
+                    .filter_map(|v| v["queued"].as_object())
+                    .flat_map(|v| v.values())
+                    .map(number)
+                    .sum()
+            }),
         })
     }
     pub fn validate(&self) -> Result<()> {
@@ -323,8 +319,8 @@ pub(crate) struct RuntimeGauges {
     pub rss_bytes: Option<String>,
     pub db_pool_size: String,
     pub db_pool_idle: String,
-    pub queue_running: String,
-    pub queue_waiting: String,
+    pub queue_running: Option<String>,
+    pub queue_waiting: Option<String>,
 }
 #[derive(Default, Serialize, Deserialize, ToSchema)]
 pub(crate) struct RuntimeRates {
@@ -388,6 +384,7 @@ pub(crate) fn aggregate_runtime(
     let mut totals = [0u128; 10];
     let mut rss = 0u128;
     let mut memory_known = true;
+    let mut queues_known = [true; 2];
     let mut rates = [0f64; 4];
     let mut hits = 0u128;
     let mut lookups = 0u128;
@@ -408,11 +405,13 @@ pub(crate) fn aggregate_runtime(
         for (sum, value) in totals[6..].iter_mut().zip([
             current.sample.db_pool_size,
             current.sample.db_pool_idle,
-            current.sample.queue_running,
-            current.sample.queue_waiting,
+            current.sample.queue_running.unwrap_or(0),
+            current.sample.queue_waiting.unwrap_or(0),
         ]) {
             *sum += value as u128;
         }
+        queues_known[0] &= current.sample.queue_running.is_some();
+        queues_known[1] &= current.sample.queue_waiting.is_some();
         if let Some(value) = &current.sample.point.rss_bytes {
             rss += value.parse::<u64>()? as u128;
         } else {
@@ -457,8 +456,8 @@ pub(crate) fn aggregate_runtime(
             rss_bytes: memory_known.then(|| rss.to_string()),
             db_pool_size: totals[6].to_string(),
             db_pool_idle: totals[7].to_string(),
-            queue_running: totals[8].to_string(),
-            queue_waiting: totals[9].to_string(),
+            queue_running: queues_known[0].then(|| totals[8].to_string()),
+            queue_waiting: queues_known[1].then(|| totals[9].to_string()),
         });
     }
     if out.rate_nodes > 0 {
@@ -513,8 +512,8 @@ mod runtime_tests {
                 },
                 db_pool_size: 3,
                 db_pool_idle: 2,
-                queue_running: 1,
-                queue_waiting: 4,
+                queue_running: Some(1),
+                queue_waiting: Some(4),
             },
         }
     }
@@ -549,6 +548,15 @@ mod runtime_tests {
         let gauges = out.gauges.unwrap();
         assert_eq!(gauges.cache_bytes, "20");
         assert_eq!(gauges.rss_bytes.as_deref(), Some("2000"));
+        assert_eq!(gauges.queue_waiting.as_deref(), Some("8"));
+        points[2].sample.queue_waiting = None;
+        assert!(
+            aggregate_runtime(at, 3, 60, &points)?
+                .gauges
+                .unwrap()
+                .queue_waiting
+                .is_none()
+        );
         points[2].sample.boot_id = Uuid::new_v4();
         let out = aggregate_runtime(at, 3, 60, &points)?;
         assert_eq!(out.rate_nodes, 1);

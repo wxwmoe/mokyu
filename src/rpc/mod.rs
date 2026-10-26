@@ -1,4 +1,5 @@
 pub(crate) mod client;
+mod metrics;
 mod multipart;
 mod native;
 mod object;

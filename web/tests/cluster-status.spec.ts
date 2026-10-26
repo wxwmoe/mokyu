@@ -10,6 +10,8 @@ test('cluster views keep node identity and read-only configuration across locale
   const nodes = (await (await request.get('/api/v1/cluster/nodes')).json()).items
   expect(nodes.length).toBeGreaterThanOrEqual(4)
   const target = nodes.find((node: { role: string }) => node.role === 'data')
+  const transport = (await (await request.get(`/api/v1/cluster/nodes/${target.id}/status`)).json()).connection
+  expect(transport).not.toBeNull()
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   if (process.env.MOKYU_TEST_SECOND_CONTROL) {
@@ -38,6 +40,8 @@ test('cluster views keep node identity and read-only configuration across locale
       await page.locator('.node-row').filter({ hasText: target.name }).click()
       await expect(page.getByRole('dialog')).toBeVisible()
       await expect(page.getByRole('dialog').locator('.technical-key')).toHaveText(target.id)
+      await expect(page.locator('.node-connection')).toBeVisible()
+      await expect(page.locator('.node-connection')).toContainText(transport.control.url)
       await page.setViewportSize({ width: 390, height: 844 })
       await page.screenshot({ path: `${process.env.MOKYU_TEST_RESULTS}/node-${locale}-${theme}.png` })
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
@@ -52,7 +56,7 @@ test('cluster views keep node identity and read-only configuration across locale
         await tab.focus()
         await expect(tab).toBeFocused()
       }
-      await expect(page.locator('.runtime-section-list article')).toHaveCount(4)
+      await expect(page.locator('.runtime-section-list article')).toHaveCount(5)
       await expect(page.locator('.config-origin-badge[data-origin="config"]')).toHaveCount(0)
       const draft = page.locator('[data-runtime-field="web.session_lifetime"] input')
       await draft.fill('11h')
@@ -60,11 +64,11 @@ test('cluster views keep node identity and read-only configuration across locale
       await expect(page.locator('.node-picker')).toBeVisible()
       await page.locator('.cluster-scopes .tab-trigger').first().click()
       await expect(draft).toHaveValue('11h')
-      await page.goto(`/runtime-config?view=node&node=${target.id}&section=database`)
+      await page.goto(`/runtime-config?view=node&node=${target.id}&section=runtime`)
       await expect(page.locator('.node-config-context .technical-key')).toHaveText(target.id)
       await expect(page.locator('.config-edit-button')).toHaveCount(0)
       await expect(page.locator('.runtime-form, .runtime-section-list')).toHaveCount(0)
-      await expect(page.locator('.config-origin-badge[data-origin="environment"]')).toHaveCount(3)
+      await expect(page.locator('.config-origin-badge[data-origin="environment"]')).toHaveCount(7)
       await expect(page.locator('.config-value-mode-badge[data-mode="read"]').first()).toHaveCSS('color', theme === 'light' ? 'rgb(75, 85, 99)' : 'rgb(203, 213, 225)')
       if (locale !== 'en') {
         const hints = await page.locator('.config-copy .field-help').allTextContents()

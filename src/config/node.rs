@@ -7,6 +7,8 @@ use std::path::Path;
 #[serde(deny_unknown_fields)]
 pub(crate) struct NodeConfig {
     pub(crate) instance: Instance,
+    #[serde(skip)]
+    pub(crate) configured_fields: std::collections::BTreeSet<String>,
 }
 
 impl NodeConfig {
@@ -22,7 +24,7 @@ impl NodeConfig {
             matches!(role, "data" | "worker"),
             "node configuration requires data or worker role"
         );
-        let config: Self = toml::from_str(text).map_err(|_| {
+        let mut config: Self = toml::from_str(text).map_err(|_| {
             anyhow::anyhow!("invalid node configuration, unknown field or wrong type")
         })?;
         ensure!(
@@ -39,6 +41,13 @@ impl NodeConfig {
                 .context("instance.control_url is required")?,
         )?;
         super::limits::validate_runtime(&config.instance, &RuntimeSettings::default())?;
+        let value: toml::Value = toml::from_str(text).expect("validated configuration");
+        config.configured_fields = value["instance"]
+            .as_table()
+            .expect("instance table")
+            .keys()
+            .map(|field| format!("instance.{field}"))
+            .collect();
         Ok(config)
     }
 }
@@ -52,6 +61,8 @@ mod tests {
         let valid = "[instance]\ncontrol_url='https://control.example'\n";
         for role in ["data", "worker"] {
             let config = NodeConfig::parse(valid, role).unwrap();
+            assert!(config.configured_fields.contains("instance.control_url"));
+            assert!(!config.configured_fields.contains("instance.cpu_jobs"));
             let budget =
                 Budget::for_runtime(&config.instance, &RuntimeSettings::default(), &[]).unwrap();
             assert_eq!(budget.database_connections, 0);

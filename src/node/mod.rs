@@ -3,8 +3,10 @@ mod cache;
 mod checks;
 pub(crate) mod delivery;
 mod files;
+mod io;
 mod observations;
 pub(crate) mod reads;
+mod report;
 pub(crate) mod request;
 pub(crate) mod resources;
 mod session;
@@ -117,6 +119,8 @@ pub(crate) struct NodeContext {
     pub(crate) observations: observations::Reports,
     pub(crate) native_work: tokio::sync::Notify,
     pub(crate) statistics: crate::status::stats::Statistics,
+    io: Arc<io::Io>,
+    foreground: Mutex<std::sync::Weak<reads::Reads>>,
     pub(crate) serving: AtomicBool,
     boot: Uuid,
     current: watch::Sender<State>,
@@ -154,6 +158,8 @@ impl NodeContext {
             observations: observations::Reports::new(),
             native_work: tokio::sync::Notify::new(),
             statistics: crate::status::stats::Statistics::default(),
+            io: Arc::new(io::Io::default()),
+            foreground: Mutex::default(),
             serving: AtomicBool::new(false),
             boot: Uuid::new_v4(),
             current: watch::channel(State {

@@ -85,7 +85,7 @@ test('node states stay consistent across lists, details and configuration', asyn
   }
   settings = []
   await page.reload()
-  await expect(page.locator('.runtime-config-card a.node-state')).toHaveCount(5)
+  await expect(page.locator('.runtime-config-card a.node-state')).toHaveCount(6)
   for (const badge of await page.locator('.runtime-config-card a.node-state').all()) {
     await expect(badge).toHaveAttribute('data-tone', 'gray')
     await expect(badge).toContainText('No relevant nodes')

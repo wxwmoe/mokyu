@@ -28,6 +28,7 @@ pub(super) struct Material {
     referenced: AtomicBool,
     _memory: Option<OwnedSemaphorePermit>,
     backend: Mutex<Option<Arc<super::body::Backend>>>,
+    io: Arc<super::io::Io>,
     policy: Option<read::Policy>,
 }
 
@@ -41,6 +42,7 @@ pub(super) struct Cache {
     index: Mutex<Index>,
     memory: Arc<Semaphore>,
     public: Weak<crate::app::public_reads::Cache>,
+    pub(super) io: Arc<super::io::Io>,
 }
 
 impl Default for Cache {
@@ -49,11 +51,19 @@ impl Default for Cache {
             index: Mutex::new(Index::default()),
             memory: Arc::new(Semaphore::new(MATERIAL_BYTES / UNIT)),
             public: Weak::new(),
+            io: Arc::default(),
         }
     }
 }
 
 impl Cache {
+    pub(super) fn for_node(node: &NodeContext) -> Self {
+        Self {
+            io: node.io.clone(),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn snapshot(&self) -> Held {
         self.index.lock().unwrap().values.clone()
     }
@@ -147,6 +157,7 @@ impl Cache {
             referenced: AtomicBool::new(true),
             _memory: memory,
             backend: Mutex::new(None),
+            io: self.io.clone(),
             policy,
         });
         if entry._memory.is_some() {
@@ -333,6 +344,10 @@ impl Prepared {
 }
 
 impl Reads {
+    pub(crate) fn report_foreground(self: &Arc<Self>) {
+        *self.node.foreground.lock().unwrap() = Arc::downgrade(self);
+    }
+
     pub(crate) async fn maintain(&self) -> Result<()> {
         self.reader.maintain().await
     }
@@ -357,9 +372,10 @@ impl Reads {
         ));
         let (public, receiver) = crate::app::public_reads::Cache::new(cors.clone(), &bodies);
         Ok(Self {
-            node,
+            node: node.clone(),
             cache: Cache {
                 public: Arc::downgrade(&public),
+                io: node.io.clone(),
                 ..Cache::default()
             },
             slots,
@@ -641,7 +657,7 @@ pub(super) fn backend(held: &Held, id: Uuid) -> Result<Arc<super::body::Backend>
             value.connection.id == id && value.profile.storage_id == id,
             "storage identity mismatch"
         );
-        *backend = Some(Arc::new(super::body::Backend::new(value)?));
+        *backend = Some(Arc::new(super::body::Backend::new(value, &material.io)?));
     }
     Ok(backend.as_ref().unwrap().clone())
 }

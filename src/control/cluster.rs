@@ -139,6 +139,13 @@ pub(crate) async fn node_status(
         node,
         boot_id: report.as_ref().map(|r| r.boot_id),
         started_at: report.as_ref().map(|r| r.started_at),
+        connection: report.as_ref().and_then(|report| {
+            serde_json::from_value(json!({
+                "phase": report.status["phase"], "control": report.status["control"],
+                "rpc": report.status["rpc"]["summary"]
+            }))
+            .ok()
+        }),
         status: report.map(|r| r.status),
         tasks,
         more_tasks,

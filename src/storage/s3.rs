@@ -127,6 +127,7 @@ mod tests {
             .unwrap();
         let signer = Arc::new(signer);
         let streaming = Streaming {
+            statistics: None,
             signer: signer.clone(),
             bucket_signer: signer,
             prefix: Path::from(""),
@@ -192,6 +193,7 @@ mod tests {
 }
 
 pub(crate) struct Streaming {
+    pub(crate) statistics: Option<Arc<crate::status::stats::Counters>>,
     pub signer: Arc<dyn Signer>,
     pub bucket_signer: Arc<dyn Signer>,
     pub prefix: Path,
@@ -291,6 +293,28 @@ impl Streaming {
     }
 
     async fn upload<'a>(
+        &self,
+        client: &reqwest::Client,
+        key: &Path,
+        length: u64,
+        digest: &[u8; 16],
+        input: impl FnMut() -> BoxStream<'a, Result<Bytes>>,
+        options: SignedUrlOptions,
+    ) -> Result<PartId> {
+        let mut operation = self.statistics.as_ref().map(|counts| counts.begin());
+        let result = self
+            .send_upload(client, key, length, digest, input, options)
+            .await;
+        if let Some(operation) = &mut operation {
+            if result.is_ok() {
+                self.statistics.as_ref().unwrap().bytes(length);
+            }
+            operation.finish(result.is_err());
+        }
+        result
+    }
+
+    async fn send_upload<'a>(
         &self,
         client: &reqwest::Client,
         key: &Path,

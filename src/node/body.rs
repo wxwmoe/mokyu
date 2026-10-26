@@ -52,14 +52,20 @@ pub(super) struct Backend {
 }
 
 impl Backend {
-    pub(super) fn new(value: read::Storage) -> Result<Self> {
+    pub(super) fn new(value: read::Storage, io: &Arc<super::io::Io>) -> Result<Self> {
         ensure!(
             value.connection.r#type == "s3",
             "nodes require shared S3 storage"
         );
         crate::storage::profile::validate(&value.profile, "s3")?;
+        let mut store = Store::connect(&value.connection, Options::from_profile(&value.profile)?)?;
+        store.backend = io.observe(store.backend);
+        store.multipart = store.multipart.map(|store| io.multipart(store));
+        if let Some(streaming) = &mut store.streaming {
+            streaming.statistics = Some(io.write.clone());
+        }
         Ok(Self {
-            store: Store::connect(&value.connection, Options::from_profile(&value.profile)?)?,
+            store,
             profile: value.profile,
         })
     }
@@ -67,12 +73,13 @@ impl Backend {
 
 #[derive(Clone)]
 pub(super) struct Limits {
-    io: Arc<Semaphore>,
+    pub(super) io: Arc<Semaphore>,
     cpu: Arc<Semaphore>,
     packs: Arc<Semaphore>,
     http: Arc<Semaphore>,
     pool: Arc<compression::Pool>,
-    files: Arc<super::files::Cache>,
+    pub(super) files: Arc<super::files::Cache>,
+    pub(super) diagnostics: Arc<Diagnostics>,
 }
 
 pub(super) struct Reader {
@@ -107,6 +114,7 @@ impl Reader {
                     packs,
                     http: Arc::new(Semaphore::new(budget.pack_memory_units as usize)),
                     pool: Arc::new(compression::Pool::new(config, budget.cpu_jobs)?),
+                    diagnostics: Arc::default(),
                 });
             }
             shared.as_ref().unwrap().clone()
@@ -123,7 +131,7 @@ impl Reader {
             workspace: budget.compression_workspace,
             pool: limits.pool,
             gets: Arc::new(AtomicU64::new(0)),
-            diagnostics: Arc::new(Diagnostics::default()),
+            diagnostics: limits.diagnostics,
             files,
         })
     }

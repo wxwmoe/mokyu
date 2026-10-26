@@ -37,6 +37,7 @@ async fn background(node: Arc<NodeContext>) -> Result<()> {
     tokio::select! {
         result = worker.run() => result,
         result = reads.maintain() => result,
+        result = node.report() => result,
     }
 }
 

@@ -39,6 +39,7 @@ struct Peer {
     endpoint: Endpoint,
     channel: OnceCell<Channel>,
     health: Mutex<Health>,
+    statistics: Arc<crate::status::stats::Counters>,
 }
 
 impl Peer {
@@ -73,6 +74,7 @@ pub(crate) struct Client {
     addresses: AsyncMutex<Addresses>,
     cursor: AtomicU64,
     requests: Semaphore,
+    metrics: Arc<super::metrics::Metrics>,
 }
 
 impl Client {
@@ -104,6 +106,7 @@ impl Client {
                 Uuid::new_v4().as_bytes()[..8].try_into().unwrap(),
             )),
             requests: Semaphore::new(64),
+            metrics: Arc::default(),
         })
     }
 
@@ -166,6 +169,7 @@ impl Client {
                                 .endpoint(address)
                                 .map_err(|_| Status::unavailable("cannot configure control TLS"))?,
                             channel: OnceCell::new(),
+                            statistics: Arc::default(),
                             health: Mutex::new(Health {
                                 failures: 0,
                                 retry_at: now,
@@ -508,6 +512,17 @@ impl Client {
         I: prost::Message + Default + Clone + 'static,
         O: prost::Message + Default + 'static,
     {
+        let mut operation = self.metrics.unary.begin();
+        let result = self.execute_unary(input, path).await;
+        operation.finish(result.is_err());
+        result
+    }
+
+    async fn execute_unary<I, O>(&self, input: I, path: &'static str) -> Result<O, Status>
+    where
+        I: prost::Message + Default + Clone + 'static,
+        O: prost::Message + Default + 'static,
+    {
         let limit = if path == "/mokyu.node.v1.NodeMultipart/BeginComplete" {
             crate::model::node_complete::REQUEST_LIMIT
         } else if path == "/mokyu.node.v1.NodeObjects/ChangeObjects" {
@@ -532,12 +547,15 @@ impl Client {
         tokio::time::timeout_at(deadline, async {
             let mut excluded = HashSet::new();
             let mut failures = 0;
+            let mut attempts = 0;
             loop {
                 let peer = match self.select(&excluded).await {
                     Ok(peer) => peer,
                     Err(error) => return Err(error),
                 };
                 excluded.insert(peer.address);
+                let mut measured = self.metrics.attempt(&peer.statistics, attempts > 0);
+                attempts += 1;
                 let attempt = deadline.min(Instant::now() + ATTEMPT);
                 let result = tokio::time::timeout_at(attempt, async {
                     let channel = peer
@@ -572,6 +590,7 @@ impl Client {
                 })
                 .await
                 .unwrap_or_else(|_| Err(Status::deadline_exceeded("control attempt timed out")));
+                measured.finish(&result);
                 match result {
                     Ok(reply) => {
                         peer.succeeded();
@@ -604,13 +623,26 @@ impl Client {
         connection: Uuid,
         previous_epoch: u64,
     ) -> Result<Session, Status> {
+        let mut operation = self.metrics.connect.begin();
+        let result = self.connect_session(boot, connection, previous_epoch).await;
+        operation.finish(result.is_err());
+        result
+    }
+
+    async fn connect_session(
+        &self,
+        boot: Uuid,
+        connection: Uuid,
+        previous_epoch: u64,
+    ) -> Result<Session, Status> {
         let deadline = Instant::now() + DEADLINE;
         tokio::time::timeout_at(deadline, async {
             let mut excluded = HashSet::new();
             let mut last = Status::unavailable("control is unavailable");
-            for _ in 0..3 {
+            for attempt in 0..3 {
                 let peer = self.select(&excluded).await?;
                 excluded.insert(peer.address);
+                let mut measured = self.metrics.attempt(&peer.statistics, attempt > 0);
                 let started = Instant::now();
                 let result = tokio::time::timeout_at(deadline.min(started + ATTEMPT), async {
                     // This is a new transport connection, independent of the Unary Channel.
@@ -634,8 +666,9 @@ impl Client {
                     super::uuid(&run.fence)?;
                     super::uuid(&welcome.control_id)?;
                     let valid_until = lease_deadline(started, welcome.valid_for_ms)?;
-                    Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until })
+                    Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until, metrics: self.metrics.clone() })
                 }).await.unwrap_or_else(|_| Err(Status::deadline_exceeded("session connection timed out")));
+                measured.finish(&result);
                 match result {
                     Ok(session) => { peer.succeeded(); return Ok(session); }
                     Err(error) if retryable(&error) || error.code() == tonic::Code::Internal => { peer.failed(); last = error; }
@@ -644,6 +677,24 @@ impl Client {
             }
             Err(last)
         }).await.unwrap_or_else(|_| Err(Status::deadline_exceeded("session deadline exceeded")))
+    }
+
+    pub(crate) fn statistics(&self) -> serde_json::Value {
+        let mut value = self.metrics.snapshot();
+        value["peers"] =
+            self.addresses
+                .try_lock()
+                .ok()
+                .map(|addresses| {
+                    addresses.peers.iter().map(|peer| {
+                let state = peer.statistics.snapshot();
+                serde_json::json!({"address": peer.address, "attempts": state["started"],
+                    "failed": state["failed"], "canceled": state["canceled"],
+                    "duration_ms": state["duration_ms"]})
+            }).collect::<Vec<_>>()
+                })
+                .map_or(serde_json::Value::Null, |peers| serde_json::json!(peers));
+        value
     }
 
     pub(crate) async fn contains(&self, address: Ipv4Addr) -> bool {
@@ -659,6 +710,7 @@ pub(crate) struct Session {
     incoming: tonic::Streaming<wire::SessionReply>,
     pub(crate) welcome: wire::Welcome,
     pub(crate) valid_until: Instant,
+    metrics: Arc<super::metrics::Metrics>,
 }
 
 impl Session {
@@ -684,6 +736,21 @@ impl Session {
     }
 
     pub(crate) async fn pulse_resources(
+        &mut self,
+        sequence: u64,
+        draining: bool,
+        renew: Vec<wire::GrantRef>,
+        release: Vec<wire::GrantRef>,
+    ) -> Result<wire::PulseReply, Status> {
+        let mut operation = self.metrics.heartbeat.begin();
+        let result = self
+            .exchange_pulse(sequence, draining, renew, release)
+            .await;
+        operation.finish(result.is_err());
+        result
+    }
+
+    async fn exchange_pulse(
         &mut self,
         sequence: u64,
         draining: bool,

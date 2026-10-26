@@ -183,16 +183,13 @@ pub(crate) fn loaded_config(app: &App) -> Result<Vec<ConfigField>> {
     config_fields(app, values)
 }
 
-fn config_fields(app: &App, runtime: Vec<(String, Value, i64, bool)>) -> Result<Vec<ConfigField>> {
-    let c = &app.config;
-    let d = &c.database;
-    // Only current file sections and database-backed runtime sections are serialized. Secret-bearing fields use an allowlist.
-    let mut sections = serde_json::Map::new();
-    let mut instance = serde_json::to_value(&c.instance)?;
+pub(crate) fn instance_config(config: &crate::config::Instance) -> Result<Value> {
+    let mut instance = serde_json::to_value(config)?;
     instance.as_object_mut().unwrap().retain(|key, _| {
         matches!(
             key.as_str(),
             "name"
+                | "control_url"
                 | "listen_control"
                 | "listen_web"
                 | "listen_s3"
@@ -216,6 +213,15 @@ fn config_fields(app: &App, runtime: Vec<(String, Value, i64, bool)>) -> Result<
                 | "compression_idle_timeout"
         )
     });
+    Ok(instance)
+}
+
+fn config_fields(app: &App, runtime: Vec<(String, Value, i64, bool)>) -> Result<Vec<ConfigField>> {
+    let c = &app.config;
+    let d = &c.database;
+    // Only current file sections and database-backed runtime sections are serialized. Secret-bearing fields use an allowlist.
+    let mut sections = serde_json::Map::new();
+    let mut instance = instance_config(&c.instance)?;
     instance["deployment_key"] = json!("[redacted]");
     sections.insert("instance".into(), instance);
     let database = if d.backend == crate::config::DatabaseType::Sqlite {
@@ -321,26 +327,9 @@ fn observed(key: &str, value: Value, missing: &'static str) -> ConfigField {
     }
 }
 
-fn environment(app: &App) -> Vec<ConfigField> {
+pub(crate) fn runtime_environment(budget: &crate::config::Budget) -> Vec<ConfigField> {
     let mut fields = Vec::new();
-    let info = serde_json::to_value(app.runtime.database_info()).unwrap_or(Value::Null);
-    for key in ["program", "version", "schema_version"] {
-        fields.push(observed(
-            &format!("database.{key}"),
-            info[key].clone(),
-            "unavailable",
-        ));
-    }
-    for key in ["journal_mode", "synchronous"] {
-        if !info[key].is_null() {
-            fields.push(observed(
-                &format!("database.{key}"),
-                info[key].clone(),
-                "unavailable",
-            ));
-        }
-    }
-    let e = &app.budget.environment;
+    let e = &budget.environment;
     for (key, value) in [
         ("version", json!(env!("CARGO_PKG_VERSION"))),
         ("os", json!(std::env::consts::OS)),
@@ -371,6 +360,29 @@ fn environment(app: &App) -> Vec<ConfigField> {
             "unavailable"
         },
     ));
+    fields
+}
+
+fn environment(app: &App) -> Vec<ConfigField> {
+    let mut fields = Vec::new();
+    let info = serde_json::to_value(app.runtime.database_info()).unwrap_or(Value::Null);
+    for key in ["program", "version", "schema_version"] {
+        fields.push(observed(
+            &format!("database.{key}"),
+            info[key].clone(),
+            "unavailable",
+        ));
+    }
+    for key in ["journal_mode", "synchronous"] {
+        if !info[key].is_null() {
+            fields.push(observed(
+                &format!("database.{key}"),
+                info[key].clone(),
+                "unavailable",
+            ));
+        }
+    }
+    fields.extend(runtime_environment(&app.budget));
     if app.config.replica_database.is_some() {
         let replica = app.runtime.read_replica();
         let missing = if replica.is_some() {

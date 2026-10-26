@@ -212,6 +212,7 @@ impl Store {
                 let store = Arc::new(PrefixStore::new(remote.as_ref().clone(), prefix.clone()));
                 multipart = Some(store.clone());
                 streaming = Some(super::s3::Streaming {
+                    statistics: None,
                     signer: store.clone(),
                     bucket_signer: remote,
                     prefix: prefix.clone(),
