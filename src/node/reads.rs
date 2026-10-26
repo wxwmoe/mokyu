@@ -342,7 +342,7 @@ impl Reads {
         let reader = super::body::Reader::new(&node)?;
         let checks = crate::content::checks::Checks::new(reader.cpu.clone());
         let bodies = crate::app::responses::Cache::new(budget.response_cache_bytes);
-        let settings = node.snapshot()?.runtime().requests.clone();
+        let settings = node.background_snapshot()?.runtime().requests.clone();
         let (cors, receiver) = crate::http::cors::Cache::new(
             crate::config::cache_bytes(&settings.cors_cache_size)? as usize,
             settings.cors_cache_entries,

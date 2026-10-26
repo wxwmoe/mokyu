@@ -34,8 +34,8 @@ impl Reader {
             units <= u64::from(self.pack_units),
             "pack exceeds node memory budget"
         );
-        let memory = Arc::new(self.packs.clone().acquire_many_owned(units as u32).await?);
-        let _io = self.io.clone().acquire_owned().await?;
+        let memory = Arc::new(self.acquire(&self.packs, units as u32).await?);
+        let _io = self.acquire(&self.io, 1).await?;
         backend.store.verify().await?;
         let mut raw = BTreeMap::<Id, (Vec<u8>, Bytes)>::new();
         for source in &batch.sources {
@@ -131,7 +131,7 @@ impl Reader {
             units <= u64::from(self.pack_units),
             "pack exceeds node memory budget"
         );
-        let memory = Arc::new(self.packs.clone().acquire_many_owned(units as u32).await?);
+        let memory = Arc::new(self.acquire(&self.packs, units as u32).await?);
         backend.store.verify().await?;
         self.pack_data(backend, keys, batch, raw, memory, attempts)
             .await

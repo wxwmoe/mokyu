@@ -38,6 +38,15 @@ async fn node_work_batches_recover_results_and_preserve_read_pins() -> Result<()
     });
     node_state(&mut states, |state| state.phase == Phase::Ready).await?;
     assert_eq!(context.budget.get().unwrap().database_connections, 0);
+    let busy = Worker::new(context.clone())?;
+    let capacity = busy.block_reads().await?;
+    fixture("work-busy-seed").await?;
+    let running = tokio::spawn(busy.run());
+    fixture("work-busy-check").await?;
+    drop(capacity);
+    fixture("work-busy-recovered").await?;
+    running.abort();
+    assert!(running.await.unwrap_err().is_cancelled());
     fixture("lose-work").await?;
     fixture("work-seed").await?;
     let mut worker = tokio::spawn(Worker::new(context.clone())?.run());

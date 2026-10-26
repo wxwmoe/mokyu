@@ -14,7 +14,7 @@ impl Reader {
         members: Vec<Member>,
         mode: crate::worker::integrity::Mode,
     ) -> Result<Outcome> {
-        let _io = self.io.clone().acquire_owned().await?;
+        let _io = self.acquire(&self.io, 1).await?;
         let timeout = crate::config::seconds(&backend.profile.integrity_batch_timeout)?;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
         // Always recheck the namespace; a cached identity is insufficient evidence of corruption.
@@ -89,7 +89,7 @@ impl Reader {
                 units <= u64::from(self.pack_units),
                 "source exceeds node memory budget"
             );
-            let memory = self.packs.clone().acquire_many_owned(units as u32).await?;
+            let memory = self.acquire(&self.packs, units as u32).await?;
             self.gets.fetch_add(1, Ordering::Relaxed);
             let bytes = read_bounded(backend.store.backend.as_ref(), &path, bound).await?;
             let cpu = self.cpu.clone().acquire_owned().await?;
@@ -130,6 +130,7 @@ impl Reader {
         .await;
         Ok(match result {
             Ok(Ok(())) => Outcome::Inspected { code: None },
+            Ok(Err(error)) if super::super::work::busy(&error) => return Err(error),
             Ok(Err(error)) => {
                 let code = error
                     .downcast_ref::<codec::IntegrityError>()

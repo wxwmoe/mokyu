@@ -549,7 +549,7 @@ impl Writes {
 
     async fn tail(&self, operation: &Operation, offset: u64, bytes: Vec<u8>) -> Result<()> {
         let node = &self.reads.node;
-        let io = Arc::new(self.io.clone().acquire_owned().await?);
+        let io = Arc::new(self.reads.reader.acquire(&self.io, 1).await?);
         let held = self.reads.cache.snapshot();
         let size = bytes.len() as u32;
         let started = Instant::now();
@@ -721,7 +721,7 @@ impl Writes {
             return Ok((size, etag, sums));
         }
         // Acquire local IO before reserving shared storage capacity.
-        let io = Arc::new(self.io.clone().acquire_owned().await?);
+        let io = Arc::new(self.reads.reader.acquire(&self.io, 1).await?);
         let started = Instant::now();
         let plan = node
             .client
@@ -949,7 +949,7 @@ impl Writes {
         let mut offset = 0;
         let mut batch_id = 1;
         while let Some(batch) = rx.recv().await {
-            let acquire = self.io.clone().acquire_many_owned(self.parallelism);
+            let acquire = self.reads.reader.acquire(&self.io, self.parallelism);
             tokio::pin!(acquire);
             #[cfg(feature = "fault-injection")]
             let permit = tokio::select! {

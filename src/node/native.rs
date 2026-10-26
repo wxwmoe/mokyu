@@ -152,7 +152,7 @@ impl Writes {
     async fn native_step(&self, stream: Option<String>) -> Result<Progress> {
         let node = &self.reads.node;
         let snapshot = node.background_snapshot()?;
-        let io = Arc::new(self.io.clone().acquire_owned().await?);
+        let io = Arc::new(self.reads.reader.acquire(&self.io, 1).await?);
         let held = self.reads.cache.snapshot();
         let target = stream.is_some();
         let id = Uuid::now_v7().to_string();
@@ -454,7 +454,7 @@ impl Writes {
         let mut resend = false;
         loop {
             operation.check()?;
-            let io = self.io.clone().acquire_owned().await?;
+            let io = self.reads.reader.acquire(&self.io, 1).await?;
             let started = Instant::now();
             let reply = node
                 .client
@@ -536,7 +536,7 @@ impl Writes {
             crate::faults::point("node-native-completed").await;
             let (digest, hash, sums) = operation
                 .guard(node, &grants, async {
-                    let _read = self.reads.reader.io.clone().acquire_owned().await?;
+                    let _read = self.reads.reader.acquire(&self.reads.reader.io, 1).await?;
                     let mut body = backend.store.backend.get(&path).await?.into_stream();
                     let mut full =
                         Integrity::new(&hyper::HeaderMap::new(), value.algorithm.as_deref())?;

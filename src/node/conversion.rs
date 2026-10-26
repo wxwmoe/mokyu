@@ -16,7 +16,7 @@ impl Writes {
                 || (source.medium == "local" && source.pending_upload),
             codec::IntegrityError::RawMetadata
         );
-        let memory = Arc::new(self.slots.clone().acquire_owned().await?);
+        let memory = Arc::new(self.reads.reader.acquire(&self.slots, 1).await?);
         let node = &self.reads.node;
         let snapshot = node.background_snapshot()?;
         let held = self.reads.cache.snapshot();
@@ -61,7 +61,7 @@ impl Writes {
         );
         let result = operation
             .guard(node, &[], async {
-                let io = self.reads.reader.io.clone().acquire_owned().await?;
+                let io = self.reads.reader.acquire(&self.reads.reader.io, 1).await?;
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("node-conversion-before-read").await;
                 let body = if source.pending_upload {

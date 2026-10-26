@@ -14,10 +14,10 @@ impl Reader {
             ensure!(hash.len() == 32, codec::IntegrityError::RawMetadata);
             return Ok(Outcome::Hashed { hash });
         }
-        let _io = self.io.clone().acquire_owned().await?;
-        let _memory = self.packs.clone().acquire_owned().await?;
+        let _memory = self.acquire(&self.packs, 1).await?;
+        let _io = self.acquire(&self.io, 1).await?;
         backend.store.verify().await?;
-        let _cpu = self.cpu.clone().acquire_owned().await?;
+        let _cpu = self.cpu.clone().try_acquire_owned()?;
         let mut file = RawFile::remote(
             backend.store.backend.clone(),
             &source,

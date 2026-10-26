@@ -2,7 +2,7 @@ use super::*;
 
 impl Writes {
     pub(crate) async fn migrate(&self, write: Uuid, size: u64) -> Result<()> {
-        let memory = Arc::new(self.slots.clone().acquire_owned().await?);
+        let memory = Arc::new(self.reads.reader.acquire(&self.slots, 1).await?);
         let node = &self.reads.node;
         let snapshot = node.background_snapshot()?;
         let held = self.reads.cache.snapshot();

@@ -18,12 +18,32 @@ pub(crate) struct Worker {
 
 impl Worker {
     pub(crate) fn new(node: Arc<NodeContext>) -> Result<Self> {
+        let mut reads = reads::Reads::new(node.clone())?;
+        reads.reader.background = true;
+        let mut reader = super::body::Reader::new(&node)?;
+        reader.background = true;
         Ok(Self {
-            writes: super::writes::Writes::new(Arc::new(reads::Reads::new(node.clone())?))?,
-            reader: super::body::Reader::new(&node)?,
+            writes: super::writes::Writes::new(Arc::new(reads))?,
+            reader,
             node,
             cache: reads::Cache::default(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn block_reads(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        let count = self
+            .node
+            .budget
+            .get()
+            .context("node budget missing")?
+            .storage_read_slots;
+        Ok(self
+            .reader
+            .io
+            .clone()
+            .acquire_many_owned(count as u32)
+            .await?)
     }
 
     async fn drain(&self, class: u32) -> Result<()> {
@@ -137,10 +157,7 @@ impl Worker {
                                     grants.clone(),
                                 )
                                 .await;
-                            outcomes.push(result.unwrap_or_else(|error| {
-                                tracing::debug!(%error,"cached raw upload postponed");
-                                work::Outcome::Retry
-                            }));
+                            outcomes.push(result.or_else(retry)?);
                         }
                         outcomes
                     }
@@ -162,11 +179,7 @@ impl Worker {
                         if let Err(error) = &result {
                             tracing::debug!(%error, "raw conversion postponed");
                         }
-                        vec![if result.is_ok() {
-                            work::Outcome::Converted
-                        } else {
-                            work::Outcome::Retry
-                        }]
+                        vec![result.map(|_| work::Outcome::Converted).or_else(retry)?]
                     }
                     work::Plan::Migrate {
                         write,
@@ -182,18 +195,11 @@ impl Worker {
                         if let Err(error) = &result {
                             tracing::debug!(%error, "storage migration postponed");
                         }
-                        vec![if result.is_ok() {
-                            work::Outcome::Migrated
-                        } else {
-                            work::Outcome::Retry
-                        }]
+                        vec![result.map(|_| work::Outcome::Migrated).or_else(retry)?]
                     }
                     work::Plan::HashRaw { storage, items } => {
                         ensure!(items.len() <= work::MAX_ITEMS, "invalid raw hash batch");
                         let count = items.len();
-                        let timeout = Duration::from_secs(crate::config::seconds(
-                            &snapshot.runtime().maintenance.max_duration,
-                        )?);
                         let hashing = async {
                             let mut outcomes = Vec::with_capacity(count);
                             for item in items {
@@ -203,21 +209,16 @@ impl Worker {
                                     grant.check()?;
                                 }
                                 outcomes.push(
-                                    self.reader
-                                        .hash_raw(&backend, item)
-                                        .await
-                                        .unwrap_or(work::Outcome::Retry),
+                                    self.reader.hash_raw(&backend, item).await.or_else(retry)?,
                                 );
                             }
                             #[cfg(feature = "fault-injection")]
                             crate::faults::point("node-raw-hashed").await;
                             Ok::<_, anyhow::Error>(outcomes)
                         };
-                        tokio::time::timeout(timeout, hashing)
+                        hashing
                             .await
-                            .ok()
-                            .and_then(Result::ok)
-                            .unwrap_or_else(|| vec![work::Outcome::Retry; count])
+                            .or_else(|error| retry(error).map(|value| vec![value; count]))?
                     }
                     work::Plan::Collect {
                         items,
@@ -225,7 +226,7 @@ impl Worker {
                         ..
                     } => {
                         ensure!(items.len() <= work::MAX_ITEMS, "invalid work size");
-                        let _io = self.reader.io.clone().acquire_owned().await?;
+                        let _io = self.reader.acquire(&self.reader.io, 1).await?;
                         if !items.is_empty() {
                             backend.store.ensure_verified().await?;
                         }
@@ -385,30 +386,18 @@ impl Worker {
                     }
                     work::Plan::Pack { batch, .. } => {
                         let keys = Arc::new(reads::keys(&materials)?);
-                        let timeout = Duration::from_secs(crate::config::seconds(
-                            &snapshot.runtime().maintenance.max_duration,
-                        )?);
                         let encoding = async {
                             let result = self.reader.pack(backend, keys, *batch).await?;
                             #[cfg(feature = "fault-injection")]
                             crate::faults::point("node-pack-stored").await;
                             Ok::<_, anyhow::Error>(work::Outcome::Packed(result))
                         };
-                        vec![
-                            tokio::time::timeout(timeout, encoding)
-                                .await
-                                .ok()
-                                .and_then(Result::ok)
-                                .unwrap_or(work::Outcome::Retry),
-                        ]
+                        vec![encoding.await.or_else(retry)?]
                     }
                     work::Plan::Rewrite { items, .. } => {
                         ensure!(items.len() <= work::MAX_ITEMS, "invalid rewrite size");
                         let keys = Arc::new(reads::keys(&materials)?);
                         let count = items.len();
-                        let timeout = Duration::from_secs(crate::config::seconds(
-                            &snapshot.runtime().maintenance.max_duration,
-                        )?);
                         let encoding = async {
                             let mut outcomes = Vec::with_capacity(count);
                             for item in items {
@@ -426,11 +415,9 @@ impl Worker {
                             crate::faults::point("node-rewrite-stored").await;
                             Ok::<_, anyhow::Error>(outcomes)
                         };
-                        tokio::time::timeout(timeout, encoding)
+                        encoding
                             .await
-                            .ok()
-                            .and_then(Result::ok)
-                            .unwrap_or_else(|| vec![work::Outcome::Retry; count])
+                            .or_else(|error| retry(error).map(|value| vec![value; count]))?
                     }
                     work::Plan::SweepScan {
                         after,
@@ -438,27 +425,17 @@ impl Worker {
                         bytes,
                         ..
                     } => {
-                        let timeout = Duration::from_secs(crate::config::seconds(
-                            &snapshot.runtime().maintenance.max_duration,
-                        )?);
                         vec![
-                            tokio::time::timeout(timeout, self.scan(backend, after, limit, bytes))
+                            self.scan(backend, after, limit, bytes)
                                 .await
-                                .ok()
-                                .and_then(Result::ok)
-                                .unwrap_or(work::Outcome::Retry),
+                                .or_else(retry)?,
                         ]
                     }
                     work::Plan::SweepDelete { before, items, .. } => {
                         let count = items.len();
-                        let timeout = Duration::from_secs(crate::config::seconds(
-                            &snapshot.runtime().maintenance.max_duration,
-                        )?);
-                        tokio::time::timeout(timeout, self.prune(backend, before, items))
+                        self.prune(backend, before, items)
                             .await
-                            .ok()
-                            .and_then(Result::ok)
-                            .unwrap_or_else(|| vec![work::Outcome::Retry; count])
+                            .or_else(|error| retry(error).map(|value| vec![value; count]))?
                     }
                 };
                 Ok::<_, anyhow::Error>(work::Completion {
@@ -510,5 +487,20 @@ impl Worker {
                 return Ok(());
             }
         }
+    }
+}
+
+pub(super) fn busy(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<tokio::sync::TryAcquireError>())
+}
+
+fn retry(error: anyhow::Error) -> Result<work::Outcome> {
+    if busy(&error) {
+        Err(error)
+    } else {
+        tracing::debug!(%error, "background work postponed");
+        Ok(work::Outcome::Retry)
     }
 }

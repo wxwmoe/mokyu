@@ -43,7 +43,7 @@ impl Writes {
             .try_into()
             .map_err(|_| codec::IntegrityError::RawMetadata)?;
         if hashing {
-            let _cpu = self.reads.reader.cpu.clone().acquire_owned().await?;
+            let _cpu = self.reads.reader.cpu.clone().try_acquire_owned()?;
             let mut file = crate::storage::raw::RawFile::Local(file);
             let hash =
                 crate::storage::raw_upload::hash_file(&mut file, source.size as u64, digest, true)

@@ -62,8 +62,8 @@ impl Reader {
             units <= u64::from(self.pack_units),
             "rewrite exceeds node memory budget"
         );
-        let memory = Arc::new(self.packs.clone().acquire_many_owned(units as u32).await?);
-        let _io = self.io.clone().acquire_owned().await?;
+        let memory = Arc::new(self.acquire(&self.packs, units as u32).await?);
+        let _io = self.acquire(&self.io, 1).await?;
         backend.store.verify().await?;
         self.gets.fetch_add(1, Ordering::Relaxed);
         let bytes = read_bounded(backend.store.backend.as_ref(), &source_path, bound).await?;

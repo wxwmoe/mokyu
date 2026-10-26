@@ -14,7 +14,7 @@ impl Worker {
             (1..=work::SCAN_ITEMS).contains(&limit),
             "invalid sweep size"
         );
-        let _io = self.reader.io.clone().acquire_owned().await?;
+        let _io = self.reader.acquire(&self.reader.io, 1).await?;
         backend.store.verify().await?;
         let after = Path::parse(after.unwrap_or_default())?;
         let mut listing = backend.store.backend.list_with_offset(None, &after);
@@ -45,7 +45,7 @@ impl Worker {
         items: Vec<work::ListedObject>,
     ) -> Result<Vec<work::Outcome>> {
         ensure!(items.len() <= work::SCAN_ITEMS, "invalid sweep size");
-        let _io = self.reader.io.clone().acquire_owned().await?;
+        let _io = self.reader.acquire(&self.reader.io, 1).await?;
         backend.store.verify().await?;
         let mut outcomes = Vec::with_capacity(items.len());
         for item in items {

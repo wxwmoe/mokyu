@@ -76,6 +76,7 @@ pub(super) struct Limits {
 }
 
 pub(super) struct Reader {
+    pub(super) background: bool,
     pub(super) io: Arc<Semaphore>,
     pub(super) cpu: Arc<Semaphore>,
     packs: Arc<Semaphore>,
@@ -112,6 +113,7 @@ impl Reader {
         };
         let files = limits.files;
         Ok(Self {
+            background: false,
             io: limits.io,
             cpu: limits.cpu,
             packs: limits.packs,
@@ -124,6 +126,19 @@ impl Reader {
             diagnostics: Arc::new(Diagnostics::default()),
             files,
         })
+    }
+
+    pub(super) async fn acquire(
+        &self,
+        gate: &Arc<Semaphore>,
+        count: u32,
+    ) -> Result<OwnedSemaphorePermit> {
+        if self.background {
+            // Work already owns backend capacity; relinquish it instead of waiting locally.
+            Ok(gate.clone().try_acquire_many_owned(count)?)
+        } else {
+            Ok(gate.clone().acquire_many_owned(count).await?)
+        }
     }
 
     pub(super) async fn maintain(&self) -> Result<()> {
@@ -140,7 +155,7 @@ impl Reader {
     }
 
     async fn io(&self, prepared: &Prepared, storage: Option<Uuid>) -> Result<Io> {
-        let global = self.io.clone().acquire_owned().await?;
+        let global = self.acquire(&self.io, 1).await?;
         let local = self.storage_io(prepared, storage).await?;
         Ok(Io {
             _global: global,
@@ -283,7 +298,7 @@ impl Reader {
                     units <= u64::from(self.pack_units),
                     "pack exceeds node memory budget"
                 );
-                let pack_memory = self.packs.clone().acquire_many_owned(units as u32).await?;
+                let pack_memory = self.acquire(&self.packs, units as u32).await?;
                 let bytes = self
                     .get(
                         &prepared,
