@@ -34,7 +34,74 @@ pub(crate) async fn prepare(
     node: Uuid,
     task: Execution,
     detail: &Value,
+    maximum: usize,
+    draining: bool,
 ) -> Result<Option<(work::Plan, Vec<read::BlockKey>)>> {
+    let Some(first) = prepare_source(db, node, task, detail).await? else {
+        return Ok(None);
+    };
+    const BYTES: u64 = 64 * 1024 * 1024;
+    let storage = first.source.storage_id;
+    let mut bytes = first.source.size as u64;
+    let mut items = vec![first];
+    for _ in 1..maximum {
+        if bytes >= BYTES {
+            break;
+        }
+        let next = queries::claim_task(
+            2,
+            &[],
+            Some(node),
+            task.token,
+            draining,
+            &["upload".to_owned()],
+            Some(false),
+            Some(storage),
+        )
+        .fetch_optional(&mut **db)
+        .await?;
+        let Some(id) = next else { break };
+        let (_, detail, _) = queries::work::task(id, task.token, node)
+            .fetch_one(&mut **db)
+            .await?;
+        let source: Id = serde_json::from_value(detail["source_id"].clone())?;
+        let size: Option<i64> = sqlx::query_scalar("SELECT size FROM raw_sources WHERE id=$1")
+            .bind(source)
+            .fetch_optional(&mut **db)
+            .await?;
+        if size.is_some_and(|size| size >= 0 && size as u64 > BYTES - bytes) {
+            queries::requeue_owned_task(id, task.token)
+                .execute(&mut **db)
+                .await?;
+            break;
+        }
+        if let Some(item) = prepare_source(
+            db,
+            node,
+            Execution {
+                id,
+                token: task.token,
+            },
+            &detail,
+        )
+        .await?
+        {
+            queries::work::task_lease(id, task.token)
+                .execute(&mut **db)
+                .await?;
+            bytes += item.source.size as u64;
+            items.push(item);
+        }
+    }
+    Ok(Some((work::Plan::UploadRaw { storage, items }, vec![])))
+}
+
+async fn prepare_source(
+    db: &mut Transaction<'_, Postgres>,
+    node: Uuid,
+    task: Execution,
+    detail: &Value,
+) -> Result<Option<work::UploadFile>> {
     let source: Id = serde_json::from_value(detail["source_id"].clone())?;
     let owner: Option<Uuid> =
         sqlx::query_scalar("SELECT node_id FROM raw_uploads WHERE source_id=$1")
@@ -56,9 +123,12 @@ pub(crate) async fn prepare(
             .await?;
     let streams = if let Some(hash) = &hash {
         let storage: Uuid = serde_json::from_value(detail["storage_id"].clone())?;
-        queries::claim_chunk_hash(storage, hash)
-            .execute(&mut **db)
-            .await?;
+        ensure!(
+            queries::try_claim_chunk_hash(storage, hash)
+                .fetch_one(&mut **db)
+                .await?,
+            Error::NodeWriteBusy
+        );
         let streams = queries::raw_upload_streams(source)
             .fetch_all(&mut **db)
             .await?;
@@ -130,36 +200,72 @@ pub(crate) async fn prepare(
         return Ok(None);
     }
     let hashing = value.deduplicate && value.content_hash.is_none();
-    Ok(Some((
-        work::Plan::UploadRaw {
-            storage: value.source.storage_id,
-            source: value.source,
-            hashing,
-        },
-        vec![],
-    )))
+    Ok(Some(work::UploadFile {
+        task: task.id,
+        source: value.source,
+        hashing,
+    }))
 }
 
 pub(crate) async fn finish(
     db: &mut Transaction<'_, Postgres>,
     node: Uuid,
     task: Execution,
-    source: &crate::model::raw::RawSource,
-    hashing: bool,
+    items: &[work::UploadFile],
     outcomes: &[work::Outcome],
 ) -> Result<(bool, Option<&'static str>)> {
-    let [outcome] = outcomes else {
-        return Err(Error::NodeOperationConflict.into());
-    };
+    ensure!(
+        !items.is_empty()
+            && items.len() <= work::MAX_ITEMS
+            && items.len() == outcomes.len()
+            && items[0].task == task.id,
+        Error::NodeOperationConflict
+    );
+    for item in items {
+        queries::work::task(item.task, task.token, node)
+            .fetch_optional(&mut **db)
+            .await?
+            .ok_or(Error::NodeExpired)?;
+    }
+    let mut first = None;
+    for (item, outcome) in items.iter().zip(outcomes) {
+        let execution = Execution {
+            id: item.task,
+            token: task.token,
+        };
+        let result =
+            finish_source(db, node, execution, &item.source, item.hashing, outcome).await?;
+        if item.task == task.id {
+            first = Some(result);
+        } else {
+            queries::work::finish(item.task, task.token, 0, result.0, result.1)
+                .execute(&mut **db)
+                .await?;
+        }
+    }
+    first.ok_or_else(|| Error::NodeOperationConflict.into())
+}
+
+async fn finish_source(
+    db: &mut Transaction<'_, Postgres>,
+    node: Uuid,
+    task: Execution,
+    source: &crate::model::raw::RawSource,
+    hashing: bool,
+    outcome: &work::Outcome,
+) -> Result<(bool, Option<&'static str>)> {
     let hash: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT content_hash FROM raw_uploads WHERE source_id=$1")
             .bind(source.id)
             .fetch_one(&mut **db)
             .await?;
     if let Some(hash) = &hash {
-        queries::claim_chunk_hash(source.storage_id, hash)
-            .execute(&mut **db)
-            .await?;
+        ensure!(
+            queries::try_claim_chunk_hash(source.storage_id, hash)
+                .fetch_one(&mut **db)
+                .await?,
+            Error::NodeWriteBusy
+        );
     }
     let current: RawUpload = queries::raw_upload_record(source.id)
         .fetch_one(&mut **db)
@@ -217,7 +323,7 @@ pub(crate) async fn inventory(
     authenticate_rpc_node(&mut tx, node, key, false).await?;
     ensure!(node.role == "data", Error::NodeAuthentication);
     require_node_run(&mut tx, node, input.run, true).await?;
-    let rows: Vec<(Uuid,Option<Uuid>,i64,Option<Uuid>,bool,bool,bool)> = sqlx::query_as("SELECT f.id,coalesce(r.storage_id,w.storage_id),coalesce(w.size,r.size,0),u.node_id,coalesce(u.source_id IS NOT NULL OR (w.node_id=$2 AND w.active),false),EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows v ON v.id=n.window_id JOIN stream_leases l ON l.id=v.read_id WHERE n.kind='raw' AND n.location_id=f.id AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM node_work n WHERE n.result_hash IS NULL AND n.expires_at>clock_timestamp() AND n.plan->'source'->>'location_id'=f.id::text) OR coalesce(r.medium='local' AND EXISTS(SELECT 1 FROM raw_ranges e WHERE e.source_id=r.id),false),coalesce(r.state='ready' AND r.medium='shared_s3' AND NOT r.pending_upload AND r.quarantine_code IS NULL AND p.cache_enabled,false) FROM unnest($1::uuid[]) f(id) LEFT JOIN raw_sources r ON r.id=f.id LEFT JOIN raw_uploads u ON u.source_id=r.id LEFT JOIN storage_profiles p ON p.storage_id=r.storage_id LEFT JOIN LATERAL (SELECT x.node_id,x.size,n.storage_id,n.state='active' AND n.boot_id=$3 AND n.fence=$4 AND n.credential_generation=$5 AND EXISTS(SELECT 1 FROM stream_leases l WHERE l.id=n.lease_id AND l.expires_at>clock_timestamp()) AS active FROM node_write_raw x JOIN node_writes n ON n.node_id=x.node_id AND n.operation_id=x.operation_id WHERE x.source_id=f.id AND x.node_id=$2 ORDER BY n.created_at DESC LIMIT 1) w ON true ORDER BY f.id")
+    let rows: Vec<(Uuid,Option<Uuid>,i64,Option<Uuid>,bool,bool,bool)> = sqlx::query_as("SELECT f.id,coalesce(r.storage_id,w.storage_id),coalesce(w.size,r.size,0),u.node_id,coalesce(u.source_id IS NOT NULL OR (w.node_id=$2 AND w.active),false),EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows v ON v.id=n.window_id JOIN stream_leases l ON l.id=v.read_id WHERE n.kind='raw' AND n.location_id=f.id AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM node_work n WHERE n.result_hash IS NULL AND n.expires_at>clock_timestamp() AND (n.plan->'source'->>'location_id'=f.id::text OR EXISTS(SELECT 1 FROM jsonb_array_elements(n.plan->'items') i WHERE i->'source'->>'location_id'=f.id::text))) OR coalesce(r.medium='local' AND EXISTS(SELECT 1 FROM raw_ranges e WHERE e.source_id=r.id),false),coalesce(r.state='ready' AND r.medium='shared_s3' AND NOT r.pending_upload AND r.quarantine_code IS NULL AND p.cache_enabled,false) FROM unnest($1::uuid[]) f(id) LEFT JOIN raw_sources r ON r.id=f.id LEFT JOIN raw_uploads u ON u.source_id=r.id LEFT JOIN storage_profiles p ON p.storage_id=r.storage_id LEFT JOIN LATERAL (SELECT x.node_id,x.size,n.storage_id,n.state='active' AND n.boot_id=$3 AND n.fence=$4 AND n.credential_generation=$5 AND EXISTS(SELECT 1 FROM stream_leases l WHERE l.id=n.lease_id AND l.expires_at>clock_timestamp()) AS active FROM node_write_raw x JOIN node_writes n ON n.node_id=x.node_id AND n.operation_id=x.operation_id WHERE x.source_id=f.id AND x.node_id=$2 ORDER BY n.created_at DESC LIMIT 1) w ON true ORDER BY f.id")
         .bind(&input.files).bind(node.node_id).bind(input.run.boot).bind(input.run.fence).bind(node.credential_generation).fetch_all(&mut *tx).await?;
     let mut result = Vec::with_capacity(rows.len());
     for (id, storage, size, owner, pending, protected, cached) in rows {

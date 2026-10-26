@@ -890,6 +890,7 @@ pub(super) async fn claim_task(
         input.draining,
         &[],
         node.map(|(_, role, _)| role == "control"),
+        None,
     )
     .fetch_optional(&mut *tx)
     .await?;

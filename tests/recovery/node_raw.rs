@@ -13,6 +13,9 @@ use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
+#[path = "node_cache_batches.rs"]
+mod cache_batches;
+
 fn begin(run: Run, name: &str) -> write::Begin {
     write::Begin {
         run,
@@ -528,7 +531,7 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
             .await?;
         let expected = processing == "background";
         assert!(
-            matches!(&batch.plan,Some(work::Plan::UploadRaw {source,hashing,..}) if source.location_id==raw.source && *hashing==expected)
+            matches!(&batch.plan,Some(work::Plan::UploadRaw {items,..}) if items.len()==1 && items[0].source.location_id==raw.source && items[0].hashing==expected)
         );
         if expected {
             assert!(
@@ -564,7 +567,7 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
                 .await?;
             assert!(matches!(
                 &batch.plan,
-                Some(work::Plan::UploadRaw { hashing: false, .. })
+                Some(work::Plan::UploadRaw { items, .. }) if items.len()==1 && !items[0].hashing
             ));
         }
         let completion = work::Completion {
@@ -595,5 +598,6 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
                 .await?;
         assert!(!pending);
     }
+    cache_batches::check(&backend, &node, &key, session.run, session.epoch, storage).await?;
     Ok(())
 }

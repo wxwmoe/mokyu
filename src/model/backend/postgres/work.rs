@@ -168,9 +168,7 @@ async fn finish(
     let mut error = None;
     let mut complete = false;
     match row.plan.context("work plan is missing")?.0 {
-        work::Plan::UploadRaw {
-            source, hashing, ..
-        } => {
+        work::Plan::UploadRaw { items, .. } => {
             (complete, error) = super::raw_cache::finish(
                 db,
                 node.node_id,
@@ -178,8 +176,7 @@ async fn finish(
                     id: task,
                     token: row.token,
                 },
-                &source,
-                hashing,
+                &items,
                 &completion.outcomes,
             )
             .await?;
@@ -728,6 +725,7 @@ pub(crate) async fn exchange(
             session.draining,
             &allowed,
             Some(false),
+            None,
         )
         .fetch_optional(&mut *tx)
         .await?;
@@ -803,6 +801,8 @@ pub(crate) async fn exchange(
                         node.node_id,
                         Execution { id: task, token },
                         &detail,
+                        input.max_items,
+                        session.draining,
                     )
                     .await?
                 } else if policy == "upload" && detail["operation"] == "deduplicate" {

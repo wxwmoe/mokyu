@@ -107,21 +107,42 @@ impl Worker {
             let backend = reads::backend(&materials, plan.storage())?;
             let future = async {
                 let outcomes = match plan {
-                    work::Plan::UploadRaw {
-                        source, hashing, ..
-                    } => {
+                    work::Plan::UploadRaw { storage, items } => {
+                        ensure!(
+                            !items.is_empty() && items.len() <= work::MAX_ITEMS,
+                            "invalid cache upload batch"
+                        );
                         let (memory, io) = upload_resources
                             .as_ref()
                             .context("cache upload resources missing")?
                             .clone();
-                        let result = self
-                            .writes
-                            .flush_raw(&backend, &source, hashing, memory, io, grants.clone())
-                            .await;
-                        vec![result.unwrap_or_else(|error| {
-                            tracing::debug!(%error,"cached raw upload postponed");
-                            work::Outcome::Retry
-                        })]
+                        let mut outcomes = Vec::with_capacity(items.len());
+                        for item in items {
+                            ensure!(
+                                item.source.storage_id == storage,
+                                "cache upload storage differs"
+                            );
+                            snapshot.lease.check()?;
+                            for grant in &grants {
+                                grant.check()?;
+                            }
+                            let result = self
+                                .writes
+                                .flush_raw(
+                                    &backend,
+                                    &item.source,
+                                    item.hashing,
+                                    memory.clone(),
+                                    io.clone(),
+                                    grants.clone(),
+                                )
+                                .await;
+                            outcomes.push(result.unwrap_or_else(|error| {
+                                tracing::debug!(%error,"cached raw upload postponed");
+                                work::Outcome::Retry
+                            }));
+                        }
+                        outcomes
                     }
                     work::Plan::ConvertRaw {
                         source,

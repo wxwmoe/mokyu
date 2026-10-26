@@ -95,6 +95,14 @@ pub(crate) struct RawHash {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UploadFile {
+    pub task: Uuid,
+    pub source: super::raw::RawSource,
+    pub hashing: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
     Migrate {
@@ -105,8 +113,7 @@ pub(crate) enum Plan {
     },
     UploadRaw {
         storage: Uuid,
-        source: super::raw::RawSource,
-        hashing: bool,
+        items: Vec<UploadFile>,
     },
     ConvertRaw {
         storage: Uuid,
