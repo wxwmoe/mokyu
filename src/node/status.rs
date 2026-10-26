@@ -50,6 +50,7 @@ impl NodeContext {
                 "diagnostics": body.as_ref().map(|body| body.diagnostics.snapshot())},
             "response_cache": foreground.as_ref().map(|reads| reads.bodies.snapshot()),
             "compression": self.observations.compression.snapshot(),
+            "access": self.access.snapshot(),
             "rpc": self.client.statistics(),
             "configuration": state.snapshot.as_ref().map(|snapshot| snapshot.settings.view()),
             "control": {"url": self.config.instance.control_url, "peer": state.peer,

@@ -5565,6 +5565,19 @@ pub(super) async fn sample_runtime(
 
 pub(super) async fn flush_access(pool: &PgPool, pending: AccessBatch, stale: f64) -> Result<()> {
     let mut tx = pool.begin().await?;
+    let dropped = pending.dropped;
+    persist_access(&mut tx, pending).await?;
+    queries::access_coverage(dropped, stale)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn persist_access(db: &mut PgConnection, pending: AccessBatch) -> Result<()> {
+    if pending.chunks.is_empty() && pending.packs.is_empty() && pending.members.is_empty() {
+        return Ok(());
+    }
     // Each capped map is persisted in one bulk query.
     let mut ids = Vec::new();
     let mut hours = Vec::new();
@@ -5581,10 +5594,10 @@ pub(super) async fn flush_access(pool: &PgPool, pending: AccessBatch, stale: f64
         origins.push(c.origins);
     }
     queries::access_chunks(&ids, &reads, &ranges, &bytes)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
     queries::access_chunk_windows(&ids, hours, reads, ranges, bytes, origins)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
     let mut ids = Vec::new();
     let mut hours = Vec::new();
@@ -5603,7 +5616,7 @@ pub(super) async fn flush_access(pool: &PgPool, pending: AccessBatch, stale: f64
         useful.push(p.useful);
     }
     queries::access_packs(ids, hours, reads, bytes, partial, useful, partial_bytes)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
     let (mut packs, mut chunks, mut hours, mut counts) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -5614,12 +5627,8 @@ pub(super) async fn flush_access(pool: &PgPool, pending: AccessBatch, stale: f64
         counts.push(n);
     }
     queries::access_members(packs, chunks, hours, counts)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
-    queries::access_coverage(pending.dropped, stale)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -9079,13 +9088,20 @@ pub(super) async fn report_node_observations(
     use crate::model::Error;
     input.validate()?;
     let mut tx = pool.begin().await?;
+    // Dropping a query future does not cancel PostgreSQL's lock wait.
+    queries::observation_limits().execute(&mut *tx).await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
     ensure!(state.role == "data", Error::NodeAuthentication);
-    let session = require_node_run(&mut tx, state, input.run, false).await?;
-    ensure!(
-        !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
-        Error::NodeInactive
-    );
+    let session = require_node_run(&mut tx, state, input.run, input.access.is_some()).await?;
+    if !input.compression.is_empty() || !input.credentials.is_empty() {
+        ensure!(
+            !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
+            Error::NodeInactive
+        );
+    }
+    if let Some(access) = input.access {
+        persist_node_access(&mut tx, state.node_id, input.run.boot, access).await?;
+    }
     let mut written = Vec::with_capacity(input.compression.len());
     for observation in input.compression {
         written.push(
@@ -9104,6 +9120,45 @@ pub(super) async fn report_node_observations(
     require_node_run(&mut tx, state, input.run, false).await?;
     tx.commit().await?;
     Ok(written)
+}
+
+async fn persist_node_access(
+    db: &mut PgConnection,
+    node: Uuid,
+    boot: Uuid,
+    access: crate::model::node_observation::Access,
+) -> Result<()> {
+    let hash = blake3::hash(&serde_json::to_vec(&access)?);
+    let previous = queries::node_access(node).fetch_optional(&mut *db).await?;
+    if let Some((old_boot, sequence, old_hash, _)) = &previous
+        && *old_boot == boot
+        && *sequence >= access.sequence
+    {
+        ensure!(
+            *sequence != access.sequence || old_hash.as_slice() == hash.as_bytes(),
+            crate::model::Error::OperationAborted
+        );
+        return Ok(());
+    }
+    let now = queries::node_clock().fetch_one(&mut *db).await?;
+    let valid_hour = |at: &DateTime<Utc>| {
+        *at >= now - chrono::Duration::hours(24) && *at <= now + chrono::Duration::hours(1)
+    };
+    ensure!(
+        access.chunks.iter().all(|((_, at), _)| valid_hour(at))
+            && access.packs.iter().all(|((_, at), _)| valid_hour(at))
+            && access.members.iter().all(|((_, _, at), _)| valid_hour(at)),
+        s3s::s3_error!(InvalidArgument)
+    );
+    let gap = previous
+        .filter(|(old_boot, sequence, _, _)| {
+            *old_boot == boot && *sequence == access.sequence - 1 && !access.dropped
+        })
+        .map_or(now, |(_, _, _, gap)| gap);
+    queries::node_access_saved(node, boot, access.sequence, hash.as_bytes(), now, gap)
+        .execute(&mut *db)
+        .await?;
+    persist_access(db, access.pending()).await
 }
 
 async fn node_read_mapping(

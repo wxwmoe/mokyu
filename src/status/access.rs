@@ -3,7 +3,10 @@ use crate::{app::App, config};
 use anyhow::Result;
 use chrono::{DateTime, Timelike, Utc};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering::Relaxed},
+    },
     time::Duration,
 };
 
@@ -13,6 +16,7 @@ pub struct Access {
     buffer: Mutex<AccessBatch>,
     limit: usize,
     pub wake: tokio::sync::Notify,
+    gaps: AtomicU64,
 }
 impl Access {
     pub fn new(limit: usize) -> Self {
@@ -20,6 +24,7 @@ impl Access {
             buffer: Mutex::new(AccessBatch::default()),
             limit,
             wake: tokio::sync::Notify::new(),
+            gaps: AtomicU64::new(0),
         }
     }
     fn hour() -> DateTime<Utc> {
@@ -38,6 +43,7 @@ impl Access {
             && !buffer.chunks.contains_key(&key)
         {
             buffer.dropped = true;
+            self.gaps.fetch_add(1, Relaxed);
             self.wake.notify_one();
             return;
         }
@@ -72,6 +78,7 @@ impl Access {
                 .sum::<usize>();
         if buffer.chunks.len() + buffer.packs.len() + buffer.members.len() + added > self.limit {
             buffer.dropped = true;
+            self.gaps.fetch_add(1, Relaxed);
             self.wake.notify_one();
             return;
         }
@@ -87,7 +94,7 @@ impl Access {
         }
     }
     async fn flush(&self, app: &App) -> Result<()> {
-        let pending = std::mem::take(&mut *self.buffer.lock().unwrap());
+        let pending = self.take();
         app.metrics
             .flush_access(
                 pending,
@@ -96,13 +103,25 @@ impl Access {
             .await?;
         Ok(())
     }
+    pub(crate) fn take(&self) -> AccessBatch {
+        std::mem::take(&mut *self.buffer.lock().unwrap())
+    }
+    pub(crate) fn lost(&self) {
+        self.buffer.lock().unwrap().dropped = true;
+        self.gaps.fetch_add(1, Relaxed);
+    }
+    pub(crate) fn snapshot(&self) -> serde_json::Value {
+        let buffer = self.buffer.lock().unwrap();
+        serde_json::json!({"pending":buffer.chunks.len() + buffer.packs.len() + buffer.members.len(),
+            "gaps":self.gaps.load(Relaxed)})
+    }
 }
 pub async fn run(app: Arc<App>) -> Result<()> {
     let period = Duration::from_secs(config::seconds(&app.config.metrics.access_flush_interval)?);
     loop {
         tokio::select! {_=tokio::time::sleep(period)=>{},_=app.storage.access.wake.notified()=>{}}
         if let Err(e) = app.storage.access.flush(&app).await {
-            app.storage.access.buffer.lock().unwrap().dropped = true;
+            app.storage.access.lost();
             tracing::warn!(error=%e,"access statistics flush failed; observation coverage has a gap");
         }
         app.metrics

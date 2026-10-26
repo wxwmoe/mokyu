@@ -36,6 +36,7 @@ message ObservationRequest {
   Run run = 1;
   repeated CompressionObservation compression = 2;
   repeated string credentials = 3;
+  optional bytes access_json = 4;
 }
 
 message ObservationReply {

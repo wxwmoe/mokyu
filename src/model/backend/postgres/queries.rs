@@ -6866,8 +6866,28 @@ pub(super) fn access_members(
     sqlx::query("INSERT INTO pack_member_access_windows(pack_id,chunk_id,window_start,downloads) SELECT p.id,c.id,s.hour,s.n FROM unnest($1::uuid[],$2::uuid[],$3::timestamptz[],$4::bigint[]) s(p,c,hour,n) JOIN packs p ON p.id=s.p JOIN chunks c ON c.id=s.c ON CONFLICT(window_start,pack_id,chunk_id) DO UPDATE SET downloads=pack_member_access_windows.downloads+EXCLUDED.downloads").bind(packs).bind(chunks).bind(hours).bind(counts)
 }
 
+pub(super) fn observation_limits() -> sqlx::RawSql {
+    sqlx::raw_sql("SET LOCAL lock_timeout='100ms'; SET LOCAL statement_timeout='1s'")
+}
+
+pub(super) fn node_access(node: Uuid) -> Rows<'static, (Uuid, i64, Vec<u8>, DateTime<Utc>)> {
+    sqlx::query_as("SELECT boot_id,sequence,request_hash,gap_since FROM node_access WHERE node_id=$1 FOR UPDATE").bind(node)
+}
+
+pub(super) fn node_access_saved<'a>(
+    node: Uuid,
+    boot: Uuid,
+    sequence: i64,
+    hash: &'a [u8],
+    now: DateTime<Utc>,
+    gap: DateTime<Utc>,
+) -> Statement<'a> {
+    sqlx::query("INSERT INTO node_access(node_id,boot_id,sequence,request_hash,received_at,gap_since) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(node_id) DO UPDATE SET boot_id=EXCLUDED.boot_id,sequence=EXCLUDED.sequence,request_hash=EXCLUDED.request_hash,received_at=EXCLUDED.received_at,gap_since=EXCLUDED.gap_since")
+        .bind(node).bind(boot).bind(sequence).bind(hash).bind(now).bind(gap)
+}
+
 pub(super) fn access_coverage(dropped: bool, stale: f64) -> Statement<'static> {
-    sqlx::query("UPDATE mokyu_meta SET access_coverage_since=CASE WHEN $1 OR access_flushed_at<now()-$2*interval '1 second' THEN now() ELSE access_coverage_since END,access_flushed_at=now()").bind(dropped).bind(stale)
+    sqlx::query("WITH coverage AS (SELECT count(*) expected,count(a.node_id) FILTER(WHERE a.boot_id=s.boot_id AND s.credential_generation=n.credential_generation AND s.expires_at>clock_timestamp() AND a.received_at>=now()-$2*interval '1 second') reported,min(a.received_at) flushed,max(a.gap_since) gap FROM nodes n LEFT JOIN node_sessions s ON s.node_id=n.id LEFT JOIN node_access a ON a.node_id=n.id WHERE n.enabled AND n.role='data') UPDATE mokyu_meta m SET access_coverage_since=CASE WHEN $1 OR m.access_flushed_at<now()-$2*interval '1 second' OR (m.deployment_mode='cluster' AND c.expected<>c.reported) THEN now() WHEN m.deployment_mode='cluster' THEN GREATEST(m.access_coverage_since,c.gap) ELSE m.access_coverage_since END,access_flushed_at=CASE WHEN m.deployment_mode<>'cluster' THEN now() WHEN c.expected=c.reported THEN COALESCE(c.flushed,now()) ELSE LEAST(m.access_flushed_at,now()-($2+1)*interval '1 second') END FROM coverage c WHERE m.singleton").bind(dropped).bind(stale)
 }
 
 async fn expire_access(pool: &PgPool, retention: f64, batch: i64) -> Result<()> {

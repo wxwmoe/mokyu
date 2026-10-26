@@ -52,7 +52,7 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     let service = Service { app };
     tonic::service::Routes::new(
         NodeControlServer::new(service.clone())
-            .max_decoding_message_size(super::read::REQUEST_LIMIT)
+            .max_decoding_message_size(super::OBSERVATION_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
@@ -263,6 +263,14 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
                 | s3s::S3ErrorCode::BadDigest => Status::invalid_argument("invalid node request"),
                 _ => Status::unavailable("control operation is unavailable"),
             }
+        }
+        _ if error
+            .downcast_ref::<sqlx::Error>()
+            .and_then(sqlx::Error::as_database_error)
+            .and_then(|error| error.code())
+            .is_some_and(|code| matches!(code.as_ref(), "55P03" | "57014")) =>
+        {
+            Status::resource_exhausted("control database is busy")
         }
         _ => {
             tracing::warn!("node RPC database operation failed");
@@ -802,13 +810,16 @@ impl NodeControl for Service {
             ));
         }
         let input = super::read::observations(request.into_inner())?;
-        let compression_written =
+        let compression_written = tokio::time::timeout(
+            Duration::from_secs(2),
             bounded(self.app.cluster().map_err(failure)?.report_observations(
                 &node,
                 &self.app.secrets.credential_key,
                 input,
-            ))
-            .await?;
+            )),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("observation transaction timed out"))??;
         Ok(Response::new(wire::ObservationReply {
             compression_written,
         }))

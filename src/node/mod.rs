@@ -1,3 +1,4 @@
+mod access;
 mod body;
 mod cache;
 mod checks;
@@ -117,6 +118,7 @@ pub(crate) struct NodeContext {
     pub(crate) client: Client,
     pub(crate) resources: Arc<resources::Resources>,
     pub(crate) observations: observations::Reports,
+    pub(crate) access: Arc<crate::status::access::Access>,
     pub(crate) native_work: tokio::sync::Notify,
     pub(crate) statistics: crate::status::stats::Statistics,
     io: Arc<io::Io>,
@@ -156,6 +158,9 @@ impl NodeContext {
             client,
             resources: Arc::new(resources::Resources::default()),
             observations: observations::Reports::new(),
+            access: Arc::new(crate::status::access::Access::new(
+                crate::model::node_observation::ACCESS_LIMIT,
+            )),
             native_work: tokio::sync::Notify::new(),
             statistics: crate::status::stats::Statistics::default(),
             io: Arc::new(io::Io::default()),

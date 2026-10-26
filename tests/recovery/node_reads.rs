@@ -14,6 +14,9 @@ use axum::http::HeaderMap;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
+#[path = "node_access.rs"]
+mod access;
+
 fn request(run: Run) -> read::Query {
     read::Query {
         run,
@@ -163,6 +166,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             },
         ],
         credentials: vec!["reader".into()],
+        access: None,
     };
     let mut forbidden = observations();
     forbidden.run = worker_run.run;
@@ -250,6 +254,15 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
     sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,standalone_size,encryption_algorithm,state) SELECT $1,decode(md5(n::text)||md5(n::text),'hex'),4096,4096,'none','ready' FROM generate_series(1,1025) n").bind(storage).execute(&pool).await?;
     sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,standalone_size,standalone_compressed,state,created_at,encryption_algorithm,storage_id,encoding_fingerprint) SELECT current_encoding_id,id,4096,false,'ready',clock_timestamp(),'none',storage_id,hash FROM chunks").execute(&pool).await?;
     sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id) SELECT $1,(row_number() OVER(ORDER BY id)-1)*4096,4096,id FROM chunks").bind(stream).execute(&pool).await?;
+    access::verify(
+        &backend,
+        &pool,
+        &key,
+        (&node, session.run),
+        (&peer, peer_run.run),
+        (&worker, worker_run.run),
+    )
+    .await?;
 
     assert!(
         backend

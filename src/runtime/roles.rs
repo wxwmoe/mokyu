@@ -93,6 +93,7 @@ async fn run_control(app: Arc<app::App>) -> Result<()> {
         result = cluster::report::run(app.clone(), false) => result?,
         result = cluster::control_loop(app.clone()) => result?,
         result = cluster::report::aggregate(app.clone()) => result?,
+        result = access::run(app.clone()) => result?,
         result = crate::worker::scheduler::run(app.clone()) => result?,
         result = serve_router(control_listener, control::router(app.clone()), connections, app.clone()) => result?,
         result = maintenance::run(app.clone()) => result?,

@@ -519,6 +519,7 @@ impl Reads {
                         max_bytes: previous.limits.1,
                     })
                     .await?;
+                reply.http_status = previous.reply.http_status;
                 let mut grants =
                     self.node
                         .resources

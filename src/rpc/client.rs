@@ -531,6 +531,8 @@ impl Client {
             crate::model::node_pack::RESULT_LIMIT
         } else if path == "/mokyu.node.v1.NodeControl/ReportNode" {
             super::REPORT_LIMIT
+        } else if path == "/mokyu.node.v1.NodeControl/ReportObservations" {
+            super::OBSERVATION_LIMIT
         } else {
             super::read::REQUEST_LIMIT
         };

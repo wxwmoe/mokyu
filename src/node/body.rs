@@ -7,7 +7,7 @@ use crate::{
     model::node_read as read,
     rpc::wire,
     storage::{
-        cache::CacheFile,
+        cache::{CacheFile, LoadedPack as Loaded},
         diagnostics::Diagnostics,
         model::{Options, Store},
         raw::RawFile,
@@ -294,8 +294,8 @@ impl Reader {
         };
         if let read::Source::Pack { pack, .. } = source {
             let current = loaded.as_ref().is_some_and(|value| {
-                value.location == pack.location_id
-                    && value.digest == pack.digest
+                value.pack.location_id == pack.location_id
+                    && value.pack.digest == pack.digest
                     && (!verify || value.verified)
             });
             if !current {
@@ -323,26 +323,30 @@ impl Reader {
                 let pack = pack.clone();
                 let lease = prepared.clone();
                 let keys = keys.clone();
+                let access = node.access.clone();
                 *loaded = Some(
                     tokio::task::spawn_blocking(move || {
                         let (_cpu, _lease) = (cpu, lease);
                         let data = pack::decode_read(&pack, bytes, keys.as_ref(), &pool, verify)?;
                         Ok::<_, anyhow::Error>(Loaded {
                             data,
-                            location: pack.location_id,
-                            digest: pack.digest,
+                            pack,
                             verified: verify,
                             _memory: pack_memory,
+                            used: Default::default(),
+                            access,
                         })
                     })
                     .await??,
                 );
             }
-            return Ok(owned(
-                loaded.as_ref().unwrap().data.chunk(chunk)?,
-                memory,
-                &prepared,
-            ));
+            let loaded = loaded.as_ref().unwrap();
+            loaded.touch(
+                chunk,
+                !self.background && !prepared.verify,
+                prepared.reply.http_status == 206,
+            );
+            return Ok(owned(loaded.data.chunk(chunk)?, memory, &prepared));
         }
         *loaded = None;
         let mut compressed = false;
@@ -590,13 +594,6 @@ struct Io {
     _global: OwnedSemaphorePermit,
     _local: Option<OwnedSemaphorePermit>,
 }
-struct Loaded {
-    data: pack::Decoded,
-    location: Uuid,
-    digest: Option<Vec<u8>>,
-    verified: bool,
-    _memory: OwnedSemaphorePermit,
-}
 struct Output {
     bytes: Bytes,
     _memory: OwnedSemaphorePermit,
@@ -772,6 +769,11 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                     let bytes = result?;
                     reads.check_chunk(current.clone(), index, &segment.source, bytes.clone())?;
                     if position + segment.length as u64 == end { current.finish_source(); }
+                    if !reads.reader.background && !current.verify {
+                        if let read::Source::Chunk { chunk } | read::Source::Pack { chunk, .. } | read::Source::Local { chunk, .. } = &segment.source {
+                            reads.node.access.chunk(chunk.id, current.reply.http_status == 206, segment.length as usize, false);
+                        }
+                    }
                     yield bytes.slice(segment.source_offset as usize..(segment.source_offset + segment.length) as usize);
                 }
                 position += segment.length as u64;

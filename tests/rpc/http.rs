@@ -253,6 +253,51 @@ async fn observation_reads(reads: &Arc<crate::node::reads::Reads>) -> Result<()>
     assert!(runtime["http"]["s3"]["completed"].as_u64().unwrap() > 0);
     assert!(runtime["http"]["web"]["completed"].as_u64().unwrap() > 0);
     assert!(runtime["http"]["web"]["bytes"].as_u64().unwrap() > 0);
+    let access = crate::model::node_observation::Access::new(1, reads.node.access.take());
+    assert!(!access.chunks.is_empty());
+    let run = reads.node.snapshot()?.lease.run.clone();
+    let request = wire::ObservationRequest {
+        run: Some(run.clone()),
+        access_json: Some(serde_json::to_vec(&access)?),
+        ..Default::default()
+    };
+    fixture("observations-access-before").await?;
+    reads
+        .node
+        .client
+        .report_observations(request.clone())
+        .await?;
+    fixture("observations-access-written").await?;
+    reads.node.client.report_observations(request).await?;
+    fixture("observations-access-replayed").await?;
+    let at = chrono::Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    let mut pending = crate::model::metrics::AccessBatch::default();
+    for _ in 0..crate::model::node_observation::ACCESS_LIMIT {
+        pending.chunks.insert(
+            (Uuid::new_v4().into(), at),
+            crate::model::metrics::ChunkCounts {
+                reads: 1,
+                ..Default::default()
+            },
+        );
+    }
+    let access = crate::model::node_observation::Access::new(2, pending);
+    let bytes = serde_json::to_vec(&access)?;
+    assert!(bytes.len() > 128 * 1024 && bytes.len() < crate::rpc::OBSERVATION_LIMIT);
+    reads
+        .node
+        .client
+        .report_observations(wire::ObservationRequest {
+            run: Some(run),
+            access_json: Some(bytes),
+            ..Default::default()
+        })
+        .await?;
+    fixture("observations-access-large").await?;
     Ok(())
 }
 

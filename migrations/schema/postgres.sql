@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0085.
+-- Generated from the complete postgres migration chain through 0086.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -832,6 +832,17 @@ CREATE TABLE public.multipart_files (
     state text DEFAULT 'open'::text NOT NULL,
     node_id uuid,
     CONSTRAINT multipart_files_state_check CHECK ((state = ANY (ARRAY['open'::text, 'sealed'::text, 'deleting'::text])))
+);
+
+CREATE TABLE public.node_access (
+    node_id uuid NOT NULL,
+    boot_id uuid NOT NULL,
+    sequence bigint NOT NULL,
+    request_hash bytea NOT NULL,
+    received_at timestamp with time zone NOT NULL,
+    gap_since timestamp with time zone NOT NULL,
+    CONSTRAINT node_access_request_hash_check CHECK ((octet_length(request_hash) = 32)),
+    CONSTRAINT node_access_sequence_check CHECK ((sequence > 0))
 );
 
 CREATE TABLE public.node_boots (
@@ -1958,6 +1969,9 @@ ALTER TABLE ONLY public.multipart_files
 ALTER TABLE ONLY public.multipart_files
     ADD CONSTRAINT multipart_files_source_id_key UNIQUE (source_id);
 
+ALTER TABLE ONLY public.node_access
+    ADD CONSTRAINT node_access_pkey PRIMARY KEY (node_id);
+
 ALTER TABLE ONLY public.node_boots
     ADD CONSTRAINT node_boots_pkey PRIMARY KEY (node_id, boot_id);
 
@@ -2625,6 +2639,9 @@ ALTER TABLE ONLY public.multipart_files
 
 ALTER TABLE ONLY public.multipart_files
     ADD CONSTRAINT multipart_files_upload_id_fkey FOREIGN KEY (upload_id) REFERENCES public.uploads(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.node_access
+    ADD CONSTRAINT node_access_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_boots
     ADD CONSTRAINT node_boots_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;

@@ -90,7 +90,8 @@ pub(crate) struct WorkSummary {
     pub(crate) updated_at: DateTime<Utc>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ChunkCounts {
     pub(crate) reads: i64,
     pub(crate) ranges: i64,
@@ -98,7 +99,8 @@ pub(crate) struct ChunkCounts {
     pub(crate) origins: i64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PackCounts {
     pub(crate) downloads: i64,
     pub(crate) bytes: i64,

@@ -138,6 +138,10 @@ pub(super) fn observations(
             })
             .collect::<Result<_, Status>>()?,
         credentials: input.credentials,
+        access: input
+            .access_json
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| invalid()))
+            .transpose()?,
     };
     batch.validate().map_err(|_| invalid())?;
     Ok(batch)
@@ -486,6 +490,7 @@ mod tests {
                 size: 300,
             }],
             credentials: vec!["reader".into()],
+            access_json: None,
         };
         assert!(observations(batch.clone()).is_ok());
         let mut duplicate = batch.clone();

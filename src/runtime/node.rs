@@ -38,6 +38,7 @@ async fn background(node: Arc<NodeContext>) -> Result<()> {
         result = worker.run() => result,
         result = reads.maintain() => result,
         result = node.report() => result,
+        result = node.report_access() => result,
     }
 }
 

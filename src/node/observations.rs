@@ -88,6 +88,7 @@ impl Reports {
                                 })
                                 .collect(),
                             credentials: credentials.clone(),
+                            access_json: None,
                         })
                         .await?;
                     if reply.compression_written.len() != compression.len() {
