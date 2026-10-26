@@ -69,10 +69,18 @@ pub(super) async fn prepare(
         .await?;
     let source = queries::raw_source(job.source).fetch_one(&mut **db).await?;
     source.validate()?;
+    let local = source.medium == "local"
+        && source.pending_upload
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM raw_uploads WHERE source_id=$1 AND node_id=$2)",
+        )
+        .bind(source.id)
+        .bind(node.node_id)
+        .fetch_one(&mut **db)
+        .await?;
     ensure!(
         source.storage_id == profile.storage_id
-            && source.medium == "shared_s3"
-            && !source.pending_upload
+            && (local || source.medium == "shared_s3" && !source.pending_upload)
             && source.size == original.size
             && original.payload_type == "raw",
         Error::SourceUnavailable

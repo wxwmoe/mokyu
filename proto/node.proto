@@ -65,6 +65,7 @@ service NodeWrites {
   rpc PrepareRaw(PrepareRawRequest) returns (PreparedRaw);
   rpc PrepareLocalPart(PrepareLocalPartRequest) returns (WriteReply);
   rpc CommitRaw(CommitRawRequest) returns (PreparedRaw);
+  rpc CheckRawFiles(LocalFilesRequest) returns (RawFilesReply);
   rpc PrepareTail(PrepareTailRequest) returns (PreparedTail);
   rpc CommitTail(WriteRequest) returns (PreparedTail);
   rpc PublishWrite(PublishWriteRequest) returns (WriteReply);
@@ -250,6 +251,11 @@ message PrepareRawRequest {
   uint64 size = 3;
   bytes digest = 4;
   bytes content_hash = 5;
+  bool local = 6;
+}
+
+message RawFilesReply {
+  bytes files_json = 1;
 }
 
 message CommitRawRequest {

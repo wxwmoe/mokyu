@@ -310,6 +310,14 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn check_raw_files(
+        &self,
+        input: wire::LocalFilesRequest,
+    ) -> Result<wire::RawFilesReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/CheckRawFiles")
+            .await
+    }
+
     pub(crate) async fn prepare_native_complete(
         &self,
         input: wire::NativeCompleteRequest,

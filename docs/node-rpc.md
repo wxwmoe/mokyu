@@ -31,8 +31,10 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeObjects/ChangeObjects` | Unary；批量删除对象或修改单个对象的 canned ACL，持久保存操作结果；仅允许 data |
 | `NodeWrites/PrepareChunks` | Unary；批量领取或复用区块，保存上传目标与编码参数，返回所需存储、密钥及上传许可 |
 | `NodeWrites/CommitChunks` | Unary；确认整批上传完成并建立引用，可按批次乱序完成 |
-| `NodeWrites/PrepareRaw` | Unary；校验完整文件身份、预留配额、查询去重并分配最终上传目标与许可 |
-| `NodeWrites/CommitRaw` | Unary；确认 raw 上传完成并建立引用，重复确认返回相同回执 |
+| `NodeWrites/PrepareRaw` | Unary；校验完整文件身份、预留配额、查询去重并分配物理身份；远端上传另取得许可 |
+| `NodeWrites/CommitRaw` | Unary；确认 raw 来源已达到所选持久化条件并建立引用，重复确认返回相同回执 |
+| `NodeWrites/CheckRawFiles` | Unary；按当前运行权检查最多 128 个本地 raw 文件的保留和回收状态；仅允许 data |
+| `NodeWork/Exchange` | Unary；提交上一批任务结果并领取下一批工作，返回所需材料和任务保护 |
 | `NodeWrites/PrepareTail` | Unary；为 chunks 分片的未闭合尾部预留共享 staging、配额和上传许可 |
 | `NodeWrites/CommitTail` | Unary；确认尾部持久化并建立片段映射，重复确认复用同一结果 |
 | `NodeWrites/PublishWrite` | Unary；核对完整性、条件和配额，原子发布对象并保存终态回执 |
@@ -129,7 +131,15 @@ CommitChunks 携带本批新增物理编码的 ID 和密文字节摘要，省略
 
 HTTP PUT 的可靠 chunks 接收按 CDC 边界流式形成最多 8 MiB 的批次，同时保留两个批次；上传受节点额度和实际返回的存储许可共同限制。完整正文、流式签名尾块和校验和通过后才调用 PublishWrite；零字节对象不调用区块接口。发布使本节点对应对象及其别名的公共快照失效。已经确认的发布回执不因写租约随后结束而改判失败。
 
-inline raw 普通 PUT 先使用节点本地请求暂存空间接收并校验完整文件，上限 5 GiB。PrepareRaw 包含长度、16 字节 MD5，以及开启整文件去重时的 32 字节 BLAKE3；同一操作必须重放相同输入。去重命中直接建立引用并返回已确认状态，不上传对象、不占存储上传许可。未命中时，control 先持久化最终 raw 身份，再返回上传许可；节点流式 PUT 到最终 S3 key，成功后调用 CommitRaw，最后 PublishWrite。该流式 PUT 将存储的 `request_timeout` 用作无传输进展或等待响应的超时，持续传输不受整文件总时长限制；失败重试从本地文件重新发送，仍受重试次数和期限限制。PrepareRaw 与 CommitRaw 都可重试，上传许可同样通过 NodeSession 续期；取消或过期不会抹去外部上传的清理记录。请求暂存与本地缓存共享磁盘容量和最低剩余空间约束，暂存空间不足返回可重试错误。
+inline raw 普通 PUT 先使用节点本地请求暂存空间接收并校验完整文件，上限 5 GiB。PrepareRaw 包含长度、16 字节 MD5、`local`，以及 inline 整文件去重需要的 32 字节 BLAKE3；同一操作必须重放相同输入。去重命中直接建立引用并返回已确认状态，不上传对象、不占存储上传许可。未命中且 `local=false` 时，control 先持久化最终 raw 身份，再返回上传许可；节点流式 PUT 到最终 S3 key，成功后调用 CommitRaw，最后 PublishWrite。该流式 PUT 将存储的 `request_timeout` 用作无传输进展或等待响应的超时，持续传输不受整文件总时长限制；失败重试从本地文件重新发送，仍受重试次数和期限限制。PrepareRaw 与 CommitRaw 都可重试，上传许可同样通过 NodeSession 续期；取消或过期不会抹去外部上传的清理记录。请求暂存与本地缓存共享磁盘容量和最低剩余空间约束，暂存空间不足返回可重试错误。
+
+普通 PUT 启用写缓存时使用 `local=true`，节点先同步本地文件和目录，再调用 CommitRaw 保存来源、所属节点和必须完成的排空任务，最后发布对象。raw 后台去重先计算摘要并查询重复来源，再上传；chunks 按接受时的编码策略在原节点执行 CDC，可直接生成最终区块包。唯一缓存只能由所属节点处理，同节点读取校验本地文件，其他节点沿用短暂等待和可重试响应。节点本地持久化不提供节点丢失冗余。
+
+写缓存遵守节点总容量和存储的 `upload_cache_size`。满额使用 `fallback` 时关闭此次提前确认；已知长度的 inline chunks 请求直接走有界内存流水线。`reject` 返回 503、`Retry-After: 60` 和 `Cache-Control: no-store`，不覆盖原对象。原节点的排空在停止准入后仍可推进；任务结果、任务保护和上传许可通过 Exchange 与 NodeSession 恢复，过期的执行结果不能发布。
+
+Exchange 的 `max_items` 范围为 1–64；携带完成结果时可设为 0，仅确认结果而不领取工作。节点在等待下一次本地额度前先释放已完成任务的后端许可；缓存上传持续持有本机内存和 I/O 额度，直至完成回执获确认。
+
+CheckRawFiles 每次接收最多 128 个不重复的 UUID，返回 `pending`、`protected`、`cached` 或 `removable`。节点在首次写入前恢复持久文件的占用，随后定期对账；前两种状态保留文件，`cached` 可转为可淘汰读缓存，`removable` 才可删除。上传完成并不立即解除仍有效的读取或任务保护；删除成功后才释放对应磁盘占用，避免断线或取消丢失唯一来源。
 
 写入 `operation_id` 使用 UUIDv7。首次准入接受过去 15 分钟至未来 30 秒内的时间戳；节点应同步系统时钟。相同操作与相同参数重放原上下文，参数变化返回 `AlreadyExists`。活动写入重放会重验原授权；同一节点的其他 boot 或凭据代次不能继续该写入。WriteStatus 可查询该节点的历史回执，返回 `WRITE_ACTIVE`、`WRITE_ABORTED`、`WRITE_EXPIRED` 或 `WRITE_PUBLISHED`；stream 被回收后仍保留终态回执，桶和 stream 身份可能为空。
 

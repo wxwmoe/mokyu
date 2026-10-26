@@ -39,6 +39,12 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
         input: super::node_native::Inventory,
     ) -> Result<Vec<Uuid>>;
+    async fn check_raw_files(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Inventory,
+    ) -> Result<Vec<super::node_raw::File>>;
     async fn prepare_native_complete(
         &self,
         node: &NodeState,

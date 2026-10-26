@@ -72,6 +72,7 @@ pub(super) struct Limits {
     packs: Arc<Semaphore>,
     http: Arc<Semaphore>,
     pool: Arc<compression::Pool>,
+    files: Arc<super::files::Cache>,
 }
 
 pub(super) struct Reader {
@@ -97,17 +98,19 @@ impl Reader {
                     context_idle_timeout: node.config.instance.compression_idle_timeout.clone(),
                     ..Default::default()
                 };
+                let packs = Arc::new(Semaphore::new(budget.pack_memory_units as usize));
                 *shared = Some(Limits {
+                    files: super::files::Cache::new(node, packs.clone())?,
                     io: Arc::new(Semaphore::new(budget.storage_read_slots)),
                     cpu: Arc::new(Semaphore::new(budget.cpu_jobs)),
-                    packs: Arc::new(Semaphore::new(budget.pack_memory_units as usize)),
+                    packs,
                     http: Arc::new(Semaphore::new(budget.pack_memory_units as usize)),
                     pool: Arc::new(compression::Pool::new(config, budget.cpu_jobs)?),
                 });
             }
             shared.as_ref().unwrap().clone()
         };
-        let files = super::files::Cache::new(node, limits.packs.clone())?;
+        let files = limits.files;
         Ok(Self {
             io: limits.io,
             cpu: limits.cpu,

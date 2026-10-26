@@ -156,6 +156,22 @@ async fn finish(
     let mut error = None;
     let mut complete = false;
     match row.plan.context("work plan is missing")?.0 {
+        work::Plan::UploadRaw {
+            source, hashing, ..
+        } => {
+            (complete, error) = super::raw_cache::finish(
+                db,
+                node.node_id,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                &source,
+                hashing,
+                &completion.outcomes,
+            )
+            .await?;
+        }
         work::Plan::ConvertRaw { .. } => {
             ensure!(!maintenance, Error::OperationAborted);
             (complete, error) = conversion::finish(
@@ -378,12 +394,21 @@ async fn permits(
     maintenance: Uuid,
     profile: &crate::storage::profile::StorageProfile,
     inspect: bool,
+    upload: bool,
 ) -> Result<bool> {
     for (direction, limit) in [
         ("control", profile.control_concurrency),
         (
-            if inspect { "integrity" } else { "maintenance" },
-            if inspect {
+            if upload {
+                "upload"
+            } else if inspect {
+                "integrity"
+            } else {
+                "maintenance"
+            },
+            if upload {
+                profile.upload_concurrency
+            } else if inspect {
                 Some(profile.integrity_concurrency)
             } else {
                 profile.maintenance_concurrency
@@ -411,7 +436,13 @@ async fn permits(
     queries::insert_storage_permit(
         maintenance,
         profile.storage_id,
-        if inspect { "integrity" } else { "maintenance" },
+        if upload {
+            "upload"
+        } else if inspect {
+            "integrity"
+        } else {
+            "maintenance"
+        },
         node,
     )
     .execute(&mut *db)
@@ -681,7 +712,11 @@ pub(crate) async fn exchange(
     let mut plan = None;
     let mut encrypted = None;
     let mut assigned = None;
-    for _ in 0..work::MAX_ITEMS {
+    for _ in 0..if input.max_items == 0 {
+        0
+    } else {
+        work::MAX_ITEMS
+    } {
         let task = queries::claim_task(
             input.class as i32,
             &[],
@@ -730,6 +765,7 @@ pub(crate) async fn exchange(
                 maintenance,
                 &profile,
                 policy == "integrity",
+                policy == "upload" && detail["operation"] == "cache",
             )
             .await?
             {
@@ -749,6 +785,14 @@ pub(crate) async fn exchange(
                     )
                     .await?
                     .map(|plan| (plan, vec![]))
+                } else if policy == "upload" && detail["operation"] == "cache" {
+                    super::raw_cache::prepare(
+                        &mut tx,
+                        node.node_id,
+                        Execution { id: task, token },
+                        &detail,
+                    )
+                    .await?
                 } else if policy == "upload" && detail["operation"] == "deduplicate" {
                     raw::prepare(&mut tx, Execution { id: task, token }, &detail, storage).await?
                 } else if policy == "upload" && detail["operation"] == "cdc" {

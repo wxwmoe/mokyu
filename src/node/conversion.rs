@@ -11,7 +11,8 @@ impl Writes {
     ) -> Result<()> {
         source.validate()?;
         ensure!(
-            source.medium == "shared_s3" && !source.pending_upload,
+            (source.medium == "shared_s3" && !source.pending_upload)
+                || (source.medium == "local" && source.pending_upload),
             codec::IntegrityError::RawMetadata
         );
         let memory = Arc::new(self.slots.clone().acquire_owned().await?);
@@ -61,34 +62,48 @@ impl Writes {
                 let io = self.reads.reader.io.clone().acquire_owned().await?;
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("node-conversion-before-read").await;
-                operation.backend.store.verify().await?;
-                let backend = operation.backend.store.backend.clone();
-                let meta = backend
-                    .head(&Path::from(format!(
-                        "raw/{}",
-                        crate::storage::chunk_name(source.location_id)
-                    )))
-                    .await?;
-                ensure!(
-                    meta.size == source.size as u64,
-                    codec::IntegrityError::Length
-                );
-                let value = backend
-                    .get_opts(
-                        &meta.location,
-                        object_store::GetOptions {
-                            if_match: meta.e_tag,
-                            ..Default::default()
-                        },
+                let body = if source.pending_upload {
+                    let path = crate::storage::cache::CacheFile::Raw
+                        .path(&node.config.instance.data_path, source.location_id);
+                    crate::http::object::blob(
+                        super::native::replay(
+                            path,
+                            source.size,
+                            hex::encode(source.digest.as_ref().context("raw digest missing")?),
+                        )
+                        .map_err(std::io::Error::other)
+                        .boxed(),
                     )
-                    .await?;
-                ensure!(
-                    value.meta.size == source.size as u64,
-                    codec::IntegrityError::Length
-                );
-                let body = crate::http::object::blob(
-                    value.into_stream().map_err(std::io::Error::other).boxed(),
-                );
+                } else {
+                    operation.backend.store.verify().await?;
+                    let backend = operation.backend.store.backend.clone();
+                    let meta = backend
+                        .head(&Path::from(format!(
+                            "raw/{}",
+                            crate::storage::chunk_name(source.location_id)
+                        )))
+                        .await?;
+                    ensure!(
+                        meta.size == source.size as u64,
+                        codec::IntegrityError::Length
+                    );
+                    let value = backend
+                        .get_opts(
+                            &meta.location,
+                            object_store::GetOptions {
+                                if_match: meta.e_tag,
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    ensure!(
+                        value.meta.size == source.size as u64,
+                        codec::IntegrityError::Length
+                    );
+                    crate::http::object::blob(
+                        value.into_stream().map_err(std::io::Error::other).boxed(),
+                    )
+                };
                 let mut headers = hyper::HeaderMap::new();
                 use base64::Engine;
                 headers.insert(

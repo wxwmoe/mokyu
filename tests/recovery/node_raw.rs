@@ -108,6 +108,7 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
         run: session.run,
         operation,
         input: raw::Input {
+            local: false,
             size: 3,
             digest: hex::decode("900150983cd24fb0d6963f7d28e17f72")?
                 .try_into()
@@ -286,6 +287,7 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
     let request = raw::Prepare {
         operation: empty_id,
         input: raw::Input {
+            local: false,
             size: 0,
             digest: hex::decode("d41d8cd98f00b204e9800998ecf8427e")?
                 .try_into()
@@ -430,5 +432,168 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
         .fetch_one(&pool)
         .await?;
     assert_eq!(state.1, 0);
+    use model::node_work as work;
+    let request = |run, completion| work::Exchange {
+        run,
+        operation: Uuid::now_v7(),
+        completion,
+        class: 2,
+        max_items: 64,
+        cached: vec![],
+    };
+    for processing in ["inline", "background"] {
+        sqlx::query("UPDATE storage_profiles SET upload_cache=true,write_processing=$2,cache_enabled=true WHERE storage_id=$1").bind(storage).bind(processing).execute(&pool).await?;
+        let mut input = first.clone();
+        input.operation = Uuid::now_v7();
+        input.input.local = true;
+        input.input.digest = if processing == "inline" {
+            [12; 16]
+        } else {
+            [13; 16]
+        };
+        let hash = if processing == "inline" {
+            [14; 32]
+        } else {
+            [15; 32]
+        };
+        input.input.hash = (processing == "inline").then_some(hash);
+        let mut opening = begin(session.run, &format!("cached-{processing}"));
+        opening.operation = input.operation;
+        opening.intent.credential_revision = queries::node_read_credential("writer")
+            .fetch_one(&pool)
+            .await?
+            .0;
+        backend.begin_write(&node, &key, opening).await?;
+        let raw = backend.prepare_raw(&node, &key, input.clone()).await?;
+        assert!(!raw.committed && raw.grants.is_empty());
+        let mut changed = input.clone();
+        changed.input.local = false;
+        assert_eq!(
+            model::error(
+                &backend
+                    .prepare_raw(&node, &key, changed)
+                    .await
+                    .err()
+                    .unwrap()
+            ),
+            Some(model::Error::NodeOperationConflict)
+        );
+        let inventory = || model::node_native::Inventory {
+            run: session.run,
+            files: vec![raw.source],
+            recover: false,
+        };
+        let states = backend.check_raw_files(&node, &key, inventory()).await?;
+        assert!(matches!(states[0].state, raw::FileState::Pending));
+        let commit = || raw::Commit {
+            run: session.run,
+            operation: input.operation,
+            source: raw.source,
+        };
+        assert!(backend.commit_raw(&node, &key, commit()).await?.committed);
+        assert!(backend.commit_raw(&node, &key, commit()).await?.committed);
+        assert!(
+            backend
+                .exchange_work(&node, &key, request(session.run, None))
+                .await?
+                .plan
+                .is_none(),
+            "unpublished cache was claimed"
+        );
+        backend
+            .publish_write(
+                &node,
+                &key,
+                write::Publish {
+                    run: session.run,
+                    operation: input.operation,
+                    size: 3,
+                    etag: hex::encode(input.input.digest),
+                    checksums: Default::default(),
+                    if_match: None,
+                    if_none: None,
+                },
+            )
+            .await?;
+        assert!(
+            backend
+                .exchange_work(&peer, &key, request(peer_session.run, None))
+                .await?
+                .plan
+                .is_none(),
+            "another node claimed unique data"
+        );
+        let mut batch = backend
+            .exchange_work(&node, &key, request(session.run, None))
+            .await?;
+        let expected = processing == "background";
+        assert!(
+            matches!(&batch.plan,Some(work::Plan::UploadRaw {source,hashing,..}) if source.location_id==raw.source && *hashing==expected)
+        );
+        if expected {
+            assert!(
+                backend
+                    .exchange_work(
+                        &node,
+                        &key,
+                        request(
+                            session.run,
+                            Some(work::Completion {
+                                operation: batch.operation,
+                                outcomes: vec![work::Outcome::Uploaded]
+                            })
+                        )
+                    )
+                    .await
+                    .is_err()
+            );
+            batch = backend
+                .exchange_work(
+                    &node,
+                    &key,
+                    request(
+                        session.run,
+                        Some(work::Completion {
+                            operation: batch.operation,
+                            outcomes: vec![work::Outcome::Hashed {
+                                hash: hash.to_vec(),
+                            }],
+                        }),
+                    ),
+                )
+                .await?;
+            assert!(matches!(
+                &batch.plan,
+                Some(work::Plan::UploadRaw { hashing: false, .. })
+            ));
+        }
+        let completion = work::Completion {
+            operation: batch.operation,
+            outcomes: vec![work::Outcome::Uploaded],
+        };
+        let receipt = Uuid::now_v7();
+        for _ in 0..2 {
+            let mut input = request(session.run, Some(completion.clone()));
+            input.operation = receipt;
+            if processing == "inline" {
+                input.max_items = 0;
+            }
+            assert!(
+                backend
+                    .exchange_work(&node, &key, input)
+                    .await?
+                    .plan
+                    .is_none()
+            );
+        }
+        let states = backend.check_raw_files(&node, &key, inventory()).await?;
+        assert!(matches!(states[0].state, raw::FileState::Cached));
+        let pending: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_uploads WHERE source_id=$1)")
+                .bind(raw.source)
+                .fetch_one(&pool)
+                .await?;
+        assert!(!pending);
+    }
     Ok(())
 }

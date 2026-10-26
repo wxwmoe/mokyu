@@ -10,7 +10,11 @@ enum Progress {
     Ready,
 }
 
-fn replay(path: std::path::PathBuf, size: i64, etag: String) -> BoxStream<'static, Result<Bytes>> {
+pub(super) fn replay(
+    path: std::path::PathBuf,
+    size: i64,
+    etag: String,
+) -> BoxStream<'static, Result<Bytes>> {
     Box::pin(async_stream::try_stream! {
         let metadata=tokio::fs::symlink_metadata(&path).await.map_err(|error| {
             if error.kind()==std::io::ErrorKind::NotFound {anyhow::Error::from(SourceError::Missing)} else {error.into()}

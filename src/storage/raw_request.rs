@@ -195,36 +195,7 @@ impl File {
             return Ok(None);
         };
         drop(reservation);
-        let file = self.file.as_mut().unwrap();
-        file.flush().await?;
-        if !buffered {
-            file.sync_all().await?;
-            #[cfg(feature = "fault-injection")]
-            crate::faults::point("raw-file-durable").await;
-        } else {
-            #[cfg(feature = "fault-injection")]
-            crate::faults::point("raw-file-buffered").await;
-        }
-        let destination = CacheFile::Raw.path(&storage.disk.root, id);
-        tokio::fs::hard_link(&self.path, &destination).await?;
-        self.linked = Some(destination.clone());
-        if !self.retained {
-            tokio::fs::remove_file(&self.path).await?;
-        }
-        self.path = destination;
-        self.linked = None;
-        if !buffered {
-            tokio::fs::File::open(self.path.parent().unwrap())
-                .await?
-                .sync_all()
-                .await?;
-            tokio::fs::File::open(storage.disk.root.join("raw"))
-                .await?
-                .sync_all()
-                .await?;
-        }
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("raw-file-published").await;
+        self.publish_in(&storage.disk.root, id, buffered).await?;
         let mut fifo = storage.fifo.lock().await;
         fifo.insert(id, self.bytes, CacheFile::Raw);
         let pins = fifo.entries[&id].pins.clone();
@@ -240,6 +211,48 @@ impl File {
             staging_storage_id: None,
             staging_object_key: id.to_string(),
         }))
+    }
+
+    pub(crate) async fn publish_in(
+        &mut self,
+        root: &std::path::Path,
+        id: Uuid,
+        buffered: bool,
+    ) -> Result<()> {
+        let destination = CacheFile::Raw.path(root, id);
+        tokio::fs::create_dir_all(destination.parent().unwrap()).await?;
+        let file = self.file.as_mut().unwrap();
+        file.flush().await?;
+        if !buffered {
+            file.sync_all().await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-file-durable").await;
+        } else {
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-file-buffered").await;
+        }
+        tokio::fs::hard_link(&self.path, &destination).await?;
+        self.linked = Some(destination.clone());
+        if !self.retained {
+            tokio::fs::remove_file(&self.path).await?;
+        }
+        self.path = destination;
+        self.linked = None;
+        if !buffered {
+            tokio::fs::File::open(self.path.parent().unwrap())
+                .await?
+                .sync_all()
+                .await?;
+            tokio::fs::File::open(root.join("raw"))
+                .await?
+                .sync_all()
+                .await?;
+            tokio::fs::File::open(root).await?.sync_all().await?;
+        }
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("raw-file-published").await;
+        self.published = true;
+        Ok(())
     }
 
     pub async fn rewind(&mut self) -> Result<()> {

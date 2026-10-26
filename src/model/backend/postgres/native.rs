@@ -578,6 +578,7 @@ pub(crate) async fn adopt(
         run: input.run,
         operation: input.operation,
         input: crate::model::node_raw::Input {
+            local: false,
             size: record.summary.size,
             digest: input.digest,
             hash: row.profile.deduplication_enabled.then_some(input.hash),

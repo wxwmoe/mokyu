@@ -6,6 +6,7 @@ use uuid::Uuid;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Input {
+    pub local: bool,
     pub size: i64,
     pub digest: [u8; 16],
     pub hash: Option<[u8; 32]>,
@@ -39,4 +40,22 @@ pub(crate) struct Prepared {
     pub size: i64,
     pub committed: bool,
     pub grants: Vec<node_read::Grant>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FileState {
+    Pending,
+    Protected,
+    Cached,
+    Removable,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct File {
+    pub id: Uuid,
+    pub storage: Option<Uuid>,
+    pub size: u64,
+    pub state: FileState,
 }

@@ -44,6 +44,9 @@ use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+#[path = "raw_cache.rs"]
+pub(super) mod raw_cache;
+
 #[path = "native.rs"]
 pub(super) mod native;
 #[path = "work.rs"]
@@ -7842,24 +7845,37 @@ pub(super) async fn reuse_raw_upload(
     if node.is_some() {
         raw_upload_processor(&mut tx, node).await?;
     }
+    let result =
+        reuse_raw_upload_in(&mut tx, work, hash, streams, node.map(|n| n.0.node_id)).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+async fn reuse_raw_upload_in(
+    tx: &mut Transaction<'_, Postgres>,
+    work: &crate::model::raw::RawUpload,
+    hash: &[u8],
+    streams: &[Id],
+    node: Option<Uuid>,
+) -> Result<bool> {
     queries::claim_chunk_hash(work.source.storage_id, hash)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     for stream in streams {
         queries::raw_upload_stream_lock(*stream)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
     }
     if node.is_some() {
         ensure!(
-            queries::raw_upload_owned(work, node.map(|n| n.0.node_id))
-                .fetch_one(&mut *tx)
+            queries::raw_upload_owned(work, node)
+                .fetch_one(&mut **tx)
                 .await?,
             crate::model::Error::OperationAborted
         );
     }
     let current = queries::raw_upload_record(work.source.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         current.token == work.token && current.token.is_some() && current.source == work.source,
@@ -7867,7 +7883,7 @@ pub(super) async fn reuse_raw_upload(
     );
     current.source.validate()?;
     let candidate = queries::raw_duplicate(work.source.storage_id, hash, work.source.size)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     let Some(candidate) = candidate.filter(|c| {
         c.id != work.source.id
@@ -7880,35 +7896,34 @@ pub(super) async fn reuse_raw_upload(
     };
     for stream in streams {
         if queries::raw_upload_share(*stream, work.source.id, candidate.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             > 0
         {
             queries::raw_processing_changed(*stream)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
     }
     queries::raw_reference(candidate.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::raw_touch_unreferenced(work.source.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if !queries::raw_upload_references(work.source.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?
     {
         queries::raw_upload_delete(work.source.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     } else {
         queries::raw_upload_retry(work, None)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
-    tx.commit().await?;
     Ok(true)
 }
 
@@ -7926,21 +7941,32 @@ pub(super) async fn complete_raw_upload(
     if node.is_some() {
         raw_upload_processor(&mut tx, node).await?;
     }
+    let result = complete_raw_upload_in(&mut tx, work, hash, node.map(|n| n.0.node_id)).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+async fn complete_raw_upload_in(
+    tx: &mut Transaction<'_, Postgres>,
+    work: &crate::model::raw::RawUpload,
+    hash: Option<&[u8]>,
+    node: Option<Uuid>,
+) -> Result<()> {
     if let Some(hash) = hash {
         queries::claim_chunk_hash(work.source.storage_id, hash)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
     if node.is_some() {
         ensure!(
-            queries::raw_upload_owned(work, node.map(|n| n.0.node_id))
-                .fetch_one(&mut *tx)
+            queries::raw_upload_owned(work, node)
+                .fetch_one(&mut **tx)
                 .await?,
             crate::model::Error::OperationAborted
         );
     }
     let current = queries::raw_upload_record(work.source.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         current.token == work.token && current.token.is_some() && current.source == work.source,
@@ -7950,7 +7976,7 @@ pub(super) async fn complete_raw_upload(
     if current.source.pending_upload {
         ensure!(
             queries::raw_uploaded(work.source.id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?
                 .rows_affected()
                 == 1,
@@ -7961,7 +7987,7 @@ pub(super) async fn complete_raw_upload(
     if let Some(hash) = hash {
         if let Some(candidate) =
             queries::raw_duplicate(work.source.storage_id, hash, work.source.size)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?
         {
             duplicate = candidate.id != work.source.id
@@ -7971,26 +7997,25 @@ pub(super) async fn complete_raw_upload(
                 && candidate.digest == work.source.digest;
             if !duplicate && candidate.id != work.source.id {
                 queries::raw_hash(candidate.id, None)
-                    .execute(&mut *tx)
+                    .execute(&mut **tx)
                     .await?;
             }
         }
         if !duplicate {
             queries::raw_hash(work.source.id, Some(hash))
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
     }
     if duplicate {
         queries::raw_upload_hash(work.source.id, hash)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     } else {
         queries::raw_upload_delete(work.source.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 
@@ -11687,7 +11712,7 @@ pub(super) async fn prepare_node_raw(
         .await?
     {
         ensure!(raw.request_hash == hash, Error::NodeOperationConflict);
-        let grants = if raw.committed {
+        let grants = if raw.committed || input.input.local {
             Vec::new()
         } else {
             require_node_write(&mut tx, &row).await?;
@@ -11713,13 +11738,19 @@ pub(super) async fn prepare_node_raw(
     let stream = require_node_write(&mut tx, &row).await?;
     ensure!(
         row.upload_id.is_none()
-            && !row.profile.upload_cache
-            && ((row.profile.write_processing == "background" && row.profile.cdc_enabled)
+            && (!input.input.local || row.profile.upload_cache)
+            && (!row.profile.upload_cache
+                || input.input.local
+                || row.profile.upload_cache_overflow == "fallback")
+            && (((row.profile.write_processing == "background" || input.input.local)
+                && row.profile.cdc_enabled)
                 || (!row.profile.cdc_enabled
                     && !row.profile.compression_enabled
                     && !row.profile.pack_enabled
                     && row.block_key_id.is_none()))
-            && (row.profile.deduplication_enabled && row.profile.write_processing == "inline")
+            && (!row.profile.cdc_enabled
+                && row.profile.deduplication_enabled
+                && row.profile.write_processing == "inline")
                 == input.input.hash.is_some()
             && row.next_batch == 1
             && row.next_offset == 0,
@@ -11771,9 +11802,19 @@ pub(super) async fn prepare_node_raw(
             .await?;
         candidate.location_id
     } else {
-        queries::raw_insert(stream, storage, row.profile.revision, "shared_s3", false)
-            .fetch_one(&mut *tx)
-            .await?
+        queries::raw_insert(
+            stream,
+            storage,
+            row.profile.revision,
+            if input.input.local {
+                "local"
+            } else {
+                "shared_s3"
+            },
+            false,
+        )
+        .fetch_one(&mut *tx)
+        .await?
     };
     queries::insert_node_raw_write(node.node_id, &input, &hash, source, committed)
         .execute(&mut *tx)
@@ -11786,7 +11827,7 @@ pub(super) async fn prepare_node_raw(
         node.node_id,
         &row,
         None,
-        usize::from(!committed),
+        usize::from(!committed && !input.input.local),
         row.storage_id.ok_or(Error::SourceUnavailable)?,
         row.profile.upload_concurrency,
     )
@@ -11821,6 +11862,11 @@ pub(super) async fn commit_node_raw(
                 .await?;
         }
         let source = raw.source_id.into();
+        let local = queries::raw_source(source)
+            .fetch_one(&mut *tx)
+            .await?
+            .medium
+            == "local";
         ensure!(
             queries::raw_finish(stream, source, raw.size, &raw.digest, true)
                 .execute(&mut *tx)
@@ -11832,11 +11878,13 @@ pub(super) async fn commit_node_raw(
         queries::raw_attach(stream, source, raw.size)
             .execute(&mut *tx)
             .await?;
-        if let Some(hash) = &raw.content_hash {
+        if let Some(hash) = &raw.content_hash
+            && !local
+        {
             let current = queries::raw_source(source).fetch_one(&mut *tx).await?;
             share_raw(&mut tx, stream, &current, hash).await?;
         }
-        if row.profile.write_processing == "background" {
+        if row.profile.write_processing == "background" || local && row.profile.cdc_enabled {
             if row.profile.cdc_enabled {
                 let algorithm = if let Some(id) = row.block_key_id {
                     queries::node_read_keys(&[id])
@@ -11856,11 +11904,41 @@ pub(super) async fn commit_node_raw(
                     block_key_id: row.block_key_id,
                 };
                 enqueue_conversion(&mut tx, stream, source, &encoding).await?;
-            } else if row.profile.deduplication_enabled {
+            } else if row.profile.deduplication_enabled && !local {
                 queries::raw_enqueue_processing(stream, source)
                     .execute(&mut *tx)
                     .await?;
             }
+        }
+        if local {
+            ensure!(
+                queries::raw_stage(source, row.profile.revision, None)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                    == 1,
+                Error::OperationAborted
+            );
+            queries::raw_queue(
+                source,
+                !row.profile.cdc_enabled && row.profile.deduplication_enabled,
+                row.profile.write_processing == "background",
+                Some(node.node_id),
+            )
+            .execute(&mut *tx)
+            .await?;
+            if raw.content_hash.is_some() {
+                queries::raw_upload_hash(source, raw.content_hash.as_deref())
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            raw_cache::enqueue(
+                &mut tx,
+                node.node_id,
+                source,
+                row.storage_id.ok_or(Error::SourceUnavailable)?,
+            )
+            .await?;
         }
         queries::extend_writing_stream(stream, raw.size)
             .execute(&mut *tx)

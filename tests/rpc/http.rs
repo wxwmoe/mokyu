@@ -37,6 +37,8 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    WriteCache,
+    CacheOrder,
     Conversion,
     Processing,
     Packing,
@@ -56,6 +58,18 @@ enum HttpCase {
     Public,
     Observations,
     Sources,
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, real cache uploads and saturated writer IO"]
+async fn node_http_cache_completion_precedes_local_capacity_reuse() -> Result<()> {
+    node_http_reads(HttpCase::CacheOrder).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, node cache files and real S3 uploads"]
+async fn node_http_write_cache_drains_and_recovers() -> Result<()> {
+    node_http_reads(HttpCase::WriteCache).await
 }
 
 #[tokio::test]
@@ -310,6 +324,7 @@ async fn node_http_native_parts_replay_and_complete() -> Result<()> {
 }
 
 async fn node_http_reads(case: HttpCase) -> Result<()> {
+    let write_cache = matches!(case, HttpCase::WriteCache | HttpCase::CacheOrder);
     let complete = matches!(case, HttpCase::Complete | HttpCase::Native);
     let parts = matches!(case, HttpCase::Parts);
     let multipart = matches!(case, HttpCase::Multipart);
@@ -344,6 +359,14 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         directory.display(),
         if cache { "16MiB" } else { "0B" }
     );
+    let config = if write_cache {
+        config.replace(
+            "cache_size='16MiB'",
+            "cache_size='64MiB'\nupload_cache_size='64MiB'",
+        )
+    } else {
+        config
+    };
     let mut context = NodeContext::new(NodeConfig::parse(&config, "data")?, "data").await?;
     let dns = Dns::new().await?;
     *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 2)]);
@@ -436,6 +459,49 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
+    if matches!(case, HttpCase::CacheOrder) {
+        let worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
+        fixture("write-cache-order-seed").await?;
+        let capacity = observed.limit_write_io().await?;
+        fixture("write-cache-order-check").await?;
+        drop(capacity);
+        context.stop();
+        tokio::time::timeout(Duration::from_secs(10), driver).await???;
+        tokio::time::timeout(Duration::from_secs(10), worker).await???;
+        s3_server.abort();
+        web_server.abort();
+        println!("PASS cache result acknowledged before local IO returns to foreground writes");
+        return Ok(());
+    }
+    if write_cache {
+        fixture("write-cache-seed").await?;
+        let mut worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
+        fixture("write-cache-drained").await?;
+        fixture("write-cache-limits").await?;
+        fixture("write-cache-restart-seed").await?;
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        fixture("write-cache-restart-release").await?;
+        worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
+        fixture("write-cache-restarted").await?;
+        fixture("write-cache-lost").await?;
+        *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 3)]);
+        dns.resolver.clear_cache();
+        context.client.addresses.lock().await.refresh_at = Instant::now();
+        fixture("stop-first").await?;
+        node_state(&mut states, |state| {
+            state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
+        })
+        .await?;
+        fixture("write-cache-replayed").await?;
+        context.stop();
+        tokio::time::timeout(Duration::from_secs(10), driver).await???;
+        tokio::time::timeout(Duration::from_secs(10), worker).await???;
+        s3_server.abort();
+        web_server.abort();
+        println!("PASS node write cache confirmation, raw/chunks drain, limits and reply replay");
+        return Ok(());
+    }
     if matches!(case, HttpCase::Conversion) {
         let setup: Fixture = serde_json::from_slice(
             &tokio::fs::read(std::env::var("MOKYU_TEST_READ_FIXTURE")?).await?,

@@ -317,6 +317,23 @@ impl NodeObjects for Service {
 
 #[tonic::async_trait]
 impl NodeWrites for Service {
+    async fn check_raw_files(
+        &self,
+        request: Request<wire::LocalFilesRequest>,
+    ) -> Result<Response<wire::RawFilesReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::native::inventory(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.check_raw_files(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(wire::RawFilesReply {
+            files_json: serde_json::to_vec(&reply)
+                .map_err(|_| Status::internal("encode raw files"))?,
+        }))
+    }
     async fn prepare_local_part(
         &self,
         request: Request<wire::PrepareLocalPartRequest>,

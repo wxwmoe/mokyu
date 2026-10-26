@@ -30,7 +30,23 @@ impl Worker {
         let snapshot = self.node.background_snapshot()?;
         let mut completion = None;
         let mut previous = Vec::<Arc<Grant>>::new();
+        let mut upload_resources = None;
         loop {
+            let mut maximum = work::MAX_ITEMS;
+            if class == 2 && upload_resources.is_none() {
+                if previous.is_empty() {
+                    let memory = Arc::new(self.writes.slots.clone().acquire_owned().await?);
+                    let io = Arc::new(self.writes.io.clone().acquire_owned().await?);
+                    upload_resources = Some((memory, io));
+                } else if let Ok(memory) = self.writes.slots.clone().try_acquire_owned()
+                    && let Ok(io) = self.writes.io.clone().try_acquire_owned()
+                {
+                    upload_resources = Some((Arc::new(memory), Arc::new(io)));
+                } else {
+                    // Release completed backend work before waiting for new local capacity.
+                    maximum = 0;
+                }
+            }
             let held = self.cache.snapshot();
             let operation = Uuid::now_v7();
             let input = wire::WorkRequest {
@@ -41,7 +57,7 @@ impl Worker {
                     .map(|value: work::Completion| serde_json::to_vec(&value))
                     .transpose()?,
                 class,
-                max_items: work::MAX_ITEMS as u32,
+                max_items: maximum as u32,
                 cached: reads::cached(&held),
             };
             let (reply, started) = loop {
@@ -64,9 +80,15 @@ impl Worker {
                 "work identity differs"
             );
             let Some(json) = reply.plan_json else {
+                if maximum == 0 {
+                    continue;
+                }
                 return Ok(());
             };
             let plan: work::Plan = serde_json::from_slice(&json)?;
+            if !matches!(plan, work::Plan::UploadRaw { .. }) {
+                upload_resources.take();
+            }
             let grants = self
                 .node
                 .resources
@@ -85,6 +107,22 @@ impl Worker {
             let backend = reads::backend(&materials, plan.storage())?;
             let future = async {
                 let outcomes = match plan {
+                    work::Plan::UploadRaw {
+                        source, hashing, ..
+                    } => {
+                        let (memory, io) = upload_resources
+                            .as_ref()
+                            .context("cache upload resources missing")?
+                            .clone();
+                        let result = self
+                            .writes
+                            .flush_raw(&backend, &source, hashing, memory, io, grants.clone())
+                            .await;
+                        vec![result.unwrap_or_else(|error| {
+                            tracing::debug!(%error,"cached raw upload postponed");
+                            work::Outcome::Retry
+                        })]
+                    }
                     work::Plan::ConvertRaw {
                         source,
                         write,

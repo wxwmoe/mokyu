@@ -43,6 +43,7 @@ pub(super) fn prepare_raw(
     input: wire::PrepareRawRequest,
 ) -> Result<crate::model::node_raw::Prepare, Status> {
     let value = crate::model::node_raw::Input {
+        local: input.local,
         size: input.size.try_into().map_err(|_| invalid())?,
         digest: input.digest.try_into().map_err(|_| invalid())?,
         hash: if input.content_hash.is_empty() {
@@ -296,6 +297,7 @@ mod tests {
     #[test]
     fn raw_input_requires_bounded_length_and_exact_digests() {
         let mut input = wire::PrepareRawRequest {
+            local: false,
             run: Some(wire::Run {
                 boot_id: Uuid::new_v4().to_string(),
                 fence: Uuid::new_v4().to_string(),

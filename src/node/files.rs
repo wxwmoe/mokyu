@@ -24,6 +24,8 @@ use std::{
 use tokio::sync::{OnceCell, Semaphore};
 use uuid::Uuid;
 
+mod uploads;
+
 pub(super) struct Cache {
     root: PathBuf,
     disk: Arc<Disk>,
@@ -31,6 +33,8 @@ pub(super) struct Cache {
     writes: tokio::sync::Mutex<()>,
     ready: OnceCell<()>,
     multipart_ready: OnceCell<()>,
+    uploads_ready: OnceCell<()>,
+    uploads: Mutex<HashMap<Uuid, crate::storage::cache::UploadCharge>>,
     local_locks: crate::runtime::locks::Locks<Uuid>,
     entries: usize,
     slots: Arc<Semaphore>,
@@ -82,6 +86,8 @@ impl Cache {
             writes: Default::default(),
             ready: OnceCell::new(),
             multipart_ready: OnceCell::new(),
+            uploads_ready: OnceCell::new(),
+            uploads: Mutex::default(),
             local_locks: Default::default(),
             entries: instance.cache_entries.unwrap_or(budget.cache_entries),
             slots: Arc::new(Semaphore::new(budget.cpu_jobs)),
@@ -137,7 +143,15 @@ impl Cache {
         self.local_locks.get(id).lock_owned().await
     }
 
-    pub(super) async fn reclaim_local(&self, node: &NodeContext, recover: bool) -> Result<()> {
+    pub(super) async fn reclaim_local(
+        self: &Arc<Self>,
+        node: &NodeContext,
+        recover: bool,
+    ) -> Result<()> {
+        self.recover_uploads(node).await?;
+        if !recover {
+            self.raw_inventory(node, false).await?;
+        }
         let disk = self.multipart().await?;
         let snapshot = node.background_snapshot()?;
         let mut entries = tokio::fs::read_dir(disk.root.join("multipart")).await?;

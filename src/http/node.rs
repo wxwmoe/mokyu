@@ -142,6 +142,11 @@ impl Gateway {
     }
 
     #[cfg(test)]
+    pub(crate) async fn limit_write_io(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        self.writes.limit_io().await
+    }
+
+    #[cfg(test)]
     pub(crate) fn control_slots(&self) -> Arc<tokio::sync::Semaphore> {
         self.controls.clone()
     }

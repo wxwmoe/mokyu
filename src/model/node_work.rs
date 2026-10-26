@@ -97,6 +97,11 @@ pub(crate) struct RawHash {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
+    UploadRaw {
+        storage: Uuid,
+        source: super::raw::RawSource,
+        hashing: bool,
+    },
     ConvertRaw {
         storage: Uuid,
         source: super::raw::RawSource,
@@ -153,6 +158,7 @@ impl Plan {
     pub(crate) fn storage(&self) -> Uuid {
         match self {
             Self::ConvertRaw { storage, .. }
+            | Self::UploadRaw { storage, .. }
             | Self::HashRaw { storage, .. }
             | Self::Collect { storage, .. }
             | Self::Audit { storage, .. }
@@ -168,6 +174,7 @@ impl Plan {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Outcome {
+    Uploaded,
     Converted,
     Hashed {
         hash: Vec<u8>,
@@ -212,7 +219,9 @@ pub(crate) struct Exchange {
 impl Exchange {
     pub(crate) fn hash(&self) -> Result<Vec<u8>> {
         ensure!(
-            self.class <= 2 && (1..=MAX_ITEMS).contains(&self.max_items),
+            self.class <= 2
+                && (self.max_items <= MAX_ITEMS
+                    && (self.max_items > 0 || self.completion.is_some())),
             "invalid work bounds"
         );
         if let Some(completion) = &self.completion {
@@ -257,6 +266,11 @@ mod tests {
             outcomes: vec![Outcome::Retry],
         });
         assert_ne!(input.hash()?, first);
+        input.max_items = 0;
+        input.hash()?;
+        let completion = input.completion.take();
+        assert!(input.hash().is_err());
+        input.completion = completion;
         input.max_items = 65;
         assert!(input.hash().is_err());
         input.max_items = 64;

@@ -20,6 +20,8 @@ mod completion;
 #[path = "native.rs"]
 mod native;
 
+#[path = "cached.rs"]
+mod cached;
 #[path = "conversion.rs"]
 mod conversion;
 
@@ -28,16 +30,16 @@ const MAX_OBJECT: i64 = 5 * 1024 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(super) struct Limits {
-    slots: Arc<Semaphore>,
+    pub(super) slots: Arc<Semaphore>,
     completions: Arc<Semaphore>,
     io: Arc<Semaphore>,
 }
 
 pub(crate) struct Writes {
     reads: Arc<Reads>,
-    slots: Arc<Semaphore>,
+    pub(super) slots: Arc<Semaphore>,
     completions: Arc<Semaphore>,
-    io: Arc<Semaphore>,
+    pub(super) io: Arc<Semaphore>,
     parallelism: u32,
 }
 
@@ -147,6 +149,19 @@ impl Writes {
         ]
     }
 
+    #[cfg(test)]
+    pub(crate) async fn limit_io(&self) -> Result<OwnedSemaphorePermit> {
+        let count = self
+            .reads
+            .node
+            .budget
+            .get()
+            .context("node budget missing")?
+            .storage_upload_slots
+            .saturating_sub(self.parallelism as usize);
+        Ok(self.io.clone().acquire_many_owned(count as u32).await?)
+    }
+
     pub(crate) fn new(reads: Arc<Reads>) -> Result<Self> {
         let budget = reads.node.budget.get().context("node budget missing")?;
         let limits = {
@@ -169,7 +184,17 @@ impl Writes {
     }
 
     pub(crate) async fn prepare(&self, access: String, bucket: String) -> Result<Request> {
-        let memory = Arc::new(self.slots.clone().acquire_owned().await?);
+        let acquire = self.slots.clone().acquire_owned();
+        tokio::pin!(acquire);
+        #[cfg(feature = "fault-injection")]
+        let permit = tokio::select! {
+            biased;
+            value=&mut acquire=>value?,
+            _=crate::faults::point("node-write-memory-waiting")=>acquire.await?,
+        };
+        #[cfg(not(feature = "fault-injection"))]
+        let permit = acquire.await?;
+        let memory = Arc::new(permit);
         super::request::prepare(&self.reads, memory, access, bucket, None).await
     }
 
@@ -311,13 +336,13 @@ impl Writes {
     ) -> Result<(u64, String, serde_json::Value)> {
         let profile = &operation.backend.profile;
         ensure!(
-            !profile.upload_cache && (profile.write_processing == "inline" || !operation.part),
+            !operation.part || (!profile.upload_cache && profile.write_processing == "inline"),
             s3s::s3_error!(
                 NotImplemented,
                 "this node write path requires shared uploads and inline multipart parts"
             )
         );
-        if profile.write_processing == "background" && !operation.part {
+        if (profile.upload_cache || profile.write_processing == "background") && !operation.part {
             return operation
                 .guard(
                     &self.reads.node,
@@ -336,32 +361,7 @@ impl Writes {
                 .await;
         }
         if profile.cdc_enabled {
-            let config = profile
-                .compression_config(&self.reads.node.config.instance.compression_idle_timeout);
-            ensure!(
-                config.workspace_bytes()? <= self.reads.reader.workspace,
-                "compression workspace exceeds node budget"
-            );
-            let (tx, rx) = mpsc::channel(1);
-            let (received, ()) = operation
-                .guard(&self.reads.node, &[], async {
-                    tokio::try_join!(
-                        self.receive(operation, body, check, trailers, length, config, tx),
-                        self.batches(operation, rx)
-                    )
-                })
-                .await?;
-            let (size, etag, sums, tail) = received;
-            if !tail.is_empty() {
-                operation
-                    .guard(
-                        &self.reads.node,
-                        &[],
-                        self.tail(operation, size - tail.len() as u64, tail),
-                    )
-                    .await?;
-            }
-            Ok((size, etag, sums))
+            self.chunks(operation, body, check, trailers, length).await
         } else {
             operation
                 .guard(
@@ -371,6 +371,43 @@ impl Writes {
                 )
                 .await
         }
+    }
+
+    async fn chunks(
+        &self,
+        operation: &Operation,
+        body: s3s::dto::StreamingBlob,
+        check: Integrity,
+        trailers: Option<s3s::TrailingHeaders>,
+        length: Option<u64>,
+    ) -> Result<(u64, String, serde_json::Value)> {
+        let profile = &operation.backend.profile;
+        let config =
+            profile.compression_config(&self.reads.node.config.instance.compression_idle_timeout);
+        ensure!(
+            config.workspace_bytes()? <= self.reads.reader.workspace,
+            "compression workspace exceeds node budget"
+        );
+        let (tx, rx) = mpsc::channel(1);
+        let (received, ()) = operation
+            .guard(&self.reads.node, &[], async {
+                tokio::try_join!(
+                    self.receive(operation, body, check, trailers, length, config, tx),
+                    self.batches(operation, rx)
+                )
+            })
+            .await?;
+        let (size, etag, sums, tail) = received;
+        if !tail.is_empty() {
+            operation
+                .guard(
+                    &self.reads.node,
+                    &[],
+                    self.tail(operation, size - tail.len() as u64, tail),
+                )
+                .await?;
+        }
+        Ok((size, etag, sums))
     }
 
     async fn publish(
@@ -600,11 +637,28 @@ impl Writes {
     ) -> Result<(u64, String, serde_json::Value)> {
         let node = &self.reads.node;
         let files = &self.reads.reader.files;
+        files.recover_uploads(node).await?;
+        let charge = if let Some(size) = length {
+            files
+                .claim_upload(node, &operation.backend.profile, size)
+                .await?
+        } else {
+            None
+        };
+        if length.is_some()
+            && charge.is_none()
+            && operation.backend.profile.upload_cache
+            && operation.backend.profile.cdc_enabled
+            && operation.backend.profile.write_processing == "inline"
+        {
+            return Box::pin(self.chunks(operation, body, check, trailers, length)).await;
+        }
         let mut file = files.raw_request(&operation.backend.profile).await?;
         let idle = Duration::from_secs(crate::config::seconds(
             &node.snapshot()?.runtime().uploads.client_idle_timeout,
         )?);
-        let mut hash = (operation.backend.profile.deduplication_enabled
+        let mut hash = (!operation.backend.profile.cdc_enabled
+            && operation.backend.profile.deduplication_enabled
             && operation.backend.profile.write_processing == "inline")
             .then(blake3::Hasher::new);
         let mut size = 0u64;
@@ -636,12 +690,39 @@ impl Writes {
         let digest: [u8; 16] = hex::decode(&etag)?
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid raw digest"))?;
+        let charge = if length.is_some() {
+            charge
+        } else {
+            files
+                .claim_upload(node, &operation.backend.profile, size)
+                .await?
+        };
+        if operation.backend.profile.cdc_enabled
+            && operation.backend.profile.write_processing == "inline"
+            && charge.is_none()
+        {
+            let replay = async_stream::try_stream! {
+                let file = file;
+                let mut stream = file.replay();
+                while let Some(bytes)=stream.next().await { yield bytes.map_err(std::io::Error::other)?; }
+            };
+            let body = crate::http::object::blob(Box::pin(replay));
+            let check = Integrity::new(&hyper::HeaderMap::new(), None)?;
+            let (written, digest, _) =
+                Box::pin(self.chunks(operation, body, check, None, Some(size))).await?;
+            ensure!(
+                written == size && digest == etag,
+                codec::IntegrityError::Hash
+            );
+            return Ok((size, etag, sums));
+        }
         // Acquire local IO before reserving shared storage capacity.
         let io = Arc::new(self.io.clone().acquire_owned().await?);
         let started = Instant::now();
         let plan = node
             .client
             .prepare_raw(wire::PrepareRawRequest {
+                local: charge.is_some(),
                 run: Some(operation.request.run.run.clone()),
                 operation_id: operation.id.clone(),
                 size,
@@ -660,40 +741,61 @@ impl Writes {
             .resources
             .adopt(&operation.request.run, &plan.grants, started)?;
         if !plan.committed {
-            ensure!(operation.backend.profile.upload_concurrency.is_none() || grants.iter().any(|grant|
-                grant.reference.r#type == wire::GrantType::StorageWrite as i32), "raw upload permit missing");
-            let upload = operation
-                .backend
-                .store
-                .streaming
-                .as_ref()
-                .context("S3 streaming upload missing")?;
-            let held: Vec<_> = operation.grants.iter().chain(&grants).cloned().collect();
-            operation
-                .guard(
-                    node,
-                    &grants,
-                    upload.put(
-                        &crate::storage::raw::remote_path(source),
-                        size,
-                        &digest,
-                        || {
-                            file.replay()
-                                .map_ok(|bytes| {
-                                    Bytes::from_owner(Upload {
-                                        bytes,
-                                        _memory: operation.request.memory.clone(),
-                                        _io: io.clone(),
-                                        _grants: held.clone(),
+            if let Some(charge) = charge {
+                files
+                    .publish_upload(
+                        file,
+                        source,
+                        charge,
+                        (
+                            operation.request.memory.clone(),
+                            io.clone(),
+                            operation.grants.clone(),
+                        ),
+                    )
+                    .await?;
+            } else {
+                ensure!(
+                    operation.backend.profile.upload_concurrency.is_none()
+                        || grants
+                            .iter()
+                            .any(|grant| grant.reference.r#type
+                                == wire::GrantType::StorageWrite as i32),
+                    "raw upload permit missing"
+                );
+                let upload = operation
+                    .backend
+                    .store
+                    .streaming
+                    .as_ref()
+                    .context("S3 streaming upload missing")?;
+                let held: Vec<_> = operation.grants.iter().chain(&grants).cloned().collect();
+                operation
+                    .guard(
+                        node,
+                        &grants,
+                        upload.put(
+                            &crate::storage::raw::remote_path(source),
+                            size,
+                            &digest,
+                            || {
+                                file.replay()
+                                    .map_ok(|bytes| {
+                                        Bytes::from_owner(Upload {
+                                            bytes,
+                                            _memory: operation.request.memory.clone(),
+                                            _io: io.clone(),
+                                            _grants: held.clone(),
+                                        })
                                     })
-                                })
-                                .boxed()
-                        },
-                    ),
-                )
-                .await?;
-            #[cfg(feature = "fault-injection")]
-            crate::faults::point("node-raw-uploaded").await;
+                                    .boxed()
+                            },
+                        ),
+                    )
+                    .await?;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("node-raw-uploaded").await;
+            }
             operation.check()?;
             let reply = node
                 .client
@@ -843,7 +945,19 @@ impl Writes {
         let mut offset = 0;
         let mut batch_id = 1;
         while let Some(batch) = rx.recv().await {
-            let io = Arc::new(self.io.clone().acquire_many_owned(self.parallelism).await?);
+            let acquire = self.io.clone().acquire_many_owned(self.parallelism);
+            tokio::pin!(acquire);
+            #[cfg(feature = "fault-injection")]
+            let permit = tokio::select! {
+                biased;
+                value=&mut acquire=>value?,
+                _=crate::faults::point("node-chunks-waiting")=>acquire.await?,
+            };
+            #[cfg(not(feature = "fault-injection"))]
+            let permit = acquire.await?;
+            let io = Arc::new(permit);
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("node-chunks-before-prepare").await;
             let held = self.reads.cache.snapshot();
             let end = offset
                 + batch
