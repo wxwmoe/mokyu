@@ -8284,16 +8284,28 @@ pub(super) async fn commit_conversion_batch(
     rows: &[crate::model::Mapping],
     outputs: &[crate::model::packing::PackOutput],
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    commit_conversion_batch_in(&mut tx, task, candidate, rows, outputs).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn commit_conversion_batch_in(
+    tx: &mut Transaction<'_, Postgres>,
+    task: Execution,
+    candidate: Id,
+    rows: &[crate::model::Mapping],
+    outputs: &[crate::model::packing::PackOutput],
+) -> Result<()> {
     ensure!(
         !rows.is_empty() && rows.len() <= 1024,
         "invalid conversion batch"
     );
-    let mut tx = pool.begin().await?;
-    lock_execution(&mut tx, task).await?;
-    require_writing_stream(&mut tx, candidate).await?;
+    lock_execution(tx, task).await?;
+    require_writing_stream(tx, candidate).await?;
     ensure!(
         queries::conversion_owned(candidate, task.id, task.token)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .is_some(),
         crate::model::Error::OperationAborted
@@ -8316,16 +8328,16 @@ pub(super) async fn commit_conversion_batch(
     for row in rows {
         ensure!(
             queries::conversion_chunk(row.chunk.id, candidate)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?
                 .is_some(),
             crate::model::Error::OperationAborted
         );
         queries::conversion_ready(row.chunk.id, candidate)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         queries::conversion_retire_encoding(row.chunk.encoding_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
     for output in outputs {
@@ -8333,35 +8345,35 @@ pub(super) async fn commit_conversion_batch(
             ensure!(
                 output.independent.is_none()
                     && queries::conversion_output_pack(pack.id, task.id)
-                        .fetch_optional(&mut *tx)
+                        .fetch_optional(&mut **tx)
                         .await?
                         .is_some(),
                 crate::model::Error::OperationAborted
             );
             queries::publish_prepared_pack(pack.id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         } else if let Some(chunk) = &output.independent {
             ensure!(
                 output.chunks == [chunk.id]
                     && queries::conversion_output_encoding(chunk.encoding_id, task.id, chunk.id)
-                        .fetch_optional(&mut *tx)
+                        .fetch_optional(&mut **tx)
                         .await?
                         .is_some(),
                 crate::model::Error::OperationAborted
             );
             queries::conversion_publish_encoding(chunk.encoding_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             queries::publish_chunk_encoding(chunk)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         } else {
             anyhow::bail!("conversion output has no physical source");
         }
         for chunk in &output.chunks {
             queries::conversion_layout(*chunk, output.pack.as_ref().map(|p| p.id))
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
     }
@@ -8372,15 +8384,14 @@ pub(super) async fn commit_conversion_batch(
             row.chunk.raw_size,
             row.chunk.id,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
-    require_sources(&mut tx, Some(candidate), &[]).await?;
+    require_sources(tx, Some(candidate), &[]).await?;
     let end = rows.last().unwrap().offset_bytes + i64::from(rows.last().unwrap().chunk.raw_size);
     queries::resize_writing_stream(candidate, end)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -11013,6 +11024,12 @@ pub(super) async fn prepare_node_chunks(
     queries::insert_node_write_batch(node.node_id, &input, &hash, end, &plan)
         .execute(&mut *tx)
         .await?;
+    let packing = work::prepare_chunk_packs(&mut tx, &row, &plan).await?;
+    let ready = packing.is_some();
+    if let Some(packing) = packing {
+        sqlx::query("UPDATE node_write_batches SET packing=$4,ready=true WHERE node_id=$1 AND operation_id=$2 AND batch_id=$3")
+            .bind(node.node_id).bind(input.operation).bind(input.batch).bind(sqlx::types::Json(packing)).execute(&mut *tx).await?;
+    }
     node_chunk_permits(&mut tx, node.node_id, &row, &input, &plan).await?;
     queries::advance_node_write(node.node_id, input.operation, end)
         .execute(&mut *tx)
@@ -11020,7 +11037,7 @@ pub(super) async fn prepare_node_chunks(
     tx.commit().await?;
     Ok(chunk::Assembly {
         items: plan,
-        ready: false,
+        ready,
         committed: false,
     })
 }
@@ -11043,6 +11060,7 @@ pub(super) async fn activate_node_chunks(
     if batch.commit_hash.is_some() {
         tx.commit().await?;
         return Ok(chunk::Prepared {
+            packing: None,
             batch: input.batch,
             end: batch.end_bytes,
             committed: true,
@@ -11133,6 +11151,7 @@ pub(super) async fn activate_node_chunks(
     }
     tx.commit().await?;
     Ok(chunk::Prepared {
+        packing: batch.packing.map(|packing| packing.0),
         batch: input.batch,
         end: batch.end_bytes,
         committed: false,
@@ -11163,35 +11182,49 @@ pub(super) async fn commit_node_chunks(
     }
     let stream = require_node_write(&mut tx, &row).await?;
     ensure!(batch.ready, Error::OperationAborted);
-    let expected: HashSet<_> = batch
-        .plan
-        .iter()
-        .filter(|item| !item.reused)
-        .map(|item| item.chunk.uuid)
-        .collect();
-    ensure!(
-        expected.len() == input.encoded.len()
-            && input
-                .encoded
-                .iter()
-                .all(|value| expected.contains(&value.chunk)),
-        Error::OperationAborted
-    );
     let (size, _) = queries::node_write_size(stream).fetch_one(&mut *tx).await?;
-    let mut completed = HashSet::new();
-    for item in batch.plan.iter().filter(|item| !item.reused) {
-        if completed.insert(item.chunk.uuid) {
-            complete_chunk_write_in(&mut tx, stream, item.offset, &item.chunk, false).await?;
-        } else {
-            reference_chunk_in(
-                &mut tx,
-                stream,
-                item.offset,
-                item.chunk.id,
-                item.chunk.raw_size,
-                false,
-            )
-            .await?;
+    if let Some(packing) = &batch.packing {
+        ensure!(input.encoded.is_empty(), Error::NodeOperationConflict);
+        work::finish_chunk_packs(
+            &mut tx,
+            &row,
+            &batch.plan,
+            packing,
+            input.packed.as_ref().ok_or(Error::NodeOperationConflict)?,
+            key,
+        )
+        .await?;
+    } else {
+        ensure!(input.packed.is_none(), Error::NodeOperationConflict);
+        let expected: HashSet<_> = batch
+            .plan
+            .iter()
+            .filter(|item| !item.reused)
+            .map(|item| item.chunk.uuid)
+            .collect();
+        ensure!(
+            expected.len() == input.encoded.len()
+                && input
+                    .encoded
+                    .iter()
+                    .all(|value| expected.contains(&value.chunk)),
+            Error::OperationAborted
+        );
+        let mut completed = HashSet::new();
+        for item in batch.plan.iter().filter(|item| !item.reused) {
+            if completed.insert(item.chunk.uuid) {
+                complete_chunk_write_in(&mut tx, stream, item.offset, &item.chunk, false).await?;
+            } else {
+                reference_chunk_in(
+                    &mut tx,
+                    stream,
+                    item.offset,
+                    item.chunk.id,
+                    item.chunk.raw_size,
+                    false,
+                )
+                .await?;
+            }
         }
     }
     require_sources(&mut tx, Some(stream), &[]).await?;

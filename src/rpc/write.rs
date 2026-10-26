@@ -179,6 +179,10 @@ pub(super) fn commit(
     input: wire::CommitChunksRequest,
 ) -> Result<crate::model::node_chunk::Commit, Status> {
     let mut value = crate::model::node_chunk::Commit {
+        packed: input
+            .packed_json
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| invalid()))
+            .transpose()?,
         run: read::run(input.run)?,
         operation: operation(&input.operation_id)?,
         batch: input.batch_id.try_into().map_err(|_| invalid())?,
@@ -215,6 +219,11 @@ pub(super) fn prepared(
     value: crate::model::node_chunk::Prepared,
 ) -> Result<wire::PreparedChunks, Status> {
     let reply = wire::PreparedChunks {
+        packing_json: value
+            .packing
+            .map(|batch| serde_json::to_vec(&batch))
+            .transpose()
+            .map_err(|_| Status::internal("cannot encode pack plan"))?,
         batch_id: value.batch as u64,
         end: value.end as u64,
         committed: value.committed,

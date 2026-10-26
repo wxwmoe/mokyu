@@ -49,7 +49,9 @@ impl Writes {
             materials: held.clone(),
             memory,
         };
-        let operation = self.accept(request, reply, held, started, false, source.size as u64)?;
+        let mut operation =
+            self.accept(request, reply, held, started, false, source.size as u64)?;
+        operation.packing = operation.backend.profile.pack_enabled;
         ensure!(
             operation.backend.profile.storage_id == source.storage_id,
             "conversion storage differs"

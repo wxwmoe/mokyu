@@ -96,6 +96,7 @@ pub(crate) struct Nonce {
 }
 
 pub(crate) struct Prepared {
+    pub packing: Option<super::node_pack::Batch>,
     pub batch: i64,
     pub end: i64,
     pub committed: bool,
@@ -112,6 +113,7 @@ pub(crate) struct Encoded {
 }
 
 pub(crate) struct Commit {
+    pub packed: Option<super::node_pack::Encoded>,
     pub run: Run,
     pub operation: Uuid,
     pub batch: i64,
@@ -133,7 +135,15 @@ impl Commit {
                     .all(|pair| pair[0].chunk != pair[1].chunk),
             "duplicate chunk receipt"
         );
-        hash(&self.encoded)
+        if let Some(packed) = &self.packed {
+            ensure!(
+                self.encoded.is_empty()
+                    && packed.chunks.len() <= MAX_ITEMS
+                    && packed.packs.len() <= MAX_ITEMS / 2,
+                "invalid packed receipt"
+            );
+        }
+        hash(&(&self.encoded, &self.packed))
     }
 }
 
@@ -185,6 +195,7 @@ mod tests {
             digest: [2; 32],
         };
         let mut commit = Commit {
+            packed: None,
             run: request.run,
             operation: request.operation,
             batch: 1,

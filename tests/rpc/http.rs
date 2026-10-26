@@ -474,6 +474,7 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         fixture("conversion-restart").await?;
         worker = tokio::spawn(crate::node::work::Worker::new(background.clone())?.run());
         fixture("conversion-switched").await?;
+        fixture("conversion-packing").await?;
         fixture("conversion-reply-seed").await?;
         fixture("conversion-committed").await?;
         *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 3)]);

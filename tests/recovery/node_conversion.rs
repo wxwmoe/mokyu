@@ -7,10 +7,24 @@ pub(super) async fn check(
     admin: &Principal,
     key: &Key,
 ) -> Result<()> {
+    check_case(backend, peer, admin, key, false).await?;
+    check_case(backend, peer, admin, key, true).await
+}
+
+async fn check_case(
+    backend: &Backend,
+    peer: &Backend,
+    admin: &Principal,
+    key: &Key,
+    packed: bool,
+) -> Result<()> {
+    let name = if packed {
+        "node-cdc-packed"
+    } else {
+        "node-cdc"
+    };
     let pool = &backend.pool;
-    let node = backend
-        .provision_node(admin, "cdc-worker", "worker", key)
-        .await?;
+    let node = backend.provision_node(admin, name, "worker", key).await?;
     let session = backend
         .open_session(
             &node,
@@ -24,17 +38,17 @@ pub(super) async fn check(
         .await?;
     let run = session.run;
     let storage = Uuid::now_v7();
-    sqlx::query("INSERT INTO storages(id,name,type,endpoint_url,remote_bucket_name,region,access_key_encrypted,secret_key_encrypted,identity_marker) VALUES($1,'node-cdc','s3','http://backend:8333','node-cdc','us-east-1',$2,$3,$4)")
+    sqlx::query("INSERT INTO storages(id,name,type,endpoint_url,remote_bucket_name,region,access_key_encrypted,secret_key_encrypted,identity_marker) VALUES($1,$5,'s3','http://backend:8333',$5,'us-east-1',$2,$3,$4)")
         .bind(storage).bind(codec::protect(b"access",key,format!("storage-{storage}-access").as_bytes())?)
         .bind(codec::protect(b"secret",key,format!("storage-{storage}-secret").as_bytes())?)
-        .bind(crate::storage::model::identity_marker(node.deployment_id,storage)?).execute(pool).await?;
+        .bind(crate::storage::model::identity_marker(node.deployment_id,storage)?).bind(name).execute(pool).await?;
     sqlx::query("INSERT INTO storage_profiles(storage_id,control_concurrency,maintenance_concurrency,upload_concurrency,pack_enabled,compression_enabled) VALUES($1,1,1,1,false,false)").bind(storage).execute(pool).await?;
-    let bucket: Uuid = sqlx::query_scalar(
-        "INSERT INTO buckets(name,storage_id) VALUES('node-cdc',$1) RETURNING id",
-    )
-    .bind(storage)
-    .fetch_one(pool)
-    .await?;
+    let bucket: Uuid =
+        sqlx::query_scalar("INSERT INTO buckets(name,storage_id) VALUES($2,$1) RETURNING id")
+            .bind(storage)
+            .bind(name)
+            .fetch_one(pool)
+            .await?;
     let source = Id::from(Uuid::now_v7());
     let etag = "02".repeat(16);
     sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision) VALUES($1,$2,'shared_s3','ready',16,$3,1)").bind(source).bind(storage).bind(vec![2u8;16]).execute(pool).await?;
@@ -46,7 +60,7 @@ pub(super) async fn check(
             enabled: false,
             ..Default::default()
         },
-        pack_enabled: false,
+        pack_enabled: packed,
         pack_max_size: "8MiB".into(),
         pack_flush_timeout: "1s".into(),
         algorithm: "none".into(),
@@ -111,31 +125,63 @@ pub(super) async fn check(
         offset: 0,
         parallelism: 1,
         cached: vec![],
-        items: vec![chunk::Input {
-            hash: [4; 32],
-            raw_size: 16,
-            payload_hash: [4; 32],
-            payload_size: 16,
-            compressed: false,
-        }],
+        items: (0..if packed { 2 } else { 1 })
+            .map(|index| chunk::Input {
+                hash: [4 + index; 32],
+                raw_size: if packed { 8 } else { 16 },
+                payload_hash: [4 + index; 32],
+                payload_size: if packed { 8 } else { 16 },
+                compressed: false,
+            })
+            .collect(),
     };
-    backend.prepare_chunks(&node, key, input.clone()).await?;
+    let prepared = backend.prepare_chunks(&node, key, input.clone()).await?;
+    assert_eq!(prepared.ready, packed);
     let ready = backend.activate_chunks(&node, key, input, vec![]).await?;
-    backend
-        .commit_chunks(
-            &node,
-            key,
-            chunk::Commit {
-                run,
-                operation,
-                batch: 1,
-                encoded: vec![chunk::Encoded {
-                    chunk: ready.items[0].chunk.uuid,
-                    digest: [5; 32],
-                }],
-            },
-        )
-        .await?;
+    assert_eq!(ready.packing.is_some(), packed);
+    use base64::Engine;
+    let outcome = packed.then(|| crate::model::node_pack::Encoded {
+        chunks: vec![0, 0],
+        packs: vec![(
+            0,
+            264,
+            base64::engine::general_purpose::STANDARD.encode([9; 32]),
+        )],
+    });
+    let completion = |packed| chunk::Commit {
+        packed,
+        run,
+        operation,
+        batch: 1,
+        encoded: if outcome.is_some() {
+            vec![]
+        } else {
+            vec![chunk::Encoded {
+                chunk: ready.items[0].chunk.uuid,
+                digest: [5; 32],
+            }]
+        },
+    };
+    if let Some(mut invalid) = outcome.clone() {
+        invalid.chunks[0] = 1;
+        assert!(
+            backend
+                .commit_chunks(&node, key, completion(Some(invalid)))
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        backend
+            .commit_chunks(&node, key, completion(outcome.clone()))
+            .await?,
+        16
+    );
+    assert_eq!(
+        peer.commit_chunks(&node, key, completion(outcome.clone()))
+            .await?,
+        16
+    );
     let publish = |etag: String| write::Publish {
         run,
         operation,
@@ -184,6 +230,15 @@ pub(super) async fn check(
             .fetch_one(pool)
             .await?,
         "raw"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT (SELECT count(*) FROM packs WHERE owner_task=$1 AND state='preparing')+(SELECT count(*) FROM chunk_encodings WHERE owner_task=$1 AND state='uploading')"
+        )
+        .bind(task)
+        .fetch_one(pool)
+        .await?,
+        0
     );
     sqlx::query("DELETE FROM stream_leases WHERE id=$1")
         .bind(lease)

@@ -298,6 +298,7 @@ message PreparedChunks {
   repeated Material materials = 5;
   Cached storage = 6;
   repeated Grant grants = 7;
+  optional bytes packing_json = 8;
 }
 
 message EncodedChunk {
@@ -310,6 +311,7 @@ message CommitChunksRequest {
   string operation_id = 2;
   uint64 batch_id = 3;
   repeated EncodedChunk chunks = 4;
+  optional bytes packed_json = 5;
 }
 
 message ChunkCommitReply {

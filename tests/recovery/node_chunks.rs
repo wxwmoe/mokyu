@@ -51,6 +51,7 @@ fn item(value: &[u8]) -> chunk::Input {
 fn completion(run: Run, operation: Uuid, batch: i64, values: &[chunk::Item]) -> chunk::Commit {
     let mut seen = std::collections::HashSet::new();
     chunk::Commit {
+        packed: None,
         run,
         operation,
         batch,

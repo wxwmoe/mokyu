@@ -51,6 +51,7 @@ struct Operation {
     grants: Vec<Arc<Grant>>,
     backend: Arc<super::body::Backend>,
     copy_references: bool,
+    packing: bool,
     part: bool,
     limit: u64,
     checksum_algorithm: Option<String>,
@@ -227,6 +228,7 @@ impl Writes {
         let value: read::Storage = request.material(storage)?;
         let backend = reads::backend(&request.materials, value.connection.id)?;
         Ok(Operation {
+            packing: false,
             copy_references: reply.copy_references,
             part,
             limit,
@@ -481,6 +483,7 @@ impl Writes {
             #[cfg(feature = "fault-injection")]
             operation
                 .guard(&self.reads.node, &[], async {
+                    #[cfg(feature = "fault-injection")]
                     crate::faults::point("node-copy-before-publish").await;
                     Ok(())
                 })
@@ -712,8 +715,11 @@ impl Writes {
         &self,
         operation: &Operation,
         raw: Vec<u8>,
-        config: crate::content::compression::Config,
+        mut config: crate::content::compression::Config,
     ) -> Result<Payload> {
+        if operation.packing {
+            config.enabled = false;
+        }
         let cpu = self.reads.reader.cpu.clone().acquire_owned().await?;
         let memory = operation.request.memory.clone();
         let grants = operation.grants.clone();
@@ -873,6 +879,73 @@ impl Writes {
                 std::mem::take(&mut reply.materials),
             )?;
             let keys = Arc::new(reads::keys(&materials)?);
+            if let Some(json) = reply.packing_json.take() {
+                ensure!(
+                    operation.packing && !reply.committed,
+                    "unexpected packed write plan"
+                );
+                let packing: crate::model::node_pack::Batch = serde_json::from_slice(&json)?;
+                let permits: Vec<_> = grants
+                    .iter()
+                    .filter(|grant| grant.reference.r#type == wire::GrantType::StorageWrite as i32)
+                    .collect();
+                ensure!(
+                    (operation.backend.profile.upload_concurrency.is_none() || !permits.is_empty())
+                        && permits.iter().all(
+                            |grant| grant.storage == Some(operation.backend.profile.storage_id)
+                        ),
+                    "storage write grants missing"
+                );
+                let mut raw = std::collections::BTreeMap::new();
+                let mut next = offset;
+                for (entry, payload) in reply.chunks.into_iter().zip(batch.items) {
+                    let chunk: codec::Chunk = serde_json::from_slice(&entry.chunk_json)?;
+                    ensure!(
+                        entry.offset == next
+                            && chunk.hash == payload.input.hash
+                            && chunk.raw_size as u32 == payload.input.raw_size,
+                        "chunk plan does not match input"
+                    );
+                    next += u64::from(payload.input.raw_size);
+                    if !entry.reused {
+                        ensure!(
+                            !payload.input.compressed
+                                && entry.payload_hash == payload.input.payload_hash,
+                            "packed input differs"
+                        );
+                        raw.entry(chunk.id)
+                            .or_insert((payload.input.hash, Bytes::from(payload.bytes)));
+                    }
+                }
+                let backend = operation.backend.clone();
+                let packed = operation
+                    .guard(
+                        node,
+                        &grants,
+                        Box::pin(self.reads.reader.pack_buffers(backend, keys, packing, raw)),
+                    )
+                    .await?;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("node-write-pack-uploaded").await;
+                let committed = node
+                    .client
+                    .commit_chunks(wire::CommitChunksRequest {
+                        run: Some(operation.request.run.run.clone()),
+                        operation_id: operation.id.clone(),
+                        batch_id,
+                        chunks: vec![],
+                        packed_json: Some(serde_json::to_vec(&packed)?),
+                    })
+                    .await?;
+                ensure!(
+                    committed.batch_id == batch_id && committed.end == end,
+                    "invalid packed commit receipt"
+                );
+                offset = end;
+                batch_id += 1;
+                continue;
+            }
+
             let mut seen = HashSet::new();
             let mut next = offset;
             let mut uploads = Vec::new();
@@ -986,6 +1059,7 @@ impl Writes {
                 let committed = node
                     .client
                     .commit_chunks(wire::CommitChunksRequest {
+                        packed_json: None,
                         run: Some(operation.request.run.run.clone()),
                         operation_id: operation.id.clone(),
                         batch_id,

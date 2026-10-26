@@ -11008,6 +11008,7 @@ pub(super) fn release_node_write_leases(ids: &[Uuid]) -> Statement<'_> {
 
 #[derive(sqlx::FromRow)]
 pub(super) struct NodeWriteBatch {
+    pub packing: Option<sqlx::types::Json<crate::model::node_pack::Batch>>,
     pub request_hash: Vec<u8>,
     pub end_bytes: i64,
     pub plan: sqlx::types::Json<Vec<crate::model::node_chunk::Item>>,
@@ -11050,7 +11051,7 @@ pub(super) fn node_write_batch(
     operation: Uuid,
     batch: i64,
 ) -> Rows<'static, NodeWriteBatch> {
-    sqlx::query_as("SELECT request_hash,end_bytes,plan,ready,commit_hash FROM node_write_batches WHERE node_id=$1 AND operation_id=$2 AND batch_id=$3 FOR UPDATE")
+    sqlx::query_as("SELECT request_hash,end_bytes,plan,packing,ready,commit_hash FROM node_write_batches WHERE node_id=$1 AND operation_id=$2 AND batch_id=$3 FOR UPDATE")
         .bind(node).bind(operation).bind(batch)
 }
 
@@ -11088,7 +11089,7 @@ pub(super) fn commit_node_write_batch<'q>(
     batch: i64,
     hash: &'q [u8],
 ) -> Statement<'q> {
-    sqlx::query("UPDATE node_write_batches SET commit_hash=$4,plan='[]'::jsonb WHERE node_id=$1 AND operation_id=$2 AND batch_id=$3 AND ready AND commit_hash IS NULL").bind(node).bind(operation).bind(batch).bind(hash)
+    sqlx::query("UPDATE node_write_batches SET commit_hash=$4,plan='[]'::jsonb,packing=NULL WHERE node_id=$1 AND operation_id=$2 AND batch_id=$3 AND ready AND commit_hash IS NULL").bind(node).bind(operation).bind(batch).bind(hash)
 }
 
 pub(super) fn node_write_size(stream: Id) -> Rows<'static, (i64, DateTime<Utc>)> {

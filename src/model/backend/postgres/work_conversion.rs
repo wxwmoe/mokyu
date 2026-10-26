@@ -43,7 +43,6 @@ pub(super) async fn prepare(
     task: Execution,
     detail: &Value,
     profile: crate::storage::profile::StorageProfile,
-    key: &Key,
 ) -> Result<Option<(work::Plan, Vec<read::BlockKey>)>> {
     let job: Conversion = serde_json::from_value(detail.clone())?;
     job.encoding.validate()?;
@@ -129,12 +128,6 @@ pub(super) async fn prepare(
             Some(write::LEASE_SECONDS),
         )
         .await?;
-        sqlx::query("UPDATE tasks SET cursor=$2 WHERE id=$1 AND lease_token=$3")
-            .bind(task.id)
-            .bind(if job.encoding.pack_enabled { "0" } else { "-1" })
-            .bind(task.token)
-            .execute(&mut **db)
-            .await?;
         let operation = Uuid::now_v7();
         let input = write::Begin {
             run,
@@ -174,25 +167,6 @@ pub(super) async fn prepare(
     };
     sqlx::query("UPDATE tasks SET detail=jsonb_set(detail,'{node_conversion}',$2) WHERE id=$1 AND lease_token=$3")
         .bind(task.id).bind(serde_json::to_value(&snapshot)?).bind(task.token).execute(&mut **db).await?;
-    if sealed && job.encoding.pack_enabled {
-        let allowed: bool =
-            sqlx::query_scalar("SELECT NOT pack_creation_paused FROM mokyu_meta WHERE singleton")
-                .fetch_one(&mut **db)
-                .await?;
-        if allowed {
-            let mut packing_detail = detail.clone();
-            packing_detail["node_conversion"] = serde_json::to_value(&snapshot)?;
-            if let Some(plan) = packing::prepare(db, task, &packing_detail, &profile, key).await? {
-                return Ok(Some(plan));
-            }
-        } else {
-            sqlx::query("UPDATE tasks SET cursor='-1' WHERE id=$1 AND lease_token=$2")
-                .bind(task.id)
-                .bind(task.token)
-                .execute(&mut **db)
-                .await?;
-        }
-    }
     Ok(Some((
         work::Plan::ConvertRaw {
             storage: source.storage_id,
@@ -272,15 +246,6 @@ pub(super) async fn finish(
         .bind(saved.node).bind(saved.write).fetch_one(&mut **db).await?;
     ensure!(sealed, Error::NodeOperationConflict);
     let job: Conversion = serde_json::from_value(detail.clone())?;
-    let remaining: bool =
-        sqlx::query_scalar("SELECT cursor IS DISTINCT FROM '-1' FROM tasks WHERE id=$1")
-            .bind(task.id)
-            .fetch_one(&mut **db)
-            .await?;
-    if job.encoding.pack_enabled && remaining {
-        return Ok((false, None));
-    }
-
     Ok((
         finish_conversion_in(
             db,

@@ -265,6 +265,7 @@ async fn node_chunk_batches_upload_once_replay_and_publish_over_rpc() -> Result<
     .await;
     fixture("chunks-lose-commit").await?;
     let commit = wire::CommitChunksRequest {
+        packed_json: None,
         run: Some(run.clone()),
         operation_id: operation.clone(),
         batch_id: 1,
@@ -304,6 +305,7 @@ async fn node_chunk_batches_upload_once_replay_and_publish_over_rpc() -> Result<
         context
             .client
             .commit_chunks(wire::CommitChunksRequest {
+                packed_json: None,
                 run: Some(run.clone()),
                 operation_id: operation.clone(),
                 batch_id: 2,
@@ -334,6 +336,7 @@ async fn node_chunk_batches_upload_once_replay_and_publish_over_rpc() -> Result<
     context
         .client
         .commit_chunks(wire::CommitChunksRequest {
+            packed_json: None,
             run: Some(run.clone()),
             operation_id: operation.clone(),
             batch_id: 3,

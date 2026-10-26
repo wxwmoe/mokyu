@@ -396,6 +396,7 @@ pub(super) async fn check(
             node,
             key,
             chunk::Commit {
+                packed: None,
                 run,
                 operation: takeover,
                 batch: 1,

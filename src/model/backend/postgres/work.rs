@@ -23,6 +23,28 @@ mod raw;
 #[path = "work_conversion.rs"]
 mod conversion;
 
+#[path = "work_write_packs.rs"]
+mod write_packs;
+
+pub(super) async fn prepare_chunk_packs(
+    db: &mut Transaction<'_, Postgres>,
+    row: &queries::NodeWrite,
+    items: &[chunk::Item],
+) -> Result<Option<crate::model::node_pack::Batch>> {
+    write_packs::prepare(db, row, items).await
+}
+
+pub(super) async fn finish_chunk_packs(
+    db: &mut Transaction<'_, Postgres>,
+    row: &queries::NodeWrite,
+    items: &[chunk::Item],
+    batch: &crate::model::node_pack::Batch,
+    result: &crate::model::node_pack::Encoded,
+    key: &Key,
+) -> Result<()> {
+    write_packs::finish(db, row, items, batch, result, key).await
+}
+
 pub(super) async fn seal_conversion(
     db: &mut Transaction<'_, Postgres>,
     row: &queries::NodeWrite,
@@ -146,6 +168,7 @@ async fn finish(
                 &completion.outcomes,
             )
             .await?;
+            release_task_inputs(db, task).await?;
         }
         work::Plan::HashRaw { items, .. } => {
             ensure!(!maintenance, Error::OperationAborted);
@@ -736,7 +759,6 @@ pub(crate) async fn exchange(
                         Execution { id: task, token },
                         &detail,
                         profile.clone(),
-                        key,
                     )
                     .await?
                 } else if matches!(policy.as_str(), "pack" | "unpack") {

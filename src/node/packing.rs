@@ -10,49 +10,7 @@ impl Reader {
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         batch: wire::Batch,
     ) -> Result<wire::Encoded> {
-        ensure!(
-            !batch.chunks.is_empty() && batch.chunks.len() <= pack::MAX_MEMBERS,
-            "invalid pack batch"
-        );
-        ensure!(
-            batch.sources.len() <= 2 * pack::MAX_MEMBERS && batch.packs.len() <= pack::MAX_MEMBERS,
-            "invalid pack sources"
-        );
-        let mut covered = 0;
-        let mut allowed = BTreeSet::new();
-        for &(start, end) in &batch.groups {
-            ensure!(
-                start == covered && start < end && end <= batch.chunks.len(),
-                "invalid pack groups"
-            );
-            let mid = start + (end - start) / 2;
-            for range in [(start, end), (start, mid), (mid, end)] {
-                if range.1 - range.0 > 1 {
-                    allowed.insert(range);
-                }
-            }
-            covered = end;
-        }
-        ensure!(covered == batch.chunks.len(), "incomplete pack groups");
-        let mut attempts = BTreeMap::new();
-        let mut identities = BTreeSet::new();
-        for target in &batch.chunks {
-            ensure!(
-                !target.location.is_nil() && identities.insert(target.location),
-                "duplicate chunk destination"
-            );
-        }
-        for (index, attempt) in batch.packs.iter().enumerate() {
-            ensure!(
-                allowed.contains(&(attempt.start, attempt.end))
-                    && attempts
-                        .insert((attempt.start, attempt.end), index)
-                        .is_none()
-                    && !attempt.location.is_nil()
-                    && identities.insert(attempt.location),
-                "invalid pack attempt"
-            );
-        }
+        let attempts = layout(&batch)?;
         let mut payload = 0u64;
         for source in &batch.sources {
             payload = payload
@@ -146,6 +104,49 @@ impl Reader {
                 raw.entry(id).or_insert(value);
             }
         }
+        self.pack_data(backend, keys, batch, raw, memory, attempts)
+            .await
+    }
+
+    pub(crate) async fn pack_buffers(
+        &self,
+        backend: Arc<Backend>,
+        keys: Arc<BTreeMap<Uuid, codec::Key>>,
+        batch: wire::Batch,
+        raw: BTreeMap<Id, (Vec<u8>, Bytes)>,
+    ) -> Result<wire::Encoded> {
+        let attempts = layout(&batch)?;
+        ensure!(
+            batch.sources.is_empty() && raw.len() == batch.chunks.len(),
+            "invalid buffered pack inputs"
+        );
+        let payload = raw
+            .values()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .sum::<u64>();
+        let config = backend.profile.compression_config("0s");
+        let units = (payload.saturating_mul(4) + self.workspace.max(config.workspace_bytes()?))
+            .div_ceil(1024 * 1024);
+        ensure!(
+            units <= u64::from(self.pack_units),
+            "pack exceeds node memory budget"
+        );
+        let memory = Arc::new(self.packs.clone().acquire_many_owned(units as u32).await?);
+        backend.store.verify().await?;
+        self.pack_data(backend, keys, batch, raw, memory, attempts)
+            .await
+    }
+
+    async fn pack_data(
+        &self,
+        backend: Arc<Backend>,
+        keys: Arc<BTreeMap<Uuid, codec::Key>>,
+        batch: wire::Batch,
+        raw: BTreeMap<Id, (Vec<u8>, Bytes)>,
+        memory: Arc<OwnedSemaphorePermit>,
+        attempts: BTreeMap<(usize, usize), usize>,
+    ) -> Result<wire::Encoded> {
+        let config = backend.profile.compression_config("0s");
         let storage = backend.profile.storage_id;
         let mut data = Vec::with_capacity(batch.chunks.len());
         for (index, target) in batch.chunks.iter().enumerate() {
@@ -316,4 +317,51 @@ impl Reader {
         ));
         Ok(true)
     }
+}
+
+fn layout(batch: &wire::Batch) -> Result<BTreeMap<(usize, usize), usize>> {
+    ensure!(
+        !batch.chunks.is_empty() && batch.chunks.len() <= pack::MAX_MEMBERS,
+        "invalid pack batch"
+    );
+    ensure!(
+        batch.sources.len() <= 2 * pack::MAX_MEMBERS && batch.packs.len() <= pack::MAX_MEMBERS,
+        "invalid pack sources"
+    );
+    let mut covered = 0;
+    let mut allowed = BTreeSet::new();
+    for &(start, end) in &batch.groups {
+        ensure!(
+            start == covered && start < end && end <= batch.chunks.len(),
+            "invalid pack groups"
+        );
+        let mid = start + (end - start) / 2;
+        for range in [(start, end), (start, mid), (mid, end)] {
+            if range.1 - range.0 > 1 {
+                allowed.insert(range);
+            }
+        }
+        covered = end;
+    }
+    ensure!(covered == batch.chunks.len(), "incomplete pack groups");
+    let mut attempts = BTreeMap::new();
+    let mut identities = BTreeSet::new();
+    for target in &batch.chunks {
+        ensure!(
+            !target.location.is_nil() && identities.insert(target.location),
+            "duplicate chunk destination"
+        );
+    }
+    for (index, attempt) in batch.packs.iter().enumerate() {
+        ensure!(
+            allowed.contains(&(attempt.start, attempt.end))
+                && attempts
+                    .insert((attempt.start, attempt.end), index)
+                    .is_none()
+                && !attempt.location.is_nil()
+                && identities.insert(attempt.location),
+            "invalid pack attempt"
+        );
+    }
+    Ok(attempts)
 }

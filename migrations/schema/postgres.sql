@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0084.
+-- Generated from the complete postgres migration chain through 0085.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1014,10 +1014,12 @@ CREATE TABLE public.node_write_batches (
     ready boolean DEFAULT false NOT NULL,
     commit_hash bytea,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    packing jsonb,
     CONSTRAINT node_write_batches_batch_id_check CHECK ((batch_id > 0)),
     CONSTRAINT node_write_batches_check CHECK (((commit_hash IS NULL) OR ready)),
     CONSTRAINT node_write_batches_commit_hash_check CHECK ((octet_length(commit_hash) = 32)),
     CONSTRAINT node_write_batches_end_bytes_check CHECK ((end_bytes > 0)),
+    CONSTRAINT node_write_batches_packing_check CHECK (((packing IS NULL) OR ((jsonb_typeof(packing) = 'object'::text) AND (octet_length((packing)::text) <= 262144)))),
     CONSTRAINT node_write_batches_plan_check CHECK (((jsonb_typeof(plan) = 'array'::text) AND (octet_length((plan)::text) <= 262144))),
     CONSTRAINT node_write_batches_request_hash_check CHECK ((octet_length(request_hash) = 32))
 );

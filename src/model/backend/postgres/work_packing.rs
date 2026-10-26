@@ -8,9 +8,6 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Serialize, Deserialize)]
 enum Progress {
     Scan(Option<String>),
-    Conversion {
-        cursor: i64,
-    },
     Change {
         pack: Id,
         generation: i64,
@@ -88,7 +85,6 @@ async fn advance(
 ) -> Result<()> {
     let next = match progress {
         Progress::Scan(next) => next.clone(),
-        Progress::Conversion { cursor } => Some(cursor.to_string()),
         Progress::Change { pack, generation } => {
             p::finish_pack_change(&mut *db, task, *pack, *generation).await?;
             Some(pack.to_string())
@@ -238,7 +234,6 @@ async fn combine(
     settings: &pack::Config,
     byte_budget: Option<u64>,
     flush: f64,
-    owner: Option<Execution>,
 ) -> Result<(Vec<Mapping>, i64, Rule)> {
     p::defer_range_repack(
         &mut *db,
@@ -249,12 +244,11 @@ async fn combine(
         from,
     )
     .await?;
-    let rows = p::pack_candidates_for(
+    let rows = p::pack_candidates(
         &mut *db,
         stream,
         from,
         config::seconds(&settings.repack_cooldown)? as f64,
-        owner,
     )
     .await?;
     let mut cursor = rows.first().map_or(-1, |r| r.row.offset_bytes);
@@ -454,33 +448,6 @@ async fn flush(db: &mut PgConnection) -> Result<f64> {
     Ok((2 * config::seconds(&metrics.access_flush_interval)?) as f64)
 }
 
-async fn target(
-    db: &mut PgConnection,
-    detail: &Value,
-    storage: Uuid,
-) -> Result<(String, Option<Uuid>)> {
-    if detail["operation"] == "cdc" {
-        let job: crate::model::raw::Conversion = serde_json::from_value(detail.clone())?;
-        if let Some(id) = job.encoding.block_key_id {
-            let key = queries::node_read_keys(&[id])
-                .fetch_optional(&mut *db)
-                .await?
-                .ok_or(Error::SourceUnavailable)?;
-            ensure!(
-                key.algorithm == job.encoding.algorithm,
-                Error::SourceUnavailable
-            );
-        }
-        return Ok((job.encoding.algorithm, job.encoding.block_key_id));
-    }
-    Ok(queries::storage_key(storage)
-        .fetch_optional(db)
-        .await?
-        .map_or(("none".to_owned(), None), |key| {
-            (key.algorithm, Some(key.id))
-        }))
-}
-
 pub(super) async fn prepare(
     db: &mut Transaction<'_, Postgres>,
     task: Execution,
@@ -489,12 +456,7 @@ pub(super) async fn prepare(
     key: &Key,
 ) -> Result<Option<(work::Plan, Vec<read::BlockKey>)>> {
     let storage = profile.storage_id;
-    let conversion = detail["operation"] == "cdc";
-    let policy = if conversion {
-        "pack"
-    } else {
-        detail["policy"].as_str().unwrap_or("unpack")
-    };
+    let policy = detail["policy"].as_str().unwrap_or("unpack");
     ensure!(
         matches!(
             policy,
@@ -533,40 +495,7 @@ pub(super) async fn prepare(
             .bind(task.id)
             .fetch_one(&mut **db)
             .await?;
-        let selected = if conversion {
-            let offset: i64 = cursor.as_deref().unwrap_or("0").parse()?;
-            if offset < 0 {
-                return Ok(None);
-            }
-            let stream = Id::from_json(&detail["node_conversion"]["candidate"])?
-                .ok_or(Error::NodeOperationConflict)?;
-            let budget = profile
-                .pack_byte_budget
-                .as_deref()
-                .map(config::bytes)
-                .transpose()?;
-            let (rows, cursor, rule) = combine(
-                db,
-                stream,
-                offset,
-                false,
-                &settings,
-                budget,
-                flush,
-                Some(task),
-            )
-            .await?;
-            Some(Selected {
-                groups: if rows.is_empty() {
-                    vec![]
-                } else {
-                    vec![rows.clone()]
-                },
-                rows,
-                progress: Progress::Conversion { cursor },
-                rule,
-            })
-        } else if policy == "range" {
+        let selected = if policy == "range" {
             if let Some(id) = p::next_range_pack(
                 &mut **db,
                 storage,
@@ -659,7 +588,6 @@ pub(super) async fn prepare(
                     &settings,
                     budget,
                     flush,
-                    None,
                 )
                 .await?;
                 let progress = if let Some(generation) = generation {
@@ -701,7 +629,11 @@ pub(super) async fn prepare(
             advance(db, task, &selected.progress, 0, &settings).await?;
             continue;
         }
-        let (algorithm, block_key) = target(db, detail, storage).await?;
+        let target = queries::storage_key(storage)
+            .fetch_optional(&mut **db)
+            .await?;
+        let (algorithm, block_key) =
+            target.map_or(("none".to_owned(), None), |k| (k.algorithm, Some(k.id)));
         let created = queries::node_clock().fetch_one(&mut **db).await?;
         let mut batch = wire::Batch {
             algorithm,
@@ -846,71 +778,24 @@ pub(super) async fn prepare(
     Ok(None)
 }
 
-pub(super) async fn finish(
-    db: &mut Transaction<'_, Postgres>,
-    task: Execution,
+pub(super) async fn outputs(
+    db: &mut PgConnection,
     storage: Uuid,
-    batch: wire::Batch,
-    detail: &Value,
-    outcomes: &[work::Outcome],
+    batch: &wire::Batch,
+    result: &wire::Encoded,
+    ready: &[Option<Chunk>],
     key: &Key,
-) -> Result<Option<&'static str>> {
+) -> Result<Vec<PackOutput>> {
     use base64::{Engine, engine::general_purpose::STANDARD};
-    let [outcome] = outcomes else {
-        return Err(Error::NodeOperationConflict.into());
-    };
-    if matches!(outcome, work::Outcome::Retry) {
-        return Ok(Some("backend_io_failed"));
-    }
-    let work::Outcome::Packed(result) = outcome else {
-        return Err(Error::NodeOperationConflict.into());
-    };
-    let mut snapshot: Snapshot = serde_json::from_value(detail["node_pack"].clone())?;
     ensure!(
         result.chunks.len() == batch.chunks.len()
-            && snapshot.ready.len() == batch.chunks.len()
-            && result.packs.len() <= pack::MAX_MEMBERS / 2,
+            && ready.len() == batch.chunks.len()
+            && result.packs.len() <= batch.chunks.len() / 2,
         Error::NodeOperationConflict
     );
-    let mut profile = queries::storage_profile(storage)
-        .fetch_one(&mut **db)
-        .await?;
-    if detail["operation"] == "cdc" {
-        conversion::freeze(detail, &mut profile)?;
-    } else if profile.revision != snapshot.revision {
-        return Ok(Some("pack_profile_changed"));
-    }
-    let settings = profile.pack_config();
-    let (algorithm, block_key) = target(db, detail, storage).await?;
-    if block_key != batch.key || algorithm != batch.algorithm {
-        return Ok(Some("pack_key_changed"));
-    }
-    let allowed: bool =
-        sqlx::query_scalar("SELECT NOT pack_creation_paused FROM mokyu_meta WHERE singleton")
-            .fetch_one(&mut **db)
-            .await?;
-    if !allowed && !result.packs.is_empty() {
-        return Ok(Some("pack_creation_stopped"));
-    }
-    let ids: Vec<_> = snapshot.rows.iter().map(|r| r.chunk.id).collect();
-    if let Err(error) = check_source_inputs(db, task.id, &ids).await {
-        if error
-            .downcast_ref::<Error>()
-            .is_some_and(|e| matches!(e, Error::OperationAborted | Error::SourceUnavailable))
-        {
-            return Ok(Some("source_changed"));
-        }
-        return Err(error);
-    }
     let mut key_ids = BTreeSet::new();
     key_ids.extend(batch.key);
-    key_ids.extend(
-        snapshot
-            .ready
-            .iter()
-            .flatten()
-            .filter_map(|c| c.block_key_id),
-    );
+    key_ids.extend(ready.iter().flatten().filter_map(|c| c.block_key_id));
     let keys: BTreeMap<_, _> = rewrite::keys(db, &key_ids.into_iter().collect::<Vec<_>>(), key)
         .await?
         .into_iter()
@@ -950,7 +835,7 @@ pub(super) async fn finish(
             continue;
         }
         ensure!(covered.insert(index), Error::NodeOperationConflict);
-        let chunk = if let Some(chunk) = &snapshot.ready[index] {
+        let chunk = if let Some(chunk) = &ready[index] {
             ensure!(
                 batch.chunks[index].ready == Some(*value),
                 Error::NodeOperationConflict
@@ -979,6 +864,67 @@ pub(super) async fn finish(
         covered.len() == batch.chunks.len(),
         Error::NodeOperationConflict
     );
+    Ok(outputs)
+}
+
+pub(super) async fn finish(
+    db: &mut Transaction<'_, Postgres>,
+    task: Execution,
+    storage: Uuid,
+    batch: wire::Batch,
+    detail: &Value,
+    outcomes: &[work::Outcome],
+    key: &Key,
+) -> Result<Option<&'static str>> {
+    let [outcome] = outcomes else {
+        return Err(Error::NodeOperationConflict.into());
+    };
+    if matches!(outcome, work::Outcome::Retry) {
+        return Ok(Some("backend_io_failed"));
+    }
+    let work::Outcome::Packed(result) = outcome else {
+        return Err(Error::NodeOperationConflict.into());
+    };
+    let mut snapshot: Snapshot = serde_json::from_value(detail["node_pack"].clone())?;
+    ensure!(
+        result.chunks.len() == batch.chunks.len()
+            && snapshot.ready.len() == batch.chunks.len()
+            && result.packs.len() <= pack::MAX_MEMBERS / 2,
+        Error::NodeOperationConflict
+    );
+    let profile = queries::storage_profile(storage)
+        .fetch_one(&mut **db)
+        .await?;
+    if profile.revision != snapshot.revision {
+        return Ok(Some("pack_profile_changed"));
+    }
+    let settings = profile.pack_config();
+    let target = queries::storage_key(storage)
+        .fetch_optional(&mut **db)
+        .await?;
+    if target.as_ref().map(|k| k.id) != batch.key
+        || target.as_ref().map_or("none", |k| k.algorithm.as_str()) != batch.algorithm
+    {
+        return Ok(Some("pack_key_changed"));
+    }
+    let allowed: bool =
+        sqlx::query_scalar("SELECT NOT pack_creation_paused FROM mokyu_meta WHERE singleton")
+            .fetch_one(&mut **db)
+            .await?;
+    if !allowed && !result.packs.is_empty() {
+        return Ok(Some("pack_creation_stopped"));
+    }
+    let ids: Vec<_> = snapshot.rows.iter().map(|r| r.chunk.id).collect();
+    if let Err(error) = check_source_inputs(db, task.id, &ids).await {
+        if error
+            .downcast_ref::<Error>()
+            .is_some_and(|e| matches!(e, Error::OperationAborted | Error::SourceUnavailable))
+        {
+            return Ok(Some("source_changed"));
+        }
+        return Err(error);
+    }
+    let outputs = outputs(db, storage, &batch, result, &snapshot.ready, key).await?;
     let after: i64 = outputs.iter().map(PackOutput::size).sum();
     let publish = match &snapshot.rule {
         Rule::Combine { before, physical } => {
