@@ -710,6 +710,7 @@ fn state(snapshot: &session::Snapshot) -> wire::NodeState {
         maintenance: snapshot.maintenance,
         native_pending: snapshot.native_pending,
         work_pending: snapshot.work_pending,
+        pending_uploads: snapshot.pending_uploads.max(0) as u64,
         draining: snapshot.draining,
         revisions: snapshot
             .settings

@@ -184,6 +184,10 @@ impl DatabaseType {
 
     pub fn validate_role(self, role: &str) -> Result<()> {
         ensure!(
+            matches!(role, "single" | "control"),
+            "data and worker do not connect to a database"
+        );
+        ensure!(
             role == "single" || self.supports_cluster(),
             "database backend '{}' does not support cluster mode",
             self.as_str()

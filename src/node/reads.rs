@@ -333,6 +333,10 @@ impl Prepared {
 }
 
 impl Reads {
+    pub(crate) async fn maintain(&self) -> Result<()> {
+        self.reader.maintain().await
+    }
+
     pub(crate) fn new(node: Arc<NodeContext>) -> Result<Self> {
         let budget = node
             .budget

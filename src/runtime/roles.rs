@@ -45,8 +45,7 @@ pub(super) async fn run_role(app: Arc<app::App>, role: Role) -> Result<()> {
     match role {
         Role::Single => run_single(app).await,
         Role::Control => run_control(app).await,
-        Role::Worker => run_worker(app).await,
-        Role::Data => run_data(app).await,
+        Role::Worker | Role::Data => anyhow::bail!("node roles require the API runtime"),
     }
 }
 
@@ -103,51 +102,6 @@ async fn run_control(app: Arc<app::App>) -> Result<()> {
     drain(app, std::future::pending()).await
 }
 
-async fn run_worker(app: Arc<app::App>) -> Result<()> {
-    if app.mode_mismatch().await? || app.recovery_required() {
-        return run_status(app).await;
-    }
-    let status_listener = TcpListener::bind(&app.config.instance.listen_control)
-        .await
-        .context("status listener")?;
-    let background = super::shutdown::background(app.clone());
-    tokio::pin!(background);
-    tokio::select! {
-        result = &mut background => { result?; anyhow::bail!("storage workers stopped"); },
-        result = serve_router(status_listener, http::status_router(app.clone()), Arc::new(Semaphore::new(4)), app.clone()) => result?,
-        _ = shutdown_signal() => tracing::info!(role="worker", "stopping listeners; draining active operations"),
-    }
-    drain(app, background).await
-}
-
-async fn run_data(app: Arc<app::App>) -> Result<()> {
-    if app.mode_mismatch().await? || app.recovery_required() {
-        return run_data_restricted(app).await;
-    }
-    let s3_listener = TcpListener::bind(&app.config.instance.listen_s3)
-        .await
-        .context("S3 listener")?;
-    let web_listener = TcpListener::bind(&app.config.instance.listen_web)
-        .await
-        .context("public listener")?;
-    let status_listener = TcpListener::bind(&app.config.instance.listen_control)
-        .await
-        .context("status listener")?;
-    let connections = Arc::new(Semaphore::new(app.budget.request_connections));
-    let s3 = build_s3(app.clone())?;
-    let background = super::shutdown::background(app.clone());
-    tokio::pin!(background);
-    tokio::select! {
-        result = &mut background => { result?; anyhow::bail!("storage workers stopped"); },
-        result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
-        result = serve_router(web_listener, http::public_router(app.clone()), connections.clone(), app.clone()) => result?,
-        result = serve_router(status_listener, http::status_router(app.clone()), Arc::new(Semaphore::new(4)), app.clone()) => result?,
-        result = access::run(app.clone()) => result?,
-        _ = shutdown_signal() => tracing::info!(role="data", "stopping listeners; draining active operations"),
-    }
-    drain(app, background).await
-}
-
 async fn run_control_restricted(app: Arc<app::App>) -> Result<()> {
     let control_listener = TcpListener::bind(&app.config.instance.listen_control)
         .await
@@ -183,41 +137,7 @@ async fn run_single_mismatch(app: Arc<app::App>) -> Result<()> {
     Ok(())
 }
 
-async fn run_data_restricted(app: Arc<app::App>) -> Result<()> {
-    let s3_listener = TcpListener::bind(&app.config.instance.listen_s3)
-        .await
-        .context("S3 listener")?;
-    let web_listener = TcpListener::bind(&app.config.instance.listen_web)
-        .await
-        .context("public listener")?;
-    let control_listener = TcpListener::bind(&app.config.instance.listen_control)
-        .await
-        .context("status listener")?;
-    let connections = Arc::new(Semaphore::new(app.budget.request_connections));
-    let s3 = build_s3(app.clone())?;
-    tokio::select! {
-        result = cluster::report::run(app.clone(), true) => result?,
-        result = cluster::status::restricted_loop(app.clone()) => result?,
-        result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
-        result = serve_router(web_listener, http::public_router(app.clone()), connections.clone(), app.clone()) => result?,
-        result = serve_router(control_listener, http::status_router(app.clone()), connections, app.clone()) => result?,
-        _ = shutdown_signal() => tracing::info!(role="data", "stopping restricted listeners"),
-    }
-    Ok(())
-}
-
-async fn run_status(app: Arc<app::App>) -> Result<()> {
-    let listener = TcpListener::bind(&app.config.instance.listen_control)
-        .await
-        .context("status listener")?;
-    tokio::select! {
-        result = cluster::report::run(app.clone(), true) => result,
-        result = cluster::status::restricted_loop(app.clone()) => result,
-        result = serve_router(listener, http::status_router(app.clone()), Arc::new(Semaphore::new(4)), app.clone()) => result,
-    }
-}
-
-async fn shutdown_signal() {
+pub(super) async fn shutdown_signal() {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
     tokio::select! {_=term.recv()=>{},_=tokio::signal::ctrl_c()=>{}}

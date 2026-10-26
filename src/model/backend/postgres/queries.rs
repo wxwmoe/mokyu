@@ -4101,7 +4101,7 @@ impl UploadCacheStore for Backend {
         transactions::cache_flush(&self.pool, node).await
     }
     async fn backlog(&self, node: Option<Uuid>) -> Result<Value> {
-        let (entries, bytes, oldest): (i64, i64, Option<DateTime<Utc>>) = sqlx::query_as("SELECT count(*),COALESCE(sum(size),0)::bigint,min(created_at) FROM (SELECT staged_size AS size,created_at FROM pending_uploads WHERE ($1::uuid IS NULL OR node_id=$1) UNION ALL SELECT r.size,r.created_at FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE ($1::uuid IS NULL OR u.node_id=$1) UNION ALL SELECT s.size,s.created_at FROM parts p JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id WHERE p.remote_node_id IS NOT NULL AND p.remote_etag IS NULL AND ($1::uuid IS NULL OR p.remote_node_id=$1) AND u.state IN ('active','completing')) waiting").bind(node).fetch_one(&self.pool).await?;
+        let (entries, bytes, oldest) = node_upload_backlog(node).fetch_one(&self.pool).await?;
         Ok(serde_json::json!({"entries": entries, "bytes": bytes, "oldest_at": oldest}))
     }
     async fn next_attempt(&self) -> Result<Option<DateTime<Utc>>> {
@@ -11348,4 +11348,10 @@ pub(super) fn raw_gc_claim(
 
 pub(super) fn raw_gc_finish(source: Id) -> Statement<'static> {
     sqlx::query("DELETE FROM raw_sources WHERE id=$1 AND state='deleting' AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=raw_sources.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation' IN ('recheck','verify') AND t.detail->>'source_location'=raw_sources.id::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)").bind(source)
+}
+
+pub(super) fn node_upload_backlog(
+    node: Option<Uuid>,
+) -> Rows<'static, (i64, i64, Option<DateTime<Utc>>)> {
+    sqlx::query_as("SELECT count(*),COALESCE(sum(size),0)::bigint,min(created_at) FROM (SELECT staged_size AS size,created_at FROM pending_uploads WHERE ($1::uuid IS NULL OR node_id=$1) UNION ALL SELECT r.size,r.created_at FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE ($1::uuid IS NULL OR u.node_id=$1) UNION ALL SELECT s.size,s.created_at FROM parts p JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id WHERE p.remote_node_id IS NOT NULL AND p.remote_etag IS NULL AND ($1::uuid IS NULL OR p.remote_node_id=$1) AND u.state IN ('active','completing')) waiting").bind(node)
 }

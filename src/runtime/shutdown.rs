@@ -79,19 +79,11 @@ pub(super) async fn drain(app: Arc<App>, workers: impl Future<Output = Result<()
 }
 
 pub(super) async fn background(app: Arc<App>) -> Result<()> {
-    ensure!(app.role != "control", "control cannot run storage workers");
-    let membership = async {
-        if app.role == "single" {
-            std::future::pending::<Result<()>>().await
-        } else {
-            tokio::select! {
-                result = crate::cluster::node_loop(app.clone(), if app.role == "data" { "data" } else { "worker" }) => result,
-                result = crate::cluster::report::run(app.clone(), false) => result,
-            }
-        }
-    };
+    ensure!(
+        app.role == "single",
+        "local storage workers require single mode"
+    );
     tokio::select! {
-        result = membership => result,
         result = crate::worker::scheduler::run(app.clone()) => result,
         result = crate::worker::raw::run(app.clone()) => result,
         result = crate::worker::raw_upload::run(app.clone()) => result,

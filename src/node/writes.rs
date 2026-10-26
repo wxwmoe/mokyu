@@ -659,7 +659,11 @@ impl Writes {
         }
         let mut file = files.raw_request(&operation.backend.profile).await?;
         let idle = Duration::from_secs(crate::config::seconds(
-            &node.snapshot()?.runtime().uploads.client_idle_timeout,
+            &node
+                .background_snapshot()?
+                .runtime()
+                .uploads
+                .client_idle_timeout,
         )?);
         let mut hash = (!operation.backend.profile.cdc_enabled
             && operation.backend.profile.deduplication_enabled
@@ -873,7 +877,7 @@ impl Writes {
             &self
                 .reads
                 .node
-                .snapshot()?
+                .background_snapshot()?
                 .runtime()
                 .uploads
                 .client_idle_timeout,

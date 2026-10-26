@@ -9,6 +9,7 @@ pub(crate) mod request;
 pub(crate) mod resources;
 mod session;
 mod settings;
+pub(crate) mod status;
 pub(crate) mod work;
 pub(crate) mod writes;
 
@@ -25,7 +26,8 @@ use tokio::{sync::watch, time::Instant};
 use tonic::Status;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
     Connecting,
     Ready,
@@ -100,6 +102,9 @@ pub(crate) struct State {
     pub(crate) maintenance: bool,
     pub(crate) draining: bool,
     pub(crate) work_pending: bool,
+    pub(crate) pending_uploads: Option<u64>,
+    pub(crate) control_id: Option<Uuid>,
+    pub(crate) last_error: Option<String>,
 }
 
 pub(crate) struct NodeContext {
@@ -112,6 +117,7 @@ pub(crate) struct NodeContext {
     pub(crate) observations: observations::Reports,
     pub(crate) native_work: tokio::sync::Notify,
     pub(crate) statistics: crate::status::stats::Statistics,
+    pub(crate) serving: AtomicBool,
     boot: Uuid,
     current: watch::Sender<State>,
     mode: watch::Sender<Mode>,
@@ -148,6 +154,7 @@ impl NodeContext {
             observations: observations::Reports::new(),
             native_work: tokio::sync::Notify::new(),
             statistics: crate::status::stats::Statistics::default(),
+            serving: AtomicBool::new(false),
             boot: Uuid::new_v4(),
             current: watch::channel(State {
                 phase: Phase::Connecting,
@@ -157,6 +164,9 @@ impl NodeContext {
                 maintenance: false,
                 draining: false,
                 work_pending: false,
+                pending_uploads: None,
+                control_id: None,
+                last_error: None,
             })
             .0,
             mode: watch::channel(Mode::Running).0,
@@ -194,6 +204,10 @@ impl NodeContext {
             .ok_or_else(|| Status::unavailable("node is synchronizing"))?;
         snapshot.lease.check()?;
         Ok(snapshot)
+    }
+
+    pub(crate) fn refresh(&self) {
+        self.resources.changed.notify_one();
     }
 
     pub(crate) fn drain(&self) {

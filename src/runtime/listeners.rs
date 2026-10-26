@@ -91,6 +91,23 @@ pub(super) async fn serve_router(
     app: Arc<app::App>,
 ) -> Result<()> {
     let router = router.layer(axum::middleware::from_fn(http::transport::router_request));
+    serve_http(
+        listener,
+        router,
+        connections,
+        app.budget.data_slots,
+        app.stop_connections.subscribe(),
+    )
+    .await
+}
+
+pub(super) async fn serve_http(
+    listener: TcpListener,
+    router: axum::Router,
+    connections: Arc<Semaphore>,
+    streams: usize,
+    stopping: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
     loop {
         let (socket, _) = listener.accept().await?;
         socket.set_nodelay(true)?;
@@ -105,8 +122,7 @@ pub(super) async fn serve_router(
             started.notify_one();
             hyper::service::Service::call(&service, request)
         });
-        let streams = app.budget.data_slots;
-        let mut stopping = app.stop_connections.subscribe();
+        let mut stopping = stopping.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let builder = http::transport::builder(streams);

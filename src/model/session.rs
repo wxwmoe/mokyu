@@ -40,4 +40,5 @@ pub(crate) struct Snapshot {
     pub grants: Vec<super::node_read::GrantResult>,
     pub native_pending: bool,
     pub work_pending: bool,
+    pub pending_uploads: i64,
 }

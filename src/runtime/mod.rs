@@ -1,6 +1,7 @@
 mod args;
 mod listeners;
 pub(crate) mod locks;
+mod node;
 mod roles;
 mod shutdown;
 
@@ -8,7 +9,7 @@ use self::{
     args::{Args, Command, ToolCommand},
     roles::{Role, run_role},
 };
-use crate::{app, cli, cluster, config, control, worker};
+use crate::{app, cli, cluster, config, control};
 use anyhow::Result;
 use clap::Parser;
 use std::time::Duration;
@@ -55,6 +56,19 @@ pub(crate) fn run() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("TLS provider initialization failed"))?;
+    if matches!(role, Role::Data | Role::Worker) {
+        anyhow::ensure!(
+            !start_maintenance,
+            "set deployment maintenance on control before starting nodes"
+        );
+        let (config, budget) = config::node::NodeConfig::load(&args.config, role.title())?;
+        return tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(budget.available_cpus)
+            .max_blocking_threads((budget.cpu_jobs * 2).max(8))
+            .enable_all()
+            .build()?
+            .block_on(node::run(config, role));
+    }
     let (config, secrets, budget) = config::Config::load(&args.config)?;
     config.validate_role(role.title())?;
     tracing::info!(version=env!("CARGO_PKG_VERSION"),resources=%serde_json::to_string(&budget)?,"starting Mokyu");
@@ -87,9 +101,6 @@ pub(crate) fn run() -> Result<()> {
         let startup_blocked = app.mode_mismatch().await? || app.recovery_required();
         if matches!(role, Role::Single) && !startup_blocked {
             app.recover().await?;
-        }
-        if matches!(role, Role::Worker) && !startup_blocked {
-            worker::scheduler::recover_stale(&app).await?;
         }
         if matches!(role, Role::Single | Role::Control) {
             control::account::initialize(&app).await?;

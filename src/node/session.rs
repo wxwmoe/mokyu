@@ -67,6 +67,8 @@ impl NodeContext {
                 Ok(()) => continue,
                 Err(error) => error,
             };
+            self.current
+                .send_modify(|state| state.last_error = Some(format!("{:?}", error.code())));
             if matches!(
                 error.code(),
                 Code::Unauthenticated
@@ -130,6 +132,8 @@ impl NodeContext {
             state.phase = Phase::Recovering;
             state.epoch = session.welcome.epoch;
             state.peer = Some(session.peer);
+            state.control_id = Uuid::parse_str(&session.welcome.control_id).ok();
+            state.last_error = None;
         });
         self.synchronize(&lease, &mut settings).await?;
         *failures = 0;
@@ -230,6 +234,7 @@ impl NodeContext {
         self.current.send_modify(|current| {
             current.maintenance = state.maintenance;
             current.work_pending = state.work_pending;
+            current.pending_uploads = state.draining.then_some(state.pending_uploads);
             current.draining = state.draining || *self.mode.borrow() != Mode::Running;
             current.phase = if current.draining {
                 Phase::Draining

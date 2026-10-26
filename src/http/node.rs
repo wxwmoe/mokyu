@@ -101,7 +101,7 @@ pub(crate) struct Gateway {
 
 impl Gateway {
     pub(crate) fn new(reads: Arc<Reads>) -> Result<Self> {
-        let settings = reads.node.snapshot()?.runtime().requests.clone();
+        let settings = reads.node.background_snapshot()?.runtime().requests.clone();
         let cors = reads.cors.clone();
         reads.start_public();
         let controls = Arc::new(tokio::sync::Semaphore::new(

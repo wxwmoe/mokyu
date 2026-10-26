@@ -554,6 +554,7 @@ message NodeState {
   repeated Revision revisions = 3;
   bool native_pending = 4;
   bool work_pending = 5;
+  uint64 pending_uploads = 6;
 }
 
 message Welcome {

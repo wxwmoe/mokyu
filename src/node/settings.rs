@@ -12,6 +12,19 @@ pub(super) struct Settings {
 }
 
 impl Settings {
+    pub(super) fn view(&self) -> serde_json::Value {
+        let revisions: BTreeMap<_, _> = self
+            .revisions
+            .iter()
+            .map(|(&section, &revision)| (name(section).expect("validated section"), revision))
+            .collect();
+        serde_json::json!({"revisions": revisions, "loaded": {
+            "requests": self.runtime.requests, "uploads": self.runtime.uploads,
+            "metrics": self.runtime.metrics, "maintenance": self.runtime.maintenance,
+            "io": {"shutdown_flush_timeout": self.runtime.io.shutdown_flush_timeout}
+        }})
+    }
+
     pub(super) fn cached(&self) -> Vec<wire::Revision> {
         self.revisions
             .iter()
@@ -68,6 +81,15 @@ impl Settings {
             );
         }
         crate::config::limits::validate_runtime(instance, &next.runtime)?;
+        if !self.revisions.is_empty() {
+            let old = &self.runtime.requests;
+            let current = &mut next.runtime.requests;
+            current.s3_domain = old.s3_domain.clone();
+            current.s3_region = old.s3_region.clone();
+            current.s3_chunk_limit = old.s3_chunk_limit.clone();
+            current.cors_cache_size = old.cors_cache_size.clone();
+            current.cors_cache_entries = old.cors_cache_entries;
+        }
         Ok(next)
     }
 }
@@ -118,6 +140,7 @@ mod tests {
             state: Some(wire::NodeState {
                 native_pending: false,
                 work_pending: false,
+                pending_uploads: 0,
                 maintenance: false,
                 draining: false,
                 revisions: revisions.clone(),
@@ -160,6 +183,47 @@ mod tests {
         assert_ne!(held.runtime.requests.read_idle_timeout, "31s");
         assert!(next.update(&instance, &initial).is_err());
         assert!(next.matches(changed.state.as_ref().unwrap()).unwrap());
+        changed.settings[0].json = serde_json::to_vec(&json!({
+            "s3_domain":"s3.example", "s3_region":"other", "s3_chunk_limit":"16MiB",
+            "cors_cache_size":"64KiB", "cors_cache_entries":12, "read_idle_timeout":"32s"
+        }))
+        .unwrap();
+        let applied = held.update(&instance, &changed).unwrap();
+        assert_eq!(
+            applied.runtime.requests.s3_domain,
+            held.runtime.requests.s3_domain
+        );
+        assert_eq!(
+            applied.runtime.requests.s3_region,
+            held.runtime.requests.s3_region
+        );
+        assert_eq!(
+            applied.runtime.requests.s3_chunk_limit,
+            held.runtime.requests.s3_chunk_limit
+        );
+        assert_eq!(
+            applied.runtime.requests.cors_cache_size,
+            held.runtime.requests.cors_cache_size
+        );
+        assert_eq!(
+            applied.runtime.requests.cors_cache_entries,
+            held.runtime.requests.cors_cache_entries
+        );
+        assert_eq!(applied.runtime.requests.read_idle_timeout, "32s");
+        assert!(applied.matches(changed.state.as_ref().unwrap()).unwrap());
+        let restarted = empty
+            .update(
+                &instance,
+                &wire::SyncReply {
+                    settings: std::iter::once(changed.settings[0].clone())
+                        .chain(initial.settings[1..].iter().cloned())
+                        .collect(),
+                    ..changed.clone()
+                },
+            )
+            .unwrap();
+        assert_eq!(restarted.runtime.requests.s3_region, "other");
+        assert_eq!(restarted.runtime.requests.s3_chunk_limit, "16MiB");
 
         for section in [0, 6, -1] {
             let mut invalid = initial.clone();

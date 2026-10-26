@@ -6,10 +6,6 @@ use futures_util::StreamExt;
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
-pub async fn recover_stale(app: &App) -> Result<u64> {
-    app.cluster()?.recover_tasks().await
-}
-
 pub(crate) async fn flush(app: Arc<App>) -> Result<()> {
     anyhow::ensure!(
         app.draining.load(std::sync::atomic::Ordering::Acquire),
@@ -28,55 +24,32 @@ pub async fn run(app: Arc<App>) -> Result<()> {
     if app.role == "single" {
         return run_single(app).await;
     }
-    if app.role != "single" {
-        let listener_app = app.clone();
-        tokio::spawn(async move {
-            loop {
-                let result: Result<()> = async {
-                    listener_app
-                        .cluster()?
-                        .listen_tasks(listener_app.wake_tasks.clone())
-                        .await
-                }
-                .await;
-                if let Err(error) = result {
-                    tracing::warn!(%error, "task notification listener will retry");
-                }
-                tokio::time::sleep(Duration::from_secs(10)).await;
+    anyhow::ensure!(
+        app.role == "control",
+        "local cluster workers require control"
+    );
+    let listener_app = app.clone();
+    tokio::spawn(async move {
+        loop {
+            let result: Result<()> = async {
+                listener_app
+                    .cluster()?
+                    .listen_tasks(listener_app.wake_tasks.clone())
+                    .await
             }
-        });
-    }
-    if app.role == "control" {
-        return worker(
-            app,
-            Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
-            0,
-        )
-        .await;
-    }
-    let active = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
-    let mut workers = futures_util::stream::FuturesUnordered::new();
-    for class in std::iter::repeat_n(
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "task notification listener will retry");
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
+    worker(
+        app,
+        Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
         0,
-        app.budget
-            .cpu_jobs
-            .min(app.budget.read_concurrency)
-            .clamp(1, 4),
     )
-    .chain(std::iter::repeat_n(1, app.budget.cpu_jobs.clamp(1, 4)))
-    .chain(std::iter::repeat_n(
-        2,
-        app.budget
-            .cpu_jobs
-            .min(app.budget.upload_concurrency)
-            .clamp(1, 4),
-    )) {
-        workers.push(worker(app.clone(), active.clone(), class));
-    }
-    workers
-        .next()
-        .await
-        .context("maintenance workers stopped")?
+    .await
 }
 
 async fn run_single(app: Arc<App>) -> Result<()> {

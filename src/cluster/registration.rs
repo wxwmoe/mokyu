@@ -11,9 +11,7 @@ pub async fn initialize(app: &App, role: &str) -> Result<()> {
         tracing::warn!(role, "service role is waiting for cluster deployment mode");
         return Ok(());
     }
-    if matches!(role, "data" | "worker") {
-        app.storage.shared_staging_ready().await?;
-    }
+    ensure!(role == "control", "local registration requires control");
     let path = node_state_path(app);
     let state = if let Some(state) = read_state(&path).await? {
         state

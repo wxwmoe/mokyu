@@ -34,13 +34,16 @@ impl std::ops::Deref for Config {
 
 impl Config {
     pub fn validate_role(&self, role: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            matches!(role, "single" | "control"),
+            "data and worker use node configuration"
+        );
         self.database.backend.validate_role(role)?;
         anyhow::ensure!(
             self.replica_database.is_none() || role != "single",
             "replica_database requires cluster mode"
         );
         let minimum = match role {
-            "data" | "worker" => 4,
             // LISTEN, two coordinators, an admin guard and its query.
             "control" => 5,
             _ => 1,
@@ -133,7 +136,10 @@ mod tests {
         let mut config = toml::from_str::<FileConfig>("[database]\ntype='postgres'\n")
             .unwrap()
             .into_config();
-        for (role, minimum) in [("single", 1), ("control", 5), ("data", 4), ("worker", 4)] {
+        for role in ["data", "worker"] {
+            assert!(config.validate_role(role).is_err());
+        }
+        for (role, minimum) in [("single", 1), ("control", 5)] {
             config.instance.database_connections = None;
             assert!(config.validate_role(role).is_ok());
             for connections in 1..=5 {
@@ -234,7 +240,7 @@ mod tests {
         );
         assert!(DatabaseType::Mysql.validate_role("control").is_err());
         assert!(DatabaseType::Sqlite.validate_role("worker").is_err());
-        assert!(DatabaseType::Postgres.validate_role("data").is_ok());
+        assert!(DatabaseType::Postgres.validate_role("data").is_err());
     }
 
     #[test]
@@ -261,8 +267,9 @@ mod tests {
         assert_eq!(resolved.password.as_deref(), Some("primary-secret"));
         assert_eq!(resolved.ssl_mode, "verify-full");
         assert!(config.validate_role("single").is_err());
-        for role in ["data", "control", "worker"] {
-            config.validate_role(role).unwrap();
+        config.validate_role("control").unwrap();
+        for role in ["data", "worker"] {
+            assert!(config.validate_role(role).is_err());
         }
         for extra in [
             "host=''",
@@ -430,7 +437,7 @@ mod tests {
             for role in ["control", "worker", "data"] {
                 assert_eq!(
                     backend.validate_role(role).is_ok(),
-                    backend.supports_cluster()
+                    role == "control" && backend.supports_cluster()
                 );
             }
             assert!(backend.validate_role("single").is_ok());

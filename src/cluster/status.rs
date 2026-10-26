@@ -3,11 +3,7 @@ use anyhow::Result;
 use std::{sync::Arc, time::Duration};
 
 pub async fn control_loop(app: Arc<App>) -> Result<()> {
-    node_loop(app, "control").await
-}
-
-pub async fn node_loop(app: Arc<App>, role: &'static str) -> Result<()> {
-    run(&app, role, true).await
+    run(&app, "control", true).await
 }
 
 pub(crate) async fn restricted_loop(app: Arc<App>) -> Result<()> {

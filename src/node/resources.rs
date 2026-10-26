@@ -94,6 +94,15 @@ fn prune(entries: &mut HashMap<Uuid, Entry>) {
 }
 
 impl Resources {
+    pub(crate) fn active(&self) -> usize {
+        let mut entries = self.entries.lock().unwrap();
+        prune(&mut entries);
+        entries
+            .values()
+            .filter(|entry| entry.held.strong_count() > 0 || !entry.released)
+            .count()
+    }
+
     pub(crate) fn released(&self, id: Uuid) -> bool {
         self.entries
             .lock()

@@ -8839,9 +8839,17 @@ async fn node_snapshot(
     let work_pending = queries::work::pending(node).fetch_one(&mut *db).await?;
     let (boot, fence, epoch, valid_for_ms, maintenance, draining) =
         queries::node_session_status(node)
-            .fetch_optional(db)
+            .fetch_optional(&mut *db)
             .await?
             .ok_or(crate::model::Error::NodeInactive)?;
+    let pending_uploads = if draining {
+        queries::node_upload_backlog(Some(node))
+            .fetch_one(db)
+            .await?
+            .0
+    } else {
+        0
+    };
     Ok(crate::model::session::Snapshot {
         run: crate::model::session::Run { boot, fence },
         epoch,
@@ -8852,6 +8860,7 @@ async fn node_snapshot(
         grants: Vec::new(),
         native_pending,
         work_pending,
+        pending_uploads,
     })
 }
 
