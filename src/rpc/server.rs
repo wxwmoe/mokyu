@@ -195,6 +195,13 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
         Some(Error::SourceUnavailable) => {
             Status::failed_precondition("read source or payload revision is unavailable")
         }
+        Some(Error::NodeSourcePending) => {
+            let mut status = Status::failed_precondition("node read source is not shared yet");
+            status
+                .metadata_mut()
+                .insert("mokyu-retryable", "source-pending".parse().unwrap());
+            status
+        }
         Some(Error::NodeLimit) => {
             Status::resource_exhausted("node boot history is full; rotate its credential")
         }
@@ -320,7 +327,7 @@ impl NodeWrites for Service {
     async fn check_raw_files(
         &self,
         request: Request<wire::LocalFilesRequest>,
-    ) -> Result<Response<wire::RawFilesReply>, Status> {
+    ) -> Result<Response<wire::FilesReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::native::inventory(request.into_inner())?;
         let reply = bounded(self.app.cluster().map_err(failure)?.check_raw_files(
@@ -329,7 +336,7 @@ impl NodeWrites for Service {
             input,
         ))
         .await?;
-        Ok(Response::new(wire::RawFilesReply {
+        Ok(Response::new(wire::FilesReply {
             files_json: serde_json::to_vec(&reply)
                 .map_err(|_| Status::internal("encode raw files"))?,
         }))
@@ -934,7 +941,7 @@ impl NodeMultipart for Service {
     async fn check_local_files(
         &self,
         request: Request<wire::LocalFilesRequest>,
-    ) -> Result<Response<wire::LocalFilesReply>, Status> {
+    ) -> Result<Response<wire::FilesReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::native::inventory(request.into_inner())?;
         let reply = bounded(self.app.cluster().map_err(failure)?.check_local_files(
@@ -943,8 +950,9 @@ impl NodeMultipart for Service {
             input,
         ))
         .await?;
-        Ok(Response::new(wire::LocalFilesReply {
-            removable: reply.into_iter().map(|id| id.to_string()).collect(),
+        Ok(Response::new(wire::FilesReply {
+            files_json: serde_json::to_vec(&reply)
+                .map_err(|_| Status::internal("encode local files"))?,
         }))
     }
     async fn finish_native(

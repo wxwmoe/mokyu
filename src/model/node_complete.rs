@@ -139,6 +139,7 @@ impl Manifest {
             algorithm: upload.checksum_algorithm.clone(),
             checksum_type: upload.checksum_type.clone(),
             result: None,
+            pending_sources: false,
         })
     }
 }
@@ -185,6 +186,8 @@ pub(crate) struct Summary {
     pub algorithm: Option<String>,
     pub checksum_type: Option<String>,
     pub result: Option<Value>,
+    #[serde(default)]
+    pub pending_sources: bool,
 }
 
 #[derive(Serialize, Deserialize)]

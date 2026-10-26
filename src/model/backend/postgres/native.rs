@@ -443,7 +443,7 @@ pub(crate) async fn inventory(
     node: &NodeState,
     key: &Key,
     input: native::Inventory,
-) -> Result<Vec<Uuid>> {
+) -> Result<Vec<crate::model::node_raw::File>> {
     ensure!(
         input.files.len() <= 128
             && input.files.iter().all(|id| !id.is_nil())
@@ -460,8 +460,30 @@ pub(crate) async fn inventory(
     let ids = q::removable(node.node_id, &input.files)
         .fetch_all(&mut *tx)
         .await?;
+    let pending: Vec<(Uuid, Uuid, i64)> = sqlx::query_as("SELECT m.id,m.storage_id,s.size FROM multipart_files m JOIN streams s ON s.id=m.id WHERE m.node_id=$1 AND m.id=ANY($2) AND (EXISTS(SELECT 1 FROM parts p JOIN uploads u ON u.id=p.upload_id WHERE p.stream_id=m.id AND p.remote_node_id=$1 AND p.remote_etag IS NULL AND u.state IN ('active','completing')) OR EXISTS(SELECT 1 FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.stream_id=m.id AND w.node_id=$1 AND w.state='active' AND l.expires_at>clock_timestamp()))")
+        .bind(node.node_id).bind(&input.files).fetch_all(&mut *tx).await?;
+    let result = input
+        .files
+        .into_iter()
+        .map(|id| {
+            use crate::model::node_raw::{File, FileState};
+            let held = pending.iter().find(|(file, _, _)| *file == id);
+            File {
+                id,
+                storage: held.map(|(_, storage, _)| *storage),
+                size: held.map_or(0, |(_, _, size)| *size as u64),
+                state: if ids.contains(&id) {
+                    FileState::Removable
+                } else if held.is_some() {
+                    FileState::Pending
+                } else {
+                    FileState::Protected
+                },
+            }
+        })
+        .collect();
     tx.commit().await?;
-    Ok(ids)
+    Ok(result)
 }
 
 pub(crate) async fn complete(

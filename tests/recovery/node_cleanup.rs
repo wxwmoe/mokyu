@@ -163,7 +163,8 @@ pub(super) async fn check(
                 }
             )
             .await?
-            .is_empty()
+            .iter()
+            .all(|file| file.state != crate::model::node_raw::FileState::Removable)
     );
     sqlx::query("DELETE FROM stream_leases WHERE id=$1")
         .bind(lease)
@@ -215,7 +216,11 @@ pub(super) async fn check(
                     recover: false
                 }
             )
-            .await?,
+            .await?
+            .into_iter()
+            .filter(|file| file.state == crate::model::node_raw::FileState::Removable)
+            .map(|file| file.id)
+            .collect::<Vec<_>>(),
         vec![file]
     );
     assert_eq!(

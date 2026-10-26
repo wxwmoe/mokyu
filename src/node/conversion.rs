@@ -8,6 +8,7 @@ impl Writes {
         source: RawSource,
         etag: String,
         checksums: serde_json::Value,
+        part: bool,
     ) -> Result<()> {
         source.validate()?;
         ensure!(
@@ -52,6 +53,7 @@ impl Writes {
         };
         let mut operation =
             self.accept(request, reply, held, started, false, source.size as u64)?;
+        operation.part = part;
         operation.packing = operation.backend.profile.pack_enabled;
         ensure!(
             operation.backend.profile.storage_id == source.storage_id,

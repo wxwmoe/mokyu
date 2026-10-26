@@ -7557,7 +7557,7 @@ impl ClusterStore for Backend {
         node: &NodeState,
         key: &crate::content::codec::Key,
         input: crate::model::node_native::Inventory,
-    ) -> Result<Vec<Uuid>> {
+    ) -> Result<Vec<crate::model::node_raw::File>> {
         transactions::native::inventory(&self.pool, node, key, input)
             .await
             .map_err(normalize_error)
@@ -10271,7 +10271,7 @@ pub(super) fn conversion_layout(chunk: Id, pack: Option<Id>) -> Statement<'stati
 }
 
 pub(super) fn conversion_current(stream: Id, revision: i64) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT id FROM streams WHERE id=$1 AND payload_revision=$2 AND payload_type='raw' AND state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=streams.id) FOR UPDATE").bind(stream).bind(revision)
+    sqlx::query_scalar("SELECT id FROM streams WHERE id=$1 AND payload_revision=$2 AND payload_type='raw' AND state='ready' AND (EXISTS(SELECT 1 FROM objects WHERE stream_id=streams.id) OR EXISTS(SELECT 1 FROM parts p JOIN uploads u ON u.id=p.upload_id WHERE p.stream_id=streams.id AND u.state IN ('active','completing'))) FOR UPDATE").bind(stream).bind(revision)
 }
 
 pub(super) fn conversion_move(candidate: Id, stream: Id) -> Statement<'static> {
@@ -11212,6 +11212,7 @@ pub(super) fn node_completion(upload: Uuid) -> Rows<'static, NodeCompletion> {
 
 pub(super) fn node_completion_summary(
     upload: Uuid,
+    node: Uuid,
 ) -> Rows<
     'static,
     (
@@ -11219,7 +11220,17 @@ pub(super) fn node_completion_summary(
         Option<Value>,
     ),
 > {
-    sqlx::query_as("SELECT c.summary,u.result FROM node_completions c JOIN uploads u ON u.id=c.upload_id WHERE c.upload_id=$1").bind(upload)
+    sqlx::query_as(r#"
+        SELECT c.summary || jsonb_build_object('pending_sources', u.state='completing' AND (
+            EXISTS(SELECT 1 FROM node_completion_parts n JOIN parts p ON p.upload_id=n.upload_id AND p.part_number=n.part_number AND p.stream_id=n.stream_id
+                WHERE n.upload_id=c.upload_id AND u.raw_source_id IS NOT NULL AND p.remote_etag IS NULL
+                AND coalesce(p.remote_error NOT IN ('local_source_missing','local_source_corrupt'),true))
+            OR EXISTS(SELECT 1 FROM node_completion_parts n JOIN raw_ranges e ON e.stream_id=n.stream_id
+                JOIN raw_sources r ON r.id=e.source_id JOIN raw_uploads a ON a.source_id=r.id
+                WHERE n.upload_id=c.upload_id AND r.medium='local' AND r.pending_upload AND r.state='ready'
+                AND r.quarantine_code IS NULL AND a.node_id<>$2)
+        )),u.result FROM node_completions c JOIN uploads u ON u.id=c.upload_id WHERE c.upload_id=$1
+    "#).bind(upload).bind(node)
 }
 
 pub(super) fn node_selected_parts<'q>(

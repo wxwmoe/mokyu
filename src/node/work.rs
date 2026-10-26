@@ -129,6 +129,7 @@ impl Worker {
                         etag,
                         checksums,
                         sealed,
+                        part,
                         ..
                     } => {
                         let timeout = Duration::from_secs(crate::config::seconds(
@@ -139,12 +140,15 @@ impl Worker {
                         } else {
                             tokio::time::timeout(
                                 timeout,
-                                Box::pin(self.writes.convert(write, source, etag, checksums)),
+                                Box::pin(self.writes.convert(write, source, etag, checksums, part)),
                             )
                             .await
                             .map_err(anyhow::Error::from)
                             .and_then(|value| value)
                         };
+                        if let Err(error) = &result {
+                            tracing::debug!(%error, "raw conversion postponed");
+                        }
                         vec![if result.is_ok() {
                             work::Outcome::Converted
                         } else {

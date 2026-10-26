@@ -109,6 +109,7 @@ pub(crate) enum Plan {
         etag: String,
         checksums: serde_json::Value,
         sealed: bool,
+        part: bool,
     },
     HashRaw {
         storage: Uuid,

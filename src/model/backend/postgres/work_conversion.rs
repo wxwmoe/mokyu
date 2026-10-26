@@ -99,6 +99,7 @@ pub(super) async fn prepare(
             Error::SourceUnavailable
         );
     }
+    let part = original.stream_type == "part";
     validate_raw(db, job.stream, source.size).await?;
     let mut retained = None;
     if let Some(saved) = saved {
@@ -126,7 +127,7 @@ pub(super) async fn prepare(
                 authority: Permit::system(),
                 bucket: job.bucket,
                 key: job.object_key.clone(),
-                stream_type: "object".into(),
+                stream_type: if part { "part" } else { "object" }.into(),
                 metadata: original.metadata.clone(),
                 public: original.public_read,
                 claim_object: false,
@@ -183,6 +184,7 @@ pub(super) async fn prepare(
             etag: original.etag,
             checksums: original.checksums,
             sealed,
+            part,
         },
         vec![],
     )))

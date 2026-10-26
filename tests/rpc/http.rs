@@ -37,6 +37,7 @@ async fn node_http_unique_sources_verify_and_recover() -> Result<()> {
 }
 
 enum HttpCase {
+    PartCache,
     WriteCache,
     CacheOrder,
     Conversion,
@@ -64,6 +65,16 @@ enum HttpCase {
 #[ignore = "requires isolated controls, real cache uploads and saturated writer IO"]
 async fn node_http_cache_completion_precedes_local_capacity_reuse() -> Result<()> {
     node_http_reads(HttpCase::CacheOrder).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated controls, local multipart caches and real S3 uploads"]
+async fn node_http_cached_parts_preserve_boundaries_and_recover() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("mokyu::node=debug")
+        .with_test_writer()
+        .try_init();
+    node_http_reads(HttpCase::PartCache).await
 }
 
 #[tokio::test]
@@ -324,7 +335,10 @@ async fn node_http_native_parts_replay_and_complete() -> Result<()> {
 }
 
 async fn node_http_reads(case: HttpCase) -> Result<()> {
-    let write_cache = matches!(case, HttpCase::WriteCache | HttpCase::CacheOrder);
+    let write_cache = matches!(
+        case,
+        HttpCase::WriteCache | HttpCase::CacheOrder | HttpCase::PartCache
+    );
     let complete = matches!(case, HttpCase::Complete | HttpCase::Native);
     let parts = matches!(case, HttpCase::Parts);
     let multipart = matches!(case, HttpCase::Multipart);
@@ -360,9 +374,14 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         if cache { "16MiB" } else { "0B" }
     );
     let config = if write_cache {
+        let capacity = if matches!(case, HttpCase::PartCache) {
+            256
+        } else {
+            64
+        };
         config.replace(
             "cache_size='16MiB'",
-            "cache_size='64MiB'\nupload_cache_size='64MiB'",
+            &format!("cache_size='{capacity}MiB'\nupload_cache_size='64MiB'"),
         )
     } else {
         config
@@ -459,6 +478,86 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     });
+    if matches!(case, HttpCase::PartCache) {
+        fixture("part-cache-seed").await?;
+        let peer_directory = path.parent().unwrap().join("part-peer-runtime");
+        tokio::fs::create_dir(&peer_directory).await?;
+        let peer_identity: NodeState = serde_json::from_slice(
+            &tokio::fs::read(path.parent().unwrap().join("part-peer.json")).await?,
+        )?;
+        crate::cluster::identity::write_state(&peer_directory.join("node.json"), &peer_identity)
+            .await?;
+        let peer_config = config.replace(
+            &directory.display().to_string(),
+            &peer_directory.display().to_string(),
+        );
+        let mut peer = NodeContext::new(NodeConfig::parse(&peer_config, "data")?, "data").await?;
+        Arc::get_mut(&mut peer).unwrap().client = dns.client(&url, peer_identity)?;
+        let mut peer_states = peer.subscribe();
+        let running = peer.clone();
+        let peer_driver = tokio::spawn(async move { running.run().await });
+        node_state(&mut peer_states, |state| state.phase == Phase::Ready).await?;
+        let peer_reads = Arc::new(crate::node::reads::Reads::new(peer.clone())?);
+        let peer_gateway = crate::http::node::Gateway::new(peer_reads)?;
+        let peer_observed = peer_gateway.clone();
+        let peer_capacity = peer_observed.write_resources();
+        let peer_service = peer_gateway.service()?;
+        let peer_listener = tokio::net::TcpListener::bind("127.0.0.1:19102").await?;
+        let peer_server = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (socket, _) = peer_listener.accept().await?;
+                socket.set_nodelay(true)?;
+                let (gateway, service) = (peer_gateway.clone(), peer_service.clone());
+                connections.spawn(async move {
+                    let handler = hyper::service::service_fn(
+                        move |request: hyper::Request<hyper::body::Incoming>| {
+                            let (gateway, service) = (gateway.clone(), service.clone());
+                            async move {
+                                Ok::<_, std::convert::Infallible>(
+                                    gateway.s3(&service, request.map(s3s::Body::from)).await,
+                                )
+                            }
+                        },
+                    );
+                    let _ = crate::http::transport::builder(64)
+                        .serve_connection(TokioIo::new(socket), handler)
+                        .await;
+                });
+                while connections.try_join_next().is_some() {}
+            }
+            #[allow(unreachable_code)]
+            Ok::<_, anyhow::Error>(())
+        });
+        fixture("part-cache-wait").await?;
+        assert_eq!(
+            peer_observed.write_resources(),
+            peer_capacity,
+            "waiting completion holds foreground capacity"
+        );
+        let worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
+        fixture("part-cache-drain").await?;
+        peer.stop();
+        tokio::time::timeout(Duration::from_secs(10), peer_driver).await???;
+        peer_server.abort();
+        fixture("part-cache-matrix").await?;
+        *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 3)]);
+        dns.resolver.clear_cache();
+        context.client.addresses.lock().await.refresh_at = Instant::now();
+        fixture("stop-first").await?;
+        node_state(&mut states, |state| {
+            state.phase == Phase::Ready && state.peer == Some(Ipv4Addr::new(127, 0, 0, 3))
+        })
+        .await?;
+        fixture("part-cache-reconnected").await?;
+        context.stop();
+        tokio::time::timeout(Duration::from_secs(10), driver).await???;
+        tokio::time::timeout(Duration::from_secs(10), worker).await???;
+        s3_server.abort();
+        web_server.abort();
+        println!("PASS cached parts, native transfer, continuous CDC and control recovery");
+        return Ok(());
+    }
     if matches!(case, HttpCase::CacheOrder) {
         let worker = tokio::spawn(crate::node::work::Worker::new(context.clone())?.run());
         fixture("write-cache-order-seed").await?;

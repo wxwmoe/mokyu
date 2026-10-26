@@ -117,6 +117,10 @@ UploadPart 通过 BeginWrite 的 `part={upload_id,number,algorithm}` 绑定上�
 
 inline chunks 分片复用批量 PrepareChunks/CommitChunks，只有小于 4 MiB 的未闭合 CDC 尾部进入共享 staging。PrepareTail 绑定偏移、长度和 BLAKE3，先保存唯一位置及空间预留，再返回存储材料与许可；CommitTail 原子建立映射并保存确认状态。节点校验完整正文后才发布分片，PublishWrite 将分片引用与回执一起提交；失败的替换不撤销原分片，重放不会重复引用或扣配额。
 
+UploadPart 开启写缓存时可以在所属节点持久确认后响应。raw 保留原生 Multipart 的本机分片文件，后台上传到对应远端分片；chunks 保存本机 raw，再按接受时的策略转换为最终区块和共享尾块。关闭缓存或容量不足而选择 fallback 时，raw 等待远端分片确认，chunks 直接完成流式分块；background 不额外上传整个 chunks 分片作为远端 raw。
+
+BeginComplete 冻结所选分片并返回完成摘要，ReadComplete 每次取得最多 8 个受保护来源。节点将所选正文连续送入同一个 CDC 接收器，分片切分位置不改变最终区块边界。摘要的 `pending_sources` 表示仍需等待远端原生分片或其他节点的本机来源，等待期间不占前台上传内存槽位；沿用 300 秒等待上限和相同清单重试。ReadComplete 发现来源仍待共享时返回带 `mokyu-retryable: source-pending` 的 FailedPrecondition，节点在期限内每 3 秒重试同一窗口标识；永久来源错误直接失败。
+
 BeginWrite 请求最多 64 KiB；包含桶、对象键、服务凭据身份、必填的 `credential_revision`、对象元数据、公开标志和可选的已知长度。调用方先使用准备的凭据验证入站签名，再携带同一修订发起准入；修订为 0 与漏传不同。control 在创建写入前确认当前修订，并在同一事务内校验写入权限及公开对象所需的 ACL 权限、桶状态、维护状态和配额，绑定对象写令牌、存储策略与块密钥。准入返回实际桶和 stream 身份；存储材料支持 `cached`，不重复发送匹配修订的连接配置。
 
 CopyObject 使用源 OpenRead 的 `include=[OBJECT,PROTECTION]` 取得元数据和读保护，空对象同样返回保护；不请求映射时不返回存储或密钥。该组合只用于有服务凭据的 GET 读取。BeginWrite 的可选 `copy_read_id` 绑定同一运行实例的完整源版本和源桶读取权限，返回是否能直接复制区块引用。
@@ -140,6 +144,8 @@ inline raw 普通 PUT 先使用节点本地请求暂存空间接收并校验完�
 Exchange 的 `max_items` 范围为 1–64；携带完成结果时可设为 0，仅确认结果而不领取工作。节点在等待下一次本地额度前先释放已完成任务的后端许可；缓存上传持续持有本机内存和 I/O 额度，直至完成回执获确认。
 
 CheckRawFiles 每次接收最多 128 个不重复的 UUID，返回 `pending`、`protected`、`cached` 或 `removable`。节点在首次写入前恢复持久文件的占用，随后定期对账；前两种状态保留文件，`cached` 可转为可淘汰读缓存，`removable` 才可删除。上传完成并不立即解除仍有效的读取或任务保护；删除成功后才释放对应磁盘占用，避免断线或取消丢失唯一来源。
+
+CheckLocalFiles 对 Multipart 文件返回同样的有界状态记录，所属节点的 `pending` 项携带存储和长度以恢复写缓存占用。远端确认后释放上传额度，物理文件仍受分片和读取引用保护；只有 `removable` 项可以删除。
 
 写入 `operation_id` 使用 UUIDv7。首次准入接受过去 15 分钟至未来 30 秒内的时间戳；节点应同步系统时钟。相同操作与相同参数重放原上下文，参数变化返回 `AlreadyExists`。活动写入重放会重验原授权；同一节点的其他 boot 或凭据代次不能继续该写入。WriteStatus 可查询该节点的历史回执，返回 `WRITE_ACTIVE`、`WRITE_ABORTED`、`WRITE_EXPIRED` 或 `WRITE_PUBLISHED`；stream 被回收后仍保留终态回执，桶和 stream 身份可能为空。
 

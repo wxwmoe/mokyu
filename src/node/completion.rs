@@ -94,6 +94,29 @@ impl Writes {
                     async move {
                         let _permit = permit;
                         let result = async {
+                            let mut value = value;
+                            tokio::time::timeout(
+                                multipart::completion_timeout(),
+                                operation.guard(&writes.reads.node, &[], async {
+                                    while value.pending_sources {
+                                        tokio::time::sleep(Duration::from_secs(3)).await;
+                                        let reply = writes
+                                            .reads
+                                            .node
+                                            .client
+                                            .write_status(operation.lookup())
+                                            .await?;
+                                        ensure!(
+                                            reply.phase == wire::WritePhase::WriteActive as i32,
+                                            "completion write is no longer active"
+                                        );
+                                        value = summary(&reply)?;
+                                    }
+                                    Ok(())
+                                }),
+                            )
+                            .await
+                            .map_err(|_| multipart::completion_retry())??;
                             let slot = operation
                                 .guard(&writes.reads.node, &[], async {
                                     Ok(writes.slots.clone().acquire_owned().await?)
@@ -200,6 +223,7 @@ impl Writes {
         let count = summary.parts;
         let expected = summary.size as u64;
         Box::pin(async_stream::try_stream! {
+            let deadline = Instant::now() + multipart::completion_timeout();
             let buffers = Arc::new(Semaphore::new(super::super::body::BUFFER_UNITS));
             let mut first = 0u32;
             let mut total = 0u64;
@@ -208,13 +232,26 @@ impl Writes {
             loop {
                 run.check()?;
                 let held = writes.reads.cache.snapshot();
-                let started = Instant::now();
-                let reply = writes.reads.node.client.read_complete(wire::ReadCompleteRequest {
+                let request = wire::ReadCompleteRequest {
                     run: Some(run.run.clone()), operation_id: id.clone(), first,
                     read_operations: (0..SOURCES.min(count - first as usize)).map(|_| Uuid::now_v7().to_string()).collect(),
                     shared_permits: retained.iter().filter(|grant| grant.reference.r#type == wire::GrantType::StorageRead as i32).map(|grant| grant.reference.id.clone()).collect(),
                     cached: reads::cached(&held),
-                }).await?;
+                };
+                let (reply, started) = tokio::time::timeout_at(deadline, async {
+                    loop {
+                        run.check()?;
+                        let started = Instant::now();
+                        match writes.reads.node.client.read_complete(request.clone()).await {
+                            Ok(reply) => break Ok::<_, anyhow::Error>((reply, started)),
+                            Err(error) if error.code() == tonic::Code::FailedPrecondition
+                                && error.metadata().get("mokyu-retryable").is_some_and(|value| value == "source-pending") => {
+                                tokio::time::sleep(Duration::from_secs(3)).await;
+                            }
+                            Err(error) => break Err(error.into()),
+                        }
+                    }
+                }).await.map_err(|_| multipart::completion_retry())??;
                 let next = first as usize + reply.parts.len();
                 if reply.first != first || reply.parts.is_empty() || reply.parts.len() > SOURCES || next > count || reply.next != (next < count).then_some(next as u32) {
                     Err(anyhow::anyhow!("invalid completion source window"))?;

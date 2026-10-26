@@ -55,6 +55,7 @@ struct Operation {
     copy_references: bool,
     packing: bool,
     part: bool,
+    cached_part: std::sync::atomic::AtomicBool,
     limit: u64,
     checksum_algorithm: Option<String>,
 }
@@ -256,6 +257,7 @@ impl Writes {
             packing: false,
             copy_references: reply.copy_references,
             part,
+            cached_part: false.into(),
             limit,
             checksum_algorithm: reply.checksum_algorithm,
             bucket: Uuid::parse_str(&reply.bucket_id)?,
@@ -315,7 +317,12 @@ impl Writes {
                 .await?;
             if !operation.backend.profile.cdc_enabled {
                 self.reads.node.native_work.notify_one();
-                self.wait_native(&operation.stream).await?;
+                if !operation
+                    .cached_part
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    self.wait_native(&operation.stream).await?;
+                }
             }
             Ok((etag, sums))
         }
@@ -335,14 +342,9 @@ impl Writes {
         length: Option<u64>,
     ) -> Result<(u64, String, serde_json::Value)> {
         let profile = &operation.backend.profile;
-        ensure!(
-            !operation.part || (!profile.upload_cache && profile.write_processing == "inline"),
-            s3s::s3_error!(
-                NotImplemented,
-                "this node write path requires shared uploads and inline multipart parts"
-            )
-        );
-        if (profile.upload_cache || profile.write_processing == "background") && !operation.part {
+        if profile.cdc_enabled && profile.upload_cache
+            || !operation.part && (profile.upload_cache || profile.write_processing == "background")
+        {
             return operation
                 .guard(
                     &self.reads.node,
@@ -649,7 +651,7 @@ impl Writes {
             && charge.is_none()
             && operation.backend.profile.upload_cache
             && operation.backend.profile.cdc_enabled
-            && operation.backend.profile.write_processing == "inline"
+            && (operation.part || operation.backend.profile.write_processing == "inline")
         {
             return Box::pin(self.chunks(operation, body, check, trailers, length)).await;
         }
@@ -698,7 +700,7 @@ impl Writes {
                 .await?
         };
         if operation.backend.profile.cdc_enabled
-            && operation.backend.profile.write_processing == "inline"
+            && (operation.part || operation.backend.profile.write_processing == "inline")
             && charge.is_none()
         {
             let replay = async_stream::try_stream! {

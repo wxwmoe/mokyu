@@ -65,7 +65,7 @@ service NodeWrites {
   rpc PrepareRaw(PrepareRawRequest) returns (PreparedRaw);
   rpc PrepareLocalPart(PrepareLocalPartRequest) returns (WriteReply);
   rpc CommitRaw(CommitRawRequest) returns (PreparedRaw);
-  rpc CheckRawFiles(LocalFilesRequest) returns (RawFilesReply);
+  rpc CheckRawFiles(LocalFilesRequest) returns (FilesReply);
   rpc PrepareTail(PrepareTailRequest) returns (PreparedTail);
   rpc CommitTail(WriteRequest) returns (PreparedTail);
   rpc PublishWrite(PublishWriteRequest) returns (WriteReply);
@@ -83,7 +83,7 @@ service NodeMultipart {
   rpc CompleteStatus(CompleteStatusRequest) returns (CompleteState);
   rpc ClaimNative(NativeClaimRequest) returns (NativeWorkReply);
   rpc FinishNative(NativeFinishRequest) returns (NativeFinishReply);
-  rpc CheckLocalFiles(LocalFilesRequest) returns (LocalFilesReply);
+  rpc CheckLocalFiles(LocalFilesRequest) returns (FilesReply);
   rpc PrepareNativeComplete(NativeCompleteRequest) returns (NativeCompleteReply);
   rpc AdoptNativeComplete(AdoptNativeRequest) returns (WriteReply);
 }
@@ -131,10 +131,6 @@ message LocalFilesRequest {
   Run run = 1;
   repeated string files = 2;
   bool recover = 3;
-}
-
-message LocalFilesReply {
-  repeated string removable = 1;
 }
 
 message NativeCompleteRequest {
@@ -254,7 +250,7 @@ message PrepareRawRequest {
   bool local = 6;
 }
 
-message RawFilesReply {
+message FilesReply {
   bytes files_json = 1;
 }
 

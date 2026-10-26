@@ -325,6 +325,9 @@ impl Writes {
         };
         node.client.finish_native(report).await?;
         result?;
+        if let Action::Part { stream, .. } = &work.action {
+            self.reads.reader.files.release_part(*stream);
+        }
         Ok(if target && matches!(work.action, Action::Part { .. }) {
             Progress::Ready
         } else {
@@ -342,6 +345,14 @@ impl Writes {
     ) -> Result<(u64, String, serde_json::Value)> {
         let node = &self.reads.node;
         let files = &self.reads.reader.files;
+        files.recover_uploads(node).await?;
+        let mut charge = if let Some(length) = length {
+            files
+                .claim_upload(node, &operation.backend.profile, length)
+                .await?
+        } else {
+            None
+        };
         let disk = files.multipart().await?;
         let id = Uuid::parse_str(&operation.stream)?;
         let mut guard = files.local_lock(id).await;
@@ -404,6 +415,17 @@ impl Writes {
             s3s::s3_error!(IncompleteBody)
         );
         let (etag, sums) = check.finish(trailers)?;
+        if length.is_none() {
+            charge = files
+                .claim_upload(node, &operation.backend.profile, size)
+                .await?;
+        }
+        if let Some(charge) = charge {
+            files.hold_part(id, charge);
+            operation
+                .cached_part
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         operation.check()?;
         let reply = node
             .client

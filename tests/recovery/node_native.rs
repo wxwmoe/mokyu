@@ -112,7 +112,11 @@ pub(super) async fn check(
                 }
             )
             .await?
-            .is_empty()
+            .iter()
+            .any(|file| file.id == stream
+                && file.storage == Some(storage)
+                && file.size == 3
+                && file.state == crate::model::node_raw::FileState::Pending)
     );
     let claim = |operation| native::Claim {
         run,

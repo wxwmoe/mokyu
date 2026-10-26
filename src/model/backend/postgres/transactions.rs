@@ -8493,6 +8493,11 @@ async fn finish_conversion_in(
     queries::conversion_move(candidate, job.stream)
         .execute(&mut **tx)
         .await?;
+    sqlx::query("UPDATE fragments SET owner_stream=$2 WHERE owner_stream=$1")
+        .bind(candidate)
+        .bind(job.stream)
+        .execute(&mut **tx)
+        .await?;
     queries::conversion_detach(job.stream)
         .execute(&mut **tx)
         .await?;
@@ -9962,7 +9967,7 @@ pub(super) async fn node_completion_status(
         record.manifest_hash == input.hash,
         s3s::s3_error!(InvalidRequest, "upload has another completion manifest")
     );
-    let (mut summary, result) = queries::node_completion_summary(upload.id)
+    let (mut summary, result) = queries::node_completion_summary(upload.id, node.node_id)
         .fetch_one(&mut *tx)
         .await?;
     summary.result = result;
@@ -10083,6 +10088,10 @@ pub(super) async fn node_complete_sources(
         reply.etag = stream.etag.clone();
         let reply =
             protect_node_read(&mut tx, node, key, &query, &stream, reply, &mut shared).await?;
+        ensure!(
+            reply.outcome != read::Outcome::Pending,
+            Error::NodeSourcePending
+        );
         ensure!(
             reply.outcome == read::Outcome::Ready,
             Error::SourceUnavailable
@@ -10536,7 +10545,7 @@ pub(super) async fn node_write_reply(
         write::Phase::Expired
     };
     let completion = if let Some(upload) = owned.completion_upload {
-        queries::node_completion_summary(upload)
+        queries::node_completion_summary(upload, state.node_id)
             .fetch_optional(&mut *db)
             .await?
             .map(|(mut summary, result)| {
@@ -11547,7 +11556,16 @@ pub(super) async fn prepare_node_tail(
     } else {
         let stream = require_node_write(&mut tx, &row).await?;
         ensure!(
-            row.upload_id.is_some() && row.profile.cdc_enabled && row.copy_source.is_none(),
+            (row.upload_id.is_some()
+                || row.owner_task_id.is_some()
+                    && sqlx::query_scalar::<_, bool>(
+                        "SELECT stream_type='part' FROM streams WHERE id=$1"
+                    )
+                    .bind(stream)
+                    .fetch_one(&mut *tx)
+                    .await?)
+                && row.profile.cdc_enabled
+                && row.copy_source.is_none(),
             s3s::s3_error!(InvalidRequest, "write does not accept a multipart tail")
         );
         ensure!(
@@ -11559,9 +11577,11 @@ pub(super) async fn prepare_node_tail(
                     == 0,
             s3s::s3_error!(InvalidArgument, "tail is out of order")
         );
-        queries::reserve_quota(stream, end, false, row.upload_id, row.part_number)
-            .fetch_one(&mut *tx)
-            .await?;
+        if row.owner_task_id.is_none() {
+            queries::reserve_quota(stream, end, false, row.upload_id, row.part_number)
+                .fetch_one(&mut *tx)
+                .await?;
+        }
         let settings = queries::node_staging_settings().fetch_one(&mut *tx).await?;
         let storage = settings
             .staging_storage_id
@@ -11737,7 +11757,7 @@ pub(super) async fn prepare_node_raw(
     }
     let stream = require_node_write(&mut tx, &row).await?;
     ensure!(
-        row.upload_id.is_none()
+        (row.upload_id.is_none() || row.profile.cdc_enabled && input.input.local)
             && (!input.input.local || row.profile.upload_cache)
             && (!row.profile.upload_cache
                 || input.input.local
@@ -11762,7 +11782,7 @@ pub(super) async fn prepare_node_raw(
         s3s::s3_error!(IncompleteBody)
     );
     let storage = row.storage_id.ok_or(Error::SourceUnavailable)?;
-    queries::reserve_quota(stream, size, false, None, None)
+    queries::reserve_quota(stream, size, false, row.upload_id, row.part_number)
         .fetch_one(&mut *tx)
         .await?;
     let candidate = if let Some(hash) = &input.input.hash {

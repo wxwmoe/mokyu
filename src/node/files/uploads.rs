@@ -5,7 +5,10 @@ impl Cache {
     pub(crate) async fn recover_uploads(self: &Arc<Self>, node: &NodeContext) -> Result<()> {
         self.initialize().await?;
         self.uploads_ready
-            .get_or_try_init(|| async { self.raw_inventory(node, true).await })
+            .get_or_try_init(|| async {
+                self.raw_inventory(node, true).await?;
+                self.part_inventory(node, true).await
+            })
             .await?;
         Ok(())
     }
@@ -179,6 +182,14 @@ impl Cache {
                 Err(anyhow::Error::new(retry).context(error))
             }
         }
+    }
+
+    pub(crate) fn hold_part(&self, id: Uuid, charge: UploadCharge) {
+        self.uploads.lock().unwrap().insert(id, charge);
+    }
+
+    pub(crate) fn release_part(&self, id: Uuid) {
+        self.uploads.lock().unwrap().remove(&id);
     }
 
     pub(crate) async fn publish_upload(

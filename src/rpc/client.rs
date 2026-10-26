@@ -305,7 +305,7 @@ impl Client {
     pub(crate) async fn check_local_files(
         &self,
         input: wire::LocalFilesRequest,
-    ) -> Result<wire::LocalFilesReply, Status> {
+    ) -> Result<wire::FilesReply, Status> {
         self.unary(input, "/mokyu.node.v1.NodeMultipart/CheckLocalFiles")
             .await
     }
@@ -313,7 +313,7 @@ impl Client {
     pub(crate) async fn check_raw_files(
         &self,
         input: wire::LocalFilesRequest,
-    ) -> Result<wire::RawFilesReply, Status> {
+    ) -> Result<wire::FilesReply, Status> {
         self.unary(input, "/mokyu.node.v1.NodeWrites/CheckRawFiles")
             .await
     }

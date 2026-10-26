@@ -151,7 +151,12 @@ impl Cache {
         self.recover_uploads(node).await?;
         if !recover {
             self.raw_inventory(node, false).await?;
+            self.part_inventory(node, false).await?;
         }
+        Ok(())
+    }
+
+    async fn part_inventory(self: &Arc<Self>, node: &NodeContext, recover: bool) -> Result<()> {
         let disk = self.multipart().await?;
         let snapshot = node.background_snapshot()?;
         let mut entries = tokio::fs::read_dir(disk.root.join("multipart")).await?;
@@ -179,16 +184,42 @@ impl Cache {
                         recover,
                     })
                     .await?;
-                for value in reply.removable {
-                    let id = Uuid::parse_str(&value)?;
+                let states: Vec<crate::model::node_raw::File> =
+                    serde_json::from_slice(&reply.files_json)?;
+                ensure!(
+                    states.len() == ids.len()
+                        && states
+                            .iter()
+                            .map(|file| file.id)
+                            .collect::<HashSet<_>>()
+                            .len()
+                            == ids.len(),
+                    "invalid multipart inventory"
+                );
+                for value in states {
+                    use crate::model::node_raw::FileState;
+                    let id = value.id;
                     ensure!(
                         ids.contains(&id),
                         "control returned an unexpected local file"
                     );
                     let _guard = self.local_lock(id).await;
                     snapshot.lease.check()?;
-                    if !disk.pending(id) {
-                        disk.remove_fragment(id).await?;
+                    if disk.pending(id) {
+                        continue;
+                    }
+                    if value.state == FileState::Pending {
+                        let storage = value.storage.context("multipart storage missing")?;
+                        self.uploads
+                            .lock()
+                            .unwrap()
+                            .entry(id)
+                            .or_insert_with(|| disk.restore_upload(storage, value.size));
+                    } else {
+                        self.release_part(id);
+                        if value.state == FileState::Removable {
+                            disk.remove_fragment(id).await?;
+                        }
                     }
                 }
                 ids.clear();

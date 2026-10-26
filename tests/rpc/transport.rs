@@ -284,7 +284,11 @@ async fn fixture(action: &str) -> Result<()> {
     tokio::fs::write(&request, b"requested").await?;
     let timeout = if matches!(
         action,
-        "http-complete" | "http-cleanup" | "write-cache-drained"
+        "http-complete"
+            | "http-cleanup"
+            | "write-cache-drained"
+            | "part-cache-drain"
+            | "part-cache-matrix"
     ) {
         120
     } else {
