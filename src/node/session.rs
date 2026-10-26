@@ -140,6 +140,7 @@ impl NodeContext {
         loop {
             tokio::select! {
                 _ = timer.tick() => {},
+                notice = session.notified() => { notice?; },
                 _ = mode.changed() => {},
                 _ = self.resources.changed.notified() => {},
             }

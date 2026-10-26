@@ -21,12 +21,14 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | 方法 | 请求与响应 |
 | --- | --- |
 | `NodeControl/SyncNode` | Unary；提交当前 `run` 和最多五个 `cached` 配置修订，返回运行状态、全部当前修订及未命中配置 |
+| `NodeControl/ReportNode` | Unary；上报当前运行权绑定的递增序号、状态及可选配置快照，重复或过时序号不覆盖已保存报告 |
+| `NodeControl/CloseNode` | Unary；结束当前 boot/fence，重复关闭安全；正常退出在排空后调用，旧运行权不能关闭新实例 |
 | `NodeControl/PrepareRequest` | Unary；按 `include` 和 `cached` 准备签名凭据、桶和策略，可同时查询桶信息、桶列表或对象列表；仅允许 data |
 | `NodeReads/OpenRead` | Unary；按路由、身份、条件、`include` 与 `cached` 返回对象结果及首个读取窗口，仅允许 data |
 | `NodeControl/ReportObservations` | Unary；批量上报 HTTP 压缩收益和已通过签名校验的凭据活动，仅允许 data |
 | `NodeReads/ReadWindow` | Unary；沿当前读取游标取下一窗口，校验运行权、读取保护和载荷修订 |
 | `NodeReads/ReportRead` | Unary；报告当前读取窗口内最多 16 个来源段，请求持久后端复核，仅允许 data |
-| `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，收到 Welcome 后发送 Pulse 并等待匹配序号的确认 |
+| `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，Welcome 包含 control 实例 ID；发送 Pulse 并等待匹配序号的确认，Notice 提示及时同步 |
 | `NodeWrites/BeginWrite` | Unary；校验权限、创建写入上下文与租约并预留配额，返回存储材料；仅允许 data |
 | `NodeObjects/ChangeObjects` | Unary；批量删除对象或修改单个对象的 canned ACL，持久保存操作结果；仅允许 data |
 | `NodeWrites/PrepareChunks` | Unary；批量领取或复用区块，保存上传目标与编码参数，返回所需存储、密钥及上传许可 |
@@ -43,6 +45,12 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeWrites/AbortWrite` | Unary；取消当前运行权持有的写入，同事务释放写租约和预留配额 |
 
 配置分区为 `requests`、`uploads`、`metrics`、`maintenance`、`io`，不含管理 `web` 设置。`cached` 只表示已持有的配置修订，不替代任何身份或租约检查；缺失或修订不符时，在同一 SyncNode 响应内补全。Settings 的 JSON 字节使用对应运行设置的现有结构。
+
+## 会话通知与状态报告
+
+control 复用进程级数据库通知订阅，将任务、运行设置和维护状态变化合并为每条连接最多每秒一条 Notice。Notice 只是提示，不能更新配置或延长任何租约；节点收到后立即发送 Pulse，修订变化时通过 SyncNode 取得完整增量。十秒心跳负责通知丢失后的恢复，持续通知不会延长服务端三十秒的缺失心跳期限。
+
+状态报告使用独立 Unary，请求最多 96 KiB，其中状态最多 30 KiB、可选元数据最多 60 KiB。报告绑定当前 boot/fence 和递增序号，同一 boot 换连接不重置报告。元数据只在报告接受后视为确认；重复或过时序号返回 `accepted=false`，可在下一份报告中重新携带。诊断请求不续租，也不代替业务确认。关闭会保留已结束 boot 的记录，不能靠重连复活；突然掉线仍由运行租约到期处理。
 
 ## 读取计划与缓存
 

@@ -4,8 +4,26 @@ package mokyu.node.v1;
 service NodeControl {
   rpc PrepareRequest(PrepareRequestInput) returns (RequestReply);
   rpc SyncNode(SyncRequest) returns (SyncReply);
+  rpc ReportNode(NodeReportRequest) returns (NodeReportReply);
+  rpc CloseNode(CloseNodeRequest) returns (CloseNodeReply);
   rpc ReportObservations(ObservationRequest) returns (ObservationReply);
 }
+
+message NodeReportRequest {
+  Run run = 1;
+  bytes report_json = 2;
+  uint64 sample_interval_seconds = 3;
+}
+
+message NodeReportReply {
+  bool accepted = 1;
+}
+
+message CloseNodeRequest {
+  Run run = 1;
+}
+
+message CloseNodeReply {}
 
 message CompressionObservation {
   string stream_id = 1;
@@ -543,6 +561,7 @@ message Welcome {
   uint64 epoch = 2;
   uint64 valid_for_ms = 3;
   NodeState state = 4;
+  string control_id = 5;
 }
 
 message PulseReply {
@@ -552,10 +571,13 @@ message PulseReply {
   repeated GrantResult grants = 4;
 }
 
+message Notice {}
+
 message SessionReply {
   oneof message {
     Welcome welcome = 1;
     PulseReply pulse = 2;
+    Notice notice = 3;
   }
 }
 

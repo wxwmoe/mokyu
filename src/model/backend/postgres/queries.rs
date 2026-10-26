@@ -7816,6 +7816,24 @@ impl ClusterStore for Backend {
     ) -> Result<crate::cluster::NodeState> {
         transactions::provision_node(&self.pool, principal, name, None, key).await
     }
+    async fn close_session(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+    ) -> Result<()> {
+        transactions::close_node_session(&self.pool, node, key, run).await
+    }
+    async fn report_session(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+        report: &NodeReport,
+        sample_interval: u64,
+    ) -> Result<bool> {
+        transactions::report_node_session(&self.pool, node, key, run, report, sample_interval).await
+    }
     async fn open_session(
         &self,
         node: &crate::cluster::NodeState,
@@ -10779,6 +10797,17 @@ pub(super) fn node_read_release<'q>(
 ) -> Statement<'q> {
     sqlx::query("DELETE FROM stream_leases l USING node_reads r WHERE l.id=r.read_id AND r.node_id=$1 AND r.credential_generation=$2 AND r.boot_id=$3 AND r.fence=$4 AND l.id=ANY($5)")
         .bind(state.node_id).bind(state.credential_generation).bind(run.boot).bind(run.fence).bind(ids)
+}
+
+pub(super) fn node_boot_retired(node: Uuid, boot: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_boots WHERE node_id=$1 AND boot_id=$2 AND retired_at IS NOT NULL)").bind(node).bind(boot)
+}
+
+pub(super) fn close_node_session(node: Uuid) -> Statement<'static> {
+    sqlx::query(
+        "UPDATE node_sessions SET expires_at=clock_timestamp(),draining=true WHERE node_id=$1",
+    )
+    .bind(node)
 }
 
 pub(super) fn node_boot_known(node: Uuid, boot: Uuid) -> Scalar<'static, bool> {

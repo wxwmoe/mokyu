@@ -2533,6 +2533,9 @@ pub(super) async fn save_runtime_settings(
         json!({"revision":row.revision}),
     )
     .await?;
+    queries::notify_task("node-state".into())
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(row)
 }
@@ -2553,6 +2556,9 @@ pub(super) async fn reset_runtime_settings(
         json!({"revision":row.revision}),
     )
     .await?;
+    queries::notify_task("node-state".into())
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(row)
 }
@@ -5863,6 +5869,9 @@ pub(super) async fn maintenance_mode(pool: &PgPool, enabled: bool) -> Result<()>
         json!({"enabled":enabled}),
     )
     .await?;
+    queries::notify_task("node-state".into())
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -8880,6 +8889,12 @@ pub(super) async fn open_node_session(
             .context("node session epoch exhausted")?;
         if previous.boot_id == input.boot {
             ensure!(
+                !queries::node_boot_retired(state.node_id, input.boot)
+                    .fetch_one(&mut *tx)
+                    .await?,
+                Error::NodeExpired
+            );
+            ensure!(
                 previous.connection_id == input.connection
                     || input.previous_epoch == previous.epoch,
                 Error::NodeConflict
@@ -8918,6 +8933,9 @@ pub(super) async fn open_node_session(
         queries::insert_node_boot(state.node_id, state.credential_generation, input.boot)
             .execute(&mut *tx)
             .await?;
+        queries::begin_node_report(state.node_id, input.boot, now)
+            .execute(&mut *tx)
+            .await?;
     }
     queries::save_node_session(
         state.node_id,
@@ -8936,6 +8954,75 @@ pub(super) async fn open_node_session(
     let snapshot = node_snapshot(&mut tx, state.node_id).await?;
     tx.commit().await?;
     Ok(snapshot)
+}
+
+pub(super) async fn close_node_session(
+    pool: &PgPool,
+    state: &crate::cluster::NodeState,
+    key: &crate::content::codec::Key,
+    run: crate::model::session::Run,
+) -> Result<()> {
+    use crate::model::Error;
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, state, key, true).await?;
+    let current = queries::node_session(state.node_id, true)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NodeExpired)?;
+    // A repeated close may observe expiry, but must never retire a replacement run.
+    ensure!(
+        current.credential_generation == state.credential_generation
+            && current.boot_id == run.boot
+            && current.fence == run.fence,
+        Error::NodeExpired
+    );
+    queries::close_node_session(state.node_id)
+        .execute(&mut *tx)
+        .await?;
+    queries::retire_node_boots(state.node_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn report_node_session(
+    pool: &PgPool,
+    state: &crate::cluster::NodeState,
+    key: &crate::content::codec::Key,
+    run: crate::model::session::Run,
+    report: &crate::model::node::NodeReport,
+    sample_interval: u64,
+) -> Result<bool> {
+    report.validate()?;
+    ensure!(
+        report.boot_id == run.boot && sample_interval <= 86_400,
+        crate::model::Error::NodeExpired
+    );
+    let sample = (sample_interval > 0)
+        .then(|| crate::model::metrics::NodeSample::from_report(report, sample_interval))
+        .transpose()?;
+    if let Some(sample) = &sample {
+        sample.validate()?;
+    }
+    let mut tx = pool.begin().await?;
+    queries::runtime_diagnostic_limits()
+        .execute(&mut *tx)
+        .await?;
+    authenticate_rpc_node(&mut tx, state, key, false).await?;
+    require_node_run(&mut tx, state, run, false).await?;
+    let written = queries::save_node_report(state.node_id, report)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        == 1;
+    if written && let Some(sample) = &sample {
+        queries::node_runtime_sample(state.node_id, sample)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(written)
 }
 
 pub(super) async fn require_node_run(

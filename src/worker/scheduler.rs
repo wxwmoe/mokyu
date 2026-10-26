@@ -28,14 +28,6 @@ pub async fn run(app: Arc<App>) -> Result<()> {
     if app.role == "single" {
         return run_single(app).await;
     }
-    if app.role == "control" {
-        return worker(
-            app,
-            Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
-            0,
-        )
-        .await;
-    }
     if app.role != "single" {
         let listener_app = app.clone();
         tokio::spawn(async move {
@@ -53,6 +45,14 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 tokio::time::sleep(Duration::from_secs(10)).await;
             }
         });
+    }
+    if app.role == "control" {
+        return worker(
+            app,
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            0,
+        )
+        .await;
     }
     let active = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
     let mut workers = futures_util::stream::FuturesUnordered::new();

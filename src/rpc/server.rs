@@ -82,7 +82,7 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     )
     .add_service(
         NodeWorkServer::new(service)
-            .max_decoding_message_size(super::read::REQUEST_LIMIT)
+            .max_decoding_message_size(model::node_pack::RESULT_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .into_axum_router()
@@ -726,6 +726,51 @@ fn state(snapshot: &session::Snapshot) -> wire::NodeState {
 
 #[tonic::async_trait]
 impl NodeControl for Service {
+    async fn close_node(
+        &self,
+        request: Request<wire::CloseNodeRequest>,
+    ) -> Result<Response<wire::CloseNodeReply>, Status> {
+        if prost::Message::encoded_len(request.get_ref()) > 1024 {
+            return Err(Status::invalid_argument("invalid node close"));
+        }
+        let node = request
+            .extensions()
+            .get::<NodeState>()
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
+        let run = super::read::run(request.into_inner().run)?;
+        bounded(self.app.cluster().map_err(failure)?.close_session(
+            &node,
+            &self.app.secrets.credential_key,
+            run,
+        ))
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-session-closed").await;
+        Ok(Response::new(wire::CloseNodeReply {}))
+    }
+
+    async fn report_node(
+        &self,
+        request: Request<wire::NodeReportRequest>,
+    ) -> Result<Response<wire::NodeReportReply>, Status> {
+        let node = request
+            .extensions()
+            .get::<NodeState>()
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
+        let (run, report, sample) = super::session::report(request.into_inner())?;
+        let accepted = bounded(self.app.cluster().map_err(failure)?.report_session(
+            &node,
+            &self.app.secrets.credential_key,
+            run,
+            &report,
+            sample,
+        ))
+        .await?;
+        Ok(Response::new(wire::NodeReportReply { accepted }))
+    }
+
     async fn prepare_request(
         &self,
         request: Request<wire::PrepareRequestInput>,
@@ -877,17 +922,45 @@ impl NodeSessions for Service {
             bounded(cluster.open_session(&node, &app.secrets.credential_key, open)).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-session-opened").await;
+        let control_id = app
+            .node
+            .get()
+            .ok_or_else(|| Status::unavailable("control identity is unavailable"))?
+            .node_id
+            .to_string();
         let stream = async_stream::try_stream! {
             let run = snapshot.run;
             let epoch = snapshot.epoch;
             yield wire::SessionReply { message: Some(wire::session_reply::Message::Welcome(wire::Welcome {
                 run: Some(wire::Run { boot_id: run.boot.to_string(), fence: run.fence.to_string() }),
-                epoch: epoch as u64, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)),
+                epoch: epoch as u64, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)), control_id,
             })) };
+            let changed = app.wake_tasks.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let mut pending = false;
+            let mut next_notice = tokio::time::Instant::now();
+            let mut deadline = next_notice + Duration::from_secs(30);
             loop {
-                let next = tokio::time::timeout(Duration::from_secs(30), incoming.message()).await
-                    .map_err(|_| Status::deadline_exceeded("node heartbeat timed out"))??;
+                let next = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(deadline) => Err(Status::deadline_exceeded("node heartbeat timed out")),
+                    next = incoming.message() => next,
+                    _ = tokio::time::sleep_until(next_notice), if pending => {
+                        pending = false;
+                        next_notice = tokio::time::Instant::now() + Duration::from_secs(1);
+                        yield wire::SessionReply { message: Some(wire::session_reply::Message::Notice(wire::Notice {})) };
+                        continue;
+                    }
+                    _ = &mut changed => {
+                        pending = true;
+                        changed.set(app.wake_tasks.notified());
+                        changed.as_mut().enable();
+                        continue;
+                    }
+                }?;
                 let Some(next) = next else { break; };
+                deadline = tokio::time::Instant::now() + Duration::from_secs(30);
                 let Some(wire::session_request::Message::Pulse(pulse)) = next.message else {
                     Err(Status::invalid_argument("session expects Pulse"))?;
                     unreachable!();

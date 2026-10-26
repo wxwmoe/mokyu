@@ -335,5 +335,148 @@ async fn postgres_node_sessions_recover_across_controls_and_fence_old_runs() -> 
     let restored = first.rotate_node(&admin, "data-test", &key).await?;
     assert_eq!(restored.node_id, node.node_id);
     assert!(second.open_session(&restored, &key, hello).await.is_ok());
+
+    let reporting = first
+        .provision_node(&admin, "reporting", "worker", &key)
+        .await?;
+    let opening = Open {
+        boot: Uuid::new_v4(),
+        connection: Uuid::new_v4(),
+        previous_epoch: 0,
+    };
+    let report_run = first.open_session(&reporting, &key, opening).await?;
+    let mut report = crate::model::node::NodeReport {
+        boot_id: opening.boot,
+        sequence: 1,
+        sampled_at: chrono::Utc::now(),
+        metadata: Some(serde_json::json!({"format":1,"revisions":{"requests":1}})),
+        status: serde_json::json!({"work":"normal","runtime":{"started_at":chrono::Utc::now(),"uptime_seconds":10}}),
+    };
+    assert!(
+        second
+            .report_session(&reporting, &key, report_run.run, &report, 10)
+            .await?
+    );
+    assert!(
+        !first
+            .report_session(&reporting, &key, report_run.run, &report, 10)
+            .await?
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM node_runtime_samples WHERE node_id=$1")
+            .bind(reporting.node_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(count, 1);
+    let reconnected = second.open_session(&reporting, &key, opening).await?;
+    assert!(
+        !second
+            .report_session(&reporting, &key, report_run.run, &report, 10)
+            .await?
+    );
+    report.sequence = 2;
+    report.metadata = None;
+    assert!(
+        first
+            .report_session(&reporting, &key, report_run.run, &report, 0)
+            .await?
+    );
+    let saved = second.node_report(reporting.node_id).await?.unwrap();
+    assert_eq!(saved.metadata["revisions"]["requests"], 1);
+    expire(&pool, reporting.node_id).await?;
+    let renewed = first
+        .open_session(
+            &reporting,
+            &key,
+            Open {
+                connection: Uuid::new_v4(),
+                previous_epoch: reconnected.epoch,
+                ..opening
+            },
+        )
+        .await?;
+    report.sequence = 3;
+    assert!(
+        second
+            .report_session(&reporting, &key, report_run.run, &report, 0)
+            .await
+            .is_err()
+    );
+    assert!(
+        second
+            .close_session(&reporting, &key, report_run.run)
+            .await
+            .is_err()
+    );
+    assert!(
+        second
+            .report_session(&reporting, &key, renewed.run, &report, 0)
+            .await?
+    );
+    first.close_session(&reporting, &key, renewed.run).await?;
+    second.close_session(&reporting, &key, renewed.run).await?;
+    assert!(
+        first
+            .sync_node(&reporting, &key, renewed.run)
+            .await
+            .is_err()
+    );
+    assert!(
+        first
+            .open_session(
+                &reporting,
+                &key,
+                Open {
+                    connection: Uuid::new_v4(),
+                    previous_epoch: renewed.epoch,
+                    ..opening
+                }
+            )
+            .await
+            .is_err()
+    );
+    let rebooted = first
+        .open_session(
+            &reporting,
+            &key,
+            Open {
+                boot: Uuid::new_v4(),
+                connection: Uuid::new_v4(),
+                previous_epoch: 0,
+            },
+        )
+        .await?;
+    assert!(
+        first
+            .close_session(&reporting, &key, renewed.run)
+            .await
+            .is_err()
+    );
+    assert!(
+        first
+            .report_session(&reporting, &key, renewed.run, &report, 0)
+            .await
+            .is_err()
+    );
+    assert!(
+        second
+            .sync_node(&reporting, &key, rebooted.run)
+            .await
+            .is_ok()
+    );
+    first.release("reporting").await?;
+    report.boot_id = rebooted.run.boot;
+    assert!(
+        second
+            .report_session(&reporting, &key, rebooted.run, &report, 0)
+            .await
+            .is_err()
+    );
+    assert!(
+        second
+            .close_session(&reporting, &key, rebooted.run)
+            .await
+            .is_err()
+    );
     Ok(())
 }

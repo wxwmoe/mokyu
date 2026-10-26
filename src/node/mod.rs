@@ -207,6 +207,20 @@ impl NodeContext {
         });
     }
 
+    pub(crate) async fn close(&self) -> Result<(), Status> {
+        let run = self
+            .current
+            .borrow()
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.lease.run.clone());
+        self.stop();
+        if let Some(run) = run {
+            self.client.close(run).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn stop(&self) {
         self.mode.send_replace(Mode::Stopped);
         self.invalidate(Phase::Stopped);

@@ -12,6 +12,8 @@ use tonic::Code;
 
 #[path = "reads.rs"]
 mod reads;
+#[path = "session.rs"]
+mod session;
 #[path = "work.rs"]
 mod work;
 

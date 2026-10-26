@@ -486,6 +486,23 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn close(&self, run: wire::Run) -> Result<(), Status> {
+        let _: wire::CloseNodeReply = self
+            .unary(
+                wire::CloseNodeRequest { run: Some(run) },
+                "/mokyu.node.v1.NodeControl/CloseNode",
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn report(&self, input: wire::NodeReportRequest) -> Result<bool, Status> {
+        let reply: wire::NodeReportReply = self
+            .unary(input, "/mokyu.node.v1.NodeControl/ReportNode")
+            .await?;
+        Ok(reply.accepted)
+    }
+
     async fn unary<I, O>(&self, input: I, path: &'static str) -> Result<O, Status>
     where
         I: prost::Message + Default + Clone + 'static,
@@ -495,6 +512,10 @@ impl Client {
             crate::model::node_complete::REQUEST_LIMIT
         } else if path == "/mokyu.node.v1.NodeObjects/ChangeObjects" {
             crate::model::node_object::REQUEST_LIMIT
+        } else if path == "/mokyu.node.v1.NodeWork/Exchange" {
+            crate::model::node_pack::RESULT_LIMIT
+        } else if path == "/mokyu.node.v1.NodeControl/ReportNode" {
+            super::REPORT_LIMIT
         } else {
             super::read::REQUEST_LIMIT
         };
@@ -611,6 +632,7 @@ impl Client {
                         return Err(Status::data_loss("control returned a different node run"));
                     }
                     super::uuid(&run.fence)?;
+                    super::uuid(&welcome.control_id)?;
                     let valid_until = lease_deadline(started, welcome.valid_for_ms)?;
                     Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until })
                 }).await.unwrap_or_else(|_| Err(Status::deadline_exceeded("session connection timed out")));
@@ -640,6 +662,16 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    pub(crate) async fn notified(&mut self) -> Result<(), Status> {
+        match self.incoming.message().await? {
+            Some(wire::SessionReply {
+                message: Some(wire::session_reply::Message::Notice(_)),
+            }) => Ok(()),
+            None => Err(Status::unavailable("node session closed")),
+            _ => Err(Status::data_loss("unexpected node session message")),
+        }
+    }
+
     pub(crate) async fn pulse(
         &mut self,
         sequence: u64,
@@ -675,7 +707,18 @@ impl Session {
                 })
                 .await
                 .map_err(|_| Status::unavailable("node session closed"))?;
-            self.incoming.message().await
+            loop {
+                let message = self.incoming.message().await?;
+                if matches!(
+                    &message,
+                    Some(wire::SessionReply {
+                        message: Some(wire::session_reply::Message::Notice(_))
+                    })
+                ) {
+                    continue;
+                }
+                return Ok::<_, Status>(message);
+            }
         })
         .await
         .map_err(|_| Status::deadline_exceeded("node heartbeat acknowledgement timed out"))??;

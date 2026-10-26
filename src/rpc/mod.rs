@@ -5,6 +5,7 @@ mod object;
 pub(crate) mod read;
 mod request;
 pub(crate) mod server;
+mod session;
 mod work;
 mod write;
 
@@ -13,6 +14,7 @@ pub(crate) mod wire {
 }
 
 pub(crate) const MESSAGE_LIMIT: usize = 4 * 1024 * 1024;
+pub(crate) const REPORT_LIMIT: usize = 96 * 1024;
 pub(crate) const SESSION_LIMIT: usize = 64 * 1024;
 pub(crate) const OBSERVATION_LIMIT: usize = 16 * 1024;
 pub(crate) const PROTOCOL: u32 = 1;

@@ -194,6 +194,20 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
     ) -> Result<NodeState>;
     async fn rotate_node(&self, principal: &Principal, name: &str, key: &Key) -> Result<NodeState>;
+    async fn close_session(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+    ) -> Result<()>;
+    async fn report_session(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        report: &super::node::NodeReport,
+        sample_interval: u64,
+    ) -> Result<bool>;
     async fn open_session(
         &self,
         node: &NodeState,

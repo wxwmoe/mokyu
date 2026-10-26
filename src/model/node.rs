@@ -135,6 +135,8 @@ pub(crate) struct ClusterOverview {
     pub settings: Vec<SettingCount>,
     pub observed_at: DateTime<Utc>,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NodeReport {
     pub boot_id: Uuid,
     pub sequence: i64,
