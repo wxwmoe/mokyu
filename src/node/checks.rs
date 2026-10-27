@@ -55,6 +55,7 @@ impl Reads {
         index: usize,
         source: &crate::model::raw::RawSource,
         complete: bool,
+        remote: bool,
     ) -> Result<Option<RawCheck>> {
         if source.pending_upload {
             return Ok(None);
@@ -65,13 +66,22 @@ impl Reads {
                 let reads = self.clone();
                 let request = prepared.clone();
                 let cache_id = source.location_id;
+                let files = self.reader.files.clone();
+                let source = source.clone();
+                let candidate = source.clone();
                 let audit = self.checks.raw(
                     source.size as u64,
                     source.digest.clone(),
-                    move |valid| async move {
+                    async move {
+                        if remote { files.begin_raw(&candidate, &backend.profile).await.ok().flatten() } else { None }
+                    },
+                    move |valid, cache| async move {
                         if !valid {
                             reads.reader.files.reject(cache_id).await;
                             reads.report(request, index).await;
+                        } else if let Some(cache) = cache
+                            && let Err(error) = reads.reader.files.finish_raw(cache, &source, request).await {
+                            tracing::debug!(%error, "node background raw cache publication skipped");
                         }
                     },
                 );

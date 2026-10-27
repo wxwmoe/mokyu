@@ -104,6 +104,7 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `recovery/cluster_identities.py`：两个真实 data 节点并发写入加密区块，检查 nonce 不重复、节点本地写缓存排空、跨节点读取，以及 pack/unpack 后 UUID、完整正文和 Range 保持一致。使用独立 PostgreSQL 库和 S3 后端，环境沿用 `source_quarantine`，另设 `MOKYU_TEST_PEER_ENDPOINT` 指向第二个 data。
 - `storage/pending_cache.py`：接管已初始化但停止的隔离服务，验证 pending/cache 布局、raw/chunks 上传确认与 inode 交接、Pack 最终身份、缓存关闭、读取保护、重启和链接/删除中断后的计数；环境沿用 `source_quarantine`，需要独立 S3 fixture。`MOKYU_TEST_CACHE_CROSS_DEVICE=1` 要求 cache/pending 分属不同文件系统，验证跳过文件交接且不复制正文。
 - `storage/raw_cache.py`：独占已初始化但停止的隔离服务，使用 9MiB 文件缓存和关闭的响应缓存、独立 S3 fixture，验证并发冷读/Range、坏缓存回退、pin/淘汰、巡检绕过、隔离/恢复代次、重启和覆盖，以及成功 PUT 不等待可选区块缓存填充；环境沿用 `source_quarantine`。
+- `storage/background_raw.py`：相同隔离服务约定，验证完整 raw 同流填充、无额外 GET、再次命中、局部来源/关闭/超限跳过、慢盘/低空间/取消/坏摘要清理，以及重启计费；需要 fault-injection，低空间分支另需 fsync 测试注入器。
 - `storage/raw_migration.py`：raw 与加密 chunks、raw 与 raw 的跨存储 copy/move，支持独立远端 S3 fixture。
 - `storage/raw_streaming.py`：raw 大分片、原始 ETag、完整摘要和跨分片 Range；`--part-mib`、`--repeat`、`--label` 记录 UploadPart/Complete 耗时和服务 RSS，`--order sequential|reverse` 选择上传顺序。默认远端需 `MOKYU_TEST_BACKEND`，本地使用 `--local` 且不设置该变量；`MOKYU_TEST_PID_FILE` 必须属于同一容器。不同构建或服务预算的数字不能直接比较。
 - `storage/raw_replay.py`：暂停 Copy/Multipart 校验后的回放，修改远端 raw 或本地暂存来源，验证失败不会替换原对象或丢失已上传分片，恢复源数据后重试成功；需要 `MOKYU_TEST_BACKEND` 和故障注入构建。

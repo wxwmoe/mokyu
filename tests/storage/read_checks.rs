@@ -70,9 +70,14 @@ async fn raw_checks_distinguish_full_body_mismatch_and_cancellation() {
             vec![0; 16]
         };
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let mut audit = checks.raw(length, Some(expected), move |result| async move {
-            let _ = sender.send(result);
-        });
+        let mut audit = checks.raw(
+            length,
+            Some(expected),
+            std::future::ready(None::<tokio::io::Sink>),
+            move |result, _| async move {
+                let _ = sender.send(result);
+            },
+        );
         let evidence = audit.evidence.clone();
         audit.feed(Bytes::from_static(b"abc"), UNIT);
         audit.feed(Bytes::from_static(b"def"), UNIT);
@@ -92,14 +97,95 @@ async fn raw_checks_distinguish_full_body_mismatch_and_cancellation() {
 #[tokio::test]
 async fn raw_queue_overflow_cannot_become_verified() {
     let checks = Checks::new(Arc::new(Semaphore::new(1)));
-    let mut audit = checks.raw(100, Some(vec![0; 16]), |_| async {
-        panic!("overflow must skip completion");
-    });
+    let mut audit = checks.raw(
+        100,
+        Some(vec![0; 16]),
+        std::future::ready(None::<tokio::io::Sink>),
+        |_, _| async {
+            panic!("overflow must skip completion");
+        },
+    );
     let evidence = audit.evidence.clone();
-    for _ in 0..100 {
+    for _ in 0..=MEMORY / UNIT {
         audit.feed(Bytes::from_static(b"x"), UNIT);
     }
     drop(audit);
     idle(&checks).await;
     assert!(!evidence.cacheable());
+}
+
+#[tokio::test]
+async fn raw_cache_is_optional_and_only_returned_after_complete_validation() {
+    use tokio::io::AsyncReadExt;
+    let checks = Checks::new(Arc::new(Semaphore::new(1)));
+    for (capacity, closed, valid, complete) in [
+        (64, false, true, true),
+        (1, false, true, true),
+        (64, true, true, true),
+        (64, false, false, true),
+        (64, false, true, false),
+    ] {
+        let (reader, writer) = tokio::io::duplex(capacity);
+        let mut reader = (!closed).then_some(reader);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let expected = if valid {
+            Md5::digest(b"abcdef").to_vec()
+        } else {
+            vec![0; 16]
+        };
+        let mut audit = checks.raw(
+            if complete { 6 } else { 7 },
+            Some(expected),
+            std::future::ready(Some(writer)),
+            move |valid, cache| async move {
+                let _ = sender.send((valid, cache.is_some()));
+            },
+        );
+        let evidence = audit.evidence.clone();
+        audit.feed(Bytes::from_static(b"abcdef"), UNIT);
+        drop(audit);
+        idle(&checks).await;
+        if complete {
+            let cached = capacity == 64 && !closed && valid;
+            assert_eq!(receiver.await.unwrap(), (valid, cached));
+            assert_eq!(evidence.verified(), valid);
+            if cached {
+                let mut bytes = Vec::new();
+                reader
+                    .as_mut()
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .await
+                    .unwrap();
+                assert_eq!(bytes, b"abcdef");
+            }
+        } else {
+            assert!(receiver.await.is_err());
+            assert!(!evidence.cacheable());
+        }
+    }
+}
+
+#[tokio::test]
+async fn slow_raw_cache_does_not_hold_the_digest_queue() {
+    let checks = Checks::new(Arc::new(Semaphore::new(1)));
+    let (_reader, writer) = tokio::io::duplex(1);
+    let body = vec![b'x'; UNIT * 50];
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let mut audit = checks.raw(
+        body.len() as u64,
+        Some(Md5::digest(&body).to_vec()),
+        std::future::ready(Some(writer)),
+        move |valid, cache| async move {
+            let _ = sender.send((valid, cache.is_some()));
+        },
+    );
+    for part in body.chunks(UNIT) {
+        audit.feed(Bytes::copy_from_slice(part), UNIT);
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    drop(audit);
+    idle(&checks).await;
+    assert_eq!(receiver.await.unwrap(), (true, false));
+    assert_eq!(checks.snapshot()["skipped"], 0);
 }

@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
 };
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 pub(crate) struct Write {
@@ -17,6 +17,28 @@ pub(crate) struct Write {
     path: PathBuf,
     ticket: Option<Reservation>,
     work: Option<CacheWork>,
+}
+
+impl AsyncWrite for Write {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(self.get_mut().file.as_mut().unwrap()).poll_write(cx, data)
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(self.get_mut().file.as_mut().unwrap()).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(self.get_mut().file.as_mut().unwrap()).poll_shutdown(cx)
+    }
 }
 
 impl Drop for Write {
@@ -111,7 +133,7 @@ impl Storage {
         }
     }
 
-    pub(super) async fn begin_raw_cache(&self, source: &RawSource) -> Result<Option<Write>> {
+    pub(crate) async fn begin_raw_cache(&self, source: &RawSource) -> Result<Option<Write>> {
         let id = source.location_id;
         let policy = self.local_cache(Some(source.storage_id))?;
         let size = source.size as u64;
@@ -124,7 +146,7 @@ impl Storage {
         self.file_cache().begin_raw(id, size, policy, work).await
     }
 
-    pub(super) async fn finish_raw_cache(
+    pub(crate) async fn finish_raw_cache(
         self: &Arc<Self>,
         write: Write,
         source: &RawSource,

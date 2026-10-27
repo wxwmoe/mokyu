@@ -576,7 +576,7 @@ impl Storage {
     pub fn storage_ids(&self) -> Vec<Uuid> {
         self.targets.read().unwrap().keys().copied().collect()
     }
-    fn store_backend(&self, storage_id: Uuid) -> Result<Arc<StoreBackend>> {
+    pub(crate) fn store_backend(&self, storage_id: Uuid) -> Result<Arc<StoreBackend>> {
         self.targets
             .read()
             .unwrap()

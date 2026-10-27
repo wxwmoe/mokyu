@@ -198,7 +198,7 @@ impl App {
                 reader.file.seek(std::io::SeekFrom::Start((row.source_offset+start-row.offset_bytes) as u64)).await?;
                 let mut remaining = end-start;
                 let complete = row.source_offset == 0 && start == row.offset_bytes && end-start == row.source.size;
-                let mut check = if mode == "background" && complete { Some(app.read_checks.raw(&row.source)) } else { None };
+                let mut check = if mode == "background" && complete { Some(app.read_checks.raw(&row.source, matches!(&reader.file, crate::storage::raw::RawFile::Remote(_)))) } else { None };
                 if mode == "background" && !complete { app.read_checks.raw_source(row.source.clone()); }
                 let evidence = if mode == "off" { Some(app.read_checks.unchecked()) } else { check.as_ref().map(|check| check.evidence.clone()) };
                 if let Some(capture) = &capture && let Some(evidence) = evidence { capture.lock().unwrap().record_check(evidence); }
@@ -208,6 +208,7 @@ impl App {
                     let count = tokio::time::timeout(idle,_pin.with_read_lease(reader.file.read(&mut buffer))).await??;
                     (count>0).then_some(()).context("raw source was truncated")?;
                     buffer.truncate(count);
+                    buffer.shrink_to_fit();
                     remaining -= count as i64;
                     reader.file.account_read(&app.storage, count as u64);
                     if let Some(digest)=&mut digest { digest.update(&buffer); }

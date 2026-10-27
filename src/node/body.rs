@@ -744,7 +744,7 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                     let (mut file, _io) = result?;
                     current.guard(&reads.node, async { file.seek(std::io::SeekFrom::Start(segment.source_offset as u64)).await?; Ok(()) }).await?;
                     let mut audit = reads.check_raw(current.clone(), index, source,
-                        segment.source_offset == 0 && segment.length == source.size)?;
+                        segment.source_offset == 0 && segment.length == source.size, matches!(&file, RawFile::Remote(_)))?;
                     let mut remaining = segment.length as usize;
                     while remaining > 0 {
                         let result = current.guard(&reads.node, async {
@@ -753,12 +753,14 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                             let count = file.read(&mut bytes).await?;
                             ensure!(count > 0, codec::IntegrityError::Length);
                             bytes.truncate(count);
-                            Ok(owned(Bytes::from(bytes), memory, &current))
+                            bytes.shrink_to_fit();
+                            let retained = bytes.capacity();
+                            Ok((owned(Bytes::from(bytes), memory, &current), retained))
                         }).await;
                         if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
-                        let bytes = result?;
+                        let (bytes, retained) = result?;
                         remaining -= bytes.len();
-                        if let Some(audit) = &mut audit { audit.feed(bytes.clone(), RAW_BUFFER * 2); }
+                        if let Some(audit) = &mut audit { audit.feed(bytes.clone(), retained); }
                         if remaining == 0 && position + segment.length as u64 == end { current.finish_source(); }
                         yield bytes;
                     }

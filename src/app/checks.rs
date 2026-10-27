@@ -54,15 +54,35 @@ impl Checks {
             },
         )
     }
-    pub fn raw(self: &Arc<Self>, source: &RawSource) -> RawCheck {
+    pub fn raw(self: &Arc<Self>, source: &RawSource, remote: bool) -> RawCheck {
         let checks = self.clone();
         let source = source.clone();
+        let target = self.storage.store_backend(source.storage_id).ok();
+        let storage = self.storage.clone();
+        let candidate = source.clone();
+        let pin = remote.then(|| storage.physical_pin(source.location_id));
         self.work.raw(
             source.size as u64,
             source.digest.clone(),
-            move |valid| async move {
+            async move {
+                if remote {
+                    storage.begin_raw_cache(&candidate).await.ok().flatten()
+                } else {
+                    None
+                }
+            },
+            move |valid, cache| async move {
+                let _pin = pin;
                 if !valid {
                     checks.failure(Target::Raw(source)).await;
+                } else if let Some(cache) = cache
+                    && let Some(target) = target
+                    && let Err(error) = checks
+                        .storage
+                        .finish_raw_cache(cache, &source, &target)
+                        .await
+                {
+                    tracing::debug!(%error, "background raw cache publication skipped");
                 }
             },
         )

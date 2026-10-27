@@ -7,7 +7,10 @@ use std::{
         atomic::{AtomicU8, AtomicU64, Ordering},
     },
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::{
+    io::{AsyncWrite, AsyncWriteExt},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
+};
 
 #[cfg(test)]
 #[path = "../../tests/storage/read_checks.rs"]
@@ -61,6 +64,7 @@ impl RawCheck {
     pub fn feed(&mut self, bytes: Bytes, retained: usize) {
         let Some(sender) = &self.sender else { return };
         let Some(memory) = self.checks.reserve(retained) else {
+            tracing::debug!(retained, "background raw check memory exhausted");
             self.checks.finish(&self.evidence, SKIPPED);
             self.sender = None;
             return;
@@ -72,6 +76,7 @@ impl RawCheck {
             })
             .is_err()
         {
+            tracing::debug!("background raw check queue exhausted");
             self.checks.finish(&self.evidence, SKIPPED);
             self.sender = None;
         }
@@ -173,14 +178,17 @@ impl Checks {
         });
         evidence
     }
-    pub fn raw<F, R>(
+    pub fn raw<W, P, F, R>(
         self: &Arc<Self>,
         size: u64,
         expected: Option<Vec<u8>>,
+        prepare: P,
         complete: F,
     ) -> RawCheck
     where
-        F: FnOnce(bool) -> R + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+        P: Future<Output = Option<W>> + Send + 'static,
+        F: FnOnce(bool, Option<W>) -> R + Send + 'static,
         R: Future<Output = ()> + Send,
     {
         let (evidence, job) = self.begin();
@@ -190,13 +198,34 @@ impl Checks {
             sender: None,
         };
         let Some(job) = job else { return audit };
-        let (sender, mut receiver) = mpsc::channel::<Payload>(32);
+        let (sender, mut receiver) = mpsc::channel::<Payload>(MEMORY / UNIT);
         audit.sender = Some(sender);
         let checks = self.clone();
         tokio::spawn(async move {
             let _job = job;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("read-integrity-check").await;
+            let (cache_sender, mut cache_receiver) = mpsc::channel::<Payload>(MEMORY / UNIT);
+            let mut cache_sender = Some(cache_sender);
+            let mut cache = tokio::task::JoinSet::new();
+            cache.spawn(async move {
+                let mut writer =
+                    tokio::time::timeout(std::time::Duration::from_millis(100), prepare)
+                        .await
+                        .ok()
+                        .flatten()?;
+                while let Some(payload) = cache_receiver.recv().await {
+                    tokio::time::timeout(std::time::Duration::from_millis(100), async {
+                        #[cfg(feature = "fault-injection")]
+                        crate::faults::point("raw-cache-stream").await;
+                        writer.write_all(&payload.bytes).await
+                    })
+                    .await
+                    .ok()?
+                    .ok()?;
+                }
+                Some(writer)
+            });
             let mut digest = Md5::new();
             let mut received = 0u64;
             loop {
@@ -215,22 +244,29 @@ impl Checks {
                     return;
                 }
                 let Ok(cpu) = checks.cpu.clone().try_acquire_owned() else {
+                    tracing::debug!("background raw check CPU busy");
                     checks.finish(&evidence, SKIPPED);
                     return;
                 };
                 received = received.saturating_add(payload.bytes.len() as u64);
                 let result = tokio::task::spawn_blocking(move || {
                     let _cpu = cpu;
-                    let _memory = payload._memory;
                     digest.update(&payload.bytes);
-                    digest
+                    (digest, payload)
                 })
                 .await;
-                let Ok(current) = result else {
+                let Ok((current, payload)) = result else {
                     checks.finish(&evidence, SKIPPED);
                     return;
                 };
                 digest = current;
+                if let Some(sender) = &cache_sender
+                    && sender.try_send(payload).is_err()
+                {
+                    // A slow optional writer must not stall digest verification.
+                    cache_sender = None;
+                    cache.abort_all();
+                }
             }
             if !evidence.pending() {
                 return;
@@ -241,7 +277,19 @@ impl Checks {
             }
             let valid = expected.as_deref() == Some(digest.finalize().as_slice());
             checks.finish(&evidence, if valid { VERIFIED } else { FAILED });
-            complete(valid).await;
+            drop(cache_sender);
+            let writer = if valid {
+                tokio::time::timeout(std::time::Duration::from_secs(1), cache.join_next())
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(Result::ok)
+                    .flatten()
+            } else {
+                None
+            };
+            drop(cache);
+            complete(valid, writer).await;
         });
         audit
     }
