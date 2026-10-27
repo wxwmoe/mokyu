@@ -140,7 +140,7 @@ with s3.get_object(Bucket='test-media', Key='multipart')['Body'] as body:
 print('PASS maintenance sweep and protection of all indexed current data', flush=True)
 
 wait(lambda: scalar("SELECT count(*) FROM fragments f WHERE NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id)") == 0)
-actual = sum(p.stat().st_size for p in (Path(os.environ['MOKYU_TEST_DATA']) / 'multipart').iterdir() if p.is_file())
+actual = sum(p.stat().st_blocks * 512 for p in (Path(os.environ['MOKYU_TEST_DATA']) / 'pending' / 'multipart').rglob('*') if p.is_file())
 assert cli('status')['local_bytes'][0] == actual
 assert scalar("SELECT count(*) FROM extents e LEFT JOIN chunks c ON c.id=e.chunk_id WHERE e.chunk_id IS NOT NULL AND c.state<>'ready'") == 0
 help_text = subprocess.check_output([binary, 'cli', '--help'], text=True)

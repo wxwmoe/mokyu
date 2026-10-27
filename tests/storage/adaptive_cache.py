@@ -24,7 +24,7 @@ s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_n
                   config=Config(retries={'max_attempts': 0}, s3={'addressing_style': 'path'},
                                 request_checksum_calculation='when_required', response_checksum_validation='when_required'))
 db = psycopg.connect(Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text(), autocommit=True)
-root = Path(os.environ['MOKYU_TEST_DATA']) / 'chunks'
+root = Path(os.environ['MOKYU_TEST_DATA']) / 'cache' / 'chunks'
 prefix = 'adaptive-cache-' + os.urandom(4).hex() + '/'
 
 

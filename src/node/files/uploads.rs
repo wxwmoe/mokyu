@@ -3,13 +3,82 @@ use crate::{model::node_raw::FileState, rpc::wire, storage::cache::UploadCharge}
 
 impl Cache {
     pub(crate) async fn recover_uploads(self: &Arc<Self>, node: &NodeContext) -> Result<()> {
-        self.initialize().await?;
         self.uploads_ready
             .get_or_try_init(|| async {
+                self.disk.initialize().await?;
                 self.raw_inventory(node, true).await?;
-                self.part_inventory(node, true).await
+                self.part_inventory(node, true).await?;
+                self.recover_requests(node).await
             })
             .await?;
+        self.initialize().await?;
+        Ok(())
+    }
+
+    async fn recover_requests(&self, node: &NodeContext) -> Result<()> {
+        // Receivers wait for uploads_ready; only interrupted, unpublished requests are present.
+        let mut directories = tokio::fs::read_dir(self.disk.root.join("pending/raw")).await?;
+        while let Some(directory) = directories.next_entry().await? {
+            if !directory.file_type().await?.is_dir() {
+                continue;
+            }
+            let mut entries = tokio::fs::read_dir(directory.path()).await?;
+            let mut batch = Vec::with_capacity(128);
+            loop {
+                let entry = entries.next_entry().await?;
+                if let Some(entry) = &entry {
+                    let name = format!(
+                        "{}/{}",
+                        directory.file_name().to_string_lossy(),
+                        entry.file_name().to_string_lossy()
+                    );
+                    if entry.file_type().await?.is_file()
+                        && let Some(id) = name
+                            .strip_suffix(".partial")
+                            .and_then(crate::storage::parse_chunk_name)
+                    {
+                        batch.push(id);
+                    }
+                }
+                if !batch.is_empty() && (batch.len() == 128 || entry.is_none()) {
+                    let snapshot = node.background_snapshot()?;
+                    let reply = node
+                        .client
+                        .check_raw_files(wire::LocalFilesRequest {
+                            run: Some(snapshot.lease.run.clone()),
+                            files: batch.iter().map(ToString::to_string).collect(),
+                            recover: true,
+                        })
+                        .await?;
+                    let states: Vec<crate::model::node_raw::File> =
+                        serde_json::from_slice(&reply.files_json)?;
+                    ensure!(
+                        states.len() == batch.len()
+                            && states
+                                .iter()
+                                .map(|file| file.id)
+                                .collect::<HashSet<_>>()
+                                .len()
+                                == batch.len()
+                            && states.iter().all(|file| batch.contains(&file.id)
+                                && matches!(file.state, FileState::Removable | FileState::Cached)),
+                        "interrupted request still has protected metadata"
+                    );
+                    snapshot.lease.check()?;
+                    for id in batch.drain(..) {
+                        tokio::fs::remove_file(
+                            CacheFile::PendingRaw
+                                .path(&self.disk.root, id)
+                                .with_extension("partial"),
+                        )
+                        .await?;
+                    }
+                }
+                if entry.is_none() {
+                    break;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -18,7 +87,7 @@ impl Cache {
         node: &NodeContext,
         recover: bool,
     ) -> Result<()> {
-        let root = self.disk.root.join("raw");
+        let root = self.disk.root.join("pending/raw");
         tokio::fs::create_dir_all(&root).await?;
         ensure!(
             tokio::fs::symlink_metadata(&root).await?.is_dir(),
@@ -102,40 +171,49 @@ impl Cache {
     ) -> Result<()> {
         let _lock = self.local_lock(state.id).await;
         lease.check()?;
-        let path = CacheFile::Raw.path(&self.disk.root, state.id);
+        let path = CacheFile::PendingRaw.path(&self.disk.root, state.id);
         if !tokio::fs::try_exists(&path).await? {
             return Ok(());
         }
-        {
-            let mut uploads = self.uploads.lock().unwrap();
-            uploads.entry(state.id).or_insert_with(|| {
-                self.disk.account_existing(Area::Cache, size);
+        if !self.uploads.lock().unwrap().contains_key(&state.id) {
+            let _write = self.writes.lock().await;
+            self.disk.account_existing(Area::Cache, size);
+            self.fifo
+                .lock()
+                .await
+                .insert(state.id, size, CacheFile::PendingRaw);
+            self.uploads.lock().unwrap().insert(
+                state.id,
                 self.disk
-                    .restore_upload(state.storage.unwrap_or_default(), size)
-            });
+                    .restore_upload(state.storage.unwrap_or_default(), size),
+            );
         }
         if matches!(state.state, FileState::Pending | FileState::Protected) {
             return Ok(());
         }
-        let _write = self.writes.lock().await;
-        let cached = matches!(state.state, FileState::Cached) && state.size == size;
-        if cached {
-            let destination = CacheFile::Raw.path(&self.root, state.id);
-            tokio::fs::create_dir_all(destination.parent().unwrap()).await?;
-            match tokio::fs::hard_link(&path, &destination).await {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
+        let policy = crate::storage::target::CachePolicy {
+            enabled: matches!(state.state, FileState::Cached) && state.size == size,
+            capacity: state
+                .cache_limit
+                .as_deref()
+                .map(crate::config::cache_bytes)
+                .transpose()?
+                .or(self.disk.limits[1]),
+            max_entries: state
+                .cache_entries
+                .map(|value| value as usize)
+                .unwrap_or(self.entries)
+                .min(self.entries),
+            upload_cache: false,
+            upload_capacity: None,
+        };
+        if self
+            .files()
+            .promote(state.id, Some(state.id), None, policy)
+            .await?
+        {
+            self.uploads.lock().unwrap().remove(&state.id);
         }
-        tokio::fs::remove_file(path).await?;
-        let mut fifo = self.fifo.lock().await;
-        if cached && !fifo.entries.contains_key(&state.id) {
-            fifo.insert(state.id, size, CacheFile::Raw);
-        } else {
-            self.disk.release(Area::Cache, size);
-        }
-        self.uploads.lock().unwrap().remove(&state.id);
         Ok(())
     }
 
@@ -209,6 +287,11 @@ impl Cache {
                 "raw upload already exists"
             );
             file.publish_in(&files.disk.root, id, false).await?;
+            files
+                .fifo
+                .lock()
+                .await
+                .insert(id, charge.size, CacheFile::PendingRaw);
             files.uploads.lock().unwrap().insert(id, charge);
             Ok::<_, anyhow::Error>(())
         })

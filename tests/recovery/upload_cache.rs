@@ -249,7 +249,10 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
     .await?;
     assert_eq!(due, ids[..2]);
     let result = backend.release(&ids, false).await?;
-    assert_eq!(result.keys, vec!["__mokyu/multipart/pending/2"]);
+    assert_eq!(
+        result.keys,
+        vec![("__mokyu/multipart/pending/2".into(), None)]
+    );
     assert_eq!(
         result.staged,
         vec![(storage, "__mokyu/multipart/pending/2".into())]

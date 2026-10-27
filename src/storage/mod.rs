@@ -116,6 +116,7 @@ pub struct Storage {
     fifo: tokio::sync::Mutex<Fifo>,
     cache_writes: tokio::sync::Mutex<()>,
     upload_pins: Mutex<HashMap<Uuid, UploadPin>>,
+    released_uploads: Mutex<HashMap<Uuid, Option<Uuid>>>,
     raw_upload_pins: Mutex<HashMap<Uuid, (crate::model::Id, UploadPin)>>,
     remote_charges: Mutex<HashMap<Id, UploadCharge>>,
     fills: Arc<Semaphore>,
@@ -351,14 +352,6 @@ impl Storage {
                 )?;
             }
         }
-        for name in ["multipart", "chunks", "raw"] {
-            tokio::fs::create_dir_all(c.instance.data_path.join(name)).await?;
-        }
-        // The parent entries must survive before a cache file can be the only acknowledged copy.
-        tokio::fs::File::open(&c.instance.data_path)
-            .await?
-            .sync_all()
-            .await?;
         let disk = Arc::new(Disk {
             root: c.instance.data_path.clone(),
             limits: [
@@ -390,6 +383,7 @@ impl Storage {
             io: Arc::new(Semaphore::new(budget.cpu_jobs)),
             pending: Mutex::new(HashSet::new()),
         });
+        disk.initialize().await?;
         let aging = Duration::from_secs(30);
         let defaults = (
             budget.storage_read_slots,
@@ -492,6 +486,7 @@ impl Storage {
             fifo: tokio::sync::Mutex::new(Fifo::default()),
             cache_writes: tokio::sync::Mutex::new(()),
             upload_pins: Mutex::new(HashMap::new()),
+            released_uploads: Mutex::new(HashMap::new()),
             raw_upload_pins: Mutex::new(HashMap::new()),
             remote_charges: Mutex::new(HashMap::new()),
             fills: Arc::new(Semaphore::new(budget.cpu_jobs)),
@@ -521,7 +516,7 @@ impl Storage {
             s.physical.recover_memory(s.boot_id).await?;
             s.restore_cache().await?;
         }
-        assembly::probe(&s, s.disk.root.join("raw"));
+        assembly::probe(&s, s.disk.root.join("pending/raw"));
         for target in s.targets.read().unwrap().values() {
             if let Some(root) = &target.raw_root {
                 assembly::probe(&s, root.clone());
@@ -615,7 +610,7 @@ impl Storage {
     fn local_cache(&self, storage_id: Option<Uuid>) -> Result<CachePolicy> {
         let target = self.store_backend(storage_id.context("source has no storage")?)?;
         Ok(CachePolicy {
-            enabled: target.cache_enabled,
+            enabled: target.cache_enabled && !target.is_local,
             capacity: target.cache_capacity.or(self.capacity),
             max_entries: target.cache_entries,
             upload_cache: target.upload_cache,
@@ -1011,8 +1006,8 @@ impl Storage {
         target.identity_ready.store(true, Ordering::Release);
         Ok(())
     }
-    fn cache_path(&self, id: Uuid, compressed: bool) -> PathBuf {
-        CacheFile::Chunk(compressed).path(&self.disk.root, id)
+    fn pending_chunk_path(&self, id: Uuid, compressed: bool) -> PathBuf {
+        CacheFile::PendingChunk(compressed).path(&self.disk.root, id)
     }
     async fn restore_upload_pins(&self) -> Result<()> {
         let mut after = Id::default();
@@ -1037,13 +1032,14 @@ impl Storage {
                 let Some(key) = key else {
                     continue;
                 };
-                let size = match tokio::fs::metadata(self.cache_path(key, compressed)).await {
+                let size = match tokio::fs::metadata(self.pending_chunk_path(key, compressed)).await
+                {
                     Ok(m) => m.len(),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
                     Err(e) => return Err(e.into()),
                 };
                 let mut fifo = self.fifo.lock().await;
-                fifo.insert(key, size, compressed);
+                fifo.insert(key, size, CacheFile::PendingChunk(compressed));
                 let pin = fifo.entries[&key].pins.clone();
                 pin.fetch_add(1, Ordering::Relaxed);
                 self.disk.account_existing(Area::Cache, size);
@@ -1070,8 +1066,46 @@ impl Storage {
     pub fn hold_upload(&self, id: Uuid, pin: UploadPin) {
         self.upload_pins.lock().unwrap().insert(id, pin);
     }
-    pub fn release_upload(&self, id: Uuid) {
-        self.upload_pins.lock().unwrap().remove(&id);
+    pub async fn release_upload(
+        self: &Arc<Self>,
+        id: Uuid,
+        destination: Option<Uuid>,
+    ) -> Result<()> {
+        let storage = self.clone();
+        tokio::spawn(async move {
+            let destination = *storage
+                .released_uploads
+                .lock()
+                .unwrap()
+                .entry(id)
+                .or_insert(destination);
+            let held = storage.upload_pins.lock().unwrap().get(&id).map(|pin| {
+                (
+                    pin._pin.as_ref().map(|pin| pin.0.clone()),
+                    pin._charge.as_ref().map(|charge| charge.storage),
+                )
+            });
+            let Some((owner, target)) = held else {
+                storage.released_uploads.lock().unwrap().remove(&id);
+                return Ok(());
+            };
+            if owner.is_none()
+                || storage
+                    .file_cache()
+                    .promote(
+                        id,
+                        destination,
+                        owner.as_ref(),
+                        storage.local_cache(target)?,
+                    )
+                    .await?
+            {
+                storage.upload_pins.lock().unwrap().remove(&id);
+                storage.released_uploads.lock().unwrap().remove(&id);
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?
     }
     pub fn upload_pin_ids(&self) -> Vec<Uuid> {
         self.upload_pins.lock().unwrap().keys().copied().collect()
@@ -1227,19 +1261,19 @@ impl Storage {
             return Ok(if let Some(root) = &backend.raw_root {
                 root.join(chunk_name(source)).with_extension("partial")
             } else {
-                CacheFile::Raw
+                CacheFile::PendingRaw
                     .path(&self.disk.root, source)
                     .with_extension("partial")
             });
         }
-        Ok(self.disk.fragment_path(file))
+        Ok(self.disk.candidate_path(file))
     }
     pub(crate) async fn remove_multipart_file(
         &self,
         file: &crate::model::multipart::MultipartFile,
     ) -> Result<()> {
         if file.source_id.is_none() {
-            return self.disk.remove_fragment(file.id).await;
+            return self.disk.remove_candidate(file.id).await;
         }
         if !self.is_local(file.storage_id)? {
             return self.remove_raw_checkpoint(file.id).await;
@@ -1358,9 +1392,13 @@ impl Storage {
             self.disk.release(Area::Cache, e.size);
             drop(removal);
         }
+        let path = self.pending_chunk_path(id, compressed);
+        tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let ticket = loop {
             if fifo.entries.len() < policy.max_entries
-                && let Ok(ticket) = self.disk.reserve(Area::Cache, size)
+                && let Ok(ticket) =
+                    self.disk
+                        .reserve_at(Area::Cache, size, false, path.parent().unwrap())
             {
                 break ticket;
             }
@@ -1390,7 +1428,6 @@ impl Storage {
             drop(removal);
         };
         drop(fifo);
-        let path = self.cache_path(id, compressed);
         let tmp = path.with_extension(if compressed { "zst.tmp" } else { "raw.tmp" });
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let result = async {
@@ -1413,7 +1450,7 @@ impl Storage {
             tokio::fs::rename(&tmp, &path).await?;
             if !buffered {
                 raw::sync_directory(path.parent().unwrap()).await?;
-                raw::sync_directory(&self.disk.root.join("chunks")).await?;
+                raw::sync_directory(&self.disk.root.join("pending/chunks")).await?;
             }
             Ok::<_, anyhow::Error>(())
         }
@@ -1431,7 +1468,7 @@ impl Storage {
         }
         ticket.commit();
         let mut fifo = self.fifo.lock().await;
-        fifo.insert(id, size, compressed);
+        fifo.insert(id, size, CacheFile::PendingChunk(compressed));
         let pin = fifo.entries[&id].pins.clone();
         pin.fetch_add(1, Ordering::Relaxed);
         drop(fifo);
@@ -1450,69 +1487,82 @@ impl Storage {
         Ok(Some(pin))
     }
     async fn scan(&self) -> Result<()> {
-        let mut parts = tokio::fs::read_dir(self.disk.root.join("multipart")).await?;
-        while let Some(e) = parts.next_entry().await? {
-            if e.file_type().await?.is_file() {
-                self.disk
-                    .account_existing(Area::Multipart, local::allocated(&e.metadata().await?));
+        for area in ["fragment", "candidate"] {
+            let mut parts =
+                tokio::fs::read_dir(self.disk.root.join("pending/multipart").join(area)).await?;
+            while let Some(file) = parts.next_entry().await? {
+                if file.file_type().await?.is_file() {
+                    self.disk.account_existing(
+                        Area::Multipart,
+                        local::allocated(&file.metadata().await?),
+                    );
+                }
             }
         }
-        for directory in ["chunks", "raw"] {
-            let mut dirs = tokio::fs::read_dir(self.disk.root.join(directory)).await?;
-            while let Some(dir) = dirs.next_entry().await? {
-                if !dir.file_type().await?.is_dir() {
-                    continue;
-                }
-                let mut files = tokio::fs::read_dir(dir.path()).await?;
-                while let Some(file) = files.next_entry().await? {
-                    if !file.file_type().await?.is_file() {
+        // Authoritative pending references have already been restored; never recover cache first.
+        for namespace in ["pending", "cache"] {
+            for directory in ["chunks", "raw"] {
+                let mut dirs =
+                    tokio::fs::read_dir(self.disk.root.join(namespace).join(directory)).await?;
+                while let Some(dir) = dirs.next_entry().await? {
+                    if !dir.file_type().await?.is_dir() {
                         continue;
                     }
-                    let len = file.metadata().await?.len();
-                    let name = format!(
-                        "{}/{}",
-                        dir.file_name().to_string_lossy(),
-                        file.file_name().to_string_lossy()
-                    );
-                    let cached = if directory == "raw" {
-                        parse_chunk_name(&name).map(|id| (id, CacheFile::Raw))
-                    } else {
-                        parse_cache_name(&name)
-                            .map(|(id, compressed)| (id, CacheFile::Chunk(compressed)))
-                    };
-                    if directory == "raw"
-                        && let Some(id) = name.strip_suffix(".partial").and_then(parse_chunk_name)
-                        && self.raw_store.cached_checkpoint(id).await?.is_some()
-                    {
-                        continue;
-                    }
-                    let mut fifo = self.fifo.lock().await;
-                    if cached.is_some_and(|(id, format)| {
-                        format == CacheFile::Raw
-                            && self.raw_upload_pins.lock().unwrap().contains_key(&id)
-                    }) {
-                        continue;
-                    }
-                    if cached.is_some_and(|(id, format)| {
-                        self.upload_pins
-                            .lock()
-                            .unwrap()
-                            .get(&id)
-                            .is_some_and(|p| format == CacheFile::Chunk(p.compressed))
-                    }) {
-                        continue;
-                    }
-                    if let Some((id, format)) = cached.filter(|(id, format)| {
-                        (matches!(format, CacheFile::Raw) || (1..=MAX as u64).contains(&len))
-                            && !fifo.entries.contains_key(id)
-                            && fifo.entries.len() < self.max_entries
-                            && self
-                                .capacity
-                                .is_none_or(|c| self.disk.used()[1].saturating_add(len) <= c)
-                    }) {
-                        fifo.insert(id, len, format);
-                        self.disk.account_existing(Area::Cache, len);
-                    } else {
+                    let mut files = tokio::fs::read_dir(dir.path()).await?;
+                    while let Some(file) = files.next_entry().await? {
+                        if !file.file_type().await?.is_file() {
+                            continue;
+                        }
+                        let len = file.metadata().await?.len();
+                        let name = format!(
+                            "{}/{}",
+                            dir.file_name().to_string_lossy(),
+                            file.file_name().to_string_lossy()
+                        );
+                        let cached = if directory == "raw" {
+                            parse_chunk_name(&name).map(|id| (id, CacheFile::Raw))
+                        } else {
+                            parse_cache_name(&name)
+                                .map(|(id, compressed)| (id, CacheFile::Chunk(compressed)))
+                        };
+                        if namespace == "pending" {
+                            if directory == "raw"
+                                && let Some(id) =
+                                    name.strip_suffix(".partial").and_then(parse_chunk_name)
+                                && self.raw_store.cached_checkpoint(id).await?.is_some()
+                            {
+                                continue;
+                            }
+                            if cached.is_some_and(|(id, format)| {
+                                if format == CacheFile::Raw {
+                                    self.raw_upload_pins.lock().unwrap().contains_key(&id)
+                                } else {
+                                    self.upload_pins
+                                        .lock()
+                                        .unwrap()
+                                        .get(&id)
+                                        .is_some_and(|pin| {
+                                            format == CacheFile::Chunk(pin.compressed)
+                                        })
+                                }
+                            }) {
+                                continue;
+                            }
+                        } else {
+                            let mut fifo = self.fifo.lock().await;
+                            if let Some((id, format)) = cached.filter(|(id, format)| {
+                                (*format == CacheFile::Raw || (1..=MAX as u64).contains(&len))
+                                    && !fifo.entries.contains_key(id)
+                                    && fifo.entries.len() < self.max_entries
+                                    && self.capacity.is_none_or(|limit| {
+                                        self.disk.used()[1].saturating_add(len) <= limit
+                                    })
+                            }) {
+                                fifo.insert(id, len, format);
+                                self.disk.account_existing(Area::Cache, len);
+                                continue;
+                            }
+                        }
                         tokio::fs::remove_file(file.path()).await?;
                     }
                 }
@@ -1660,11 +1710,13 @@ impl Storage {
             .pin(id)
             .await
             .and_then(|(pin, file)| match file {
-                CacheFile::Chunk(compressed) => Some((pin, compressed)),
-                CacheFile::Raw => None,
+                CacheFile::Chunk(compressed) | CacheFile::PendingChunk(compressed) => {
+                    Some((pin, file, compressed))
+                }
+                _ => None,
             });
-        if let Some((pin, compressed)) = cached {
-            let file = read_bounded(self.cache_path(id, compressed), MAX).await;
+        if let Some((pin, format, compressed)) = cached {
+            let file = read_bounded(format.path(&self.disk.root, id), MAX).await;
             let missing = file.as_ref().err().is_some_and(|e| {
                 e.downcast_ref::<std::io::Error>()
                     .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
@@ -1752,7 +1804,7 @@ impl Storage {
             self.diagnostics
                 .pending_unavailable
                 .fetch_add(1, Ordering::Relaxed);
-            return Err(anyhow::anyhow!("pending upload cache is missing or corrupt for chunk {}; preserve data/chunks and restore its durable source", c.id).context(codec::IntegrityError::PendingUnavailable));
+            return Err(anyhow::anyhow!("pending upload cache is missing or corrupt for chunk {}; preserve pending/chunks and restore its durable source", c.id).context(codec::IntegrityError::PendingUnavailable));
         }
         if self.cluster_mode && self.physical.pending_only(c.id).await? {
             return Err(crate::app::readiness::pending());
@@ -1855,17 +1907,6 @@ impl Storage {
                 }
             }),
         );
-    }
-    async fn reserve_cache(&self, size: u64, policy: CachePolicy) -> Result<Option<Reservation>> {
-        self.reserve_cache_space(size, policy, false).await
-    }
-    async fn reserve_cache_space(
-        &self,
-        size: u64,
-        policy: CachePolicy,
-        existing: bool,
-    ) -> Result<Option<Reservation>> {
-        self.file_cache().reserve(size, policy, existing).await
     }
     async fn fill_owned(
         &self,

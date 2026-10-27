@@ -83,13 +83,13 @@ def main():
         # Every cache name must resolve to a durable logical or physical identity.
         known = {identity(row["uuid"]) for row in original}
         known.update(identity(row["location_id"]) for row in encodings)
-        cached = {identity(path.stem) for path in (data / "chunks").glob("*/*")
+        cached = {identity(path.stem) for path in (data / "cache" / "chunks").glob("*/*")
                   if path.suffix in (".raw", ".zst")}
         assert known & cached, "pack read produced no persistent cache entry"
         all_known = {identity(row["uuid"]) for row in database.query("SELECT " + logical + " AS uuid FROM chunks")}
         all_known.update(identity(row["location_id"]) for row in database.query("SELECT location_id FROM chunk_encodings"))
         assert cached <= all_known, "cache name has no durable database identity"
-        for path in (data / "chunks").glob("*/*"):
+        for path in (data / "cache" / "chunks").glob("*/*"):
             if path.suffix in (".raw", ".zst"):
                 assert path.parent.name == identity(path.stem).hex[-2:]
 

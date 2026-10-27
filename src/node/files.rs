@@ -81,7 +81,7 @@ impl Cache {
             pending: Mutex::default(),
         });
         Ok(Arc::new(Self {
-            root: instance.data_path.join("read-cache"),
+            root: instance.data_path.clone(),
             disk,
             fifo: Default::default(),
             writes: Default::default(),
@@ -112,27 +112,29 @@ impl Cache {
     pub(super) async fn multipart(&self) -> Result<Arc<Disk>> {
         self.multipart_ready
             .get_or_try_init(|| async {
-                let root = self.disk.root.join("multipart");
-                tokio::fs::create_dir_all(&root).await?;
-                ensure!(
-                    tokio::fs::symlink_metadata(&root).await?.is_dir(),
-                    "multipart path is not a directory"
-                );
-                tokio::fs::File::open(&self.disk.root)
-                    .await?
-                    .sync_all()
-                    .await?;
-                let mut entries = tokio::fs::read_dir(&root).await?;
+                self.disk.initialize().await?;
                 let mut size = 0u64;
-                while let Some(entry) = entries.next_entry().await? {
-                    let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
+                for area in ["fragment", "candidate"] {
+                    let root = self.disk.root.join("pending/multipart").join(area);
                     ensure!(
-                        metadata.is_file(),
-                        "multipart directory contains a non-file entry"
+                        tokio::fs::symlink_metadata(&root).await?.is_dir(),
+                        "multipart path is not a directory"
                     );
-                    size = size
-                        .checked_add(crate::storage::local::allocated(&metadata))
-                        .context("multipart accounting overflow")?;
+                    tokio::fs::File::open(&self.disk.root)
+                        .await?
+                        .sync_all()
+                        .await?;
+                    let mut entries = tokio::fs::read_dir(&root).await?;
+                    while let Some(entry) = entries.next_entry().await? {
+                        let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
+                        ensure!(
+                            metadata.is_file(),
+                            "multipart directory contains a non-file entry"
+                        );
+                        size = size
+                            .checked_add(crate::storage::local::allocated(&metadata))
+                            .context("multipart accounting overflow")?;
+                    }
                 }
                 self.disk.account_existing(Area::Multipart, size);
                 Ok::<_, anyhow::Error>(())
@@ -161,73 +163,80 @@ impl Cache {
     async fn part_inventory(self: &Arc<Self>, node: &NodeContext, recover: bool) -> Result<()> {
         let disk = self.multipart().await?;
         let snapshot = node.background_snapshot()?;
-        let mut entries = tokio::fs::read_dir(disk.root.join("multipart")).await?;
-        let mut ids = Vec::with_capacity(128);
-        loop {
-            let entry = entries.next_entry().await?;
-            if let Some(entry) = &entry {
-                if let Some(id) = entry
-                    .file_name()
-                    .to_str()
-                    .and_then(|name| Uuid::parse_str(name).ok())
-                {
-                    if !disk.pending(id) {
-                        ids.push(id);
-                    }
-                }
-            }
-            if !ids.is_empty() && (ids.len() == 128 || entry.is_none()) {
-                snapshot.lease.check()?;
-                let reply = node
-                    .client
-                    .check_local_files(crate::rpc::wire::LocalFilesRequest {
-                        run: Some(snapshot.lease.run.clone()),
-                        files: ids.iter().map(ToString::to_string).collect(),
-                        recover,
-                    })
-                    .await?;
-                let states: Vec<crate::model::node_raw::File> =
-                    serde_json::from_slice(&reply.files_json)?;
-                ensure!(
-                    states.len() == ids.len()
-                        && states
-                            .iter()
-                            .map(|file| file.id)
-                            .collect::<HashSet<_>>()
-                            .len()
-                            == ids.len(),
-                    "invalid multipart inventory"
-                );
-                for value in states {
-                    use crate::model::node_raw::FileState;
-                    let id = value.id;
-                    ensure!(
-                        ids.contains(&id),
-                        "control returned an unexpected local file"
-                    );
-                    let _guard = self.local_lock(id).await;
-                    snapshot.lease.check()?;
-                    if disk.pending(id) {
-                        continue;
-                    }
-                    if value.state == FileState::Pending {
-                        let storage = value.storage.context("multipart storage missing")?;
-                        self.uploads
-                            .lock()
-                            .unwrap()
-                            .entry(id)
-                            .or_insert_with(|| disk.restore_upload(storage, value.size));
-                    } else {
-                        self.release_part(id);
-                        if value.state == FileState::Removable {
-                            disk.remove_fragment(id).await?;
+        for area in ["fragment", "candidate"] {
+            let mut entries =
+                tokio::fs::read_dir(disk.root.join("pending/multipart").join(area)).await?;
+            let mut ids = Vec::with_capacity(128);
+            loop {
+                let entry = entries.next_entry().await?;
+                if let Some(entry) = &entry {
+                    if let Some(id) = entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| Uuid::parse_str(name).ok())
+                    {
+                        if !disk.pending(id) {
+                            ids.push(id);
                         }
                     }
                 }
-                ids.clear();
-            }
-            if entry.is_none() {
-                break;
+                if !ids.is_empty() && (ids.len() == 128 || entry.is_none()) {
+                    snapshot.lease.check()?;
+                    let reply = node
+                        .client
+                        .check_local_files(crate::rpc::wire::LocalFilesRequest {
+                            run: Some(snapshot.lease.run.clone()),
+                            files: ids.iter().map(ToString::to_string).collect(),
+                            recover,
+                        })
+                        .await?;
+                    let states: Vec<crate::model::node_raw::File> =
+                        serde_json::from_slice(&reply.files_json)?;
+                    ensure!(
+                        states.len() == ids.len()
+                            && states
+                                .iter()
+                                .map(|file| file.id)
+                                .collect::<HashSet<_>>()
+                                .len()
+                                == ids.len(),
+                        "invalid multipart inventory"
+                    );
+                    for value in states {
+                        use crate::model::node_raw::FileState;
+                        let id = value.id;
+                        ensure!(
+                            ids.contains(&id),
+                            "control returned an unexpected local file"
+                        );
+                        let _guard = self.local_lock(id).await;
+                        snapshot.lease.check()?;
+                        if disk.pending(id) {
+                            continue;
+                        }
+                        if value.state == FileState::Pending {
+                            let storage = value.storage.context("multipart storage missing")?;
+                            self.uploads
+                                .lock()
+                                .unwrap()
+                                .entry(id)
+                                .or_insert_with(|| disk.restore_upload(storage, value.size));
+                        } else {
+                            if value.state == FileState::Removable {
+                                if area == "fragment" {
+                                    disk.remove_fragment(id).await?;
+                                } else {
+                                    disk.remove_candidate(id).await?;
+                                }
+                            }
+                            self.release_part(id);
+                        }
+                    }
+                    ids.clear();
+                }
+                if entry.is_none() {
+                    break;
+                }
             }
         }
         Ok(())
@@ -276,8 +285,9 @@ impl Cache {
     async fn initialize(&self) -> Result<()> {
         self.ready
             .get_or_try_init(|| async {
+                self.disk.initialize().await?;
                 for area in ["chunks", "raw"] {
-                    let root = self.root.join(area);
+                    let root = self.root.join("cache").join(area);
                     tokio::fs::create_dir_all(&root).await?;
                     ensure!(
                         tokio::fs::symlink_metadata(&self.root).await?.is_dir(),
@@ -306,6 +316,13 @@ impl Cache {
                                 crate::storage::parse_cache_name(&name)
                                     .map(|(id, compressed)| (id, CacheFile::Chunk(compressed)))
                             };
+                            if let Some((id, format)) = parsed
+                                && tokio::fs::try_exists(format.pending().path(&self.root, id))
+                                    .await?
+                            {
+                                tokio::fs::remove_file(file.path()).await?;
+                                continue;
+                            }
                             let mut fifo = self.fifo.lock().await;
                             if parsed.is_some_and(|(id, format)| {
                                 fifo.entries

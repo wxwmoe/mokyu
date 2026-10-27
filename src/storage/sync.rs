@@ -46,8 +46,8 @@ impl Storage {
                 cache_pin = Some(CachePin(entry.pins.clone()));
             }
             (
-                self.disk.root.join("chunks"),
-                self.cache_path(id, key.ends_with(".zst")),
+                self.disk.root.join("pending/chunks"),
+                self.pending_chunk_path(id, key.ends_with(".zst")),
                 true,
             )
         } else if !target.is_local {

@@ -160,7 +160,7 @@ impl App {
         let (position, _lease, _guard) = self
             .storage
             .disk
-            .append_fragment(file, data, guard)
+            .append_candidate(file, data, guard)
             .await
             .map_err(|error| {
                 tracing::warn!(%error,"raw multipart file could not be persisted");

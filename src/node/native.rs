@@ -231,7 +231,7 @@ impl Writes {
                         .try_into()
                         .map_err(|_| anyhow::anyhow!("invalid part digest"))?;
                     let disk = self.reads.reader.files.multipart().await?;
-                    let local = disk.fragment_path(*file);
+                    let local = disk.candidate_path(*file);
                     let _lock = self.reads.reader.files.local_lock(*file).await;
                     let value = backend
                         .store
@@ -356,7 +356,7 @@ impl Writes {
         let disk = files.multipart().await?;
         let id = Uuid::parse_str(&operation.stream)?;
         let mut guard = files.local_lock(id).await;
-        let path = disk.fragment_path(id);
+        let path = disk.candidate_path(id);
         let file = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -398,7 +398,7 @@ impl Writes {
                 rest = &rest[count..];
                 if buffer.len() == codec::MAX || (eof && !buffer.is_empty()) {
                     hashes.push(blake3::hash(&buffer).as_bytes().to_vec());
-                    let (_, _, held) = disk.append_fragment(id, &buffer, guard).await?;
+                    let (_, _, held) = disk.append_candidate(id, &buffer, guard).await?;
                     guard = held;
                     buffer.clear();
                 }

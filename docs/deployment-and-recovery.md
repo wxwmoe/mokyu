@@ -146,26 +146,26 @@ docker exec mokyu mokyu cli gc mark-unreferenced
 | 数据库一致备份及相应恢复日志 | 对象索引、权限、引用和上传状态 |
 | 配置、`instance.deployment_key` | storage 身份、解密数据库中的历史区块密钥及客户端凭据 |
 | 仍存在的存储区块和区块包（包括本地存储目录或 S3 命名空间） | 实际对象内容 |
-| `instance.data_path/multipart` 的一致快照 | 恢复已确认但尚未 Complete 的分片上传 |
-| `instance.data_path/chunks` | 包含待上传唯一副本；有积压时必须与数据库一致保存 |
+| `instance.data_path/pending` 的一致快照 | 未完成 Multipart、接收文件及待上传唯一副本，与数据库恢复点一致保存 |
+| 各群集节点的 `instance.data_path/node.json` | 节点身份及所属本机任务的恢复 |
 
-上传缓存默认开启，成功响应可能表示数据库和本地文件已持久，远端存储尚未收到。本地磁盘丢失可能丢失这些已确认数据。只读缓存可重建，待上传文件不能丢弃。
+上传缓存默认开启，成功响应可能表示数据库和本地文件已持久，远端存储尚未收到。本地磁盘丢失可能丢失这些已确认数据。`instance.data_path/cache` 可重建、无需备份；pending 文件不能丢弃。
 
 建立恢复点可选择：
 
-1. 进入维护模式、等待活跃写入排空，显式运行 `cli cache flush --wait` 并确认成功、`cli cache status` 无积压；停止网关，再备份数据库、配置和必要的 multipart 数据。等待超时只结束 CLI 等待，凭返回的 task_id 检查服务器任务；不能将超时或正常退出的尽力排空视为备份屏障已完成。
-2. 停止写入并取得数据库、配置、multipart 和 chunks 待上传数据的一致快照。
+1. 进入维护模式、等待活跃写入排空，显式运行 `cli cache flush --wait` 并确认成功、`cli cache status` 无积压；停止网关，再备份数据库、配置和必要的 pending 数据。等待超时只结束 CLI 等待，凭返回的 task_id 检查服务器任务；不能将超时或正常退出的尽力排空视为备份屏障已完成。
+2. 停止写入并取得数据库、配置和 pending 数据的一致快照。
 
 排空只保证该恢复点，不保证此前任意 WAL 时刻：旧数据库可能引用后来已淘汰的本地来源。任意 PITR 还需匹配的数据历史，或关闭提前本地确认并遵守存储 GC 保留窗口。仅备份配置不能恢复本地唯一数据。
 
-SQLite 优先在停止 Mokyu 后备份整个数据库目录；若存在 `mokyu.db-wal`，必须与数据库文件一起保留，不要只复制正在使用的 `.db`。在线备份须使用 SQLite 的一致备份接口或 `VACUUM INTO`，并另行保证 multipart、chunks 和载荷属于匹配的恢复点。自动 WAL checkpoint 不等于备份；不要手动删除 WAL。
+SQLite 优先在停止 Mokyu 后备份整个数据库目录；若存在 `mokyu.db-wal`，必须与数据库文件一起保留，不要只复制正在使用的 `.db`。在线备份须使用 SQLite 的一致备份接口或 `VACUUM INTO`，并另行保证 pending 和载荷属于匹配的恢复点。自动 WAL checkpoint 不等于备份；不要手动删除 WAL。
 
 **可恢复时间同时受数据库备份及恢复日志、存储 GC 和密钥保留限制。** 旧数据库引用的区块若已被回收，无法仅凭数据库或密钥重建。
 
 ## 恢复步骤
 
 1. 停止所有会写同一数据库或存储范围的网关，保留现场，核对备份所属部署。
-2. 恢复数据库、配置和全部历史密钥；一并恢复该恢复点依赖的 multipart、chunks 待上传快照。只有确认恢复点不存在待上传数据时，chunks 才可以为空。
+2. 恢复数据库、配置和全部历史密钥；一并恢复该恢复点依赖的 pending 快照和节点身份。只有确认恢复点不存在待上传或未完成 Multipart 引用时，pending 才可以为空；cache 可以不恢复。
 3. 保持恢复数据库对应的 `instance.deployment_key` 不变。单容器使用 `mokyu --maintenance` 启动（Compose 临时设置 `command: ["--maintenance"]`）；群集先只启动 `mokyu control --maintenance`。启动过程先持久化维护状态，再恢复上传和任务，确认 `cli status` 的 `maintenance=true`。不要先正常启动再开启维护。
 4. **生成新的实际区块写密钥**：用 `cli key create NAME block` 创建，再对每个存储执行 `cli storage key set STORAGE NAME`，保留历史读密钥。需要把存量编码全部切换时，再显式运行 `storage rewrite`。数据库 ID 可能回滚；只改名称或日期不能防止 nonce 重用。完成这一步前不要执行缓存 flush、运行会重新编码区块的维护任务或恢复写入。
 5. 确认 `cli status` 的 `maintenance=true`，核对 storage 身份、历史密钥、旧对象和 Range 读取；可运行巡检。清桶任务会保持暂停，须在核验并退出维护后显式恢复。缺失 multipart 尾部的未完成上传需重传，已发布对象不依赖该目录。
@@ -178,7 +178,7 @@ SQLite 优先在停止 Mokyu 后备份整个数据库目录；若存在 `mokyu.d
 
 非空库必须具有合法的 `mokyu_meta.schema_version` 和匹配的完整迁移历史。已有版本通过迁移前检查后执行后续编号迁移；当前版本只校验、不重复初始化。版本缺失、非法、超出支持范围或历史不匹配时终止启动。已有空表、只有 `_sqlx_migrations` 的库也属于非空库；程序不会据此猜测版本或自动重建。
 
-1. 保留当前镜像，并按上面的方式排空或一致备份待上传数据，同时保留数据库、配置、密钥及必要的 multipart 数据。
+1. 保留当前镜像，并按上面的方式排空或一致备份待上传数据，同时保留数据库、配置、密钥及必要的 pending 数据。
 2. 停止网关，构建目标源码的镜像，保留现有数据库、data 和存储配置。
 3. 启动新镜像。服务先取得独占锁、校验迁移文件并执行待应用 SQL，全部成功后才启动 HTTP、GC 和上传恢复。
 4. 检查日志、`cli status`、旧对象及新上传。普通升级不回滚序列，无需换写密钥；恢复数据库时必须遵循上面的换密钥步骤。

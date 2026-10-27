@@ -65,7 +65,7 @@ impl Writes {
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("node-conversion-before-read").await;
                 let body = if source.pending_upload {
-                    let path = crate::storage::cache::CacheFile::Raw
+                    let path = crate::storage::cache::CacheFile::PendingRaw
                         .path(&node.config.instance.data_path, source.location_id);
                     crate::http::object::blob(
                         super::native::replay(

@@ -57,8 +57,8 @@ def main():
                        upload_retention='1s', deleted_chunk_retention='1s', unreferenced_grace='1s', min_storage_duration='0s')
         profile.update({'upload_cache': True, 'cache_enabled': True} if arguments.s3_cache else {'min_free_space': '16MiB'})
         profile = fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
-        backend_root = Path(database.config['instance']['data_path']) if arguments.s3_cache else fixture.root
-        root = Path(database.config['instance']['data_path']) / 'multipart'
+        backend_root = Path(database.config['instance']['data_path']) / 'pending' if arguments.s3_cache else fixture.root
+        root = Path(database.config['instance']['data_path']) / 'pending' / 'multipart' / 'candidate'
         source_ids = set()
         acknowledged = {}
 
@@ -100,7 +100,10 @@ def main():
                 JOIN raw_sources s ON s.id=r.source_id WHERE o.bucket_id=%s AND o.object_key=%s''',
                 uuid.UUID(fixture.bucket_id), key if database.type == 'postgres' else key.encode())
             ident = identifier(row['id']).hex
-            return backend_root / 'raw' / ident[-2:] / ident
+            pending = backend_root / 'raw' / ident[-2:] / ident
+            if arguments.s3_cache and not pending.exists():
+                return Path(database.config['instance']['data_path']) / 'cache' / 'raw' / ident[-2:] / ident
+            return pending
 
         data = [os.urandom(5 * 1024 * 1024 + 3), os.urandom(5 * 1024 * 1024 + 5), b'last part']
         upload = create('sequential')

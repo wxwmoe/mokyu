@@ -26,7 +26,7 @@ impl File {
         id: Uuid,
         policy: CachePolicy,
     ) -> Result<Self> {
-        let path = CacheFile::Raw
+        let path = CacheFile::PendingRaw
             .path(files.root, id)
             .with_extension("partial");
         tokio::fs::create_dir_all(path.parent().unwrap())
@@ -72,7 +72,8 @@ impl File {
             let reservation = {
                 let _write = storage.cache_writes.lock().await;
                 storage
-                    .reserve_cache_space(size, self.policy, true)
+                    .file_cache()
+                    .reserve(size, self.policy, true, &self.path)
                     .await?
                     .ok_or_else(|| s3s::s3_error!(SlowDown, "raw request workspace is full"))?
             };
@@ -130,7 +131,7 @@ impl File {
             let _write = files.cache_writes.lock().await;
             self.pending = Some(
                 files
-                    .reserve(size, self.policy, false)
+                    .reserve(size, self.policy, false, &self.path)
                     .await?
                     .ok_or_else(|| s3s::s3_error!(SlowDown, "raw request workspace is full"))?,
             );
@@ -191,13 +192,17 @@ impl File {
         buffered: bool,
     ) -> Result<Option<super::UploadPin>> {
         let _write = storage.cache_writes.lock().await;
-        let Some(reservation) = storage.reserve_cache(0, self.policy).await? else {
+        let Some(reservation) = storage
+            .file_cache()
+            .reserve(0, self.policy, true, &self.path)
+            .await?
+        else {
             return Ok(None);
         };
         drop(reservation);
         self.publish_in(&storage.disk.root, id, buffered).await?;
         let mut fifo = storage.fifo.lock().await;
-        fifo.insert(id, self.bytes, CacheFile::Raw);
+        fifo.insert(id, self.bytes, CacheFile::PendingRaw);
         let pins = fifo.entries[&id].pins.clone();
         pins.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.published = true;
@@ -219,7 +224,7 @@ impl File {
         id: Uuid,
         buffered: bool,
     ) -> Result<()> {
-        let destination = CacheFile::Raw.path(root, id);
+        let destination = CacheFile::PendingRaw.path(root, id);
         tokio::fs::create_dir_all(destination.parent().unwrap()).await?;
         let file = self.file.as_mut().unwrap();
         file.flush().await?;
@@ -243,7 +248,7 @@ impl File {
                 .await?
                 .sync_all()
                 .await?;
-            tokio::fs::File::open(root.join("raw"))
+            tokio::fs::File::open(root.join("pending/raw"))
                 .await?
                 .sync_all()
                 .await?;

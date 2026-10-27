@@ -58,4 +58,6 @@ pub(crate) struct File {
     pub storage: Option<Uuid>,
     pub size: u64,
     pub state: FileState,
+    pub cache_limit: Option<String>,
+    pub cache_entries: Option<u32>,
 }

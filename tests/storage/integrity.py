@@ -88,7 +88,7 @@ data = os.urandom(128 * 1024)
 for key, body in [('a', data), ('b', data), ('empty', b'')]:
     s3.put_object(Bucket=bucket, Key=key, Body=body)
 assert s3.get_object(Bucket=bucket, Key='a')['Body'].read() == data
-cache = Path(os.environ['MOKYU_TEST_DATA']) / 'chunks'
+cache = Path(os.environ['MOKYU_TEST_DATA']) / 'cache' / 'chunks'
 cache_before = {str(p): p.read_bytes() for p in cache.rglob('*') if p.is_file()}
 def backend_gets():
     return int(next(row['value'] for row in get('/api/v1/system/status')['counters'] if row['key'] == 'backend_gets'))

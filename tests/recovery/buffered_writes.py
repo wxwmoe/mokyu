@@ -56,7 +56,7 @@ def main():
     def file(fixture, key):
         identity = source(fixture, key)['file_uuid']
         identity = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
-        root = Path(database.config['instance']['data_path']) if fixture.backend else fixture.root
+        root = Path(database.config['instance']['data_path']) / 'pending' if fixture.backend else fixture.root
         return root / 'raw' / identity.hex[-2:] / identity.hex
 
     try:
@@ -312,7 +312,10 @@ def main():
             assert source(remote, 'pending')['durability'] == 'durable'
             uploader.unlink(missing_ok=True)
             remote.cli('cache', 'flush', '--wait', '--timeout', '30s')
-            assert not source(remote, 'pending')['pending_upload'] and cached.is_file()
+            destination = Path(database.config['instance']['data_path']) / 'cache' / cached.relative_to(
+                Path(database.config['instance']['data_path']) / 'pending')
+            wait(destination.is_file, 'raw pending file did not enter read cache')
+            assert not source(remote, 'pending')['pending_upload'] and not cached.exists()
             remote.read('pending', value)
             print('PASS S3 buffered cache survives restart and becomes read cache after durable upload', flush=True)
 

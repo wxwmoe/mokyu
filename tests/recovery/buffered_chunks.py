@@ -49,8 +49,9 @@ def main():
     def rows(fixture, key):
         location = 'encoding_id' if database.type == 'postgres' else 'location_id'
         cache = 'staging_object_key' if database.type == 'postgres' else 'cache_key'
+        logical = 'c.id' if database.type == 'postgres' else 'c.uuid'
         return database.query(f'''SELECT c.id,l.{location} AS file_uuid,l.sync_pending,
-            l.quarantine_code,p.{cache} AS cache_key FROM objects o
+            l.quarantine_code,p.{cache} AS cache_key,coalesce(l.{location},{logical}) AS cache_uuid FROM objects o
             JOIN extents e ON e.stream_id=o.stream_id JOIN chunks c ON c.id=e.chunk_id
             LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id
             LEFT JOIN pending_uploads p ON p.chunk_id=c.id
@@ -61,7 +62,7 @@ def main():
         source = rows(fixture, key)[0]
         if source['cache_key']:
             identity = uuid.UUID(source['cache_key'].rsplit('.', 1)[0])
-            return Path(database.config['instance']['data_path']) / 'chunks' / identity.hex[-2:] / (identity.hex + '.raw')
+            return Path(database.config['instance']['data_path']) / 'pending' / 'chunks' / identity.hex[-2:] / (identity.hex + '.raw')
         identity = source['file_uuid']
         identity = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
         return fixture.root / identity.hex[-2:] / identity.hex
@@ -148,7 +149,11 @@ def main():
             fixture.cli('cache', 'flush', '--wait', '--timeout', '60s')
             fixture.read('buffered', data)
             if cached:
-                assert cached.is_file(), 'successful upload discarded the reusable read cache'
+                value = rows(fixture, 'commit')[0]['cache_uuid']
+                identity = uuid.UUID(bytes=value) if isinstance(value, bytes) else uuid.UUID(str(value))
+                destination = Path(database.config['instance']['data_path']) / 'cache/chunks' / identity.hex[-2:] / (identity.hex + '.raw')
+                wait(destination.is_file, 'chunk pending file did not enter read cache')
+                assert not cached.exists()
             print('PASS ' + label + ' explicit flush and cache ownership transfer', flush=True)
 
         if backend:

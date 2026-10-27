@@ -97,7 +97,7 @@ if mode == 'single':
     marker = Path(os.environ['MOKYU_TEST_FAULT_DIR']) / 'local-cleanup'
     marker.touch()
     wait(lambda: marker.with_suffix('.hit').exists(), 'local sweeper was not isolated')
-    directory = Path(os.environ['MOKYU_TEST_DATA']) / 'multipart'
+    directory = Path(os.environ['MOKYU_TEST_DATA']) / 'pending' / 'multipart' / 'fragment'
     directory.mkdir(parents=True, exist_ok=True)
 else:
     assert mode == 'cluster', mode

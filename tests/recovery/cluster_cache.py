@@ -58,9 +58,9 @@ def main():
             JOIN raw_ranges e ON e.stream_id=o.stream_id JOIN raw_sources r ON r.id=e.source_id
             WHERE o.bucket_id=%s AND o.object_key=%s''', bucket, key)[0]
 
-    def path(source):
+    def path(source, cached=False):
         value = source.hex
-        return roots[0].parent / 'data' / 'raw' / value[-2:] / value
+        return roots[0].parent / 'data' / ('cache' if cached else 'pending') / 'raw' / value[-2:] / value
 
     def queued():
         return database.query('SELECT u.* FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id '
@@ -132,7 +132,8 @@ def main():
         assert not fixture.keys(), 'peer claimed a file it does not own'
         action('start-primary')
         drain()
-        assert path(source).read_bytes() == original, 'upload release removed the read-cache file'
+        wait(lambda: path(source, cached=True).exists(), 'pending file did not enter the read cache')
+        assert path(source, cached=True).read_bytes() == original
         for selected in (fixture.client, peer):
             read(selected, 'cached', original)
         assert not mapping('cached')['pending_upload']
@@ -170,12 +171,13 @@ def main():
         assert all(not row['staging_object_key'].startswith('__mokyu/') for row in pending_rows)
         read(fixture.client, 'chunks', chunked)
         pending(lambda: peer.get_object(Bucket=fixture.name, Key='chunks'))
-        retained = [roots[0].parent / 'data' / 'chunks' / uuid.UUID(row['staging_object_key'].split('.')[0]).hex[-2:] /
+        retained = [roots[0].parent / 'data' / 'pending' / 'chunks' / uuid.UUID(row['staging_object_key'].split('.')[0]).hex[-2:] /
                     (uuid.UUID(row['staging_object_key'].split('.')[0]).hex + '.' + row['staging_object_key'].split('.')[1]) for row in pending_rows]
         held.unlink(missing_ok=True)
         wait(lambda: not database.query('SELECT p.chunk_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE c.storage_id=%s', storage), 'chunks did not drain', seconds=150)
         read(peer, 'chunks', chunked)
-        assert all(file.exists() for file in retained), retained
+        wait(lambda: all(not file.exists() for file in retained), 'released chunks remained pending')
+        assert list((roots[0].parent / 'data' / 'cache' / 'chunks').glob('*/*'))
         assert not database.query("SELECT object_key FROM staging_objects WHERE object_key NOT LIKE %s", '__mokyu/multipart/fragment/%')
         print('PASS chunks use owner-scoped local upload/pack work and retain ordinary read-cache files', flush=True)
 

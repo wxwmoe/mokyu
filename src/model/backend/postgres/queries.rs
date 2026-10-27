@@ -4018,8 +4018,10 @@ pub(super) fn complete_upload_task(task: Uuid) -> Statement<'static> {
     )
     .bind(task)
 }
-pub(super) fn lock_pending_chunks<'q>(ids: &'q [Id]) -> Rows<'q, (Id, Option<String>)> {
-    sqlx::query_as("SELECT c.id,u.staging_object_key FROM chunks c LEFT JOIN pending_uploads u ON u.chunk_id=c.id WHERE c.id=ANY($1) ORDER BY c.id FOR UPDATE OF c").bind(ids)
+pub(super) fn lock_pending_chunks<'q>(
+    ids: &'q [Id],
+) -> Rows<'q, (Id, Option<String>, Option<Uuid>)> {
+    sqlx::query_as("SELECT c.id,u.staging_object_key,CASE WHEN c.state='ready' THEN COALESCE((SELECT e.encoding_id FROM chunk_encodings e WHERE e.encoding_id=c.current_encoding_id AND e.state='ready'),CASE WHEN EXISTS(SELECT 1 FROM packs p WHERE p.id=c.pack_id AND p.state='ready') THEN c.id END) END FROM chunks c LEFT JOIN pending_uploads u ON u.chunk_id=c.id WHERE c.id=ANY($1) ORDER BY c.id FOR UPDATE OF c").bind(ids)
 }
 pub(super) fn pending_staging_objects<'q>(ids: &'q [Id]) -> Rows<'q, (Id, Uuid, String)> {
     sqlx::query_as("SELECT chunk_id,staging_storage_id,staging_object_key FROM pending_uploads WHERE chunk_id=ANY($1) AND staging_storage_id IS NOT NULL AND staging_object_key LIKE '__mokyu/multipart/%'").bind(ids)

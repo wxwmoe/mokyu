@@ -472,6 +472,8 @@ pub(crate) async fn inventory(
             use crate::model::node_raw::{File, FileState};
             let held = pending.iter().find(|(file, _, _)| *file == id);
             File {
+                cache_limit: None,
+                cache_entries: None,
                 id,
                 storage: held.map(|(_, storage, _)| *storage),
                 size: held.map_or(0, |(_, _, size)| *size as u64),

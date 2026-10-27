@@ -3538,7 +3538,7 @@ pub(super) async fn cache_release(
         .await?;
     let mut released = Vec::new();
     let mut released_ids = std::collections::HashSet::new();
-    for (id, object_key) in keys {
+    for (id, object_key, destination) in keys {
         if queries::can_release_pending(id, existing_pack)
             .fetch_one(&mut *tx)
             .await?
@@ -3549,7 +3549,7 @@ pub(super) async fn cache_release(
             queries::delete_pending_upload(id).execute(&mut *tx).await?;
             released_ids.insert(id);
             if let Some(key) = object_key {
-                released.push(key);
+                released.push((key, destination));
             }
         }
     }

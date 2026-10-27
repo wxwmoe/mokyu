@@ -49,11 +49,11 @@ impl Storage {
     pub(super) async fn cached_raw(&self, source: &RawSource, verify: bool) -> Option<RawFile> {
         let id = source.location_id;
         let (pin, file) = self.file_cache().pin(id).await?;
-        if file != CacheFile::Raw {
+        if !matches!(file, CacheFile::Raw | CacheFile::PendingRaw) {
             return None;
         }
         let result = async {
-            let path = CacheFile::Raw.path(&self.disk.root, id);
+            let path = file.path(&self.disk.root, id);
             ensure!(
                 tokio::fs::symlink_metadata(&path).await?.is_file(),
                 "raw cache was replaced"
@@ -172,10 +172,10 @@ impl Files<'_> {
         if self.fifo.lock().await.entries.contains_key(&id) {
             return Ok(None);
         }
-        let Some(ticket) = self.reserve(size, policy, false).await? else {
+        let path = CacheFile::Raw.path(self.root, id).with_extension("tmp");
+        let Some(ticket) = self.reserve(size, policy, false, &path).await? else {
             return Ok(None);
         };
-        let path = CacheFile::Raw.path(self.root, id).with_extension("tmp");
         let mut write = Write {
             file: None,
             path,

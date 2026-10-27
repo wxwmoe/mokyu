@@ -106,9 +106,12 @@ async fn storage_diagnostics_count_shared_failures_and_cache_fallback() -> Resul
 
     storage.put_path_for(store.id, &path, raw.to_vec()).await?;
     // Exercise cache I/O with the local fixture; public local profiles disable caching.
-    Arc::get_mut(storage.targets.write().unwrap().get_mut(&store.id).unwrap())
-        .unwrap()
-        .cache_enabled = true;
+    {
+        let mut targets = storage.targets.write().unwrap();
+        let target = Arc::get_mut(targets.get_mut(&store.id).unwrap()).unwrap();
+        target.cache_enabled = true;
+        target.is_local = false;
+    }
     let _fills = storage
         .fills
         .clone()
@@ -116,7 +119,7 @@ async fn storage_diagnostics_count_shared_failures_and_cache_fallback() -> Resul
         .await?;
     // An invalid cache entry remains skippable even when its path is a directory.
     let id = cache::cache_id(&chunk);
-    let cache_path = storage.cache_path(id, false);
+    let cache_path = CacheFile::Chunk(false).path(&storage.disk.root, id);
     tokio::fs::create_dir_all(cache_path.parent().unwrap()).await?;
     tokio::fs::create_dir(&cache_path).await?;
     storage

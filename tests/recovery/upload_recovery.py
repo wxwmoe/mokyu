@@ -102,7 +102,7 @@ try:
     os.kill(backend_pid, signal.SIGCONT)
     pin = db.execute('SELECT c.storage_id,u.staged_compressed,u.staged_size FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id ORDER BY u.chunk_id LIMIT 1').fetchone()
     key = pin[0].hex
-    path = data / 'chunks' / key[-2:] / (key + ('.zst' if pin[1] else '.raw'))
+    path = data / 'pending' / 'chunks' / key[-2:] / (key + ('.zst' if pin[1] else '.raw'))
     saved = path.read_bytes()
     path.write_bytes(b'corrupt')
     try:

@@ -268,7 +268,7 @@ def main():
                 row, = database.query(f'SELECT {database.raw_location} AS file_uuid FROM raw_sources WHERE storage_id=%s', uuid.UUID(cached.store['id']))
                 identity = row['file_uuid']
                 identity = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
-                cache = Path(database.config['instance']['data_path']) / 'raw' / identity.hex[-2:] / identity.hex
+                cache = Path(database.config['instance']['data_path']) / 'cache' / 'raw' / identity.hex[-2:] / identity.hex
                 wait(cache.exists, 'raw disk cache was not populated')
                 cache.write_bytes(bytes([body[0] ^ 1]) + body[1:])
                 policy(cached, read_integrity='background')

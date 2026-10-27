@@ -5134,7 +5134,7 @@ pub(super) fn release_task_inputs(task: Uuid) -> Statement<'static> {
 }
 pub(super) fn lock_pending_chunks(ids: &[Id]) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT c.id,u.cache_key FROM chunks c LEFT JOIN pending_uploads u ON u.chunk_id=c.id WHERE c.id IN ",
+        "SELECT c.id,u.cache_key,CASE WHEN c.state='ready' THEN COALESCE((SELECT e.location_id FROM chunk_encodings e WHERE e.encoding_id=c.current_encoding_id AND e.state='ready'),CASE WHEN EXISTS(SELECT 1 FROM packs p WHERE p.id=c.pack_id AND p.state='ready') THEN c.uuid END) END FROM chunks c LEFT JOIN pending_uploads u ON u.chunk_id=c.id WHERE c.id IN ",
     );
     chunk_ids(&mut query, ids);
     query.push(" ORDER BY c.id");

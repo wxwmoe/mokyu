@@ -403,7 +403,7 @@ impl Storage {
                     continue;
                 }
                 let source = work.source;
-                let path = CacheFile::Raw.path(&self.disk.root, source.location_id);
+                let path = CacheFile::PendingRaw.path(&self.disk.root, source.location_id);
                 let metadata=tokio::fs::symlink_metadata(&path).await.context("pending raw upload is missing; preserve the raw cache and restore its durable source")?;
                 ensure!(
                     metadata.is_file() && metadata.len() == source.size as u64,
@@ -412,7 +412,7 @@ impl Storage {
                 let size = metadata.len();
                 self.disk.account_existing(Area::Cache, size);
                 let mut fifo = self.fifo.lock().await;
-                fifo.insert(source.location_id, size, CacheFile::Raw);
+                fifo.insert(source.location_id, size, CacheFile::PendingRaw);
                 let pins = fifo.entries[&source.location_id].pins.clone();
                 pins.fetch_add(1, Ordering::Relaxed);
                 self.raw_upload_pins.lock().unwrap().insert(
@@ -448,7 +448,7 @@ impl Storage {
             }
             for (location, source) in rows {
                 after = location;
-                let path = CacheFile::Raw.path(&self.disk.root, location);
+                let path = CacheFile::PendingRaw.path(&self.disk.root, location);
                 let partial = tokio::fs::symlink_metadata(path.with_extension("partial"))
                     .await
                     .context("multipart cache checkpoint is missing; restore its durable file")?;
@@ -479,7 +479,7 @@ impl Storage {
                 let size = metadata.len();
                 self.disk.account_existing(Area::Cache, size);
                 let mut fifo = self.fifo.lock().await;
-                fifo.insert(location, size, CacheFile::Raw);
+                fifo.insert(location, size, CacheFile::PendingRaw);
                 let pins = fifo.entries[&location].pins.clone();
                 pins.fetch_add(1, Ordering::Relaxed);
                 self.raw_upload_pins.lock().unwrap().insert(
@@ -505,7 +505,7 @@ impl Storage {
 
     pub(super) async fn remove_raw_checkpoint(&self, location: Uuid) -> Result<()> {
         let _write = self.cache_writes.lock().await;
-        let path = CacheFile::Raw.path(&self.disk.root, location);
+        let path = CacheFile::PendingRaw.path(&self.disk.root, location);
         let partial = path.with_extension("partial");
         let metadata = match tokio::fs::symlink_metadata(&partial).await {
             Ok(metadata) => metadata,
@@ -527,9 +527,9 @@ impl Storage {
         Ok(())
     }
 
-    pub(crate) async fn reconcile_raw_uploads(&self) -> Result<()> {
+    pub(crate) async fn reconcile_raw_uploads(self: &std::sync::Arc<Self>) -> Result<()> {
         let mut after = Id::default();
-        let mut retained = std::collections::HashSet::new();
+        let mut pending = std::collections::HashSet::new();
         loop {
             let rows = self
                 .raw_store
@@ -541,62 +541,85 @@ impl Storage {
             for work in rows {
                 after = work.source.id;
                 if work.source.pending_upload {
-                    retained.insert(work.source.location_id);
+                    pending.insert(work.source.location_id);
                 }
             }
         }
-        let unregistered: Vec<_> = self
+        let pins: Vec<_> = self
             .raw_upload_pins
             .lock()
             .unwrap()
             .iter()
-            .filter(|(id, _)| !retained.contains(id))
-            .map(|(id, (source, _))| (*id, *source))
+            .filter(|(location, _)| !pending.contains(location))
+            .map(|(location, (source, _))| (*source, *location))
             .collect();
-        for (location, source) in unregistered {
-            let current = self.raw_store.current(source).await?;
-            let writing = current
-                .as_ref()
-                .is_some_and(|source| source.state == "writing");
-            if writing
-                || self.raw_store.has_upload(source).await?
-                || self.raw_store.cached_checkpoint(location).await?.is_some()
-            {
-                retained.insert(location);
-            }
-            if !writing
-                && current.is_none_or(|source| !source.pending_upload)
-                && let Some((_, pin)) = self.raw_upload_pins.lock().unwrap().get_mut(&location)
-            {
-                pin._charge = None;
-            }
+        for (source, location) in pins {
+            self.release_finished_raw(source, location).await?;
         }
-        self.raw_upload_pins
-            .lock()
-            .unwrap()
-            .retain(|id, _| retained.contains(id));
         Ok(())
     }
 
-    pub(crate) async fn release_finished_raw(&self, source: Id, location: Uuid) -> Result<()> {
-        if !self.raw_store.has_upload(source).await?
-            || self
-                .raw_store
-                .current(source)
-                .await?
-                .is_none_or(|source| !source.pending_upload)
-        {
-            let checkpoint = self.raw_store.cached_checkpoint(location).await?.is_some();
-            let mut pins = self.raw_upload_pins.lock().unwrap();
-            if checkpoint {
-                if let Some((_, pin)) = pins.get_mut(&location) {
-                    pin._charge = None;
-                }
-            } else {
-                pins.remove(&location);
+    pub(crate) async fn release_finished_raw(
+        self: &std::sync::Arc<Self>,
+        source: Id,
+        location: Uuid,
+    ) -> Result<()> {
+        let storage = self.clone();
+        tokio::spawn(async move {
+            let current = storage.raw_store.current(source).await?;
+            if current
+                .as_ref()
+                .is_some_and(|source| source.state == "writing" || source.pending_upload)
+                || storage.raw_store.has_upload(source).await?
+                || storage
+                    .raw_store
+                    .cached_checkpoint(location)
+                    .await?
+                    .is_some()
+            {
+                return Ok(());
             }
-        }
-        Ok(())
+            let held = storage
+                .raw_upload_pins
+                .lock()
+                .unwrap()
+                .get(&location)
+                .map(|(_, pin)| {
+                    (
+                        pin._pin.as_ref().map(|pin| pin.0.clone()),
+                        pin._charge.as_ref().map(|charge| charge.storage),
+                    )
+                });
+            let Some((owner, target)) = held else {
+                return Ok(());
+            };
+            let destination = current
+                .as_ref()
+                .filter(|source| source.validate().is_ok() && source.medium == "shared_s3")
+                .map(|_| location);
+            let policy =
+                if let Some(target) = current.as_ref().map(|source| source.storage_id).or(target) {
+                    storage.local_cache(Some(target))?
+                } else {
+                    super::CachePolicy {
+                        enabled: false,
+                        capacity: storage.capacity,
+                        max_entries: storage.max_entries,
+                        upload_cache: false,
+                        upload_capacity: None,
+                    }
+                };
+            if owner.is_none()
+                || storage
+                    .file_cache()
+                    .promote(location, destination, owner.as_ref(), policy)
+                    .await?
+            {
+                storage.raw_upload_pins.lock().unwrap().remove(&location);
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?
     }
 
     pub(super) async fn pending_raw(
@@ -617,20 +640,21 @@ impl Storage {
             }
             return Ok(file);
         }
-        let pin = {
+        let (pin, format) = {
             let mut fifo = self.fifo.lock().await;
             let entry = fifo
                 .entries
                 .get_mut(&source.location_id)
                 .context("pending raw upload is missing")?;
             ensure!(
-                entry.file == CacheFile::Raw && entry.pins.load(Ordering::Relaxed) != usize::MAX,
+                matches!(entry.file, CacheFile::Raw | CacheFile::PendingRaw)
+                    && entry.pins.load(Ordering::Relaxed) != usize::MAX,
                 "pending raw upload is unavailable"
             );
             entry.pins.fetch_add(1, Ordering::Relaxed);
-            CachePin(entry.pins.clone())
+            (CachePin(entry.pins.clone()), entry.file)
         };
-        let path = CacheFile::Raw.path(&self.disk.root, source.location_id);
+        let path = format.path(&self.disk.root, source.location_id);
         ensure!(
             tokio::fs::symlink_metadata(&path).await?.is_file(),
             "pending raw upload was replaced"

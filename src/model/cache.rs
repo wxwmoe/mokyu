@@ -90,7 +90,7 @@ pub(crate) enum CacheBatch {
 }
 
 pub(crate) struct CacheRelease {
-    pub keys: Vec<String>,
+    pub keys: Vec<(String, Option<Uuid>)>,
     pub staged: Vec<(Uuid, String)>,
 }
 

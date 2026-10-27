@@ -162,7 +162,7 @@ impl Storage {
             return Ok(());
         }
         let root = if source.pending_upload {
-            self.disk.root.join("raw")
+            self.disk.root.join("pending/raw")
         } else {
             target
                 .raw_root

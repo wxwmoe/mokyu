@@ -359,7 +359,7 @@ impl Reader {
             };
             let root = &node.config.instance.data_path;
             match crate::storage::local::read_bounded(
-                CacheFile::Chunk(false).path(root, id),
+                CacheFile::PendingChunk(false).path(root, id),
                 codec::MAX,
             )
             .await
@@ -372,7 +372,7 @@ impl Reader {
                 {
                     compressed = true;
                     crate::storage::local::read_bounded(
-                        CacheFile::Chunk(true).path(root, id),
+                        CacheFile::PendingChunk(true).path(root, id),
                         codec::MAX,
                     )
                     .await?
@@ -449,9 +449,12 @@ impl Reader {
                 let root = &node.config.instance.data_path;
                 let bytes = if let Some(file) = source.file_id {
                     let path = if let Some(raw) = source.raw_source {
-                        CacheFile::Raw.path(root, raw).with_extension("partial")
+                        CacheFile::PendingRaw
+                            .path(root, raw)
+                            .with_extension("partial")
                     } else {
-                        root.join("multipart").join(file.simple().to_string())
+                        root.join("pending/multipart/candidate")
+                            .join(file.simple().to_string())
                     };
                     ensure!(
                         tokio::fs::symlink_metadata(&path).await?.is_file(),
@@ -473,7 +476,7 @@ impl Reader {
                     bytes
                 } else {
                     crate::storage::local::read_bounded(
-                        root.join("multipart")
+                        root.join("pending/multipart/fragment")
                             .join(source.location_id.simple().to_string()),
                         codec::MAX,
                     )
@@ -509,7 +512,8 @@ impl Reader {
         source.validate()?;
         let mut io = self.io(prepared, None).await?;
         if source.pending_upload {
-            let path = CacheFile::Raw.path(&node.config.instance.data_path, source.location_id);
+            let path =
+                CacheFile::PendingRaw.path(&node.config.instance.data_path, source.location_id);
             ensure!(
                 tokio::fs::symlink_metadata(&path).await?.is_file(),
                 "raw source is not a regular file"

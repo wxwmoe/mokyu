@@ -119,18 +119,20 @@ S3 写缓存接收新块时先持久保存已校验的原始字节，不提前�
 各节点的本地目录由 `instance.data_path` 指定：
 
 ```text
-<data_path>/chunks/<后两位>/<UUID>.zst
-<data_path>/chunks/<后两位>/<UUID>.raw
-<data_path>/raw/<后两位>/<UUID>
-<data_path>/read-cache/chunks/<后两位>/<UUID>.raw
-<data_path>/read-cache/raw/<后两位>/<UUID>
-<data_path>/multipart/<fragment or candidate UUID>
 <data_path>/node.json
+<data_path>/cache/chunks/<后两位>/<UUID>{.zst|.raw}
+<data_path>/cache/raw/<后两位>/<UUID>
+<data_path>/pending/chunks/<后两位>/<UUID>{.zst|.raw}
+<data_path>/pending/raw/<后两位>/<UUID>{|.partial}
+<data_path>/pending/multipart/fragment/<UUID>
+<data_path>/pending/multipart/candidate/<UUID>
 ```
 
 Multipart 暂存配额按文件实际分配的磁盘块计量，稀疏空洞和已回收区间不继续占用配额；不支持物理块查询的平台保守按文件长度计量。同一文件系统上的暂存、缓存和目标后端写入共享进行中的空间预留，已落盘的部分由文件系统可用空间反映。
 
-API 节点的可丢弃区块和 raw 读缓存分别位于 `read-cache/chunks` 和 `read-cache/raw`，与唯一待上传来源分开。独立区块和 raw 使用物理来源 UUID，Pack 解包成员使用逻辑区块 UUID；区块写入已核验的明文 `.raw`，也能读取 `.zst` 缓存。重新加载时恢复合格文件并清理该缓存目录中的未完成填充，不扫描或回收唯一来源目录。
+单容器的 PostgreSQL、MySQL、MariaDB、SQLite 和群集 API 节点采用同一目录布局。`cache` 只保存可重建的读缓存，无需备份；`pending` 保存接收中的文件、未完成 Multipart 及待上传来源，须按恢复点一致备份。群集节点另保留 `node.json`。`node (data + worker)` 共用同一套目录、身份和额度；依赖本机 pending 的任务只由所属 data/node 执行。
+
+独立区块和 raw 使用物理来源 UUID，Pack 解包成员使用逻辑区块 UUID。pending 区块保存原始或压缩明文，不保存最终加密载荷。后端与元数据发布确认、读取 pin 和检查点释放后，兼容文件在同一文件系统通过硬链接和删除原路径转入 cache，保留 inode；组包后使用最终逻辑 UUID。目标文件先核对或替换，跨文件系统跳过可选缓存，不复制整份正文。缓存关闭或不准入时，待上传引用释放后删除文件；删除失败保留占用并重试。
 
 本地 storage 的载荷直接从本地后端读取，不进入磁盘读写缓存；为性能可关闭本地 storage 的压缩和加密。S3 storage 才使用 profile cache，损坏缓存可回源重建。待上传的唯一副本受 pin 保护，不能按普通缓存淘汰。
 
@@ -142,7 +144,7 @@ Linux 下，Mokyu 启动时设置 umask 为 `0022`；新建目录使用 `0755`�
 
 远端 raw 的首次严格读取边校验边流式填充文件，完成后复用同一文件输出，避免为正文再完整下载一次；并发相同来源复用填充结果。缓存命中仍校验完整文件，Range 从同一文件句柄读取，不把大对象作为区块或整文件 Bytes 放入内存。raw 与 chunks 共用节点缓存额度、索引和淘汰保护；独立区块缓存复用后端物理 UUID，解包缓存复用数据库批量读取的逻辑区块 UUID，不派生缓存 UUID；raw 缓存直接使用后端文件 UUID（PostgreSQL 的 `raw_sources.id`，MySQL/MariaDB/SQLite 的 `raw_sources.location_id`），UUID 均为 32 位小写无连字符格式。覆盖使用新来源 UUID，去重引用共享同一缓存文件；命名不代替权限、来源状态和长度、摘要校验。后台完整性检查和来源复检直接检查后端，损坏缓存只能回源重建，不能证明后端健康。
 
-重启恢复完整缓存文件，清理未完成填充；正在发送的文件持有 pin，实际删除后才释放缓存占用。本地 storage 的根目录不得与 data 目录中的 raw、chunks、read-cache、multipart、thumbnails 命名空间重叠，符号链接按实际路径检查。
+重启先恢复 pending 的上传与检查点保护，再恢复完整缓存文件、清理未完成填充；数据库或 control 无法确认时保留待确认文件。正在发送的文件持有 pin，实际删除后才释放缓存占用。本地 storage 的根目录不得与 data 目录中的 cache、pending、thumbnails 命名空间重叠，符号链接按实际路径检查。
 
 所有写入先持久化文件或远端对象，再提交数据库映射；local 后端在确认成功前同步文件和父目录，同步失败不会发布新映射。对象发布要求 stream 连续、来源 ready、长度和哈希全部匹配。跨 storage 的复制/移动由异步 `storage_migration` 任务完成复制、校验、权限和发布一致性；部署管理员负责两端容量、凭据、网络和供应商策略。
 

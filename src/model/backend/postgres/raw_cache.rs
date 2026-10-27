@@ -326,10 +326,10 @@ pub(crate) async fn inventory(
         Error::NodeAuthentication
     );
     require_node_run(&mut tx, node, input.run, true).await?;
-    let rows: Vec<(Uuid,Option<Uuid>,i64,Option<Uuid>,bool,bool,bool)> = sqlx::query_as("SELECT f.id,coalesce(r.storage_id,w.storage_id),coalesce(w.size,r.size,0),u.node_id,coalesce(u.source_id IS NOT NULL OR (w.node_id=$2 AND w.active),false),EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows v ON v.id=n.window_id JOIN stream_leases l ON l.id=v.read_id WHERE n.kind='raw' AND n.location_id=f.id AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM node_work n WHERE n.result_hash IS NULL AND n.expires_at>clock_timestamp() AND (n.plan->'source'->>'location_id'=f.id::text OR EXISTS(SELECT 1 FROM jsonb_array_elements(n.plan->'items') i WHERE i->'source'->>'location_id'=f.id::text))) OR coalesce(r.medium='local' AND EXISTS(SELECT 1 FROM raw_ranges e WHERE e.source_id=r.id),false),coalesce(r.state='ready' AND r.medium='shared_s3' AND NOT r.pending_upload AND r.quarantine_code IS NULL AND p.cache_enabled,false) FROM unnest($1::uuid[]) f(id) LEFT JOIN raw_sources r ON r.id=f.id LEFT JOIN raw_uploads u ON u.source_id=r.id LEFT JOIN storage_profiles p ON p.storage_id=r.storage_id LEFT JOIN LATERAL (SELECT x.node_id,x.size,n.storage_id,n.state='active' AND n.boot_id=$3 AND n.fence=$4 AND n.credential_generation=$5 AND EXISTS(SELECT 1 FROM stream_leases l WHERE l.id=n.lease_id AND l.expires_at>clock_timestamp()) AS active FROM node_write_raw x JOIN node_writes n ON n.node_id=x.node_id AND n.operation_id=x.operation_id WHERE x.source_id=f.id AND x.node_id=$2 ORDER BY n.created_at DESC LIMIT 1) w ON true ORDER BY f.id")
+    let rows: Vec<(Uuid,Option<Uuid>,i64,Option<Uuid>,bool,bool,bool,Option<String>,Option<i32>)> = sqlx::query_as("SELECT f.id,coalesce(r.storage_id,w.storage_id),coalesce(w.size,r.size,0),u.node_id,coalesce(u.source_id IS NOT NULL OR (w.node_id=$2 AND w.active),false),EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows v ON v.id=n.window_id JOIN stream_leases l ON l.id=v.read_id WHERE n.kind='raw' AND n.location_id=f.id AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM node_work n WHERE n.result_hash IS NULL AND n.expires_at>clock_timestamp() AND (n.plan->'source'->>'location_id'=f.id::text OR EXISTS(SELECT 1 FROM jsonb_array_elements(n.plan->'items') i WHERE i->'source'->>'location_id'=f.id::text))) OR coalesce(r.medium='local' AND EXISTS(SELECT 1 FROM raw_ranges e WHERE e.source_id=r.id),false),coalesce(r.state='ready' AND r.medium='shared_s3' AND NOT r.pending_upload AND r.quarantine_code IS NULL AND p.cache_enabled,false),p.cache_soft_limit,p.cache_entries FROM unnest($1::uuid[]) f(id) LEFT JOIN raw_sources r ON r.id=f.id LEFT JOIN raw_uploads u ON u.source_id=r.id LEFT JOIN storage_profiles p ON p.storage_id=r.storage_id LEFT JOIN LATERAL (SELECT x.node_id,x.size,n.storage_id,n.state='active' AND n.boot_id=$3 AND n.fence=$4 AND n.credential_generation=$5 AND EXISTS(SELECT 1 FROM stream_leases l WHERE l.id=n.lease_id AND l.expires_at>clock_timestamp()) AS active FROM node_write_raw x JOIN node_writes n ON n.node_id=x.node_id AND n.operation_id=x.operation_id WHERE x.source_id=f.id AND x.node_id=$2 ORDER BY n.created_at DESC LIMIT 1) w ON true ORDER BY f.id")
         .bind(&input.files).bind(node.node_id).bind(input.run.boot).bind(input.run.fence).bind(node.credential_generation).fetch_all(&mut *tx).await?;
     let mut result = Vec::with_capacity(rows.len());
-    for (id, storage, size, owner, pending, protected, cached) in rows {
+    for (id, storage, size, owner, pending, protected, cached, cache_limit, cache_entries) in rows {
         ensure!(
             owner.is_none_or(|owner| owner == node.node_id),
             Error::NodeAuthentication
@@ -338,6 +338,8 @@ pub(crate) async fn inventory(
             id,
             storage,
             size: size.try_into()?,
+            cache_limit,
+            cache_entries: cache_entries.map(u32::try_from).transpose()?,
             state: if pending {
                 FileState::Pending
             } else if protected {

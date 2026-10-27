@@ -1,5 +1,5 @@
 use super::{Area, CacheFile, CachePin, CachePolicy, CacheRemoval, Disk, Fifo, Reservation};
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use std::{
     path::Path,
     sync::{
@@ -47,7 +47,8 @@ impl Files<'_> {
         let Some(entry) = fifo.entries.get(&id) else {
             return Ok(());
         };
-        if entry.pins.load(Ordering::Relaxed) > 0
+        if entry.file.is_pending()
+            || entry.pins.load(Ordering::Relaxed) > 0
             || expected.is_some_and(|pins| !Arc::ptr_eq(pins, &entry.pins))
         {
             return Ok(());
@@ -75,15 +76,14 @@ impl Files<'_> {
         size: u64,
         policy: CachePolicy,
         existing: bool,
+        path: &Path,
     ) -> Result<Option<Reservation>> {
+        let directory = path.parent().unwrap();
+        tokio::fs::create_dir_all(directory).await?;
         let mut fifo = self.fifo.lock().await;
         loop {
             if fifo.entries.len() < policy.max_entries
-                && let Ok(ticket) = if existing {
-                    self.disk.reserve_existing(Area::Cache, size)
-                } else {
-                    self.disk.reserve(Area::Cache, size)
-                }
+                && let Ok(ticket) = self.disk.reserve_at(Area::Cache, size, existing, directory)
             {
                 return Ok(Some(ticket));
             }
@@ -140,10 +140,10 @@ impl Files<'_> {
         if self.fifo.lock().await.entries.contains_key(&id) {
             return Ok(());
         }
-        let Some(ticket) = self.reserve(size, policy, false).await? else {
+        let path = CacheFile::Chunk(compressed).path(self.root, id);
+        let Some(ticket) = self.reserve(size, policy, false, &path).await? else {
             return Ok(());
         };
-        let path = CacheFile::Chunk(compressed).path(self.root, id);
         #[cfg(feature = "fault-injection")]
         crate::faults::point("cache-reserved").await;
         let tmp = path.with_extension(if compressed { "zst.tmp" } else { "raw.tmp" });
@@ -179,6 +179,137 @@ impl Files<'_> {
         self.fifo.lock().await.insert(id, size, compressed);
         Ok(())
     }
+
+    // Call from a cancellation-safe owner after its metadata references have been released.
+    pub(crate) async fn promote(
+        &self,
+        id: Uuid,
+        destination: Option<Uuid>,
+        owner: Option<&Arc<AtomicUsize>>,
+        policy: CachePolicy,
+    ) -> Result<bool> {
+        let _write = self.cache_writes.lock().await;
+        let mut fifo = self.fifo.lock().await;
+        let Some(entry) = fifo.entries.get(&id) else {
+            return Ok(true);
+        };
+        if !entry.file.is_pending() {
+            ensure!(
+                owner.is_some_and(|pins| !Arc::ptr_eq(pins, &entry.pins)),
+                "pending file identity changed"
+            );
+            return Ok(true);
+        }
+        if entry.pins.load(Ordering::Relaxed) != usize::from(owner.is_some())
+            || owner.is_some_and(|pins| !Arc::ptr_eq(pins, &entry.pins))
+        {
+            return Ok(false);
+        }
+        let removal = if owner.is_some() {
+            CacheRemoval::owned(&entry.pins)
+        } else {
+            CacheRemoval::new(&entry.pins)
+        };
+        let source = entry.file.path(self.root, id);
+        let format = entry.file.cached();
+        let size = entry.size;
+        let destination = destination.filter(|_| {
+            entry.valid
+                && policy.enabled
+                && fifo.entries.len() <= policy.max_entries
+                && policy.capacity.is_none_or(|limit| size <= limit)
+        });
+        let other = destination
+            .filter(|target| *target != id)
+            .and_then(|target| fifo.entries.get(&target).map(|entry| (target, entry)));
+        if other.is_some_and(|(_, entry)| {
+            entry.file.is_pending() || entry.pins.load(Ordering::Relaxed) != 0
+        }) {
+            return Ok(false);
+        }
+        let other_removal = other.map(|(_, entry)| CacheRemoval::new(&entry.pins));
+        let other_path = other.map(|(target, entry)| entry.file.path(self.root, target));
+        drop(fifo);
+        let cache_path = destination.map(|target| format.path(self.root, target));
+        let cached = if let Some(target) = destination {
+            link(&source, &format.path(self.root, target), size).await?
+        } else {
+            false
+        };
+        if cached && let Some(path) = other_path {
+            if Some(&path) != cache_path.as_ref() {
+                remove(&path).await?;
+            }
+            if let Some(entry) = self.fifo.lock().await.forget(destination.unwrap()) {
+                self.disk.release(Area::Cache, entry.size);
+            }
+        }
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("pending-cache-linked").await;
+        remove(&source).await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("pending-cache-unlinked").await;
+        fifo = self.fifo.lock().await;
+        fifo.forget(id);
+        if cached {
+            fifo.insert(destination.unwrap(), size, format);
+        } else {
+            self.disk.release(Area::Cache, size);
+        }
+        drop((removal, other_removal));
+        Ok(true)
+    }
+}
+
+async fn remove(path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn link(source: &Path, destination: &Path, size: u64) -> Result<bool> {
+    let metadata = tokio::fs::symlink_metadata(source).await?;
+    ensure!(
+        metadata.is_file() && metadata.len() == size,
+        "pending file was replaced"
+    );
+    tokio::fs::create_dir_all(destination.parent().unwrap()).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.dev()
+            != tokio::fs::metadata(destination.parent().unwrap())
+                .await?
+                .dev()
+        {
+            return Ok(false);
+        }
+    }
+    match tokio::fs::symlink_metadata(destination).await {
+        Ok(existing) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if existing.is_file()
+                    && metadata.dev() == existing.dev()
+                    && metadata.ino() == existing.ino()
+                {
+                    return Ok(true);
+                }
+            }
+            // The pending file is authoritative; an unrelated cache entry is replaceable.
+            tokio::fs::remove_file(destination).await?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    match tokio::fs::hard_link(source, destination).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +318,116 @@ mod tests {
     use crate::storage::local::Usage;
     use std::collections::{HashMap, HashSet};
     use tokio::sync::Semaphore;
+
+    fn disk(root: &Path) -> Arc<Disk> {
+        Arc::new(Disk {
+            root: root.to_owned(),
+            limits: [None, Some(8192), None],
+            floor: 0,
+            spaces: Default::default(),
+            upload_limit: None,
+            usage: std::sync::Mutex::new(Usage {
+                used: [0; 3],
+                upload: 0,
+                upload_by_storage: HashMap::new(),
+            }),
+            io: Arc::new(Semaphore::new(1)),
+            pending: std::sync::Mutex::new(HashSet::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn promotion_preserves_inode_waits_for_readers_and_retries_without_double_charging()
+    -> Result<()> {
+        let root = std::env::temp_dir().join(format!("mokyu-promotion-{}", Uuid::new_v4()));
+        let disk = disk(&root);
+        disk.initialize().await?;
+        let fifo = Mutex::new(Fifo::default());
+        let writes = Mutex::new(());
+        let cache = Files {
+            disk: &disk,
+            root: &root,
+            fifo: &fifo,
+            cache_writes: &writes,
+        };
+        let policy = CachePolicy {
+            enabled: true,
+            capacity: Some(8192),
+            max_entries: 2,
+            upload_cache: true,
+            upload_capacity: None,
+        };
+        let source = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let pending = CacheFile::PendingChunk(true).path(&root, source);
+        tokio::fs::create_dir_all(pending.parent().unwrap()).await?;
+        tokio::fs::write(&pending, [7; 4096]).await?;
+        disk.account_existing(Area::Cache, 4096);
+        fifo.lock()
+            .await
+            .insert(source, 4096, CacheFile::PendingChunk(true));
+        let owner = fifo.lock().await.entries[&source].pins.clone();
+        owner.fetch_add(1, Ordering::Relaxed);
+        let upload = CachePin(owner.clone());
+        let (reader, _) = cache.pin(source).await.unwrap();
+        assert!(
+            !cache
+                .promote(source, Some(target), Some(&owner), policy)
+                .await?
+        );
+        cache.invalidate(source, None).await?;
+        assert!(pending.exists());
+        drop(reader);
+        let destination = CacheFile::Chunk(true).path(&root, target);
+        tokio::fs::create_dir_all(&destination).await?;
+        assert!(
+            cache
+                .promote(source, Some(target), Some(&owner), policy)
+                .await
+                .is_err()
+        );
+        assert_eq!(disk.used()[1], 4096);
+        assert_eq!(owner.load(Ordering::Relaxed), 1);
+        tokio::fs::remove_dir(&destination).await?;
+        tokio::fs::write(&destination, [3; 4096]).await?;
+        let before = tokio::fs::metadata(&pending).await?;
+        assert!(
+            cache
+                .promote(source, Some(target), Some(&owner), policy)
+                .await?
+        );
+        drop(upload);
+        assert!(!pending.exists());
+        assert_eq!(tokio::fs::read(&destination).await?, [7; 4096]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let after = tokio::fs::metadata(&destination).await?;
+            assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        }
+        assert_eq!(disk.used()[1], 4096);
+        cache.invalidate(target, None).await?;
+
+        // A crash can leave both names for one inode before the index handoff.
+        let id = Uuid::new_v4();
+        let pending = CacheFile::PendingRaw.path(&root, id);
+        let destination = CacheFile::Raw.path(&root, id);
+        for path in [&pending, &destination] {
+            tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+        }
+        tokio::fs::write(&pending, [9; 4096]).await?;
+        tokio::fs::hard_link(&pending, &destination).await?;
+        disk.account_existing(Area::Cache, 4096);
+        fifo.lock().await.insert(id, 4096, CacheFile::PendingRaw);
+        assert!(fifo.lock().await.victim(8192).is_none());
+        assert!(cache.promote(id, Some(id), None, policy).await?);
+        assert_eq!(disk.used()[1], 4096);
+        assert_eq!(tokio::fs::read(&destination).await?, [9; 4096]);
+        cache.invalidate(id, None).await?;
+        assert_eq!(disk.used()[1], 0);
+        tokio::fs::remove_dir_all(root).await?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn pinned_files_and_failed_deletion_keep_disk_accounting() -> Result<()> {

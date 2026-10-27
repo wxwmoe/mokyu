@@ -20,7 +20,7 @@ pub(super) fn probe(storage: &super::Storage, destination: PathBuf) {
     probe_background(
         storage.reflink.clone(),
         storage.disk.io.clone(),
-        storage.disk.root.join("multipart"),
+        storage.disk.root.join("pending/multipart/candidate"),
         destination,
     );
 }

@@ -88,10 +88,10 @@ def main():
             retained.append((fixture, published, body))
 
             upload = fixture.client.create_multipart_upload(Bucket=fixture.name, Key="multipart")["UploadId"]
-            before = set((data / "multipart").rglob("*"))
+            before = set((data / "pending" / "multipart").rglob("*"))
             part = fixture.client.upload_part(Bucket=fixture.name, Key="multipart",
                                              UploadId=upload, PartNumber=1, Body=body)
-            candidates = [path for path in set((data / "multipart").rglob("*")) - before if path.is_file()]
+            candidates = [path for path in set((data / "pending" / "multipart").rglob("*")) - before if path.is_file()]
             assert candidates, "Multipart candidate was not created"
             for candidate in candidates:
                 mode(candidate, 0o644)

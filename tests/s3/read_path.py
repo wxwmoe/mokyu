@@ -64,7 +64,7 @@ def cache_paths(key):
         JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id
         WHERE b.name=%s AND o.object_key=%s''', (bucket, prefix + key)).fetchall()
     return [path for (location,) in rows
-            for path in (Path(os.environ['MOKYU_TEST_DATA']) / 'chunks' / location.hex[-2:]).glob(location.hex + '.*')]
+            for path in (Path(os.environ['MOKYU_TEST_DATA']) / 'cache' / 'chunks' / location.hex[-2:]).glob(location.hex + '.*')]
 
 
 def cache_idle():
@@ -198,7 +198,7 @@ cache_idle()
 assert read('corrupt') == raw[::-1]
 cache_idle()
 reached.unlink(missing_ok=True)
-cache = Path(os.environ['MOKYU_TEST_DATA']) / 'chunks'
+cache = Path(os.environ['MOKYU_TEST_DATA']) / 'cache' / 'chunks'
 assert not list(cache.glob('*/*.tmp'))
 assert status()['local_bytes'][1] == sum(p.stat().st_size for p in cache.glob('*/*') if p.is_file())
 print('PASS nonblocking cache fills/cleanup, coalesced jobs, warm reads and exact disk accounting', flush=True)

@@ -46,7 +46,7 @@ def main():
         database = Database()
         storage = uuid.UUID(fixture.store['id'])
         bucket = uuid.UUID(fixture.bucket_id)
-        root = Path(database.config['instance']['data_path']) / 'raw'
+        root = Path(database.config['instance']['data_path']) / 'pending' / 'raw'
 
         def configure(**changes):
             profile = fixture.cli('storage', 'profile', 'show', fixture.name)

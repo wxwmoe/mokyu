@@ -59,7 +59,7 @@ def count(pack):
 
 
 def evict():
-    for path in (data / 'chunks').glob('*/*'):
+    for path in (data / 'cache' / 'chunks').glob('*/*'):
         if path.is_file():
             path.unlink()
 

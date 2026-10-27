@@ -20,15 +20,39 @@ pub(super) fn cache_id(chunk: &Chunk) -> Uuid {
 pub(crate) enum CacheFile {
     Chunk(bool),
     Raw,
+    PendingChunk(bool),
+    PendingRaw,
 }
 impl CacheFile {
-    pub(crate) fn path(self, root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
+    pub(crate) fn is_pending(self) -> bool {
+        matches!(self, Self::PendingChunk(_) | Self::PendingRaw)
+    }
+    pub(crate) fn pending(self) -> Self {
         match self {
-            Self::Chunk(compressed) => root
+            Self::Chunk(compressed) | Self::PendingChunk(compressed) => {
+                Self::PendingChunk(compressed)
+            }
+            Self::Raw | Self::PendingRaw => Self::PendingRaw,
+        }
+    }
+    pub(crate) fn cached(self) -> Self {
+        match self {
+            Self::Chunk(compressed) | Self::PendingChunk(compressed) => Self::Chunk(compressed),
+            Self::Raw | Self::PendingRaw => Self::Raw,
+        }
+    }
+    pub(crate) fn path(self, root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
+        let root = root.join(if self.is_pending() {
+            "pending"
+        } else {
+            "cache"
+        });
+        match self {
+            Self::Chunk(compressed) | Self::PendingChunk(compressed) => root
                 .join("chunks")
                 .join(super::chunk_name(id))
                 .with_extension(if compressed { "zst" } else { "raw" }),
-            Self::Raw => root.join("raw").join(super::chunk_name(id)),
+            Self::Raw | Self::PendingRaw => root.join("raw").join(super::chunk_name(id)),
         }
     }
 }
@@ -57,18 +81,25 @@ impl Drop for CachePin {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
-pub(crate) struct CacheRemoval(Arc<AtomicUsize>);
+pub(crate) struct CacheRemoval(Arc<AtomicUsize>, usize);
 impl CacheRemoval {
     pub(crate) fn new(pins: &Arc<AtomicUsize>) -> Self {
         // Reserve deletion while unrelated cache hits continue through the FIFO.
         debug_assert_eq!(pins.load(Ordering::Relaxed), 0);
         pins.store(usize::MAX, Ordering::Relaxed);
-        Self(pins.clone())
+        Self(pins.clone(), 0)
+    }
+}
+impl CacheRemoval {
+    pub(crate) fn owned(pins: &Arc<AtomicUsize>) -> Self {
+        debug_assert_eq!(pins.load(Ordering::Relaxed), 1);
+        pins.store(usize::MAX, Ordering::Relaxed);
+        Self(pins.clone(), 1)
     }
 }
 impl Drop for CacheRemoval {
     fn drop(&mut self) {
-        self.0.store(0, Ordering::Relaxed);
+        self.0.store(self.1, Ordering::Relaxed);
     }
 }
 pub(crate) struct CacheWork {
@@ -273,7 +304,7 @@ impl Fifo {
             let Some(e) = self.entries.get_mut(&id) else {
                 continue;
             };
-            if e.pins.load(Ordering::Relaxed) > 0 {
+            if e.file.is_pending() || e.pins.load(Ordering::Relaxed) > 0 {
                 if small {
                     self.small.push_back(id);
                 } else {

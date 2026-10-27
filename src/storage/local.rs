@@ -61,8 +61,8 @@ mod tests {
     #[test]
     fn storage_namespaces_cannot_alias_disposable_cache_files() -> Result<()> {
         let root = std::env::temp_dir().join(format!("mokyu-paths-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(root.join("raw"))?;
-        for name in ["raw", "chunks", "read-cache", "multipart", "thumbnails"] {
+        std::fs::create_dir_all(root.join("cache/raw"))?;
+        for name in ["cache", "pending", "thumbnails"] {
             assert!(validate_storage_path(&root, &root.join(name)).is_err());
             assert!(validate_storage_path(&root, &root.join(name).join("backend")).is_err());
         }
@@ -71,7 +71,7 @@ mod tests {
         validate_storage_path(&root, &root.join("storage"))?;
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(root.join("raw"), root.join("alias"))?;
+            std::os::unix::fs::symlink(root.join("cache/raw"), root.join("alias"))?;
             assert!(validate_storage_path(&root, &root.join("alias/new")).is_err());
         }
         std::fs::remove_dir_all(root)?;
@@ -82,7 +82,7 @@ mod tests {
     async fn multipart_accounts_allocated_blocks_and_shares_filesystem_reservations() -> Result<()>
     {
         let root = std::env::temp_dir().join(format!("mokyu-space-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(root.join("multipart"))?;
+        std::fs::create_dir_all(root.join("pending/multipart/candidate"))?;
         std::fs::create_dir(root.join("storage"))?;
         let disk = Arc::new(Disk {
             root: root.clone(),
@@ -114,15 +114,15 @@ mod tests {
         let id = Uuid::new_v4();
         let lock = Arc::new(tokio::sync::Mutex::new(()));
         let (_, lease, guard) = disk
-            .append_fragment(id, &[7], lock.clone().lock_owned().await)
+            .append_candidate(id, &[7], lock.clone().lock_owned().await)
             .await?;
-        let (_, second, guard) = disk.append_fragment(id, &[8], guard).await?;
-        let metadata = std::fs::metadata(disk.fragment_path(id))?;
+        let (_, second, guard) = disk.append_candidate(id, &[8], guard).await?;
+        let metadata = std::fs::metadata(disk.candidate_path(id))?;
         assert_eq!(disk.used()[0], allocated(&metadata));
-        assert_eq!(std::fs::read(disk.fragment_path(id))?, [7, 8]);
+        assert_eq!(std::fs::read(disk.candidate_path(id))?, [7, 8]);
         assert_eq!(*pending.lock().unwrap(), 0);
         drop((guard, lease, second));
-        disk.remove_fragment(id).await?;
+        disk.remove_candidate(id).await?;
         assert_eq!(disk.used()[0], 0);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -230,7 +230,7 @@ pub(crate) fn validate_storage_path(
         Ok(path)
     }
     let storage = resolve(storage)?;
-    for name in ["chunks", "raw", "read-cache", "multipart", "thumbnails"] {
+    for name in ["cache", "pending", "thumbnails"] {
         let reserved = resolve(&data.join(name))?;
         ensure!(
             !storage.starts_with(&reserved) && !reserved.starts_with(&storage),
@@ -282,6 +282,25 @@ impl Drop for Space {
 }
 
 impl Disk {
+    pub(crate) async fn initialize(&self) -> Result<()> {
+        for directory in [
+            "cache/chunks",
+            "cache/raw",
+            "pending/chunks",
+            "pending/raw",
+            "pending/multipart/fragment",
+            "pending/multipart/candidate",
+        ] {
+            tokio::fs::create_dir_all(self.root.join(directory)).await?;
+        }
+        for directory in ["pending/multipart", "pending", "cache", ""] {
+            tokio::fs::File::open(self.root.join(directory))
+                .await?
+                .sync_all()
+                .await?;
+        }
+        Ok(())
+    }
     pub(crate) fn space_for(&self, path: &std::path::Path) -> Result<Arc<Mutex<u64>>> {
         #[cfg(unix)]
         let key = {
@@ -360,24 +379,18 @@ impl Disk {
         }
     }
     pub(crate) fn reserve(self: &Arc<Self>, area: Area, bytes: u64) -> Result<Reservation> {
-        self.reserve_space(area, bytes, false)
+        self.reserve_at(area, bytes, false, &self.root)
     }
-    pub(crate) fn reserve_existing(
-        self: &Arc<Self>,
-        area: Area,
-        bytes: u64,
-    ) -> Result<Reservation> {
-        self.reserve_space(area, bytes, true)
-    }
-    fn reserve_space(
+    pub(crate) fn reserve_at(
         self: &Arc<Self>,
         area: Area,
         bytes: u64,
         existing: bool,
+        path: &std::path::Path,
     ) -> Result<Reservation> {
         let mut usage = self.usage.lock().unwrap();
         let bytes = if matches!(area, Area::Multipart) {
-            let granularity = fs2::allocation_granularity(&self.root)?.max(1);
+            let granularity = fs2::allocation_granularity(path)?.max(1);
             bytes
                 .div_ceil(granularity)
                 .checked_mul(granularity)
@@ -393,10 +406,10 @@ impl Disk {
             "local storage quota exhausted"
         );
         let space = Space::claim(
-            &self.root,
+            path,
             self.floor,
             if existing { 0 } else { bytes },
-            &self.space_for(&self.root)?,
+            &self.space_for(path)?,
         )?;
         usage.used[area as usize] = next;
         Ok(Reservation {
@@ -418,7 +431,14 @@ impl Disk {
         u.used[area as usize] = u.used[area as usize].saturating_sub(bytes);
     }
     pub(crate) fn fragment_path(&self, id: Uuid) -> PathBuf {
-        self.root.join("multipart").join(id.simple().to_string())
+        self.root
+            .join("pending/multipart/fragment")
+            .join(id.simple().to_string())
+    }
+    pub(crate) fn candidate_path(&self, id: Uuid) -> PathBuf {
+        self.root
+            .join("pending/multipart/candidate")
+            .join(id.simple().to_string())
     }
     pub(crate) fn pending(&self, id: Uuid) -> bool {
         self.pending.lock().unwrap().contains(&id)
@@ -433,8 +453,13 @@ impl Disk {
             "invalid fragment length"
         );
         let permit = self.io.clone().acquire_owned().await?;
-        let ticket = self.reserve(Area::Multipart, data.len() as u64)?;
         let path = self.fragment_path(id);
+        let ticket = self.reserve_at(
+            Area::Multipart,
+            data.len() as u64,
+            false,
+            path.parent().unwrap(),
+        )?;
         self.pending.lock().unwrap().insert(id);
         let lease = Fragment {
             id,
@@ -470,7 +495,12 @@ impl Disk {
         .await?
     }
     pub(crate) async fn remove_fragment(&self, id: Uuid) -> Result<()> {
-        let path = self.fragment_path(id);
+        self.remove_part(self.fragment_path(id)).await
+    }
+    pub(crate) async fn remove_candidate(&self, id: Uuid) -> Result<()> {
+        self.remove_part(self.candidate_path(id)).await
+    }
+    async fn remove_part(&self, path: PathBuf) -> Result<()> {
         match tokio::fs::metadata(&path).await {
             Ok(m) => {
                 tokio::fs::remove_file(path).await?;
@@ -482,7 +512,7 @@ impl Disk {
         Ok(())
     }
 
-    pub(crate) async fn append_fragment(
+    pub(crate) async fn append_candidate(
         self: &Arc<Self>,
         id: Uuid,
         data: &[u8],
@@ -493,8 +523,13 @@ impl Disk {
             "invalid fragment length"
         );
         let permit = self.io.clone().acquire_owned().await?;
-        let ticket = self.reserve(Area::Multipart, data.len() as u64)?;
-        let path = self.fragment_path(id);
+        let path = self.candidate_path(id);
+        let ticket = self.reserve_at(
+            Area::Multipart,
+            data.len() as u64,
+            false,
+            path.parent().unwrap(),
+        )?;
         self.pending.lock().unwrap().insert(id);
         let lease = Fragment {
             id,

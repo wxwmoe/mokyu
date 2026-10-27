@@ -64,10 +64,10 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 | `instance.listen_control` | single/control：`0.0.0.0:9002`；data/worker/node：`127.0.0.1:9002` | 单容器管理 HTTP；control 同端口提供管理 HTTP 与节点 gRPC；data/worker/node 只提供本机状态与 CLI status |
 | `instance.listen_web` | `0.0.0.0:9001` | 公共读 Web 监听 |
 | `instance.listen_s3` | `0.0.0.0:9000` | S3 监听 |
-| `instance.data_path` | `/data` | 本节点持久目录，保存 multipart、缓存和锁，群集角色另保存 node.json |
+| `instance.data_path` | `/data` | 本节点目录，保存 pending、cache 和锁，群集角色另保存 node.json |
 | `instance.min_free_space` | `1GiB` | 本地文件写入后必须保留的空间 |
 | `instance.multipart_limit` | 自动 | 节点本地 Multipart 暂存上限，单容器和群集均适用 |
-| `instance.cache_size` | 自动 | 本地 chunks/raw 文件缓存共用字节上限 |
+| `instance.cache_size` | 自动 | cache 与 pending 的 chunks/raw 文件共用字节上限 |
 | `instance.cache_entries` | 自动 | 本地缓存索引条目上限 |
 | `instance.response_cache_size` | `0B` | 对象响应缓存的内存额度，包含正文、索引和公开元数据的扩充份额；公共读取与已授权的签名 S3 共用，示例显式设为 `64MiB`，省略或 `0B` 关闭；启用至少 `4MiB`，需要重启 |
 | `instance.write_memory_size` | `0B` | 单容器 S3 volatile 写缓存的共享内存额度；示例 `64MiB`，最少 `4KiB`，按 `4KiB` 向下取整，需重启 |

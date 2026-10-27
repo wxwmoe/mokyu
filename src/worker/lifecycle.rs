@@ -177,17 +177,25 @@ impl App {
             .await?;
         // Only startup scans unindexed local files: no receiver can be between fsync and SQL commit yet.
         if self.role == "single" {
-            let mut files = tokio::fs::read_dir(self.storage.disk.root.join("multipart")).await?;
-            while let Some(file) = files.next_entry().await? {
-                if !file.file_type().await?.is_file() {
-                    continue;
-                }
-                let Ok(id) = Uuid::parse_str(&file.file_name().to_string_lossy()) else {
-                    continue;
-                };
-                let referenced: bool = self.maintenance_store.fragment_exists(id).await?;
-                if !referenced {
-                    self.storage.disk.remove_fragment(id).await?;
+            for area in ["fragment", "candidate"] {
+                let mut files = tokio::fs::read_dir(
+                    self.storage.disk.root.join("pending/multipart").join(area),
+                )
+                .await?;
+                while let Some(file) = files.next_entry().await? {
+                    if !file.file_type().await?.is_file() {
+                        continue;
+                    }
+                    let Ok(id) = Uuid::parse_str(&file.file_name().to_string_lossy()) else {
+                        continue;
+                    };
+                    if !self.maintenance_store.fragment_exists(id).await? {
+                        if area == "fragment" {
+                            self.storage.disk.remove_fragment(id).await?;
+                        } else {
+                            self.storage.disk.remove_candidate(id).await?;
+                        }
+                    }
                 }
             }
         }

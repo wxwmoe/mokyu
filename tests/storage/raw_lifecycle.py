@@ -59,7 +59,7 @@ def main():
     print('PASS raw corruption detection, quarantine, copy rejection, failed recheck and recovery', flush=True)
     before = set(fixture.keys())
     config = tomllib.loads(Path(os.environ['MOKYU_TEST_CONFIG']).read_text())
-    staging = Path(config['instance']['data_path']) / 'multipart'
+    staging = Path(config['instance']['data_path']) / 'pending' / 'multipart' / 'candidate'
     before_parts = set(staging.iterdir())
     upload = fixture.client.create_multipart_upload(Bucket=fixture.name, Key='parts')['UploadId']
     part = fixture.client.upload_part(Bucket=fixture.name, Key='parts', UploadId=upload, PartNumber=1, Body=data)

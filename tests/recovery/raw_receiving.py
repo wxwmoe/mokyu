@@ -49,7 +49,7 @@ def main():
         assert fixture.backend, 'requires a disposable S3 backend'
         database = Database()
         storage = uuid.UUID(fixture.store['id'])
-        root = Path(database.config['instance']['data_path']) / 'raw'
+        root = Path(database.config['instance']['data_path']) / 'pending' / 'raw'
 
         def configure(**changes):
             profile = fixture.cli('storage', 'profile', 'show', fixture.name)

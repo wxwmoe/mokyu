@@ -919,13 +919,14 @@ impl App {
                         .try_into()
                         .map_err(|_| anyhow::anyhow!("invalid fragment hash"))?;
                     ranges.push(crate::storage::assembly::Range {
-                        path: self.storage.multipart_path(
-                            row.file_id
-                                .or(row.fragment_location)
-                                .context("missing fragment location")?,
-                            row.file_storage,
-                            row.raw_source,
-                        )?,
+                        path: if let Some(file) = row.file_id {
+                            self.storage
+                                .multipart_path(file, row.file_storage, row.raw_source)?
+                        } else {
+                            self.storage.disk.fragment_path(
+                                row.fragment_location.context("missing fragment location")?,
+                            )
+                        },
                         offset: offset as u64,
                         length: row.length as usize,
                         hash,

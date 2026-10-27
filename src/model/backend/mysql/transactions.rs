@@ -2111,12 +2111,12 @@ pub(super) async fn cache_release(
     existing_pack: bool,
 ) -> Result<CacheRelease> {
     let mut tx = pool.begin().await?;
-    let rows: Vec<(Id, Option<String>)> = queries::lock_pending_chunks(ids)
+    let rows: Vec<(Id, Option<String>, Option<Uuid>)> = queries::lock_pending_chunks(ids)
         .build_query_as()
         .fetch_all(&mut *tx)
         .await?;
     let mut keys = Vec::new();
-    for (id, key) in rows {
+    for (id, key, destination) in rows {
         if queries::can_release_pending(id, existing_pack)
             .fetch_one(&mut *tx)
             .await?
@@ -2127,7 +2127,7 @@ pub(super) async fn cache_release(
             queries::delete_upload_pins(id).execute(&mut *tx).await?;
             queries::delete_pending_upload(id).execute(&mut *tx).await?;
             if let Some(key) = key {
-                keys.push(key);
+                keys.push((key, destination));
             }
         }
     }

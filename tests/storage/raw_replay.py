@@ -76,7 +76,7 @@ def main():
     assert rows
     identity = rows[0]['id']
     identity = uuid.UUID(str(identity)) if database.type == 'postgres' else uuid.UUID(bytes=bytes(identity))
-    path = Path(database.config['instance']['data_path']) / 'multipart' / identity.hex
+    path = Path(database.config['instance']['data_path']) / 'pending' / 'multipart' / 'candidate' / identity.hex
 
     def complete():
         return target.client.complete_multipart_upload(Bucket=target.name, Key='multipart', UploadId=upload,

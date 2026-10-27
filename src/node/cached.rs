@@ -23,7 +23,7 @@ impl Writes {
             .files
             .recover_uploads(&self.reads.node)
             .await?;
-        let path = crate::storage::cache::CacheFile::Raw.path(
+        let path = crate::storage::cache::CacheFile::PendingRaw.path(
             &self.reads.node.config.instance.data_path,
             source.location_id,
         );

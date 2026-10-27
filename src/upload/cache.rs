@@ -160,7 +160,7 @@ impl App {
             .await?
         {
             if let Some(id) = local_id {
-                self.storage.release_upload(id);
+                self.storage.release_upload(id, None).await?;
             }
             return Ok(false);
         }
@@ -327,12 +327,10 @@ impl App {
     pub async fn release_pending(&self, ids: &[Id], existing_pack: bool) -> Result<()> {
         let _coord = self.coord.lock().await;
         let released = self.upload_cache.release(ids, existing_pack).await?;
-        for key in released
-            .keys
-            .iter()
-            .filter_map(|name| crate::storage::parse_upload_cache_name(name))
-        {
-            self.storage.release_upload(key);
+        for (name, destination) in released.keys {
+            if let Some(key) = crate::storage::parse_upload_cache_name(&name) {
+                self.storage.release_upload(key, destination).await?;
+            }
         }
         for (storage_id, object_key) in released.staged {
             if let Err(error) = self.storage.delete_staged(storage_id, &object_key).await {
@@ -365,7 +363,7 @@ impl App {
                         || owned.contains(&format!("{key}.raw"))
                         || owned.contains(&format!("{key}.zst")))
                 {
-                    self.storage.release_upload(*key);
+                    self.storage.release_upload(*key, None).await?;
                 }
             }
         }

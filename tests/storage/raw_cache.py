@@ -62,7 +62,7 @@ def main():
             wait(lambda: status()['cache_jobs_active'] == 0, 'cache work did not drain')
 
         def files():
-            return [path for path in (data_path / 'raw').glob('*/*') if path.is_file()]
+            return [path for path in (data_path / 'cache' / 'raw').glob('*/*') if path.is_file()]
 
         def source(key, native=False):
             rows = database.query(f'''SELECT r.id,r.{database.raw_location} AS file_uuid FROM objects o JOIN raw_ranges e ON e.stream_id=o.stream_id
@@ -75,7 +75,7 @@ def main():
             return value if isinstance(value, uuid.UUID) else uuid.UUID(bytes=bytes(value))
 
         def cache_path(identity):
-            return data_path / 'raw' / identity.hex[-2:] / identity.hex
+            return data_path / 'cache' / 'raw' / identity.hex[-2:] / identity.hex
 
         configure(cdc_enabled=False, pack_range_enabled=False, deduplication_enabled=False, cache_enabled=True)
         data = bytes(range(256)) * (6 * 1024 * 1024 // 256)
@@ -182,7 +182,7 @@ def main():
 
         idle()
         stop(crash=True)
-        orphan = data_path / 'raw' / 'aa' / ('aa' + '0' * 30 + '.tmp')
+        orphan = data_path / 'cache' / 'raw' / 'aa' / ('aa' + '0' * 30 + '.tmp')
         orphan.parent.mkdir(exist_ok=True)
         orphan.write_bytes(b'incomplete')
         start()
@@ -239,7 +239,7 @@ def main():
                      'cache publication did not pause')
                 assert not reading.done(), reading.exception()
                 stop(crash=True)
-                assert list((data_path / 'raw').glob('*/*.tmp'))
+                assert list((data_path / 'cache' / 'raw').glob('*/*.tmp'))
             finally:
                 marker.unlink(missing_ok=True)
             try:
@@ -249,7 +249,7 @@ def main():
             else:
                 raise AssertionError('unpublished cache read succeeded after service death')
         start()
-        assert not list((data_path / 'raw').glob('*/*.tmp'))
+        assert not list((data_path / 'cache' / 'raw').glob('*/*.tmp'))
         fixture.read('interrupted', interrupted)
         fixture.read('empty', b'')
         configure(cache_enabled=False)
@@ -258,8 +258,8 @@ def main():
         assert status()['backend_gets'] - before['backend_gets'] == 3
         configure(cache_enabled=True)
         fixture.cli('storage', 'create', fixture.name + '-overlap', 'local', '--init',
-                    '--path', str(data_path / 'raw'), succeeds=False)
-        assert not (data_path / 'raw' / 'meta.json').exists()
+                    '--path', str(data_path / 'cache' / 'raw'), succeeds=False)
+        assert not (data_path / 'cache' / 'raw' / 'meta.json').exists()
         print('PASS empty files, killed fills, disabled cache and overlapping storage roots remain safe', flush=True)
 
         # Optional chunks read-cache publication must not delay a durable PUT.
@@ -273,7 +273,7 @@ def main():
             marker.unlink(missing_ok=True)
         idle()
         assert status()['local_bytes'][1] == sum(path.stat().st_size
-            for folder in ('raw', 'chunks') for path in (data_path / folder).glob('*/*') if path.is_file())
+            for folder in ('raw', 'chunks') for path in (data_path / 'cache' / folder).glob('*/*') if path.is_file())
         print('PASS durable chunks PUT completes while optional cache publication is paused', flush=True)
 
         configure(cdc_enabled=False, write_processing='background')

@@ -70,7 +70,7 @@ sid = stream('pinned')
 location = scalar('SELECT l.encoding_id FROM chunks c JOIN extents e ON e.chunk_id=c.id '
                   'JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE e.stream_id=%s', (sid,))
 for extension in ('raw', 'zst'):
-    (data / 'chunks' / location.hex[-2:] / (location.hex + '.' + extension)).unlink(missing_ok=True)
+    (data / 'cache' / 'chunks' / location.hex[-2:] / (location.hex + '.' + extension)).unlink(missing_ok=True)
 marker = arm('cache-reserved')
 try:
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -117,7 +117,7 @@ try:
             wait(lambda: marker.with_suffix('.hit').exists())
             fragment = scalar("SELECT f.id FROM fragments f JOIN streams s ON s.id=f.owner_stream WHERE s.object_key=%s AND NOT f.sealed", (prefix + 'pending',))
             cli('gc', 'run')
-            assert (data / 'multipart' / fragment.hex).exists()
+            assert (data / 'pending' / 'multipart' / 'fragment' / fragment.hex).exists()
             assert scalar('SELECT count(*) FROM fragments WHERE id=%s', (fragment,)) == 1
         finally:
             marker.unlink(missing_ok=True)

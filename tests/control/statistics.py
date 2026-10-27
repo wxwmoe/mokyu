@@ -91,7 +91,7 @@ with psycopg.connect(db_url) as db:
     storage_id = db.execute('''SELECT c.storage_id FROM objects o JOIN buckets b ON b.id=o.bucket_id
         JOIN extents e ON e.stream_id=o.stream_id JOIN chunks c ON c.id=e.chunk_id
         WHERE b.name=%s AND o.object_key='statistics/one' ''', (bucket,)).fetchone()[0].hex
-for path in (Path(os.environ['MOKYU_TEST_DATA']) / 'chunks' / storage_id[-2:]).glob(storage_id + '.*'):
+for path in (Path(os.environ['MOKYU_TEST_DATA']) / 'cache' / 'chunks' / storage_id[-2:]).glob(storage_id + '.*'):
     path.unlink()
 
 # A complete stream, Range, HEAD and an empty object must never count as canceled.

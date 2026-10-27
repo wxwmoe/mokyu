@@ -288,7 +288,10 @@ async fn mysql_upload_cache_contract() -> Result<()> {
             .fetch_one(db)
             .await?;
     let release = backend.release(&ids, false).await?;
-    assert_eq!(release.keys, vec![names[0].clone()]);
+    assert_eq!(
+        release.keys,
+        vec![(names[0].clone(), Some(chunks[0].location_id))]
+    );
     assert!(release.staged.is_empty());
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT generation FROM pack_maintenance WHERE stream_id=?")
@@ -343,7 +346,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     assert!(backend.unused(Some(Uuid::new_v4())).await?.is_empty());
     assert_eq!(
         backend.release(&[ids[1]], false).await?.keys,
-        vec![names[1].clone()]
+        vec![(names[1].clone(), None)]
     );
     assert!(backend.release(&[], false).await?.keys.is_empty());
 
@@ -390,7 +393,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     durable(&backend, &chunks[2]).await?;
     assert_eq!(
         backend.release(&[ids[2]], false).await?.keys,
-        vec![names[2].clone()]
+        vec![(names[2].clone(), Some(chunks[2].location_id))]
     );
     let later = stream(&backend, bucket, "later").await?;
     let late_chunk = chunk(&backend, storage, later, 9).await?;
@@ -438,7 +441,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     durable(&backend, &late_chunk).await?;
     assert_eq!(
         backend.release(&[late_chunk.id], false).await?.keys,
-        vec![late_name]
+        vec![(late_name, Some(late_chunk.location_id))]
     );
     UploadCacheStore::finish(&backend, current).await?;
 
