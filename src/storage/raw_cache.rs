@@ -17,6 +17,8 @@ pub(crate) struct Write {
     path: PathBuf,
     ticket: Option<Reservation>,
     work: Option<CacheWork>,
+    cold: bool,
+    pub(crate) epoch: u64,
 }
 
 impl AsyncWrite for Write {
@@ -63,7 +65,101 @@ impl Drop for Write {
     }
 }
 
+pub(crate) async fn append(write: &mut Option<Write>, data: &[u8]) {
+    if let Some(writer) = write {
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("raw-cache-stream").await;
+            for part in data.chunks(256 * 1024) {
+                writer.write_all(part).await?;
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            *write = None;
+        }
+    }
+}
+
 impl Storage {
+    pub(crate) fn prepare_raw_file(
+        self: &Arc<Self>,
+        mut file: super::raw_request::File,
+        id: Uuid,
+        target: Arc<StoreBackend>,
+    ) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let policy = self.local_cache(Some(target.profile.storage_id)).ok()?;
+        if !policy.enabled {
+            return None;
+        }
+        let work = self.cache_work(id, 1)?;
+        let storage = self.clone();
+        let (ready, published) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _work = work;
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), published).await,
+                Ok(Ok(()))
+            ) {
+                return;
+            }
+            let result = file
+                .cache_in(&storage.file_cache(), id, policy, || {
+                    ensure!(
+                        Arc::ptr_eq(&storage.store_backend(target.profile.storage_id)?, &target),
+                        "cache storage changed"
+                    );
+                    Ok(())
+                })
+                .await;
+            if let Err(error) = result {
+                tracing::debug!(%error, "raw request cache publication skipped");
+            }
+        });
+        Some(ready)
+    }
+
+    pub(crate) fn prepare_raw_fill(
+        self: &Arc<Self>,
+        write: Write,
+        id: Uuid,
+        size: u64,
+        target: Arc<StoreBackend>,
+    ) -> tokio::sync::oneshot::Sender<()> {
+        let storage = self.clone();
+        let (ready, published) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), published).await,
+                Ok(Ok(()))
+            ) {
+                return;
+            }
+            let result = async {
+                let _write = storage.cache_writes.lock().await;
+                storage
+                    .file_cache()
+                    .publish_raw(write, id, size, || {
+                        ensure!(
+                            Arc::ptr_eq(
+                                &storage.store_backend(target.profile.storage_id)?,
+                                &target
+                            ),
+                            "cache storage changed"
+                        );
+                        Ok(())
+                    })
+                    .await
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::debug!(%error, "processed raw cache publication skipped");
+            }
+        });
+        ready
+    }
+
     pub(super) fn raw_cache_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
         self.raw_misses.get(id)
     }
@@ -134,9 +230,17 @@ impl Storage {
     }
 
     pub(crate) async fn begin_raw_cache(&self, source: &RawSource) -> Result<Option<Write>> {
-        let id = source.location_id;
-        let policy = self.local_cache(Some(source.storage_id))?;
-        let size = source.size as u64;
+        self.begin_raw_output(source.storage_id, source.location_id, source.size as u64)
+            .await
+    }
+
+    pub(crate) async fn begin_raw_output(
+        &self,
+        storage: Uuid,
+        id: Uuid,
+        size: u64,
+    ) -> Result<Option<Write>> {
+        let policy = self.local_cache(Some(storage))?;
         if !policy.enabled || policy.capacity.is_some_and(|capacity| size > capacity) {
             return Ok(None);
         }
@@ -163,7 +267,13 @@ impl Storage {
             }
             storage
                 .file_cache()
-                .publish_raw(write, source.location_id, source.size as u64)
+                .publish_raw(write, source.location_id, source.size as u64, || {
+                    ensure!(
+                        Arc::ptr_eq(&storage.store_backend(source.storage_id)?, &target),
+                        "cache storage changed"
+                    );
+                    Ok(())
+                })
                 .await
                 .map(Some)
         })
@@ -203,6 +313,8 @@ impl Files<'_> {
             path,
             ticket: Some(ticket),
             work: Some(work),
+            cold: policy.cold,
+            epoch: 0,
         };
         tokio::fs::create_dir_all(write.path.parent().unwrap()).await?;
         write.file = Some(
@@ -223,16 +335,29 @@ impl Files<'_> {
         mut write: Write,
         id: Uuid,
         size: u64,
+        check: impl Fn() -> Result<()> + Send + Sync,
     ) -> Result<RawFile> {
         let file = write.file.as_mut().unwrap();
-        file.flush().await?;
-        file.rewind().await?;
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            file.flush().await?;
+            file.rewind().await?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("raw-cache-written").await;
+        check()?;
+        ensure!(
+            file.metadata().await?.len() == size,
+            "raw cache length changed"
+        );
         let path = CacheFile::Raw.path(self.root, id);
         tokio::fs::rename(&write.path, &path).await?;
         write.path = path;
         let mut fifo = self.fifo.lock().await;
+        if write.cold {
+            fifo.ghost.remove(&id);
+        }
         fifo.insert(id, size, CacheFile::Raw);
         let pin = fifo.entries[&id].pins.clone();
         pin.fetch_add(1, Ordering::Relaxed);
@@ -281,6 +406,8 @@ mod tests {
             path: path.clone(),
             ticket: Some(ticket),
             work: None,
+            cold: false,
+            epoch: 0,
         };
         assert_eq!(disk.used()[1], 65536);
         drop(write);

@@ -25,7 +25,13 @@ impl Files<'_> {
             return None;
         }
         entry.pins.fetch_add(1, Ordering::Relaxed);
-        entry.frequency = entry.frequency.saturating_add(1).min(3);
+        if super::resource_gate::PRIORITY
+            .try_with(|priority| *priority)
+            .unwrap_or(super::resource_gate::FOREGROUND)
+            == super::resource_gate::FOREGROUND
+        {
+            entry.frequency = entry.frequency.saturating_add(1).min(3);
+        }
         Some((CachePin(entry.pins.clone()), entry.file))
     }
 
@@ -82,10 +88,20 @@ impl Files<'_> {
         tokio::fs::create_dir_all(directory).await?;
         let mut fifo = self.fifo.lock().await;
         loop {
+            if policy.cold
+                && policy
+                    .capacity
+                    .is_some_and(|limit| self.disk.used()[1].saturating_add(size) > limit)
+            {
+                return Ok(None);
+            }
             if fifo.entries.len() < policy.max_entries
                 && let Ok(ticket) = self.disk.reserve_at(Area::Cache, size, existing, directory)
             {
                 return Ok(Some(ticket));
+            }
+            if policy.cold {
+                return Ok(None);
             }
             let capacity = policy.capacity.unwrap_or(self.disk.used()[1].max(size));
             let Some(victim) = fifo.victim(capacity) else {
@@ -119,6 +135,7 @@ impl Files<'_> {
         data: &[u8],
         compressed: bool,
         policy: CachePolicy,
+        check: impl Fn() -> Result<()> + Send + Sync,
     ) -> Result<()> {
         let size = data.len() as u64;
         if policy.capacity.is_some_and(|capacity| size > capacity) {
@@ -140,6 +157,7 @@ impl Files<'_> {
         if self.fifo.lock().await.entries.contains_key(&id) {
             return Ok(());
         }
+        check()?;
         let path = CacheFile::Chunk(compressed).path(self.root, id);
         let Some(ticket) = self.reserve(size, policy, false, &path).await? else {
             return Ok(());
@@ -149,22 +167,26 @@ impl Files<'_> {
         let tmp = path.with_extension(if compressed { "zst.tmp" } else { "raw.tmp" });
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let result = async {
-            let mut f = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o644)
-                .open(&tmp)
-                .await?;
-            f.write_all(data).await?;
-            f.flush().await?;
-            drop(f);
+            tokio::time::timeout(std::time::Duration::from_millis(100), async {
+                let mut f = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o644)
+                    .open(&tmp)
+                    .await?;
+                f.write_all(data).await?;
+                f.flush().await?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("cache-written").await;
+            check()?;
             tokio::fs::rename(&tmp, &path).await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("cache-published").await;
-            Ok::<_, std::io::Error>(())
+            Ok::<_, anyhow::Error>(())
         }
         .await;
         if let Err(e) = result {
@@ -173,10 +195,14 @@ impl Files<'_> {
             {
                 ticket.commit();
             }
-            return Err(e.into());
+            return Err(e);
         }
         ticket.commit();
-        self.fifo.lock().await.insert(id, size, compressed);
+        let mut fifo = self.fifo.lock().await;
+        if policy.cold {
+            fifo.ghost.remove(&id);
+        }
+        fifo.insert(id, size, compressed);
         Ok(())
     }
 
@@ -269,7 +295,7 @@ async fn remove(path: &Path) -> Result<()> {
     }
 }
 
-async fn link(source: &Path, destination: &Path, size: u64) -> Result<bool> {
+pub(super) async fn link(source: &Path, destination: &Path, size: u64) -> Result<bool> {
     let metadata = tokio::fs::symlink_metadata(source).await?;
     ensure!(
         metadata.is_file() && metadata.len() == size,
@@ -352,6 +378,7 @@ mod tests {
         };
         let policy = CachePolicy {
             enabled: true,
+            cold: false,
             capacity: Some(8192),
             max_entries: 2,
             upload_cache: true,
@@ -430,6 +457,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maintenance_fills_preserve_hot_entries_and_recheck_publication() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("mokyu-cold-cache-{}", Uuid::new_v4()));
+        let disk = disk(&root);
+        let fifo = Mutex::new(Fifo::default());
+        let writes = Mutex::new(());
+        let files = Files {
+            disk: &disk,
+            root: &root,
+            fifo: &fifo,
+            cache_writes: &writes,
+        };
+        let policy = CachePolicy {
+            enabled: true,
+            cold: false,
+            capacity: Some(8192),
+            max_entries: 2,
+            upload_cache: false,
+            upload_capacity: None,
+        };
+        let hot = Uuid::new_v4();
+        files
+            .fill(hot, &[1; 4096], false, policy, || Ok(()))
+            .await?;
+        drop(files.pin(hot).await);
+        let frequency = fifo.lock().await.entries[&hot].frequency;
+        super::super::resource_gate::PRIORITY
+            .scope(super::super::resource_gate::MAINTENANCE, async {
+                for _ in 0..8 {
+                    drop(files.pin(hot).await);
+                }
+            })
+            .await;
+        assert_eq!(fifo.lock().await.entries[&hot].frequency, frequency);
+        let cold = Uuid::new_v4();
+        fifo.lock().await.ghost.insert(cold);
+        let cold_policy = CachePolicy {
+            cold: true,
+            ..policy
+        };
+        files
+            .fill(cold, &[2; 4096], false, cold_policy, || Ok(()))
+            .await?;
+        assert!(matches!(
+            fifo.lock().await.entries[&cold].queue,
+            super::super::cache::Queue::Small
+        ));
+        for _ in 0..8 {
+            files
+                .fill(Uuid::new_v4(), &[3; 4096], false, cold_policy, || Ok(()))
+                .await?;
+        }
+        assert_eq!(disk.used()[1], 8192);
+        assert!(files.pin(hot).await.is_some());
+        files.invalidate(cold, None).await?;
+        let rejected = Uuid::new_v4();
+        let checks = AtomicUsize::new(0);
+        assert!(
+            files
+                .fill(rejected, &[4; 4096], false, cold_policy, || {
+                    ensure!(
+                        checks.fetch_add(1, Ordering::Relaxed) == 0,
+                        "authority expired"
+                    );
+                    Ok(())
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(checks.load(Ordering::Relaxed), 2);
+        assert_eq!(disk.used()[1], 4096);
+        assert!(!fifo.lock().await.entries.contains_key(&rejected));
+        assert!(!CacheFile::Chunk(false).path(&root, rejected).exists());
+        tokio::fs::remove_dir_all(root).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn confirmed_request_handoff_reuses_inode_and_one_disk_charge() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("mokyu-request-cache-{}", Uuid::new_v4()));
+        let disk = disk(&root);
+        let fifo = Mutex::new(Fifo::default());
+        let writes = Mutex::new(());
+        let files = Files {
+            disk: &disk,
+            root: &root,
+            fifo: &fifo,
+            cache_writes: &writes,
+        };
+        let policy = CachePolicy {
+            enabled: true,
+            cold: true,
+            capacity: Some(8192),
+            max_entries: 2,
+            upload_cache: false,
+            upload_capacity: None,
+        };
+        let id = Uuid::new_v4();
+        let mut request = super::super::raw_request::File::create_in(&files, id, policy).await?;
+        request.append_in(&files, &[7; 4096]).await?;
+        let source = CacheFile::PendingRaw
+            .path(&root, id)
+            .with_extension("partial");
+        let metadata = tokio::fs::metadata(&source).await?;
+        let target = Uuid::new_v4();
+        request.cache_in(&files, target, policy, || Ok(())).await?;
+        drop(request);
+        assert!(!source.exists());
+        let path = CacheFile::Raw.path(&root, target);
+        assert_eq!(tokio::fs::read(&path).await?, [7; 4096]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(metadata.ino(), tokio::fs::metadata(&path).await?.ino());
+        }
+        assert_eq!(disk.used()[1], 4096);
+        files.invalidate(target, None).await?;
+        assert_eq!(disk.used()[1], 0);
+        tokio::fs::remove_dir_all(root).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn pinned_files_and_failed_deletion_keep_disk_accounting() -> Result<()> {
         let root = std::env::temp_dir().join(format!("mokyu-file-cache-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await?;
@@ -457,6 +606,7 @@ mod tests {
         };
         let policy = CachePolicy {
             enabled: true,
+            cold: false,
             capacity: Some(8192),
             max_entries: 1,
             upload_cache: false,
@@ -464,9 +614,13 @@ mod tests {
         };
         let first = Uuid::new_v4();
         let second = Uuid::new_v4();
-        cache.fill(first, &[1; 4096], false, policy).await?;
+        cache
+            .fill(first, &[1; 4096], false, policy, || Ok(()))
+            .await?;
         let (pin, _) = cache.pin(first).await.unwrap();
-        cache.fill(second, &[2; 4096], false, policy).await?;
+        cache
+            .fill(second, &[2; 4096], false, policy, || Ok(()))
+            .await?;
         assert_eq!(fifo.lock().await.entries.len(), 1);
         assert!(fifo.lock().await.entries.contains_key(&first));
         drop(pin);
@@ -474,13 +628,20 @@ mod tests {
         tokio::fs::remove_file(&path).await?;
         tokio::fs::create_dir(&path).await?;
         tokio::fs::write(path.join("blocked"), b"blocked").await?;
-        assert!(cache.fill(second, &[2; 4096], false, policy).await.is_err());
+        assert!(
+            cache
+                .fill(second, &[2; 4096], false, policy, || Ok(()))
+                .await
+                .is_err()
+        );
         assert_eq!(disk.used()[1], 4096);
         assert!(cache.pin(first).await.is_some());
         tokio::fs::remove_file(path.join("blocked")).await?;
         tokio::fs::remove_dir(&path).await?;
         tokio::fs::write(&path, [1; 4096]).await?;
-        cache.fill(second, &[2; 4096], false, policy).await?;
+        cache
+            .fill(second, &[2; 4096], false, policy, || Ok(()))
+            .await?;
         assert!(!path.exists());
         assert_eq!(disk.used()[1], 4096);
         assert_eq!(

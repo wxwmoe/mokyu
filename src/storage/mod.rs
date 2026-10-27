@@ -115,7 +115,7 @@ pub struct Storage {
     pub controls: Arc<crate::storage::resource_gate::Gate>,
     fifo: tokio::sync::Mutex<Fifo>,
     cache_writes: tokio::sync::Mutex<()>,
-    upload_pins: Mutex<HashMap<Uuid, UploadPin>>,
+    upload_pins: Mutex<UploadPins>,
     released_uploads: Mutex<HashMap<Uuid, Option<Uuid>>>,
     raw_upload_pins: Mutex<HashMap<Uuid, (crate::model::Id, UploadPin)>>,
     remote_charges: Mutex<HashMap<Id, UploadCharge>>,
@@ -485,7 +485,7 @@ impl Storage {
             controls: crate::storage::resource_gate::Gate::new(budget.storage_control_slots, aging),
             fifo: tokio::sync::Mutex::new(Fifo::default()),
             cache_writes: tokio::sync::Mutex::new(()),
-            upload_pins: Mutex::new(HashMap::new()),
+            upload_pins: Mutex::default(),
             released_uploads: Mutex::new(HashMap::new()),
             raw_upload_pins: Mutex::new(HashMap::new()),
             remote_charges: Mutex::new(HashMap::new()),
@@ -611,6 +611,10 @@ impl Storage {
         let target = self.store_backend(storage_id.context("source has no storage")?)?;
         Ok(CachePolicy {
             enabled: target.cache_enabled && !target.is_local,
+            cold: resource_gate::PRIORITY
+                .try_with(|priority| *priority)
+                .unwrap_or(resource_gate::FOREGROUND)
+                != resource_gate::FOREGROUND,
             capacity: target.cache_capacity.or(self.capacity),
             max_entries: target.cache_entries,
             upload_cache: target.upload_cache,
@@ -1045,6 +1049,7 @@ impl Storage {
                 self.disk.account_existing(Area::Cache, size);
                 self.upload_pins.lock().unwrap().insert(
                     key,
+                    id,
                     UploadPin {
                         memory: None,
                         _pin: Some(CachePin(pin)),
@@ -1063,8 +1068,8 @@ impl Storage {
         }
         Ok(())
     }
-    pub fn hold_upload(&self, id: Uuid, pin: UploadPin) {
-        self.upload_pins.lock().unwrap().insert(id, pin);
+    pub fn hold_upload(&self, id: Uuid, chunk: Id, pin: UploadPin) {
+        self.upload_pins.lock().unwrap().insert(id, chunk, pin);
     }
     pub async fn release_upload(
         self: &Arc<Self>,
@@ -1079,12 +1084,18 @@ impl Storage {
                 .unwrap()
                 .entry(id)
                 .or_insert(destination);
-            let held = storage.upload_pins.lock().unwrap().get(&id).map(|pin| {
-                (
-                    pin._pin.as_ref().map(|pin| pin.0.clone()),
-                    pin._charge.as_ref().map(|charge| charge.storage),
-                )
-            });
+            let held = storage
+                .upload_pins
+                .lock()
+                .unwrap()
+                .files
+                .get(&id)
+                .map(|(_, pin)| {
+                    (
+                        pin._pin.as_ref().map(|pin| pin.0.clone()),
+                        pin._charge.as_ref().map(|charge| charge.storage),
+                    )
+                });
             let Some((owner, target)) = held else {
                 storage.released_uploads.lock().unwrap().remove(&id);
                 return Ok(());
@@ -1108,7 +1119,13 @@ impl Storage {
         .await?
     }
     pub fn upload_pin_ids(&self) -> Vec<Uuid> {
-        self.upload_pins.lock().unwrap().keys().copied().collect()
+        self.upload_pins
+            .lock()
+            .unwrap()
+            .files
+            .keys()
+            .copied()
+            .collect()
     }
     fn shared_staging_id(&self) -> Result<Uuid> {
         ensure!(
@@ -1327,7 +1344,14 @@ impl Storage {
         })
     }
     pub(crate) fn chunk_memory(&self, id: Uuid) -> Option<Bytes> {
-        self.upload_pins.lock().unwrap().get(&id)?.memory.clone()
+        self.upload_pins
+            .lock()
+            .unwrap()
+            .files
+            .get(&id)?
+            .1
+            .memory
+            .clone()
     }
     pub async fn stage_upload(
         self: &Arc<Self>,
@@ -1537,13 +1561,9 @@ impl Storage {
                                 if format == CacheFile::Raw {
                                     self.raw_upload_pins.lock().unwrap().contains_key(&id)
                                 } else {
-                                    self.upload_pins
-                                        .lock()
-                                        .unwrap()
-                                        .get(&id)
-                                        .is_some_and(|pin| {
-                                            format == CacheFile::Chunk(pin.compressed)
-                                        })
+                                    self.upload_pins.lock().unwrap().files.get(&id).is_some_and(
+                                        |(_, pin)| format == CacheFile::Chunk(pin.compressed),
+                                    )
                                 }
                             }) {
                                 continue;
@@ -1630,7 +1650,12 @@ impl Storage {
         })
         .await?
     }
-    pub async fn put(self: &Arc<Self>, c: &Chunk, encoded: Vec<u8>, cache: Bytes) -> Result<()> {
+    pub async fn put(
+        self: &Arc<Self>,
+        c: &Chunk,
+        encoded: Vec<u8>,
+        cache: Bytes,
+    ) -> Result<Option<tokio::sync::oneshot::Sender<()>>> {
         self.put_received(c, encoded, cache, false).await
     }
     pub(crate) async fn put_received(
@@ -1639,7 +1664,7 @@ impl Storage {
         encoded: Vec<u8>,
         cache: Bytes,
         buffered: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<tokio::sync::oneshot::Sender<()>>> {
         let storage_id = c.storage_id.context("chunk has no store")?;
         self.ensure_storage_verified(storage_id).await?;
         let target = self.store_backend(storage_id)?;
@@ -1678,10 +1703,12 @@ impl Storage {
         self.operations[1].bytes(size as u64);
         self.backend_write_bytes
             .fetch_add(size as u64, Ordering::Relaxed);
-        if let Ok((_, _, threshold)) = self.compression_for(c.storage_id) {
-            self.fill_read(c, cache, Some(codec::cache_compressed(c, threshold)));
-        }
-        Ok(())
+        Ok(self
+            .compression_for(c.storage_id)
+            .ok()
+            .and_then(|(_, _, threshold)| {
+                self.prepare_fill(c, &cache, Some(codec::cache_compressed(c, threshold)))
+            }))
     }
     async fn cached_file(
         &self,
@@ -1701,7 +1728,7 @@ impl Storage {
             return Ok(Some((data, 0)));
         }
         if !self.local_cache(c.storage_id)?.enabled
-            && !self.upload_pins.lock().unwrap().contains_key(&id)
+            && !self.upload_pins.lock().unwrap().files.contains_key(&id)
         {
             return Ok(None);
         }
@@ -1798,6 +1825,7 @@ impl Storage {
             .upload_pins
             .lock()
             .unwrap()
+            .files
             .keys()
             .any(|id| *id == cache_id);
         if pending && self.physical.pending_only(c.id).await? {
@@ -1861,61 +1889,85 @@ impl Storage {
         })
     }
     pub(crate) fn fill_read(self: &Arc<Self>, c: &Chunk, data: Bytes, compressed: Option<bool>) {
-        if let Ok(fifo) = self.fifo.try_lock()
-            && fifo
+        if let Some(ready) = self.prepare_fill(c, &data, compressed) {
+            let _ = ready.send(());
+        }
+    }
+    pub(crate) fn has_pending(&self, c: &Chunk) -> bool {
+        let pins = self.upload_pins.lock().unwrap();
+        pins.chunks.contains_key(&c.id)
+    }
+    pub(crate) fn prepare_fill(
+        self: &Arc<Self>,
+        c: &Chunk,
+        data: &[u8],
+        compressed: Option<bool>,
+    ) -> Option<tokio::sync::oneshot::Sender<()>> {
+        if self.has_pending(c)
+            || self
+                .fifo
+                .try_lock()
+                .ok()?
                 .entries
                 .get(&cache::cache_id(c))
                 .is_some_and(|entry| entry.valid)
         {
-            return;
+            return None;
         }
-        let Ok(policy) = self.local_cache(c.storage_id) else {
-            return;
-        };
+        let policy = self.local_cache(c.storage_id).ok()?;
         if !policy.enabled {
-            return;
+            return None;
         }
-        let Ok((pool, _, _)) = self.compression_for(c.storage_id) else {
-            return;
-        };
-        let Ok(workspace) = pool.workspace_bytes() else {
-            return;
-        };
-        // Detached fills retain their buffers after the request returns its data slot.
+        let target = self.store_backend(c.storage_id?).ok()?;
+        let (pool, _, _) = self.compression_for(c.storage_id).ok()?;
+        let workspace = pool.workspace_bytes().ok()?;
         let units =
             (data.len().max(c.raw_size as usize) as u64 * 4 + workspace).div_ceil(1024 * 1024);
-        let Ok(units) = u32::try_from(units) else {
-            return;
-        };
-        let Some(work) = self.cache_work(cache::cache_id(c), units) else {
-            return;
-        };
+        let work = self.cache_work(cache::cache_id(c), units.try_into().ok()?)?;
+        // Copy only after admission: a member slice may otherwise retain an entire pack.
+        let data = Bytes::copy_from_slice(data);
+        let (ready, published) = tokio::sync::oneshot::channel();
         let storage = self.clone();
         let chunk = c.clone();
         tokio::spawn(
             resource_gate::PRIORITY.scope(resource_gate::MAINTENANCE, async move {
                 let _work = work;
-                let result = if let Some(compressed) = compressed {
+                if !matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), published).await,
+                    Ok(Ok(()))
+                ) || !storage
+                    .store_backend(chunk.storage_id.unwrap())
+                    .is_ok_and(|current| Arc::ptr_eq(&current, &target))
+                {
+                    return;
+                }
+                let result = async {
+                    let (data, compressed) = if let Some(compressed) = compressed {
+                        (data, compressed)
+                    } else {
+                        storage.cache_payload(&chunk, data).await?
+                    };
                     storage
-                        .fill_owned(cache::cache_id(&chunk), &data, compressed, policy)
+                        .file_cache()
+                        .fill(cache::cache_id(&chunk), &data, compressed, policy, || {
+                            ensure!(
+                                Arc::ptr_eq(
+                                    &storage.store_backend(chunk.storage_id.unwrap())?,
+                                    &target
+                                ),
+                                "cache storage changed"
+                            );
+                            Ok(())
+                        })
                         .await
-                } else {
-                    storage.fill_raw(&chunk, data).await
-                };
+                }
+                .await;
                 if let Err(e) = result {
                     tracing::warn!(error=%e,"cache fill failed; serving verified backend data");
                 }
             }),
         );
-    }
-    async fn fill_owned(
-        &self,
-        id: Uuid,
-        data: &[u8],
-        compressed: bool,
-        policy: CachePolicy,
-    ) -> Result<()> {
-        self.file_cache().fill(id, data, compressed, policy).await
+        Some(ready)
     }
     pub async fn get_with(
         self: &Arc<Self>,
@@ -2373,12 +2425,13 @@ impl Storage {
                     if verify && let Ok(permit) = self.fills.clone().try_acquire_owned() {
                         let storage = self.clone();
                         let loaded = loaded.clone();
-                        tokio::spawn(async move {
+                        let priority = lock.priority.load(Ordering::Relaxed);
+                        tokio::spawn(resource_gate::PRIORITY.scope(priority, async move {
                             let _permit = permit;
                             if let Err(e) = storage.fill_pack(&loaded).await {
                                 tracing::warn!(error=%e,"pack cache fill failed");
                             }
-                        });
+                        }));
                     }
                     Ok(loaded)
                 }
@@ -2399,12 +2452,21 @@ impl Storage {
         Ok(())
     }
     pub async fn fill_raw(&self, c: &Chunk, raw: Bytes) -> Result<()> {
-        if !self.local_cache(c.storage_id)?.enabled {
+        if self.has_pending(c) || !self.local_cache(c.storage_id)?.enabled {
             return Ok(());
         }
+        let storage = c.storage_id.context("chunk has no store")?;
+        let target = self.store_backend(storage)?;
         let (data, compressed) = self.cache_payload(c, raw).await?;
         let policy = self.local_cache(c.storage_id)?;
-        self.fill_owned(cache::cache_id(c), &data, compressed, policy)
+        self.file_cache()
+            .fill(cache::cache_id(c), &data, compressed, policy, || {
+                ensure!(
+                    Arc::ptr_eq(&self.store_backend(storage)?, &target),
+                    "cache storage changed"
+                );
+                Ok(())
+            })
             .await
     }
     pub async fn cache_payload(&self, c: &Chunk, raw: Bytes) -> Result<(Bytes, bool)> {
@@ -2458,7 +2520,7 @@ impl Storage {
         Ok(result?)
     }
     pub async fn inspect(
-        &self,
+        self: &Arc<Self>,
         task: Uuid,
         c: &Chunk,
         mode: crate::worker::integrity::Mode,
@@ -2500,7 +2562,7 @@ impl Storage {
         Ok(target.is_local)
     }
     pub(crate) async fn inspect_exact(
-        &self,
+        self: &Arc<Self>,
         snapshot: &crate::model::source::SourceSnapshot,
     ) -> Result<u64> {
         if let crate::model::PhysicalSource::Raw(raw) = &snapshot.physical {
@@ -2538,7 +2600,7 @@ impl Storage {
         .await
     }
     async fn inspect_source(
-        &self,
+        self: &Arc<Self>,
         task: Option<Uuid>,
         source: Source,
         c: &Chunk,
@@ -2564,7 +2626,10 @@ impl Storage {
                     crate::worker::integrity::Mode::Full => {
                         let data = self.read_backend(&physical).await?;
                         let size = data.len() as u64;
-                        self.decode(&physical, data).await?;
+                        let (raw, _) = self.decode(&physical, data).await?;
+                        resource_gate::PRIORITY.sync_scope(resource_gate::MAINTENANCE, || {
+                            self.fill_read(&physical, raw, None)
+                        });
                         Ok(size)
                     }
                 }
@@ -2638,6 +2703,7 @@ impl Storage {
                     let secrets = self.secrets.clone();
                     let pack = p.clone();
                     let diagnostics = self.diagnostics.clone();
+                    let storage = self.clone();
                     tokio::task::spawn_blocking(move || {
                         let _permit = permit;
                         let _memory = memory;
@@ -2657,6 +2723,14 @@ impl Storage {
                                                 + *offset as usize,
                                     codec::IntegrityError::Metadata
                                 );
+                            }
+                            for (mut c, _) in members {
+                                c.location_id = Uuid::nil();
+                                let data = decoded.chunk(&c)?;
+                                resource_gate::PRIORITY
+                                    .sync_scope(resource_gate::MAINTENANCE, || {
+                                        storage.fill_read(&c, data, None)
+                                    });
                             }
                             Ok::<_, anyhow::Error>(())
                         })();

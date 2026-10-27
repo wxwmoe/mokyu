@@ -110,7 +110,7 @@ async fn mysql_packing_contract() -> Result<()> {
     assert_eq!(backend.ready_encoding(rows[0].chunk.id).await?, None);
     assert_eq!(
         backend.ready_encoding(rows[2].chunk.id).await?,
-        Some((rows[2].chunk.encoding_id, 32))
+        Some((rows[2].chunk.encoding_id, rows[2].chunk.location_id, 32))
     );
     assert_eq!(backend.pack_stream_metadata(stream).await?.1, "source");
     assert_eq!(backend.unpack_totals(None).await?, (1, 64));

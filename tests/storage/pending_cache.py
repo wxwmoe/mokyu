@@ -111,6 +111,7 @@ def main():
         for compressed in (False, True):
             configure(compression_enabled=compressed)
             marker = fixture.arm('upload-before-work')
+            release = fixture.arm('upload-before-release')
             name = 'zstd' if compressed else 'chunk'
             data = b'compressed pending candidate' * 4096 if compressed else os.urandom(128 * 1024)
             fixture.put(name, data)
@@ -128,6 +129,14 @@ def main():
                 candidates.append((row['id'], source, inode(source), '.' + extension))
             fixture.read(name, data)
             marker.unlink()
+            wait(release.with_suffix('.hit').exists, 'encoded pending file did not reach release')
+            wait(lambda: fixture.cli('status')['cache_jobs_active'] == 0, 'cache fills did not finish')
+            for chunk, source, before, extension in candidates:
+                rows = database.query('SELECT location_id FROM chunk_encodings WHERE chunk_id=%s AND state=\'ready\'', chunk)
+                assert len(rows) == 1 and inode(source) == before
+                destination = path('cache', 'chunks', rows[0]['location_id'], extension)
+                assert not destination.exists(), 'background encoding duplicated a pending file'
+            release.unlink()
             for chunk, source, before, extension in candidates:
                 wait(lambda: not source.exists(), 'chunk pending file was not released')
                 rows = database.query('SELECT location_id FROM chunk_encodings WHERE chunk_id=%s AND state=\'ready\'', chunk)
@@ -144,6 +153,7 @@ def main():
             configure(pack_enabled=True, deduplication_enabled=True, compression_enabled=True)
             packed = b'A' * (4 * 1024 * 1024) + b'B' * (4 * 1024 * 1024) + b'C' * (4 * 1024 * 1024 + 31)
             marker = fixture.arm('upload-before-work')
+            release = fixture.arm('upload-before-release')
             fixture.put('packed', packed)
             wait(marker.with_suffix('.hit').exists, 'pack upload did not pause')
             column = 'u.staging_object_key' if database.type == 'postgres' else 'u.cache_key'
@@ -162,6 +172,12 @@ def main():
                 source = path('pending', 'chunks', value, '.' + extension)
                 originals[row['id']] = source, inode(source), row['file_uuid'], '.' + extension
             marker.unlink()
+            wait(release.with_suffix('.hit').exists, 'packed pending files did not reach release')
+            wait(lambda: fixture.cli('status')['cache_jobs_active'] == 0, 'cache fills did not finish')
+            for source, before, value, extension in originals.values():
+                assert inode(source) == before
+                assert not path('cache', 'chunks', value, extension).exists(), 'packing duplicated a pending file'
+            release.unlink()
             wait(lambda: not pending_chunks('packed'), 'pack did not publish')
             for source, before, value, extension in originals.values():
                 destination = path('cache', 'chunks', value, extension)

@@ -66,7 +66,7 @@ def main():
         configure(cdc_enabled=False, pack_enabled=False, pack_range_enabled=False,
                   deduplication_enabled=False, cache_enabled=True, read_integrity='background')
         body = os.urandom(6 * 1024 * 1024 + 17)
-        fixture.put('full', body)
+        fixture.cold_put('full', body)
         before = status()
         fixture.read('full', body)
         idle()
@@ -84,24 +84,31 @@ def main():
         assert cache('full').read_bytes() == body
         print('PASS complete background raw fills from one download and serves later full/Range reads', flush=True)
 
-        fixture.put('partial', body)
+        fixture.cold_put('partial', body)
+        marker = fixture.arm('read-integrity-check')
+        before = status()['backend_read_bytes']
         with fixture.client.get_object(Bucket=fixture.name, Key='partial', Range='bytes=17-511')['Body'] as response:
             assert response.read() == body[17:512]
-        idle()
         assert not cache('partial').exists()
+        marker.unlink()
+        idle()
+        assert status()['backend_read_bytes'] - before == len(body) + 495
+        if cache('partial').exists():
+            assert cache('partial').read_bytes() == body
+        print('PASS a partial response never publishes; the existing full background check may refill verified bytes', flush=True)
         for name, changes in [('off', dict(read_integrity='off')),
                               ('disabled', dict(read_integrity='background', cache_enabled=False)),
                               ('oversized', dict(cache_enabled=True, cache_soft_limit='1MiB'))]:
             configure(**changes)
-            fixture.put(name, body)
+            fixture.cold_put(name, body)
             fixture.read(name, body)
             idle()
             assert not cache(name).exists(), name
         configure(cache_soft_limit=None)
-        print('PASS partial sources, disabled integrity/cache and oversized files do not publish a raw cache', flush=True)
+        print('PASS disabled integrity/cache and oversized files do not publish a raw cache', flush=True)
 
         small = os.urandom(512 * 1024 + 13)
-        fixture.put('slow', small)
+        fixture.cold_put('slow', small)
         marker = fixture.arm('raw-cache-stream')
         try:
             with ThreadPoolExecutor(max_workers=1) as pool:
@@ -118,7 +125,7 @@ def main():
         print('PASS slow optional cache writes are dropped without blocking the response or losing later admission', flush=True)
 
         if fault := os.environ.get('MOKYU_TEST_SPACE_FAULT'):
-            fixture.put('space', small)
+            fixture.cold_put('space', small)
             marker = Path(fault)
             marker.touch()
             try:
@@ -129,7 +136,7 @@ def main():
                 marker.unlink(missing_ok=True)
             print('PASS low disk space skips only the optional cache', flush=True)
 
-        fixture.put('cancel', body * 4)
+        fixture.cold_put('cancel', body * 4)
         marker = fixture.arm('read-integrity-check')
         try:
             response = fixture.client.get_object(Bucket=fixture.name, Key='cancel')['Body']
@@ -140,7 +147,7 @@ def main():
         idle()
         assert not cache('cancel').exists()
 
-        fixture.put('bad', small)
+        fixture.cold_put('bad', small)
         identity = source('bad').hex
         physical = fixture.prefix + 'raw/' + identity[-2:] + '/' + identity
         fixture.bytes(physical, b'!' + small[1:])

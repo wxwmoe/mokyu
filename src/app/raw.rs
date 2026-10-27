@@ -70,8 +70,11 @@ impl App {
                     crate::content::codec::IntegrityError::Length
                 );
             }
-            Written::Final(hash) => {
+            Written::Final(hash, fill) => {
                 self.raw.finish(stream, source, size, digest).await?;
+                if let Some(fill) = fill {
+                    let _ = fill.send(());
+                }
                 self.deduplicate_raw(stream, storage, source, hash).await?;
             }
             Written::Cached {

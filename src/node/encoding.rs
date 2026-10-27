@@ -7,7 +7,7 @@ impl Reader {
         backend: Arc<Backend>,
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         item: Rewrite,
-    ) -> Result<Outcome> {
+    ) -> Result<(Outcome, crate::storage::cache::Fills)> {
         let config = backend.profile.compression_config("0s");
         let (bound, source_path, output_path) = match &item {
             Rewrite::Chunk {
@@ -69,14 +69,23 @@ impl Reader {
         let bytes = read_bounded(backend.store.backend.as_ref(), &source_path, bound).await?;
         let cpu = self.cpu.clone().acquire_owned().await?;
         let pool = self.pool.clone();
-        let (outcome, encoded, _memory) = tokio::task::spawn_blocking(move || {
+        let files = self.files.clone();
+        let profile = backend.profile.clone();
+        let (outcome, encoded, fills, _memory) = tokio::task::spawn_blocking(move || {
             let _cpu = cpu;
+            let mut fills = Vec::new();
             let (outcome, encoded) = match item {
                 Rewrite::Chunk {
                     source, mut target, ..
                 } => {
                     let (raw, _) =
                         codec::decode_read(&source, bytes, keys.as_ref(), 0, &pool, true)?;
+                    fills.extend(
+                        crate::storage::resource_gate::PRIORITY
+                            .sync_scope(crate::storage::resource_gate::MAINTENANCE, || {
+                                files.prepare_fill(target.location_id, &raw, false, &profile)
+                            }),
+                    );
                     let compressed = pool.compress_for(&raw, source.compressed, &config)?;
                     target.compressed = compressed.is_some();
                     let encoded = compressed.unwrap_or_else(|| raw.to_vec());
@@ -97,6 +106,7 @@ impl Reader {
                     source,
                     target,
                     members,
+                    current,
                     ..
                 } => {
                     let decoded = pack::decode(&source, bytes, keys.as_ref(), &pool)?;
@@ -135,6 +145,19 @@ impl Reader {
                             state: "ready".into(),
                             created_at: target.created_at,
                         };
+                        if current.contains(&id) {
+                            fills.extend(crate::storage::resource_gate::PRIORITY.sync_scope(
+                                crate::storage::resource_gate::MAINTENANCE,
+                                || {
+                                    files.prepare_fill(
+                                        member.id,
+                                        &decoded.bytes[member.start..member.start + member.len],
+                                        false,
+                                        &profile,
+                                    )
+                                },
+                            ));
+                        }
                         data.push((
                             chunk,
                             decoded.bytes.slice(member.start..member.start + member.len),
@@ -159,7 +182,7 @@ impl Reader {
                     )
                 }
             };
-            Ok::<_, anyhow::Error>((outcome, encoded, memory))
+            Ok::<_, anyhow::Error>((outcome, encoded, fills, memory))
         })
         .await??;
         backend
@@ -167,6 +190,6 @@ impl Reader {
             .backend
             .put(&output_path, Bytes::from(encoded).into())
             .await?;
-        Ok(outcome)
+        Ok((outcome, fills))
     }
 }

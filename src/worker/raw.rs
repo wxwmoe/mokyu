@@ -121,7 +121,20 @@ async fn process(app: &App, work: &RawProcessing) -> Result<bool> {
                 .try_into()
                 .map_err(|_| IntegrityError::RawMetadata)?
         } else {
+            let target = app.storage.store_backend(source.storage_id)?;
             let mut reader = app.storage.raw_reader_uncached(source, false).await?;
+            let mut cache = if matches!(&reader.file, crate::storage::raw::RawFile::Remote(_)) {
+                tokio::time::timeout(
+                    Duration::from_millis(100),
+                    app.storage.begin_raw_cache(source),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+            } else {
+                None
+            };
             let Ok(cpu) = app.storage.cpu.try_acquire() else {
                 return Ok(false);
             };
@@ -140,6 +153,7 @@ async fn process(app: &App, work: &RawProcessing) -> Result<bool> {
                     ensure!(size <= source.size, IntegrityError::Length);
                     hash.update(&buffer[..count]);
                     digest.update(&buffer[..count]);
+                    crate::storage::raw_cache::append(&mut cache, &buffer[..count]).await;
                 }
                 ensure!(size == source.size, IntegrityError::Length);
                 ensure!(
@@ -149,13 +163,23 @@ async fn process(app: &App, work: &RawProcessing) -> Result<bool> {
                 app.storage
                     .backend_read_bytes
                     .fetch_add(size as u64, Ordering::Relaxed);
-                Ok::<_, anyhow::Error>(*hash.finalize().as_bytes())
+                Ok::<_, anyhow::Error>((*hash.finalize().as_bytes(), cache))
             }
             .await?;
             drop(cpu);
+            let (hash, cache) = hash;
             app.raw
                 .save_processing_hash(work, source.revision, &hash)
                 .await?;
+            if let Some(cache) = cache {
+                let fill = app.storage.prepare_raw_fill(
+                    cache,
+                    source.location_id,
+                    source.size as u64,
+                    target,
+                );
+                let _ = fill.send(());
+            }
             hash
         };
         #[cfg(feature = "fault-injection")]

@@ -43,6 +43,8 @@ pub(super) struct Cache {
     raw_misses: crate::runtime::locks::Locks<Uuid>,
     hits: AtomicU64,
     lookups: AtomicU64,
+    state: tokio::sync::watch::Receiver<super::State>,
+    epoch: Arc<AtomicU64>,
 }
 
 impl Cache {
@@ -97,6 +99,8 @@ impl Cache {
             raw_misses: Default::default(),
             hits: 0.into(),
             lookups: 0.into(),
+            state: node.subscribe(),
+            epoch: node.cache_epoch.clone(),
         }))
     }
 
@@ -266,6 +270,10 @@ impl Cache {
     fn policy(&self, profile: &StorageProfile) -> Result<CachePolicy> {
         Ok(CachePolicy {
             enabled: profile.cache_enabled,
+            cold: crate::storage::resource_gate::PRIORITY
+                .try_with(|priority| *priority)
+                .unwrap_or(crate::storage::resource_gate::FOREGROUND)
+                != crate::storage::resource_gate::FOREGROUND,
             capacity: profile
                 .cache_soft_limit
                 .as_deref()
@@ -440,18 +448,99 @@ impl Cache {
     ) -> Result<Option<Write>> {
         let policy = self.policy(profile)?;
         let size = source.size as u64;
-        if !policy.enabled
-            || policy.capacity.is_some_and(|limit| size > limit)
-            || self.ready.get().is_none()
-        {
+        if !policy.enabled || policy.capacity.is_some_and(|limit| size > limit) {
             return Ok(None);
         }
+        self.initialize().await?;
         let Some(work) = self.work(source.location_id, 1) else {
             return Ok(None);
         };
-        self.files()
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let mut write = self
+            .files()
             .begin_raw(source.location_id, size, policy, work)
-            .await
+            .await?;
+        if let Some(write) = &mut write {
+            write.epoch = epoch;
+        }
+        Ok(write)
+    }
+
+    pub(super) fn prepare_raw(
+        self: &Arc<Self>,
+        write: Write,
+        source: &crate::model::raw::RawSource,
+    ) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let run = self.state.borrow().snapshot.as_ref()?.lease.clone();
+        run.check().ok()?;
+        let cache = self.clone();
+        let (id, size) = (source.location_id, source.size as u64);
+        let epoch = write.epoch;
+        let (ready, published) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), published).await,
+                Ok(Ok(()))
+            ) {
+                return;
+            }
+            let result = async {
+                let _write = cache.writes.lock().await;
+                run.check()?;
+                cache
+                    .files()
+                    .publish_raw(write, id, size, || {
+                        run.check()?;
+                        ensure!(
+                            cache.epoch.load(Ordering::Acquire) == epoch,
+                            "cache storage changed"
+                        );
+                        Ok(())
+                    })
+                    .await
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::debug!(%error, "node processed raw cache publication skipped");
+            }
+        });
+        Some(ready)
+    }
+
+    pub(super) fn fill_request(
+        self: &Arc<Self>,
+        mut file: crate::storage::raw_request::File,
+        id: Uuid,
+        profile: &StorageProfile,
+        run: Arc<super::RunLease>,
+        epoch: u64,
+    ) {
+        let Ok(policy) = self.policy(profile) else {
+            return;
+        };
+        if !policy.enabled {
+            return;
+        }
+        let Some(work) = self.work(id, 1) else {
+            return;
+        };
+        let cache = self.clone();
+        tokio::spawn(async move {
+            let _work = work;
+            let result = file
+                .cache_in(&cache.files(), id, policy, || {
+                    run.check()?;
+                    ensure!(
+                        cache.epoch.load(Ordering::Acquire) == epoch,
+                        "cache storage changed"
+                    );
+                    Ok(())
+                })
+                .await;
+            if let Err(error) = result {
+                tracing::debug!(%error, "node request cache publication skipped");
+            }
+        });
     }
 
     pub(super) async fn finish_raw(
@@ -463,10 +552,21 @@ impl Cache {
         let cache = self.clone();
         let (id, size) = (source.location_id, source.size as u64);
         // Keep the read protection and disk reservation through detached publication.
+        let epoch = write.epoch;
         tokio::spawn(async move {
             let _write = cache.writes.lock().await;
             prepared.check()?;
-            cache.files().publish_raw(write, id, size).await
+            cache
+                .files()
+                .publish_raw(write, id, size, || {
+                    prepared.check()?;
+                    ensure!(
+                        cache.epoch.load(Ordering::Acquire) == epoch,
+                        "cache storage changed"
+                    );
+                    Ok(())
+                })
+                .await
         })
         .await?
     }
@@ -486,29 +586,68 @@ impl Cache {
     }
 
     pub(super) fn fill(self: &Arc<Self>, id: Uuid, data: Bytes, profile: &StorageProfile) {
-        let Ok(policy) = self.policy(profile) else {
-            return;
-        };
-        if !policy.enabled || self.ready.get().is_none() {
-            return;
+        if let Some(ready) = self.prepare_fill(id, &data, false, profile) {
+            let _ = ready.send(());
         }
-        if let Ok(fifo) = self.fifo.try_lock()
-            && fifo.entries.get(&id).is_some_and(|entry| entry.valid)
+    }
+
+    pub(super) fn prepare_fill(
+        self: &Arc<Self>,
+        id: Uuid,
+        data: &[u8],
+        compressed: bool,
+        profile: &StorageProfile,
+    ) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let policy = self.policy(profile).ok()?;
+        if !policy.enabled
+            || data.is_empty()
+            || data.len() > codec::MAX
+            || self
+                .fifo
+                .try_lock()
+                .ok()?
+                .entries
+                .get(&id)
+                .is_some_and(|entry| entry.valid)
         {
-            return;
+            return None;
         }
-        // A returned Bytes may retain a complete decoder allocation, not just this slice.
-        let units = (codec::MAX as u64 * 4).div_ceil(1024 * 1024) as u32;
-        let Some(work) = self.work(id, units) else {
-            return;
-        };
+        let run = self.state.borrow().snapshot.as_ref()?.lease.clone();
+        run.check().ok()?;
+        let units = (data.len() as u64 * 2).div_ceil(1024 * 1024) as u32;
+        let work = self.work(id, units)?;
+        let data = Bytes::copy_from_slice(data);
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let (ready, published) = tokio::sync::oneshot::channel();
         let cache = self.clone();
         tokio::spawn(async move {
             let _work = work;
-            if let Err(error) = cache.files().fill(id, &data, false, policy).await {
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), published).await,
+                Ok(Ok(()))
+            ) {
+                return;
+            }
+            let result = async {
+                cache.initialize().await?;
+                cache
+                    .files()
+                    .fill(id, &data, compressed, policy, || {
+                        run.check()?;
+                        ensure!(
+                            cache.epoch.load(Ordering::Acquire) == epoch,
+                            "cache storage changed"
+                        );
+                        Ok(())
+                    })
+                    .await
+            }
+            .await;
+            if let Err(error) = result {
                 tracing::debug!(%error, "node read cache fill failed");
             }
         });
+        Some(ready)
     }
 
     pub(super) async fn snapshot(&self) -> serde_json::Value {

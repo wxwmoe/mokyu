@@ -49,6 +49,7 @@ impl Worker {
     async fn drain(&self, class: u32) -> Result<()> {
         let snapshot = self.node.background_snapshot()?;
         let mut completion = None;
+        let mut fills = Vec::new();
         let mut previous = Vec::<Arc<Grant>>::new();
         let mut upload_resources = None;
         loop {
@@ -99,6 +100,13 @@ impl Worker {
                 reply.operation_id == operation.to_string(),
                 "work identity differs"
             );
+            snapshot.lease.check()?;
+            let materials = self.cache.apply(
+                self.node.client.identity.deployment_id,
+                held,
+                reply.materials,
+            )?;
+            crate::storage::cache::publish_fills(std::mem::take(&mut fills));
             let Some(json) = reply.plan_json else {
                 if maximum == 0 {
                     continue;
@@ -119,11 +127,6 @@ impl Worker {
                     && grants[0].storage == Some(plan.storage()),
                 "work protection is missing"
             );
-            let materials = self.cache.apply(
-                self.node.client.identity.deployment_id,
-                held,
-                reply.materials,
-            )?;
             let backend = reads::backend(&materials, plan.storage())?;
             let future = async {
                 let outcomes = match plan {
@@ -208,9 +211,12 @@ impl Worker {
                                 for grant in &grants {
                                     grant.check()?;
                                 }
-                                outcomes.push(
-                                    self.reader.hash_raw(&backend, item).await.or_else(retry)?,
-                                );
+                                let (outcome, candidates) =
+                                    self.reader.hash_raw(&backend, item).await.or_else(
+                                        |error| retry(error).map(|outcome| (outcome, Vec::new())),
+                                    )?;
+                                fills.extend(candidates);
+                                outcomes.push(outcome);
                             }
                             #[cfg(feature = "fault-injection")]
                             crate::faults::point("node-raw-hashed").await;
@@ -303,7 +309,7 @@ impl Worker {
                             "inspection identity differs"
                         );
                         vec![if inspect {
-                            let result = self
+                            let (result, candidates) = self
                                 .reader
                                 .inspect(
                                     backend,
@@ -313,6 +319,7 @@ impl Worker {
                                     crate::worker::integrity::Mode::Full,
                                 )
                                 .await?;
+                            fills.extend(candidates);
                             match &result {
                                 work::Outcome::Inspected { code: Some(code) }
                                     if !crate::model::source::quarantine_code(code) =>
@@ -358,7 +365,8 @@ impl Worker {
                                             code: Some("source_unavailable".into()),
                                         }
                                     } else {
-                                        self.reader
+                                        let (outcome, candidates) = self
+                                            .reader
                                             .inspect(
                                                 backend.clone(),
                                                 keys.clone(),
@@ -366,7 +374,9 @@ impl Worker {
                                                 item.members,
                                                 mode,
                                             )
-                                            .await?
+                                            .await?;
+                                        fills.extend(candidates);
+                                        outcome
                                     }
                                 };
                                 if matches!(outcome, work::Outcome::Retry) {
@@ -387,7 +397,9 @@ impl Worker {
                     work::Plan::Pack { batch, .. } => {
                         let keys = Arc::new(reads::keys(&materials)?);
                         let encoding = async {
-                            let result = self.reader.pack(backend, keys, *batch).await?;
+                            let (result, candidates) =
+                                self.reader.pack(backend, keys, *batch).await?;
+                            fills.extend(candidates);
                             #[cfg(feature = "fault-injection")]
                             crate::faults::point("node-pack-stored").await;
                             Ok::<_, anyhow::Error>(work::Outcome::Packed(result))
@@ -405,11 +417,12 @@ impl Worker {
                                 for grant in &grants {
                                     grant.check()?;
                                 }
-                                outcomes.push(
-                                    self.reader
-                                        .rewrite(backend.clone(), keys.clone(), item)
-                                        .await?,
-                                );
+                                let (outcome, candidates) = self
+                                    .reader
+                                    .rewrite(backend.clone(), keys.clone(), item)
+                                    .await?;
+                                fills.extend(candidates);
+                                outcomes.push(outcome);
                             }
                             #[cfg(feature = "fault-injection")]
                             crate::faults::point("node-rewrite-stored").await;
@@ -438,6 +451,12 @@ impl Worker {
                             .or_else(|error| retry(error).map(|value| vec![value; count]))?
                     }
                 };
+                if outcomes
+                    .iter()
+                    .any(|outcome| matches!(outcome, work::Outcome::Retry))
+                {
+                    fills.clear();
+                }
                 Ok::<_, anyhow::Error>(work::Completion {
                     operation,
                     outcomes,
@@ -478,7 +497,16 @@ impl Worker {
                 return Ok(());
             }
             if state.work_pending
-                && let Err(error) = self.drain(class).await
+                && let Err(error) = crate::storage::resource_gate::PRIORITY
+                    .scope(
+                        if class == 2 {
+                            crate::storage::resource_gate::UPLOAD
+                        } else {
+                            crate::storage::resource_gate::MAINTENANCE
+                        },
+                        self.drain(class),
+                    )
+                    .await
             {
                 tracing::debug!(%error,class,"background work postponed");
                 tokio::time::sleep(Duration::from_secs(3)).await;

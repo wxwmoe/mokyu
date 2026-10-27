@@ -193,6 +193,7 @@ impl Cache {
         }
         let policy = crate::storage::target::CachePolicy {
             enabled: matches!(state.state, FileState::Cached) && state.size == size,
+            cold: false,
             capacity: state
                 .cache_limit
                 .as_deref()

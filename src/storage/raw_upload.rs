@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
 pub(crate) enum Written {
-    Final(Option<[u8; 32]>),
+    Final(Option<[u8; 32]>, Option<tokio::sync::oneshot::Sender<()>>),
     Chunks(super::raw_request::File),
     Cached {
         revision: i64,
@@ -336,7 +336,12 @@ impl Writer {
                 None,
             )
             .await?;
-        Ok(Written::Final(hash))
+        let fill = self.storage.prepare_raw_file(
+            self.file.take().unwrap(),
+            self.location,
+            self.storage.store_backend(self.target)?,
+        );
+        Ok(Written::Final(hash, fill))
     }
 }
 
@@ -603,6 +608,7 @@ impl Storage {
                 } else {
                     super::CachePolicy {
                         enabled: false,
+                        cold: false,
                         capacity: storage.capacity,
                         max_entries: storage.max_entries,
                         upload_cache: false,

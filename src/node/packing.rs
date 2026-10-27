@@ -9,7 +9,7 @@ impl Reader {
         backend: Arc<Backend>,
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         batch: wire::Batch,
-    ) -> Result<wire::Encoded> {
+    ) -> Result<(wire::Encoded, crate::storage::cache::Fills)> {
         let attempts = layout(&batch)?;
         let mut payload = 0u64;
         for source in &batch.sources {
@@ -114,7 +114,7 @@ impl Reader {
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         batch: wire::Batch,
         raw: BTreeMap<Id, (Vec<u8>, Bytes)>,
-    ) -> Result<wire::Encoded> {
+    ) -> Result<(wire::Encoded, crate::storage::cache::Fills)> {
         let attempts = layout(&batch)?;
         ensure!(
             batch.sources.is_empty() && raw.len() == batch.chunks.len(),
@@ -145,7 +145,7 @@ impl Reader {
         raw: BTreeMap<Id, (Vec<u8>, Bytes)>,
         memory: Arc<OwnedSemaphorePermit>,
         attempts: BTreeMap<(usize, usize), usize>,
-    ) -> Result<wire::Encoded> {
+    ) -> Result<(wire::Encoded, crate::storage::cache::Fills)> {
         let config = backend.profile.compression_config("0s");
         let storage = backend.profile.storage_id;
         let mut data = Vec::with_capacity(batch.chunks.len());
@@ -237,7 +237,16 @@ impl Reader {
                 }
             }
         }
-        Ok(result)
+        let mut fills = Vec::new();
+        for (index, (chunk, raw)) in data.iter().enumerate() {
+            let id = if result.chunks[index] != 0 {
+                chunk.location_id
+            } else {
+                chunk.uuid
+            };
+            fills.extend(self.files.prepare_fill(id, raw, false, &backend.profile));
+        }
+        Ok((result, fills))
     }
 
     async fn pack_attempt(

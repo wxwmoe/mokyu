@@ -382,6 +382,21 @@ impl Storage {
                 .then(blake3::Hasher::new);
         if !target.is_local {
             remote_size(declared.unwrap_or(0).max(0) as u64)?;
+            let fill = if cache
+                && hash.is_none()
+                && let Some(size) = declared.filter(|size| *size >= 0)
+            {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    self.begin_raw_output(storage, location, size as u64),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+            } else {
+                None
+            };
             return Ok(RawWriter::Remote(RemoteWriter {
                 storage: self,
                 source,
@@ -395,6 +410,8 @@ impl Storage {
                 size: 0,
                 hash,
                 temporary: None,
+                fill,
+                cache,
                 cache_policy: self.local_cache(Some(storage))?,
                 _permit: permit,
                 _global: global,
@@ -465,7 +482,7 @@ impl Storage {
     }
 
     pub(crate) async fn raw_reader_uncached(
-        &self,
+        self: &Arc<Self>,
         source: &RawSource,
         verify: bool,
     ) -> Result<RawReader> {
@@ -550,7 +567,11 @@ impl Storage {
         Ok(reader)
     }
 
-    async fn raw_reader_inner(&self, source: &RawSource, verify: bool) -> Result<RawReader> {
+    async fn raw_reader_inner(
+        self: &Arc<Self>,
+        source: &RawSource,
+        verify: bool,
+    ) -> Result<RawReader> {
         source.validate()?;
         let pin = {
             let _gate = self.source_gate.read().await;
@@ -627,10 +648,31 @@ impl Storage {
         if verify {
             #[cfg(feature = "fault-injection")]
             crate::faults::point("raw-verify-before-cpu").await;
+            let mut cache = if matches!(&file, RawFile::Remote(_)) {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    self.begin_raw_cache(source),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+            } else {
+                None
+            };
             let _cpu = self.cpu.acquire().await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("raw-before-verify").await;
-            let size = verify_file(&mut file, source, None).await?;
+            let size = verify_file(&mut file, source, Some(&mut cache)).await?;
+            if let Some(cache) = cache {
+                let fill = self.prepare_raw_fill(
+                    cache,
+                    source.location_id,
+                    source.size as u64,
+                    target.clone(),
+                );
+                let _ = fill.send(());
+            }
             file.rewind().await?;
             self.backend_read_bytes.fetch_add(size, Ordering::Relaxed);
         }
@@ -708,17 +750,8 @@ pub(crate) async fn verify_file(
         size += count as u64;
         ensure!(size <= source.size as u64, IntegrityError::Length);
         digest.update(&buffer[..count]);
-        if let Some(cache) = cache.as_deref_mut()
-            && let Some(write) = cache.as_mut()
-            && let Err(error) = write
-                .file
-                .as_mut()
-                .unwrap()
-                .write_all(&buffer[..count])
-                .await
-        {
-            tracing::warn!(error=%error, "raw cache write failed; reading backend");
-            *cache = None;
+        if let Some(cache) = cache.as_deref_mut() {
+            super::raw_cache::append(cache, &buffer[..count]).await;
         }
     }
     ensure!(size == source.size as u64, IntegrityError::Length);
@@ -838,7 +871,7 @@ pub(crate) struct ReplayWriter<'a> {
 }
 
 pub(crate) struct RemoteWriter<'a> {
-    storage: &'a Storage,
+    storage: &'a Arc<Storage>,
     source: Id,
     target: Arc<StoreBackend>,
     key: ObjectPath,
@@ -850,6 +883,8 @@ pub(crate) struct RemoteWriter<'a> {
     size: u64,
     hash: Option<blake3::Hasher>,
     temporary: Option<super::raw_request::File>,
+    fill: Option<super::raw_cache::Write>,
+    cache: bool,
     cache_policy: super::CachePolicy,
     _permit: StorePermit,
     _global: resource_gate::Permit,
@@ -949,6 +984,7 @@ impl RawWriter<'_> {
             Self::Local(writer) => writer.write(data).await,
             Self::Pending(writer) => writer.write(data).await,
             Self::Replay(replay) => {
+                super::raw_cache::append(&mut replay.writer.fill, data).await;
                 replay.writer.size = replay
                     .writer
                     .size
@@ -974,6 +1010,7 @@ impl RawWriter<'_> {
                 Ok(())
             }
             Self::Remote(writer) => {
+                super::raw_cache::append(&mut writer.fill, data).await;
                 writer.size = writer
                     .size
                     .checked_add(data.len() as u64)
@@ -1038,6 +1075,7 @@ impl RawWriter<'_> {
         match self {
             Self::Local(writer) => Ok(super::raw_upload::Written::Final(
                 writer.finish(expected).await?,
+                None,
             )),
             Self::Pending(writer) => writer.finish(stream, expected, digest, received).await,
             Self::Replay(_) => anyhow::bail!("raw upload requires its replay source"),
@@ -1074,6 +1112,27 @@ impl RawWriter<'_> {
                         Some(hash.finalize()) == writer.hash.as_ref().map(|hash| hash.finalize()),
                         IntegrityError::Hash
                     );
+                    writer.temporary = Some(temporary);
+                }
+                // A complete request file takes precedence over a second cache write.
+                if writer.cache
+                    && writer.temporary.is_none()
+                    && writer.fill.is_none()
+                    && writer.buffer.len() as u64 == expected
+                {
+                    writer.fill = tokio::time::timeout(
+                        std::time::Duration::from_millis(100),
+                        writer.storage.begin_raw_output(
+                            writer.target.profile.storage_id,
+                            writer.location,
+                            expected,
+                        ),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
+                    super::raw_cache::append(&mut writer.fill, &writer.buffer).await;
                 }
                 if writer.upload.is_some() {
                     if !writer.buffer.is_empty() {
@@ -1115,8 +1174,23 @@ impl RawWriter<'_> {
                 }
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("raw-file-published").await;
+                let fill = if let Some(file) = writer.temporary.take() {
+                    writer
+                        .storage
+                        .prepare_raw_file(file, writer.location, writer.target.clone())
+                } else {
+                    writer.fill.take().map(|fill| {
+                        writer.storage.prepare_raw_fill(
+                            fill,
+                            writer.location,
+                            expected,
+                            writer.target.clone(),
+                        )
+                    })
+                };
                 Ok(super::raw_upload::Written::Final(
                     writer.hash.as_ref().map(|hash| *hash.finalize().as_bytes()),
+                    fill,
                 ))
             }
         }

@@ -93,7 +93,11 @@ impl App {
                         (row.offset_bytes==offset).then_some(()).context("raw mapping has gaps or overlaps")?;
                         let whole_source = row.source_offset == 0 && row.length == row.source.size;
                         let mut digest = Md5::new();
+                        let target = self.storage.store_backend(row.source.storage_id)?;
                         let mut reader = self.storage.raw_reader(&row.source,!whole_source).await?;
+                        let mut cache = if whole_source && matches!(&reader.file, crate::storage::raw::RawFile::Remote(_)) {
+                            tokio::time::timeout(std::time::Duration::from_millis(100), self.storage.begin_raw_cache(&row.source)).await.ok().and_then(Result::ok).flatten()
+                        } else { None };
                         reader.file.seek(std::io::SeekFrom::Start(row.source_offset as u64)).await?;
                         let mut remaining = row.length;
                         while remaining>0 {
@@ -103,6 +107,7 @@ impl App {
                             (count>0).then_some(()).context("raw source was truncated")?;
                             buffer.truncate(count);
                             if whole_source { digest.update(&buffer); }
+                            crate::storage::raw_cache::append(&mut cache, &buffer).await;
                             remaining -= count as i64;
                             offset += count as i64;
                             reader.file.account_read(&self.storage, count as u64);
@@ -111,6 +116,10 @@ impl App {
                         if whole_source {
                             (Some(digest.finalize().as_slice()) == row.source.digest.as_deref())
                                 .then_some(()).context(crate::content::codec::IntegrityError::Hash)?;
+                            if let Some(cache) = cache {
+                                let fill = self.storage.prepare_raw_fill(cache, row.source.location_id, row.source.size as u64, target);
+                                let _ = fill.send(());
+                            }
                         }
                     }
                     if offset==source.size { break; }

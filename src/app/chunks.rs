@@ -176,12 +176,16 @@ impl App {
             && profile.write_durability.as_deref() == Some("buffered")
             && !self.storage.write_overdue(storage_id, &profile)
             && self.storage.is_local(storage_id)?;
-        self.storage
+        let cache = self
+            .storage
             .put_received(&c, encoded, cache, buffered)
             .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("chunk-stored").await;
         self.chunks.complete(stream, offset, &c).await?;
+        if let Some(cache) = cache {
+            let _ = cache.send(());
+        }
         Ok(c)
     }
 
@@ -261,7 +265,7 @@ impl App {
         self.chunks.repair_metadata(&repair).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("repair-uploading").await;
-        self.storage.put(&repair.chunk, encoded, cache).await?;
+        let cache = self.storage.put(&repair.chunk, encoded, cache).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("repair-stored").await;
         self.storage.verify_chunk(&repair.chunk).await?;
@@ -281,6 +285,9 @@ impl App {
         };
         #[cfg(feature = "fault-injection")]
         crate::faults::point("repair-committed").await;
+        if let Some(cache) = cache {
+            let _ = cache.send(());
+        }
         self.seal_uploads(repair.stream, false).await?;
         Ok(chunk)
     }

@@ -83,7 +83,20 @@ impl App {
                     )
                     .await?;
                 let read = self.reads.acquire().await?;
+                let target = self.storage.store_backend(source.storage_id)?;
                 let mut reader = self.storage.raw_reader_uncached(source, false).await?;
+                let mut cache = if matches!(&reader.file, crate::storage::raw::RawFile::Remote(_)) {
+                    tokio::time::timeout(
+                        Duration::from_millis(100),
+                        self.storage.begin_raw_cache(source),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                } else {
+                    None
+                };
                 let mut window = vec![0; MAX];
                 let mut filled = 0usize;
                 let mut eof = false;
@@ -99,6 +112,11 @@ impl App {
                         let count = reader.file.read(&mut window[filled..]).await?;
                         eof = count == 0;
                         digest.update(&window[filled..filled + count]);
+                        crate::storage::raw_cache::append(
+                            &mut cache,
+                            &window[filled..filled + count],
+                        )
+                        .await;
                         filled += count;
                         ensure!(
                             offset + filled as i64 <= source.size,
@@ -176,6 +194,15 @@ impl App {
                     Some(digest.finalize().as_slice()) == source.digest.as_deref(),
                     IntegrityError::Hash
                 );
+                if let Some(cache) = cache {
+                    let fill = self.storage.prepare_raw_fill(
+                        cache,
+                        source.location_id,
+                        source.size as u64,
+                        target,
+                    );
+                    let _ = fill.send(());
+                }
                 self.convert_batch(
                     task,
                     candidate,
@@ -267,6 +294,7 @@ impl App {
             super::task::fence(self, task.id, task.token).await?,
             crate::model::Error::OperationAborted
         );
+        let mut fills = Vec::new();
         let outputs = self
             .pack_data(
                 task,
@@ -277,6 +305,7 @@ impl App {
                 &job.object_key,
                 job.encoding.pack_enabled,
                 Some(&job.encoding),
+                &mut fills,
             )
             .await?;
         #[cfg(feature = "fault-injection")]
@@ -286,6 +315,7 @@ impl App {
         self.raw
             .commit_conversion_batch(task, candidate, rows, &outputs)
             .await?;
+        crate::storage::cache::publish_fills(fills);
         rows.clear();
         data.clear();
         Ok(())

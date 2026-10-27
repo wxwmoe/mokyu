@@ -122,6 +122,16 @@ class Fixture:
     def put(self, key, raw):
         return self.client.put_object(Bucket=self.name, Key=key, Body=raw)
 
+    def cold_put(self, key, raw):
+        profile = self.cli('storage', 'profile', 'show', self.name)
+        enabled = profile['cache_enabled']
+        self.cli('storage', 'profile', 'set', self.name, '-', value={**profile, 'cache_enabled': False})
+        try:
+            return self.put(key, raw)
+        finally:
+            profile = self.cli('storage', 'profile', 'show', self.name)
+            self.cli('storage', 'profile', 'set', self.name, '-', value={**profile, 'cache_enabled': enabled})
+
     def read(self, key, expected):
         with self.client.get_object(Bucket=self.name, Key=key)['Body'] as body:
             assert body.read() == expected

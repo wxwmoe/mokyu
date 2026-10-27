@@ -156,11 +156,16 @@ impl App {
         raw: Bytes,
         memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         accepted: Option<&EncodingPolicy>,
+        fills: &mut crate::storage::cache::Fills,
     ) -> Result<Output> {
-        if let Some((id, size)) = self.packing.ready_encoding(c.id).await? {
+        if let Some((id, location, size)) = self.packing.ready_encoding(c.id).await? {
             let mut physical = c.clone();
             physical.encoding_id = id;
+            physical.location_id = location;
             physical.stored_size = Some(size);
+            if !self.storage.has_pending(c) {
+                fills.extend(self.storage.prepare_fill(&physical, &raw, Some(false)));
+            }
             return Ok(Output {
                 chunks: vec![c.id],
                 pack: None,
@@ -200,6 +205,9 @@ impl App {
                 encoded,
             )
             .await?;
+        if !self.storage.has_pending(c) {
+            fills.extend(self.storage.prepare_fill(&physical, &raw, None));
+        }
         Ok(Output {
             chunks: vec![c.id],
             pack: None,
@@ -215,6 +223,7 @@ impl App {
         key: &str,
         allow_pack: bool,
         accepted: Option<&EncodingPolicy>,
+        fills: &mut crate::storage::cache::Fills,
     ) -> Result<Vec<Output>> {
         let raw_size: usize = rows.iter().map(|r| r.chunk.raw_size as usize).sum();
         let memory = self
@@ -235,6 +244,7 @@ impl App {
             key,
             allow_pack,
             accepted,
+            fills,
         )
         .await
     }
@@ -249,12 +259,13 @@ impl App {
         key: &str,
         allow_pack: bool,
         accepted: Option<&EncodingPolicy>,
+        fills: &mut crate::storage::cache::Fills,
     ) -> Result<Vec<Output>> {
         if rows.len() == 1 || !allow_pack || !self.pack_creation_allowed() {
             let mut outputs = Vec::new();
             for (c, raw) in data {
                 outputs.push(
-                    self.independent_output(task, c, raw.clone(), memory, accepted)
+                    self.independent_output(task, c, raw.clone(), memory, accepted, fills)
                         .await?,
                 );
             }
@@ -287,7 +298,16 @@ impl App {
             start = end;
             if rows.len() > 1
                 && let Some(output) = self
-                    .try_pack_output(task, rows, data, content_type, key, &memory, accepted)
+                    .try_pack_output(
+                        task,
+                        rows,
+                        data,
+                        content_type,
+                        key,
+                        &memory,
+                        accepted,
+                        fills,
+                    )
                     .await?
             {
                 outputs.push(output);
@@ -298,7 +318,16 @@ impl App {
             for (rows, data) in [(&rows[..mid], &data[..mid]), (&rows[mid..], &data[mid..])] {
                 if rows.len() > 1
                     && let Some(output) = self
-                        .try_pack_output(task, rows, data, content_type, key, &memory, accepted)
+                        .try_pack_output(
+                            task,
+                            rows,
+                            data,
+                            content_type,
+                            key,
+                            &memory,
+                            accepted,
+                            fills,
+                        )
                         .await?
                 {
                     outputs.push(output);
@@ -306,7 +335,7 @@ impl App {
                 }
                 for (c, raw) in data {
                     outputs.push(
-                        self.independent_output(task, c, raw.clone(), &memory, accepted)
+                        self.independent_output(task, c, raw.clone(), &memory, accepted, fills)
                             .await?,
                     );
                 }
@@ -323,6 +352,7 @@ impl App {
         key: &str,
         memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         accepted: Option<&EncodingPolicy>,
+        fills: &mut crate::storage::cache::Fills,
     ) -> Result<Option<Output>> {
         if !self.pack_creation_allowed() {
             return Ok(None);
@@ -407,6 +437,13 @@ impl App {
         #[cfg(feature = "fault-injection")]
         crate::faults::point("pack-stored").await;
         self.packing.insert_pack_members(p.id, rows).await?;
+        for (source, bytes) in data {
+            if !self.storage.has_pending(source) {
+                let mut member = source.clone();
+                member.location_id = Uuid::nil();
+                fills.extend(self.storage.prepare_fill(&member, bytes, None));
+            }
+        }
         Ok(Some(Output {
             chunks: rows.iter().map(|r| r.chunk.id).collect(),
             pack: Some(p),
@@ -551,6 +588,7 @@ impl App {
         self.pin_pack_inputs(task, &rows).await?;
         let context = ReadContext::default();
         let mut outputs = Vec::new();
+        let mut fills = Vec::new();
         for group in &groups {
             outputs.extend(
                 self.pack_output(
@@ -561,6 +599,7 @@ impl App {
                     "",
                     self.pack_creation_allowed() && !unpack,
                     None,
+                    &mut fills,
                 )
                 .await?,
             );
@@ -586,6 +625,7 @@ impl App {
             }
         }
         self.commit_outputs(task, &rows, &outputs, true).await?;
+        crate::storage::cache::publish_fills(fills);
         Ok(groups.iter().map(Vec::len).sum())
     }
     async fn pack_stream(
@@ -678,6 +718,7 @@ impl App {
         let (metadata, key): (Value, String) = self.packing.pack_stream_metadata(stream).await?;
         let context = ReadContext::default();
         self.pin_pack_inputs(task, &group).await?;
+        let mut fills = Vec::new();
         let outputs = self
             .pack_output(
                 task,
@@ -687,6 +728,7 @@ impl App {
                 &key,
                 true,
                 None,
+                &mut fills,
             )
             .await?;
         let ids: Vec<Id> = group.iter().map(|r| r.chunk.id).collect();
@@ -716,6 +758,7 @@ impl App {
                 <= old_size + 12 + crate::content::pack::MEMBER_SIZE as i64 * group.len() as i64
         {
             self.commit_outputs(task, &group, &outputs, false).await?;
+            crate::storage::cache::publish_fills(fills);
             return Ok((cursor, group.len()));
         }
         Ok((cursor, 0))

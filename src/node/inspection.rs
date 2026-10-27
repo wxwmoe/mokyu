@@ -13,7 +13,7 @@ impl Reader {
         snapshot: SourceSnapshot,
         members: Vec<Member>,
         mode: crate::worker::integrity::Mode,
-    ) -> Result<Outcome> {
+    ) -> Result<(Outcome, crate::storage::cache::Fills)> {
         let _io = self.acquire(&self.io, 1).await?;
         let timeout = crate::config::seconds(&backend.profile.integrity_batch_timeout)?;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
@@ -22,8 +22,9 @@ impl Reader {
             tokio::time::timeout_at(deadline, backend.store.verify()).await,
             Ok(Ok(()))
         ) {
-            return Ok(Outcome::Retry);
+            return Ok((Outcome::Retry, Vec::new()));
         }
+        let mut fills = Vec::new();
         let result = tokio::time::timeout_at(deadline, async {
             if let PhysicalSource::Raw(raw) = &snapshot.physical {
                 let mut raw = raw.clone();
@@ -41,7 +42,18 @@ impl Reader {
                 )
                 .await?;
                 if mode == crate::worker::integrity::Mode::Full {
-                    file.verify(&raw).await?;
+                    let mut cache = tokio::time::timeout(
+                        std::time::Duration::from_millis(100),
+                        self.files.begin_raw(&raw, &backend.profile),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
+                    crate::storage::raw::verify_file(&mut file, &raw, Some(&mut cache)).await?;
+                    if let Some(cache) = cache {
+                        fills.extend(self.files.prepare_raw(cache, &raw));
+                    }
                 }
                 return Ok::<_, anyhow::Error>(());
             }
@@ -94,11 +106,21 @@ impl Reader {
             let bytes = read_bounded(backend.store.backend.as_ref(), &path, bound).await?;
             let cpu = self.cpu.clone().acquire_owned().await?;
             let pool = self.pool.clone();
-            tokio::task::spawn_blocking(move || {
+            let files = self.files.clone();
+            let profile = backend.profile.clone();
+            let candidates = tokio::task::spawn_blocking(move || {
                 let (_cpu, _memory) = (cpu, memory);
+                let mut fills = Vec::new();
                 match snapshot.physical {
                     PhysicalSource::Chunk(chunk) => {
-                        codec::decode_read(&chunk, bytes, keys.as_ref(), 0, &pool, true)?;
+                        let (raw, _) =
+                            codec::decode_read(&chunk, bytes, keys.as_ref(), 0, &pool, true)?;
+                        fills.extend(
+                            crate::storage::resource_gate::PRIORITY
+                                .sync_scope(crate::storage::resource_gate::MAINTENANCE, || {
+                                    files.prepare_fill(chunk.location_id, &raw, false, &profile)
+                                }),
+                        );
                     }
                     PhysicalSource::Pack(pack) => {
                         let decoded = pack::decode(&pack, bytes, keys.as_ref(), &pool)?;
@@ -119,16 +141,29 @@ impl Reader {
                                             + *offset as usize,
                                 codec::IntegrityError::Metadata
                             );
+                            fills.extend(crate::storage::resource_gate::PRIORITY.sync_scope(
+                                crate::storage::resource_gate::MAINTENANCE,
+                                || {
+                                    files.prepare_fill(
+                                        member.id,
+                                        &decoded.bytes[member.start..member.start + member.len],
+                                        false,
+                                        &profile,
+                                    )
+                                },
+                            ));
                         }
                     }
                     PhysicalSource::Raw(_) => unreachable!(),
                 }
-                Ok::<_, anyhow::Error>(())
+                Ok::<_, anyhow::Error>(fills)
             })
-            .await?
+            .await??;
+            fills.extend(candidates);
+            Ok(())
         })
         .await;
-        Ok(match result {
+        let outcome = match result {
             Ok(Ok(())) => Outcome::Inspected { code: None },
             Ok(Err(error)) if super::super::work::busy(&error) => return Err(error),
             Ok(Err(error)) => {
@@ -150,6 +185,10 @@ impl Reader {
                 }
             }
             Err(_) => Outcome::Retry,
-        })
+        };
+        if !matches!(outcome, Outcome::Inspected { code: None }) {
+            fills.clear();
+        }
+        Ok((outcome, fills))
     }
 }

@@ -79,7 +79,7 @@ def main():
 
         configure(cdc_enabled=False, pack_range_enabled=False, deduplication_enabled=False, cache_enabled=True)
         data = bytes(range(256)) * (6 * 1024 * 1024 // 256)
-        fixture.put('original', data)
+        fixture.cold_put('original', data)
         assert not files(), 'raw PUT unexpectedly filled a read cache'
         before = status()
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -139,7 +139,7 @@ def main():
 
         # A pinned 6 MiB file cannot be evicted to fit a second one into 9 MiB.
         other = b'other' * (len(data) // 5 + 1)
-        fixture.put('other', other)
+        fixture.cold_put('other', other)
         marker = fixture.arm('raw-cache-hit')
         with ThreadPoolExecutor(max_workers=2) as pool:
             reading = pool.submit(fixture.read, 'original', data)
@@ -194,7 +194,7 @@ def main():
         print('PASS restart restores whole raw files above the chunk bound and removes incomplete fills', flush=True)
 
         changed = b'replacement' * 4096
-        fixture.put('original', changed)
+        fixture.cold_put('original', changed)
         before = status()
         fixture.read('original', changed)
         assert status()['backend_gets'] - before['backend_gets'] == 2
@@ -209,13 +209,13 @@ def main():
 
         configure(deduplication_enabled=True)
         shared = b'immutable raw source shared across logical references' * 1024
-        fixture.put('shared-a', shared)
+        fixture.cold_put('shared-a', shared)
         fixture.read('shared-a', shared)
         canonical = source('shared-a')
         shared_file = cache_path(canonical)
         inode = shared_file.stat().st_ino
         before = status()
-        fixture.put('shared-b', shared)
+        fixture.cold_put('shared-b', shared)
         assert source('shared-b') == canonical
         fixture.read('shared-b', shared)
         assert status()['backend_gets'] == before['backend_gets']
@@ -226,11 +226,11 @@ def main():
         assert shared_file.stat().st_ino == inode
         print('PASS deduplicated references and profile revisions reuse the backend UUID and the same cached inode', flush=True)
 
-        fixture.put('empty', b'')
+        fixture.cold_put('empty', b'')
         fixture.read('empty', b'')
         assert any(path.stat().st_size == 0 for path in files())
         interrupted = b'interrupted cache fill' * 8192
-        fixture.put('interrupted', interrupted)
+        fixture.cold_put('interrupted', interrupted)
         marker = fixture.arm('raw-cache-written')
         with ThreadPoolExecutor(max_workers=1) as pool:
             reading = pool.submit(fixture.read, 'interrupted', interrupted)
@@ -280,7 +280,7 @@ def main():
         marker = fixture.arm('raw-processing-before-hash')
         pending = b'cached bytes cannot certify a broken backend' * 1000
         try:
-            fixture.put('background', pending)
+            fixture.cold_put('background', pending)
             wait(lambda: marker.with_suffix('.hit').exists(), 'background work did not pause')
             fixture.read('background', pending)
             identity = source('background')

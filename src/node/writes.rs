@@ -641,6 +641,7 @@ impl Writes {
     ) -> Result<(u64, String, serde_json::Value)> {
         let node = &self.reads.node;
         let files = &self.reads.reader.files;
+        let epoch = node.cache_epoch.load(std::sync::atomic::Ordering::Acquire);
         files.recover_uploads(node).await?;
         let charge = if let Some(size) = length {
             files
@@ -748,11 +749,12 @@ impl Writes {
         let grants = node
             .resources
             .adopt(&operation.request.run, &plan.grants, started)?;
+        let mut file = Some(file);
         if !plan.committed {
             if let Some(charge) = charge {
                 files
                     .publish_upload(
-                        file,
+                        file.take().unwrap(),
                         source,
                         charge,
                         (
@@ -787,7 +789,9 @@ impl Writes {
                             size,
                             &digest,
                             || {
-                                file.replay()
+                                file.as_ref()
+                                    .unwrap()
+                                    .replay()
                                     .map_ok(|bytes| {
                                         Bytes::from_owner(Upload {
                                             bytes,
@@ -816,6 +820,15 @@ impl Writes {
             ensure!(
                 reply.committed && reply.source_id == plan.source_id && reply.size == size,
                 "invalid raw commit receipt"
+            );
+        }
+        if let Some(file) = file {
+            files.fill_request(
+                file,
+                source,
+                &operation.backend.profile,
+                operation.request.run.clone(),
+                epoch,
             );
         }
         Ok((size, etag, sums))
@@ -1040,7 +1053,7 @@ impl Writes {
                     }
                 }
                 let backend = operation.backend.clone();
-                let packed = operation
+                let (packed, fills) = operation
                     .guard(
                         node,
                         &grants,
@@ -1063,6 +1076,7 @@ impl Writes {
                     committed.batch_id == batch_id && committed.end == end,
                     "invalid packed commit receipt"
                 );
+                crate::storage::cache::publish_fills(fills);
                 offset = end;
                 batch_id += 1;
                 continue;
@@ -1130,7 +1144,12 @@ impl Writes {
                                 let cpu = self.reads.reader.cpu.clone().acquire_owned().await?;
                                 let id = chunk.uuid;
                                 let location = chunk.location_id;
-                                let (body, digest) =
+                                let files = self.reads.reader.files.clone();
+                                let profile = backend.profile.clone();
+                                let priority = crate::storage::resource_gate::PRIORITY
+                                    .try_with(|priority| *priority)
+                                    .unwrap_or(crate::storage::resource_gate::FOREGROUND);
+                                let (body, digest, fill) =
                                     tokio::task::spawn_blocking(move || -> Result<_> {
                                         let _cpu = cpu;
                                         #[cfg(feature = "fault-injection")]
@@ -1139,6 +1158,15 @@ impl Writes {
                                             blake3::hash(&bytes).as_bytes().as_slice() == hash,
                                             "write payload changed after preparation"
                                         );
+                                        let fill = crate::storage::resource_gate::PRIORITY
+                                            .sync_scope(priority, || {
+                                                files.prepare_fill(
+                                                    chunk.location_id,
+                                                    &bytes,
+                                                    chunk.compressed,
+                                                    &profile,
+                                                )
+                                            });
                                         let bytes = codec::seal(&chunk, bytes, keys.as_ref())?;
                                         let digest = blake3::hash(&bytes).as_bytes().to_vec();
                                         Ok((
@@ -1149,6 +1177,7 @@ impl Writes {
                                                 _grants: grants,
                                             },
                                             digest,
+                                            fill,
                                         ))
                                     })
                                     .await??;
@@ -1161,10 +1190,13 @@ impl Writes {
                                         Bytes::from_owner(body).into(),
                                     )
                                     .await?;
-                                Ok::<_, anyhow::Error>(wire::EncodedChunk {
-                                    chunk_id: id.to_string(),
-                                    digest,
-                                })
+                                Ok::<_, anyhow::Error>((
+                                    wire::EncodedChunk {
+                                        chunk_id: id.to_string(),
+                                        digest,
+                                    },
+                                    fill,
+                                ))
                             }
                         },
                     ))
@@ -1173,6 +1205,7 @@ impl Writes {
                     .await
                 })
                 .await?;
+            let (encoded, fills): (Vec<_>, Vec<_>) = encoded.into_iter().unzip();
             operation.check()?;
             for grant in &grants {
                 grant.check()?;
@@ -1193,6 +1226,7 @@ impl Writes {
                     "invalid chunk commit receipt"
                 );
             }
+            crate::storage::cache::publish_fills(fills.into_iter().flatten().collect());
             offset = end;
             batch_id += 1;
         }

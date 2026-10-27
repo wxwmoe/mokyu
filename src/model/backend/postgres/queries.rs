@@ -4581,7 +4581,7 @@ impl PackingStore for Backend {
                 .await?,
         )
     }
-    async fn ready_encoding(&self, chunk: Id) -> Result<Option<(Id, i32)>> {
+    async fn ready_encoding(&self, chunk: Id) -> Result<Option<(Id, Uuid, i32)>> {
         pack_work::ready_encoding(&self.pool, chunk).await
     }
 

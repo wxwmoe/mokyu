@@ -9,6 +9,14 @@ use std::{
 };
 use uuid::Uuid;
 
+pub(crate) type Fills = Vec<tokio::sync::oneshot::Sender<()>>;
+
+pub(crate) fn publish_fills(fills: Fills) {
+    for fill in fills {
+        let _ = fill.send(());
+    }
+}
+
 pub(super) fn cache_id(chunk: &Chunk) -> Uuid {
     if !chunk.location_id.is_nil() {
         return chunk.location_id;
@@ -140,6 +148,61 @@ pub(crate) struct UploadPin {
     pub staging_storage_id: Option<Uuid>,
     pub staging_object_key: String,
 }
+
+#[derive(Default)]
+pub(super) struct UploadPins {
+    pub files: HashMap<Uuid, (Id, UploadPin)>,
+    pub chunks: HashMap<Id, usize>,
+}
+
+impl UploadPins {
+    pub fn insert(&mut self, file: Uuid, chunk: Id, pin: UploadPin) {
+        self.remove(&file);
+        *self.chunks.entry(chunk).or_default() += 1;
+        self.files.insert(file, (chunk, pin));
+    }
+
+    pub fn remove(&mut self, file: &Uuid) {
+        if let Some((chunk, _)) = self.files.remove(file) {
+            let count = self.chunks.get_mut(&chunk).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                self.chunks.remove(&chunk);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn upload_pins_follow_chunks_across_file_replacement() {
+    let pin = || UploadPin {
+        memory: None,
+        _pin: None,
+        _charge: None,
+        size: 0,
+        compressed: false,
+        remote: false,
+        staging_storage_id: None,
+        staging_object_key: String::new(),
+    };
+    for chunk in [Id::Integer(1), Id::Uuid(Uuid::new_v4())] {
+        let mut pins = UploadPins::default();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        pins.insert(first, chunk, pin());
+        pins.insert(first, chunk, pin());
+        assert_eq!(pins.chunks[&chunk], 1);
+        pins.insert(second, chunk, pin());
+        pins.remove(&first);
+        assert_eq!(pins.chunks[&chunk], 1);
+        assert!(pins.files.contains_key(&second));
+        pins.remove(&first);
+        pins.remove(&second);
+        assert!(pins.files.is_empty() && pins.chunks.is_empty());
+    }
+}
+
 pub(crate) struct LoadedPack {
     pub pack: crate::content::pack::Pack,
     pub data: crate::content::pack::Decoded,

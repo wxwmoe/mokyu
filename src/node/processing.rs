@@ -3,7 +3,11 @@ use crate::model::node_work::{Outcome, RawHash};
 use md5::{Digest, Md5};
 
 impl Reader {
-    pub(crate) async fn hash_raw(&self, backend: &Backend, item: RawHash) -> Result<Outcome> {
+    pub(crate) async fn hash_raw(
+        &self,
+        backend: &Backend,
+        item: RawHash,
+    ) -> Result<(Outcome, crate::storage::cache::Fills)> {
         let source = item.source;
         source.validate()?;
         ensure!(
@@ -12,7 +16,7 @@ impl Reader {
         );
         if let Some(hash) = item.hash {
             ensure!(hash.len() == 32, codec::IntegrityError::RawMetadata);
-            return Ok(Outcome::Hashed { hash });
+            return Ok((Outcome::Hashed { hash }, Vec::new()));
         }
         let _memory = self.acquire(&self.packs, 1).await?;
         let _io = self.acquire(&self.io, 1).await?;
@@ -25,6 +29,14 @@ impl Reader {
             self.diagnostics.clone(),
         )
         .await?;
+        let mut cache = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            self.files.begin_raw(&source, &backend.profile),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
         let mut hash = blake3::Hasher::new();
         let mut digest = Md5::new();
         let mut buffer = vec![0; RAW_BUFFER];
@@ -38,14 +50,22 @@ impl Reader {
             ensure!(size <= source.size as u64, codec::IntegrityError::Length);
             hash.update(&buffer[..count]);
             digest.update(&buffer[..count]);
+            crate::storage::raw_cache::append(&mut cache, &buffer[..count]).await;
         }
         ensure!(size == source.size as u64, codec::IntegrityError::Length);
         ensure!(
             source.digest.as_deref() == Some(digest.finalize().as_slice()),
             codec::IntegrityError::Hash
         );
-        Ok(Outcome::Hashed {
-            hash: hash.finalize().as_bytes().to_vec(),
-        })
+        let fills = cache
+            .and_then(|cache| self.files.prepare_raw(cache, &source))
+            .into_iter()
+            .collect();
+        Ok((
+            Outcome::Hashed {
+                hash: hash.finalize().as_bytes().to_vec(),
+            },
+            fills,
+        ))
     }
 }

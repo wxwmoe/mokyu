@@ -22,6 +22,11 @@ impl Reads {
         };
         let backend = prepared.backend(source.storage()?.context("source storage missing")?)?;
         let cache_id = super::files::id(source).context("cache identity missing")?;
+        let priority = if self.reader.background {
+            crate::storage::resource_gate::MAINTENANCE
+        } else {
+            crate::storage::resource_gate::FOREGROUND
+        };
         match backend.profile.read_integrity.as_str() {
             "background" => {
                 let reads = self.clone();
@@ -35,7 +40,9 @@ impl Reads {
                             reads.reader.files.reject(cache_id).await;
                             reads.report(request, index).await;
                         } else {
-                            reads.reader.files.fill(cache_id, bytes, &backend.profile);
+                            crate::storage::resource_gate::PRIORITY.sync_scope(priority, || {
+                                reads.reader.files.fill(cache_id, bytes, &backend.profile)
+                            });
                         }
                     },
                 );
@@ -44,7 +51,9 @@ impl Reads {
             "off" => {
                 prepared.record_check(self.checks.unchecked());
             }
-            _ => self.reader.files.fill(cache_id, bytes, &backend.profile),
+            _ => crate::storage::resource_gate::PRIORITY.sync_scope(priority, || {
+                self.reader.files.fill(cache_id, bytes, &backend.profile)
+            }),
         }
         Ok(())
     }

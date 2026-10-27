@@ -100,7 +100,7 @@ pub(crate) trait PackingStore: Send + Sync {
     async fn unpack_totals(&self, pack: Option<Id>) -> Result<(i64, i64)>;
     async fn unpack_identity(&self, pack: Option<Id>) -> Result<(String, String)>;
     async fn preparing_packs(&self) -> Result<bool>;
-    async fn ready_encoding(&self, chunk: Id) -> Result<Option<(Id, i32)>>;
+    async fn ready_encoding(&self, chunk: Id) -> Result<Option<(Id, Uuid, i32)>>;
     async fn prepare_encoding(&self, physical: &Chunk, task: Execution) -> Result<Id>;
     async fn encoding_metadata(&self, physical: &Chunk) -> Result<()>;
     async fn prepare_pack(

@@ -170,11 +170,15 @@ impl App {
                 .await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("rewrite-chunk-stored").await;
+            let cache = self.storage.prepare_fill(&physical, &raw, None);
             self.storage_writable()?;
             let _gate = self.storage.source_gate.write().await;
             self.packing
                 .commit_rewrite_chunk(id, token, &source, &physical)
                 .await?;
+            if let Some(cache) = cache {
+                let _ = cache.send(());
+            }
             return Ok(false);
         }
 
@@ -233,6 +237,12 @@ impl App {
                 .await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("rewrite-pack-stored").await;
+            let mut fills = Vec::new();
+            for (source, bytes) in &encoded_members {
+                let mut member = source.clone();
+                member.location_id = Uuid::nil();
+                fills.extend(self.storage.prepare_fill(&member, bytes, None));
+            }
             self.storage_writable()?;
             let _gate = self.storage.source_gate.write().await;
             let members = encoded_members
@@ -250,6 +260,7 @@ impl App {
                     first_id,
                 )
                 .await?;
+            crate::storage::cache::publish_fills(fills);
             return Ok(false);
         }
 

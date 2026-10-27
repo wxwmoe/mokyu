@@ -64,6 +64,7 @@ impl Writes {
                 let io = self.reads.reader.acquire(&self.reads.reader.io, 1).await?;
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("node-conversion-before-read").await;
+                let (cached, mut cache) = tokio::sync::oneshot::channel();
                 let body = if source.pending_upload {
                     let path = crate::storage::cache::CacheFile::PendingRaw
                         .path(&node.config.instance.data_path, source.location_id);
@@ -102,9 +103,27 @@ impl Writes {
                         value.meta.size == source.size as u64,
                         codec::IntegrityError::Length
                     );
-                    crate::http::object::blob(
-                        value.into_stream().map_err(std::io::Error::other).boxed(),
+                    let mut fill = tokio::time::timeout(
+                        Duration::from_millis(100),
+                        self.reads
+                            .reader
+                            .files
+                            .begin_raw(&source, &operation.backend.profile),
                     )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
+                    let body = async_stream::try_stream! {
+                        let mut stream = value.into_stream();
+                        while let Some(bytes) = stream.next().await {
+                            let bytes = bytes.map_err(std::io::Error::other)?;
+                            crate::storage::raw_cache::append(&mut fill, &bytes).await;
+                            yield bytes;
+                        }
+                        let _ = cached.send(fill);
+                    };
+                    crate::http::object::blob(Box::pin(body))
                 };
                 let mut headers = hyper::HeaderMap::new();
                 use base64::Engine;
@@ -118,6 +137,12 @@ impl Writes {
                 let (size, _, _) = self
                     .write_body(&operation, body, check, None, Some(source.size as u64))
                     .await?;
+                operation.check()?;
+                if let Ok(Some(cache)) = cache.try_recv()
+                    && let Some(fill) = self.reads.reader.files.prepare_raw(cache, &source)
+                {
+                    let _ = fill.send(());
+                }
                 drop(io);
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("node-conversion-before-seal").await;

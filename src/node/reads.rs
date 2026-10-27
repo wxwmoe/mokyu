@@ -44,6 +44,7 @@ pub(super) struct Cache {
     memory: Arc<Semaphore>,
     public: Weak<crate::app::public_reads::Cache>,
     pub(super) io: Arc<super::io::Io>,
+    epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for Cache {
@@ -53,6 +54,7 @@ impl Default for Cache {
             memory: Arc::new(Semaphore::new(MATERIAL_BYTES / UNIT)),
             public: Weak::new(),
             io: Arc::default(),
+            epoch: Arc::default(),
         }
     }
 }
@@ -61,6 +63,7 @@ impl Cache {
     pub(super) fn for_node(node: &NodeContext) -> Self {
         Self {
             io: node.io.clone(),
+            epoch: node.cache_epoch.clone(),
             ..Self::default()
         }
     }
@@ -181,6 +184,10 @@ impl Cache {
             io: self.io.clone(),
             policy,
         });
+        if !stale && entry.policy.is_some() {
+            // Discard optional fills prepared with an earlier storage configuration.
+            self.epoch.fetch_add(1, Ordering::AcqRel);
+        }
         if entry._memory.is_some() {
             if !index.values.contains_key(&key) {
                 index.order.push_back(key.clone());
@@ -397,6 +404,7 @@ impl Reads {
             cache: Cache {
                 public: Arc::downgrade(&public),
                 io: node.io.clone(),
+                epoch: node.cache_epoch.clone(),
                 ..Cache::default()
             },
             slots,

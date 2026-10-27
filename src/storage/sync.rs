@@ -16,6 +16,7 @@ impl Storage {
             let storage = self.clone();
             let storage_id = chunk.storage_id.unwrap();
             let location = chunk.location_id;
+            let chunk_id = chunk.id;
             // Publication and pin transfer must finish even if the stronger request is cancelled.
             let persisted = tokio::spawn(async move {
                 let Some(pin) = storage
@@ -24,7 +25,7 @@ impl Storage {
                 else {
                     return Ok::<_, anyhow::Error>(false);
                 };
-                storage.hold_upload(location, pin);
+                storage.hold_upload(location, chunk_id, pin);
                 Ok(true)
             })
             .await??;

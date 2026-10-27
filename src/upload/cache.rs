@@ -136,7 +136,7 @@ impl App {
         };
         // Protect before starting the transaction; cancellation may retain an extra pin until reconciliation.
         if let Some(id) = local_id {
-            self.storage.hold_upload(id, pin);
+            self.storage.hold_upload(id, c.id, pin);
         }
         if !self
             .upload_cache
@@ -295,6 +295,7 @@ impl App {
                 };
                 let content_type = metadata.as_ref().and_then(|m| m.0["content_type"].as_str());
                 let key = metadata.as_ref().map_or("", |m| m.1.as_str());
+                let mut fills = Vec::new();
                 let outputs = self
                     .pack_output(
                         task,
@@ -304,9 +305,11 @@ impl App {
                         key,
                         self.pack_creation_allowed() && !flush && !expired,
                         encoding.as_ref(),
+                        &mut fills,
                     )
                     .await?;
                 self.commit_outputs(task, &rows, &outputs, false).await?;
+                crate::storage::cache::publish_fills(fills);
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("upload-before-release").await;
                 let ids: Vec<Id> = rows.iter().map(|r| r.chunk.id).collect();

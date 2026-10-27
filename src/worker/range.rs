@@ -215,6 +215,7 @@ impl App {
         self.pin_pack_inputs(task, &rows).await?;
         let context = ReadContext::default();
         let mut outputs: Vec<Output> = Vec::new();
+        let mut fills = Vec::new();
         for group in &groups {
             outputs.extend(
                 self.pack_output(
@@ -225,6 +226,7 @@ impl App {
                     "",
                     self.pack_creation_allowed(),
                     None,
+                    &mut fills,
                 )
                 .await?,
             );
@@ -241,6 +243,7 @@ impl App {
             return Ok((0, report));
         }
         self.commit_outputs(task, &rows, &outputs, true).await?;
+        crate::storage::cache::publish_fills(fills);
         report["applied"] = json!(true);
         report["reason"] = json!("repeated_partial_downloads");
         Ok((rows.len(), report))

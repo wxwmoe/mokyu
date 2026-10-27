@@ -3,8 +3,8 @@ use super::*;
 pub(crate) async fn ready_encoding(
     db: impl sqlx::PgExecutor<'_>,
     chunk: Id,
-) -> Result<Option<(Id, i32)>> {
-    Ok(sqlx::query_as("SELECT encoding_id,standalone_size FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'").bind(chunk).fetch_optional(db).await?)
+) -> Result<Option<(Id, Uuid, i32)>> {
+    Ok(sqlx::query_as("SELECT encoding_id,encoding_id,standalone_size FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'").bind(chunk).fetch_optional(db).await?)
 }
 
 pub(crate) async fn pack_has_pending(db: impl sqlx::PgExecutor<'_>, pack: Id) -> Result<bool> {

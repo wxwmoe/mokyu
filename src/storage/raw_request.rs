@@ -24,8 +24,10 @@ impl File {
     pub(crate) async fn create_in(
         files: &super::file_cache::Files<'_>,
         id: Uuid,
-        policy: CachePolicy,
+        mut policy: CachePolicy,
     ) -> Result<Self> {
+        // Required request storage may reclaim disposable caches even for maintenance work.
+        policy.cold = false;
         let path = CacheFile::PendingRaw
             .path(files.root, id)
             .with_extension("partial");
@@ -262,6 +264,52 @@ impl File {
 
     pub async fn rewind(&mut self) -> Result<()> {
         self.file.as_mut().unwrap().rewind().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn cache_in(
+        &mut self,
+        files: &super::file_cache::Files<'_>,
+        id: Uuid,
+        policy: CachePolicy,
+        check: impl Fn() -> Result<()> + Send + Sync,
+    ) -> Result<()> {
+        if self.published
+            || self.retained
+            || self.pending.is_some()
+            || !policy.enabled
+            || policy.capacity.is_some_and(|limit| self.bytes > limit)
+        {
+            return Ok(());
+        }
+        let _write = files.cache_writes.lock().await;
+        check()?;
+        {
+            let fifo = files.fifo.lock().await;
+            if fifo.entries.contains_key(&id)
+                || fifo.entries.len() >= policy.max_entries
+                || policy
+                    .capacity
+                    .is_some_and(|limit| files.disk.used()[1] > limit)
+            {
+                return Ok(());
+            }
+        }
+        let destination = CacheFile::Raw.path(files.root, id);
+        if !super::file_cache::link(&self.path, &destination, self.bytes).await? {
+            return Ok(());
+        }
+        self.linked = Some(destination.clone());
+        check()?;
+        tokio::fs::remove_file(&self.path).await?;
+        self.path = destination;
+        self.linked = None;
+        let mut fifo = files.fifo.lock().await;
+        if policy.cold {
+            fifo.ghost.remove(&id);
+        }
+        fifo.insert(id, self.bytes, CacheFile::Raw);
+        self.published = true;
         Ok(())
     }
 }

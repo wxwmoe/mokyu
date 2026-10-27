@@ -5615,8 +5615,8 @@ impl PackingStore for Backend {
                 .await?,
         )
     }
-    async fn ready_encoding(&self, chunk: Id) -> Result<Option<(Id, i32)>> {
-        Ok(sqlx::query_as("SELECT encoding_id,standalone_size FROM chunk_encodings WHERE chunk_id=? AND state='ready'").bind(chunk).fetch_optional(&self.read).await?)
+    async fn ready_encoding(&self, chunk: Id) -> Result<Option<(Id, Uuid, i32)>> {
+        Ok(sqlx::query_as("SELECT encoding_id,location_id,standalone_size FROM chunk_encodings WHERE chunk_id=? AND state='ready'").bind(chunk).fetch_optional(&self.read).await?)
     }
     async fn prepare_encoding(&self, physical: &Chunk, task: Execution) -> Result<Id> {
         transactions::prepare_encoding(&self.write, physical, task).await

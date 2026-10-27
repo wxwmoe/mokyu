@@ -56,6 +56,7 @@ impl StoreBackend {
 #[derive(Clone, Copy)]
 pub(crate) struct CachePolicy {
     pub(crate) enabled: bool,
+    pub(crate) cold: bool,
     pub(crate) capacity: Option<u64>,
     pub(crate) max_entries: usize,
     pub(crate) upload_cache: bool,

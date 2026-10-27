@@ -86,6 +86,7 @@ fn declared_material_survives_eviction_until_last_request_releases_it() {
         memory: Arc::new(Semaphore::new(1)),
         public: Weak::new(),
         io: Arc::default(),
+        epoch: Arc::default(),
     };
     let supplied = value(deployment, "bucket", br#"{"revision":1}"#);
     let version = supplied.version.clone().unwrap();
@@ -160,6 +161,7 @@ fn cache_pressure_skips_admission_without_losing_held_materials() {
         memory: Arc::new(Semaphore::new(4)),
         public: Weak::new(),
         io: Arc::default(),
+        epoch: Arc::default(),
     };
     let values = (0..4)
         .map(|index| value(deployment, &index.to_string(), b"{}"))
@@ -210,6 +212,11 @@ fn late_read_policy_keeps_its_reply_without_replacing_current_policy() {
     cache
         .apply(deployment, Held::new(), vec![policy(2)])
         .unwrap();
+    let epoch = cache.epoch.load(Ordering::Acquire);
+    cache
+        .apply(deployment, Held::new(), vec![policy(2)])
+        .unwrap();
+    assert_eq!(cache.epoch.load(Ordering::Acquire), epoch);
     let old = policy(1);
     let version = old.version.clone().unwrap();
     let held = cache.apply(deployment, Held::new(), vec![old]).unwrap();
@@ -219,4 +226,9 @@ fn late_read_policy_keeps_its_reply_without_replacing_current_policy() {
     );
     assert_eq!(cache.policy(storage).unwrap().revision, 2);
     assert_eq!(cache.snapshot().len(), 1);
+    assert_eq!(cache.epoch.load(Ordering::Acquire), epoch);
+    cache
+        .apply(deployment, Held::new(), vec![policy(3)])
+        .unwrap();
+    assert!(cache.epoch.load(Ordering::Acquire) > epoch);
 }
