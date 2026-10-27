@@ -19,6 +19,7 @@ mod public;
 
 const UNIT: usize = 4096;
 const MATERIAL_BYTES: usize = 1024 * 1024;
+const DECLARATION_BYTES: usize = 8 * 1024;
 type Key = (i32, String);
 pub(super) type Held = HashMap<Key, Arc<Material>>;
 
@@ -65,7 +66,27 @@ impl Cache {
     }
 
     pub(super) fn snapshot(&self) -> Held {
-        self.index.lock().unwrap().values.clone()
+        let index = self.index.lock().unwrap();
+        let mut held = Held::new();
+        let mut remaining = DECLARATION_BYTES;
+        // Keep optional hints small, prioritizing shared dependencies over object history.
+        for objects in [false, true] {
+            for (key, material) in &index.values {
+                if matches!(
+                    wire::MaterialType::try_from(material.version.r#type),
+                    Ok(wire::MaterialType::ObjectMetadata | wire::MaterialType::ObjectMapping)
+                ) != objects
+                {
+                    continue;
+                }
+                let bytes = prost::Message::encoded_len(&material.version) + 6;
+                if bytes <= remaining {
+                    held.insert(key.clone(), material.clone());
+                    remaining -= bytes;
+                }
+            }
+        }
+        held
     }
 
     fn policy(&self, id: Uuid) -> Option<read::Policy> {

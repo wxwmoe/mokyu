@@ -1,4 +1,5 @@
 """Bounded cluster history on real nodes; requires an isolated deployment."""
+import json
 import os
 from pathlib import Path
 import time
@@ -26,9 +27,11 @@ while True:
         break
     assert time.monotonic()<until,'cluster runtime baselines did not converge'
     time.sleep(2)
-for host,count in [('data1',12),('data2',24)]:
+endpoints = json.loads(os.environ['MOKYU_TEST_DATA_ENDPOINTS'])
+assert len(endpoints) == 2 and all(endpoint.startswith(('http://', 'https://')) for endpoint in endpoints)
+for endpoint,count in zip(endpoints, [12,24]):
     for _ in range(count):
-        requests.get('http://mokyu-runtime-console-'+host+':9001/runtime-observation-missing',timeout=10)
+        requests.get(endpoint.rstrip('/')+'/runtime-observation-missing',timeout=10)
 until=time.monotonic()+210
 while True:
     runtime=get('/api/v1/usage/runtime')

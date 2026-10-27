@@ -1,119 +1,101 @@
 # 群集部署
 
-Mokyu 的群集模式让多个进程共享一个 PostgreSQL 数据库和部署密钥。进程使用同一镜像，通过启动命令选择职责；配置文件只保存数据库、实例监听、资源预算、数据目录和部署密钥等启动字段。存储、账户、节点注册信息和其他运行设置保存在数据库中。
+Mokyu 群集由平等的 control 节点、提供 S3/公共读的 data 节点和执行后台工作的 worker 组成。只有 control 连接共享 PostgreSQL 并持有部署密钥。data/worker 通过 HTTPS gRPC 取得业务元数据和任务，直接访问后端对象存储；对象正文不经过 control。
 
-群集模式不代替 PostgreSQL 做故障转移。需要高可用数据库时，由部署环境提供稳定的 PostgreSQL 连接地址；所有 Mokyu 进程直接连接这个地址。Mokyu 负责节点注册、任务租约和按角色提供 HTTP 入口。
-
-control 执行 usage 统计、桶 purge 和历史清理等数据库任务；存储清理和其他需要后端 I/O 的任务由数据节点执行。多个 control 使用任务租约协调，未完成的数据库任务可在租约过期后由其他 control 接管。
-
-## 拓扑
-
-下面的拓扑对应三台机器。控制节点和 worker 可以在同一台机器上，也可以分开；data 节点由部署管理员自行安排宿主机。
+## 拓扑与配置
 
 ```text
-                         admin.example.com
-                               |
-                         control-a
-                               |
-                    +----------+----------+
-                    |                     |
-                 data-b + worker-b    data-c + worker-c
-                    |                     |
-             shared PostgreSQL + staging S3
+data / worker -> control.example.com -> control-a / control-b -> PostgreSQL
+      |                                    |
+      +---------- shared S3 storage -------+
 
-       s3.example.com    -> data-b, data-c
-       media.example.com -> data-b, data-c
+S3 clients -> s3.example.com    -> data nodes
+Public GET -> media.example.com -> data nodes
+Management -> control.example.com -> control nodes
 ```
 
-典型安排如下：
-
-| 机器 | 容器 | 监听和职责 |
+| 角色 | 启动配置 | 入口和职责 |
 | --- | --- | --- |
-| A | PostgreSQL、`mokyu control` | 提供数据库和管理 API、管理页面、控制 CLI；不提供 S3 或公共读 |
-| B/C | `mokyu data` + `mokyu worker` | data 提供 S3/公共读，worker 领取后台任务；两者各自直接连接 PostgreSQL |
+| `mokyu control` | database、deployment_key、唯一 instance.name，可选 replica_database | 同一 listen_control 端口提供管理页面、管理 API、CLI 和节点 gRPC；处理数据库任务、授权、调度与租约 |
+| `mokyu data` | control_url、本机预算和数据目录、预创建 node.json | 提供 S3/公共读、正文传输和可领取的后台工作；本机 status |
+| `mokyu worker` | control_url、本机预算和数据目录、预创建 node.json | 执行需要后端 I/O 或计算的后台工作；本机 status |
 
-每个容器使用自己的配置文件和 `instance.data_path` 目录，不共享本地目录。所有容器必须使用同一个不可替换的 `instance.deployment_key`，并连接同一个数据库。data 节点和 worker 仍需要数据库地址，不从 control 读取数据库连接信息。
+每个进程使用独立配置和持久 data 目录。control 使用 [`config.example.toml`](../config.example.toml)，data/worker 使用 [`config.node.example.toml`](../config.node.example.toml)。节点禁止配置 database、replica_database、deployment_key 和数据库连接预算；名称由预创建身份确定。数据库只需允许 control 访问。后端 S3 应允许相应节点直接访问。
 
-开启后端写缓存后，raw 和 chunks 在接收节点本地确认即可响应，所属节点负责后续上传。上传完成后文件转为普通读缓存，不另行复制；跨节点需要尚未上传的正文时最多等待约 3 秒，仍未就绪则返回 `503 SlowDown` 和 `Retry-After: 60`。同节点健康缓存可直接读取，HEAD 和列表不等待正文。应持久保存该节点的数据目录及 `node.json`；丢失唯一的本地副本不能由其他节点恢复。
+data/worker 主动连接 `control_url`；节点状态查询、CLI 和容器健康检查默认监听 `127.0.0.1:9002`，无需向 control 或公网开放。节点示例省略 `listen_control`；需要外部监控采集时，可显式设置监听地址。
 
-启动命令是镜像的角色开关：
+control 执行 usage、桶 purge 和历史清理等数据库任务。普通共享任务可以由 worker 或 data 执行，本机唯一来源任务只交给所属节点；多个 control 通过持久任务租约协调。数据库高可用、主备切换及旧主库隔离由部署环境负责。
 
-```sh
-mokyu                 # 未指定命令，单容器模式（single）
-mokyu control         # 管理/control
-mokyu worker          # 后台任务/worker
-mokyu data            # S3 和公共读/data
-mokyu cli ...         # 通过本机 control HTTP 入口执行管理命令
-```
+## 网络与多地址
 
-CLI 向本机 `instance.listen_control` 发送请求。单容器使用配置中的部署密钥认证，不注册节点或创建 `node.json`；群集 control 使用 `node.json` 中的节点凭据。data/worker 在模式不匹配或需要恢复时只提供 `/status`，不会接收业务流量或调度任务。
-
-## 网络和 DNS
-
-反向代理把管理域名转发到 `instance.listen_control`，把数据域名转发到 `instance.listen_s3` 或 `instance.listen_web`。control、worker 和 data 都直接连接 PostgreSQL；节点注册和心跳也写入数据库，不经过 control URL 或节点间转发。data 的对象读写不会经过 control。
-
-数据面可以使用多 IP A 记录：
+`instance.control_url` 是 HTTPS 域名源地址，例如 `https://control.example.com`。域名可以配置多个 A 记录，各入口应提供同一域名的有效证书并转发到对应 control：
 
 ```text
-s3.example.com    A  <machine-b-ip>
-s3.example.com    A  <machine-c-ip>
-media.example.com A  <machine-b-ip>
-media.example.com A  <machine-c-ip>
+control.example.com A <control-a-public-ip>
+control.example.com A <control-b-public-ip>
 ```
 
-DNS 轮询不提供健康检查；客户端应按 S3 重试规则处理节点不可用。管理域名也可以使用多 IP A 记录，但各 control 进程独立验证自己的节点凭据，不依赖主备租约或请求转发。
+客户端最多保留 32 个 A 地址，按 DNS TTL 在 1–300 秒内刷新并复用健康地址的连接；DNS 临时失败时，已知集合在原刷新时间之后最多继续使用 300 秒。Unary 在地址间轮转，NodeSession 使用独立持久连接；连接和安全重试共用总期限。TCP 连接目标是选中的 IP，TLS SNI、证书校验和 HTTP authority 始终使用原域名。删除地址会触发该地址会话恢复，业务运行权由 control 确认。
 
-## 首次安装
+S3/公共读域名也可以有多个 data 地址；这是面向 S3 客户端的入口选择，客户端需处理不可用节点并遵守重试规则。
 
-1. 准备 PostgreSQL 数据库、每个容器独立的配置和 data 目录，生成一次部署密钥，并把同一字符串写入所有配置的 `instance.deployment_key`。
-2. 启动一个临时单容器实例，让它创建数据库结构并完成初始管理设置；也可以在 control 容器上直接执行相同 CLI：
+### Nginx 与 Cloudflare
+
+[`nginx.example.conf`](../nginx.example.conf) 在公网终止 TLS：普通管理、S3 和公共读以 `proxy_http_version 2` 使用 h2c 回源；`/mokyu.node.` 命名空间以 `grpc_pass grpc://` 转发到同一个 control 端口。使用 Nginx 1.30.6+ 或 1.31.7+，启用 HTTP/2 和 gRPC 模块，并安装安全补丁。替换域名、证书和 upstream 后执行 `nginx -t`；control_url 的域名须与 control server_name 一致。[HTTP/2 回源](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_http_version)、[gRPC 模块](https://nginx.org/en/docs/http/ngx_http_grpc_module.html)、[安全公告](https://nginx.org/en/security_advisories.html)
+
+管理 HTTP 和 gRPC 使用各自的 upstream keepalive 池，两者仍指向同一个 `listen_control` 地址；不要把示例的 `mokyu_control` 和 `mokyu_control_rpc` 合并，以免不同代理模块复用不相容的连接状态。
+
+代理保留原始 Host、URI、查询参数、gRPC metadata 和 trailers；节点路径禁止缓存、重写和交互式挑战。Unary 重试由节点的幂等协议处理，代理不自动重发。NodeSession 的应用心跳与 HTTP/2 PING 独立，代理读写超时须覆盖心跳间隔。
+
+接入 Cloudflare 时使用代理记录，在 Network 中启用 gRPC；源站入口使用 443、TLS 和通过 ALPN 声明的 HTTP/2，SSL/TLS 使用 Full (strict)。客户端均衡的是 DNS 返回的边缘 IP，Cloudflare 到源站的选择由 Cloudflare 管理，二者不是同一层均衡。节点凭据继续由 Mokyu 验证，管理页面的访问策略不能阻断节点 RPC。[Cloudflare gRPC 要求及限制](https://developers.cloudflare.com/network/grpc-connections/)
+
+## 安装与启动
+
+1. 准备 PostgreSQL、单容器/control 的配置和固定部署密钥，先按[部署与恢复](deployment-and-recovery.md)完成管理员初始化、共享 S3 staging、普通 S3 storage 和桶配置。群集禁止 local storage；`uploads.staging_storage_id` 须指向启用的 S3 暂存存储。
+2. 在单容器上进入维护模式并排空工作，执行 `mokyu cli cluster mode cluster`，随后停止该进程。使用有唯一名称的配置启动 `mokyu control`；其他 control 使用同一数据库和部署密钥、各自的名称与目录。
+3. 配置 TLS 代理和 control 域名，在 control 上预创建 data/worker。命令只在创建或轮换时返回完整凭据，将输出直接保存到对应节点目录，不发布到日志或共享位置：
 
    ```sh
-   docker exec mokyu mokyu cli status
-   docker exec mokyu mokyu cli setup token
+   umask 077
+   mkdir -p data-1 worker-1
+   docker exec mokyu-control mokyu cli cluster create data-1 data > data-1/node.json
+   docker exec mokyu-control mokyu cli cluster create worker-1 worker > worker-1/node.json
    ```
 
-3. 在数据库中创建共享 S3/S3 兼容 staging storage 和至少一个普通 S3 storage，再创建桶。群集模式拒绝 local 存储；`instance.data_path` 仍可用于节点状态和本机临时文件，它不是共享存储。
-4. 停止单容器，使用 control、worker、data 的独立配置启动对应进程。B/C 的每台机器同时启动一个 data 和一个 worker；每个进程首次启动时在 PostgreSQL 注册自身并把凭据写入各自 `instance.data_path/node.json`。
+4. 为每个节点准备独立目录和 `config.node.example.toml`，设置 control_url，安全传送对应 node.json，并给运行用户读写权限。官方镜像使用 UID/GID 10001，身份文件权限为 0600。以 `mokyu data` 或 `mokyu worker` 启动，角色须与文件一致。
+5. 通过本机 `mokyu cli status` 和管理面检查会话、配置与节点状态，退出维护模式后检查 `status --ready`。data 完成同步后提供 S3/公共读，worker 开始领取工作。
 
-## 节点注册和管理
+未指定启动命令的 `mokyu` 是单容器模式。data/worker 本机 CLI 只支持 `status`；其他管理命令在单容器/control 执行。
 
-节点不使用 join token。control、worker 和 data 直接使用部署密钥保护的数据库注册流程：节点名称来自 `instance.name`，角色来自启动命令，凭据只写入本节点的 `node.json`。重启时复用该文件；文件丢失或数据库中已有同名节点时，进程进入 `recovery_required`，不会覆盖旧节点身份。
+## 节点身份与恢复
 
-把每个节点的 `node.json` 纳入备份。恢复时先恢复对应文件；若文件不可恢复，管理员可在 control 上释放旧节点，再让该角色重新启动并注册。
+control 首次启动通过 PostgreSQL 注册，使用自己的 node.json 恢复。data/worker 必须事先取得身份，不会自行注册；缺文件或角色不符会拒绝启动。连接不可用时保留本机状态入口并有界重连；复制同一身份启动另一个活跃进程会产生所有权冲突，不能同时服务。
 
-节点管理命令：
+把每个节点的 node.json 和持久 data 目录纳入备份。重建时恢复对应文件并确保原进程已停止。data/worker 身份文件不可恢复时，在 control 执行 `cluster rotate NAME --confirm`，安全保存返回文件并替换后重启；该操作保留节点 UUID、递增凭据代次、隔离旧会话并撤销旧任务租约。它不能恢复已经丢失的本机唯一正文。control 文件丢失时先恢复备份；无法恢复则释放原 control 身份后重新注册。
 
-```sh
-docker exec mokyu-control mokyu cli cluster status
-docker exec mokyu-control mokyu cli cluster nodes
-docker exec mokyu-control mokyu cli cluster release <node-name> --confirm
-```
+| 命令 | 行为 |
+| --- | --- |
+| `cluster status` | 部署模式、启用节点数和 local storage 数 |
+| `cluster nodes` | 节点身份、角色、启用状态及最近报告 |
+| `cluster create NAME data/worker` | 预创建身份并返回 node.json |
+| `cluster rotate NAME --confirm` | 更换 data/worker 凭据并返回 node.json |
+| `cluster release NAME --confirm` | 禁用节点，释放租约并重新排队未完成任务 |
 
-`cluster status` 返回 deployment mode、enabled 节点数和 local storage 数；`cluster nodes` 返回节点 id、名称、角色、启用状态和最近心跳；`cluster release` 禁用节点、释放其 lease 并把未完成任务重新排队。本地待上传文件仍属于原节点，释放节点不会把文件或上传责任转给其他节点，操作前应完成 `cache flush`。所有管理命令都经由 control HTTP API 执行，并记录 CLI 审计来源。
+启用后端写缓存时，确认规则取决于 storage 的持久性档位；待上传唯一文件保留在所属节点。其他节点等待共享来源就绪，超时返回既有 `503 SlowDown`；HEAD 和列表不等待正文。释放或轮换前应在 control 完成 `cache flush`，不能把释放节点当成迁移本机文件。正常 SIGTERM 停止新准入并继续续租、任务结果确认和本机上传排空；超过退出期限会报告未完成项，后续依赖原目录恢复。
 
 ## 模式切换和恢复
 
-使用当前 single 或最后一个 control 的 CLI 切换数据库部署模式，也可由管理员通过管理 API 操作：
+在单容器或最后一个 control 上执行 `cluster mode single|cluster`，前置条件是维护模式和已排空工作：
 
-```sh
-docker exec mokyu-control mokyu cli cluster mode cluster
-docker exec mokyu-control mokyu cli cluster mode single
-```
+1. 暂停定时维护，完成或中止上传与任务，使用 `cache flush` 排空唯一暂存。进入群集前迁移并移除 local storage、配置共享 S3 staging；回到单容器前释放其他启用节点。
+2. 停止其他进程，包括已释放但仍运行的进程；只保留执行切换的单容器/control。执行 `maintenance enable`，等待活动读写、读取租约和后台工作排空。
+3. 执行模式切换。服务在数据库独占运行权下更新部署模式，当前进程进入需要重启的状态；停止它，再按目标模式启动。
+4. 核对状态和配置，执行 `maintenance disable`，恢复维护计划并检查 `status --ready`。
 
-1. 暂停定时维护策略，完成 queued/running/paused 任务；完成或中止上传，并执行 `cache flush` 排空已确认的暂存数据。
-2. 进入 cluster 前迁移并移除所有 local storage，配置启用的 S3 `uploads.staging_storage_id`。回到 single 前释放其他 enabled 节点；当前 control 会在成功切换时释放自己。
-3. 停止其他所有进程，包括已经 release 但尚未退出的节点；只保留执行切换的 single/control。进入维护模式并等待活动读写、GC、清理与读取租约排空。仍被引用的 multipart 暂存或待上传数据会阻止切换。
-4. 执行模式切换。服务在数据库独占运行权下更新 `deployment_mode_revision`，保留独占直到当前进程退出；旧进程停止接受数据操作和新任务，不能直接恢复服务。
-5. 停止当前进程，再按新模式启动对应角色。核对 `status --ready` 后退出维护模式，恢复需要的定时策略。
-
-同一模式的重复设置不重复切换。失败任务历史保留，但不能在另一模式恢复旧任务形态；不会自动转换任务树。切换请求中断或提交结果无法确认时，当前进程保持受限，应核对数据库模式后重启。
-
-角色与数据库模式不匹配时，control/single 继续提供管理入口；worker/data 只提供 `/status` 并停止调度或数据面服务。`mokyu cli status --ready` 只有在模式匹配、没有待重启的切换且未处于 `recovery_required` 时才成功；群集角色还要求节点已注册。启动时读取的模式在当前运行权期间固定，请求无需反复查询数据库；修正数据库模式、节点文件或部署配置后须重启进程。
-
-维护模式由任一 control 写入部署状态，各节点随 10 秒心跳刷新；数据库读取失败时保留上次状态。进入维护后，确认各节点工作状态已切换且在途操作排空，再执行要求停写的操作。退出维护后，各节点刷新状态即可恢复写入，无需重启；正在停机排空的进程不会重新接受写入。
+重复设置相同模式不重复切换。未完成 Multipart、唯一来源或任务会阻止切换；失败任务历史保留，不自动转换任务树。请求中断或结果未知时先查询部署模式再重启。节点收到模式、凭据或运行权失效后停止相应工作；配置同步与续租确认不能由缓存或仅 HTTP/2 PING 替代。
 
 ## 存储限制与迁移
+
 
 群集模式禁用 local 存储。单容器模式切换到群集模式时，Mokyu 会检查存储和运行状态，不会替部署管理员上传文件：
 
@@ -125,31 +107,22 @@ docker exec mokyu-control mokyu cli cluster mode single
 
 ## 可选 PostgreSQL 从库
 
-先为公共入口启用合适的响应缓存，再按元数据分页负载考虑从库。control 和 data 可以通过 `[replica_database]` 指定一个 PostgreSQL 物理热备入口，连接字段及凭据继承规则见[配置参考](configuration.md#replica_database)。无需启用同步复制；不配置时全部读取继续走主库。
+只在 control 配置 `[replica_database]`，字段和最小只读权限见[配置参考](configuration.md#replica_database)。从库仅用于合格匿名公共读的后续区块映射页；首个 OpenRead、当前对象、权限、Range 起点、物理来源、租约和写入仍在主库处理。签名读取和后台任务不使用从库。
 
-分流仅覆盖 Web 公共读和匿名 S3 公共读的后续区块映射页。路由、ACL、当前对象、完整响应缓存校验、首个页面、Range 起点、物理来源及其保护仍在主库；签名/预签名 S3、管理请求、后台任务、写入、迁移和通知不使用从库。data 分页每页最多 64 条映射；control 的 ReadWindow 沿用请求的有界窗口。小对象和完整正文缓存命中通常没有从库查询。
+control 检查从库的部署身份、结构版本、hot standby 状态，以及同一快照中的读标记和载荷修订。池忙、未追平、身份异常或查询超时均沿当前窗口回退主库，不增加节点 RPC。连接获取最多 200ms，分页查询最多 100ms；不等待 WAL 追平、不重播已发字节、不拼接对象版本。
 
-每个来源读取在主库创建独立 UUID 读租约。后续页在从库同一 SQL 快照中确认该租约标记可见，再读取对应不可变 stream 的映射；看不到标记立即回主库，不等待 WAL 追平。从库中残留的旧租约不能用于新请求，也不能续活主库已过期的租约。主库续约、运行权及来源保护仍然决定请求能否继续。
+control 主库池至少五个连接，另有池外运行权连接；从库预算独立，不能代替主库可靠写与回退容量。`status.read_replica` 提供状态、尝试、成功页、未追平、错误、忙碌和回退计数；每页仍重新检查可见性。主库故障转移和旧主隔离由部署环境处理，从库不能让节点脱离 control 独立授权。
 
-从库连接检查 PostgreSQL 版本、hot standby 状态、部署 ID、部署密钥指纹和 schema 版本，页面查询再次检查身份及恢复状态。账户只需 SELECT 权限；从库不会执行初始化、迁移、锁定业务记录、心跳或租约写入。连接按需建立，失败时健康主库仍可用。
+## 备份与故障边界
 
-池忙直接回主库；新连接获取最多等待 200ms，页面查询最多 100ms，超时连接关闭。未追平后短暂退避 250ms，故障按 1–30 秒退避，并限制恢复探测。每页至多回主库一次，沿用原 stream 和尚未发送的起点；不重播已发字节、不拼接不同对象版本。主库也无法提供数据时中止响应流。
+备份 PostgreSQL/WAL、部署密钥、各节点持久目录及 S3 载荷，参见[部署与恢复](deployment-and-recovery.md)。元数据和正文必须属于一致的恢复边界，单独的对象存储副本不能恢复数据库、权限或密钥。
 
-`instance.database_connections` 保留主库预算，`instance.database_read_connections` 独立限制从库池。主库池包括通知监听：control 至少 5 个连接，容纳通知、统计与维护协调、管理权限保护和查询；data/worker 至少 4 个，容纳两条通知监听及业务查询。区块领取在短事务内完成，编码和 S3 I/O 不持有数据库连接；同内容竞争释放连接后有界退避，领取锁忙时也不在数据库中等待。这些是启动下限，高并发需增加预算。owner 连接在池外，仍需单独计入数据库总连接预算以及主从数据库的 CPU/内存。不要仅因配置了从库就缩减主库可靠写和故障回退容量。`status.read_replica` 返回 `disabled`、`not_applicable`、`idle`、`available`、`lagging` 或 `backoff`，并提供池大小、尝试、成功页、未追平、错误、忙碌、回退次数和下次尝试时间；可用状态只反映最近结果，每页仍需检查本次租约。
+读取在 control 上固定对象版本和精确物理来源，NodeSession 批量续租和释放；丢失释放由 TTL 回收，超时租约不能复活。control 失联后只在已确认运行权及来源保护期限内继续已有工作，不能无限发布或读取。断线恢复重新同步权威配置、资源和任务；连接切换不直接等于业务失败或成功。
 
-PostgreSQL 故障切换和旧主库隔离由部署环境负责。主库运行权连接丢失时 Mokyu 退出，切换后重启并为新请求创建新租约；旧时间线的从库无法提供这些标记，因此回退新主库。被提升的从库因不再处于 recovery 状态停止接受分流。此功能不把从库变成可脱离主库运行的数据面。
-
-## 备份、升级和故障边界
-
-PostgreSQL 数据库、WAL、部署密钥、每个容器的 data 目录（尤其是 `node.json`）和存储区块仍按[部署与恢复](deployment-and-recovery.md)的要求备份。
-
-群集部署只改变进程职责，不改变 S3 兼容接口、存储格式或 PostgreSQL 的恢复责任。S3 服务、DNS 健康检查、TLS 终止和 PostgreSQL 主备切换由部署环境提供和维护。
-
-正文读取在同一事务中固定对象版本和创建读取租约。续约间隔为租约 TTL 的三分之一，TTL 为读取空闲超时与 30 秒中较大值的两倍；续约失败或租约已经过期时停止取源。续约次数随读取时间增长，不随区块数量增长。HEAD/304 不获取来源租约；单容器继续使用本机 pin，不写群集租约。
-
-完整响应缓存由各 data 节点独立配置和计费，control/worker 不分配正文缓存。普通 GET 有本机正文候选时，通过主库单个快照检查当前对象、权限、桶设置版本及最多 64 条逻辑映射；成功命中直接发送独立内存正文，不创建或释放来源租约。候选失效或缺少所需编码时重新取得来源保护并检查当前对象；没有候选的冷读沿用正常路径。权限生效不依赖节点间失效通知或 TTL；校验后已经开始的响应可以完成，后续请求按新权限处理。添加 data 节点可分摊传输和编码，但不会消除 PostgreSQL 元数据负载。
+已初始化节点的正常冷读在一次 OpenRead 中得到首窗口及缺失依赖，随后直接访问 S3。`include` 选择本次需要的材料，`cached` 声明仍持有的修订；失效材料在同次响应补齐。正文缓存和公开快照按当前存储策略使用，签名、条件及强制刷新请求继续验证。具体消息、批次、租约与重试边界见[节点 RPC](node-rpc.md)。
 
 ## 节点观测
+
 
 群集的节点报告独立于心跳和请求执行，每约十秒保存一次本地资源、缓存、请求和队列快照。页面查询数据库中的报告，不逐台连接节点。联系状态（在线、失联、尚未报告、已释放）、工作状态、报告新鲜度和配置状态分别显示；最近心跳或报告超过三十秒即不作为当前生效证明。没有注册身份的失败容器只能通过本机状态和日志诊断。
 
@@ -162,3 +135,5 @@ PostgreSQL 数据库、WAL、部署密钥、每个容器的 data 目录（尤其
 节点历史按 `metrics.runtime_interval` 记录，保留期沿用 `metrics.runtime_retention`。control 平等竞争短期汇总锁，每轮最多读取 4096 个有联系节点的最近两个采样；超过范围的节点仍计入预期数，并显示部分覆盖。汇总和清理受超时限制，清理每轮最多八批，每批最多一千项；失败保留已有结果，不在页面请求中补算历史。
 
 请求和后端流量先按相同节点、启动编号与单调时间计算差分，再相加；公共请求统计只计 Web/S3 数据入口，不计 control 管理流量。缓存命中率使用有效窗口的命中数之和除以查询数之和，不平均各节点百分比。不汇总节点 p95/p99。重启后的首样本和缺失基线显示未知；共享待上传和任务只从主库统计一次。各节点缓存及 RSS 为有覆盖说明的副本总和，不等于部署唯一文件量。
+
+节点详情显示 control_url、当前连接 IP、control ID、会话阶段、最近错误和 RPC 延迟/尝试/重试计数。最近错误保留为诊断记录，不能仅凭该字段判断当前离线；当前工作以会话阶段和报告时间为准。未采样队列显示未知，不伪造零值。访问观测使用独立有界批次，缺报或丢批会重置统计覆盖起点，不阻塞前台读取。

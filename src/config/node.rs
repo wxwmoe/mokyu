@@ -40,7 +40,6 @@ impl NodeConfig {
                 .as_deref()
                 .context("instance.control_url is required")?,
         )?;
-        super::limits::validate_runtime(&config.instance, &RuntimeSettings::default())?;
         let value: toml::Value = toml::from_str(text).expect("validated configuration");
         config.configured_fields = value["instance"]
             .as_table()
@@ -48,6 +47,10 @@ impl NodeConfig {
             .keys()
             .map(|field| format!("instance.{field}"))
             .collect();
+        if !config.configured_fields.contains("instance.listen_control") {
+            config.instance.listen_control = "127.0.0.1:9002".into();
+        }
+        super::limits::validate_runtime(&config.instance, &RuntimeSettings::default())?;
         Ok(config)
     }
 }
@@ -61,6 +64,19 @@ mod tests {
         let valid = "[instance]\ncontrol_url='https://control.example'\n";
         for role in ["data", "worker"] {
             let config = NodeConfig::parse(valid, role).unwrap();
+            assert_eq!(config.instance.listen_control, "127.0.0.1:9002");
+            assert!(!config.configured_fields.contains("instance.listen_control"));
+            for address in ["0.0.0.0:9002", "[::1]:19002"] {
+                let explicit =
+                    NodeConfig::parse(&format!("{valid}listen_control='{address}'\n"), role)
+                        .unwrap();
+                assert_eq!(explicit.instance.listen_control, address);
+                assert!(
+                    explicit
+                        .configured_fields
+                        .contains("instance.listen_control")
+                );
+            }
             assert!(config.configured_fields.contains("instance.control_url"));
             assert!(!config.configured_fields.contains("instance.cpu_jobs"));
             let budget =
@@ -80,6 +96,7 @@ mod tests {
             }
         }
         assert!(NodeConfig::parse(valid, "control").is_err());
+        assert_eq!(Instance::default().listen_control, "0.0.0.0:9002");
         assert!(NodeConfig::parse("[instance]", "data").is_err());
         assert!(
             NodeConfig::parse("[instance]\ncontrol_url='http://control.example'", "worker")

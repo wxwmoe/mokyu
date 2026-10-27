@@ -2,7 +2,7 @@
 
 数据库保存对象目录、权限、存储映射、任务和运行状态；载荷位于 storage 或受保护的暂存目录。本文只列出当前公开语义，完整类型、约束、索引和触发器以 [`migrations/`](../migrations) 为准。
 
-全新安装使用 `migrations/schema/{postgres,mysql,sqlite}.sql` 的对应最新结构；已初始化数据库执行所选后端的增量迁移：PostgreSQL 使用 `migrations/*.sql`，MySQL 使用 `migrations/mysql/*.sql`，SQLite 使用 `migrations/sqlite/*.sql`。已发布迁移不可修改。PostgreSQL 的单容器和群集使用同一套表；MySQL 和 SQLite 只有单容器表，不保存节点、lease、子任务或共享 staging。群集的 control、worker、data 共享 PostgreSQL，各自保留独立 `instance.data_path` 和 `node.json`。
+数据库初始化使用 `migrations/schema/{postgres,mysql,sqlite}.sql` 的对应结构；已初始化数据库执行所选后端的增量迁移：PostgreSQL 使用 `migrations/*.sql`，MySQL 使用 `migrations/mysql/*.sql`，SQLite 使用 `migrations/sqlite/*.sql`。已发布迁移不可修改。PostgreSQL 的单容器和群集使用同一套表；MySQL 和 SQLite 只有单容器表，不保存节点、lease、子任务或共享 staging。群集只有 control 连接 PostgreSQL，data/worker 通过 control API 访问业务数据；各进程保留独立 `instance.data_path` 和 `node.json`。
 
 下表描述共有数据含义，并列出 PostgreSQL 群集字段；原生类型和约束以各后端迁移为准。MySQL/MariaDB 共用 `migrations/mysql/`，使用二进制 UUID、自增 BIGINT 内容 ID、UTC `DATETIME(6)` 和二进制对象键。名称比较区分大小写和尾空格；MySQL 使用原生 JSON，MariaDB 使用带 JSON 有效性约束的文本表示。引用、配额和任务更新在同一事务中显式完成；容量 scope 的桶集合使用关联表。SQLite 使用 STRICT 表、16 字节 UUID、整数自增内容 ID、UTC 微秒整数时间、JSON 文本和二进制对象键；写事务使用 `BEGIN IMMEDIATE`，引用与配额同样在事务内显式维护。原生类型不影响对外 ID、分页、时间和字节数的接口语义。
 

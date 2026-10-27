@@ -1,5 +1,6 @@
-"""Small h2c wire client for isolated listener and proxy regressions."""
+"""Small HTTP/2 wire client for isolated listener and proxy regressions."""
 import socket
+import ssl
 from urllib.parse import urlsplit
 
 import h2.config
@@ -10,10 +11,16 @@ import h2.events
 class Client:
     def __init__(self, endpoint, authority=None, host_only=False):
         target = urlsplit(endpoint)
-        assert target.scheme == 'http' and target.path in ('', '/')
+        assert target.scheme in ('http', 'https') and target.path in ('', '/')
+        self.scheme = target.scheme
         self.authority = authority or target.netloc
         self.host_only = host_only
-        self.socket = socket.create_connection((target.hostname, target.port or 80), timeout=20)
+        self.socket = socket.create_connection((target.hostname, target.port or (443 if self.scheme == 'https' else 80)), timeout=20)
+        if self.scheme == 'https':
+            context = ssl.create_default_context()
+            context.set_alpn_protocols(['h2'])
+            self.socket = context.wrap_socket(self.socket, server_hostname=target.hostname)
+            assert self.socket.selected_alpn_protocol() == 'h2'
         self.connection = h2.connection.H2Connection(config=h2.config.H2Configuration(
             client_side=True, header_encoding='utf-8', validate_outbound_headers=False))
         self.responses = {}
@@ -50,7 +57,7 @@ class Client:
     def start(self, method, path, headers=(), end=True):
         stream = self.connection.get_next_available_stream_id()
         self.responses[stream] = dict(headers={}, body=bytearray(), trailers={}, ended=False)
-        values = [(':method', method), (':scheme', 'http'), (':path', path)]
+        values = [(':method', method), (':scheme', self.scheme), (':path', path)]
         values.append(('host' if self.host_only else ':authority', self.authority))
         values.extend((name.lower(), str(value)) for name, value in headers)
         self.connection.send_headers(stream, values, end_stream=end)

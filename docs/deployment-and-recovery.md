@@ -1,6 +1,6 @@
 # 部署、升级与恢复
 
-默认部署运行一个单容器模式实例，同时提供管理、S3 和公共读，独占一个数据库、data 目录和存储范围。需要拆分职责或多节点入口时，使用[群集部署](cluster-deployment.md)；群集的 control、worker、data 容器仍共享同一数据库和部署密钥，但各自使用独立 data 目录。以下单容器部署命令在源码根目录执行。
+默认部署运行一个单容器模式实例，同时提供管理、S3 和公共读，独占一个数据库、data 目录和存储范围。需要拆分职责或多节点入口时，使用[群集部署](cluster-deployment.md)；群集只有 control 连接 PostgreSQL 并持有部署密钥，data/worker 通过 control 的 HTTPS API 通信，各进程使用独立 data 目录。以下单容器部署命令在源码根目录执行。
 
 单容器使用进程内任务调度、活动读写保护和存储并发限制，不创建群集节点或子任务，也不维护分布式租约或共享 staging。任务、配额、上传确认和恢复状态仍持久化在数据库中。
 
@@ -45,8 +45,8 @@ Rust 构建还需要 `protoc`，由 `proto/node.proto` 生成 gRPC 类型。两�
    | 配置 | 填写内容 |
    | --- | --- |
    | `database` | 主机、端口、数据库和用户；删除示例 `password`，启用 `password_file = "secrets/postgres-password"`，与 Compose 共用密码文件 |
-   | `instance` | 监听地址、数据目录、资源预算和固定 `deployment_key`；所有角色使用同一部署密钥 |
-   `instance.deployment_key` 必须在同一部署的所有容器中保持不变。首次启动后用 `cli key create NAME block` 创建区块密钥，并用 `cli storage key set STORE KEY` 绑定；密钥材料只在数据库中保存加密副本，CLI 和 Web 永不返回明文。完整字段和资源限制见[配置参考](configuration.md)。
+   | `instance` | 监听地址、数据目录、资源预算和固定 `deployment_key`；单容器/control 使用同一部署密钥 |
+   `instance.deployment_key` 仅配置在单容器/control，同一部署保持不变；data/worker 使用独立节点配置，见[群集部署](cluster-deployment.md)。首次启动后用 `cli key create NAME block` 创建区块密钥，并用 `cli storage key set STORE KEY` 绑定；密钥材料只在数据库中保存加密副本，CLI 和 Web 永不返回明文。完整字段和资源限制见[配置参考](configuration.md)。
 
 3. 设置权限并启动：
 
@@ -104,7 +104,7 @@ docker exec mokyu mokyu cli domain set media.example.com media
 
 S3 客户端使用网关 endpoint、逻辑桶和生成的凭据，签名 region 与 runtime `requests.s3_region` 一致。寻址、ACL 和上传限制见[S3 兼容性](s3-compatibility.md)。反代配置见[Nginx 示例](../nginx.example.conf)，需替换域名、证书和上游。
 
-示例禁用 nginx gzip，并将 `Accept-Encoding` 传给 Mokyu；`Content-Encoding`、`Vary`、`ETag` 和 `Cache-Control` 随响应透传。额外安装的 Brotli、Zstandard 或 gunzip 过滤器也应在这些入口关闭，避免二次转换。TLS 和 HTTP/3 由反向代理终止；Mokyu 监听器同时支持 HTTP/1.1 与明文 HTTP/2（h2c prior knowledge）。
+示例禁用 nginx gzip，并将 `Accept-Encoding` 传给 Mokyu；`Content-Encoding`、`Vary`、`ETag` 和 `Cache-Control` 随响应透传。额外安装的 Brotli、Zstandard 或 gunzip 过滤器也应在这些入口关闭，避免二次转换。TLS 和 HTTP/3 由反向代理终止；Mokyu 监听器同时支持 HTTP/1.1 与明文 HTTP/2（h2c prior knowledge）。示例使用 `proxy_http_version 2` 回源，control 的节点路径使用 `grpc_pass grpc://`。使用包含 HTTP/2、gRPC 模块的 Nginx 1.30.6+ 或 1.31.7+，并持续安装对应分支的安全补丁。[HTTP/2 回源](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_http_version)、[安全公告](https://nginx.org/en/security_advisories.html)
 
 本地 raw 的匿名 S3/Web GET 可交给 Nginx 或 Apache 读取只读目录，完整初始化和回退配置见[SQLite 与本地代理交付](local-nginx-deployment.md)。通用 Nginx 示例中的 `mokyu_control` 还提供可选的有界面板资源缓存，只缓存哈希资源的公开 immutable 成功响应；启用时取消两个标记块的注释并准备可写缓存目录。页面、管理 API、固定文件名和缺失资源不缓存，压缩变体继续按 Vary 区分。
 

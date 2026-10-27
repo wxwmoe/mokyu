@@ -262,48 +262,53 @@ impl S3Auth for Gateway {
 #[async_trait::async_trait]
 impl S3Access for Gateway {
     async fn check(&self, cx: &mut S3AccessContext<'_>) -> S3Result<()> {
-        reject_features(cx.headers()).map_err(internal)?;
-        if matches!(
-            cx.s3_op().name(),
-            "GetObject" | "HeadObject" | "GetObjectAcl" | "PutObjectAcl"
-        ) && cx
-            .uri()
-            .query()
-            .unwrap_or("")
-            .split('&')
-            .map(|p| crate::http::decode_path(p.split('=').next().unwrap_or("")))
-            .collect::<Result<Vec<_>>>()
-            .map_err(internal)?
-            .iter()
-            .any(|k| matches!(k.as_str(), "versionId" | "partNumber"))
-        {
-            return Err(s3_error!(
-                NotImplemented,
-                "versioning and part-number reads are unsupported"
-            ));
-        }
-        if cx.s3_op().name() == "DeleteObject"
-            && [
-                "if-match",
-                "x-amz-if-match-last-modified-time",
-                "x-amz-if-match-size",
-            ]
-            .into_iter()
-            .any(|h| cx.headers().contains_key(h))
-        {
-            return Err(s3_error!(
-                NotImplemented,
-                "conditional deletes are unsupported"
-            ));
-        }
-        if cx.credentials().is_none() && !matches!(cx.s3_op().name(), "GetObject" | "HeadObject") {
-            return Err(s3_error!(AccessDenied));
-        }
+        check_request(cx)?;
         if let Some(credential) = cx.credentials() {
             self.0.credential_activity.record(&credential.access_key);
         }
         Ok(())
     }
+}
+
+pub(super) fn check_request(cx: &S3AccessContext<'_>) -> S3Result<()> {
+    reject_features(cx.headers()).map_err(internal)?;
+    if matches!(
+        cx.s3_op().name(),
+        "GetObject" | "HeadObject" | "GetObjectAcl" | "PutObjectAcl"
+    ) && cx
+        .uri()
+        .query()
+        .unwrap_or("")
+        .split('&')
+        .map(|p| crate::http::decode_path(p.split('=').next().unwrap_or("")))
+        .collect::<Result<Vec<_>>>()
+        .map_err(internal)?
+        .iter()
+        .any(|k| matches!(k.as_str(), "versionId" | "partNumber"))
+    {
+        return Err(s3_error!(
+            NotImplemented,
+            "versioning and part-number reads are unsupported"
+        ));
+    }
+    if cx.s3_op().name() == "DeleteObject"
+        && [
+            "if-match",
+            "x-amz-if-match-last-modified-time",
+            "x-amz-if-match-size",
+        ]
+        .into_iter()
+        .any(|h| cx.headers().contains_key(h))
+    {
+        return Err(s3_error!(
+            NotImplemented,
+            "conditional deletes are unsupported"
+        ));
+    }
+    if cx.credentials().is_none() && !matches!(cx.s3_op().name(), "GetObject" | "HeadObject") {
+        return Err(s3_error!(AccessDenied));
+    }
+    Ok(())
 }
 #[async_trait::async_trait]
 impl S3 for Gateway {

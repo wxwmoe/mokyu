@@ -769,24 +769,7 @@ impl S3Auth for Gateway {
 #[async_trait::async_trait]
 impl S3Access for Gateway {
     async fn check(&self, context: &mut S3AccessContext<'_>) -> S3Result<()> {
-        gateway::reject_features(context.headers()).map_err(delivery::error)?;
-        if context.credentials().is_none()
-            && !matches!(context.s3_op().name(), "GetObject" | "HeadObject")
-        {
-            return Err(s3s::s3_error!(AccessDenied));
-        }
-        if matches!(context.s3_op().name(), "GetObject" | "HeadObject") {
-            for part in context.uri().query().unwrap_or("").split('&') {
-                let name = s3::decode_path(part.split('=').next().unwrap_or(""))
-                    .map_err(delivery::error)?;
-                if matches!(name.as_str(), "versionId" | "partNumber") {
-                    return Err(s3s::s3_error!(
-                        NotImplemented,
-                        "versioning and part-number reads are unsupported"
-                    ));
-                }
-            }
-        }
+        gateway::check_request(context)?;
         if let Some(credential) = context.credentials() {
             self.reads
                 .node

@@ -28,6 +28,7 @@ fastcdc = "=5.0.0"
 fs2 = "0.4"
 flate2 = "=1.1.10"
 futures-util = "0.3"
+h2 = "=0.4.19"
 hex = "0.4"
 hyper = { version = "=1.11.1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "server-auto"] }

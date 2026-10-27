@@ -1,3 +1,5 @@
+# For the single-container process or `mokyu control`.
+# Data and worker use config.node.example.toml.
 [database]
 type = "postgres" # postgres | mysql | sqlite
 host = "postgres"
@@ -12,8 +14,8 @@ ssl_mode = "prefer"
 # Defaults to instance.data_path/mokyu.db when path is omitted.
 #path = "/data/mokyu.db"
 
-# Optional PostgreSQL standby for cluster data nodes. No type or path field.
-# Omit this section to use only the primary. Control/worker do not open this pool.
+# Optional PostgreSQL standby for control. No type or path field.
+# Omit this section to use only the primary.
 #[replica_database]
 #host = "postgres-replica"
 # port, name, user and ssl_mode inherit database; name must match.
@@ -22,10 +24,10 @@ ssl_mode = "prefer"
 #password_file = "secrets/replica-password"
 
 [instance]
-# Generate once with `mokyu tool keygen`; use the same key for every role.
+# Generate once with `mokyu tool keygen`; keep it on single/control only.
 deployment_key = "REPLACE_WITH_MOKYU_TOOL_KEYGEN_OUTPUT"
-# Cluster roles must set a unique name; the single container defaults to `single`.
-#name = "data-1"
+# Control must set a unique name; the single container defaults to `single`.
+#name = "control-1"
 
 # Listeners
 listen_control = "0.0.0.0:9002"

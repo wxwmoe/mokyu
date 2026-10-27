@@ -169,6 +169,34 @@ async fn postgres_node_chunks_replay_claims_nonces_and_publication() -> Result<(
         parallelism: 2,
         cached: vec![],
     };
+    let mut admission = pool.begin().await?;
+    queries::lock_quota(bucket).execute(&mut *admission).await?;
+    let preparing = super::transactions::prepare_node_chunks(&pool, &node, &key, first.clone());
+    tokio::pin!(preparing);
+    let waiting = async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND query='SELECT quota_reserve($1,$2,$3,$4,$5)' AND wait_event_type='Lock')",
+            )
+            .fetch_one(&pool)
+            .await?;
+            if blocked {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        result = &mut preparing => panic!("chunk preparation did not wait for quota: {:?}", result.err()),
+        result = tokio::time::timeout(std::time::Duration::from_secs(5), waiting) => result??,
+    }
+    // Admission must still reach its key lock while preparation waits for quota.
+    sqlx::query("SELECT id FROM managed_keys WHERE id=$1 FOR UPDATE NOWAIT")
+        .bind(block_key)
+        .fetch_one(&mut *admission)
+        .await?;
+    admission.commit().await?;
+    preparing.await?;
     let requests = (0..8).map(|_| backend.prepare_chunks(&node, &key, first.clone()));
     let mut replies = futures_util::future::try_join_all(requests).await?;
     let allocated = replies.pop().unwrap();

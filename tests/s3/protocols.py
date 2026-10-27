@@ -1,4 +1,4 @@
-"""HTTP/1.1 and h2c contracts on the S3, public and management listeners.
+"""HTTP/1.1 and HTTP/2 contracts on the S3, public and management listeners.
 
 Requires the ordinary S3 credential fixture, MOKYU_TEST_PUBLIC and a configured
 MOKYU_TEST_PUBLIC_HOST, MOKYU_TEST_WEB, and Python h2, boto3 and requests.
@@ -98,7 +98,9 @@ def run():
             check(client.request('PUT', path, signed('PUT', body=replacement), replacement), 200)
             check(client.request('GET', path, signed('GET')), 200, replacement)
             check(client.request('GET', path), 403)
-            streams = [client.start('GET', path, signed('GET')) for _ in range(6)]
+            concurrency = min(6, client.connection.remote_settings.max_concurrent_streams)
+            assert concurrency >= 2, 'fixture requires at least two HTTP/2 streams'
+            streams = [client.start('GET', path, signed('GET')) for _ in range(concurrency)]
             for reply in client.collect(streams):
                 check(reply, 200, replacement)
 
@@ -117,9 +119,10 @@ def run():
             client.flush()
             check(client.collect([stream])[0], 403)
             check(client.request('GET', path, signed('GET')), 200, replacement)
+        direct = [target for target in [endpoint, public, web] if urlsplit(target).scheme == 'http']
         with ThreadPoolExecutor(max_workers=3) as pool:
-            list(pool.map(lambda target: slow_preface(target, b'PRI * HTTP/2.0\r\n'), [endpoint, public, web]))
-        print('PASS HTTP/1.1+h2c on three listeners, signed URI, authority, Range, flow control, concurrent reads, RST_STREAM and slow preface', flush=True)
+            list(pool.map(lambda target: slow_preface(target, b'PRI * HTTP/2.0\r\n'), direct))
+        print('PASS HTTP/1.1+HTTP/2 on three listeners, signed URI, authority, Range, flow control, concurrent reads, RST_STREAM; direct h2c preface checks:', len(direct), flush=True)
     finally:
         s3.delete_object(Bucket=bucket, Key=key)
         s3.delete_object(Bucket=bucket, Key=key + '-cancelled')

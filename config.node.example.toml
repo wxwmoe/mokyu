@@ -1,0 +1,19 @@
+# For `mokyu data` or `mokyu worker`.
+# Provision this role with `mokyu cli cluster create NAME ROLE` on control,
+# then save the returned identity as /data/node.json with mode 0600.
+# Node names come from the provisioned identity.
+[instance]
+control_url = "https://control.example.com"
+listen_web = "0.0.0.0:9001"
+listen_s3 = "0.0.0.0:9000"
+data_path = "/data"
+min_free_space = "1GiB"
+stream_memory_budget = "256MiB"
+response_cache_size = "64MiB" # Only data uses the response cache.
+#cache_size = "10GiB"
+#upload_cache_size = "2GiB"
+#request_connections = 128
+#cpu_jobs = 2
+#storage_read_slots = 16
+#storage_upload_slots = 4
+#storage_control_slots = 2

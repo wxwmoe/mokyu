@@ -196,16 +196,31 @@ impl Client {
     }
 
     async fn select(&self, excluded: &HashSet<Ipv4Addr>) -> Result<Arc<Peer>, Status> {
-        let peers = self.peers().await?;
-        let cursor = self.cursor.fetch_add(1, Ordering::Relaxed);
-        let now = Instant::now();
-        for offset in 0..peers.len() {
-            let peer = &peers[(cursor.wrapping_add(offset as u64) % peers.len() as u64) as usize];
-            if !excluded.contains(&peer.address) && peer.health.lock().unwrap().retry_at <= now {
-                return Ok(peer.clone());
+        loop {
+            let peers = self.peers().await?;
+            let cursor = self.cursor.fetch_add(1, Ordering::Relaxed);
+            let now = Instant::now();
+            let mut next_retry: Option<Instant> = None;
+            for offset in 0..peers.len() {
+                let peer =
+                    &peers[(cursor.wrapping_add(offset as u64) % peers.len() as u64) as usize];
+                if excluded.contains(&peer.address) {
+                    continue;
+                }
+                let retry_at = peer.health.lock().unwrap().retry_at;
+                if retry_at <= now {
+                    return Ok(peer.clone());
+                }
+                next_retry = Some(next_retry.map_or(retry_at, |next| next.min(retry_at)));
             }
+            let Some(next_retry) = next_retry else {
+                return Err(Status::unavailable(
+                    "control addresses have already been attempted",
+                ));
+            };
+            // Another request's success can end a cooldown before its timer expires.
+            tokio::time::sleep_until(next_retry.min(now + Duration::from_millis(100))).await;
         }
-        Err(Status::unavailable("control addresses are cooling down"))
     }
 
     fn request<T>(&self, input: T) -> Request<T> {
@@ -605,10 +620,21 @@ impl Client {
                         tokio::time::sleep(Duration::from_millis(100 + jitter)).await;
                     }
                     Err(error) if retryable(&error) => {
-                        peer.failed();
+                        let closed = transport_closed(&error);
+                        if closed {
+                            peer.succeeded();
+                            excluded.remove(&peer.address);
+                        } else {
+                            peer.failed();
+                        }
                         failures += 1;
                         if failures == 3 {
                             return Err(error);
+                        }
+                        if closed {
+                            // Give the channel time to replace its closed connection.
+                            let jitter = u64::from(Uuid::new_v4().as_bytes()[0]) % 100;
+                            tokio::time::sleep(Duration::from_millis(50 + jitter)).await;
                         }
                     }
                     Err(error) => return Err(error),
@@ -668,7 +694,7 @@ impl Client {
                     super::uuid(&run.fence)?;
                     super::uuid(&welcome.control_id)?;
                     let valid_until = lease_deadline(started, welcome.valid_for_ms)?;
-                    Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until, metrics: self.metrics.clone() })
+                    Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until, acknowledged_at: Instant::now(), metrics: self.metrics.clone() })
                 }).await.unwrap_or_else(|_| Err(Status::deadline_exceeded("session connection timed out")));
                 measured.finish(&result);
                 match result {
@@ -712,6 +738,7 @@ pub(crate) struct Session {
     incoming: tonic::Streaming<wire::SessionReply>,
     pub(crate) welcome: wire::Welcome,
     pub(crate) valid_until: Instant,
+    acknowledged_at: Instant,
     metrics: Arc<super::metrics::Metrics>,
 }
 
@@ -763,7 +790,9 @@ impl Session {
         let expected: Vec<_> = renew.iter().chain(&release).cloned().collect();
         let renew_count = renew.len();
         let started = Instant::now();
-        let deadline = self.valid_until.min(started + Duration::from_secs(30));
+        let deadline = self
+            .valid_until
+            .min(self.acknowledged_at + Duration::from_secs(30));
         let reply = tokio::time::timeout_at(deadline, async {
             self.sender
                 .send(wire::SessionRequest {
@@ -823,6 +852,7 @@ impl Session {
         {
             return Err(Status::data_loss("invalid resource acknowledgement"));
         }
+        self.acknowledged_at = Instant::now();
         Ok(reply)
     }
 }
@@ -839,10 +869,39 @@ pub(crate) fn retryable(status: &Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
-    ) || (status.code() == tonic::Code::Cancelled
+    ) || transport_closed(status)
+        || (status.code() == tonic::Code::Cancelled
         // Tonic reports its own transport deadline as Cancelled, including behind a proxy.
         && std::iter::successors(std::error::Error::source(status), |error| error.source())
             .any(|error| error.is::<tonic::TimeoutExpired>()))
+}
+
+fn transport_closed(status: &Status) -> bool {
+    std::iter::successors(std::error::Error::source(status), |error| error.source()).any(|error| {
+        match status.code() {
+            // Hyper cancels pending requests when their connection closes before dispatch.
+            tonic::Code::Cancelled => error
+                .downcast_ref::<hyper::Error>()
+                .is_some_and(hyper::Error::is_canceled),
+            // Tonic maps a normal HTTP/2 connection rotation to Internal.
+            tonic::Code::Internal => error.downcast_ref::<h2::Error>().is_some_and(|error| {
+                error.is_go_away()
+                    && error.is_remote()
+                    && error.reason() == Some(h2::Reason::NO_ERROR)
+            }),
+            // Tonic can retain Unknown for a connection interrupted by transport I/O.
+            tonic::Code::Unknown => error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::UnexpectedEof
+                )
+            }),
+            _ => false,
+        }
+    })
 }
 
 fn proxy_response(
@@ -931,6 +990,99 @@ mod tests {
         assert!(!retryable(&Status::cancelled("Timeout expired")));
         assert!(!retryable(&Status::internal("server failure")));
         assert!(!retryable(&Status::permission_denied("revoked")));
+        assert!(!retryable(&Status::unknown("transport error")));
+        assert!(!retryable(&Status::from_error(Box::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        ))));
+        assert!(!retryable(&Status::from(h2::Error::from(
+            h2::Reason::NO_ERROR
+        ))));
+        assert!(!retryable(&Status::from(h2::Error::from(
+            h2::Reason::CANCEL
+        ))));
+    }
+
+    #[tokio::test]
+    async fn transport_cancel_before_dispatch_is_retryable() -> Result<()> {
+        let (client, _server) = tokio::io::duplex(4096);
+        let (mut sender, connection) = hyper::client::conn::http2::handshake(
+            hyper_util::rt::TokioExecutor::new(),
+            hyper_util::rt::TokioIo::new(client),
+        )
+        .await?;
+        drop(connection);
+        let error = sender
+            .send_request(hyper::Request::new(tonic::body::Body::empty()))
+            .await
+            .unwrap_err();
+        assert!(error.is_canceled());
+        let status = Status::from_error(Box::new(error));
+        assert_eq!(status.code(), tonic::Code::Cancelled);
+        assert!(retryable(&status));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interrupted_http2_connection_is_retryable() -> Result<()> {
+        let (client, server) = tokio::io::duplex(4096);
+        let (mut sender, connection) = hyper::client::conn::http2::handshake(
+            hyper_util::rt::TokioExecutor::new(),
+            hyper_util::rt::TokioIo::new(client),
+        )
+        .await?;
+        let driver = tokio::spawn(connection);
+        let request = tokio::spawn(async move {
+            sender
+                .send_request(
+                    hyper::Request::builder()
+                        .uri("http://control.example/")
+                        .body(tonic::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+        });
+        let mut server = h2::server::handshake(server).await?;
+        let _received = tokio::time::timeout(Duration::from_secs(2), server.accept())
+            .await?
+            .unwrap()?;
+        drop(server);
+        let error = tokio::time::timeout(Duration::from_secs(2), request)
+            .await??
+            .unwrap_err();
+        let status = Status::from_error(Box::new(error));
+        assert_eq!(status.code(), tonic::Code::Unknown);
+        assert!(retryable(&status), "{status:?}");
+        driver.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_graceful_goaway_retries_without_retrying_protocol_errors() -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        for reason in [h2::Reason::NO_ERROR, h2::Reason::PROTOCOL_ERROR] {
+            let (client, mut server) = tokio::io::duplex(4096);
+            let (mut sender, connection) = h2::client::handshake(client).await?;
+            let driver = tokio::spawn(connection);
+            let request = hyper::Request::builder()
+                .uri("http://control.example/")
+                .body(())?;
+            let (response, _) = sender.send_request(request, true)?;
+            // Empty SETTINGS, then GOAWAY with last-stream-id zero.
+            let mut frames = vec![
+                0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ];
+            frames.extend_from_slice(&u32::from(reason).to_be_bytes());
+            server.write_all(&frames).await?;
+            let error = tokio::time::timeout(Duration::from_secs(2), response)
+                .await?
+                .unwrap_err();
+            assert!(error.is_go_away() && error.is_remote());
+            let status = Status::from(error);
+            assert_eq!(status.code(), tonic::Code::Internal);
+            assert_eq!(retryable(&status), reason == h2::Reason::NO_ERROR);
+            driver.abort();
+        }
+        Ok(())
     }
 
     #[test]

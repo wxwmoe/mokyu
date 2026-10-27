@@ -24,6 +24,10 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `postgres_node_sessions_recover_across_controls_and_fence_old_runs` 使用两个独立连接池检查身份代次、会话接管、并发同步与心跳、过期 fencing、退役 boot、历史上限、轮换和禁用。
 
+`rpc::client::transport_tests::rotation::node_rpc_survives_connection_rotation` 将隔离 TLS 代理的 `keepalive_requests` 设为 8，运行 100 组、每组 8 个并发 SyncNode 请求，验证正常 HTTP/2 连接轮换不会泄漏为业务失败。普通测试单独验证 GOAWAY 与协议错误、RST_STREAM 和服务端业务错误的重试边界。
+
+群集 data/worker 使用独立节点配置及预创建身份，观察者的 PostgreSQL 连接单独提供，不将数据库配置放入节点文件。`tests.control.cluster_runtime_history` 需要 `MOKYU_TEST_DATA_ENDPOINTS`，值为两个公共读入口 URL 的 JSON 数组；它通过实际请求核对节点及群集历史。
+
 `postgres_node_reads_close_dependencies_bound_windows_and_protect_sources` 验证读取依赖、材料复用、Range、超过首窗口的映射、双窗口背压、资源到期与节点隔离，以及区块、包、raw 和暂存来源在映射改写后的 GC 保护。
 
 `rpc::client::transport_tests::reads::node_read_plans_reuse_materials_fetch_s3_and_survive_lost_replies` 使用下述双 control/TLS 夹具及独立 S3 存储。`MOKYU_TEST_READ_FIXTURE` 指向包含桶、读取凭据、预期正文路径和 worker 身份路径的 JSON；编排器增加 `change-read-profile`、`lose-read`、`resume-read`、`assert-no-reads` 动作，丢响应使用 `node-read-opened` 故障点。验证一次 RPC 后直接解密读取、材料和正文复用、分窗口读取与失去响应后的跨 control 重放。

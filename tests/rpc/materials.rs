@@ -13,6 +13,72 @@ fn value(deployment: Uuid, id: &str, json: &[u8]) -> wire::Material {
 }
 
 #[test]
+fn cache_declarations_bound_bytes_and_prioritize_shared_dependencies() {
+    let deployment = Uuid::new_v4();
+    let cache = Cache::default();
+    let mut supplied: Vec<_> = (0..250)
+        .map(|_| wire::Material {
+            version: Some(crate::rpc::read::version(read::Version::new(
+                deployment,
+                read::MaterialType::Object,
+                Uuid::new_v4().to_string(),
+                b"{}",
+            ))),
+            value: Some(wire::material::Value::Json(b"{}".to_vec())),
+        })
+        .collect();
+    let shared = value(deployment, "shared-bucket", b"{}");
+    let shared_version = shared.version.clone().unwrap();
+    supplied.push(shared);
+    cache.apply(deployment, Held::new(), supplied).unwrap();
+    let declared = cache.snapshot();
+    assert!(declared.contains_key(&(shared_version.r#type, shared_version.id.clone())));
+    let request = wire::ReadRequest {
+        cached: cached(&declared),
+        ..Default::default()
+    };
+    assert!(prost::Message::encoded_len(&request) <= DECLARATION_BYTES);
+    assert!(declared.len() < 251);
+    let omitted = cache
+        .index
+        .lock()
+        .unwrap()
+        .values
+        .iter()
+        .find(|(key, _)| !declared.contains_key(*key))
+        .unwrap()
+        .1
+        .version
+        .clone();
+    assert!(
+        cache
+            .apply(
+                deployment,
+                declared.clone(),
+                vec![wire::Material {
+                    version: Some(omitted.clone()),
+                    value: Some(wire::material::Value::Reuse(true)),
+                }],
+            )
+            .is_err()
+    );
+    let reply = cache
+        .apply(
+            deployment,
+            declared,
+            vec![wire::Material {
+                version: Some(omitted.clone()),
+                value: Some(wire::material::Value::Json(b"{}".to_vec())),
+            }],
+        )
+        .unwrap();
+    assert_eq!(
+        material::<serde_json::Value>(&reply, &omitted).unwrap(),
+        serde_json::json!({})
+    );
+}
+
+#[test]
 fn declared_material_survives_eviction_until_last_request_releases_it() {
     let deployment = Uuid::new_v4();
     let cache = Cache {

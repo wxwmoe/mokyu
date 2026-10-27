@@ -6,7 +6,7 @@
 
 ## 创建单容器部署
 
-以下文件保存在同一目录，宿主需要 Docker Compose 和 `jq`。示例保留可靠写入与 SQLite FULL，仅关闭普通读取的额外摘要复核；对象接收完整性、元数据事务和文件长度检查仍保留。额外摘要关闭后，尚未发现的同长度文件损坏可能直接返回客户端。
+以下文件保存在同一目录，宿主需要 Docker Compose 和 `jq`。Nginx 使用 1.30.6+ 或 1.31.7+，启用 HTTP/2 模块；普通请求和失败回退均以 h2c 回源。示例保留可靠写入与 SQLite FULL，仅关闭普通读取的额外摘要复核；对象接收完整性、元数据事务和文件长度检查仍保留。额外摘要关闭后，尚未发现的同长度文件损坏可能直接返回客户端。
 
 ```sh
 mkdir -p config data
@@ -52,7 +52,7 @@ services:
       - ./config:/config:ro
       - ./data:/data
   nginx:
-    image: nginx:stable
+    image: nginx:1.30.6
     restart: unless-stopped
     mem_limit: 256m
     ports:
@@ -102,12 +102,14 @@ http {
     upstream mokyu_web { server mokyu:9001; keepalive 32; }
     server {
         listen 8080;
+        http2 on;
         client_max_body_size 0;
         set $mokyu_upstream http://mokyu_s3;
         include /etc/nginx/mokyu-file-delivery.conf;
     }
     server {
         listen 8081;
+        http2 on;
         server_name media.example.com;
         set $mokyu_upstream http://mokyu_web;
         include /etc/nginx/mokyu-file-delivery.conf;
@@ -120,10 +122,11 @@ http {
 ```nginx
 location / {
     proxy_pass $mokyu_upstream;
-    proxy_http_version 1.1;
+    proxy_http_version 2;
     proxy_set_header Host $http_host;
     proxy_set_header Accept-Encoding $http_accept_encoding;
     proxy_set_header Connection "";
+    proxy_set_header Upgrade "";
     proxy_set_header X-Mokyu-File-Delivery x_accel_redirect;
     proxy_request_buffering off;
     proxy_buffering off;
@@ -155,10 +158,11 @@ location ^~ /_mokyu_raw/ {
 }
 location @mokyu_fallback {
     proxy_pass $mokyu_upstream$request_uri;
-    proxy_http_version 1.1;
+    proxy_http_version 2;
     proxy_set_header Host $http_host;
     proxy_set_header Accept-Encoding $http_accept_encoding;
     proxy_set_header Connection "";
+    proxy_set_header Upgrade "";
     proxy_set_header X-Mokyu-File-Delivery application;
     proxy_buffering off;
 }

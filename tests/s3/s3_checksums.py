@@ -3,6 +3,7 @@ import base64
 import hashlib
 import os
 import zlib
+from datetime import datetime, timezone
 from tests.integration import bucket, s3, read, error
 
 
@@ -64,7 +65,15 @@ assert [b['Name'] for page in s3.get_paginator('list_buckets').paginate(Paginati
         for b in page['Buckets']] == [bucket]
 error('NotImplemented', s3.get_object, Bucket=bucket, Key='checksum', PartNumber=1)
 error('NotImplemented', s3.put_object, Bucket=bucket, Key='checksum', Body=b'append', WriteOffsetBytes=0)
-error('NotImplemented', s3.delete_object, Bucket=bucket, Key='checksum', IfMatch='*')
+original, _ = read('checksum')
+for condition in [{'IfMatch': '*'}, {'IfMatchSize': len(original)},
+                  {'IfMatchLastModifiedTime': datetime.now(timezone.utc)}]:
+    error('NotImplemented', s3.delete_object, Bucket=bucket, Key='checksum', **condition)
+    assert read('checksum')[0] == original
+for operation in [s3.get_object_acl, s3.put_object_acl]:
+    extra = {'ACL': 'public-read'} if operation == s3.put_object_acl else {}
+    error('NotImplemented', operation, Bucket=bucket, Key='checksum', VersionId='unsupported', **extra)
+assert read('checksum')[0] == original
 error('NotImplemented', s3.copy_object, Bucket=bucket, Key='checksum-copy',
       CopySource={'Bucket': bucket, 'Key': 'checksum'}, ChecksumAlgorithm='CRC32')
 error('NotImplemented', s3.put_object, Bucket=bucket, Key='checksum', Body=b'x', ServerSideEncryption='AES256')

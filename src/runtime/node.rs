@@ -181,7 +181,12 @@ pub(super) async fn run(config: NodeConfig, role: Role) -> Result<()> {
     }
     drop(workers);
     status_stopping.send_replace(true);
-    if let Err(error) = node.close().await {
+    // Keep polling the session so stopping releases in-flight client locks.
+    let closed = tokio::select! {
+        result = node.close() => result,
+        _ = &mut driver => unreachable!(),
+    };
+    if let Err(error) = closed {
         tracing::warn!(code=?error.code(), "node close was not acknowledged; run expiry remains in effect");
     }
     result

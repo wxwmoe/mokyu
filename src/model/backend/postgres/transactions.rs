@@ -11173,6 +11173,12 @@ pub(super) async fn prepare_node_chunks(
         Error::NodeWriteBusy
     );
     let storage = row.storage_id.ok_or(Error::SourceUnavailable)?;
+    // Lock quota before key material, matching write admission.
+    if row.completion_upload.is_none() && row.owner_task_id.is_none() {
+        queries::reserve_quota(stream, end, false, row.upload_id, row.part_number)
+            .fetch_one(&mut *tx)
+            .await?;
+    }
     let algorithm = if let Some(id) = row.block_key_id {
         queries::node_read_keys(&[id])
             .fetch_optional(&mut *tx)
@@ -11182,11 +11188,6 @@ pub(super) async fn prepare_node_chunks(
     } else {
         "none".into()
     };
-    if row.completion_upload.is_none() && row.owner_task_id.is_none() {
-        queries::reserve_quota(stream, end, false, row.upload_id, row.part_number)
-            .fetch_one(&mut *tx)
-            .await?;
-    }
     let unique: BTreeMap<_, _> = input
         .items
         .iter()

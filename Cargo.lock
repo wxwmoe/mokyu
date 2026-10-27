@@ -1931,6 +1931,7 @@ dependencies = [
  "flate2",
  "fs2",
  "futures-util",
+ "h2",
  "hex",
  "hickory-resolver",
  "hyper",

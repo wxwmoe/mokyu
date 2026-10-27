@@ -17,6 +17,9 @@ mod session;
 #[path = "work.rs"]
 mod work;
 
+#[path = "rotation.rs"]
+mod rotation;
+
 struct Dns {
     answers: Arc<RwLock<Option<Vec<Ipv4Addr>>>>,
     resolver: TokioResolver,
@@ -87,6 +90,60 @@ impl Drop for Dns {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+#[tokio::test]
+async fn node_rpc_waits_for_cooling_address() -> Result<()> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let dns = Dns::new().await?;
+    let client = dns.client(
+        "https://control.example",
+        NodeState {
+            format: 1,
+            deployment_id: Uuid::new_v4(),
+            node_id: Uuid::new_v4(),
+            role: "data".into(),
+            credential_generation: 1,
+            credential: "A".repeat(64),
+        },
+    )?;
+    let peers = client.peers().await?;
+    let excluded = HashSet::from([peers[0].address]);
+    let retry_at = Instant::now() + Duration::from_millis(150);
+    peers[1].health.lock().unwrap().retry_at = retry_at;
+    let waiting = client.select(&excluded);
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+            .await
+            .is_err()
+    );
+    let selected = tokio::time::timeout(Duration::from_secs(1), waiting).await??;
+    assert_eq!(selected.address, peers[1].address);
+    assert!(Instant::now() >= retry_at);
+
+    peers[1].health.lock().unwrap().retry_at = Instant::now() + Duration::from_secs(30);
+    let waiting = client.select(&excluded);
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+            .await
+            .is_err()
+    );
+    peers[1].succeeded();
+    let selected = tokio::time::timeout(Duration::from_millis(500), waiting).await??;
+    assert_eq!(selected.address, peers[1].address);
+
+    let excluded = peers.iter().map(|peer| peer.address).collect();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(50), client.select(&excluded))
+            .await?
+            .err()
+            .unwrap()
+            .code(),
+        Code::Unavailable
+    );
+    Ok(())
 }
 
 async fn node_state(
@@ -507,6 +564,10 @@ async fn node_rpc_balances_tls_origins_and_recovers_sessions() -> Result<()> {
         .await;
     assert_eq!(unknown.unwrap_err().code(), Code::Unimplemented);
     fixture("stop-first").await?;
+    let peers = client.peers().await?;
+    peers[0].succeeded();
+    // A recovered backup may retain a cooldown from the preceding outage.
+    peers[1].health.lock().unwrap().retry_at = Instant::now() + Duration::from_secs(2);
     client.cursor.store(0, Ordering::Relaxed);
     let started = Instant::now();
     assert_eq!(client.sync(run.clone(), vec![]).await?.settings.len(), 5);

@@ -15,9 +15,13 @@ from pathlib import Path
 from urllib.parse import quote
 
 import boto3
+import h2.config
+import h2.connection
+import h2.events
 import requests
 
 from tests.storage.source_quarantine import Fixture, wait
+from tests.http2 import Client
 
 
 class Gate:
@@ -33,26 +37,69 @@ class Gate:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = 'HTTP/1.1'
 
-            def do_GET(self):
-                gate.paths.append(self.path)
-                reply = requests.request(self.command, f'http://127.0.0.1:{port}' + self.path,
-                    headers={key: value for key, value in self.headers.items() if key.lower() not in ('connection', 'content-length')},
-                    stream=True, timeout=30)
-                body = reply.raw.read(decode_content=False)
+            def forward(self, method, path, headers):
+                gate.paths.append(path)
+                authority = next((value for key, value in headers.items() if key.lower() == 'host'), None)
+                with Client(f'http://127.0.0.1:{port}', authority) as upstream:
+                    reply = upstream.request(method, path, [(key, value) for key, value in headers.items()
+                        if key.lower() not in ('connection', 'content-length', 'host')])
+                assert 'reset' not in reply, reply['headers']
+                body = bytes(reply['body'])
+                response_headers = reply['headers']
                 gate.bytes += len(body)
                 gate.requests += 1
-                if gate.pause.is_set() and ('X-Accel-Redirect' in reply.headers or 'X-Sendfile' in reply.headers):
+                if gate.pause.is_set() and ('x-accel-redirect' in response_headers or 'x-sendfile' in response_headers):
                     gate.selected.set()
                     assert gate.release.wait(60), 'test did not release the proxy handoff'
-                self.send_response(reply.status_code)
-                for key, value in reply.headers.items():
-                    if key.lower() not in ('connection', 'transfer-encoding', 'content-length', 'date', 'server'):
-                        self.send_header(key, value)
-                self.send_header('Content-Length', reply.headers.get('Content-Length', str(len(body))) if self.command == 'HEAD' else str(len(body)))
+                headers = [(key, value) for key, value in response_headers.items()
+                           if key not in (':status', 'connection', 'transfer-encoding', 'content-length', 'date', 'server')]
+                headers.append(('content-length', response_headers.get('content-length', str(len(body))) if method == 'HEAD' else str(len(body))))
+                return int(response_headers[':status']), headers, body if method != 'HEAD' else b''
+
+            def do_GET(self):
+                status, headers, body = self.forward(self.command, self.path, dict(self.headers))
+                self.send_response(status)
+                for key, value in headers:
+                    self.send_header(key, value)
                 self.end_headers()
-                if self.command != 'HEAD':
+                if body:
                     self.wfile.write(body)
-                reply.close()
+
+            def handle(self):
+                if not self.rfile.peek(24).startswith(b'PRI * HTTP/2.0'):
+                    return super().handle()
+                connection = h2.connection.H2Connection(config=h2.config.H2Configuration(
+                    client_side=False, header_encoding='utf-8'))
+                connection.initiate_connection()
+                self.connection.sendall(connection.data_to_send())
+                requests_pending, bodies = {}, {}
+                while data := self.rfile.read1(65536):
+                    for event in connection.receive_data(data):
+                        if isinstance(event, h2.events.RequestReceived):
+                            requests_pending[event.stream_id] = dict(event.headers)
+                        elif isinstance(event, h2.events.StreamEnded):
+                            headers = requests_pending.pop(event.stream_id)
+                            method, path = headers[':method'], headers[':path']
+                            forwarded = {key: value for key, value in headers.items() if not key.startswith(':')}
+                            forwarded['Host'] = headers.get(':authority', headers.get('host'))
+                            status, response_headers, body = self.forward(method, path, forwarded)
+                            connection.send_headers(event.stream_id, [(':status', str(status)), *response_headers], end_stream=not body)
+                            if body:
+                                bodies[event.stream_id] = memoryview(body)
+                        elif isinstance(event, h2.events.StreamReset):
+                            requests_pending.pop(event.stream_id, None)
+                            bodies.pop(event.stream_id, None)
+                        elif isinstance(event, h2.events.ConnectionTerminated):
+                            return
+                    for stream, body in list(bodies.items()):
+                        while body and (size := min(len(body), connection.local_flow_control_window(stream), connection.max_outbound_frame_size)):
+                            connection.send_data(stream, body[:size].tobytes(), end_stream=size == len(body))
+                            body = body[size:]
+                        if body:
+                            bodies[stream] = body
+                        else:
+                            del bodies[stream]
+                    self.connection.sendall(connection.data_to_send())
 
             do_HEAD = do_GET
             do_OPTIONS = do_GET
@@ -81,7 +128,7 @@ def proxy_configs(folder, host):
     shared, assets = [re.sub(r'(?m)^ *# ?', '', block) for block in blocks]
     assets = assets.replace('proxy_cache mokyu_control_assets;',
         'proxy_cache mokyu_control_assets; add_header X-Test-Cache $upstream_cache_status always;')
-    control = f'upstream mokyu_control {{ server {host}:9002; }}\nserver {{ listen 8082; {assets} location / {{ proxy_pass http://mokyu_control; }} }}\n'
+    control = f'upstream mokyu_control {{ server {host}:9002; }}\nserver {{ listen 8082; http2 on; {assets} location / {{ proxy_pass http://mokyu_control; proxy_http_version 2; }} }}\n'
     nginx = nginx.replace('http {', 'http {\n' + shared + control, 1)
     apache = 'Listen 8080\nListen 8081\nServerName localhost\n'
     snippet, = re.findall(r'```apache\n(.*?)\n```', document, re.S)
