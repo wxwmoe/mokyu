@@ -1,6 +1,6 @@
 # 配置参考
 
-单容器和 control 使用 [`config.example.toml`](../config.example.toml)，data/worker 使用 [`config.node.example.toml`](../config.node.example.toml)，默认路径均为 `/config/config.toml`。data/worker 只接受 `[instance]`，必须设置 `control_url`，并从本机 `node.json` 读取预创建身份；配置数据库、从库、部署密钥或数据库连接预算会拒绝启动。Web、请求、上传、统计、维护和 storage 策略由管理面保存，节点通过 control API 同步。
+单容器和 control 使用 [`config.example.toml`](../config.example.toml)，data/worker/node 使用 [`config.node.example.toml`](../config.node.example.toml)，默认路径均为 `/config/config.toml`。data/worker/node 只接受 `[instance]`，必须设置 `control_url`，并从本机 `node.json` 读取预创建身份；配置数据库、从库、部署密钥或数据库连接预算会拒绝启动。Web、请求、上传、统计、维护和 storage 策略由管理面保存，节点通过 control API 同步。
 
 未知字段、错误类型、超范围数值和无法满足本机内存预算的配置会拒绝启动。保存需要重启的字段时只显示 `restart_required`，新值不会阻塞请求，也不会在当前进程中假装已经生效。
 
@@ -27,7 +27,7 @@
 
 最低兼容版本不代表推荐部署版本。新部署建议选择仍在维护的稳定版或 LTS，并安装该系列最新补丁。
 
-群集模式下只有 control 连接 PostgreSQL。data/worker 通过 `instance.control_url` 调用 gRPC，数据库不必向这些节点开放。Mokyu 不执行 PostgreSQL 故障转移，数据库高可用由部署环境提供。
+群集模式下只有 control 连接 PostgreSQL。data/worker/node 通过 `instance.control_url` 调用 gRPC，数据库不必向这些节点开放。Mokyu 不执行 PostgreSQL 故障转移，数据库高可用由部署环境提供。
 
 SQLite 使用 WAL、外键和默认 FULL 同步，数据库及其 `-wal`、`-shm` 文件必须位于可写的本地持久文件系统，不支持网络共享盘。默认文件是 `/data/mokyu.db`；新建数据库和锁文件权限为 `0600`，新建父目录为 `0755`。一个数据库文件只允许一个 Mokyu 实例，符号链接按实际路径识别，数据库硬链接被拒绝。文件被替换或运行锁丢失时进程退出。
 
@@ -37,7 +37,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 
 ## replica_database
 
-可选的 PostgreSQL 物理从库，仅由 control 查询节点公共读取的后续映射页。省略整节时不创建从库池或探测；单容器、data/worker、MySQL、MariaDB、SQLite 拒绝此配置。
+可选的 PostgreSQL 物理从库，仅由 control 查询节点公共读取的后续映射页。省略整节时不创建从库池或探测；单容器、data/worker/node、MySQL、MariaDB、SQLite 拒绝此配置。
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -54,14 +54,14 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 
 ## instance
 
-字段按“身份、监听、本机目录、上传缓存、连接池和资源预算”排列。control 的 `instance.name` 是注册名；data/worker 的名称来自预创建身份；单容器省略时使用 `single`。
+字段按“身份、监听、本机目录、上传缓存、连接池和资源预算”排列。control 的 `instance.name` 是注册名；data/worker/node 的名称来自预创建身份；单容器省略时使用 `single`。
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `instance.deployment_key` | 单容器/control 必填 | `mokyu tool keygen` 生成的 64 字符部署密钥，同一部署保持不变；data/worker 禁止配置 |
-| `instance.control_url` | data/worker 必填 | HTTPS 域名源地址，可含端口；不接受 IP 字面量、用户信息、路径或查询串；单容器/control 禁止配置 |
-| `instance.name` | 单容器为 `single` | control 必填部署内唯一名称；data/worker 由 `cluster create` 指定名称 |
-| `instance.listen_control` | single/control：`0.0.0.0:9002`；data/worker：`127.0.0.1:9002` | 单容器管理 HTTP；control 同端口提供管理 HTTP 与节点 gRPC；data/worker 只提供本机状态与 CLI status |
+| `instance.deployment_key` | 单容器/control 必填 | `mokyu tool keygen` 生成的 64 字符部署密钥，同一部署保持不变；data/worker/node 禁止配置 |
+| `instance.control_url` | data/worker/node 必填 | HTTPS 域名源地址，可含端口；不接受 IP 字面量、用户信息、路径或查询串；单容器/control 禁止配置 |
+| `instance.name` | 单容器为 `single` | control 必填部署内唯一名称；data/worker/node 由 `cluster create` 指定名称 |
+| `instance.listen_control` | single/control：`0.0.0.0:9002`；data/worker/node：`127.0.0.1:9002` | 单容器管理 HTTP；control 同端口提供管理 HTTP 与节点 gRPC；data/worker/node 只提供本机状态与 CLI status |
 | `instance.listen_web` | `0.0.0.0:9001` | 公共读 Web 监听 |
 | `instance.listen_s3` | `0.0.0.0:9000` | S3 监听 |
 | `instance.data_path` | `/data` | 本节点持久目录，保存 multipart、缓存和锁，群集角色另保存 node.json |
@@ -74,7 +74,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 | `instance.upload_cache_size` | 自动 | 本地待上传暂存上限 |
 | `instance.thumbnail_cache_size` | `256MiB` | 缩略图缓存上限 |
 | `instance.request_connections` | 自动 | 本节点 HTTP/S3 请求连接池上限 |
-| `instance.database_connections` | 自动 | 单容器/control 数据库连接池上限，control 至少 5；data/worker 禁止配置 |
+| `instance.database_connections` | 自动 | 单容器/control 数据库连接池上限，control 至少 5；data/worker/node 禁止配置 |
 | `instance.database_read_connections` | 启用从库时 `min(4, max(1, database_connections / 4))` | control 从库池的独立上限；正整数，需同时配置 replica_database；不扣减主库预算 |
 | `instance.cpu_jobs` | 自动 | 本节点压缩、哈希和加解密等阻塞计算预算 |
 | `instance.stream_memory_budget` | 自动 | 数据流临时内存预算，不是 RSS 硬限制 |
@@ -188,7 +188,7 @@ mokyu data            # data
 mokyu cli status      # 本机 control HTTP
 ```
 
-`mokyu cli` 访问 `127.0.0.1:instance.listen_control`。单容器使用部署密钥认证，群集 control 使用本机 `node.json` 凭据。worker/data 只提供 status。节点只有建立有效会话并完成配置同步后才启动数据入口或任务调度；连接中、恢复中、已隔离或停机排空状态可通过本机状态端口查询。数据库模式由单容器/control 的 `cluster mode single|cluster` 管理，成功切换后重启相应进程。
+`mokyu cli` 访问 `127.0.0.1:instance.listen_control`。单容器使用部署密钥认证，群集 control 使用本机 `node.json` 凭据。worker/data/node 只提供 status。节点只有建立有效会话并完成配置同步后才启动数据入口或任务调度；连接中、恢复中、已隔离或停机排空状态可通过本机状态端口查询。数据库模式由单容器/control 的 `cluster mode single|cluster` 管理，成功切换后重启相应进程。
 
 ## 运行环境信息
 

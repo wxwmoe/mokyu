@@ -81,8 +81,8 @@ impl Client {
     pub(crate) fn new(url: &str, identity: NodeState) -> Result<Self> {
         identity.validate()?;
         ensure!(
-            matches!(identity.role.as_str(), "data" | "worker"),
-            "control_url requires a data or worker identity"
+            matches!(identity.role.as_str(), "data" | "worker" | "node"),
+            "control_url requires a data, worker or node identity"
         );
         let origin = control_uri(url)?;
         let domain = origin

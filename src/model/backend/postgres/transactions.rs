@@ -1127,7 +1127,10 @@ pub(super) async fn change_node_objects(
     let hash = input.validate()?;
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, node, key, false).await?;
-    ensure!(node.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(node.role.as_str(), "data" | "node"),
+        Error::NodeAuthentication
+    );
     let session = require_node_run(&mut tx, node, input.run, true).await?;
     queries::lock_staging(format!(
         "mokyu:node-object:{}:{}",
@@ -8754,8 +8757,8 @@ pub(super) async fn provision_node(
 ) -> Result<crate::cluster::NodeState> {
     check_node_name(name)?;
     ensure!(
-        role.is_none_or(|role| matches!(role, "data" | "worker")),
-        s3s::s3_error!(InvalidArgument, "node role must be data or worker")
+        role.is_none_or(|role| matches!(role, "data" | "worker" | "node")),
+        s3s::s3_error!(InvalidArgument, "node role must be data, worker or node")
     );
     let mut tx = pool.begin().await?;
     principal.lock_admin(&mut tx).await?;
@@ -8786,7 +8789,7 @@ pub(super) async fn provision_node(
         let (id, role, _, generation) =
             existing.ok_or_else(|| s3s::s3_error!(NoSuchKey, "node not found"))?;
         ensure!(
-            matches!(role.as_str(), "data" | "worker"),
+            matches!(role.as_str(), "data" | "worker" | "node"),
             s3s::s3_error!(
                 InvalidRequest,
                 "use local control recovery for control nodes"
@@ -8829,7 +8832,7 @@ pub(super) async fn authenticate_rpc_node(
         .ok_or(crate::model::Error::NodeAuthentication)?;
     verify_node_identity(&row, state, &state.role, key)?;
     ensure!(
-        matches!(state.role.as_str(), "data" | "worker"),
+        matches!(state.role.as_str(), "data" | "worker" | "node"),
         crate::model::Error::NodeAuthentication
     );
     ensure!(
@@ -9091,7 +9094,10 @@ pub(super) async fn report_node_observations(
     // Dropping a query future does not cancel PostgreSQL's lock wait.
     queries::observation_limits().execute(&mut *tx).await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
-    ensure!(state.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(state.role.as_str(), "data" | "node"),
+        Error::NodeAuthentication
+    );
     let session = require_node_run(&mut tx, state, input.run, input.access.is_some()).await?;
     if !input.compression.is_empty() || !input.credentials.is_empty() {
         ensure!(
@@ -9576,7 +9582,10 @@ pub(super) async fn open_node_read(
     };
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
-    ensure!(state.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(state.role.as_str(), "data" | "node"),
+        Error::NodeAuthentication
+    );
     let session = require_node_run(&mut tx, state, input.run, false).await?;
     ensure!(
         !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
@@ -9855,7 +9864,7 @@ pub(super) async fn report_node_read(
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
     ensure!(
-        matches!(state.role.as_str(), "data" | "worker"),
+        matches!(state.role.as_str(), "data" | "worker" | "node"),
         Error::NodeAuthentication
     );
     require_node_run(&mut tx, state, input.run, false).await?;
@@ -9957,7 +9966,7 @@ pub(super) async fn node_read_window(
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
     ensure!(
-        matches!(state.role.as_str(), "data" | "worker"),
+        matches!(state.role.as_str(), "data" | "worker" | "node"),
         Error::NodeAuthentication
     );
     require_node_run(&mut tx, state, input.run, false).await?;
@@ -10093,7 +10102,10 @@ pub(super) async fn node_completion_status(
     input.validate()?;
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, node, key, false).await?;
-    ensure!(node.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(node.role.as_str(), "data" | "node"),
+        Error::NodeAuthentication
+    );
     require_node_run(&mut tx, node, input.run, false).await?;
     let bucket = queries::node_read_bucket(&crate::model::ReadRoute::Bucket {
         name: input.bucket,
@@ -10376,7 +10388,10 @@ pub(super) async fn begin_node_write(
     let hash = input.intent.hash()?;
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
-    ensure!(state.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(state.role.as_str(), "data" | "node"),
+        Error::NodeAuthentication
+    );
     let session = require_node_run(&mut tx, state, input.run, true).await?;
     if let Some(owned) = queries::node_write(state.node_id, input.operation)
         .fetch_optional(&mut *tx)
@@ -10806,7 +10821,7 @@ pub(super) async fn node_write_status(
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
     ensure!(
-        matches!(state.role.as_str(), "data" | "worker"),
+        matches!(state.role.as_str(), "data" | "worker" | "node"),
         Error::NodeAuthentication
     );
     require_node_run(&mut tx, state, input.run, true).await?;
@@ -10982,7 +10997,7 @@ async fn node_write_owned(
 ) -> Result<queries::NodeWrite> {
     authenticate_rpc_node(db, node, key, false).await?;
     ensure!(
-        matches!(node.role.as_str(), "data" | "worker"),
+        matches!(node.role.as_str(), "data" | "worker" | "node"),
         Error::NodeAuthentication
     );
     require_node_run(db, node, run, true).await?;
@@ -12237,7 +12252,10 @@ pub(super) async fn prepare_node_request(
     input.validate()?;
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, node, key, false).await?;
-    ensure!(node.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(node.role.as_str(), "data" | "node"),
+        Error::NodeAuthentication
+    );
     let session = require_node_run(&mut tx, node, input.run, false).await?;
     ensure!(
         !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
@@ -12456,7 +12474,10 @@ pub(super) async fn node_multipart_operation(
     let hash = input.validate()?;
     let mut tx = pool.begin().await?;
     authenticate_rpc_node(&mut tx, node, key, false).await?;
-    ensure!(node.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(node.role.as_str(), "data" | "node"),
+        Error::NodeAuthentication
+    );
     let session = require_node_run(&mut tx, node, input.run, true).await?;
     queries::lock_staging(format!(
         "mokyu:node-multipart:{}:{}",

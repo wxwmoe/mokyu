@@ -1,4 +1,4 @@
-# For `mokyu data` or `mokyu worker`.
+# For `mokyu data`, `mokyu worker` or `mokyu node` (data + worker).
 # Provision this role with `mokyu cli cluster create NAME ROLE` on control,
 # then save the returned identity as /data/node.json with mode 0600.
 # Node names come from the provisioned identity.

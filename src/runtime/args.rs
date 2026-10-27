@@ -67,6 +67,26 @@ mod tests {
         ));
         assert!(!Args::try_parse_from(["mokyu"]).unwrap().maintenance);
     }
+
+    #[test]
+    fn combined_node_has_one_role_and_provisioned_identity() {
+        let args = Args::try_parse_from(["mokyu", "node"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Node { maintenance: false })
+        ));
+        let args = Args::try_parse_from(["mokyu", "cli", "cluster", "create", "combined", "node"])
+            .unwrap();
+        assert!(
+            matches!(args.command, Some(Command::Cli { command: cli::Command::Cluster(cli::Cluster::Create { role, .. }) }) if role == "node")
+        );
+        for args in [
+            vec!["mokyu", "data+worker"],
+            vec!["mokyu", "data", "worker"],
+        ] {
+            assert!(Args::try_parse_from(args).is_err());
+        }
+    }
 }
 #[derive(Subcommand)]
 pub(super) enum Command {
@@ -82,6 +102,11 @@ pub(super) enum Command {
     },
     /// Run the S3 and public-read data role.
     Data {
+        #[arg(long)]
+        maintenance: bool,
+    },
+    /// Run data services and shared background work in one node.
+    Node {
         #[arg(long)]
         maintenance: bool,
     },

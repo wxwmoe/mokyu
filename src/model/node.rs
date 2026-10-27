@@ -43,7 +43,7 @@ impl NodeFilter {
         );
         ensure!((1..=200).contains(&self.limit), "node limit must be 1..200");
         for (value, allowed) in [
-            (&self.role, &["control", "data", "worker"][..]),
+            (&self.role, &["control", "data", "worker", "node"][..]),
             (
                 &self.contact,
                 &["online", "unresponsive", "not_reported", "released"][..],
@@ -221,7 +221,7 @@ pub(crate) fn applicable(role: &str, section: &str, mut value: Value) -> Value {
         if section == "io" && role != "control" {
             fields.remove("sqlite_synchronous");
         }
-        if section == "requests" && role != "data" {
+        if section == "requests" && !matches!(role, "data" | "node") {
             fields.remove("s3_domain");
             fields.remove("s3_region");
         }
@@ -242,7 +242,7 @@ pub(crate) fn applicable(role: &str, section: &str, mut value: Value) -> Value {
 pub(crate) async fn desired(app: &crate::app::App) -> Result<Value> {
     let sections = app.runtime_settings.inspect().await?;
     let mut roles = serde_json::Map::new();
-    for role in ["control", "data", "worker"] {
+    for role in ["control", "data", "worker", "node"] {
         let mut values = serde_json::Map::new();
         for (section, value, revision, _) in &sections {
             values.insert(
@@ -281,6 +281,7 @@ mod tests {
             3
         );
         assert_eq!(applicable("data", "requests", requests.clone()), requests);
+        assert_eq!(applicable("node", "requests", requests.clone()), requests);
         assert_eq!(
             applicable("data", "web", json!({"origin":"example"})),
             json!({})

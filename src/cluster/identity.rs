@@ -23,7 +23,7 @@ impl NodeState {
             !self.deployment_id.is_nil()
                 && !self.node_id.is_nil()
                 && self.credential_generation > 0
-                && matches!(self.role.as_str(), "control" | "data" | "worker"),
+                && matches!(self.role.as_str(), "control" | "data" | "worker" | "node"),
             "invalid node identity"
         );
         ensure!(

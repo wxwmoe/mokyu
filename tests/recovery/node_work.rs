@@ -30,7 +30,7 @@ pub(super) async fn check(
         .provision_node(admin, "work-owner", "worker", key)
         .await?;
     let other = backend
-        .provision_node(admin, "work-other", "data", key)
+        .provision_node(admin, "work-other", "node", key)
         .await?;
     let session = backend
         .open_session(
@@ -75,6 +75,50 @@ pub(super) async fn check(
         max_items: 64,
         cached: vec![],
     };
+    let data = backend
+        .provision_node(admin, "work-data-only", "data", key)
+        .await?;
+    let data_session = backend
+        .open_session(
+            &data,
+            key,
+            Open {
+                boot: Uuid::new_v4(),
+                connection: Uuid::new_v4(),
+                previous_epoch: 0,
+            },
+        )
+        .await?;
+    sqlx::query("UPDATE tasks SET execution_scope='cluster',target_node_id=NULL WHERE id=$1")
+        .bind(task)
+        .execute(pool)
+        .await?;
+    let mut data_request = request(Uuid::now_v7(), None);
+    data_request.run = data_session.run;
+    assert!(
+        backend
+            .exchange_work(&data, key, data_request)
+            .await?
+            .plan
+            .is_none()
+    );
+    assert!(!queries::work::pending(data.node_id).fetch_one(pool).await?);
+    sqlx::query("UPDATE tasks SET execution_scope='node',target_node_id=NULL WHERE id=$1")
+        .bind(task)
+        .execute(pool)
+        .await?;
+    assert!(
+        backend
+            .exchange_work(&node, key, request(Uuid::now_v7(), None))
+            .await?
+            .plan
+            .is_none()
+    );
+    sqlx::query("UPDATE tasks SET target_node_id=$2 WHERE id=$1")
+        .bind(task)
+        .bind(other.node_id)
+        .execute(pool)
+        .await?;
     assert!(
         backend
             .exchange_work(&node, key, request(Uuid::now_v7(), None))

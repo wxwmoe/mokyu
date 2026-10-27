@@ -8,7 +8,7 @@ use std::{
 use uuid::Uuid;
 
 pub(crate) async fn run(app: Arc<App>) -> Result<()> {
-    if !matches!(app.role.as_str(), "single" | "data" | "worker") {
+    if !matches!(app.role.as_str(), "single" | "data" | "worker" | "node") {
         return std::future::pending().await;
     }
     uploads(app).await

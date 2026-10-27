@@ -1,30 +1,31 @@
 # 群集部署
 
-Mokyu 群集由平等的 control 节点、提供 S3/公共读的 data 节点和执行后台工作的 worker 组成。只有 control 连接共享 PostgreSQL 并持有部署密钥。data/worker 通过 HTTPS gRPC 取得业务元数据和任务，直接访问后端对象存储；对象正文不经过 control。
+Mokyu 群集由平等的 control 节点、提供 S3/公共读的 data 节点、执行共享后台工作的 worker 和同时兼任两者的 node 组成。只有 control 连接共享 PostgreSQL 并持有部署密钥。data/worker/node 通过 HTTPS gRPC 取得业务元数据和任务，直接访问后端对象存储；对象正文不经过 control。
 
 ## 拓扑与配置
 
 ```text
-data / worker -> control.example.com -> control-a / control-b -> PostgreSQL
+data / worker / node -> control.example.com -> control-a / control-b -> PostgreSQL
       |                                    |
       +---------- shared S3 storage -------+
 
-S3 clients -> s3.example.com    -> data nodes
-Public GET -> media.example.com -> data nodes
+S3 clients -> s3.example.com    -> data / node
+Public GET -> media.example.com -> data / node
 Management -> control.example.com -> control nodes
 ```
 
 | 角色 | 启动配置 | 入口和职责 |
 | --- | --- | --- |
 | `mokyu control` | database、deployment_key、唯一 instance.name，可选 replica_database | 同一 listen_control 端口提供管理页面、管理 API、CLI 和节点 gRPC；处理数据库任务、授权、调度与租约 |
-| `mokyu data` | control_url、本机预算和数据目录、预创建 node.json | 提供 S3/公共读、正文传输和可领取的后台工作；本机 status |
-| `mokyu worker` | control_url、本机预算和数据目录、预创建 node.json | 执行需要后端 I/O 或计算的后台工作；本机 status |
+| `mokyu data` | control_url、本机预算和数据目录、预创建 node.json | 提供 S3/公共读、正文传输并执行依赖本机文件的后台工作；本机 status |
+| `mokyu worker` | control_url、本机预算和数据目录、预创建 node.json | 执行来源已在共享后端就绪的后台工作；本机 status |
+| `mokyu node` | control_url、本机预算和数据目录、预创建 node.json | node (data + worker)：同时提供 data 与 worker 的能力，共用一份身份、会话、目录与资源预算；本机 status |
 
-每个进程使用独立配置和持久 data 目录。control 使用 [`config.example.toml`](../config.example.toml)，data/worker 使用 [`config.node.example.toml`](../config.node.example.toml)。节点禁止配置 database、replica_database、deployment_key 和数据库连接预算；名称由预创建身份确定。数据库只需允许 control 访问。后端 S3 应允许相应节点直接访问。
+每个进程使用独立配置和持久 data 目录。control 使用 [`config.example.toml`](../config.example.toml)，data/worker/node 使用 [`config.node.example.toml`](../config.node.example.toml)。节点禁止配置 database、replica_database、deployment_key 和数据库连接预算；名称由预创建身份确定。数据库只需允许 control 访问。后端 S3 应允许相应节点直接访问。
 
-data/worker 主动连接 `control_url`；节点状态查询、CLI 和容器健康检查默认监听 `127.0.0.1:9002`，无需向 control 或公网开放。节点示例省略 `listen_control`；需要外部监控采集时，可显式设置监听地址。
+data/worker/node 主动连接 `control_url`；节点状态查询、CLI 和容器健康检查默认监听 `127.0.0.1:9002`，无需向 control 或公网开放。节点示例省略 `listen_control`；需要外部监控采集时，可显式设置监听地址。
 
-control 执行 usage、桶 purge 和历史清理等数据库任务。普通共享任务可以由 worker 或 data 执行，本机唯一来源任务只交给所属节点；多个 control 通过持久任务租约协调。数据库高可用、主备切换及旧主库隔离由部署环境负责。
+control 执行 usage、桶 purge 和历史清理等数据库任务。普通共享任务由 worker 或 node 执行；依赖 data/node 本机文件的上传、转换和处理任务只交给所属节点，断线或租约过期也不会转派。只有所需来源全部在共享后端就绪并确认后，后续工作才能作为共享任务领取；多个 control 通过持久任务租约协调。数据库高可用、主备切换及旧主库隔离由部署环境负责。
 
 ## 网络与多地址
 
@@ -37,7 +38,7 @@ control.example.com A <control-b-public-ip>
 
 客户端最多保留 32 个 A 地址，按 DNS TTL 在 1–300 秒内刷新并复用健康地址的连接；DNS 临时失败时，已知集合在原刷新时间之后最多继续使用 300 秒。Unary 在地址间轮转，NodeSession 使用独立持久连接；连接和安全重试共用总期限。TCP 连接目标是选中的 IP，TLS SNI、证书校验和 HTTP authority 始终使用原域名。删除地址会触发该地址会话恢复，业务运行权由 control 确认。
 
-S3/公共读域名也可以有多个 data 地址；这是面向 S3 客户端的入口选择，客户端需处理不可用节点并遵守重试规则。
+S3/公共读域名也可以有多个 data/node 地址；这是面向 S3 客户端的入口选择，客户端需处理不可用节点并遵守重试规则。
 
 ### Nginx 与 Cloudflare
 
@@ -53,32 +54,33 @@ S3/公共读域名也可以有多个 data 地址；这是面向 S3 客户端的�
 
 1. 准备 PostgreSQL、单容器/control 的配置和固定部署密钥，先按[部署与恢复](deployment-and-recovery.md)完成管理员初始化、共享 S3 staging、普通 S3 storage 和桶配置。群集禁止 local storage；`uploads.staging_storage_id` 须指向启用的 S3 暂存存储。
 2. 在单容器上进入维护模式并排空工作，执行 `mokyu cli cluster mode cluster`，随后停止该进程。使用有唯一名称的配置启动 `mokyu control`；其他 control 使用同一数据库和部署密钥、各自的名称与目录。
-3. 配置 TLS 代理和 control 域名，在 control 上预创建 data/worker。命令只在创建或轮换时返回完整凭据，将输出直接保存到对应节点目录，不发布到日志或共享位置：
+3. 配置 TLS 代理和 control 域名，在 control 上预创建 data/worker/node。命令只在创建或轮换时返回完整凭据，将输出直接保存到对应节点目录，不发布到日志或共享位置：
 
    ```sh
    umask 077
-   mkdir -p data-1 worker-1
+   mkdir -p data-1 worker-1 node-1
    docker exec mokyu-control mokyu cli cluster create data-1 data > data-1/node.json
    docker exec mokyu-control mokyu cli cluster create worker-1 worker > worker-1/node.json
+   docker exec mokyu-control mokyu cli cluster create node-1 node > node-1/node.json
    ```
 
-4. 为每个节点准备独立目录和 `config.node.example.toml`，设置 control_url，安全传送对应 node.json，并给运行用户读写权限。官方镜像使用 UID/GID 10001，身份文件权限为 0600。以 `mokyu data` 或 `mokyu worker` 启动，角色须与文件一致。
-5. 通过本机 `mokyu cli status` 和管理面检查会话、配置与节点状态，退出维护模式后检查 `status --ready`。data 完成同步后提供 S3/公共读，worker 开始领取工作。
+4. 为每个节点准备独立目录和 `config.node.example.toml`，设置 control_url，安全传送对应 node.json，并给运行用户读写权限。官方镜像使用 UID/GID 10001，身份文件权限为 0600。以 `mokyu data`、`mokyu worker` 或 `mokyu node` 启动，角色须与文件一致。
+5. 通过本机 `mokyu cli status` 和管理面检查会话、配置与节点状态，退出维护模式后检查 `status --ready`。data/node 完成同步后提供 S3/公共读；worker/node 领取共享工作，data/node 同时推进本机工作。
 
-未指定启动命令的 `mokyu` 是单容器模式。data/worker 本机 CLI 只支持 `status`；其他管理命令在单容器/control 执行。
+未指定启动命令的 `mokyu` 是单容器模式。data/worker/node 本机 CLI 只支持 `status`；其他管理命令在单容器/control 执行。
 
 ## 节点身份与恢复
 
-control 首次启动通过 PostgreSQL 注册，使用自己的 node.json 恢复。data/worker 必须事先取得身份，不会自行注册；缺文件或角色不符会拒绝启动。连接不可用时保留本机状态入口并有界重连；复制同一身份启动另一个活跃进程会产生所有权冲突，不能同时服务。
+control 首次启动通过 PostgreSQL 注册，使用自己的 node.json 恢复。data/worker/node 必须事先取得身份，不会自行注册；缺文件或角色不符会拒绝启动。连接不可用时保留本机状态入口并有界重连；复制同一身份启动另一个活跃进程会产生所有权冲突，不能同时服务。
 
-把每个节点的 node.json 和持久 data 目录纳入备份。重建时恢复对应文件并确保原进程已停止。data/worker 身份文件不可恢复时，在 control 执行 `cluster rotate NAME --confirm`，安全保存返回文件并替换后重启；该操作保留节点 UUID、递增凭据代次、隔离旧会话并撤销旧任务租约。它不能恢复已经丢失的本机唯一正文。control 文件丢失时先恢复备份；无法恢复则释放原 control 身份后重新注册。
+把每个节点的 node.json 和持久 data 目录纳入备份。重建时恢复对应文件并确保原进程已停止。data/worker/node 身份文件不可恢复时，在 control 执行 `cluster rotate NAME --confirm`，安全保存返回文件并替换后重启；该操作保留节点 UUID、递增凭据代次、隔离旧会话并撤销旧任务租约。它不能恢复已经丢失的本机唯一正文。control 文件丢失时先恢复备份；无法恢复则释放原 control 身份后重新注册。
 
 | 命令 | 行为 |
 | --- | --- |
 | `cluster status` | 部署模式、启用节点数和 local storage 数 |
 | `cluster nodes` | 节点身份、角色、启用状态及最近报告 |
-| `cluster create NAME data/worker` | 预创建身份并返回 node.json |
-| `cluster rotate NAME --confirm` | 更换 data/worker 凭据并返回 node.json |
+| `cluster create NAME data/worker/node` | 预创建身份并返回 node.json |
+| `cluster rotate NAME --confirm` | 更换 data/worker/node 凭据并返回 node.json |
 | `cluster release NAME --confirm` | 禁用节点，释放租约并重新排队未完成任务 |
 
 启用后端写缓存时，确认规则取决于 storage 的持久性档位；待上传唯一文件保留在所属节点。其他节点等待共享来源就绪，超时返回既有 `503 SlowDown`；HEAD 和列表不等待正文。释放或轮换前应在 control 完成 `cache flush`，不能把释放节点当成迁移本机文件。正常 SIGTERM 停止新准入并继续续租、任务结果确认和本机上传排空；超过退出期限会报告未完成项，后续依赖原目录恢复。

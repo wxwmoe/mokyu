@@ -136,7 +136,7 @@ mod tests {
         let mut config = toml::from_str::<FileConfig>("[database]\ntype='postgres'\n")
             .unwrap()
             .into_config();
-        for role in ["data", "worker"] {
+        for role in ["data", "worker", "node"] {
             assert!(config.validate_role(role).is_err());
         }
         for (role, minimum) in [("single", 1), ("control", 5)] {
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(resolved.ssl_mode, "verify-full");
         assert!(config.validate_role("single").is_err());
         config.validate_role("control").unwrap();
-        for role in ["data", "worker"] {
+        for role in ["data", "worker", "node"] {
             assert!(config.validate_role(role).is_err());
         }
         for extra in [
@@ -434,7 +434,7 @@ mod tests {
             }
             restored.uploads.staging_bytes_limit = Some("1GiB".into());
             assert_eq!(restored.validate().is_ok(), backend.supports_cluster());
-            for role in ["control", "worker", "data"] {
+            for role in ["control", "worker", "data", "node"] {
                 assert_eq!(
                     backend.validate_role(role).is_ok(),
                     role == "control" && backend.supports_cluster()

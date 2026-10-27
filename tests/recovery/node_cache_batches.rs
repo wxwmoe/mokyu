@@ -4,6 +4,7 @@ use anyhow::Context;
 
 pub(super) async fn check(
     backend: &Backend,
+    admin: &Principal,
     node: &crate::cluster::NodeState,
     key: &Key,
     run: Run,
@@ -25,6 +26,25 @@ pub(super) async fn check(
         max_items: 64,
         cached: vec![],
     };
+    let mut outsiders = Vec::new();
+    for role in ["data", "worker", "node"] {
+        let other = backend
+            .provision_node(admin, &format!("cache-outsider-{role}"), role, key)
+            .await?;
+        let session = backend
+            .open_session(
+                &other,
+                key,
+                Open {
+                    boot: Uuid::new_v4(),
+                    connection: Uuid::new_v4(),
+                    previous_epoch: 0,
+                },
+            )
+            .await?;
+        outsiders.push((other, session.run));
+    }
+    check_owner(backend, key, &outsiders).await?;
     let mut hash_lock = pool.begin().await?;
     queries::claim_chunk_hash(storage, &[95; 32])
         .execute(&mut *hash_lock)
@@ -117,6 +137,7 @@ pub(super) async fn check(
         .bind(paused)
         .execute(pool)
         .await?;
+    check_owner(backend, key, &outsiders).await?;
     let replacement = backend.exchange_work(node, key, request(None)).await?;
     let work::Plan::UploadRaw { items, .. } = replacement.plan.as_ref().unwrap() else {
         panic!("expected recovered upload batch")
@@ -267,6 +288,35 @@ pub(super) async fn check(
         backend.exchange_work(node, key, finish).await?;
     }
     assert!(oversized);
+    Ok(())
+}
+
+async fn check_owner(
+    backend: &Backend,
+    key: &Key,
+    outsiders: &[(crate::cluster::NodeState, Run)],
+) -> Result<()> {
+    for (node, run) in outsiders {
+        let reply = backend
+            .exchange_work(
+                node,
+                key,
+                work::Exchange {
+                    run: *run,
+                    operation: Uuid::now_v7(),
+                    completion: None,
+                    class: 2,
+                    max_items: 64,
+                    cached: vec![],
+                },
+            )
+            .await?;
+        assert!(
+            reply.plan.is_none(),
+            "local uploads were offered to {}",
+            node.role
+        );
+    }
     Ok(())
 }
 

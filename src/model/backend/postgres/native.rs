@@ -129,7 +129,10 @@ fn owned(node: &NodeState, run: Run, row: &q::Work) -> Result<()> {
 
 async fn authorize(db: &mut PgConnection, node: &NodeState, key: &Key, run: Run) -> Result<()> {
     authenticate_rpc_node(db, node, key, false).await?;
-    ensure!(node.role == "data", Error::NodeAuthentication);
+    ensure!(
+        matches!(node.role.as_str(), "data" | "node"),
+        Error::NodeAuthentication
+    );
     require_node_run(db, node, run, true).await?;
     ensure!(
         queries::raw_upload_mode(true).fetch_one(db).await?,

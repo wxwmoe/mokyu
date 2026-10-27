@@ -456,7 +456,7 @@ pub enum Cluster {
     Status,
     Create {
         name: String,
-        #[arg(value_parser = ["data", "worker"])]
+        #[arg(value_parser = ["data", "worker", "node"])]
         role: String,
     },
     Rotate {

@@ -247,7 +247,7 @@ pub(crate) async fn recover(
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateNodeInput {
     name: String,
-    #[schema(example = "data", pattern = "^(data|worker)$")]
+    #[schema(example = "data", pattern = "^(data|worker|node)$")]
     role: String,
 }
 

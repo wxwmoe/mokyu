@@ -1,6 +1,6 @@
 # 部署、升级与恢复
 
-默认部署运行一个单容器模式实例，同时提供管理、S3 和公共读，独占一个数据库、data 目录和存储范围。需要拆分职责或多节点入口时，使用[群集部署](cluster-deployment.md)；群集只有 control 连接 PostgreSQL 并持有部署密钥，data/worker 通过 control 的 HTTPS API 通信，各进程使用独立 data 目录。以下单容器部署命令在源码根目录执行。
+默认部署运行一个单容器模式实例，同时提供管理、S3 和公共读，独占一个数据库、data 目录和存储范围。需要拆分职责或多节点入口时，使用[群集部署](cluster-deployment.md)；群集只有 control 连接 PostgreSQL 并持有部署密钥，data/worker/node 通过 control 的 HTTPS API 通信，各进程使用独立 data 目录。以下单容器部署命令在源码根目录执行。
 
 单容器使用进程内任务调度、活动读写保护和存储并发限制，不创建群集节点或子任务，也不维护分布式租约或共享 staging。任务、配额、上传确认和恢复状态仍持久化在数据库中。
 
@@ -46,7 +46,7 @@ Rust 构建还需要 `protoc`，由 `proto/node.proto` 生成 gRPC 类型。两�
    | --- | --- |
    | `database` | 主机、端口、数据库和用户；删除示例 `password`，启用 `password_file = "secrets/postgres-password"`，与 Compose 共用密码文件 |
    | `instance` | 监听地址、数据目录、资源预算和固定 `deployment_key`；单容器/control 使用同一部署密钥 |
-   `instance.deployment_key` 仅配置在单容器/control，同一部署保持不变；data/worker 使用独立节点配置，见[群集部署](cluster-deployment.md)。首次启动后用 `cli key create NAME block` 创建区块密钥，并用 `cli storage key set STORE KEY` 绑定；密钥材料只在数据库中保存加密副本，CLI 和 Web 永不返回明文。完整字段和资源限制见[配置参考](configuration.md)。
+   `instance.deployment_key` 仅配置在单容器/control，同一部署保持不变；data/worker/node 使用独立节点配置，见[群集部署](cluster-deployment.md)。首次启动后用 `cli key create NAME block` 创建区块密钥，并用 `cli storage key set STORE KEY` 绑定；密钥材料只在数据库中保存加密副本，CLI 和 Web 永不返回明文。完整字段和资源限制见[配置参考](configuration.md)。
 
 3. 设置权限并启动：
 
@@ -64,7 +64,7 @@ Compose 将配置只读挂载、数据目录可写挂载；PostgreSQL 在独立�
 
 设置 `[database]` 的 `type = "mysql"`，复用 `host`、`port`（默认 `3306`）、`name`、`user`、密码和 SSL 字段。自行准备 MySQL 8.0.19+ 或 MariaDB 10.6.3+ 空库与具备建表、索引和迁移权限的用户；程序自动识别服务器，数据表由 Mokyu 初始化。示例 Compose 使用 PostgreSQL 18，选择 MySQL/MariaDB 时替换数据库服务及其持久卷。`innodb_flush_log_at_trx_commit` 必须为 `1`。新部署建议使用仍在维护的稳定版或 LTS 的最新补丁。
 
-一个 MySQL/MariaDB 库只允许一个 single 实例，启动时取得连接级独占锁；锁连接丢失会触发退出。不能启动 control、worker 或 data，也不能切换为群集。库内不建立群集协调表，载荷存储仍可选 local 或 S3。
+一个 MySQL/MariaDB 库只允许一个 single 实例，启动时取得连接级独占锁；锁连接丢失会触发退出。不能启动 control、worker、data 或 node，也不能切换为群集。库内不建立群集协调表，载荷存储仍可选 local 或 S3。
 
 ### SQLite 单容器模式
 
@@ -76,7 +76,7 @@ type = "sqlite"
 # path = "/data/mokyu.db"
 ```
 
-保留 `[instance]` 的部署密钥、监听和资源设置，将 `/data` 挂载为可写的本地持久目录。无需数据库服务；使用示例 Compose 时删除 `postgres` 服务、网关对它的依赖及数据库专用密码挂载。运行命令仍为 `mokyu`，不可使用 control、worker 或 data。
+保留 `[instance]` 的部署密钥、监听和资源设置，将 `/data` 挂载为可写的本地持久目录。无需数据库服务；使用示例 Compose 时删除 `postgres` 服务、网关对它的依赖及数据库专用密码挂载。运行命令仍为 `mokyu`，不可使用 control、worker、data 或 node。
 
 数据库及 WAL、本地暂存应纳入一致备份。不要在运行时移动、覆盖或删除数据库及锁文件，也不要让多个容器共用同一文件。载荷存储仍可使用 local 或 S3；选择 SQLite 不代表对象内容全部存入数据库。连接池、文件系统和权限要求见[配置参考](configuration.md#database)。
 

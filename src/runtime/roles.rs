@@ -18,6 +18,7 @@ pub(super) enum Role {
     Control,
     Worker,
     Data,
+    Node,
 }
 impl Role {
     pub(super) fn title(self) -> &'static str {
@@ -26,6 +27,7 @@ impl Role {
             Self::Control => "control",
             Self::Worker => "worker",
             Self::Data => "data",
+            Self::Node => "node",
         }
     }
     pub(super) fn uses_storage(self) -> bool {
@@ -35,7 +37,8 @@ impl Role {
         match command {
             Some(Command::Control { maintenance })
             | Some(Command::Worker { maintenance })
-            | Some(Command::Data { maintenance }) => *maintenance,
+            | Some(Command::Data { maintenance })
+            | Some(Command::Node { maintenance }) => *maintenance,
             _ => false,
         }
     }
@@ -45,7 +48,9 @@ pub(super) async fn run_role(app: Arc<app::App>, role: Role) -> Result<()> {
     match role {
         Role::Single => run_single(app).await,
         Role::Control => run_control(app).await,
-        Role::Worker | Role::Data => anyhow::bail!("node roles require the API runtime"),
+        Role::Worker | Role::Data | Role::Node => {
+            anyhow::bail!("node roles require the API runtime")
+        }
     }
 }
 

@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0086.
+-- Generated from the complete postgres migration chain through 0087.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1140,7 +1140,7 @@ CREATE TABLE public.nodes (
     credential_generation bigint DEFAULT 1 NOT NULL,
     CONSTRAINT nodes_credential_generation_check CHECK ((credential_generation > 0)),
     CONSTRAINT nodes_name_check CHECK (((octet_length(name) >= 1) AND (octet_length(name) <= 128))),
-    CONSTRAINT nodes_role_check CHECK ((role = ANY (ARRAY['control'::text, 'worker'::text, 'data'::text])))
+    CONSTRAINT nodes_role_check CHECK ((role = ANY (ARRAY['control'::text, 'worker'::text, 'data'::text, 'node'::text])))
 );
 
 CREATE TABLE public.nonce_counters (

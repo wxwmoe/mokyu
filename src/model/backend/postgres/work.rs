@@ -689,7 +689,12 @@ pub(crate) async fn exchange(
         q::active(node.node_id).fetch_one(&mut *tx).await? < 64,
         Error::NodeWorkLimit
     );
-    if input.class == 2 && !sweep_barrier && !maintenance_enabled && !session.draining {
+    if input.class == 2
+        && matches!(node.role.as_str(), "worker" | "node")
+        && !sweep_barrier
+        && !maintenance_enabled
+        && !session.draining
+    {
         raw::schedule(&mut tx, input.max_items).await?;
     }
     let token = Uuid::new_v4();

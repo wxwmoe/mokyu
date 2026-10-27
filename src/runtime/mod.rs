@@ -42,6 +42,7 @@ pub(crate) fn run() -> Result<()> {
         Some(Command::Control { .. }) => Role::Control,
         Some(Command::Worker { .. }) => Role::Worker,
         Some(Command::Data { .. }) => Role::Data,
+        Some(Command::Node { .. }) => Role::Node,
         _ => Role::Single,
     };
     set_process_title(role.title());
@@ -56,7 +57,7 @@ pub(crate) fn run() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("TLS provider initialization failed"))?;
-    if matches!(role, Role::Data | Role::Worker) {
+    if matches!(role, Role::Data | Role::Worker | Role::Node) {
         anyhow::ensure!(
             !start_maintenance,
             "set deployment maintenance on control before starting nodes"

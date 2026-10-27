@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 
 impl NodeContext {
     pub(crate) async fn report_access(self: &Arc<Self>) -> Result<()> {
-        if self.client.identity.role != "data" {
+        if !matches!(self.client.identity.role.as_str(), "data" | "node") {
             return std::future::pending().await;
         }
         let mut sequence = 0i64;

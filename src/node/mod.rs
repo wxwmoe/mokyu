@@ -139,7 +139,7 @@ impl NodeContext {
                 .await?
                 .context("node.json is required; provision this node on control first")?;
         ensure!(
-            identity.role == role && matches!(role, "data" | "worker"),
+            identity.role == role && matches!(role, "data" | "worker" | "node"),
             "node identity does not match process role"
         );
         let client = Client::new(

@@ -253,8 +253,8 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 | `GET /api/v1/cluster/status` | 读取 deployment mode、enabled 节点数和 local storage 数 |
 | `POST /api/v1/cluster/mode` | 在维护模式、工作已排空且独占运行权时切换 single/cluster，递增 mode revision；当前进程保持受限，必须重启 |
 | `GET /api/v1/cluster/nodes` | 列出节点名称、角色、启用状态和最近 heartbeat |
-| `POST /api/v1/cluster/nodes` | `{name,role}` 预创建 data/worker；同名节点拒绝，返回一次性完整 `node.json` |
-| `POST /api/v1/cluster/nodes/{name}/credentials` | `{confirm:true}` 轮换 data/worker 凭据；保留 UUID、递增代次、撤销旧会话与任务租约，返回新 `node.json` |
+| `POST /api/v1/cluster/nodes` | `{name,role}` 预创建 data/worker/node；同名节点拒绝，返回一次性完整 `node.json` |
+| `POST /api/v1/cluster/nodes/{name}/credentials` | `{confirm:true}` 轮换 data/worker/node 凭据；保留 UUID、递增代次、撤销旧会话与任务租约，返回新 `node.json` |
 | `POST /api/v1/cluster/nodes/{name}/release` | 释放节点、撤销凭据并重新排队其任务 |
 | `POST /api/v1/cluster/recover` | 使用 deployment key 确认恢复模式并释放待恢复节点；仅 control 可调用 |
 

@@ -31,7 +31,7 @@ async fn postgres_node_runtime_bounds_fences_and_aggregation() -> Result<()> {
         .await?
         .unwrap();
     let b = backend
-        .register("data-b", "data", "b".into(), &key)
+        .register("combined", "node", "b".into(), &key)
         .await?
         .unwrap();
     let boot = Uuid::new_v4();
@@ -43,23 +43,23 @@ async fn postgres_node_runtime_bounds_fences_and_aggregation() -> Result<()> {
         status: json!({}),
     };
     for node in [&a, &b] {
-        backend.heartbeat(node, "data", &key).await?;
+        backend.heartbeat(node, &node.role, &key).await?;
         backend
-            .begin_report(node, "data", &key, boot, Utc::now())
+            .begin_report(node, &node.role, &key, boot, Utc::now())
             .await?;
         for sequence in [1, 2] {
             report.sequence = sequence;
             report.status = json!({"runtime":{"started_at":Utc::now(),"uptime_seconds":sequence*60,"http":{"web":{"started":(sequence-1)*60}}},"cache":{"hits":sequence-1},"io":{"cache_lookups":(sequence-1)*10}});
-            assert!(backend.report(node, "data", &key, &report).await?);
+            assert!(backend.report(node, &node.role, &key, &report).await?);
             let sample = NodeSample::from_report(&report, 60)?;
             assert!(
                 backend
-                    .sample_node_runtime(node, "data", &key, &sample)
+                    .sample_node_runtime(node, &node.role, &key, &sample)
                     .await?
             );
             assert!(
                 !backend
-                    .sample_node_runtime(node, "data", &key, &sample)
+                    .sample_node_runtime(node, &node.role, &key, &sample)
                     .await?
             );
             assert!(
@@ -136,10 +136,10 @@ async fn postgres_node_runtime_bounds_fences_and_aggregation() -> Result<()> {
     let history = backend.cluster_runtime(&RuntimeQuery::default()).await?;
     assert_eq!(history.last().unwrap().reported_nodes, 1);
     assert_eq!(history.first().unwrap().reported_nodes, 2);
-    backend.release("data-b").await?;
+    backend.release("combined").await?;
     assert!(
         backend
-            .sample_node_runtime(&b, "data", &key, &sample)
+            .sample_node_runtime(&b, &b.role, &key, &sample)
             .await
             .is_err()
     );

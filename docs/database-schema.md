@@ -2,7 +2,7 @@
 
 数据库保存对象目录、权限、存储映射、任务和运行状态；载荷位于 storage 或受保护的暂存目录。本文只列出当前公开语义，完整类型、约束、索引和触发器以 [`migrations/`](../migrations) 为准。
 
-数据库初始化使用 `migrations/schema/{postgres,mysql,sqlite}.sql` 的对应结构；已初始化数据库执行所选后端的增量迁移：PostgreSQL 使用 `migrations/*.sql`，MySQL 使用 `migrations/mysql/*.sql`，SQLite 使用 `migrations/sqlite/*.sql`。已发布迁移不可修改。PostgreSQL 的单容器和群集使用同一套表；MySQL 和 SQLite 只有单容器表，不保存节点、lease、子任务或共享 staging。群集只有 control 连接 PostgreSQL，data/worker 通过 control API 访问业务数据；各进程保留独立 `instance.data_path` 和 `node.json`。
+数据库初始化使用 `migrations/schema/{postgres,mysql,sqlite}.sql` 的对应结构；已初始化数据库执行所选后端的增量迁移：PostgreSQL 使用 `migrations/*.sql`，MySQL 使用 `migrations/mysql/*.sql`，SQLite 使用 `migrations/sqlite/*.sql`。已发布迁移不可修改。PostgreSQL 的单容器和群集使用同一套表；MySQL 和 SQLite 只有单容器表，不保存节点、lease、子任务或共享 staging。群集只有 control 连接 PostgreSQL，data/worker/node 通过 control API 访问业务数据；各进程保留独立 `instance.data_path` 和 `node.json`。
 
 下表描述共有数据含义，并列出 PostgreSQL 群集字段；原生类型和约束以各后端迁移为准。MySQL/MariaDB 共用 `migrations/mysql/`，使用二进制 UUID、自增 BIGINT 内容 ID、UTC `DATETIME(6)` 和二进制对象键。名称比较区分大小写和尾空格；MySQL 使用原生 JSON，MariaDB 使用带 JSON 有效性约束的文本表示。引用、配额和任务更新在同一事务中显式完成；容量 scope 的桶集合使用关联表。SQLite 使用 STRICT 表、16 字节 UUID、整数自增内容 ID、UTC 微秒整数时间、JSON 文本和二进制对象键；写事务使用 `BEGIN IMMEDIATE`，引用与配额同样在事务内显式维护。原生类型不影响对外 ID、分页、时间和字节数的接口语义。
 
@@ -30,7 +30,7 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 | `key_replacements` | `id`、`actor`、`plan`、`result`、`expires_at` | 关联存储换 key 的预览和幂等结果；预览十分钟、完成结果七天，过期由现有清理流程分批回收；不保存密钥材料 |
 | `setup_tokens` | `token_hash`、`created_at`、`expires_at` | Web 首次管理员设置的一次性 token；CLI 初始化不依赖它 |
 | `web_users`、`sessions`、`api_tokens` | 用户、会话和个人 API token 字段 | Web 认证、CSRF、授权修订和会话撤销 |
-| `nodes` | `id`、`name`、`role`、`credential_encrypted`、`credential_generation`、`enabled`、`status`、`recovery_required`、`lease_expires_at` | control/worker/data 身份和状态；凭据代次为非空正 BIGINT，默认 1，轮换递增 |
+| `nodes` | `id`、`name`、`role`、`credential_encrypted`、`credential_generation`、`enabled`、`status`、`recovery_required`、`lease_expires_at` | control/worker/data/node 身份和状态；凭据代次为非空正 BIGINT，默认 1，轮换递增 |
 | `node_boots` | `node_id`、`credential_generation`、`boot_id`、`created_at`、`retired_at` | `(node_id,boot_id)` 主键，节点级联外键；代次为非空正 BIGINT，两个 ID 为 UUID；创建时间默认数据库时钟，退役时间可空；每代最多 4096 个 boot，轮换后清理旧代历史 |
 | `node_sessions` | `node_id`、`credential_generation`、`boot_id`、`fence`、`epoch`、`connection_id`、`expires_at`、`sequence`、`draining` | 每节点一行，主键/级联节点外键及 `(node_id,boot_id)` 外键；ID 为 UUID，代次与 epoch 为正 BIGINT；sequence 非负默认 0，draining 默认 false；其余均非空且无默认值；到期时间为数据库时钟的 90 秒租约 |
 | `node_access` | `node_id`、`boot_id`、`sequence`、`request_hash`、`received_at`、`gap_since` | PostgreSQL 每节点一行，UUID 主键/级联节点外键；boot 为 UUID，sequence 为正 BIGINT，摘要为 32 字节 BYTEA，两个时间为 TIMESTAMPTZ；全部非空且无默认值；保存访问观测的去重回执及覆盖缺口，与统计更新原子提交 |

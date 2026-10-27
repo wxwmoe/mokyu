@@ -48,7 +48,7 @@ async fn listeners(
     connections: Arc<Semaphore>,
     stopping: watch::Sender<bool>,
 ) -> Result<()> {
-    if !matches!(role, Role::Data) {
+    if !matches!(role, Role::Data | Role::Node) {
         return std::future::pending().await;
     }
     configured(&node).await?;
@@ -88,7 +88,7 @@ async fn drained(node: &NodeContext, connections: &Semaphore, role: Role) -> Res
     if node.subscribe().borrow().snapshot.is_none() {
         return Ok(());
     }
-    let limit = if matches!(role, Role::Data) {
+    let limit = if matches!(role, Role::Data | Role::Node) {
         node.budget
             .get()
             .map_or(0, |budget| budget.request_connections)

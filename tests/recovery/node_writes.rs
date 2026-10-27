@@ -77,7 +77,9 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
         id: control.node_id,
         role: "control".into(),
     };
-    let node = backend.provision_node(&admin, "data", "data", &key).await?;
+    let node = backend
+        .provision_node(&admin, "combined", "node", &key)
+        .await?;
     let peer = backend.provision_node(&admin, "peer", "data", &key).await?;
     let worker = backend
         .provision_node(&admin, "worker", "worker", &key)

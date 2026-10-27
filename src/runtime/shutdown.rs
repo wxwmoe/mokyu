@@ -18,7 +18,7 @@ pub(super) async fn drain(app: Arc<App>, workers: impl Future<Output = Result<()
         while app.stop_connections.receiver_count() != 0 {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        if !matches!(app.role.as_str(), "single" | "data" | "worker")
+        if !matches!(app.role.as_str(), "single" | "data" | "worker" | "node")
             || app.ensure_mode().is_err()
             || app.recovery_required()
         {

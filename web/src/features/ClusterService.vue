@@ -40,7 +40,7 @@ const total = computed(() => counts.value.filter(row => row.contact !== 'release
 const online = computed(() => counts.value.filter(row => row.contact === 'online').reduce((sum, row) => sum + Number(row.count), 0))
 const pending = computed(() => counts.value.filter(row => row.contact !== 'released' && row.configuration === 'restart_required').reduce((sum, row) => sum + Number(row.count), 0))
 const unknown = computed(() => counts.value.filter(row => row.contact !== 'released' && row.configuration === 'unknown').reduce((sum, row) => sum + Number(row.count), 0))
-const roles = computed(() => ['control', 'data', 'worker'].map(role => ({ role, count: counts.value.filter(row => row.role === role && row.contact !== 'released').reduce((sum, row) => sum + Number(row.count), 0) })))
+const roles = computed(() => ['control', 'data', 'worker', 'node'].map(role => ({ role, count: counts.value.filter(row => row.role === role && row.contact !== 'released').reduce((sum, row) => sum + Number(row.count), 0) })))
 const roleOptions = computed(() => [{ value: '', label: t('clusterAllRoles') }, ...roles.value.map(row => ({ value: row.role, label: t('nodeRole_' + row.role) }))])
 const contactOptions = computed(() => [{ value: '', label: t('clusterAllContacts') }, ...['online', 'unresponsive', 'not_reported', 'released'].map(value => ({ value, label: t('nodeState_' + value) }))])
 const workOptions = computed(() => [{ value: '', label: t('clusterAllWork') }, ...['normal', 'starting', 'maintenance', 'restricted', 'recovery', 'unknown'].map(value => ({ value, label: t('nodeState_' + value) }))])

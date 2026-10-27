@@ -109,7 +109,9 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         id: control.node_id,
         role: "control".into(),
     };
-    let node = backend.provision_node(&admin, "data", "data", &key).await?;
+    let node = backend
+        .provision_node(&admin, "combined", "node", &key)
+        .await?;
     let peer = backend.provision_node(&admin, "peer", "data", &key).await?;
     let worker = backend
         .provision_node(&admin, "worker", "worker", &key)

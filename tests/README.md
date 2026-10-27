@@ -26,7 +26,7 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `rpc::client::transport_tests::rotation::node_rpc_survives_connection_rotation` 将隔离 TLS 代理的 `keepalive_requests` 设为 8，运行 100 组、每组 8 个并发 SyncNode 请求，验证正常 HTTP/2 连接轮换不会泄漏为业务失败。普通测试单独验证 GOAWAY 与协议错误、RST_STREAM 和服务端业务错误的重试边界。
 
-群集 data/worker 使用独立节点配置及预创建身份，观察者的 PostgreSQL 连接单独提供，不将数据库配置放入节点文件。`tests.control.cluster_runtime_history` 需要 `MOKYU_TEST_DATA_ENDPOINTS`，值为两个公共读入口 URL 的 JSON 数组；它通过实际请求核对节点及群集历史。
+群集 data/worker/node 使用独立节点配置及预创建身份，观察者的 PostgreSQL 连接单独提供，不将数据库配置放入节点文件。`tests.control.cluster_runtime_history` 需要 `MOKYU_TEST_DATA_ENDPOINTS`，值为两个公共读入口 URL 的 JSON 数组；它通过实际请求核对节点及群集历史。
 
 `postgres_node_reads_close_dependencies_bound_windows_and_protect_sources` 验证读取依赖、材料复用、Range、超过首窗口的映射、双窗口背压、资源到期与节点隔离，以及区块、包、raw 和暂存来源在映射改写后的 GC 保护。
 
@@ -331,3 +331,5 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 `python -m tests.benchmarks.cors_cache` uses a started isolated fixture to compare 100 buckets sharing 100-rule CORS documents. It reports retained memory, parse counts and five HTTP HEAD rounds at concurrency 8; missing objects deliberately keep public object caching out of the measurement.
 
 `python -m tests.recovery.cluster_cors_cache` requires two isolated PostgreSQL data nodes and the shared S3 fixture. It covers forced CORS caching with public snapshots, independent CORS-only confirmation and peer convergence. Set `MOKYU_TEST_CORS_RESTART_SIGNALS` when the harness can restart the peer after `restart-peer` appears to verify deployment-wide limits with independent per-node activation.
+
+节点角色契约覆盖 `node` 的读写与共享工作能力、纯 `data` 拒绝共享任务，以及 data/worker/node 无法领取其他节点本机上传（含租约过期后的重试）。对应 PostgreSQL 入口为 `node_reads`、`node_writes`、`node_raw` 和 `node_multipart`，每项须使用独立空测试库。

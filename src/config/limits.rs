@@ -261,7 +261,7 @@ impl Config {
         );
         ensure!(
             c.instance.control_url.is_none(),
-            "control_url is only valid for data or worker configuration"
+            "control_url is only valid for data, worker or node configuration"
         );
         Ok(())
     }

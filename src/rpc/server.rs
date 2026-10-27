@@ -175,9 +175,9 @@ fn identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
     };
     node.validate()
         .map_err(|_| Status::unauthenticated("invalid node identity"))?;
-    if !matches!(node.role.as_str(), "data" | "worker") {
+    if !matches!(node.role.as_str(), "data" | "worker" | "node") {
         return Err(Status::permission_denied(
-            "this protocol requires a data or worker identity",
+            "this protocol requires a data, worker or node identity",
         ));
     }
     Ok(node)
@@ -577,9 +577,9 @@ fn write_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
         .get::<NodeState>()
         .cloned()
         .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
-    if !matches!(node.role.as_str(), "data" | "worker") {
+    if !matches!(node.role.as_str(), "data" | "worker" | "node") {
         return Err(Status::permission_denied(
-            "request requires a data or worker node",
+            "request requires a data, worker or node node",
         ));
     }
     Ok(node)
@@ -587,7 +587,7 @@ fn write_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
 
 fn data_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
     let node = write_identity(request)?;
-    if node.role != "data" {
+    if !matches!(node.role.as_str(), "data" | "node") {
         return Err(Status::permission_denied("request requires a data node"));
     }
     Ok(node)
@@ -623,7 +623,7 @@ impl NodeReads for Service {
             .get::<NodeState>()
             .cloned()
             .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
-        if !matches!(node.role.as_str(), "data" | "worker") {
+        if !matches!(node.role.as_str(), "data" | "worker" | "node") {
             return Err(Status::permission_denied(
                 "read reports require a node identity",
             ));
@@ -648,7 +648,7 @@ impl NodeReads for Service {
             .get::<NodeState>()
             .cloned()
             .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
-        if node.role != "data" {
+        if !matches!(node.role.as_str(), "data" | "node") {
             return Err(Status::permission_denied(
                 "object reads require a data node",
             ));
@@ -681,7 +681,7 @@ impl NodeReads for Service {
             .get::<NodeState>()
             .cloned()
             .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
-        if !matches!(node.role.as_str(), "data" | "worker") {
+        if !matches!(node.role.as_str(), "data" | "worker" | "node") {
             return Err(Status::permission_denied(
                 "protected reads require a node identity",
             ));
@@ -804,7 +804,7 @@ impl NodeControl for Service {
             .get::<NodeState>()
             .cloned()
             .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
-        if node.role != "data" {
+        if !matches!(node.role.as_str(), "data" | "node") {
             return Err(Status::permission_denied(
                 "read observations require a data node",
             ));

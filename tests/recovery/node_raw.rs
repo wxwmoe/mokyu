@@ -598,6 +598,15 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
                 .await?;
         assert!(!pending);
     }
-    cache_batches::check(&backend, &node, &key, session.run, session.epoch, storage).await?;
+    cache_batches::check(
+        &backend,
+        &admin,
+        &node,
+        &key,
+        session.run,
+        session.epoch,
+        storage,
+    )
+    .await?;
     Ok(())
 }
