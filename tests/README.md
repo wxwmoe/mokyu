@@ -106,6 +106,8 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `storage/raw_cache.py`：独占已初始化但停止的隔离服务，使用 9MiB 文件缓存和关闭的响应缓存、独立 S3 fixture，验证并发冷读/Range、坏缓存回退、pin/淘汰、巡检绕过、隔离/恢复代次、重启和覆盖，以及成功 PUT 不等待可选区块缓存填充；环境沿用 `source_quarantine`。
 - `storage/background_raw.py`：相同隔离服务约定，验证完整 raw 同流填充、无额外 GET、再次命中、局部响应不发布半文件、关闭/超限跳过、慢盘/低空间/取消/坏摘要清理，以及重启计费；需要 fault-injection，低空间分支另需 fsync 测试注入器。
 - `storage/background_cache.py`：相同隔离服务与 S3 后端，覆盖编码、pack/full check/rewrite/unpack、raw 摘要、CDC 和迁移的实际回填及前台 L2 命中；对 metadata/head/full 检查核对真实后端读取。可用 `MOKYU_TEST_NODE_CONFIG` 指向停止的 node 配置，管理和数据库环境仍指向运行中的 control，以验证前后台共享缓存。
+- `storage/cache_pressure.py`：沿用上述服务约定，要求 `instance.cache_size="8MiB"`；建立热点后执行冷来源扫描并发读取，核对热点 inode、再次命中、候选数量和容量上限，再验证紧张额度下 pending 排空仍能完成。输出本次响应时间，不推断生产容量。
+- `storage/local_cache.py`：同一停止服务约定但不设置 S3 后端；每种单容器数据库分别验证 local raw/chunks、完整检查、Range 和重启后读取，不生成重复节点 L2；同时核对 local 禁用读缓存的配置约束。
 - `storage/raw_migration.py`：raw 与加密 chunks、raw 与 raw 的跨存储 copy/move，支持独立远端 S3 fixture。
 - `storage/raw_streaming.py`：raw 大分片、原始 ETag、完整摘要和跨分片 Range；`--part-mib`、`--repeat`、`--label` 记录 UploadPart/Complete 耗时和服务 RSS，`--order sequential|reverse` 选择上传顺序。默认远端需 `MOKYU_TEST_BACKEND`，本地使用 `--local` 且不设置该变量；`MOKYU_TEST_PID_FILE` 必须属于同一容器。不同构建或服务预算的数字不能直接比较。
 - `storage/raw_replay.py`：暂停 Copy/Multipart 校验后的回放，修改远端 raw 或本地暂存来源，验证失败不会替换原对象或丢失已上传分片，恢复源数据后重试成功；需要 `MOKYU_TEST_BACKEND` 和故障注入构建。
@@ -117,7 +119,7 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `recovery/multipart_completion.py`：四库及双 data 的 Complete 5 秒保活、HTTP 200 内 XML 错误、断线继续、相同清单加入、持久结果重放、进程重启及租约 fencing。服务以 fault-injection 构建，快速回归设置 `MOKYU_TEST_COMPLETE_TIMEOUT_SECONDS=12`，真实截止回归使用 `300`；群集服务与测试使用相同值；群集另验发布清理竞态及等待本地队列远端确认，使用原有节点 kill/start 标记。测试超时变量不属于运行配置。
 - `s3/multipart_admission.py`：完成工作独立额度及满额 503、前台读写可用、校验失败释放额度、断线继续；需要独立 PostgreSQL 夹具与现有 integration 环境。
 - `recovery/remote_multipart.py`：原生后端 MPU 的跨节点乱序及稀疏分片、仅本地暂存、本地提前确认与重启、迟到同编号覆盖重传、上游完成后强杀恢复、缓存满 reject/fallback、Abort、空对象、profile 修改、维护排空、低空间拒绝和空闲回收；使用 `raw_cluster.py` 的双 data 夹具及 `replacement-control` 节点 kill/start 标记。
-- `recovery/raw_cluster.py`：两个实际 data 节点的原生远端 raw Multipart、跨节点 Complete/去重/读取，以及慢校验续租与 GC；另设 `MOKYU_TEST_PEER_ENDPOINT`，服务端 `read_idle_timeout=30s`，故障目录指向第一个 data 节点。`--cache` 额外验证两节点 raw 文件缓存及慢缓存命中续租；节点文件缓存至少 32MiB，并用 `MOKYU_TEST_CACHE_DIRS` 传入两个逗号分隔的 data/raw 路径。
+- `recovery/raw_cluster.py`：两个实际 data 节点的原生远端 raw Multipart、跨节点 Complete/去重/读取，以及慢校验续租与 GC；另设 `MOKYU_TEST_PEER_ENDPOINT`，服务端 `read_idle_timeout=30s`，故障目录指向第一个 data 节点。`--cache` 额外验证两节点 raw 文件缓存及慢缓存命中续租；节点文件缓存至少 32MiB，并用 `MOKYU_TEST_CACHE_DIRS` 传入两个逗号分隔的 data/cache/raw 路径。
 - `storage/single_lifecycle.py`：提前本地确认、持久上传、pack、rewrite、unpack、巡检、容量和清理。
 - `recovery/upload_cache.rs`：PostgreSQL 上传准备的双执行者竞争、取消回滚和 owner/pin/来源代次原子性；需要故障注入构建。
 - `recovery/single_restart.py`：三个后端共用的 API 契约，覆盖 10 个崩溃点，包括上传准备提交前后的 owner/pin 原子恢复、待上传数据的密钥轮换及 local/S3 加密数据重启读取。
@@ -299,7 +301,7 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 
 `python -m tests.recovery.cached_encoding` 使用相同的隔离服务与 S3 夹具，覆盖新块在最终编码前的持久确认、零提前 nonce 消耗、读取与去重、重启恢复、压缩/组包/密钥设置变更隔离、旧密钥撤销保护、直接组包后的最终文件数量、独立块压缩和缓存满 reject/fallback。上传缓存至少 8MiB。设置 `MOKYU_TEST_PEER_ENDPOINT` 时复用已启动的双 data 夹具，故障目录列表使用 `MOKYU_TEST_SOURCE_FAULT_DIRS`；单容器入口自行启停服务，四库分别运行。
 
-`python -m tests.recovery.background_cdc` 复用上述环境，验证原始表示提前确认、设置冻结、后台直接组包、健康复用、同内容并发、旧读者保护、覆盖/删除、空对象、候选上传后的强杀恢复、坏源拒绝及修复重试、显式缓存刷新和 Multipart。四库分别运行；`MOKYU_TEST_CDC_LOCAL=1` 使用本地后端，双 data 使用同样的 peer/fault 变量。故障点只可用于隔离构建。
+`python -m tests.recovery.background_cdc` 复用上述环境，验证原始表示提前确认、设置冻结、后台直接组包、健康复用、同内容并发、旧读者保护、覆盖/删除、空对象、候选上传后的强杀恢复、坏源拒绝及修复重试、显式缓存刷新和 Multipart。四库分别运行；`MOKYU_TEST_CDC_LOCAL=1` 使用本地后端，双 data 使用同样的 peer/fault 变量。竞争等待验证要求 `upload_idle_timeout="10s"`，单容器夹具会设置并重启，群集需在启动节点前配置。故障点只可用于隔离构建。
 
 `upload-overflow.spec.ts` 使用独立 S3 fixture（`MOKYU_TEST_BACKEND`），自行创建本地后端，验证三语明暗表单、键盘选择、320–1440px、草稿取消/保存及本地禁用。`recovery.raw_uploads` 同时验证 chunks/raw 的 fallback/reject、503 SlowDown、失败写入不覆盖旧对象、重启保存策略、非法选项与缺省字段。
 

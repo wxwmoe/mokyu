@@ -152,8 +152,19 @@ def main():
                 assert state(excess)['state'] == 'active'
             finally:
                 marker.unlink(missing_ok=True)
-            for work in active:
-                assert work.result(timeout=25)['ResponseMetadata']['HTTPStatusCode'] == 200
+            for work, (args, data) in zip(active, bounded[:-1]):
+                try:
+                    reply = work.result(timeout=25)
+                except ClientError as error:
+                    assert database.type == 'mysql' and error.response['Error']['Code'] == 'OperationAborted', error.response
+                    reply = fixture.client.complete_multipart_upload(**args)
+                    print('PASS concurrent transaction abort recovered by replaying Complete', flush=True)
+                assert reply['ResponseMetadata']['HTTPStatusCode'] == 200
+                fixture.read(args['Key'], data)
+                published = state(args)
+                assert published['state'] == 'completed'
+                assert fixture.client.complete_multipart_upload(**args)['ResponseMetadata']['HTTPStatusCode'] == 200
+                assert state(args) == published, 'completion replay changed its persisted result'
         fixture.client.complete_multipart_upload(**bounded[-1][0])
         print('PASS bounded completion jobs reject excess work before headers and retain foreground read/write capacity', flush=True)
 

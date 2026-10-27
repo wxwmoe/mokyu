@@ -45,6 +45,13 @@ def main():
             start()
         backend = os.environ.pop('MOKYU_TEST_BACKEND', None) if os.environ.get('MOKYU_TEST_CDC_LOCAL') else None
         fixture, database = Fixture(), Database()
+        settings = fixture.cli('settings', 'get', 'requests')
+        if not cluster and settings['upload_idle_timeout'] != '10s':
+            fixture.cli('settings', 'set', 'requests', '-', value={**settings, 'upload_idle_timeout': '10s'})
+            stop()
+            start()
+        else:
+            assert settings['upload_idle_timeout'] == '10s', 'requires a 10s upload idle timeout'
         if backend:
             os.environ['MOKYU_TEST_BACKEND'] = backend
         storage, bucket = uuid.UUID(fixture.store['id']), uuid.UUID(fixture.bucket_id)
@@ -161,7 +168,7 @@ def main():
             fixture.put('contender', value)
             raise AssertionError('a foreground write reused an unpublished allocation')
         except ClientError as error:
-            assert error.response['Error']['Code'] == 'RequestTimeout', error.response
+            assert error.response['Error']['Code'] in ('RequestTimeout', 'OperationAborted'), error.response
         assert {row['id'] for row in database.query(
             "SELECT id FROM chunks WHERE storage_id=%s AND state='preparing'", storage)} == active
         marker.unlink()

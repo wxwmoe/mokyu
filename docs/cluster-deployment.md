@@ -73,7 +73,7 @@ S3/公共读域名也可以有多个 data/node 地址；这是面向 S3 客户�
 
 control 首次启动通过 PostgreSQL 注册，使用自己的 node.json 恢复。data/worker/node 必须事先取得身份，不会自行注册；缺文件或角色不符会拒绝启动。连接不可用时保留本机状态入口并有界重连；复制同一身份启动另一个活跃进程会产生所有权冲突，不能同时服务。
 
-把每个节点的 node.json 和持久 data 目录纳入备份。重建时恢复对应文件并确保原进程已停止。data/worker/node 身份文件不可恢复时，在 control 执行 `cluster rotate NAME --confirm`，安全保存返回文件并替换后重启；该操作保留节点 UUID、递增凭据代次、隔离旧会话并撤销旧任务租约。它不能恢复已经丢失的本机唯一正文。control 文件丢失时先恢复备份；无法恢复则释放原 control 身份后重新注册。
+把每个节点的 node.json 和 pending 目录纳入与数据库一致的备份；cache 可丢弃，无需备份。重建时恢复对应身份和 pending 文件并确保原进程已停止，目录布局见[存储格式](storage-format.md#本地目录和缓存)。data/worker/node 身份文件不可恢复时，在 control 执行 `cluster rotate NAME --confirm`，安全保存返回文件并替换后重启；该操作保留节点 UUID、递增凭据代次、隔离旧会话并撤销旧任务租约。它不能恢复已经丢失的本机唯一正文。control 文件丢失时先恢复备份；无法恢复则释放原 control 身份后重新注册。
 
 | 命令 | 行为 |
 | --- | --- |
