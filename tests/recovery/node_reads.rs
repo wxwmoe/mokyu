@@ -499,13 +499,59 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             .and_then(model::error),
         Some(model::Error::NodeReadBusy)
     ));
-    let pulse = backend
+    sqlx::raw_sql(
+        "CREATE TABLE release_statements(name text NOT NULL);
+         CREATE FUNCTION record_release_statement() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN INSERT INTO release_statements VALUES(TG_TABLE_NAME); RETURN NULL; END $$;
+         CREATE TRIGGER release_statement AFTER DELETE ON storage_permits
+         FOR EACH STATEMENT EXECUTE FUNCTION record_release_statement();
+         CREATE TRIGGER release_statement AFTER DELETE ON node_read_windows
+         FOR EACH STATEMENT EXECUTE FUNCTION record_release_statement();
+         CREATE TRIGGER release_statement AFTER DELETE ON stream_leases
+         FOR EACH STATEMENT EXECUTE FUNCTION record_release_statement();
+         CREATE TRIGGER release_statement AFTER UPDATE ON node_native_work
+         FOR EACH STATEMENT EXECUTE FUNCTION record_release_statement();
+         CREATE TRIGGER release_statement AFTER UPDATE ON node_work
+         FOR EACH STATEMENT EXECUTE FUNCTION record_release_statement();",
+    )
+    .execute(&pool)
+    .await?;
+    let renewed = backend
         .pulse_session(
             &node,
             &key,
             session.run,
             session.epoch,
             1,
+            false,
+            read::KeepAlive {
+                renew: first
+                    .grants
+                    .iter()
+                    .map(|grant| read::GrantRef {
+                        r#type: grant.r#type,
+                        id: grant.id,
+                    })
+                    .collect(),
+                release: Vec::new(),
+            },
+        )
+        .await?;
+    assert!(renewed.grants.iter().all(|grant| grant.accepted));
+    let statements: Vec<String> = sqlx::query_scalar("SELECT name FROM release_statements")
+        .fetch_all(&pool)
+        .await?;
+    assert!(
+        statements.is_empty(),
+        "renewal ran release statements: {statements:?}"
+    );
+    let pulse = backend
+        .pulse_session(
+            &node,
+            &key,
+            session.run,
+            session.epoch,
+            2,
             false,
             read::KeepAlive {
                 renew: first
@@ -522,6 +568,15 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         )
         .await?;
     assert!(pulse.grants.iter().all(|grant| grant.accepted));
+    let statements: Vec<String> = sqlx::query_scalar("SELECT name FROM release_statements")
+        .fetch_all(&pool)
+        .await?;
+    assert_eq!(statements, ["node_read_windows"]);
+    sqlx::raw_sql(
+        "DROP FUNCTION record_release_statement() CASCADE; DROP TABLE release_statements",
+    )
+    .execute(&pool)
+    .await?;
     let third = backend
         .read_window(
             &node,
@@ -605,7 +660,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             &key,
             session.run,
             session.epoch,
-            2,
+            3,
             false,
             read::KeepAlive {
                 renew: Vec::new(),
@@ -632,7 +687,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             &key,
             session.run,
             session.epoch,
-            3,
+            4,
             false,
             read::KeepAlive {
                 renew: tail
@@ -659,7 +714,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             &key,
             session.run,
             session.epoch,
-            4,
+            5,
             false,
             read::KeepAlive {
                 renew: Vec::new(),
@@ -695,7 +750,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             &key,
             session.run,
             session.epoch,
-            5,
+            6,
             false,
             read::KeepAlive {
                 renew: Vec::new(),
@@ -795,7 +850,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             &key,
             session.run,
             session.epoch,
-            6,
+            7,
             false,
             read::KeepAlive {
                 renew: Vec::new(),
@@ -849,7 +904,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             &key,
             session.run,
             session.epoch,
-            7,
+            8,
             false,
             read::KeepAlive {
                 renew: Vec::new(),

@@ -10681,18 +10681,22 @@ async fn abort_node_writes(
         .await?;
     let streams: Vec<_> = rows.iter().filter_map(|row| row.0).collect();
     let leases: Vec<_> = rows.iter().filter_map(|row| row.1).collect();
-    queries::release_node_completions(&streams)
-        .execute(&mut *db)
-        .await?;
-    queries::node_write_release_permits(state, run, &streams, &[])
-        .execute(&mut *db)
-        .await?;
-    queries::abandon_node_streams(&streams)
-        .execute(&mut *db)
-        .await?;
-    queries::release_node_write_leases(&leases)
-        .execute(db)
-        .await?;
+    if !streams.is_empty() {
+        queries::release_node_completions(&streams)
+            .execute(&mut *db)
+            .await?;
+        queries::node_write_release_permits(state, run, &streams, &[])
+            .execute(&mut *db)
+            .await?;
+        queries::abandon_node_streams(&streams)
+            .execute(&mut *db)
+            .await?;
+    }
+    if !leases.is_empty() {
+        queries::release_node_write_leases(&leases)
+            .execute(db)
+            .await?;
+    }
     Ok(())
 }
 
@@ -10766,28 +10770,47 @@ async fn maintain_node_reads(
             .collect::<Vec<_>>()
     };
     let reads = ids(GrantType::Read);
-    queries::node_read_release_permits(state, run, &reads, &ids(GrantType::StorageRead))
-        .execute(&mut *db)
-        .await?;
-    queries::node_read_release_windows(state, run, &ids(GrantType::Window))
-        .execute(&mut *db)
-        .await?;
-    queries::node_read_release(state, run, &reads)
-        .execute(&mut *db)
-        .await?;
+    let permits = ids(GrantType::StorageRead);
+    if !reads.is_empty() || !permits.is_empty() {
+        queries::node_read_release_permits(state, run, &reads, &permits)
+            .execute(&mut *db)
+            .await?;
+    }
+    let windows = ids(GrantType::Window);
+    if !windows.is_empty() {
+        queries::node_read_release_windows(state, run, &windows)
+            .execute(&mut *db)
+            .await?;
+    }
+    if !reads.is_empty() {
+        queries::node_read_release(state, run, &reads)
+            .execute(&mut *db)
+            .await?;
+    }
     abort_node_writes(db, state, run, &[], &ids(GrantType::Write)).await?;
-    queries::node_write_release_permits(state, run, &[], &ids(GrantType::StorageWrite))
-        .execute(&mut *db)
-        .await?;
-    queries::native::release_reads(state, run, &ids(GrantType::StorageRead))
-        .execute(&mut *db)
-        .await?;
-    queries::native::renew(state, run, &ids(GrantType::Native), true)
-        .fetch_all(&mut *db)
-        .await?;
-    queries::work::renew(state, run, &ids(GrantType::Work), true)
-        .fetch_all(&mut *db)
-        .await?;
+    let writes = ids(GrantType::StorageWrite);
+    if !writes.is_empty() {
+        queries::node_write_release_permits(state, run, &[], &writes)
+            .execute(&mut *db)
+            .await?;
+    }
+    if !permits.is_empty() {
+        queries::native::release_reads(state, run, &permits)
+            .execute(&mut *db)
+            .await?;
+    }
+    let native = ids(GrantType::Native);
+    if !native.is_empty() {
+        queries::native::renew(state, run, &native, true)
+            .fetch_all(&mut *db)
+            .await?;
+    }
+    let work = ids(GrantType::Work);
+    if !work.is_empty() {
+        queries::work::renew(state, run, &work, true)
+            .fetch_all(&mut *db)
+            .await?;
+    }
     let mut renewed = HashMap::new();
     for r#type in [
         GrantType::Read,
@@ -10816,18 +10839,22 @@ async fn maintain_node_reads(
                     .copied()
                     .filter(|id| !renewed.contains_key(id))
                     .collect();
-                queries::work::renew(state, run, &rejected, true)
-                    .fetch_all(&mut *db)
-                    .await?;
+                if !rejected.is_empty() {
+                    queries::work::renew(state, run, &rejected, true)
+                        .fetch_all(&mut *db)
+                        .await?;
+                }
             }
             if r#type == GrantType::Write {
                 let accepted: Vec<_> = ids
                     .into_iter()
                     .filter(|id| renewed.contains_key(id))
                     .collect();
-                queries::renew_node_completions(state, run, &accepted)
-                    .execute(&mut *db)
-                    .await?;
+                if !accepted.is_empty() {
+                    queries::renew_node_completions(state, run, &accepted)
+                        .execute(&mut *db)
+                        .await?;
+                }
             }
         }
     }
