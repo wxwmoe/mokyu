@@ -428,32 +428,6 @@ impl App {
         });
         compression::Observations::start(Arc::downgrade(&app), compression_receiver);
         credential_activity::Activity::start(Arc::downgrade(&app), credential_receiver);
-        if app.role != "single" {
-            let cluster = app
-                .cluster
-                .clone()
-                .context("cluster backend is unavailable")?;
-            let profile_app = app.clone();
-            tokio::spawn(async move {
-                loop {
-                    let result: Result<()> = async {
-                        let mut listener = cluster.profile_changes().await?;
-                        profile_app.storage.refresh_storages().await?;
-                        loop {
-                            let storage_id = listener.next().await?;
-                            #[cfg(feature = "fault-injection")]
-                            crate::faults::point("storage-profile-notification").await;
-                            profile_app.storage.refresh_store(storage_id).await?;
-                        }
-                    }
-                    .await;
-                    if let Err(error) = result {
-                        tracing::warn!(%error, "storage profile listener will retry");
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                }
-            });
-        }
         app.read_checks.bind(Arc::downgrade(&app));
         tokio::spawn(public_reads::run(Arc::downgrade(&app), public_receiver));
         tokio::spawn(crate::http::cors::run(Arc::downgrade(&app), cors_receiver));

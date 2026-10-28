@@ -544,13 +544,19 @@ message Pulse {
   bool draining = 2;
   repeated GrantRef renew = 3;
   repeated GrantRef release = 4;
+  bool renew_run = 5;
+  repeated string applied = 6;
 }
+
+message Ping { uint64 nonce = 1; }
+message Pong { uint64 nonce = 1; }
 
 message SessionRequest {
   oneof message {
     Hello hello = 1;
     Pulse pulse = 2;
     Receipt receipt = 3;
+    Ping ping = 4;
   }
 }
 
@@ -610,6 +616,8 @@ message Notice {
   repeated Invalidation changes = 1;
   bool reset = 2;
   bool state_changed = 3;
+  bool work_available = 4;
+  repeated Revision settings = 5;
 }
 
 message Receipt {
@@ -621,6 +629,7 @@ message SessionReply {
     Welcome welcome = 1;
     PulseReply pulse = 2;
     Notice notice = 3;
+    Pong pong = 4;
   }
 }
 

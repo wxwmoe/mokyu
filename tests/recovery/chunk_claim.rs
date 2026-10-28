@@ -54,12 +54,8 @@ async fn postgres_chunk_claims_release_connections_and_fence_stale_writers() -> 
         PgConnection::connect(url.trim()).await?,
         false,
     );
-    let _first_profile = first.profile_changes().await?;
-    let _other_profile = other.profile_changes().await?;
-    let mut first_tasks = sqlx::postgres::PgListener::connect_with(&pool).await?;
-    first_tasks.listen("mokyu_tasks").await?;
-    let mut other_tasks = sqlx::postgres::PgListener::connect_with(&other_pool).await?;
-    other_tasks.listen("mokyu_tasks").await?;
+    let _first_notifications = first.notification_changes().await?;
+    let _other_notifications = other.notification_changes().await?;
     let storage = Uuid::new_v4();
     let bucket = Uuid::new_v4();
     sqlx::query("INSERT INTO storages(id,name,type,endpoint_url,remote_bucket_name,region,access_key_encrypted,secret_key_encrypted) VALUES($1,'claims','s3','http://backend:8333','claims','us-east-1','fixture','fixture')")

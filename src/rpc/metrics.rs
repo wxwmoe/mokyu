@@ -9,7 +9,9 @@ use std::sync::{
 pub(super) struct Metrics {
     pub(super) unary: Arc<Counters>,
     pub(super) connect: Arc<Counters>,
-    pub(super) heartbeat: Arc<Counters>,
+    pub(super) maintenance: Arc<Counters>,
+    pub(super) ping: Arc<Counters>,
+    pub(super) receipts: Arc<Counters>,
     pub(super) attempts: Arc<Counters>,
     pub(super) retries: AtomicU64,
 }
@@ -47,7 +49,7 @@ impl Metrics {
 
     pub(super) fn snapshot(&self) -> Value {
         json!({"summary": self.summary(), "unary": self.unary.snapshot(),
-            "connect": self.connect.snapshot(), "heartbeat": self.heartbeat.snapshot(),
+            "connect": self.connect.snapshot(), "maintenance": self.maintenance.snapshot(), "ping": self.ping.snapshot(), "receipts": self.receipts.snapshot(),
             "attempts": self.attempts.snapshot()})
     }
 }

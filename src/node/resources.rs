@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 const LIMIT: usize = 8192;
 const BATCH: usize = 256;
-const INTERVAL: Duration = Duration::from_secs(10);
+fn renew_at(now: Instant, expires: Instant) -> Instant {
+    now + (expires.saturating_duration_since(now) / 3).min(Duration::from_secs(30))
+}
 
 pub(crate) struct Grant {
     pub(crate) reference: wire::GrantRef,
@@ -187,6 +189,7 @@ impl Resources {
                     .upgrade()
                     .ok_or_else(|| Status::failed_precondition("node resource was released"))?;
                 entry.expires = resource.renew(deadline)?;
+                entry.next = entry.next.min(renew_at(now, entry.expires));
                 held.push(resource);
             } else {
                 let reference = wire::GrantRef {
@@ -208,7 +211,7 @@ impl Resources {
                         run: run.clone(),
                         held: Arc::downgrade(&resource),
                         expires: deadline,
-                        next: now + INTERVAL,
+                        next: renew_at(now, deadline),
                         retired: false,
                         released: false,
                     },
@@ -216,13 +219,24 @@ impl Resources {
                 held.push(resource);
             }
         }
-        if held
-            .iter()
-            .any(|grant| *grant.expires.lock().unwrap() <= now + INTERVAL)
-        {
-            self.changed.notify_one();
-        }
+        self.changed.notify_one();
         Ok(held)
+    }
+
+    pub(super) fn next(&self, run: &Arc<RunLease>) -> Instant {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| {
+                !entry.released
+                    && !entry.retired
+                    && entry.held.strong_count() > 0
+                    && Arc::ptr_eq(&entry.run, run)
+            })
+            .map(|entry| entry.next.min(entry.expires))
+            .min()
+            .unwrap_or_else(|| run.deadline())
     }
 
     pub(super) fn batch(&self, run: &Arc<RunLease>) -> Batch {
@@ -237,7 +251,7 @@ impl Resources {
                 }
                 let release =
                     entry.retired || entry.held.strong_count() == 0 || entry.expires <= now;
-                (release || entry.next <= now || entry.expires <= now + INTERVAL).then_some((
+                (release || entry.next <= now).then_some((
                     release,
                     entry.expires,
                     entry.reference.clone(),
@@ -294,7 +308,7 @@ impl Resources {
                 continue;
             }
             let deadline = lease_deadline(started, result.valid_for_ms)?;
-            entry.next = Instant::now() + INTERVAL;
+            entry.next = renew_at(Instant::now(), deadline);
             if let Some(held) = entry.held.upgrade() {
                 match held.renew(deadline) {
                     Ok(deadline) => entry.expires = deadline,

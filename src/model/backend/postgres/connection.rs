@@ -260,14 +260,23 @@ pub(super) async fn set_mode(
     result
 }
 
-struct ProfileListener(sqlx::postgres::PgListener);
-
 struct NotificationListener(sqlx::postgres::PgListener);
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NotificationChanges for NotificationListener {
-    async fn next(&mut self) -> Result<bool> {
-        Ok(self.0.try_recv().await?.is_some())
+    async fn next(&mut self) -> Result<crate::model::notification::Signal> {
+        use crate::model::notification::Signal;
+        loop {
+            let Some(notification) = self.0.try_recv().await? else {
+                return Ok(Signal::Reconnected);
+            };
+            if notification.channel() == "mokyu_notifications" {
+                return Ok(Signal::Changes);
+            }
+            if let Some(signal) = Signal::parse(notification.payload()) {
+                return Ok(signal);
+            }
+        }
     }
 }
 
@@ -275,48 +284,10 @@ pub(super) async fn notification_changes(
     pool: &PgPool,
 ) -> Result<Box<dyn crate::model::cluster::NotificationChanges>> {
     let mut listener = sqlx::postgres::PgListener::connect_with(pool).await?;
-    listener.listen("mokyu_notifications").await?;
-    Ok(Box::new(NotificationListener(listener)))
-}
-
-#[async_trait::async_trait]
-impl crate::model::cluster::ProfileChanges for ProfileListener {
-    async fn next(&mut self) -> Result<uuid::Uuid> {
-        loop {
-            let notification = self.0.recv().await?;
-            match notification.payload().parse() {
-                Ok(id) => return Ok(id),
-                Err(_) => tracing::warn!(
-                    payload = notification.payload(),
-                    "invalid storage profile notification"
-                ),
-            }
-        }
-    }
-}
-
-pub(super) async fn profile_changes(
-    pool: &PgPool,
-) -> Result<Box<dyn crate::model::cluster::ProfileChanges>> {
-    let mut listener = sqlx::postgres::PgListener::connect_with(pool).await?;
     listener
-        .listen("mokyu_storage_profiles")
-        .await
-        .context("storage profile subscription failed")?;
-    Ok(Box::new(ProfileListener(listener)))
-}
-
-pub(super) async fn listen_tasks(
-    pool: &PgPool,
-    wake: std::sync::Arc<tokio::sync::Notify>,
-) -> Result<()> {
-    let mut listener = sqlx::postgres::PgListener::connect_with(pool).await?;
-    listener.listen("mokyu_tasks").await?;
-    wake.notify_waiters();
-    loop {
-        listener.recv().await?;
-        wake.notify_waiters();
-    }
+        .listen_all(["mokyu_tasks", "mokyu_notifications"])
+        .await?;
+    Ok(Box::new(NotificationListener(listener)))
 }
 
 pub async fn connect(

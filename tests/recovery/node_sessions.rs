@@ -78,6 +78,30 @@ async fn postgres_node_sessions_recover_across_controls_and_fence_old_runs() -> 
         .provision_node(&admin, "data-test", "data", &key)
         .await?;
     node.validate()?;
+    let task = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    super::transactions::insert_task(
+        &mut tx,
+        task,
+        "upload",
+        None,
+        serde_json::json!({"operation":"cache"}),
+        None,
+    )
+    .await?;
+    sqlx::query("UPDATE tasks SET execution_scope='node',target_node_id=$2 WHERE id=$1")
+        .bind(task)
+        .bind(node.node_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert_eq!(first.task_targets(&[task]).await?, vec![Some(node.node_id)]);
+    sqlx::query("UPDATE tasks SET task_type='usage',execution_scope='cluster',target_node_id=NULL WHERE id=$1").bind(task).execute(&pool).await?;
+    assert!(first.task_targets(&[task]).await?.is_empty());
+    sqlx::query("DELETE FROM tasks WHERE id=$1")
+        .bind(task)
+        .execute(&pool)
+        .await?;
     assert!(
         second
             .provision_node(&admin, "data-test", "data", &key)
@@ -105,6 +129,40 @@ async fn postgres_node_sessions_recover_across_controls_and_fence_old_runs() -> 
             .bind(node.node_id)
             .fetch_one(&pool)
             .await?;
+    let (remaining, grants) = first
+        .maintain_session(
+            &node,
+            &key,
+            initial.run,
+            initial.epoch,
+            1,
+            Default::default(),
+        )
+        .await?;
+    assert!(remaining > 80_000 && remaining <= initial.valid_for_ms);
+    assert!(grants.is_empty());
+    assert_eq!(
+        expires,
+        sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+            "SELECT expires_at FROM node_sessions WHERE node_id=$1"
+        )
+        .bind(node.node_id)
+        .fetch_one(&pool)
+        .await?
+    );
+    assert!(
+        first
+            .maintain_session(
+                &node,
+                &key,
+                initial.run,
+                initial.epoch,
+                1,
+                Default::default()
+            )
+            .await
+            .is_err()
+    );
     let replayed = second.open_session(&node, &key, hello).await?;
     assert_eq!(initial.run.fence, replayed.run.fence);
     assert_eq!(initial.epoch + 1, replayed.epoch);

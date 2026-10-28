@@ -164,58 +164,89 @@ impl NodeContext {
             .await?;
         *failures = 0;
         let mut sequence = 0u64;
-        let mut timer = tokio::time::interval(Duration::from_secs(10));
-        timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut renew_run = Instant::now();
         let mut mode = self.mode.subscribe();
         loop {
+            let due = renew_run.min(self.resources.next(&lease));
+            let mut force = false;
             tokio::select! {
-                _ = timer.tick() => {},
-                notice = session.notified() => { notice?; if !session.take_state_change() { continue; } },
-                _ = mode.changed() => {},
-                _ = self.resources.changed.notified() => {},
+                biased;
+                _ = tokio::time::sleep_until(due) => {},
+                _ = tokio::time::sleep_until(session.io_deadline()) => { session.service_io().await?; },
+                notice = session.notified() => { notice?; },
+                _ = mode.changed() => { force=true; },
+                _ = self.resources.changed.notified() => {
+                    session.during(async { tokio::time::sleep(Duration::from_millis(20)).await; Ok(()) }).await?;
+                },
             }
             if *mode.borrow() == Mode::Stopped {
                 return Ok(());
             }
             lease.check()?;
+            if session.take_work() {
+                self.native_work.notify_one();
+                self.current.send_modify(|state| state.work_pending = true);
+            }
+            let hints = session.take_settings();
+            let cached = settings.cached();
+            if session.take_state_change()
+                || hints.iter().any(|hint| {
+                    !cached
+                        .iter()
+                        .any(|v| v.section == hint.section && v.revision >= hint.revision)
+                })
+            {
+                session
+                    .during(self.synchronize(&lease, &mut settings))
+                    .await?;
+            }
             let draining = *mode.borrow() == Mode::Draining;
-            // Drain bounded batches promptly; one batch per heartbeat cannot cover all live reads.
-            for index in 0..32 {
+            for _ in 0..32 {
                 let batch = self.resources.batch(&lease);
-                if index > 0 && batch.renew.is_empty() && batch.release.is_empty() {
+                let extend = force || Instant::now() >= renew_run;
+                if !extend && batch.renew.is_empty() && batch.release.is_empty() {
                     break;
                 }
                 sequence = sequence
                     .checked_add(1)
-                    .ok_or_else(|| Status::data_loss("heartbeat sequence exhausted"))?;
+                    .ok_or_else(|| Status::data_loss("maintenance sequence exhausted"))?;
                 let started = Instant::now();
                 let reply = session
-                    .pulse_resources(
+                    .maintain_resources(
                         sequence,
-                        draining,
+                        extend && draining,
                         batch.renew.clone(),
                         batch.release.clone(),
+                        extend,
                     )
                     .await?;
                 lease.renew(session.valid_until)?;
                 self.resources
                     .acknowledge(&lease, &batch, started, &reply.grants)?;
-                let state = reply
-                    .state
-                    .ok_or_else(|| Status::data_loss("control omitted node state"))?;
-                self.publish(&lease, &settings, &state);
-                if !settings.matches(&state).map_err(invalid_settings)? {
-                    session
-                        .during(self.synchronize(&lease, &mut settings))
-                        .await?;
+                if extend {
+                    renew_run = started
+                        + (session.valid_until.saturating_duration_since(started) / 3)
+                            // Leave headroom before the 30-second contact freshness threshold.
+                            .min(Duration::from_secs(25));
+                    force = false;
                 }
-            }
-            let peer = session.peer;
-            if !session
-                .during(async { Ok(self.client.contains(peer).await) })
-                .await?
-            {
-                return Err(Status::unavailable("session origin left control DNS"));
+                if let Some(state) = reply.state {
+                    self.publish(&lease, &settings, &state);
+                    if !settings.matches(&state).map_err(invalid_settings)? {
+                        session
+                            .during(self.synchronize(&lease, &mut settings))
+                            .await?;
+                    }
+                }
+                if extend {
+                    let peer = session.peer;
+                    if !session
+                        .during(async { Ok(self.client.contains(peer).await) })
+                        .await?
+                    {
+                        return Err(Status::unavailable("session origin left control DNS"));
+                    }
+                }
             }
         }
     }

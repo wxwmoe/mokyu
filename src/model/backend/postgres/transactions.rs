@@ -974,9 +974,7 @@ pub(crate) async fn insert_task(
     queries::insert_task(id, task_type, bucket, detail, audit_id)
         .execute(&mut *db)
         .await?;
-    queries::notify_task(id.to_string())
-        .execute(&mut *db)
-        .await?;
+    queries::notify_work(id).execute(&mut *db).await?;
     Ok(())
 }
 
@@ -2539,7 +2537,7 @@ pub(super) async fn save_runtime_settings(
         json!({"revision":row.revision}),
     )
     .await?;
-    queries::notify_task("node-state".into())
+    queries::notify_task(format!("settings:{section}:{}", row.revision))
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -2562,7 +2560,7 @@ pub(super) async fn reset_runtime_settings(
         json!({"revision":row.revision}),
     )
     .await?;
-    queries::notify_task("node-state".into())
+    queries::notify_task(format!("settings:{section}:{}", row.revision))
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -5965,9 +5963,7 @@ pub(super) async fn update_storage_profile(
         serde_json::json!({"revision": profile.revision + 1}),
     )
     .await?;
-    queries::notify_storage_profile(storage_id.to_string())
-        .execute(&mut *tx)
-        .await?;
+
     tx.commit().await?;
     Ok(storage_id)
 }
@@ -6010,10 +6006,8 @@ impl StorageInitializer for StorageInitialization {
         Ok(effective)
     }
     async fn finish(mut self: Box<Self>) -> Result<()> {
-        let id = self.id.context("storage was not prepared")?;
-        queries::notify_storage_profile(id.to_string())
-            .execute(&mut *self.tx)
-            .await?;
+        self.id.context("storage was not prepared")?;
+
         self.tx.commit().await?;
         Ok(())
     }
@@ -6080,9 +6074,7 @@ impl StorageUpdate for StorageModification {
             .execute(&mut *self.tx)
             .await?;
         save_storage_profile(&mut self.tx, profile).await?;
-        queries::notify_storage_profile(record.id.to_string())
-            .execute(&mut *self.tx)
-            .await?;
+
         self.tx.commit().await?;
         Ok(())
     }
@@ -6117,9 +6109,7 @@ pub(super) async fn storage_current_key(
     queries::bump_storage_profile(row.id)
         .execute(&mut *tx)
         .await?;
-    queries::notify_storage_profile(row.id.to_string())
-        .execute(&mut *tx)
-        .await?;
+
     checkpoint_event(
         &mut tx,
         "storage.current_key.update",
@@ -6390,9 +6380,7 @@ pub(super) async fn change_task_state(
             .execute(&mut *tx)
             .await?;
     }
-    queries::notify_task(id.to_string())
-        .execute(&mut *tx)
-        .await?;
+    queries::notify_work(id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -7177,9 +7165,7 @@ async fn enqueue_conversion(
     let mut detail = serde_json::to_value(job)?;
     detail["operation"] = json!("cdc");
     let task = Uuid::new_v4();
-    queries::insert_task(task, "upload", Some(bucket), detail, None)
-        .execute(&mut *db)
-        .await?;
+    insert_task(&mut *db, task, "upload", Some(bucket), detail, None).await?;
     queries::conversion_link(source, task).execute(db).await?;
     Ok(())
 }
@@ -7743,9 +7729,6 @@ pub(super) async fn replace_keys(
             .execute(&mut *tx)
             .await?;
         queries::bump_storage_profile(storage.id)
-            .execute(&mut *tx)
-            .await?;
-        queries::notify_storage_profile(storage.id.to_string())
             .execute(&mut *tx)
             .await?;
     }
@@ -10847,6 +10830,30 @@ async fn maintain_node_reads(
             valid_for_ms: 0,
         }))
         .collect())
+}
+
+pub(super) async fn maintain_node_session(
+    pool: &PgPool,
+    state: &NodeState,
+    key: &Key,
+    run: Run,
+    epoch: i64,
+    sequence: i64,
+    resources: read::KeepAlive,
+) -> Result<(i64, Vec<read::GrantResult>)> {
+    let mut tx = pool.begin().await?;
+    authenticate_rpc_node(&mut tx, state, key, true).await?;
+    let session = require_node_run(&mut tx, state, run, true).await?;
+    ensure!(
+        session.epoch == epoch && sequence > session.sequence,
+        Error::NodeConflict
+    );
+    let grants = maintain_node_reads(&mut tx, state, run, resources).await?;
+    let remaining = queries::maintain_node_session(state.node_id, sequence)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok((remaining, grants))
 }
 
 pub(super) async fn pulse_node_session(

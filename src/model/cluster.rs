@@ -20,6 +20,7 @@ pub(crate) trait ClusterStore: Send + Sync {
     ) -> Result<u64>;
     async fn maintain_notifications(&self) -> Result<bool>;
     async fn notification_changes(&self) -> Result<Box<dyn NotificationChanges>>;
+    async fn task_targets(&self, tasks: &[Uuid]) -> Result<Vec<Option<Uuid>>>;
     async fn read_migration(
         &self,
         node: &NodeState,
@@ -248,6 +249,15 @@ pub(crate) trait ClusterStore: Send + Sync {
         draining: bool,
         resources: super::node_read::KeepAlive,
     ) -> Result<super::session::Snapshot>;
+    async fn maintain_session(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        epoch: i64,
+        sequence: i64,
+        resources: super::node_read::KeepAlive,
+    ) -> Result<(i64, Vec<super::node_read::GrantResult>)>;
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
     async fn begin_remote(
         &self,
@@ -361,8 +371,6 @@ pub(crate) trait ClusterStore: Send + Sync {
     async fn release_read(&self, id: Uuid) -> Result<()>;
     async fn renew_write(&self, stream: Id, ttl_seconds: i64) -> Result<()>;
     async fn expire_stream_leases(&self) -> Result<()>;
-    async fn profile_changes(&self) -> Result<Box<dyn ProfileChanges>>;
-    async fn listen_tasks(&self, wake: std::sync::Arc<tokio::sync::Notify>) -> Result<()>;
     async fn mode(&self) -> Result<String>;
     async fn status(&self) -> Result<ClusterStatus>;
     async fn nodes(
@@ -425,15 +433,9 @@ pub(crate) trait ClusterStore: Send + Sync {
     async fn heartbeat(&self, state: &NodeState, role: &str, key: &Key) -> Result<()>;
     async fn leader(&self, key: i64) -> Result<Option<Box<dyn Leader>>>;
 }
-#[async_trait]
-pub(crate) trait ProfileChanges: Send {
-    async fn next(&mut self) -> Result<Uuid>;
-}
-
 #[async_trait::async_trait]
 pub(crate) trait NotificationChanges: Send {
-    // False reports a reconnected subscription, including SQLx automatic recovery.
-    async fn next(&mut self) -> Result<bool>;
+    async fn next(&mut self) -> Result<super::notification::Signal>;
 }
 #[async_trait]
 pub(crate) trait Leader: Send {

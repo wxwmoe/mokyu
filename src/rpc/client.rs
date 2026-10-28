@@ -702,7 +702,7 @@ impl Client {
                     super::uuid(&run.fence)?;
                     super::uuid(&welcome.control_id)?;
                     let valid_until = lease_deadline(started, welcome.valid_for_ms)?;
-                    Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until, acknowledged_at: Instant::now(), metrics: self.metrics.clone(), on_notice: None, applied: Default::default(), state_changed: false })
+                    Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until, last_received: Instant::now(), last_sent: Instant::now(), nonce: 0, receipts: Vec::new(), receipt_due: None, work_available: false, settings: Vec::new(), metrics: self.metrics.clone(), on_notice: None, applied: Default::default(), state_changed: false })
                 }).await.unwrap_or_else(|_| Err(Status::deadline_exceeded("session connection timed out")));
                 measured.finish(&result);
                 match result {
@@ -746,7 +746,13 @@ pub(crate) struct Session {
     incoming: tonic::Streaming<wire::SessionReply>,
     pub(crate) welcome: wire::Welcome,
     pub(crate) valid_until: Instant,
-    acknowledged_at: Instant,
+    last_received: Instant,
+    last_sent: Instant,
+    nonce: u64,
+    receipts: Vec<String>,
+    receipt_due: Option<Instant>,
+    work_available: bool,
+    settings: Vec<wire::Revision>,
     metrics: Arc<super::metrics::Metrics>,
     pub(crate) on_notice:
         Option<Arc<dyn Fn(bool, &[crate::model::notification::Change]) + Send + Sync>>,
@@ -756,7 +762,9 @@ pub(crate) struct Session {
 
 impl Session {
     pub(crate) async fn notified(&mut self) -> Result<(), Status> {
-        match self.incoming.message().await? {
+        let message = self.incoming.message().await?;
+        self.last_received = Instant::now();
+        match message {
             Some(wire::SessionReply {
                 message: Some(wire::session_reply::Message::Notice(notice)),
             }) => self.notice(notice).await,
@@ -766,6 +774,29 @@ impl Session {
     }
 
     async fn notice(&mut self, notice: wire::Notice) -> Result<(), Status> {
+        if notice.settings.len() > 5
+            || notice.settings.iter().any(|r| {
+                !(1..=5).contains(&r.section) || r.revision == 0 || r.revision > i64::MAX as u64
+            })
+        {
+            return Err(Status::data_loss("invalid settings hint"));
+        }
+        let mut seen = HashSet::new();
+        for revision in &notice.settings {
+            if !seen.insert(revision.section) {
+                return Err(Status::data_loss("duplicate settings hint"));
+            }
+            if let Some(previous) = self
+                .settings
+                .iter_mut()
+                .find(|r| r.section == revision.section)
+            {
+                previous.revision = previous.revision.max(revision.revision);
+            } else {
+                self.settings.push(revision.clone());
+            }
+        }
+        self.work_available |= notice.work_available;
         self.state_changed |= notice.state_changed;
         let handler = self.on_notice.as_ref();
         let receipt = self.applied.apply(notice, |reset, changes| {
@@ -774,14 +805,112 @@ impl Session {
             }
         })?;
         if handler.is_some() && !receipt.applied.is_empty() {
-            self.sender
-                .send(wire::SessionRequest {
-                    message: Some(wire::session_request::Message::Receipt(receipt)),
-                })
-                .await
-                .map_err(|_| Status::unavailable("node session closed"))?;
+            if self.receipts.len() + receipt.applied.len() > crate::model::notification::LIMIT {
+                self.flush_receipts().await?;
+            }
+            for id in receipt.applied {
+                if !self.receipts.contains(&id) {
+                    self.receipts.push(id);
+                }
+            }
+            self.receipt_due
+                .get_or_insert_with(|| Instant::now() + Duration::from_millis(50));
+            if self.receipts.len() == crate::model::notification::LIMIT {
+                self.flush_receipts().await?;
+            }
         }
         Ok(())
+    }
+
+    pub(crate) fn take_work(&mut self) -> bool {
+        std::mem::take(&mut self.work_available)
+    }
+    pub(crate) fn take_settings(&mut self) -> Vec<wire::Revision> {
+        std::mem::take(&mut self.settings)
+    }
+
+    async fn send(&mut self, message: wire::session_request::Message) -> Result<(), Status> {
+        tokio::time::timeout_at(
+            self.valid_until
+                .min(Instant::now() + Duration::from_secs(10)),
+            self.sender.send(wire::SessionRequest {
+                message: Some(message),
+            }),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("node session send timed out"))?
+        .map_err(|_| Status::unavailable("node session closed"))?;
+        self.last_sent = Instant::now();
+        Ok(())
+    }
+
+    async fn flush_receipts(&mut self) -> Result<(), Status> {
+        if self.receipts.is_empty() {
+            return Ok(());
+        }
+        let mut operation = self.metrics.receipts.begin();
+        let applied = std::mem::take(&mut self.receipts);
+        self.receipt_due = None;
+        let result = self
+            .send(wire::session_request::Message::Receipt(wire::Receipt {
+                applied,
+            }))
+            .await;
+        operation.finish(result.is_err());
+        result
+    }
+
+    pub(crate) fn io_deadline(&self) -> Instant {
+        let idle = self.last_sent.min(self.last_received) + Duration::from_secs(10);
+        self.receipt_due
+            .map_or(idle, |at| at.min(idle))
+            .min(self.valid_until)
+    }
+
+    pub(crate) async fn service_io(&mut self) -> Result<(), Status> {
+        if Instant::now() >= self.valid_until {
+            return Err(Status::failed_precondition("node run expired"));
+        }
+        if self.receipt_due.is_some_and(|at| at <= Instant::now()) {
+            self.flush_receipts().await?;
+        }
+        if self.last_sent.min(self.last_received) + Duration::from_secs(10) <= Instant::now() {
+            self.ping().await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn ping(&mut self) -> Result<(), Status> {
+        let mut operation = self.metrics.ping.begin();
+        self.nonce = self
+            .nonce
+            .checked_add(1)
+            .ok_or_else(|| Status::data_loss("ping sequence exhausted"))?;
+        let nonce = self.nonce;
+        let deadline = self
+            .valid_until
+            .min(Instant::now() + Duration::from_secs(10));
+        let result = tokio::time::timeout_at(deadline, async {
+            self.send(wire::session_request::Message::Ping(wire::Ping { nonce }))
+                .await?;
+            loop {
+                let message = self.incoming.message().await?;
+                self.last_received = Instant::now();
+                match message.and_then(|r| r.message) {
+                    Some(wire::session_reply::Message::Pong(pong)) if pong.nonce == nonce => {
+                        return Ok(());
+                    }
+                    Some(wire::session_reply::Message::Notice(notice)) => {
+                        self.notice(notice).await?
+                    }
+                    _ => return Err(Status::data_loss("invalid ping acknowledgement")),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err(Status::deadline_exceeded("node ping timed out")));
+        operation.finish(result.is_err());
+        result
     }
 
     pub(crate) fn take_state_change(&mut self) -> bool {
@@ -796,6 +925,7 @@ impl Session {
         loop {
             tokio::select! {
                 biased;
+                _ = tokio::time::sleep_until(self.io_deadline()) => self.service_io().await?,
                 result = &mut future => return result,
                 notice = self.notified() => notice?,
             }
@@ -820,9 +950,21 @@ impl Session {
         renew: Vec<wire::GrantRef>,
         release: Vec<wire::GrantRef>,
     ) -> Result<wire::PulseReply, Status> {
-        let mut operation = self.metrics.heartbeat.begin();
+        self.maintain_resources(sequence, draining, renew, release, true)
+            .await
+    }
+
+    pub(crate) async fn maintain_resources(
+        &mut self,
+        sequence: u64,
+        draining: bool,
+        renew: Vec<wire::GrantRef>,
+        release: Vec<wire::GrantRef>,
+        renew_run: bool,
+    ) -> Result<wire::PulseReply, Status> {
+        let mut operation = self.metrics.maintenance.begin();
         let result = self
-            .exchange_pulse(sequence, draining, renew, release)
+            .exchange_pulse(sequence, draining, renew, release, renew_run)
             .await;
         operation.finish(result.is_err());
         result
@@ -834,6 +976,7 @@ impl Session {
         draining: bool,
         renew: Vec<wire::GrantRef>,
         release: Vec<wire::GrantRef>,
+        renew_run: bool,
     ) -> Result<wire::PulseReply, Status> {
         super::read::keep_alive(renew.clone(), release.clone())?;
         let expected: Vec<_> = renew.iter().chain(&release).cloned().collect();
@@ -841,21 +984,23 @@ impl Session {
         let started = Instant::now();
         let deadline = self
             .valid_until
-            .min(self.acknowledged_at + Duration::from_secs(30));
+            .min(self.last_received + Duration::from_secs(30))
+            .min(started + Duration::from_secs(10));
         let reply = tokio::time::timeout_at(deadline, async {
-            self.sender
-                .send(wire::SessionRequest {
-                    message: Some(wire::session_request::Message::Pulse(wire::Pulse {
-                        sequence,
-                        draining,
-                        renew,
-                        release,
-                    })),
-                })
-                .await
-                .map_err(|_| Status::unavailable("node session closed"))?;
+            let applied = std::mem::take(&mut self.receipts);
+            self.receipt_due = None;
+            self.send(wire::session_request::Message::Pulse(wire::Pulse {
+                sequence,
+                draining,
+                renew,
+                release,
+                renew_run,
+                applied,
+            }))
+            .await?;
             loop {
                 let message = self.incoming.message().await?;
+                self.last_received = Instant::now();
                 if let Some(wire::SessionReply {
                     message: Some(wire::session_reply::Message::Notice(notice)),
                 }) = &message
@@ -880,7 +1025,7 @@ impl Session {
             return Err(Status::data_loss("node heartbeat sequence does not match"));
         }
         self.valid_until = lease_deadline(started, reply.valid_for_ms)?;
-        if reply.state.is_none()
+        if reply.state.is_some() != renew_run
             || reply.grants.len() != expected.len()
             || reply
                 .grants
@@ -900,7 +1045,7 @@ impl Session {
         {
             return Err(Status::data_loss("invalid resource acknowledgement"));
         }
-        self.acknowledged_at = Instant::now();
+        self.last_received = Instant::now();
         Ok(reply)
     }
 }

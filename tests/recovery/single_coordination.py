@@ -14,7 +14,7 @@ assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
 dsn = Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text()
 db = psycopg.connect(dsn, autocommit=True)
 observer = psycopg.connect(dsn, autocommit=True)
-observer.execute('LISTEN mokyu_storage_profiles')
+observer.execute('LISTEN mokyu_notifications')
 observer.execute('LISTEN mokyu_tasks')
 assert db.execute('SELECT deployment_mode FROM mokyu_meta WHERE singleton').fetchone()[0] == 'single'
 command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli']

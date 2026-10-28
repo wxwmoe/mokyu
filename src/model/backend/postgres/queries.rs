@@ -683,6 +683,10 @@ pub(super) fn notify_task(id: String) -> Statement<'static> {
     sqlx::query("SELECT pg_notify('mokyu_tasks',$1) FROM mokyu_meta WHERE singleton AND deployment_mode='cluster'").bind(id)
 }
 
+pub(super) fn notify_work(id: Uuid) -> Statement<'static> {
+    notify_task(format!("task:{id}"))
+}
+
 pub(super) fn finish_stream<'q>(
     id: Id,
     size: i64,
@@ -7417,10 +7421,6 @@ pub(super) fn storage_profile_target<'q>(name: &'q str) -> Rows<'q, (Uuid, Strin
     sqlx::query_as("SELECT id,type,block_key_id FROM storages WHERE name=$1 FOR UPDATE").bind(name)
 }
 
-pub(super) fn notify_storage_profile(id: String) -> Statement<'static> {
-    sqlx::query("SELECT pg_notify('mokyu_storage_profiles',$1) FROM mokyu_meta WHERE singleton AND deployment_mode='cluster'").bind(id)
-}
-
 pub(super) fn insert_storage_record<'q>(
     record: &'q BackendRecord,
     key: Option<Uuid>,
@@ -7556,6 +7556,10 @@ impl ClusterStore for Backend {
     }
     async fn maintain_notifications(&self) -> Result<bool> {
         transactions::notifications::maintain(&self.pool).await
+    }
+    async fn task_targets(&self, tasks: &[Uuid]) -> Result<Vec<Option<Uuid>>> {
+        anyhow::ensure!(tasks.len() <= 256, "too many task hints");
+        Ok(sqlx::query_scalar("SELECT DISTINCT CASE WHEN t.execution_scope='node' THEN t.target_node_id END FROM tasks t WHERE t.id=ANY($1) AND (t.execution_scope<>'node' OR t.target_node_id IS NOT NULL) AND NOT (t.task_type IN ('usage','purge') OR (t.task_type='cleanup' AND t.detail->>'storage_id' IS NULL) OR coalesce(t.task_type='integrity' AND NOT t.detail ? 'source_operation' AND (t.detail->>'mode'='metadata' OR t.detail->>'phase'='metadata'),false))").bind(tasks).fetch_all(&self.pool).await?)
     }
     async fn notification_changes(
         &self,
@@ -7922,6 +7926,18 @@ impl ClusterStore for Backend {
         )
         .await
     }
+    async fn maintain_session(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+        epoch: i64,
+        sequence: i64,
+        resources: crate::model::node_read::KeepAlive,
+    ) -> Result<(i64, Vec<crate::model::node_read::GrantResult>)> {
+        transactions::maintain_node_session(&self.pool, node, key, run, epoch, sequence, resources)
+            .await
+    }
 
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
         Ok(remote_upload(upload).fetch_optional(&self.pool).await?)
@@ -8144,12 +8160,6 @@ impl ClusterStore for Backend {
     async fn expire_stream_leases(&self) -> Result<()> {
         expire_stream_leases().execute(&self.pool).await?;
         Ok(())
-    }
-    async fn profile_changes(&self) -> Result<Box<dyn crate::model::cluster::ProfileChanges>> {
-        connection::profile_changes(&self.pool).await
-    }
-    async fn listen_tasks(&self, wake: std::sync::Arc<tokio::sync::Notify>) -> Result<()> {
-        connection::listen_tasks(&self.pool, wake).await
     }
     async fn mode(&self) -> Result<String> {
         Ok(deployment_mode().fetch_one(&self.pool).await?)
@@ -10903,6 +10913,10 @@ pub(super) fn save_node_session(
 pub(super) fn pulse_node_session(node: Uuid, sequence: i64, draining: bool) -> Statement<'static> {
     sqlx::query("UPDATE node_sessions SET sequence=$2,draining=draining OR $3,expires_at=clock_timestamp()+$4*interval '1 second' WHERE node_id=$1")
         .bind(node).bind(sequence).bind(draining).bind(crate::model::session::LEASE_SECONDS)
+}
+
+pub(super) fn maintain_node_session(node: Uuid, sequence: i64) -> Scalar<'static, i64> {
+    sqlx::query_scalar("UPDATE node_sessions SET sequence=$2 WHERE node_id=$1 RETURNING greatest(0,floor(extract(epoch FROM (expires_at-clock_timestamp()))*1000))::bigint").bind(node).bind(sequence)
 }
 
 pub(super) fn node_session_status(node: Uuid) -> Rows<'static, (Uuid, Uuid, i64, i64, bool, bool)> {

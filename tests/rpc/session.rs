@@ -21,11 +21,11 @@ async fn node_sessions_push_reports_and_close() -> Result<()> {
     let run = session.welcome.run.clone().unwrap();
     let control = session.welcome.control_id.clone();
     let deadline = session.valid_until;
-    let acknowledged = session.acknowledged_at;
+    let sent = session.last_sent;
     fixture("change-settings").await?;
     tokio::time::timeout(Duration::from_secs(3), session.notified()).await??;
     assert_eq!(session.valid_until, deadline);
-    assert_eq!(session.acknowledged_at, acknowledged);
+    assert_eq!(session.last_sent, sent);
     let state = session.pulse(1, false).await?;
     let changed = client.sync(run.clone(), vec![]).await?;
     assert_eq!(state.revisions, changed.state.unwrap().revisions);
@@ -134,7 +134,7 @@ async fn node_sessions_push_reports_and_close() -> Result<()> {
     rebooted.pulse(1, false).await?;
 
     // Idle time counts toward the acknowledgement deadline, even if the peer is healthy.
-    rebooted.acknowledged_at = Instant::now() - Duration::from_secs(31);
+    rebooted.last_received = Instant::now() - Duration::from_secs(31);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), rebooted.pulse(2, false))
             .await?

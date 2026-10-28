@@ -970,7 +970,7 @@ impl NodeSessions for Service {
         };
         let mut notifications = app
             .notifications
-            .subscribe(consumer)
+            .subscribe(consumer, &node.role)
             .map_err(|_| Status::resource_exhausted("notification session limit reached"))?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-session-opened").await;
@@ -987,13 +987,12 @@ impl NodeSessions for Service {
                 run: Some(wire::Run { boot_id: run.boot.to_string(), fence: run.fence.to_string() }),
                 epoch: epoch as u64, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)), control_id,
             })) };
-            let changed = app.wake_tasks.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
+            let mut sent_hints = crate::cluster::notifications::Hints::default();
             let mut pending = false;
             let mut next_notice = tokio::time::Instant::now();
             let mut deadline = next_notice + Duration::from_secs(30);
             let mut outstanding = std::collections::HashMap::new();
+            let mut last_ping = 0;
             loop {
                 let receipt_deadline = outstanding.values().copied().min().unwrap_or(deadline);
                 let next = tokio::select! {
@@ -1024,18 +1023,27 @@ impl NodeSessions for Service {
                     _ = tokio::time::sleep_until(next_notice), if pending => {
                         pending = false;
                         next_notice = tokio::time::Instant::now() + Duration::from_secs(1);
-                        yield wire::SessionReply { message: Some(wire::session_reply::Message::Notice(wire::Notice { state_changed: true, ..Default::default() })) };
+                        let hints = notifications.hints.borrow_and_update().clone();
+                        let settings = hints.settings.iter().filter(|(section, revision)| sent_hints.settings.get(*section) != Some(*revision)).filter_map(|(name, revision)| Some(wire::Revision { section:super::section(name)? as i32, revision:*revision as u64 })).collect();
+                        let notice = wire::Notice { state_changed:hints.state != sent_hints.state, work_available:hints.work != sent_hints.work, settings, ..Default::default() };
+                        sent_hints = hints;
+                        yield wire::SessionReply { message: Some(wire::session_reply::Message::Notice(notice)) };
                         continue;
                     }
-                    _ = &mut changed => {
+                    _ = notifications.hints.changed() => {
+                        notifications.hints.borrow_and_update();
                         pending = true;
-                        changed.set(app.wake_tasks.notified());
-                        changed.as_mut().enable();
                         continue;
                     }
                 }?;
                 let Some(next) = next else { break; };
                 deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                if let Some(wire::session_request::Message::Ping(ping)) = next.message.as_ref() {
+                    if ping.nonce == 0 || ping.nonce <= last_ping { Err(Status::invalid_argument("invalid ping sequence"))?; }
+                    last_ping = ping.nonce;
+                    yield wire::SessionReply { message:Some(wire::session_reply::Message::Pong(wire::Pong { nonce:ping.nonce })) };
+                    continue;
+                }
                 if let Some(wire::session_request::Message::Receipt(receipt)) = next.message.as_ref() {
                     let ids = super::notifications::receipt(receipt.clone())?;
                     #[cfg(feature = "fault-injection")]
@@ -1052,7 +1060,21 @@ impl NodeSessions for Service {
                 if pulse.sequence == 0 || pulse.sequence > i64::MAX as u64 {
                     Err(Status::invalid_argument("invalid heartbeat sequence"))?;
                 }
+                if !pulse.applied.is_empty() {
+                    let ids = super::notifications::receipt(wire::Receipt { applied:pulse.applied })?;
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("notification-receipt").await;
+                    let count = bounded(app.cluster().map_err(failure)?.acknowledge_notifications(consumer,&ids)).await?;
+                    app.notifications.applied(count);
+                    for id in ids { outstanding.remove(&id); }
+                }
                 let resources = super::read::keep_alive(pulse.renew, pulse.release)?;
+                if !pulse.renew_run {
+                    if pulse.draining { Err(Status::invalid_argument("draining requires run renewal"))?; }
+                    let (remaining,grants) = bounded(app.cluster().map_err(failure)?.maintain_session(&node,&app.secrets.credential_key,run,epoch,pulse.sequence as i64,resources)).await?;
+                    yield wire::SessionReply { message:Some(wire::session_reply::Message::Pulse(wire::PulseReply { sequence:pulse.sequence, valid_for_ms:remaining as u64, state:None, grants:grants.into_iter().map(super::read::grant_result).collect() })) };
+                    continue;
+                }
                 let snapshot = bounded(app.cluster().map_err(failure)?.pulse_session(&node, &app.secrets.credential_key, run, epoch, pulse.sequence as i64, pulse.draining, resources)).await?;
                 yield wire::SessionReply { message: Some(wire::session_reply::Message::Pulse(wire::PulseReply {
                     sequence: pulse.sequence, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)),

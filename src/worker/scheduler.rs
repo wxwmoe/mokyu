@@ -28,22 +28,6 @@ pub async fn run(app: Arc<App>) -> Result<()> {
         app.role == "control",
         "local cluster workers require control"
     );
-    let listener_app = app.clone();
-    tokio::spawn(async move {
-        loop {
-            let result: Result<()> = async {
-                listener_app
-                    .cluster()?
-                    .listen_tasks(listener_app.wake_tasks.clone())
-                    .await
-            }
-            .await;
-            if let Err(error) = result {
-                tracing::warn!(%error, "task notification listener will retry");
-            }
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        }
-    });
     worker(
         app,
         Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),

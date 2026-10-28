@@ -90,7 +90,10 @@ async fn postgres_notifications_survive_rollback_takeover_and_membership_changes
     );
     sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,'object',$2,uuidv7())").bind(bucket).bind(stream).execute(&pool).await?;
     let first = backend.claim_notifications(&[consumer]).await?;
-    assert!(tokio::time::timeout(std::time::Duration::from_secs(3), listener.next()).await??);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), listener.next()).await??,
+        crate::model::notification::Signal::Changes
+    );
     assert_eq!(first.len(), 1);
     assert!(backend.claim_notifications(&[consumer]).await?.is_empty());
     assert_eq!(
@@ -227,7 +230,10 @@ async fn postgres_notifications_survive_rollback_takeover_and_membership_changes
     let interruption =
         tokio::time::timeout(std::time::Duration::from_secs(3), listener.next()).await?;
     assert!(
-        !matches!(interruption, Ok(true)),
+        !matches!(
+            interruption,
+            Ok(crate::model::notification::Signal::Changes)
+        ),
         "subscription interruption must be observable"
     );
     if interruption.is_err() {
@@ -236,7 +242,10 @@ async fn postgres_notifications_survive_rollback_takeover_and_membership_changes
     sqlx::query("SELECT pg_notify('mokyu_notifications','recovered')")
         .execute(&pool)
         .await?;
-    assert!(tokio::time::timeout(std::time::Duration::from_secs(3), listener.next()).await??);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), listener.next()).await??,
+        crate::model::notification::Signal::Changes
+    );
 
     sqlx::query(
         "UPDATE notification_consumers SET expires_at=clock_timestamp()-interval '1 second'",

@@ -29,7 +29,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeControl/ReportObservations` | Unary；批量上报 HTTP 压缩收益、已通过签名校验的凭据活动及区块/区块包访问统计，仅允许 data |
 | `NodeReads/ReadWindow` | Unary；沿当前读取游标取下一窗口，校验运行权、读取保护和载荷修订 |
 | `NodeReads/ReportRead` | Unary；报告当前读取窗口内最多 16 个来源段，请求持久后端复核，仅允许 data |
-| `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，Welcome 包含 control 实例 ID；Pulse 维护运行权和资源，Notice 传递状态提示或缓存失效批次，Receipt 确认已应用的失效 |
+| `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，Welcome 包含 control 实例 ID；Ping/Pong 检查连接，Pulse 维护运行权和资源，Notice 传递提示或缓存失效批次，Receipt 确认已应用的失效 |
 | `NodeWrites/BeginWrite` | Unary；校验权限、创建写入上下文与租约并预留配额，返回存储材料；仅允许 data |
 | `NodeObjects/ChangeObjects` | Unary；批量删除对象或修改单个对象的 canned ACL，持久保存操作结果；仅允许 data |
 | `NodeWrites/PrepareChunks` | Unary；批量领取或复用区块，保存上传目标与编码参数，返回所需存储、密钥及上传许可 |
@@ -51,11 +51,11 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 
 node 具备 data 与 worker 的接口权限。每个 API 节点维持一条主要 NodeSession；control 通过 PostgreSQL 协调通知，无需彼此建立节点连接。
 
-任务、运行设置和维护状态变化合并为每条连接最多每秒一条普通 Notice，节点通过 Pulse 比较状态，修订变化时使用 SyncNode。对象发布、ACL、删除、桶和域名、存储策略及已确认来源健康变化则与业务事务一起保存事件和目标代次；PostgreSQL 通知唤醒 control，持久扫描补偿遗漏并接管未确认目标。缓存通知按 50 ms 窗口聚合，每帧最多 32 项；发送队列和进程内存有界。
+任务、运行设置和维护状态变化合并为每条连接最多每秒一条普通 Notice。配置提示携带分区修订，节点只在需要时使用 SyncNode；共享任务提示发往 worker/node，本机任务只提示所属节点，提示不改变任务领取权限。control 共用一个 PostgreSQL 监听连接接收普通提示和缓存事件。对象发布、ACL、删除、桶和域名、存储策略及已确认来源健康变化与业务事务一起保存事件和目标代次；PostgreSQL 通知唤醒 control，持久扫描补偿遗漏并接管未确认目标。缓存通知按 50 ms 窗口聚合，每帧最多 32 项；发送队列和进程内存有界。
 
 节点先隔离旧授权和在途填充，再以 Receipt 批量确认事件 ID；确认不要求后台刷新成功。重复投递只补确认，不能再次驱逐已经刷新的快照。有效且仍驻留的条目立即排队刷新元数据，前台可共用正在刷新的结果；正文继续复用，不为刷新预取 S3 正文。无条目或已过期时不主动预取。队列满、刷新失败和较新的通知都不能让旧授权恢复可用。
 
-Pulse 仍按十秒周期维护租约；Notice、Receipt 和 SyncNode 不续租，重要缓存通知不额外触发 Pulse。等待 PulseReply 或 SyncNode 时继续处理通知。服务端三十秒未收到入站消息，或已发送事件三十秒未收到应用确认时关闭会话；待确认数超过 1024 同样要求重建。客户端在重连 Hello 前隔离公共缓存授权，重新同步后才恢复快路径；原来的异步校验、硬过期、来源校验和资源租约继续生效。
+Receipt 最多聚合 50 ms、128 项，也可搭载 Pulse；应用失效后才确认，不等待后台刷新。Notice、Receipt、Ping/Pong 和 SyncNode 不续租。等待 PulseReply 或 SyncNode 时继续处理通知。服务端三十秒未收到入站消息，或已发送事件三十秒未收到应用确认时关闭会话；待确认数超过 1024 同样要求重建。客户端在重连 Hello 前隔离公共缓存授权，重新同步后才恢复快路径；异步校验、硬过期、来源校验和资源租约继续生效。
 
 control 状态中的 `notifications` 提供订阅状态、会话数、队列字节、已发送和已应用条数及背压次数；节点 `public_read_cache` 另提供 `pending_checks` 和 `pending_refreshes`。应用确认与刷新完成分别计数，不能把入队或发送视为已生效。
 
@@ -109,13 +109,13 @@ ReportRead 绑定当前运行权、有效读取与窗口，下标只引用该窗
 
 每次进程启动生成新的 `boot_id`，一次待确认接入使用固定 `connection_id`。Hello 包含协议号 1、boot ID、connection ID 和最后获知的 `previous_epoch`；初次为 0。Welcome 返回 `run={boot_id,fence}`、会话 epoch、剩余有效毫秒数和配置修订。
 
-会话有效期为 90 秒，数据库时钟决定到期。Pulse 的正整数 sequence 必须严格递增，确认后续期；流上 30 秒没有新 Pulse 时关闭连接。`draining` 一旦设为 true，同一 boot 不可撤销。客户端用请求发出时的单调时钟扣除传输耗时及 2 秒余量，不能把到期时间直接换成本机墙上时钟。
+运行权有效期为 90 秒，数据库时钟决定到期。Pulse 的正整数 sequence 必须严格递增；`renew_run=true` 才延长运行权并返回完整状态，否则只维护指定资源、返回运行权剩余时间。资源维护不延长通知消费代次。`draining` 通过运行权续租设置，一旦为 true，同一 boot 不可撤销。客户端用请求发出时的单调时钟扣除传输耗时及 2 秒余量，不能把到期时间直接换成本机墙上时钟。
 
 每次成功接入都会推进 epoch，旧流不能继续心跳。相同 boot 在有效期内重连保留业务 fence；过期重连会更换 fence。Welcome 丢失时，用相同 connection ID 重试可接入其他 control；获知新 epoch 后再创建下一次接入。新的 boot 须等待前一个 boot 过期，已退役的 boot 不能再次成为当前实例。每代凭据的 boot 历史达到 4096 项时，由管理员轮换凭据。
 
 会话存在于共享 PostgreSQL 中，各 control 使用相同规则接管。流消息不构成业务提交记录。SyncNode 不续期会话，凭据轮换或节点禁用立即阻止后续请求。
 
-会话客户端每 10 秒发送应用心跳，确认最多等待 30 秒且不超过本地运行权截止时间。断线后先尝试恢复，连续失败以 0.5～30 秒抖动退避；DNS 移除当前地址时也重新选择连接。每次接入后先 SyncNode，配置修订变化时只拉取缺少的分区。配置整体校验通过后才替换快照，拒绝重复、缺失或倒退的修订；增大单流内存需求的配置需要重启后重新分配预算。
+会话客户端在上行或下行连续 10 秒无活动时发送 Ping，持续双向消息会推迟 Ping；仅下行流量不能隐藏上行失联。Pong 返回同一递增 nonce，不访问数据库，也不证明运行权仍有效。Ping 和 Pulse 的确认最多等待 10 秒且不超过本地运行权截止时间。运行权和资源分别按剩余有效期的三分之一安排续期，运行权最多间隔 25 秒、资源最多 30 秒；释放短暂聚合约 20 ms 后发送。断线后先尝试恢复，连续失败以 0.5～30 秒抖动退避；DNS 移除当前地址时也重新选择连接。每次接入后先 SyncNode，配置修订变化时只拉取缺少的分区。配置整体校验通过后才替换快照，拒绝重复、缺失或倒退的修订；增大单流内存需求的配置需要重启后重新分配预算。
 
 重连保留同一有效运行权句柄，已到期的句柄不能被后来的确认复活。新的 fence、凭据拒绝、停止或驱动取消会使旧句柄失效。排空立即停止本地新工作准入，同时保留心跳和恢复连接；维护状态不撤销仍有效的运行权。仅 Session 中断时，持有有效运行权的调用仍可使用独立 Unary 连接，由相应业务 RPC 检查当前权限。
 

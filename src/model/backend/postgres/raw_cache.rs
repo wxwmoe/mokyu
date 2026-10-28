@@ -12,14 +12,14 @@ pub(crate) async fn enqueue(
     storage: Uuid,
 ) -> Result<()> {
     let task = Uuid::now_v7();
-    queries::insert_task(
+    crate::model::backend::postgres::transactions::insert_task(
+        &mut *db,
         task,
         "upload",
         None,
         json!({"operation":"cache", "source_id":source, "storage_id":storage, "source_node":node}),
         None,
     )
-    .execute(&mut *db)
     .await?;
     sqlx::query("UPDATE tasks SET execution_scope='node',target_node_id=$2 WHERE id=$1")
         .bind(task)

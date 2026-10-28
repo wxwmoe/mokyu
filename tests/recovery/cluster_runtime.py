@@ -80,7 +80,7 @@ if phase == 'live':
     assert admin.post(url + '/api/v1/cluster/mode', json={'mode': 'single'}).status_code >= 400
     assert rpc({'Cluster': 'Status'})['mode'] == 'cluster'
     seen = dict(db.execute('SELECT id,last_seen_at FROM nodes WHERE enabled').fetchall())
-    wait(lambda: all(stamp > seen[id] for id, stamp in db.execute('SELECT id,last_seen_at FROM nodes WHERE enabled').fetchall()), 25)
+    wait(lambda: all(stamp > seen[id] for id, stamp in db.execute('SELECT id,last_seen_at FROM nodes WHERE enabled').fetchall()), 45)
     raw = os.urandom(9 * 1024 * 1024 + 17)
     s3.put_object(Bucket=fixture['bucket'], Key='cluster-source', Body=raw)
     assert s3.get_object(Bucket=fixture['bucket'], Key='cluster-source')['Body'].read() == raw
@@ -156,17 +156,17 @@ elif phase == 'runtime':
     assert 0 <= status['db_pool_idle'] <= status['db_pool_size']
     def listeners():
         return db.execute("SELECT pid FROM pg_stat_activity WHERE datname=current_database() "
-                          "AND rtrim(query, ';') IN ('LISTEN \"mokyu_storage_profiles\"', 'LISTEN \"mokyu_tasks\"')").fetchall()
-    wait(lambda: len(listeners()) == 5)
+                          "AND query LIKE 'LISTEN %mokyu_notifications%'").fetchall()
+    wait(lambda: len(listeners()) == 1)
     previous = listeners()
     for (pid,) in previous:
         db.execute('SELECT pg_terminate_backend(%s)', (pid,))
-    wait(lambda: len(listeners()) == 5 and not set(previous).intersection(listeners()), 30)
+    wait(lambda: len(listeners()) == 1 and not set(previous).intersection(listeners()), 30)
     observer = psycopg.connect(Path(fixture['dsn']).read_text(), autocommit=True)
-    observer.execute('LISTEN mokyu_storage_profiles')
+    observer.execute('LISTEN mokyu_notifications')
     observer.execute('LISTEN mokyu_tasks')
     seen = dict(db.execute('SELECT id,last_seen_at FROM nodes WHERE enabled').fetchall())
-    wait(lambda: all(stamp > seen[id] for id, stamp in db.execute('SELECT id,last_seen_at FROM nodes WHERE enabled').fetchall()), 25)
+    wait(lambda: all(stamp > seen[id] for id, stamp in db.execute('SELECT id,last_seen_at FROM nodes WHERE enabled').fetchall()), 45)
     name = db.execute('SELECT name FROM storages WHERE id=%s', (fixture['storage'],)).fetchone()[0]
     profile_url = url + '/api/v1/storages/' + name + '/profile'
     original = admin.get(profile_url, timeout=15).json()
@@ -199,7 +199,7 @@ elif phase == 'runtime':
                           (fixture['bucket'], key)).fetchone()[0]
         assert s3.get_object(Bucket=fixture['bucket'], Key=key)['Body'].read() == payload['raw']
         channels = {notice.channel for notice in observer.notifies(timeout=.5)}
-        assert channels == {'mokyu_storage_profiles', 'mokyu_tasks'}, channels
+        assert channels == {'mokyu_notifications', 'mokyu_tasks'}, channels
     finally:
         observer.close()
         current = admin.get(profile_url, timeout=15).json()

@@ -21,6 +21,27 @@ fn grant() -> wire::Grant {
     }
 }
 
+#[test]
+fn resource_deadlines_follow_remaining_ttl_and_release_immediately() {
+    let resources = Arc::new(Resources::default());
+    let run = run();
+    let now = Instant::now();
+    assert_eq!(
+        renew_at(now, now + Duration::from_secs(90)),
+        now + Duration::from_secs(30)
+    );
+    assert_eq!(
+        renew_at(now, now + Duration::from_secs(6)),
+        now + Duration::from_secs(2)
+    );
+    assert_eq!(renew_at(now, now), now);
+    let held = resources.adopt(&run, &[grant()], now).unwrap();
+    assert!(resources.next(&run) > now + Duration::from_secs(15));
+    assert!(resources.batch(&run).renew.is_empty());
+    drop(held);
+    assert_eq!(resources.batch(&run).release.len(), 1);
+}
+
 fn acknowledge(resources: &Resources, run: &Arc<RunLease>, batch: &Batch) {
     let results = batch
         .renew
