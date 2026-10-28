@@ -118,6 +118,15 @@ impl Drop for Refreshing {
 }
 
 impl Refresh {
+    pub(crate) fn new(entry: Arc<Entry>, generation: u64) -> Arc<Self> {
+        Arc::new(Self {
+            entry,
+            generation: AtomicU64::new(generation),
+            started: AtomicBool::new(false),
+            done: watch::channel(false).0,
+        })
+    }
+
     pub(crate) fn claim(self: &Arc<Self>) -> Option<Refreshing> {
         (!self.started.swap(true, std::sync::atomic::Ordering::AcqRel))
             .then(|| Refreshing(self.clone()))
@@ -422,12 +431,7 @@ impl Cache {
                 self.skipped.fetch_add(1, Relaxed);
                 continue;
             }
-            let job = Arc::new(Refresh {
-                entry,
-                generation: AtomicU64::new(generation),
-                started: AtomicBool::new(false),
-                done: watch::channel(false).0,
-            });
+            let job = Refresh::new(entry, generation);
             index.refreshes.insert(key, Arc::downgrade(&job));
             jobs.push(job);
         }
@@ -718,7 +722,7 @@ impl Cache {
         }
     }
 
-    pub(crate) fn remove(&self, entry: &Arc<Entry>) {
+    pub(crate) fn remove(&self, entry: &Arc<Entry>) -> bool {
         let mut index = self.index.lock().unwrap();
         let key = key(&entry.route);
         if index
@@ -728,6 +732,9 @@ impl Cache {
         {
             index.remove(key);
             index.order.retain(|current| *current != key);
+            true
+        } else {
+            false
         }
     }
 
@@ -1207,10 +1214,21 @@ mod tests {
         drop(cache.changing_object(snapshot.bucket.id, "absent"));
         assert_ne!(generation, cache.generation());
         assert!(current(&cache.index.lock().unwrap(), &entry));
-        cache.remove(&entry);
+        assert!(cache.remove(&entry));
+        assert!(!cache.remove(&entry));
         assert!(!cache.index.lock().unwrap().paths.contains_key(
             &super::super::responses::path_key(snapshot.bucket.id, "replacement")
         ));
+        cache.put(
+            &route,
+            snapshot,
+            None,
+            vec![],
+            (1, 5),
+            (Instant::now(), cache.generation()),
+        );
+        assert!(!cache.remove(&entry));
+        assert!(cache.entry(&route).is_some());
         drop(cache.changing());
         assert!(cache.index.lock().unwrap().paths.is_empty());
     }

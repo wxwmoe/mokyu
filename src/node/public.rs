@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    app::public_reads::{Confirmation, Entry, Work},
+    app::public_reads::{Confirmation, Entry, Refresh, Work},
     model::{ReadRoute, ReadSnapshot},
 };
 use std::{sync::atomic::Ordering::Relaxed, time::Duration};
@@ -240,16 +240,29 @@ impl Reads {
     }
 
     async fn refresh_notified(&self, job: Arc<crate::app::public_reads::Refresh>) {
-        if !self.refresh_batch(vec![job.clone()]).await {
+        if !self.refresh_batch(vec![job.clone()], false).await {
             job.wait().await;
         }
     }
 
-    async fn refresh_batch(&self, jobs: Vec<Arc<crate::app::public_reads::Refresh>>) -> bool {
+    fn periodic_candidate(&self, entry: &Arc<Entry>) -> bool {
+        self.public
+            .reusable(entry, |profiles| self.current_profiles(profiles))
+            && self
+                .candidate(&request(&entry.route, false))
+                .and_then(|(_, body)| super::super::cache::claim(&body))
+                .is_some()
+    }
+
+    async fn refresh_batch(&self, jobs: Vec<Arc<Refresh>>, periodic: bool) -> bool {
         let mut running = Vec::new();
         let mut jobs: Vec<_> = jobs
             .into_iter()
             .filter(|job| {
+                if periodic && !self.periodic_candidate(&job.entry) {
+                    self.public.skipped.fetch_add(1, Relaxed);
+                    return false;
+                }
                 if let Some(guard) = job.claim() {
                     running.push(guard);
                     true
@@ -328,7 +341,12 @@ impl Reads {
                     )
                     .await??;
                     #[cfg(feature = "fault-injection")]
-                    crate::faults::point("node-notification-refreshed").await;
+                    crate::faults::point(if periodic {
+                        "node-public-refreshed"
+                    } else {
+                        "node-notification-refreshed"
+                    })
+                    .await;
                     ensure!(
                         reply.reads.len() == selected.len(),
                         "refresh result count mismatch"
@@ -349,7 +367,11 @@ impl Reads {
                         selected.into_iter().zip(reply.reads)
                     {
                         if job.generation.load(Relaxed) != requested || confirmed.is_none() {
-                            retry.push(job);
+                            if periodic {
+                                self.public.skipped.fetch_add(1, Relaxed);
+                            } else {
+                                retry.push(job);
+                            }
                             continue;
                         }
                         ensure!(
@@ -379,6 +401,10 @@ impl Reads {
                             started,
                             verify: false,
                         };
+                        if periodic && !self.public.remove(&job.entry) {
+                            self.public.skipped.fetch_add(1, Relaxed);
+                            continue;
+                        }
                         if let Some((snapshot, confirmation)) =
                             self.public_confirmation(&prepared)?
                         {
@@ -396,6 +422,8 @@ impl Reads {
                             .finish_refresh(&job, requested, confirmed.unwrap())
                         {
                             self.public.refreshed.fetch_add(1, Relaxed);
+                        } else if periodic {
+                            self.public.skipped.fetch_add(1, Relaxed);
                         } else {
                             retry.push(job);
                         }
@@ -615,7 +643,7 @@ async fn run(reads: Weak<Reads>, mut receiver: tokio::sync::mpsc::Receiver<Work>
                         Err(_) => break,
                     }
                 }
-                reads.refresh_batch(jobs).await;
+                reads.refresh_batch(jobs, false).await;
             }
             Work::Fill {
                 route,
@@ -642,6 +670,41 @@ async fn run(reads: Weak<Reads>, mut receiver: tokio::sync::mpsc::Receiver<Work>
                     );
                 }
                 reads.public.finished(&route);
+            }
+            Work::Refresh(entry) if reads.periodic_candidate(&entry) => {
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("node-public-refresh").await;
+                let mut entries = vec![entry];
+                while entries.len() < crate::model::node_refresh::LIMIT {
+                    match receiver.try_recv() {
+                        Ok(Work::Refresh(next)) if reads.periodic_candidate(&next) => {
+                            entries.push(next);
+                        }
+                        Ok(Work::Notify(jobs)) => {
+                            reads.refresh_batch(jobs, false).await;
+                            break;
+                        }
+                        Ok(next) => {
+                            deferred = Some(next);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let generation = reads.public_generation();
+                let jobs = entries
+                    .iter()
+                    .map(|entry| Refresh::new(entry.clone(), generation))
+                    .collect();
+                if tokio::time::timeout(Duration::from_secs(2), reads.refresh_batch(jobs, true))
+                    .await
+                    .is_err()
+                {
+                    reads.public.failed.fetch_add(entries.len() as u64, Relaxed);
+                }
+                for entry in entries {
+                    reads.public.finished(&entry.route);
+                }
             }
             Work::Refresh(entry) => {
                 let result = tokio::time::timeout(Duration::from_secs(2), async {
