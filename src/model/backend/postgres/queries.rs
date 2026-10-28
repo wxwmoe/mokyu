@@ -8349,6 +8349,9 @@ impl ClusterStore for Backend {
     async fn leader(&self, key: i64) -> Result<Option<Box<dyn Leader>>> {
         transactions::cluster_leader(&self.pool, key).await
     }
+    async fn maintenance_state(&self) -> Result<(Value, bool, DateTime<Utc>)> {
+        Ok(maintenance_state().fetch_one(&self.pool).await?)
+    }
     async fn register(
         &self,
         name: &str,
@@ -8431,6 +8434,12 @@ pub(super) fn recover_node_lock<'q>(name: &'q str) -> Rows<'q, (Uuid, String)> {
 
 pub(super) fn try_cluster_leader(key: i64) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)").bind(key)
+}
+
+pub(super) fn maintenance_state() -> Rows<'static, (Value, bool, DateTime<Utc>)> {
+    sqlx::query_as(
+        "SELECT jsonb_build_array(m.maintenance,m.gc_paused,m.pack_creation_paused,(SELECT jsonb_agg(jsonb_build_array(c.policy,c.paused,c.last_scheduled_at) ORDER BY c.policy) FROM maintenance_controls c),(SELECT jsonb_agg(jsonb_build_array(s.id,s.enabled,p.revision) ORDER BY s.id) FROM storages s JOIN storage_profiles p ON p.storage_id=s.id)),NOT m.maintenance AND EXISTS(SELECT 1 FROM maintenance_controls WHERE policy='reuse' AND NOT paused) AND EXISTS(SELECT 1 FROM storages WHERE enabled) AND EXISTS(SELECT 1 FROM pack_changes WHERE reason='reuse' AND next_check_at<=clock_timestamp()),clock_timestamp() FROM mokyu_meta m WHERE singleton",
+    )
 }
 use crate::model::runtime::{RuntimeState, RuntimeStore};
 

@@ -242,47 +242,91 @@ impl App {
     }
 }
 
+async fn schedule(app: &App) -> Result<Duration> {
+    let controls = app.maintenance_store.schedule().await?;
+    let mut next = Duration::from_secs(3600);
+    for (policy, interval, enabled) in app.maintenance_schedule().await? {
+        let (_, paused, age) = controls.iter().find(|(key, _, _)| key == policy).unwrap();
+        if !enabled || *paused || (policy != "cleanup" && app.maintenance.load(Ordering::Acquire)) {
+            continue;
+        }
+        let due = age.is_none_or(|age| age >= interval as f64);
+        let changed = policy == "reuse" && app.maintenance_store.reuse_due().await?;
+        let remaining = if due || changed {
+            let result = if matches!(policy, "gc" | "cleanup") {
+                app.maintenance_start(policy).await
+            } else {
+                app.start_pack(policy, true).await
+            };
+            if let Err(error) = result {
+                tracing::warn!(%error, policy, "maintenance scheduling deferred");
+            }
+            // Limit retries as well as successful periodic runs; explicit runs remain available.
+            app.maintenance_store.scheduled(policy).await?;
+            interval as f64
+        } else {
+            interval as f64 - age.unwrap_or_default()
+        };
+        next = next.min(Duration::from_secs_f64(remaining.clamp(1.0, 3600.0)));
+    }
+    Ok(next)
+}
+
 pub async fn run(app: Arc<App>) -> Result<()> {
     const LEADER_KEY: i64 = 734922709851034;
+    let mut previous = None;
+    let mut next = None;
     loop {
-        let leader = if app.role == "single" {
+        let notified = app.wake_maintenance.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let state = if app.role == "single" {
             None
-        } else if let Some(leader) = app.cluster()?.leader(LEADER_KEY).await? {
-            Some(leader)
         } else {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
+            Some(app.cluster()?.maintenance_state().await?)
         };
-        {
-            let controls: Vec<(String, bool, Option<f64>)> =
-                app.maintenance_store.schedule().await?;
-            for (policy, interval, enabled) in app.maintenance_schedule().await? {
-                let (_, paused, age) = controls.iter().find(|(k, _, _)| k == policy).unwrap();
-                if !enabled
-                    || *paused
-                    || (policy != "cleanup" && app.maintenance.load(Ordering::Acquire))
-                {
-                    continue;
+        let flags = (
+            app.maintenance.load(Ordering::Acquire),
+            app.pack_creation_paused.load(Ordering::Acquire),
+        );
+        let due = state.as_ref().is_none_or(|(revision, reuse, now)| {
+            *reuse
+                || previous
+                    .as_ref()
+                    .is_none_or(|(old, old_flags)| old != revision || *old_flags != flags)
+                || next.is_none_or(|next| next <= *now)
+        });
+        if due {
+            let leader = if state.is_some() {
+                app.cluster()?.leader(LEADER_KEY).await?
+            } else {
+                None
+            };
+            if state.is_none() || leader.is_some() {
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("maintenance-before-schedule").await;
+                let delay = schedule(&app).await?;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("maintenance-after-schedule").await;
+                if let Some(leader) = leader {
+                    leader.finish().await?;
                 }
-                let due = age.is_none_or(|age| age >= interval as f64);
-                let changed = policy == "reuse" && app.maintenance_store.reuse_due().await?;
-                if due || changed {
-                    let result = if matches!(policy, "gc" | "cleanup") {
-                        app.maintenance_start(policy).await
-                    } else {
-                        app.start_pack(policy, true).await
-                    };
-                    if let Err(error) = result {
-                        tracing::warn!(%error,policy,"maintenance scheduling deferred");
-                    }
-                    // Limit retries as well as successful periodic runs; explicit runs remain available.
-                    app.maintenance_store.scheduled(policy).await?;
+                if let Some((revision, _, now)) = &state {
+                    previous = Some((revision.clone(), flags));
+                    next = Some(*now + chrono::TimeDelta::milliseconds(delay.as_millis() as i64));
                 }
             }
         }
-        if let Some(leader) = leader {
-            leader.finish().await?;
+        // Database time also detects clock changes without extending the recovery scan.
+        let delay = state
+            .and_then(|(_, _, now)| next.map(|next| next - now))
+            .and_then(|remaining| remaining.to_std().ok())
+            .filter(|delay| !delay.is_zero())
+            .unwrap_or(Duration::from_secs(1))
+            .min(Duration::from_secs(1));
+        tokio::select! {
+            _ = &mut notified => tokio::time::sleep(Duration::from_millis(50)).await,
+            _ = tokio::time::sleep(delay) => {},
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }

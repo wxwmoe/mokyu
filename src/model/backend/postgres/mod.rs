@@ -122,6 +122,10 @@ mod node_report_tests;
 mod node_session_tests;
 
 #[cfg(test)]
+#[path = "../../../../tests/recovery/maintenance_schedule.rs"]
+mod maintenance_schedule_tests;
+
+#[cfg(test)]
 #[path = "../../../../tests/recovery/notifications.rs"]
 mod notification_tests;
 

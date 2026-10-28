@@ -432,6 +432,7 @@ pub(crate) trait ClusterStore: Send + Sync {
     ) -> Result<Option<NodeState>>;
     async fn heartbeat(&self, state: &NodeState, role: &str, key: &Key) -> Result<()>;
     async fn leader(&self, key: i64) -> Result<Option<Box<dyn Leader>>>;
+    async fn maintenance_state(&self) -> Result<(serde_json::Value, bool, DateTime<Utc>)>;
 }
 #[async_trait::async_trait]
 pub(crate) trait NotificationChanges: Send {

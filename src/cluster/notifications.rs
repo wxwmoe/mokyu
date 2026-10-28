@@ -242,12 +242,14 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
                 app.storage.refresh_storages().await?;
                 app.notifications.reset(true);
                 app.wake_tasks.notify_waiters();
+                app.wake_maintenance.notify_one();
                 loop {
                     match listener.next().await? {
                         Signal::Reconnected => {
                             app.storage.refresh_storages().await?;
                             app.notifications.reset(true);
                             app.wake_tasks.notify_waiters();
+                            app.wake_maintenance.notify_one();
                         }
                         Signal::Changes => {
                             #[cfg(feature = "fault-injection")]
@@ -255,6 +257,12 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
                             app.notifications.wake.notify_one();
                         }
                         signal => {
+                            if matches!(
+                                signal,
+                                Signal::Control | Signal::State | Signal::Settings { .. }
+                            ) {
+                                app.wake_maintenance.notify_one();
+                            }
                             app.notifications.hint(&signal);
                             app.wake_tasks.notify_waiters();
                         }
@@ -327,6 +335,7 @@ async fn dispatch(app: &App) -> Result<()> {
                             #[cfg(feature = "fault-injection")]
                             crate::faults::point("storage-profile-notification").await;
                             app.storage.refresh_store(*storage).await?;
+                            app.wake_maintenance.notify_one();
                         }
                     }
                     applied.push(delivery.id);
