@@ -2,6 +2,7 @@ mod access;
 mod body;
 mod cache;
 mod checks;
+mod completion_waiters;
 pub(crate) mod delivery;
 mod files;
 mod io;
@@ -120,6 +121,7 @@ pub(crate) struct NodeContext {
     pub(crate) observations: observations::Reports,
     pub(crate) access: Arc<crate::status::access::Access>,
     pub(crate) native_work: tokio::sync::Notify,
+    completion_waiters: completion_waiters::Waiters,
     pub(crate) statistics: crate::status::stats::Statistics,
     io: Arc<io::Io>,
     cache_epoch: Arc<std::sync::atomic::AtomicU64>,
@@ -163,6 +165,7 @@ impl NodeContext {
                 crate::model::node_observation::ACCESS_LIMIT,
             )),
             native_work: tokio::sync::Notify::new(),
+            completion_waiters: completion_waiters::Waiters::default(),
             statistics: crate::status::stats::Statistics::default(),
             io: Arc::new(io::Io::default()),
             cache_epoch: Arc::default(),

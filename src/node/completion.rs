@@ -78,9 +78,23 @@ impl Writes {
                 && value.size >= 0,
             "invalid completion summary"
         );
+        let mut waiter = None;
         let work = match wire::WritePhase::try_from(reply.phase)? {
             wire::WritePhase::WritePublished => return output(&bucket, &key, &value),
             wire::WritePhase::WriteBusy => {
+                let resolved: crate::app::Bucket = request.material(
+                    request
+                        .reply
+                        .bucket
+                        .as_ref()
+                        .context("completion bucket missing")?,
+                )?;
+                waiter = Some(
+                    self.reads
+                        .node
+                        .completion_waiters
+                        .register(resolved.id, &key),
+                );
                 drop(request);
                 drop(permit);
                 None
@@ -183,7 +197,12 @@ impl Writes {
                 if let Some(work) = work {
                     return work.await.map_err(anyhow::Error::from)?;
                 }
+                let waiter = waiter.context("completion waiter missing")?;
                 loop {
+                    let notified = waiter.notified();
+                    tokio::pin!(notified);
+                    // Register before checking so publication during the RPC cannot be lost.
+                    notified.as_mut().enable();
                     let reply = writes
                         .reads
                         .node
@@ -197,7 +216,12 @@ impl Writes {
                         wire::WritePhase::WriteBusy => {}
                         _ => return Err(multipart::completion_retry().into()),
                     }
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("node-completion-waiting").await;
+                    tokio::select! {
+                        _ = notified => {},
+                        _ = tokio::time::sleep(Duration::from_secs(3)) => {},
+                    }
                 }
             })
             .await

@@ -120,6 +120,7 @@ impl NodeContext {
                 if let Some(reads) = node.foreground.lock().unwrap().upgrade() {
                     reads.notify_public(reset, changes);
                 }
+                node.completion_waiters.notify(reset, changes);
                 if reset
                     || changes.iter().any(|change| {
                         matches!(change, crate::model::notification::Change::Storage { .. })
