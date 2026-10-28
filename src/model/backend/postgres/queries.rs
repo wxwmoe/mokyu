@@ -821,6 +821,14 @@ pub(super) fn extend_write_lease(stream: Id, ttl: i64) -> Statement<'static> {
         .bind(ttl)
 }
 
+pub(super) fn share_object_stream<'q>(bucket: Uuid, key: &'q str) -> Scalar<'q, Option<Id>> {
+    sqlx::query_scalar(
+        "SELECT stream_id FROM objects WHERE bucket_id=$1 AND object_key=$2 FOR SHARE",
+    )
+    .bind(bucket)
+    .bind(key)
+}
+
 pub(super) fn current_stream<'q>(
     bucket: Uuid,
     key: &'q str,

@@ -57,7 +57,9 @@ node 具备 data 与 worker 的接口权限。每个 API 节点维持一条主�
 
 Receipt 最多聚合 50 ms、128 项，也可搭载 Pulse；应用失效后才确认，不等待后台刷新。Notice、Receipt、Ping/Pong 和 SyncNode 不续租。等待 PulseReply 或 SyncNode 时继续处理通知。服务端三十秒未收到入站消息，或已发送事件三十秒未收到应用确认时关闭会话；待确认数超过 1024 同样要求重建。客户端在重连 Hello 前隔离公共缓存授权，重新同步后才恢复快路径；异步校验、硬过期、来源校验和资源租约继续生效。
 
-control 状态中的 `notifications` 提供订阅状态、会话数、队列字节、已发送和已应用条数及背压次数；节点 `public_read_cache` 另提供 `pending_checks` 和 `pending_refreshes`。应用确认与刷新完成分别计数，不能把入队或发送视为已生效。
+目标绑定节点与会话代次；切换到新代次时，旧代次隔离后的目标记为退役，不冒充应用确认。control 的持久扫描继续处理未确认目标，发起 control 退出不丢失已提交的通知。
+
+control 状态中的 `notifications` 提供订阅状态、重连次数、会话数、队列字节、已发送和已应用条数、背压次数、普通提示与提示丢弃计数；节点 `public_read_cache` 另提供 `pending_checks` 和 `pending_refreshes`。节点状态还包含 `cors_cache` 和 `read_checks`，分别报告前台 CORS 缓存与后台摘要校验。应用确认与刷新完成分别计数，不能把入队或发送视为已生效。
 
 驻留通知刷新通过 `RefreshReads` 合并，普通冷读继续使用 `OpenRead`。control 最多收集 5 ms，再按集合查询确认路由、权限、元数据、策略和来源；开始查询后到达的请求进入下一组。每个调用者独立验证运行身份，批次不共享租约。control 的 `read_refresh` 提供请求数、合并组数、候选项数、查询路由数、材料缓存命中及排队项数。
 

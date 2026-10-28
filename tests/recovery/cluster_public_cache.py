@@ -1,6 +1,8 @@
-"""Explicit public-authority windows on two actual PostgreSQL data nodes."""
+"""Public cache notifications and expiry on two actual API data nodes."""
 import os
 import time
+import uuid
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import boto3
@@ -16,8 +18,8 @@ def main():
     assert fixture.backend
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile.update(cdc_enabled=False, pack_range_enabled=False, upload_cache=False,
-                   public_cache_validation='background', public_cache_refresh_interval='3s', public_cache_max_age='3s',
-                   read_source_validation='background', source_validation_max_age='3s')
+                   public_cache_validation='background', public_cache_refresh_interval='30s', public_cache_max_age='60s',
+                   read_source_validation='background', source_validation_max_age='60s')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     domain = fixture.name + '.public.test'
     fixture.cli('domain', 'set', domain, fixture.name)
@@ -49,29 +51,58 @@ def main():
             return all(reply.status_code == 200 and reply.content == body for reply in replies) and status(node)['public_read_cache']['entries'] >= 2
         wait(loaded, 'data node did not load the public policy', seconds=45)
         for _ in range(3):
-            assert read(node).content == body
+            assert read(node).content == body and read(node, web=True).content == body
         before = status(node)
         assert read(node).content == body and read(node, web=True).content == body
         after = status(node)
         assert after['public_read_cache']['hits'] >= before['public_read_cache']['hits'] + 2
-        assert after['response_cache']['hits'] >= before['response_cache']['hits'] + 2
-        assert after['backend_gets'] == before['backend_gets']
+        assert after['response_cache']['hits'] >= before['response_cache']['hits'] + 2, (before['response_cache'], after['response_cache'])
+        assert after['io']['backend']['read']['started'] == before['io']['backend']['read']['started']
     print('PASS each data node reuses public metadata and immutable response bytes across S3/Web', flush=True)
 
-    # Refresh the peer's snapshot at the start of its full, explicitly configured window.
-    time.sleep(3.1)
-    assert read(1).content == body and read(1, web=True).content == body
+    database = Database()
+    peer = uuid.UUID(status(1)['node_id'])
+    before = database.query('SELECT clock_timestamp() AS stamp')[0]['stamp']
     fixture.client.put_object_acl(Bucket=fixture.name, Key='cached', ACL='private')
     assert read(0).status_code == 403
-    assert read(1).status_code == 200 and read(1, web=True).status_code == 200
+    def applied():
+        rows = database.query("SELECT bool_and(t.applied_at IS NOT NULL) AS applied FROM notification_targets t JOIN notifications n ON n.id=t.notification_id WHERE t.node_id=%s AND n.scope='object' AND n.resource_id=%s AND n.object_key='cached' AND n.created_at>=%s", peer, uuid.UUID(fixture.bucket_id), before)
+        return rows[0]['applied'] is True
+    wait(applied, 'peer did not confirm the ACL notification', seconds=5)
+    assert read(1).status_code == 403 and read(1, web=True).status_code == 403
     assert clients[1].get_object(Bucket=fixture.name, Key='cached')['Body'].read() == body
     signed = clients[1].generate_presigned_url('get_object', Params={'Bucket': fixture.name, 'Key': 'cached'})
     fixture.cli('cred', 'disable', fixture.credentials['access_key'])
     assert requests.get(signed, timeout=15).status_code == 403
     fixture.cli('cred', 'enable', fixture.credentials['access_key'])
+    print('PASS peer notification applies before the long cache deadline; signed revocation stays immediate', flush=True)
+
+    roots = os.environ['MOKYU_TEST_CONTROL_FAULT_DIRS'].split(',')
+    assert len(roots) >= 2, 'the expiry scenario requires every control fault directory'
+    markers = [Path(root) / 'notifications-claimed' for root in roots]
+    profile = fixture.cli('storage', 'profile', 'show', fixture.name)
+    profile.update(public_cache_refresh_interval='3s', public_cache_max_age='3s', source_validation_max_age='3s')
+    fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+    fixture.client.put_object_acl(Bucket=fixture.name, Key='cached', ACL='public-read')
+    wait(lambda: read(1).status_code == 200 and read(1, web=True).status_code == 200,
+         'peer did not restore public authority')
     time.sleep(3.1)
-    assert read(1).status_code == 403 and read(1, web=True).status_code == 403
-    print('PASS writer-node invalidation is immediate, peer expiry is hard, signed revocation stays immediate', flush=True)
+    assert read(1).content == body and read(1, web=True).content == body
+    try:
+        for marker in markers:
+            marker.with_suffix('.hit').unlink(missing_ok=True)
+            marker.touch()
+        fixture.client.put_object_acl(Bucket=fixture.name, Key='cached', ACL='private')
+        wait(lambda: any(marker.with_suffix('.hit').exists() for marker in markers),
+             'notification delivery did not pause', seconds=2)
+        assert read(1).status_code == 200 and read(1, web=True).status_code == 200
+        time.sleep(3.1)
+        assert read(1).status_code == 403 and read(1, web=True).status_code == 403
+    finally:
+        for marker in markers:
+            marker.unlink(missing_ok=True)
+            marker.with_suffix('.hit').unlink(missing_ok=True)
+    print('PASS deliberately delayed notifications retain the configured hard expiry', flush=True)
 
     replacement = body[::-1]
     fixture.client.put_object(Bucket=fixture.name, Key='cached', Body=replacement, ACL='public-read')
@@ -89,21 +120,11 @@ def main():
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     body = b'Cluster source snapshots retain read leases and hard health expiry.\n' * 512
     fixture.client.put_object(Bucket=fixture.name, Key='cached', Body=body, ACL='public-read', CacheControl='no-store')
-    def source_stats(value):
-        if isinstance(value, dict):
-            if 'source_cache' in value:
-                return value['source_cache']
-            for child in value.values():
-                if result := source_stats(child):
-                    return result
-        return None
     for node in range(2):
-        def loaded_source():
-            assert read(node).content == body
-            assert read(node, web=True).content == body
-            return source_stats(status(node))['hits'] > 0
-        wait(loaded_source, 'data node did not cache its protected chunk source', seconds=45)
-    database = Database()
+        before = status(node)['rpc']['summary']['requests']
+        assert read(node).content == body
+        assert read(node, web=True).content == body
+        assert status(node)['rpc']['summary']['requests'] >= before + 2
     chunk, = database.chunks(fixture)
     database.query("UPDATE chunk_encodings SET quarantine_code='hash_mismatch',quarantined_at=created_at WHERE encoding_id=%s", chunk['current_encoding_id'])
     try:
@@ -116,7 +137,7 @@ def main():
     finally:
         database.query('UPDATE chunk_encodings SET quarantine_code=NULL,quarantined_at=NULL WHERE encoding_id=%s', chunk['current_encoding_id'])
     assert all(read(node).content == body for node in range(2))
-    print('PASS both data nodes cache protected chunk sources, enforce health expiry and recover after state restoration', flush=True)
+    print('PASS body misses confirm current chunk sources through RPC and recover after health restoration', flush=True)
 
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile.update(cdc_enabled=False, pack_range_enabled=False, read_integrity='off',
@@ -126,7 +147,6 @@ def main():
     body = b'Optional read digests stay behind per-node profile generations.\n' * 1000
     fixture.client.put_object(Bucket=fixture.name, Key=key, Body=body, ACL='public-read')
     def raw_path():
-        import uuid
         row, = database.query('SELECT r.id FROM objects o JOIN raw_ranges e ON e.stream_id=o.stream_id JOIN raw_sources r ON r.id=e.source_id WHERE o.bucket_id=%s AND o.object_key=%s', uuid.UUID(fixture.bucket_id), key)
         identity = str(row['id']).replace('-', '')
         return fixture.prefix + 'raw/' + identity[-2:] + '/' + identity
@@ -160,10 +180,10 @@ def main():
     fixture.client.put_object(Bucket=fixture.name, Key=key, Body=body, ACL='public-read', CacheControl='no-store')
     for node in range(2):
         before = status(node)['read_checks']['verified']
-        def background_ready():
+        def checked():
             assert read(node).content == body
             return status(node)['read_checks']['verified'] > before
-        wait(background_ready, 'data node did not apply background digests', seconds=45)
+        wait(checked, 'data node did not complete its background digest', seconds=45)
         wait(lambda: status(node)['read_checks']['active'] == 0, 'peer checks did not drain')
     physical = raw_path()
     bad = bytes([body[0] ^ 1]) + body[1:]

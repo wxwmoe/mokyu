@@ -323,7 +323,7 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 
 `python -m tests.recovery.source_read_cache` uses the same stopped-service fixture with no response body budget. It verifies zero-SQL raw reads and Range with explicit source snapshots, independent source expiry, strict and signed bypass, quarantine/recheck invalidation, pre-open pins through overwrite/GC, and bounded chunk refresh failures. Run each supported database locally and set `MOKYU_TEST_BACKEND` for remote raw/chunk/pack coverage. The optional source policy in `tests.recovery.cluster_public_cache` must retain real data-node read leases on body misses.
 
-`python -m tests.recovery.cluster_public_cache` uses the same two-data-node fixture to verify per-node metadata/body reuse, immediate writer-node invalidation, bounded peer permission staleness, current signed credential revocation and convergence after overwrite/delete.
+`python -m tests.recovery.cluster_public_cache` uses the same two-data-node fixture with two controls to verify per-node metadata/body reuse, confirmed peer invalidation, current signed credential revocation, overwrite/delete, source health and read-integrity changes. Set `MOKYU_TEST_CONTROL_FAULT_DIRS` to both comma-separated control fault directories. The test first waits for the peer application receipt, then deliberately pauses notification dispatch to verify the configured hard expiry independently.
 
 `tests/recovery/read_integrity.py` 在隔离四库/本地及远端 S3 上验证额外摘要策略、迟到缓存、后台队列与内存上限、Range/取消、实际坏缓存与真实后端的隔离边界；pack 与加密认证的强制检查还由 Rust 内容格式回归覆盖
 
@@ -339,6 +339,8 @@ CPU/cgroup 内存、各节点状态、后端字节/操作均记录前后差值�
 
 `python -m tests.benchmarks.cors_cache` uses a started isolated fixture to compare 100 buckets sharing 100-rule CORS documents. It reports retained memory, parse counts and five HTTP HEAD rounds at concurrency 8; missing objects deliberately keep public object caching out of the measurement.
 
-`python -m tests.recovery.cluster_cors_cache` requires two isolated PostgreSQL data nodes and the shared S3 fixture. It covers forced CORS caching with public snapshots, independent CORS-only confirmation and peer convergence. Set `MOKYU_TEST_CORS_RESTART_SIGNALS` when the harness can restart the peer after `restart-peer` appears to verify deployment-wide limits with independent per-node activation.
+`python -m tests.recovery.cluster_cors_cache` requires two isolated API data nodes, PostgreSQL controls and the shared S3 fixture. It covers forced CORS caching with public snapshots, independent CORS-only confirmation and peer convergence. Set `MOKYU_TEST_CORS_RESTART_SIGNALS` when the harness can restart the peer after `restart-peer` appears to verify deployment-wide limits with independent per-node activation.
 
 节点角色契约覆盖 `node` 的读写与共享工作能力、纯 `data` 拒绝共享任务，以及 data/worker/node 无法领取其他节点本机上传（含租约过期后的重试）。对应 PostgreSQL 入口为 `node_reads`、`node_writes`、`node_raw` 和 `node_multipart`，每项须使用独立空测试库。
+
+NodeSession notification fault points are `notification-wake` (pause a consumed PostgreSQL wake while durable scanning continues), `notifications-claimed` (pause dispatch after committing claims), and `notification-receipt` (pause before persisting an application receipt). Arm only the isolated controls under test; the runner owns process termination, restart and removal of every marker. A retired target generation is not a successful delivery. Verify the replacement session and its first read separately.

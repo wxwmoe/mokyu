@@ -50,6 +50,8 @@ impl NodeContext {
                 "diagnostics": body.as_ref().map(|body| body.diagnostics.snapshot())},
             "response_cache": foreground.as_ref().map(|reads| reads.bodies.snapshot()),
             "public_read_cache": foreground.as_ref().map(|reads| reads.public.snapshot()),
+            "cors_cache": foreground.as_ref().map(|reads| reads.cors.snapshot()),
+            "read_checks": foreground.as_ref().map(|reads| reads.checks.snapshot()),
             "compression": self.observations.compression.snapshot(),
             "access": self.access.snapshot(),
             "rpc": self.client.statistics(),

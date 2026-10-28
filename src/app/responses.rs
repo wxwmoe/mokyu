@@ -133,7 +133,7 @@ impl Entry {
 
 struct NodeBody {
     proof: crate::model::node_read::CachedBody,
-    route: [u8; 32],
+    routes: Mutex<VecDeque<[u8; 32]>>,
     _memory: OwnedSemaphorePermit,
 }
 
@@ -190,9 +190,11 @@ impl Index {
         if let Some(entry) = self.ready.remove(&key) {
             entry.ownership.retire();
             if let Some(body) = &entry.node {
-                let route = (body.route, key.encoding);
-                if self.node_routes.get(&route) == Some(&key) {
-                    self.node_routes.remove(&route);
+                for route in body.routes.lock().unwrap().iter() {
+                    let route = (*route, key.encoding);
+                    if self.node_routes.get(&route) == Some(&key) {
+                        self.node_routes.remove(&route);
+                    }
                 }
             }
             if let Some(count) = self.paths.get_mut(&entry.path) {
@@ -343,12 +345,31 @@ impl Cache {
         }
         if let Some(entry) = self.get(key) {
             if entry.node.as_ref().is_some_and(|old| old.proof == proof) && entry.usable(0) {
+                let mut index = self.index.lock().unwrap();
+                if index
+                    .ready
+                    .get(&key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                {
+                    let mut routes = entry.node.as_ref().unwrap().routes.lock().unwrap();
+                    if !routes.contains(&route) {
+                        // Route aliases share bytes and have a fixed metadata budget per body.
+                        if routes.len() == 4 {
+                            let oldest = (routes.pop_front().unwrap(), key.encoding);
+                            if index.node_routes.get(&oldest) == Some(&key) {
+                                index.node_routes.remove(&oldest);
+                            }
+                        }
+                        routes.push_back(route);
+                        index.node_routes.insert((route, key.encoding), key);
+                    }
+                }
                 return None;
             }
             self.remove(key, &entry);
         }
         let mut builder = self.begin(key, stream, &stream.object_key)?;
-        let bytes = 512
+        let bytes = 1024
             + proof.representation.capacity()
             + proof.object.id.capacity()
             + proof.mapping.id.capacity()
@@ -369,7 +390,7 @@ impl Cache {
             .ok()?;
         builder.node = Some(NodeBody {
             proof,
-            route,
+            routes: Mutex::new(VecDeque::from([route])),
             _memory: memory,
         });
         Some(builder)
@@ -811,9 +832,11 @@ impl Builder {
         }
         *index.paths.entry(self.path).or_default() += 1;
         if let Some(body) = &entry.node {
-            index
-                .node_routes
-                .insert((body.route, self.key.encoding), self.key);
+            for route in body.routes.lock().unwrap().iter() {
+                index
+                    .node_routes
+                    .insert((*route, self.key.encoding), self.key);
+            }
         }
         index.ready.insert(self.key, entry);
         index.order.push_back(self.key);
@@ -1030,7 +1053,9 @@ mod tests {
                 .begin_node(key, &stream, route, proof.clone())
                 .is_none()
         );
-        let mut builder = cache.begin_node(key, &stream, route, proof).unwrap();
+        let mut builder = cache
+            .begin_node(key, &stream, route, proof.clone())
+            .unwrap();
         let checks = crate::content::checks::Checks::new(Arc::new(Semaphore::new(1)));
         let (evidence, _job) = checks.begin();
         builder
@@ -1044,9 +1069,23 @@ mod tests {
         let (_, entry) = cache.node_candidate(route, "identity").unwrap();
         assert!(!entry.node_body().unwrap().verified);
         let charged = cache.memory.available_permits();
+        for alias in [8, 9, 10, 11] {
+            let route = [alias; 32];
+            assert!(
+                cache
+                    .begin_node(key, &stream, route, proof.clone())
+                    .is_none()
+            );
+            let (_, reused) = cache.node_candidate(route, "identity").unwrap();
+            assert!(Arc::ptr_eq(&entry, &reused));
+            assert_eq!(cache.memory.available_permits(), charged);
+        }
+        assert!(cache.node_candidate(route, "identity").is_none());
+        assert!(cache.node_candidate([8; 32], "identity").is_some());
+        assert_eq!(cache.index.lock().unwrap().node_routes.len(), 4);
         let body = entry.bytes.clone();
         checks.finish(&evidence, crate::content::checks::FAILED);
-        assert!(cache.node_candidate(route, "identity").is_none());
+        assert!(cache.node_candidate([8; 32], "identity").is_none());
         assert_eq!(cache.memory.available_permits(), charged);
         assert!(cache.index.lock().unwrap().node_routes.is_empty());
         drop(entry);

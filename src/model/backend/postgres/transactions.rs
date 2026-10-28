@@ -1274,6 +1274,25 @@ impl StreamStore for Backend {
     }
 }
 
+async fn locked_current_stream(
+    db: &mut PgConnection,
+    bucket: Uuid,
+    key: &str,
+) -> Result<Option<crate::app::StoredStream>> {
+    // A joined row lock can lose its match while waiting for an overwrite to commit.
+    if queries::share_object_stream(bucket, key)
+        .fetch_optional(&mut *db)
+        .await?
+        .flatten()
+        .is_none()
+    {
+        return Ok(None);
+    }
+    Ok(queries::current_stream(bucket, key, true)
+        .fetch_optional(db)
+        .await?)
+}
+
 pub(super) async fn current_stream(
     pool: &PgPool,
     bucket: Uuid,
@@ -1281,8 +1300,7 @@ pub(super) async fn current_stream(
     lease_seconds: i64,
 ) -> Result<(crate::app::StoredStream, Uuid)> {
     let mut tx = pool.begin().await?;
-    let stream: crate::app::StoredStream = queries::current_stream(bucket, key, true)
-        .fetch_optional(&mut *tx)
+    let stream = locked_current_stream(&mut tx, bucket, key)
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
     let lease = create_read_lease(&mut tx, stream.id, lease_seconds).await?;
@@ -9498,10 +9516,7 @@ pub(super) async fn open_node_read(
             .map_or(key, |(_, key)| key),
         crate::model::ReadRoute::Host { key, .. } => key,
     };
-    let Some(stream) = queries::current_stream(bucket.id, object_key, true)
-        .fetch_optional(&mut *tx)
-        .await?
-    else {
+    let Some(stream) = locked_current_stream(&mut tx, bucket.id, object_key).await? else {
         reply.outcome = Outcome::NoSuchKey;
         return Ok(reply);
     };

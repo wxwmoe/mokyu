@@ -249,7 +249,11 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
                             app.notifications.reset(true);
                             app.wake_tasks.notify_waiters();
                         }
-                        Signal::Changes => app.notifications.wake.notify_one(),
+                        Signal::Changes => {
+                            #[cfg(feature = "fault-injection")]
+                            crate::faults::point("notification-wake").await;
+                            app.notifications.wake.notify_one();
+                        }
                         signal => {
                             app.notifications.hint(&signal);
                             app.wake_tasks.notify_waiters();

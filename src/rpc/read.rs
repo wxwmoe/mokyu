@@ -292,7 +292,8 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
                 || !text(&route.name, 255)
                 || !text(&route.key, 1024)
                 || !text(&route.alias_name, 255)
-                || !text(&route.alias_key, 1024)
+                // The alternate host route can include the path-style bucket prefix.
+                || !text(&route.alias_key, 255 + 1 + 1024)
                 || (!input.access_key.is_empty() && !route.alias_name.is_empty())
                 || (route.alias_name.is_empty() && !route.alias_key.is_empty())
             {
@@ -720,6 +721,36 @@ mod tests {
         input.method = wire::ReadMethod::Get as i32;
         input.include.push(5);
         assert!(query(input).is_err());
+    }
+
+    #[test]
+    fn path_style_key_limit_preserves_the_alternate_host_route() {
+        for key in ["x".repeat(1024), "\u{96ea}".repeat(341)] {
+            let mut input = request();
+            let route = wire::BucketRoute {
+                name: "objects".into(),
+                key: key.clone(),
+                alias_name: "public.example".into(),
+                alias_key: format!("objects/{key}"),
+            };
+            input.route = Some(wire::ReadRoute {
+                route: Some(wire::read_route::Route::Bucket(route.clone())),
+            });
+            assert!(query(input.clone()).is_ok());
+            for route in [
+                wire::BucketRoute {
+                    key: "x".repeat(1025),
+                    ..route.clone()
+                },
+                wire::BucketRoute {
+                    alias_key: "x".repeat(1281),
+                    ..route
+                },
+            ] {
+                input.route.as_mut().unwrap().route = Some(wire::read_route::Route::Bucket(route));
+                assert!(query(input.clone()).is_err());
+            }
+        }
     }
 
     #[test]

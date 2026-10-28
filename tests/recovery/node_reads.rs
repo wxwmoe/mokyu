@@ -71,6 +71,95 @@ async fn active(pool: &PgPool) -> Result<(i64, i64, i64)> {
     Ok(sqlx::query_as("SELECT (SELECT count(*) FROM node_reads),(SELECT count(*) FROM node_read_windows),(SELECT count(*) FROM storage_permits)").fetch_one(pool).await?)
 }
 
+async fn publication_waits(
+    pool: &PgPool,
+    node: &crate::cluster::NodeState,
+    key: &Key,
+    run: Run,
+    bucket: Uuid,
+) -> Result<()> {
+    for rpc in [false, true] {
+        for commit in [false, true] {
+            let name = format!("publication-{rpc}-{commit}");
+            let mut streams = Vec::new();
+            for state in ["ready", "writing"] {
+                let stream: Uuid = sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,etag,public_read,metadata) VALUES($1,$2,'object',$3,0,'empty',true,'{}') RETURNING id")
+                    .bind(bucket).bind(&name).bind(state).fetch_one(pool).await?;
+                streams.push(stream);
+            }
+            sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,$2,$3,uuidv7())")
+                .bind(bucket).bind(&name).bind(streams[0]).execute(pool).await?;
+            let mut writer = pool.begin().await?;
+            let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *writer)
+                .await?;
+            queries::lock_object_stream(bucket, &name)
+                .fetch_one(&mut *writer)
+                .await?;
+            sqlx::query("UPDATE streams SET state=CASE WHEN id=$1 THEN 'retired' ELSE 'ready' END WHERE id=ANY($2)")
+                .bind(streams[0]).bind(&streams).execute(&mut *writer).await?;
+            sqlx::query("UPDATE objects SET stream_id=$3 WHERE bucket_id=$1 AND object_key=$2")
+                .bind(bucket)
+                .bind(&name)
+                .bind(streams[1])
+                .execute(&mut *writer)
+                .await?;
+            let reader_pool = pool.clone();
+            let reader_node = node.clone();
+            let reader_key = key.clone();
+            let reader = tokio::spawn(async move {
+                if rpc {
+                    let mut input = request(run);
+                    input.route = model::ReadRoute::Bucket {
+                        name: "reads".into(),
+                        key: name,
+                        alias: None,
+                    };
+                    input.head = true;
+                    input.mapping = false;
+                    let reply = super::transactions::open_node_read(
+                        &reader_pool,
+                        &reader_node,
+                        &reader_key,
+                        input,
+                    )
+                    .await?;
+                    assert!(matches!(reply.outcome, read::Outcome::Ready));
+                    Ok::<Id, anyhow::Error>(
+                        material::<read::Object>(&reply, read::MaterialType::Object)?
+                            .id
+                            .into(),
+                    )
+                } else {
+                    let (stream, lease) =
+                        super::transactions::current_stream(&reader_pool, bucket, &name, 90)
+                            .await?;
+                    queries::release_read_lease(&reader_pool, lease).await?;
+                    Ok(stream.id)
+                }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))")
+                        .bind(writer_pid).fetch_one(pool).await?;
+                    if waiting { return Ok::<(), anyhow::Error>(()); }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }).await??;
+            if commit {
+                writer.commit().await?;
+            } else {
+                writer.rollback().await?;
+            }
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), reader).await???,
+                Id::from(streams[usize::from(commit)]),
+            );
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires a new isolated PostgreSQL database"]
 async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_sources() -> Result<()> {
@@ -149,6 +238,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         .execute(&pool)
         .await?;
     sqlx::query("INSERT INTO s3_credential_grants(access_key,bucket_id,actions) VALUES('reader',$1,ARRAY['object.read'])").bind(bucket).execute(&pool).await?;
+    publication_waits(&pool, &node, &key, session.run, bucket).await?;
     let observed: Uuid = sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,etag) VALUES($1,'observed','object','ready',4096,'observed') RETURNING id")
         .bind(bucket).fetch_one(&pool).await?;
     let observations = || model::node_observation::Batch {
