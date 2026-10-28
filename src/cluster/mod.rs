@@ -1,4 +1,5 @@
 pub(crate) mod identity;
+pub(crate) mod notifications;
 pub(crate) mod registration;
 pub(crate) mod report;
 pub(crate) mod status;

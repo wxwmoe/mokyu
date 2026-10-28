@@ -9,6 +9,17 @@ use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait ClusterStore: Send + Sync {
+    async fn claim_notifications(
+        &self,
+        consumers: &[super::notification::Consumer],
+    ) -> Result<Vec<super::notification::Delivery>>;
+    async fn acknowledge_notifications(
+        &self,
+        consumer: super::notification::Consumer,
+        ids: &[Uuid],
+    ) -> Result<u64>;
+    async fn maintain_notifications(&self) -> Result<bool>;
+    async fn notification_changes(&self) -> Result<Box<dyn NotificationChanges>>;
     async fn read_migration(
         &self,
         node: &NodeState,
@@ -410,6 +421,12 @@ pub(crate) trait ClusterStore: Send + Sync {
 #[async_trait]
 pub(crate) trait ProfileChanges: Send {
     async fn next(&mut self) -> Result<Uuid>;
+}
+
+#[async_trait::async_trait]
+pub(crate) trait NotificationChanges: Send {
+    // False reports a reconnected subscription, including SQLx automatic recovery.
+    async fn next(&mut self) -> Result<bool>;
 }
 #[async_trait]
 pub(crate) trait Leader: Send {

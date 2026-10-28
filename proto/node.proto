@@ -532,6 +532,7 @@ message SessionRequest {
   oneof message {
     Hello hello = 1;
     Pulse pulse = 2;
+    Receipt receipt = 3;
   }
 }
 
@@ -573,7 +574,29 @@ message PulseReply {
   repeated GrantResult grants = 4;
 }
 
-message Notice {}
+message ObjectChange {
+  string bucket_id = 1;
+  string key = 2;
+}
+
+message Invalidation {
+  string event_id = 1;
+  oneof target {
+    ObjectChange object = 2;
+    string bucket_id = 3;
+    string storage_id = 4;
+  }
+}
+
+message Notice {
+  repeated Invalidation changes = 1;
+  bool reset = 2;
+  bool state_changed = 3;
+}
+
+message Receipt {
+  repeated string applied = 1;
+}
 
 message SessionReply {
   oneof message {

@@ -1,5 +1,8 @@
 //! PostgreSQL statements, row decoding, and nontransactional operations.
 
+#[path = "notification_queries.rs"]
+pub(super) mod notifications;
+
 #[path = "pack_queries.rs"]
 pub(super) mod pack_work;
 use crate::cluster::NodeState;
@@ -7538,6 +7541,27 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn claim_notifications(
+        &self,
+        consumers: &[crate::model::notification::Consumer],
+    ) -> Result<Vec<crate::model::notification::Delivery>> {
+        transactions::notifications::claim(&self.pool, consumers).await
+    }
+    async fn acknowledge_notifications(
+        &self,
+        consumer: crate::model::notification::Consumer,
+        ids: &[Uuid],
+    ) -> Result<u64> {
+        transactions::notifications::acknowledge(&self.pool, consumer, ids).await
+    }
+    async fn maintain_notifications(&self) -> Result<bool> {
+        transactions::notifications::maintain(&self.pool).await
+    }
+    async fn notification_changes(
+        &self,
+    ) -> Result<Box<dyn crate::model::cluster::NotificationChanges>> {
+        connection::notification_changes(&self.pool).await
+    }
     async fn read_migration(
         &self,
         node: &NodeState,

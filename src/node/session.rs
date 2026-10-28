@@ -46,6 +46,12 @@ impl NodeContext {
             if *mode.borrow() == Mode::Stopped {
                 return Ok(());
             }
+            // Fence old cached authorization before activation can retire its target generation.
+            self.current
+                .send_modify(|state| state.phase = Phase::Recovering);
+            if let Some(reads) = self.foreground.lock().unwrap().upgrade() {
+                reads.notify_public(true, &[]);
+            }
             let result = tokio::select! {
                 result = self.client.open(self.boot, connection, epoch) => result,
                 _ = stopped(&mut mode) => return Ok(()),
@@ -103,7 +109,26 @@ impl NodeContext {
         }
     }
 
-    async fn connected(&self, session: &mut Session, failures: &mut u32) -> Result<(), Status> {
+    async fn connected(
+        self: &Arc<Self>,
+        session: &mut Session,
+        failures: &mut u32,
+    ) -> Result<(), Status> {
+        let node = Arc::downgrade(self);
+        session.on_notice = Some(Arc::new(move |reset, changes| {
+            if let Some(node) = node.upgrade() {
+                if let Some(reads) = node.foreground.lock().unwrap().upgrade() {
+                    reads.notify_public(reset, changes);
+                }
+                if reset
+                    || changes.iter().any(|change| {
+                        matches!(change, crate::model::notification::Change::Storage { .. })
+                    })
+                {
+                    node.cache_epoch.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+        }));
         let run = session
             .welcome
             .run
@@ -134,7 +159,9 @@ impl NodeContext {
             state.peer = Some(session.peer);
             state.control_id = Uuid::parse_str(&session.welcome.control_id).ok();
         });
-        self.synchronize(&lease, &mut settings).await?;
+        session
+            .during(self.synchronize(&lease, &mut settings))
+            .await?;
         *failures = 0;
         let mut sequence = 0u64;
         let mut timer = tokio::time::interval(Duration::from_secs(10));
@@ -143,7 +170,7 @@ impl NodeContext {
         loop {
             tokio::select! {
                 _ = timer.tick() => {},
-                notice = session.notified() => { notice?; },
+                notice = session.notified() => { notice?; if !session.take_state_change() { continue; } },
                 _ = mode.changed() => {},
                 _ = self.resources.changed.notified() => {},
             }
@@ -178,10 +205,16 @@ impl NodeContext {
                     .ok_or_else(|| Status::data_loss("control omitted node state"))?;
                 self.publish(&lease, &settings, &state);
                 if !settings.matches(&state).map_err(invalid_settings)? {
-                    self.synchronize(&lease, &mut settings).await?;
+                    session
+                        .during(self.synchronize(&lease, &mut settings))
+                        .await?;
                 }
             }
-            if !self.client.contains(session.peer).await {
+            let peer = session.peer;
+            if !session
+                .during(async { Ok(self.client.contains(peer).await) })
+                .await?
+            {
                 return Err(Status::unavailable("session origin left control DNS"));
             }
         }

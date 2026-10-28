@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0087.
+-- Generated from the complete postgres migration chain through 0088.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -155,6 +155,124 @@ BEGIN
     UPDATE api_tokens SET authorization_revision=authorization_revision+1 WHERE id=COALESCE(NEW.token_id,OLD.token_id);
     RETURN NULL;
 END $$;
+
+CREATE FUNCTION public.mokyu_notify_bucket() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        PERFORM mokyu_notify_change('bucket',OLD.id);
+    ELSIF OLD IS DISTINCT FROM NEW THEN
+        PERFORM mokyu_notify_change('bucket',NEW.id);
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.mokyu_notify_change(change_scope text, resource uuid, object_name text DEFAULT ''::text) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    event uuid;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM mokyu_meta WHERE singleton AND deployment_mode='cluster') THEN
+        RETURN;
+    END IF;
+    PERFORM pg_advisory_xact_lock_shared(734922709851088);
+    IF NOT EXISTS (SELECT 1 FROM notification_consumers c JOIN nodes n ON n.id=c.node_id
+        WHERE n.enabled AND c.expires_at>clock_timestamp()
+        AND (change_scope='storage' OR c.role<>'worker')) THEN
+        RETURN;
+    END IF;
+    INSERT INTO notifications(scope,resource_id,object_key) VALUES(change_scope,resource,object_name)
+        ON CONFLICT (transaction_id,scope,resource_id,object_key) DO NOTHING RETURNING id INTO event;
+    IF event IS NULL THEN
+        RETURN;
+    END IF;
+    INSERT INTO notification_targets(notification_id,node_id,generation)
+        SELECT event,c.node_id,c.generation FROM notification_consumers c JOIN nodes n ON n.id=c.node_id
+        WHERE n.enabled AND c.expires_at>clock_timestamp()
+        AND (change_scope='storage' OR c.role<>'worker');
+    PERFORM pg_notify('mokyu_notifications','changed');
+END
+$$;
+
+CREATE FUNCTION public.mokyu_notify_domain() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP<>'INSERT' THEN
+        PERFORM mokyu_notify_change('bucket',OLD.bucket_id);
+    END IF;
+    IF TG_OP<>'DELETE' THEN
+        PERFORM mokyu_notify_change('bucket',NEW.bucket_id);
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.mokyu_notify_health() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF (to_jsonb(OLD)->'quarantine_revision') IS DISTINCT FROM (to_jsonb(NEW)->'quarantine_revision')
+        OR OLD.quarantine_code IS DISTINCT FROM NEW.quarantine_code THEN
+        PERFORM mokyu_notify_change('storage',NEW.storage_id);
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.mokyu_notify_object() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        IF OLD.stream_id IS NOT NULL THEN
+            PERFORM mokyu_notify_change('object',OLD.bucket_id,OLD.object_key);
+        END IF;
+    ELSIF TG_OP='INSERT' THEN
+        IF NEW.stream_id IS NOT NULL THEN
+            PERFORM mokyu_notify_change('object',NEW.bucket_id,NEW.object_key);
+        END IF;
+    ELSIF OLD.stream_id IS DISTINCT FROM NEW.stream_id THEN
+        PERFORM mokyu_notify_change('object',NEW.bucket_id,NEW.object_key);
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.mokyu_notify_storage() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    previous jsonb;
+    current jsonb;
+    resource uuid;
+BEGIN
+    previous:=to_jsonb(OLD);
+    current:=to_jsonb(NEW);
+    IF TG_OP='DELETE' OR previous IS DISTINCT FROM current THEN
+        resource:=COALESCE((previous->>'storage_id')::uuid,(previous->>'id')::uuid);
+        PERFORM mokyu_notify_change('storage',resource);
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.mokyu_notify_stream() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.stream_type='object' AND NEW.state='ready'
+        AND EXISTS (SELECT 1 FROM objects WHERE bucket_id=NEW.bucket_id AND object_key=NEW.object_key AND stream_id=NEW.id)
+        AND (OLD.public_read,OLD.metadata,OLD.etag,OLD.size,OLD.payload_revision)
+            IS DISTINCT FROM (NEW.public_read,NEW.metadata,NEW.etag,NEW.size,NEW.payload_revision) THEN
+        PERFORM mokyu_notify_change('object',NEW.bucket_id,NEW.object_key);
+    END IF;
+    RETURN NULL;
+END
+$$;
 
 CREATE FUNCTION public.prevent_bucket_store_change() RETURNS trigger
     LANGUAGE plpgsql
@@ -1158,6 +1276,40 @@ CREATE TABLE public.nonce_observations (
     CONSTRAINT nonce_observations_revision_check CHECK ((revision > 0))
 );
 
+CREATE TABLE public.notification_consumers (
+    node_id uuid NOT NULL,
+    generation uuid NOT NULL,
+    role text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT notification_consumers_role_check CHECK ((role = ANY (ARRAY['control'::text, 'data'::text, 'worker'::text, 'node'::text])))
+);
+
+CREATE TABLE public.notification_targets (
+    notification_id uuid NOT NULL,
+    node_id uuid NOT NULL,
+    generation uuid NOT NULL,
+    claim_token uuid,
+    claim_until timestamp with time zone,
+    attempts integer DEFAULT 0 NOT NULL,
+    applied_at timestamp with time zone,
+    retired_at timestamp with time zone,
+    CONSTRAINT notification_targets_attempts_check CHECK ((attempts >= 0)),
+    CONSTRAINT notification_targets_check CHECK (((claim_token IS NULL) = (claim_until IS NULL))),
+    CONSTRAINT notification_targets_check1 CHECK (((applied_at IS NULL) OR (retired_at IS NULL)))
+);
+
+CREATE TABLE public.notifications (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    transaction_id xid8 DEFAULT pg_current_xact_id() NOT NULL,
+    scope text NOT NULL,
+    resource_id uuid NOT NULL,
+    object_key text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT notifications_check CHECK (((scope = 'object'::text) = (object_key <> ''::text))),
+    CONSTRAINT notifications_object_key_check CHECK ((octet_length(object_key) <= 1024)),
+    CONSTRAINT notifications_scope_check CHECK ((scope = ANY (ARRAY['object'::text, 'bucket'::text, 'storage'::text])))
+);
+
 CREATE TABLE public.objects (
     bucket_id uuid NOT NULL,
     object_key text CONSTRAINT objects_key_not_null NOT NULL COLLATE pg_catalog."C",
@@ -2068,6 +2220,18 @@ ALTER TABLE ONLY public.nonce_counters
 ALTER TABLE ONLY public.nonce_observations
     ADD CONSTRAINT nonce_observations_pkey PRIMARY KEY (block_key_id);
 
+ALTER TABLE ONLY public.notification_consumers
+    ADD CONSTRAINT notification_consumers_pkey PRIMARY KEY (node_id);
+
+ALTER TABLE ONLY public.notification_targets
+    ADD CONSTRAINT notification_targets_pkey PRIMARY KEY (notification_id, node_id, generation);
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_transaction_id_scope_resource_id_object_key_key UNIQUE (transaction_id, scope, resource_id, object_key);
+
 ALTER TABLE ONLY public.objects
     ADD CONSTRAINT objects_pkey PRIMARY KEY (bucket_id, object_key);
 
@@ -2323,6 +2487,10 @@ CREATE INDEX node_writes_key ON public.node_writes USING btree (block_key_id) WH
 
 CREATE INDEX nodes_role_enabled ON public.nodes USING btree (role, enabled);
 
+CREATE INDEX notification_targets_pending ON public.notification_targets USING btree (node_id, generation, notification_id) WHERE ((applied_at IS NULL) AND (retired_at IS NULL));
+
+CREATE INDEX notifications_created ON public.notifications USING btree (created_at, id);
+
 CREATE INDEX objects_catalog_category ON public.objects USING btree (bucket_id, catalog_category, object_key) WHERE (stream_id IS NOT NULL);
 
 CREATE INDEX objects_catalog_modified ON public.objects USING btree (bucket_id, catalog_modified, object_key) WHERE (stream_id IS NOT NULL);
@@ -2463,6 +2631,8 @@ CREATE INDEX web_users_directory ON public.web_users USING btree (username COLLA
 
 CREATE TRIGGER bucket_settings_revision BEFORE UPDATE OF cors, website_enabled, index_document, error_document, project_id, state, uploads_paused, public_base_url ON public.buckets FOR EACH ROW EXECUTE FUNCTION public.bucket_settings_revision();
 
+CREATE TRIGGER buckets_notify AFTER DELETE OR UPDATE ON public.buckets FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_bucket();
+
 CREATE TRIGGER buckets_store_immutable BEFORE UPDATE OF storage_id ON public.buckets FOR EACH ROW EXECUTE FUNCTION public.prevent_bucket_store_change();
 
 CREATE TRIGGER catalog_object BEFORE INSERT OR UPDATE OF stream_id ON public.objects FOR EACH ROW EXECUTE FUNCTION public.catalog_object();
@@ -2479,9 +2649,15 @@ CREATE TRIGGER credential_expiration BEFORE UPDATE OF expires_at ON public.s3_cr
 
 CREATE TRIGGER domain_settings_revision AFTER INSERT OR DELETE OR UPDATE ON public.bucket_domains FOR EACH ROW EXECUTE FUNCTION public.domain_settings_revision();
 
+CREATE TRIGGER domains_notify AFTER INSERT OR DELETE OR UPDATE ON public.bucket_domains FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_domain();
+
+CREATE TRIGGER encodings_notify AFTER UPDATE OF quarantine_code, quarantine_revision ON public.chunk_encodings FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_health();
+
 CREATE TRIGGER grant_authorization AFTER INSERT OR DELETE OR UPDATE ON public.member_bucket_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_member_authorization();
 
 CREATE TRIGGER member_authorization AFTER INSERT OR DELETE OR UPDATE ON public.project_members FOR EACH ROW EXECUTE FUNCTION public.invalidate_member_authorization();
+
+CREATE TRIGGER objects_notify AFTER INSERT OR DELETE OR UPDATE OF stream_id ON public.objects FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_object();
 
 CREATE TRIGGER pack_extents_delete AFTER DELETE ON public.extents REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION public.enqueue_pack_extents();
 
@@ -2494,6 +2670,10 @@ CREATE TRIGGER pack_members_storage_binding BEFORE INSERT OR UPDATE OF pack_id, 
 CREATE TRIGGER pack_stream_ready AFTER UPDATE OF state ON public.streams FOR EACH ROW EXECUTE FUNCTION public.enqueue_pack_stream();
 
 CREATE TRIGGER packs_fingerprint BEFORE INSERT OR UPDATE OF storage_id, block_key_id, encryption_algorithm, pack_compressed, member_count ON public.packs FOR EACH ROW EXECUTE FUNCTION public.refresh_pack_fingerprint();
+
+CREATE TRIGGER packs_notify AFTER UPDATE OF quarantine_code, quarantine_revision ON public.packs FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_health();
+
+CREATE TRIGGER profiles_notify AFTER DELETE OR UPDATE ON public.storage_profiles FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_storage();
 
 CREATE TRIGGER quota_bucket AFTER INSERT OR DELETE OR UPDATE OF project_id ON public.buckets FOR EACH ROW EXECUTE FUNCTION public.quota_bucket();
 
@@ -2511,11 +2691,17 @@ CREATE TRIGGER quota_upload_delete BEFORE DELETE ON public.uploads FOR EACH ROW 
 
 CREATE TRIGGER quota_upload_end AFTER UPDATE OF state ON public.uploads FOR EACH ROW EXECUTE FUNCTION public.quota_upload_end();
 
+CREATE TRIGGER raw_notify AFTER UPDATE OF quarantine_code ON public.raw_sources FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_health();
+
 CREATE TRIGGER service_grant_authorization AFTER INSERT OR DELETE OR UPDATE ON public.s3_credential_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_service_authorization();
 
 CREATE TRIGGER storages_block_key_validate BEFORE INSERT OR UPDATE OF block_key_id ON public.storages FOR EACH ROW EXECUTE FUNCTION public.validate_store_current_key();
 
+CREATE TRIGGER storages_notify AFTER DELETE OR UPDATE ON public.storages FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_storage();
+
 CREATE TRIGGER streams_clear_write_lease AFTER UPDATE OF state ON public.streams FOR EACH ROW EXECUTE FUNCTION public.clear_stream_write_lease();
+
+CREATE TRIGGER streams_notify AFTER UPDATE OF public_read, metadata, etag, size, payload_revision ON public.streams FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_stream();
 
 CREATE TRIGGER token_authorization BEFORE UPDATE OF system, expires_at, revoked_at ON public.api_tokens FOR EACH ROW EXECUTE FUNCTION public.advance_authorization_revision();
 
@@ -2744,6 +2930,12 @@ ALTER TABLE ONLY public.nonce_counters
 
 ALTER TABLE ONLY public.nonce_observations
     ADD CONSTRAINT nonce_observations_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);
+
+ALTER TABLE ONLY public.notification_consumers
+    ADD CONSTRAINT notification_consumers_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.notification_targets
+    ADD CONSTRAINT notification_targets_notification_id_fkey FOREIGN KEY (notification_id) REFERENCES public.notifications(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.objects
     ADD CONSTRAINT objects_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);

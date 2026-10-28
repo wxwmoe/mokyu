@@ -262,6 +262,23 @@ pub(super) async fn set_mode(
 
 struct ProfileListener(sqlx::postgres::PgListener);
 
+struct NotificationListener(sqlx::postgres::PgListener);
+
+#[async_trait::async_trait]
+impl crate::model::cluster::NotificationChanges for NotificationListener {
+    async fn next(&mut self) -> Result<bool> {
+        Ok(self.0.try_recv().await?.is_some())
+    }
+}
+
+pub(super) async fn notification_changes(
+    pool: &PgPool,
+) -> Result<Box<dyn crate::model::cluster::NotificationChanges>> {
+    let mut listener = sqlx::postgres::PgListener::connect_with(pool).await?;
+    listener.listen("mokyu_notifications").await?;
+    Ok(Box::new(NotificationListener(listener)))
+}
+
 #[async_trait::async_trait]
 impl crate::model::cluster::ProfileChanges for ProfileListener {
     async fn next(&mut self) -> Result<uuid::Uuid> {

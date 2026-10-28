@@ -2,6 +2,7 @@ pub(crate) mod client;
 mod metrics;
 mod multipart;
 mod native;
+mod notifications;
 mod object;
 pub(crate) mod read;
 mod request;

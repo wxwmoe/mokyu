@@ -5,11 +5,11 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicU64, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use uuid::Uuid;
 
 const UNIT: usize = super::responses::MEMORY_UNIT;
@@ -48,6 +48,7 @@ struct Index {
     order: VecDeque<Key>,
     buckets: HashMap<Key, Weak<Entry>>,
     pending: HashSet<Key>,
+    refreshes: HashMap<Key, Weak<Refresh>>,
     generation: u64,
     changing: usize,
 }
@@ -90,6 +91,7 @@ pub(crate) struct Confirmation {
 
 pub(crate) enum Work {
     Refresh(Arc<Entry>),
+    Notify(Arc<Refresh>),
     Fill {
         route: ReadRoute,
         snapshot: Arc<ReadSnapshot>,
@@ -98,6 +100,52 @@ pub(crate) enum Work {
         confirmed: Option<Box<Confirmation>>,
         _memory: Memory,
     },
+}
+
+pub(crate) struct Refresh {
+    pub(crate) entry: Arc<Entry>,
+    pub(crate) generation: AtomicU64,
+    started: AtomicBool,
+    done: watch::Sender<bool>,
+}
+
+pub(crate) struct Refreshing(Arc<Refresh>);
+
+impl Drop for Refreshing {
+    fn drop(&mut self) {
+        self.0.done.send_replace(true);
+    }
+}
+
+impl Refresh {
+    pub(crate) fn claim(self: &Arc<Self>) -> Option<Refreshing> {
+        (!self.started.swap(true, std::sync::atomic::Ordering::AcqRel))
+            .then(|| Refreshing(self.clone()))
+    }
+
+    pub(crate) async fn wait(&self) {
+        let mut done = self.done.subscribe();
+        if !*done.borrow_and_update() {
+            let _ = done.changed().await;
+        }
+    }
+}
+
+fn affected(entry: &Entry, reset: bool, changes: &[crate::model::notification::Change]) -> bool {
+    use crate::model::notification::Change;
+    reset
+        || changes.iter().any(|change| match change {
+            Change::Object { bucket, key } => {
+                entry.snapshot.bucket.id == *bucket
+                    && entry
+                        .snapshot
+                        .stream
+                        .as_ref()
+                        .is_some_and(|stream| stream.object_key == *key)
+            }
+            Change::Bucket { bucket } => entry.snapshot.bucket.id == *bucket,
+            Change::Storage { storage } => entry.profiles.iter().any(|(id, _)| id == storage),
+        })
 }
 
 pub(crate) struct Change<'a> {
@@ -298,6 +346,103 @@ impl Cache {
 
     pub(crate) fn entry(&self, route: &ReadRoute) -> Option<Arc<Entry>> {
         self.index.lock().unwrap().entries.get(&key(route)).cloned()
+    }
+
+    pub(crate) fn refreshing(&self, route: &ReadRoute) -> Option<Arc<Refresh>> {
+        self.index
+            .lock()
+            .unwrap()
+            .refreshes
+            .get(&key(route))
+            .and_then(Weak::upgrade)
+            .filter(|job| !*job.done.borrow())
+    }
+
+    pub(crate) fn finish_refresh(
+        &self,
+        job: &Arc<Refresh>,
+        requested: u64,
+        confirmed: u64,
+    ) -> bool {
+        let mut index = self.index.lock().unwrap();
+        if job.generation.load(Relaxed) != requested || index.generation != confirmed {
+            return false;
+        }
+        job.done.send_replace(true);
+        let key = key(&job.entry.route);
+        if index
+            .refreshes
+            .get(&key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|current| Arc::ptr_eq(&current, job))
+        {
+            index.refreshes.remove(&key);
+        }
+        true
+    }
+
+    pub(crate) fn notified(&self, reset: bool, changes: &[crate::model::notification::Change]) {
+        if !reset && changes.is_empty() {
+            return;
+        }
+        let mut index = self.index.lock().unwrap();
+        // Fence first fills even when no resident entry matches this batch.
+        index.generation = index.generation.wrapping_add(1);
+        let generation = index.generation;
+        if reset
+            || changes
+                .iter()
+                .any(|change| matches!(change, crate::model::notification::Change::Bucket { .. }))
+        {
+            self.cors.change(true);
+            self.cors.change(false);
+        }
+        index
+            .refreshes
+            .retain(|_, job| job.upgrade().is_some_and(|job| !*job.done.borrow()));
+        for job in index.refreshes.values().filter_map(Weak::upgrade) {
+            if affected(&job.entry, reset, changes) {
+                job.generation.store(generation, Relaxed);
+            }
+        }
+        let entries: Vec<_> = index
+            .entries
+            .iter()
+            .filter(|(_, entry)| affected(entry, reset, changes))
+            .map(|(key, entry)| (*key, entry.clone()))
+            .collect();
+        for (key, entry) in entries {
+            index.remove(key);
+            if entry.verified.elapsed() >= entry.age || index.refreshes.contains_key(&key) {
+                continue;
+            }
+            // Candidate snapshots keep their existing memory permits; only 32 jobs can wait.
+            if index.refreshes.len() >= 32 {
+                self.skipped.fetch_add(1, Relaxed);
+                continue;
+            }
+            let job = Arc::new(Refresh {
+                entry,
+                generation: AtomicU64::new(generation),
+                started: AtomicBool::new(false),
+                done: watch::channel(false).0,
+            });
+            if self.sender.try_send(Work::Notify(job.clone())).is_ok() {
+                index.refreshes.insert(key, Arc::downgrade(&job));
+            } else {
+                self.skipped.fetch_add(1, Relaxed);
+            }
+        }
+        let index = &mut *index;
+        index.order.retain(|key| index.entries.contains_key(key));
+        let entries = &index.entries;
+        index.buckets.retain(|_, entry| {
+            entry.upgrade().is_some_and(|entry| {
+                entries
+                    .get(&key(&entry.route))
+                    .is_some_and(|current| Arc::ptr_eq(current, &entry))
+            })
+        });
     }
 
     pub fn raw_current(&self, entry: &Arc<Entry>, storage: &crate::storage::Storage) -> bool {
@@ -628,7 +773,8 @@ impl Cache {
 
     pub fn snapshot(&self) -> serde_json::Value {
         let extra = self.limit - LIMIT - self.extra.available_permits() * UNIT;
-        serde_json::json!({"limit_bytes":self.limit,"used_bytes":LIMIT-self.memory.available_permits()*UNIT+extra,"entry_limit":self.entries,"entries":self.index.lock().unwrap().entries.len(),"hits":self.hits.load(Relaxed),"refreshed":self.refreshed.load(Relaxed),"failed":self.failed.load(Relaxed),"skipped":self.skipped.load(Relaxed)})
+        let index = self.index.lock().unwrap();
+        serde_json::json!({"limit_bytes":self.limit,"used_bytes":LIMIT-self.memory.available_permits()*UNIT+extra,"entry_limit":self.entries,"entries":index.entries.len(),"pending_checks":index.pending.len(),"pending_refreshes":index.refreshes.values().filter_map(Weak::upgrade).filter(|job| !*job.done.borrow()).count(),"hits":self.hits.load(Relaxed),"refreshed":self.refreshed.load(Relaxed),"failed":self.failed.load(Relaxed),"skipped":self.skipped.load(Relaxed)})
     }
 }
 
@@ -723,6 +869,11 @@ impl App {
 
 pub(crate) async fn run(app: Weak<App>, mut receiver: mpsc::Receiver<Work>) {
     while let Some(work) = receiver.recv().await {
+        if let Work::Notify(job) = &work {
+            // Notification refreshes are consumed by API nodes, never the single runtime.
+            job.done.send_replace(true);
+            continue;
+        }
         if let Work::Fill {
             route,
             snapshot,
@@ -812,6 +963,75 @@ mod tests {
     use super::*;
     use crate::app::{Bucket, StoredStream};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn notification_refreshes_only_resident_entries_and_coalesces_pending_work() {
+        let (cors, _) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let (cache, mut receiver) = Cache::new(cors, &super::super::responses::Cache::new(0));
+        let (route, snapshot) = fixture();
+        let other_route = ReadRoute::Host {
+            host: "media.test".into(),
+            key: "other".into(),
+        };
+        let mut other = (*snapshot).clone();
+        other.stream.as_mut().unwrap().object_key = "other".into();
+        for (route, snapshot) in [(&route, snapshot.clone()), (&other_route, Arc::new(other))] {
+            cache.put(
+                route,
+                snapshot,
+                None,
+                vec![],
+                (30, 60),
+                (Instant::now(), cache.generation()),
+            );
+        }
+        let before = cache.generation();
+        let change = crate::model::notification::Change::Object {
+            bucket: snapshot.bucket.id,
+            key: "object".into(),
+        };
+        cache.notified(false, &[change.clone()]);
+        assert!(cache.get_with(&route, |_| true).is_none());
+        assert!(cache.get_with(&other_route, |_| true).is_some());
+        let Work::Notify(job) = receiver.recv().await.unwrap() else {
+            panic!("missing refresh")
+        };
+        assert!(Arc::ptr_eq(&job, &cache.refreshing(&route).unwrap()));
+        let generation = job.generation.load(Relaxed);
+        cache.notified(false, &[change]);
+        assert!(job.generation.load(Relaxed) > generation);
+        assert!(receiver.try_recv().is_err());
+        cache.put(
+            &route,
+            snapshot.clone(),
+            None,
+            vec![],
+            (30, 60),
+            (Instant::now(), before),
+        );
+        assert!(
+            cache.get_with(&route, |_| true).is_none(),
+            "a fill started before notification stays fenced"
+        );
+        cache.notified(
+            false,
+            &[crate::model::notification::Change::Object {
+                bucket: snapshot.bucket.id,
+                key: "missing".into(),
+            }],
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "absent objects are not prefetched"
+        );
+        let running = job.claim().unwrap();
+        assert!(job.claim().is_none());
+        assert!(!cache.finish_refresh(&job, generation, cache.generation()));
+        assert!(cache.finish_refresh(&job, job.generation.load(Relaxed), cache.generation()));
+        drop(running);
+        job.wait().await;
+        assert!(cache.refreshing(&route).is_none());
+    }
 
     #[test]
     fn public_capacity_uses_only_its_share_of_the_response_budget() {

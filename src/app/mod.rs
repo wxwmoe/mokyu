@@ -253,6 +253,7 @@ pub struct App {
     pub(crate) restart_required: Arc<std::sync::atomic::AtomicBool>,
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: Arc<tokio::sync::Notify>,
+    pub(crate) notifications: Arc<crate::cluster::notifications::Hub>,
     pub(crate) raw_upload_worker: tokio::sync::Mutex<()>,
     pub(crate) pending_reads: readiness::Reads,
     pub wake_raw_uploads: Arc<tokio::sync::Notify>,
@@ -416,6 +417,7 @@ impl App {
             restart_required,
             wake_gc: Arc::new(tokio::sync::Notify::new()),
             wake_tasks: Arc::new(tokio::sync::Notify::new()),
+            notifications: Arc::default(),
             stop_connections: tokio::sync::watch::channel(false).0,
             raw_upload_worker: tokio::sync::Mutex::new(()),
             pending_reads: readiness::Reads::default(),
@@ -606,6 +608,9 @@ impl App {
         status["read_checks"] = self.read_checks.snapshot();
         status["cors_cache"] = self.cors_cache.snapshot();
         status["public_read_cache"] = self.public_reads.snapshot();
+        if self.role == "control" {
+            status["notifications"] = self.notifications.snapshot();
+        }
         status["read_replica"] = self.runtime.read_replica().unwrap_or_else(|| json!({"state":if self.config.replica_database.is_some() {"not_applicable"} else {"disabled"}}));
         status["cleanup"] = self.cleanup_status();
         status["storage"] = self.statistics.inventory(crate::config::seconds(

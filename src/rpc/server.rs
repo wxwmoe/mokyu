@@ -932,6 +932,14 @@ impl NodeSessions for Service {
         let app = self.app.clone();
         let snapshot =
             bounded(cluster.open_session(&node, &app.secrets.credential_key, open)).await?;
+        let consumer = crate::model::notification::Consumer {
+            node: node.node_id,
+            generation: open.connection,
+        };
+        let mut notifications = app
+            .notifications
+            .subscribe(consumer)
+            .map_err(|_| Status::resource_exhausted("notification session limit reached"))?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-session-opened").await;
         let control_id = app
@@ -953,15 +961,38 @@ impl NodeSessions for Service {
             let mut pending = false;
             let mut next_notice = tokio::time::Instant::now();
             let mut deadline = next_notice + Duration::from_secs(30);
+            let mut outstanding = std::collections::HashMap::new();
             loop {
+                let receipt_deadline = outstanding.values().copied().min().unwrap_or(deadline);
                 let next = tokio::select! {
                     biased;
                     _ = tokio::time::sleep_until(deadline) => Err(Status::deadline_exceeded("node heartbeat timed out")),
+                    _ = tokio::time::sleep_until(receipt_deadline), if !outstanding.is_empty() => Err(Status::deadline_exceeded("node notification receipt timed out")),
                     next = incoming.message() => next,
+                    batch = notifications.receiver.recv() => {
+                        if let Some(batch) = batch {
+                            for delivery in &batch.deliveries {
+                                outstanding.entry(delivery.id).or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(30));
+                            }
+                            if outstanding.len() > 1024 {
+                                Err(Status::resource_exhausted("node notification receipt backlog"))
+                            } else {
+                                yield wire::SessionReply { message: Some(wire::session_reply::Message::Notice(super::notifications::notice(&batch.deliveries))) };
+                                continue;
+                            }
+                        } else {
+                            Err(Status::unavailable("notification session replaced"))
+                        }
+                    }
+                    _ = notifications.resets.changed() => {
+                        notifications.resets.borrow_and_update();
+                        yield wire::SessionReply { message: Some(wire::session_reply::Message::Notice(wire::Notice { reset: true, ..Default::default() })) };
+                        continue;
+                    }
                     _ = tokio::time::sleep_until(next_notice), if pending => {
                         pending = false;
                         next_notice = tokio::time::Instant::now() + Duration::from_secs(1);
-                        yield wire::SessionReply { message: Some(wire::session_reply::Message::Notice(wire::Notice {})) };
+                        yield wire::SessionReply { message: Some(wire::session_reply::Message::Notice(wire::Notice { state_changed: true, ..Default::default() })) };
                         continue;
                     }
                     _ = &mut changed => {
@@ -973,6 +1004,15 @@ impl NodeSessions for Service {
                 }?;
                 let Some(next) = next else { break; };
                 deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                if let Some(wire::session_request::Message::Receipt(receipt)) = next.message.as_ref() {
+                    let ids = super::notifications::receipt(receipt.clone())?;
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("notification-receipt").await;
+                    let count = bounded(app.cluster().map_err(failure)?.acknowledge_notifications(consumer, &ids)).await?;
+                    app.notifications.applied(count);
+                    for id in ids { outstanding.remove(&id); }
+                    continue;
+                }
                 let Some(wire::session_request::Message::Pulse(pulse)) = next.message else {
                     Err(Status::invalid_argument("session expects Pulse"))?;
                     unreachable!();

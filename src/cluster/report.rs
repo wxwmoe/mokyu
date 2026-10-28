@@ -42,6 +42,7 @@ async fn collect(app: &App, restricted: bool) -> Result<(Value, Value)> {
             "backend_read_bytes": app.storage.backend_read_bytes.load(Relaxed),
             "backend_write_bytes": app.storage.backend_write_bytes.load(Relaxed)},
         "response_cache": app.response_cache.snapshot(),
+        "notifications": app.notifications.snapshot(),
         "compression": app.compression_observations.snapshot(),
         "read_replica": app.runtime.read_replica()
     });

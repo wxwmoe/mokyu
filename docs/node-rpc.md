@@ -10,7 +10,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | --- | --- |
 | `x-mokyu-deployment-id` | 部署 UUID |
 | `x-mokyu-node-id` | 节点 UUID |
-| `x-mokyu-node-role` | `data` 或 `worker` |
+| `x-mokyu-node-role` | `data`、`worker` 或 `node` |
 | `x-mokyu-credential-generation` | 正整数凭据代次 |
 | `authorization` | `Bearer <credential>` |
 
@@ -28,7 +28,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeControl/ReportObservations` | Unary；批量上报 HTTP 压缩收益、已通过签名校验的凭据活动及区块/区块包访问统计，仅允许 data |
 | `NodeReads/ReadWindow` | Unary；沿当前读取游标取下一窗口，校验运行权、读取保护和载荷修订 |
 | `NodeReads/ReportRead` | Unary；报告当前读取窗口内最多 16 个来源段，请求持久后端复核，仅允许 data |
-| `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，Welcome 包含 control 实例 ID；发送 Pulse 并等待匹配序号的确认，Notice 提示及时同步 |
+| `NodeSessions/NodeSession` | 双向流；首条必须为 Hello，Welcome 包含 control 实例 ID；Pulse 维护运行权和资源，Notice 传递状态提示或缓存失效批次，Receipt 确认已应用的失效 |
 | `NodeWrites/BeginWrite` | Unary；校验权限、创建写入上下文与租约并预留配额，返回存储材料；仅允许 data |
 | `NodeObjects/ChangeObjects` | Unary；批量删除对象或修改单个对象的 canned ACL，持久保存操作结果；仅允许 data |
 | `NodeWrites/PrepareChunks` | Unary；批量领取或复用区块，保存上传目标与编码参数，返回所需存储、密钥及上传许可 |
@@ -48,7 +48,15 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 
 ## 会话通知与状态报告
 
-control 复用进程级数据库通知订阅，将任务、运行设置和维护状态变化合并为每条连接最多每秒一条 Notice。Notice 只是提示，不能更新配置或延长任何租约；节点收到后立即发送 Pulse，修订变化时通过 SyncNode 取得完整增量。十秒心跳负责通知丢失后的恢复，持续通知不会延长服务端三十秒的缺失心跳期限。
+node 具备 data 与 worker 的接口权限。每个 API 节点维持一条主要 NodeSession；control 通过 PostgreSQL 协调通知，无需彼此建立节点连接。
+
+任务、运行设置和维护状态变化合并为每条连接最多每秒一条普通 Notice，节点通过 Pulse 比较状态，修订变化时使用 SyncNode。对象发布、ACL、删除、桶和域名、存储策略及已确认来源健康变化则与业务事务一起保存事件和目标代次；PostgreSQL 通知唤醒 control，持久扫描补偿遗漏并接管未确认目标。缓存通知按 50 ms 窗口聚合，每帧最多 32 项；发送队列和进程内存有界。
+
+节点先隔离旧授权和在途填充，再以 Receipt 批量确认事件 ID；确认不要求后台刷新成功。重复投递只补确认，不能再次驱逐已经刷新的快照。有效且仍驻留的条目立即排队刷新元数据，前台可共用正在刷新的结果；正文继续复用，不为刷新预取 S3 正文。无条目或已过期时不主动预取。队列满、刷新失败和较新的通知都不能让旧授权恢复可用。
+
+Pulse 仍按十秒周期维护租约；Notice、Receipt 和 SyncNode 不续租，重要缓存通知不额外触发 Pulse。等待 PulseReply 或 SyncNode 时继续处理通知。服务端三十秒未收到入站消息，或已发送事件三十秒未收到应用确认时关闭会话；待确认数超过 1024 同样要求重建。客户端在重连 Hello 前隔离公共缓存授权，重新同步后才恢复快路径；原来的异步校验、硬过期、来源校验和资源租约继续生效。
+
+control 状态中的 `notifications` 提供订阅状态、会话数、队列字节、已发送和已应用条数及背压次数；节点 `public_read_cache` 另提供 `pending_checks` 和 `pending_refreshes`。应用确认与刷新完成分别计数，不能把入队或发送视为已生效。
 
 状态报告使用独立 Unary，请求最多 96 KiB，其中状态最多 30 KiB、可选元数据最多 60 KiB。报告绑定当前 boot/fence 和递增序号，同一 boot 换连接不重置报告。元数据只在报告接受后视为确认；重复或过时序号返回 `accepted=false`，可在下一份报告中重新携带。诊断请求不续租，也不代替业务确认。关闭会保留已结束 boot 的记录，不能靠重连复活；突然掉线仍由运行租约到期处理。
 

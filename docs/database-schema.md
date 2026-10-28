@@ -34,6 +34,9 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 | `node_boots` | `node_id`、`credential_generation`、`boot_id`、`created_at`、`retired_at` | `(node_id,boot_id)` 主键，节点级联外键；代次为非空正 BIGINT，两个 ID 为 UUID；创建时间默认数据库时钟，退役时间可空；每代最多 4096 个 boot，轮换后清理旧代历史 |
 | `node_sessions` | `node_id`、`credential_generation`、`boot_id`、`fence`、`epoch`、`connection_id`、`expires_at`、`sequence`、`draining` | 每节点一行，主键/级联节点外键及 `(node_id,boot_id)` 外键；ID 为 UUID，代次与 epoch 为正 BIGINT；sequence 非负默认 0，draining 默认 false；其余均非空且无默认值；到期时间为数据库时钟的 90 秒租约 |
 | `node_access` | `node_id`、`boot_id`、`sequence`、`request_hash`、`received_at`、`gap_since` | PostgreSQL 每节点一行，UUID 主键/级联节点外键；boot 为 UUID，sequence 为正 BIGINT，摘要为 32 字节 BYTEA，两个时间为 TIMESTAMPTZ；全部非空且无默认值；保存访问观测的去重回执及覆盖缺口，与统计更新原子提交 |
+| `notification_consumers` | `node_id`、`generation`、`role`、`expires_at` | PostgreSQL 每节点一个消费代次；UUID 节点主键/级联外键，代次为 UUID，角色为 control/data/worker/node，到期时间为 TIMESTAMPTZ；节点对应连接 ID，control 对应 boot |
+| `notifications` | `id`、`transaction_id`、`scope`、`resource_id`、`object_key`、`created_at` | PostgreSQL 事务内的重要缓存事件；UUID 主键，事务 ID 为 xid8；scope 为 object/bucket/storage，资源为 UUID，key 最多 1024 字节；事务、范围、资源和 key 联合唯一，同事务合并相同目标 |
+| `notification_targets` | `notification_id`、`node_id`、`generation`、`claim_token`、`claim_until`、`attempts`、`applied_at`、`retired_at` | PostgreSQL 事件、节点、代次复合主键；事件级联外键，UUID 领取令牌与 TIMESTAMPTZ 到期成对出现；应用与退役状态互斥，未完成目标有部分索引；领取过期可由其他 control 重试，完成事件分批回收 |
 
 单容器不创建 `nodes` 记录或 `node.json`。群集节点凭据只写入本节点 `node.json`。释放节点时会清除其凭据、回收任务 lease 并允许同名节点重新注册；部署密钥丢失或改变不能作为普通升级处理。
 

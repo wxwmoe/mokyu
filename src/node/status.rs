@@ -49,6 +49,7 @@ impl NodeContext {
             "io": {"backend": backend, "cache_lookups": cache["lookups"],
                 "diagnostics": body.as_ref().map(|body| body.diagnostics.snapshot())},
             "response_cache": foreground.as_ref().map(|reads| reads.bodies.snapshot()),
+            "public_read_cache": foreground.as_ref().map(|reads| reads.public.snapshot()),
             "compression": self.observations.compression.snapshot(),
             "access": self.access.snapshot(),
             "rpc": self.client.statistics(),

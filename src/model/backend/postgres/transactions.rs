@@ -47,6 +47,9 @@ use uuid::Uuid;
 #[path = "raw_cache.rs"]
 pub(super) mod raw_cache;
 
+#[path = "notification_transactions.rs"]
+pub(super) mod notifications;
+
 #[path = "native.rs"]
 pub(super) mod native;
 #[path = "work.rs"]
@@ -6230,6 +6233,9 @@ pub(super) async fn heartbeat(
     let mut tx = pool.begin().await?;
     validate_node(&mut *tx, state, role, key).await?;
     queries::node_seen(state.node_id).execute(&mut *tx).await?;
+    queries::notifications::renew(state.node_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -6247,6 +6253,15 @@ pub(super) async fn begin_report(
     queries::begin_node_report(state.node_id, boot, started)
         .execute(&mut *tx)
         .await?;
+    notifications::activate(
+        &mut tx,
+        crate::model::notification::Consumer {
+            node: state.node_id,
+            generation: boot,
+        },
+        role,
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -8973,6 +8988,15 @@ pub(super) async fn open_node_session(
     .await?;
     queries::node_seen(state.node_id).execute(&mut *tx).await?;
     let snapshot = node_snapshot(&mut tx, state.node_id).await?;
+    notifications::activate(
+        &mut tx,
+        crate::model::notification::Consumer {
+            node: state.node_id,
+            generation: input.connection,
+        },
+        &state.role,
+    )
+    .await?;
     tx.commit().await?;
     Ok(snapshot)
 }
@@ -8998,6 +9022,9 @@ pub(super) async fn close_node_session(
         Error::NodeExpired
     );
     queries::close_node_session(state.node_id)
+        .execute(&mut *tx)
+        .await?;
+    queries::notifications::renew(state.node_id)
         .execute(&mut *tx)
         .await?;
     queries::retire_node_boots(state.node_id)
@@ -10979,6 +11006,9 @@ pub(super) async fn pulse_node_session(
         crate::model::Error::NodeConflict
     );
     queries::pulse_node_session(state.node_id, sequence, draining)
+        .execute(&mut *tx)
+        .await?;
+    queries::notifications::renew(state.node_id)
         .execute(&mut *tx)
         .await?;
     queries::node_seen(state.node_id).execute(&mut *tx).await?;

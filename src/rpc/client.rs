@@ -694,7 +694,7 @@ impl Client {
                     super::uuid(&run.fence)?;
                     super::uuid(&welcome.control_id)?;
                     let valid_until = lease_deadline(started, welcome.valid_for_ms)?;
-                    Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until, acknowledged_at: Instant::now(), metrics: self.metrics.clone() })
+                    Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until, acknowledged_at: Instant::now(), metrics: self.metrics.clone(), on_notice: None, applied: Default::default(), state_changed: false })
                 }).await.unwrap_or_else(|_| Err(Status::deadline_exceeded("session connection timed out")));
                 measured.finish(&result);
                 match result {
@@ -740,16 +740,57 @@ pub(crate) struct Session {
     pub(crate) valid_until: Instant,
     acknowledged_at: Instant,
     metrics: Arc<super::metrics::Metrics>,
+    pub(crate) on_notice:
+        Option<Arc<dyn Fn(bool, &[crate::model::notification::Change]) + Send + Sync>>,
+    applied: super::notifications::Applied,
+    state_changed: bool,
 }
 
 impl Session {
     pub(crate) async fn notified(&mut self) -> Result<(), Status> {
         match self.incoming.message().await? {
             Some(wire::SessionReply {
-                message: Some(wire::session_reply::Message::Notice(_)),
-            }) => Ok(()),
+                message: Some(wire::session_reply::Message::Notice(notice)),
+            }) => self.notice(notice).await,
             None => Err(Status::unavailable("node session closed")),
             _ => Err(Status::data_loss("unexpected node session message")),
+        }
+    }
+
+    async fn notice(&mut self, notice: wire::Notice) -> Result<(), Status> {
+        self.state_changed |= notice.state_changed;
+        let handler = self.on_notice.as_ref();
+        let receipt = self.applied.apply(notice, |reset, changes| {
+            if let Some(handler) = handler {
+                handler(reset, changes);
+            }
+        })?;
+        if handler.is_some() && !receipt.applied.is_empty() {
+            self.sender
+                .send(wire::SessionRequest {
+                    message: Some(wire::session_request::Message::Receipt(receipt)),
+                })
+                .await
+                .map_err(|_| Status::unavailable("node session closed"))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take_state_change(&mut self) -> bool {
+        std::mem::take(&mut self.state_changed)
+    }
+
+    pub(crate) async fn during<T>(
+        &mut self,
+        future: impl std::future::Future<Output = Result<T, Status>>,
+    ) -> Result<T, Status> {
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut future => return result,
+                notice = self.notified() => notice?,
+            }
         }
     }
 
@@ -807,12 +848,11 @@ impl Session {
                 .map_err(|_| Status::unavailable("node session closed"))?;
             loop {
                 let message = self.incoming.message().await?;
-                if matches!(
-                    &message,
-                    Some(wire::SessionReply {
-                        message: Some(wire::session_reply::Message::Notice(_))
-                    })
-                ) {
+                if let Some(wire::SessionReply {
+                    message: Some(wire::session_reply::Message::Notice(notice)),
+                }) = &message
+                {
+                    self.notice(notice.clone()).await?;
                     continue;
                 }
                 return Ok::<_, Status>(message);

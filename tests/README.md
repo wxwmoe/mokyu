@@ -24,6 +24,8 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 
 `postgres_node_sessions_recover_across_controls_and_fence_old_runs` 使用两个独立连接池检查身份代次、会话接管、并发同步与心跳、过期 fencing、退役 boot、历史上限、轮换和禁用。
 
+`postgres_notifications_survive_rollback_takeover_and_membership_changes` 使用全新隔离 PostgreSQL 库，覆盖事务回滚、同事务合并、相同 ETag 的 ACL 变化、领取过期重试、重复和跨代确认、成员激活与发布的双向交错、LISTEN 单连接中断、过期回收和单容器不写群集事件。公开缓存单元测试另检查通知与在途填充、候选合并和单次刷新完成之间的隔离。
+
 `rpc::client::transport_tests::rotation::node_rpc_survives_connection_rotation` 将隔离 TLS 代理的 `keepalive_requests` 设为 8，运行 100 组、每组 8 个并发 SyncNode 请求，验证正常 HTTP/2 连接轮换不会泄漏为业务失败。普通测试单独验证 GOAWAY 与协议错误、RST_STREAM 和服务端业务错误的重试边界。
 
 群集 data/worker/node 使用独立节点配置及预创建身份，观察者的 PostgreSQL 连接单独提供，不将数据库配置放入节点文件。`tests.control.cluster_runtime_history` 需要 `MOKYU_TEST_DATA_ENDPOINTS`，值为两个公共读入口 URL 的 JSON 数组；它通过实际请求核对节点及群集历史。

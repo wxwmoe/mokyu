@@ -31,6 +31,7 @@ pub(crate) mod node_request;
 pub(crate) mod node_tail;
 pub(crate) mod node_work;
 pub(crate) mod node_write;
+pub(crate) mod notification;
 pub(crate) mod object;
 pub(crate) mod packing;
 mod physical;

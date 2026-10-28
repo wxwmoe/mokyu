@@ -97,6 +97,7 @@ async fn run_control(app: Arc<app::App>) -> Result<()> {
     tokio::select! {
         result = cluster::report::run(app.clone(), false) => result?,
         result = cluster::control_loop(app.clone()) => result?,
+        result = cluster::notifications::run(app.clone()) => result?,
         result = cluster::report::aggregate(app.clone()) => result?,
         result = access::run(app.clone()) => result?,
         result = crate::worker::scheduler::run(app.clone()) => result?,

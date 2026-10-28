@@ -6,6 +6,15 @@ use crate::{
 use std::{sync::atomic::Ordering::Relaxed, time::Duration};
 
 impl Reads {
+    pub(crate) fn notify_public(
+        &self,
+        reset: bool,
+        changes: &[crate::model::notification::Change],
+    ) {
+        let _epoch = self.public_epoch.lock().unwrap();
+        self.public.notified(reset, changes);
+    }
+
     pub(crate) fn start_public(self: &Arc<Self>) {
         if let Some(receiver) = self.public_receiver.lock().unwrap().take() {
             tokio::spawn(run(Arc::downgrade(self), receiver));
@@ -82,7 +91,12 @@ impl Reads {
             query.access.is_none() && crate::http::object::reuse_public(&query.headers),
             "invalid public cache request"
         );
-        let cached = if bucket_only {
+        if let Some(job) = self.public.refreshing(&query.route) {
+            let _ = tokio::time::timeout(Duration::from_secs(2), self.refresh_notified(job)).await;
+        }
+        let cached = if self.node.current.borrow().phase != super::super::Phase::Ready {
+            None
+        } else if bucket_only {
             self.public
                 .bucket_with(&query.route, |profiles| self.current_profiles(profiles))
         } else {
@@ -225,6 +239,76 @@ impl Reads {
         )))
     }
 
+    async fn refresh_notified(&self, job: Arc<crate::app::public_reads::Refresh>) {
+        let Some(_running) = job.claim() else {
+            job.wait().await;
+            return;
+        };
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut state = self.node.subscribe();
+            loop {
+                let phase = state.borrow_and_update().phase;
+                if phase == super::super::Phase::Ready {
+                    break;
+                }
+                if matches!(
+                    phase,
+                    super::super::Phase::Stopped | super::super::Phase::Fenced
+                ) {
+                    return Ok(false);
+                }
+                state.changed().await?;
+            }
+            for _ in 0..3 {
+                let generation = job.generation.load(Relaxed);
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("node-notification-refresh").await;
+                let prepared = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    self.open(request(&job.entry.route, job.entry.mapping.is_none())),
+                )
+                .await??;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("node-notification-refreshed").await;
+                self.public_generation();
+                if job.generation.load(Relaxed) != generation
+                    || prepared.public_generation.is_none()
+                {
+                    continue;
+                }
+                if let Some((snapshot, confirmation)) = self.public_confirmation(&prepared)? {
+                    self.public.put(
+                        &job.entry.route,
+                        snapshot,
+                        confirmation.mapping,
+                        confirmation.profiles,
+                        confirmation.times,
+                        (prepared.started, prepared.public_generation.unwrap()),
+                    );
+                }
+                if self
+                    .public
+                    .finish_refresh(&job, generation, prepared.public_generation.unwrap())
+                {
+                    return Ok::<_, anyhow::Error>(true);
+                }
+            }
+            Ok(false)
+        })
+        .await;
+        match result {
+            Ok(Ok(true)) => {
+                self.public.refreshed.fetch_add(1, Relaxed);
+            }
+            Ok(Ok(false)) => {
+                self.public.skipped.fetch_add(1, Relaxed);
+            }
+            _ => {
+                self.public.failed.fetch_add(1, Relaxed);
+            }
+        }
+    }
+
     fn reuse_public(
         &self,
         input: &wire::ReadRequest,
@@ -233,7 +317,8 @@ impl Reads {
         bucket_only: bool,
     ) -> Result<Option<Prepared>> {
         let epoch = self.public_epoch.lock().unwrap();
-        if *epoch != self.node.current.borrow().epoch
+        if self.node.current.borrow().phase != super::super::Phase::Ready
+            || *epoch != self.node.current.borrow().epoch
             || !self
                 .public
                 .reusable(entry, |profiles| self.current_profiles(profiles))
@@ -402,6 +487,7 @@ async fn run(reads: Weak<Reads>, mut receiver: tokio::sync::mpsc::Receiver<Work>
         let Some(reads) = reads.upgrade() else { return };
         reads.public_generation();
         match work {
+            Work::Notify(job) => reads.refresh_notified(job).await,
             Work::Fill {
                 route,
                 snapshot,
