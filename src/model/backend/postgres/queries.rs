@@ -59,7 +59,7 @@ pub(super) mod native;
 pub(super) mod work;
 
 type Statement<'q> = Query<'q, Postgres, PgArguments>;
-type Rows<'q, T> = QueryAs<'q, Postgres, T, PgArguments>;
+pub(super) type Rows<'q, T> = QueryAs<'q, Postgres, T, PgArguments>;
 type Scalar<'q, T> = QueryScalar<'q, Postgres, T, PgArguments>;
 type TaskFenceRow = (String, Option<Uuid>, Option<Uuid>, String, Value);
 
@@ -7836,6 +7836,17 @@ impl ClusterStore for Backend {
         input: crate::model::node_read::Query,
     ) -> Result<crate::model::node_read::Reply> {
         transactions::open_node_read(&self.pool, node, key, input).await
+    }
+    async fn refresh_reads(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_refresh::Request,
+    ) -> Result<crate::model::node_refresh::Reply> {
+        super::refresh::request(&self.pool, self.refresh.clone(), node, key, input).await
+    }
+    fn refresh_status(&self) -> serde_json::Value {
+        self.refresh.snapshot()
     }
     async fn read_window(
         &self,

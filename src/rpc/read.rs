@@ -365,6 +365,51 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
     })
 }
 
+pub(super) fn refresh(
+    input: wire::RefreshReadsRequest,
+) -> Result<crate::model::node_refresh::Request, Status> {
+    if input.reads.is_empty()
+        || input.reads.len() > crate::model::node_refresh::LIMIT
+        || prost::Message::encoded_len(&input) > REQUEST_LIMIT
+    {
+        return Err(invalid());
+    }
+    let run = run(input.run.clone())?;
+    let reads = input
+        .reads
+        .into_iter()
+        .map(|item| {
+            let surface = if item
+                .route
+                .as_ref()
+                .is_some_and(|r| matches!(r.route, Some(wire::read_route::Route::Host(_))))
+            {
+                wire::ReadSurface::Web
+            } else {
+                wire::ReadSurface::S3
+            };
+            query(wire::ReadRequest {
+                run: input.run.clone(),
+                operation_id: run.boot.to_string(),
+                route: item.route,
+                body: item.body,
+                method: wire::ReadMethod::Get as i32,
+                surface: surface as i32,
+                include: vec![
+                    wire::ReadInclude::Object as i32,
+                    wire::ReadInclude::Policy as i32,
+                ],
+                ..Default::default()
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(crate::model::node_refresh::Request {
+        run,
+        reads,
+        cached: cached(input.cached)?,
+    })
+}
+
 pub(super) fn window(input: wire::ReadWindowRequest) -> Result<read::Window, Status> {
     let cursor = input.cursor.ok_or_else(invalid)?;
     if cursor.payload_revision == 0
@@ -550,6 +595,35 @@ mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn refresh_batch_rejects_unbounded_or_invalid_public_routes() {
+        let request = request();
+        let mut batch = wire::RefreshReadsRequest {
+            run: request.run,
+            reads: vec![
+                wire::RefreshRead {
+                    route: request.route,
+                    body: None
+                };
+                32
+            ],
+            cached: Vec::new(),
+        };
+        let parsed = refresh(batch.clone()).unwrap();
+        assert_eq!(parsed.reads.len(), 32);
+        assert!(
+            parsed
+                .reads
+                .iter()
+                .all(|q| q.access.is_none() && !q.mapping && !q.protection)
+        );
+        batch.reads.push(batch.reads[0].clone());
+        assert!(refresh(batch.clone()).is_err());
+        batch.reads.truncate(1);
+        batch.reads[0].route = None;
+        assert!(refresh(batch).is_err());
     }
 
     #[test]

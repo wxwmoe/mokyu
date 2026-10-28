@@ -191,6 +191,13 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
         input: super::node_read::Query,
     ) -> Result<super::node_read::Reply>;
+    async fn refresh_reads(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_refresh::Request,
+    ) -> Result<super::node_refresh::Reply>;
+    fn refresh_status(&self) -> serde_json::Value;
     async fn read_window(
         &self,
         node: &NodeState,

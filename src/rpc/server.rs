@@ -672,6 +672,38 @@ impl NodeReads for Service {
         Ok(Response::new(reply))
     }
 
+    async fn refresh_reads(
+        &self,
+        request: Request<wire::RefreshReadsRequest>,
+    ) -> Result<Response<wire::RefreshReadsReply>, Status> {
+        let node = request
+            .extensions()
+            .get::<NodeState>()
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
+        let input = super::read::refresh(request.into_inner())?;
+        let reply = bounded(self.app.cluster().map_err(failure)?.refresh_reads(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        let reply = wire::RefreshReadsReply {
+            reads: reply.reads.into_iter().map(super::read::reply).collect(),
+            materials: reply
+                .materials
+                .into_iter()
+                .map(super::read::material)
+                .collect(),
+        };
+        if prost::Message::encoded_len(&reply) > model::node_read::TARGET_BYTES {
+            return Err(Status::resource_exhausted(
+                "refresh reply exceeds message budget",
+            ));
+        }
+        Ok(Response::new(reply))
+    }
+
     async fn read_window(
         &self,
         request: Request<wire::ReadWindowRequest>,

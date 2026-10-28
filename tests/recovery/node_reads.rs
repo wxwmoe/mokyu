@@ -791,3 +791,287 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
     assert_eq!(active(&pool).await?, (0, 0, 0));
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires a new isolated PostgreSQL database"]
+async fn postgres_refresh_reads_batch_public_metadata_and_fence_callers() -> Result<()> {
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let url = std::fs::read_to_string(std::env::var("MOKYU_TEST_DATABASE_URL_FILE")?)?;
+    let pool = PgPoolOptions::new()
+        .max_connections(6)
+        .connect(url.trim())
+        .await?;
+    assert!(queries::metadata_table().fetch_one(&pool).await?.is_none());
+    {
+        let mut owner = pool.acquire().await?;
+        migration::run(&mut owner).await?;
+    }
+    sqlx::query("UPDATE mokyu_meta SET deployment_mode='cluster'")
+        .execute(&pool)
+        .await?;
+    let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
+    let key = Key::new("aes-256-gcm", [73; 32])?;
+    let config =
+        toml::from_str::<crate::config::FileConfig>("[database]\ntype='postgres'\n")?.into_config();
+    RuntimeSettingsStore::ensure(&backend, &model::runtime_defaults(&config)).await?;
+    let control = backend
+        .register(
+            "control",
+            "control",
+            crate::cluster::identity::credential()?,
+            &key,
+        )
+        .await?
+        .unwrap();
+    let admin = Principal::Node {
+        id: control.node_id,
+        role: "control".into(),
+    };
+    let node = backend
+        .provision_node(&admin, "combined", "node", &key)
+        .await?;
+    let peer = backend.provision_node(&admin, "peer", "data", &key).await?;
+    let worker = backend
+        .provision_node(&admin, "worker", "worker", &key)
+        .await?;
+    let hello = || Open {
+        boot: Uuid::new_v4(),
+        connection: Uuid::new_v4(),
+        previous_epoch: 0,
+    };
+    let session = backend.open_session(&node, &key, hello()).await?;
+    let peer_run = backend.open_session(&peer, &key, hello()).await?;
+    let worker_run = backend.open_session(&worker, &key, hello()).await?;
+    let storage = Uuid::now_v7();
+    sqlx::query("INSERT INTO storages(id,name,type,endpoint_url,remote_bucket_name,region,access_key_encrypted,secret_key_encrypted,identity_marker) VALUES($1,'source','s3','http://backend:8333','read-fixture','us-east-1',$2,$3,$4)")
+        .bind(storage).bind(codec::protect(b"source-access", &key, format!("storage-{storage}-access").as_bytes())?)
+        .bind(codec::protect(b"source-secret", &key, format!("storage-{storage}-secret").as_bytes())?)
+        .bind(crate::storage::model::identity_marker(node.deployment_id, storage)?).execute(&pool).await?;
+    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency) VALUES($1,2)")
+        .bind(storage)
+        .execute(&pool)
+        .await?;
+    let bucket: Uuid =
+        sqlx::query_scalar("INSERT INTO buckets(name,storage_id) VALUES('reads',$1) RETURNING id")
+            .bind(storage)
+            .fetch_one(&pool)
+            .await?;
+    let stream: Uuid = sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,etag,public_read,metadata) VALUES($1,'object','object','ready',4198400,'fixture',true,'{\"content_type\":\"application/octet-stream\"}') RETURNING id").bind(bucket).fetch_one(&pool).await?;
+    sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,'object',$2,uuidv7())")
+        .bind(bucket)
+        .bind(stream)
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO s3_credentials(access_key_id,secret_encrypted) VALUES('reader',$1)")
+        .bind(codec::protect(b"reader-secret", &key, b"reader")?)
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO s3_credential_grants(access_key,bucket_id,actions) VALUES('reader',$1,ARRAY['object.read'])").bind(bucket).execute(&pool).await?;
+
+    sqlx::query("UPDATE streams SET payload_type='raw',size=8 WHERE id=$1")
+        .bind(stream)
+        .execute(&pool)
+        .await?;
+    let raw: Uuid = sqlx::query_scalar("INSERT INTO raw_sources(storage_id,medium,state,size,digest,profile_revision) VALUES($1,'shared_s3','ready',8,$2,1) RETURNING id").bind(storage).bind(vec![8u8;16]).fetch_one(&pool).await?;
+    sqlx::query(
+        "INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_id) VALUES($1,0,8,$2)",
+    )
+    .bind(stream)
+    .bind(raw)
+    .execute(&pool)
+    .await?;
+    for n in 1..32 {
+        let id:Uuid=sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,payload_type,state,size,etag,public_read,metadata) VALUES($1,$2,'object','raw','ready',8,'fixture',true,'{\"content_type\":\"application/octet-stream\"}') RETURNING id").bind(bucket).bind(format!("object-{n}")).fetch_one(&pool).await?;
+        sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,$2,$3,uuidv7())").bind(bucket).bind(format!("object-{n}")).bind(id).execute(&pool).await?;
+        sqlx::query(
+            "INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_id) VALUES($1,0,8,$2)",
+        )
+        .bind(id)
+        .bind(raw)
+        .execute(&pool)
+        .await?;
+    }
+    sqlx::query("INSERT INTO bucket_domains(host,bucket_id) VALUES('reads.test',$1)")
+        .bind(bucket)
+        .execute(&pool)
+        .await?;
+    let mut input = request(session.run);
+    input.access = None;
+    input.policy = true;
+    let first = backend.open_read(&node, &key, input).await?;
+    let body = read::CachedBody {
+        object: first.object.clone().unwrap(),
+        mapping: first.mapping.clone().unwrap(),
+        storages: first
+            .materials
+            .iter()
+            .filter(|m| m.version.r#type == read::MaterialType::Storage)
+            .map(|m| m.version.clone())
+            .collect(),
+        representation: "identity".into(),
+        policy: crate::http::object::POLICY as u32,
+        verified: true,
+    };
+    let baseline = active(&pool).await?;
+    let batch = |run, count: usize| {
+        let reads = (0..count)
+            .map(|n| {
+                let mut q = request(run);
+                q.access = None;
+                q.mapping = false;
+                q.policy = true;
+                q.route = model::ReadRoute::Bucket {
+                    name: "reads".into(),
+                    key: if n == 0 {
+                        "object".into()
+                    } else {
+                        format!("object-{n}")
+                    },
+                    alias: None,
+                };
+                if n == 0 {
+                    q.body = Some(body.clone());
+                }
+                q
+            })
+            .collect();
+        model::node_refresh::Request {
+            run,
+            reads,
+            cached: Vec::new(),
+        }
+    };
+    let before = backend.refresh_status();
+    let (a, b) = tokio::join!(
+        backend.refresh_reads(&node, &key, batch(session.run, 32)),
+        backend.refresh_reads(&peer, &key, batch(peer_run.run, 32))
+    );
+    let (a, b) = (a?, b?);
+    assert_eq!(
+        active(&pool).await?,
+        baseline,
+        "refresh must never acquire read protection"
+    );
+    assert_eq!(a.reads.len(), 32);
+    assert_eq!(b.reads.len(), 32);
+    assert!(a.reads.iter().all(|r| r.outcome == read::Outcome::Ready
+        && r.grants.is_empty()
+        && r.materials.is_empty()));
+    assert!(a.reads[0].body_reused && b.reads[0].body_reused);
+    assert_eq!(
+        a.materials
+            .iter()
+            .filter(|m| m.version.r#type == read::MaterialType::Bucket)
+            .count(),
+        1
+    );
+    let after = backend.refresh_status();
+    assert_eq!(
+        after["requests"].as_u64().unwrap() - before["requests"].as_u64().unwrap(),
+        2
+    );
+    let groups = after["groups"].as_u64().unwrap() - before["groups"].as_u64().unwrap();
+    assert!((1..=2).contains(&groups));
+    assert_eq!(
+        after["routes"].as_u64().unwrap() - before["routes"].as_u64().unwrap(),
+        32 * groups
+    );
+    // Submit already validated fixture identities without scheduling-dependent DB latency.
+    let before = backend.refresh_status();
+    let queued_a =
+        super::refresh::enqueue(&pool, &backend.refresh, &node, &key, batch(session.run, 32))?;
+    let queued_b = super::refresh::enqueue(
+        &pool,
+        &backend.refresh,
+        &peer,
+        &key,
+        batch(peer_run.run, 32),
+    )?;
+    assert_eq!(queued_a.await??.reads.len(), 32);
+    assert_eq!(queued_b.await??.reads.len(), 32);
+    let after = backend.refresh_status();
+    assert_eq!(
+        after["groups"].as_u64().unwrap() - before["groups"].as_u64().unwrap(),
+        1
+    );
+    assert_eq!(
+        after["routes"].as_u64().unwrap() - before["routes"].as_u64().unwrap(),
+        32
+    );
+    let mut cached = batch(session.run, 32);
+    cached.cached = a.materials.iter().map(|m| m.version.clone()).collect();
+    let cached = backend.refresh_reads(&node, &key, cached).await?;
+    assert!(cached.materials.iter().all(|m| m.json.is_none()));
+    assert!(backend.refresh_status()["material_hits"].as_u64().unwrap() > 0);
+    let mut routes = batch(session.run, 3);
+    routes.reads[0].route = model::ReadRoute::Host {
+        host: "reads.test".into(),
+        key: "object".into(),
+    };
+    routes.reads[1].route = model::ReadRoute::Bucket {
+        name: "missing".into(),
+        key: "wrong".into(),
+        alias: Some(("reads".into(), "object".into())),
+    };
+    routes.reads[2].route = model::ReadRoute::Bucket {
+        name: "reads".into(),
+        key: "missing".into(),
+        alias: None,
+    };
+    let routes = backend.refresh_reads(&node, &key, routes).await?;
+    assert!(
+        routes.reads[0].body_reused
+            && routes.reads[1].outcome == read::Outcome::Ready
+            && routes.reads[2].outcome == read::Outcome::NoSuchKey
+    );
+    assert!(
+        backend
+            .refresh_reads(&worker, &key, batch(worker_run.run, 1))
+            .await
+            .is_err()
+    );
+    assert!(
+        backend
+            .refresh_reads(&peer, &key, batch(session.run, 1))
+            .await
+            .is_err()
+    );
+    assert!(
+        backend
+            .refresh_reads(&node, &key, batch(session.run, 33))
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE raw_sources SET quarantine_code='digest_mismatch' WHERE id=$1")
+        .bind(raw)
+        .execute(&pool)
+        .await?;
+    assert!(
+        !backend
+            .refresh_reads(&node, &key, batch(session.run, 1))
+            .await?
+            .reads[0]
+            .body_reused
+    );
+    sqlx::query("UPDATE raw_sources SET quarantine_code=NULL WHERE id=$1")
+        .bind(raw)
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE streams SET public_read=false WHERE id=$1")
+        .bind(stream)
+        .execute(&pool)
+        .await?;
+    let private = backend
+        .refresh_reads(&node, &key, batch(session.run, 2))
+        .await?;
+    assert!(
+        private.reads[0].outcome == read::Outcome::AccessDenied
+            && private.reads[1].outcome == read::Outcome::Ready
+    );
+    assert!(private.reads[0].object.is_none() && !private.reads[0].body_reused);
+    assert_eq!(active(&pool).await?, baseline);
+    Ok(())
+}

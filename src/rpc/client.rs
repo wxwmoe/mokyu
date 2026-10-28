@@ -266,6 +266,14 @@ impl Client {
         self.unary(input, "/mokyu.node.v1.NodeReads/OpenRead").await
     }
 
+    pub(crate) async fn refresh_reads(
+        &self,
+        input: wire::RefreshReadsRequest,
+    ) -> Result<wire::RefreshReadsReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeReads/RefreshReads")
+            .await
+    }
+
     pub(crate) async fn prepare_request(
         &self,
         input: wire::PrepareRequestInput,

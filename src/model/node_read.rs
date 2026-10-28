@@ -76,11 +76,13 @@ impl Version {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Material {
     pub(crate) version: Version,
     pub(crate) json: Option<Vec<u8>>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Query {
     pub(crate) run: Run,
     pub(crate) operation: Uuid,

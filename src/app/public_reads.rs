@@ -91,7 +91,7 @@ pub(crate) struct Confirmation {
 
 pub(crate) enum Work {
     Refresh(Arc<Entry>),
-    Notify(Arc<Refresh>),
+    Notify(Vec<Arc<Refresh>>),
     Fill {
         route: ReadRoute,
         snapshot: Arc<ReadSnapshot>,
@@ -259,7 +259,7 @@ impl Cache {
         cors: Arc<crate::http::cors::Cache>,
         response: &super::responses::Cache,
     ) -> (Arc<Self>, mpsc::Receiver<Work>) {
-        let (sender, receiver) = mpsc::channel(32);
+        let (sender, receiver) = mpsc::channel(128);
         let limit = LIMIT + response.public_bytes;
         let index_bytes = limit / 8;
         (
@@ -411,13 +411,14 @@ impl Cache {
             .filter(|(_, entry)| affected(entry, reset, changes))
             .map(|(key, entry)| (*key, entry.clone()))
             .collect();
+        let mut jobs = Vec::new();
         for (key, entry) in entries {
             index.remove(key);
             if entry.verified.elapsed() >= entry.age || index.refreshes.contains_key(&key) {
                 continue;
             }
-            // Candidate snapshots keep their existing memory permits; only 32 jobs can wait.
-            if index.refreshes.len() >= 32 {
+            // Candidate snapshots and index slots retain their existing memory permits.
+            if index.refreshes.len() >= index.slots.min(4096) {
                 self.skipped.fetch_add(1, Relaxed);
                 continue;
             }
@@ -427,10 +428,12 @@ impl Cache {
                 started: AtomicBool::new(false),
                 done: watch::channel(false).0,
             });
-            if self.sender.try_send(Work::Notify(job.clone())).is_ok() {
-                index.refreshes.insert(key, Arc::downgrade(&job));
-            } else {
-                self.skipped.fetch_add(1, Relaxed);
+            index.refreshes.insert(key, Arc::downgrade(&job));
+            jobs.push(job);
+        }
+        for batch in jobs.chunks(crate::model::node_refresh::LIMIT) {
+            if self.sender.try_send(Work::Notify(batch.to_vec())).is_err() {
+                self.skipped.fetch_add(batch.len() as u64, Relaxed);
             }
         }
         let index = &mut *index;
@@ -869,9 +872,11 @@ impl App {
 
 pub(crate) async fn run(app: Weak<App>, mut receiver: mpsc::Receiver<Work>) {
     while let Some(work) = receiver.recv().await {
-        if let Work::Notify(job) = &work {
+        if let Work::Notify(jobs) = &work {
             // Notification refreshes are consumed by API nodes, never the single runtime.
-            job.done.send_replace(true);
+            for job in jobs {
+                job.done.send_replace(true);
+            }
             continue;
         }
         if let Work::Fill {
@@ -965,6 +970,49 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
+    async fn notification_batches_cover_resident_hotsets() {
+        let (cors, _) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let (cache, mut receiver) =
+            Cache::new(cors, &super::super::responses::Cache::new(64 * 1024 * 1024));
+        let (_, snapshot) = fixture();
+        for n in 0..128 {
+            let mut snapshot = (*snapshot).clone();
+            let name = format!("object-{n}");
+            snapshot.stream.as_mut().unwrap().object_key = name.clone();
+            let route = ReadRoute::Host {
+                host: "media.test".into(),
+                key: name,
+            };
+            cache.put(
+                &route,
+                Arc::new(snapshot),
+                None,
+                vec![],
+                (30, 60),
+                (Instant::now(), cache.generation()),
+            );
+        }
+        assert_eq!(cache.snapshot()["entries"], 128);
+        cache.notified(
+            false,
+            &[crate::model::notification::Change::Bucket {
+                bucket: snapshot.bucket.id,
+            }],
+        );
+        let mut candidates = Vec::new();
+        while let Ok(work) = receiver.try_recv() {
+            let Work::Notify(jobs) = work else {
+                panic!("unexpected foreground work")
+            };
+            assert!(jobs.len() <= crate::model::node_refresh::LIMIT);
+            candidates.extend(jobs);
+        }
+        assert_eq!(candidates.len(), 128);
+        assert_eq!(cache.snapshot()["entries"], 0);
+        assert_eq!(cache.snapshot()["pending_refreshes"], 128);
+    }
+
+    #[tokio::test]
     async fn notification_refreshes_only_resident_entries_and_coalesces_pending_work() {
         let (cors, _) = crate::http::cors::Cache::new(1024 * 1024, 256);
         let (cache, mut receiver) = Cache::new(cors, &super::super::responses::Cache::new(0));
@@ -993,9 +1041,10 @@ mod tests {
         cache.notified(false, &[change.clone()]);
         assert!(cache.get_with(&route, |_| true).is_none());
         assert!(cache.get_with(&other_route, |_| true).is_some());
-        let Work::Notify(job) = receiver.recv().await.unwrap() else {
+        let Work::Notify(mut jobs) = receiver.recv().await.unwrap() else {
             panic!("missing refresh")
         };
+        let job = jobs.remove(0);
         assert!(Arc::ptr_eq(&job, &cache.refreshing(&route).unwrap()));
         let generation = job.generation.load(Relaxed);
         cache.notified(false, &[change]);

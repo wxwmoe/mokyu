@@ -3,6 +3,8 @@ pub(crate) const USER_LOCK: i64 = 734922709851002;
 mod connection;
 mod migration;
 mod queries;
+mod read_sources;
+mod refresh;
 mod transactions;
 
 #[cfg(test)]
@@ -32,6 +34,7 @@ pub(crate) struct Backend {
     pool: PgPool,
     owner: tokio::sync::Mutex<PgConnection>,
     single: bool,
+    refresh: Arc<refresh::Queue>,
     replica: Option<connection::Replica>,
 }
 
@@ -42,6 +45,7 @@ impl Backend {
             pool,
             owner: tokio::sync::Mutex::new(owner),
             single,
+            refresh: Arc::default(),
             replica: None,
         }
     }

@@ -240,10 +240,27 @@ impl Reads {
     }
 
     async fn refresh_notified(&self, job: Arc<crate::app::public_reads::Refresh>) {
-        let Some(_running) = job.claim() else {
+        if !self.refresh_batch(vec![job.clone()]).await {
             job.wait().await;
-            return;
-        };
+        }
+    }
+
+    async fn refresh_batch(&self, jobs: Vec<Arc<crate::app::public_reads::Refresh>>) -> bool {
+        let mut running = Vec::new();
+        let mut jobs: Vec<_> = jobs
+            .into_iter()
+            .filter(|job| {
+                if let Some(guard) = job.claim() {
+                    running.push(guard);
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect();
+        if jobs.is_empty() {
+            return false;
+        }
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             let mut state = self.node.subscribe();
             loop {
@@ -255,58 +272,145 @@ impl Reads {
                     phase,
                     super::super::Phase::Stopped | super::super::Phase::Fenced
                 ) {
-                    return Ok(false);
+                    return Ok(());
                 }
                 state.changed().await?;
             }
             for _ in 0..3 {
-                let generation = job.generation.load(Relaxed);
-                #[cfg(feature = "fault-injection")]
-                crate::faults::point("node-notification-refresh").await;
-                let prepared = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    self.open(request(&job.entry.route, job.entry.mapping.is_none())),
-                )
-                .await??;
-                #[cfg(feature = "fault-injection")]
-                crate::faults::point("node-notification-refreshed").await;
-                self.public_generation();
-                if job.generation.load(Relaxed) != generation
-                    || prepared.public_generation.is_none()
-                {
-                    continue;
+                if jobs.is_empty() {
+                    break;
                 }
-                if let Some((snapshot, confirmation)) = self.public_confirmation(&prepared)? {
-                    self.public.put(
-                        &job.entry.route,
-                        snapshot,
-                        confirmation.mapping,
-                        confirmation.profiles,
-                        confirmation.times,
-                        (prepared.started, prepared.public_generation.unwrap()),
+                let mut retry = Vec::new();
+                let mut pending = jobs.into_iter().peekable();
+                while pending.peek().is_some() {
+                    let memory = Arc::new(self.slots.clone().acquire_owned().await?);
+                    let snapshot = self.node.snapshot()?;
+                    let generation = self.public_generation();
+                    let declared = self.cache.snapshot();
+                    let mut input = wire::RefreshReadsRequest {
+                        run: Some(snapshot.lease.run.clone()),
+                        reads: Vec::new(),
+                        cached: cached(&declared),
+                    };
+                    let mut selected = Vec::new();
+                    while let Some(job) = pending.peek() {
+                        let request = request(&job.entry.route, false);
+                        let candidate = self.candidate(&request);
+                        let item = wire::RefreshRead {
+                            route: request.route.clone(),
+                            body: candidate
+                                .as_ref()
+                                .and_then(|(_, entry)| super::super::cache::claim(entry)),
+                        };
+                        if !selected.is_empty()
+                            && prost::Message::encoded_len(&input)
+                                + prost::Message::encoded_len(&item)
+                                + 16
+                                > 120 * 1024
+                        {
+                            break;
+                        }
+                        input.reads.push(item);
+                        selected.push((
+                            job.clone(),
+                            job.generation.load(Relaxed),
+                            request,
+                            candidate,
+                        ));
+                        pending.next();
+                    }
+                    let started = std::time::Instant::now();
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("node-notification-refresh").await;
+                    let mut reply = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        self.node.client.refresh_reads(input),
+                    )
+                    .await??;
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("node-notification-refreshed").await;
+                    ensure!(
+                        reply.reads.len() == selected.len(),
+                        "refresh result count mismatch"
                     );
+                    self.public_generation();
+                    let (materials, confirmed) = {
+                        let _epoch = self.public_epoch.lock().unwrap();
+                        let current = self.public.generation() == generation
+                            && self.node.current.borrow().phase == super::super::Phase::Ready;
+                        let materials = self.cache.apply(
+                            self.node.client.identity.deployment_id,
+                            declared,
+                            std::mem::take(&mut reply.materials),
+                        )?;
+                        (materials, current.then(|| self.public.generation()))
+                    };
+                    for ((job, requested, request, candidate), reply) in
+                        selected.into_iter().zip(reply.reads)
+                    {
+                        if job.generation.load(Relaxed) != requested || confirmed.is_none() {
+                            retry.push(job);
+                            continue;
+                        }
+                        ensure!(
+                            reply.grants.is_empty()
+                                && reply.next.is_none()
+                                && reply.materials.is_empty()
+                                && reply.mapping.is_none()
+                                && reply.credential.is_none(),
+                            "invalid refresh result"
+                        );
+                        let prepared = Prepared {
+                            cached_body: if reply.body_reused {
+                                Some(candidate.context("control reused an undeclared body")?.1)
+                            } else {
+                                None
+                            },
+                            reply,
+                            run: snapshot.lease.clone(),
+                            materials: materials.clone(),
+                            grants: Vec::new(),
+                            memory: memory.clone(),
+                            buffers: Arc::new(Semaphore::new(super::super::body::BUFFER_UNITS)),
+                            limits: (0, 0),
+                            route: super::super::cache::route(&request),
+                            capture: None,
+                            public_generation: confirmed,
+                            started,
+                            verify: false,
+                        };
+                        if let Some((snapshot, confirmation)) =
+                            self.public_confirmation(&prepared)?
+                        {
+                            self.public.put(
+                                &job.entry.route,
+                                snapshot,
+                                confirmation.mapping,
+                                confirmation.profiles,
+                                confirmation.times,
+                                (started, confirmed.unwrap()),
+                            );
+                        }
+                        if self
+                            .public
+                            .finish_refresh(&job, requested, confirmed.unwrap())
+                        {
+                            self.public.refreshed.fetch_add(1, Relaxed);
+                        } else {
+                            retry.push(job);
+                        }
+                    }
                 }
-                if self
-                    .public
-                    .finish_refresh(&job, generation, prepared.public_generation.unwrap())
-                {
-                    return Ok::<_, anyhow::Error>(true);
-                }
+                jobs = retry;
             }
-            Ok(false)
+            self.public.skipped.fetch_add(jobs.len() as u64, Relaxed);
+            Ok::<_, anyhow::Error>(())
         })
         .await;
-        match result {
-            Ok(Ok(true)) => {
-                self.public.refreshed.fetch_add(1, Relaxed);
-            }
-            Ok(Ok(false)) => {
-                self.public.skipped.fetch_add(1, Relaxed);
-            }
-            _ => {
-                self.public.failed.fetch_add(1, Relaxed);
-            }
+        if !matches!(result, Ok(Ok(()))) {
+            self.public.failed.fetch_add(running.len() as u64, Relaxed);
         }
+        true
     }
 
     fn reuse_public(
@@ -483,11 +587,36 @@ fn request(route: &ReadRoute, head: bool) -> wire::ReadRequest {
 }
 
 async fn run(reads: Weak<Reads>, mut receiver: tokio::sync::mpsc::Receiver<Work>) {
-    while let Some(work) = receiver.recv().await {
+    let mut deferred = None;
+    loop {
+        let work = match deferred.take() {
+            Some(work) => work,
+            None => match receiver.recv().await {
+                Some(work) => work,
+                None => break,
+            },
+        };
         let Some(reads) = reads.upgrade() else { return };
         reads.public_generation();
         match work {
-            Work::Notify(job) => reads.refresh_notified(job).await,
+            Work::Notify(mut jobs) => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                while jobs.len() < crate::model::node_refresh::LIMIT {
+                    match receiver.try_recv() {
+                        Ok(Work::Notify(mut next))
+                            if jobs.len() + next.len() <= crate::model::node_refresh::LIMIT =>
+                        {
+                            jobs.append(&mut next)
+                        }
+                        Ok(next) => {
+                            deferred = Some(next);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                reads.refresh_batch(jobs).await;
+            }
             Work::Fill {
                 route,
                 snapshot,

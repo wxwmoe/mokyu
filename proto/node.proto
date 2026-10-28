@@ -77,8 +77,26 @@ message WorkReply {
 
 service NodeReads {
   rpc OpenRead(ReadRequest) returns (ReadReply);
+  rpc RefreshReads(RefreshReadsRequest) returns (RefreshReadsReply);
   rpc ReadWindow(ReadWindowRequest) returns (ReadReply);
   rpc ReportRead(ReadReportRequest) returns (ReadReportReply);
+}
+
+// Anonymous metadata confirmation only; never allocates a body read lease.
+message RefreshReadsRequest {
+  Run run = 1;
+  repeated RefreshRead reads = 2;
+  repeated Cached cached = 3;
+}
+
+message RefreshRead {
+  ReadRoute route = 1;
+  CachedBody body = 2;
+}
+
+message RefreshReadsReply {
+  repeated ReadReply reads = 1;
+  repeated Material materials = 2;
 }
 
 service NodeWrites {

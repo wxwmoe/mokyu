@@ -25,6 +25,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeControl/CloseNode` | Unary；结束当前 boot/fence，重复关闭安全；正常退出在排空后调用，旧运行权不能关闭新实例 |
 | `NodeControl/PrepareRequest` | Unary；按 `include` 和 `cached` 准备签名凭据、桶和策略，可同时查询桶信息、桶列表或对象列表；仅允许 data |
 | `NodeReads/OpenRead` | Unary；按路由、身份、条件、`include` 与 `cached` 返回对象结果及首个读取窗口，仅允许 data |
+| `NodeReads/RefreshReads` | Unary；data/node 批量确认最多 32 个匿名公共读取快照及已有完整正文证明，返回分项结果和去重材料，不申请读取保护 |
 | `NodeControl/ReportObservations` | Unary；批量上报 HTTP 压缩收益、已通过签名校验的凭据活动及区块/区块包访问统计，仅允许 data |
 | `NodeReads/ReadWindow` | Unary；沿当前读取游标取下一窗口，校验运行权、读取保护和载荷修订 |
 | `NodeReads/ReportRead` | Unary；报告当前读取窗口内最多 16 个来源段，请求持久后端复核，仅允许 data |
@@ -58,6 +59,8 @@ Pulse 仍按十秒周期维护租约；Notice、Receipt 和 SyncNode 不续租�
 
 control 状态中的 `notifications` 提供订阅状态、会话数、队列字节、已发送和已应用条数及背压次数；节点 `public_read_cache` 另提供 `pending_checks` 和 `pending_refreshes`。应用确认与刷新完成分别计数，不能把入队或发送视为已生效。
 
+驻留通知刷新通过 `RefreshReads` 合并，普通冷读继续使用 `OpenRead`。control 最多收集 5 ms，再按集合查询确认路由、权限、元数据、策略和来源；开始查询后到达的请求进入下一组。每个调用者独立验证运行身份，批次不共享租约。control 的 `read_refresh` 提供请求数、合并组数、候选项数、查询路由数、材料缓存命中及排队项数。
+
 状态报告使用独立 Unary，请求最多 96 KiB，其中状态最多 30 KiB、可选元数据最多 60 KiB。报告绑定当前 boot/fence 和递增序号，同一 boot 换连接不重置报告。元数据只在报告接受后视为确认；重复或过时序号返回 `accepted=false`，可在下一份报告中重新携带。诊断请求不续租，也不代替业务确认。关闭会保留已结束 boot 的记录，不能靠重连复活；突然掉线仍由运行租约到期处理。
 
 ## 读取计划与缓存
@@ -65,6 +68,8 @@ control 状态中的 `notifications` 提供订阅状态、会话数、队列字�
 `include` 必须明确指定：`OBJECT` 请求对象信息，`MAPPING` 请求正文读取计划及其必要依赖，`POLICY` 请求桶所用存储的读取策略；HEAD 接受 `OBJECT` 和 `POLICY`。读取策略包含存储身份、修订、读取校验策略、有效 CORS 缓存开关及公共快照的刷新间隔和最大有效期，不携带存储连接或密钥。control 在同一事务内检查权限、条件和 Range，选择物理来源并登记保护，再返回有界结果。节点完成初始化后，首次 OpenRead 即可取得访问远端 S3 所需的对象映射、存储连接及所需块密钥；DNS、TLS 和会话建立另计。
 
 `cached` 最多 256 项，每项包含材料类型、ID 和 32 字节修订。修订绑定部署、用途、身份与具体内容；响应明确给出 JSON 材料或 `reuse`。节点须在请求期间持有声明的材料，收到 `reuse` 时只能使用对应修订。桶已缓存而对象未缓存时，只补齐对象及未持有的依赖；配置、权限和来源有效性仍按当前状态检查。
+
+`RefreshReads` 请求共用 `run` 和 `cached`，每项包含路由及可选完整正文证明。响应按原顺序返回 403/404 或当前对象结果，公共材料集中去重；仅确认元数据时不表示完整 GET 来源已确认。正文证明不匹配、来源不可确认或结果超限时，实际 GET 继续使用 `OpenRead`，不预取正文、不保留负授权缓存。control 只短暂缓存按当前配置指纹匹配的不可变存储材料（最多 8 MiB、128 项、1 秒），仍需每轮查询当前数据库状态。
 
 完整正文缓存使用 `body` 提示，绑定正文检查状态、对象、完整映射、存储修订、表示和压缩策略。客户端在 RPC 期间固定候选；control 在每次 OpenRead 中验证当前权限和来源，命中时不申请读取保护或 S3 I/O 额度。任一必要修订变化时，同次响应提供读取计划。identity 正文可用于 Range 或派生 HTTP 压缩体；inline 拒绝未验证正文，off/background 仍须匹配当前存储策略。请求中的 access key 只用于内部准备；data 必须使用返回的用户密钥完成原请求签名校验后，才向外呈现结果或开始正文 I/O。worker 无权调用此接口。
 

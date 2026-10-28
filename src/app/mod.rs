@@ -610,6 +610,9 @@ impl App {
         status["public_read_cache"] = self.public_reads.snapshot();
         if self.role == "control" {
             status["notifications"] = self.notifications.snapshot();
+            if let Ok(cluster) = self.cluster() {
+                status["read_refresh"] = cluster.refresh_status();
+            }
         }
         status["read_replica"] = self.runtime.read_replica().unwrap_or_else(|| json!({"state":if self.config.replica_database.is_some() {"not_applicable"} else {"disabled"}}));
         status["cleanup"] = self.cleanup_status();

@@ -9203,35 +9203,18 @@ async fn node_read_mapping(
     limit: usize,
     extents: Option<Vec<crate::app::Extent>>,
 ) -> Result<crate::model::node_read::Mapping> {
-    use crate::model::{
-        Error,
-        node_read::{Mapping, Segment, Source},
-    };
-    use std::collections::HashMap;
-    let mut segments = Vec::new();
-    if stream.payload_type == "raw" {
-        for row in queries::node_read_raw(stream.id, start, end, limit as i64)
-            .fetch_all(&mut *db)
-            .await?
-        {
-            row.range.validate()?;
-            ensure!(
-                (!row.range.source.pending_upload && row.range.source.medium == "shared_s3")
-                    || (row.range.source.pending_upload && row.node_id == Some(node)),
-                Error::SourceUnavailable
-            );
-            segments.push(Segment {
-                offset: row.range.offset_bytes,
-                length: row.range.length,
-                source_offset: row.range.source_offset,
-                source: Source::Raw {
-                    source: row.range.source,
-                },
-            });
-        }
+    let (raw, extents) = if stream.payload_type == "raw" {
+        (
+            queries::node_read_raw(stream.id, start, end, limit as i64)
+                .fetch_all(&mut *db)
+                .await?
+                .into_iter()
+                .map(|row| (stream.id, row))
+                .collect(),
+            Vec::new(),
+        )
     } else {
-        ensure!(stream.payload_type == "chunks", Error::SourceUnavailable);
-        let rows = match extents {
+        let extents = match extents {
             Some(rows) => rows,
             None => {
                 queries::node_read_extents(stream.id, start, end, limit as i64)
@@ -9239,133 +9222,11 @@ async fn node_read_mapping(
                     .await?
             }
         };
-        let ids: Vec<_> = rows.iter().filter_map(|row| row.chunk_id).collect();
-        let chunks: HashMap<_, _> = queries::node_read_chunks(&ids)
-            .fetch_all(&mut *db)
-            .await?
-            .into_iter()
-            .map(|row| (row.chunk.id, row))
-            .collect();
-        let encodings: HashMap<_, _> = queries::node_read_encodings(&ids)
-            .fetch_all(&mut *db)
-            .await?
-            .into_iter()
-            .map(|chunk| (chunk.id, chunk))
-            .collect();
-        let pack_ids: Vec<_> = chunks
-            .values()
-            .filter(|row| !encodings.contains_key(&row.chunk.id))
-            .filter_map(|row| row.pack_id)
-            .collect();
-        let packs: HashMap<_, _> = queries::node_read_packs(&pack_ids)
-            .fetch_all(&mut *db)
-            .await?
-            .into_iter()
-            .map(|pack| (pack.id, pack))
-            .collect();
-        let pending: HashMap<_, _> = queries::node_read_pending(&ids)
-            .fetch_all(&mut *db)
-            .await?
-            .into_iter()
-            .collect();
-        let fragment_ids: Vec<_> = rows.iter().filter_map(|row| row.fragment_id).collect();
-        let fragments: HashMap<_, _> = queries::node_read_fragments(&fragment_ids)
-            .fetch_all(&mut *db)
-            .await?
-            .into_iter()
-            .map(|row| (row.source.location_id, row))
-            .collect();
-        for row in rows {
-            let source = if let Some(id) = row.chunk_id {
-                let chunk = chunks.get(&id).ok_or(Error::SourceUnavailable)?;
-                ensure!(
-                    i64::from(row.source_offset) + i64::from(row.length)
-                        <= i64::from(chunk.chunk.raw_size),
-                    Error::SourceUnavailable
-                );
-                if let Some(chunk) = encodings.get(&id) {
-                    Source::Chunk {
-                        chunk: chunk.clone(),
-                    }
-                } else if let Some(pack) = chunk.pack_id.and_then(|id| packs.get(&id)) {
-                    Source::Pack {
-                        pack: pack.clone(),
-                        chunk: chunk.chunk.clone(),
-                    }
-                } else if pending.get(&id) == Some(&Some(node)) {
-                    Source::Local {
-                        node,
-                        chunk: chunk.chunk.clone(),
-                    }
-                } else {
-                    return Err(Error::SourceUnavailable.into());
-                }
-            } else {
-                let Some(Id::Uuid(id)) = row.fragment_id else {
-                    return Err(Error::SourceUnavailable.into());
-                };
-                let fragment = fragments.get(&id).ok_or(Error::SourceUnavailable)?;
-                ensure!(
-                    row.source_offset >= 0
-                        && row.source_offset + row.length <= fragment.source.size,
-                    Error::SourceUnavailable
-                );
-                if let (Some(storage), Some(key)) = (
-                    fragment.source.staging_storage_id,
-                    &fragment.source.staging_object_key,
-                ) {
-                    Source::Staged {
-                        fragment: id,
-                        storage,
-                        key: key.clone(),
-                        size: i64::from(fragment.source.size),
-                        hash: fragment.source.hash.clone(),
-                    }
-                } else {
-                    ensure!(fragment.node_id == Some(node), Error::SourceUnavailable);
-                    Source::Fragment {
-                        node,
-                        source: fragment.source.clone(),
-                    }
-                }
-            };
-            segments.push(Segment {
-                offset: row.offset_bytes,
-                length: i64::from(row.length),
-                source_offset: i64::from(row.source_offset),
-                source,
-            });
-        }
-    }
-    let mut position = start;
-    for segment in &mut segments {
-        let source_end = segment
-            .offset
-            .checked_add(segment.length)
-            .context("read extent overflow")?;
-        ensure!(
-            segment.offset <= position && source_end > position,
-            Error::SourceUnavailable
-        );
-        segment.source_offset += position - segment.offset;
-        segment.offset = position;
-        segment.length = source_end.min(end) - position;
-        position += segment.length;
-    }
-    ensure!(
-        position > start && position <= end,
-        Error::SourceUnavailable
-    );
-    let Id::Uuid(id) = stream.id else {
-        anyhow::bail!("node reads require UUID stream identities");
+        (Vec::new(), extents)
     };
-    Ok(Mapping {
-        stream: id,
-        revision: stream.payload_revision,
-        start,
-        end: position,
-        segments,
-    })
+    super::read_sources::Sources::load(db, raw, extents)
+        .await?
+        .mapping(node, stream, start, end)
 }
 
 async fn node_read_materials(
