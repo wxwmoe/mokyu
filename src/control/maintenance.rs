@@ -605,7 +605,8 @@ pub(super) async fn task_action(
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     let mut access = guard(&app, &actor).await?;
-    app.task_change(id, input.action == "resume").await?;
+    app.task_change(&actor.principal, id, input.action == "resume")
+        .await?;
     access
         .checkpoint(
             "task.action",

@@ -7,6 +7,8 @@ mod migration;
 mod queries;
 mod read_sources;
 mod refresh;
+mod replication_queries;
+mod replication_transactions;
 mod transactions;
 
 #[cfg(test)]
@@ -188,6 +190,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         managed_keys: backend.clone(),
         storage_records: backend.clone(),
         external_buckets: backend.clone(),
+        replications: backend.clone(),
         chunks: backend,
     }
 }

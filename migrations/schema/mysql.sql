@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0043.
+-- Generated from the complete mysql migration chain through 0044.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -1141,6 +1141,62 @@ CREATE TABLE `token_external_grants` (
   CONSTRAINT `token_external_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `external_buckets` (`id`) ON DELETE CASCADE,
   CONSTRAINT `token_external_token` FOREIGN KEY (`token_id`) REFERENCES `api_tokens` (`id`) ON DELETE CASCADE,
   CONSTRAINT `token_external_actions` CHECK ((`actions` <= 15))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `transfer_items` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `task_id` binary(16) NOT NULL,
+  `source_key` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `target_key` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `source_version` bigint DEFAULT NULL,
+  `source_pin` bigint DEFAULT NULL,
+  `target_version` bigint DEFAULT NULL,
+  `candidate` bigint DEFAULT NULL,
+  `output_version` bigint DEFAULT NULL,
+  `snapshot` json NOT NULL,
+  `state` varchar(24) COLLATE utf8mb4_bin NOT NULL DEFAULT 'planning',
+  `position_bytes` bigint NOT NULL DEFAULT '0',
+  `error` varchar(24) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `transfer_items_work` (`task_id`,`state`,`id`),
+  KEY `transfer_items_source_pin` (`source_pin`),
+  KEY `transfer_items_candidate` (`candidate`),
+  CONSTRAINT `transfer_items_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_runs` (`task_id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_items_ibfk_2` FOREIGN KEY (`source_pin`) REFERENCES `streams` (`id`),
+  CONSTRAINT `transfer_items_ibfk_3` FOREIGN KEY (`candidate`) REFERENCES `streams` (`id`),
+  CONSTRAINT `transfer_items_chk_1` CHECK ((`position_bytes` >= 0)),
+  CONSTRAINT `transfer_items_chk_2` CHECK ((`state` in (_utf8mb4'planning',_utf8mb4'planned',_utf8mb4'copying',_utf8mb4'completed',_utf8mb4'skipped',_utf8mb4'conflict',_utf8mb4'cancelled')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `transfer_runs` (
+  `task_id` binary(16) NOT NULL,
+  `created_by` binary(16) DEFAULT NULL,
+  `options` json NOT NULL,
+  `authority` json NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `profile_revision` bigint NOT NULL,
+  `generation` bigint NOT NULL DEFAULT '1',
+  `phase` varchar(24) COLLATE utf8mb4_bin NOT NULL DEFAULT 'scan',
+  `cursor_key` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  `progress` json NOT NULL,
+  PRIMARY KEY (`task_id`),
+  KEY `transfer_runs_creator` (`created_by`,`task_id`),
+  CONSTRAINT `transfer_runs_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_runs_chk_1` CHECK ((`generation` > 0)),
+  CONSTRAINT `transfer_runs_chk_2` CHECK ((`phase` in (_utf8mb4'scan',_utf8mb4'plan',_utf8mb4'verify',_utf8mb4'publish',_utf8mb4'cancel',_utf8mb4'complete',_utf8mb4'cancelled')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `transfer_sources` (
+  `task_id` binary(16) NOT NULL,
+  `source_type` varchar(24) COLLATE utf8mb4_bin NOT NULL,
+  `source_id` bigint NOT NULL,
+  `generation` bigint NOT NULL DEFAULT '0',
+  `snapshot` json DEFAULT NULL,
+  PRIMARY KEY (`task_id`,`source_type`,`source_id`),
+  KEY `transfer_sources_protection` (`source_type`,`source_id`,`task_id`),
+  CONSTRAINT `transfer_sources_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_runs` (`task_id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_sources_chk_1` CHECK ((`source_type` in (_utf8mb4'raw',_utf8mb4'chunk',_utf8mb4'pack'))),
+  CONSTRAINT `transfer_sources_chk_2` CHECK ((`generation` >= 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `uploads` (

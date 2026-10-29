@@ -6806,7 +6806,7 @@ pub(super) fn reset_startup_tasks(maintenance: bool) -> Statement<'static> {
 }
 fn stale_stream_filter(query: &mut sqlx::QueryBuilder<Sqlite>, retention: Option<f64>) {
     query.push(" AND ((s.state IN ('retired','abandoned') AND (").push_bind(retention).push(" IS NULL OR s.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-").push_bind(retention.map(|value|(value*1_000_000.) as i64))
-        .push(")) OR s.state='writing') AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE output_stream=s.id AND state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.execution_token=s.owner_execution_token)");
+        .push(")) OR s.state='writing') AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.source_pin=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE output_stream=s.id AND state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.execution_token=s.owner_execution_token)");
 }
 
 pub(super) fn stale_streams(
@@ -8728,15 +8728,15 @@ impl RawStore for Backend {
             (1..=128).contains(&limit) && grace >= 0 && minimum >= 0,
             "invalid raw cleanup bounds"
         );
-        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=? AND r.owner_stream IS NULL AND r.unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND r.created_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) ORDER BY r.unreferenced_at,r.id LIMIT ?")
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=? AND r.owner_stream IS NULL AND r.unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND r.created_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=r.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) ORDER BY r.unreferenced_at,r.id LIMIT ?")
             .bind(storage).bind(grace).bind(minimum).bind(limit).fetch_all(&self.read).await?)
     }
     async fn claim(&self, source: Id, revision: i64, grace: i64, minimum: i64) -> Result<bool> {
-        Ok(sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=? AND revision=? AND owner_stream IS NULL AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND created_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)")
+        Ok(sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=? AND revision=? AND owner_stream IS NULL AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND created_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=raw_sources.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)")
             .bind(source).bind(revision).bind(grace).bind(minimum).execute(&self.write).await?.rows_affected()==1)
     }
     async fn removed(&self, source: Id) -> Result<()> {
-        sqlx::query("DELETE FROM raw_sources WHERE id=? AND state='deleting' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)")
+        sqlx::query("DELETE FROM raw_sources WHERE id=? AND state='deleting' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=raw_sources.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)")
             .bind(source).execute(&self.write).await?;
         Ok(())
     }

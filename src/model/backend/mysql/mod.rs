@@ -3,6 +3,8 @@ mod external_queries;
 mod external_transactions;
 mod migration;
 mod queries;
+mod replication_queries;
+mod replication_transactions;
 mod transactions;
 
 use sqlx::{MySqlConnection, MySqlPool};

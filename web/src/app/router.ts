@@ -22,6 +22,7 @@ export const router = createRouter({
     { path: '/tokens', name: 'tokens', component: () => import('../features/AccessKeys.vue') },
     { path: '/audit', name: 'audit', component: () => import('../features/Activity.vue') },
     { path: '/transfers', name: 'transfers', component: () => import('../features/Transfers.vue') },
+    { path: '/replications', name: 'replications', component: () => import('../features/Replications.vue') },
     { path: '/users', name: 'users', meta: { admin: true }, component: () => import('../features/Users.vue') },
     { path: '/projects', name: 'projects', component: () => import('../features/Projects.vue') },
     { path: '/account', name: 'account', component: () => import('../features/Account.vue') },

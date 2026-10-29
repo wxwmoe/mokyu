@@ -381,7 +381,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                                 .context("rewrite task not found")?;
                             let resume =
                                 matches!(command, RewriteCommand::Resume | RewriteCommand::Retry);
-                            app.task_change(task, resume).await
+                            app.task_change(principal, task, resume).await
                         }
                     }
                 }
@@ -754,8 +754,8 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             }
             Ok(task)
         }
-        Command::Task(Tasks::Pause { id }) => app.task_change(id, false).await,
-        Command::Task(Tasks::Resume { id }) => app.task_change(id, true).await,
+        Command::Task(Tasks::Pause { id }) => app.task_change(principal, id, false).await,
+        Command::Task(Tasks::Resume { id }) => app.task_change(principal, id, true).await,
         Command::Bucket(Buckets::Purge {
             name,
             execute: false,

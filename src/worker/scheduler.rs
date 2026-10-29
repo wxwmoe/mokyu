@@ -354,6 +354,8 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
                     ),
                 )
                 .await
+        } else if task_type == "storage_migration" && detail["operation"] == "replication" {
+            app.replication_batch(execution).await
         } else if task_type == "storage_migration" {
             crate::storage::resource_gate::PRIORITY
                 .scope(

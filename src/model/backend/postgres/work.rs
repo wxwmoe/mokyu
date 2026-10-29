@@ -308,17 +308,30 @@ async fn finish(
         }
         work::Plan::HashRaw { items, .. } => {
             ensure!(!maintenance, Error::OperationAborted);
-            (deleted, complete, error) = raw::finish(
-                db,
-                Execution {
-                    id: task,
-                    token: row.token,
-                },
-                &detail,
-                items,
-                &completion.outcomes,
-            )
-            .await?;
+            (deleted, complete, error) = if detail["operation"] == "replication" {
+                super::super::replication_transactions::complete_verification(
+                    db,
+                    Execution {
+                        id: task,
+                        token: row.token,
+                    },
+                    &items,
+                    &completion.outcomes,
+                )
+                .await?
+            } else {
+                raw::finish(
+                    db,
+                    Execution {
+                        id: task,
+                        token: row.token,
+                    },
+                    &detail,
+                    items,
+                    &completion.outcomes,
+                )
+                .await?
+            };
         }
         work::Plan::Collect {
             items,
@@ -871,7 +884,7 @@ pub(crate) async fn exchange(
                     .fetch_one(&mut *tx)
                     .await?
                     .storage_id
-            } else if policy == "storage_migration" {
+            } else if policy == "storage_migration" && detail["operation"] != "replication" {
                 migration::storage(&mut tx, &detail).await?
             } else {
                 detail["storage_id"]
@@ -946,6 +959,25 @@ pub(crate) async fn exchange(
                         profile.clone(),
                     )
                     .await?
+                } else if policy == "storage_migration" && detail["operation"] == "replication" {
+                    let execution = Execution { id: task, token };
+                    let mut run =
+                        super::super::replication_transactions::owned(&mut tx, execution).await?;
+                    match super::super::replication_transactions::verification(&mut tx, &mut run)
+                        .await?
+                    {
+                        crate::model::replication::Step::Verify { storage, sources } => Some((
+                            work::Plan::HashRaw {
+                                storage,
+                                items: sources
+                                    .into_iter()
+                                    .map(|source| work::RawHash { source, hash: None })
+                                    .collect(),
+                            },
+                            vec![],
+                        )),
+                        crate::model::replication::Step::Continue => None,
+                    }
                 } else if policy == "storage_migration" {
                     migration::prepare(
                         &mut tx,

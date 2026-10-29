@@ -43,6 +43,7 @@ mod publish;
 pub(crate) mod quota;
 pub(crate) mod raw;
 pub(crate) mod recovery;
+pub(crate) mod replication;
 pub(crate) mod runtime;
 pub(crate) mod session;
 pub(crate) mod settings;
@@ -120,6 +121,7 @@ pub(crate) struct Stores {
     pub(crate) runtime_settings: Arc<dyn RuntimeSettingsStore>,
     pub(crate) managed_keys: Arc<dyn ManagedKeyStore>,
     pub(crate) storage_records: Arc<dyn StorageRecordStore>,
+    pub(crate) replications: Arc<dyn replication::ReplicationStore>,
     pub(crate) external_buckets: Arc<dyn external::ExternalStore>,
     pub(crate) chunks: Arc<dyn ChunkStore>,
 }

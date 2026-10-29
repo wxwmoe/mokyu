@@ -85,6 +85,15 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::settings::reset_section))
         .routes(routes!(super::storage::list, super::storage::create))
         .routes(routes!(super::external::list, super::external::create))
+        .routes(routes!(super::replication::list))
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(super::replication::create))
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .routes(routes!(super::replication::get))
+        .routes(routes!(super::replication::items))
+        .routes(routes!(super::replication::command))
         .routes(routes!(
             super::external::start_test,
             super::external::latest_test

@@ -184,6 +184,24 @@ connection 包含 `endpoint_url`、`region`、`bucket`、`prefix`（默认空）
 
 client_id 是调用方 UUID。成功回执与变更同事务提交；同身份、同参数重试返回回执，参数不同返回 409 IdempotencyConflict。已确认失败的新尝试使用新 ID，未知结果保留原 ID。重试仍检查实时权限，回执按 task_retention 清理。Web 每批 20 项、选择限当前页；关闭浏览器不保留未确认的操作编号。
 
+## 数据复制
+
+复制任务当前支持同一内部存储后端上的桶，执行时复用可用物理来源。创建和执行均检查源读取、目标写入权限；全桶/prefix 需要源列举权限，Move 另需源删除权限，除 `ignore` 外均需目标 ACL 权限。
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `POST /api/v1/replications` | 创建任务，返回 202 和 `{task_id}`；可带 UUID 格式的 `Idempotency-Key`，同一用户以相同输入重试会得到原任务 |
+| `GET /api/v1/replications` | 当前用户创建且仍可访问的任务；`after`/`limit` 分页，默认 50、最多 100，返回 `replications`/`next_after` |
+| `GET /api/v1/replications/{id}` | 任务 `state`、`phase`、`options`、`progress` 和错误 |
+| `GET /api/v1/replications/{id}/items` | 逐对象结果，`after`/`limit` 分页，返回 `items`/`next_after` |
+| `POST /api/v1/replications/{id}/command` | JSON 字符串 `"pause"`、`"resume"` 或 `"cancel"`，返回 202；取消保留已完成项目 |
+
+创建正文包含 `source_bucket`、`target_bucket`、`operation`（`copy`/`move`）和 `scope`。范围为 `{selection:"all"}`、`{selection:"prefix",prefix:"photos/"}` 或 `{selection:"objects",keys:["photos/a.jpg"]}`。明确路径最多 1,000 条，每条最多 1,024 UTF-8 字节，重复路径拒绝。`target_prefix` 默认空串，prefix 选择会用它替换源 prefix，其余选择会在原 key 前添加它。单个明确路径可改用 `target_key`，此时 `target_prefix` 必须为空。保留大小写、重复斜线、百分号和 `..`，不按文件系统路径归一化；同桶重叠范围或覆盖所选来源会被拒绝。
+
+`conflict` 为 `report`（默认）、`skip` 或 `overwrite`。`permissions` 为 `inherit`（默认）、`ignore`、`public_read` 或 `private`，独立于正文覆盖策略。`ignore` 使新对象私有，覆盖时保留目标发布当时的权限。正文相同仍会核对元数据和权限，全部一致才跳过；正文冲突不改变 ACL。Move 仅在目标发布与权限确定后，原子删除仍匹配预期版本的来源。
+
+任务按有界批次扫描、建立物理依赖、验证并发布，来源和目标在扫描后变化会报告冲突。暂停保留检查点与来源保护，恢复重新检查权限和存储配置；部分失败或取消不会回滚已完成文件。任务列表可能因权限过滤返回空页，只要 `next_after` 非空就可继续翻页。任务结束后重新复制可使用新的幂等键。
+
 ## 上传与传输中心
 
 | 方法与路径 | 用途 |

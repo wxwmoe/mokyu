@@ -838,7 +838,8 @@ pub(crate) async fn rewrite(
                 .rewrite_task(storage_id)
                 .await?
                 .context("rewrite task not found")?;
-            app.task_change(task, input.action != "pause").await?
+            app.task_change(&actor.principal, task, input.action != "pause")
+                .await?
         }
         _ => return Err(s3s::s3_error!(InvalidArgument).into()),
     };
