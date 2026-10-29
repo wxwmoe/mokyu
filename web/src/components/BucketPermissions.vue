@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import type { Bucket } from '../api/client'
+import type { Bucket as BucketView } from '../api/client'
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
 import UiCheckbox from './ui/UiCheckbox.vue'
 type Action = components['schemas']['Action']
+type Bucket = Pick<BucketView, 'id' | 'name' | 'actions'>
 type Grant = components['schemas']['BucketGrant']
 const props = defineProps<{ buckets: Bucket[]; actions: Action[]; disabled?: boolean }>()
 const grants = defineModel<Grant[]>({ required: true })

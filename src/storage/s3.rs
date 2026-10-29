@@ -202,6 +202,19 @@ pub(crate) struct Streaming {
     pub options: Options,
 }
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UploadedPart {
+    pub number: u16,
+    pub size: u64,
+    pub etag: String,
+}
+
+pub(crate) struct Parts {
+    pub items: Vec<UploadedPart>,
+    pub next: Option<u16>,
+}
+
 impl Streaming {
     pub(crate) async fn pending_multipart(&self, key: &Path) -> Result<(Vec<String>, bool)> {
         let key = if self.prefix.as_ref().is_empty() {
@@ -460,7 +473,113 @@ impl Streaming {
     }
 }
 
-fn multipart_listing(bytes: &[u8]) -> Result<(Vec<(String, String)>, bool)> {
+pub(super) fn parts_listing(bytes: &[u8], key: &str, upload: &str, after: u16) -> Result<Parts> {
+    let mut xml = s3s::xml::Deserializer::new(bytes);
+    let mut items = Vec::new();
+    let (mut remote_key, mut remote_upload, mut truncated, mut next) = (None, None, None, None);
+    xml.named_element("ListPartsResult", |xml| {
+        xml.for_each_element(|xml, name| {
+            match name {
+                b"Part" => {
+                    if items.len() >= 1000 {
+                        return Err(s3s::xml::DeError::UnexpectedTagName);
+                    }
+                    let (mut number, mut size, mut etag) = (None, None, None);
+                    xml.for_each_element(|xml, name| {
+                        match name {
+                            b"PartNumber" if number.is_none() => {
+                                number = Some(
+                                    xml.content::<String>()?
+                                        .parse::<u16>()
+                                        .map_err(|_| s3s::xml::DeError::UnexpectedTagName)?,
+                                )
+                            }
+                            b"Size" if size.is_none() => {
+                                size = Some(
+                                    xml.content::<String>()?
+                                        .parse::<u64>()
+                                        .map_err(|_| s3s::xml::DeError::UnexpectedTagName)?,
+                                )
+                            }
+                            b"ETag" if etag.is_none() => etag = Some(xml.content::<String>()?),
+                            b"PartNumber" | b"Size" | b"ETag" => {
+                                return Err(s3s::xml::DeError::UnexpectedTagName);
+                            }
+                            _ => {
+                                let _: String = xml.content()?;
+                            }
+                        }
+                        Ok(())
+                    })?;
+                    let missing = || s3s::xml::DeError::UnexpectedTagName;
+                    items.push(UploadedPart {
+                        number: number.ok_or_else(missing)?,
+                        size: size.ok_or_else(missing)?,
+                        etag: etag.ok_or_else(missing)?,
+                    });
+                }
+                b"Owner" | b"Initiator" => {
+                    xml.for_each_element(|xml, _| {
+                        let _: String = xml.content()?;
+                        Ok(())
+                    })?;
+                }
+                b"Key" if remote_key.is_none() => remote_key = Some(xml.content::<String>()?),
+                b"UploadId" if remote_upload.is_none() => {
+                    remote_upload = Some(xml.content::<String>()?)
+                }
+                b"IsTruncated" if truncated.is_none() => truncated = Some(xml.content::<String>()?),
+                b"NextPartNumberMarker" if next.is_none() => {
+                    next = Some(
+                        xml.content::<String>()?
+                            .parse::<u16>()
+                            .map_err(|_| s3s::xml::DeError::UnexpectedTagName)?,
+                    )
+                }
+                b"Key" | b"UploadId" | b"IsTruncated" | b"NextPartNumberMarker" => {
+                    return Err(s3s::xml::DeError::UnexpectedTagName);
+                }
+                _ => {
+                    let _: String = xml.content()?;
+                }
+            }
+            Ok(())
+        })
+    })?;
+    xml.expect_eof()?;
+    ensure!(
+        remote_key.as_deref() == Some(key)
+            && remote_upload.as_deref() == Some(upload)
+            && matches!(truncated.as_deref(), Some("true" | "false")),
+        "S3 part listing identity or pagination differs"
+    );
+    let mut previous = after;
+    for part in &items {
+        ensure!(
+            part.number > previous
+                && part.number <= 10000
+                && part.size <= 5 * 1024 * 1024 * 1024
+                && !part.etag.is_empty()
+                && part.etag.len() <= 2048
+                && !part.etag.chars().any(char::is_control),
+            "invalid S3 uploaded part"
+        );
+        previous = part.number;
+    }
+    let next = if truncated.as_deref() == Some("true") {
+        let next = next.context("S3 part listing has no continuation")?;
+        ensure!(
+            !items.is_empty() && next == previous && next > after && next < 10000,
+            "S3 part listing cannot advance"
+        );
+        Some(next)
+    } else {
+        None
+    };
+    Ok(Parts { items, next })
+}
+
+pub(super) fn multipart_listing(bytes: &[u8]) -> Result<(Vec<(String, String)>, bool)> {
     let mut xml = s3s::xml::Deserializer::new(bytes);
     let mut uploads = Vec::new();
     let mut more = String::new();
@@ -566,7 +685,7 @@ impl Streaming {
     }
 }
 
-fn complete_response(success: bool, bytes: &[u8]) -> Result<bool> {
+pub(super) fn complete_response(success: bool, bytes: &[u8]) -> Result<bool> {
     let mut xml = s3s::xml::Deserializer::new(bytes);
     let mut completed = false;
     let mut code = None;
@@ -598,6 +717,57 @@ fn complete_response(success: bool, bytes: &[u8]) -> Result<bool> {
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+    #[test]
+    fn validates_part_identity_order_and_resume_markers() {
+        let body = b"<ListPartsResult><Key>scope/file</Key><UploadId>id</UploadId><IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker><Part><PartNumber>2</PartNumber><ETag>&quot;abc&quot;</ETag><Size>13</Size></Part></ListPartsResult>";
+        let page = parts_listing(body, "scope/file", "id", 1).unwrap();
+        assert_eq!(page.next, Some(2));
+        assert_eq!(
+            page.items,
+            vec![UploadedPart {
+                number: 2,
+                size: 13,
+                etag: "\"abc\"".into()
+            }]
+        );
+        assert!(parts_listing(body, "other/file", "id", 1).is_err());
+        assert!(parts_listing(body, "scope/file", "other", 1).is_err());
+        assert!(parts_listing(body, "scope/file", "id", 2).is_err());
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        for bad in [
+            text.replace("<NextPartNumberMarker>2", "<NextPartNumberMarker>1"),
+            text.replace("<IsTruncated>true", "<IsTruncated>unknown"),
+            text.replace("<Size>13", "<Size>-1"),
+            text.replace("<ETag>&quot;abc&quot;</ETag>", ""),
+            text.replace(
+                "<PartNumber>2</PartNumber>",
+                "<PartNumber>2</PartNumber><PartNumber>3</PartNumber>",
+            ),
+            text.replace(
+                "</ListPartsResult>",
+                "<Key>scope/file</Key></ListPartsResult>",
+            ),
+        ] {
+            assert!(parts_listing(bad.as_bytes(), "scope/file", "id", 1).is_err());
+        }
+        let empty = b"<ListPartsResult><Key>scope/file</Key><UploadId>id</UploadId><IsTruncated>false</IsTruncated></ListPartsResult>";
+        assert!(
+            parts_listing(empty, "scope/file", "id", 0)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(
+            parts_listing(
+                b"<Error><Code>AccessDenied</Code></Error>",
+                "scope/file",
+                "id",
+                0
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn parses_bounded_native_upload_listings() {
         let (uploads,more)=multipart_listing(b"<ListMultipartUploadsResult><IsTruncated>true</IsTruncated><Upload><Key>raw/a</Key><UploadId>first&amp;one</UploadId><Owner><ID>owner</ID></Owner><Initiator><ID>writer</ID><DisplayName>name</DisplayName></Initiator></Upload></ListMultipartUploadsResult>").unwrap();

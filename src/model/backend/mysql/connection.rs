@@ -60,6 +60,7 @@ pub(crate) async fn connect(
         runtime_settings: backend.clone(),
         managed_keys: backend.clone(),
         storage_records: backend.clone(),
+        external_buckets: backend.clone(),
         chunks: backend.clone(),
     };
     Ok((stores, Box::new(RuntimeOwner(backend))))

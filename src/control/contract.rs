@@ -84,6 +84,20 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::settings::save_section))
         .routes(routes!(super::settings::reset_section))
         .routes(routes!(super::storage::list, super::storage::create))
+        .routes(routes!(super::external::list, super::external::create))
+        .routes(routes!(
+            super::external::start_test,
+            super::external::latest_test
+        ))
+        .routes(routes!(
+            super::external::stop_test,
+            super::external::get_test
+        ))
+        .routes(routes!(
+            super::external::get,
+            super::external::update,
+            super::external::delete
+        ))
         .routes(routes!(super::storage::check, super::storage::update))
         .routes(routes!(super::storage::profile))
         .routes(routes!(super::storage::update_profile_route))

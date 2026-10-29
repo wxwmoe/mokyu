@@ -7,6 +7,8 @@ pub(crate) mod assembly;
 mod backlog;
 pub(crate) mod cache;
 pub(crate) mod diagnostics;
+pub(crate) mod external;
+pub(crate) mod external_test;
 pub(crate) mod file_cache;
 pub(crate) mod local;
 pub(crate) mod location;

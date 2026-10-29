@@ -1,4 +1,6 @@
 mod connection;
+mod external_queries;
+mod external_transactions;
 mod migration;
 mod queries;
 mod transactions;

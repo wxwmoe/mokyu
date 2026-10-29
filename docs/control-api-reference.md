@@ -61,7 +61,7 @@
 | `GET/POST /api/v1/projects`、`PUT/DELETE /api/v1/projects/{id}` | 项目目录、创建、修改及删除空项目 |
 | `GET/PUT /api/v1/runtime-settings/projects` | 项目管理开关 `{enabled}` |
 | `GET /api/v1/projects/{id}/members` | 项目成员及授权 |
-| `PUT/DELETE /api/v1/projects/{id}/members/{user}` | 完整替换 `{role,scope,grants}` / 移除成员 |
+| `PUT/DELETE /api/v1/projects/{id}/members/{user}` | 完整替换 `{role,scope,grants,external_grants}` / 移除成员 |
 | `GET/POST /api/v1/users`、`GET/PATCH/DELETE /api/v1/users/{id}` | 用户目录、创建、角色与状态、删除 |
 | `POST /api/v1/users/{id}/reset-password` | 重置密码及下次改密要求 |
 
@@ -82,6 +82,26 @@
 S3 密钥由管理员管理，属于项目，不随创建者删除；只能授权同项目桶。Token 权限与用户当前权限取交集，空 grants 没有桶权限。`system=true` 仅管理员可签发，必须空 grants，允许全实例管理；仍不能调用 Cookie 专属入口。普通 Token 无全局任务、审计和用户管理权限。
 
 secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployment key 加密。label 1～128 字节，授权最多 1000 桶。`expires_in` 为正时长、最多 3650 天：密钥省略或 null 不到期；Token 省略为 90 天、null 不到期。更新的 `keep_expiry=true` 保留原时间；轮换 overlap 为 0～30 天。最近使用最多五分钟落库一次。S3 密钥使用时间在签名验证后进入有界后台队列，同一密钥合并回写；排队满、数据库超时或进程退出时允许丢弃本次统计，请求不等待此项回写。
+
+## 外部存储桶
+
+外部存储桶属于项目，连接普通 S3 对象空间。成员与 API Token 使用独立的 `external_grants`，每项仍为 `{bucket_id,actions}`，只允许 `bucket.list`、`object.read`、`object.write`、`object.delete`；权限与成员角色及当前用户权限取交集。内部桶的 grants 不授予外部桶权限。成员 `scope=all` 时两个 grants 列表都必须为空。
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /api/v1/external-buckets` | 授权资源目录；可选 project/after/limit，默认 100、最多 200，返回 items/next |
+| `POST /api/v1/external-buckets` | 创建 `{project_id,name,connection,access_key,secret_key}`，返回 201 |
+| `GET/PATCH/DELETE /api/v1/external-buckets/{id}` | 查看、更新及删除；更新和删除须提交当前 revision |
+| `POST /api/v1/external-buckets/{id}/test` | 提交 `{revision,node_id?}`，返回 202 和 `{task_id}` |
+| `GET /api/v1/external-buckets/{id}/test` | 最新能力报告，无测试时为 null |
+| `GET /api/v1/external-tests/{id}` | 按任务 ID 读取报告，连接删除后仍可查询 |
+| `POST /api/v1/external-buckets/{id}/test/stop` | 提交 `{test_id}` 停止自动恢复，返回 204 |
+
+connection 包含 `endpoint_url`、`region`、`bucket`、`prefix`（默认空）、`virtual_hosted`（默认 false）和 `allow_http`（默认 false）。endpoint 不接受用户名、密码、query 或 fragment；HTTP 需显式允许，HTTPS 验证证书。prefix 不带首尾斜线。更新采用 PATCH，省略的字段保留；凭据只接受写入，任何目录和报告都不返回凭据。修改成功递增 revision，修订冲突返回 409。
+
+配置写入和能力测试限管理员，写操作需要最近认证。测试由 single 或群集 worker/node 执行，群集可指定 node_id；single 不接受 node_id。报告绑定启动时的连接修订，分别记录列举、读写、Range、条件操作、版本标识和 Multipart 能力；连接修改不改变已启动测试的目标。成功、权限不足、不支持、未执行、失败和结果未知分别展示，任务完成不表示所有能力都可用。
+
+测试只在 prefix 下随机的 `.mokyu-tests/<任务 UUID>/` 写入小对象，按已记录的对象版本和上传 ID 清理。未完成或仍需清理的测试阻止同一连接再次测试和删除；可通过后台任务接口暂停/恢复。停止自动恢复仅适用于 queued/paused/failed 且无有效节点分配的测试，会清除执行凭据并拒绝再次恢复，保留 `stopped=true`、原报告及待处理位置；不会把残留标成清理成功。
 
 ## 存储桶
 

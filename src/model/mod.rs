@@ -9,6 +9,8 @@ mod chunk;
 pub(crate) mod cluster;
 pub(crate) mod credential;
 mod error;
+pub(crate) mod external;
+pub(crate) mod external_test;
 mod id;
 pub(crate) mod integrity;
 pub(crate) mod key;
@@ -118,6 +120,7 @@ pub(crate) struct Stores {
     pub(crate) runtime_settings: Arc<dyn RuntimeSettingsStore>,
     pub(crate) managed_keys: Arc<dyn ManagedKeyStore>,
     pub(crate) storage_records: Arc<dyn StorageRecordStore>,
+    pub(crate) external_buckets: Arc<dyn external::ExternalStore>,
     pub(crate) chunks: Arc<dyn ChunkStore>,
 }
 

@@ -36,6 +36,7 @@ fn material(access: &str) -> CredentialMaterial {
 
 fn token_input(bucket: Uuid) -> TokenInput {
     TokenInput {
+        external_grants: Vec::new(),
         label: " token ".into(),
         system: false,
         expires_in: Some("1h".into()),
@@ -321,6 +322,7 @@ async fn mysql_credential_contract() -> Result<()> {
             DEFAULT_PROJECT,
             member.id,
             Some(Membership {
+                external_grants: Vec::new(),
                 role: "reader".into(),
                 scope: "all".into(),
                 grants: vec![],

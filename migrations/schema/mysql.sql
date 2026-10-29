@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0042.
+-- Generated from the complete mysql migration chain through 0043.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -241,6 +241,46 @@ CREATE TABLE `extents` (
   CONSTRAINT `extents_source_offset` CHECK (((`source_offset` >= 0) and ((`source_offset` + `length`) <= 4194304)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `external_buckets` (
+  `id` binary(16) NOT NULL,
+  `project_id` binary(16) NOT NULL,
+  `name` varchar(128) /*!80000 COLLATE utf8mb4_0900_bin */ /*M!100603 COLLATE utf8mb4_nopad_bin */ NOT NULL,
+  `connection` json NOT NULL,
+  `revision` bigint NOT NULL DEFAULT '1',
+  `access_encrypted` blob NOT NULL,
+  `secret_encrypted` blob NOT NULL,
+  `enabled` tinyint(1) NOT NULL DEFAULT '1',
+  `created_at` timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `external_buckets_name` (`project_id`,`name`),
+  UNIQUE KEY `external_buckets_project_id` (`id`,`project_id`),
+  CONSTRAINT `external_buckets_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`),
+  CONSTRAINT `external_buckets_connection` CHECK ((json_type(`connection`) = _utf8mb4'OBJECT')),
+  CONSTRAINT `external_buckets_name_size` CHECK ((length(`name`) between 1 and 128)),
+  CONSTRAINT `external_buckets_revision` CHECK ((`revision` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 /*!80000 COLLATE=utf8mb4_0900_bin */ /*M!100603 COLLATE=utf8mb4_nopad_bin */;
+
+CREATE TABLE `external_tests` (
+  `id` binary(16) NOT NULL,
+  `external_id` binary(16) DEFAULT NULL,
+  `revision` bigint NOT NULL,
+  `connection_encrypted` mediumblob,
+  `node_id` binary(16) DEFAULT NULL,
+  `attempts` int NOT NULL DEFAULT '0',
+  `report` json NOT NULL DEFAULT (json_object()),
+  `cleanup_required` tinyint(1) NOT NULL DEFAULT '1',
+  `created_at` timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  KEY `external_tests_bucket` (`external_id`,`created_at` DESC,`id` DESC),
+  CONSTRAINT `external_tests_bucket_fk` FOREIGN KEY (`external_id`) REFERENCES `external_buckets` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `external_tests_task` FOREIGN KEY (`id`) REFERENCES `tasks` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `external_tests_attempts` CHECK ((`attempts` >= 0)),
+  CONSTRAINT `external_tests_report` CHECK ((json_type(`report`) = _utf8mb4'OBJECT')),
+  CONSTRAINT `external_tests_revision` CHECK ((`revision` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `fragments` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `location_id` binary(16) NOT NULL,
@@ -373,6 +413,19 @@ CREATE TABLE `member_bucket_grants` (
   CONSTRAINT `member_grants_bucket` FOREIGN KEY (`bucket_id`, `project_id`) REFERENCES `buckets` (`id`, `project_id`) ON DELETE CASCADE,
   CONSTRAINT `member_grants_member` FOREIGN KEY (`user_id`, `project_id`) REFERENCES `project_members` (`user_id`, `project_id`) ON DELETE CASCADE,
   CONSTRAINT `member_grants_actions` CHECK ((`actions` <= 127))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `member_external_grants` (
+  `user_id` binary(16) NOT NULL,
+  `project_id` binary(16) NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `actions` smallint unsigned NOT NULL,
+  PRIMARY KEY (`user_id`,`bucket_id`),
+  KEY `member_external_member` (`user_id`,`project_id`),
+  KEY `member_external_bucket` (`bucket_id`,`project_id`),
+  CONSTRAINT `member_external_bucket` FOREIGN KEY (`bucket_id`, `project_id`) REFERENCES `external_buckets` (`id`, `project_id`) ON DELETE CASCADE,
+  CONSTRAINT `member_external_member` FOREIGN KEY (`user_id`, `project_id`) REFERENCES `project_members` (`user_id`, `project_id`) ON DELETE CASCADE,
+  CONSTRAINT `member_external_actions` CHECK ((`actions` <= 15))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `mokyu_meta` (
@@ -1079,6 +1132,17 @@ CREATE TABLE `token_bucket_grants` (
   CONSTRAINT `token_grants_actions` CHECK ((`actions` <= 127))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `token_external_grants` (
+  `token_id` binary(16) NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `actions` smallint unsigned NOT NULL,
+  PRIMARY KEY (`token_id`,`bucket_id`),
+  KEY `token_external_bucket` (`bucket_id`),
+  CONSTRAINT `token_external_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `external_buckets` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `token_external_token` FOREIGN KEY (`token_id`) REFERENCES `api_tokens` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `token_external_actions` CHECK ((`actions` <= 15))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `uploads` (
   `id` binary(16) NOT NULL,
   `bucket_id` binary(16) NOT NULL,
@@ -1193,7 +1257,11 @@ SET foreign_key_checks=@mokyu_schema_foreign_keys;
 
 CREATE SQL SECURITY DEFINER VIEW `user_bucket_access` AS select `m`.`user_id` AS `user_id`,`b`.`id` AS `bucket_id`,((case `m`.`role` when 'reader' then 67 when 'writer' then 95 when 'maintainer' then 127 else 0 end) & if((`m`.`scope` = 'all'),127,coalesce(`g`.`actions`,0))) AS `actions` from ((`project_members` `m` join `buckets` `b` on((`b`.`project_id` = `m`.`project_id`))) left join `member_bucket_grants` `g` on(((`g`.`user_id` = `m`.`user_id`) and (`g`.`bucket_id` = `b`.`id`))));
 
+CREATE SQL SECURITY DEFINER VIEW `user_external_access` AS select `m`.`user_id` AS `user_id`,`b`.`id` AS `bucket_id`,((case `m`.`role` when 'reader' then 3 when 'writer' then 15 when 'maintainer' then 15 else 0 end) & if((`m`.`scope` = 'all'),15,coalesce(`g`.`actions`,0))) AS `actions` from ((`project_members` `m` join `external_buckets` `b` on((`b`.`project_id` = `m`.`project_id`))) left join `member_external_grants` `g` on(((`g`.`user_id` = `m`.`user_id`) and (`g`.`bucket_id` = `b`.`id`))));
+
 CREATE SQL SECURITY DEFINER VIEW `token_bucket_access` AS select `t`.`id` AS `token_id`,`g`.`bucket_id` AS `bucket_id`,(`g`.`actions` & if((`u`.`role` = 'admin'),127,coalesce(`a`.`actions`,0))) AS `actions` from (((`api_tokens` `t` join `web_users` `u` on((`u`.`id` = `t`.`user_id`))) join `token_bucket_grants` `g` on((`g`.`token_id` = `t`.`id`))) left join `user_bucket_access` `a` on(((`a`.`user_id` = `t`.`user_id`) and (`a`.`bucket_id` = `g`.`bucket_id`))));
+
+CREATE SQL SECURITY DEFINER VIEW `token_external_access` AS select `t`.`id` AS `token_id`,`g`.`bucket_id` AS `bucket_id`,(`g`.`actions` & if((`u`.`role` = 'admin'),15,coalesce(`a`.`actions`,0))) AS `actions` from (((`api_tokens` `t` join `web_users` `u` on((`u`.`id` = `t`.`user_id`))) join `token_external_grants` `g` on((`g`.`token_id` = `t`.`id`))) left join `user_external_access` `a` on(((`a`.`user_id` = `t`.`user_id`) and (`a`.`bucket_id` = `g`.`bucket_id`))));
 
 CREATE TRIGGER `encodings_owner_insert` BEFORE INSERT ON `chunk_encodings` FOR EACH ROW BEGIN
     IF NEW.owner_task IS NOT NULL AND NEW.owner_stream IS NOT NULL THEN

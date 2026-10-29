@@ -5722,6 +5722,13 @@ pub(super) async fn save_member(
         queries::delete_member_grants(user, project)
             .execute(&mut *tx)
             .await?;
+        super::external_transactions::replace_member(
+            &mut tx,
+            user,
+            project,
+            &input.external_grants,
+        )
+        .await?;
         for grant in input.grants {
             queries::insert_member_grant(user, project, &grant)
                 .execute(&mut *tx)
@@ -6117,7 +6124,9 @@ async fn token_scope(
         .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| s3s::s3_error!(AccessDenied))?;
-    if input.system && (role != "admin" || !input.grants.is_empty()) {
+    if input.system
+        && (role != "admin" || !input.grants.is_empty() || !input.external_grants.is_empty())
+    {
         return Err(s3s::s3_error!(AccessDenied).into());
     }
     let mut grants: Vec<_> = input.grants.iter().collect();
@@ -6140,6 +6149,8 @@ async fn token_scope(
             }
         }
     }
+    super::external_transactions::token_scope(&mut *tx, user, &role, &input.external_grants)
+        .await?;
     Ok(revision)
 }
 
@@ -6177,9 +6188,10 @@ pub(super) async fn create_token(
     queries::insert_token(id, user, &input, &material, revision, expires)
         .execute(&mut *tx)
         .await?;
+    super::external_transactions::replace_token(&mut tx, id, &input.external_grants).await?;
     replace_token_grants(&mut tx, id, input.grants).await?;
     let token = get_token(&mut tx, id).await?;
-    checkpoint_event(&mut tx,"token.create",&id.to_string(),serde_json::json!({"user_id":user,"label":token.label,"system":token.system,"grants":token.grants,"expires_at":token.expires_at})).await?;
+    checkpoint_event(&mut tx,"token.create",&id.to_string(),serde_json::json!({"user_id":user,"label":token.label,"system":token.system,"grants":token.grants,"external_grants":token.external_grants,"expires_at":token.expires_at})).await?;
     tx.commit().await?;
     Ok(token)
 }
@@ -6205,9 +6217,10 @@ pub(super) async fn update_token(
     queries::update_token(id, &input, expires)
         .execute(&mut *tx)
         .await?;
+    super::external_transactions::replace_token(&mut tx, id, &input.external_grants).await?;
     replace_token_grants(&mut tx, id, input.grants).await?;
     let result = get_token(&mut tx, id).await?;
-    checkpoint_event(&mut tx,"token.update",&id.to_string(),serde_json::json!({"user_id":user,"label":result.label,"system":result.system,"grants":result.grants,"expires_at":result.expires_at})).await?;
+    checkpoint_event(&mut tx,"token.update",&id.to_string(),serde_json::json!({"user_id":user,"label":result.label,"system":result.system,"grants":result.grants,"external_grants":result.external_grants,"expires_at":result.expires_at})).await?;
     tx.commit().await?;
     Ok(result)
 }

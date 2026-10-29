@@ -608,7 +608,7 @@ pub(super) fn claim_task<'q>(
     metadata_only: Option<bool>,
     cache_storage: Option<Uuid>,
 ) -> Scalar<'q, Uuid> {
-    sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=CASE WHEN $3::uuid IS NOT NULL THEN now()+interval '5 minutes' END,updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='failed' AND t.detail->>'operation' IN ('cdc','deduplicate','cache') AND t.updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND t.state='running' AND t.lease_expires_at<now())) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=$1 AND (NOT $5 OR (t.task_type IN ('upload','cache_flush') AND coalesce(t.detail->>'operation' NOT IN ('cdc','deduplicate'),true))) AND ((t.detail->>'operation' IS DISTINCT FROM 'deduplicate' AND t.detail->>'operation' IS DISTINCT FROM 'cdc') OR (NOT m.maintenance AND (NOT EXISTS(SELECT 1 FROM raw_processing w WHERE w.token=t.id) OR EXISTS(SELECT 1 FROM raw_processing w WHERE w.token=t.id AND w.next_attempt_at<=clock_timestamp())))) AND (t.detail->>'operation' IS DISTINCT FROM 'cdc' OR t.state<>'queued' OR NOT t.detail ? 'node_conversion' OR t.updated_at<clock_timestamp()-interval '1 second') AND (t.detail->>'operation' IS DISTINCT FROM 'cache' OR NOT EXISTS(SELECT 1 FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id JOIN storage_profiles p ON p.storage_id=r.storage_id WHERE r.id::text=t.detail->>'source_id' AND (u.next_attempt_at>clock_timestamp() OR u.token IS NOT NULL AND u.lease_expires_at>clock_timestamp() OR r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing') OR NOT $5 AND NOT m.maintenance AND r.created_at+p.write_backlog_max_age*interval '1 second'>clock_timestamp() AND EXISTS(SELECT 1 FROM tasks c WHERE c.id=r.processing_task AND c.state<>'completed')))) AND ($8::uuid IS NULL OR (t.task_type='upload' AND t.detail->>'operation'='cache' AND t.detail->>'storage_id'=$8::uuid::text)) AND NOT(t.id=ANY($2)) AND (($3::uuid IS NULL AND (t.execution_scope<>'node' OR t.target_node_id IS NULL)) OR (t.execution_scope='node' AND t.target_node_id=$3) OR (t.execution_scope<>'node' AND EXISTS(SELECT 1 FROM nodes n WHERE n.id=$3 AND n.enabled AND n.role IN ('control','worker','node')))) AND (cardinality($6::text[])=0 OR (t.task_type=ANY($6) AND ($7 IS DISTINCT FROM false OR t.task_type<>'upload' OR t.detail->>'operation' IN ('cdc','deduplicate','cache')) AND (t.task_type='sweep' OR NOT EXISTS(SELECT 1 FROM tasks sweep WHERE sweep.task_type='sweep' AND sweep.detail->>'dry_run'='false' AND sweep.state IN ('queued','running'))) AND (t.task_type<>'integrity' OR t.detail ? 'source_operation' OR (t.detail->>'mode' IN ('head','full') AND t.detail->>'phase' IN ('raw','chunks'))))) AND ($7::bool IS NULL OR $7=(t.task_type IN ('usage','purge') OR (t.task_type='cleanup' AND t.detail->>'storage_id' IS NULL) OR coalesce(t.task_type='integrity' AND NOT t.detail ? 'source_operation' AND (t.detail->>'mode'='metadata' OR t.detail->>'phase'='metadata'),false))) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND NOT (m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','storage_migration','rewrite','usage')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END AND CASE WHEN c.policy='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.task_type='pack' AND t.detail->>'policy' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='failed' AND detail->>'operation' IN ('cdc','deduplicate','cache') AND updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND state='running' AND lease_expires_at<now())) RETURNING id")
+    sqlx::query_scalar("UPDATE tasks SET state='running',started_at=coalesce(started_at,now()),lease_node_id=$3,lease_token=$4,lease_expires_at=CASE WHEN $3::uuid IS NOT NULL THEN now()+interval '5 minutes' END,updated_at=now() WHERE id=(SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='failed' AND t.detail->>'operation' IN ('cdc','deduplicate','cache') AND t.updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND t.state='running' AND t.lease_expires_at<now())) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=$1 AND (NOT $5 OR (t.task_type IN ('upload','cache_flush') AND coalesce(t.detail->>'operation' NOT IN ('cdc','deduplicate'),true))) AND ((t.detail->>'operation' IS DISTINCT FROM 'deduplicate' AND t.detail->>'operation' IS DISTINCT FROM 'cdc') OR (NOT m.maintenance AND (NOT EXISTS(SELECT 1 FROM raw_processing w WHERE w.token=t.id) OR EXISTS(SELECT 1 FROM raw_processing w WHERE w.token=t.id AND w.next_attempt_at<=clock_timestamp())))) AND (t.detail->>'operation' IS DISTINCT FROM 'cdc' OR t.state<>'queued' OR NOT t.detail ? 'node_conversion' OR t.updated_at<clock_timestamp()-interval '1 second') AND (t.detail->>'operation' IS DISTINCT FROM 'cache' OR NOT EXISTS(SELECT 1 FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id JOIN storage_profiles p ON p.storage_id=r.storage_id WHERE r.id::text=t.detail->>'source_id' AND (u.next_attempt_at>clock_timestamp() OR u.token IS NOT NULL AND u.lease_expires_at>clock_timestamp() OR r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing') OR NOT $5 AND NOT m.maintenance AND r.created_at+p.write_backlog_max_age*interval '1 second'>clock_timestamp() AND EXISTS(SELECT 1 FROM tasks c WHERE c.id=r.processing_task AND c.state<>'completed')))) AND ($8::uuid IS NULL OR (t.task_type='upload' AND t.detail->>'operation'='cache' AND t.detail->>'storage_id'=$8::uuid::text)) AND NOT(t.id=ANY($2)) AND (($3::uuid IS NULL AND (t.execution_scope<>'node' OR t.target_node_id IS NULL)) OR (t.execution_scope='node' AND t.target_node_id=$3) OR (t.execution_scope<>'node' AND EXISTS(SELECT 1 FROM nodes n WHERE n.id=$3 AND n.enabled AND n.role IN ('control','worker','node')))) AND (cardinality($6::text[])=0 OR (t.task_type=ANY($6) AND ($7 IS DISTINCT FROM false OR t.task_type<>'upload' OR t.detail->>'operation' IN ('cdc','deduplicate','cache')) AND (t.task_type='sweep' OR NOT EXISTS(SELECT 1 FROM tasks sweep WHERE sweep.task_type='sweep' AND sweep.detail->>'dry_run'='false' AND sweep.state IN ('queued','running'))) AND (t.task_type<>'integrity' OR t.detail->>'operation'='external_test' OR t.detail ? 'source_operation' OR (t.detail->>'mode' IN ('head','full') AND t.detail->>'phase' IN ('raw','chunks'))))) AND ($7::bool IS NULL OR $7=(t.task_type IN ('usage','purge') OR (t.task_type='cleanup' AND t.detail->>'storage_id' IS NULL) OR coalesce(t.task_type='integrity' AND NOT t.detail ? 'source_operation' AND (t.detail->>'mode'='metadata' OR t.detail->>'phase'='metadata'),false))) AND t.detail->>'role' IS DISTINCT FROM 'parent' AND NOT (m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','storage_migration','rewrite','usage')) AND NOT EXISTS(SELECT 1 FROM maintenance_controls c WHERE c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END AND CASE WHEN c.policy='gc' THEN m.gc_paused ELSE c.paused END) AND NOT (t.task_type='pack' AND t.detail->>'policy' IN ('pack','repack') AND m.pack_creation_paused) ORDER BY t.updated_at,t.id LIMIT 1) AND (state='queued' OR (state='failed' AND detail->>'operation' IN ('cdc','deduplicate','cache') AND updated_at<now()-interval '30 seconds') OR ($3::uuid IS NOT NULL AND state='running' AND lease_expires_at<now())) RETURNING id")
         .bind(class)
         .bind(active)
         .bind(node)
@@ -761,9 +761,9 @@ pub(super) fn task_control(id: Uuid) -> Rows<'static, (bool, String, Value)> {
 pub(super) fn change_task_state(id: Uuid, parent: bool, resume: bool) -> Statement<'static> {
     let query = if resume {
         if parent {
-            "UPDATE tasks SET state='queued',error=NULL,updated_at=now() WHERE (id=$1 OR parent_task_id=$1) AND state IN ('paused','failed')"
+            "UPDATE tasks SET state='queued',error=NULL,updated_at=now() WHERE (id=$1 OR parent_task_id=$1) AND state IN ('paused','failed') AND coalesce(detail->>'test_stopped','false')<>'true'"
         } else {
-            "UPDATE tasks SET state='queued',error=NULL,updated_at=now() WHERE id=$1 AND state IN ('paused','failed')"
+            "UPDATE tasks SET state='queued',error=NULL,updated_at=now() WHERE id=$1 AND state IN ('paused','failed') AND coalesce(detail->>'test_stopped','false')<>'true'"
         }
     } else if parent {
         "UPDATE tasks SET state='paused',updated_at=now() WHERE (id=$1 OR parent_task_id=$1) AND state IN ('queued','running')"
@@ -1537,7 +1537,7 @@ impl TaskControlStore for Backend {
     }
 
     async fn other_integrity(&self, task: Uuid) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND NOT (detail ? 'source_operation') AND state IN ('queued','running') AND id<>$1)").bind(task).fetch_one(&self.pool).await?)
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND NOT (detail ? 'source_operation') AND detail->>'operation' IS DISTINCT FROM 'external_test' AND state IN ('queued','running') AND id<>$1)").bind(task).fetch_one(&self.pool).await?)
     }
 
     async fn enqueue(&self, task_type: &str, bucket: Option<Uuid>, detail: Value) -> Result<Uuid> {
@@ -2464,7 +2464,7 @@ pub(super) fn delete_membership(user: Uuid, project: Uuid) -> Statement<'static>
 }
 
 pub(super) fn project_members(id: Uuid) -> Rows<'static, Member> {
-    sqlx::query_as("SELECT m.user_id,u.username,u.display_name,u.enabled,m.role,m.scope,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM member_bucket_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),'[]'::jsonb) AS grants FROM project_members m JOIN web_users u ON u.id=m.user_id WHERE m.project_id=$1 ORDER BY u.username LIMIT 1000").bind(id)
+    sqlx::query_as("SELECT m.user_id,u.username,u.display_name,u.enabled,m.role,m.scope,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM member_bucket_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),'[]'::jsonb) AS grants,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM member_external_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),'[]'::jsonb) AS external_grants FROM project_members m JOIN web_users u ON u.id=m.user_id WHERE m.project_id=$1 ORDER BY u.username LIMIT 1000").bind(id)
 }
 
 pub(super) fn projects() -> Rows<'static, Project> {
@@ -2503,7 +2503,7 @@ pub(super) fn lock_project(id: Uuid) -> Scalar<'static, Uuid> {
 }
 
 pub(super) fn project_dependents(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE project_id=$1) OR EXISTS(SELECT 1 FROM s3_credentials WHERE project_id=$1) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=$1)").bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE project_id=$1) OR EXISTS(SELECT 1 FROM s3_credentials WHERE project_id=$1) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=$1) OR EXISTS(SELECT 1 FROM external_buckets WHERE project_id=$1)").bind(id)
 }
 
 pub(super) fn delete_project(id: Uuid) -> Statement<'static> {
@@ -2525,7 +2525,7 @@ pub(super) fn visible_projects(
     admin: bool,
     token: Option<Uuid>,
 ) -> Rows<'static, Project> {
-    sqlx::query_as("SELECT p.* FROM projects p WHERE $2 OR CASE WHEN $3::uuid IS NOT NULL THEN EXISTS(SELECT 1 FROM token_bucket_access t JOIN buckets b ON b.id=t.bucket_id WHERE t.token_id=$3 AND b.project_id=p.id AND 'bucket.list'=ANY(t.actions)) ELSE EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=p.id AND m.user_id=$1) END ORDER BY p.builtin DESC,p.name LIMIT 1000").bind(user).bind(admin).bind(token)
+    sqlx::query_as("SELECT p.* FROM projects p WHERE $2 OR CASE WHEN $3::uuid IS NOT NULL THEN EXISTS(SELECT 1 FROM token_bucket_access t JOIN buckets b ON b.id=t.bucket_id WHERE t.token_id=$3 AND b.project_id=p.id AND 'bucket.list'=ANY(t.actions)) OR EXISTS(SELECT 1 FROM token_external_access t JOIN external_buckets b ON b.id=t.bucket_id WHERE t.token_id=$3 AND b.project_id=p.id AND 'bucket.list'=ANY(t.actions)) ELSE EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=p.id AND m.user_id=$1) END ORDER BY p.builtin DESC,p.name LIMIT 1000").bind(user).bind(admin).bind(token)
 }
 
 pub(super) fn project_mode() -> Scalar<'static, bool> {
@@ -2697,7 +2697,7 @@ pub(super) fn credential_records<'q>(
 }
 
 pub(super) fn token_record(id: Uuid) -> Rows<'static, Token> {
-    sqlx::query_as("SELECT t.id,t.user_id,t.label,t.prefix,t.system,t.created_at,t.expires_at,t.last_used_at,t.revoked_at,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AS active,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM token_bucket_grants g WHERE g.token_id=t.id),'[]'::jsonb) AS grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.id=$1").bind(id)
+    sqlx::query_as("SELECT t.id,t.user_id,t.label,t.prefix,t.system,t.created_at,t.expires_at,t.last_used_at,t.revoked_at,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AS active,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM token_bucket_grants g WHERE g.token_id=t.id),'[]'::jsonb) AS grants,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM token_external_grants g WHERE g.token_id=t.id),'[]'::jsonb) AS external_grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.id=$1").bind(id)
 }
 
 pub(super) fn lock_token_owner(user: Uuid) -> Statement<'static> {
@@ -2756,7 +2756,7 @@ pub(super) fn revoke_token(id: Uuid) -> Statement<'static> {
 }
 
 pub(super) fn token_records(user: Uuid, after: Option<Uuid>, limit: i64) -> Rows<'static, Token> {
-    sqlx::query_as("SELECT t.id,t.user_id,t.label,t.prefix,t.system,t.created_at,t.expires_at,t.last_used_at,t.revoked_at,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AS active,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM token_bucket_grants g WHERE g.token_id=t.id),'[]'::jsonb) AS grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.user_id=$1 AND ($2::uuid IS NULL OR t.id>$2) ORDER BY t.id LIMIT $3").bind(user).bind(after).bind(limit)
+    sqlx::query_as("SELECT t.id,t.user_id,t.label,t.prefix,t.system,t.created_at,t.expires_at,t.last_used_at,t.revoked_at,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>now()) AS active,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM token_bucket_grants g WHERE g.token_id=t.id),'[]'::jsonb) AS grants,COALESCE((SELECT jsonb_agg(jsonb_build_object('bucket_id',g.bucket_id,'actions',g.actions) ORDER BY g.bucket_id) FROM token_external_grants g WHERE g.token_id=t.id),'[]'::jsonb) AS external_grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.user_id=$1 AND ($2::uuid IS NULL OR t.id>$2) ORDER BY t.id LIMIT $3").bind(user).bind(after).bind(limit)
 }
 
 #[async_trait::async_trait]
@@ -5366,7 +5366,7 @@ pub(super) fn cleanup_history<'q>(
             "DELETE FROM integrity_issues WHERE id IN (SELECT i.id FROM integrity_issues i JOIN tasks t ON t.id=i.task_id WHERE t.state='completed' AND t.updated_at<now()-$1*interval '1 second' ORDER BY i.id LIMIT $2 FOR UPDATE OF i SKIP LOCKED)"
         }
         "tasks" => {
-            "DELETE FROM tasks WHERE id IN (SELECT id FROM tasks t WHERE state='completed' AND updated_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id) ORDER BY updated_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
+            "DELETE FROM tasks WHERE id IN (SELECT id FROM tasks t WHERE state='completed' AND updated_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id) AND NOT EXISTS(SELECT 1 FROM external_tests e WHERE e.id=t.id AND e.cleanup_required) ORDER BY updated_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
         }
         "sessions" => {
             "DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions s WHERE expires_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM session_refresh_tokens r WHERE r.session_id=s.id AND r.revoked_at IS NULL AND r.expires_at>now()) ORDER BY expires_at,token_hash LIMIT $2 FOR UPDATE SKIP LOCKED)"
@@ -8678,6 +8678,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::model::administrati
             role: row.try_get("role")?,
             scope: row.try_get("scope")?,
             grants: row.try_get::<sqlx::types::Json<_>, _>("grants")?.0,
+            external_grants: row.try_get::<sqlx::types::Json<_>, _>("external_grants")?.0,
         })
     }
 }
@@ -8893,6 +8894,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::model::credential::
             last_used_at: row.try_get("last_used_at")?,
             revoked_at: row.try_get("revoked_at")?,
             grants: row.try_get::<sqlx::types::Json<_>, _>("grants")?.0,
+            external_grants: row.try_get::<sqlx::types::Json<_>, _>("external_grants")?.0,
         })
     }
 }

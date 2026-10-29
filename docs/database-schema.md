@@ -57,6 +57,16 @@ storage 连接和 profile 修改只改变后续写入及新请求的策略；已
 
 各算法观测通过后端原子更新合并，同策略保留未知键，切换策略只保留有效预估并清除全部旧算法结果；旧节点不能覆盖新策略。观测只写 ready stream，遵守维护、运行模式与所有者边界，不改变对象时间、ETag 或目录 revision。内存队列有界且允许丢弃，数据库中没有额外观测任务或租约；读取不等待回写。
 
+### 外部存储桶
+
+| 表 | 关键字段 | 约束 |
+| --- | --- | --- |
+| `external_buckets` | `id`、`project_id`、`name`、`connection`、`revision`、加密凭据、`enabled` | 项目内名称唯一；连接修订控制并发更新；不属于内部 storages |
+| `member_external_grants`、`token_external_grants` | 成员或 Token 身份、`bucket_id`、`actions` | 与内部桶授权分开，只允许列举、读取、写入、删除；成员资源属于同一项目 |
+| `external_tests` | `id`、`external_id`、`revision`、`connection_encrypted`、`node_id`、`attempts`、`report`、`cleanup_required` | id 对应任务；报告包含阶段与产物身份；删除连接后 external_id 置空，报告保留；未解决清理的测试不随常规任务 GC 回收 |
+
+外部测试使用任务执行令牌和固定的加密连接快照。群集的 `node_work` 分配在完成阶段时同时清除计划及临时凭据，保留请求/结果摘要；测试完成或停止恢复时清除该测试的全部历史执行材料。
+
 ## 原始来源与范围
 
 `streams.payload_type` 为 `chunks`（默认）或 `raw`，`payload_revision` 为正整数、默认 1。旧对象继续采用原表示；原始对象不创建 `extents` 或 `chunks` 行。

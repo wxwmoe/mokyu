@@ -23,6 +23,11 @@ impl App {
         if resume {
             self.ensure_mode()?;
             let (_, task_type, detail) = task.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+            if detail["test_stopped"] == true {
+                return Err(
+                    s3s::s3_error!(OperationAborted, "external test recovery was stopped").into(),
+                );
+            }
             let mode = if self.role == "single" {
                 "single"
             } else {
@@ -68,7 +73,7 @@ impl App {
                 self.writable()?;
             } else if detail.get("source_operation").is_some() {
                 self.source_writable()?;
-            } else if task_type == "integrity" {
+            } else if task_type == "integrity" && detail["operation"] != "external_test" {
                 let busy: bool = self.task_control.other_integrity(id).await?;
                 if busy {
                     return Err(s3s::s3_error!(

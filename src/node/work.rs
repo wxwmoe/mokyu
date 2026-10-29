@@ -124,12 +124,29 @@ impl Worker {
             ensure!(
                 grants.len() == 1
                     && grants[0].reference.r#type == wire::GrantType::TaskWork as i32
-                    && grants[0].storage == Some(plan.storage()),
+                    && grants[0].storage == plan.storage(),
                 "work protection is missing"
             );
-            let backend = reads::backend(&materials, plan.storage())?;
             let future = async {
+                if let work::Plan::ExternalTest(test) = &plan {
+                    let connection = serde_json::from_slice(
+                        reply
+                            .external_connection_json
+                            .as_deref()
+                            .context("external connection missing")?,
+                    )?;
+                    let _io = self.reader.io.clone().acquire_owned().await?;
+                    let report =
+                        crate::storage::external_test::execute(test.clone(), &connection).await?;
+                    return Ok(work::Completion {
+                        operation,
+                        outcomes: vec![work::Outcome::ExternalTest(report)],
+                    });
+                }
+                let backend =
+                    reads::backend(&materials, plan.storage().context("work storage missing")?)?;
                 let outcomes = match plan {
+                    work::Plan::ExternalTest(_) => unreachable!(),
                     work::Plan::UploadRaw { storage, items } => {
                         ensure!(
                             !items.is_empty() && items.len() <= work::MAX_ITEMS,

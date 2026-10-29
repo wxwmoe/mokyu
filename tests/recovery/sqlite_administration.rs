@@ -26,6 +26,7 @@ fn project_input(name: &str) -> ProjectInput {
 
 fn membership(bucket: Uuid) -> Membership {
     Membership {
+        external_grants: Vec::new(),
         role: "reader".into(),
         scope: "selected".into(),
         grants: vec![BucketGrant {
@@ -332,6 +333,7 @@ async fn sqlite_administration_contract() -> Result<()> {
             project.id,
             member.id,
             Some(Membership {
+                external_grants: Vec::new(),
                 role: "writer".into(),
                 scope: "all".into(),
                 grants: Vec::new(),

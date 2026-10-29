@@ -105,6 +105,7 @@ pub(crate) struct UploadFile {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
+    ExternalTest(super::external_test::Plan),
     Migrate {
         storage: Uuid,
         write: Uuid,
@@ -169,8 +170,9 @@ pub(crate) enum Plan {
 }
 
 impl Plan {
-    pub(crate) fn storage(&self) -> Uuid {
+    pub(crate) fn storage(&self) -> Option<Uuid> {
         match self {
+            Self::ExternalTest(_) => None,
             Self::ConvertRaw { storage, .. }
             | Self::Migrate { storage, .. }
             | Self::UploadRaw { storage, .. }
@@ -180,8 +182,8 @@ impl Plan {
             | Self::SweepScan { storage, .. }
             | Self::SweepDelete { storage, .. }
             | Self::Rewrite { storage, .. }
-            | Self::Pack { storage, .. } => *storage,
-            Self::Inspect { snapshot, .. } => snapshot.scope.storage_id,
+            | Self::Pack { storage, .. } => Some(*storage),
+            Self::Inspect { snapshot, .. } => Some(snapshot.scope.storage_id),
         }
     }
 }
@@ -189,6 +191,7 @@ impl Plan {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Outcome {
+    ExternalTest(super::external_test::Report),
     Uploaded,
     Converted,
     Migrated,
@@ -263,6 +266,7 @@ pub(crate) struct Reply {
     pub plan: Option<Plan>,
     pub materials: Vec<node_read::Material>,
     pub grants: Vec<node_read::Grant>,
+    pub external: Option<super::external_test::Snapshot>,
 }
 
 #[cfg(test)]

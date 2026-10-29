@@ -152,6 +152,8 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/account"
                 | "/api/v1/account/sessions"
                 | "/api/v1/buckets"
+                | "/api/v1/external-buckets"
+                | "/api/v1/external-buckets/{id}"
                 | "/api/v1/usage/summary"
                 | "/api/v1/usage/runtime"
                 | "/api/v1/packs"

@@ -38,6 +38,8 @@ pub(crate) struct Membership {
     pub scope: String,
     #[serde(default)]
     pub grants: Vec<BucketGrant>,
+    #[serde(default)]
+    pub external_grants: Vec<BucketGrant>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -50,6 +52,7 @@ pub(crate) struct Member {
     pub(crate) scope: String,
     #[schema(value_type=Vec<BucketGrant>)]
     pub(crate) grants: Vec<BucketGrant>,
+    pub(crate) external_grants: Vec<BucketGrant>,
 }
 
 #[derive(Serialize, ToSchema)]

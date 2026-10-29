@@ -1,3 +1,4 @@
+use super::super::external_transactions;
 use super::*;
 use crate::model::node_work as work;
 use queries::work as q;
@@ -86,44 +87,52 @@ fn reply(
         row.request_hash == input.hash()?,
         Error::NodeOperationConflict
     );
-    let mut materials = vec![];
-    let mut grants = vec![];
-    let plan = row.plan.map(|value| value.0);
-    if let Some(plan) = &plan {
+    if row.task_id.is_some() || row.plan.is_some() {
         ensure!(
             row.valid_for_ms > 0 && row.result_hash.is_none(),
             Error::NodeExpired
         );
-        let values: work::Materials = serde_json::from_str(&codec::unprotect(
+    }
+    let mut materials = vec![];
+    let mut grants = vec![];
+    let mut external = None;
+    let plan = row.plan.map(|value| value.0);
+    if let Some(plan) = &plan {
+        let material = codec::unprotect(
             row.storage_encrypted
                 .as_deref()
                 .context("work storage is missing")?,
             key,
             row.token.as_bytes(),
-        )?)?;
-        read::material(
-            &mut materials,
-            node.deployment_id,
-            read::MaterialType::Storage,
-            plan.storage().to_string(),
-            &values.storage,
-            &input.cached,
         )?;
-        for block in values.keys {
+        if let Some(storage) = plan.storage() {
+            let values: work::Materials = serde_json::from_str(&material)?;
             read::material(
                 &mut materials,
                 node.deployment_id,
-                read::MaterialType::Key,
-                block.id.to_string(),
-                &block,
+                read::MaterialType::Storage,
+                storage.to_string(),
+                &values.storage,
                 &input.cached,
             )?;
+            for block in values.keys {
+                read::material(
+                    &mut materials,
+                    node.deployment_id,
+                    read::MaterialType::Key,
+                    block.id.to_string(),
+                    &block,
+                    &input.cached,
+                )?;
+            }
+        } else {
+            external = Some(serde_json::from_str(&material)?);
         }
         grants.push(read::Grant {
             r#type: read::GrantType::Work,
             id: row.token,
             valid_for_ms: row.valid_for_ms as u64,
-            storage: Some(plan.storage()),
+            storage: plan.storage(),
         });
     }
     Ok(work::Reply {
@@ -131,7 +140,66 @@ fn reply(
         plan,
         materials,
         grants,
+        external,
     })
+}
+
+#[cfg(test)]
+#[test]
+fn cleared_work_cannot_be_replayed_as_an_empty_assignment() -> Result<()> {
+    let node = NodeState {
+        format: 1,
+        deployment_id: Uuid::new_v4(),
+        node_id: Uuid::new_v4(),
+        role: "worker".into(),
+        credential_generation: 1,
+        credential: String::new(),
+    };
+    let input = work::Exchange {
+        run: Run {
+            boot: Uuid::new_v4(),
+            fence: Uuid::new_v4(),
+        },
+        operation: Uuid::new_v4(),
+        completion: None,
+        class: 0,
+        max_items: 1,
+        cached: vec![],
+    };
+    let key = Key::new("aes-256-gcm", [7; 32])?;
+    for (assigned, completed, valid_for_ms) in
+        [(false, false, 0), (true, false, 0), (true, true, 60_000)]
+    {
+        let row = q::Batch {
+            credential_generation: node.credential_generation,
+            boot_id: input.run.boot,
+            fence: input.run.fence,
+            request_hash: input.hash()?,
+            task_id: assigned.then(Uuid::new_v4),
+            token: Uuid::new_v4(),
+            maintenance_token: Uuid::new_v4(),
+            plan: None,
+            storage_encrypted: None,
+            valid_for_ms,
+            result_hash: completed.then(|| vec![0; 32]),
+        };
+        match reply(&node, &key, &input, row) {
+            Ok(value) => {
+                assert!(!assigned);
+                assert!(
+                    value.plan.is_none() && value.grants.is_empty() && value.external.is_none()
+                );
+            }
+            Err(error) => {
+                assert!(assigned);
+                assert!(matches!(
+                    error.downcast_ref::<Error>(),
+                    Some(Error::NodeExpired)
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn finish(
@@ -153,12 +221,18 @@ async fn finish(
         return Ok(());
     }
     ensure!(row.valid_for_ms > 0, Error::NodeExpired);
-    ensure!(
-        q::live_permits(row.token, row.maintenance_token)
-            .fetch_one(&mut **db)
-            .await?,
-        Error::NodeExpired
-    );
+    if row
+        .plan
+        .as_ref()
+        .is_some_and(|plan| plan.0.storage().is_some())
+    {
+        ensure!(
+            q::live_permits(row.token, row.maintenance_token)
+                .fetch_one(&mut **db)
+                .await?,
+            Error::NodeExpired
+        );
+    }
     let task = row.task_id.ok_or(Error::NodeExpired)?;
     let (_, detail, parent) = q::task(task, row.token, node.node_id)
         .fetch_optional(&mut **db)
@@ -168,6 +242,29 @@ async fn finish(
     let mut error = None;
     let mut complete = false;
     match row.plan.context("work plan is missing")?.0 {
+        work::Plan::ExternalTest(plan) => {
+            ensure!(
+                detail["operation"] == "external_test",
+                Error::NodeOperationConflict
+            );
+            let [work::Outcome::ExternalTest(report)] = completion.outcomes.as_slice() else {
+                return Err(Error::NodeOperationConflict.into());
+            };
+            external_transactions::finish_test(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                &plan,
+                report,
+            )
+            .await?;
+            complete = report.phase == crate::model::external_test::Phase::Done;
+            error = report
+                .blocked
+                .map(|_| "external connection test needs reconciliation");
+        }
         work::Plan::UploadRaw { items, .. } => {
             (complete, error) = super::raw_cache::finish(
                 db,
@@ -741,6 +838,33 @@ pub(crate) async fn exchange(
             let (policy, detail, parent) = q::task(task, token, node.node_id)
                 .fetch_one(&mut *tx)
                 .await?;
+            if policy == "integrity" && detail["operation"] == "external_test" {
+                ensure!(
+                    matches!(node.role.as_str(), "worker" | "node"),
+                    Error::NodeOperationConflict
+                );
+                let assignment = external_transactions::prepare_test(
+                    &mut tx,
+                    Execution { id: task, token },
+                    Some(node.node_id),
+                )
+                .await?;
+                let snapshot = crate::model::external_test::Snapshot::open(
+                    assignment.external_id,
+                    assignment.revision,
+                    &assignment.connection_encrypted,
+                    key,
+                )?;
+                encrypted = Some(codec::protect(
+                    &serde_json::to_vec(&snapshot)?,
+                    key,
+                    token.as_bytes(),
+                )?);
+                q::task_lease(task, token).execute(&mut *tx).await?;
+                assigned = Some(task);
+                plan = Some(work::Plan::ExternalTest(assignment.plan));
+                break;
+            }
             let storage: Uuid = if policy == "upload" && detail["operation"] == "cdc" {
                 let job: crate::model::raw::Conversion = serde_json::from_value(detail.clone())?;
                 queries::raw_source(job.source)
