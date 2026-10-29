@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 0045.
+-- Generated from the complete sqlite migration chain through 0046.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -313,11 +313,11 @@ CREATE TABLE member_bucket_grants (
     CONSTRAINT member_grants_bucket FOREIGN KEY (bucket_id,project_id) REFERENCES buckets(id,project_id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE member_external_grants (
+CREATE TABLE "member_external_grants" (
     user_id BLOB NOT NULL CHECK (length(user_id)=16),
     project_id BLOB NOT NULL CHECK (length(project_id)=16),
     bucket_id BLOB NOT NULL CHECK (length(bucket_id)=16),
-    actions INTEGER NOT NULL CHECK (actions BETWEEN 0 AND 15),
+    actions INTEGER NOT NULL CHECK (actions BETWEEN 0 AND 31),
     PRIMARY KEY (user_id,bucket_id),
     FOREIGN KEY (user_id,project_id) REFERENCES project_members(user_id,project_id) ON DELETE CASCADE,
     FOREIGN KEY (bucket_id,project_id) REFERENCES external_buckets(id,project_id) ON DELETE CASCADE
@@ -865,10 +865,10 @@ CREATE TABLE token_bucket_grants (
     CONSTRAINT token_grants_bucket FOREIGN KEY (bucket_id) REFERENCES buckets(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE token_external_grants (
+CREATE TABLE "token_external_grants" (
     token_id BLOB NOT NULL REFERENCES api_tokens(id) ON DELETE CASCADE CHECK (length(token_id)=16),
     bucket_id BLOB NOT NULL REFERENCES external_buckets(id) ON DELETE CASCADE CHECK (length(bucket_id)=16),
-    actions INTEGER NOT NULL CHECK (actions BETWEEN 0 AND 15),
+    actions INTEGER NOT NULL CHECK (actions BETWEEN 0 AND 31),
     PRIMARY KEY (token_id,bucket_id)
 ) STRICT, WITHOUT ROWID;
 
@@ -1252,7 +1252,7 @@ LEFT JOIN user_bucket_access a ON a.user_id=t.user_id AND a.bucket_id=g.bucket_i
 
 CREATE VIEW token_external_access AS
 SELECT t.id AS token_id,g.bucket_id,
-    g.actions & IIF(u.role='admin',15,COALESCE(a.actions,0)) AS actions
+    g.actions & IIF(u.role='admin',31,COALESCE(a.actions,0)) AS actions
 FROM api_tokens t JOIN web_users u ON u.id=t.user_id
 JOIN token_external_grants g ON g.token_id=t.id
 LEFT JOIN user_external_access a ON a.user_id=t.user_id AND a.bucket_id=g.bucket_id;
@@ -1266,8 +1266,8 @@ LEFT JOIN member_bucket_grants g ON g.user_id=m.user_id AND g.bucket_id=b.id;
 
 CREATE VIEW user_external_access AS
 SELECT m.user_id,b.id AS bucket_id,
-    (CASE m.role WHEN 'reader' THEN 3 WHEN 'writer' THEN 15 WHEN 'maintainer' THEN 15 ELSE 0 END)
-    & IIF(m.scope='all',15,COALESCE(g.actions,0)) AS actions
+    (CASE m.role WHEN 'reader' THEN 3 WHEN 'writer' THEN 31 WHEN 'maintainer' THEN 31 ELSE 0 END)
+    & IIF(m.scope='all',31,COALESCE(g.actions,0)) AS actions
 FROM project_members m JOIN external_buckets b ON b.project_id=m.project_id
 LEFT JOIN member_external_grants g ON g.user_id=m.user_id AND g.bucket_id=b.id;
 

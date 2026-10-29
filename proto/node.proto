@@ -274,6 +274,8 @@ message ChangeObjectsRequest {
   repeated string keys = 6;
   // Absent deletes the selected keys; present changes one object's canned ACL.
   optional bool public_read = 7;
+  // A single-key delete may require the current ETag, or any existing object (*).
+  optional string if_match = 8;
 }
 
 message ChangeObjectsReply {
@@ -284,6 +286,7 @@ enum ObjectChangeOutcome {
   OBJECT_CHANGE_OUTCOME_UNSPECIFIED = 0;
   APPLIED = 1;
   OBJECT_CHANGE_NO_SUCH_KEY = 2;
+  OBJECT_CHANGE_PRECONDITION_FAILED = 3;
 }
 
 message PrepareRawRequest {

@@ -85,7 +85,7 @@ secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployme
 
 ## 外部存储桶
 
-外部存储桶属于项目，连接普通 S3 对象空间。成员与 API Token 使用独立的 `external_grants`，每项仍为 `{bucket_id,actions}`，只允许 `bucket.list`、`object.read`、`object.write`、`object.delete`；权限与成员角色及当前用户权限取交集。内部桶的 grants 不授予外部桶权限。成员 `scope=all` 时两个 grants 列表都必须为空。
+外部存储桶属于项目，连接普通 S3 对象空间。成员与 API Token 使用独立的 `external_grants`，每项仍为 `{bucket_id,actions}`，允许 `bucket.list`、`object.read`、`object.write`、`object.delete`、`object.acl`；正文写入与对象权限修改分别授权，权限与成员角色及当前用户权限取交集。内部桶的 grants 不授予外部桶权限。成员 `scope=all` 时两个 grants 列表都必须为空。
 
 | 方法与路径 | 用途 |
 | --- | --- |
@@ -99,7 +99,9 @@ secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployme
 
 connection 包含 `endpoint_url`、`region`、`bucket`、`prefix`（默认空）、`virtual_hosted`（默认 false）和 `allow_http`（默认 false）。endpoint 不接受用户名、密码、query 或 fragment；HTTP 需显式允许，HTTPS 验证证书。prefix 不带首尾斜线。更新采用 PATCH，省略的字段保留；凭据只接受写入，任何目录和报告都不返回凭据。修改成功递增 revision，修订冲突返回 409。
 
-配置写入和能力测试限管理员，写操作需要最近认证。测试由 single 或群集 worker/node 执行，群集可指定 node_id；single 不接受 node_id。报告绑定启动时的连接修订，分别记录列举、读写、Range、条件操作、版本标识和 Multipart 能力；连接修改不改变已启动测试的目标。成功、权限不足、不支持、未执行、失败和结果未知分别展示，任务完成不表示所有能力都可用。
+配置写入和能力测试限管理员，写操作需要最近认证。测试由 single 或群集 worker/node 执行，群集可指定 node_id；single 不接受 node_id。报告绑定启动时的连接修订，分别记录列举、读写、Range、条件操作、版本标识、Multipart、ACL 读取/修改及公共/私有访问能力；连接修改不改变已启动测试的目标。成功、权限不足、访问策略阻止、不支持、未执行、失败和结果未知分别展示，任务完成不表示所有能力都可用。
+
+权限测试仅操作本任务的测试文件，核对正文、标记和版本后临时设为公共读，再恢复私有。公共读使用不带凭据的请求验证实际正文；私有访问检查匿名读取是否被拒绝。ACL 写入成功不代表桶策略允许对应访问效果，未知或无法解析的 ACL 不视为私有。测试结果只代表该连接修订下测试文件的访问情况。
 
 测试只在 prefix 下随机的 `.mokyu-tests/<任务 UUID>/` 写入小对象，按已记录的对象版本和上传 ID 清理。未完成或仍需清理的测试阻止同一连接再次测试和删除；可通过后台任务接口暂停/恢复。停止自动恢复仅适用于 queued/paused/failed 且无有效节点分配的测试，会清除执行凭据并拒绝再次恢复，保留 `stopped=true`、原报告及待处理位置；不会把残留标成清理成功。
 

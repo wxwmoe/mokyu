@@ -66,10 +66,21 @@ assert [b['Name'] for page in s3.get_paginator('list_buckets').paginate(Paginati
 error('NotImplemented', s3.get_object, Bucket=bucket, Key='checksum', PartNumber=1)
 error('NotImplemented', s3.put_object, Bucket=bucket, Key='checksum', Body=b'append', WriteOffsetBytes=0)
 original, _ = read('checksum')
-for condition in [{'IfMatch': '*'}, {'IfMatchSize': len(original)},
+for condition in [{'IfMatchSize': len(original)},
                   {'IfMatchLastModifiedTime': datetime.now(timezone.utc)}]:
     error('NotImplemented', s3.delete_object, Bucket=bucket, Key='checksum', **condition)
     assert read('checksum')[0] == original
+key = 'conditional-delete'
+first = s3.put_object(Bucket=bucket, Key=key, Body=b'first')['ETag']
+second = s3.put_object(Bucket=bucket, Key=key, Body=b'second')['ETag']
+for condition in [first, 'W/' + second]:
+    error('PreconditionFailed', s3.delete_object, Bucket=bucket, Key=key, IfMatch=condition)
+    assert read(key)[0] == b'second'
+s3.delete_object(Bucket=bucket, Key=key, IfMatch=second)
+error('PreconditionFailed', s3.delete_object, Bucket=bucket, Key=key, IfMatch='*')
+s3.put_object(Bucket=bucket, Key=key, Body=b'third')
+s3.delete_object(Bucket=bucket, Key=key, IfMatch='*')
+error('NoSuchKey', s3.get_object, Bucket=bucket, Key=key)
 for operation in [s3.get_object_acl, s3.put_object_acl]:
     extra = {'ACL': 'public-read'} if operation == s3.put_object_acl else {}
     error('NotImplemented', operation, Bucket=bucket, Key='checksum', VersionId='unsupported', **extra)

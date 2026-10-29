@@ -37,6 +37,7 @@ fn request(
             bucket: "object-change-a".into(),
             keys: keys.iter().map(|key| (*key).to_owned()).collect(),
             public,
+            if_match: None,
         },
     }
 }
@@ -121,6 +122,76 @@ async fn postgres_node_objects_replay_without_mutating_replacements() -> Result<
         peer_pool.acquire().await?.detach(),
         false,
     );
+    let conditional_operation = Uuid::now_v7();
+    let conditional = |operation, condition: &str| {
+        let mut input = request(session.run, operation, &["conditional"], None, revision);
+        input.change.if_match = Some(condition.into());
+        input
+    };
+    assert_eq!(
+        backend
+            .change_objects(&node, &key, conditional(conditional_operation, "*"))
+            .await?,
+        Outcome::PreconditionFailed
+    );
+    let conditional_stream = seed(&pool, bucket, "conditional").await?;
+    assert_eq!(
+        peer.change_objects(&node, &key, conditional(conditional_operation, "*"))
+            .await?,
+        Outcome::PreconditionFailed
+    );
+    let current: Uuid = sqlx::query_scalar(
+        "SELECT stream_id FROM objects WHERE bucket_id=$1 AND object_key='conditional'",
+    )
+    .bind(bucket)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(current, conditional_stream);
+    assert!(
+        backend
+            .change_objects(
+                &node,
+                &key,
+                conditional(conditional_operation, "\"different\"")
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        backend
+            .change_objects(&node, &key, conditional(Uuid::now_v7(), "\"different\""))
+            .await?,
+        Outcome::PreconditionFailed
+    );
+    let success = Uuid::now_v7();
+    assert_eq!(
+        backend
+            .change_objects(
+                &node,
+                &key,
+                conditional(success, "\"d41d8cd98f00b204e9800998ecf8427e\"")
+            )
+            .await?,
+        Outcome::Applied
+    );
+    let conditional_replacement = seed(&pool, bucket, "conditional").await?;
+    assert_eq!(
+        peer.change_objects(
+            &node,
+            &key,
+            conditional(success, "\"d41d8cd98f00b204e9800998ecf8427e\"")
+        )
+        .await?,
+        Outcome::Applied
+    );
+    let current: Uuid = sqlx::query_scalar(
+        "SELECT stream_id FROM objects WHERE bucket_id=$1 AND object_key='conditional'",
+    )
+    .bind(bucket)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(current, conditional_replacement);
+
     let original = seed(&pool, bucket, "object").await?;
     let operation = Uuid::now_v7();
     let (first, second) = tokio::join!(
@@ -380,6 +451,9 @@ async fn postgres_node_objects_replay_without_mutating_replacements() -> Result<
     .await?;
     assert_eq!(left?, Outcome::Applied);
     assert_eq!(right?, Outcome::Applied);
+    let receipts: i64 = sqlx::query_scalar("SELECT count(*) FROM node_object_changes")
+        .fetch_one(&pool)
+        .await?;
     let mut too_many = request(session.run, Uuid::now_v7(), &borrowed, None, revision);
     too_many.change.keys.push("object".into());
     assert!(backend.change_objects(&node, &key, too_many).await.is_err());
@@ -419,7 +493,7 @@ async fn postgres_node_objects_replay_without_mutating_replacements() -> Result<
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM node_object_changes")
         .fetch_one(&pool)
         .await?;
-    assert_eq!(count, 6, "rejected requests created receipts");
+    assert_eq!(count, receipts, "rejected requests created receipts");
 
     sqlx::raw_sql("CREATE FUNCTION object_change_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.object_key='concurrent-insert' AND NEW.stream_id IS NULL THEN PERFORM pg_advisory_xact_lock(783421); END IF; RETURN NEW; END $$; CREATE TRIGGER object_change_pause BEFORE INSERT ON objects FOR EACH ROW EXECUTE FUNCTION object_change_pause()")
         .execute(&pool).await?;

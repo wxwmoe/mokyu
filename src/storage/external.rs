@@ -161,6 +161,64 @@ impl Connection {
     }
 }
 
+pub(crate) fn public_read(bytes: &[u8]) -> Result<bool> {
+    use s3s::{
+        dto::{AccessControlPolicy, Permission, Type},
+        xml::Deserialize,
+    };
+    let mut xml = s3s::xml::Deserializer::new(bytes);
+    let policy = AccessControlPolicy::deserialize(&mut xml)?;
+    xml.expect_eof()?;
+    let grants = policy.grants.context("external ACL grants missing")?;
+    ensure!(
+        !grants.is_empty() && grants.len() <= 100,
+        "invalid external ACL grants"
+    );
+    let mut public = false;
+    for grant in grants {
+        let permission = grant
+            .permission
+            .context("external ACL permission missing")?;
+        ensure!(
+            matches!(
+                permission.as_str(),
+                "READ" | "WRITE" | "READ_ACP" | "WRITE_ACP" | "FULL_CONTROL"
+            ),
+            "unknown external ACL permission"
+        );
+        let grantee = grant.grantee.context("external ACL grantee missing")?;
+        match grantee.type_.as_str() {
+            Type::GROUP => {
+                let uri = grantee.uri.context("external ACL group missing")?;
+                ensure!(
+                    matches!(
+                        uri.as_str(),
+                        "http://acs.amazonaws.com/groups/global/AllUsers"
+                            | "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
+                            | "http://acs.amazonaws.com/groups/s3/LogDelivery"
+                    ),
+                    "unknown external ACL group"
+                );
+                public |= uri == "http://acs.amazonaws.com/groups/global/AllUsers"
+                    && matches!(
+                        permission.as_str(),
+                        Permission::READ | Permission::FULL_CONTROL
+                    );
+            }
+            Type::CANONICAL_USER => ensure!(
+                grantee.id.is_some_and(|id| !id.is_empty()),
+                "external ACL identity missing"
+            ),
+            Type::AMAZON_CUSTOMER_BY_EMAIL => ensure!(
+                grantee.email_address.is_some_and(|email| !email.is_empty()),
+                "external ACL identity missing"
+            ),
+            _ => anyhow::bail!("unknown external ACL grantee"),
+        }
+    }
+    Ok(public)
+}
+
 pub(crate) struct Client {
     connection: Connection,
     access: String,
@@ -248,6 +306,20 @@ impl Client {
         Ok(reply.map(Body::new))
     }
 
+    pub(crate) async fn anonymous_read(
+        &self,
+        key: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Response<Body>> {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(self.connection.uri(Some(key), query)?)
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(Body::empty())?;
+        let reply = tokio::time::timeout(self.timeout, self.client.request(request)).await??;
+        Ok(reply.map(Body::new))
+    }
+
     pub(crate) async fn bounded(&self, body: Body, maximum: usize) -> Result<Bytes> {
         let mut stream = body.into_data_stream();
         let mut output = Vec::new();
@@ -266,6 +338,39 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acl_visibility_requires_a_complete_known_policy() {
+        let owner = r#"<Grant><Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="CanonicalUser"><ID>owner</ID></Grantee><Permission>FULL_CONTROL</Permission></Grant>"#;
+        let group = r#"<Grant><Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="Group"><URI>http://acs.amazonaws.com/groups/global/AllUsers</URI></Grantee><Permission>READ</Permission></Grant>"#;
+        let policy = |grants: &str| {
+            format!(
+                "<AccessControlPolicy><AccessControlList>{grants}</AccessControlList></AccessControlPolicy>"
+            )
+        };
+        assert!(!public_read(policy(owner).as_bytes()).unwrap());
+        let value = policy(&format!("{owner}{group}"));
+        assert!(public_read(value.as_bytes()).unwrap());
+        assert!(!public_read(value.replace("AllUsers", "AuthenticatedUsers").as_bytes()).unwrap());
+        for invalid in [
+            policy(""),
+            value.replace("AllUsers", "UnknownUsers"),
+            value.replace("<Permission>READ</Permission>", ""),
+            value.replace(
+                "<Permission>READ</Permission>",
+                "<Permission>OTHER</Permission>",
+            ),
+            value.replace("<ID>owner</ID>", ""),
+            format!("{value}<AccessControlPolicy/>"),
+            "<AccessControlPolicy/>".into(),
+            "<Error><Code>AccessDenied</Code></Error>".into(),
+        ] {
+            assert!(
+                public_read(invalid.as_bytes()).is_err(),
+                "accepted {invalid}"
+            );
+        }
+    }
 
     fn connection() -> Connection {
         Connection {

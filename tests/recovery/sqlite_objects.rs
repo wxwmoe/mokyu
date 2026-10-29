@@ -378,6 +378,7 @@ async fn sqlite_object_contract() -> Result<()> {
                 bucket: a,
                 key: "a.txt".into(),
                 expected: None,
+                if_match: None,
                 public: Some(true)
             })
             .await
@@ -391,6 +392,7 @@ async fn sqlite_object_contract() -> Result<()> {
                 bucket: a,
                 key: "a.txt".into(),
                 expected: Some(Id::from(i64::MAX)),
+                if_match: None,
                 public: None
             })
             .await
@@ -422,6 +424,7 @@ async fn sqlite_object_contract() -> Result<()> {
         bucket: a,
         key: "a.txt".into(),
         expected: Some(original),
+        if_match: None,
         public: Some(true),
     };
     assert!(
@@ -619,6 +622,7 @@ async fn sqlite_object_contract() -> Result<()> {
                 bucket: a,
                 key: "a.txt".into(),
                 expected: Some(original),
+                if_match: None,
                 public: None
             })
             .await?
@@ -642,6 +646,7 @@ async fn sqlite_object_contract() -> Result<()> {
                 bucket: a,
                 key: "missing".into(),
                 expected: None,
+                if_match: None,
                 public: None
             })
             .await?

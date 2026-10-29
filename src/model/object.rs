@@ -14,6 +14,7 @@ pub(crate) struct ObjectChange {
     pub(crate) key: String,
     pub(crate) expected: Option<Id>,
     pub(crate) public: Option<bool>,
+    pub(crate) if_match: Option<s3s::dto::ETagCondition>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]

@@ -292,17 +292,13 @@ pub(super) fn check_request(cx: &S3AccessContext<'_>) -> S3Result<()> {
         ));
     }
     if cx.s3_op().name() == "DeleteObject"
-        && [
-            "if-match",
-            "x-amz-if-match-last-modified-time",
-            "x-amz-if-match-size",
-        ]
-        .into_iter()
-        .any(|h| cx.headers().contains_key(h))
+        && ["x-amz-if-match-last-modified-time", "x-amz-if-match-size"]
+            .into_iter()
+            .any(|h| cx.headers().contains_key(h))
     {
         return Err(s3_error!(
             NotImplemented,
-            "conditional deletes are unsupported"
+            "delete conditions on size and modification time are unsupported"
         ));
     }
     if cx.credentials().is_none() && !matches!(cx.s3_op().name(), "GetObject" | "HeadObject") {
@@ -756,7 +752,7 @@ impl S3 for Gateway {
                 )
                 .await?;
             self.0
-                .delete_object(&authority.principal, b.id, &i.key)
+                .change_object(&authority.principal, b.id, &i.key, None, None, i.if_match)
                 .await?;
             Ok(S3Response::new(DeleteObjectOutput::default()))
         }
@@ -913,7 +909,7 @@ impl S3 for Gateway {
             }
             let public = canned(i.acl.as_ref())?;
             self.0
-                .change_object(&authority.principal, b.id, &i.key, None, Some(public))
+                .change_object(&authority.principal, b.id, &i.key, None, Some(public), None)
                 .await?;
             Ok(S3Response::new(PutObjectAclOutput::default()))
         }

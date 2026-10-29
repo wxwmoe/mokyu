@@ -10,7 +10,7 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | ListBuckets | 仅列已授权桶，支持 prefix/region 过滤和分页；max-buckets 默认 1000，范围 1～10000 |
 | PutObject | 流式 CDC、校验、元数据、ACL 和条件发布；失败保留旧对象 |
 | GetObject / HeadObject | 原始字节、ETag、长度、时间、元数据及请求的已有 checksum；匿名公共读可协商压缩；单段 Range 和条件请求 |
-| DeleteObject / DeleteObjects | 逻辑删除，批量最多 1000 项，逐项错误／Quiet；共享块由 GC 回收 |
+| DeleteObject / DeleteObjects | 逻辑删除；单对象支持 If-Match ETag／`*`，条件与删除原子执行；批量最多 1000 项，逐项错误／Quiet；共享块由 GC 回收 |
 | ListObjectsV2 | prefix/delimiter/start-after/continuation-token/encoding-type=url；max-keys 为 0～1000，C 排序，游标绑定桶和前缀 |
 | CreateMultipartUpload | 保存初始元数据、ACL 和校验模式，无需预知总大小 |
 | UploadPart | 编号 1～10000，可并行、乱序、替换；校验并持久保存每个字节的来源后返回 |
@@ -31,7 +31,7 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | GetBucketWebsite / PutBucketWebsite / DeleteBucketWebsite | 使用管理 Web/API |
 | ListObjects V1 / UploadPartCopy | 使用 ListObjectsV2、普通上传或 CopyObject |
 | Versioning、lifecycle、tagging、object lock、replication、IAM、STS | 不提供对应能力 |
-| 浏览器 POST 表单上传、SSE、read partNumber、write offset、条件 Delete | 拒绝相关请求字段 |
+| 浏览器 POST 表单上传、SSE、read partNumber、write offset、按大小／修改时间条件删除、批量条件删除 | 拒绝相关请求字段 |
 | expected-owner、request-payer、SSE-C/SSE-KMS／复制源 SSE、标签、重定向、任意 grant、MFA、保留策略 | 拒绝扩展字段；CopyObject 也不接受更换 checksum 算法，版本 ID 请求不提供历史版本读写 |
 
 ## 寻址与权限
@@ -42,6 +42,8 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | S3 virtual-hosted | 在 Web/CLI 的 `requests.s3_domain` 设置中启用，受该域名限制 |
 | S3 匿名 Host 映射 | Host 等于已有桶名时，GET/HEAD 读取该桶的公开对象，无需 domains 记录 |
 | 公共读 | 按 CLI 配置的 Host→桶映射，只接受 GET/HEAD/OPTIONS；路径解码一次后作为完整 key |
+
+单对象条件删除使用强 ETag 比较；弱 ETag、值不匹配或对象不存在返回 `PreconditionFailed`。指定 ETag 需要对象读权限和删除权限，`If-Match: *` 仅需要删除权限。
 
 客户端签名 region 必须等于 runtime `requests.s3_region`，与 storage profile 的后端 region 独立。反代需保留 Host、URI、签名头和 query，不改写编码路径。支持 SigV4 Authorization 和预签名读取，不启用 SigV2；签名请求核对有效期、参数和签名。
 

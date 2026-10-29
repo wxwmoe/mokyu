@@ -15,6 +15,9 @@ use std::time::Duration;
 const LIMIT: usize = 64 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(6);
 
+#[cfg(test)]
+mod acl_tests;
+
 pub(crate) async fn execute(plan: Plan, snapshot: &Snapshot) -> Result<Report> {
     plan.report.validate()?;
     ensure!(
@@ -81,6 +84,7 @@ impl Probe {
     fn headers(&self) -> Result<HeaderMap> {
         let mut value = HeaderMap::new();
         value.insert("x-amz-meta-mokyu-test", self.plan.id.to_string().parse()?);
+        value.insert(header::CACHE_CONTROL, "no-store".parse()?);
         Ok(value)
     }
     fn blocked(&mut self, problem: Problem) {
@@ -143,6 +147,10 @@ impl Probe {
             Phase::Inspect => self.inspect().await,
             Phase::Write => self.write().await,
             Phase::ConditionalWrite => self.conditional_write().await,
+            Phase::ReadAcl => self.read_acl().await,
+            Phase::WriteAcl => self.write_acl().await,
+            Phase::PublicRead => self.public_read().await,
+            Phase::RestoreAcl => self.restore_acl().await,
             Phase::StartMultipart => self.start(TestFile::Multipart).await,
             Phase::CompleteMultipart => self.complete().await,
             Phase::StartAbort => self.start(TestFile::Abort).await,
@@ -351,6 +359,242 @@ impl Probe {
             }
             if self.plan.report.blocked == Some(Problem::Unavailable) {
                 self.plan.report.blocked = None;
+            }
+        }
+        Ok(())
+    }
+
+    async fn acl_artifact(&mut self) -> Result<Option<(Artifact, Bytes)>> {
+        let Some(artifact) = self
+            .plan
+            .report
+            .artifacts
+            .iter()
+            .rev()
+            .find(|item| item.file == TestFile::Write && item.upload.is_none() && !item.cleaned)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let key = self.key(artifact.file);
+        let query = artifact
+            .version
+            .as_deref()
+            .map(|version| vec![("versionId", version)])
+            .unwrap_or_default();
+        let reply = self
+            .client
+            .bytes(
+                Method::GET,
+                Some(&key),
+                &query,
+                HeaderMap::new(),
+                Bytes::new(),
+            )
+            .await?;
+        if !reply.status().is_success() {
+            self.blocked(Problem::Unavailable);
+            return Ok(None);
+        }
+        if text(reply.headers(), "x-amz-meta-mokyu-test").as_deref()
+            != Some(&self.plan.id.to_string())
+            || text(reply.headers(), "etag") != artifact.etag
+        {
+            self.blocked(Problem::IdentityConflict);
+            return Ok(None);
+        }
+        let body = self.client.bounded(reply.into_body(), LIMIT).await?;
+        let expected = if self
+            .plan
+            .report
+            .checks
+            .get(&Cap::ConditionalWrite)
+            .is_some_and(|check| check.state == State::Unsupported)
+        {
+            Bytes::from_static(b"condition ignored")
+        } else {
+            self.payload()
+        };
+        if body != expected {
+            self.blocked(Problem::IdentityConflict);
+            return Ok(None);
+        }
+        Ok(Some((artifact, body)))
+    }
+
+    async fn acl_request(
+        &mut self,
+        artifact: &Artifact,
+        cap: Cap,
+        public: Option<bool>,
+    ) -> Result<Option<Bytes>> {
+        let key = self.key(artifact.file);
+        let mut query = vec![("acl", "")];
+        if let Some(version) = artifact.version.as_deref() {
+            query.push(("versionId", version));
+        }
+        let mut headers = HeaderMap::new();
+        if let Some(public) = public {
+            headers.insert(
+                "x-amz-acl",
+                if public { "public-read" } else { "private" }.parse()?,
+            );
+        }
+        self.uncertain = public.is_some();
+        self.check(cap, State::Unknown, None);
+        let reply = self
+            .client
+            .bytes(
+                if public.is_some() {
+                    Method::PUT
+                } else {
+                    Method::GET
+                },
+                Some(&key),
+                &query,
+                headers,
+                Bytes::new(),
+            )
+            .await?;
+        let status = reply.status().as_u16();
+        let body = self.client.bounded(reply.into_body(), LIMIT).await?;
+        if (200..=299).contains(&status) {
+            self.uncertain = false;
+            if public.is_some() && !body.iter().all(u8::is_ascii_whitespace) {
+                self.check(cap, State::Failed, Some(status));
+                return Ok(None);
+            }
+            self.check(cap, State::Passed, Some(status));
+            return Ok(Some(body));
+        }
+        let state = if status >= 500 && status != 501 {
+            if public.is_some() {
+                self.blocked(Problem::UncertainResult);
+            }
+            State::Unknown
+        } else {
+            self.uncertain = false;
+            match status {
+                401 | 403 if public == Some(true) => State::Blocked,
+                401 | 403 => State::Denied,
+                405 | 501 => State::Unsupported,
+                400 if acl_disabled(&body) => State::Unsupported,
+                _ => State::Failed,
+            }
+        };
+        self.check(cap, state, Some(status));
+        Ok(None)
+    }
+
+    async fn acl_value(&mut self, artifact: &Artifact, cap: Cap) -> Result<Option<bool>> {
+        let Some(body) = self.acl_request(artifact, cap, None).await? else {
+            return Ok(None);
+        };
+        match super::external::public_read(&body) {
+            Ok(public) => Ok(Some(public)),
+            Err(_) => {
+                self.check(cap, State::Failed, Some(200));
+                Ok(None)
+            }
+        }
+    }
+
+    async fn read_acl(&mut self) -> Result<()> {
+        if let Some((artifact, _)) = self.acl_artifact().await? {
+            self.acl_value(&artifact, Cap::AclRead).await?;
+        }
+        Ok(())
+    }
+
+    async fn write_acl(&mut self) -> Result<()> {
+        if let Some((artifact, _)) = self.acl_artifact().await? {
+            if self
+                .acl_request(&artifact, Cap::AclWrite, Some(false))
+                .await?
+                .is_some()
+                && self.plan.report.passed(Cap::AclRead)
+                && self.acl_value(&artifact, Cap::AclWrite).await? == Some(true)
+            {
+                self.check(Cap::AclWrite, State::Failed, Some(200));
+            }
+        }
+        Ok(())
+    }
+
+    async fn anonymous(
+        &mut self,
+        artifact: &Artifact,
+        expected: &[u8],
+        public: bool,
+    ) -> Result<()> {
+        let cap = if public {
+            Cap::PublicRead
+        } else {
+            Cap::PrivateAccess
+        };
+        self.check(cap, State::Unknown, None);
+        let query = artifact
+            .version
+            .as_deref()
+            .map(|version| vec![("versionId", version)])
+            .unwrap_or_default();
+        let reply = self
+            .client
+            .anonymous_read(&self.key(artifact.file), &query)
+            .await?;
+        let status = reply.status().as_u16();
+        let state = match status {
+            401 | 403 => {
+                if public {
+                    State::Blocked
+                } else {
+                    State::Passed
+                }
+            }
+            200 => {
+                let body = self.client.bounded(reply.into_body(), LIMIT).await?;
+                if body != expected {
+                    State::Failed
+                } else if public {
+                    State::Passed
+                } else {
+                    State::Blocked
+                }
+            }
+            500..=599 => State::Unknown,
+            _ => State::Failed,
+        };
+        self.check(cap, state, Some(status));
+        Ok(())
+    }
+
+    async fn public_read(&mut self) -> Result<()> {
+        if !self.plan.report.passed(Cap::AclWrite) {
+            return Ok(());
+        }
+        if let Some((artifact, expected)) = self.acl_artifact().await? {
+            if self
+                .acl_request(&artifact, Cap::PublicRead, Some(true))
+                .await?
+                .is_some()
+            {
+                self.anonymous(&artifact, &expected, true).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn restore_acl(&mut self) -> Result<()> {
+        if !self.plan.report.passed(Cap::AclWrite) {
+            return Ok(());
+        }
+        if let Some((artifact, expected)) = self.acl_artifact().await? {
+            if self
+                .acl_request(&artifact, Cap::PrivateAccess, Some(false))
+                .await?
+                .is_some()
+            {
+                self.anonymous(&artifact, &expected, false).await?;
             }
         }
         Ok(())
@@ -734,6 +978,26 @@ impl Probe {
     }
 }
 
+fn acl_disabled(bytes: &[u8]) -> bool {
+    let mut xml = s3s::xml::Deserializer::new(bytes);
+    let mut code = None;
+    let result = xml.named_element("Error", |xml| {
+        xml.for_each_element(|xml, name| {
+            let value: String = xml.content()?;
+            if name == b"Code" {
+                if code.is_some() {
+                    return Err(s3s::xml::DeError::DuplicateField);
+                }
+                code = Some(value);
+            }
+            Ok(())
+        })
+    });
+    result.is_ok()
+        && xml.expect_eof().is_ok()
+        && code.as_deref() == Some("AccessControlListNotSupported")
+}
+
 fn text(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)
@@ -834,6 +1098,23 @@ fn listed_key(bytes: &[u8], prefix: &str) -> Result<Option<(String, u64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_acls_are_distinct_from_denied_permissions() {
+        assert!(acl_disabled(
+            b"<Error><Code>AccessControlListNotSupported</Code><Message>Disabled</Message></Error>"
+        ));
+        assert!(!acl_disabled(b"<Error><Code>AccessDenied</Code></Error>"));
+        assert!(!acl_disabled(
+            b"<Error><Code>AccessControlListNotSupported</Code><Code>AccessDenied</Code></Error>"
+        ));
+        assert!(!acl_disabled(
+            b"<Error><Code>AccessControlListNotSupported</Code></Error><extra/>"
+        ));
+        assert!(!acl_disabled(
+            b"<Error><Message>AccessControlListNotSupported</Message></Error>"
+        ));
+    }
 
     #[test]
     fn external_listing_preserves_opaque_keys_and_rejects_other_scopes() {

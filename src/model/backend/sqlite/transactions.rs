@@ -4003,7 +4003,7 @@ async fn replace_object_reference(
 
 pub(super) async fn change_object(pool: &SqlitePool, input: ObjectChange) -> Result<bool> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    let permit = Permit::for_action(
+    let mut permit = Permit::for_action(
         input.principal,
         input.bucket,
         if input.public.is_some() {
@@ -4012,6 +4012,9 @@ pub(super) async fn change_object(pool: &SqlitePool, input: ObjectChange) -> Res
             Action::Delete
         },
     );
+    if matches!(input.if_match, Some(s3s::dto::ETagCondition::ETag(_))) {
+        permit.add(input.bucket, Action::Read);
+    }
     lock_media_scope(&mut tx, &permit).await?;
     let old = queries::lock_object_version(input.bucket, &input.key)
         .fetch_optional(&mut *tx)
@@ -4021,6 +4024,13 @@ pub(super) async fn change_object(pool: &SqlitePool, input: ObjectChange) -> Res
         input.expected.is_none() || input.expected == old,
         s3s::s3_error!(PreconditionFailed)
     );
+    if let Some(condition) = input.if_match.as_ref() {
+        let etag = match old {
+            Some(id) => Some(queries::stream_size_etag(id).fetch_one(&mut *tx).await?.1),
+            None => None,
+        };
+        crate::model::check_write_conditions(etag.as_deref(), Some(condition), None)?;
+    }
     if let Some(public) = input.public {
         let id = old.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
         queries::set_stream_public(id, public)

@@ -259,6 +259,7 @@ async fn apply(
                                 MediaAction::Private => Some(false),
                                 _ => Some(true),
                             },
+                            None,
                         )
                         .await
                     }

@@ -12,6 +12,7 @@ pub(crate) struct Change {
     pub bucket: String,
     pub keys: Vec<String>,
     pub public: Option<bool>,
+    pub if_match: Option<String>,
 }
 
 impl Change {
@@ -24,9 +25,14 @@ impl Change {
                 && name(&self.bucket, 255)
                 && self.keys.len() <= 1000
                 && self.keys.iter().all(|key| name(key, 1024))
-                && (self.public.is_none() || self.keys.len() == 1),
+                && (self.public.is_none() || self.keys.len() == 1)
+                && (self.if_match.is_none() || (self.public.is_none() && self.keys.len() == 1)),
             "invalid object change"
         );
+        if let Some(value) = &self.if_match {
+            ensure!(value.len() <= 256, "invalid object condition");
+            s3s::dto::ETagCondition::parse_http_header(value.as_bytes())?;
+        }
         Ok(blake3::hash(&serde_json::to_vec(self)?).as_bytes().to_vec())
     }
 }
@@ -49,6 +55,7 @@ impl Request {
 pub(crate) enum Outcome {
     Applied,
     NoSuchKey,
+    PreconditionFailed,
 }
 
 #[cfg(test)]
@@ -63,6 +70,7 @@ mod tests {
             bucket: "bucket".into(),
             keys: vec!["a".into(), "b".into()],
             public: None,
+            if_match: None,
         };
         let hash = change.hash()?;
         change.keys.reverse();
@@ -71,6 +79,15 @@ mod tests {
         assert!(change.hash().is_err());
         change.keys.truncate(1);
         change.hash()?;
+        change.if_match = Some("*".into());
+        assert!(change.hash().is_err());
+        change.public = None;
+        let conditional = change.hash()?;
+        change.if_match = Some("\"etag\"".into());
+        assert_ne!(conditional, change.hash()?);
+        change.if_match = Some("bad\r\ncondition".into());
+        assert!(change.hash().is_err());
+        change.if_match = None;
         change.credential_revision = -1;
         assert!(change.hash().is_err());
         change.credential_revision = 1;

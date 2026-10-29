@@ -50,6 +50,10 @@ pub(crate) enum Phase {
     Inspect,
     Write,
     ConditionalWrite,
+    ReadAcl,
+    WriteAcl,
+    PublicRead,
+    RestoreAcl,
     StartMultipart,
     CompleteMultipart,
     StartAbort,
@@ -63,7 +67,11 @@ impl Phase {
         match self {
             Self::Inspect => Self::Write,
             Self::Write => Self::ConditionalWrite,
-            Self::ConditionalWrite => Self::StartMultipart,
+            Self::ConditionalWrite => Self::ReadAcl,
+            Self::ReadAcl => Self::WriteAcl,
+            Self::WriteAcl => Self::PublicRead,
+            Self::PublicRead => Self::RestoreAcl,
+            Self::RestoreAcl => Self::StartMultipart,
             Self::StartMultipart => Self::CompleteMultipart,
             Self::CompleteMultipart => Self::StartAbort,
             Self::StartAbort => Self::Abort,
@@ -86,6 +94,10 @@ pub(crate) enum Capability {
     Delete,
     ConditionalRead,
     ConditionalWrite,
+    AclRead,
+    AclWrite,
+    PublicRead,
+    PrivateAccess,
     MultipartList,
     MultipartStart,
     MultipartParts,
@@ -100,6 +112,7 @@ pub(crate) enum Capability {
 pub(crate) enum CheckState {
     Passed,
     Denied,
+    Blocked,
     Unsupported,
     Skipped,
     Failed,
@@ -185,6 +198,10 @@ impl Report {
                 Delete,
                 ConditionalRead,
                 ConditionalWrite,
+                AclRead,
+                AclWrite,
+                PublicRead,
+                PrivateAccess,
                 MultipartList,
                 MultipartStart,
                 MultipartParts,
@@ -219,7 +236,7 @@ impl Report {
     pub(crate) fn validate(&self) -> Result<()> {
         self.connection.validate()?;
         ensure!(
-            self.checks.len() == 15 && self.artifacts.len() <= 8,
+            self.checks.len() == 19 && self.artifacts.len() <= 8,
             "invalid external test bounds"
         );
         ensure!(
