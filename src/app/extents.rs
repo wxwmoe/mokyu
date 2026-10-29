@@ -62,6 +62,7 @@ impl App {
                 .await;
         }
         if source_target != destination_target {
+            let context = crate::storage::ReadContext::default();
             let mut offset = 0;
             while offset < source.size {
                 self.renew_write_lease(destination).await?;
@@ -69,7 +70,7 @@ impl App {
                 ensure!(!rows.is_empty(), "source mapping is incomplete");
                 for row in rows {
                     ensure!(row.offset_bytes == offset, "invalid copy mapping");
-                    let data = self.extent_bytes(&row).await?;
+                    let data = self.extent_bytes_with(&row, &context).await?;
                     self.put_chunk(destination, offset, data.to_vec(), false)
                         .await?;
                     offset += i64::from(row.length);
@@ -142,6 +143,7 @@ impl App {
         source: &'a StoredStream,
     ) -> impl futures_util::Stream<Item = Result<Bytes>> + Send + 'a {
         async_stream::try_stream! {
+            let context = crate::storage::ReadContext::default();
             let mut offset = 0;
             if source.payload_type=="raw" {
                 use md5::{Digest, Md5};
@@ -193,7 +195,7 @@ impl App {
                     (!rows.is_empty()).then_some(()).context("object mapping is incomplete")?;
                     for row in rows {
                         (row.offset_bytes==offset).then_some(()).context("object mapping has gaps or overlaps")?;
-                        let data = self.extent_bytes(&row).await?;
+                        let data = self.extent_bytes_with(&row, &context).await?;
                         offset += i64::from(row.length);
                         yield data;
                     }
@@ -210,6 +212,7 @@ impl App {
         range: std::ops::Range<u64>,
     ) -> futures_util::stream::BoxStream<'a, Result<Bytes>> {
         Box::pin(async_stream::try_stream! {
+            let context = crate::storage::ReadContext::default();
             let mut base = 0u64;
             let mut emitted = 0u64;
             let mut renewed = tokio::time::Instant::now();
@@ -257,7 +260,7 @@ impl App {
                         for row in self.chunks.extents(source.id, cursor, until).await? {
                             (row.offset_bytes <= position && row.offset_bytes + i64::from(row.length) > position)
                                 .then_some(()).context("replay source mapping has a gap")?;
-                            let bytes = self.extent_bytes(&row).await?;
+                            let bytes = self.extent_bytes_with(&row, &context).await?;
                             let skip = (position - row.offset_bytes) as usize;
                             let count = (bytes.len() - skip).min((until - position) as usize);
                             position += count as i64;

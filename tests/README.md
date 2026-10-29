@@ -113,6 +113,7 @@ MySQL 连接验证还需冷重启数据库后直接启动应用，不能先由�
 - `storage/cache_pressure.py`：沿用上述服务约定，要求 `instance.cache_size="8MiB"`；建立热点后执行冷来源扫描并发读取，核对热点 inode、再次命中、候选数量和容量上限，再验证紧张额度下 pending 排空仍能完成。输出本次响应时间，不推断生产容量。
 - `storage/local_cache.py`：同一停止服务约定但不设置 S3 后端；每种单容器数据库分别验证 local raw/chunks、完整检查、Range 和重启后读取，不生成重复节点 L2；同时核对 local 禁用读缓存的配置约束。
 - `storage/raw_migration.py`：raw 与加密 chunks、raw 与 raw 的跨存储 copy/move，支持独立远端 S3 fixture。
+- `storage/physical_copy_reads.py`：在关闭读缓存的单容器服务中，核对加密 pack 跨存储复制为 chunks/raw 的后端读取次数、字节数和正文；在校验与重放之间破坏来源，验证原目标保留及恢复后重试。需要独立 S3 fixture 和故障注入构建，环境沿用 `source_quarantine`。
 - `storage/raw_streaming.py`：raw 大分片、原始 ETag、完整摘要和跨分片 Range；`--part-mib`、`--repeat`、`--label` 记录 UploadPart/Complete 耗时和服务 RSS，`--order sequential|reverse` 选择上传顺序。默认远端需 `MOKYU_TEST_BACKEND`，本地使用 `--local` 且不设置该变量；`MOKYU_TEST_PID_FILE` 必须属于同一容器。不同构建或服务预算的数字不能直接比较。
 - `storage/raw_replay.py`：暂停 Copy/Multipart 校验后的回放，修改远端 raw 或本地暂存来源，验证失败不会替换原对象或丢失已上传分片，恢复源数据后重试成功；需要 `MOKYU_TEST_BACKEND` 和故障注入构建。
 - `recovery/raw_crashes.py`：独占启动/停止隔离服务，验证 raw 发布前后强杀、响应丢失、fsync EIO 和孤儿回收，使用与 `local_durability.py` 相同的 fsync 注入环境。
