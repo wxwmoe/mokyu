@@ -1280,6 +1280,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/replications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["replication_list"];
+        put?: never;
+        post: operations["replication_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/replications/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["replication_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/replications/{id}/command": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["replication_command"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/replications/{id}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["replication_items"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runtime-settings": {
         parameters: {
             query?: never;
@@ -2911,6 +2975,79 @@ export interface components {
         };
         ReleaseInput: {
             confirm?: boolean;
+        };
+        Replication: {
+            error?: string | null;
+            /** Format: uuid */
+            id: string;
+            options: components["schemas"]["ReplicationOptions"];
+            phase: string;
+            progress: components["schemas"]["ReplicationProgress"];
+            state: string;
+        };
+        /** @enum {string} */
+        ReplicationCommand: "pause" | "resume" | "cancel";
+        /** @enum {string} */
+        ReplicationConflict: "skip" | "report" | "overwrite";
+        ReplicationItem: {
+            error?: string | null;
+            id: components["schemas"]["Id"];
+            output_version?: components["schemas"]["Id"] | null;
+            source_key: string;
+            source_version?: components["schemas"]["Id"] | null;
+            state: string;
+            target_key: string;
+        };
+        ReplicationItems: {
+            items: components["schemas"]["ReplicationItem"][];
+            next_after?: components["schemas"]["Id"] | null;
+        };
+        /** @enum {string} */
+        ReplicationOperation: "copy" | "move";
+        ReplicationOptions: {
+            conflict?: components["schemas"]["ReplicationConflict"];
+            operation: components["schemas"]["ReplicationOperation"];
+            permissions?: components["schemas"]["ReplicationPermissions"];
+            scope: components["schemas"]["ReplicationScope"];
+            /** Format: uuid */
+            source_bucket: string;
+            /** Format: uuid */
+            target_bucket: string;
+            target_key?: string | null;
+            target_prefix?: string;
+        };
+        ReplicationPage: {
+            /** Format: uuid */
+            next_after?: string | null;
+            replications: components["schemas"]["Replication"][];
+        };
+        /** @enum {string} */
+        ReplicationPermissions: "inherit" | "ignore" | "public_read" | "private";
+        ReplicationProgress: {
+            /** Format: int64 */
+            completed: number;
+            /** Format: int64 */
+            conflicts: number;
+            /** Format: int64 */
+            discovered: number;
+            /** Format: int64 */
+            skipped: number;
+            /** Format: int64 */
+            sources: number;
+            /** Format: int64 */
+            verified: number;
+        };
+        ReplicationScope: {
+            /** @enum {string} */
+            selection: "all";
+        } | {
+            prefix: string;
+            /** @enum {string} */
+            selection: "prefix";
+        } | {
+            keys: string[];
+            /** @enum {string} */
+            selection: "objects";
         };
         Request: {
             bucket?: string | null;
@@ -5888,6 +6025,124 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Quota"];
+                };
+            };
+        };
+    };
+    replication_list: {
+        parameters: {
+            query?: {
+                after?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplicationPage"];
+                };
+            };
+        };
+    };
+    replication_create: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Reuse this UUID when retrying the same task creation */
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicationOptions"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskStarted"];
+                };
+            };
+        };
+    };
+    replication_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Replication"];
+                };
+            };
+        };
+    };
+    replication_command: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicationCommand"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskStarted"];
+                };
+            };
+        };
+    };
+    replication_items: {
+        parameters: {
+            query?: {
+                after?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplicationItems"];
                 };
             };
         };

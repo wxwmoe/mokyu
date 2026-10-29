@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0089.
+-- Generated from the complete postgres migration chain through 0090.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -2021,6 +2021,49 @@ CREATE VIEW public.token_external_access AS
      JOIN public.token_external_grants g ON ((g.token_id = t.id)))
      LEFT JOIN public.user_external_access a ON (((a.user_id = t.user_id) AND (a.bucket_id = g.bucket_id))));
 
+CREATE TABLE public.transfer_items (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    task_id uuid NOT NULL,
+    source_key text NOT NULL,
+    target_key text NOT NULL,
+    source_version uuid,
+    source_pin uuid,
+    target_version uuid,
+    candidate uuid,
+    output_version uuid,
+    snapshot jsonb NOT NULL,
+    state text DEFAULT 'planning'::text NOT NULL,
+    position_bytes bigint DEFAULT 0 NOT NULL,
+    error text,
+    CONSTRAINT transfer_items_position_bytes_check CHECK ((position_bytes >= 0)),
+    CONSTRAINT transfer_items_state_check CHECK ((state = ANY (ARRAY['planning'::text, 'planned'::text, 'copying'::text, 'completed'::text, 'skipped'::text, 'conflict'::text, 'cancelled'::text])))
+);
+
+CREATE TABLE public.transfer_runs (
+    task_id uuid NOT NULL,
+    created_by uuid,
+    options jsonb NOT NULL,
+    authority jsonb NOT NULL,
+    storage_id uuid NOT NULL,
+    profile_revision bigint NOT NULL,
+    generation bigint DEFAULT 1 NOT NULL,
+    phase text DEFAULT 'scan'::text NOT NULL,
+    cursor_key text,
+    progress jsonb NOT NULL,
+    CONSTRAINT transfer_runs_generation_check CHECK ((generation > 0)),
+    CONSTRAINT transfer_runs_phase_check CHECK ((phase = ANY (ARRAY['scan'::text, 'plan'::text, 'verify'::text, 'publish'::text, 'cancel'::text, 'complete'::text, 'cancelled'::text])))
+);
+
+CREATE TABLE public.transfer_sources (
+    task_id uuid NOT NULL,
+    source_type text NOT NULL,
+    source_id uuid NOT NULL,
+    generation bigint DEFAULT 0 NOT NULL,
+    snapshot jsonb,
+    CONSTRAINT transfer_sources_generation_check CHECK ((generation >= 0)),
+    CONSTRAINT transfer_sources_source_type_check CHECK ((source_type = ANY (ARRAY['raw'::text, 'chunk'::text, 'pack'::text])))
+);
+
 CREATE TABLE public.uploads (
     id uuid DEFAULT uuidv7() NOT NULL,
     bucket_id uuid NOT NULL,
@@ -2454,6 +2497,15 @@ ALTER TABLE ONLY public.token_external_grants
 ALTER TABLE ONLY public.token_bucket_grants
     ADD CONSTRAINT token_grants_pkey PRIMARY KEY (token_id, bucket_id);
 
+ALTER TABLE ONLY public.transfer_items
+    ADD CONSTRAINT transfer_items_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.transfer_runs
+    ADD CONSTRAINT transfer_runs_pkey PRIMARY KEY (task_id);
+
+ALTER TABLE ONLY public.transfer_sources
+    ADD CONSTRAINT transfer_sources_pkey PRIMARY KEY (task_id, source_type, source_id);
+
 ALTER TABLE ONLY public.uploads
     ADD CONSTRAINT uploads_pkey PRIMARY KEY (id);
 
@@ -2708,6 +2760,16 @@ CREATE INDEX tasks_work ON public.tasks USING btree (updated_at, id) WHERE (stat
 CREATE INDEX token_bucket_grants_bucket ON public.token_bucket_grants USING btree (bucket_id, token_id);
 
 CREATE INDEX token_external_bucket ON public.token_external_grants USING btree (bucket_id);
+
+CREATE INDEX transfer_items_candidate ON public.transfer_items USING btree (candidate);
+
+CREATE INDEX transfer_items_source_pin ON public.transfer_items USING btree (source_pin);
+
+CREATE INDEX transfer_items_work ON public.transfer_items USING btree (task_id, state, id);
+
+CREATE INDEX transfer_runs_creator ON public.transfer_runs USING btree (created_by, task_id);
+
+CREATE INDEX transfer_sources_protection ON public.transfer_sources USING btree (source_type, source_id, task_id);
 
 CREATE INDEX uploads_bucket_transfers ON public.uploads USING btree (bucket_id, created_at DESC, id);
 
@@ -3239,6 +3301,21 @@ ALTER TABLE ONLY public.token_bucket_grants
 
 ALTER TABLE ONLY public.token_bucket_grants
     ADD CONSTRAINT token_grants_token_id_fkey FOREIGN KEY (token_id) REFERENCES public.api_tokens(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_items
+    ADD CONSTRAINT transfer_items_candidate_fkey FOREIGN KEY (candidate) REFERENCES public.streams(id);
+
+ALTER TABLE ONLY public.transfer_items
+    ADD CONSTRAINT transfer_items_source_pin_fkey FOREIGN KEY (source_pin) REFERENCES public.streams(id);
+
+ALTER TABLE ONLY public.transfer_items
+    ADD CONSTRAINT transfer_items_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.transfer_runs(task_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_runs
+    ADD CONSTRAINT transfer_runs_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_sources
+    ADD CONSTRAINT transfer_sources_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.transfer_runs(task_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.uploads
     ADD CONSTRAINT uploads_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);

@@ -18,6 +18,7 @@ pub(crate) mod objects;
 pub(crate) mod operations;
 pub(crate) mod projects;
 pub(crate) mod quotas;
+mod replication;
 pub(crate) mod service;
 pub(crate) mod settings;
 pub(crate) mod storage;

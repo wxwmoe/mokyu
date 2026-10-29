@@ -16,9 +16,32 @@ pub(crate) async fn fence(app: &App, id: Uuid, token: Uuid) -> Result<bool> {
 }
 
 impl App {
-    pub async fn task_change(&self, id: Uuid, resume: bool) -> Result<Value> {
+    pub async fn task_change(
+        &self,
+        principal: &crate::authorization::Principal,
+        id: Uuid,
+        resume: bool,
+    ) -> Result<Value> {
         let _coord = self.coord.lock().await;
         let task = self.task_control.load(id).await?;
+        if task
+            .as_ref()
+            .is_some_and(|(_, _, detail)| detail["operation"] == "replication")
+        {
+            self.replications
+                .command(
+                    principal,
+                    id,
+                    if resume {
+                        crate::model::replication::Command::Resume
+                    } else {
+                        crate::model::replication::Command::Pause
+                    },
+                )
+                .await?;
+            self.wake_tasks.notify_one();
+            return Ok(json!({"task_id":id}));
+        }
         let parent_task = task.as_ref().is_some_and(|(parent, _, _)| *parent);
         if resume {
             self.ensure_mode()?;

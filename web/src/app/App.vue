@@ -20,6 +20,7 @@ const router = useRouter(), route = useRoute(), navigation = ref(false)
 const destinations = [
   { key: 'overview', icon: HouseHeart, group: 'workspace' }, { key: 'media', icon: Images, group: 'workspace' },
   { key: 'storage', icon: Package, group: 'workspace' }, { key: 'transfers', icon: UploadCloud, group: 'workspace' },
+  { key: 'replications', icon: Copy, group: 'workspace' },
   { key: 'maintenance', icon: Flower2, group: 'workspace', admin: true },
   { key: 'buckets', icon: Settings2, group: 'administration', admin: true },
   { key: 'external-buckets', label: 'externalBuckets', icon: Cloud, group: 'administration', admin: true },

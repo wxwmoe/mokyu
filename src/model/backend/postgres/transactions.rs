@@ -657,7 +657,7 @@ pub(super) async fn copy_chunk_references(
     Ok(())
 }
 
-async fn copy_chunk_references_in(
+pub(super) async fn copy_chunk_references_in(
     db: &mut PgConnection,
     destination: Id,
     source: Id,
@@ -1319,7 +1319,7 @@ pub(super) async fn create_stream(
     Ok(id)
 }
 
-async fn create_stream_in(
+pub(super) async fn create_stream_in(
     tx: &mut Transaction<'_, Postgres>,
     mut input: StreamCreate,
     ttl_seconds: Option<i64>,
@@ -4984,7 +4984,10 @@ async fn record_media_operation(tx: &mut Transaction<'_, Postgres>, result: Outc
     Ok(())
 }
 
-async fn lock_media_scope(tx: &mut Transaction<'_, Postgres>, permit: &Permit) -> Result<()> {
+pub(super) async fn lock_media_scope(
+    tx: &mut Transaction<'_, Postgres>,
+    permit: &Permit,
+) -> Result<()> {
     permit.lock(tx).await?;
     let buckets: Vec<Uuid> = permit.resources.keys().copied().collect();
     let blocked: bool = queries::blocked_media_buckets(&buckets)
@@ -5203,6 +5206,24 @@ pub(super) async fn complete_storage_migration_in(
     destination: Id,
     job: &StorageMigration,
 ) -> Result<()> {
+    publish_migration_in(tx, id, lease_token, destination, job).await?;
+    let completed = queries::complete_migration_task(id, lease_token)
+        .execute(&mut **tx)
+        .await?;
+    ensure!(
+        completed.rows_affected() == 1,
+        "storage migration lease lost before publish"
+    );
+    Ok(())
+}
+
+pub(super) async fn publish_migration_in(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    lease_token: Uuid,
+    destination: Id,
+    job: &StorageMigration,
+) -> Result<()> {
     let owned: Option<Uuid> = queries::lock_migration_task(id, lease_token)
         .fetch_optional(&mut **tx)
         .await?;
@@ -5252,13 +5273,6 @@ pub(super) async fn complete_storage_migration_in(
     if let Some(old) = old {
         queries::retire_stream(old).execute(&mut **tx).await?;
     }
-    let completed = queries::complete_migration_task(id, lease_token)
-        .execute(&mut **tx)
-        .await?;
-    ensure!(
-        completed.rows_affected() == 1,
-        "storage migration lease lost before publish"
-    );
     Ok(())
 }
 
@@ -7116,7 +7130,7 @@ pub(super) async fn copy_raw_references(
     Ok(())
 }
 
-async fn copy_raw_references_in(
+pub(super) async fn copy_raw_references_in(
     tx: &mut Transaction<'_, Postgres>,
     destination: Id,
     source: Id,

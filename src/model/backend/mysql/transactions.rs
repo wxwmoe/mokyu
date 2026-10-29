@@ -2269,7 +2269,10 @@ pub(super) async fn audit_object_batch(
     Ok(())
 }
 
-async fn lock_media_scope(connection: &mut MySqlConnection, permit: &Permit) -> Result<()> {
+pub(super) async fn lock_media_scope(
+    connection: &mut MySqlConnection,
+    permit: &Permit,
+) -> Result<()> {
     lock_permit(connection, permit).await?;
     for bucket in permit.resources.keys() {
         ensure!(
@@ -2615,17 +2618,36 @@ pub(super) async fn complete_storage_migration(
     id: Id,
     job: &StorageMigration,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let result = publish_migration_in(&mut tx, task, id, job).await?;
+    ensure!(
+        queries::complete_migration_task(task)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(super) async fn publish_migration_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    task: Execution,
+    id: Id,
+    job: &StorageMigration,
+) -> Result<()> {
     ensure!(
         matches!(job.action.as_str(), "copy" | "move"),
         s3s::s3_error!(InvalidArgument)
     );
-    let mut tx = pool.begin().await?;
-    lock_execution(&mut tx, task).await?;
+    lock_execution(tx, task).await?;
     let mut authority = Permit::for_action(Principal::System, job.source_bucket, Action::Read);
     authority.add(job.target_bucket, Action::Write);
-    lock_media_scope(&mut tx, &authority).await?;
+    lock_media_scope(tx, &authority).await?;
     let old = selected_objects(
-        &mut tx,
+        tx,
         &ObjectTransfer {
             source_bucket: job.source_bucket,
             source_key: &job.source_key,
@@ -2636,49 +2658,32 @@ pub(super) async fn complete_storage_migration(
         },
     )
     .await?;
-    let stream = validate_copy(
-        &mut tx,
-        id,
-        job.target_bucket,
-        &job.target_key,
-        job.public_read,
-    )
-    .await?;
-    require_sources(&mut tx, Some(id), &[]).await?;
+    let stream = validate_copy(tx, id, job.target_bucket, &job.target_key, job.public_read).await?;
+    require_sources(tx, Some(id), &[]).await?;
     ensure!(
         queries::publish_migration_stream(id, task)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
         crate::model::Error::OperationAborted
     );
-    queries::ready_stream_queues(&mut tx, id).await?;
+    queries::ready_stream_queues(tx, id).await?;
     if job.action == "move" {
         remove_object_reference(
-            &mut tx,
+            tx,
             job.source_bucket,
             &job.source_key,
             Some(job.source_version),
         )
         .await?;
         queries::retire_stream(job.source_version)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
-    replace_object_reference(&mut tx, &stream, old).await?;
-    ensure!(
-        queries::complete_migration_task(task)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
-            == 1,
-        crate::model::Error::OperationAborted
-    );
-    tx.commit().await?;
+    replace_object_reference(tx, &stream, old).await?;
     Ok(())
 }
-
 pub(super) async fn abandon_copy(pool: &MySqlPool, id: Id) -> Result<()> {
     let mut tx = pool.begin().await?;
     let stream = queries::publish_stream_record(id)
@@ -4534,12 +4539,21 @@ pub(super) async fn learn_compression(
     Ok(changed == 1)
 }
 
-pub(super) async fn create_stream(pool: &sqlx::MySqlPool, mut input: StreamCreate) -> Result<Id> {
+pub(super) async fn create_stream(pool: &sqlx::MySqlPool, input: StreamCreate) -> Result<Id> {
     let mut tx = pool.begin().await?;
+    let result = create_stream_in(&mut tx, input).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(super) async fn create_stream_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    mut input: StreamCreate,
+) -> Result<Id> {
     if let Some((task, token)) = input.owner {
         ensure!(
             queries::lock_owned_task(task, token)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?
                 .is_some(),
             "storage migration execution lost"
@@ -4553,28 +4567,27 @@ pub(super) async fn create_stream(pool: &sqlx::MySqlPool, mut input: StreamCreat
             .authority
             .add(input.bucket, crate::authorization::Action::Acl);
     }
-    lock_permit(&mut tx, &input.authority).await?;
+    lock_permit(tx, &input.authority).await?;
     let (state, paused) = queries::lock_bucket_uploads(input.bucket)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
     if paused && input.stream_type == "object" {
         ensure!(
             queries::completing_upload(input.completion, input.bucket, &input.key)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?,
             crate::model::Error::OperationAborted
         );
     }
-    let inserted = queries::insert_stream(&input).execute(&mut *tx).await?;
+    let inserted = queries::insert_stream(&input).execute(&mut **tx).await?;
     let id = Id::try_from(inserted.last_insert_id())?;
     if input.claim_object {
         queries::claim_object(input.bucket, &input.key, id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        supersede_object_quota(&mut tx, input.bucket, &input.key, id).await?;
+        supersede_object_quota(tx, input.bucket, &input.key, id).await?;
     }
-    tx.commit().await?;
     Ok(id)
 }
 
@@ -4750,18 +4763,31 @@ pub(super) async fn copy_chunk_references(
     chunks: &[Id],
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    writing_stream(&mut tx, destination).await?;
-    let locked = queries::lock_ready_chunks(&mut tx, chunks).await?;
-    ensure!(locked.len() == chunks.len(), "copy source is not ready");
-    require_sources(&mut tx, None, chunks).await?;
-    queries::copy_extents(destination, source, offset, end)
-        .execute(&mut *tx)
-        .await?;
-    queries::reference_chunks(&mut tx, chunks, destination).await?;
-    queries::resize_writing_stream(destination, end)
-        .execute(&mut *tx)
-        .await?;
+    let result =
+        copy_chunk_references_in(&mut tx, destination, source, offset, end, chunks).await?;
     tx.commit().await?;
+    Ok(result)
+}
+
+pub(super) async fn copy_chunk_references_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    destination: Id,
+    source: Id,
+    offset: i64,
+    end: i64,
+    chunks: &[Id],
+) -> Result<()> {
+    writing_stream(tx, destination).await?;
+    let locked = queries::lock_ready_chunks(tx, chunks).await?;
+    ensure!(locked.len() == chunks.len(), "copy source is not ready");
+    require_sources(tx, None, chunks).await?;
+    queries::copy_extents(destination, source, offset, end)
+        .execute(&mut **tx)
+        .await?;
+    queries::reference_chunks(tx, chunks, destination).await?;
+    queries::resize_writing_stream(destination, end)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -6989,11 +7015,25 @@ pub(super) async fn copy_raw_references(
     revision: i64,
     rows: &[crate::model::raw::RawRange],
 ) -> Result<()> {
-    let (offset, end, sources) = crate::model::raw::copy_window(storage, rows)?;
     let mut tx = pool.begin().await?;
-    writing_stream(&mut tx, destination).await?;
+    let result =
+        copy_raw_references_in(&mut tx, destination, source, storage, revision, rows).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(super) async fn copy_raw_references_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    destination: Id,
+    source: Id,
+    storage: Uuid,
+    revision: i64,
+    rows: &[crate::model::raw::RawRange],
+) -> Result<()> {
+    let (offset, end, sources) = crate::model::raw::copy_window(storage, rows)?;
+    writing_stream(tx, destination).await?;
     let (storage_type, unencoded, current, cdc, _) = queries::raw_target(destination, storage)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or(crate::model::Error::OperationAborted)?;
     ensure!(
@@ -7003,7 +7043,7 @@ pub(super) async fn copy_raw_references(
     if offset == 0 {
         ensure!(
             queries::raw_prepare(destination)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?
                 .rows_affected()
                 == 1,
@@ -7012,20 +7052,20 @@ pub(super) async fn copy_raw_references(
     }
     ensure!(
         queries::raw_copy_position(destination, offset)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             == Some(destination),
         crate::model::Error::OperationAborted
     );
     let locked: Vec<Id> = queries::raw_copy_sources(storage, &sources)
         .build_query_scalar()
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
     ensure!(locked == sources, crate::model::Error::SourceUnavailable);
     ensure!(
         queries::raw_copy_ranges(destination, source, offset, end, &sources)
             .build()
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == rows.len() as u64,
@@ -7033,12 +7073,11 @@ pub(super) async fn copy_raw_references(
     );
     queries::raw_copy_reference(&sources)
         .build()
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::resize_writing_stream(destination, end)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
