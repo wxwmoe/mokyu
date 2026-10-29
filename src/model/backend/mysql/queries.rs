@@ -119,7 +119,7 @@ pub(super) async fn inventory_cleanup(
 ) -> Result<Value> {
     let rows:Vec<(String,i64,Option<DateTime<Utc>>)>=sqlx::query_as("WITH cutoffs AS (SELECT TIMESTAMPADD(MICROSECOND,-?,CURRENT_TIMESTAMP(6)) AS tasks) SELECT 'chunks',COUNT(*),MIN(deleted_at) FROM chunks c WHERE state='deleted' AND deleted_at<TIMESTAMPADD(SECOND,-((SELECT (CAST(LEFT(sp.deleted_chunk_retention,LENGTH(sp.deleted_chunk_retention)-1) AS UNSIGNED)*CASE RIGHT(sp.deleted_chunk_retention,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=c.storage_id)),UTC_TIMESTAMP(6)) AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND (state<>'deleted' OR recovery_pending OR owner_stream IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pack_members WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM cache_pins WHERE chunk_id=c.id)
         UNION ALL SELECT 'uploads',COUNT(*),MIN(touched_at) FROM uploads u WHERE state IN ('completed','aborted') AND touched_at<TIMESTAMPADD(SECOND,-((SELECT (CAST(LEFT(sp.upload_retention,LENGTH(sp.upload_retention)-1) AS UNSIGNED)*CASE RIGHT(sp.upload_retention,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=(SELECT storage_id FROM buckets WHERE id=u.bucket_id))),UTC_TIMESTAMP(6)) AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id) AND NOT EXISTS(SELECT 1 FROM quota_reservations WHERE upload_id=u.id)
-        UNION ALL SELECT 'tasks',COUNT(*),MIN(updated_at) FROM tasks t WHERE state='completed' AND updated_at<(SELECT tasks FROM cutoffs) AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id)
+        UNION ALL SELECT 'tasks',COUNT(*),MIN(updated_at) FROM tasks t WHERE state='completed' AND updated_at<(SELECT tasks FROM cutoffs) AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id) AND NOT EXISTS(SELECT 1 FROM external_tests e WHERE e.id=t.id AND e.cleanup_required)
         UNION ALL SELECT 'integrity_issues',COUNT(*),MIN(t.updated_at) FROM integrity_issues i JOIN tasks t ON t.id=i.task_id WHERE t.state='completed' AND t.updated_at<(SELECT tasks FROM cutoffs)
         UNION ALL SELECT 'sessions',COUNT(*),MIN(expires_at) FROM sessions s WHERE expires_at<CURRENT_TIMESTAMP(6) AND NOT EXISTS(SELECT 1 FROM session_refresh_tokens r WHERE r.session_id=s.id AND r.revoked_at IS NULL AND r.expires_at>CURRENT_TIMESTAMP(6))
         UNION ALL SELECT 'packs',COUNT(*),MIN(deleted_at) FROM packs p WHERE state='deleted' AND deleted_at<TIMESTAMPADD(SECOND,-((SELECT (CAST(LEFT(sp.deleted_chunk_retention,LENGTH(sp.deleted_chunk_retention)-1) AS UNSIGNED)*CASE RIGHT(sp.deleted_chunk_retention,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=p.storage_id)),UTC_TIMESTAMP(6)) AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack_id=p.id)
@@ -799,7 +799,7 @@ pub(super) async fn cleanup_history(
             "tasks",
             "id",
             "updated_at",
-            "h.state='completed' AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=h.id)",
+            "h.state='completed' AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=h.id) AND NOT EXISTS(SELECT 1 FROM external_tests e WHERE e.id=h.id AND e.cleanup_required)",
         ),
         "sessions" => (
             "sessions",
@@ -3108,7 +3108,7 @@ impl TaskControlStore for Backend {
             .transpose()
     }
     async fn other_integrity(&self, id: Uuid) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND JSON_EXTRACT(detail,'$.source_operation') IS NULL AND state IN ('queued','running') AND id<>?)").bind(id).fetch_one(&self.pool).await?)
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND JSON_EXTRACT(detail,'$.source_operation') IS NULL AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation')),'')<>'external_test' AND state IN ('queued','running') AND id<>?)").bind(id).fetch_one(&self.pool).await?)
     }
     async fn enqueue(&self, task_type: &str, bucket: Option<Uuid>, detail: Value) -> Result<Uuid> {
         transactions::enqueue_task(&mut *self.pool.acquire().await?, task_type, bucket, detail)
@@ -3155,7 +3155,7 @@ impl TaskControlStore for Backend {
     async fn change_state(&self, id: Uuid, parent: bool, resume: bool) -> Result<bool> {
         ensure!(!parent, "MySQL does not support child tasks");
         let query = if resume {
-            "UPDATE tasks t LEFT JOIN storage_profiles p ON p.storage_id=UNHEX(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.storage_id')),'-','')) SET t.state='queued',t.error=NULL,t.updated_at=CURRENT_TIMESTAMP(6),t.detail=IF(p.storage_id IS NOT NULL AND JSON_CONTAINS_PATH(t.detail,'one','$.profile_revision'),JSON_SET(t.detail,'$.profile_revision',p.revision),t.detail) WHERE t.id=? AND t.state IN ('paused','failed')"
+            "UPDATE tasks t LEFT JOIN storage_profiles p ON p.storage_id=UNHEX(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.storage_id')),'-','')) SET t.state='queued',t.error=NULL,t.updated_at=CURRENT_TIMESTAMP(6),t.detail=IF(p.storage_id IS NOT NULL AND JSON_CONTAINS_PATH(t.detail,'one','$.profile_revision'),JSON_SET(t.detail,'$.profile_revision',p.revision),t.detail) WHERE t.id=? AND t.state IN ('paused','failed') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')),'false')<>'true'"
         } else {
             "UPDATE tasks SET state='paused',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND state IN ('queued','running')"
         };
@@ -6013,11 +6013,11 @@ pub(super) fn expire_credential(access: &str, expires: DateTime<Utc>) -> Stateme
 }
 
 pub(super) fn token_record(id: Uuid) -> Rows<'static, Token> {
-    sqlx::query_as("SELECT t.*,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>CURRENT_TIMESTAMP(6)) AS active,COALESCE((SELECT JSON_ARRAYAGG(JSON_ARRAY(HEX(g.bucket_id),g.actions)) FROM token_bucket_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.id=?").bind(id)
+    sqlx::query_as("SELECT t.*,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>CURRENT_TIMESTAMP(6)) AS active,COALESCE((SELECT JSON_ARRAYAGG(JSON_ARRAY(HEX(g.bucket_id),g.actions)) FROM token_bucket_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS grants,COALESCE((SELECT JSON_ARRAYAGG(JSON_ARRAY(HEX(g.bucket_id),g.actions)) FROM token_external_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS external_grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.id=?").bind(id)
 }
 
 pub(super) fn token_records(user: Uuid, after: Option<Uuid>, limit: i64) -> Rows<'static, Token> {
-    sqlx::query_as("SELECT t.*,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>CURRENT_TIMESTAMP(6)) AS active,COALESCE((SELECT JSON_ARRAYAGG(JSON_ARRAY(HEX(g.bucket_id),g.actions)) FROM token_bucket_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.user_id=? AND (? IS NULL OR t.id>?) ORDER BY t.id LIMIT ?").bind(user).bind(after).bind(after).bind(limit)
+    sqlx::query_as("SELECT t.*,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>CURRENT_TIMESTAMP(6)) AS active,COALESCE((SELECT JSON_ARRAYAGG(JSON_ARRAY(HEX(g.bucket_id),g.actions)) FROM token_bucket_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS grants,COALESCE((SELECT JSON_ARRAYAGG(JSON_ARRAY(HEX(g.bucket_id),g.actions)) FROM token_external_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS external_grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.user_id=? AND (? IS NULL OR t.id>?) ORDER BY t.id LIMIT ?").bind(user).bind(after).bind(after).bind(limit)
 }
 
 pub(super) fn lock_token_owner(user: Uuid) -> Statement<'static> {
@@ -6357,9 +6357,9 @@ pub(super) fn advance_user_authorization(user: Uuid) -> Statement<'static> {
         .bind(user)
 }
 
-fn grants(row: &sqlx::mysql::MySqlRow) -> sqlx::Result<Vec<BucketGrant>> {
+fn grants(row: &sqlx::mysql::MySqlRow, column: &str) -> sqlx::Result<Vec<BucketGrant>> {
     use sqlx::Row;
-    let sqlx::types::Json(rows): sqlx::types::Json<Vec<(Uuid, u64)>> = row.try_get("grants")?;
+    let sqlx::types::Json(rows): sqlx::types::Json<Vec<(Uuid, u64)>> = row.try_get(column)?;
     let mut grants: Vec<_> = rows
         .into_iter()
         .map(|(bucket_id, bits)| BucketGrant {
@@ -6372,7 +6372,7 @@ fn grants(row: &sqlx::mysql::MySqlRow) -> sqlx::Result<Vec<BucketGrant>> {
 }
 
 pub(super) fn project_members(project: Uuid) -> Rows<'static, Member> {
-    sqlx::query_as("SELECT m.user_id,u.username,u.display_name,u.enabled,m.role,m.scope,COALESCE((SELECT JSON_ARRAYAGG(JSON_ARRAY(HEX(g.bucket_id),g.actions)) FROM member_bucket_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),JSON_ARRAY()) AS grants FROM project_members m JOIN web_users u ON u.id=m.user_id WHERE m.project_id=? ORDER BY u.username LIMIT 1000").bind(project)
+    sqlx::query_as("SELECT m.user_id,u.username,u.display_name,u.enabled,m.role,m.scope,COALESCE((SELECT JSON_ARRAYAGG(JSON_ARRAY(HEX(g.bucket_id),g.actions)) FROM member_bucket_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),JSON_ARRAY()) AS grants,COALESCE((SELECT JSON_ARRAYAGG(JSON_ARRAY(HEX(g.bucket_id),g.actions)) FROM member_external_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),JSON_ARRAY()) AS external_grants FROM project_members m JOIN web_users u ON u.id=m.user_id WHERE m.project_id=? ORDER BY u.username LIMIT 1000").bind(project)
 }
 
 pub(super) fn projects() -> Rows<'static, Project> {
@@ -6413,7 +6413,7 @@ pub(super) fn lock_project(id: Uuid) -> Scalar<'static, Uuid> {
 }
 
 pub(super) fn project_dependents(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE project_id=?) OR EXISTS(SELECT 1 FROM s3_credentials WHERE project_id=?) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=?)").bind(id).bind(id).bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE project_id=?) OR EXISTS(SELECT 1 FROM s3_credentials WHERE project_id=?) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=?) OR EXISTS(SELECT 1 FROM external_buckets WHERE project_id=?)").bind(id).bind(id).bind(id).bind(id)
 }
 
 pub(super) fn delete_project(id: Uuid) -> Statement<'static> {
@@ -6435,7 +6435,7 @@ pub(super) fn visible_projects(
     admin: bool,
     token: Option<Uuid>,
 ) -> Rows<'static, Project> {
-    sqlx::query_as("SELECT p.* FROM projects p WHERE ? OR CASE WHEN ? IS NOT NULL THEN EXISTS(SELECT 1 FROM token_bucket_access t JOIN buckets b ON b.id=t.bucket_id WHERE t.token_id=? AND b.project_id=p.id AND (t.actions & 1)<>0) ELSE EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=p.id AND m.user_id=?) END ORDER BY p.builtin DESC,p.name LIMIT 1000").bind(admin).bind(token).bind(token).bind(user)
+    sqlx::query_as("SELECT p.* FROM projects p WHERE ? OR CASE WHEN ? IS NOT NULL THEN EXISTS(SELECT 1 FROM token_bucket_access t JOIN buckets b ON b.id=t.bucket_id WHERE t.token_id=? AND b.project_id=p.id AND (t.actions & 1)<>0) OR EXISTS(SELECT 1 FROM token_external_access t JOIN external_buckets b ON b.id=t.bucket_id WHERE t.token_id=? AND b.project_id=p.id AND (t.actions & 1)<>0) ELSE EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=p.id AND m.user_id=?) END ORDER BY p.builtin DESC,p.name LIMIT 1000").bind(admin).bind(token).bind(token).bind(token).bind(user)
 }
 
 pub(super) fn project_mode() -> Scalar<'static, bool> {
@@ -7187,7 +7187,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for crate::model::administrati
             enabled: row.try_get("enabled")?,
             role: row.try_get("role")?,
             scope: row.try_get("scope")?,
-            grants: grants(row)?,
+            grants: grants(row, "grants")?,
+            external_grants: grants(row, "external_grants")?,
         })
     }
 }
@@ -7361,7 +7362,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for crate::model::credential::
             expires_at: row.try_get("expires_at")?,
             last_used_at: row.try_get("last_used_at")?,
             created_by: row.try_get("created_by")?,
-            grants: grants(row)?,
+            grants: grants(row, "grants")?,
         })
     }
 }
@@ -7380,7 +7381,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for crate::model::credential::
             expires_at: row.try_get("expires_at")?,
             last_used_at: row.try_get("last_used_at")?,
             revoked_at: row.try_get("revoked_at")?,
-            grants: grants(row)?,
+            grants: grants(row, "grants")?,
+            external_grants: grants(row, "external_grants")?,
         })
     }
 }

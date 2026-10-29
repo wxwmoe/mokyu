@@ -1352,9 +1352,9 @@ pub(super) fn advance_user_authorization(user: Uuid) -> Statement<'static> {
         .bind(user)
 }
 
-fn grants(row: &SqliteRow) -> sqlx::Result<Vec<BucketGrant>> {
+fn grants(row: &SqliteRow, column: &str) -> sqlx::Result<Vec<BucketGrant>> {
     use sqlx::Row;
-    let sqlx::types::Json(rows): sqlx::types::Json<Vec<(Uuid, i64)>> = row.try_get("grants")?;
+    let sqlx::types::Json(rows): sqlx::types::Json<Vec<(Uuid, i64)>> = row.try_get(column)?;
     let mut grants: Vec<_> = rows
         .into_iter()
         .map(|(bucket_id, bits)| BucketGrant {
@@ -1367,7 +1367,7 @@ fn grants(row: &SqliteRow) -> sqlx::Result<Vec<BucketGrant>> {
 }
 
 pub(super) fn project_members(project: Uuid) -> Rows<'static, Member> {
-    sqlx::query_as("SELECT m.user_id,u.username,u.display_name,u.enabled,m.role,m.scope,COALESCE((SELECT JSON_GROUP_ARRAY(JSON_ARRAY(lower(hex(g.bucket_id)),g.actions)) FROM member_bucket_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),JSON_ARRAY()) AS grants FROM project_members m JOIN web_users u ON u.id=m.user_id WHERE m.project_id=? ORDER BY u.username LIMIT 1000").bind(project)
+    sqlx::query_as("SELECT m.user_id,u.username,u.display_name,u.enabled,m.role,m.scope,COALESCE((SELECT JSON_GROUP_ARRAY(JSON_ARRAY(lower(hex(g.bucket_id)),g.actions)) FROM member_bucket_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),JSON_ARRAY()) AS grants,COALESCE((SELECT JSON_GROUP_ARRAY(JSON_ARRAY(lower(hex(g.bucket_id)),g.actions)) FROM member_external_grants g WHERE g.user_id=m.user_id AND g.project_id=m.project_id),JSON_ARRAY()) AS external_grants FROM project_members m JOIN web_users u ON u.id=m.user_id WHERE m.project_id=? ORDER BY u.username LIMIT 1000").bind(project)
 }
 
 pub(super) fn projects() -> Rows<'static, Project> {
@@ -1408,7 +1408,7 @@ pub(super) fn lock_project(id: Uuid) -> Scalar<'static, Uuid> {
 }
 
 pub(super) fn project_dependents(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE project_id=?) OR EXISTS(SELECT 1 FROM s3_credentials WHERE project_id=?) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=?)").bind(id).bind(id).bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE project_id=?) OR EXISTS(SELECT 1 FROM s3_credentials WHERE project_id=?) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=?) OR EXISTS(SELECT 1 FROM external_buckets WHERE project_id=?)").bind(id).bind(id).bind(id).bind(id)
 }
 
 pub(super) fn delete_project(id: Uuid) -> Statement<'static> {
@@ -1430,7 +1430,7 @@ pub(super) fn visible_projects(
     admin: bool,
     token: Option<Uuid>,
 ) -> Rows<'static, Project> {
-    sqlx::query_as("SELECT p.* FROM projects p WHERE ? OR CASE WHEN ? IS NOT NULL THEN EXISTS(SELECT 1 FROM token_bucket_access t JOIN buckets b ON b.id=t.bucket_id WHERE t.token_id=? AND b.project_id=p.id AND (t.actions & 1)<>0) ELSE EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=p.id AND m.user_id=?) END ORDER BY p.builtin DESC,p.name LIMIT 1000").bind(admin).bind(token).bind(token).bind(user)
+    sqlx::query_as("SELECT p.* FROM projects p WHERE ? OR CASE WHEN ? IS NOT NULL THEN EXISTS(SELECT 1 FROM token_bucket_access t JOIN buckets b ON b.id=t.bucket_id WHERE t.token_id=? AND b.project_id=p.id AND (t.actions & 1)<>0) OR EXISTS(SELECT 1 FROM token_external_access t JOIN external_buckets b ON b.id=t.bucket_id WHERE t.token_id=? AND b.project_id=p.id AND (t.actions & 1)<>0) ELSE EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=p.id AND m.user_id=?) END ORDER BY p.builtin DESC,p.name LIMIT 1000").bind(admin).bind(token).bind(token).bind(token).bind(user)
 }
 
 pub(super) fn project_mode() -> Scalar<'static, bool> {
@@ -1580,7 +1580,8 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for crate::model::administration::Member {
             enabled: row.try_get("enabled")?,
             role: row.try_get("role")?,
             scope: row.try_get("scope")?,
-            grants: grants(row)?,
+            grants: grants(row, "grants")?,
+            external_grants: grants(row, "external_grants")?,
         })
     }
 }
@@ -1679,11 +1680,11 @@ pub(super) fn expire_credential(access: &str, expires: DateTime<Utc>) -> Stateme
 }
 
 pub(super) fn token_record(id: Uuid) -> Rows<'static, Token> {
-    sqlx::query_as("SELECT t.*,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AS active,COALESCE((SELECT JSON_GROUP_ARRAY(JSON_ARRAY(lower(hex(g.bucket_id)),g.actions)) FROM token_bucket_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.id=?").bind(id)
+    sqlx::query_as("SELECT t.*,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AS active,COALESCE((SELECT JSON_GROUP_ARRAY(JSON_ARRAY(lower(hex(g.bucket_id)),g.actions)) FROM token_bucket_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS grants,COALESCE((SELECT JSON_GROUP_ARRAY(JSON_ARRAY(lower(hex(g.bucket_id)),g.actions)) FROM token_external_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS external_grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.id=?").bind(id)
 }
 
 pub(super) fn token_records(user: Uuid, after: Option<Uuid>, limit: i64) -> Rows<'static, Token> {
-    sqlx::query_as("SELECT t.*,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AS active,COALESCE((SELECT JSON_GROUP_ARRAY(JSON_ARRAY(lower(hex(g.bucket_id)),g.actions)) FROM token_bucket_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.user_id=? AND (? IS NULL OR t.id>?) ORDER BY t.id LIMIT ?").bind(user).bind(after).bind(after).bind(limit)
+    sqlx::query_as("SELECT t.*,u.enabled AND NOT u.must_change_password AND t.auth_revision=u.auth_revision AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AS active,COALESCE((SELECT JSON_GROUP_ARRAY(JSON_ARRAY(lower(hex(g.bucket_id)),g.actions)) FROM token_bucket_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS grants,COALESCE((SELECT JSON_GROUP_ARRAY(JSON_ARRAY(lower(hex(g.bucket_id)),g.actions)) FROM token_external_grants g WHERE g.token_id=t.id),JSON_ARRAY()) AS external_grants FROM api_tokens t JOIN web_users u ON u.id=t.user_id WHERE t.user_id=? AND (? IS NULL OR t.id>?) ORDER BY t.id LIMIT ?").bind(user).bind(after).bind(after).bind(limit)
 }
 
 pub(super) fn token_owner_revision(user: Uuid) -> Rows<'static, (String, i64)> {
@@ -1905,7 +1906,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for crate::model::credential::Credential {
             expires_at: optional_date(row, "expires_at")?,
             last_used_at: optional_date(row, "last_used_at")?,
             created_by: row.try_get("created_by")?,
-            grants: grants(row)?,
+            grants: grants(row, "grants")?,
         })
     }
 }
@@ -1924,7 +1925,8 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for crate::model::credential::Token {
             expires_at: optional_date(row, "expires_at")?,
             last_used_at: optional_date(row, "last_used_at")?,
             revoked_at: optional_date(row, "revoked_at")?,
-            grants: grants(row)?,
+            grants: grants(row, "grants")?,
+            external_grants: grants(row, "external_grants")?,
         })
     }
 }
@@ -4935,7 +4937,7 @@ impl TaskControlStore for Backend {
             .transpose()
     }
     async fn other_integrity(&self, id: Uuid) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND json_extract(detail,'$.source_operation') IS NULL AND state IN ('queued','running') AND id<>?)").bind(id).fetch_one(&self.read).await?)
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND json_extract(detail,'$.source_operation') IS NULL AND COALESCE(json_extract(detail,'$.operation'),'')<>'external_test' AND state IN ('queued','running') AND id<>?)").bind(id).fetch_one(&self.read).await?)
     }
     async fn enqueue(&self, task_type: &str, bucket: Option<Uuid>, detail: Value) -> Result<Uuid> {
         transactions::enqueue_task(&mut *self.write.acquire().await?, task_type, bucket, detail)
@@ -4982,7 +4984,7 @@ impl TaskControlStore for Backend {
     async fn change_state(&self, id: Uuid, parent: bool, resume: bool) -> Result<bool> {
         ensure!(!parent, "SQLite does not support child tasks");
         let query = if resume {
-            "UPDATE tasks SET state='queued',error=NULL,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),detail=CASE WHEN json_type(detail,'$.profile_revision') IS NOT NULL THEN COALESCE((SELECT json_set(tasks.detail,'$.profile_revision',p.revision) FROM storage_profiles p WHERE p.storage_id=unhex(replace(json_extract(tasks.detail,'$.storage_id'),'-',''))),detail) ELSE detail END WHERE id=? AND state IN ('paused','failed')"
+            "UPDATE tasks SET state='queued',error=NULL,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),detail=CASE WHEN json_type(detail,'$.profile_revision') IS NOT NULL THEN COALESCE((SELECT json_set(tasks.detail,'$.profile_revision',p.revision) FROM storage_profiles p WHERE p.storage_id=unhex(replace(json_extract(tasks.detail,'$.storage_id'),'-',''))),detail) ELSE detail END WHERE id=? AND state IN ('paused','failed') AND coalesce(json_extract(detail,'$.test_stopped'),0)=0"
         } else {
             "UPDATE tasks SET state='paused',updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state IN ('queued','running')"
         };
@@ -7007,7 +7009,7 @@ pub(super) async fn cleanup_history(
             "tasks",
             "id",
             "updated_at",
-            "h.state='completed' AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=h.id)",
+            "h.state='completed' AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=h.id) AND NOT EXISTS(SELECT 1 FROM external_tests e WHERE e.id=h.id AND e.cleanup_required)",
         ),
         "sessions" => (
             "sessions",
@@ -7491,7 +7493,7 @@ pub(super) async fn inventory_cleanup(
 ) -> Result<Value> {
     let rows:Vec<(String,i64,Option<i64>)>=sqlx::query_as("WITH cutoffs AS (SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AS tasks) SELECT 'chunks',COUNT(*),MIN(deleted_at) FROM chunks c WHERE state='deleted' AND deleted_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.deleted_chunk_retention,1,length(sp.deleted_chunk_retention)-1) AS INTEGER)*CASE substr(sp.deleted_chunk_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=c.storage_id))*1000000 AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND (state<>'deleted' OR recovery_pending OR owner_stream IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pack_members WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM cache_pins WHERE chunk_id=c.id)
         UNION ALL SELECT 'uploads',COUNT(*),MIN(touched_at) FROM uploads u WHERE state IN ('completed','aborted') AND touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.upload_retention,1,length(sp.upload_retention)-1) AS INTEGER)*CASE substr(sp.upload_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=(SELECT storage_id FROM buckets WHERE id=u.bucket_id)))*1000000 AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id) AND NOT EXISTS(SELECT 1 FROM quota_reservations WHERE upload_id=u.id)
-        UNION ALL SELECT 'tasks',COUNT(*),MIN(updated_at) FROM tasks t WHERE state='completed' AND updated_at<(SELECT tasks FROM cutoffs) AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id)
+        UNION ALL SELECT 'tasks',COUNT(*),MIN(updated_at) FROM tasks t WHERE state='completed' AND updated_at<(SELECT tasks FROM cutoffs) AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id) AND NOT EXISTS(SELECT 1 FROM external_tests e WHERE e.id=t.id AND e.cleanup_required)
         UNION ALL SELECT 'integrity_issues',COUNT(*),MIN(t.updated_at) FROM integrity_issues i JOIN tasks t ON t.id=i.task_id WHERE t.state='completed' AND t.updated_at<(SELECT tasks FROM cutoffs)
         UNION ALL SELECT 'sessions',COUNT(*),MIN(expires_at) FROM sessions s WHERE expires_at<CAST(unixepoch('subsec')*1000000 AS INTEGER) AND NOT EXISTS(SELECT 1 FROM session_refresh_tokens r WHERE r.session_id=s.id AND r.revoked_at IS NULL AND r.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))
         UNION ALL SELECT 'packs',COUNT(*),MIN(deleted_at) FROM packs p WHERE state='deleted' AND deleted_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.deleted_chunk_retention,1,length(sp.deleted_chunk_retention)-1) AS INTEGER)*CASE substr(sp.deleted_chunk_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=p.storage_id))*1000000 AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack_id=p.id)

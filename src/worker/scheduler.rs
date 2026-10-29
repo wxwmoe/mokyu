@@ -275,6 +275,28 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
             app.sweep_batch(execution, cursor.as_deref(), detail)
                 .await
                 .map(|_| false)
+        } else if task_type == "integrity" && detail["operation"] == "external_test" {
+            anyhow::ensure!(
+                app.role == "single",
+                "external tests require an execution node"
+            );
+            let assignment = app.external_buckets.prepare_test(execution).await?;
+            let snapshot = crate::model::external_test::Snapshot::open(
+                assignment.external_id,
+                assignment.revision,
+                &assignment.connection_encrypted,
+                &app.secrets.credential_key,
+            )?;
+            let report =
+                crate::storage::external_test::execute(assignment.plan.clone(), &snapshot).await?;
+            app.external_buckets
+                .finish_test(execution, &assignment.plan, &report)
+                .await?;
+            anyhow::ensure!(
+                report.blocked.is_none(),
+                "external connection test needs reconciliation"
+            );
+            Ok(false)
         } else if task_type == "integrity" {
             let timeout = if let Some(storage_id) = detail["storage_id"]
                 .as_str()

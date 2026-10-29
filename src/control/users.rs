@@ -207,12 +207,18 @@ pub(crate) async fn save_member(
     input: Option<Membership>,
 ) -> Result<()> {
     if let Some(input) = &input {
+        crate::model::external::validate_grants(&input.external_grants)?;
         let ceiling = Action::role(&input.role);
         let mut ids = HashSet::new();
         if ceiling.is_empty()
             || !matches!(input.scope.as_str(), "all" | "selected")
             || input.grants.len() > 1000
-            || (input.scope == "all" && !input.grants.is_empty())
+            || (input.scope == "all"
+                && (!input.grants.is_empty() || !input.external_grants.is_empty()))
+            || input
+                .external_grants
+                .iter()
+                .any(|g| g.actions.iter().any(|a| !ceiling.contains(a)))
             || input.grants.iter().any(|g| {
                 !ids.insert(g.bucket_id)
                     || g.actions.is_empty()

@@ -17,6 +17,7 @@ export const router = createRouter({
     { path: '/storages/:name', name: 'storage-details', meta: { admin: true }, component: () => import('../features/StorageDetail.vue') },
     { path: '/media', name: 'media', component: () => import('../features/Media.vue') },
     { path: '/buckets/:bucket?', name: 'buckets', component: () => import('../features/Buckets.vue') },
+    { path: '/external-buckets/:external?', name: 'external-buckets', meta: { admin: true }, component: () => import('../features/ExternalBuckets.vue') },
     { path: '/credentials', name: 'credentials', meta: { admin: true }, component: () => import('../features/AccessKeys.vue') },
     { path: '/tokens', name: 'tokens', component: () => import('../features/AccessKeys.vue') },
     { path: '/audit', name: 'audit', component: () => import('../features/Activity.vue') },

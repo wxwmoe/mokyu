@@ -752,6 +752,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/external-buckets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["external_list"];
+        put?: never;
+        post: operations["external_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/external-buckets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["external_get"];
+        put?: never;
+        post?: never;
+        delete: operations["external_delete"];
+        options?: never;
+        head?: never;
+        patch: operations["external_update"];
+        trace?: never;
+    };
+    "/api/v1/external-buckets/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["external_test_latest"];
+        put?: never;
+        post: operations["external_test_start"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/external-buckets/{id}/test/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["external_test_stop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/external-tests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["external_test_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/info": {
         parameters: {
             query?: never;
@@ -2000,6 +2080,14 @@ export interface components {
             /** Format: uuid */
             storage_id?: string | null;
         };
+        CreateExternalBucket: {
+            access_key: string;
+            connection: components["schemas"]["ExternalConnection"];
+            name: string;
+            /** Format: uuid */
+            project_id: string;
+            secret_key: string;
+        };
         CreateNodeInput: {
             name: string;
             /** @example data */
@@ -2097,6 +2185,107 @@ export interface components {
             confirmation: string;
             /** Format: uuid */
             preview_id: string;
+        };
+        ExternalBucket: {
+            actions: components["schemas"]["Action"][];
+            connection: components["schemas"]["ExternalConnection"];
+            /** Format: date-time */
+            created_at: string;
+            enabled: boolean;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: int64 */
+            revision: number;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ExternalBucketPage: {
+            items: components["schemas"]["ExternalBucket"][];
+            /** Format: uuid */
+            next?: string | null;
+        };
+        ExternalBucketPatch: {
+            access_key?: string | null;
+            connection?: components["schemas"]["ExternalConnection"] | null;
+            enabled?: boolean | null;
+            name?: string | null;
+            /** Format: int64 */
+            revision: number;
+            secret_key?: string | null;
+        };
+        ExternalBucketRevision: {
+            /** Format: int64 */
+            revision: number;
+        };
+        ExternalCheck: {
+            state: components["schemas"]["ExternalCheckState"];
+            /** Format: int32 */
+            status?: number | null;
+        };
+        /** @enum {string} */
+        ExternalCheckState: "passed" | "denied" | "unsupported" | "skipped" | "failed" | "unknown";
+        ExternalConnection: {
+            allow_http?: boolean;
+            bucket: string;
+            endpoint_url: string;
+            prefix?: string;
+            region: string;
+            virtual_hosted?: boolean;
+        };
+        ExternalTest: {
+            /** Format: int32 */
+            attempts: number;
+            cleanup_required: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            external_id?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            node_id?: string | null;
+            report: components["schemas"]["ExternalTestReport"];
+            /** Format: int64 */
+            revision: number;
+            state: string;
+            stopped: boolean;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ExternalTestArtifact: {
+            cleaned: boolean;
+            etag?: string | null;
+            file: components["schemas"]["ExternalTestFile"];
+            upload?: string | null;
+            version?: string | null;
+        };
+        /** @enum {string} */
+        ExternalTestFile: "write" | "multipart" | "abort";
+        /** @enum {string} */
+        ExternalTestPhase: "inspect" | "write" | "conditional_write" | "start_multipart" | "complete_multipart" | "start_abort" | "abort" | "cleanup" | "done";
+        /** @enum {string} */
+        ExternalTestProblem: "unavailable" | "invalid_response" | "identity_conflict" | "uncertain_result" | "cleanup_pending";
+        ExternalTestReport: {
+            artifacts: components["schemas"]["ExternalTestArtifact"][];
+            blocked?: components["schemas"]["ExternalTestProblem"] | null;
+            checks: {
+                [key: string]: components["schemas"]["ExternalCheck"];
+            };
+            connection: components["schemas"]["ExternalConnection"];
+            phase: components["schemas"]["ExternalTestPhase"];
+        };
+        ExternalTestRequest: {
+            /** Format: uuid */
+            node_id?: string | null;
+            /** Format: int64 */
+            revision: number;
+        };
+        ExternalTestStop: {
+            /** Format: uuid */
+            test_id: string;
         };
         Id: string;
         IntegrityIssue: {
@@ -2325,6 +2514,7 @@ export interface components {
         Member: {
             display_name: string;
             enabled: boolean;
+            external_grants: components["schemas"]["BucketGrant"][];
             grants: components["schemas"]["BucketGrant"][];
             role: string;
             scope: string;
@@ -2333,6 +2523,7 @@ export interface components {
             username: string;
         };
         Membership: {
+            external_grants?: components["schemas"]["BucketGrant"][];
             grants?: components["schemas"]["BucketGrant"][];
             role: string;
             scope: string;
@@ -3111,6 +3302,7 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             expires_at?: string | null;
+            external_grants: components["schemas"]["BucketGrant"][];
             grants: components["schemas"]["BucketGrant"][];
             /** Format: uuid */
             id: string;
@@ -3126,6 +3318,7 @@ export interface components {
         };
         TokenInput: {
             expires_in?: string | null;
+            external_grants?: components["schemas"]["BucketGrant"][];
             grants?: components["schemas"]["BucketGrant"][];
             keep_expiry?: boolean;
             label: string;
@@ -4709,6 +4902,211 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    external_list: {
+        parameters: {
+            query?: {
+                project?: string | null;
+                after?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExternalBucketPage"];
+                };
+            };
+        };
+    };
+    external_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateExternalBucket"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExternalBucket"];
+                };
+            };
+        };
+    };
+    external_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExternalBucket"];
+                };
+            };
+        };
+    };
+    external_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExternalBucketRevision"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    external_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExternalBucketPatch"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExternalBucket"];
+                };
+            };
+        };
+    };
+    external_test_latest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExternalTest"] | null;
+                };
+            };
+        };
+    };
+    external_test_start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExternalTestRequest"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskStarted"];
+                };
+            };
+        };
+    };
+    external_test_stop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExternalTestStop"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    external_test_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExternalTest"];
+                };
             };
         };
     };

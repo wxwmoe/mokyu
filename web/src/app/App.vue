@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { TooltipProvider, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from 'reka-ui'
-import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ChevronDown, Settings2, Users, FolderHeart, KeyRound, BookHeart, UploadCloud, HouseHeart, Package, Flower2, ListChecks, HeartPulse, HardDrive, Copy } from 'lucide-vue-next'
+import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ChevronDown, Settings2, Users, FolderHeart, KeyRound, BookHeart, UploadCloud, HouseHeart, Package, Flower2, ListChecks, HeartPulse, HardDrive, Cloud, Copy } from 'lucide-vue-next'
 import { session, signOut, savePreferences, refreshSession, resetSession, startAuthManager } from '../api/client'
 import { appearance, setTheme } from './theme'
 import { report, notices, manualCopy, copy } from './feedback'
@@ -22,6 +22,7 @@ const destinations = [
   { key: 'storage', icon: Package, group: 'workspace' }, { key: 'transfers', icon: UploadCloud, group: 'workspace' },
   { key: 'maintenance', icon: Flower2, group: 'workspace', admin: true },
   { key: 'buckets', icon: Settings2, group: 'administration', admin: true },
+  { key: 'external-buckets', label: 'externalBuckets', icon: Cloud, group: 'administration', admin: true },
   { key: 'users', icon: Users, group: 'administration', admin: true },
   { key: 'projects', icon: FolderHeart, group: 'administration', projects: true },
   { key: 'credentials', icon: KeyRound, group: 'administration', admin: true },

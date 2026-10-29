@@ -30,6 +30,9 @@ pub(super) fn exchange(input: wire::WorkRequest) -> Result<work::Exchange, Statu
     }
     if let Some(completion) = &value.completion {
         for outcome in &completion.outcomes {
+            if let work::Outcome::ExternalTest(report) = outcome {
+                report.validate().map_err(|_| invalid())?;
+            }
             if matches!(outcome, work::Outcome::Hashed { hash } if hash.len()!=32) {
                 return Err(invalid());
             }
@@ -57,6 +60,11 @@ pub(super) fn reply(value: work::Reply) -> Result<wire::WorkReply, Status> {
             .map_err(|_| Status::internal("work plan encoding failed"))?,
         materials: value.materials.into_iter().map(read::material).collect(),
         grants: value.grants.into_iter().map(read::grant).collect(),
+        external_connection_json: value
+            .external
+            .map(|snapshot| serde_json::to_vec(&snapshot))
+            .transpose()
+            .map_err(|_| Status::internal("external connection encoding failed"))?,
     };
     if prost::Message::encoded_len(&reply) > super::MESSAGE_LIMIT {
         return Err(Status::resource_exhausted(

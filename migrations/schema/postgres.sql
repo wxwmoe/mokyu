@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0088.
+-- Generated from the complete postgres migration chain through 0089.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -815,6 +815,38 @@ CREATE TABLE public.extents (
 )
 WITH (autovacuum_vacuum_scale_factor='0.05', autovacuum_analyze_scale_factor='0.02');
 
+CREATE TABLE public.external_buckets (
+    id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    name text NOT NULL,
+    connection jsonb NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    access_encrypted bytea NOT NULL,
+    secret_encrypted bytea NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT external_buckets_connection_check CHECK ((jsonb_typeof(connection) = 'object'::text)),
+    CONSTRAINT external_buckets_name_check CHECK (((octet_length(name) >= 1) AND (octet_length(name) <= 128))),
+    CONSTRAINT external_buckets_revision_check CHECK ((revision > 0))
+);
+
+CREATE TABLE public.external_tests (
+    id uuid NOT NULL,
+    external_id uuid,
+    revision bigint NOT NULL,
+    connection_encrypted bytea,
+    node_id uuid,
+    attempts integer DEFAULT 0 NOT NULL,
+    report jsonb DEFAULT '{}'::jsonb NOT NULL,
+    cleanup_required boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT external_tests_attempts_check CHECK ((attempts >= 0)),
+    CONSTRAINT external_tests_report_check CHECK ((jsonb_typeof(report) = 'object'::text)),
+    CONSTRAINT external_tests_revision_check CHECK ((revision > 0))
+);
+
 CREATE TABLE public.fragments (
     id uuid DEFAULT uuidv7() NOT NULL,
     owner_stream uuid,
@@ -919,6 +951,14 @@ CREATE TABLE public.member_bucket_grants (
     bucket_id uuid CONSTRAINT member_grants_bucket_id_not_null NOT NULL,
     actions text[] CONSTRAINT member_grants_actions_not_null NOT NULL,
     CONSTRAINT member_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'bucket.settings'::text, 'storage.inspect'::text]))
+);
+
+CREATE TABLE public.member_external_grants (
+    user_id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    bucket_id uuid NOT NULL,
+    actions text[] NOT NULL,
+    CONSTRAINT member_external_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text]))
 );
 
 CREATE TABLE public.mokyu_meta (
@@ -1949,6 +1989,38 @@ CREATE VIEW public.token_bucket_access AS
      JOIN public.token_bucket_grants g ON ((g.token_id = t.id)))
      LEFT JOIN public.user_bucket_access a ON (((a.user_id = t.user_id) AND (a.bucket_id = g.bucket_id))));
 
+CREATE TABLE public.token_external_grants (
+    token_id uuid NOT NULL,
+    bucket_id uuid NOT NULL,
+    actions text[] NOT NULL,
+    CONSTRAINT token_external_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text]))
+);
+
+CREATE VIEW public.user_external_access AS
+ SELECT m.user_id,
+    b.id AS bucket_id,
+    ARRAY( SELECT action.action
+           FROM unnest(
+                CASE m.role
+                    WHEN 'reader'::text THEN ARRAY['bucket.list'::text, 'object.read'::text]
+                    ELSE ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text]
+                END) action(action)
+          WHERE ((m.scope = 'all'::text) OR (action.action = ANY (COALESCE(g.actions, ARRAY[]::text[]))))) AS actions
+   FROM ((public.project_members m
+     JOIN public.external_buckets b ON ((b.project_id = m.project_id)))
+     LEFT JOIN public.member_external_grants g ON (((g.user_id = m.user_id) AND (g.bucket_id = b.id))));
+
+CREATE VIEW public.token_external_access AS
+ SELECT t.id AS token_id,
+    g.bucket_id,
+    ARRAY( SELECT action.action
+           FROM unnest(g.actions) action(action)
+          WHERE ((u.role = 'admin'::text) OR (action.action = ANY (COALESCE(a.actions, ARRAY[]::text[]))))) AS actions
+   FROM (((public.api_tokens t
+     JOIN public.web_users u ON ((u.id = t.user_id)))
+     JOIN public.token_external_grants g ON ((g.token_id = t.id)))
+     LEFT JOIN public.user_external_access a ON (((a.user_id = t.user_id) AND (a.bucket_id = g.bucket_id))));
+
 CREATE TABLE public.uploads (
     id uuid DEFAULT uuidv7() NOT NULL,
     bucket_id uuid NOT NULL,
@@ -2067,6 +2139,18 @@ ALTER TABLE ONLY public.bucket_domains
 ALTER TABLE ONLY public.extents
     ADD CONSTRAINT extents_pkey PRIMARY KEY (stream_id, offset_bytes);
 
+ALTER TABLE ONLY public.external_buckets
+    ADD CONSTRAINT external_buckets_id_project_id_key UNIQUE (id, project_id);
+
+ALTER TABLE ONLY public.external_buckets
+    ADD CONSTRAINT external_buckets_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.external_buckets
+    ADD CONSTRAINT external_buckets_project_id_name_key UNIQUE (project_id, name);
+
+ALTER TABLE ONLY public.external_tests
+    ADD CONSTRAINT external_tests_pkey PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.fragments
     ADD CONSTRAINT fragments_pkey PRIMARY KEY (id);
 
@@ -2108,6 +2192,9 @@ ALTER TABLE ONLY public.media_operations
 
 ALTER TABLE ONLY public.media_operations
     ADD CONSTRAINT media_operations_user_id_token_id_client_id_key UNIQUE NULLS NOT DISTINCT (user_id, token_id, client_id);
+
+ALTER TABLE ONLY public.member_external_grants
+    ADD CONSTRAINT member_external_grants_pkey PRIMARY KEY (user_id, bucket_id);
 
 ALTER TABLE ONLY public.member_bucket_grants
     ADD CONSTRAINT member_grants_pkey PRIMARY KEY (user_id, bucket_id);
@@ -2361,6 +2448,9 @@ ALTER TABLE ONLY public.streams
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_pkey PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.token_external_grants
+    ADD CONSTRAINT token_external_grants_pkey PRIMARY KEY (token_id, bucket_id);
+
 ALTER TABLE ONLY public.token_bucket_grants
     ADD CONSTRAINT token_grants_pkey PRIMARY KEY (token_id, bucket_id);
 
@@ -2435,6 +2525,8 @@ CREATE INDEX extents_chunk ON public.extents USING btree (chunk_id) WHERE (chunk
 
 CREATE INDEX extents_fragment ON public.extents USING btree (fragment_id) WHERE (fragment_id IS NOT NULL);
 
+CREATE INDEX external_tests_bucket ON public.external_tests USING btree (external_id, created_at DESC, id DESC);
+
 CREATE INDEX fragments_cleanup ON public.fragments USING btree (created_at, id);
 
 CREATE INDEX fragments_file ON public.fragments USING btree (file_id, file_offset) WHERE (file_id IS NOT NULL);
@@ -2452,6 +2544,10 @@ CREATE UNIQUE INDEX managed_keys_fingerprint ON public.managed_keys USING btree 
 CREATE INDEX media_operations_cleanup ON public.media_operations USING btree (created_at, id);
 
 CREATE INDEX member_bucket_grants_bucket ON public.member_bucket_grants USING btree (bucket_id, user_id);
+
+CREATE INDEX member_external_bucket ON public.member_external_grants USING btree (bucket_id);
+
+CREATE INDEX member_external_membership ON public.member_external_grants USING btree (user_id, project_id);
 
 CREATE INDEX multipart_files_node ON public.multipart_files USING btree (node_id, id);
 
@@ -2611,6 +2707,8 @@ CREATE INDEX tasks_work ON public.tasks USING btree (updated_at, id) WHERE (stat
 
 CREATE INDEX token_bucket_grants_bucket ON public.token_bucket_grants USING btree (bucket_id, token_id);
 
+CREATE INDEX token_external_bucket ON public.token_external_grants USING btree (bucket_id);
+
 CREATE INDEX uploads_bucket_transfers ON public.uploads USING btree (bucket_id, created_at DESC, id);
 
 CREATE INDEX uploads_expiry ON public.uploads USING btree (state, touched_at, id);
@@ -2652,6 +2750,10 @@ CREATE TRIGGER domain_settings_revision AFTER INSERT OR DELETE OR UPDATE ON publ
 CREATE TRIGGER domains_notify AFTER INSERT OR DELETE OR UPDATE ON public.bucket_domains FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_domain();
 
 CREATE TRIGGER encodings_notify AFTER UPDATE OF quarantine_code, quarantine_revision ON public.chunk_encodings FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_health();
+
+CREATE TRIGGER external_member_authorization AFTER INSERT OR DELETE OR UPDATE ON public.member_external_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_member_authorization();
+
+CREATE TRIGGER external_token_authorization AFTER INSERT OR DELETE OR UPDATE ON public.token_external_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_token_authorization();
 
 CREATE TRIGGER grant_authorization AFTER INSERT OR DELETE OR UPDATE ON public.member_bucket_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_member_authorization();
 
@@ -2772,6 +2874,15 @@ ALTER TABLE ONLY public.extents
 ALTER TABLE ONLY public.extents
     ADD CONSTRAINT extents_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.external_buckets
+    ADD CONSTRAINT external_buckets_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id);
+
+ALTER TABLE ONLY public.external_tests
+    ADD CONSTRAINT external_tests_external_id_fkey FOREIGN KEY (external_id) REFERENCES public.external_buckets(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.external_tests
+    ADD CONSTRAINT external_tests_id_fkey FOREIGN KEY (id) REFERENCES public.tasks(id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY public.fragments
     ADD CONSTRAINT fragments_file_id_fkey FOREIGN KEY (file_id) REFERENCES public.multipart_files(id);
 
@@ -2807,6 +2918,12 @@ ALTER TABLE ONLY public.maintenance_previews
 
 ALTER TABLE ONLY public.media_operations
     ADD CONSTRAINT media_operations_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.web_users(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.member_external_grants
+    ADD CONSTRAINT member_external_grants_bucket_id_project_id_fkey FOREIGN KEY (bucket_id, project_id) REFERENCES public.external_buckets(id, project_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.member_external_grants
+    ADD CONSTRAINT member_external_grants_user_id_project_id_fkey FOREIGN KEY (user_id, project_id) REFERENCES public.project_members(user_id, project_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.member_bucket_grants
     ADD CONSTRAINT member_grants_bucket_id_project_id_fkey FOREIGN KEY (bucket_id, project_id) REFERENCES public.buckets(id, project_id) ON DELETE CASCADE;
@@ -3110,6 +3227,12 @@ ALTER TABLE ONLY public.tasks
 
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_target_node_id_fkey FOREIGN KEY (target_node_id) REFERENCES public.nodes(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.token_external_grants
+    ADD CONSTRAINT token_external_grants_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.external_buckets(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.token_external_grants
+    ADD CONSTRAINT token_external_grants_token_id_fkey FOREIGN KEY (token_id) REFERENCES public.api_tokens(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.token_bucket_grants
     ADD CONSTRAINT token_grants_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;

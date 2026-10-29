@@ -131,6 +131,7 @@ impl Resources {
                 return Err(invalid());
             }
             let storage = match wire::GrantType::try_from(grant.r#type) {
+                Ok(wire::GrantType::TaskWork) if grant.storage_id.is_empty() => None,
                 Ok(
                     wire::GrantType::StorageRead
                     | wire::GrantType::StorageWrite

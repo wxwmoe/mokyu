@@ -22,6 +22,35 @@ fn grant() -> wire::Grant {
 }
 
 #[test]
+fn external_work_grants_keep_run_and_release_guards_without_internal_storage() {
+    let resources = Arc::new(Resources::default());
+    let run = run();
+    let mut value = grant();
+    value.storage_id.clear();
+    assert!(
+        resources
+            .adopt(&run, &[value.clone()], Instant::now())
+            .is_err()
+    );
+    value.r#type = wire::GrantType::TaskWork as i32;
+    let held = resources
+        .adopt(&run, &[value.clone()], Instant::now())
+        .unwrap();
+    held[0].check().unwrap();
+    drop(held);
+    let batch = resources.batch(&run);
+    assert_eq!(batch.release.len(), 1);
+    acknowledge(&resources, &run, &batch);
+    value.id = Uuid::new_v4().to_string();
+    let held = resources.adopt(&run, &[value], Instant::now()).unwrap();
+    run.invalidate();
+    assert!(held[0].check().is_err());
+    drop(held);
+    assert!(resources.batch(&run).release.is_empty());
+    assert!(resources.entries.lock().unwrap().is_empty());
+}
+
+#[test]
 fn resource_deadlines_follow_remaining_ttl_and_release_immediately() {
     let resources = Arc::new(Resources::default());
     let run = run();

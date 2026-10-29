@@ -77,6 +77,7 @@ pub(crate) struct Token {
     pub revoked_at: Option<DateTime<Utc>>,
     #[schema(value_type=Vec<BucketGrant>)]
     pub grants: Vec<BucketGrant>,
+    pub external_grants: Vec<BucketGrant>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -91,6 +92,8 @@ pub(crate) struct TokenInput {
     pub keep_expiry: bool,
     #[serde(default)]
     pub grants: Vec<BucketGrant>,
+    #[serde(default)]
+    pub external_grants: Vec<BucketGrant>,
 }
 
 #[derive(Serialize, ToSchema)]

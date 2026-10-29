@@ -8,6 +8,7 @@ pub(crate) mod catalog;
 pub(crate) mod cli;
 pub(crate) mod cluster;
 mod contract;
+mod external;
 pub(crate) mod insights;
 pub(crate) mod keys;
 mod maintenance;

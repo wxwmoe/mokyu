@@ -1,6 +1,8 @@
 pub(crate) const USER_LOCK: i64 = 734922709851002;
 
 mod connection;
+mod external_queries;
+mod external_transactions;
 mod migration;
 mod queries;
 mod read_sources;
@@ -185,6 +187,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         runtime_settings: backend.clone(),
         managed_keys: backend.clone(),
         storage_records: backend.clone(),
+        external_buckets: backend.clone(),
         chunks: backend,
     }
 }

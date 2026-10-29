@@ -73,6 +73,7 @@ message WorkReply {
   optional bytes plan_json = 2;
   repeated Material materials = 3;
   repeated Grant grants = 4;
+  optional bytes external_connection_json = 5;
 }
 
 service NodeReads {
