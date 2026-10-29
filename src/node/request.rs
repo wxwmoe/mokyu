@@ -91,6 +91,7 @@ impl Request {
         bucket: &str,
         keys: Vec<String>,
         public: Option<bool>,
+        if_match: Option<s3s::dto::ETagCondition>,
     ) -> Result<()> {
         let credential = self.authorize(access, bucket)?;
         let resolved: crate::app::Bucket = self.material(
@@ -114,6 +115,12 @@ impl Request {
                 bucket: bucket.to_owned(),
                 keys: keys.clone(),
                 public_read: public,
+                if_match: if_match
+                    .as_ref()
+                    .map(|value| -> Result<String> {
+                        Ok(value.to_http_header()?.to_str()?.to_owned())
+                    })
+                    .transpose()?,
             })
             .await?;
         self.check()?;
@@ -121,6 +128,9 @@ impl Request {
             wire::ObjectChangeOutcome::Applied => Ok(()),
             wire::ObjectChangeOutcome::ObjectChangeNoSuchKey => {
                 Err(s3s::s3_error!(NoSuchKey).into())
+            }
+            wire::ObjectChangeOutcome::ObjectChangePreconditionFailed => {
+                Err(s3s::s3_error!(PreconditionFailed).into())
             }
             _ => anyhow::bail!("invalid object change reply"),
         }

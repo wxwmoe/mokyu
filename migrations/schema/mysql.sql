@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0044.
+-- Generated from the complete mysql migration chain through 0045.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -425,7 +425,7 @@ CREATE TABLE `member_external_grants` (
   KEY `member_external_bucket` (`bucket_id`,`project_id`),
   CONSTRAINT `member_external_bucket` FOREIGN KEY (`bucket_id`, `project_id`) REFERENCES `external_buckets` (`id`, `project_id`) ON DELETE CASCADE,
   CONSTRAINT `member_external_member` FOREIGN KEY (`user_id`, `project_id`) REFERENCES `project_members` (`user_id`, `project_id`) ON DELETE CASCADE,
-  CONSTRAINT `member_external_actions` CHECK ((`actions` <= 15))
+  CONSTRAINT `member_external_actions` CHECK ((`actions` <= 31))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `mokyu_meta` (
@@ -1140,7 +1140,7 @@ CREATE TABLE `token_external_grants` (
   KEY `token_external_bucket` (`bucket_id`),
   CONSTRAINT `token_external_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `external_buckets` (`id`) ON DELETE CASCADE,
   CONSTRAINT `token_external_token` FOREIGN KEY (`token_id`) REFERENCES `api_tokens` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `token_external_actions` CHECK ((`actions` <= 15))
+  CONSTRAINT `token_external_actions` CHECK ((`actions` <= 31))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `transfer_items` (
@@ -1313,11 +1313,11 @@ SET foreign_key_checks=@mokyu_schema_foreign_keys;
 
 CREATE SQL SECURITY DEFINER VIEW `user_bucket_access` AS select `m`.`user_id` AS `user_id`,`b`.`id` AS `bucket_id`,((case `m`.`role` when 'reader' then 67 when 'writer' then 95 when 'maintainer' then 127 else 0 end) & if((`m`.`scope` = 'all'),127,coalesce(`g`.`actions`,0))) AS `actions` from ((`project_members` `m` join `buckets` `b` on((`b`.`project_id` = `m`.`project_id`))) left join `member_bucket_grants` `g` on(((`g`.`user_id` = `m`.`user_id`) and (`g`.`bucket_id` = `b`.`id`))));
 
-CREATE SQL SECURITY DEFINER VIEW `user_external_access` AS select `m`.`user_id` AS `user_id`,`b`.`id` AS `bucket_id`,((case `m`.`role` when 'reader' then 3 when 'writer' then 15 when 'maintainer' then 15 else 0 end) & if((`m`.`scope` = 'all'),15,coalesce(`g`.`actions`,0))) AS `actions` from ((`project_members` `m` join `external_buckets` `b` on((`b`.`project_id` = `m`.`project_id`))) left join `member_external_grants` `g` on(((`g`.`user_id` = `m`.`user_id`) and (`g`.`bucket_id` = `b`.`id`))));
+CREATE SQL SECURITY DEFINER VIEW `user_external_access` AS select `m`.`user_id` AS `user_id`,`b`.`id` AS `bucket_id`,((case `m`.`role` when 'reader' then 3 when 'writer' then 31 when 'maintainer' then 31 else 0 end) & if((`m`.`scope` = 'all'),31,coalesce(`g`.`actions`,0))) AS `actions` from ((`project_members` `m` join `external_buckets` `b` on((`b`.`project_id` = `m`.`project_id`))) left join `member_external_grants` `g` on(((`g`.`user_id` = `m`.`user_id`) and (`g`.`bucket_id` = `b`.`id`))));
 
 CREATE SQL SECURITY DEFINER VIEW `token_bucket_access` AS select `t`.`id` AS `token_id`,`g`.`bucket_id` AS `bucket_id`,(`g`.`actions` & if((`u`.`role` = 'admin'),127,coalesce(`a`.`actions`,0))) AS `actions` from (((`api_tokens` `t` join `web_users` `u` on((`u`.`id` = `t`.`user_id`))) join `token_bucket_grants` `g` on((`g`.`token_id` = `t`.`id`))) left join `user_bucket_access` `a` on(((`a`.`user_id` = `t`.`user_id`) and (`a`.`bucket_id` = `g`.`bucket_id`))));
 
-CREATE SQL SECURITY DEFINER VIEW `token_external_access` AS select `t`.`id` AS `token_id`,`g`.`bucket_id` AS `bucket_id`,(`g`.`actions` & if((`u`.`role` = 'admin'),15,coalesce(`a`.`actions`,0))) AS `actions` from (((`api_tokens` `t` join `web_users` `u` on((`u`.`id` = `t`.`user_id`))) join `token_external_grants` `g` on((`g`.`token_id` = `t`.`id`))) left join `user_external_access` `a` on(((`a`.`user_id` = `t`.`user_id`) and (`a`.`bucket_id` = `g`.`bucket_id`))));
+CREATE SQL SECURITY DEFINER VIEW `token_external_access` AS select `t`.`id` AS `token_id`,`g`.`bucket_id` AS `bucket_id`,(`g`.`actions` & if((`u`.`role` = 'admin'),31,coalesce(`a`.`actions`,0))) AS `actions` from (((`api_tokens` `t` join `web_users` `u` on((`u`.`id` = `t`.`user_id`))) join `token_external_grants` `g` on((`g`.`token_id` = `t`.`id`))) left join `user_external_access` `a` on(((`a`.`user_id` = `t`.`user_id`) and (`a`.`bucket_id` = `g`.`bucket_id`))));
 
 CREATE TRIGGER `encodings_owner_insert` BEFORE INSERT ON `chunk_encodings` FOR EACH ROW BEGIN
     IF NEW.owner_task IS NOT NULL AND NEW.owner_stream IS NOT NULL THEN

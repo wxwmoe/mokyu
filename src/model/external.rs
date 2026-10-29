@@ -9,7 +9,13 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-pub(crate) const ACTIONS: [Action; 4] = [Action::List, Action::Read, Action::Write, Action::Delete];
+pub(crate) const ACTIONS: [Action; 5] = [
+    Action::List,
+    Action::Read,
+    Action::Write,
+    Action::Delete,
+    Action::Acl,
+];
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ExternalBucket {
@@ -103,7 +109,7 @@ pub(crate) fn validate_grants(grants: &[super::administration::BucketGrant]) -> 
             .all(|grant| grant.actions.iter().all(|action| ACTIONS.contains(action))),
         s3s::s3_error!(
             InvalidArgument,
-            "external grants only allow listing, reading, writing and deletion"
+            "external grants only allow listing, reading, writing, deletion and object permissions"
         )
     );
     Ok(())

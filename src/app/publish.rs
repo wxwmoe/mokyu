@@ -88,7 +88,8 @@ impl App {
         bucket: Uuid,
         key: &str,
     ) -> Result<()> {
-        self.change_object(principal, bucket, key, None, None).await
+        self.change_object(principal, bucket, key, None, None, None)
+            .await
     }
     pub async fn change_object(
         &self,
@@ -97,6 +98,7 @@ impl App {
         key: &str,
         expected: Option<Id>,
         public: Option<bool>,
+        if_match: Option<s3s::dto::ETagCondition>,
     ) -> Result<()> {
         self.writable()?;
         #[cfg(feature = "fault-injection")]
@@ -112,6 +114,7 @@ impl App {
                 key: key.into(),
                 expected,
                 public,
+                if_match,
             })
             .await?
         {

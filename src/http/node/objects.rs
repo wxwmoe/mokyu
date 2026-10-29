@@ -28,6 +28,7 @@ impl Gateway {
                 &i.bucket,
                 vec![i.key],
                 None,
+                i.if_match,
             )
             .await?;
         Ok(S3Response::new(DeleteObjectOutput::default()))
@@ -70,6 +71,7 @@ impl Gateway {
                 &i.bucket,
                 keys.clone(),
                 None,
+                None,
             )
             .await?;
         let deleted = if i.delete.quiet == Some(true) {
@@ -111,6 +113,7 @@ impl Gateway {
                 &i.bucket,
                 vec![i.key],
                 Some(public),
+                None,
             )
             .await?;
         Ok(S3Response::new(PutObjectAclOutput::default()))

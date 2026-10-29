@@ -22,6 +22,7 @@ pub(super) fn change(input: wire::ChangeObjectsRequest) -> Result<node_object::R
             bucket: input.bucket,
             keys: input.keys,
             public: input.public_read,
+            if_match: input.if_match,
         },
     };
     value.validate().map_err(|_| invalid())?;
@@ -33,6 +34,9 @@ pub(super) fn reply(outcome: node_object::Outcome) -> wire::ChangeObjectsReply {
         outcome: match outcome {
             node_object::Outcome::Applied => wire::ObjectChangeOutcome::Applied,
             node_object::Outcome::NoSuchKey => wire::ObjectChangeOutcome::ObjectChangeNoSuchKey,
+            node_object::Outcome::PreconditionFailed => {
+                wire::ObjectChangeOutcome::ObjectChangePreconditionFailed
+            }
         } as i32,
     }
 }

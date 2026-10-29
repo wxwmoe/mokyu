@@ -1050,7 +1050,7 @@ pub(super) async fn apply_object_change(
 
 pub(super) async fn change_object(pool: &PgPool, input: ObjectChange) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    Permit::for_action(
+    let mut permit = Permit::for_action(
         input.principal,
         input.bucket,
         if input.public.is_some() {
@@ -1058,9 +1058,11 @@ pub(super) async fn change_object(pool: &PgPool, input: ObjectChange) -> Result<
         } else {
             crate::authorization::Action::Delete
         },
-    )
-    .lock(&mut tx)
-    .await?;
+    );
+    if matches!(input.if_match, Some(s3s::dto::ETagCondition::ETag(_))) {
+        permit.add(input.bucket, Action::Read);
+    }
+    permit.lock(&mut tx).await?;
     lock_object_bucket(&mut tx, input.bucket).await?;
     let changed = change_object_in(
         &mut tx,
@@ -1068,6 +1070,7 @@ pub(super) async fn change_object(pool: &PgPool, input: ObjectChange) -> Result<
         &input.key,
         input.expected,
         input.public,
+        input.if_match.as_ref(),
     )
     .await?;
     tx.commit().await?;
@@ -1091,6 +1094,7 @@ async fn change_object_in(
     object_key: &str,
     expected: Option<Id>,
     public: Option<bool>,
+    if_match: Option<&s3s::dto::ETagCondition>,
 ) -> Result<bool> {
     // Lock an absent key too, then read again after any concurrent insertion commits.
     queries::ensure_object(bucket, object_key)
@@ -1106,6 +1110,13 @@ async fn change_object_in(
             "object changed; refresh before retrying"
         )
         .into());
+    }
+    if let Some(condition) = if_match {
+        let etag = match old {
+            Some(id) => Some(queries::stream_etag(id).fetch_one(&mut **tx).await?),
+            None => None,
+        };
+        check_write_conditions(etag.as_deref(), Some(condition), None)?;
     }
     if let Some(public) = public {
         let id = old.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
@@ -1170,7 +1181,7 @@ pub(super) async fn change_node_objects(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
-    Permit::for_action(
+    let mut permit = Permit::for_action(
         Principal::Service {
             access_key: change.access.clone(),
             revision: change.credential_revision,
@@ -1181,9 +1192,16 @@ pub(super) async fn change_node_objects(
         } else {
             Action::Delete
         },
-    )
-    .lock(&mut tx)
-    .await?;
+    );
+    let if_match = change
+        .if_match
+        .as_ref()
+        .map(|value| s3s::dto::ETagCondition::parse_http_header(value.as_bytes()))
+        .transpose()?;
+    if matches!(if_match, Some(s3s::dto::ETagCondition::ETag(_))) {
+        permit.add(bucket.id, Action::Read);
+    }
+    permit.lock(&mut tx).await?;
     lock_object_bucket(&mut tx, bucket.id).await?;
     // All batches acquire object locks in the same order, including duplicate keys.
     let mut keys = change.keys.clone();
@@ -1191,7 +1209,16 @@ pub(super) async fn change_node_objects(
     keys.dedup();
     let mut outcome = Outcome::Applied;
     for object_key in keys {
-        match change_object_in(&mut tx, bucket.id, &object_key, None, change.public).await {
+        match change_object_in(
+            &mut tx,
+            bucket.id,
+            &object_key,
+            None,
+            change.public,
+            if_match.as_ref(),
+        )
+        .await
+        {
             Ok(_) => {}
             Err(error)
                 if error
@@ -1199,6 +1226,13 @@ pub(super) async fn change_node_objects(
                     .is_some_and(|error| error.code() == &s3s::S3ErrorCode::NoSuchKey) =>
             {
                 outcome = Outcome::NoSuchKey;
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<s3s::S3Error>()
+                    .is_some_and(|error| error.code() == &s3s::S3ErrorCode::PreconditionFailed) =>
+            {
+                outcome = Outcome::PreconditionFailed;
             }
             Err(error) => return Err(error),
         }

@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0090.
+-- Generated from the complete postgres migration chain through 0092.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -958,7 +958,7 @@ CREATE TABLE public.member_external_grants (
     project_id uuid NOT NULL,
     bucket_id uuid NOT NULL,
     actions text[] NOT NULL,
-    CONSTRAINT member_external_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text]))
+    CONSTRAINT member_external_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text]))
 );
 
 CREATE TABLE public.mokyu_meta (
@@ -1066,7 +1066,7 @@ CREATE TABLE public.node_object_changes (
     request_hash bytea NOT NULL,
     outcome jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT node_object_changes_outcome_check CHECK ((outcome = ANY (ARRAY['"applied"'::jsonb, '"no_such_key"'::jsonb]))),
+    CONSTRAINT node_object_changes_outcome_check CHECK ((outcome = ANY (ARRAY['"applied"'::jsonb, '"no_such_key"'::jsonb, '"precondition_failed"'::jsonb]))),
     CONSTRAINT node_object_changes_request_hash_check CHECK ((octet_length(request_hash) = 32))
 );
 
@@ -1993,7 +1993,7 @@ CREATE TABLE public.token_external_grants (
     token_id uuid NOT NULL,
     bucket_id uuid NOT NULL,
     actions text[] NOT NULL,
-    CONSTRAINT token_external_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text]))
+    CONSTRAINT token_external_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text]))
 );
 
 CREATE VIEW public.user_external_access AS
@@ -2003,7 +2003,7 @@ CREATE VIEW public.user_external_access AS
            FROM unnest(
                 CASE m.role
                     WHEN 'reader'::text THEN ARRAY['bucket.list'::text, 'object.read'::text]
-                    ELSE ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text]
+                    ELSE ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text]
                 END) action(action)
           WHERE ((m.scope = 'all'::text) OR (action.action = ANY (COALESCE(g.actions, ARRAY[]::text[]))))) AS actions
    FROM ((public.project_members m

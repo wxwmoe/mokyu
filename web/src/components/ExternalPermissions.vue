@@ -11,7 +11,7 @@ type Grant = components['schemas']['BucketGrant']
 type Action = components['schemas']['Action']
 const props = defineProps<{ project?: string; actions: Action[]; disabled?: boolean; summary?: boolean }>()
 const grants = defineModel<Grant[]>({ required: true })
-const allowed: Action[] = ['bucket.list', 'object.read', 'object.write', 'object.delete']
+const allowed: Action[] = ['bucket.list', 'object.read', 'object.write', 'object.delete', 'object.acl']
 const actions = computed(() => props.actions.filter(action => allowed.includes(action)))
 const query = useInfiniteQuery({
   queryKey: computed(() => ['external-buckets', 'permissions', props.project || '']),

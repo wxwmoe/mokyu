@@ -115,14 +115,15 @@ test('grant external buckets to members and API tokens through the existing perm
     const editor = page.getByRole('dialog', { name: en.createToken, exact: true })
     await editor.getByRole('textbox', { name: en.keyLabel, exact: true }).fill('External token ' + suffix)
     const scope = editor.getByRole('group', { name, exact: true })
-    await expect(scope.getByRole('checkbox')).toHaveCount(4)
+    await expect(scope.getByRole('checkbox')).toHaveCount(5)
     await scope.getByRole('checkbox', { name: en['action_bucket.list'], exact: true }).check()
+    await scope.getByRole('checkbox', { name: en['action_object.acl'], exact: true }).check()
     const created = page.waitForResponse(response => response.url().endsWith('/api/v1/api-tokens') && response.request().method() === 'POST')
     await editor.getByRole('button', { name: en.createToken, exact: true }).click()
     const reply = await created
     expect(reply.status()).toBe(201)
     const result = await reply.json(); token = result.token.id
-    expect(result.token.external_grants).toEqual([{ bucket_id: external, actions: ['bucket.list'] }])
+    expect(result.token.external_grants).toEqual([{ bucket_id: external, actions: ['bucket.list', 'object.acl'] }])
     const save = page.getByRole('dialog', { name: en.saveSecret, exact: true })
     await save.getByRole('checkbox', { name: en.secretSaved, exact: true }).check()
     await save.getByRole('button', { name: en.done, exact: true }).click()
