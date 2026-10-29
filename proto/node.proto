@@ -105,8 +105,8 @@ service NodeWrites {
   rpc WriteStatus(WriteRequest) returns (WriteReply);
   rpc AbortWrite(WriteRequest) returns (WriteReply);
   rpc PrepareChunks(PrepareChunksRequest) returns (PreparedChunks);
-  rpc CommitChunks(CommitChunksRequest) returns (ChunkCommitReply);
-  rpc CopyChunks(CopyChunksRequest) returns (ChunkCommitReply);
+  rpc CommitChunks(CommitChunksRequest) returns (WriteBatchReply);
+  rpc CopyReferences(CopyReferencesRequest) returns (WriteBatchReply);
   rpc PrepareRaw(PrepareRawRequest) returns (PreparedRaw);
   rpc PrepareLocalPart(PrepareLocalPartRequest) returns (WriteReply);
   rpc CommitRaw(CommitRawRequest) returns (PreparedRaw);
@@ -361,12 +361,12 @@ message CommitChunksRequest {
   optional bytes packed_json = 5;
 }
 
-message ChunkCommitReply {
+message WriteBatchReply {
   uint64 batch_id = 1;
   uint64 end = 2;
 }
 
-message CopyChunksRequest {
+message CopyReferencesRequest {
   Run run = 1;
   string operation_id = 2;
   uint64 batch_id = 3;

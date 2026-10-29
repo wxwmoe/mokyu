@@ -508,8 +508,13 @@ impl Reader {
         node: &NodeContext,
         prepared: &Arc<Prepared>,
         source: &crate::model::raw::RawSource,
+        verify_backend: bool,
     ) -> Result<(RawFile, Io)> {
         source.validate()?;
+        ensure!(
+            !verify_backend || !source.pending_upload,
+            codec::IntegrityError::RawMetadata
+        );
         let mut io = self.io(prepared, None).await?;
         if source.pending_upload {
             let path =
@@ -531,13 +536,15 @@ impl Reader {
         }
         ensure!(source.medium == "shared_s3", "invalid node raw medium");
         let backend = prepared.backend(source.storage_id)?;
-        let verify = prepared.verify || backend.profile.read_integrity == "inline";
+        let verify =
+            verify_backend || prepared.verify || backend.profile.read_integrity == "inline";
         let lock = self.files.raw_lock(source, &backend.profile);
         let _miss = match &lock {
             Some(lock) => Some(lock.lock().await),
             None => None,
         };
-        if lock.is_some()
+        if !verify_backend
+            && lock.is_some()
             && let Some(mut file) = self.files.raw(source).await
         {
             let checked = if verify {
@@ -620,6 +627,69 @@ struct Prefetch(tokio::task::JoinHandle<Result<Prepared>>);
 impl Drop for Prefetch {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+impl Reads {
+    pub(super) async fn verify_copy_raw(
+        &self,
+        prepared: Prepared,
+        object: &read::Object,
+    ) -> Result<()> {
+        ensure!(
+            object.payload == "raw" && object.size > 0,
+            "invalid raw copy source"
+        );
+        let lease = prepared
+            .grants
+            .iter()
+            .find(|grant| grant.reference.r#type == wire::GrantType::ReadProtection as i32)
+            .context("copy protection missing")?
+            .reference
+            .id
+            .clone();
+        let end = object.size as u64;
+        let mut position = 0;
+        let mut current = self
+            .window(
+                Arc::new(prepared),
+                wire::ReadCursor {
+                    lease_id: lease,
+                    stream_id: object.id.to_string(),
+                    payload_revision: object.revision as u64,
+                    offset: 0,
+                    end,
+                },
+                None,
+            )
+            .await?;
+        loop {
+            let held = Arc::new(current);
+            let plan = mapping(&held, object.id, object.revision, position, end)?;
+            let mut verified = std::collections::HashSet::new();
+            for (index, segment) in plan.segments.iter().enumerate() {
+                let read::Source::Raw { source } = &segment.source else {
+                    anyhow::bail!("copy source is not raw");
+                };
+                if verified.insert(source.id) {
+                    let result = held
+                        .guard(&self.node, self.reader.raw(&self.node, &held, source, true))
+                        .await;
+                    if let Err(error) = &result {
+                        self.report_error(held.clone(), index, &segment.source, error)
+                            .await;
+                    }
+                    drop(result?);
+                }
+            }
+            position = plan.end as u64;
+            let Some(cursor) = held.reply.next.clone() else {
+                break;
+            };
+            current = self.window(held, cursor, None).await?;
+        }
+        ensure!(position == end, "incomplete raw copy verification");
+        Ok(())
     }
 }
 
@@ -739,7 +809,7 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
             for (index, segment) in value.segments.into_iter().enumerate() {
                 if let read::Source::Raw { source } = &segment.source {
                     loaded = None;
-                    let result = current.guard(&reads.node, reads.reader.raw(&reads.node, &current, source)).await;
+                    let result = current.guard(&reads.node, reads.reader.raw(&reads.node, &current, source, false)).await;
                     if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
                     let (mut file, _io) = result?;
                     current.guard(&reads.node, async { file.seek(std::io::SeekFrom::Start(segment.source_offset as u64)).await?; Ok(()) }).await?;

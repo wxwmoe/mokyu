@@ -10,17 +10,20 @@ from tests.storage.source_quarantine import Fixture, rejected, wait
 
 
 def main():
+    origin = Fixture()
     target = Fixture()
     assert target.backend, 'requires a disposable S3 backend'
     target.faults.mkdir(parents=True, exist_ok=True)
     database = Database()
-    profile = target.cli('storage', 'profile', 'show', target.name)
-    profile.update(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False)
-    target.cli('storage', 'profile', 'set', target.name, '-', value=profile)
+    for fixture in (origin, target):
+        profile = fixture.cli('storage', 'profile', 'show', fixture.name)
+        profile.update(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False)
+        fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+    target.cli('cred', 'grant', target.credentials['access_key'], origin.name, '--read-only')
     data = bytes(range(256)) * (8 * 1024 * 1024 // 256) + b'end'
     previous = b'previous durable target'
-    target.put('source', data)
-    source = target.keys()[0]
+    origin.put('source', data)
+    source = origin.keys()[0]
     target.put('copy', previous)
 
     def mutate_during_replay(request, read, write):
@@ -41,12 +44,12 @@ def main():
 
     def copy():
         return target.client.copy_object(Bucket=target.name, Key='copy',
-                                        CopySource={'Bucket': target.name, 'Key': 'source'})
+                                        CopySource={'Bucket': origin.name, 'Key': 'source'})
 
     def write_backend(value):
         def restored():
             try:
-                target.bytes(source, value)
+                origin.bytes(source, value)
             except ClientError as error:
                 if error.response['Error']['Code'] == 'SlowDown':
                     return False
@@ -55,7 +58,7 @@ def main():
         # The cancelled upstream request may still be releasing its admission slot.
         wait(restored, 'backend did not accept the fixture write', seconds=10)
 
-    mutate_during_replay(copy, lambda: target.bytes(source), write_backend)
+    mutate_during_replay(copy, lambda: origin.bytes(source), write_backend)
     target.read('copy', previous)
     copy()
     target.read('copy', data)

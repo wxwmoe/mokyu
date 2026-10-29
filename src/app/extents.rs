@@ -28,6 +28,34 @@ impl App {
             .await?
             .context("destination stream has no store")?;
         let raw_revision = self.storage.raw_policy(destination_target)?;
+        if source_target == destination_target
+            && source.payload_type == "raw"
+            && let Some(revision) = raw_revision
+            && self.raw.copyable(source.id, destination_target).await?
+        {
+            let mut offset = 0;
+            loop {
+                self.renew_write_lease(destination).await?;
+                let mut rows = self.raw.page(source.id, offset, source.size).await?;
+                rows.retain(|row| row.offset_bytes >= offset);
+                let (start, end, sources) =
+                    crate::model::raw::copy_window(destination_target, &rows)?;
+                ensure!(
+                    start == offset && end <= source.size && (end > offset || source.size == 0),
+                    "invalid raw copy mapping"
+                );
+                self.verify_raw_copy(destination, &rows, &sources).await?;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("raw-copy-found").await;
+                self.raw
+                    .copy_references(destination, source.id, destination_target, revision, &rows)
+                    .await?;
+                if end == source.size {
+                    return Ok(());
+                }
+                offset = end;
+            }
+        }
         if source.payload_type == "raw" || raw_revision.is_some() {
             return self
                 .copy_payload(destination, destination_target, raw_revision, source)
@@ -73,6 +101,40 @@ impl App {
             offset = end;
         }
         Ok(())
+    }
+
+    async fn verify_raw_copy(
+        &self,
+        destination: Id,
+        rows: &[crate::model::raw::RawRange],
+        sources: &[Id],
+    ) -> Result<()> {
+        let verify = async {
+            for id in sources {
+                let row = rows
+                    .iter()
+                    .find(|row| row.source.id == *id)
+                    .context("raw copy source missing")?;
+                // A cached body cannot establish that the shared physical source is intact.
+                drop(self.storage.raw_reader_uncached(&row.source, true).await?);
+            }
+            Ok(())
+        };
+        if self.role == "single" {
+            return verify.await;
+        }
+        let period =
+            std::time::Duration::from_secs((self.write_lease_seconds()? / 3).max(1) as u64);
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        tokio::select! {
+            result = verify => result,
+            result = async {
+                loop {
+                    tick.tick().await;
+                    self.renew_write_lease(destination).await?;
+                }
+            } => result,
+        }
     }
 
     pub(crate) fn payload_bytes<'a>(

@@ -36,7 +36,8 @@ def main():
                                         '--bucket', fixture.name, '--key', 'original'))
     issues = fixture.api('/api/v1/tasks/' + task['id'] + '/issues')['items']
     assert any(item['code'] == 'hash_mismatch' and item['detail']['source'] == 'raw'
-               and item['detail']['location_id'] == source for item in issues), issues
+               and item['location_id'] == source
+               and item['detail']['location_id'] == scope['id'] for item in issues), issues
     fixture.finished(fixture.execute('quarantine', fixture.preview('quarantine', scope)))
     listed = fixture.cli('integrity', 'quarantines', '--storage', fixture.store['id'], '--source', 'raw')
     assert len(listed['items']) == 1 and listed['items'][0]['id'] == scope['id'], listed
@@ -79,12 +80,18 @@ def main():
         return usage if usage and int(usage['logical_bytes']) == expected else None
 
     usage = wait(usage_ready, 'raw usage summary did not refresh', seconds=90)
-    assert Decimal(usage['unique_bytes']) == expected and Decimal(usage['encoded_bytes']) == expected, usage
-    assert all(Decimal(usage[name]) == 0 for name in ('local_savings', 'shared_savings', 'encoding_savings')), usage
-    inventory = fixture.cli('status')['storage']
-    assert inventory['last_error'] is None, inventory
-    assert inventory['snapshot']['live']['raw_objects'] >= 3, inventory
-    print('PASS raw usage and inventory report physical bytes without deduplication or encoding savings', flush=True)
+    physical_bytes = len(data) + len(old)
+    assert Decimal(usage['unique_bytes']) == physical_bytes and Decimal(usage['encoded_bytes']) == physical_bytes, usage
+    assert Decimal(usage['local_savings']) == len(data), usage
+    assert all(Decimal(usage[name]) == 0 for name in ('shared_savings', 'encoding_savings')), usage
+    def inventory_ready():
+        inventory = fixture.cli('status')['storage']
+        assert inventory['last_error'] is None, inventory
+        snapshot = inventory['snapshot']
+        return inventory if snapshot and snapshot['live']['raw_objects'] >= 2 else None
+
+    wait(inventory_ready, 'raw physical inventory did not refresh', seconds=30)
+    print('PASS raw usage distinguishes shared physical payloads from logical object bytes', flush=True)
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile.update(upload_retention='1s', unreferenced_grace='1s', min_storage_duration='0s')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
@@ -101,13 +108,17 @@ def main():
             marker.unlink(missing_ok=True)
         read.result(timeout=30)
     fixture.read('original', b'new version')
+    fixture.read('recovered', data)
+    fixture.finished(fixture.cli('maintenance', 'run', 'gc'))
+    assert Path(physical).exists(), 'GC removed a source shared by a copy'
+    fixture.client.delete_object(Bucket=fixture.name, Key='recovered')
 
     def reclaimed():
         fixture.finished(fixture.cli('maintenance', 'run', 'gc'))
         return not Path(physical).exists()
 
     wait(reclaimed, 'raw source was not collected after its reader finished', seconds=45)
-    print('PASS overwrite and GC retain a pinned raw reader and reclaim it after completion', flush=True)
+    print('PASS overwrite and GC retain raw readers and copies until their final reference is released', flush=True)
 
 
 if __name__ == '__main__':

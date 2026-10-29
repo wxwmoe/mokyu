@@ -6981,6 +6981,67 @@ pub(super) async fn finish_repair(
     Ok(result)
 }
 
+pub(super) async fn copy_raw_references(
+    pool: &sqlx::MySqlPool,
+    destination: Id,
+    source: Id,
+    storage: Uuid,
+    revision: i64,
+    rows: &[crate::model::raw::RawRange],
+) -> Result<()> {
+    let (offset, end, sources) = crate::model::raw::copy_window(storage, rows)?;
+    let mut tx = pool.begin().await?;
+    writing_stream(&mut tx, destination).await?;
+    let (storage_type, unencoded, current, cdc, _) = queries::raw_target(destination, storage)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(crate::model::Error::OperationAborted)?;
+    ensure!(
+        matches!(storage_type.as_str(), "local" | "s3") && unencoded && !cdc && current == revision,
+        crate::model::Error::OperationAborted
+    );
+    if offset == 0 {
+        ensure!(
+            queries::raw_prepare(destination)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
+    }
+    ensure!(
+        queries::raw_copy_position(destination, offset)
+            .fetch_optional(&mut *tx)
+            .await?
+            == Some(destination),
+        crate::model::Error::OperationAborted
+    );
+    let locked: Vec<Id> = queries::raw_copy_sources(storage, &sources)
+        .build_query_scalar()
+        .fetch_all(&mut *tx)
+        .await?;
+    ensure!(locked == sources, crate::model::Error::SourceUnavailable);
+    ensure!(
+        queries::raw_copy_ranges(destination, source, offset, end, &sources)
+            .build()
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == rows.len() as u64,
+        crate::model::Error::OperationAborted
+    );
+    queries::raw_copy_reference(&sources)
+        .build()
+        .execute(&mut *tx)
+        .await?;
+    queries::resize_writing_stream(destination, end)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub(super) async fn begin_raw(
     pool: &sqlx::MySqlPool,
     stream: Id,

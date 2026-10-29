@@ -7794,13 +7794,13 @@ impl ClusterStore for Backend {
             .await
             .map_err(normalize_error)
     }
-    async fn copy_chunks(
+    async fn copy_write_references(
         &self,
         node: &crate::cluster::NodeState,
         key: &crate::content::codec::Key,
         input: crate::model::node_write::CopyBatch,
     ) -> Result<i64> {
-        transactions::copy_node_chunks(&self.pool, node, key, input)
+        transactions::copy_node_references(&self.pool, node, key, input)
             .await
             .map_err(normalize_error)
     }
@@ -9477,6 +9477,83 @@ pub(super) fn source_audit<'a>(
 }
 
 use crate::model::raw::{RawProcessing, RawRange, RawSource, RawStore, RawUpload};
+const RAW_COPY_READY: &str = "r.state='ready' AND r.quarantine_code IS NULL AND r.durability='durable' AND NOT r.pending_upload AND r.medium IN ('local','shared_s3') AND r.size>=0 AND length(r.digest)=16";
+
+pub(super) fn raw_page(stream: Id, start: i64, end: i64) -> Rows<'static, RawRange> {
+    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=$1 AND e.offset_bytes+e.length>=$2 AND e.offset_bytes<=$3 ORDER BY e.offset_bytes LIMIT 128")
+            .bind(stream).bind(start).bind(end)
+}
+
+pub(super) fn raw_copyable(stream: Id, storage: Uuid) -> sqlx::QueryBuilder<Postgres> {
+    let mut q = sqlx::QueryBuilder::new("SELECT EXISTS(SELECT 1 FROM raw_ranges WHERE stream_id=");
+    q.push_bind(stream).push(") AND NOT EXISTS(SELECT 1 FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=");
+    q.push_bind(stream)
+        .push(" AND NOT (r.storage_id=")
+        .push_bind(storage)
+        .push(" AND ")
+        .push(RAW_COPY_READY)
+        .push("))");
+    q
+}
+
+pub(super) fn raw_copy_sources(storage: Uuid, sources: &[Id]) -> sqlx::QueryBuilder<Postgres> {
+    let mut q = sqlx::QueryBuilder::new("SELECT r.id FROM raw_sources r WHERE r.storage_id=");
+    q.push_bind(storage)
+        .push(" AND ")
+        .push(RAW_COPY_READY)
+        .push(" AND r.id IN (");
+    let mut list = q.separated(",");
+    for id in sources {
+        list.push_bind(*id);
+    }
+    q.push(") ORDER BY r.id FOR UPDATE");
+    q
+}
+
+pub(super) fn raw_copy_position(stream: Id, offset: i64) -> Scalar<'static, Id> {
+    sqlx::query_scalar(
+        "SELECT id FROM streams WHERE id=$1 AND size=$2 AND state='writing' AND payload_type='raw'",
+    )
+    .bind(stream)
+    .bind(offset)
+}
+
+pub(super) fn raw_copy_ranges(
+    destination: Id,
+    source: Id,
+    offset: i64,
+    end: i64,
+    sources: &[Id],
+) -> sqlx::QueryBuilder<Postgres> {
+    let mut q = sqlx::QueryBuilder::new(
+        "INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_id,source_offset) SELECT ",
+    );
+    q.push_bind(destination).push(",e.offset_bytes,e.length,e.source_id,e.source_offset FROM raw_ranges e WHERE e.stream_id=").push_bind(source);
+    q.push(" AND e.offset_bytes>=")
+        .push_bind(offset)
+        .push(" AND e.offset_bytes<=")
+        .push_bind(end);
+    q.push(" AND (e.offset_bytes<")
+        .push_bind(end)
+        .push(" OR e.length=0) AND e.source_id IN (");
+    let mut list = q.separated(",");
+    for id in sources {
+        list.push_bind(*id);
+    }
+    q.push(")");
+    q
+}
+
+pub(super) fn raw_copy_reference(sources: &[Id]) -> sqlx::QueryBuilder<Postgres> {
+    let mut q = sqlx::QueryBuilder::new("UPDATE raw_sources SET revision=revision+1 WHERE id IN (");
+    let mut list = q.separated(",");
+    for id in sources {
+        list.push_bind(*id);
+    }
+    q.push(")");
+    q
+}
+
 pub(super) fn raw_target(
     stream: Id,
     storage: Uuid,
@@ -9901,9 +9978,25 @@ impl RawStore for Backend {
     async fn finish(&self, stream: Id, source: Id, size: i64, digest: &[u8]) -> Result<()> {
         transactions::finish_raw(&self.pool, stream, source, size, digest, None, None).await
     }
+    async fn copyable(&self, stream: Id, storage: Uuid) -> Result<bool> {
+        Ok(raw_copyable(stream, storage)
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await?)
+    }
+    async fn copy_references(
+        &self,
+        destination: Id,
+        source: Id,
+        storage: Uuid,
+        revision: i64,
+        rows: &[RawRange],
+    ) -> Result<()> {
+        transactions::copy_raw_references(&self.pool, destination, source, storage, revision, rows)
+            .await
+    }
     async fn page(&self, stream: Id, start: i64, end: i64) -> Result<Vec<RawRange>> {
-        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=$1 AND e.offset_bytes+e.length>=$2 AND e.offset_bytes<=$3 ORDER BY e.offset_bytes LIMIT 128")
-            .bind(stream).bind(start).bind(end).fetch_all(&self.pool).await?)
+        Ok(raw_page(stream, start, end).fetch_all(&self.pool).await?)
     }
     async fn candidates(
         &self,

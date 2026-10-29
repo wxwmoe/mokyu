@@ -7102,6 +7102,79 @@ pub(super) async fn finish_repair(
     Ok(result)
 }
 
+pub(super) async fn copy_raw_references(
+    pool: &sqlx::PgPool,
+    destination: Id,
+    source: Id,
+    storage: Uuid,
+    revision: i64,
+    rows: &[crate::model::raw::RawRange],
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    copy_raw_references_in(&mut tx, destination, source, storage, revision, rows).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn copy_raw_references_in(
+    tx: &mut Transaction<'_, Postgres>,
+    destination: Id,
+    source: Id,
+    storage: Uuid,
+    revision: i64,
+    rows: &[crate::model::raw::RawRange],
+) -> Result<()> {
+    let (offset, end, sources) = crate::model::raw::copy_window(storage, rows)?;
+    require_writing_stream(tx, destination).await?;
+    let (storage_type, unencoded, current, cdc, _) = queries::raw_target(destination, storage)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(crate::model::Error::OperationAborted)?;
+    ensure!(
+        matches!(storage_type.as_str(), "local" | "s3") && unencoded && !cdc && current == revision,
+        crate::model::Error::OperationAborted
+    );
+    if offset == 0 {
+        ensure!(
+            queries::raw_prepare(destination)
+                .execute(&mut **tx)
+                .await?
+                .rows_affected()
+                == 1,
+            crate::model::Error::OperationAborted
+        );
+    }
+    ensure!(
+        queries::raw_copy_position(destination, offset)
+            .fetch_optional(&mut **tx)
+            .await?
+            == Some(destination),
+        crate::model::Error::OperationAborted
+    );
+    let locked: Vec<Id> = queries::raw_copy_sources(storage, &sources)
+        .build_query_scalar()
+        .fetch_all(&mut **tx)
+        .await?;
+    ensure!(locked == sources, crate::model::Error::SourceUnavailable);
+    ensure!(
+        queries::raw_copy_ranges(destination, source, offset, end, &sources)
+            .build()
+            .execute(&mut **tx)
+            .await?
+            .rows_affected()
+            == rows.len() as u64,
+        crate::model::Error::OperationAborted
+    );
+    queries::raw_copy_reference(&sources)
+        .build()
+        .execute(&mut **tx)
+        .await?;
+    queries::resize_writing_stream(destination, end)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 pub(super) async fn begin_raw(
     pool: &sqlx::PgPool,
     stream: Id,
@@ -10360,7 +10433,7 @@ pub(super) async fn begin_node_write(
         bucket.id,
         Action::Write,
     );
-    let copy_source = if let Some(id) = input.intent.copy_read {
+    let mut copy_source = if let Some(id) = input.intent.copy_read {
         let lease = queries::node_read_owned(state, input.run, id)
             .fetch_optional(&mut *tx)
             .await?
@@ -10390,6 +10463,7 @@ pub(super) async fn begin_node_write(
             checksums: source.checksums,
             payload: source.payload_type,
             storage,
+            references: false,
         })
     } else {
         None
@@ -10520,6 +10594,25 @@ pub(super) async fn begin_node_write(
         .fetch_one(&mut *tx)
         .await?;
     profile.write_durability = None;
+    if let Some(source) = &mut copy_source {
+        source.references = source.storage == storage
+            && match source.payload.as_str() {
+                "chunks" => profile.cdc_enabled,
+                "raw"
+                    if source.size > 0
+                        && !profile.cdc_enabled
+                        && !profile.compression_enabled
+                        && !profile.pack_enabled
+                        && block_key.is_none() =>
+                {
+                    queries::raw_copyable(source.stream, storage)
+                        .build_query_scalar::<bool>()
+                        .fetch_one(&mut *tx)
+                        .await?
+                }
+                _ => false,
+            };
+    }
     if let Some(upload) = input
         .intent
         .part
@@ -10640,7 +10733,7 @@ pub(super) async fn node_write_reply(
         copy_references: owned
             .copy_source
             .as_ref()
-            .is_some_and(|source| source.references(&owned.profile)),
+            .is_some_and(|source| source.references),
         checksum_algorithm: owned.checksum_algorithm,
         completion,
         materials: Vec::new(),
@@ -11422,7 +11515,7 @@ pub(super) async fn commit_node_chunks(
     Ok(batch.end_bytes)
 }
 
-pub(super) async fn copy_node_chunks(
+pub(super) async fn copy_node_references(
     pool: &PgPool,
     node: &NodeState,
     key: &Key,
@@ -11448,8 +11541,8 @@ pub(super) async fn copy_node_chunks(
         .as_ref()
         .ok_or_else(|| s3s::s3_error!(InvalidRequest))?;
     ensure!(
-        source.references(&row.profile),
-        s3s::s3_error!(InvalidRequest, "write cannot copy chunk references")
+        source.references,
+        s3s::s3_error!(InvalidRequest, "write cannot copy references")
     );
     ensure!(
         row.next_batch == input.batch
@@ -11457,26 +11550,50 @@ pub(super) async fn copy_node_chunks(
             && input.offset < source.size,
         s3s::s3_error!(InvalidArgument, "copy batch is out of order")
     );
-    let extents = queries::extents_for_copy(source.stream, input.offset)
-        .fetch_all(&mut *tx)
-        .await?;
-    ensure!(!extents.is_empty(), Error::SourceUnavailable);
-    let mut end = input.offset;
-    let mut chunks = Vec::with_capacity(extents.len());
-    for extent in extents {
+    let end = if source.payload == "raw" {
+        let mut rows = queries::raw_page(source.stream, input.offset, source.size)
+            .fetch_all(&mut *tx)
+            .await?;
+        rows.retain(|row| row.offset_bytes >= input.offset);
+        let (offset, end, _) = crate::model::raw::copy_window(source.storage, &rows)?;
         ensure!(
-            extent.offset_bytes == end && extent.fragment_id.is_none() && extent.length > 0,
+            offset == input.offset && end > offset && end <= source.size,
             Error::SourceUnavailable
         );
-        end = end
-            .checked_add(i64::from(extent.length))
-            .ok_or(Error::SourceUnavailable)?;
-        chunks.push(extent.chunk_id.ok_or(Error::SourceUnavailable)?);
-    }
-    ensure!(end <= source.size, Error::SourceUnavailable);
-    chunks.sort_unstable();
-    chunks.dedup();
-    copy_chunk_references_in(&mut tx, stream, source.stream, input.offset, end, &chunks).await?;
+        copy_raw_references_in(
+            &mut tx,
+            stream,
+            source.stream,
+            source.storage,
+            row.profile.revision,
+            &rows,
+        )
+        .await?;
+        end
+    } else {
+        let extents = queries::extents_for_copy(source.stream, input.offset)
+            .fetch_all(&mut *tx)
+            .await?;
+        ensure!(!extents.is_empty(), Error::SourceUnavailable);
+        let mut end = input.offset;
+        let mut chunks = Vec::with_capacity(extents.len());
+        for extent in extents {
+            ensure!(
+                extent.offset_bytes == end && extent.fragment_id.is_none() && extent.length > 0,
+                Error::SourceUnavailable
+            );
+            end = end
+                .checked_add(i64::from(extent.length))
+                .ok_or(Error::SourceUnavailable)?;
+            chunks.push(extent.chunk_id.ok_or(Error::SourceUnavailable)?);
+        }
+        ensure!(end <= source.size, Error::SourceUnavailable);
+        chunks.sort_unstable();
+        chunks.dedup();
+        copy_chunk_references_in(&mut tx, stream, source.stream, input.offset, end, &chunks)
+            .await?;
+        end
+    };
     queries::save_node_copy_batch(node.node_id, &input, &hash, end)
         .execute(&mut *tx)
         .await?;

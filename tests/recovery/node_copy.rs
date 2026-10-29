@@ -81,8 +81,8 @@ pub(super) async fn exercise(
         offset: 0,
     };
     let (first, retry) = tokio::try_join!(
-        backend.copy_chunks(node, key, batch()),
-        backend.copy_chunks(node, key, batch())
+        backend.copy_write_references(node, key, batch()),
+        backend.copy_write_references(node, key, batch())
     )?;
     assert_eq!((first, retry), (object.size, object.size));
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM extents WHERE stream_id=$1")
@@ -93,7 +93,13 @@ pub(super) async fn exercise(
     let mut changed = batch();
     changed.offset = 1;
     assert_eq!(
-        model::error(&backend.copy_chunks(node, key, changed).await.err().unwrap()),
+        model::error(
+            &backend
+                .copy_write_references(node, key, changed)
+                .await
+                .err()
+                .unwrap()
+        ),
         Some(model::Error::NodeOperationConflict)
     );
     let publication = || write::Publish {
@@ -130,7 +136,7 @@ pub(super) async fn exercise(
     );
     assert_eq!(
         backend
-            .copy_chunks(
+            .copy_write_references(
                 node,
                 key,
                 write::CopyBatch {
@@ -166,7 +172,12 @@ pub(super) async fn exercise(
     );
     let mut fenced = batch();
     fenced.run.fence = Uuid::new_v4();
-    assert!(backend.copy_chunks(node, key, fenced).await.is_err());
+    assert!(
+        backend
+            .copy_write_references(node, key, fenced)
+            .await
+            .is_err()
+    );
     let empty = backend.open_read(node, key, source(run, "empty")).await?;
     assert!(empty.outcome == read::Outcome::Ready && empty.mapping.is_none());
     assert_eq!(empty.grants.len(), 1);
@@ -212,9 +223,20 @@ pub(super) async fn exercise(
         batch,
         offset,
     };
-    assert_eq!(backend.copy_chunks(node, key, part(1, 0)).await?, 1500);
-    assert_eq!(backend.copy_chunks(node, key, part(2, 1500)).await?, 1503);
-    assert_eq!(backend.copy_chunks(node, key, part(1, 0)).await?, 1500);
+    assert_eq!(
+        backend.copy_write_references(node, key, part(1, 0)).await?,
+        1500
+    );
+    assert_eq!(
+        backend
+            .copy_write_references(node, key, part(2, 1500))
+            .await?,
+        1503
+    );
+    assert_eq!(
+        backend.copy_write_references(node, key, part(1, 0)).await?,
+        1500
+    );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM extents WHERE stream_id=$1")
         .bind(destination)
         .fetch_one(pool)
@@ -242,7 +264,7 @@ pub(super) async fn exercise(
     let revoked = input.operation;
     backend.begin_write(node, key, input).await?;
     backend
-        .copy_chunks(
+        .copy_write_references(
             node,
             key,
             write::CopyBatch {
@@ -252,7 +274,7 @@ pub(super) async fn exercise(
         )
         .await?;
     backend
-        .copy_chunks(
+        .copy_write_references(
             node,
             key,
             write::CopyBatch {
