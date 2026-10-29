@@ -22,6 +22,10 @@ def cli(*args):
     return json.loads(subprocess.check_output(command + list(args), text=True))
 
 
+def thumbnail_bytes():
+    return cli('status')['local_bytes'][2]
+
+
 def login(username, password):
     client = requests.Session()
     reply = client.post(url + '/api/v1/auth/login', headers={'Origin': url}, json={'username': username, 'password': password})
@@ -45,7 +49,7 @@ s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_n
 base = url + '/api/v1/buckets/' + bucket['id']
 files = []
 user = None
-cache_root = Path(os.environ['MOKYU_TEST_CONFIG']).parent.parent / 'data' / 'thumbnails'
+cache_root = Path(os.environ['MOKYU_TEST_DATA']) / 'thumbnails'
 mode = cache_root.stat().st_mode if cache_root.exists() else None
 
 
@@ -55,7 +59,7 @@ def put(key, data, mime, **options):
         files.append(key)
     reply = admin.get(base + '/objects', params={'q': key, 'mode': 'exact'})
     assert reply.status_code == 200, reply.text
-    return {'key': key, 'version': reply.json()['objects'][0]['id']}
+    return {'key': key, 'version': reply.json()['items'][0]['id']}
 
 
 try:
@@ -67,17 +71,17 @@ try:
     assert thumb.status_code == 200, thumb.text
     assert thumb.headers['content-type'] == 'image/png' and 'no-store' in thumb.headers['cache-control']
     assert struct.unpack('!II', thumb.content[16:24]) == (384, 192)
-    path = cache_root / ('v1-' + q['version'])
+    path = cache_root / f"v1-{q['version']}"
     assert path.is_file(), cache_root
-    before = admin.get(url + '/api/v1/system/status').json()['local_bytes'][2]
+    before = thumbnail_bytes()
     assert before >= len(thumb.content) + 32
     assert admin.get(base + '/object/thumbnail', params=q).content == thumb.content
-    assert admin.get(url + '/api/v1/system/status').json()['local_bytes'][2] == before
+    assert thumbnail_bytes() == before
     path.write_bytes(b'damaged preview')
     cache_root.chmod(0o555)
     fallback = admin.get(base + '/object/thumbnail', params=q)
     assert fallback.status_code == 200 and fallback.content == thumb.content, fallback.text
-    assert admin.get(url + '/api/v1/system/status').json()['local_bytes'][2] == before
+    assert thumbnail_bytes() == before
     cache_root.chmod(mode or 0o755)
     assert admin.get(base + '/object/thumbnail', params=q).content == thumb.content
     assert len(path.read_bytes()) == len(thumb.content) + 32
