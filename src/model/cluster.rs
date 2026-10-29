@@ -155,7 +155,7 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
         input: super::node_write::Publish,
     ) -> Result<super::node_write::Reply>;
-    async fn copy_chunks(
+    async fn copy_write_references(
         &self,
         node: &NodeState,
         key: &Key,

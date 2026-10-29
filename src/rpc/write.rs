@@ -133,7 +133,7 @@ pub(super) fn lookup(input: wire::WriteRequest) -> Result<write::Lookup, Status>
     })
 }
 
-pub(super) fn copy(input: wire::CopyChunksRequest) -> Result<write::CopyBatch, Status> {
+pub(super) fn copy(input: wire::CopyReferencesRequest) -> Result<write::CopyBatch, Status> {
     let value = write::CopyBatch {
         run: read::run(input.run)?,
         operation: operation(&input.operation_id)?,

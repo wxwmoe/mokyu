@@ -316,7 +316,7 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
 }
 async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit) -> Result<()> {
     let _admission = app.admit(true).await?;
-    let (source, _pin) = app.current(input.bucket, &item.key).await?;
+    let (source, source_pin) = app.current(input.bucket, &item.key).await?;
     if source.id != item.version {
         return Err(s3s::s3_error!(PreconditionFailed).into());
     }
@@ -387,7 +387,9 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         )
         .await?;
     let result = async {
-        app.copy_extents(id, &source).await?;
+        source_pin
+            .with_read_lease(app.copy_extents(id, &source))
+            .await?;
         app.finish_stream(id, source.size, &source.etag, source.checksums.clone())
             .await?;
         #[cfg(feature = "fault-injection")]

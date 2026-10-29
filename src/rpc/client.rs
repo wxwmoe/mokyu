@@ -492,16 +492,16 @@ impl Client {
     pub(crate) async fn commit_chunks(
         &self,
         input: wire::CommitChunksRequest,
-    ) -> Result<wire::ChunkCommitReply, Status> {
+    ) -> Result<wire::WriteBatchReply, Status> {
         self.unary(input, "/mokyu.node.v1.NodeWrites/CommitChunks")
             .await
     }
 
-    pub(crate) async fn copy_chunks(
+    pub(crate) async fn copy_references(
         &self,
-        input: wire::CopyChunksRequest,
-    ) -> Result<wire::ChunkCommitReply, Status> {
-        self.unary(input, "/mokyu.node.v1.NodeWrites/CopyChunks")
+        input: wire::CopyReferencesRequest,
+    ) -> Result<wire::WriteBatchReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/CopyReferences")
             .await
     }
 

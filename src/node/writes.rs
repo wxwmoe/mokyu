@@ -485,6 +485,15 @@ impl Writes {
         let _cache = self.reads.public.changing_object(operation.bucket, &key);
         let result = async {
             if operation.copy_references {
+                if object.payload == "raw" {
+                    operation
+                        .guard(
+                            &self.reads.node,
+                            &[],
+                            self.reads.verify_copy_raw(source, &object),
+                        )
+                        .await?;
+                }
                 let mut offset = 0;
                 let mut batch_id = 1;
                 while offset < object.size as u64 {
@@ -494,7 +503,7 @@ impl Writes {
                                 .reads
                                 .node
                                 .client
-                                .copy_chunks(wire::CopyChunksRequest {
+                                .copy_references(wire::CopyReferencesRequest {
                                     run: Some(operation.request.run.run.clone()),
                                     operation_id: operation.id.clone(),
                                     batch_id,

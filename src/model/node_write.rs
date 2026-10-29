@@ -140,12 +140,7 @@ pub(crate) struct CopySource {
     pub checksums: serde_json::Value,
     pub payload: String,
     pub storage: Uuid,
-}
-
-impl CopySource {
-    pub(crate) fn references(&self, profile: &crate::storage::profile::StorageProfile) -> bool {
-        self.payload == "chunks" && profile.cdc_enabled && self.storage == profile.storage_id
-    }
+    pub references: bool,
 }
 
 pub(crate) struct CopyBatch {

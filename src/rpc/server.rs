@@ -480,7 +480,7 @@ impl NodeWrites for Service {
     async fn commit_chunks(
         &self,
         request: Request<wire::CommitChunksRequest>,
-    ) -> Result<Response<wire::ChunkCommitReply>, Status> {
+    ) -> Result<Response<wire::WriteBatchReply>, Status> {
         let node = write_identity(&request)?;
         let input = super::write::commit(request.into_inner())?;
         let batch_id = input.batch as u64;
@@ -492,28 +492,28 @@ impl NodeWrites for Service {
         .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-chunks-committed").await;
-        Ok(Response::new(wire::ChunkCommitReply {
+        Ok(Response::new(wire::WriteBatchReply {
             batch_id,
             end: end as u64,
         }))
     }
 
-    async fn copy_chunks(
+    async fn copy_references(
         &self,
-        request: Request<wire::CopyChunksRequest>,
-    ) -> Result<Response<wire::ChunkCommitReply>, Status> {
+        request: Request<wire::CopyReferencesRequest>,
+    ) -> Result<Response<wire::WriteBatchReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::write::copy(request.into_inner())?;
         let batch_id = input.batch as u64;
-        let end = bounded(self.app.cluster().map_err(failure)?.copy_chunks(
+        let end = bounded(self.app.cluster().map_err(failure)?.copy_write_references(
             &node,
             &self.app.secrets.credential_key,
             input,
         ))
         .await?;
         #[cfg(feature = "fault-injection")]
-        crate::faults::point("node-chunks-copied").await;
-        Ok(Response::new(wire::ChunkCommitReply {
+        crate::faults::point("node-references-copied").await;
+        Ok(Response::new(wire::WriteBatchReply {
             batch_id,
             end: end as u64,
         }))

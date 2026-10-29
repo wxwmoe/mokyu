@@ -113,6 +113,30 @@ pub(crate) struct Conversion {
     pub target_key_id: Option<Uuid>,
 }
 
+pub(crate) fn copy_window(storage: Uuid, rows: &[RawRange]) -> Result<(i64, i64, Vec<Id>)> {
+    ensure!(
+        !rows.is_empty() && rows.len() <= 128,
+        "invalid raw copy batch"
+    );
+    let start = rows[0].offset_bytes;
+    let mut end = start;
+    let mut sources = Vec::with_capacity(rows.len());
+    for row in rows {
+        row.validate()?;
+        ensure!(
+            row.source.storage_id == storage
+                && row.offset_bytes == end
+                && (row.length > 0 || rows.len() == 1 && start == 0),
+            "invalid raw copy mapping"
+        );
+        end = row.offset_bytes + row.length;
+        sources.push(row.source.id);
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    Ok((start, end, sources))
+}
+
 #[async_trait]
 pub(crate) trait RawStore: Send + Sync {
     async fn recover_memory(&self, boot: Uuid) -> Result<()>;
@@ -258,6 +282,15 @@ pub(crate) trait RawStore: Send + Sync {
     async fn upload_id(&self, source: Id) -> Result<Option<String>>;
     async fn deduplicate(&self, stream: Id, source: Id, hash: &[u8]) -> Result<bool>;
     async fn page(&self, stream: Id, start: i64, end: i64) -> Result<Vec<RawRange>>;
+    async fn copyable(&self, stream: Id, storage: Uuid) -> Result<bool>;
+    async fn copy_references(
+        &self,
+        destination: Id,
+        source: Id,
+        storage: Uuid,
+        revision: i64,
+        rows: &[RawRange],
+    ) -> Result<()>;
     async fn quarantines(
         &self,
         storage: Uuid,
@@ -299,6 +332,26 @@ mod tests {
             source_offset: 0,
         };
         assert!(range.validate().is_ok());
+        let storage = range.source.storage_id;
+        assert_eq!(
+            copy_window(storage, std::slice::from_ref(&range)).unwrap(),
+            (0, 1024, vec![range.source.id])
+        );
+        let mut sliced = range.clone();
+        sliced.offset_bytes = 1024;
+        sliced.source_offset = 7;
+        sliced.length = 23;
+        assert_eq!(
+            copy_window(storage, &[range.clone(), sliced.clone()]).unwrap(),
+            (0, 1047, vec![range.source.id])
+        );
+        sliced.offset_bytes += 1;
+        assert!(copy_window(storage, &[range.clone(), sliced.clone()]).is_err());
+        sliced.offset_bytes -= 2;
+        assert!(copy_window(storage, &[range.clone(), sliced]).is_err());
+        assert!(copy_window(Uuid::new_v4(), std::slice::from_ref(&range)).is_err());
+        assert!(copy_window(storage, &[]).is_err());
+        assert!(copy_window(storage, &vec![range.clone(); 129]).is_err());
         range.source_offset = 1;
         assert!(range.validate().is_err());
         range.source_offset = 0;
@@ -317,6 +370,10 @@ mod tests {
         range.source.size = 0;
         range.length = 0;
         assert!(range.validate().is_ok());
+        assert_eq!(
+            copy_window(storage, std::slice::from_ref(&range)).unwrap(),
+            (0, 0, vec![range.source.id])
+        );
         range.source.digest = None;
         assert!(range.validate().is_err());
     }
