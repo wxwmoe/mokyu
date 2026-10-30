@@ -1,5 +1,22 @@
 use super::*;
 
+#[test]
+fn missing_content_type_uses_s3_default() -> Result<()> {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-length", "0".parse()?);
+    headers.insert("etag", "\"opaque\"".parse()?);
+    assert_eq!(
+        Object::headers(&headers)?.metadata["content-type"],
+        "application/octet-stream"
+    );
+    headers.insert("content-type", "image/jpeg".parse()?);
+    assert_eq!(
+        Object::headers(&headers)?.metadata["content-type"],
+        "image/jpeg"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires an isolated external S3 fixture"]
 async fn remote_object_transport() -> Result<()> {

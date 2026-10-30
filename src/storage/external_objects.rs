@@ -171,6 +171,9 @@ impl Object {
         for name in headers.keys().filter(|name| metadata_header(name.as_str())) {
             metadata.insert(name.to_string(), text(headers, name.as_str())?.unwrap());
         }
+        metadata
+            .entry("content-type".into())
+            .or_insert_with(|| "application/octet-stream".into());
         let value = Self {
             size: text(headers, "content-length")?
                 .context("external content length missing")?
@@ -905,6 +908,26 @@ impl Client {
     }
 
     pub(crate) async fn read(
+        &self,
+        key: &str,
+        object: &Object,
+        start: u64,
+        length: usize,
+    ) -> Result<Bytes> {
+        match &self.reads {
+            Some(super::Reads::Single(gate)) => {
+                let _read = gate.acquire().await?;
+                self.read_inner(key, object, start, length).await
+            }
+            Some(super::Reads::Node(gate)) => {
+                let _read = gate.clone().try_acquire_owned()?;
+                self.read_inner(key, object, start, length).await
+            }
+            None => self.read_inner(key, object, start, length).await,
+        }
+    }
+
+    async fn read_inner(
         &self,
         key: &str,
         object: &Object,

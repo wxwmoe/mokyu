@@ -40,7 +40,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeWork/Exchange` | Unary；提交上一批任务结果并领取下一批工作，返回所需材料和任务保护 |
 | `NodeWork/CheckpointTransfer` | Unary；持久化 raw 传输的上传与分片回执，核对当前节点运行权、任务、来源与目标许可 |
 | `NodeWork/ReadMigration` | Unary；取得任务绑定源版本的首个读取窗口，只允许候选所属节点和有效任务执行权 |
-| `NodeWork/ReadTransfer` | Unary；worker/node 取得当前导出任务绑定的源窗口、缺少的材料和读取保护；raw 附带持久化分段证明，响应窗口可短于请求长度 |
+| `NodeWork/ReadTransfer` | Unary；worker/node 取得当前导出来源或导入对比目标的窗口、缺少的材料和读取保护；raw 附带持久化分段证明，响应窗口可短于请求长度 |
 | `NodeWrites/PrepareTail` | Unary；为 chunks 分片的未闭合尾部预留共享 staging、配额和上传许可 |
 | `NodeWrites/CommitTail` | Unary；确认尾部持久化并建立片段映射，重复确认复用同一结果 |
 | `NodeWrites/PublishWrite` | Unary；核对完整性、条件和配额，原子发布对象并保存终态回执 |
@@ -194,6 +194,8 @@ CheckLocalFiles 对 Multipart 文件返回同样的有界状态记录，所属�
 后台批次已领取后，本机 I/O 或共享内存不足时立即释放本批任务保护并退避，保持任务可重新领取，不能把本机繁忙记为后端失败。缓存上传在领取前取得本机容量，并持有至结果确认。raw 摘要计算在 CPU 忙时同样退让；编码流水线保持先读取后 CPU 的顺序。pack、编码重写、raw 摘要和存储扫描按条目与字节限制成批，使用后端请求超时和有效租约；`maintenance.max_duration` 不作为这些有正文 I/O 批次的整体截止时间。完整性检查保留存储策略的批次超时。
 
 外部存储桶能力测试也通过 `NodeWork/Exchange` 分阶段执行，只分派给 worker/node。响应中的 `external_connection_json` 仅包含本次执行所需的连接快照，不进入通用元数据缓存，也不包含部署密钥。此类任务没有内部 storage_id，并保留节点 boot/fence、任务令牌、有效期和本机 I/O 限制。control 持久化报告并检查提交身份；任务结果未知时按专用对象和上传 ID 对账，不能直接重新创建上传。
+
+导入内部桶时，工作计划提供本次分段的任务候选和普通 NodeWrite 身份。worker/node 按固定来源范围直接读取外部 S3，经目标后端编码写入并封存；control 从已封存候选计算回执，拒绝节点自行提交未验证的分段回执。任务许可、节点写入保护、目标配置修订及原授权持续有效才可提交；根候选通过有界映射事务拼接，最终通过内部对象事务发布。断线接管复用已封存分段，未封存分段退役后重试；control 不转发正文。
 
 ## 地址选择
 

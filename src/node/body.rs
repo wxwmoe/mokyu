@@ -193,6 +193,15 @@ impl Reader {
         Ok(Arc::new(self.acquire(&self.packs, units as u32).await?))
     }
 
+    pub(super) async fn import_memory(&self) -> Result<Arc<OwnedSemaphorePermit>> {
+        let units = (crate::storage::external::objects::WINDOW * 2).div_ceil(1024 * 1024) as u32;
+        ensure!(
+            units <= self.pack_units,
+            "import input exceeds node memory budget"
+        );
+        Ok(Arc::new(self.acquire(&self.packs, units).await?))
+    }
+
     pub(super) fn http_work(&self) -> Option<OwnedSemaphorePermit> {
         self.http.clone().try_acquire_many_owned(32).ok()
     }

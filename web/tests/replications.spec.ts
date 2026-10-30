@@ -143,12 +143,25 @@ test('create, inspect and control durable replication tasks using the forms', as
   expect((await request.get(fixture.s3 + '/' + fixture.target.name + '/external/exported.jpg')).status()).toBe(200)
   await details().locator('.dialog-footer').getByRole('button', { name: en.close, exact: true }).click()
 
+  await page.getByRole('button', { name: en.replicationCreate, exact: true }).click()
+  await page.getByRole('combobox', { name: en.replicationSource, exact: true }).fill(fixture.external.source.name)
+  await page.getByRole('option').filter({ hasText: fixture.external.source.name }).click()
+  await choice(en.replicationTarget, fixture.target.name, true)
+  await page.getByLabel(en.replicationKeys).fill('one.jpg')
+  await page.getByLabel(en.replicationRename, { exact: true }).fill('imported.jpg')
+  const importedTask = await start()
+  await expect(details().locator('.replication-summary')).toContainText(en.completed, { timeout: 30000 })
+  expect((await (await request.get('/api/v1/replications/' + importedTask)).json()).options).toMatchObject({
+    source_bucket: fixture.external.source.id, target_bucket: fixture.target.id, source_external: true, target_external: false })
+  expect((await request.get(fixture.s3 + '/' + fixture.target.name + '/imported.jpg')).status()).toBe(200)
+  await details().locator('.dialog-footer').getByRole('button', { name: en.close, exact: true }).click()
+
   for (const [locale, theme, width, labels] of [['en', 'light', 1400, en], ['zh-CN', 'dark', 1400, zh], ['ja', 'light', 390, ja]] as const) {
     await preferences(locale, theme)
     await page.setViewportSize({ width, height: 940 })
     await page.reload()
     await expect(page.getByRole('heading', { name: labels.replications, exact: true })).toBeVisible()
-    await expect(page.locator('.table-scroll tbody tr')).toHaveCount(6)
+    await expect(page.locator('.table-scroll tbody tr')).toHaveCount(7)
     await expect(page.getByRole('columnheader', { name: labels.replicationStatus, exact: true })).toBeVisible()
     const layout = await page.evaluate(() => ({ viewport: innerWidth, width: document.documentElement.scrollWidth, boxes: Array.from(document.querySelectorAll('.workspace, #main, .page, .page-heading, .table-scroll, .app-footer')).map(element => ({ name: element.className, width: element.getBoundingClientRect().width, right: element.getBoundingClientRect().right, minWidth: getComputedStyle(element).minWidth, overflow: getComputedStyle(element).overflowX })) }))
     expect(layout.width <= layout.viewport + 1, JSON.stringify(layout)).toBeTruthy()

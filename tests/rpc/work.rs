@@ -168,3 +168,99 @@ async fn node_raw_checkpoints_require_current_runs_and_permits() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires an isolated import paused before part sealing; see tests/README.md"]
+async fn node_import_parts_reject_stale_runs_and_changed_seals() -> Result<()> {
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let identity: NodeState =
+        serde_json::from_slice(&tokio::fs::read(std::env::var("MOKYU_TEST_NODE_STATE")?).await?)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(std::env::var("MOKYU_TEST_IMPORT_PART")?).await?)?;
+    let string = |name: &str| {
+        value[name]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("import fixture field missing"))
+    };
+    let run = Some(wire::Run {
+        boot_id: string("boot")?,
+        fence: string("fence")?,
+    });
+    let dns = Dns::new().await?;
+    let client = dns.client(&std::env::var("MOKYU_TEST_CONTROL_URL")?, identity)?;
+    let lookup = wire::WriteRequest {
+        run: run.clone(),
+        operation_id: string("write")?,
+    };
+    assert_eq!(
+        client.write_status(lookup.clone()).await?.phase,
+        wire::WritePhase::WriteActive as i32
+    );
+    let mut invalid = lookup.clone();
+    invalid.operation_id = "invalid".into();
+    assert_eq!(
+        client.write_status(invalid).await.unwrap_err().code(),
+        Code::InvalidArgument
+    );
+    let mut unknown = lookup.clone();
+    unknown.operation_id = Uuid::now_v7().to_string();
+    assert_eq!(
+        client.write_status(unknown).await.unwrap_err().code(),
+        Code::NotFound
+    );
+    let input = wire::PublishWriteRequest {
+        run: run.clone(),
+        operation_id: lookup.operation_id.clone(),
+        size: value["size"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("import size missing"))?,
+        etag: string("etag")?,
+        checksums_json: serde_json::to_vec(&value["checksums"])?,
+        if_match: None,
+        if_none: None,
+    };
+    let mut stale = input.clone();
+    stale.run.as_mut().unwrap().fence = Uuid::new_v4().to_string();
+    assert_eq!(
+        client.publish_write(stale).await.unwrap_err().code(),
+        Code::FailedPrecondition
+    );
+    let mut changed = input.clone();
+    changed.size += 1;
+    let rejected = client.publish_write(changed).await.unwrap_err();
+    assert_eq!(rejected.code(), Code::FailedPrecondition);
+    assert_eq!(
+        rejected.metadata().get("mokyu-s3-code").unwrap(),
+        "IncompleteBody"
+    );
+    let mut conditional = input;
+    conditional.if_none = Some("*".into());
+    assert_eq!(
+        client.publish_write(conditional).await.unwrap_err().code(),
+        Code::AlreadyExists
+    );
+    for length in [0, 1, crate::storage::external::objects::WINDOW as u32 + 1] {
+        let read = wire::ReadTransferRequest {
+            run: run.clone(),
+            operation_id: string("operation")?,
+            read_id: Uuid::now_v7().to_string(),
+            offset: 0,
+            length,
+            cached: vec![],
+        };
+        assert_eq!(
+            client.read_transfer(read).await.unwrap_err().code(),
+            Code::AlreadyExists
+        );
+    }
+    assert_eq!(
+        client.write_status(lookup).await?.phase,
+        wire::WritePhase::WriteActive as i32
+    );
+    Ok(())
+}

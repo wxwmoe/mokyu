@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0095.
+-- Generated from the complete postgres migration chain through 0096.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -2045,6 +2045,14 @@ CREATE TABLE public.transfer_external_parts (
     CONSTRAINT transfer_external_parts_size_bytes_check CHECK (((size_bytes >= 0) AND (size_bytes <= '5368709120'::bigint)))
 );
 
+CREATE TABLE public.transfer_imports (
+    item_id uuid NOT NULL,
+    part_stream uuid,
+    node_id uuid,
+    operation_id uuid,
+    CONSTRAINT transfer_imports_check CHECK (((node_id IS NULL) = (operation_id IS NULL)))
+);
+
 CREATE TABLE public.transfer_items (
     id uuid DEFAULT uuidv7() NOT NULL,
     task_id uuid NOT NULL,
@@ -2581,6 +2589,9 @@ ALTER TABLE ONLY public.transfer_external_items
 ALTER TABLE ONLY public.transfer_external_parts
     ADD CONSTRAINT transfer_external_parts_pkey PRIMARY KEY (item_id, part_number);
 
+ALTER TABLE ONLY public.transfer_imports
+    ADD CONSTRAINT transfer_imports_pkey PRIMARY KEY (item_id);
+
 ALTER TABLE ONLY public.transfer_items
     ADD CONSTRAINT transfer_items_pkey PRIMARY KEY (id);
 
@@ -2864,6 +2875,8 @@ CREATE INDEX token_bucket_grants_bucket ON public.token_bucket_grants USING btre
 CREATE INDEX token_external_bucket ON public.token_external_grants USING btree (bucket_id);
 
 CREATE INDEX transfer_connections_external ON public.transfer_connections USING btree (external_id);
+
+CREATE INDEX transfer_imports_part ON public.transfer_imports USING btree (part_stream);
 
 CREATE INDEX transfer_items_candidate ON public.transfer_items USING btree (candidate);
 
@@ -3433,6 +3446,12 @@ ALTER TABLE ONLY public.transfer_external_items
 
 ALTER TABLE ONLY public.transfer_external_parts
     ADD CONSTRAINT transfer_external_parts_item_id_fkey FOREIGN KEY (item_id) REFERENCES public.transfer_external_items(item_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_imports
+    ADD CONSTRAINT transfer_imports_item_id_fkey FOREIGN KEY (item_id) REFERENCES public.transfer_items(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_imports
+    ADD CONSTRAINT transfer_imports_part_stream_fkey FOREIGN KEY (part_stream) REFERENCES public.streams(id);
 
 ALTER TABLE ONLY public.transfer_items
     ADD CONSTRAINT transfer_items_candidate_fkey FOREIGN KEY (candidate) REFERENCES public.streams(id);

@@ -43,6 +43,8 @@ pub(crate) enum Phase {
     Compare,
     Start,
     Transfer,
+    Import,
+    Project,
     Complete,
     Locate,
     Verify,
@@ -141,7 +143,10 @@ impl State {
         if matches!(self.phase, Phase::Transfer) {
             ensure!(self.upload.is_some(), "transfer upload missing");
         }
-        if matches!(self.phase, Phase::Compare | Phase::Transfer | Phase::Verify) {
+        if matches!(
+            self.phase,
+            Phase::Compare | Phase::Transfer | Phase::Import | Phase::Verify
+        ) {
             ensure!(
                 self.position < self.parts()?,
                 "transfer position is complete"
@@ -192,13 +197,15 @@ impl State {
         );
     }
 
-    fn write(&mut self) -> Result<()> {
+    fn write(&mut self, options: &Options) -> Result<()> {
         self.changed = true;
         self.position = 0;
         self.phase = if self.parts()? == 0 {
             Phase::Complete
-        } else {
+        } else if options.target_external {
             Phase::Start
+        } else {
+            Phase::Import
         };
         Ok(())
     }
@@ -207,7 +214,7 @@ impl State {
         match options.conflict {
             Conflict::Skip => self.finish("skipped", None),
             Conflict::Report => self.finish("conflict", Some("target_exists")),
-            Conflict::Overwrite => self.write()?,
+            Conflict::Overwrite => self.write(options)?,
         }
         Ok(())
     }
@@ -215,18 +222,24 @@ impl State {
     fn matched(&mut self, options: &Options) -> Result<()> {
         let source = self.source.as_ref().context("transfer source missing")?;
         let target = self.target.as_ref().context("transfer target missing")?;
-        if source.metadata != target.metadata {
-            return self.write();
-        }
-        self.output = Some(target.clone());
-        if options.permissions != Permissions::Ignore
+        let permissions_changed = options.permissions != Permissions::Ignore
             && self.target_public
                 != Some(
                     options
                         .permissions
                         .public(self.source_public.unwrap_or(false), self.target_public),
-                )
-        {
+                );
+        if !options.target_external && (source.metadata != target.metadata || permissions_changed) {
+            self.changed = true;
+            self.position = 0;
+            self.phase = Phase::Project;
+            return Ok(());
+        }
+        if source.metadata != target.metadata {
+            return self.write(options);
+        }
+        self.output = Some(target.clone());
+        if permissions_changed {
             if target.version.is_none() {
                 self.finish("conflict", Some("target_acl_unfenced"));
             } else {
@@ -282,6 +295,8 @@ pub(crate) struct Plan {
     pub parts: Vec<Part>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<Native>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incoming: Option<super::import::Write>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -340,11 +355,19 @@ impl Plan {
         self.state.validate()?;
         if let Some(native) = &self.native {
             ensure!(
-                !self.options.source_external && self.item.is_some(),
+                self.options.source_external != self.options.target_external && self.item.is_some(),
                 "unexpected native source"
             );
             native.object.validate()?;
         }
+        if let Some(incoming) = &self.incoming {
+            incoming.validate(self)?;
+        }
+        ensure!(
+            !matches!(self.state.phase, Phase::Import | Phase::Project)
+                || self.options.source_external && !self.options.target_external,
+            "unexpected native import phase"
+        );
         if let Some(key) = &self.key {
             self.options.target(key)?;
         }
@@ -361,7 +384,7 @@ impl Plan {
             previous = part.number;
         }
         match self.state.phase {
-            Phase::Transfer => ensure!(
+            Phase::Transfer | Phase::Import => ensure!(
                 self.parts.len() == usize::from(self.state.position > 0)
                     && self
                         .parts
@@ -394,6 +417,14 @@ impl Plan {
     pub(crate) fn target(&self) -> Result<String> {
         self.options
             .target(self.key.as_deref().context("transfer key missing")?)
+    }
+
+    pub(crate) fn native_key(&self) -> Result<String> {
+        if self.options.target_external {
+            Ok(self.key.as_ref().context("transfer key missing")?.clone())
+        } else {
+            self.target()
+        }
     }
 
     pub(crate) fn public(&self) -> Option<bool> {
@@ -465,6 +496,7 @@ pub(crate) enum Outcome {
         upload: String,
     },
     Transferred(Part),
+    Imported,
     Written(Written),
     Located {
         object: Option<Object>,
@@ -563,7 +595,7 @@ pub(crate) fn apply(plan: &Plan, outcome: &Outcome) -> Result<Change> {
                         state.phase = Phase::Compare;
                     }
                 } else {
-                    state.write()?;
+                    state.write(&plan.options)?;
                 }
             } else {
                 state.finish("conflict", Some("source_missing"));
@@ -587,14 +619,16 @@ pub(crate) fn apply(plan: &Plan, outcome: &Outcome) -> Result<Change> {
             state.upload = Some(upload.clone());
             state.phase = Phase::Transfer;
         }
-        (Phase::Transfer, Outcome::Transferred(receipt)) => {
+        (Phase::Transfer | Phase::Import, Outcome::Transferred(receipt)) => {
             receipt.validate(&state)?;
             ensure!(
                 receipt.number == i32::from(state.position) + 1,
                 "unexpected transfer part"
             );
             state.position += 1;
-            if state.position == state.parts()? {
+            if state.phase == Phase::Import {
+                state.phase = Phase::Project;
+            } else if state.position == state.parts()? {
                 state.phase = Phase::Complete;
             }
             part = Some(receipt.clone());
@@ -820,7 +854,104 @@ mod tests {
             state,
             parts,
             native: None,
+            incoming: None,
         })
+    }
+
+    #[test]
+    fn native_parts_keep_receipts_without_remote_upload_ids() -> Result<()> {
+        let mut plan = pending(objects::WINDOW as u64 + 7)?;
+        let receipts = plan.parts.clone();
+        plan.options.target_external = false;
+        plan.state.phase = Phase::Import;
+        plan.state.upload = None;
+        plan.state.position = 0;
+        plan.state.starts = 0;
+        plan.parts.clear();
+        let change = apply(&plan, &Outcome::Transferred(receipts[0].clone()))?;
+        assert_eq!(change.state.phase, Phase::Project);
+        assert_eq!(change.state.position, 1);
+        assert!(change.state.upload.is_none());
+        assert!(change.finish.is_none());
+        plan.state = change.state;
+        assert!(apply(&plan, &Outcome::Transferred(receipts[1].clone())).is_err());
+        plan.state.phase = Phase::Complete;
+        plan.state.position = 2;
+        plan.parts = receipts;
+        let native = super::super::import::snapshot(&plan)?;
+        assert!(native.etag.ends_with("-2"));
+        assert_eq!(native.size, objects::WINDOW as i64 + 7);
+        assert_eq!(native.checksums["type"], "COMPOSITE");
+        plan.parts[1].size += 1;
+        assert!(super::super::import::snapshot(&plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn native_import_write_is_bound_to_the_current_part() -> Result<()> {
+        let mut plan = pending(9)?;
+        plan.options.target_external = false;
+        plan.state.phase = Phase::Import;
+        plan.state.upload = None;
+        plan.state.position = 0;
+        plan.parts.clear();
+        let write = super::super::import::Write {
+            stream: Uuid::now_v7().into(),
+            storage: Uuid::new_v4(),
+            offset: 0,
+            size: 9,
+            operation: Some(Uuid::now_v7()),
+        };
+        plan.incoming = Some(write.clone());
+        plan.validate()?;
+        let mut invalid = write.clone();
+        invalid.offset = 1;
+        assert!(invalid.validate(&plan).is_err());
+        invalid = write.clone();
+        invalid.size = 10;
+        assert!(invalid.validate(&plan).is_err());
+        invalid = write.clone();
+        invalid.operation = Some(Uuid::new_v4());
+        assert!(invalid.validate(&plan).is_err());
+        plan.state.phase = Phase::Project;
+        assert!(write.validate(&plan).is_err());
+        plan.state.phase = Phase::Import;
+        plan.options.source_external = false;
+        assert!(write.validate(&plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn matching_native_body_reuses_target_for_permission_changes() -> Result<()> {
+        let mut plan = pending(9)?;
+        plan.options.target_external = false;
+        plan.options.permissions = Permissions::Inherit;
+        plan.state.phase = Phase::Compare;
+        plan.state.upload = None;
+        plan.state.position = 0;
+        plan.state.target = plan.state.source.clone();
+        plan.state.source_public = Some(true);
+        plan.state.target_public = Some(false);
+        plan.parts.clear();
+        let result = apply(&plan, &Outcome::Compared { equal: true })?;
+        assert_eq!(result.state.phase, Phase::Project);
+        assert!(result.state.changed);
+        assert!(result.part.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn native_empty_import_uses_content_checksums() -> Result<()> {
+        let mut plan = pending(0)?;
+        plan.options.target_external = false;
+        plan.state.upload = None;
+        let result = super::super::import::snapshot(&plan)?;
+        assert_eq!(result.etag, "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(
+            result.checksums["sha256"],
+            "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
+        );
+        Ok(())
     }
 
     #[test]
@@ -1017,8 +1148,16 @@ mod tests {
                 .acquire_owned()
                 .await?,
         );
-        let outcome =
-            crate::storage::external::transfer::execute(&plan, &[], &memory, None).await?;
+        let outcome = crate::storage::external::transfer::execute(
+            &plan,
+            &[],
+            &memory,
+            None,
+            &crate::storage::external::Reads::Node(std::sync::Arc::new(
+                tokio::sync::Semaphore::new(1),
+            )),
+        )
+        .await?;
         assert!(matches!(outcome, Outcome::Conflict));
         let change = apply(&plan, &outcome)?;
         assert_eq!(change.state.phase, Phase::Cleanup);

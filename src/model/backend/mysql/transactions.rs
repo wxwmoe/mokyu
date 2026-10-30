@@ -8261,3 +8261,31 @@ pub(super) async fn recover_raw_memory(pool: &sqlx::MySqlPool, boot: Uuid) -> Re
     }
     Ok(())
 }
+
+pub(super) async fn publish_import_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    task: Execution,
+    id: Id,
+    bucket: Uuid,
+    key: &str,
+    expected: Option<Id>,
+    public: bool,
+) -> Result<()> {
+    lock_execution(tx, task).await?;
+    let authority = Permit::for_action(Principal::System, bucket, Action::Write);
+    lock_media_scope(tx, &authority).await?;
+    let old = selected_object(tx, bucket, key, expected).await?;
+    let stream = validate_copy(tx, id, bucket, key, public).await?;
+    require_sources(tx, Some(id), &[]).await?;
+    ensure!(
+        queries::publish_migration_stream(id, task)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    queries::ready_stream_queues(tx, id).await?;
+    replace_object_reference(tx, &stream, old).await?;
+    Ok(())
+}

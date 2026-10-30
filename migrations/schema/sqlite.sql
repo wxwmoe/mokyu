@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 0049.
+-- Generated from the complete sqlite migration chain through 0050.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -898,6 +898,14 @@ CREATE TABLE transfer_external_parts (
     FOREIGN KEY (item_id) REFERENCES transfer_external_items(item_id) ON DELETE CASCADE
 );
 
+CREATE TABLE transfer_imports (
+    item_id INTEGER PRIMARY KEY REFERENCES transfer_items(id) ON DELETE CASCADE,
+    part_stream INTEGER REFERENCES streams(id),
+    node_id BLOB CHECK (node_id IS NULL OR length(node_id)=16),
+    operation_id BLOB CHECK (operation_id IS NULL OR length(operation_id)=16),
+    CHECK ((node_id IS NULL)=(operation_id IS NULL))
+);
+
 CREATE TABLE transfer_items (
     id INTEGER PRIMARY KEY,
     task_id BLOB NOT NULL REFERENCES transfer_runs(task_id) ON DELETE CASCADE,
@@ -1280,6 +1288,8 @@ CREATE INDEX token_external_bucket ON token_external_grants(bucket_id);
 CREATE INDEX token_grants_bucket ON token_bucket_grants(bucket_id);
 
 CREATE INDEX transfer_connections_external ON transfer_connections(external_id);
+
+CREATE INDEX transfer_imports_part ON transfer_imports(part_stream);
 
 CREATE INDEX transfer_items_candidate ON transfer_items(candidate);
 

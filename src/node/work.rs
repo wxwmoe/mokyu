@@ -151,13 +151,32 @@ impl Worker {
                                 .as_deref()
                                 .context("external connections missing")?,
                         )?;
-                    let outcome = self
+                    let outcome = match self
                         .writes
                         .external_transfer(operation, transfer, &connections)
-                        .await?;
+                        .await
+                    {
+                        Ok(outcome) => work::Outcome::ExternalTransfer(outcome),
+                        Err(error)
+                            if error.downcast_ref::<s3s::S3Error>().is_some_and(|error| {
+                                matches!(
+                                    error.code(),
+                                    s3s::S3ErrorCode::AccessDenied
+                                        | s3s::S3ErrorCode::InvalidAccessKeyId
+                                        | s3s::S3ErrorCode::SignatureDoesNotMatch
+                                        | s3s::S3ErrorCode::NotImplemented
+                                )
+                            }) || error.downcast_ref::<tonic::Status>().is_some_and(
+                                |status| status.code() == tonic::Code::PermissionDenied,
+                            ) =>
+                        {
+                            work::Outcome::Retry
+                        }
+                        Err(error) => return Err(error),
+                    };
                     return Ok(work::Completion {
                         operation,
-                        outcomes: vec![work::Outcome::ExternalTransfer(outcome)],
+                        outcomes: vec![outcome],
                     });
                 }
                 let backend =

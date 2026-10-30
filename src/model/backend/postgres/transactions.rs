@@ -12697,3 +12697,44 @@ pub(super) async fn node_multipart_operation(
     tx.commit().await?;
     Ok(outcome)
 }
+
+pub(super) async fn publish_import_in(
+    tx: &mut Transaction<'_, Postgres>,
+    task: Execution,
+    id: Id,
+    bucket: Uuid,
+    key: &str,
+    expected: Option<Id>,
+    public: bool,
+) -> Result<()> {
+    lock_execution(tx, task).await?;
+    let old = selected_object(tx, bucket, key, expected).await?;
+    require_writing_stream(tx, id).await?;
+    let stream = super::replication_import_queries::stream(id)
+        .fetch_one(&mut **tx)
+        .await?;
+    ensure!(
+        stream.bucket_id == bucket && stream.object_key == key && stream.public_read == public,
+        Error::OperationAborted
+    );
+    if stream.payload_type == "raw" {
+        validate_raw(tx, id, stream.size).await?;
+    } else {
+        require_sources(tx, Some(id), &[]).await?;
+    }
+    ensure!(
+        queries::publish_migration_stream(id, task.id, task.token)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected()
+            == 1,
+        Error::OperationAborted
+    );
+    queries::upsert_object(bucket, key, id)
+        .execute(&mut **tx)
+        .await?;
+    if let Some(old) = old {
+        queries::retire_stream(old).execute(&mut **tx).await?;
+    }
+    Ok(())
+}

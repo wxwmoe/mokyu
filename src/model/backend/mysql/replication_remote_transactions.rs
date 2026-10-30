@@ -14,7 +14,7 @@ type Tx<'a> = Transaction<'a, MySql>;
 
 async fn parts(db: &mut Tx<'_>, item: crate::model::Id, state: &State) -> Result<Vec<Part>> {
     let bounds = match state.phase {
-        Phase::Transfer if state.position > 0 => {
+        Phase::Transfer | Phase::Import if state.position > 0 => {
             Some((i32::from(state.position), i32::from(state.position)))
         }
         Phase::Complete => Some((1, i32::from(state.parts()?))),
@@ -37,13 +37,15 @@ async fn parts(db: &mut Tx<'_>, item: crate::model::Id, state: &State) -> Result
     Ok(rows)
 }
 
-async fn finished(
+pub(super) async fn finished(
     db: &mut Tx<'_>,
     run: &mut Run,
     item: crate::model::Id,
     result: &external::Finish,
+    output: Option<crate::model::Id>,
 ) -> Result<()> {
-    q::finish_item(item, &result.status, None, result.error.as_deref())
+    super::replication_import_transactions::cleanup(db, run.task_id, item, output).await?;
+    q::finish_item(item, &result.status, output, result.error.as_deref())
         .execute(&mut **db)
         .await?;
     match result.status.as_str() {
@@ -55,8 +57,11 @@ async fn finished(
     Ok(())
 }
 
-pub(super) async fn prepare(db: &mut Tx<'_>, run: &mut Run) -> Result<Option<Plan>> {
-    ensure!(run.options.0.target_external, Error::OperationAborted);
+pub(super) async fn prepare(
+    db: &mut Tx<'_>,
+    task: crate::model::task::Execution,
+    run: &mut Run,
+) -> Result<Option<Plan>> {
     let mut plan = Plan {
         task: run.task_id,
         generation: run.generation,
@@ -67,6 +72,7 @@ pub(super) async fn prepare(db: &mut Tx<'_>, run: &mut Run) -> Result<Option<Pla
         state: State::default(),
         parts: Vec::new(),
         native: None,
+        incoming: None,
     };
     if run.phase == "scan" && !run.options.0.source_external {
         scan_native(db, run).await?;
@@ -111,6 +117,7 @@ pub(super) async fn prepare(db: &mut Tx<'_>, run: &mut Run) -> Result<Option<Pla
                 run,
                 item,
                 state.finish.as_ref().ok_or(Error::OperationAborted)?,
+                None,
             )
             .await?;
             return Ok(None);
@@ -128,6 +135,9 @@ pub(super) async fn prepare(db: &mut Tx<'_>, run: &mut Run) -> Result<Option<Pla
         .for_item(plan.key.as_deref().ok_or(Error::OperationAborted)?)?;
     plan.parts = parts(db, item, &state).await?;
     plan.state = state;
+    if !run.options.0.target_external {
+        return super::replication_import_transactions::prepare(db, task, run, plan).await;
+    }
     plan.native = native(db, run, item).await?;
     plan.validate()?;
     Ok(Some(plan))
@@ -135,6 +145,7 @@ pub(super) async fn prepare(db: &mut Tx<'_>, run: &mut Run) -> Result<Option<Pla
 
 pub(super) async fn complete(
     db: &mut Tx<'_>,
+    task: crate::model::task::Execution,
     run: &mut Run,
     plan: &Plan,
     outcome: &external::Outcome,
@@ -165,6 +176,10 @@ pub(super) async fn complete(
             state == plan.state && parts(db, item, &state).await? == plan.parts,
             Error::OperationAborted
         );
+        if !run.options.0.target_external {
+            return super::replication_import_transactions::complete(db, task, run, plan, outcome)
+                .await;
+        }
         let current = native(db, run, item).await?;
         let mut change = external::apply(plan, outcome)?;
         if current != plan.native && plan.state.phase != Phase::Cleanup {
@@ -175,7 +190,7 @@ pub(super) async fn complete(
         }
         r::save(item, &change.state).execute(&mut **db).await?;
         if let Some(result) = &change.finish {
-            finished(db, run, item, result).await?;
+            finished(db, run, item, result, None).await?;
         }
         return Ok(());
     }
@@ -228,13 +243,16 @@ pub(super) async fn native(
     run: &Run,
     item: crate::model::Id,
 ) -> Result<Option<external::Native>> {
-    if run.options.0.source_external || run.phase == "cancel" {
+    if run.options.0.source_external && run.options.0.target_external || run.phase == "cancel" {
         return Ok(None);
     }
     let entry = r::entry(run.task_id, item).fetch_one(&mut **db).await?;
-    let source = q::source(run.options.0.source_bucket, &entry.source_key)
-        .fetch_optional(&mut **db)
-        .await?;
+    let (bucket, key) = if run.options.0.source_external {
+        (run.options.0.target_bucket, &entry.target_key)
+    } else {
+        (run.options.0.source_bucket, &entry.source_key)
+    };
+    let source = q::source(bucket, key).fetch_optional(&mut **db).await?;
     match source {
         Some(source)
             if Some(source.id) == entry.source_pin && source.snapshot() == entry.snapshot.0 =>
@@ -281,7 +299,7 @@ pub(super) async fn preflight(
 ) -> Result<Option<crate::model::replication::Step>> {
     use super::{transfer_queries as t, transfer_transactions as transfer};
     use crate::model::{replication::Step, transfer::Input};
-    if run.options.0.source_external || run.phase != "verify" {
+    if run.options.0.source_external && run.options.0.target_external || run.phase != "verify" {
         return Ok(None);
     }
     let Some(item) = r::pending(run.task_id).fetch_optional(&mut **db).await? else {
