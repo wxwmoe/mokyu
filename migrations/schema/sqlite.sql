@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 0047.
+-- Generated from the complete sqlite migration chain through 0048.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -885,7 +885,7 @@ CREATE TABLE transfer_items (
     snapshot TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'planning',
     position_bytes BIGINT NOT NULL DEFAULT 0 CHECK (position_bytes>=0),
-    error TEXT,
+    error TEXT, reuse_target INTEGER NOT NULL DEFAULT 0 CHECK (reuse_target IN (0,1)),
     CHECK (state IN ('planning','planned','copying','completed','skipped','conflict','cancelled'))
 );
 
@@ -1256,6 +1256,8 @@ CREATE INDEX token_external_bucket ON token_external_grants(bucket_id);
 CREATE INDEX token_grants_bucket ON token_bucket_grants(bucket_id);
 
 CREATE INDEX transfer_items_candidate ON transfer_items(candidate);
+
+CREATE INDEX transfer_items_receipt ON transfer_items(source_version,output_version) WHERE output_version IS NOT NULL AND error IS NULL AND state IN ('completed','skipped');
 
 CREATE INDEX transfer_items_source_pin ON transfer_items(source_pin);
 

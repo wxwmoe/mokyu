@@ -83,6 +83,7 @@ pub(super) struct Entry {
     pub snapshot: Json<Snapshot>,
     pub state: String,
     pub position_bytes: i64,
+    pub reuse_target: bool,
     pub error: Option<String>,
 }
 impl Entry {
@@ -222,20 +223,20 @@ pub(super) fn insert_item<'q>(
 }
 
 pub(super) fn items<'q>(id: Uuid, after: Option<Id>, limit: i64) -> Rows<'q, Entry> {
-    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,error FROM transfer_items WHERE task_id=$1 AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3")
+    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error FROM transfer_items WHERE task_id=$1 AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3")
         .bind(id)
         .bind(after)
         .bind(limit)
 }
 
 pub(super) fn pending<'q>(id: Uuid, state: &'q str) -> Rows<'q, Entry> {
-    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,error FROM transfer_items WHERE task_id=$1 AND state=$2 ORDER BY id LIMIT 1 FOR UPDATE")
+    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error FROM transfer_items WHERE task_id=$1 AND state=$2 ORDER BY id LIMIT 1 FOR UPDATE")
         .bind(id)
         .bind(state)
 }
 
 pub(super) fn live<'q>(id: Uuid) -> Rows<'q, Entry> {
-    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,error FROM transfer_items WHERE task_id=$1 AND (source_pin IS NOT NULL OR candidate IS NOT NULL) ORDER BY id LIMIT 32 FOR UPDATE")
+    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error FROM transfer_items WHERE task_id=$1 AND (source_pin IS NOT NULL OR candidate IS NOT NULL) ORDER BY id LIMIT 32 FOR UPDATE")
         .bind(id)
 }
 
@@ -256,7 +257,7 @@ pub(super) fn candidate<'q>(id: Id, candidate: Id) -> Statement<'q> {
 
 pub(super) fn replan<'q>(id: Id) -> Statement<'q> {
     sqlx::query(
-        "UPDATE transfer_items SET candidate=NULL,state='planning',position_bytes=0 WHERE id=$1",
+        "UPDATE transfer_items SET candidate=NULL,state='planning',position_bytes=0,reuse_target=FALSE WHERE id=$1",
     )
     .bind(id)
 }
@@ -335,10 +336,27 @@ pub(super) fn invalidate<'q>(task: Uuid, source: Id) -> Statement<'q> {
 }
 
 pub(super) fn same_data<'q>(source: Id, target: Id, payload: &'q str) -> Scalar<'q, bool> {
-    sqlx::query_scalar("SELECT CASE WHEN $3='raw' THEN NOT EXISTS(SELECT 1 FROM raw_ranges s LEFT JOIN raw_ranges t ON t.stream_id=$2 AND t.offset_bytes=s.offset_bytes AND t.length=s.length AND t.source_id=s.source_id AND t.source_offset=s.source_offset WHERE s.stream_id=$1 AND t.source_id IS NULL) ELSE NOT EXISTS(SELECT 1 FROM extents s LEFT JOIN extents t ON t.stream_id=$2 AND t.offset_bytes=s.offset_bytes AND t.length=s.length AND t.chunk_id=s.chunk_id WHERE s.stream_id=$1 AND (t.chunk_id IS NULL OR s.fragment_id IS NOT NULL)) END")
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfer_items WHERE source_version=$1 AND output_version=$2 AND error IS NULL AND state IN ('completed','skipped')) OR (EXISTS(SELECT 1 FROM streams s JOIN streams t ON t.id=$2 WHERE s.id=$1 AND s.payload_type=t.payload_type) AND CASE WHEN $3='raw' THEN NOT EXISTS(SELECT 1 FROM raw_ranges s LEFT JOIN raw_sources sr ON sr.id=s.source_id WHERE s.stream_id=$1 AND NOT EXISTS(SELECT 1 FROM raw_ranges t JOIN raw_sources tr ON tr.id=t.source_id WHERE t.stream_id=$2 AND t.offset_bytes=s.offset_bytes AND t.length=s.length AND t.source_offset=s.source_offset AND (t.source_id=s.source_id OR (tr.size=sr.size AND octet_length(sr.content_hash)=32 AND tr.content_hash=sr.content_hash)))) ELSE NOT EXISTS(SELECT 1 FROM extents s LEFT JOIN chunks sc ON sc.id=s.chunk_id WHERE s.stream_id=$1 AND (s.fragment_id IS NOT NULL OR NOT EXISTS(SELECT 1 FROM extents t JOIN chunks tc ON tc.id=t.chunk_id WHERE t.stream_id=$2 AND t.offset_bytes=s.offset_bytes AND t.length=s.length AND t.source_offset=s.source_offset AND t.fragment_id IS NULL AND (t.chunk_id=s.chunk_id OR (tc.hash=sc.hash AND tc.raw_size=sc.raw_size))))) END)")
         .bind(source)
         .bind(target)
         .bind(payload)
+}
+
+pub(super) fn ready<'q>(stream: Id, payload: &'q str) -> Scalar<'q, bool> {
+    sqlx::query_scalar("SELECT CASE WHEN $2='raw' THEN NOT EXISTS(SELECT 1 FROM raw_ranges x LEFT JOIN raw_sources r ON r.id=x.source_id WHERE x.stream_id=$1 AND (r.id IS NULL OR r.state<>'ready' OR r.pending_upload OR r.quarantine_code IS NOT NULL OR r.medium NOT IN ('local','shared_s3'))) ELSE NOT EXISTS(SELECT 1 FROM extents x LEFT JOIN chunks c ON c.id=x.chunk_id WHERE x.stream_id=$1 AND (c.id IS NULL OR x.fragment_id IS NOT NULL OR c.state<>'ready' OR (NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.encoding_id=c.current_encoding_id AND l.state='ready' AND l.quarantined_at IS NULL) AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=c.pack_id AND p.state='ready' AND p.quarantined_at IS NULL)))) END")
+        .bind(stream)
+        .bind(payload)
+}
+
+pub(super) fn lock_raw(stream: Id) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT r.state='ready' AND NOT r.pending_upload AND r.quarantine_code IS NULL AND r.medium IN ('local','shared_s3') FROM raw_sources r WHERE r.id IN (SELECT source_id FROM raw_ranges WHERE stream_id=$1) ORDER BY r.id FOR SHARE").bind(stream)
+}
+
+pub(super) fn reuse_target(id: Id) -> Statement<'static> {
+    sqlx::query(
+        "UPDATE transfer_items SET state='planned',position_bytes=0,reuse_target=TRUE WHERE id=$1",
+    )
+    .bind(id)
 }
 
 pub(super) fn extents<'q>(

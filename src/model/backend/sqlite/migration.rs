@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, SqliteConnection, migrate::Migrate};
 
 static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
-const SCHEMA_VERSION: i64 = 47;
+const SCHEMA_VERSION: i64 = 48;
 // Only the 0.0.6 format boundary requires an empty store.
 const EMPTY_UPGRADE_VERSION: i64 = 43;
 
