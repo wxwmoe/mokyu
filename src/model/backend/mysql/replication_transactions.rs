@@ -1,6 +1,6 @@
 use super::{Backend, queries, replication_queries as q, transactions};
 use crate::{
-    authorization::{Action, Permit, Principal},
+    authorization::{Permit, Principal},
     model::{
         Error, Id, StreamCreate,
         object::StorageMigration,
@@ -22,10 +22,10 @@ type Tx<'a> = Transaction<'a, MySql>;
 fn detail(run: &q::Run) -> serde_json::Value {
     json!({"operation":"replication","phase":run.phase,"storage_id":run.storage_id,
         "execution_mode":run.mode,"progress":run.progress.0,
-        "source_bucket":run.options.0.source_bucket,"target_bucket":run.options.0.target_bucket})
+        "external":run.options.0.external(),"source_bucket":run.options.0.source_bucket,"target_bucket":run.options.0.target_bucket})
 }
 
-async fn save(db: &mut Tx<'_>, run: &q::Run) -> Result<()> {
+pub(super) async fn save(db: &mut Tx<'_>, run: &q::Run) -> Result<()> {
     q::save(
         run.task_id,
         &run.phase,
@@ -53,19 +53,39 @@ async fn authorize(
     principal: &Principal,
     write: bool,
 ) -> Result<()> {
+    let options = &run.options.0;
     let authority = if write {
-        run.options.0.authority(principal.clone())
+        options.authority(principal.clone())
     } else {
-        let mut permit =
-            Permit::for_action(principal.clone(), run.options.0.source_bucket, Action::Read);
-        permit.add(run.options.0.target_bucket, Action::Write);
-        permit
+        options.visible(principal.clone(), false)
     };
     if write {
-        transactions::lock_media_scope(db, &authority).await
+        transactions::lock_media_scope(db, &authority).await?;
     } else {
-        transactions::lock_permit(db, &authority).await
+        transactions::lock_permit(db, &authority).await?;
     }
+    if options.external() {
+        let authority = if write {
+            options.external_authority(principal.clone())
+        } else {
+            options.visible(principal.clone(), true)
+        };
+        let records = super::external_transactions::authorized(&mut **db, &authority).await?;
+        if write {
+            let connections = q::connections(run.task_id).fetch_all(&mut **db).await?;
+            ensure!(connections.len() == records.len(), Error::OperationAborted);
+            for record in records {
+                ensure!(
+                    connections
+                        .iter()
+                        .any(|connection| connection.external_id == record.bucket.id
+                            && connection.revision == record.bucket.revision),
+                    Error::OperationAborted
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn owned(db: &mut Tx<'_>, task: Execution) -> Result<q::Run> {
@@ -86,16 +106,66 @@ pub(super) async fn owned(db: &mut Tx<'_>, task: Execution) -> Result<q::Run> {
 
 #[async_trait::async_trait]
 impl ReplicationStore for Backend {
-    async fn create(&self, principal: &Principal, options: &Options) -> Result<Uuid> {
+    async fn create(
+        &self,
+        principal: &Principal,
+        options: &Options,
+        connections: &[model::external::Connection],
+    ) -> Result<Uuid> {
         options.validate()?;
+        ensure!(
+            !options.external()
+                || options.source_external
+                    && options.target_external
+                    && options.operation == Operation::Copy,
+            s3s::s3_error!(NotImplemented, "external transfer route is unavailable")
+        );
         let mut db = self.pool.begin().await?;
         transactions::lock_media_scope(&mut db, &options.authority(principal.clone())).await?;
-        let source = q::profile(options.source_bucket)
-            .fetch_one(&mut *db)
+        if options.external() {
+            let records = super::external_transactions::authorized(
+                &mut db,
+                &options.external_authority(principal.clone()),
+            )
             .await?;
-        let target = q::profile(options.target_bucket)
-            .fetch_one(&mut *db)
-            .await?;
+            ensure!(
+                connections.len() == records.len()
+                    && records.iter().all(|record| connections
+                        .iter()
+                        .any(|connection| connection.external_id == record.bucket.id
+                            && connection.revision == record.bucket.revision)),
+                Error::OperationAborted
+            );
+            let source = records
+                .iter()
+                .find(|record| record.bucket.id == options.source_bucket)
+                .ok_or(Error::OperationAborted)?;
+            let target = records
+                .iter()
+                .find(|record| record.bucket.id == options.target_bucket)
+                .ok_or(Error::OperationAborted)?;
+            options.external_scopes(&source.bucket.connection, &target.bucket.connection)?;
+        } else {
+            ensure!(connections.is_empty(), s3s::s3_error!(InvalidArgument));
+        }
+        let source = if options.source_external {
+            None
+        } else {
+            Some(
+                q::profile(options.source_bucket)
+                    .fetch_one(&mut *db)
+                    .await?,
+            )
+        };
+        let target = if options.target_external {
+            None
+        } else {
+            Some(
+                q::profile(options.target_bucket)
+                    .fetch_one(&mut *db)
+                    .await?,
+            )
+        };
         if let Ok(id) = crate::model::REQUEST_ID.try_with(|id| *id) {
             if let Some(previous) = q::run(id).fetch_optional(&mut *db).await? {
                 ensure!(
@@ -109,11 +179,22 @@ impl ReplicationStore for Backend {
             }
         }
         let mode = q::mode().fetch_one(&mut *db).await?;
-        let id = transactions::enqueue_task(&mut db, "storage_migration", Some(options.target_bucket),
-            json!({"operation":"replication","phase":"scan","storage_id":target.0,"execution_mode":mode})).await?;
-        q::create(id, principal, options, target.0, target.1, source.0)
-            .execute(&mut *db)
-            .await?;
+        let id = transactions::enqueue_task(&mut db, "storage_migration", (!options.target_external).then_some(options.target_bucket),
+            json!({"operation":"replication","phase":"scan","external":options.external(),"storage_id":target.map(|value| value.0),"execution_mode":mode})).await?;
+        q::create(
+            id,
+            principal,
+            options,
+            target.map(|value| value.0),
+            target.map(|value| value.1),
+            source.map(|value| value.0),
+        )
+        .execute(&mut *db)
+        .await?;
+        for connection in connections {
+            connection.validate(id)?;
+            q::connection(id, connection).execute(&mut *db).await?;
+        }
         db.commit().await?;
         Ok(id)
     }
@@ -204,13 +285,15 @@ impl ReplicationStore for Backend {
                     run.mode == q::mode().fetch_one(&mut *db).await?,
                     Error::OperationAborted
                 );
-                let target = q::profile(run.options.0.target_bucket)
-                    .fetch_one(&mut *db)
-                    .await?;
-                ensure!(
-                    target == (run.storage_id, run.profile_revision),
-                    s3s::s3_error!(OperationAborted, "storage profile changed")
-                );
+                if !run.options.0.target_external {
+                    let target = q::profile(run.options.0.target_bucket)
+                        .fetch_one(&mut *db)
+                        .await?;
+                    ensure!(
+                        target == (run.storage()?, run.profile_revision()?),
+                        s3s::s3_error!(OperationAborted, "storage profile changed")
+                    );
+                }
                 q::actor(id, principal).execute(&mut *db).await?;
                 q::resume(id).execute(&mut *db).await?;
                 run = load(&mut db, id).await?;
@@ -233,6 +316,20 @@ impl ReplicationStore for Backend {
             let result = async {
                 let mut db = self.pool.begin().await?;
                 let mut run = owned(&mut db, task).await?;
+                if run.options.0.external() {
+                    let plan =
+                        super::replication_remote_transactions::prepare(&mut db, &mut run).await?;
+                    let connections = q::connections(task.id).fetch_all(&mut *db).await?;
+                    save(&mut db, &run).await?;
+                    db.commit().await?;
+                    return Ok(match plan {
+                        Some(plan) => Step::External {
+                            plan: Box::new(plan),
+                            connections,
+                        },
+                        None => Step::Continue,
+                    });
+                }
                 #[cfg(feature = "fault-injection")]
                 let completed = run.progress.0.completed;
                 let result = match run.phase.as_str() {
@@ -277,6 +374,20 @@ impl ReplicationStore for Backend {
             }
             return result;
         }
+    }
+
+    async fn external_complete(
+        &self,
+        task: Execution,
+        plan: &model::external::Plan,
+        outcome: &model::external::Outcome,
+    ) -> Result<()> {
+        let mut db = self.pool.begin().await?;
+        let mut run = owned(&mut db, task).await?;
+        super::replication_remote_transactions::complete(&mut db, &mut run, plan, outcome).await?;
+        save(&mut db, &run).await?;
+        db.commit().await?;
+        Ok(())
     }
 
     async fn scanned(
@@ -536,7 +647,7 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
                     return finish_item(db, run, &item, "skipped", Some(target.id), None).await;
                 }
                 let raw_allowed = target.payload_type != "raw"
-                    || super::transfer_queries::policy(run.storage_id, run.profile_revision)
+                    || super::transfer_queries::policy(run.storage()?, run.profile_revision()?)
                         .fetch_one(&mut **db)
                         .await?
                         .0;
@@ -603,7 +714,7 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
         }
     }
     ensure!(end <= item.snapshot.0.size, Error::SourceUnavailable);
-    if run.source_storage_id != run.storage_id && !chunks.is_empty() {
+    if run.source_storage()? != run.storage()? && !chunks.is_empty() {
         let ids: Vec<_> = chunks
             .iter()
             .map(|(id, _)| *id)
@@ -654,7 +765,7 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
             }
         }
         run.progress.0.sources += added;
-        if run.source_storage_id != run.storage_id {
+        if run.source_storage()? != run.storage()? {
             run.progress.0.sources -=
                 super::transfer_transactions::capture(db, run, &chunks, &raw).await? as i64;
         }
@@ -679,7 +790,7 @@ pub(super) async fn verification(
     run: &mut q::Run,
 ) -> Result<Step> {
     ensure!(run.phase == "verify", Error::OperationAborted);
-    if run.source_storage_id != run.storage_id {
+    if run.source_storage()? != run.storage()? {
         if let Some(mut unit) = super::transfer_queries::pending(run.task_id)
             .fetch_optional(&mut **db)
             .await?
@@ -714,12 +825,12 @@ pub(super) async fn verification(
         return Ok(Step::Continue);
     }
     ensure!(
-        source.storage_id == run.storage_id
+        source.storage_id == run.storage()?
             && matches!(source.medium.as_str(), "local" | "shared_s3"),
         Error::SourceUnavailable
     );
     Ok(Step::Verify {
-        storage: run.storage_id,
+        storage: run.storage()?,
         sources: vec![source],
     })
 }
@@ -828,7 +939,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
         .fetch_one(&mut **db)
         .await?;
     ensure!(
-        profile == (run.storage_id, run.profile_revision),
+        profile == (run.storage()?, run.profile_revision()?),
         s3s::s3_error!(OperationAborted, "storage profile changed")
     );
     let candidate = if let Some(id) = item.candidate {
@@ -870,7 +981,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
     };
     let mut end = item.position_bytes;
     if item.snapshot.0.size > 0 {
-        if run.source_storage_id != run.storage_id && !item.reuse_target {
+        if run.source_storage()? != run.storage()? && !item.reuse_target {
             end = super::transfer_transactions::project(
                 db,
                 run,
@@ -885,7 +996,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             let rows = q::ranges(projection_source, end)
                 .fetch_all(&mut **db)
                 .await?;
-            let (start, next, ids) = crate::model::raw::copy_window(run.storage_id, &rows)?;
+            let (start, next, ids) = crate::model::raw::copy_window(run.storage()?, &rows)?;
             ensure!(
                 start == end && next <= item.snapshot.0.size && next > end,
                 Error::SourceUnavailable
@@ -914,8 +1025,8 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
                 db,
                 candidate,
                 projection_source,
-                run.storage_id,
-                run.profile_revision,
+                run.storage()?,
+                run.profile_revision()?,
                 &rows,
             )
             .await?;

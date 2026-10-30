@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0094.
+-- Generated from the complete postgres migration chain through 0095.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -2021,6 +2021,30 @@ CREATE VIEW public.token_external_access AS
      JOIN public.token_external_grants g ON ((g.token_id = t.id)))
      LEFT JOIN public.user_external_access a ON (((a.user_id = t.user_id) AND (a.bucket_id = g.bucket_id))));
 
+CREATE TABLE public.transfer_connections (
+    task_id uuid NOT NULL,
+    external_id uuid NOT NULL,
+    revision bigint NOT NULL,
+    encrypted bytea NOT NULL,
+    CONSTRAINT transfer_connections_revision_check CHECK ((revision > 0))
+);
+
+CREATE TABLE public.transfer_external_items (
+    item_id uuid NOT NULL,
+    state jsonb NOT NULL
+);
+
+CREATE TABLE public.transfer_external_parts (
+    item_id uuid NOT NULL,
+    part_number integer NOT NULL,
+    size_bytes bigint NOT NULL,
+    etag text NOT NULL,
+    digest bytea NOT NULL,
+    CONSTRAINT transfer_external_parts_digest_check CHECK ((length(digest) = 32)),
+    CONSTRAINT transfer_external_parts_part_number_check CHECK (((part_number >= 1) AND (part_number <= 10000))),
+    CONSTRAINT transfer_external_parts_size_bytes_check CHECK (((size_bytes >= 0) AND (size_bytes <= '5368709120'::bigint)))
+);
+
 CREATE TABLE public.transfer_items (
     id uuid DEFAULT uuidv7() NOT NULL,
     task_id uuid NOT NULL,
@@ -2068,13 +2092,13 @@ CREATE TABLE public.transfer_runs (
     created_by uuid,
     options jsonb NOT NULL,
     authority jsonb NOT NULL,
-    storage_id uuid NOT NULL,
-    profile_revision bigint NOT NULL,
+    storage_id uuid,
+    profile_revision bigint,
     generation bigint DEFAULT 1 NOT NULL,
     phase text DEFAULT 'scan'::text NOT NULL,
     cursor_key text,
     progress jsonb NOT NULL,
-    source_storage_id uuid NOT NULL,
+    source_storage_id uuid,
     CONSTRAINT transfer_runs_generation_check CHECK ((generation > 0)),
     CONSTRAINT transfer_runs_phase_check CHECK ((phase = ANY (ARRAY['scan'::text, 'plan'::text, 'verify'::text, 'publish'::text, 'cancel'::text, 'complete'::text, 'cancelled'::text])))
 );
@@ -2548,6 +2572,15 @@ ALTER TABLE ONLY public.token_external_grants
 ALTER TABLE ONLY public.token_bucket_grants
     ADD CONSTRAINT token_grants_pkey PRIMARY KEY (token_id, bucket_id);
 
+ALTER TABLE ONLY public.transfer_connections
+    ADD CONSTRAINT transfer_connections_pkey PRIMARY KEY (task_id, external_id);
+
+ALTER TABLE ONLY public.transfer_external_items
+    ADD CONSTRAINT transfer_external_items_pkey PRIMARY KEY (item_id);
+
+ALTER TABLE ONLY public.transfer_external_parts
+    ADD CONSTRAINT transfer_external_parts_pkey PRIMARY KEY (item_id, part_number);
+
 ALTER TABLE ONLY public.transfer_items
     ADD CONSTRAINT transfer_items_pkey PRIMARY KEY (id);
 
@@ -2830,9 +2863,13 @@ CREATE INDEX token_bucket_grants_bucket ON public.token_bucket_grants USING btre
 
 CREATE INDEX token_external_bucket ON public.token_external_grants USING btree (bucket_id);
 
+CREATE INDEX transfer_connections_external ON public.transfer_connections USING btree (external_id);
+
 CREATE INDEX transfer_items_candidate ON public.transfer_items USING btree (candidate);
 
 CREATE INDEX transfer_items_receipt ON public.transfer_items USING btree (source_version, output_version) WHERE ((output_version IS NOT NULL) AND (error IS NULL) AND (state = ANY (ARRAY['completed'::text, 'skipped'::text])));
+
+CREATE INDEX transfer_items_source_key ON public.transfer_items USING btree (task_id, source_key);
 
 CREATE INDEX transfer_items_source_pin ON public.transfer_items USING btree (source_pin);
 
@@ -3384,6 +3421,18 @@ ALTER TABLE ONLY public.token_bucket_grants
 
 ALTER TABLE ONLY public.token_bucket_grants
     ADD CONSTRAINT token_grants_token_id_fkey FOREIGN KEY (token_id) REFERENCES public.api_tokens(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_connections
+    ADD CONSTRAINT transfer_connections_external_id_fkey FOREIGN KEY (external_id) REFERENCES public.external_buckets(id);
+
+ALTER TABLE ONLY public.transfer_connections
+    ADD CONSTRAINT transfer_connections_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.transfer_runs(task_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_external_items
+    ADD CONSTRAINT transfer_external_items_item_id_fkey FOREIGN KEY (item_id) REFERENCES public.transfer_items(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_external_parts
+    ADD CONSTRAINT transfer_external_parts_item_id_fkey FOREIGN KEY (item_id) REFERENCES public.transfer_external_items(item_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.transfer_items
     ADD CONSTRAINT transfer_items_candidate_fkey FOREIGN KEY (candidate) REFERENCES public.streams(id);

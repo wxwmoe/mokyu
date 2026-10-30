@@ -18,6 +18,12 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use utoipa::ToSchema;
 
+#[path = "external_objects.rs"]
+pub(crate) mod objects;
+
+#[path = "external_transfer.rs"]
+pub(crate) mod transfer;
+
 pub(crate) fn credentials(access: &str, secret: &str) -> Result<()> {
     ensure!(
         (1..=256).contains(&access.len())
@@ -49,6 +55,20 @@ pub(crate) struct Connection {
 }
 
 impl Connection {
+    pub(crate) fn object_address(&self, key: &str) -> Result<String> {
+        let mut connection = self.clone();
+        connection.virtual_hosted = false;
+        Ok(connection.uri(Some(key), &[])?.to_string())
+    }
+
+    pub(crate) fn object_prefix(&self, prefix: &str) -> Result<String> {
+        if prefix.is_empty() {
+            Ok(self.object_address("_")?.trim_end_matches('_').to_owned())
+        } else {
+            self.object_address(prefix)
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             self.endpoint_url.len() <= 2048,
@@ -111,6 +131,7 @@ impl Connection {
             secret: secret.to_owned(),
             client,
             timeout: options.request_timeout,
+            memory: None,
         })
     }
 
@@ -130,7 +151,10 @@ impl Connection {
         }
         path.push('/');
         if let Some(key) = key {
-            ensure!(!key.is_empty(), "external object key is empty");
+            ensure!(
+                !key.is_empty() && !key.contains('\0'),
+                "invalid external object key"
+            );
             let scoped = if self.prefix.is_empty() {
                 key.to_owned()
             } else {
@@ -225,6 +249,18 @@ pub(crate) struct Client {
     secret: String,
     client: HttpClient<hyper_rustls::HttpsConnector<HttpConnector>, Body>,
     timeout: Duration,
+    memory: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
+}
+
+struct Buffered {
+    bytes: Vec<u8>,
+    _memory: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl AsRef<[u8]> for Buffered {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl Client {
@@ -247,10 +283,24 @@ impl Client {
         method: Method,
         key: Option<&str>,
         query: &[(&str, &str)],
-        mut headers: HeaderMap,
+        headers: HeaderMap,
         body: Body,
         digest: &str,
     ) -> Result<Response<Body>> {
+        let request = self.signed(method, key, query, headers, body, digest)?;
+        let reply = tokio::time::timeout(self.timeout, self.client.request(request)).await??;
+        Ok(reply.map(Body::new))
+    }
+
+    fn signed(
+        &self,
+        method: Method,
+        key: Option<&str>,
+        query: &[(&str, &str)],
+        mut headers: HeaderMap,
+        body: Body,
+        digest: &str,
+    ) -> Result<Request<Body>> {
         ensure!(
             digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
             "invalid external payload digest"
@@ -302,10 +352,62 @@ impl Client {
         headers.insert(header::AUTHORIZATION, authorization.parse()?);
         let mut request = Request::builder().method(method).uri(uri).body(body)?;
         *request.headers_mut() = headers;
-        let reply = tokio::time::timeout(self.timeout, self.client.request(request)).await??;
-        Ok(reply.map(Body::new))
+        Ok(request)
     }
 
+    pub(crate) async fn stream<'a>(
+        &self,
+        key: &str,
+        query: &[(&str, &str)],
+        length: u64,
+        digest: &'a [u8; 32],
+        source: futures_util::stream::BoxStream<'a, Result<Bytes>>,
+    ) -> Result<Response<Body>> {
+        let (body, feed, mut activity) = super::s3::upload_body::<Sha256>(source, length, digest);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, length.to_string().parse()?);
+        let request = self.signed(
+            Method::PUT,
+            Some(key),
+            query,
+            headers,
+            Body::from_stream(body),
+            &hex::encode(digest),
+        )?;
+        let send = async {
+            let request = self.client.request(request);
+            tokio::pin!(request);
+            let mut ended = false;
+            loop {
+                let deadline = *activity.borrow() + self.timeout;
+                tokio::select! {
+                    reply = &mut request => return reply.map_err(anyhow::Error::from),
+                    changed = activity.changed(), if !ended => { ended = changed.is_err(); },
+                    _ = tokio::time::sleep_until(deadline) => return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "external upload made no progress").into()),
+                }
+            }
+        };
+        let (complete, response) = {
+            tokio::pin!(feed, send);
+            tokio::select! {
+                fed = &mut feed => (fed?, send.await),
+                response = &mut send => {
+                    let complete = if response.as_ref().is_ok_and(|reply| reply.status().is_success()) {
+                        tokio::time::timeout(self.timeout, feed).await??
+                    } else {
+                        false
+                    };
+                    (complete, response)
+                }
+            }
+        };
+        let reply = response?;
+        ensure!(
+            !reply.status().is_success() || complete,
+            "external accepted an incomplete upload request"
+        );
+        Ok(reply.map(Body::new))
+    }
     pub(crate) async fn anonymous_read(
         &self,
         key: &str,
@@ -331,7 +433,14 @@ impl Client {
             );
             output.extend_from_slice(&bytes);
         }
-        Ok(output.into())
+        Ok(if let Some(memory) = &self.memory {
+            Bytes::from_owner(Buffered {
+                bytes: output,
+                _memory: memory.clone(),
+            })
+        } else {
+            output.into()
+        })
     }
 }
 

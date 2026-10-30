@@ -5,7 +5,7 @@ use tonic::Status;
 pub(super) fn exchange(input: wire::WorkRequest) -> Result<work::Exchange, Status> {
     let invalid = || Status::invalid_argument("invalid work exchange");
     let size = prost::Message::encoded_len(&input);
-    if size > crate::model::node_pack::RESULT_LIMIT {
+    if size > 512 * 1024 {
         return Err(invalid());
     }
     let value = work::Exchange {
@@ -21,10 +21,11 @@ pub(super) fn exchange(input: wire::WorkRequest) -> Result<work::Exchange, Statu
         cached: read::cached(input.cached)?,
     };
     if size > read::REQUEST_LIMIT
-        && !value
-            .completion
-            .as_ref()
-            .is_some_and(|c| matches!(c.outcomes.as_slice(), [work::Outcome::Packed(_)]))
+        && !value.completion.as_ref().is_some_and(|c| {
+            size <= crate::model::node_pack::RESULT_LIMIT
+                && matches!(c.outcomes.as_slice(), [work::Outcome::Packed(_)])
+                || matches!(c.outcomes.as_slice(), [work::Outcome::ExternalTransfer(_)])
+        })
     {
         return Err(invalid());
     }
@@ -32,6 +33,9 @@ pub(super) fn exchange(input: wire::WorkRequest) -> Result<work::Exchange, Statu
         for outcome in &completion.outcomes {
             if let work::Outcome::ExternalTest(report) = outcome {
                 report.validate().map_err(|_| invalid())?;
+            }
+            if let work::Outcome::ExternalTransfer(outcome) = outcome {
+                outcome.validate().map_err(|_| invalid())?;
             }
             if matches!(outcome, work::Outcome::Hashed { hash } if hash.len()!=32) {
                 return Err(invalid());
@@ -83,7 +87,7 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn large_results_are_reserved_for_one_bounded_pack() {
+    fn large_results_require_a_bounded_pack_or_external_transfer() {
         let request = |outcomes| wire::WorkRequest {
             run: Some(wire::Run {
                 boot_id: Uuid::new_v4().to_string(),
@@ -111,6 +115,25 @@ mod tests {
         assert!(prost::Message::encoded_len(&input) > read::REQUEST_LIMIT);
         assert!(exchange(input).is_ok());
         assert!(exchange(request(vec![outcome.clone(), work::Outcome::Retry])).is_err());
+        let external =
+            work::Outcome::ExternalTransfer(crate::model::replication::external::Outcome::Listed {
+                keys: (0..64)
+                    .map(|index| format!("{index:02}{}", "\x01".repeat(1022)))
+                    .collect(),
+                next: None,
+            });
+        let input = request(vec![external.clone()]);
+        assert!(prost::Message::encoded_len(&input) > read::REQUEST_LIMIT);
+        assert!(exchange(input).is_ok());
+        assert!(exchange(request(vec![external, work::Outcome::Retry])).is_err());
+        assert!(
+            exchange(request(vec![work::Outcome::ExternalTransfer(
+                crate::model::replication::external::Outcome::Verified {
+                    digest: vec![0; 31]
+                }
+            )]))
+            .is_err()
+        );
         let work::Outcome::Packed(mut result) = outcome else {
             unreachable!()
         };

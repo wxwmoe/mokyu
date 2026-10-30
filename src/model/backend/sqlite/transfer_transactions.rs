@@ -15,7 +15,7 @@ pub(super) async fn capture(
     raw: &[Id],
 ) -> Result<u64> {
     ensure!(
-        run.source_storage_id != run.storage_id,
+        run.source_storage()? != run.storage()?,
         Error::OperationAborted
     );
     for &id in raw {
@@ -26,7 +26,7 @@ pub(super) async fn capture(
             let source = r::raw(id).fetch_one(&mut **db).await?;
             source.validate()?;
             ensure!(
-                source.storage_id == run.source_storage_id,
+                source.storage_id == run.source_storage()?,
                 Error::SourceUnavailable
             );
             q::freeze(unit.id, &Input::Raw { source })
@@ -58,7 +58,7 @@ pub(super) async fn capture(
                 }
             };
             ensure!(
-                input.storage()? == run.source_storage_id,
+                input.storage()? == run.source_storage()?,
                 Error::SourceUnavailable
             );
             q::freeze(unit.id, &input).execute(&mut **db).await?;
@@ -83,7 +83,7 @@ pub(super) async fn scan(
     unit: &mut q::Unit,
 ) -> Result<Option<Scan>> {
     ensure!(
-        run.phase == "verify" && run.source_storage_id != run.storage_id,
+        run.phase == "verify" && run.source_storage()? != run.storage()?,
         Error::OperationAborted
     );
     if !matches!(unit.state.as_str(), "selected" | "scanning") {
@@ -120,7 +120,7 @@ pub(super) async fn scan(
     ensure!(
         unit.source_type == "raw"
             && unit.source_id == source.id
-            && source.storage_id == run.source_storage_id,
+            && source.storage_id == run.source_storage()?,
         Error::SourceUnavailable
     );
     let current = r::raw(source.id).fetch_one(&mut **db).await?;
@@ -137,7 +137,7 @@ pub(super) async fn scan(
         Error::SourceUnavailable
     );
     let source = current;
-    let (raw, cdc) = q::policy(run.storage_id, run.profile_revision)
+    let (raw, cdc) = q::policy(run.storage()?, run.profile_revision()?)
         .fetch_optional(&mut **db)
         .await?
         .ok_or(Error::OperationAborted)?;
@@ -243,7 +243,7 @@ pub(super) async fn prepare(
     };
     ensure!(
         run.phase == "verify"
-            && run.source_storage_id != run.storage_id
+            && run.source_storage()? != run.storage()?
             && matches!(unit.state.as_str(), "selected" | "copying"),
         Error::OperationAborted
     );
@@ -255,27 +255,27 @@ pub(super) async fn prepare(
         .clone();
     input.validate()?;
     ensure!(
-        input.storage()? == run.source_storage_id,
+        input.storage()? == run.source_storage()?,
         Error::SourceUnavailable
     );
     ensure!(
         r::profile(run.options.0.target_bucket)
             .fetch_one(&mut **db)
             .await?
-            == (run.storage_id, run.profile_revision),
+            == (run.storage()?, run.profile_revision()?),
         Error::OperationAborted
     );
-    let profile = super::queries::storage_profile(run.storage_id)
+    let profile = super::queries::storage_profile(run.storage()?)
         .fetch_one(&mut **db)
         .await?;
     ensure!(
-        profile.revision == run.profile_revision,
+        profile.revision == run.profile_revision()?,
         Error::OperationAborted
     );
-    let (raw, _) = q::policy(run.storage_id, run.profile_revision)
+    let (raw, _) = q::policy(run.storage()?, run.profile_revision()?)
         .fetch_one(&mut **db)
         .await?;
-    let (algorithm, key) = q::encoding(run.storage_id).fetch_one(&mut **db).await?;
+    let (algorithm, key) = q::encoding(run.storage()?).fetch_one(&mut **db).await?;
     let candidate = if let Some(candidate) = unit.candidate {
         ensure!(
             r::adopt(candidate, task)
@@ -402,7 +402,7 @@ pub(super) async fn prepare(
                 value.clone()
             } else {
                 let create = ChunkCreate {
-                    storage: run.storage_id,
+                    storage: run.storage()?,
                     stream: candidate,
                     hash: hash.as_slice().try_into()?,
                     raw_size: size,
@@ -463,7 +463,7 @@ pub(super) async fn prepare(
         revision: run.generation,
         input,
         candidate,
-        storage: run.storage_id,
+        storage: run.storage()?,
         prepared: output,
     };
     plan.validate()?;
@@ -482,15 +482,15 @@ pub(super) async fn copied(
     ensure!(
         run.phase == "verify"
             && run.generation == plan.revision
-            && run.storage_id == plan.storage
-            && run.source_storage_id == plan.input.storage()?,
+            && run.storage()? == plan.storage
+            && run.source_storage()? == plan.input.storage()?,
         Error::OperationAborted
     );
     ensure!(
         r::profile(run.options.0.target_bucket)
             .fetch_one(&mut **db)
             .await?
-            == (run.storage_id, run.profile_revision),
+            == (run.storage()?, run.profile_revision()?),
         Error::OperationAborted
     );
     let unit = q::unit(task.id, plan.unit).fetch_one(&mut **db).await?;
@@ -591,7 +591,7 @@ pub(super) async fn project(
     size: i64,
 ) -> Result<i64> {
     ensure!(position >= 0 && position < size, Error::SourceUnavailable);
-    if q::policy(run.storage_id, run.profile_revision)
+    if q::policy(run.storage()?, run.profile_revision()?)
         .fetch_one(&mut **db)
         .await?
         .0
@@ -669,11 +669,11 @@ pub(super) async fn prepare_raw(
         };
         target.clone()
     } else {
-        let (medium, unencoded, revision, cdc, _) = base::raw_target(candidate, run.storage_id)
+        let (medium, unencoded, revision, cdc, _) = base::raw_target(candidate, run.storage()?)
             .fetch_one(&mut **db)
             .await?;
         ensure!(
-            unencoded && !cdc && revision == run.profile_revision,
+            unencoded && !cdc && revision == run.profile_revision()?,
             Error::OperationAborted
         );
         ensure!(
@@ -693,8 +693,8 @@ pub(super) async fn prepare_raw(
         let id: Id = base::raw_insert(
             location,
             candidate,
-            run.storage_id,
-            run.profile_revision,
+            run.storage()?,
+            run.profile_revision()?,
             medium,
             false,
         )
@@ -758,15 +758,15 @@ pub(super) async fn raw_progress(
     ensure!(
         run.phase == "verify"
             && run.generation == plan.revision
-            && run.source_storage_id == plan.input.storage()?
-            && run.storage_id == plan.target.storage_id,
+            && run.source_storage()? == plan.input.storage()?
+            && run.storage()? == plan.target.storage_id,
         Error::OperationAborted
     );
     ensure!(
         r::profile(run.options.0.target_bucket)
             .fetch_one(&mut **db)
             .await?
-            == (run.storage_id, run.profile_revision),
+            == (run.storage()?, run.profile_revision()?),
         Error::OperationAborted
     );
     let unit = q::unit(task.id, plan.unit).fetch_one(&mut **db).await?;
@@ -983,7 +983,7 @@ pub(super) async fn project_raw(
         for row in selected.into_iter().take(128 - rows.len()) {
             row.validate()?;
             ensure!(
-                row.source.storage_id == run.storage_id,
+                row.source.storage_id == run.storage()?,
                 Error::SourceUnavailable
             );
             let first = row.offset_bytes.max(start);
@@ -1003,7 +1003,7 @@ pub(super) async fn project_raw(
     }
     ensure!(end > position && end <= size, Error::SourceUnavailable);
     let ids: Vec<_> = ids.into_iter().collect();
-    let locked: Vec<Id> = base::raw_copy_sources(run.storage_id, &ids)
+    let locked: Vec<Id> = base::raw_copy_sources(run.storage()?, &ids)
         .build_query_scalar()
         .fetch_all(&mut **db)
         .await?;

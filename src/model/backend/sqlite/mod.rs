@@ -4,6 +4,8 @@ mod external_transactions;
 mod migration;
 mod queries;
 mod replication_queries;
+mod replication_remote_queries;
+mod replication_remote_transactions;
 mod replication_transactions;
 mod transactions;
 mod transfer_queries;

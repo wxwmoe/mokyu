@@ -156,6 +156,22 @@ impl Reader {
         self.pool.run().await
     }
 
+    pub(super) async fn external_transfer(
+        &self,
+        plan: &crate::model::replication::external::Plan,
+        connections: &[crate::model::external::Snapshot],
+    ) -> Result<crate::model::replication::external::Outcome> {
+        let units = (crate::storage::external::objects::WINDOW as u64 * 4 + self.workspace)
+            .div_ceil(1024 * 1024);
+        ensure!(
+            units <= u64::from(self.pack_units),
+            "external transfer exceeds node memory budget"
+        );
+        let memory = Arc::new(self.acquire(&self.packs, units as u32).await?);
+        let _io = self.acquire(&self.io, 1).await?;
+        crate::storage::external::transfer::execute(plan, connections, &memory).await
+    }
+
     pub(super) fn http_work(&self) -> Option<OwnedSemaphorePermit> {
         self.http.clone().try_acquire_many_owned(32).ok()
     }

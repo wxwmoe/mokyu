@@ -251,6 +251,24 @@ impl App {
             let _cache = self.public_reads.changing();
             self.replications.step(task).await?
         };
+        if let Step::External { plan, connections } = &result {
+            anyhow::ensure!(self.role == "single", "external transfers require a worker");
+            let snapshots = connections
+                .iter()
+                .map(|connection| connection.open(task.id, &self.secrets.credential_key))
+                .collect::<Result<Vec<_>>>()?;
+            let outcome = {
+                let memory = self
+                    .storage
+                    .pack_work(crate::storage::external::objects::WINDOW)
+                    .await?;
+                let _io = self.storage.reads.acquire().await?;
+                crate::storage::external::transfer::execute(plan, &snapshots, &memory).await?
+            };
+            self.replications
+                .external_complete(task, plan, &outcome)
+                .await?;
+        }
         if let Step::Scan(plan) = &result {
             anyhow::ensure!(self.role == "single", "transfer scanning requires a worker");
             let _permit = self

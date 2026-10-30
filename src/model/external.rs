@@ -1,5 +1,6 @@
 use crate::{
     authorization::{Action, Principal},
+    content::codec,
     storage::external::Connection,
 };
 use anyhow::{Result, ensure};
@@ -8,6 +9,76 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Snapshot {
+    pub external_id: Uuid,
+    pub revision: i64,
+    pub connection: Connection,
+    pub access_key: String,
+    pub secret_key: String,
+}
+
+impl Snapshot {
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.external_id.is_nil() && self.revision > 0,
+            "invalid external snapshot identity"
+        );
+        self.connection.validate()?;
+        crate::storage::external::credentials(&self.access_key, &self.secret_key)
+    }
+
+    pub(crate) fn seal_test(&self, key: &codec::Key) -> Result<Vec<u8>> {
+        self.validate()?;
+        codec::protect(
+            &serde_json::to_vec(self)?,
+            key,
+            format!("external-{}-test-{}", self.external_id, self.revision).as_bytes(),
+        )
+    }
+
+    pub(crate) fn open_test(
+        id: Uuid,
+        revision: i64,
+        bytes: &[u8],
+        key: &codec::Key,
+    ) -> Result<Self> {
+        let value: Self = serde_json::from_str(&codec::unprotect(
+            bytes,
+            key,
+            format!("external-{id}-test-{revision}").as_bytes(),
+        )?)?;
+        ensure!(
+            value.external_id == id && value.revision == revision,
+            "external snapshot differs"
+        );
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub(crate) fn from_record(record: Record, key: &codec::Key) -> Result<Self> {
+        let id = record.bucket.id;
+        let value = Self {
+            external_id: id,
+            revision: record.bucket.revision,
+            connection: record.bucket.connection,
+            access_key: codec::unprotect(
+                &record.access_encrypted,
+                key,
+                format!("external-{id}-access").as_bytes(),
+            )?,
+            secret_key: codec::unprotect(
+                &record.secret_encrypted,
+                key,
+                format!("external-{id}-secret").as_bytes(),
+            )?,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
 
 pub(crate) const ACTIONS: [Action; 5] = [
     Action::List,
@@ -117,6 +188,7 @@ pub(crate) fn validate_grants(grants: &[super::administration::BucketGrant]) -> 
 
 #[async_trait]
 pub(crate) trait ExternalStore: Send + Sync {
+    async fn authorized(&self, permit: &crate::authorization::Permit) -> Result<Vec<Record>>;
     async fn page(
         &self,
         principal: &Principal,

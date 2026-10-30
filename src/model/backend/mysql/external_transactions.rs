@@ -145,8 +145,45 @@ pub(super) async fn replace_token(
     Ok(())
 }
 
+pub(super) async fn authorized(
+    db: &mut sqlx::MySqlConnection,
+    permit: &crate::authorization::Permit,
+) -> Result<Vec<Record>> {
+    ensure!(permit.resources.len() <= 2, s3s::s3_error!(InvalidArgument));
+    let admin = queries::validate_identity(&permit.principal, &mut *db, true).await?;
+    let mut result = Vec::new();
+    for (id, actions) in &permit.resources {
+        q::scope(*id)
+            .fetch_optional(&mut *db)
+            .await?
+            .ok_or_else(|| s3s::s3_error!(AccessDenied))?;
+        let record = q::page(&permit.principal, admin, None, None, Some(*id), 1)
+            .fetch_optional(&mut *db)
+            .await?
+            .ok_or_else(|| s3s::s3_error!(AccessDenied))?
+            .record()?;
+        ensure!(
+            record.bucket.enabled
+                && actions
+                    .iter()
+                    .all(|action| record.bucket.actions.contains(action)),
+            s3s::s3_error!(AccessDenied)
+        );
+        result.push(record);
+    }
+    Ok(result)
+}
+
 #[async_trait::async_trait]
 impl ExternalStore for Backend {
+    async fn authorized(&self, permit: &crate::authorization::Permit) -> Result<Vec<Record>> {
+        ensure!(permit.resources.len() <= 2, s3s::s3_error!(InvalidArgument));
+        let mut db = self.pool.begin().await?;
+        let result = authorized(&mut db, permit).await?;
+        db.commit().await?;
+        Ok(result)
+    }
+
     async fn start_test(&self, principal: &Principal, input: test::Start) -> Result<Uuid> {
         input.report.validate()?;
         ensure!(

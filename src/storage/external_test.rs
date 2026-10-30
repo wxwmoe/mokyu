@@ -1,7 +1,14 @@
-use super::{external::Client, model::Options, s3};
+use super::{
+    external::{
+        Client,
+        objects::{created_upload, listing},
+    },
+    model::Options,
+    s3,
+};
+use crate::model::external::Snapshot;
 use crate::model::external_test::{
-    Artifact, Capability as Cap, CheckState as State, Phase, Plan, Problem, Report, Snapshot,
-    TestFile,
+    Artifact, Capability as Cap, CheckState as State, Phase, Plan, Problem, Report, TestFile,
 };
 use anyhow::{Context, Result, ensure};
 use axum::{
@@ -1008,91 +1015,9 @@ fn text(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn created_upload(bytes: &[u8], key: &str) -> Result<String> {
-    let mut xml = s3s::xml::Deserializer::new(bytes);
-    let (mut remote_key, mut upload) = (None, None);
-    xml.named_element("InitiateMultipartUploadResult", |xml| {
-        xml.for_each_element(|xml, name| {
-            let value: String = xml.content()?;
-            match name {
-                b"Key" if remote_key.is_none() => remote_key = Some(value),
-                b"UploadId" if upload.is_none() => upload = Some(value),
-                b"Key" | b"UploadId" => return Err(s3s::xml::DeError::UnexpectedTagName),
-                _ => {}
-            }
-            Ok(())
-        })
-    })?;
-    xml.expect_eof()?;
-    let upload = upload.context("external upload ID missing")?;
-    ensure!(
-        remote_key.as_deref() == Some(key)
-            && !upload.is_empty()
-            && upload.len() <= 4096
-            && !upload.chars().any(char::is_control),
-        "invalid external upload identity"
-    );
-    Ok(upload)
-}
-
 fn listed_key(bytes: &[u8], prefix: &str) -> Result<Option<(String, u64)>> {
-    let mut xml = s3s::xml::Deserializer::new(bytes);
-    let (mut entry, mut encoding) = (None, None);
-    xml.named_element("ListBucketResult", |xml| {
-        xml.for_each_element(|xml, name| {
-            match name {
-                b"Contents" if entry.is_none() => {
-                    let (mut key, mut size) = (None, None);
-                    xml.for_each_element(|xml, name| {
-                        if name == b"Owner" {
-                            xml.for_each_element(|xml, _| {
-                                let _: String = xml.content()?;
-                                Ok(())
-                            })?;
-                        } else {
-                            let value: String = xml.content()?;
-                            match name {
-                                b"Key" if key.is_none() => key = Some(value),
-                                b"Size" if size.is_none() => size = Some(value),
-                                b"Key" | b"Size" => {
-                                    return Err(s3s::xml::DeError::UnexpectedTagName);
-                                }
-                                _ => {}
-                            }
-                        }
-                        Ok(())
-                    })?;
-                    entry = Some((key, size));
-                }
-                b"Contents" => return Err(s3s::xml::DeError::UnexpectedTagName),
-                _ => {
-                    let value: String = xml.content()?;
-                    if name == b"EncodingType" {
-                        encoding = Some(value);
-                    }
-                }
-            }
-            Ok(())
-        })
-    })?;
-    xml.expect_eof()?;
-    let Some((key, size)) = entry else {
-        return Ok(None);
-    };
-    let key = key.context("external listing key missing")?;
-    let key = if encoding.as_deref() == Some("url") {
-        crate::http::decode_path(&key)?
-    } else {
-        key
-    };
-    ensure!(
-        key.len() <= 1024 && key.starts_with(prefix),
-        "external listing escaped its prefix"
-    );
-    Ok(Some((
-        key.strip_prefix(prefix).unwrap().to_owned(),
-        size.context("external listing size missing")?.parse()?,
-    )))
+    let mut page = listing(bytes, prefix, prefix, None, 1)?;
+    Ok(page.objects.pop().map(|entry| (entry.key, entry.size)))
 }
 
 #[cfg(test)]
@@ -1118,16 +1043,16 @@ mod tests {
 
     #[test]
     fn external_listing_preserves_opaque_keys_and_rejects_other_scopes() {
-        let xml = b"<ListBucketResult><Contents><Key>imports%2Fa%2F..%2F%2Fb%252F</Key><Size>23</Size></Contents><EncodingType>url</EncodingType></ListBucketResult>";
+        let xml = b"<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>imports%2Fa%2F..%2F%2Fb%252F</Key><Size>23</Size></Contents><EncodingType>url</EncodingType></ListBucketResult>";
         assert_eq!(
             listed_key(xml, "imports/").unwrap(),
             Some(("a/..//b%2F".into(), 23))
         );
         assert!(listed_key(xml, "other/").is_err());
-        let xml = b"<ListBucketResult><Contents><Key>imports%2Fspace%20%2B+%2520</Key><Size>1</Size></Contents><EncodingType>url</EncodingType></ListBucketResult>";
+        let xml = b"<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>imports%2Fspace%20%2B+%2520</Key><Size>1</Size></Contents><EncodingType>url</EncodingType></ListBucketResult>";
         assert_eq!(
             listed_key(xml, "imports/").unwrap(),
-            Some(("space ++%20".into(), 1))
+            Some(("space + %20".into(), 1))
         );
         assert!(created_upload(b"<InitiateMultipartUploadResult><Key>other</Key><UploadId>id</UploadId></InitiateMultipartUploadResult>", "test").is_err());
         assert_eq!(created_upload(b"<InitiateMultipartUploadResult><Key>test</Key><UploadId>id</UploadId></InitiateMultipartUploadResult>", "test").unwrap(), "id");

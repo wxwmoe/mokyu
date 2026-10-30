@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 0048.
+-- Generated from the complete sqlite migration chain through 0049.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -872,6 +872,32 @@ CREATE TABLE "token_external_grants" (
     PRIMARY KEY (token_id,bucket_id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE transfer_connections (
+    task_id BLOB NOT NULL,
+    external_id BLOB NOT NULL,
+    revision BIGINT NOT NULL CHECK (revision>0),
+    encrypted BLOB NOT NULL,
+    PRIMARY KEY (task_id,external_id),
+    FOREIGN KEY (task_id) REFERENCES transfer_runs(task_id) ON DELETE CASCADE,
+    FOREIGN KEY (external_id) REFERENCES external_buckets(id)
+);
+
+CREATE TABLE transfer_external_items (
+    item_id INTEGER PRIMARY KEY,
+    state TEXT NOT NULL,
+    FOREIGN KEY (item_id) REFERENCES transfer_items(id) ON DELETE CASCADE
+);
+
+CREATE TABLE transfer_external_parts (
+    item_id INTEGER NOT NULL,
+    part_number INTEGER NOT NULL CHECK (part_number BETWEEN 1 AND 10000),
+    size_bytes BIGINT NOT NULL CHECK (size_bytes>=0 AND size_bytes<=5368709120),
+    etag TEXT NOT NULL,
+    digest BLOB NOT NULL CHECK (length(digest)=32),
+    PRIMARY KEY (item_id,part_number),
+    FOREIGN KEY (item_id) REFERENCES transfer_external_items(item_id) ON DELETE CASCADE
+);
+
 CREATE TABLE transfer_items (
     id INTEGER PRIMARY KEY,
     task_id BLOB NOT NULL REFERENCES transfer_runs(task_id) ON DELETE CASCADE,
@@ -914,12 +940,10 @@ CREATE TABLE transfer_runs (
     created_by BLOB,
     options TEXT NOT NULL,
     authority TEXT NOT NULL,
-    storage_id BLOB NOT NULL,
-    profile_revision BIGINT NOT NULL,
     generation BIGINT NOT NULL DEFAULT 1 CHECK (generation>0),
     phase TEXT NOT NULL DEFAULT 'scan',
     cursor_key TEXT,
-    progress TEXT NOT NULL, source_storage_id BLOB NOT NULL DEFAULT X'00000000000000000000000000000000',
+    progress TEXT NOT NULL, storage_id BLOB, source_storage_id BLOB, profile_revision BIGINT,
     CHECK (phase IN ('scan','plan','verify','publish','cancel','complete','cancelled'))
 );
 
@@ -1255,9 +1279,13 @@ CREATE INDEX token_external_bucket ON token_external_grants(bucket_id);
 
 CREATE INDEX token_grants_bucket ON token_bucket_grants(bucket_id);
 
+CREATE INDEX transfer_connections_external ON transfer_connections(external_id);
+
 CREATE INDEX transfer_items_candidate ON transfer_items(candidate);
 
 CREATE INDEX transfer_items_receipt ON transfer_items(source_version,output_version) WHERE output_version IS NOT NULL AND error IS NULL AND state IN ('completed','skipped');
+
+CREATE INDEX transfer_items_source_key ON transfer_items(task_id,source_key);
 
 CREATE INDEX transfer_items_source_pin ON transfer_items(source_pin);
 

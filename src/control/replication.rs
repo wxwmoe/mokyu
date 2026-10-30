@@ -73,8 +73,28 @@ pub(super) async fn create(
         })
         .transpose()?
         .unwrap_or_else(Uuid::now_v7);
+    let mut connections = Vec::new();
+    if input.external() {
+        for record in app
+            .external_buckets
+            .authorized(&input.external_authority(actor.principal.clone()))
+            .await?
+        {
+            let snapshot =
+                crate::model::external::Snapshot::from_record(record, &app.secrets.credential_key)?;
+            connections.push(crate::model::replication::external::Connection::seal(
+                id,
+                &snapshot,
+                &app.secrets.credential_key,
+            )?);
+        }
+    }
     let task_id = crate::model::REQUEST_ID
-        .scope(id, app.replications.create(&actor.principal, &input))
+        .scope(
+            id,
+            app.replications
+                .create(&actor.principal, &input, &connections),
+        )
         .await?;
     #[cfg(feature = "fault-injection")]
     crate::faults::point("replication-created").await;
