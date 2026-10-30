@@ -132,6 +132,7 @@ impl Connection {
             client,
             timeout: options.request_timeout,
             memory: None,
+            reads: None,
         })
     }
 
@@ -250,6 +251,13 @@ pub(crate) struct Client {
     client: HttpClient<hyper_rustls::HttpsConnector<HttpConnector>, Body>,
     timeout: Duration,
     memory: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
+    reads: Option<Reads>,
+}
+
+#[derive(Clone)]
+pub(crate) enum Reads {
+    Single(std::sync::Arc<super::resource_gate::Gate>),
+    Node(std::sync::Arc<tokio::sync::Semaphore>),
 }
 
 struct Buffered {

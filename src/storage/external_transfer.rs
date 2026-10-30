@@ -75,11 +75,12 @@ fn uploaded(part: &Part) -> super::super::s3::UploadedPart {
     }
 }
 
-fn client(
+pub(crate) fn client(
     plan: &Plan,
     snapshots: &[Snapshot],
     source: bool,
     memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    reads: &super::Reads,
 ) -> Result<Client> {
     let id = if source {
         plan.options.source_bucket
@@ -102,6 +103,7 @@ fn client(
         },
     )?;
     client.memory = Some(memory.clone());
+    client.reads = Some(reads.clone());
     Ok(client)
 }
 
@@ -111,14 +113,129 @@ fn code(error: &anyhow::Error, code: s3s::S3ErrorCode) -> bool {
         .is_some_and(|error| error.code() == &code)
 }
 
+async fn execute_import(
+    plan: &Plan,
+    source: &Client,
+    reader: Option<&dyn super::objects::Source>,
+) -> Result<Outcome> {
+    ensure!(
+        plan.options.source_external && !plan.options.target_external,
+        "invalid import endpoints"
+    );
+    let key = plan.key.as_deref().context("import key missing")?;
+    let state = &plan.state;
+    match state.phase {
+        Phase::Inspect | Phase::Finalize => {
+            #[cfg(feature = "fault-injection")]
+            if state.phase == Phase::Finalize {
+                crate::faults::point("import-before-final-check").await;
+            }
+            let original = source.head(key, None).await?;
+            let source_public = if plan.options.permissions == replication::Permissions::Inherit {
+                if let Some(object) = &original {
+                    Some(source.acl(key, object).await?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if state.phase == Phase::Inspect {
+                Ok(Outcome::Inspected {
+                    source: original,
+                    source_public,
+                    target: plan.native.as_ref().map(|native| native.object.clone()),
+                    target_public: plan.native.as_ref().map(|native| native.public),
+                })
+            } else {
+                Ok(Outcome::Finalized {
+                    source: original,
+                    source_public,
+                    target: state.output.clone(),
+                    public: plan.public(),
+                })
+            }
+        }
+        Phase::Compare => {
+            let original = state.source.as_ref().context("import source missing")?;
+            let target = state.target.as_ref().context("import target missing")?;
+            let (start, size) = state.range(i32::from(state.position) + 1)?;
+            let left = source.hash_range(key, original, start, size).await?;
+            let right = reader
+                .context("import comparison reader missing")?
+                .hash_range(&plan.target()?, target, start, size)
+                .await?;
+            Ok(Outcome::Compared {
+                equal: left == right,
+            })
+        }
+        _ => anyhow::bail!("unexpected native import phase"),
+    }
+}
+
+pub(crate) async fn import_source(
+    plan: &Plan,
+    snapshots: &[Snapshot],
+    memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    reads: &super::Reads,
+) -> Result<std::sync::Arc<Client>> {
+    plan.validate()?;
+    plan.incoming
+        .as_ref()
+        .context("import write missing")?
+        .validate(plan)?;
+    let source = client(plan, snapshots, true, memory, reads)?;
+    if let Some(previous) = plan.parts.first() {
+        let (start, size) = plan.state.range(previous.number)?;
+        let digest = source
+            .hash_range(
+                plan.key.as_deref().context("import key missing")?,
+                plan.state
+                    .source
+                    .as_ref()
+                    .context("import source missing")?,
+                start,
+                size,
+            )
+            .await?;
+        ensure!(
+            digest.as_slice() == previous.digest,
+            s3s::s3_error!(PreconditionFailed, "import boundary changed")
+        );
+    }
+    Ok(std::sync::Arc::new(source))
+}
+
+pub(crate) fn import_body(
+    source: std::sync::Arc<Client>,
+    key: String,
+    object: Object,
+    range: std::ops::Range<u64>,
+) -> futures_util::stream::BoxStream<'static, Result<Bytes>> {
+    use futures_util::StreamExt;
+    async_stream::try_stream! {
+        (range.start <= range.end && range.end <= object.size).then_some(()).context("invalid import body range")?;
+        let mut offset = range.start;
+        while offset < range.end {
+            let length = (range.end - offset).min(super::objects::WINDOW as u64) as usize;
+            let bytes = source.read(&key, &object, offset, length).await?;
+            (bytes.len() == length).then_some(()).context("import range is incomplete")?;
+            offset += length as u64;
+            yield bytes;
+        }
+    }
+    .boxed()
+}
+
 pub(crate) async fn execute(
     plan: &Plan,
     snapshots: &[Snapshot],
     memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
     reader: Option<&dyn super::objects::Source>,
+    reads: &super::Reads,
 ) -> Result<Outcome> {
     plan.validate()?;
-    let result = match execute_plan(plan, snapshots, memory, reader).await {
+    let result = match execute_plan(plan, snapshots, memory, reader, reads).await {
         Err(error) if code(&error, s3s::S3ErrorCode::PreconditionFailed) => Ok(Outcome::Conflict),
         result => result,
     };
@@ -142,8 +259,8 @@ async fn execute_plan(
     snapshots: &[Snapshot],
     memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
     reader: Option<&dyn super::objects::Source>,
+    reads: &super::Reads,
 ) -> Result<Outcome> {
-    ensure!(plan.options.target_external, "external target required");
     if !plan.options.source_external
         && plan.native.is_none()
         && plan.state.source.is_some()
@@ -152,11 +269,10 @@ async fn execute_plan(
         return Ok(Outcome::Conflict);
     }
     let source = if plan.options.source_external {
-        Source::External(client(plan, snapshots, true, memory)?)
+        Source::External(client(plan, snapshots, true, memory, reads)?)
     } else {
         Source::Native(plan, reader)
     };
-    let target = client(plan, snapshots, false, memory)?;
     let Some(key) = plan.key.as_deref() else {
         let page = match &plan.options.scope {
             replication::Scope::Objects { keys } => {
@@ -191,6 +307,10 @@ async fn execute_plan(
             next: page.next,
         });
     };
+    if !plan.options.target_external {
+        return execute_import(plan, source.external()?, reader).await;
+    }
+    let target = client(plan, snapshots, false, memory, reads)?;
     let destination = plan.target()?;
     let state = &plan.state;
     if state.phase == Phase::Inspect {

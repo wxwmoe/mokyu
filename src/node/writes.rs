@@ -29,6 +29,8 @@ mod migration;
 
 #[path = "export.rs"]
 mod export;
+#[path = "import.rs"]
+mod import;
 
 const BATCH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OBJECT: i64 = 5 * 1024 * 1024 * 1024;

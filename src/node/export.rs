@@ -13,7 +13,7 @@ struct Export<'a> {
 impl Source for Export<'_> {
     async fn read(&self, key: &str, object: &Object, start: u64, size: usize) -> Result<Bytes> {
         ensure!(
-            self.plan.key.as_deref() == Some(key)
+            self.plan.native_key()? == key
                 && self
                     .plan
                     .native
@@ -122,18 +122,27 @@ impl Writes {
         plan: &Plan,
         connections: &[crate::model::external::Snapshot],
     ) -> Result<crate::model::replication::external::Outcome> {
-        let memory = self.reads.reader.transfer_memory().await?;
-        let _io = if plan.options.source_external {
-            Some(self.reads.reader.acquire(&self.reads.reader.io, 1).await?)
+        let memory = if plan.incoming.is_some() {
+            self.reads.reader.import_memory().await?
         } else {
-            None
+            self.reads.reader.transfer_memory().await?
         };
+        if plan.incoming.is_some() {
+            return self.import_part(plan, connections, &memory).await;
+        }
         let reader = Export {
             writes: self,
             operation,
             plan,
             memory: memory.clone(),
         };
-        crate::storage::external::transfer::execute(plan, connections, &memory, Some(&reader)).await
+        crate::storage::external::transfer::execute(
+            plan,
+            connections,
+            &memory,
+            Some(&reader),
+            &crate::storage::external::Reads::Node(self.reads.reader.io.clone()),
+        )
+        .await
     }
 }

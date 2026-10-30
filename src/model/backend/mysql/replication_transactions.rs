@@ -114,7 +114,7 @@ impl ReplicationStore for Backend {
     ) -> Result<Uuid> {
         options.validate()?;
         ensure!(
-            !options.external() || options.target_external && options.operation == Operation::Copy,
+            !options.external() || options.operation == Operation::Copy,
             s3s::s3_error!(NotImplemented, "external transfer route is unavailable")
         );
         let mut db = self.pool.begin().await?;
@@ -133,7 +133,7 @@ impl ReplicationStore for Backend {
                             && connection.revision == record.bucket.revision)),
                 Error::OperationAborted
             );
-            if options.source_external {
+            if options.source_external && options.target_external {
                 let source = records
                     .iter()
                     .find(|record| record.bucket.id == options.source_bucket)
@@ -324,7 +324,8 @@ impl ReplicationStore for Backend {
                         return Ok(step);
                     }
                     let plan =
-                        super::replication_remote_transactions::prepare(&mut db, &mut run).await?;
+                        super::replication_remote_transactions::prepare(&mut db, task, &mut run)
+                            .await?;
                     let connections = q::connections(task.id).fetch_all(&mut *db).await?;
                     save(&mut db, &run).await?;
                     db.commit().await?;
@@ -396,7 +397,7 @@ impl ReplicationStore for Backend {
             run.phase == "verify"
                 && run.task_id == plan.task
                 && run.generation == plan.generation
-                && !run.options.0.source_external,
+                && run.options.0.source_external != run.options.0.target_external,
             Error::OperationAborted
         );
         let native = super::replication_remote_transactions::native(
@@ -428,7 +429,8 @@ impl ReplicationStore for Backend {
     ) -> Result<()> {
         let mut db = self.pool.begin().await?;
         let mut run = owned(&mut db, task).await?;
-        super::replication_remote_transactions::complete(&mut db, &mut run, plan, outcome).await?;
+        super::replication_remote_transactions::complete(&mut db, task, &mut run, plan, outcome)
+            .await?;
         save(&mut db, &run).await?;
         db.commit().await?;
         Ok(())

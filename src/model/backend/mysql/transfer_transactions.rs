@@ -15,7 +15,7 @@ pub(super) async fn capture(
     raw: &[Id],
 ) -> Result<u64> {
     ensure!(
-        run.options.0.target_external || run.source_storage()? != run.storage()?,
+        run.options.0.external() || run.read_storage()? != run.storage()?,
         Error::OperationAborted
     );
     for &id in raw {
@@ -26,7 +26,7 @@ pub(super) async fn capture(
             let source = r::raw(id).fetch_one(&mut **db).await?;
             source.validate()?;
             ensure!(
-                source.storage_id == run.source_storage()?,
+                source.storage_id == run.read_storage()?,
                 Error::SourceUnavailable
             );
             q::freeze(unit.id, &Input::Raw { source })
@@ -58,7 +58,7 @@ pub(super) async fn capture(
                 }
             };
             ensure!(
-                input.storage()? == run.source_storage()?,
+                input.storage()? == run.read_storage()?,
                 Error::SourceUnavailable
             );
             q::freeze(unit.id, &input).execute(&mut **db).await?;
@@ -84,7 +84,7 @@ pub(super) async fn scan(
 ) -> Result<Option<Scan>> {
     ensure!(
         run.phase == "verify"
-            && (run.options.0.target_external || run.source_storage()? != run.storage()?),
+            && (run.options.0.external() || run.read_storage()? != run.storage()?),
         Error::OperationAborted
     );
     if !matches!(unit.state.as_str(), "selected" | "scanning") {
@@ -121,7 +121,7 @@ pub(super) async fn scan(
     ensure!(
         unit.source_type == "raw"
             && unit.source_id == source.id
-            && source.storage_id == run.source_storage()?,
+            && source.storage_id == run.read_storage()?,
         Error::SourceUnavailable
     );
     let current = r::raw(source.id).fetch_one(&mut **db).await?;
@@ -138,7 +138,7 @@ pub(super) async fn scan(
         Error::SourceUnavailable
     );
     let source = current;
-    let (raw, cdc) = if run.options.0.target_external {
+    let (raw, cdc) = if run.options.0.external() {
         (true, false)
     } else {
         q::policy(run.storage()?, run.profile_revision()?)

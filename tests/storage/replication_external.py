@@ -10,6 +10,9 @@ from tests.storage.source_quarantine import Fixture, wait
 
 
 def run(restart):
+    if os.environ.get('MOKYU_TEST_IMPORT_MODE'):
+        from tests.storage.replication_import import run as native_import
+        return native_import(restart)
     fixture = Fixture()
     database = Database()
     project = fixture.api('/api/v1/projects')[0]['id']

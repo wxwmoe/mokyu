@@ -32,6 +32,8 @@ pub(crate) mod migration;
 
 #[path = "work_export.rs"]
 pub(crate) mod export;
+#[path = "work_import.rs"]
+mod import;
 
 #[path = "work_write_packs.rs"]
 mod write_packs;
@@ -60,12 +62,13 @@ pub(super) async fn seal_task_write(
     row: &queries::NodeWrite,
     input: &write::Publish,
 ) -> Result<()> {
-    let migration: bool =
-        sqlx::query_scalar("SELECT task_type='storage_migration' FROM tasks WHERE id=$1")
-            .bind(row.owner_task_id.ok_or(Error::NodeOperationConflict)?)
+    let (migration, replication) =
+        q::task_write(row.owner_task_id.ok_or(Error::NodeOperationConflict)?)
             .fetch_one(&mut **db)
             .await?;
-    if migration {
+    if replication {
+        import::seal(db, row, input).await
+    } else if migration {
         self::migration::seal(db, row, input).await
     } else {
         conversion::seal(db, row, input).await
@@ -79,6 +82,41 @@ fn owned(node: &NodeState, run: Run, batch: &q::Batch) -> Result<()> {
             && batch.fence == run.fence,
         Error::NodeExpired
     );
+    Ok(())
+}
+
+fn replication_error(error: &anyhow::Error) -> Option<&'static str> {
+    match crate::model::error(error) {
+        Some(Error::QuotaExceeded) => return Some("quota_exceeded"),
+        Some(Error::SourceUnavailable) => return Some("source_unavailable"),
+        _ => {}
+    }
+    match error
+        .downcast_ref::<s3s::S3Error>()
+        .map(|error| error.code())
+    {
+        Some(s3s::S3ErrorCode::AccessDenied) => Some("access_revoked"),
+        Some(s3s::S3ErrorCode::OperationAborted) => Some("transfer_configuration_changed"),
+        _ => None,
+    }
+}
+
+async fn fail_replication(
+    db: &mut Transaction<'_, Postgres>,
+    task: Uuid,
+    token: Uuid,
+    maintenance: Uuid,
+    failure: anyhow::Error,
+) -> Result<()> {
+    let Some(error) = replication_error(&failure) else {
+        return Err(failure);
+    };
+    q::release_permits(&[token, maintenance])
+        .execute(&mut **db)
+        .await?;
+    q::finish(task, token, 0, false, Some(error))
+        .execute(&mut **db)
+        .await?;
     Ok(())
 }
 
@@ -240,7 +278,7 @@ async fn finish(
     if row
         .plan
         .as_ref()
-        .is_some_and(|plan| plan.0.storage().is_some())
+        .is_some_and(|plan| plan.0.storage().is_some() || matches!(&plan.0, work::Plan::ExternalTransfer(transfer) if !transfer.options.target_external))
     {
         ensure!(
             q::live_permits(&permit_tokens).fetch_one(&mut **db).await?,
@@ -261,17 +299,46 @@ async fn finish(
                 detail["operation"] == "replication" && detail["external"] == true,
                 Error::NodeOperationConflict
             );
-            let [work::Outcome::ExternalTransfer(outcome)] = completion.outcomes.as_slice() else {
+            let [outcome] = completion.outcomes.as_slice() else {
                 return Err(Error::NodeOperationConflict.into());
             };
             let execution = Execution {
                 id: task,
                 token: row.token,
             };
-            let mut run = super::super::replication_transactions::owned(db, execution).await?;
-            super::super::replication_remote_transactions::complete(db, &mut run, &plan, outcome)
-                .await?;
-            super::super::replication_transactions::save(db, &run).await?;
+            let mut publication = sqlx::Acquire::begin(&mut **db).await?;
+            let result = async {
+                let mut run =
+                    super::super::replication_transactions::owned(&mut publication, execution)
+                        .await?;
+                match outcome {
+                    work::Outcome::ExternalTransfer(outcome) => {
+                        super::super::replication_remote_transactions::complete(
+                            &mut publication,
+                            execution,
+                            &mut run,
+                            &plan,
+                            outcome,
+                        )
+                        .await?
+                    }
+                    work::Outcome::Retry => error = Some("external_request_rejected"),
+                    _ => return Err(Error::NodeOperationConflict.into()),
+                }
+                super::super::replication_transactions::save(&mut publication, &run).await
+            }
+            .await;
+            match result {
+                Ok(()) => publication.commit().await?,
+                Err(failure) => {
+                    publication.rollback().await?;
+                    if let Some(reason) = replication_error(&failure) {
+                        error = Some(reason);
+                    } else {
+                        return Err(failure);
+                    }
+                }
+            }
         }
         work::Plan::ExternalTest(plan) => {
             ensure!(
@@ -995,9 +1062,23 @@ pub(crate) async fn exchange(
                 );
                 let execution = Execution { id: task, token };
                 let mut run =
-                    super::super::replication_transactions::owned(&mut tx, execution).await?;
+                    match super::super::replication_transactions::owned(&mut tx, execution).await {
+                        Ok(run) => run,
+                        Err(error) => {
+                            fail_replication(&mut tx, task, token, maintenance, error).await?;
+                            continue;
+                        }
+                    };
                 let pending =
-                    super::super::replication_remote_transactions::preflight(&mut tx, &run).await?;
+                    match super::super::replication_remote_transactions::preflight(&mut tx, &run)
+                        .await
+                    {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            fail_replication(&mut tx, task, token, maintenance, error).await?;
+                            continue;
+                        }
+                    };
                 if matches!(pending, Some(crate::model::replication::Step::Continue)) {
                     q::finish(task, token, 0, false, None)
                         .execute(&mut *tx)
@@ -1005,11 +1086,40 @@ pub(crate) async fn exchange(
                     continue;
                 }
                 if pending.is_none() {
-                    let next =
-                        super::super::replication_remote_transactions::prepare(&mut tx, &mut run)
+                    if !run.options.0.target_external {
+                        let profile = queries::storage_profile(run.storage()?)
+                            .fetch_one(&mut *tx)
                             .await?;
+                        if !permits(
+                            &mut tx,
+                            node.node_id,
+                            token,
+                            maintenance,
+                            &profile,
+                            "migration",
+                        )
+                        .await?
+                        {
+                            q::finish(task, token, 0, false, None)
+                                .execute(&mut *tx)
+                                .await?;
+                            continue;
+                        }
+                    }
+                    let next = match super::super::replication_remote_transactions::prepare(
+                        &mut tx, execution, &mut run,
+                    )
+                    .await
+                    {
+                        Ok(next) => next,
+                        Err(error) => {
+                            fail_replication(&mut tx, task, token, maintenance, error).await?;
+                            continue;
+                        }
+                    };
                     super::super::replication_transactions::save(&mut tx, &run).await?;
-                    if let Some(next) = next {
+                    if let Some(mut next) = next {
+                        import::prepare(&mut tx, node, input.run, execution, &mut next).await?;
                         let connections = super::super::replication_queries::connections(task)
                             .fetch_all(&mut *tx)
                             .await?;
@@ -1027,6 +1137,9 @@ pub(crate) async fn exchange(
                         plan = Some(work::Plan::ExternalTransfer(Box::new(next)));
                         break;
                     }
+                    q::release_permits(&[token, maintenance])
+                        .execute(&mut *tx)
+                        .await?;
                     q::finish(
                         task,
                         token,
@@ -1052,7 +1165,7 @@ pub(crate) async fn exchange(
                 )
                 .await?;
                 if run.options.0.target_external {
-                    run.source_storage()?
+                    run.read_storage()?
                 } else if let Some(unit) = super::super::transfer_queries::pending(task)
                     .fetch_optional(&mut *tx)
                     .await?
@@ -1060,7 +1173,7 @@ pub(crate) async fn exchange(
                     if matches!(unit.state.as_str(), "selected" | "scanning")
                         && unit.source_type == "raw"
                     {
-                        run.source_storage()?
+                        run.read_storage()?
                     } else {
                         run.storage()?
                     }

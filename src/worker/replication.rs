@@ -23,7 +23,7 @@ impl crate::storage::external::objects::Source for Export<'_> {
         use futures_util::StreamExt;
         anyhow::ensure!(
             self.app.role == "single"
-                && self.plan.key.as_deref() == Some(key)
+                && self.plan.native_key()? == key
                 && self
                     .plan
                     .native
@@ -84,6 +84,107 @@ impl crate::storage::external::objects::Source for Export<'_> {
 }
 
 impl App {
+    async fn import_part(
+        &self,
+        plan: &crate::model::replication::external::Plan,
+        snapshots: &[crate::model::external::Snapshot],
+        memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<crate::model::replication::external::Outcome> {
+        use crate::{model::replication::external::Outcome, storage::external::transfer};
+        use anyhow::{Context, ensure};
+        use futures_util::StreamExt;
+        let incoming = plan.incoming.as_ref().context("import write missing")?;
+        incoming.validate(plan)?;
+        ensure!(
+            incoming.operation.is_none(),
+            "single import has a node operation"
+        );
+        let _pin = self.pin(incoming.stream);
+        let _permit = self
+            .storage
+            .profile_permit(incoming.storage, "migration")
+            .await?;
+        let profile = self.storage.profile(incoming.storage)?;
+        let (algorithm, block_key_id) = self.store_encoding(incoming.storage).await?;
+        let encoding = crate::model::cache::EncodingPolicy {
+            compression: profile.compression_config(&self.config.instance.compression_idle_timeout),
+            pack_enabled: profile.pack_enabled,
+            pack_max_size: profile.pack_max_size.clone(),
+            pack_flush_timeout: profile.pack_upload_flush_timeout.clone(),
+            algorithm,
+            block_key_id,
+        };
+        let result = async {
+            let source = transfer::import_source(
+                plan,
+                snapshots,
+                memory,
+                &crate::storage::external::Reads::Single(self.storage.reads.clone()),
+            )
+            .await?;
+            let key = plan.key.clone().context("import key missing")?;
+            let object = plan.state.source.clone().context("import source missing")?;
+            let mut body = transfer::import_body(
+                source.clone(),
+                key.clone(),
+                object.clone(),
+                incoming.offset..incoming.offset + incoming.size,
+            );
+            let mut check =
+                crate::upload::Integrity::new(&hyper::HeaderMap::new(), Some("SHA256"))?;
+            let integrity = &mut check;
+            let input = async_stream::try_stream! {
+                while let Some(data) = body.next().await {
+                    let data = data?;
+                    integrity.update(&data);
+                    yield data;
+                }
+            }
+            .boxed();
+            self.copy_body(
+                incoming.stream,
+                incoming.storage,
+                self.storage.raw_policy(incoming.storage)?,
+                i64::try_from(incoming.size)?,
+                input,
+                Some(&encoding),
+                |range| {
+                    transfer::import_body(
+                        source.clone(),
+                        key.clone(),
+                        object.clone(),
+                        incoming.offset + range.start..incoming.offset + range.end,
+                    )
+                },
+            )
+            .await?;
+            let (etag, checksums) = check.finish(None)?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("import-part-written").await;
+            self.finish_stream(
+                incoming.stream,
+                i64::try_from(incoming.size)?,
+                &etag,
+                checksums,
+            )
+            .await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("import-part-sealed").await;
+            Ok::<_, anyhow::Error>(Outcome::Imported)
+        }
+        .await;
+        match result {
+            Err(error)
+                if error
+                    .downcast_ref::<s3s::S3Error>()
+                    .is_some_and(|error| error.code() == &s3s::S3ErrorCode::PreconditionFailed) =>
+            {
+                Ok(Outcome::Conflict)
+            }
+            result => result,
+        }
+    }
+
     async fn transfer_encoded(
         &self,
         input: &crate::model::transfer::Input,
@@ -341,24 +442,24 @@ impl App {
                     .storage
                     .pack_work(crate::storage::external::objects::WINDOW)
                     .await?;
-                let _io = if plan.options.source_external {
-                    Some(self.storage.reads.acquire().await?)
-                } else {
-                    None
-                };
                 let reader = Export {
                     app: self,
                     task,
                     plan,
                     memory: memory.clone(),
                 };
-                crate::storage::external::transfer::execute(
-                    plan,
-                    &snapshots,
-                    &memory,
-                    Some(&reader),
-                )
-                .await?
+                if plan.incoming.is_some() {
+                    self.import_part(plan, &snapshots, &memory).await?
+                } else {
+                    crate::storage::external::transfer::execute(
+                        plan,
+                        &snapshots,
+                        &memory,
+                        Some(&reader),
+                        &crate::storage::external::Reads::Single(self.storage.reads.clone()),
+                    )
+                    .await?
+                }
             };
             self.replications
                 .external_complete(task, plan, &outcome)

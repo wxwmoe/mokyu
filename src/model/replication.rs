@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 #[path = "replication_external.rs"]
 pub(crate) mod external;
+#[path = "replication_import.rs"]
+pub(crate) mod import;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -271,6 +273,13 @@ impl Run {
     pub(crate) fn source_storage(&self) -> Result<Uuid> {
         self.source_storage_id
             .ok_or_else(|| super::Error::OperationAborted.into())
+    }
+    pub(crate) fn read_storage(&self) -> Result<Uuid> {
+        if self.options.0.source_external {
+            self.storage()
+        } else {
+            self.source_storage()
+        }
     }
     pub(crate) fn profile_revision(&self) -> Result<i64> {
         self.profile_revision

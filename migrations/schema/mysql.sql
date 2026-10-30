@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0048.
+-- Generated from the complete mysql migration chain through 0049.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -1173,6 +1173,18 @@ CREATE TABLE `transfer_external_parts` (
   CONSTRAINT `transfer_external_parts_chk_1` CHECK ((`part_number` between 1 and 10000)),
   CONSTRAINT `transfer_external_parts_chk_2` CHECK (((`size_bytes` >= 0) and (`size_bytes` <= 5368709120))),
   CONSTRAINT `transfer_external_parts_chk_3` CHECK ((length(`digest`) = 32))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `transfer_imports` (
+  `item_id` bigint NOT NULL,
+  `part_stream` bigint DEFAULT NULL,
+  `node_id` binary(16) DEFAULT NULL,
+  `operation_id` binary(16) DEFAULT NULL,
+  PRIMARY KEY (`item_id`),
+  KEY `transfer_imports_part` (`part_stream`),
+  CONSTRAINT `transfer_imports_ibfk_1` FOREIGN KEY (`item_id`) REFERENCES `transfer_items` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_imports_ibfk_2` FOREIGN KEY (`part_stream`) REFERENCES `streams` (`id`),
+  CONSTRAINT `transfer_imports_chk_1` CHECK (((`node_id` is null) = (`operation_id` is null)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `transfer_items` (

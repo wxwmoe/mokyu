@@ -307,8 +307,29 @@ impl App {
         revision: Option<i64>,
         source: &StoredStream,
     ) -> Result<()> {
+        self.copy_body(
+            destination,
+            storage,
+            revision,
+            source.size,
+            Box::pin(self.payload_bytes(source)),
+            None,
+            |range| self.replay_payload(destination, std::slice::from_ref(source), range),
+        )
+        .await
+    }
+
+    pub(crate) async fn copy_body<'a>(
+        &'a self,
+        destination: Id,
+        storage: Uuid,
+        revision: Option<i64>,
+        size: i64,
+        mut input: futures_util::stream::BoxStream<'a, Result<Bytes>>,
+        accepted: Option<&crate::model::cache::EncodingPolicy>,
+        replay: impl FnMut(std::ops::Range<u64>) -> futures_util::stream::BoxStream<'a, Result<Bytes>>,
+    ) -> Result<()> {
         use md5::{Digest, Md5};
-        let mut input = Box::pin(self.payload_bytes(source));
         let mut offset = 0;
         if let Some(revision) = revision {
             let (id, location) = self
@@ -317,7 +338,7 @@ impl App {
                 .await?;
             let mut writer = self
                 .storage
-                .raw_replay_writer(storage, id, location, source.size, &[])
+                .raw_replay_writer(storage, id, location, size, &[])
                 .await?;
             let mut digest = Md5::new();
             while let Some(data) = input.next().await {
@@ -327,12 +348,10 @@ impl App {
                 writer.write(&data).await?;
                 offset += data.len() as i64;
             }
-            ensure!(offset == source.size, "copy length mismatch");
+            ensure!(offset == size, "copy length mismatch");
             let digest = digest.finalize();
             let written = writer
-                .finish_replay(destination, offset as u64, &digest, |range| {
-                    self.replay_payload(destination, std::slice::from_ref(source), range)
-                })
+                .finish_replay(destination, offset as u64, &digest, replay)
                 .await?;
             self.finish_raw_received(destination, id, storage, offset, &digest, written)
                 .await?;
@@ -347,8 +366,14 @@ impl App {
                     rest = &rest[count..];
                     if window.len() == MAX {
                         let count = crate::content::codec::cut(&window);
-                        self.put_chunk(destination, offset, window[..count].to_vec(), false)
-                            .await?;
+                        self.put_chunk_with(
+                            destination,
+                            offset,
+                            window[..count].to_vec(),
+                            false,
+                            accepted,
+                        )
+                        .await?;
                         offset += count as i64;
                         window.drain(..count);
                     }
@@ -356,12 +381,18 @@ impl App {
             }
             while !window.is_empty() {
                 let count = crate::content::codec::cut(&window);
-                self.put_chunk(destination, offset, window[..count].to_vec(), false)
-                    .await?;
+                self.put_chunk_with(
+                    destination,
+                    offset,
+                    window[..count].to_vec(),
+                    false,
+                    accepted,
+                )
+                .await?;
                 offset += count as i64;
                 window.drain(..count);
             }
-            ensure!(offset == source.size, "copy length mismatch");
+            ensure!(offset == size, "copy length mismatch");
         }
         Ok(())
     }

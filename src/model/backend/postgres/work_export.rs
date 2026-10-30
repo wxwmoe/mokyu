@@ -43,7 +43,12 @@ pub(crate) async fn read(
     let work::Plan::ExternalTransfer(plan) = row.plan.ok_or(Error::NodeOperationConflict)?.0 else {
         return Err(Error::NodeOperationConflict.into());
     };
-    ensure!(!plan.options.source_external, Error::NodeOperationConflict);
+    ensure!(
+        plan.options.source_external != plan.options.target_external
+            && (!plan.options.source_external
+                || plan.state.phase == crate::model::replication::external::Phase::Compare),
+        Error::NodeOperationConflict
+    );
     let run = super::super::super::replication_transactions::owned(&mut db, task).await?;
     ensure!(
         run.phase == "verify"
