@@ -271,6 +271,15 @@ pub(crate) struct ReadMigration {
     pub cached: Vec<node_read::Version>,
 }
 
+pub(crate) struct ReadTransfer {
+    pub run: Run,
+    pub operation: Uuid,
+    pub read: Uuid,
+    pub offset: u64,
+    pub length: u32,
+    pub cached: Vec<node_read::Version>,
+}
+
 impl Exchange {
     pub(crate) fn hash(&self) -> Result<Vec<u8>> {
         ensure!(

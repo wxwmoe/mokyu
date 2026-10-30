@@ -114,10 +114,7 @@ impl ReplicationStore for Backend {
     ) -> Result<Uuid> {
         options.validate()?;
         ensure!(
-            !options.external()
-                || options.source_external
-                    && options.target_external
-                    && options.operation == Operation::Copy,
+            !options.external() || options.target_external && options.operation == Operation::Copy,
             s3s::s3_error!(NotImplemented, "external transfer route is unavailable")
         );
         let mut db = self.write.begin_with(queries::BEGIN_WRITE).await?;
@@ -136,15 +133,17 @@ impl ReplicationStore for Backend {
                             && connection.revision == record.bucket.revision)),
                 Error::OperationAborted
             );
-            let source = records
-                .iter()
-                .find(|record| record.bucket.id == options.source_bucket)
-                .ok_or(Error::OperationAborted)?;
-            let target = records
-                .iter()
-                .find(|record| record.bucket.id == options.target_bucket)
-                .ok_or(Error::OperationAborted)?;
-            options.external_scopes(&source.bucket.connection, &target.bucket.connection)?;
+            if options.source_external {
+                let source = records
+                    .iter()
+                    .find(|record| record.bucket.id == options.source_bucket)
+                    .ok_or(Error::OperationAborted)?;
+                let target = records
+                    .iter()
+                    .find(|record| record.bucket.id == options.target_bucket)
+                    .ok_or(Error::OperationAborted)?;
+                options.external_scopes(&source.bucket.connection, &target.bucket.connection)?;
+            }
         } else {
             ensure!(connections.is_empty(), s3s::s3_error!(InvalidArgument));
         }
@@ -314,6 +313,13 @@ impl ReplicationStore for Backend {
         let mut db = self.write.begin_with(queries::BEGIN_WRITE).await?;
         let mut run = owned(&mut db, task).await?;
         if run.options.0.external() {
+            if let Some(step) =
+                super::replication_remote_transactions::preflight(&mut db, &run).await?
+            {
+                save(&mut db, &run).await?;
+                db.commit().await?;
+                return Ok(step);
+            }
             let plan = super::replication_remote_transactions::prepare(&mut db, &mut run).await?;
             let connections = q::connections(task.id).fetch_all(&mut *db).await?;
             save(&mut db, &run).await?;
@@ -355,6 +361,44 @@ impl ReplicationStore for Backend {
             crate::faults::point("replication-published").await;
         }
         Ok(result)
+    }
+
+    async fn native_source(
+        &self,
+        task: Execution,
+        plan: &model::external::Plan,
+        offset: u64,
+        length: u32,
+    ) -> Result<(crate::app::StoredStream, Option<model::external::RawRead>)> {
+        let mut db = self.write.begin_with(queries::BEGIN_WRITE).await?;
+        let run = owned(&mut db, task).await?;
+        plan.validate()?;
+        ensure!(
+            run.phase == "verify"
+                && run.task_id == plan.task
+                && run.generation == plan.generation
+                && !run.options.0.source_external,
+            Error::OperationAborted
+        );
+        let native = super::replication_remote_transactions::native(
+            &mut db,
+            &run,
+            plan.item.ok_or(Error::OperationAborted)?,
+        )
+        .await?;
+        ensure!(
+            native.is_some() && native == plan.native,
+            s3s::s3_error!(PreconditionFailed)
+        );
+        let stream = super::replication_remote_queries::stream(native.unwrap().stream)
+            .fetch_one(&mut *db)
+            .await?;
+        let raw = super::replication_remote_transactions::raw_read(
+            &mut db, &run, &stream, offset, length,
+        )
+        .await?;
+        db.commit().await?;
+        Ok((stream, raw))
     }
 
     async fn external_complete(
@@ -417,7 +461,10 @@ impl ReplicationStore for Backend {
     }
 }
 
-async fn scan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
+pub(super) async fn source_page(
+    db: &mut Tx<'_>,
+    run: &q::Run,
+) -> Result<Vec<(String, Option<q::Source>)>> {
     let options = run.options.0.clone();
     let rows: Vec<(String, Option<q::Source>)> = match &options.scope {
         Scope::Objects { keys } => {
@@ -461,6 +508,12 @@ async fn scan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
                 .collect()
         }
     };
+    Ok(rows)
+}
+
+async fn scan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
+    let options = run.options.0.clone();
+    let rows = source_page(db, run).await?;
     if rows.is_empty() {
         run.phase = "plan".into();
         return Ok(());
@@ -771,6 +824,11 @@ pub(super) async fn verification(
     run: &mut q::Run,
 ) -> Result<Step> {
     ensure!(run.phase == "verify", Error::OperationAborted);
+    if run.options.0.external() {
+        return Ok(super::replication_remote_transactions::preflight(db, run)
+            .await?
+            .unwrap_or(Step::Continue));
+    }
     if run.source_storage()? != run.storage()? {
         if let Some(mut unit) = super::transfer_queries::pending(run.task_id)
             .fetch_optional(&mut **db)

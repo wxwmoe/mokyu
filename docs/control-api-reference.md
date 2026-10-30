@@ -200,13 +200,15 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 | `GET /api/v1/replications/{id}/items` | 逐对象结果，`after`/`limit` 分页，返回 `items`/`next_after` |
 | `POST /api/v1/replications/{id}/command` | JSON 字符串 `"pause"`、`"resume"` 或 `"cancel"`，返回 202；取消保留已完成项目 |
 
-创建正文包含 `source_bucket`、`target_bucket`、`operation`（`copy`/`move`）和 `scope`。`source_external`、`target_external` 默认 `false`；设为 `true` 时相应 UUID 指向已登记的外部存储桶。当前支持内部桶之间复制/移动、外部桶之间复制。范围为 `{selection:"all"}`、`{selection:"prefix",prefix:"photos/"}` 或 `{selection:"objects",keys:["photos/a.jpg"]}`。明确路径最多 1,000 条，每条最多 1,024 UTF-8 字节，重复路径拒绝。`target_prefix` 默认空串，prefix 选择会用它替换源 prefix，其余选择会在原 key 前添加它。单个明确路径可改用 `target_key`，此时 `target_prefix` 必须为空。保留大小写、重复斜线、百分号和 `..`，不按文件系统路径归一化；同桶重叠范围或覆盖所选来源会被拒绝。外部连接的 prefix 始终限制该任务的访问范围；不同外部记录指向同一可识别路径时也检查重叠。
+创建正文包含 `source_bucket`、`target_bucket`、`operation`（`copy`/`move`）和 `scope`。`source_external`、`target_external` 默认 `false`；设为 `true` 时相应 UUID 指向已登记的外部存储桶。当前支持内部桶之间复制/移动、内部桶到外部桶复制、外部桶之间复制。范围为 `{selection:"all"}`、`{selection:"prefix",prefix:"photos/"}` 或 `{selection:"objects",keys:["photos/a.jpg"]}`。明确路径最多 1,000 条，每条最多 1,024 UTF-8 字节，重复路径拒绝。`target_prefix` 默认空串，prefix 选择会用它替换源 prefix，其余选择会在原 key 前添加它。单个明确路径可改用 `target_key`，此时 `target_prefix` 必须为空。保留大小写、重复斜线、百分号和 `..`，不按文件系统路径归一化；同桶重叠范围或覆盖所选来源会被拒绝。外部连接的 prefix 始终限制该任务的访问范围；不同外部记录指向同一可识别路径时也检查重叠。
 
 `conflict` 为 `report`（默认）、`skip` 或 `overwrite`。`permissions` 为 `inherit`（默认）、`ignore`、`public_read` 或 `private`，独立于正文覆盖策略。`ignore` 在内部桶使新对象私有，覆盖时保留目标发布当时的权限；对外部桶不发送 ACL 请求或 ACL header，新建/覆盖遵循目标服务器默认权限。外部权限映射仅涉及对象 ACL，不复制账号、桶策略或 IAM；不支持读取 ACL 的来源不能选择继承。正文相同仍会核对元数据和权限，全部一致才跳过；正文冲突不改变 ACL。对已有外部正文单独修改权限需要可固定的目标版本，否则报告 `target_acl_unfenced`。内部 Move 仅在目标发布与权限确定后，原子删除仍匹配预期版本的来源。
 
 任务按有界批次扫描、建立物理依赖、验证并发布，来源和目标在扫描后变化会报告冲突。暂停保留检查点与来源保护，恢复重新检查权限和存储配置；部分失败或取消不会回滚已完成文件。任务列表可能因权限过滤返回空页，只要 `next_after` 非空就可继续翻页。任务结束后重新复制可使用新的幂等键。
 
 外部复制按对象传输普通 S3 内容，群集正文由 worker/node 直接读写。非空对象使用 Multipart，保存上传 ID、分段回执和 SHA-256；恢复核对已确认边界，完成前核对完整分段清单，正文校验与权限确认完成后才记录成功。目标必须正确支持条件写、固定来源读取和相同分段号重试，能力不足或回执不一致会失败并保留源对象。创建 Multipart 的响应丢失时可能留下无法确认 ID 的空上传；再次创建后的项目结果带 `upload_cleanup_pending`。取消只终止已记录的上传，不推测其他上传的所有权。仍被任务引用的外部连接不能删除。
+
+内部桶导出冻结来源版本、元数据和权限，并保护其物理引用。chunks/pack 按原存储格式解密、解压并校验后输出普通对象；raw 保存完整来源校验得到的分段证明，重读时逐段核验，跨进程恢复复用已确认记录。来源被替换或权限变化时报告冲突，保留新来源并清理已知的未完成上传。
 
 ## 上传与传输中心
 

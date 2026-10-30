@@ -15,7 +15,7 @@ pub(super) async fn capture(
     raw: &[Id],
 ) -> Result<u64> {
     ensure!(
-        run.source_storage()? != run.storage()?,
+        run.options.0.target_external || run.source_storage()? != run.storage()?,
         Error::OperationAborted
     );
     for &id in raw {
@@ -83,7 +83,8 @@ pub(super) async fn scan(
     unit: &mut q::Unit,
 ) -> Result<Option<Scan>> {
     ensure!(
-        run.phase == "verify" && run.source_storage()? != run.storage()?,
+        run.phase == "verify"
+            && (run.options.0.target_external || run.source_storage()? != run.storage()?),
         Error::OperationAborted
     );
     if !matches!(unit.state.as_str(), "selected" | "scanning") {
@@ -137,10 +138,14 @@ pub(super) async fn scan(
         Error::SourceUnavailable
     );
     let source = current;
-    let (raw, cdc) = q::policy(run.storage()?, run.profile_revision()?)
-        .fetch_optional(&mut **db)
-        .await?
-        .ok_or(Error::OperationAborted)?;
+    let (raw, cdc) = if run.options.0.target_external {
+        (true, false)
+    } else {
+        q::policy(run.storage()?, run.profile_revision()?)
+            .fetch_optional(&mut **db)
+            .await?
+            .ok_or(Error::OperationAborted)?
+    };
     if unit.state == "selected" {
         let input = Input::Raw {
             source: source.clone(),

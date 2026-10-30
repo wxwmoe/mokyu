@@ -371,6 +371,13 @@ pub(crate) trait ReplicationStore: Send + Sync {
     ) -> Result<Vec<Item>>;
     async fn command(&self, principal: &Principal, id: Uuid, command: Command) -> Result<()>;
     async fn step(&self, task: Execution) -> Result<Step>;
+    async fn native_source(
+        &self,
+        task: Execution,
+        plan: &external::Plan,
+        offset: u64,
+        length: u32,
+    ) -> Result<(crate::app::StoredStream, Option<external::RawRead>)>;
     async fn external_complete(
         &self,
         task: Execution,

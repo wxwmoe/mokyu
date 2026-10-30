@@ -52,6 +52,7 @@ service NodeWork {
   rpc Exchange(WorkRequest) returns (WorkReply);
   rpc CheckpointTransfer(TransferCheckpointRequest) returns (TransferCheckpointReply);
   rpc ReadMigration(ReadMigrationRequest) returns (ReadReply);
+  rpc ReadTransfer(ReadTransferRequest) returns (ReadTransferReply);
 }
 
 message TransferCheckpointRequest {
@@ -66,6 +67,20 @@ message ReadMigrationRequest {
   Run run = 1;
   string operation_id = 2;
   repeated Cached cached = 3;
+}
+
+message ReadTransferRequest {
+  Run run = 1;
+  string operation_id = 2;
+  string read_id = 3;
+  uint64 offset = 4;
+  uint32 length = 5;
+  repeated Cached cached = 6;
+}
+
+message ReadTransferReply {
+  ReadReply read = 1;
+  bytes raw_json = 2;
 }
 
 message WorkRequest {

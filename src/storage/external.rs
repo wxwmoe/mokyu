@@ -263,6 +263,16 @@ impl AsRef<[u8]> for Buffered {
     }
 }
 
+pub(crate) fn buffered(
+    bytes: Vec<u8>,
+    memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+) -> Bytes {
+    Bytes::from_owner(Buffered {
+        bytes,
+        _memory: memory.clone(),
+    })
+}
+
 impl Client {
     pub(crate) async fn bytes(
         &self,
@@ -434,10 +444,7 @@ impl Client {
             output.extend_from_slice(&bytes);
         }
         Ok(if let Some(memory) = &self.memory {
-            Bytes::from_owner(Buffered {
-                bytes: output,
-                _memory: memory.clone(),
-            })
+            buffered(output, memory)
         } else {
             output.into()
         })

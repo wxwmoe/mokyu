@@ -1,6 +1,7 @@
 """Verify external jobs, permissions and durable multipart recovery on isolated S3 endpoints."""
 import json
 import os
+import random
 from pathlib import Path
 import uuid
 
@@ -13,6 +14,14 @@ def run(restart):
     database = Database()
     project = fixture.api('/api/v1/projects')[0]['id']
     remote = os.environ.get('MOKYU_TEST_EXTERNAL_PROVIDER', 'mokyu') != 'mokyu'
+    export = os.environ.get('MOKYU_TEST_EXPORT_MODE', '')
+    assert export in ('', 'raw', 'chunks', 'pack')
+    if export:
+        assert not remote, 'native source fixture uses its ordinary S3 endpoint'
+        profile = fixture.cli('storage', 'profile', 'show', fixture.name)
+        profile.update(cdc_enabled=export != 'raw', deduplication_enabled=export != 'raw',
+            pack_enabled=export == 'pack', compression_enabled=export == 'pack', pack_range_enabled=False)
+        fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     client = fixture.backend if remote else fixture.client
     bucket = fixture.remote_bucket if remote else fixture.name
     backend = json.loads(Path(os.environ['MOKYU_TEST_BACKEND']).read_text()) if remote else {}
@@ -26,8 +35,16 @@ def run(restart):
         **credentials), expected=201) for scope in scopes]
 
     def create(scope, **changes):
-        value = dict(source_bucket=resources[0]['id'], target_bucket=resources[1]['id'],
-            source_external=True, target_external=True, operation='copy', scope=scope,
+        scope = dict(scope)
+        if export:
+            if scope['selection'] == 'prefix':
+                scope['prefix'] = scopes[0] + scope['prefix']
+            elif scope['selection'] == 'objects':
+                scope['keys'] = [scopes[0] + key for key in scope['keys']]
+            else:
+                assert False, 'shared fixture requires a bounded native source scope'
+        value = dict(source_bucket=fixture.bucket_id if export else resources[0]['id'], target_bucket=resources[1]['id'],
+            source_external=not bool(export), target_external=True, operation='copy', scope=scope,
             conflict='report', permissions='ignore' if remote else 'inherit')
         value.update(changes)
         return fixture.api('/api/v1/replications', value, expected=202)['task_id']
@@ -56,7 +73,7 @@ def run(restart):
         return any(g['Grantee'].get('URI') == 'http://acs.amazonaws.com/groups/global/AllUsers'
             and g['Permission'] == 'READ' for g in grants)
 
-    data = bytes(range(256)) * 65536 + b'persisted-boundary'
+    data = random.Random(813).randbytes(16 * 1024 * 1024) + b'persisted-boundary'
     source_keys = ['in/large', 'in/empty', 'in/a%2fb', 'in/a+b', 'in/unicode-\u3042']
     if not remote:
         source_keys += ['in/a//b', 'in/../keep']
@@ -64,6 +81,27 @@ def run(restart):
         for key in source_keys}
     for key, value in expected.items():
         put(key, value, public=True)
+    if export == 'raw':
+        key = 'in/multipart'
+        upload = client.create_multipart_upload(Bucket=bucket, Key=scopes[0] + key,
+            ACL='public-read', ContentType='application/octet-stream', Metadata={'fixture': 'native-parts'})['UploadId']
+        parts = []
+        length = 5 * 1024 * 1024 + 11
+        for start in range(0, len(data), length):
+            number = len(parts) + 1
+            part = client.upload_part(Bucket=bucket, Key=scopes[0] + key, UploadId=upload,
+                PartNumber=number, Body=data[start:start + length])
+            parts.append(dict(PartNumber=number, ETag=part['ETag']))
+        client.complete_multipart_upload(Bucket=bucket, Key=scopes[0] + key,
+            UploadId=upload, MultipartUpload=dict(Parts=parts))
+        expected[key] = data
+    if export == 'pack':
+        fixture.finished(fixture.cli('pack', 'run'))
+        key_name = fixture.name + '-key'
+        fixture.cli('key', 'create', key_name, 'block', '-a', 'aes-256-gcm')
+        preview = fixture.cli('storage', 'rewrite', fixture.name, 'preview', '--key', key_name)
+        fixture.finished(fixture.cli('storage', 'rewrite', fixture.name, 'start', '--key', key_name, '--confirm', preview['confirmation']))
+        assert database.query("SELECT COUNT(*) AS n FROM packs WHERE storage_id=%s AND state='ready'", uuid.UUID(fixture.store['id']))[0]['n'] > 0
     put('outside', b'keep source')
     put('outside', b'keep target', source=False)
     task = create(dict(selection='prefix', prefix='in/'), target_prefix='out/')
@@ -96,6 +134,42 @@ def run(restart):
         finish(private)
         assert body('forced-private') == b'' and not public('forced-private')
     result.append('same-body reuse, conflict preservation and overwrite')
+
+    for point in ('external-upload-started', 'external-part-uploaded', 'external-upload-completed') if export else ():
+        marker = fixture.arm(point)
+        destination = 'changed-source-' + point
+        task = create(dict(selection='objects', keys=['in/large']), target_key=destination)
+        wait(lambda: marker.with_suffix('.hit').exists(), 'source-change fault point not reached', seconds=180)
+        assert database.query('SELECT COUNT(*) AS n FROM transfer_items WHERE task_id=%s AND source_pin IS NOT NULL', uuid.UUID(task))[0]['n'] == 1
+        put('in/large', b'new source', public=True)
+        marker.unlink(missing_ok=True)
+        assert finish(task, failed=True)['progress']['conflicts'] == 1
+        assert body('in/large', True) == b'new source'
+        assert not client.list_multipart_uploads(Bucket=bucket, Prefix=scopes[1] + destination).get('Uploads')
+        assert database.query('SELECT COUNT(*) AS n FROM transfer_items WHERE task_id=%s AND source_pin IS NOT NULL', uuid.UUID(task))[0]['n'] == 0
+        put('in/large', data, public=True)
+    if export:
+        marker = fixture.arm('external-part-uploaded')
+        task = create(dict(selection='objects', keys=['in/large']), target_key='changed-while-paused')
+        wait(lambda: marker.with_suffix('.hit').exists(), 'pause fault point not reached', seconds=180)
+        fixture.api('/api/v1/replications/' + task + '/command', 'pause', expected=202)
+        marker.unlink(missing_ok=True)
+        wait(lambda: fixture.api('/api/v1/replications/' + task)['state'] == 'paused', 'task did not pause')
+        put('in/large', b'changed between work assignments', public=True)
+        fixture.api('/api/v1/replications/' + task + '/command', 'resume', expected=202)
+        assert finish(task, failed=True)['progress']['conflicts'] == 1
+        assert body('in/large', True) == b'changed between work assignments'
+        assert not client.list_multipart_uploads(Bucket=bucket, Prefix=scopes[1] + 'changed-while-paused').get('Uploads')
+        put('in/large', data, public=True)
+        marker = fixture.arm('external-part-uploaded')
+        task = create(dict(selection='objects', keys=['in/large']), target_key='changed-acl')
+        wait(lambda: marker.with_suffix('.hit').exists(), 'ACL-change fault point not reached', seconds=180)
+        client.put_object_acl(Bucket=bucket, Key=scopes[0] + 'in/large', ACL='private')
+        marker.unlink(missing_ok=True)
+        assert finish(task, failed=True)['progress']['conflicts'] == 1
+        assert body('in/large', True) == data
+        client.put_object_acl(Bucket=bucket, Key=scopes[0] + 'in/large', ACL='public-read')
+        result.append('native source pins, replacement at create/part/complete and concurrent ACL changes preserve sources and clean known uploads')
 
     for point in ('external-part-uploaded', 'external-upload-completed'):
         marker = fixture.arm(point)
@@ -131,5 +205,9 @@ def run(restart):
         response = fixture.session.delete(fixture.web + '/api/v1/external-buckets/' + resource['id'],
             headers=fixture.headers, json=dict(revision=resource['revision']), timeout=30)
         assert response.status_code == 204, response.status_code
+    if export == 'raw':
+        assert database.query('SELECT COUNT(*) AS n FROM transfer_sources WHERE task_id=%s AND source_raw IS NOT NULL', uuid.UUID(task))[0]['n'] == 0
+        assert database.query('SELECT COUNT(*) AS n FROM transfer_spans s JOIN transfer_sources u ON u.id=s.unit_id WHERE u.task_id=%s', uuid.UUID(task))[0]['n'] == 0
+        result.append('unaligned native multipart ranges use persisted source proofs; cancellation releases proofs and physical protection')
     result.append('active connection deletion is rejected; cancellation aborts known uploads and releases resource references')
     return result

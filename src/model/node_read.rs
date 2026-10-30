@@ -422,8 +422,11 @@ impl Object {
         let crate::model::Id::Uuid(id) = stream.id else {
             anyhow::bail!("node reads require UUID stream identities");
         };
+        // Pinned readers can outlive replacement of the current object.
         ensure!(
-            !id.is_nil() && stream.state == "ready" && stream.size >= 0,
+            !id.is_nil()
+                && matches!(stream.state.as_str(), "ready" | "retired")
+                && stream.size >= 0,
             "invalid readable stream"
         );
         Ok(Self {

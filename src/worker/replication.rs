@@ -4,6 +4,85 @@ use crate::{
 };
 use anyhow::Result;
 
+struct Export<'a> {
+    app: &'a App,
+    task: Execution,
+    plan: &'a crate::model::replication::external::Plan,
+    memory: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+
+#[async_trait::async_trait]
+impl crate::storage::external::objects::Source for Export<'_> {
+    async fn read(
+        &self,
+        key: &str,
+        object: &crate::storage::external::objects::Object,
+        start: u64,
+        size: usize,
+    ) -> Result<bytes::Bytes> {
+        use futures_util::StreamExt;
+        anyhow::ensure!(
+            self.app.role == "single"
+                && self.plan.key.as_deref() == Some(key)
+                && self
+                    .plan
+                    .native
+                    .as_ref()
+                    .is_some_and(|native| &native.object == object)
+                && size <= crate::storage::external::objects::WINDOW
+                && start <= object.size
+                && size as u64 <= object.size - start,
+            "invalid native export range"
+        );
+        let mut bytes = Vec::with_capacity(size);
+        while bytes.len() < size {
+            let position = start + bytes.len() as u64;
+            let (source, raw) = self
+                .app
+                .replications
+                .native_source(self.task, self.plan, position, (size - bytes.len()) as u32)
+                .await?;
+            let _pin = self.app.pin(source.id);
+            if let Some(raw) = raw {
+                let mut reader = self
+                    .app
+                    .storage
+                    .raw_reader_uncached(&raw.source, false)
+                    .await?;
+                let resources = crate::content::transfer::Resources {
+                    cpu: self.app.storage.cpu.clone(),
+                    memory: self.memory.clone(),
+                };
+                let part = crate::content::transfer::read_range(&raw, &mut reader.file, &resources)
+                    .await?;
+                reader
+                    .file
+                    .account_read(&self.app.storage, u64::from(raw.proof.size));
+                anyhow::ensure!(
+                    part.len() <= size - bytes.len(),
+                    "native export range exceeds size"
+                );
+                bytes.extend_from_slice(&part);
+            } else {
+                let mut stream = self
+                    .app
+                    .checked_range(&source, position..start + size as u64);
+                while let Some(part) = stream.next().await {
+                    let part = part?;
+                    anyhow::ensure!(
+                        part.len() <= size - bytes.len(),
+                        "native export range exceeds size"
+                    );
+                    bytes.extend_from_slice(&part);
+                }
+                break;
+            }
+        }
+        anyhow::ensure!(bytes.len() == size, "native export range is incomplete");
+        Ok(crate::storage::external::buffered(bytes, &self.memory))
+    }
+}
+
 impl App {
     async fn transfer_encoded(
         &self,
@@ -262,8 +341,24 @@ impl App {
                     .storage
                     .pack_work(crate::storage::external::objects::WINDOW)
                     .await?;
-                let _io = self.storage.reads.acquire().await?;
-                crate::storage::external::transfer::execute(plan, &snapshots, &memory).await?
+                let _io = if plan.options.source_external {
+                    Some(self.storage.reads.acquire().await?)
+                } else {
+                    None
+                };
+                let reader = Export {
+                    app: self,
+                    task,
+                    plan,
+                    memory: memory.clone(),
+                };
+                crate::storage::external::transfer::execute(
+                    plan,
+                    &snapshots,
+                    &memory,
+                    Some(&reader),
+                )
+                .await?
             };
             self.replications
                 .external_complete(task, plan, &outcome)
@@ -291,6 +386,9 @@ impl App {
                 .seek(std::io::SeekFrom::Start(plan.checksum.object.offset))
                 .await?;
             let scanned = crate::content::transfer::scan(plan, &mut input.file, &resources).await?;
+            input
+                .file
+                .account_read(&self.storage, scanned.end - plan.checksum.object.offset);
             #[cfg(feature = "fault-injection")]
             crate::faults::point("transfer-scanned").await;
             self.replications.scanned(task, &scanned).await?;

@@ -30,6 +30,9 @@ mod conversion;
 #[path = "work_migration.rs"]
 pub(crate) mod migration;
 
+#[path = "work_export.rs"]
+pub(crate) mod export;
+
 #[path = "work_write_packs.rs"]
 mod write_packs;
 
@@ -993,38 +996,48 @@ pub(crate) async fn exchange(
                 let execution = Execution { id: task, token };
                 let mut run =
                     super::super::replication_transactions::owned(&mut tx, execution).await?;
-                let next =
-                    super::super::replication_remote_transactions::prepare(&mut tx, &mut run)
+                let pending =
+                    super::super::replication_remote_transactions::preflight(&mut tx, &run).await?;
+                if matches!(pending, Some(crate::model::replication::Step::Continue)) {
+                    q::finish(task, token, 0, false, None)
+                        .execute(&mut *tx)
                         .await?;
-                super::super::replication_transactions::save(&mut tx, &run).await?;
-                if let Some(next) = next {
-                    let connections = super::super::replication_queries::connections(task)
-                        .fetch_all(&mut *tx)
-                        .await?;
-                    let snapshots = connections
-                        .iter()
-                        .map(|connection| connection.open(task, key))
-                        .collect::<Result<Vec<_>>>()?;
-                    encrypted = Some(codec::protect(
-                        &serde_json::to_vec(&snapshots)?,
-                        key,
-                        token.as_bytes(),
-                    )?);
-                    q::task_lease(task, token).execute(&mut *tx).await?;
-                    assigned = Some(task);
-                    plan = Some(work::Plan::ExternalTransfer(Box::new(next)));
-                    break;
+                    continue;
                 }
-                q::finish(
-                    task,
-                    token,
-                    0,
-                    matches!(run.phase.as_str(), "complete" | "cancelled"),
-                    None,
-                )
-                .execute(&mut *tx)
-                .await?;
-                continue;
+                if pending.is_none() {
+                    let next =
+                        super::super::replication_remote_transactions::prepare(&mut tx, &mut run)
+                            .await?;
+                    super::super::replication_transactions::save(&mut tx, &run).await?;
+                    if let Some(next) = next {
+                        let connections = super::super::replication_queries::connections(task)
+                            .fetch_all(&mut *tx)
+                            .await?;
+                        let snapshots = connections
+                            .iter()
+                            .map(|connection| connection.open(task, key))
+                            .collect::<Result<Vec<_>>>()?;
+                        encrypted = Some(codec::protect(
+                            &serde_json::to_vec(&snapshots)?,
+                            key,
+                            token.as_bytes(),
+                        )?);
+                        q::task_lease(task, token).execute(&mut *tx).await?;
+                        assigned = Some(task);
+                        plan = Some(work::Plan::ExternalTransfer(Box::new(next)));
+                        break;
+                    }
+                    q::finish(
+                        task,
+                        token,
+                        0,
+                        matches!(run.phase.as_str(), "complete" | "cancelled"),
+                        None,
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                    continue;
+                }
             }
             let storage: Uuid = if policy == "upload" && detail["operation"] == "cdc" {
                 let job: crate::model::raw::Conversion = serde_json::from_value(detail.clone())?;
@@ -1038,7 +1051,9 @@ pub(crate) async fn exchange(
                     Execution { id: task, token },
                 )
                 .await?;
-                if let Some(unit) = super::super::transfer_queries::pending(task)
+                if run.options.0.target_external {
+                    run.source_storage()?
+                } else if let Some(unit) = super::super::transfer_queries::pending(task)
                     .fetch_optional(&mut *tx)
                     .await?
                 {

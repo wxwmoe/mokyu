@@ -27,6 +27,15 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
         input: super::node_work::ReadMigration,
     ) -> Result<super::node_read::Reply>;
+    async fn read_transfer(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_work::ReadTransfer,
+    ) -> Result<(
+        super::node_read::Reply,
+        Option<super::replication::external::RawRead>,
+    )>;
     async fn exchange_work(
         &self,
         node: &NodeState,

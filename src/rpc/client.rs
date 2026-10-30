@@ -321,6 +321,14 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn read_transfer(
+        &self,
+        input: wire::ReadTransferRequest,
+    ) -> Result<wire::ReadTransferReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWork/ReadTransfer")
+            .await
+    }
+
     pub(crate) async fn checkpoint_transfer(
         &self,
         input: wire::TransferCheckpointRequest,

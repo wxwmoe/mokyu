@@ -64,7 +64,7 @@ pub(crate) fn metadata_progress(id: Uuid, token: Uuid, count: i64) -> Statement<
 }
 
 pub(crate) fn result<'a>(node: Uuid, operation: Uuid, hash: &'a [u8]) -> Statement<'a> {
-    sqlx::query("UPDATE node_work SET result_hash=$3,plan=CASE WHEN plan->>'action' IN ('external_test','external_transfer') THEN NULL ELSE plan END,storage_encrypted=CASE WHEN plan->>'action' IN ('external_test','external_transfer') THEN NULL ELSE storage_encrypted END,expires_at=clock_timestamp() WHERE node_id=$1 AND operation_id=$2 AND result_hash IS NULL").bind(node).bind(operation).bind(hash)
+    sqlx::query("UPDATE node_work SET result_hash=$3,plan=CASE WHEN plan->>'action' IN ('external_test','external_transfer','scan_transfer') THEN NULL ELSE plan END,storage_encrypted=CASE WHEN plan->>'action' IN ('external_test','external_transfer','scan_transfer') THEN NULL ELSE storage_encrypted END,expires_at=clock_timestamp() WHERE node_id=$1 AND operation_id=$2 AND result_hash IS NULL").bind(node).bind(operation).bind(hash)
 }
 
 pub(crate) fn finish(
