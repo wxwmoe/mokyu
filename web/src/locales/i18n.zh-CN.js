@@ -1069,7 +1069,6 @@ export default {
   replicationTarget: "目标",
   replicationProgress: "已完成文件",
   replicationEmpty: "还没有复制任务",
-  replicationSameStore: "选择使用同一后端的小仓库",
   replicationScope: "复制范围",
   replicationScope_all: "整个小仓库",
   replicationScope_prefix: "路径前缀",

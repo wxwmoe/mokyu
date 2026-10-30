@@ -96,13 +96,6 @@ impl ReplicationStore for Backend {
         let target = q::profile(options.target_bucket)
             .fetch_one(&mut *db)
             .await?;
-        ensure!(
-            source.0 == target.0,
-            s3s::s3_error!(
-                InvalidArgument,
-                "replication requires matching internal stores"
-            )
-        );
         if let Ok(id) = crate::model::REQUEST_ID.try_with(|id| *id) {
             if let Some(previous) = q::run(id).fetch_optional(&mut *db).await? {
                 ensure!(
@@ -117,7 +110,7 @@ impl ReplicationStore for Backend {
         }
         let mode = q::mode().fetch_one(&mut *db).await?;
         let id = transactions::enqueue_task(&mut db, "storage_migration", Some(options.target_bucket),
-            json!({"operation":"replication","phase":"scan","storage_id":source.0,"execution_mode":mode}), false).await?;
+            json!({"operation":"replication","phase":"scan","storage_id":target.0,"execution_mode":mode}), false).await?;
         q::create(id, principal, options, target.0, target.1, source.0)
             .execute(&mut *db)
             .await?;
@@ -450,6 +443,49 @@ async fn current(db: &mut Tx<'_>, run: &q::Run, item: &q::Entry) -> Result<bool>
     }))
 }
 
+async fn equivalent(db: &mut Tx<'_>, item: &q::Entry, target: &q::Source) -> Result<bool> {
+    Ok(target.size == item.snapshot.0.size
+        && (target.size == 0
+            || q::same_data(
+                item.source_pin.ok_or(Error::SourceUnavailable)?,
+                target.id,
+                &item.snapshot.0.payload,
+            )
+            .fetch_one(&mut **db)
+            .await?))
+}
+
+async fn reusable(db: &mut Tx<'_>, item: &q::Entry, target: &q::Source) -> Result<bool> {
+    use futures_util::TryStreamExt;
+    let mut sources = [
+        (
+            item.source_pin.ok_or(Error::SourceUnavailable)?,
+            item.snapshot.0.payload.as_str(),
+        ),
+        (target.id, target.payload_type.as_str()),
+    ];
+    sources.sort_by_key(|(id, _)| *id);
+    for (id, payload) in sources {
+        if !q::ready(id, payload).fetch_one(&mut **db).await? {
+            return Ok(false);
+        }
+        if payload == "raw" {
+            let mut rows = q::lock_raw(id).fetch(&mut **db);
+            while let Some(ready) = rows.try_next().await? {
+                if !ready {
+                    return Ok(false);
+                }
+            }
+        } else {
+            transactions::require_sources(&mut **db, Some(id), &[]).await?;
+            if !q::ready(id, payload).fetch_one(&mut **db).await? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
     let Some(item) = q::pending(run.task_id, "planning")
         .fetch_optional(&mut **db)
@@ -460,6 +496,53 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
     };
     if !current(db, run, &item).await? {
         return finish_item(db, run, &item, "conflict", None, Some("source_changed")).await;
+    }
+    if item.position_bytes == 0 {
+        let target = q::source(run.options.0.target_bucket, &item.target_key)
+            .fetch_optional(&mut **db)
+            .await?;
+        if target.as_ref().map(|source| source.id) != item.target_version {
+            return finish_item(db, run, &item, "conflict", None, Some("target_changed")).await;
+        }
+        if let Some(target) = target {
+            let equal = equivalent(db, &item, &target).await?;
+            if equal && reusable(db, &item, &target).await? {
+                let mut expected = item.snapshot.0.clone();
+                expected.public = run
+                    .options
+                    .0
+                    .permissions
+                    .public(expected.public, Some(target.public_read));
+                expected.payload = target.payload_type.clone();
+                if run.options.0.operation == Operation::Copy && target.snapshot() == expected {
+                    return finish_item(db, run, &item, "skipped", Some(target.id), None).await;
+                }
+                let raw_allowed = target.payload_type != "raw"
+                    || super::transfer_queries::policy(run.storage_id, run.profile_revision)
+                        .fetch_one(&mut **db)
+                        .await?
+                        .0;
+                if raw_allowed {
+                    q::reuse_target(item.id).execute(&mut **db).await?;
+                    return Ok(());
+                }
+            }
+            if !equal && run.options.0.conflict != Conflict::Overwrite {
+                return finish_item(
+                    db,
+                    run,
+                    &item,
+                    if run.options.0.conflict == Conflict::Skip {
+                        "skipped"
+                    } else {
+                        "conflict"
+                    },
+                    None,
+                    Some("target_exists"),
+                )
+                .await;
+            }
+        }
     }
     let source = item.source_pin.ok_or(Error::SourceUnavailable)?;
     let mut end = item.position_bytes;
@@ -693,22 +776,18 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
     }
     if item.candidate.is_none() {
         if let Some(target) = &target {
-            let equal = target.size == item.snapshot.0.size
-                && (target.size == 0
-                    || target.payload_type == item.snapshot.0.payload
-                        && q::same_data(
-                            item.source_pin.ok_or(Error::SourceUnavailable)?,
-                            target.id,
-                            &item.snapshot.0.payload,
-                        )
-                        .fetch_one(&mut **db)
-                        .await?);
+            let equal = equivalent(db, &item, target).await?;
             let mut expected = item.snapshot.0.clone();
             expected.public = options
                 .permissions
                 .public(expected.public, Some(target.public_read));
-            if equal && options.operation == Operation::Copy && target.snapshot() == expected {
-                return finish_item(db, run, &item, "skipped", None, None).await;
+            expected.payload = target.payload_type.clone();
+            if equal
+                && reusable(db, &item, target).await?
+                && options.operation == Operation::Copy
+                && target.snapshot() == expected
+            {
+                return finish_item(db, run, &item, "skipped", Some(target.id), None).await;
             }
             if !equal && options.conflict != Conflict::Overwrite {
                 return finish_item(
@@ -763,9 +842,21 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
         id
     };
     let source = item.source_pin.ok_or(Error::SourceUnavailable)?;
+    let projection_source = if item.reuse_target {
+        target.as_ref().ok_or(Error::OperationAborted)?.id
+    } else {
+        source
+    };
+    let raw = if item.reuse_target {
+        target
+            .as_ref()
+            .is_some_and(|target| target.payload_type == "raw")
+    } else {
+        item.snapshot.0.payload == "raw"
+    };
     let mut end = item.position_bytes;
     if item.snapshot.0.size > 0 {
-        if run.source_storage_id != run.storage_id {
+        if run.source_storage_id != run.storage_id && !item.reuse_target {
             end = super::transfer_transactions::project(
                 db,
                 run,
@@ -776,14 +867,19 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
                 item.snapshot.0.size,
             )
             .await?;
-        } else if item.snapshot.0.payload == "raw" {
-            let rows = q::ranges(source, end).fetch_all(&mut **db).await?;
+        } else if raw {
+            let rows = q::ranges(projection_source, end)
+                .fetch_all(&mut **db)
+                .await?;
             let (start, next, ids) = crate::model::raw::copy_window(run.storage_id, &rows)?;
             ensure!(
                 start == end && next <= item.snapshot.0.size && next > end,
                 Error::SourceUnavailable
             );
             for id in ids {
+                if item.reuse_target {
+                    continue;
+                }
                 let proof = q::proof(task.id, id, run.generation)
                     .fetch_optional(&mut **db)
                     .await?
@@ -803,7 +899,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             transactions::copy_raw_references_in(
                 db,
                 candidate,
-                source,
+                projection_source,
                 run.storage_id,
                 run.profile_revision,
                 &rows,
@@ -811,7 +907,9 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             .await?;
             end = next;
         } else {
-            let rows = q::extents(source, end).fetch_all(&mut **db).await?;
+            let rows = q::extents(projection_source, end)
+                .fetch_all(&mut **db)
+                .await?;
             ensure!(!rows.is_empty(), Error::SourceUnavailable);
             let mut chunks = std::collections::BTreeSet::new();
             for (offset, length, chunk, fragment, _) in rows {
@@ -826,7 +924,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             transactions::copy_chunk_references_in(
                 db,
                 candidate,
-                source,
+                projection_source,
                 item.position_bytes,
                 end,
                 &chunks.into_iter().collect::<Vec<_>>(),
@@ -839,6 +937,12 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             .execute(&mut **db)
             .await?;
         return Ok(());
+    }
+    if item.reuse_target {
+        ensure!(
+            reusable(db, &item, target.as_ref().ok_or(Error::OperationAborted)?).await?,
+            Error::SourceUnavailable
+        );
     }
     let public = options.permissions.public(
         item.snapshot.0.public,

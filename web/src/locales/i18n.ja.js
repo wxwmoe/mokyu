@@ -1069,7 +1069,6 @@ export default {
   replicationTarget: "コピー先",
   replicationProgress: "完了したファイル",
   replicationEmpty: "コピータスクはまだありません",
-  replicationSameStore: "同じストレージのバケットを選択",
   replicationScope: "対象",
   replicationScope_all: "バケット全体",
   replicationScope_prefix: "パスの接頭辞",

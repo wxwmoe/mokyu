@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0093.
+-- Generated from the complete postgres migration chain through 0094.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -2035,6 +2035,7 @@ CREATE TABLE public.transfer_items (
     state text DEFAULT 'planning'::text NOT NULL,
     position_bytes bigint DEFAULT 0 NOT NULL,
     error text,
+    reuse_target boolean DEFAULT false NOT NULL,
     CONSTRAINT transfer_items_position_bytes_check CHECK ((position_bytes >= 0)),
     CONSTRAINT transfer_items_state_check CHECK ((state = ANY (ARRAY['planning'::text, 'planned'::text, 'copying'::text, 'completed'::text, 'skipped'::text, 'conflict'::text, 'cancelled'::text])))
 );
@@ -2830,6 +2831,8 @@ CREATE INDEX token_bucket_grants_bucket ON public.token_bucket_grants USING btre
 CREATE INDEX token_external_bucket ON public.token_external_grants USING btree (bucket_id);
 
 CREATE INDEX transfer_items_candidate ON public.transfer_items USING btree (candidate);
+
+CREATE INDEX transfer_items_receipt ON public.transfer_items USING btree (source_version, output_version) WHERE ((output_version IS NOT NULL) AND (error IS NULL) AND (state = ANY (ARRAY['completed'::text, 'skipped'::text])));
 
 CREATE INDEX transfer_items_source_pin ON public.transfer_items USING btree (source_pin);
 

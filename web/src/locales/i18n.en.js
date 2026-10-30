@@ -1069,7 +1069,6 @@ export default {
   replicationTarget: "Destination",
   replicationProgress: "Objects completed",
   replicationEmpty: "No replication tasks yet",
-  replicationSameStore: "Choose a bucket on the same storage",
   replicationScope: "Selection",
   replicationScope_all: "Entire bucket",
   replicationScope_prefix: "Path prefix",

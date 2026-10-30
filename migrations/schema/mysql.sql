@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0046.
+-- Generated from the complete mysql migration chain through 0047.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -1157,10 +1157,12 @@ CREATE TABLE `transfer_items` (
   `state` varchar(24) COLLATE utf8mb4_bin NOT NULL DEFAULT 'planning',
   `position_bytes` bigint NOT NULL DEFAULT '0',
   `error` varchar(24) COLLATE utf8mb4_bin DEFAULT NULL,
+  `reuse_target` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   KEY `transfer_items_work` (`task_id`,`state`,`id`),
   KEY `transfer_items_source_pin` (`source_pin`),
   KEY `transfer_items_candidate` (`candidate`),
+  KEY `transfer_items_receipt` (`source_version`,`output_version`,`state`),
   CONSTRAINT `transfer_items_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_runs` (`task_id`) ON DELETE CASCADE,
   CONSTRAINT `transfer_items_ibfk_2` FOREIGN KEY (`source_pin`) REFERENCES `streams` (`id`),
   CONSTRAINT `transfer_items_ibfk_3` FOREIGN KEY (`candidate`) REFERENCES `streams` (`id`),

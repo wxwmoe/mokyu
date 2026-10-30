@@ -24,8 +24,7 @@ const job = useQuery({ queryKey: ['replication', selected], enabled: computed(()
 const items = useQuery({ queryKey: ['replication-items', selected, itemCursor], enabled: computed(() => !!selected.value), queryFn: ({ signal }) => api<components['schemas']['ReplicationItems']>(endpoint + '/' + selected.value + '/items?' + params({ after: itemCursor.value || undefined }), { signal }), refetchInterval: computed(() => ['queued', 'running'].includes(job.data.value?.state || '') ? 3000 : false) })
 const details = computed({ get: () => !!selected.value, set: value => { if (!value) selected.value = '' } })
 const sourceOptions = computed(() => (buckets.data.value || []).filter(bucket => bucket.status === 'active' && bucket.actions.includes('object.read') && (scope.value === 'objects' || bucket.actions.includes('bucket.list')) && (operation.value !== 'move' || bucket.actions.includes('object.delete'))).map(bucket => ({ value: bucket.id, label: bucket.name })))
-const selectedSource = computed(() => buckets.data.value?.find(bucket => bucket.id === source.value))
-const targetOptions = computed(() => (buckets.data.value || []).filter(bucket => bucket.status === 'active' && bucket.storage_id === selectedSource.value?.storage_id && bucket.actions.includes('object.write') && (permissions.value === 'ignore' || bucket.actions.includes('object.acl')) && (scope.value !== 'all' || bucket.id !== source.value)).map(bucket => ({ value: bucket.id, label: bucket.name })))
+const targetOptions = computed(() => (buckets.data.value || []).filter(bucket => bucket.status === 'active' && bucket.actions.includes('object.write') && (permissions.value === 'ignore' || bucket.actions.includes('object.acl')) && (scope.value !== 'all' || bucket.id !== source.value)).map(bucket => ({ value: bucket.id, label: bucket.name })))
 const selections = computed(() => ['all', 'prefix', 'objects'].map(value => ({ value, label: t('replicationScope_' + value) })))
 const permissionOptions = computed(() => ['inherit', 'ignore', 'public_read', 'private'].map(value => ({ value, label: t('replicationPermission_' + value) })))
 const conflicts = computed(() => ['report', 'skip', 'overwrite'].map(value => ({ value, label: t('replicationConflict_' + value) })))
@@ -82,7 +81,7 @@ async function command(action: components['schemas']['ReplicationCommand']) {
     <UiDialog v-model:open="creating" :title="t('replicationCreate')" :busy="busy" wide>
       <form id="replication-form" class="replication-form" @submit.prevent="create">
         <ErrorNotice :error="error" />
-        <div class="form-grid"><label>{{ t('replicationSource') }}<UiSelect v-model="source" :options="sourceOptions" :label="t('replicationSource')" searchable /></label><label>{{ t('replicationTarget') }}<UiSelect v-model="target" :options="targetOptions" :label="t('replicationTarget')" searchable /><small>{{ t('replicationSameStore') }}</small></label></div>
+        <div class="form-grid"><label>{{ t('replicationSource') }}<UiSelect v-model="source" :options="sourceOptions" :label="t('replicationSource')" searchable /></label><label>{{ t('replicationTarget') }}<UiSelect v-model="target" :options="targetOptions" :label="t('replicationTarget')" searchable /></label></div>
         <div class="form-grid"><label>{{ t('replicationOperation') }}<UiSelect v-model="operation" :options="operations" :label="t('replicationOperation')" /></label><label>{{ t('replicationScope') }}<UiSelect v-model="scope" :options="selections" :label="t('replicationScope')" /></label></div>
         <p v-if="operation === 'move'" class="muted">{{ t('replicationMoveHint') }}</p>
         <label v-if="scope === 'prefix'">{{ t('replicationPrefix') }}<input v-model="prefix" autocomplete="off" /></label>
