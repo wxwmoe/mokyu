@@ -4,9 +4,13 @@ use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::types::Json;
 use std::collections::BTreeSet;
 use utoipa::ToSchema;
 use uuid::Uuid;
+
+#[path = "replication_external.rs"]
+pub(crate) mod external;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +67,10 @@ pub(crate) enum Scope {
 pub(crate) struct Options {
     pub source_bucket: Uuid,
     pub target_bucket: Uuid,
+    #[serde(default)]
+    pub source_external: bool,
+    #[serde(default)]
+    pub target_external: bool,
     pub operation: Operation,
     pub scope: Scope,
     #[serde(default)]
@@ -79,6 +87,14 @@ fn valid_key(key: &str, prefix: bool) -> bool {
 }
 
 impl Options {
+    pub(crate) fn external(&self) -> bool {
+        self.source_external || self.target_external
+    }
+
+    fn same_endpoint(&self) -> bool {
+        self.source_bucket == self.target_bucket && self.source_external == self.target_external
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         let invalid = || s3s::s3_error!(InvalidArgument, "invalid replication scope");
         ensure!(
@@ -96,10 +112,10 @@ impl Options {
             );
         }
         match &self.scope {
-            Scope::All => ensure!(self.source_bucket != self.target_bucket, invalid()),
+            Scope::All => ensure!(!self.same_endpoint(), invalid()),
             Scope::Prefix { prefix } => {
                 ensure!(valid_key(prefix, true), invalid());
-                if self.source_bucket == self.target_bucket {
+                if self.same_endpoint() {
                     ensure!(
                         !prefix.starts_with(&self.target_prefix)
                             && !self.target_prefix.starts_with(prefix),
@@ -117,8 +133,7 @@ impl Options {
                     let target = self.target(key)?;
                     ensure!(
                         targets.insert(target.clone())
-                            && (self.source_bucket != self.target_bucket
-                                || !selected.contains(&target)),
+                            && (!self.same_endpoint() || !selected.contains(&target)),
                         invalid()
                     );
                 }
@@ -142,19 +157,134 @@ impl Options {
         Ok(target)
     }
 
+    pub(crate) fn for_item(&self, key: &str) -> Result<Self> {
+        let target = self.target(key)?;
+        let mut options = self.clone();
+        options.scope = Scope::Objects {
+            keys: vec![key.to_owned()],
+        };
+        options.target_prefix.clear();
+        options.target_key = Some(target);
+        options.validate()?;
+        Ok(options)
+    }
+
     pub(crate) fn authority(&self, principal: Principal) -> Permit {
-        let mut permit = Permit::for_action(principal, self.source_bucket, Action::Read);
-        if !matches!(self.scope, Scope::Objects { .. }) {
-            permit.add(self.source_bucket, Action::List);
+        self.authority_for(principal, false)
+    }
+
+    pub(crate) fn external_authority(&self, principal: Principal) -> Permit {
+        self.authority_for(principal, true)
+    }
+
+    pub(crate) fn external_scopes(
+        &self,
+        source: &crate::storage::external::Connection,
+        target: &crate::storage::external::Connection,
+    ) -> Result<()> {
+        if let Scope::Objects { keys } = &self.scope {
+            let originals: BTreeSet<_> = keys
+                .iter()
+                .map(|key| source.object_address(key))
+                .collect::<Result<_>>()?;
+            for key in keys {
+                ensure!(
+                    !originals.contains(&target.object_address(&self.target(key)?)?),
+                    s3s::s3_error!(InvalidArgument, "replication scopes overlap")
+                );
+            }
+        } else {
+            let prefix = match &self.scope {
+                Scope::Prefix { prefix } => prefix.as_str(),
+                _ => "",
+            };
+            let source = source.object_prefix(prefix)?;
+            let target = target.object_prefix(&self.target_prefix)?;
+            ensure!(
+                !source.starts_with(&target) && !target.starts_with(&source),
+                s3s::s3_error!(InvalidArgument, "replication scopes overlap")
+            );
         }
-        if self.operation == Operation::Move {
-            permit.add(self.source_bucket, Action::Delete);
+        Ok(())
+    }
+
+    pub(crate) fn visible(&self, principal: Principal, external: bool) -> Permit {
+        let mut permit = Permit {
+            principal,
+            resources: Default::default(),
+        };
+        if self.source_external == external {
+            permit.add(self.source_bucket, Action::Read);
         }
-        permit.add(self.target_bucket, Action::Write);
-        if self.permissions != Permissions::Ignore {
-            permit.add(self.target_bucket, Action::Acl);
+        if self.target_external == external {
+            permit.add(self.target_bucket, Action::Write);
         }
         permit
+    }
+
+    fn authority_for(&self, principal: Principal, external: bool) -> Permit {
+        let mut permit = Permit {
+            principal,
+            resources: Default::default(),
+        };
+        if self.source_external == external {
+            permit.add(self.source_bucket, Action::Read);
+            if !matches!(self.scope, Scope::Objects { .. }) {
+                permit.add(self.source_bucket, Action::List);
+            }
+            if self.operation == Operation::Move {
+                permit.add(self.source_bucket, Action::Delete);
+            }
+        }
+        if self.target_external == external {
+            permit.add(self.target_bucket, Action::Write);
+            if self.permissions != Permissions::Ignore {
+                permit.add(self.target_bucket, Action::Acl);
+            }
+        }
+        permit
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct Run {
+    pub task_id: Uuid,
+    pub created_by: Option<Uuid>,
+    pub options: Json<Options>,
+    pub authority: Json<Principal>,
+    pub storage_id: Option<Uuid>,
+    pub source_storage_id: Option<Uuid>,
+    pub profile_revision: Option<i64>,
+    pub phase: String,
+    pub cursor_key: Option<String>,
+    pub progress: Json<Progress>,
+    pub generation: i64,
+    pub state: String,
+    pub error: Option<String>,
+    pub mode: String,
+}
+impl Run {
+    pub(crate) fn storage(&self) -> Result<Uuid> {
+        self.storage_id
+            .ok_or_else(|| super::Error::OperationAborted.into())
+    }
+    pub(crate) fn source_storage(&self) -> Result<Uuid> {
+        self.source_storage_id
+            .ok_or_else(|| super::Error::OperationAborted.into())
+    }
+    pub(crate) fn profile_revision(&self) -> Result<i64> {
+        self.profile_revision
+            .ok_or_else(|| super::Error::OperationAborted.into())
+    }
+    pub(crate) fn view(self) -> Replication {
+        Replication {
+            id: self.task_id,
+            state: self.state,
+            phase: self.phase,
+            options: self.options.0,
+            progress: self.progress.0,
+            error: self.error,
+        }
     }
 }
 
@@ -204,6 +334,10 @@ pub(crate) enum Command {
 
 pub(crate) enum Step {
     Continue,
+    External {
+        plan: Box<external::Plan>,
+        connections: Vec<external::Connection>,
+    },
     Scan(super::transfer::Scan),
     Copy(super::transfer::Copy),
     Raw(super::transfer::RawCopy),
@@ -215,7 +349,12 @@ pub(crate) enum Step {
 
 #[async_trait]
 pub(crate) trait ReplicationStore: Send + Sync {
-    async fn create(&self, principal: &Principal, options: &Options) -> Result<Uuid>;
+    async fn create(
+        &self,
+        principal: &Principal,
+        options: &Options,
+        connections: &[external::Connection],
+    ) -> Result<Uuid>;
     async fn view(&self, principal: &Principal, id: Uuid) -> Result<Replication>;
     async fn list(
         &self,
@@ -232,6 +371,12 @@ pub(crate) trait ReplicationStore: Send + Sync {
     ) -> Result<Vec<Item>>;
     async fn command(&self, principal: &Principal, id: Uuid, command: Command) -> Result<()>;
     async fn step(&self, task: Execution) -> Result<Step>;
+    async fn external_complete(
+        &self,
+        task: Execution,
+        plan: &external::Plan,
+        outcome: &external::Outcome,
+    ) -> Result<()>;
     async fn verified(&self, task: Execution, sources: &[RawSource]) -> Result<()>;
     async fn scanned(&self, task: Execution, value: &super::transfer::Scanned) -> Result<()>;
     async fn raw_progress(
@@ -272,6 +417,8 @@ mod tests {
         Options {
             source_bucket: Uuid::new_v4(),
             target_bucket: Uuid::new_v4(),
+            source_external: false,
+            target_external: false,
             operation: Operation::Copy,
             scope,
             target_prefix: "out/".into(),
@@ -279,6 +426,29 @@ mod tests {
             conflict: Conflict::Report,
             permissions: Permissions::Inherit,
         }
+    }
+
+    #[test]
+    fn endpoint_permissions_keep_external_resources_separate() {
+        let mut value = options(Scope::All);
+        value.source_external = true;
+        value.operation = Operation::Move;
+        let internal = value.authority(Principal::Local);
+        let external = value.external_authority(Principal::Local);
+        assert!(!internal.resources.contains_key(&value.source_bucket));
+        assert!(!external.resources.contains_key(&value.target_bucket));
+        assert_eq!(
+            external.resources[&value.source_bucket],
+            vec![Action::Read, Action::List, Action::Delete]
+        );
+        assert_eq!(
+            internal.resources[&value.target_bucket],
+            vec![Action::Write, Action::Acl]
+        );
+        value.target_bucket = value.source_bucket;
+        assert!(value.validate().is_ok());
+        value.target_external = true;
+        assert!(value.validate().is_err());
     }
 
     #[test]

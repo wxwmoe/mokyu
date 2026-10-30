@@ -1,47 +1,10 @@
-use crate::{content::codec, storage::external::Connection};
+use crate::storage::external::Connection;
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Snapshot {
-    pub external_id: Uuid,
-    pub revision: i64,
-    pub connection: Connection,
-    pub access_key: String,
-    pub secret_key: String,
-}
-
-impl Snapshot {
-    pub(crate) fn seal(&self, key: &codec::Key) -> Result<Vec<u8>> {
-        self.connection.validate()?;
-        crate::storage::external::credentials(&self.access_key, &self.secret_key)?;
-        codec::protect(&serde_json::to_vec(self)?, key, self.context().as_bytes())
-    }
-
-    fn context(&self) -> String {
-        format!("external-{}-test-{}", self.external_id, self.revision)
-    }
-
-    pub(crate) fn open(id: Uuid, revision: i64, bytes: &[u8], key: &codec::Key) -> Result<Self> {
-        let value: Self = serde_json::from_str(&codec::unprotect(
-            bytes,
-            key,
-            format!("external-{id}-test-{revision}").as_bytes(),
-        )?)?;
-        ensure!(
-            value.external_id == id && value.revision == revision,
-            "external snapshot differs"
-        );
-        value.connection.validate()?;
-        crate::storage::external::credentials(&value.access_key, &value.secret_key)?;
-        Ok(value)
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]

@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0047.
+-- Generated from the complete mysql migration chain through 0048.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -1143,6 +1143,38 @@ CREATE TABLE `token_external_grants` (
   CONSTRAINT `token_external_actions` CHECK ((`actions` <= 31))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `transfer_connections` (
+  `task_id` binary(16) NOT NULL,
+  `external_id` binary(16) NOT NULL,
+  `revision` bigint NOT NULL,
+  `encrypted` blob NOT NULL,
+  PRIMARY KEY (`task_id`,`external_id`),
+  KEY `transfer_connections_external` (`external_id`),
+  CONSTRAINT `transfer_connections_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_runs` (`task_id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_connections_ibfk_2` FOREIGN KEY (`external_id`) REFERENCES `external_buckets` (`id`),
+  CONSTRAINT `transfer_connections_chk_1` CHECK ((`revision` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `transfer_external_items` (
+  `item_id` bigint NOT NULL,
+  `state` json NOT NULL,
+  PRIMARY KEY (`item_id`),
+  CONSTRAINT `transfer_external_items_ibfk_1` FOREIGN KEY (`item_id`) REFERENCES `transfer_items` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `transfer_external_parts` (
+  `item_id` bigint NOT NULL,
+  `part_number` int NOT NULL,
+  `size_bytes` bigint NOT NULL,
+  `etag` varchar(4096) COLLATE utf8mb4_bin NOT NULL,
+  `digest` binary(32) NOT NULL,
+  PRIMARY KEY (`item_id`,`part_number`),
+  CONSTRAINT `transfer_external_parts_ibfk_1` FOREIGN KEY (`item_id`) REFERENCES `transfer_external_items` (`item_id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_external_parts_chk_1` CHECK ((`part_number` between 1 and 10000)),
+  CONSTRAINT `transfer_external_parts_chk_2` CHECK (((`size_bytes` >= 0) and (`size_bytes` <= 5368709120))),
+  CONSTRAINT `transfer_external_parts_chk_3` CHECK ((length(`digest`) = 32))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `transfer_items` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `task_id` binary(16) NOT NULL,
@@ -1158,11 +1190,13 @@ CREATE TABLE `transfer_items` (
   `position_bytes` bigint NOT NULL DEFAULT '0',
   `error` varchar(24) COLLATE utf8mb4_bin DEFAULT NULL,
   `reuse_target` tinyint(1) NOT NULL DEFAULT '0',
+  `source_key_hash` binary(32) GENERATED ALWAYS AS (unhex(sha2(cast(`source_key` as char charset binary),256))) STORED,
   PRIMARY KEY (`id`),
   KEY `transfer_items_work` (`task_id`,`state`,`id`),
   KEY `transfer_items_source_pin` (`source_pin`),
   KEY `transfer_items_candidate` (`candidate`),
   KEY `transfer_items_receipt` (`source_version`,`output_version`,`state`),
+  KEY `transfer_items_source_key` (`task_id`,`source_key_hash`),
   CONSTRAINT `transfer_items_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_runs` (`task_id`) ON DELETE CASCADE,
   CONSTRAINT `transfer_items_ibfk_2` FOREIGN KEY (`source_pin`) REFERENCES `streams` (`id`),
   CONSTRAINT `transfer_items_ibfk_3` FOREIGN KEY (`candidate`) REFERENCES `streams` (`id`),
@@ -1205,13 +1239,13 @@ CREATE TABLE `transfer_runs` (
   `created_by` binary(16) DEFAULT NULL,
   `options` json NOT NULL,
   `authority` json NOT NULL,
-  `storage_id` binary(16) NOT NULL,
-  `profile_revision` bigint NOT NULL,
+  `storage_id` binary(16) DEFAULT NULL,
+  `profile_revision` bigint DEFAULT NULL,
   `generation` bigint NOT NULL DEFAULT '1',
   `phase` varchar(24) COLLATE utf8mb4_bin NOT NULL DEFAULT 'scan',
-  `cursor_key` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  `cursor_key` text CHARACTER SET utf8mb4 COLLATE utf8mb4_bin,
   `progress` json NOT NULL,
-  `source_storage_id` binary(16) NOT NULL,
+  `source_storage_id` binary(16) DEFAULT NULL,
   PRIMARY KEY (`task_id`),
   KEY `transfer_runs_creator` (`created_by`,`task_id`),
   CONSTRAINT `transfer_runs_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE CASCADE,

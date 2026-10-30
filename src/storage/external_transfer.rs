@@ -1,0 +1,353 @@
+use super::{Client, objects::Condition};
+use crate::model::{
+    external::Snapshot,
+    replication::{
+        self,
+        external::{Outcome, Part, Phase, Plan},
+    },
+};
+use anyhow::{Context, Result, ensure};
+use bytes::Bytes;
+
+fn uploaded(part: &Part) -> super::super::s3::UploadedPart {
+    super::super::s3::UploadedPart {
+        number: part.number as u16,
+        size: part.size as u64,
+        etag: part.etag.clone(),
+    }
+}
+
+fn client(
+    plan: &Plan,
+    snapshots: &[Snapshot],
+    source: bool,
+    memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<Client> {
+    let id = if source {
+        plan.options.source_bucket
+    } else {
+        plan.options.target_bucket
+    };
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.external_id == id)
+        .context("transfer connection missing")?;
+    snapshot.validate()?;
+    let mut client = snapshot.connection.connect(
+        &snapshot.access_key,
+        &snapshot.secret_key,
+        super::super::model::Options {
+            connect_timeout: std::time::Duration::from_secs(15),
+            request_timeout: std::time::Duration::from_secs(60),
+            retry_timeout: std::time::Duration::from_secs(60),
+            max_retries: 0,
+        },
+    )?;
+    client.memory = Some(memory.clone());
+    Ok(client)
+}
+
+fn code(error: &anyhow::Error, code: s3s::S3ErrorCode) -> bool {
+    error
+        .downcast_ref::<s3s::S3Error>()
+        .is_some_and(|error| error.code() == &code)
+}
+
+pub(crate) async fn execute(
+    plan: &Plan,
+    snapshots: &[Snapshot],
+    memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<Outcome> {
+    plan.validate()?;
+    let result = match execute_plan(plan, snapshots, memory).await {
+        Err(error) if code(&error, s3s::S3ErrorCode::PreconditionFailed) => Ok(Outcome::Conflict),
+        result => result,
+    };
+    #[cfg(feature = "fault-injection")]
+    if let Ok(outcome) = &result {
+        let point = match outcome {
+            Outcome::Started { .. } => Some("external-upload-started"),
+            Outcome::Transferred(_) => Some("external-part-uploaded"),
+            Outcome::Written(_) => Some("external-upload-completed"),
+            _ => None,
+        };
+        if let Some(point) = point {
+            crate::faults::point(point).await;
+        }
+    }
+    result
+}
+
+async fn execute_plan(
+    plan: &Plan,
+    snapshots: &[Snapshot],
+    memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<Outcome> {
+    ensure!(
+        plan.options.source_external && plan.options.target_external,
+        "external endpoints required"
+    );
+    let source = client(plan, snapshots, true, memory)?;
+    let target = client(plan, snapshots, false, memory)?;
+    let Some(key) = plan.key.as_deref() else {
+        let page = match &plan.options.scope {
+            replication::Scope::Objects { keys } => {
+                let position = plan
+                    .cursor
+                    .as_deref()
+                    .map(str::parse::<usize>)
+                    .transpose()?
+                    .unwrap_or(0);
+                ensure!(position <= keys.len(), "transfer listing position differs");
+                let end = (position + 64).min(keys.len());
+                return Ok(Outcome::Listed {
+                    keys: keys[position..end].to_vec(),
+                    next: (end < keys.len()).then(|| end.to_string()),
+                });
+            }
+            replication::Scope::All => source.list("", plan.cursor.as_deref(), 64).await?,
+            replication::Scope::Prefix { prefix } => {
+                source.list(prefix, plan.cursor.as_deref(), 64).await?
+            }
+        };
+        return Ok(Outcome::Listed {
+            keys: page.objects.into_iter().map(|entry| entry.key).collect(),
+            next: page.next,
+        });
+    };
+    let destination = plan.target()?;
+    let state = &plan.state;
+    if state.phase == Phase::Inspect {
+        let (original, previous) =
+            tokio::try_join!(source.head(key, None), target.head(&destination, None))?;
+        let source_public = if plan.options.permissions == replication::Permissions::Inherit {
+            match &original {
+                Some(object) => Some(source.acl(key, object).await?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let target_public = if plan.options.permissions != replication::Permissions::Ignore {
+            match &previous {
+                Some(object) => Some(target.acl(&destination, object).await?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        return Ok(Outcome::Inspected {
+            source: original,
+            target: previous,
+            source_public,
+            target_public,
+        });
+    }
+    if state.phase == Phase::Cleanup {
+        if let Some(upload) = &state.upload {
+            target.abort_upload(&destination, upload).await?;
+        }
+        return Ok(Outcome::Aborted);
+    }
+    let original = state.source.as_ref().context("transfer source missing")?;
+    let public = plan.public();
+    let condition = state
+        .target
+        .as_ref()
+        .map(|object| Condition::Match(object.etag.clone()))
+        .unwrap_or(Condition::Absent);
+    match state.phase {
+        Phase::Compare => {
+            let previous = state.target.as_ref().context("transfer target missing")?;
+            ensure!(
+                previous.size == original.size,
+                "transfer comparison sizes differ"
+            );
+            let (start, size) = state.range(i32::from(state.position) + 1)?;
+            let left = source.hash_range(key, original, start, size).await?;
+            let right = target
+                .hash_range(&destination, previous, start, size)
+                .await?;
+            Ok(Outcome::Compared {
+                equal: left == right,
+            })
+        }
+        Phase::Start => {
+            let current = target.head(&destination, None).await?;
+            ensure!(
+                current == state.target,
+                s3s::s3_error!(PreconditionFailed, "transfer target changed")
+            );
+            let upload = target
+                .start_upload(&destination, &original.metadata, public)
+                .await?;
+            Ok(Outcome::Started { upload })
+        }
+        Phase::Transfer => {
+            let upload = state.upload.as_deref().context("transfer upload missing")?;
+            let page = target
+                .parts(&destination, upload, state.position.saturating_sub(1))
+                .await?
+                .context("transfer upload disappeared")?;
+            if let Some(previous) = plan.parts.first() {
+                ensure!(
+                    page.items.first() == Some(&uploaded(previous)),
+                    "transfer boundary receipt changed"
+                );
+            }
+            let number = state.position + 1;
+            let (start, size) = state.range(i32::from(number))?;
+            let (part, digest) = target
+                .transfer_part(
+                    &destination,
+                    upload,
+                    number,
+                    &source,
+                    key,
+                    original,
+                    start,
+                    size,
+                )
+                .await?;
+            Ok(Outcome::Transferred(Part {
+                number: i32::from(number),
+                size: size as i64,
+                etag: part.etag,
+                digest: digest.to_vec(),
+            }))
+        }
+        Phase::Complete => {
+            let written = if original.size == 0 {
+                target
+                    .put(
+                        &destination,
+                        &condition,
+                        &original.metadata,
+                        public,
+                        Bytes::new(),
+                    )
+                    .await
+            } else {
+                let upload = state.upload.as_deref().context("transfer upload missing")?;
+                let mut after = 0;
+                let mut index = 0;
+                let mut missing = false;
+                loop {
+                    let Some(page) = target.parts(&destination, upload, after).await? else {
+                        missing = true;
+                        break;
+                    };
+                    for part in page.items {
+                        ensure!(
+                            plan.parts
+                                .get(index)
+                                .is_some_and(|expected| uploaded(expected) == part),
+                            "transfer completion receipt changed"
+                        );
+                        index += 1;
+                    }
+                    if let Some(next) = page.next {
+                        after = next;
+                    } else {
+                        break;
+                    }
+                }
+                if missing {
+                    return Ok(Outcome::Located {
+                        object: target.head(&destination, None).await?,
+                    });
+                }
+                ensure!(
+                    index == plan.parts.len(),
+                    "transfer completion receipts missing"
+                );
+                target
+                    .complete_upload(
+                        &destination,
+                        upload,
+                        &plan.parts.iter().map(uploaded).collect::<Vec<_>>(),
+                        &condition,
+                    )
+                    .await
+            };
+            match written {
+                Ok(written) => Ok(Outcome::Written(written)),
+                Err(error)
+                    if code(&error, s3s::S3ErrorCode::NoSuchUpload)
+                        || code(&error, s3s::S3ErrorCode::PreconditionFailed) =>
+                {
+                    Ok(Outcome::Located {
+                        object: target.head(&destination, None).await?,
+                    })
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Phase::Locate => Ok(Outcome::Located {
+            object: target
+                .head(
+                    &destination,
+                    state
+                        .written
+                        .as_ref()
+                        .and_then(|written| written.version.as_deref()),
+                )
+                .await?,
+        }),
+        Phase::Verify => {
+            let output = state.output.as_ref().context("transfer output missing")?;
+            let part = plan
+                .parts
+                .first()
+                .context("transfer verification receipt missing")?;
+            let (start, size) = state.range(part.number)?;
+            Ok(Outcome::Verified {
+                digest: target
+                    .hash_range(&destination, output, start, size)
+                    .await?
+                    .to_vec(),
+            })
+        }
+        Phase::Permissions => {
+            let output = state
+                .output
+                .as_ref()
+                .or(state.target.as_ref())
+                .context("transfer output missing")?;
+            let public = public.context("transfer permission selection missing")?;
+            if target.acl(&destination, output).await? != public {
+                target.set_acl(&destination, output, public).await?;
+            }
+            Ok(Outcome::Permissions {
+                public: target.acl(&destination, output).await?,
+            })
+        }
+        Phase::Finalize => {
+            let (source_object, target_object) =
+                tokio::try_join!(source.head(key, None), target.head(&destination, None))?;
+            let source_public = if plan.options.permissions == replication::Permissions::Inherit {
+                match &source_object {
+                    Some(object) => Some(source.acl(key, object).await?),
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let public = if public.is_some() {
+                match &target_object {
+                    Some(object) => Some(target.acl(&destination, object).await?),
+                    None => None,
+                }
+            } else {
+                None
+            };
+            Ok(Outcome::Finalized {
+                source: source_object,
+                source_public,
+                target: target_object,
+                public,
+            })
+        }
+        _ => anyhow::bail!("invalid external transfer execution phase"),
+    }
+}

@@ -281,7 +281,7 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
                 "external tests require an execution node"
             );
             let assignment = app.external_buckets.prepare_test(execution).await?;
-            let snapshot = crate::model::external_test::Snapshot::open(
+            let snapshot = crate::model::external::Snapshot::open_test(
                 assignment.external_id,
                 assignment.revision,
                 &assignment.connection_encrypted,

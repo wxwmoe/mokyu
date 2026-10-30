@@ -53,21 +53,8 @@ pub(super) async fn start_test(
     if record.bucket.revision != input.revision {
         return Err(crate::model::Error::OperationAborted.into());
     }
-    let snapshot = crate::model::external_test::Snapshot {
-        external_id: id,
-        revision: input.revision,
-        connection: record.bucket.connection,
-        access_key: codec::unprotect(
-            &record.access_encrypted,
-            &app.secrets.credential_key,
-            format!("external-{id}-access").as_bytes(),
-        )?,
-        secret_key: codec::unprotect(
-            &record.secret_encrypted,
-            &app.secrets.credential_key,
-            format!("external-{id}-secret").as_bytes(),
-        )?,
-    };
+    let snapshot =
+        crate::model::external::Snapshot::from_record(record, &app.secrets.credential_key)?;
     let task_id = app
         .external_buckets
         .start_test(
@@ -76,7 +63,7 @@ pub(super) async fn start_test(
                 external_id: id,
                 revision: input.revision,
                 node: input.node_id,
-                connection_encrypted: snapshot.seal(&app.secrets.credential_key)?,
+                connection_encrypted: snapshot.seal_test(&app.secrets.credential_key)?,
                 report: crate::model::external_test::Report::new(snapshot.connection),
             },
         )

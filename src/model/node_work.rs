@@ -108,6 +108,7 @@ pub(crate) struct UploadFile {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
     ExternalTest(super::external_test::Plan),
+    ExternalTransfer(Box<super::replication::external::Plan>),
     Migrate {
         storage: Uuid,
         write: Uuid,
@@ -193,7 +194,7 @@ impl Plan {
     }
     pub(crate) fn storage(&self) -> Option<Uuid> {
         match self {
-            Self::ExternalTest(_) => None,
+            Self::ExternalTest(_) | Self::ExternalTransfer(_) => None,
             Self::ScanTransfer(value) => Some(value.source.storage_id),
             Self::ConvertRaw { storage, .. }
             | Self::CopyTransfer { storage, .. }
@@ -216,6 +217,7 @@ impl Plan {
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Outcome {
     ExternalTest(super::external_test::Report),
+    ExternalTransfer(super::replication::external::Outcome),
     Uploaded,
     Converted,
     Migrated,
@@ -294,7 +296,7 @@ pub(crate) struct Reply {
     pub plan: Option<Plan>,
     pub materials: Vec<node_read::Material>,
     pub grants: Vec<node_read::Grant>,
-    pub external: Option<super::external_test::Snapshot>,
+    pub external: Option<serde_json::Value>,
 }
 
 #[cfg(test)]

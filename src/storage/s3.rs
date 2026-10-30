@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use futures_util::{StreamExt, stream::BoxStream};
-use md5::{Digest, Md5};
+use md5::Md5;
 use object_store::{
     client::{HttpClient, HttpConnector},
     multipart::PartId,
@@ -11,6 +11,10 @@ use object_store::{
     signer::{SignedUrlOptions, Signer},
 };
 use std::{sync::Arc, time::Duration};
+
+#[path = "s3_body.rs"]
+mod body;
+pub(super) use body::upload_body;
 
 #[derive(Debug, Clone)]
 pub(super) struct Connector(pub reqwest::Client);
@@ -24,6 +28,7 @@ impl HttpConnector for Connector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use md5::Digest;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
@@ -427,46 +432,7 @@ impl Streaming {
                     &options,
                 )
                 .await?;
-            let (sender, receiver) = tokio::sync::mpsc::channel::<Bytes>(2);
-            let (progress, mut activity) = tokio::sync::watch::channel(tokio::time::Instant::now());
-            let body = futures_util::stream::unfold(
-                (receiver, progress),
-                |(mut receiver, progress)| async {
-                    let bytes = receiver.recv().await?;
-                    progress.send_replace(tokio::time::Instant::now());
-                    Some((Ok::<_, std::io::Error>(bytes), (receiver, progress)))
-                },
-            );
-            let mut source = input();
-            let feed = async move {
-                let mut sent = 0u64;
-                let mut actual = Md5::new();
-                while let Some(bytes) = source.next().await {
-                    let bytes = bytes?;
-                    sent = sent
-                        .checked_add(bytes.len() as u64)
-                        .context("S3 upload length overflow")?;
-                    ensure!(sent <= length, "S3 upload source exceeded its length");
-                    actual.update(&bytes);
-                    for start in (0..bytes.len()).step_by(256 * 1024) {
-                        if sender
-                            .send(bytes.slice(start..(start + 256 * 1024).min(bytes.len())))
-                            .await
-                            .is_err()
-                        {
-                            // The request result determines whether an early response is retryable.
-                            return Ok::<_, anyhow::Error>(false);
-                        }
-                    }
-                }
-                ensure!(sent == length, "S3 upload source was truncated");
-                ensure!(
-                    actual.finalize().as_slice() == digest,
-                    "S3 upload replay checksum mismatch"
-                );
-                drop(sender);
-                Ok(true)
-            };
+            let (body, feed, mut activity) = upload_body::<Md5>(input(), length, digest);
             let send = async {
                 let request = client
                     .put(url)

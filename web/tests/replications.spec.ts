@@ -109,12 +109,33 @@ test('create, inspect and control durable replication tasks using the forms', as
     await details().locator('.dialog-footer').getByRole('button', { name: en.close, exact: true }).click()
   } finally { remove(marker); remove(hit) }
 
+  await page.getByRole('button', { name: en.replicationCreate, exact: true }).click()
+  await choice(en.replicationOperation, en.copy)
+  for (const [label, resource] of [[en.replicationSource, fixture.external.source], [en.replicationTarget, fixture.external.target]]) {
+    await page.getByRole('combobox', { name: label, exact: true }).fill(resource.name)
+    await page.getByRole('option').filter({ hasText: resource.name }).click()
+  }
+  await page.getByRole('combobox', { name: en.replicationOperation, exact: true }).click()
+  await expect(page.getByRole('option', { name: en.replicationMove, exact: true })).toHaveAttribute('aria-disabled', 'true')
+  await page.keyboard.press('Escape')
+  await choice(en.replicationScope, en.replicationScope_objects)
+  await page.getByLabel(en.replicationKeys).fill('one.jpg')
+  await page.getByLabel(en.replicationRename, { exact: true }).fill('preview.jpg')
+  await choice(en.replicationPermissions, en.replicationPermission_inherit)
+  const externalTask = await start()
+  await expect(details().locator('.replication-summary')).toContainText(en.completed, { timeout: 30000 })
+  const externalOptions = (await (await request.get('/api/v1/replications/' + externalTask)).json()).options
+  expect(externalOptions).toMatchObject({ source_bucket: fixture.external.source.id, target_bucket: fixture.external.target.id,
+    source_external: true, target_external: true, operation: 'copy', target_key: 'preview.jpg', permissions: 'inherit' })
+  expect((await request.get(fixture.s3 + '/' + fixture.target.name + '/external/preview.jpg')).status()).toBe(200)
+  await details().locator('.dialog-footer').getByRole('button', { name: en.close, exact: true }).click()
+
   for (const [locale, theme, width, labels] of [['en', 'light', 1400, en], ['zh-CN', 'dark', 1400, zh], ['ja', 'light', 390, ja]] as const) {
     await preferences(locale, theme)
     await page.setViewportSize({ width, height: 940 })
     await page.reload()
     await expect(page.getByRole('heading', { name: labels.replications, exact: true })).toBeVisible()
-    await expect(page.locator('.table-scroll tbody tr')).toHaveCount(4)
+    await expect(page.locator('.table-scroll tbody tr')).toHaveCount(5)
     await expect(page.getByRole('columnheader', { name: labels.replicationStatus, exact: true })).toBeVisible()
     const layout = await page.evaluate(() => ({ viewport: innerWidth, width: document.documentElement.scrollWidth, boxes: Array.from(document.querySelectorAll('.workspace, #main, .page, .page-heading, .table-scroll, .app-footer')).map(element => ({ name: element.className, width: element.getBoundingClientRect().width, right: element.getBoundingClientRect().right, minWidth: getComputedStyle(element).minWidth, overflow: getComputedStyle(element).overflowX })) }))
     expect(layout.width <= layout.viewport + 1, JSON.stringify(layout)).toBeTruthy()

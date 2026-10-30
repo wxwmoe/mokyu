@@ -8,6 +8,8 @@ mod queries;
 mod read_sources;
 mod refresh;
 mod replication_queries;
+mod replication_remote_queries;
+mod replication_remote_transactions;
 mod replication_transactions;
 mod transactions;
 mod transfer_queries;

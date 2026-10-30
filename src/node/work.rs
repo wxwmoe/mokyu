@@ -143,10 +143,27 @@ impl Worker {
                         outcomes: vec![work::Outcome::ExternalTest(report)],
                     });
                 }
+                if let work::Plan::ExternalTransfer(transfer) = &plan {
+                    let connections =
+                        serde_json::from_slice::<Vec<crate::model::external::Snapshot>>(
+                            reply
+                                .external_connection_json
+                                .as_deref()
+                                .context("external connections missing")?,
+                        )?;
+                    let outcome = self
+                        .reader
+                        .external_transfer(transfer, &connections)
+                        .await?;
+                    return Ok(work::Completion {
+                        operation,
+                        outcomes: vec![work::Outcome::ExternalTransfer(outcome)],
+                    });
+                }
                 let backend =
                     reads::backend(&materials, plan.storage().context("work storage missing")?)?;
                 let outcomes = match plan {
-                    work::Plan::ExternalTest(_) => unreachable!(),
+                    work::Plan::ExternalTest(_) | work::Plan::ExternalTransfer(_) => unreachable!(),
                     work::Plan::UploadRaw { storage, items } => {
                         ensure!(
                             !items.is_empty() && items.len() <= work::MAX_ITEMS,

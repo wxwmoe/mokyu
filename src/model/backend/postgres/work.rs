@@ -253,6 +253,23 @@ async fn finish(
     let mut error = None;
     let mut complete = false;
     match row.plan.context("work plan is missing")?.0 {
+        work::Plan::ExternalTransfer(plan) => {
+            ensure!(
+                detail["operation"] == "replication" && detail["external"] == true,
+                Error::NodeOperationConflict
+            );
+            let [work::Outcome::ExternalTransfer(outcome)] = completion.outcomes.as_slice() else {
+                return Err(Error::NodeOperationConflict.into());
+            };
+            let execution = Execution {
+                id: task,
+                token: row.token,
+            };
+            let mut run = super::super::replication_transactions::owned(db, execution).await?;
+            super::super::replication_remote_transactions::complete(db, &mut run, &plan, outcome)
+                .await?;
+            super::super::replication_transactions::save(db, &run).await?;
+        }
         work::Plan::ExternalTest(plan) => {
             ensure!(
                 detail["operation"] == "external_test",
@@ -949,7 +966,7 @@ pub(crate) async fn exchange(
                     Some(node.node_id),
                 )
                 .await?;
-                let snapshot = crate::model::external_test::Snapshot::open(
+                let snapshot = crate::model::external::Snapshot::open_test(
                     assignment.external_id,
                     assignment.revision,
                     &assignment.connection_encrypted,
@@ -964,6 +981,50 @@ pub(crate) async fn exchange(
                 assigned = Some(task);
                 plan = Some(work::Plan::ExternalTest(assignment.plan));
                 break;
+            }
+            if policy == "storage_migration"
+                && detail["operation"] == "replication"
+                && detail["external"] == true
+            {
+                ensure!(
+                    matches!(node.role.as_str(), "worker" | "node"),
+                    Error::NodeOperationConflict
+                );
+                let execution = Execution { id: task, token };
+                let mut run =
+                    super::super::replication_transactions::owned(&mut tx, execution).await?;
+                let next =
+                    super::super::replication_remote_transactions::prepare(&mut tx, &mut run)
+                        .await?;
+                super::super::replication_transactions::save(&mut tx, &run).await?;
+                if let Some(next) = next {
+                    let connections = super::super::replication_queries::connections(task)
+                        .fetch_all(&mut *tx)
+                        .await?;
+                    let snapshots = connections
+                        .iter()
+                        .map(|connection| connection.open(task, key))
+                        .collect::<Result<Vec<_>>>()?;
+                    encrypted = Some(codec::protect(
+                        &serde_json::to_vec(&snapshots)?,
+                        key,
+                        token.as_bytes(),
+                    )?);
+                    q::task_lease(task, token).execute(&mut *tx).await?;
+                    assigned = Some(task);
+                    plan = Some(work::Plan::ExternalTransfer(Box::new(next)));
+                    break;
+                }
+                q::finish(
+                    task,
+                    token,
+                    0,
+                    matches!(run.phase.as_str(), "complete" | "cancelled"),
+                    None,
+                )
+                .execute(&mut *tx)
+                .await?;
+                continue;
             }
             let storage: Uuid = if policy == "upload" && detail["operation"] == "cdc" {
                 let job: crate::model::raw::Conversion = serde_json::from_value(detail.clone())?;
@@ -984,12 +1045,12 @@ pub(crate) async fn exchange(
                     if matches!(unit.state.as_str(), "selected" | "scanning")
                         && unit.source_type == "raw"
                     {
-                        run.source_storage_id
+                        run.source_storage()?
                     } else {
-                        run.storage_id
+                        run.storage()?
                     }
                 } else {
-                    run.storage_id
+                    run.storage()?
                 }
             } else if policy == "storage_migration" && detail["operation"] != "replication" {
                 migration::storage(&mut tx, &detail).await?
@@ -1173,6 +1234,9 @@ pub(crate) async fn exchange(
                             }
                         }
                         crate::model::replication::Step::Continue => None,
+                        crate::model::replication::Step::External { .. } => {
+                            return Err(Error::NodeOperationConflict.into());
+                        }
                     }
                 } else if policy == "storage_migration" {
                     migration::prepare(

@@ -3,7 +3,7 @@ use crate::{
     model::{
         Id,
         raw::RawSource,
-        replication::{Item, Options, Progress, Replication, Snapshot},
+        replication::{Item, Options, Progress, Snapshot},
         task::Execution,
     },
 };
@@ -16,35 +16,7 @@ type Rows<'q, T> = sqlx::query::QueryAs<'q, Postgres, T, <Postgres as sqlx::Data
 type Scalar<'q, T> =
     sqlx::query::QueryScalar<'q, Postgres, T, <Postgres as sqlx::Database>::Arguments>;
 
-#[derive(sqlx::FromRow)]
-pub(super) struct Run {
-    pub task_id: Uuid,
-    pub created_by: Option<Uuid>,
-    pub options: Json<Options>,
-    pub authority: Json<Principal>,
-    pub storage_id: Uuid,
-    pub source_storage_id: Uuid,
-    pub profile_revision: i64,
-    pub phase: String,
-    pub cursor_key: Option<String>,
-    pub progress: Json<Progress>,
-    pub generation: i64,
-    pub state: String,
-    pub error: Option<String>,
-    pub mode: String,
-}
-impl Run {
-    pub(super) fn view(self) -> Replication {
-        Replication {
-            id: self.task_id,
-            state: self.state,
-            phase: self.phase,
-            options: self.options.0,
-            progress: self.progress.0,
-            error: self.error,
-        }
-    }
-}
+pub(super) use crate::model::replication::Run;
 
 #[derive(sqlx::FromRow)]
 pub(super) struct Source {
@@ -130,9 +102,9 @@ pub(super) fn create<'q>(
     id: Uuid,
     actor: &'q Principal,
     options: &'q Options,
-    storage: Uuid,
-    revision: i64,
-    source: Uuid,
+    storage: Option<Uuid>,
+    revision: Option<i64>,
+    source: Option<Uuid>,
 ) -> Statement<'q> {
     sqlx::query("INSERT INTO transfer_runs(task_id,created_by,options,authority,storage_id,profile_revision,progress,source_storage_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
         .bind(id)
@@ -404,4 +376,19 @@ pub(super) fn selected(bucket: Uuid, keys: &[String]) -> sqlx::QueryBuilder<Post
     }
     values.push_unseparated(") ORDER BY o.object_key FOR UPDATE");
     query
+}
+
+pub(super) fn connections(
+    task: Uuid,
+) -> Rows<'static, crate::model::replication::external::Connection> {
+    sqlx::query_as("SELECT external_id,revision,encrypted FROM transfer_connections WHERE task_id=$1 ORDER BY external_id")
+        .bind(task)
+}
+
+pub(super) fn connection<'q>(
+    task: Uuid,
+    value: &'q crate::model::replication::external::Connection,
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO transfer_connections(task_id,external_id,revision,encrypted) VALUES($1,$2,$3,$4)")
+        .bind(task).bind(value.external_id).bind(value.revision).bind(&value.encrypted)
 }

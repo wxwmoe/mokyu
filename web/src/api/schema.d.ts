@@ -3011,8 +3011,10 @@ export interface components {
             scope: components["schemas"]["ReplicationScope"];
             /** Format: uuid */
             source_bucket: string;
+            source_external?: boolean;
             /** Format: uuid */
             target_bucket: string;
+            target_external?: boolean;
             target_key?: string | null;
             target_prefix?: string;
         };
