@@ -295,7 +295,7 @@ impl Storage {
         })
     }
 
-    async fn verify_raw_target(&self, target: &StoreBackend) -> Result<()> {
+    pub(crate) async fn verify_raw_target(&self, target: &StoreBackend) -> Result<()> {
         if target.identity_ready.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -691,16 +691,19 @@ impl Storage {
             self.remove_raw_checkpoint(source.location_id).await?;
             let _permit = target.controls.acquire().await?;
             let key = remote_path(source.location_id);
-            if let Some(upload) = self.raw_store.upload_id(source.id).await? {
-                let multipart = target
-                    .multipart
-                    .as_ref()
-                    .context("S3 multipart backend is missing")?;
-                match multipart.abort_multipart(&key, &upload).await {
-                    Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
+            target
+                .streaming
+                .as_ref()
+                .context("S3 streaming backend is missing")?
+                .abort_pending_multipart(
+                    &key,
+                    target
+                        .multipart
+                        .as_deref()
+                        .context("S3 multipart backend is missing")?,
+                    self.raw_store.upload_id(source.id).await?.as_deref(),
+                )
+                .await?;
             match target.backend.delete(&key).await {
                 Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
                 Err(error) => return Err(error.into()),
@@ -1343,6 +1346,15 @@ impl RawFile {
             }
         }
     }
+    pub(crate) async fn read_exact(&mut self, mut output: &mut [u8]) -> Result<()> {
+        while !output.is_empty() {
+            let count = self.read(output).await?;
+            ensure!(count > 0, IntegrityError::Length);
+            output = &mut output[count..];
+        }
+        Ok(())
+    }
+
     pub async fn rewind(&mut self) -> Result<()> {
         self.seek(std::io::SeekFrom::Start(0)).await?;
         Ok(())

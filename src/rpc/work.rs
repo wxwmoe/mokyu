@@ -36,6 +36,9 @@ pub(super) fn exchange(input: wire::WorkRequest) -> Result<work::Exchange, Statu
             if matches!(outcome, work::Outcome::Hashed { hash } if hash.len()!=32) {
                 return Err(invalid());
             }
+            if matches!(outcome, work::Outcome::Transferred { digest } if digest.len()!=16) {
+                return Err(invalid());
+            }
             if let work::Outcome::Packed(result) = outcome {
                 if result.chunks.len() > crate::content::pack::MAX_MEMBERS
                     || result.packs.len() > crate::content::pack::MAX_MEMBERS / 2

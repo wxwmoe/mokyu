@@ -216,6 +216,80 @@ pub(crate) struct Parts {
 }
 
 impl Streaming {
+    pub(crate) async fn parts(
+        &self,
+        key: &Path,
+        upload: &str,
+        after: u16,
+    ) -> Result<Option<Parts>> {
+        let options = SignedUrlOptions::default().with_query([
+            ("uploadId", upload.to_owned()),
+            ("part-number-marker", after.to_string()),
+            ("max-parts", "128".into()),
+        ]);
+        let url = self
+            .signer
+            .signed_url_opts(
+                reqwest::Method::GET,
+                key,
+                Duration::from_secs(3600),
+                &options,
+            )
+            .await?;
+        let reply = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
+        if reply.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        ensure!(
+            reply.status().is_success(),
+            "S3 part listing failed: {}",
+            reply.status()
+        );
+        let mut stream = reply.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(part) = stream.next().await {
+            let part = part.map_err(reqwest::Error::without_url)?;
+            ensure!(
+                bytes.len() + part.len() <= 1024 * 1024,
+                "S3 part listing is too large"
+            );
+            bytes.extend_from_slice(&part);
+        }
+        let name = if self.prefix.as_ref().is_empty() {
+            key.to_string()
+        } else {
+            format!("{}/{key}", self.prefix)
+        };
+        Ok(Some(parts_listing(&bytes, &name, upload, after)?))
+    }
+
+    pub(crate) async fn abort_pending_multipart(
+        &self,
+        key: &Path,
+        multipart: &dyn object_store::multipart::MultipartStore,
+        known: Option<&str>,
+    ) -> Result<()> {
+        let (mut uploads, more) = self.pending_multipart(key).await?;
+        if let Some(known) = known {
+            uploads.push(known.to_owned());
+        }
+        uploads.sort();
+        uploads.dedup();
+        for upload in uploads {
+            match multipart.abort_multipart(key, &upload).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        ensure!(!more, "raw upload cleanup requires another batch");
+        Ok(())
+    }
+
     pub(crate) async fn pending_multipart(&self, key: &Path) -> Result<(Vec<String>, bool)> {
         let key = if self.prefix.as_ref().is_empty() {
             key.to_string()

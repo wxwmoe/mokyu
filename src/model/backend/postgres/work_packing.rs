@@ -448,6 +448,43 @@ async fn flush(db: &mut PgConnection) -> Result<f64> {
     Ok((2 * config::seconds(&metrics.access_flush_interval)?) as f64)
 }
 
+pub(super) async fn reserve_outputs(
+    db: &mut PgConnection,
+    task: Uuid,
+    storage: Uuid,
+    batch: &mut wire::Batch,
+) -> Result<()> {
+    if let Some(key) = batch.key {
+        for tag in [crate::content::nonce::CHUNK, crate::content::nonce::PACK] {
+            let slots: Vec<_> = if tag == crate::content::nonce::CHUNK {
+                batch
+                    .chunks
+                    .iter_mut()
+                    .filter(|c| c.ready.is_none())
+                    .map(|c| &mut c.nonce)
+                    .collect()
+            } else {
+                batch.packs.iter_mut().map(|p| &mut p.nonce).collect()
+            };
+            if !slots.is_empty() {
+                let units = slots.len().div_ceil(crate::content::nonce::UNIT as usize) as u32;
+                let (first, last) = reserve_nonce_in(db, key, tag, units).await?;
+                ensure!(
+                    last - first + 1 >= slots.len() as i64,
+                    "encryption key cannot reserve enough nonce IDs"
+                );
+                for (offset, nonce) in slots.into_iter().enumerate() {
+                    *nonce = Some(
+                        codec::typed_nonce(batch.created, first + offset as i64, tag)?.to_vec(),
+                    );
+                }
+            }
+        }
+    }
+    p::prepare_outputs(db, task, storage, batch).await?;
+    Ok(())
+}
+
 pub(super) async fn prepare(
     db: &mut Transaction<'_, Postgres>,
     task: Execution,
@@ -729,33 +766,7 @@ pub(super) async fn prepare(
                 }
             }
         }
-        if let Some(key) = block_key {
-            for tag in [crate::content::nonce::CHUNK, crate::content::nonce::PACK] {
-                let slots: Vec<_> = if tag == crate::content::nonce::CHUNK {
-                    batch
-                        .chunks
-                        .iter_mut()
-                        .filter(|c| c.ready.is_none())
-                        .map(|c| &mut c.nonce)
-                        .collect()
-                } else {
-                    batch.packs.iter_mut().map(|p| &mut p.nonce).collect()
-                };
-                if !slots.is_empty() {
-                    let units = slots.len().div_ceil(crate::content::nonce::UNIT as usize) as u32;
-                    let (first, last) = reserve_nonce_in(db, key, tag, units).await?;
-                    ensure!(
-                        last - first + 1 >= slots.len() as i64,
-                        "encryption key cannot reserve enough nonce IDs"
-                    );
-                    for (offset, nonce) in slots.into_iter().enumerate() {
-                        *nonce =
-                            Some(codec::typed_nonce(created, first + offset as i64, tag)?.to_vec());
-                    }
-                }
-            }
-        }
-        p::prepare_outputs(db, task.id, storage, &batch).await?;
+        reserve_outputs(db, task.id, storage, &mut batch).await?;
         let snapshot = Snapshot {
             revision: profile.revision,
             rows: selected.rows,

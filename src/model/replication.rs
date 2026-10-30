@@ -204,6 +204,9 @@ pub(crate) enum Command {
 
 pub(crate) enum Step {
     Continue,
+    Scan(super::transfer::Scan),
+    Copy(super::transfer::Copy),
+    Raw(super::transfer::RawCopy),
     Verify {
         storage: Uuid,
         sources: Vec<RawSource>,
@@ -230,6 +233,19 @@ pub(crate) trait ReplicationStore: Send + Sync {
     async fn command(&self, principal: &Principal, id: Uuid, command: Command) -> Result<()>;
     async fn step(&self, task: Execution) -> Result<Step>;
     async fn verified(&self, task: Execution, sources: &[RawSource]) -> Result<()>;
+    async fn scanned(&self, task: Execution, value: &super::transfer::Scanned) -> Result<()>;
+    async fn raw_progress(
+        &self,
+        task: Execution,
+        plan: &super::transfer::RawCopy,
+        progress: &super::transfer::RawProgress,
+    ) -> Result<()>;
+    async fn copied(
+        &self,
+        task: Execution,
+        plan: &super::transfer::Copy,
+        outputs: &[super::packing::PackOutput],
+    ) -> Result<()>;
 }
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]

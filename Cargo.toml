@@ -38,6 +38,7 @@ image = { version = "=0.25.10", default-features = false, features = ["jpeg", "p
 libc = "0.2"
 log = "0.4"
 md-5 = "0.10"
+md5-checkpoint = { package = "md-5", version = "=0.11.0" }
 object_store = { version = "=0.14.2", default-features = false, features = ["aws", "fs"] }
 rpassword = "7.5"
 reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls"] }

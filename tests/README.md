@@ -13,6 +13,8 @@ cargo clippy --locked --all-targets --features fault-injection
 cargo build --locked
 ```
 
+`storage::transfer` 的普通测试验证本地 raw 传输在确认分片之后恢复、完成结果对账，以及拒绝非连续回执和变更的来源正文。`model::transfer` 验证摘要检查点和有界节点计划；正文解码的选择性包成员与身份校验由 `content::transfer` 覆盖。
+
 数据库契约默认 ignored。设置 `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`，再按后端提供 `MOKYU_TEST_DATABASE_URL_FILE`（PostgreSQL，保存 DSN 的文件）、`MOKYU_TEST_MYSQL_CONFIG` 或 `MOKYU_TEST_SQLITE_CONFIG`。配置文件包含测试数据库连接、固定部署密钥和独立 data 目录；各测试头部注明额外环境变量。例如：
 
 ```sh
@@ -21,6 +23,8 @@ MOKYU_TEST_SQLITE_CONFIG=/config/sqlite-accounts.toml \
 ```
 
 每个原生契约覆盖对应接口、事务和故障恢复；原生 SQL 仅用于构造或检查本后端状态。不要用同一配置批量并发执行所有 ignored 测试，也不要把过滤后执行零个测试视为通过。曾经执行并写入数据的契约，应更换空库后重跑。
+
+`node_raw_checkpoints_require_current_runs_and_permits` 连接专用传输夹具，核对 raw 分片回执重放、旧运行权、未知操作、格式校验、节点禁用、运行与许可过期及维护屏障。夹具通过 `MOKYU_TEST_TRANSFER_CHECKPOINT` 提供已保存分片回执，通过 `MOKYU_TEST_RPC_ACTIONS` 驱动数据库故障；测试节点使用 `MOKYU_TEST_NODE_STATE` 和 `MOKYU_TEST_CONTROL_URL`。
 
 `postgres_node_sessions_recover_across_controls_and_fence_old_runs` 使用两个独立连接池检查身份代次、会话接管、并发同步与心跳、过期 fencing、退役 boot、历史上限、轮换和禁用。
 

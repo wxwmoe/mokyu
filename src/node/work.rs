@@ -217,6 +217,70 @@ impl Worker {
                         }
                         vec![result.map(|_| work::Outcome::Migrated).or_else(retry)?]
                     }
+                    work::Plan::ScanTransfer(plan) => {
+                        let result = self.reader.scan_transfer(&backend, &plan).await;
+                        #[cfg(feature = "fault-injection")]
+                        crate::faults::point("node-transfer-scanned").await;
+                        vec![result.map(work::Outcome::Scanned).or_else(retry)?]
+                    }
+                    work::Plan::RawTransfer { transfer, .. } => {
+                        let source = reads::backend(&materials, transfer.input.storage()?)?;
+                        let keys = Arc::new(reads::keys(&materials)?);
+                        let result = self
+                            .reader
+                            .copy_raw_transfer(source, backend, keys, &transfer, |progress| {
+                                let lease = &snapshot.lease;
+                                let grants = &grants;
+                                let client = &self.node.client;
+                                async move {
+                                    let input = wire::TransferCheckpointRequest {
+                                        run: Some(lease.run.clone()),
+                                        operation_id: operation.to_string(),
+                                        progress_json: serde_json::to_vec(&progress)?,
+                                    };
+                                    loop {
+                                        lease.check()?;
+                                        for grant in grants {
+                                            grant.check()?;
+                                        }
+                                        match client.checkpoint_transfer(input.clone()).await {
+                                            Ok(_) => return Ok(()),
+                                            Err(error) if crate::rpc::client::retryable(&error) => {
+                                                tokio::time::sleep(Duration::from_secs(1)).await
+                                            }
+                                            Err(error) => return Err(error.into()),
+                                        }
+                                    }
+                                }
+                            })
+                            .await;
+                        vec![match result {
+                            Ok((digest, candidates)) => {
+                                fills.extend(candidates);
+                                work::Outcome::Transferred { digest }
+                            }
+                            Err(error) => retry(error)?,
+                        }]
+                    }
+                    work::Plan::CopyTransfer {
+                        transfer, batch, ..
+                    } => {
+                        let source = reads::backend(&materials, transfer.input.storage()?)?;
+                        let keys = Arc::new(reads::keys(&materials)?);
+                        let result = self
+                            .reader
+                            .copy_transfer(source, backend, keys, &transfer, *batch)
+                            .await;
+                        #[cfg(feature = "fault-injection")]
+                        crate::faults::point("node-transfer-written").await;
+                        vec![match result {
+                            Ok((encoded, candidates)) => {
+                                fills.extend(candidates);
+                                work::Outcome::Packed(encoded)
+                            }
+                            Err(error) => retry(error)?,
+                        }]
+                    }
                     work::Plan::HashRaw { storage, items } => {
                         ensure!(items.len() <= work::MAX_ITEMS, "invalid raw hash batch");
                         let count = items.len();
@@ -272,21 +336,7 @@ impl Worker {
                                 }
                                 work::Physical::Staging { key } => Path::parse(key)?,
                             };
-                            let result = async {
-                                if let work::Physical::Raw {
-                                    upload: Some(upload),
-                                } = &item.source
-                                {
-                                    let multipart = backend
-                                        .store
-                                        .multipart
-                                        .as_ref()
-                                        .context("S3 multipart backend is missing")?;
-                                    match multipart.abort_multipart(&path, upload).await {
-                                        Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
-                                        Err(error) => return Err(anyhow::Error::from(error)),
-                                    }
-                                }
+                            let result: Result<work::Outcome> = async {
                                 let stored_at = if item.inspect_age {
                                     match backend.store.backend.head(&path).await {
                                         Ok(meta) if meta.last_modified > delete_before => {
@@ -295,14 +345,29 @@ impl Worker {
                                             });
                                         }
                                         Ok(meta) => Some(meta.last_modified),
-                                        Err(object_store::Error::NotFound { .. }) => {
-                                            return Ok(work::Outcome::Deleted { stored_at: None });
-                                        }
+                                        Err(object_store::Error::NotFound { .. }) => None,
                                         Err(error) => return Err(error.into()),
                                     }
                                 } else {
                                     None
                                 };
+                                if let work::Physical::Raw { upload } = &item.source {
+                                    backend
+                                        .store
+                                        .streaming
+                                        .as_ref()
+                                        .context("S3 streaming backend is missing")?
+                                        .abort_pending_multipart(
+                                            &path,
+                                            backend
+                                                .store
+                                                .multipart
+                                                .as_deref()
+                                                .context("S3 multipart backend is missing")?,
+                                            upload.as_deref(),
+                                        )
+                                        .await?;
+                                }
                                 match backend.store.backend.delete(&path).await {
                                     Ok(()) | Err(object_store::Error::NotFound { .. }) => {
                                         Ok(work::Outcome::Deleted { stored_at })

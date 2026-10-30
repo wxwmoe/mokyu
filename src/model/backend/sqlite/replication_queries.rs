@@ -22,6 +22,7 @@ pub(super) struct Run {
     pub options: Json<Options>,
     pub authority: Json<Principal>,
     pub storage_id: Uuid,
+    pub source_storage_id: Uuid,
     pub profile_revision: i64,
     pub phase: String,
     pub cursor_key: Option<String>,
@@ -98,7 +99,7 @@ impl Entry {
 }
 
 pub(super) fn run<'q>(id: Uuid) -> Rows<'q, Run> {
-    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,t.state,t.error,json_extract(t.detail,'$.execution_mode') AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE r.task_id=$1")
+    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.source_storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,t.state,t.error,json_extract(t.detail,'$.execution_mode') AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE r.task_id=$1")
         .bind(id)
 }
 
@@ -119,7 +120,7 @@ pub(super) fn mode<'q>() -> Scalar<'q, String> {
 }
 
 pub(super) fn list<'q>(user: Option<Uuid>, after: Option<Uuid>, limit: i64) -> Rows<'q, Run> {
-    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,t.state,t.error,json_extract(t.detail,'$.execution_mode') AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE (r.created_by=$1 OR (r.created_by IS NULL AND $1 IS NULL)) AND ($2 IS NULL OR r.task_id>$2) ORDER BY r.task_id LIMIT $3")
+    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.source_storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,t.state,t.error,json_extract(t.detail,'$.execution_mode') AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE (r.created_by=$1 OR (r.created_by IS NULL AND $1 IS NULL)) AND ($2 IS NULL OR r.task_id>$2) ORDER BY r.task_id LIMIT $3")
         .bind(user)
         .bind(after)
         .bind(limit)
@@ -131,8 +132,9 @@ pub(super) fn create<'q>(
     options: &'q Options,
     storage: Uuid,
     revision: i64,
+    source: Uuid,
 ) -> Statement<'q> {
-    sqlx::query("INSERT INTO transfer_runs(task_id,created_by,options,authority,storage_id,profile_revision,progress) VALUES($1,$2,$3,$4,$5,$6,$7)")
+    sqlx::query("INSERT INTO transfer_runs(task_id,created_by,options,authority,storage_id,profile_revision,progress,source_storage_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
         .bind(id)
         .bind(actor.user_id())
         .bind(Json(options))
@@ -140,6 +142,7 @@ pub(super) fn create<'q>(
         .bind(storage)
         .bind(revision)
         .bind(Json(Progress::default()))
+        .bind(source)
 }
 
 pub(super) fn save<'q>(

@@ -1920,23 +1920,32 @@ pub(super) async fn allocate_chunk(
     input: ChunkCreate,
 ) -> Result<(Chunk, bool)> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    writing_stream(&mut tx, input.stream).await?;
+    let result = allocate_chunk_in(&mut tx, input).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(super) async fn allocate_chunk_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    input: ChunkCreate,
+) -> Result<(Chunk, bool)> {
+    writing_stream(tx, input.stream).await?;
     if let Some(key) = input.key {
         queries::encoding_key(key, &input.algorithm)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
     }
     queries::fail_chunk_allocations(&input)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::retire_failed_encodings(&input)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    let (chunk, reused) = if let Some(chunk) = queries::reusable_chunk(&mut tx, &input).await? {
+    let (chunk, reused) = if let Some(chunk) = queries::reusable_chunk(tx, &input).await? {
         (chunk, true)
     } else {
         let chunk = queries::insert_chunk(&input)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| {
                 if error
@@ -1951,20 +1960,19 @@ pub(super) async fn allocate_chunk(
             .last_insert_rowid()
             .into();
         let encoding = queries::allocate_encoding(chunk)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .last_insert_rowid()
             .into();
         queries::set_chunk_encoding(chunk, encoding)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        queries::refresh_encoding_fingerprint(&mut tx, encoding).await?;
-        (queries::allocated_chunk(&mut tx, chunk).await?, false)
+        queries::refresh_encoding_fingerprint(tx, encoding).await?;
+        (queries::allocated_chunk(tx, chunk).await?, false)
     };
     if reused {
-        require_sources(&mut tx, None, &[chunk.id]).await?;
+        require_sources(tx, None, &[chunk.id]).await?;
     }
-    tx.commit().await?;
     Ok((chunk, reused))
 }
 
@@ -5654,6 +5662,112 @@ pub(super) async fn insert_pack_members(
     Ok(())
 }
 
+pub(super) async fn publish_pack_outputs_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task: Execution,
+    rows: &[Mapping],
+    outputs: &[PackOutput],
+    split: bool,
+    range: bool,
+    cooldown: f64,
+    range_after: &str,
+) -> Result<()> {
+    for output in outputs {
+        ensure!(
+            !output.chunks.is_empty() && output.pack.is_some() != output.independent.is_some(),
+            "invalid pack output"
+        );
+        if let Some(pack) = &output.pack {
+            ensure!(
+                output.chunks.len() == pack.member_count as usize
+                    && output.chunks.iter().all(|id| rows
+                        .iter()
+                        .any(|r| r.chunk.id == *id && r.chunk.storage_id == pack.storage_id)),
+                "pack members changed"
+            );
+            ensure!(
+                queries::pack_member_ids(pack.id)
+                    .fetch_all(&mut **tx)
+                    .await?
+                    == output.chunks,
+                "pack members changed"
+            );
+            for pair in output.chunks.windows(2) {
+                let a = rows.iter().find(|r| r.chunk.id == pair[0]).unwrap();
+                let b = rows.iter().find(|r| r.chunk.id == pair[1]).unwrap();
+                ensure!(
+                    queries::same_references(pair[0], pair[1], b.offset_bytes - a.offset_bytes)
+                        .fetch_one(&mut **tx)
+                        .await?,
+                    "pack reference boundaries changed; retry maintenance"
+                );
+            }
+            ensure!(
+                queries::publish_prepared_pack(pack.id, task.id)
+                    .execute(&mut **tx)
+                    .await?
+                    .rows_affected()
+                    == 1,
+                "pack output changed"
+            );
+            queries::retire_pack_encodings(&output.chunks, None)
+                .build()
+                .execute(&mut **tx)
+                .await?;
+        } else if let Some(chunk) = &output.independent {
+            ensure!(
+                output.chunks == [chunk.id],
+                "independent output members changed"
+            );
+            let (state, owner) = queries::lock_output_encoding(chunk.encoding_id, chunk.id)
+                .fetch_one(&mut **tx)
+                .await?;
+            if state != "ready" {
+                ensure!(
+                    state == "uploading" && owner == Some(task.id),
+                    "encoding output changed"
+                );
+                queries::retire_pack_encodings(&output.chunks, Some(chunk.encoding_id))
+                    .build()
+                    .execute(&mut **tx)
+                    .await?;
+                ensure!(
+                    queries::complete_encoding(chunk.encoding_id)
+                        .execute(&mut **tx)
+                        .await?
+                        .rows_affected()
+                        == 1,
+                    "encoding output changed"
+                );
+            }
+            // Reused ready encodings keep their persisted metadata, even if the input is stale.
+            ensure!(
+                queries::publish_chunk_encoding(chunk.id, chunk.encoding_id)
+                    .execute(&mut **tx)
+                    .await?
+                    .rows_affected()
+                    == 1,
+                "chunk output changed"
+            );
+        }
+        queries::publish_pack_layout(
+            &output.chunks,
+            output.pack.as_ref().map(|p| p.id),
+            split,
+            if range {
+                crate::config::seconds(range_after)? as f64
+            } else {
+                cooldown
+            },
+            range,
+        )
+        .build()
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 pub(super) async fn commit_pack_outputs(
     pool: &SqlitePool,
     task: Execution,
@@ -5727,99 +5841,17 @@ pub(super) async fn commit_pack_outputs(
             "pack references changed; retry maintenance"
         );
     }
-    for output in outputs {
-        ensure!(
-            !output.chunks.is_empty() && output.pack.is_some() != output.independent.is_some(),
-            "invalid pack output"
-        );
-        if let Some(pack) = &output.pack {
-            ensure!(
-                output.chunks.len() == pack.member_count as usize
-                    && output.chunks.iter().all(|id| rows
-                        .iter()
-                        .any(|r| r.chunk.id == *id && r.chunk.storage_id == pack.storage_id)),
-                "pack members changed"
-            );
-            ensure!(
-                queries::pack_member_ids(pack.id)
-                    .fetch_all(&mut *tx)
-                    .await?
-                    == output.chunks,
-                "pack members changed"
-            );
-            for pair in output.chunks.windows(2) {
-                let a = rows.iter().find(|r| r.chunk.id == pair[0]).unwrap();
-                let b = rows.iter().find(|r| r.chunk.id == pair[1]).unwrap();
-                ensure!(
-                    queries::same_references(pair[0], pair[1], b.offset_bytes - a.offset_bytes)
-                        .fetch_one(&mut *tx)
-                        .await?,
-                    "pack reference boundaries changed; retry maintenance"
-                );
-            }
-            ensure!(
-                queries::publish_prepared_pack(pack.id, task.id)
-                    .execute(&mut *tx)
-                    .await?
-                    .rows_affected()
-                    == 1,
-                "pack output changed"
-            );
-            queries::retire_pack_encodings(&output.chunks, None)
-                .build()
-                .execute(&mut *tx)
-                .await?;
-        } else if let Some(chunk) = &output.independent {
-            ensure!(
-                output.chunks == [chunk.id],
-                "independent output members changed"
-            );
-            let (state, owner) = queries::lock_output_encoding(chunk.encoding_id, chunk.id)
-                .fetch_one(&mut *tx)
-                .await?;
-            if state != "ready" {
-                ensure!(
-                    state == "uploading" && owner == Some(task.id),
-                    "encoding output changed"
-                );
-                queries::retire_pack_encodings(&output.chunks, Some(chunk.encoding_id))
-                    .build()
-                    .execute(&mut *tx)
-                    .await?;
-                ensure!(
-                    queries::complete_encoding(chunk.encoding_id)
-                        .execute(&mut *tx)
-                        .await?
-                        .rows_affected()
-                        == 1,
-                    "encoding output changed"
-                );
-            }
-            // Reused ready encodings keep their persisted metadata, even if the input is stale.
-            ensure!(
-                queries::publish_chunk_encoding(chunk.id, chunk.encoding_id)
-                    .execute(&mut *tx)
-                    .await?
-                    .rows_affected()
-                    == 1,
-                "chunk output changed"
-            );
-        }
-        queries::publish_pack_layout(
-            &output.chunks,
-            output.pack.as_ref().map(|p| p.id),
-            split,
-            if range {
-                crate::config::seconds(&settings.range_repack_after)? as f64
-            } else {
-                cooldown
-            },
-            range,
-        )
-        .build()
-        .execute(&mut *tx)
-        .await?;
-    }
+    publish_pack_outputs_in(
+        &mut tx,
+        task,
+        rows,
+        outputs,
+        split,
+        range,
+        cooldown,
+        &settings.range_repack_after,
+    )
+    .await?;
     let dead: Vec<_> = ids
         .iter()
         .filter(|id| retained.binary_search(id).is_err())
@@ -6794,7 +6826,7 @@ pub(super) async fn expire_access(pool: &SqlitePool, retention: f64, batch: i64)
     }
 }
 
-async fn require_sources(
+pub(super) async fn require_sources(
     db: &mut sqlx::SqliteConnection,
     stream: Option<Id>,
     chunks: &[Id],

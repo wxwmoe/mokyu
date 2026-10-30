@@ -3,6 +3,42 @@ use crate::model::node_work::{Outcome, RawHash};
 use md5::{Digest, Md5};
 
 impl Reader {
+    pub(crate) async fn scan_transfer(
+        &self,
+        backend: &Backend,
+        plan: &crate::model::transfer::Scan,
+    ) -> Result<crate::model::transfer::Scanned> {
+        plan.source.validate()?;
+        ensure!(
+            plan.source.medium == "shared_s3"
+                && !plan.source.pending_upload
+                && plan.source.storage_id == backend.profile.storage_id,
+            codec::IntegrityError::RawMetadata
+        );
+        let resources = crate::content::transfer::Resources {
+            cpu: self.cpu.clone(),
+            memory: Arc::new(
+                self.acquire(
+                    &self.packs,
+                    (crate::model::transfer::PROOF_BYTES / (1024 * 1024) + 1) as u32,
+                )
+                .await?,
+            ),
+        };
+        let _io = self.acquire(&self.io, 1).await?;
+        backend.store.verify().await?;
+        let mut file = RawFile::remote(
+            backend.store.backend.clone(),
+            &plan.source,
+            self.gets.clone(),
+            self.diagnostics.clone(),
+        )
+        .await?;
+        file.seek(std::io::SeekFrom::Start(plan.checksum.object.offset))
+            .await?;
+        crate::content::transfer::scan(plan, &mut file, &resources).await
+    }
+
     pub(crate) async fn hash_raw(
         &self,
         backend: &Backend,

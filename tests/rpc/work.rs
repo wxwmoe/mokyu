@@ -96,3 +96,75 @@ async fn node_work_batches_recover_results_and_preserve_read_pins() -> Result<()
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires an isolated active raw transfer and checkpoint fixture; see tests/README.md"]
+async fn node_raw_checkpoints_require_current_runs_and_permits() -> Result<()> {
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let identity: NodeState =
+        serde_json::from_slice(&tokio::fs::read(std::env::var("MOKYU_TEST_NODE_STATE")?).await?)?;
+    let value: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(std::env::var("MOKYU_TEST_TRANSFER_CHECKPOINT")?).await?,
+    )?;
+    let string = |name: &str| {
+        value[name]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("checkpoint field missing"))
+    };
+    let input = wire::TransferCheckpointRequest {
+        run: Some(wire::Run {
+            boot_id: string("boot")?,
+            fence: string("fence")?,
+        }),
+        operation_id: string("operation")?,
+        progress_json: serde_json::to_vec(&value["progress"])?,
+    };
+    let dns = Dns::new().await?;
+    let client = dns.client(&std::env::var("MOKYU_TEST_CONTROL_URL")?, identity)?;
+    client.checkpoint_transfer(input.clone()).await?;
+    client.checkpoint_transfer(input.clone()).await?;
+    let mut stale = input.clone();
+    stale.run.as_mut().unwrap().fence = Uuid::new_v4().to_string();
+    assert_eq!(
+        client.checkpoint_transfer(stale).await.unwrap_err().code(),
+        Code::FailedPrecondition
+    );
+    let mut unknown = input.clone();
+    unknown.operation_id = Uuid::now_v7().to_string();
+    assert_eq!(
+        client
+            .checkpoint_transfer(unknown)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    let mut invalid = input.clone();
+    invalid.progress_json = br#"{"action":"part","upload":null,"number":0,"etag":"bad"}"#.to_vec();
+    assert_eq!(
+        client
+            .checkpoint_transfer(invalid)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::InvalidArgument
+    );
+    for (action, expected) in [
+        ("checkpoint-expired-run", Code::FailedPrecondition),
+        ("checkpoint-expired-permit", Code::FailedPrecondition),
+        ("checkpoint-disabled", Code::PermissionDenied),
+        ("checkpoint-maintenance", Code::Aborted),
+    ] {
+        fixture(action).await?;
+        let response = client.checkpoint_transfer(input.clone()).await;
+        fixture("checkpoint-restore").await?;
+        assert_eq!(response.unwrap_err().code(), expected, "{action}");
+        client.checkpoint_transfer(input.clone()).await?;
+    }
+    Ok(())
+}

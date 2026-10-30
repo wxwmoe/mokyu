@@ -156,7 +156,7 @@ impl App {
         raw: Bytes,
         memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         accepted: Option<&EncodingPolicy>,
-        fills: &mut crate::storage::cache::Fills,
+        cache: &mut Vec<(Chunk, Bytes)>,
     ) -> Result<Output> {
         if let Some((id, location, size)) = self.packing.ready_encoding(c.id).await? {
             let mut physical = c.clone();
@@ -164,7 +164,7 @@ impl App {
             physical.location_id = location;
             physical.stored_size = Some(size);
             if !self.storage.has_pending(c) {
-                fills.extend(self.storage.prepare_fill(&physical, &raw, Some(false)));
+                cache.push((physical.clone(), raw));
             }
             return Ok(Output {
                 chunks: vec![c.id],
@@ -206,7 +206,7 @@ impl App {
             )
             .await?;
         if !self.storage.has_pending(c) {
-            fills.extend(self.storage.prepare_fill(&physical, &raw, None));
+            cache.push((physical.clone(), raw));
         }
         Ok(Output {
             chunks: vec![c.id],
@@ -261,14 +261,16 @@ impl App {
         accepted: Option<&EncodingPolicy>,
         fills: &mut crate::storage::cache::Fills,
     ) -> Result<Vec<Output>> {
+        let mut cache = Vec::new();
         if rows.len() == 1 || !allow_pack || !self.pack_creation_allowed() {
             let mut outputs = Vec::new();
             for (c, raw) in data {
                 outputs.push(
-                    self.independent_output(task, c, raw.clone(), memory, accepted, fills)
+                    self.independent_output(task, c, raw.clone(), memory, accepted, &mut cache)
                         .await?,
                 );
             }
+            fills.extend(self.storage.prepare_batch(cache, memory.clone()));
             return Ok(outputs);
         }
         let mut outputs = Vec::new();
@@ -306,7 +308,7 @@ impl App {
                         key,
                         &memory,
                         accepted,
-                        fills,
+                        &mut cache,
                     )
                     .await?
             {
@@ -326,7 +328,7 @@ impl App {
                             key,
                             &memory,
                             accepted,
-                            fills,
+                            &mut cache,
                         )
                         .await?
                 {
@@ -335,12 +337,20 @@ impl App {
                 }
                 for (c, raw) in data {
                     outputs.push(
-                        self.independent_output(task, c, raw.clone(), &memory, accepted, fills)
-                            .await?,
+                        self.independent_output(
+                            task,
+                            c,
+                            raw.clone(),
+                            &memory,
+                            accepted,
+                            &mut cache,
+                        )
+                        .await?,
                     );
                 }
             }
         }
+        fills.extend(self.storage.prepare_batch(cache, memory.clone()));
         Ok(outputs)
     }
     async fn try_pack_output(
@@ -352,7 +362,7 @@ impl App {
         key: &str,
         memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         accepted: Option<&EncodingPolicy>,
-        fills: &mut crate::storage::cache::Fills,
+        cache: &mut Vec<(Chunk, Bytes)>,
     ) -> Result<Option<Output>> {
         if !self.pack_creation_allowed() {
             return Ok(None);
@@ -441,7 +451,7 @@ impl App {
             if !self.storage.has_pending(source) {
                 let mut member = source.clone();
                 member.location_id = Uuid::nil();
-                fills.extend(self.storage.prepare_fill(&member, bytes, None));
+                cache.push((member, bytes.clone()));
             }
         }
         Ok(Some(Output {
