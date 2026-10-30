@@ -50,8 +50,17 @@ service NodeSessions {
 
 service NodeWork {
   rpc Exchange(WorkRequest) returns (WorkReply);
+  rpc CheckpointTransfer(TransferCheckpointRequest) returns (TransferCheckpointReply);
   rpc ReadMigration(ReadMigrationRequest) returns (ReadReply);
 }
+
+message TransferCheckpointRequest {
+  Run run = 1;
+  string operation_id = 2;
+  bytes progress_json = 3;
+}
+
+message TransferCheckpointReply {}
 
 message ReadMigrationRequest {
   Run run = 1;

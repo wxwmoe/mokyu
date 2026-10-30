@@ -10,6 +10,8 @@ mod refresh;
 mod replication_queries;
 mod replication_transactions;
 mod transactions;
+mod transfer_queries;
+mod transfer_transactions;
 
 #[cfg(test)]
 #[path = "../../../../tests/recovery/postgres_compression.rs"]

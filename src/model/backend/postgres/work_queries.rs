@@ -16,6 +16,10 @@ pub(crate) struct Batch {
     pub result_hash: Option<Vec<u8>>,
 }
 
+pub(crate) fn writable() -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT NOT maintenance FROM mokyu_meta WHERE singleton FOR SHARE")
+}
+
 pub(crate) fn batch(node: Uuid, operation: Uuid) -> Rows<'static, Batch> {
     sqlx::query_as("SELECT credential_generation,boot_id,fence,request_hash,task_id,token,maintenance_token,plan,storage_encrypted,GREATEST(0,(extract(epoch FROM(expires_at-clock_timestamp()))*1000)::bigint) AS valid_for_ms,result_hash FROM node_work WHERE node_id=$1 AND operation_id=$2 FOR UPDATE")
         .bind(node).bind(operation)
@@ -88,8 +92,17 @@ pub(crate) fn sweep_drained(task: Uuid) -> Scalar<'static, bool> {
         .bind(task)
 }
 
-pub(crate) fn live_permits(token: Uuid, maintenance: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT count(*)=2 FROM storage_permits WHERE token IN ($1,$2) AND expires_at>clock_timestamp()").bind(token).bind(maintenance)
+pub(crate) fn live_permits(tokens: &[Uuid]) -> Scalar<'_, bool> {
+    sqlx::query_scalar("SELECT count(*)=cardinality($1) FROM storage_permits WHERE token=ANY($1) AND expires_at>clock_timestamp()").bind(tokens)
+}
+
+pub(crate) fn release_permits(tokens: &[Uuid]) -> Statement<'_> {
+    sqlx::query("DELETE FROM storage_permits WHERE token=ANY($1)").bind(tokens)
+}
+
+pub(crate) fn transfer_source(task: Uuid, storage: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT source_storage_id FROM transfer_runs WHERE task_id=$1 AND source_storage_id<>$2 AND phase='verify'")
+        .bind(task).bind(storage)
 }
 
 pub(crate) fn renew<'a>(
@@ -98,7 +111,7 @@ pub(crate) fn renew<'a>(
     ids: &'a [Uuid],
     release: bool,
 ) -> Rows<'a, (Uuid, i64)> {
-    sqlx::query_as("WITH owned AS (UPDATE node_work w SET expires_at=clock_timestamp()+CASE WHEN $6 THEN interval '0 seconds' ELSE interval '60 seconds' END WHERE node_id=$1 AND credential_generation=$2 AND boot_id=$3 AND fence=$4 AND token=ANY($5) AND expires_at>clock_timestamp() AND result_hash IS NULL AND ($6 OR (EXISTS(SELECT 1 FROM tasks t WHERE t.id=w.task_id AND t.state='running' AND t.lease_token=w.token AND t.lease_node_id=$1 AND t.lease_expires_at>clock_timestamp()) AND (w.plan->>'action'<>'upload_raw' OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(w.plan->'items') i WHERE NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=(i->>'task')::uuid AND t.state='running' AND t.lease_token=w.token AND t.lease_node_id=$1 AND t.lease_expires_at>clock_timestamp()))) AND (w.plan->>'action'='external_test' OR (SELECT count(*) FROM storage_permits p WHERE p.token IN (w.token,w.maintenance_token) AND p.expires_at>clock_timestamp())=2))) RETURNING token,maintenance_token,task_id,expires_at,plan), permits AS (UPDATE storage_permits p SET expires_at=o.expires_at FROM owned o WHERE p.token IN (o.token,o.maintenance_token)), tasks AS (UPDATE tasks t SET lease_expires_at=o.expires_at FROM owned o WHERE t.lease_token=o.token AND t.lease_node_id=$1 AND (t.id=o.task_id OR (o.plan->>'action'='upload_raw' AND EXISTS(SELECT 1 FROM jsonb_array_elements(o.plan->'items') i WHERE i->>'task'=t.id::text)))), uploads AS (UPDATE raw_uploads u SET lease_expires_at=o.expires_at FROM owned o WHERE u.token=o.token AND u.node_id=$1 AND u.lease_expires_at>clock_timestamp()) SELECT token,CASE WHEN $6 THEN 0 ELSE 60000 END::bigint FROM owned")
+    sqlx::query_as("WITH owned AS (UPDATE node_work w SET expires_at=clock_timestamp()+CASE WHEN $6 THEN interval '0 seconds' ELSE interval '60 seconds' END WHERE node_id=$1 AND credential_generation=$2 AND boot_id=$3 AND fence=$4 AND token=ANY($5) AND expires_at>clock_timestamp() AND result_hash IS NULL AND ($6 OR (EXISTS(SELECT 1 FROM tasks t WHERE t.id=w.task_id AND t.state='running' AND t.lease_token=w.token AND t.lease_node_id=$1 AND t.lease_expires_at>clock_timestamp()) AND (w.plan->>'action'<>'upload_raw' OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(w.plan->'items') i WHERE NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=(i->>'task')::uuid AND t.state='running' AND t.lease_token=w.token AND t.lease_node_id=$1 AND t.lease_expires_at>clock_timestamp()))) AND (w.plan->>'action'='external_test' OR (SELECT count(*) FROM storage_permits p WHERE p.token IN (w.token,w.maintenance_token,(w.plan->'source_permits'->>0)::uuid,(w.plan->'source_permits'->>1)::uuid) AND p.expires_at>clock_timestamp())=CASE WHEN w.plan->>'action' IN ('copy_transfer','raw_transfer') THEN 4 ELSE 2 END))) RETURNING token,maintenance_token,task_id,expires_at,plan), permits AS (UPDATE storage_permits p SET expires_at=o.expires_at FROM owned o WHERE p.token IN (o.token,o.maintenance_token,(o.plan->'source_permits'->>0)::uuid,(o.plan->'source_permits'->>1)::uuid)), tasks AS (UPDATE tasks t SET lease_expires_at=o.expires_at FROM owned o WHERE t.lease_token=o.token AND t.lease_node_id=$1 AND (t.id=o.task_id OR (o.plan->>'action'='upload_raw' AND EXISTS(SELECT 1 FROM jsonb_array_elements(o.plan->'items') i WHERE i->>'task'=t.id::text)))), uploads AS (UPDATE raw_uploads u SET lease_expires_at=o.expires_at FROM owned o WHERE u.token=o.token AND u.node_id=$1 AND u.lease_expires_at>clock_timestamp()) SELECT token,CASE WHEN $6 THEN 0 ELSE 60000 END::bigint FROM owned")
         .bind(node.node_id).bind(node.credential_generation).bind(run.boot).bind(run.fence).bind(ids).bind(release)
 }
 

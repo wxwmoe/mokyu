@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0045.
+-- Generated from the complete mysql migration chain through 0046.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -1168,6 +1168,36 @@ CREATE TABLE `transfer_items` (
   CONSTRAINT `transfer_items_chk_2` CHECK ((`state` in (_utf8mb4'planning',_utf8mb4'planned',_utf8mb4'copying',_utf8mb4'completed',_utf8mb4'skipped',_utf8mb4'conflict',_utf8mb4'cancelled')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `transfer_members` (
+  `unit_id` bigint NOT NULL,
+  `task_id` binary(16) NOT NULL,
+  `source_chunk` bigint NOT NULL,
+  `source_offset` bigint NOT NULL,
+  `length` int NOT NULL,
+  PRIMARY KEY (`task_id`,`source_chunk`),
+  UNIQUE KEY `unit_id` (`unit_id`,`source_offset`),
+  KEY `transfer_members_chunk` (`source_chunk`),
+  CONSTRAINT `transfer_members_ibfk_1` FOREIGN KEY (`unit_id`) REFERENCES `transfer_sources` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_members_ibfk_2` FOREIGN KEY (`task_id`) REFERENCES `transfer_runs` (`task_id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_members_ibfk_3` FOREIGN KEY (`source_chunk`) REFERENCES `chunks` (`id`),
+  CONSTRAINT `transfer_members_chk_1` CHECK ((`source_offset` >= 0)),
+  CONSTRAINT `transfer_members_chk_2` CHECK ((`length` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `transfer_parts` (
+  `unit_id` bigint NOT NULL,
+  `number` int NOT NULL,
+  `source_offset` bigint NOT NULL,
+  `length` bigint NOT NULL,
+  `digest` binary(16) NOT NULL,
+  `etag` text COLLATE utf8mb4_bin,
+  PRIMARY KEY (`unit_id`,`number`),
+  CONSTRAINT `transfer_parts_ibfk_1` FOREIGN KEY (`unit_id`) REFERENCES `transfer_sources` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_parts_chk_1` CHECK ((`number` between 1 and 10000)),
+  CONSTRAINT `transfer_parts_chk_2` CHECK ((`source_offset` >= 0)),
+  CONSTRAINT `transfer_parts_chk_3` CHECK ((`length` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `transfer_runs` (
   `task_id` binary(16) NOT NULL,
   `created_by` binary(16) DEFAULT NULL,
@@ -1179,6 +1209,7 @@ CREATE TABLE `transfer_runs` (
   `phase` varchar(24) COLLATE utf8mb4_bin NOT NULL DEFAULT 'scan',
   `cursor_key` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
   `progress` json NOT NULL,
+  `source_storage_id` binary(16) NOT NULL,
   PRIMARY KEY (`task_id`),
   KEY `transfer_runs_creator` (`created_by`,`task_id`),
   CONSTRAINT `transfer_runs_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE CASCADE,
@@ -1192,11 +1223,49 @@ CREATE TABLE `transfer_sources` (
   `source_id` bigint NOT NULL,
   `generation` bigint NOT NULL DEFAULT '0',
   `snapshot` json DEFAULT NULL,
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `input` json DEFAULT NULL,
+  `output` json DEFAULT NULL,
+  `candidate` bigint DEFAULT NULL,
+  `state` varchar(24) COLLATE utf8mb4_bin NOT NULL DEFAULT 'selected',
+  `scanned_bytes` bigint NOT NULL DEFAULT '0',
+  `written_bytes` bigint NOT NULL DEFAULT '0',
+  `checksum` json DEFAULT NULL,
+  `upload_id` text COLLATE utf8mb4_bin,
+  `source_encoding` bigint DEFAULT NULL,
+  `source_pack` bigint DEFAULT NULL,
+  `source_raw` bigint DEFAULT NULL,
   PRIMARY KEY (`task_id`,`source_type`,`source_id`),
+  UNIQUE KEY `id` (`id`),
   KEY `transfer_sources_protection` (`source_type`,`source_id`,`task_id`),
+  KEY `transfer_sources_candidate` (`candidate`),
+  KEY `transfer_sources_encoding` (`source_encoding`),
+  KEY `transfer_sources_pack` (`source_pack`),
+  KEY `transfer_sources_raw` (`source_raw`),
+  KEY `transfer_sources_work` (`task_id`,`state`,`id`),
   CONSTRAINT `transfer_sources_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_runs` (`task_id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_sources_ibfk_2` FOREIGN KEY (`candidate`) REFERENCES `streams` (`id`),
+  CONSTRAINT `transfer_sources_ibfk_3` FOREIGN KEY (`source_encoding`) REFERENCES `chunk_encodings` (`encoding_id`),
+  CONSTRAINT `transfer_sources_ibfk_4` FOREIGN KEY (`source_pack`) REFERENCES `packs` (`id`),
+  CONSTRAINT `transfer_sources_ibfk_5` FOREIGN KEY (`source_raw`) REFERENCES `raw_sources` (`id`),
   CONSTRAINT `transfer_sources_chk_1` CHECK ((`source_type` in (_utf8mb4'raw',_utf8mb4'chunk',_utf8mb4'pack'))),
-  CONSTRAINT `transfer_sources_chk_2` CHECK ((`generation` >= 0))
+  CONSTRAINT `transfer_sources_chk_2` CHECK ((`generation` >= 0)),
+  CONSTRAINT `transfer_sources_chk_3` CHECK ((`state` in (_utf8mb4'selected',_utf8mb4'scanning',_utf8mb4'copying',_utf8mb4'verifying',_utf8mb4'ready'))),
+  CONSTRAINT `transfer_sources_chk_4` CHECK ((`scanned_bytes` >= 0)),
+  CONSTRAINT `transfer_sources_chk_5` CHECK ((`written_bytes` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `transfer_spans` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `unit_id` bigint NOT NULL,
+  `source_offset` bigint NOT NULL,
+  `length` int NOT NULL,
+  `hash` binary(32) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `unit_id` (`unit_id`,`source_offset`),
+  CONSTRAINT `transfer_spans_ibfk_1` FOREIGN KEY (`unit_id`) REFERENCES `transfer_sources` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_spans_chk_1` CHECK ((`source_offset` >= 0)),
+  CONSTRAINT `transfer_spans_chk_2` CHECK ((`length` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `uploads` (

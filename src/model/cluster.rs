@@ -33,6 +33,14 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
         input: super::node_work::Exchange,
     ) -> Result<super::node_work::Reply>;
+    async fn checkpoint_transfer(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        operation: Uuid,
+        progress: &super::transfer::RawProgress,
+    ) -> Result<()>;
     async fn prepare_local_part(
         &self,
         node: &NodeState,

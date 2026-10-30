@@ -321,6 +321,14 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn checkpoint_transfer(
+        &self,
+        input: wire::TransferCheckpointRequest,
+    ) -> Result<wire::TransferCheckpointReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWork/CheckpointTransfer")
+            .await
+    }
+
     pub(crate) async fn claim_native(
         &self,
         input: wire::NativeClaimRequest,

@@ -27,6 +27,7 @@ mod s3;
 mod sources;
 mod sync;
 pub(crate) mod target;
+pub(crate) mod transfer;
 
 #[cfg(all(test, feature = "fault-injection"))]
 #[path = "../../tests/recovery/pack_memory.rs"]
@@ -1971,6 +1972,67 @@ impl Storage {
         );
         Some(ready)
     }
+    pub(crate) fn prepare_batch(
+        self: &Arc<Self>,
+        rows: Vec<(Chunk, Bytes)>,
+        memory: Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let first = &rows.first()?.0;
+        let store = first.storage_id?;
+        let policy = self.local_cache(Some(store)).ok()?;
+        if !policy.enabled {
+            return None;
+        }
+        let target = self.store_backend(store).ok()?;
+        let work = self.cache_work(cache::cache_id(first), 1)?;
+        let storage = self.clone();
+        let (ready, published) = tokio::sync::oneshot::channel();
+        tokio::spawn(
+            resource_gate::PRIORITY.scope(resource_gate::MAINTENANCE, async move {
+                let (_work, _memory) = (work, memory);
+                if !matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), published).await,
+                    Ok(Ok(()))
+                ) {
+                    return;
+                }
+                let result = async {
+                    let started = tokio::time::Instant::now();
+                    for (chunk, data) in rows {
+                        if started.elapsed() >= std::time::Duration::from_secs(1) {
+                            break;
+                        }
+                        ensure!(
+                            chunk.storage_id == Some(store)
+                                && Arc::ptr_eq(&storage.store_backend(store)?, &target),
+                            "cache storage changed"
+                        );
+                        if storage.has_pending(&chunk) {
+                            continue;
+                        }
+                        let (data, compressed) = storage.cache_payload(&chunk, data).await?;
+                        storage
+                            .file_cache()
+                            .fill(cache::cache_id(&chunk), &data, compressed, policy, || {
+                                ensure!(
+                                    Arc::ptr_eq(&storage.store_backend(store)?, &target),
+                                    "cache storage changed"
+                                );
+                                Ok(())
+                            })
+                            .await?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                if let Err(error) = result {
+                    tracing::debug!(%error,"processed cache batch skipped");
+                }
+            }),
+        );
+        Some(ready)
+    }
+
     pub async fn get_with(
         self: &Arc<Self>,
         c: &Chunk,

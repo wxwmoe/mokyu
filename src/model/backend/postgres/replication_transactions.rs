@@ -118,7 +118,7 @@ impl ReplicationStore for Backend {
         let mode = q::mode().fetch_one(&mut *db).await?;
         let id = transactions::enqueue_task(&mut db, "storage_migration", Some(options.target_bucket),
             json!({"operation":"replication","phase":"scan","storage_id":source.0,"execution_mode":mode}), false).await?;
-        q::create(id, principal, options, target.0, target.1)
+        q::create(id, principal, options, target.0, target.1, source.0)
             .execute(&mut *db)
             .await?;
         db.commit().await?;
@@ -248,7 +248,7 @@ impl ReplicationStore for Backend {
                 plan(&mut db, &mut run).await?;
                 Step::Continue
             }
-            "verify" => verification(&mut db, &mut run).await?,
+            "verify" => verification(&mut db, task, &mut run).await?,
             "publish" => {
                 publish(&mut db, task, &mut run).await?;
                 Step::Continue
@@ -266,6 +266,44 @@ impl ReplicationStore for Backend {
             crate::faults::point("replication-published").await;
         }
         Ok(result)
+    }
+
+    async fn scanned(
+        &self,
+        task: Execution,
+        value: &crate::model::transfer::Scanned,
+    ) -> Result<()> {
+        let mut db = self.pool.begin().await?;
+        let run = owned(&mut db, task).await?;
+        super::transfer_transactions::scanned(&mut db, &run, value).await?;
+        db.commit().await?;
+        Ok(())
+    }
+
+    async fn raw_progress(
+        &self,
+        task: Execution,
+        plan: &crate::model::transfer::RawCopy,
+        progress: &crate::model::transfer::RawProgress,
+    ) -> Result<()> {
+        let mut db = self.pool.begin().await?;
+        let run = owned(&mut db, task).await?;
+        super::transfer_transactions::raw_progress(&mut db, task, &run, plan, progress).await?;
+        db.commit().await?;
+        Ok(())
+    }
+
+    async fn copied(
+        &self,
+        task: Execution,
+        plan: &crate::model::transfer::Copy,
+        outputs: &[crate::model::packing::PackOutput],
+    ) -> Result<()> {
+        let mut db = self.pool.begin().await?;
+        let run = owned(&mut db, task).await?;
+        super::transfer_transactions::copied(&mut db, task, &run, plan, outputs).await?;
+        db.commit().await?;
+        Ok(())
     }
 
     async fn verified(&self, task: Execution, sources: &[RawSource]) -> Result<()> {
@@ -426,6 +464,8 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
     let source = item.source_pin.ok_or(Error::SourceUnavailable)?;
     let mut end = item.position_bytes;
     let mut units = std::collections::BTreeSet::new();
+    let mut chunks = Vec::new();
+    let mut raw = Vec::new();
     if item.snapshot.0.size > 0 {
         if item.snapshot.0.payload == "raw" {
             let rows = q::ranges(source, end).fetch_all(&mut **db).await?;
@@ -439,6 +479,7 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
                     .checked_add(row.length)
                     .ok_or(Error::SourceUnavailable)?;
                 units.insert(("raw", row.source.id));
+                raw.push(row.source.id);
             }
         } else {
             let rows = q::extents(source, end).fetch_all(&mut **db).await?;
@@ -451,6 +492,7 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
                 end = end
                     .checked_add(i64::from(length))
                     .ok_or(Error::SourceUnavailable)?;
+                chunks.push((chunk.ok_or(Error::SourceUnavailable)?, pack));
                 units.insert(if let Some(pack) = pack {
                     ("pack", pack)
                 } else {
@@ -460,6 +502,37 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
         }
     }
     ensure!(end <= item.snapshot.0.size, Error::SourceUnavailable);
+    if run.source_storage_id != run.storage_id && !chunks.is_empty() {
+        let ids: Vec<_> = chunks
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let layouts: Vec<(Id, Option<Id>, bool, bool)> = super::transfer_queries::layouts(&ids)
+            .build_query_as()
+            .fetch_all(&mut **db)
+            .await?;
+        ensure!(layouts.len() == ids.len(), Error::SourceUnavailable);
+        if layouts
+            .iter()
+            .any(|(_, _, ready, pending)| !ready && *pending)
+        {
+            return Ok(());
+        }
+        ensure!(
+            layouts.iter().all(|(_, _, ready, _)| *ready),
+            Error::SourceUnavailable
+        );
+        chunks = layouts
+            .into_iter()
+            .map(|(id, pack, _, _)| (id, pack))
+            .collect();
+        units.retain(|(source_type, _)| *source_type == "raw");
+        for (id, pack) in &chunks {
+            units.insert(pack.map_or(("chunk", *id), |id| ("pack", id)));
+        }
+    }
     if !units.is_empty() {
         let units = units.into_iter().collect::<Vec<_>>();
         for (source_type, id) in &units {
@@ -480,6 +553,10 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
             }
         }
         run.progress.0.sources += added;
+        if run.source_storage_id != run.storage_id {
+            run.progress.0.sources -=
+                super::transfer_transactions::capture(db, run, &chunks, &raw).await? as i64;
+        }
     }
     q::advance(
         item.id,
@@ -495,8 +572,33 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn verification(db: &mut Tx<'_>, run: &mut q::Run) -> Result<Step> {
+pub(super) async fn verification(
+    db: &mut Tx<'_>,
+    task: Execution,
+    run: &mut q::Run,
+) -> Result<Step> {
     ensure!(run.phase == "verify", Error::OperationAborted);
+    if run.source_storage_id != run.storage_id {
+        if let Some(mut unit) = super::transfer_queries::pending(run.task_id)
+            .fetch_optional(&mut **db)
+            .await?
+        {
+            if let Some(scan) = super::transfer_transactions::scan(db, run, &mut unit).await? {
+                return Ok(Step::Scan(scan));
+            }
+            if unit.state == "copying" || (unit.state == "selected" && unit.source_type != "raw") {
+                return Ok(
+                    super::transfer_transactions::prepare(db, task, run, &mut unit)
+                        .await?
+                        .unwrap_or(Step::Continue),
+                );
+            }
+            return Ok(Step::Continue);
+        }
+        run.phase = "publish".into();
+        save(db, run).await?;
+        return Ok(Step::Continue);
+    }
     let Some(id) = q::unverified(run.task_id, run.generation)
         .fetch_optional(&mut **db)
         .await?
@@ -558,6 +660,9 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             .await?
     };
     let Some(item) = item else {
+        if !super::transfer_transactions::cleanup(db, run.task_id).await? {
+            return Ok(());
+        }
         run.phase = "complete".into();
         q::task_state(
             task.id,
@@ -660,7 +765,18 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
     let source = item.source_pin.ok_or(Error::SourceUnavailable)?;
     let mut end = item.position_bytes;
     if item.snapshot.0.size > 0 {
-        if item.snapshot.0.payload == "raw" {
+        if run.source_storage_id != run.storage_id {
+            end = super::transfer_transactions::project(
+                db,
+                run,
+                candidate,
+                source,
+                item.snapshot.0.payload == "raw",
+                end,
+                item.snapshot.0.size,
+            )
+            .await?;
+        } else if item.snapshot.0.payload == "raw" {
             let rows = q::ranges(source, end).fetch_all(&mut **db).await?;
             let (start, next, ids) = crate::model::raw::copy_window(run.storage_id, &rows)?;
             ensure!(
@@ -761,6 +877,9 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
 async fn cancel(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
     let rows = q::live(run.task_id).fetch_all(&mut **db).await?;
     if rows.is_empty() {
+        if !super::transfer_transactions::cleanup(db, run.task_id).await? {
+            return Ok(());
+        }
         run.phase = "cancelled".into();
         q::task_state(run.task_id, "completed", None)
             .execute(&mut **db)

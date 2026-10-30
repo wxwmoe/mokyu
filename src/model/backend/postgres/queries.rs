@@ -246,7 +246,7 @@ pub(super) fn try_claim_chunk_hash(storage: Uuid, hash: &[u8]) -> Scalar<'_, boo
 }
 
 pub(super) fn fail_chunk_allocations(input: &ChunkCreate, single: bool) -> Statement<'_> {
-    sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE storage_id=$1 AND hash=$2 AND raw_size=$3 AND state IN ('preparing','uploading') AND NOT EXISTS (SELECT 1 FROM streams s LEFT JOIN tasks t ON t.id=s.owner_task_id WHERE s.id=chunks.owner_stream AND s.state='writing' AND ((s.owner_task_id IS NULL AND NOT $4) OR (t.state='running' AND t.lease_token=s.owner_lease_token AND (t.lease_expires_at IS NULL OR t.lease_expires_at>clock_timestamp()))) AND ($4 OR EXISTS(SELECT 1 FROM stream_leases l WHERE l.stream_id=s.id AND l.lease_type='write' AND l.expires_at>clock_timestamp())))")
+    sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=now(),owner_stream=NULL WHERE storage_id=$1 AND hash=$2 AND raw_size=$3 AND state IN ('preparing','uploading') AND NOT EXISTS (SELECT 1 FROM streams s LEFT JOIN tasks t ON t.id=s.owner_task_id WHERE s.id=chunks.owner_stream AND s.state='writing' AND ((s.owner_task_id IS NULL AND NOT $4) OR (t.state='running' AND t.lease_token=s.owner_lease_token AND (t.lease_expires_at IS NULL OR t.lease_expires_at>clock_timestamp()))) AND ($4 OR EXISTS(SELECT 1 FROM stream_leases l WHERE l.stream_id=s.id AND l.lease_type='write' AND l.expires_at>clock_timestamp()))) AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=chunks.owner_stream)")
         .bind(input.storage)
         .bind(input.hash.as_slice())
         .bind(input.raw_size)
@@ -555,7 +555,7 @@ pub(super) fn lock_stale_tasks() -> Scalar<'static, Uuid> {
 }
 
 pub(super) fn abandon_task_streams<'q>(ids: &'q [Uuid]) -> Statement<'q> {
-    sqlx::query("UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL,touched_at=now() WHERE state='writing' AND owner_task_id=ANY($1)")
+    sqlx::query("UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL,touched_at=now() WHERE state='writing' AND owner_task_id=ANY($1) AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=streams.id)")
         .bind(ids)
 }
 
@@ -5148,19 +5148,19 @@ pub(super) fn task_progress<'q>(
 }
 
 pub(super) fn gc_candidates(storage: Uuid, grace: f64, batch: i64) -> Rows<'static, (Id, i32)> {
-    sqlx::query_as("SELECT id,raw_size FROM chunks WHERE storage_id=$1 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$2*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) ORDER BY unreferenced_at,id LIMIT $3").bind(storage).bind(grace).bind(batch)
+    sqlx::query_as("SELECT id,raw_size FROM chunks WHERE storage_id=$1 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$2*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM transfer_members p WHERE p.source_chunk=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) ORDER BY unreferenced_at,id LIMIT $3").bind(storage).bind(grace).bind(batch)
 }
 pub(super) fn reset_access_coverage() -> Statement<'static> {
     sqlx::query("UPDATE mokyu_meta SET access_coverage_since=now(),access_flushed_at=now()")
 }
 pub(super) fn abandon_startup_streams() -> Statement<'static> {
     sqlx::query(
-        "UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL,touched_at=now() WHERE state='writing'",
+        "UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL,touched_at=now() WHERE state='writing' AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=streams.id)",
     )
 }
 pub(super) fn fail_startup_chunks() -> Statement<'static> {
     sqlx::query(
-        "UPDATE chunks SET state='failed',unreferenced_at=COALESCE(unreferenced_at,now()) WHERE state IN ('preparing','uploading')",
+        "UPDATE chunks SET state='failed',unreferenced_at=COALESCE(unreferenced_at,now()) WHERE state IN ('preparing','uploading') AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=chunks.owner_stream)",
     )
 }
 pub(super) fn retire_startup_encodings() -> Statement<'static> {
@@ -5208,7 +5208,7 @@ fn stale_stream_filter(query: &mut QueryBuilder<Postgres>, retention: Option<f64
     if !single {
         query.push(" AND NOT EXISTS(SELECT 1 FROM stream_leases l WHERE l.stream_id=s.id AND l.expires_at>now())");
     }
-    query.push(" AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.source_pin=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>now()))");
+    query.push(" AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.source_pin=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>now()))");
 }
 pub(super) fn stale_streams(
     active: &[Id],
@@ -5298,7 +5298,7 @@ pub(super) fn lock_reclaim_chunk(
     storage: Uuid,
     grace: f64,
 ) -> Rows<'static, (Option<Id>,)> {
-    sqlx::query_as("SELECT owner_stream FROM chunks WHERE id=$1 AND storage_id=$2 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=chunks.id AND owner_stream IS NOT NULL) FOR UPDATE").bind(id).bind(storage).bind(grace)
+    sqlx::query_as("SELECT owner_stream FROM chunks WHERE id=$1 AND storage_id=$2 AND state IN ('ready','failed','deleting') AND unreferenced_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM transfer_members p WHERE p.source_chunk=chunks.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=chunks.id AND owner_stream IS NOT NULL) FOR UPDATE").bind(id).bind(storage).bind(grace)
 }
 pub(super) fn claim_reclaim_chunk(id: Id, storage: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE chunks SET state='deleting',pack_id=NULL WHERE id=$1 AND storage_id=$2")
@@ -5400,13 +5400,13 @@ fn physical_table(packed: bool) -> (&'static str, &'static str, &'static str) {
         (
             "packs",
             "id",
-            "NOT EXISTS(SELECT 1 FROM stream_leases l JOIN extents e ON e.stream_id=l.stream_id JOIN pack_members m ON m.chunk_id=e.chunk_id WHERE m.pack_id=r.id AND l.expires_at>now())",
+            "NOT EXISTS(SELECT 1 FROM stream_leases l JOIN extents e ON e.stream_id=l.stream_id JOIN pack_members m ON m.chunk_id=e.chunk_id WHERE m.pack_id=r.id AND l.expires_at>now()) AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.source_pack=r.id)",
         )
     } else {
         (
             "chunk_encodings",
             "encoding_id",
-            "NOT EXISTS(SELECT 1 FROM stream_leases l JOIN extents e ON e.stream_id=l.stream_id JOIN chunk_encodings ce ON ce.chunk_id=e.chunk_id WHERE ce.encoding_id=r.encoding_id AND l.expires_at>now())",
+            "NOT EXISTS(SELECT 1 FROM stream_leases l JOIN extents e ON e.stream_id=l.stream_id JOIN chunk_encodings ce ON ce.chunk_id=e.chunk_id WHERE ce.encoding_id=r.encoding_id AND l.expires_at>now()) AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.source_encoding=r.encoding_id)",
         )
     }
 }
@@ -5436,7 +5436,15 @@ pub(super) fn physical_gc_candidates(
     };
     let lease_guard = format!(
         "({}) AND ({})",
-        if single { "true" } else { lease_guard },
+        if single {
+            if packed {
+                "NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.source_pack=r.id)"
+            } else {
+                "NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.source_encoding=r.encoding_id)"
+            }
+        } else {
+            lease_guard
+        },
         node_read_source_guard(
             if packed { "pack" } else { "chunk" },
             &format!("r.{id_column}")
@@ -7589,6 +7597,17 @@ impl ClusterStore for Backend {
         input: crate::model::node_work::Exchange,
     ) -> Result<crate::model::node_work::Reply> {
         transactions::work::exchange(&self.pool, node, key, input).await
+    }
+    async fn checkpoint_transfer(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+        operation: Uuid,
+        progress: &crate::model::transfer::RawProgress,
+    ) -> Result<()> {
+        transactions::work::checkpoint_transfer(&self.pool, node, key, run, operation, progress)
+            .await
     }
     async fn prepare_local_part(
         &self,

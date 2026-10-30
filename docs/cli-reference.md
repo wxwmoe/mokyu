@@ -62,7 +62,7 @@ docker exec mokyu mokyu cli bucket cors media /config/cors.json
 | `storage rewrite NAME status` | 查看该存储最近的重写任务 |
 | `storage rewrite NAME pause\|resume\|retry` | 暂停、继续或重试该存储最近的重写任务 |
 
-存储名称为 1～128 字节且不能含 `/` 或控制字符；S3 的 endpoint 必须是没有查询串或片段的 HTTP(S) URL。`local` 只接受 path，`s3` 需要 endpoint、bucket、region、access key 和 secret key，并具备对应范围的 Get、Put、Delete、List 和条件创建权限；原生 Multipart 还需要创建、上传分片、完成、终止和列举未完成上传的权限（AWS 的 `s3:ListBucketMultipartUploads`），以核对创建结果及清理未决上传；`prefix` 默认为空。存储创建前，目标命名空间必须为空并会写入身份标识；更新连接信息只接受与已有标识匹配的目标，不会初始化空目标。存储由数据库管理，创建桶时用 `bucket create NAME --storage UUID` 绑定；绑定后不可更改。
+存储名称为 1～128 字节且不能含 `/` 或控制字符；S3 的 endpoint 必须是没有查询串或片段的 HTTP(S) URL。`local` 只接受 path，`s3` 需要 endpoint、bucket、region、access key 和 secret key，并具备对应范围的 Get、Put、Delete、List 和条件创建权限；原生 Multipart 还需要创建、上传分片、完成、终止、列举未完成上传和列举分片的权限（AWS 的 `s3:ListBucketMultipartUploads`、`s3:ListMultipartUploadParts`），以核对创建结果及清理未决上传；`prefix` 默认为空。存储创建前，目标命名空间必须为空并会写入身份标识；更新连接信息只接受与已有标识匹配的目标，不会初始化空目标。存储由数据库管理，创建桶时用 `bucket create NAME --storage UUID` 绑定；绑定后不可更改。
 
 单容器模式下可以使用本地存储；群集模式必须使用 S3 存储。创建桶前至少要有一个启用的存储，存在多个时必须指定 `--storage`。相关 HTTP 接口见[存储](control-api-reference.md#存储)。
 

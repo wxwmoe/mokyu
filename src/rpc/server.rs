@@ -1300,6 +1300,33 @@ mod tests {
 
 #[tonic::async_trait]
 impl NodeWork for Service {
+    async fn checkpoint_transfer(
+        &self,
+        request: Request<wire::TransferCheckpointRequest>,
+    ) -> Result<Response<wire::TransferCheckpointReply>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        if prost::Message::encoded_len(&input) > super::read::REQUEST_LIMIT {
+            return Err(Status::resource_exhausted(
+                "transfer checkpoint exceeds message budget",
+            ));
+        }
+        let progress: model::transfer::RawProgress =
+            serde_json::from_slice(&input.progress_json)
+                .map_err(|_| Status::invalid_argument("invalid transfer checkpoint"))?;
+        progress
+            .validate()
+            .map_err(|_| Status::invalid_argument("invalid transfer checkpoint"))?;
+        bounded(self.app.cluster().map_err(failure)?.checkpoint_transfer(
+            &node,
+            &self.app.secrets.credential_key,
+            super::read::run(input.run)?,
+            super::uuid(&input.operation_id)?,
+            &progress,
+        ))
+        .await?;
+        Ok(Response::new(wire::TransferCheckpointReply {}))
+    }
     async fn read_migration(
         &self,
         request: Request<wire::ReadMigrationRequest>,

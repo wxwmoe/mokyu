@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0092.
+-- Generated from the complete postgres migration chain through 0093.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -2039,6 +2039,29 @@ CREATE TABLE public.transfer_items (
     CONSTRAINT transfer_items_state_check CHECK ((state = ANY (ARRAY['planning'::text, 'planned'::text, 'copying'::text, 'completed'::text, 'skipped'::text, 'conflict'::text, 'cancelled'::text])))
 );
 
+CREATE TABLE public.transfer_members (
+    unit_id uuid NOT NULL,
+    task_id uuid NOT NULL,
+    source_chunk uuid NOT NULL,
+    source_offset bigint NOT NULL,
+    length integer NOT NULL,
+    CONSTRAINT transfer_members_length_check CHECK ((length > 0)),
+    CONSTRAINT transfer_members_source_offset_check CHECK ((source_offset >= 0))
+);
+
+CREATE TABLE public.transfer_parts (
+    unit_id uuid NOT NULL,
+    number integer NOT NULL,
+    source_offset bigint NOT NULL,
+    length bigint NOT NULL,
+    digest bytea NOT NULL,
+    etag text,
+    CONSTRAINT transfer_parts_digest_check CHECK ((octet_length(digest) = 16)),
+    CONSTRAINT transfer_parts_length_check CHECK ((length > 0)),
+    CONSTRAINT transfer_parts_number_check CHECK (((number >= 1) AND (number <= 10000))),
+    CONSTRAINT transfer_parts_source_offset_check CHECK ((source_offset >= 0))
+);
+
 CREATE TABLE public.transfer_runs (
     task_id uuid NOT NULL,
     created_by uuid,
@@ -2050,6 +2073,7 @@ CREATE TABLE public.transfer_runs (
     phase text DEFAULT 'scan'::text NOT NULL,
     cursor_key text,
     progress jsonb NOT NULL,
+    source_storage_id uuid NOT NULL,
     CONSTRAINT transfer_runs_generation_check CHECK ((generation > 0)),
     CONSTRAINT transfer_runs_phase_check CHECK ((phase = ANY (ARRAY['scan'::text, 'plan'::text, 'verify'::text, 'publish'::text, 'cancel'::text, 'complete'::text, 'cancelled'::text])))
 );
@@ -2060,8 +2084,34 @@ CREATE TABLE public.transfer_sources (
     source_id uuid NOT NULL,
     generation bigint DEFAULT 0 NOT NULL,
     snapshot jsonb,
+    id uuid DEFAULT uuidv7() NOT NULL,
+    input jsonb,
+    output jsonb,
+    candidate uuid,
+    state text DEFAULT 'selected'::text NOT NULL,
+    scanned_bytes bigint DEFAULT 0 NOT NULL,
+    written_bytes bigint DEFAULT 0 NOT NULL,
+    checksum jsonb,
+    upload_id text,
+    source_encoding uuid,
+    source_pack uuid,
+    source_raw uuid,
     CONSTRAINT transfer_sources_generation_check CHECK ((generation >= 0)),
-    CONSTRAINT transfer_sources_source_type_check CHECK ((source_type = ANY (ARRAY['raw'::text, 'chunk'::text, 'pack'::text])))
+    CONSTRAINT transfer_sources_scanned_bytes_check CHECK ((scanned_bytes >= 0)),
+    CONSTRAINT transfer_sources_source_type_check CHECK ((source_type = ANY (ARRAY['raw'::text, 'chunk'::text, 'pack'::text]))),
+    CONSTRAINT transfer_sources_state_check CHECK ((state = ANY (ARRAY['selected'::text, 'scanning'::text, 'copying'::text, 'verifying'::text, 'ready'::text]))),
+    CONSTRAINT transfer_sources_written_bytes_check CHECK ((written_bytes >= 0))
+);
+
+CREATE TABLE public.transfer_spans (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    unit_id uuid NOT NULL,
+    source_offset bigint NOT NULL,
+    length integer NOT NULL,
+    hash bytea NOT NULL,
+    CONSTRAINT transfer_spans_hash_check CHECK ((octet_length(hash) = 32)),
+    CONSTRAINT transfer_spans_length_check CHECK ((length > 0)),
+    CONSTRAINT transfer_spans_source_offset_check CHECK ((source_offset >= 0))
 );
 
 CREATE TABLE public.uploads (
@@ -2500,11 +2550,29 @@ ALTER TABLE ONLY public.token_bucket_grants
 ALTER TABLE ONLY public.transfer_items
     ADD CONSTRAINT transfer_items_pkey PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.transfer_members
+    ADD CONSTRAINT transfer_members_pkey PRIMARY KEY (task_id, source_chunk);
+
+ALTER TABLE ONLY public.transfer_members
+    ADD CONSTRAINT transfer_members_unit_id_source_offset_key UNIQUE (unit_id, source_offset);
+
+ALTER TABLE ONLY public.transfer_parts
+    ADD CONSTRAINT transfer_parts_pkey PRIMARY KEY (unit_id, number);
+
 ALTER TABLE ONLY public.transfer_runs
     ADD CONSTRAINT transfer_runs_pkey PRIMARY KEY (task_id);
 
 ALTER TABLE ONLY public.transfer_sources
+    ADD CONSTRAINT transfer_sources_id_key UNIQUE (id);
+
+ALTER TABLE ONLY public.transfer_sources
     ADD CONSTRAINT transfer_sources_pkey PRIMARY KEY (task_id, source_type, source_id);
+
+ALTER TABLE ONLY public.transfer_spans
+    ADD CONSTRAINT transfer_spans_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.transfer_spans
+    ADD CONSTRAINT transfer_spans_unit_id_source_offset_key UNIQUE (unit_id, source_offset);
 
 ALTER TABLE ONLY public.uploads
     ADD CONSTRAINT uploads_pkey PRIMARY KEY (id);
@@ -2767,9 +2835,21 @@ CREATE INDEX transfer_items_source_pin ON public.transfer_items USING btree (sou
 
 CREATE INDEX transfer_items_work ON public.transfer_items USING btree (task_id, state, id);
 
+CREATE INDEX transfer_members_chunk ON public.transfer_members USING btree (source_chunk);
+
 CREATE INDEX transfer_runs_creator ON public.transfer_runs USING btree (created_by, task_id);
 
+CREATE INDEX transfer_sources_candidate ON public.transfer_sources USING btree (candidate);
+
+CREATE INDEX transfer_sources_encoding ON public.transfer_sources USING btree (source_encoding);
+
+CREATE INDEX transfer_sources_pack ON public.transfer_sources USING btree (source_pack);
+
 CREATE INDEX transfer_sources_protection ON public.transfer_sources USING btree (source_type, source_id, task_id);
+
+CREATE INDEX transfer_sources_raw ON public.transfer_sources USING btree (source_raw);
+
+CREATE INDEX transfer_sources_work ON public.transfer_sources USING btree (task_id, state, id);
 
 CREATE INDEX uploads_bucket_transfers ON public.uploads USING btree (bucket_id, created_at DESC, id);
 
@@ -3311,11 +3391,38 @@ ALTER TABLE ONLY public.transfer_items
 ALTER TABLE ONLY public.transfer_items
     ADD CONSTRAINT transfer_items_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.transfer_runs(task_id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.transfer_members
+    ADD CONSTRAINT transfer_members_source_chunk_fkey FOREIGN KEY (source_chunk) REFERENCES public.chunks(id);
+
+ALTER TABLE ONLY public.transfer_members
+    ADD CONSTRAINT transfer_members_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.transfer_runs(task_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_members
+    ADD CONSTRAINT transfer_members_unit_id_fkey FOREIGN KEY (unit_id) REFERENCES public.transfer_sources(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_parts
+    ADD CONSTRAINT transfer_parts_unit_id_fkey FOREIGN KEY (unit_id) REFERENCES public.transfer_sources(id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY public.transfer_runs
     ADD CONSTRAINT transfer_runs_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.transfer_sources
+    ADD CONSTRAINT transfer_sources_candidate_fkey FOREIGN KEY (candidate) REFERENCES public.streams(id);
+
+ALTER TABLE ONLY public.transfer_sources
+    ADD CONSTRAINT transfer_sources_source_encoding_fkey FOREIGN KEY (source_encoding) REFERENCES public.chunk_encodings(encoding_id);
+
+ALTER TABLE ONLY public.transfer_sources
+    ADD CONSTRAINT transfer_sources_source_pack_fkey FOREIGN KEY (source_pack) REFERENCES public.packs(id);
+
+ALTER TABLE ONLY public.transfer_sources
+    ADD CONSTRAINT transfer_sources_source_raw_fkey FOREIGN KEY (source_raw) REFERENCES public.raw_sources(id);
+
+ALTER TABLE ONLY public.transfer_sources
     ADD CONSTRAINT transfer_sources_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.transfer_runs(task_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_spans
+    ADD CONSTRAINT transfer_spans_unit_id_fkey FOREIGN KEY (unit_id) REFERENCES public.transfer_sources(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.uploads
     ADD CONSTRAINT uploads_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);

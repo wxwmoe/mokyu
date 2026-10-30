@@ -11,6 +11,8 @@ pub(crate) type Member = (super::Id, i64, i32, Vec<u8>);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Materials {
     pub storage: node_read::Storage,
+    #[serde(default)]
+    pub additional: Vec<node_read::Storage>,
     pub keys: Vec<node_read::BlockKey>,
 }
 
@@ -125,6 +127,18 @@ pub(crate) enum Plan {
         sealed: bool,
         part: bool,
     },
+    ScanTransfer(super::transfer::Scan),
+    CopyTransfer {
+        storage: Uuid,
+        transfer: Box<super::transfer::Work>,
+        batch: Box<super::node_pack::Batch>,
+        source_permits: [Uuid; 2],
+    },
+    RawTransfer {
+        storage: Uuid,
+        transfer: Box<super::transfer::RawCopy>,
+        source_permits: [Uuid; 2],
+    },
     HashRaw {
         storage: Uuid,
         items: Vec<RawHash>,
@@ -170,10 +184,20 @@ pub(crate) enum Plan {
 }
 
 impl Plan {
+    pub(crate) fn source_permits(&self) -> &[Uuid] {
+        match self {
+            Self::CopyTransfer { source_permits, .. }
+            | Self::RawTransfer { source_permits, .. } => source_permits,
+            _ => &[],
+        }
+    }
     pub(crate) fn storage(&self) -> Option<Uuid> {
         match self {
             Self::ExternalTest(_) => None,
+            Self::ScanTransfer(value) => Some(value.source.storage_id),
             Self::ConvertRaw { storage, .. }
+            | Self::CopyTransfer { storage, .. }
+            | Self::RawTransfer { storage, .. }
             | Self::Migrate { storage, .. }
             | Self::UploadRaw { storage, .. }
             | Self::HashRaw { storage, .. }
@@ -195,6 +219,7 @@ pub(crate) enum Outcome {
     Uploaded,
     Converted,
     Migrated,
+    Scanned(super::transfer::Scanned),
     Hashed {
         hash: Vec<u8>,
     },
@@ -212,6 +237,9 @@ pub(crate) enum Outcome {
         items: Vec<ListedObject>,
     },
     Packed(super::node_pack::Encoded),
+    Transferred {
+        digest: Vec<u8>,
+    },
     Encoded {
         size: i64,
         compressed: bool,

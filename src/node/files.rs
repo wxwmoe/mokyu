@@ -650,6 +650,63 @@ impl Cache {
         Some(ready)
     }
 
+    pub(super) fn prepare_batch(
+        self: &Arc<Self>,
+        rows: Vec<(Uuid, Bytes)>,
+        profile: &StorageProfile,
+        memory: Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let policy = self.policy(profile).ok()?;
+        if !policy.enabled || rows.is_empty() {
+            return None;
+        }
+        let run = self.state.borrow().snapshot.as_ref()?.lease.clone();
+        run.check().ok()?;
+        let work = self.work(rows[0].0, 1)?;
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let cache = self.clone();
+        let (ready, published) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (_work, _memory) = (work, memory);
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), published).await,
+                Ok(Ok(()))
+            ) {
+                return;
+            }
+            let result = async {
+                cache.initialize().await?;
+                let started = tokio::time::Instant::now();
+                for (id, data) in rows {
+                    if started.elapsed() >= std::time::Duration::from_secs(1) {
+                        break;
+                    }
+                    ensure!(
+                        !data.is_empty() && data.len() <= codec::MAX,
+                        "invalid processed cache chunk"
+                    );
+                    cache
+                        .files()
+                        .fill(id, &data, false, policy, || {
+                            run.check()?;
+                            ensure!(
+                                cache.epoch.load(Ordering::Acquire) == epoch,
+                                "cache storage changed"
+                            );
+                            Ok(())
+                        })
+                        .await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::debug!(%error,"node processed cache batch skipped");
+            }
+        });
+        Some(ready)
+    }
+
     pub(super) async fn snapshot(&self) -> serde_json::Value {
         let capacity = self.disk.upload_capacity().ok();
         let used = self.disk.used();

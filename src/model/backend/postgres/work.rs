@@ -18,6 +18,9 @@ mod rewrite;
 #[path = "work_packing.rs"]
 mod packing;
 
+#[path = "work_transfer.rs"]
+mod transfer;
+
 #[path = "work_raw.rs"]
 mod raw;
 
@@ -107,14 +110,20 @@ fn reply(
         )?;
         if let Some(storage) = plan.storage() {
             let values: work::Materials = serde_json::from_str(&material)?;
-            read::material(
-                &mut materials,
-                node.deployment_id,
-                read::MaterialType::Storage,
-                storage.to_string(),
-                &values.storage,
-                &input.cached,
-            )?;
+            ensure!(
+                values.storage.profile.storage_id == storage,
+                Error::NodeOperationConflict
+            );
+            for value in std::iter::once(values.storage).chain(values.additional) {
+                read::material(
+                    &mut materials,
+                    node.deployment_id,
+                    read::MaterialType::Storage,
+                    value.profile.storage_id.to_string(),
+                    &value,
+                    &input.cached,
+                )?;
+            }
             for block in values.keys {
                 read::material(
                     &mut materials,
@@ -221,15 +230,17 @@ async fn finish(
         return Ok(());
     }
     ensure!(row.valid_for_ms > 0, Error::NodeExpired);
+    let mut permit_tokens = vec![row.token, row.maintenance_token];
+    if let Some(plan) = &row.plan {
+        permit_tokens.extend_from_slice(plan.0.source_permits());
+    }
     if row
         .plan
         .as_ref()
         .is_some_and(|plan| plan.0.storage().is_some())
     {
         ensure!(
-            q::live_permits(row.token, row.maintenance_token)
-                .fetch_one(&mut **db)
-                .await?,
+            q::live_permits(&permit_tokens).fetch_one(&mut **db).await?,
             Error::NodeExpired
         );
     }
@@ -305,6 +316,85 @@ async fn finish(
             )
             .await?;
             release_task_inputs(db, task).await?;
+        }
+        work::Plan::RawTransfer { transfer: plan, .. } => {
+            ensure!(!maintenance, Error::OperationAborted);
+            let [outcome] = completion.outcomes.as_slice() else {
+                return Err(Error::NodeOperationConflict.into());
+            };
+            match outcome {
+                work::Outcome::Transferred { digest } => {
+                    let task = Execution {
+                        id: task,
+                        token: row.token,
+                    };
+                    let run = super::super::replication_transactions::owned(db, task).await?;
+                    super::super::transfer_transactions::raw_progress(
+                        db,
+                        task,
+                        &run,
+                        &plan,
+                        &crate::model::transfer::RawProgress::Finished {
+                            digest: digest.clone(),
+                        },
+                    )
+                    .await?;
+                }
+                work::Outcome::Retry => error = Some("backend_io_failed"),
+                _ => return Err(Error::NodeOperationConflict.into()),
+            }
+        }
+        work::Plan::CopyTransfer {
+            storage,
+            transfer: copied,
+            batch,
+            ..
+        } => {
+            ensure!(!maintenance, Error::OperationAborted);
+            let [outcome] = completion.outcomes.as_slice() else {
+                return Err(Error::NodeOperationConflict.into());
+            };
+            match outcome {
+                work::Outcome::Packed(result) => {
+                    transfer::finish(
+                        db,
+                        Execution {
+                            id: task,
+                            token: row.token,
+                        },
+                        storage,
+                        &copied,
+                        &batch,
+                        result,
+                        key,
+                    )
+                    .await?
+                }
+                work::Outcome::Retry => error = Some("backend_io_failed"),
+                _ => return Err(Error::NodeOperationConflict.into()),
+            }
+        }
+        work::Plan::ScanTransfer(plan) => {
+            ensure!(
+                !maintenance && completion.outcomes.len() == 1,
+                Error::OperationAborted
+            );
+            match &completion.outcomes[0] {
+                work::Outcome::Scanned(value) => {
+                    plan.validate(value)?;
+                    let run = super::super::replication_transactions::owned(
+                        db,
+                        Execution {
+                            id: task,
+                            token: row.token,
+                        },
+                    )
+                    .await?;
+                    super::super::transfer_transactions::scanned(db, &run, value).await?;
+                }
+                work::Outcome::Retry => error = Some("backend_io_failed"),
+                _ => return Err(Error::NodeOperationConflict.into()),
+            }
         }
         work::Plan::HashRaw { items, .. } => {
             ensure!(!maintenance, Error::OperationAborted);
@@ -503,10 +593,7 @@ async fn finish(
     q::result(node.node_id, completion.operation, &hash)
         .execute(&mut **db)
         .await?;
-    queries::release_storage_permit(row.token)
-        .execute(&mut **db)
-        .await?;
-    queries::release_storage_permit(row.maintenance_token)
+    q::release_permits(&permit_tokens)
         .execute(&mut **db)
         .await?;
     q::finish(task, row.token, deleted, complete, error)
@@ -884,6 +971,26 @@ pub(crate) async fn exchange(
                     .fetch_one(&mut *tx)
                     .await?
                     .storage_id
+            } else if policy == "storage_migration" && detail["operation"] == "replication" {
+                let run = super::super::replication_transactions::owned(
+                    &mut tx,
+                    Execution { id: task, token },
+                )
+                .await?;
+                if let Some(unit) = super::super::transfer_queries::pending(task)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                {
+                    if matches!(unit.state.as_str(), "selected" | "scanning")
+                        && unit.source_type == "raw"
+                    {
+                        run.source_storage_id
+                    } else {
+                        run.storage_id
+                    }
+                } else {
+                    run.storage_id
+                }
             } else if policy == "storage_migration" && detail["operation"] != "replication" {
                 migration::storage(&mut tx, &detail).await?
             } else {
@@ -903,24 +1010,53 @@ pub(crate) async fn exchange(
                 .fetch_one(&mut *tx)
                 .await?;
             ensure!(record.r#type == "s3", Error::SourceUnavailable);
-            if permits(
-                &mut tx,
-                node.node_id,
-                token,
-                maintenance,
-                &profile,
-                if policy == "integrity" {
-                    "integrity"
-                } else if policy == "storage_migration" {
-                    "migration"
-                } else if policy == "upload" && detail["operation"] == "cache" {
-                    "upload"
+            let secondary_id: Option<Uuid> =
+                if policy == "storage_migration" && detail["operation"] == "replication" {
+                    q::transfer_source(task, storage)
+                        .fetch_optional(&mut *tx)
+                        .await?
                 } else {
-                    "maintenance"
-                },
-            )
-            .await?
-            {
+                    None
+                };
+            let secondary = if let Some(storage) = secondary_id {
+                let profile = queries::storage_profile(storage)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let record = queries::node_read_storages(&[storage])
+                    .fetch_one(&mut *tx)
+                    .await?;
+                ensure!(record.r#type == "s3", Error::SourceUnavailable);
+                Some((record, profile))
+            } else {
+                None
+            };
+            let source_permits = [Uuid::new_v4(), Uuid::new_v4()];
+            let mut scopes = vec![(profile.clone(), token, maintenance)];
+            if let Some((_, source)) = &secondary {
+                scopes.push((source.clone(), source_permits[0], source_permits[1]));
+            }
+            scopes.sort_by_key(|(profile, _, _)| profile.storage_id);
+            let permit_tokens: Vec<_> = scopes
+                .iter()
+                .flat_map(|(_, control, work)| [*control, *work])
+                .collect();
+            let direction = if policy == "integrity" {
+                "integrity"
+            } else if policy == "storage_migration" {
+                "migration"
+            } else if policy == "upload" && detail["operation"] == "cache" {
+                "upload"
+            } else {
+                "maintenance"
+            };
+            let mut permitted = true;
+            for (profile, control, work) in &scopes {
+                if !permits(&mut tx, node.node_id, *control, *work, profile, direction).await? {
+                    permitted = false;
+                    break;
+                }
+            }
+            if permitted {
                 let selected = if policy == "sweep" && detail["dry_run"] == false && !sweep_barrier
                 {
                     // A sweep queued after the shared mode lock needs a new exclusive admission.
@@ -963,8 +1099,10 @@ pub(crate) async fn exchange(
                     let execution = Execution { id: task, token };
                     let mut run =
                         super::super::replication_transactions::owned(&mut tx, execution).await?;
-                    match super::super::replication_transactions::verification(&mut tx, &mut run)
-                        .await?
+                    match super::super::replication_transactions::verification(
+                        &mut tx, execution, &mut run,
+                    )
+                    .await?
                     {
                         crate::model::replication::Step::Verify { storage, sources } => Some((
                             work::Plan::HashRaw {
@@ -976,6 +1114,64 @@ pub(crate) async fn exchange(
                             },
                             vec![],
                         )),
+                        crate::model::replication::Step::Scan(value) => {
+                            ensure!(value.source.storage_id == storage, Error::OperationAborted);
+                            Some((work::Plan::ScanTransfer(value), vec![]))
+                        }
+                        crate::model::replication::Step::Raw(copy) => {
+                            copy.validate()?;
+                            ensure!(
+                                copy.target.storage_id == storage
+                                    && secondary_id == Some(copy.input.storage()?),
+                                Error::OperationAborted
+                            );
+                            let block = match &copy.input {
+                                crate::model::transfer::Input::Chunk { chunk } => {
+                                    chunk.block_key_id
+                                }
+                                crate::model::transfer::Input::Pack { pack, .. } => {
+                                    pack.block_key_id
+                                }
+                                crate::model::transfer::Input::Raw { .. } => None,
+                            };
+                            let keys =
+                                rewrite::keys(&mut tx, &block.into_iter().collect::<Vec<_>>(), key)
+                                    .await?;
+                            let plan = work::Plan::RawTransfer {
+                                storage,
+                                transfer: Box::new(copy),
+                                source_permits,
+                            };
+                            ensure!(
+                                serde_json::to_vec(&plan)?.len() <= 3 * 1024 * 1024,
+                                Error::NodeWorkLimit
+                            );
+                            Some((plan, keys))
+                        }
+                        crate::model::replication::Step::Copy(copy) => {
+                            ensure!(
+                                copy.storage == storage
+                                    && secondary_id == Some(copy.input.storage()?),
+                                Error::OperationAborted
+                            );
+                            if let Some(prepared) =
+                                transfer::prepare(&mut tx, execution, &copy, key).await?
+                            {
+                                let plan = work::Plan::CopyTransfer {
+                                    storage,
+                                    transfer: Box::new(prepared.work),
+                                    batch: Box::new(prepared.batch),
+                                    source_permits,
+                                };
+                                ensure!(
+                                    serde_json::to_vec(&plan)?.len() <= 3 * 1024 * 1024,
+                                    Error::NodeWorkLimit
+                                );
+                                Some((plan, prepared.keys))
+                            } else {
+                                None
+                            }
+                        }
                         crate::model::replication::Step::Continue => None,
                     }
                 } else if policy == "storage_migration" {
@@ -1054,7 +1250,20 @@ pub(crate) async fn exchange(
                             .execute(&mut *tx)
                             .await?;
                     } else {
+                        let additional = secondary
+                            .into_iter()
+                            .map(|(record, profile)| {
+                                Ok(read::Storage {
+                                    connection: crate::storage::model::Connection::unprotect(
+                                        &record, key,
+                                    )?,
+                                    revision: profile.revision,
+                                    profile,
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
                         let material = work::Materials {
+                            additional,
                             storage: read::Storage {
                                 connection: crate::storage::model::Connection::unprotect(
                                     &record, key,
@@ -1079,12 +1288,7 @@ pub(crate) async fn exchange(
                         .await?;
                 }
                 if assigned.is_none() {
-                    queries::release_storage_permit(token)
-                        .execute(&mut *tx)
-                        .await?;
-                    queries::release_storage_permit(maintenance)
-                        .execute(&mut *tx)
-                        .await?;
+                    q::release_permits(&permit_tokens).execute(&mut *tx).await?;
                     if let Some(parent) = parent {
                         queries::update_parent_progress(parent)
                             .execute(&mut *tx)
@@ -1092,6 +1296,7 @@ pub(crate) async fn exchange(
                     }
                 }
             } else {
+                q::release_permits(&permit_tokens).execute(&mut *tx).await?;
                 queries::requeue_owned_task(task, token)
                     .execute(&mut *tx)
                     .await?;
@@ -1129,4 +1334,60 @@ pub(crate) async fn exchange(
     let value = reply(node, key, &input, row)?;
     tx.commit().await?;
     Ok(value)
+}
+
+pub(crate) async fn checkpoint_transfer(
+    pool: &sqlx::PgPool,
+    node: &NodeState,
+    key: &Key,
+    run: Run,
+    operation: Uuid,
+    progress: &crate::model::transfer::RawProgress,
+) -> Result<()> {
+    progress.validate()?;
+    let mut db = pool.begin().await?;
+    ensure!(
+        q::writable().fetch_one(&mut *db).await?,
+        Error::OperationAborted
+    );
+    authenticate_rpc_node(&mut db, node, key, false).await?;
+    require_node_run(&mut db, node, run, true).await?;
+    ensure!(
+        matches!(node.role.as_str(), "worker" | "node"),
+        Error::NodeInactive
+    );
+    let row = q::batch(node.node_id, operation)
+        .fetch_optional(&mut *db)
+        .await?
+        .ok_or(Error::NodeExpired)?;
+    owned(node, run, &row)?;
+    ensure!(
+        row.valid_for_ms > 0 && row.result_hash.is_none(),
+        Error::NodeExpired
+    );
+    let plan = row.plan.context("work plan missing")?.0;
+    let mut tokens = vec![row.token, row.maintenance_token];
+    tokens.extend_from_slice(plan.source_permits());
+    ensure!(
+        q::live_permits(&tokens).fetch_one(&mut *db).await?,
+        Error::NodeExpired
+    );
+    let work::Plan::RawTransfer { transfer: plan, .. } = plan else {
+        anyhow::bail!(Error::NodeOperationConflict)
+    };
+    let task = Execution {
+        id: row.task_id.context("work task missing")?,
+        token: row.token,
+    };
+    ensure!(
+        q::task(task.id, task.token, node.node_id)
+            .fetch_optional(&mut *db)
+            .await?
+            .is_some(),
+        Error::NodeExpired
+    );
+    let run = super::super::replication_transactions::owned(&mut db, task).await?;
+    super::super::transfer_transactions::raw_progress(&mut db, task, &run, &plan, progress).await?;
+    db.commit().await?;
+    Ok(())
 }

@@ -51,6 +51,7 @@ pub(crate) mod source;
 pub(crate) mod storage;
 mod stream;
 pub(crate) mod task;
+pub(crate) mod transfer;
 
 use backend::postgres;
 use std::sync::Arc;

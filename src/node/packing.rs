@@ -4,6 +4,118 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use std::collections::BTreeSet;
 
 impl Reader {
+    pub(super) async fn transfer_encoded(
+        &self,
+        source: &Backend,
+        keys: Arc<BTreeMap<Uuid, codec::Key>>,
+        input: &crate::model::transfer::Input,
+        memory: &Arc<OwnedSemaphorePermit>,
+    ) -> Result<Vec<(Id, Bytes)>> {
+        use crate::model::transfer::Input;
+        let (path, bound) = match input {
+            Input::Chunk { chunk } => (
+                Path::from(crate::storage::chunk_name(chunk.location_id)),
+                codec::MAX + 16,
+            ),
+            Input::Pack { pack, .. } => (
+                Path::from(format!(
+                    "packs/{}",
+                    crate::storage::chunk_name(pack.location_id)
+                )),
+                pack.payload_size()? + 16,
+            ),
+            Input::Raw { .. } => unreachable!(),
+        };
+        self.gets.fetch_add(1, Ordering::Relaxed);
+        let bytes = read_bounded(source.store.backend.as_ref(), &path, bound).await?;
+        let input = input.clone();
+        let pool = self.pool.clone();
+        let secrets = keys.clone();
+        let cpu = self.cpu.clone().acquire_owned().await?;
+        let hold = memory.clone();
+        let (data, _memory) = tokio::task::spawn_blocking(move || {
+            let _cpu = cpu;
+            Ok::<_, anyhow::Error>((
+                crate::content::transfer::decode(&input, bytes, secrets.as_ref(), &pool)?,
+                hold,
+            ))
+        })
+        .await??;
+        Ok(data)
+    }
+
+    pub(crate) async fn copy_transfer(
+        &self,
+        source: Arc<Backend>,
+        target: Arc<Backend>,
+        keys: Arc<BTreeMap<Uuid, codec::Key>>,
+        work: &crate::model::transfer::Work,
+        batch: wire::Batch,
+    ) -> Result<(wire::Encoded, crate::storage::cache::Fills)> {
+        use crate::model::transfer::Input;
+        work.validate(target.profile.storage_id, &batch)?;
+        ensure!(
+            source.profile.storage_id == work.input.storage()?,
+            "transfer source storage differs"
+        );
+        let attempts = layout(&batch)?;
+        let payload = match &work.input {
+            Input::Pack { pack, .. } => pack.payload_size()? as u64 + 16,
+            Input::Raw { source } => {
+                let (start, end) = crate::model::transfer::chunk_span_bounds(source, &work.spans)?;
+                end - start
+            }
+            Input::Chunk { chunk } => chunk.raw_size as u64 + 16,
+        };
+        let config = target.profile.compression_config("0s");
+        let units = (payload.saturating_mul(4) + self.workspace.max(config.workspace_bytes()?))
+            .div_ceil(1024 * 1024);
+        ensure!(
+            units <= u64::from(self.pack_units),
+            "transfer exceeds node memory budget"
+        );
+        let memory = Arc::new(self.acquire(&self.packs, units as u32).await?);
+        let _io = self.acquire(&self.io, 1).await?;
+        source.store.verify().await?;
+        let data = if let Input::Raw { source: raw } = &work.input {
+            ensure!(
+                raw.medium == "shared_s3" && !raw.pending_upload,
+                codec::IntegrityError::RawMetadata
+            );
+            let mut file = RawFile::remote(
+                source.store.backend.clone(),
+                raw,
+                self.gets.clone(),
+                self.diagnostics.clone(),
+            )
+            .await?;
+            let resources = crate::content::transfer::Resources {
+                cpu: self.cpu.clone(),
+                memory: memory.clone(),
+            };
+            crate::content::transfer::read_spans(raw, &work.spans, &mut file, &resources).await?
+        } else {
+            self.transfer_encoded(&source, keys.clone(), &work.input, &memory)
+                .await?
+        };
+        let data: BTreeMap<_, _> = data.into_iter().collect();
+        let mut raw = BTreeMap::new();
+        for ((source, target), chunk) in work.targets.iter().zip(&batch.chunks) {
+            raw.insert(
+                *target,
+                (
+                    chunk.hash.clone(),
+                    data.get(source)
+                        .context("transfer source data missing")?
+                        .clone(),
+                ),
+            );
+        }
+        target.store.verify().await?;
+        self.pack_data(target, keys, batch, raw, memory, attempts)
+            .await
+    }
+
     pub(crate) async fn pack(
         &self,
         backend: Arc<Backend>,
@@ -237,15 +349,23 @@ impl Reader {
                 }
             }
         }
-        let mut fills = Vec::new();
-        for (index, (chunk, raw)) in data.iter().enumerate() {
-            let id = if result.chunks[index] != 0 {
-                chunk.location_id
-            } else {
-                chunk.uuid
-            };
-            fills.extend(self.files.prepare_fill(id, raw, false, &backend.profile));
-        }
+        let cached = data
+            .iter()
+            .enumerate()
+            .map(|(index, (chunk, raw))| {
+                let id = if result.chunks[index] != 0 {
+                    chunk.location_id
+                } else {
+                    chunk.uuid
+                };
+                (id, raw.clone())
+            })
+            .collect();
+        let fills = self
+            .files
+            .prepare_batch(cached, &backend.profile, memory)
+            .into_iter()
+            .collect();
         Ok((result, fills))
     }
 
