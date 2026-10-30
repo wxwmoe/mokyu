@@ -100,6 +100,33 @@ pub(super) struct Reader {
 }
 
 impl Reader {
+    pub(super) async fn export_range(
+        &self,
+        prepared: &Prepared,
+        range: &crate::model::replication::external::RawRead,
+    ) -> Result<Bytes> {
+        range.validate()?;
+        ensure!(
+            range.source.medium == "shared_s3" && !range.source.pending_upload,
+            codec::IntegrityError::RawMetadata
+        );
+        let _io = self.io(prepared, Some(range.source.storage_id)).await?;
+        let backend = prepared.backend(range.source.storage_id)?;
+        backend.store.ensure_verified().await?;
+        let mut file = RawFile::remote(
+            backend.store.backend.clone(),
+            &range.source,
+            self.gets.clone(),
+            self.diagnostics.clone(),
+        )
+        .await?;
+        let resources = crate::content::transfer::Resources {
+            cpu: self.cpu.clone(),
+            memory: prepared.memory.clone(),
+        };
+        crate::content::transfer::read_range(range, &mut file, &resources).await
+    }
+
     pub(super) fn new(node: &NodeContext) -> Result<Self> {
         let budget = node.budget.get().context("node budget missing")?;
         let limits = {
@@ -156,20 +183,14 @@ impl Reader {
         self.pool.run().await
     }
 
-    pub(super) async fn external_transfer(
-        &self,
-        plan: &crate::model::replication::external::Plan,
-        connections: &[crate::model::external::Snapshot],
-    ) -> Result<crate::model::replication::external::Outcome> {
+    pub(super) async fn transfer_memory(&self) -> Result<Arc<OwnedSemaphorePermit>> {
         let units = (crate::storage::external::objects::WINDOW as u64 * 4 + self.workspace)
             .div_ceil(1024 * 1024);
         ensure!(
             units <= u64::from(self.pack_units),
             "external transfer exceeds node memory budget"
         );
-        let memory = Arc::new(self.acquire(&self.packs, units as u32).await?);
-        let _io = self.acquire(&self.io, 1).await?;
-        crate::storage::external::transfer::execute(plan, connections, &memory).await
+        Ok(Arc::new(self.acquire(&self.packs, units as u32).await?))
     }
 
     pub(super) fn http_work(&self) -> Option<OwnedSemaphorePermit> {

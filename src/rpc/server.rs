@@ -1357,6 +1357,47 @@ impl NodeWork for Service {
         }
         Ok(Response::new(reply))
     }
+    async fn read_transfer(
+        &self,
+        request: Request<wire::ReadTransferRequest>,
+    ) -> Result<Response<wire::ReadTransferReply>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        if prost::Message::encoded_len(&input) > super::read::REQUEST_LIMIT {
+            return Err(Status::resource_exhausted(
+                "transfer read request exceeds message budget",
+            ));
+        }
+        let input = model::node_work::ReadTransfer {
+            run: super::read::run(input.run)?,
+            operation: super::uuid(&input.operation_id)?,
+            read: super::uuid(&input.read_id)?,
+            offset: input.offset,
+            length: input.length,
+            cached: super::read::cached(input.cached)?,
+        };
+        let (value, raw) = bounded(self.app.cluster().map_err(failure)?.read_transfer(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        let reply = wire::ReadTransferReply {
+            read: Some(super::read::reply(value)),
+            raw_json: raw
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()
+                .map_err(|error| failure(error.into()))?
+                .unwrap_or_default(),
+        };
+        if prost::Message::encoded_len(&reply) > super::MESSAGE_LIMIT {
+            return Err(Status::resource_exhausted(
+                "transfer read exceeds message budget",
+            ));
+        }
+        Ok(Response::new(reply))
+    }
     async fn exchange(
         &self,
         request: Request<wire::WorkRequest>,

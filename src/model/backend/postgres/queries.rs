@@ -7598,6 +7598,17 @@ impl ClusterStore for Backend {
     ) -> Result<crate::model::node_work::Reply> {
         transactions::work::exchange(&self.pool, node, key, input).await
     }
+    async fn read_transfer(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_work::ReadTransfer,
+    ) -> Result<(
+        crate::model::node_read::Reply,
+        Option<crate::model::replication::external::RawRead>,
+    )> {
+        transactions::work::export::read(&self.pool, node, key, input).await
+    }
     async fn checkpoint_transfer(
         &self,
         node: &NodeState,

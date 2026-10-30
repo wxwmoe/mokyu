@@ -152,8 +152,8 @@ impl Worker {
                                 .context("external connections missing")?,
                         )?;
                     let outcome = self
-                        .reader
-                        .external_transfer(transfer, &connections)
+                        .writes
+                        .external_transfer(operation, transfer, &connections)
                         .await?;
                     return Ok(work::Completion {
                         operation,

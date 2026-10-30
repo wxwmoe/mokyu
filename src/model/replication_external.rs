@@ -3,6 +3,38 @@ use crate::storage::external::objects::{self, Object, Written};
 use crate::{content::codec, model::external::Snapshot};
 use anyhow::Context;
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawRead {
+    pub source: super::super::raw::RawSource,
+    pub proof: super::super::transfer::Proof,
+    pub offset: u64,
+    pub length: u32,
+}
+
+impl RawRead {
+    pub(crate) fn validate(&self) -> Result<()> {
+        self.source.validate()?;
+        let end = self
+            .proof
+            .offset
+            .checked_add(u64::from(self.proof.size))
+            .context("transfer proof overflow")?;
+        ensure!(
+            self.proof.size > 0
+                && self.proof.size as usize <= super::super::transfer::PROOF_BYTES
+                && self.proof.hash.len() == 32
+                && end <= self.source.size as u64
+                && self.offset >= self.proof.offset
+                && self.offset < end
+                && self.length > 0
+                && u64::from(self.length) <= end - self.offset,
+            "invalid transfer read proof"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
@@ -49,6 +81,13 @@ pub(crate) struct Change {
     pub state: State,
     pub part: Option<Part>,
     pub finish: Option<Finish>,
+}
+
+impl Change {
+    pub(crate) fn source_changed(&mut self) {
+        self.state.finish("conflict", Some("object_changed"));
+        self.finish = (self.state.phase == Phase::Done).then(|| self.state.finish.clone().unwrap());
+    }
 }
 
 impl State {
@@ -241,6 +280,44 @@ pub(crate) struct Plan {
     pub key: Option<String>,
     pub state: State,
     pub parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<Native>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Native {
+    pub stream: Id,
+    pub object: Object,
+    pub public: bool,
+}
+
+impl Native {
+    pub(crate) fn new(stream: Id, source: &super::Snapshot) -> Result<Self> {
+        ensure!(source.size >= 0, "invalid native source size");
+        let metadata: crate::app::Metadata = serde_json::from_value(source.metadata.clone())?;
+        let headers = crate::http::object::metadata_headers(&metadata)?;
+        let mut values = std::collections::BTreeMap::new();
+        for (name, value) in &headers {
+            values.insert(name.as_str().into(), value.to_str()?.into());
+        }
+        for (name, value) in metadata.user.unwrap_or_default() {
+            values.insert(format!("x-amz-meta-{}", name.to_ascii_lowercase()), value);
+        }
+        let object = Object {
+            size: source.size as u64,
+            etag: format!("\"{}\"", source.etag),
+            version: Some(stream.to_string()),
+            modified: None,
+            metadata: values,
+        };
+        object.validate()?;
+        Ok(Self {
+            stream,
+            object,
+            public: source.public,
+        })
+    }
 }
 
 impl Plan {
@@ -261,6 +338,13 @@ impl Plan {
             "invalid transfer cursor"
         );
         self.state.validate()?;
+        if let Some(native) = &self.native {
+            ensure!(
+                !self.options.source_external && self.item.is_some(),
+                "unexpected native source"
+            );
+            native.object.validate()?;
+        }
         if let Some(key) = &self.key {
             self.options.target(key)?;
         }
@@ -735,6 +819,7 @@ mod tests {
             },
             state,
             parts,
+            native: None,
         })
     }
 
@@ -895,6 +980,70 @@ mod tests {
         assert!(plan.options.external_scopes(&source, &target).is_err());
         target.prefix = "separate".into();
         plan.options.external_scopes(&source, &target)?;
+        Ok(())
+    }
+
+    #[test]
+    fn native_sources_preserve_headers_and_public_state() -> Result<()> {
+        let id = Id::from(Uuid::now_v7());
+        let source = super::super::Snapshot {
+            metadata: serde_json::json!({"content_type":"image/png","cache_control":"public, max-age=60","user":{"author":"test"}}),
+            checksums: serde_json::json!({}),
+            public: true,
+            size: 3,
+            etag: "abc".into(),
+            payload: "chunks".into(),
+        };
+        let native = Native::new(id, &source)?;
+        assert_eq!(native.object.version, Some(id.to_string()));
+        assert_eq!(native.object.metadata["x-amz-meta-author"], "test");
+        assert_eq!(native.object.metadata["content-type"], "image/png");
+        assert!(native.public);
+        let mut invalid = source.clone();
+        invalid.size = -1;
+        assert!(Native::new(id, &invalid).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_native_source_returns_conflict_before_remote_io() -> Result<()> {
+        let mut plan = pending(17)?;
+        plan.options.source_external = false;
+        plan.state.phase = Phase::Transfer;
+        plan.state.position = 0;
+        plan.parts.clear();
+        let memory = std::sync::Arc::new(
+            std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await?,
+        );
+        let outcome =
+            crate::storage::external::transfer::execute(&plan, &[], &memory, None).await?;
+        assert!(matches!(outcome, Outcome::Conflict));
+        let change = apply(&plan, &outcome)?;
+        assert_eq!(change.state.phase, Phase::Cleanup);
+        assert_eq!(change.state.upload.as_deref(), Some("upload"));
+        assert!(change.finish.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn changed_native_source_keeps_new_upload_for_cleanup() -> Result<()> {
+        let mut plan = pending(17)?;
+        plan.state.phase = Phase::Start;
+        plan.state.position = 0;
+        plan.state.upload = None;
+        plan.parts.clear();
+        let mut changed = apply(
+            &plan,
+            &Outcome::Started {
+                upload: "new-upload".into(),
+            },
+        )?;
+        changed.source_changed();
+        assert_eq!(changed.state.phase, Phase::Cleanup);
+        assert_eq!(changed.state.upload.as_deref(), Some("new-upload"));
+        assert!(changed.finish.is_none());
         Ok(())
     }
 }

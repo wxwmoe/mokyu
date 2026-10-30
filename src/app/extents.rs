@@ -211,12 +211,30 @@ impl App {
         sources: &'a [StoredStream],
         range: std::ops::Range<u64>,
     ) -> futures_util::stream::BoxStream<'a, Result<Bytes>> {
+        self.replay_ranges(Some(destination), sources, range, false)
+    }
+
+    pub(crate) fn checked_range<'a>(
+        &'a self,
+        source: &'a StoredStream,
+        range: std::ops::Range<u64>,
+    ) -> futures_util::stream::BoxStream<'a, Result<Bytes>> {
+        self.replay_ranges(None, std::slice::from_ref(source), range, true)
+    }
+
+    fn replay_ranges<'a>(
+        &'a self,
+        destination: Option<Id>,
+        sources: &'a [StoredStream],
+        range: std::ops::Range<u64>,
+        verify: bool,
+    ) -> futures_util::stream::BoxStream<'a, Result<Bytes>> {
         Box::pin(async_stream::try_stream! {
             let context = crate::storage::ReadContext::default();
             let mut base = 0u64;
             let mut emitted = 0u64;
             let mut renewed = tokio::time::Instant::now();
-            self.renew_write_lease(destination).await?;
+            if let Some(destination) = destination { self.renew_write_lease(destination).await?; }
             for source in sources {
                 let end = base.checked_add(source.size as u64).context("replay size overflow")?;
                 if range.start >= end { base = end; continue; }
@@ -228,7 +246,7 @@ impl App {
                 while position < until {
                     self.ensure_mode()?;
                     if renewed.elapsed() >= std::time::Duration::from_secs(5) {
-                        self.renew_write_lease(destination).await?;
+                        if let Some(destination) = destination { self.renew_write_lease(destination).await?; }
                         renewed = tokio::time::Instant::now();
                     }
                     let before = position;
@@ -238,7 +256,7 @@ impl App {
                             row.validate()?;
                             (row.offset_bytes <= position).then_some(()).context("replay source mapping has a gap")?;
                             let end = (row.offset_bytes + row.length).min(until);
-                            let mut reader = self.storage.raw_reader(&row.source, false).await?;
+                            let mut reader = self.storage.raw_reader(&row.source, verify).await?;
                             reader.file.seek(std::io::SeekFrom::Start((row.source_offset + position - row.offset_bytes) as u64)).await?;
                             while position < end {
                                 let mut bytes = vec![0; (end - position).min(256 * 1024) as usize];
@@ -249,7 +267,7 @@ impl App {
                                 emitted += count as u64;
                                 reader.file.account_read(&self.storage, count as u64);
                                 if renewed.elapsed() >= std::time::Duration::from_secs(5) {
-                                    self.renew_write_lease(destination).await?;
+                                    if let Some(destination) = destination { self.renew_write_lease(destination).await?; }
                                     renewed = tokio::time::Instant::now();
                                 }
                                 yield Bytes::from(bytes);

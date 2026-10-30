@@ -9,6 +9,41 @@ const RESPONSE_LIMIT: usize = 1024 * 1024;
 const MAX_SIZE: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 pub(crate) const MAX_PART: u64 = 5 * 1024 * 1024 * 1024;
 
+#[async_trait::async_trait]
+pub(crate) trait Source: Send + Sync {
+    async fn read(&self, key: &str, snapshot: &Object, start: u64, size: usize) -> Result<Bytes>;
+
+    async fn hash_range(
+        &self,
+        key: &str,
+        snapshot: &Object,
+        start: u64,
+        size: u64,
+    ) -> Result<[u8; 32]> {
+        ensure!(
+            start <= snapshot.size && size <= snapshot.size - start,
+            "invalid source hash range"
+        );
+        let mut digest = Sha256::new();
+        let mut offset = start;
+        while offset < start + size {
+            let length = (start + size - offset).min(WINDOW as u64) as usize;
+            let bytes = self.read(key, snapshot, offset, length).await?;
+            ensure!(bytes.len() == length, "source range length differs");
+            digest.update(&bytes);
+            offset += length as u64;
+        }
+        Ok(digest.finalize().into())
+    }
+}
+
+#[async_trait::async_trait]
+impl Source for Client {
+    async fn read(&self, key: &str, snapshot: &Object, start: u64, size: usize) -> Result<Bytes> {
+        Client::read(self, key, snapshot, start, size).await
+    }
+}
+
 pub(crate) fn part_size(size: u64) -> Result<u64> {
     ensure!(size <= MAX_SIZE, "external object exceeds size limit");
     Ok(size
@@ -544,19 +579,7 @@ impl Client {
         start: u64,
         size: u64,
     ) -> Result<[u8; 32]> {
-        ensure!(
-            start <= snapshot.size && size <= snapshot.size - start,
-            "invalid external hash range"
-        );
-        let mut digest = Sha256::new();
-        let mut offset = start;
-        while offset < start + size {
-            let length = (start + size - offset).min(WINDOW as u64) as usize;
-            let bytes = self.read(key, snapshot, offset, length).await?;
-            digest.update(&bytes);
-            offset += length as u64;
-        }
-        Ok(digest.finalize().into())
+        Source::hash_range(self, key, snapshot, start, size).await
     }
 
     pub(crate) async fn transfer_part(
@@ -564,7 +587,7 @@ impl Client {
         key: &str,
         upload: &str,
         number: u16,
-        source: &Client,
+        source: &dyn Source,
         source_key: &str,
         snapshot: &Object,
         start: u64,

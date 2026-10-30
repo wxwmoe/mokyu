@@ -1,4 +1,7 @@
-use super::{Client, objects::Condition};
+use super::{
+    Client,
+    objects::{Condition, Object, Source as _},
+};
 use crate::model::{
     external::Snapshot,
     replication::{
@@ -8,6 +11,61 @@ use crate::model::{
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
+
+enum Source<'a> {
+    External(Client),
+    Native(&'a Plan, Option<&'a dyn super::objects::Source>),
+}
+
+impl Source<'_> {
+    async fn head(&self, key: &str) -> Result<Option<Object>> {
+        match self {
+            Self::External(client) => client.head(key, None).await,
+            Self::Native(plan, _) => Ok(plan.native.as_ref().map(|native| native.object.clone())),
+        }
+    }
+
+    async fn acl(&self, key: &str, object: &Object) -> Result<bool> {
+        match self {
+            Self::External(client) => client.acl(key, object).await,
+            Self::Native(plan, _) => {
+                let native = plan.native.as_ref().context("native source missing")?;
+                ensure!(&native.object == object, s3s::s3_error!(PreconditionFailed));
+                Ok(native.public)
+            }
+        }
+    }
+
+    fn external(&self) -> Result<&Client> {
+        let Self::External(client) = self else {
+            anyhow::bail!("native listings require a catalog")
+        };
+        Ok(client)
+    }
+}
+
+#[async_trait::async_trait]
+impl super::objects::Source for Source<'_> {
+    async fn read(&self, key: &str, object: &Object, start: u64, size: usize) -> Result<Bytes> {
+        match self {
+            Self::External(client) => client.read(key, object, start, size).await,
+            Self::Native(plan, reader) => {
+                ensure!(
+                    plan.key.as_deref() == Some(key)
+                        && plan
+                            .native
+                            .as_ref()
+                            .is_some_and(|native| &native.object == object),
+                    s3s::s3_error!(PreconditionFailed, "native source changed")
+                );
+                reader
+                    .context("native source reader missing")?
+                    .read(key, object, start, size)
+                    .await
+            }
+        }
+    }
+}
 
 fn uploaded(part: &Part) -> super::super::s3::UploadedPart {
     super::super::s3::UploadedPart {
@@ -57,9 +115,10 @@ pub(crate) async fn execute(
     plan: &Plan,
     snapshots: &[Snapshot],
     memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    reader: Option<&dyn super::objects::Source>,
 ) -> Result<Outcome> {
     plan.validate()?;
-    let result = match execute_plan(plan, snapshots, memory).await {
+    let result = match execute_plan(plan, snapshots, memory, reader).await {
         Err(error) if code(&error, s3s::S3ErrorCode::PreconditionFailed) => Ok(Outcome::Conflict),
         result => result,
     };
@@ -82,12 +141,21 @@ async fn execute_plan(
     plan: &Plan,
     snapshots: &[Snapshot],
     memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    reader: Option<&dyn super::objects::Source>,
 ) -> Result<Outcome> {
-    ensure!(
-        plan.options.source_external && plan.options.target_external,
-        "external endpoints required"
-    );
-    let source = client(plan, snapshots, true, memory)?;
+    ensure!(plan.options.target_external, "external target required");
+    if !plan.options.source_external
+        && plan.native.is_none()
+        && plan.state.source.is_some()
+        && plan.state.phase != Phase::Cleanup
+    {
+        return Ok(Outcome::Conflict);
+    }
+    let source = if plan.options.source_external {
+        Source::External(client(plan, snapshots, true, memory)?)
+    } else {
+        Source::Native(plan, reader)
+    };
     let target = client(plan, snapshots, false, memory)?;
     let Some(key) = plan.key.as_deref() else {
         let page = match &plan.options.scope {
@@ -105,9 +173,17 @@ async fn execute_plan(
                     next: (end < keys.len()).then(|| end.to_string()),
                 });
             }
-            replication::Scope::All => source.list("", plan.cursor.as_deref(), 64).await?,
+            replication::Scope::All => {
+                source
+                    .external()?
+                    .list("", plan.cursor.as_deref(), 64)
+                    .await?
+            }
             replication::Scope::Prefix { prefix } => {
-                source.list(prefix, plan.cursor.as_deref(), 64).await?
+                source
+                    .external()?
+                    .list(prefix, plan.cursor.as_deref(), 64)
+                    .await?
             }
         };
         return Ok(Outcome::Listed {
@@ -119,7 +195,7 @@ async fn execute_plan(
     let state = &plan.state;
     if state.phase == Phase::Inspect {
         let (original, previous) =
-            tokio::try_join!(source.head(key, None), target.head(&destination, None))?;
+            tokio::try_join!(source.head(key), target.head(&destination, None))?;
         let source_public = if plan.options.permissions == replication::Permissions::Inherit {
             match &original {
                 Some(object) => Some(source.acl(key, object).await?),
@@ -324,7 +400,7 @@ async fn execute_plan(
         }
         Phase::Finalize => {
             let (source_object, target_object) =
-                tokio::try_join!(source.head(key, None), target.head(&destination, None))?;
+                tokio::try_join!(source.head(key), target.head(&destination, None))?;
             let source_public = if plan.options.permissions == replication::Permissions::Inherit {
                 match &source_object {
                     Some(object) => Some(source.acl(key, object).await?),

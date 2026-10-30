@@ -40,6 +40,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeWork/Exchange` | Unary；提交上一批任务结果并领取下一批工作，返回所需材料和任务保护 |
 | `NodeWork/CheckpointTransfer` | Unary；持久化 raw 传输的上传与分片回执，核对当前节点运行权、任务、来源与目标许可 |
 | `NodeWork/ReadMigration` | Unary；取得任务绑定源版本的首个读取窗口，只允许候选所属节点和有效任务执行权 |
+| `NodeWork/ReadTransfer` | Unary；worker/node 取得当前导出任务绑定的源窗口、缺少的材料和读取保护；raw 附带持久化分段证明，响应窗口可短于请求长度 |
 | `NodeWrites/PrepareTail` | Unary；为 chunks 分片的未闭合尾部预留共享 staging、配额和上传许可 |
 | `NodeWrites/CommitTail` | Unary；确认尾部持久化并建立片段映射，重复确认复用同一结果 |
 | `NodeWrites/PublishWrite` | Unary；核对完整性、条件和配额，原子发布对象并保存终态回执 |

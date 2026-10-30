@@ -13,6 +13,33 @@ pub(crate) struct Resources {
     pub memory: Arc<OwnedSemaphorePermit>,
 }
 
+pub(crate) async fn read_range(
+    plan: &crate::model::replication::external::RawRead,
+    input: &mut RawFile,
+    resources: &Resources,
+) -> Result<bytes::Bytes> {
+    plan.validate()?;
+    input
+        .seek(std::io::SeekFrom::Start(plan.proof.offset))
+        .await?;
+    let mut data = vec![0; plan.proof.size as usize];
+    input.read_exact(&mut data).await?;
+    let cpu = resources.cpu.clone().acquire_owned().await?;
+    let memory = resources.memory.clone();
+    let hash = plan.proof.hash.clone();
+    let (data, _memory) = tokio::task::spawn_blocking(move || {
+        let _cpu = cpu;
+        ensure!(
+            blake3::hash(&data).as_bytes().as_slice() == hash,
+            codec::IntegrityError::Hash
+        );
+        Ok::<_, anyhow::Error>((bytes::Bytes::from(data), memory))
+    })
+    .await??;
+    let start = usize::try_from(plan.offset - plan.proof.offset)?;
+    Ok(data.slice(start..start + plan.length as usize))
+}
+
 pub(crate) async fn read_proofs(
     plan: &crate::model::transfer::Copy,
     input: &mut RawFile,
@@ -613,6 +640,59 @@ mod tests {
         copying.prepared.targets[1].offset -= 1;
         copying.prepared.spans[1].offset += 1;
         assert!(copying.validate().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn export_ranges_check_the_entire_proof_before_slicing() -> Result<()> {
+        use crate::model::replication::external::RawRead;
+        let bytes = vec![0x51; PROOF_BYTES + 31];
+        let mut range = RawRead {
+            source: plan(&bytes, bytes.len() as u64).source,
+            proof: Proof {
+                offset: 0,
+                size: PROOF_BYTES as u32,
+                hash: blake3::hash(&bytes[..PROOF_BYTES]).as_bytes().to_vec(),
+            },
+            offset: 13,
+            length: 4001,
+        };
+        let resources = Resources {
+            cpu: Arc::new(Semaphore::new(1)),
+            memory: Arc::new(Arc::new(Semaphore::new(1)).acquire_owned().await?),
+        };
+        let file = |value: &[u8]| RawFile::Memory {
+            data: bytes::Bytes::copy_from_slice(value),
+            offset: 0,
+        };
+        assert_eq!(
+            read_range(&range, &mut file(&bytes), &resources).await?,
+            bytes[13..4014]
+        );
+        let mut changed = bytes.clone();
+        changed[PROOF_BYTES - 1] ^= 1;
+        assert!(
+            read_range(&range, &mut file(&changed), &resources)
+                .await
+                .is_err()
+        );
+        assert!(
+            read_range(&range, &mut file(&bytes[..PROOF_BYTES - 1]), &resources)
+                .await
+                .is_err()
+        );
+        range.proof.size += 1;
+        assert!(range.validate().is_err());
+        range.proof.size -= 1;
+        range.offset = PROOF_BYTES as u64 - 1;
+        assert!(range.validate().is_err());
+        range.length = 1;
+        assert_eq!(
+            read_range(&range, &mut file(&bytes), &resources).await?,
+            bytes[PROOF_BYTES - 1..PROOF_BYTES]
+        );
+        range.proof.offset = u64::MAX;
+        assert!(range.validate().is_err());
         Ok(())
     }
 
