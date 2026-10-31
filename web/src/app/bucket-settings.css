@@ -13,7 +13,9 @@ fieldset.form-stack { min-inline-size: 0; margin: 0; padding: 0; border: 0; }
 .bucket-panel h2 { font-size: 18px; }
 .bucket-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; }
 .bucket-heading { display: flex; min-width: 0; gap: 12px; align-items: center; }
+.bucket-heading > .chunk-bead { flex: none; }
 .bucket-heading > div { display: grid; min-width: 0; gap: 4px; }
+.bucket-heading h3 { font-size: 16px; }
 .bucket-subpanel { min-width: 0; padding: clamp(14px, 2vw, 20px); border-radius: 16px; background: var(--surface-soft); border: 1px solid var(--line-soft); }
 .bucket-section-head .actions, .bucket-panel .actions { gap: 8px; }
 .bucket-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(130px, 100%), 1fr)); gap: 12px; margin: 0; }

@@ -6,7 +6,18 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[derive(
-    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize, ToSchema,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+    Deserialize,
+    ToSchema,
+    clap::ValueEnum,
 )]
 #[serde(rename_all = "snake_case")]
 #[schema(as=TierUnit)]
@@ -15,6 +26,7 @@ pub(crate) enum Unit {
     Chunk,
     Pack,
     Raw,
+    #[value(skip)]
     Member,
 }
 
@@ -126,6 +138,26 @@ pub(crate) struct Progress {
     pub parts: u16,
 }
 
+impl Progress {
+    pub(crate) const PART_BYTES: u64 = 8 * 1024 * 1024;
+    pub(crate) fn raw_part_size(size: u64) -> u64 {
+        Self::PART_BYTES.max(size.div_ceil(10000))
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+#[schema(as=TierUnitUsage)]
+pub(crate) struct Usage {
+    pub id: Uuid,
+    pub unit: Unit,
+    pub phase: Option<String>,
+    pub hot_bytes: i64,
+    pub cold_bytes: i64,
+    pub duplicate_bytes: i64,
+    pub retiring_bytes: i64,
+    pub unconfirmed: bool,
+}
+
 pub(crate) struct Step {
     pub work: Option<Work>,
     pub switched: bool,
@@ -226,7 +258,7 @@ pub(crate) struct Update {
     pub policy: Policy,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Copy, Deserialize, Serialize, ToSchema, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 #[schema(as=TieringAction)]
 pub(crate) enum Transition {
@@ -346,6 +378,14 @@ pub(crate) trait TieringStore: Send + Sync {
         busy: Option<Uuid>,
     ) -> Result<Step>;
     async fn finish(&self, task: super::task::Execution, outcome: &Outcome) -> Result<()>;
+    async fn usage(
+        &self,
+        principal: &Principal,
+        bucket: Uuid,
+        unit: Unit,
+        after: Uuid,
+        limit: u16,
+    ) -> Result<Vec<Usage>>;
     async fn candidates(
         &self,
         principal: &Principal,

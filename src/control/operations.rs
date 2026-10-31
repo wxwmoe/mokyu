@@ -5,7 +5,7 @@ use crate::{
     cli::{
         Buckets, Cache, Cleanup, Cluster, Command, ControlSettings, Credentials, Domains, Gc,
         Integrity, Keys, Maintenance, Packs, Projects, RewriteCommand, Settings, Setup, StorageKey,
-        StorageProfiles, Storages, Tasks, Users,
+        StorageProfiles, Storages, Tasks, Tiering, Users,
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -774,6 +774,67 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
         Command::Bucket(Buckets::List) => {
             let buckets: Vec<Bucket> = app.buckets.all().await?;
             Ok(serde_json::to_value(buckets)?)
+        }
+        Command::Bucket(Buckets::Tiering { name, command }) => {
+            let bucket = app.bucket(&name, true).await?.id;
+            use crate::model::tiering::{Change, Update};
+            match command {
+                Tiering::Show => Ok(serde_json::to_value(
+                    app.tiering.tiering(principal, bucket).await?,
+                )?),
+                Tiering::Preview { ref document, .. } | Tiering::Set { ref document, .. } => {
+                    let input: Update = serde_json::from_value(
+                        document.clone().context("missing tiering policy")?,
+                    )?;
+                    Ok(serde_json::to_value(
+                        super::tiering::change(
+                            app,
+                            principal,
+                            bucket,
+                            &input,
+                            matches!(command, Tiering::Preview { .. }),
+                        )
+                        .await?,
+                    )?)
+                }
+                Tiering::State { action, revision } => {
+                    let view = super::tiering::change_state(
+                        app,
+                        principal,
+                        bucket,
+                        &Change { revision, action },
+                    )
+                    .await?;
+                    Ok(serde_json::to_value(view)?)
+                }
+                Tiering::Units(page) => {
+                    let stale = crate::config::seconds(&app.config.metrics.access_flush_interval)?
+                        .saturating_mul(2);
+                    Ok(serde_json::to_value(
+                        app.tiering
+                            .candidates(
+                                principal,
+                                bucket,
+                                page.unit,
+                                page.after.unwrap_or_default(),
+                                page.limit,
+                                stale.try_into()?,
+                            )
+                            .await?,
+                    )?)
+                }
+                Tiering::Usage(page) => Ok(serde_json::to_value(
+                    app.tiering
+                        .usage(
+                            principal,
+                            bucket,
+                            page.unit,
+                            page.after.unwrap_or_default(),
+                            page.limit,
+                        )
+                        .await?,
+                )?),
+            }
         }
         Command::Bucket(Buckets::Create {
             name,

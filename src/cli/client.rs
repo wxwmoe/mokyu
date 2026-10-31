@@ -24,6 +24,10 @@ fn read_json(path: &Path, limit: usize, label: &str) -> Result<Value> {
 pub async fn client(path: &Path, mut command: Command) -> Result<()> {
     match &mut command {
         Command::User(Users::Membership { file, document, .. })
+        | Command::Bucket(Buckets::Tiering {
+            command: Tiering::Set { file, document } | Tiering::Preview { file, document },
+            ..
+        })
         | Command::Quota(Quotas::Set { file, document, .. })
         | Command::Storages(Storages::Profile {
             command:

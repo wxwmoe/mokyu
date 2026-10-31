@@ -23,6 +23,26 @@ pub(super) struct Filter {
     limit: Option<u16>,
 }
 
+#[utoipa::path(get,path="/api/v1/buckets/{bucket}/tiering/usage",operation_id="bucket_tiering_usage",params(("bucket"=Uuid,Path),Filter),responses((status=200,body=Vec<crate::model::tiering::Usage>)))]
+pub(super) async fn usage(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(bucket): Path<Uuid>,
+    Query(filter): Query<Filter>,
+) -> Result<Json<Vec<crate::model::tiering::Usage>>, HttpError> {
+    Ok(Json(
+        app.tiering
+            .usage(
+                &actor.principal,
+                bucket,
+                filter.unit,
+                filter.after.unwrap_or_default(),
+                filter.limit.unwrap_or(128),
+            )
+            .await?,
+    ))
+}
+
 #[utoipa::path(get,path="/api/v1/buckets/{bucket}/tiering/units",operation_id="bucket_tiering_units",params(("bucket"=Uuid,Path),Filter),responses((status=200,body=Vec<Candidate>)))]
 pub(super) async fn units(
     State(app): State<Arc<App>>,
@@ -55,9 +75,9 @@ pub(super) async fn get(
     Ok(Json(app.tiering.tiering(&actor.principal, bucket).await?))
 }
 
-async fn change(
+pub(super) async fn change(
     app: &App,
-    actor: &Identity,
+    principal: &crate::authorization::Principal,
     bucket: Uuid,
     input: &Update,
     preview: bool,
@@ -73,7 +93,7 @@ async fn change(
     );
     let pair = app
         .tiering
-        .locations(&actor.principal, bucket, input.policy.cold_storage)
+        .locations(principal, bucket, input.policy.cold_storage)
         .await?;
     ensure!(
         app.role == "single"
@@ -87,7 +107,7 @@ async fn change(
     app.storage.check_tier(pair.cold.0, pair.cold.1).await?;
     let result = app
         .tiering
-        .update(&actor.principal, bucket, input, &pair, &placement, preview)
+        .update(principal, bucket, input, &pair, &placement, preview)
         .await?;
     if !preview {
         app.storage.access.collect(true);
@@ -103,7 +123,9 @@ pub(super) async fn save(
     Path(bucket): Path<Uuid>,
     Json(input): Json<Update>,
 ) -> Result<Json<View>, HttpError> {
-    Ok(Json(change(&app, &actor, bucket, &input, false).await?))
+    Ok(Json(
+        change(&app, &actor.principal, bucket, &input, false).await?,
+    ))
 }
 #[utoipa::path(post,path="/api/v1/buckets/{bucket}/tiering/preview",operation_id="bucket_tiering_preview",params(("bucket"=Uuid,Path)),request_body=Update,responses((status=200,body=View)))]
 pub(super) async fn preview(
@@ -112,7 +134,9 @@ pub(super) async fn preview(
     Path(bucket): Path<Uuid>,
     Json(input): Json<Update>,
 ) -> Result<Json<View>, HttpError> {
-    Ok(Json(change(&app, &actor, bucket, &input, true).await?))
+    Ok(Json(
+        change(&app, &actor.principal, bucket, &input, true).await?,
+    ))
 }
 
 #[utoipa::path(post,path="/api/v1/buckets/{bucket}/tiering/state",operation_id="bucket_tiering_transition",params(("bucket"=Uuid,Path)),request_body=crate::model::tiering::Change,responses((status=200,body=View)))]
@@ -122,10 +146,18 @@ pub(super) async fn transition(
     Path(bucket): Path<Uuid>,
     Json(input): Json<crate::model::tiering::Change>,
 ) -> Result<Json<View>, HttpError> {
-    let view = app
-        .tiering
-        .transition(&actor.principal, bucket, &input)
-        .await?;
+    Ok(Json(
+        change_state(&app, &actor.principal, bucket, &input).await?,
+    ))
+}
+
+pub(super) async fn change_state(
+    app: &App,
+    principal: &crate::authorization::Principal,
+    bucket: Uuid,
+    input: &crate::model::tiering::Change,
+) -> Result<View> {
+    let view = app.tiering.transition(principal, bucket, input).await?;
     app.storage.access.wake.notify_one();
-    Ok(Json(view))
+    Ok(view)
 }

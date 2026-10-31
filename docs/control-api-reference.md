@@ -236,6 +236,8 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 
 `POST /api/v1/buckets/{bucket}/tiering/state` 接受当前 `revision` 和 `action`：`pause` 暂停新迁移，已发布的位置继续可读；`resume` 恢复自动判断；`drain` 将该桶使用的冷单位搬回热端；`disable` 在冷位置及在途依赖解除后关闭策略。修改冷后端同样需要先排空该桶。读取直接访问当前位置，不等待后台升热。
 
+`GET /api/v1/buckets/{bucket}/tiering/usage?unit=raw` 按物理 ID 返回用量，可用 `after`、`limit`（1–256）继续翻页；`unit` 可选 `chunk`、`pack`、`raw`。同一桶内共享的物理单位只列一次，整包的成员不另计。`hot_bytes`、`cold_bytes` 包含确认写入的额外副本，`duplicate_bytes` 和 `retiring_bytes` 是其中的临时双份和待回收部分，不能再次相加。`unconfirmed` 表示未确认的写入仍可能占用更多空间。跨页统计反映查询期间陆续观测到的位置；物理用量不改变对象逻辑配额。桶详情中的「智能分层」可按需统计用量，并查看迁移阶段、最近读取及降冷条件。
+
 | 方法与路径 | 作用 |
 | --- | --- |
 | `GET` | 返回热端、当前策略、状态和修订号；未配置时 `policy` 为 `null`，修订号为 0 |

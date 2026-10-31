@@ -25,6 +25,10 @@
 | `bucket create NAME [--project UUID]` | 创建空逻辑桶，默认内置项目，返回桶信息 |
 | `bucket delete NAME` | 删除空桶，返回 deleted UUID；仍有对象、上传或待清理版本时拒绝 |
 | `bucket cors NAME FILE` | 用 JSON 文件替换 CORS，返回实际规则；`[]` 关闭 |
+| `bucket tiering NAME show` | 返回冷热后端、当前策略、状态和修订号 |
+| `bucket tiering NAME preview FILE` / `set FILE` | 预览或保存含 `revision`、`policy` 的 JSON；文件名 `-` 从 stdin 读取 |
+| `bucket tiering NAME state ACTION --revision N` | 以当前修订号执行 `pause`、`resume`、`drain` 或 `disable` |
+| `bucket tiering NAME units UNIT` / `usage UNIT` | 按 `chunk`、`pack` 或 `raw` 分页查看降冷依据或物理占用；支持 `--after UUID` 和 `--limit N` |
 | `bucket purge NAME [--execute]` | 默认预览对象、活跃上传和桶 UUID；确认执行后封桶并返回 task_id |
 | `domain list` | 列出公共 Host 与桶名映射 |
 | `domain set HOST BUCKET` | 绑定域名；Host 转小写，可含端口；拒绝占用其他桶的映射 |

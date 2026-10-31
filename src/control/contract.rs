@@ -102,6 +102,7 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::tiering::preview))
         .routes(routes!(super::tiering::transition))
         .routes(routes!(super::tiering::units))
+        .routes(routes!(super::tiering::usage))
         .routes(routes!(
             super::external::start_test,
             super::external::latest_test

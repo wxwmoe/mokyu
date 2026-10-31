@@ -48,7 +48,7 @@ pub(super) async fn references(
     let (table, column) = q::physical(unit);
     let (refs, size, extra) = match unit {
         Unit::Chunk => (
-            "JOIN chunks c ON c.current_encoding_id=u.encoding_id JOIN extents e ON e.chunk_id=c.id",
+            "JOIN chunks c ON c.current_encoding_id=u.encoding_id AND c.pack_id IS NULL JOIN extents e ON e.chunk_id=c.id",
             "u.standalone_size",
             " AND (u.owner_task IS NULL OR EXISTS(SELECT 1 FROM tasks t WHERE t.id=u.owner_task AND t.state='completed')) AND u.owner_stream IS NULL AND NOT u.recovery_pending AND NOT u.sync_pending",
         ),
@@ -118,6 +118,105 @@ pub(super) async fn references(
         .fetch_one(&mut **db)
         .await?;
     Ok((ids, rows, clock))
+}
+
+pub(super) async fn usage(
+    db: &mut q::Tx<'_>,
+    bucket: Uuid,
+    hot: Uuid,
+    unit: Unit,
+    after: Uuid,
+    limit: u16,
+) -> Result<Vec<crate::model::tiering::Usage>> {
+    use crate::model::tiering::{Progress, Usage};
+    #[derive(sqlx::FromRow)]
+    struct Copy {
+        id: Uuid,
+        storage_id: Option<Uuid>,
+        current_bytes: i64,
+        phase: Option<String>,
+        source_storage: Option<Uuid>,
+        source_bytes: Option<i64>,
+        target_storage: Option<Uuid>,
+        target_bytes: Option<i64>,
+        checkpoint: Option<sqlx::types::Json<Progress>>,
+    }
+    anyhow::ensure!((1..=256).contains(&limit), s3s::s3_error!(InvalidArgument));
+    let (table, column) = q::physical(unit);
+    let (refs, size) = match unit {
+        Unit::Chunk => (
+            "JOIN chunks c ON c.current_encoding_id=u.encoding_id AND c.pack_id IS NULL JOIN extents e ON e.chunk_id=c.id",
+            "u.standalone_size",
+        ),
+        Unit::Pack => (
+            "JOIN pack_members p ON p.pack_id=u.id JOIN chunks c ON c.id=p.chunk_id AND c.pack_id=u.id JOIN extents e ON e.chunk_id=c.id",
+            "u.stored_size",
+        ),
+        Unit::Raw => ("JOIN raw_ranges e ON e.source_id=u.id", "u.size"),
+        Unit::Member => {
+            return Err(
+                s3s::s3_error!(InvalidArgument, "pack members move with their pack").into(),
+            );
+        }
+    };
+    let mut sql = QueryBuilder::<q::Db>::new(format!(
+        "WITH chosen AS (SELECT u.{column} AS id FROM {table} u {refs} JOIN streams s ON s.id=e.stream_id JOIN objects o ON o.stream_id=s.id WHERE o.bucket_id="
+    ));
+    sql.push_bind(bucket).push(format!(" AND u.{column}>")).push_bind(after)
+        .push(" UNION SELECT physical_id FROM tier_moves WHERE bucket_id=").push_bind(bucket)
+        .push(" AND unit=").push_bind(unit as i16).push(" AND physical_id>").push_bind(after)
+        .push(" ORDER BY id LIMIT ").push_bind(i64::from(limit))
+        .push(format!(") SELECT i.id,h.storage_id,CAST(COALESCE(h.stored_bytes,{size},m.source_bytes,0) AS {}) AS current_bytes,m.phase,m.source_storage,m.source_bytes,m.target_storage,m.target_bytes,m.checkpoint FROM chosen i LEFT JOIN {table} u ON u.{column}=i.id LEFT JOIN tier_locations h ON h.physical_id=i.id AND h.unit=",q::BIG_INT)).push_bind(unit as i16)
+        .push(" LEFT JOIN tier_moves m ON m.physical_id=i.id AND m.unit=").push_bind(unit as i16).push(" ORDER BY i.id");
+    let rows = sql.build_query_as::<Copy>().fetch_all(&mut **db).await?;
+    rows.into_iter()
+        .map(|row| {
+            let current = row.storage_id.unwrap_or(hot);
+            let (mut hot_bytes, mut cold_bytes) = if current == hot {
+                (row.current_bytes, 0)
+            } else {
+                (0, row.current_bytes)
+            };
+            let mut duplicate_bytes = 0;
+            let mut retiring_bytes = 0;
+            let mut unconfirmed = false;
+            if let Some(phase) = row.phase.as_deref() {
+                let source = row.source_bytes.unwrap_or_default();
+                let (storage, bytes) = if phase == "retiring" {
+                    (row.source_storage, source)
+                } else {
+                    unconfirmed = row.target_bytes.is_none();
+                    let confirmed = if unit == Unit::Raw {
+                        let size = u64::try_from(source)?;
+                        let parts = row.checkpoint.as_ref().map_or(0, |p| u64::from(p.parts));
+                        i64::try_from(size.min(parts * Progress::raw_part_size(size)))?
+                    } else {
+                        0
+                    };
+                    (row.target_storage, row.target_bytes.unwrap_or(confirmed))
+                };
+                if storage == Some(hot) {
+                    hot_bytes += bytes
+                } else {
+                    cold_bytes += bytes
+                }
+                duplicate_bytes = bytes;
+                if matches!(phase, "retiring" | "discarding") {
+                    retiring_bytes = bytes;
+                }
+            }
+            Ok(Usage {
+                id: row.id,
+                unit,
+                phase: row.phase,
+                hot_bytes,
+                cold_bytes,
+                duplicate_bytes,
+                retiring_bytes,
+                unconfirmed,
+            })
+        })
+        .collect()
 }
 
 pub(super) async fn identity(

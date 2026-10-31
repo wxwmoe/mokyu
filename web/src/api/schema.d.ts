@@ -592,6 +592,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/buckets/{bucket}/tiering/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["bucket_tiering_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/buckets/{bucket}/transfer": {
         parameters: {
             query?: never;
@@ -2115,6 +2131,7 @@ export interface components {
         };
         BucketCreationOptions: {
             projects: components["schemas"]["BucketProject"][];
+            shared_storage_only: boolean;
             storages: components["schemas"]["BucketStorage"][];
         };
         BucketGrant: {
@@ -3639,6 +3656,21 @@ export interface components {
         };
         /** @enum {string} */
         TierUnit: "chunk" | "pack" | "raw" | "member";
+        TierUnitUsage: {
+            /** Format: int64 */
+            cold_bytes: number;
+            /** Format: int64 */
+            duplicate_bytes: number;
+            /** Format: int64 */
+            hot_bytes: number;
+            /** Format: uuid */
+            id: string;
+            phase?: string | null;
+            /** Format: int64 */
+            retiring_bytes: number;
+            unconfirmed: boolean;
+            unit: components["schemas"]["TierUnit"];
+        };
         /** @enum {string} */
         TieringAction: "pause" | "resume" | "drain" | "disable";
         TieringPolicy: {
@@ -4958,6 +4990,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TieringUnit"][];
+                };
+            };
+        };
+    };
+    bucket_tiering_usage: {
+        parameters: {
+            query: {
+                unit: components["schemas"]["TierUnit"];
+                after?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TierUnitUsage"][];
                 };
             };
         };

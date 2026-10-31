@@ -30,6 +30,7 @@ pub(super) struct BucketSettings {
 pub(super) struct BucketCreationOptions {
     projects: Vec<BucketProject>,
     storages: Vec<BucketStorage>,
+    shared_storage_only: bool,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -275,7 +276,11 @@ pub(super) async fn options(
             matches!(actor.principal, Principal::User { .. }),
         )
         .await?;
-    Ok(Json(BucketCreationOptions { projects, storages }))
+    Ok(Json(BucketCreationOptions {
+        projects,
+        storages,
+        shared_storage_only: app.role != "single",
+    }))
 }
 #[utoipa::path(get,operation_id="bucket_settings",path="/api/v1/buckets/{bucket}/settings",params(("bucket"=Uuid,Path)),responses((status=200,body=BucketSettings)))]
 pub(super) async fn get(

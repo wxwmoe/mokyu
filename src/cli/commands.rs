@@ -169,6 +169,11 @@ pub enum Integrity {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Buckets {
     List,
+    Tiering {
+        name: String,
+        #[command(subcommand)]
+        command: Tiering,
+    },
     Create {
         name: String,
         #[arg(long)]
@@ -194,6 +199,35 @@ pub enum Buckets {
         #[arg(skip)]
         confirmed: bool,
     },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Tiering {
+    Show,
+    Preview {
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    Set {
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    State {
+        action: crate::model::tiering::Transition,
+        #[arg(long)]
+        revision: i64,
+    },
+    Units(TierPage),
+    Usage(TierPage),
+}
+#[derive(clap::Args, Serialize, Deserialize)]
+pub struct TierPage {
+    pub unit: crate::model::tiering::Unit,
+    #[arg(long)]
+    pub after: Option<Uuid>,
+    #[arg(long, default_value_t = 64)]
+    pub limit: u16,
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Gc {
@@ -590,6 +624,11 @@ impl Command {
             | Self::Status { .. }
             | Self::Audit { .. }
             | Self::Bucket(Buckets::List)
+            | Self::Bucket(Buckets::Tiering {
+                command:
+                    Tiering::Show | Tiering::Preview { .. } | Tiering::Units(_) | Tiering::Usage(_),
+                ..
+            })
             | Self::Credential(Credentials::List { .. } | Credentials::Show { .. })
             | Self::Token(Tokens::List { .. })
             | Self::Domain(Domains::List)

@@ -291,6 +291,21 @@ impl TieringStore for Backend {
     async fn active(&self) -> Result<bool> {
         q::active(self).await
     }
+    async fn usage(
+        &self,
+        principal: &Principal,
+        bucket: Uuid,
+        unit: Unit,
+        after: Uuid,
+        limit: u16,
+    ) -> Result<Vec<crate::model::tiering::Usage>> {
+        let mut db = q::begin(self).await?;
+        let home = hot(&mut db, principal, bucket).await?;
+        let rows =
+            super::tier_read_queries::usage(&mut db, bucket, home, unit, after, limit).await?;
+        db.commit().await?;
+        Ok(rows)
+    }
     async fn candidates(
         &self,
         principal: &Principal,

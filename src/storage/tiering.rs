@@ -23,7 +23,7 @@ use tokio::{
     time::Instant,
 };
 
-const PART: u64 = 8 * 1024 * 1024;
+const PART: u64 = Progress::PART_BYTES;
 
 pub(crate) struct Site<'a> {
     backend: Arc<dyn ObjectStore>,
@@ -213,7 +213,7 @@ async fn raw(
             digest: b.1,
         });
     }
-    let part = PART.max(size.div_ceil(10000));
+    let part = Progress::raw_part_size(size);
     let count = u16::try_from(size.div_ceil(part))?;
     if size <= PART {
         let bytes = source.bounded(0, size, PART).await?;
